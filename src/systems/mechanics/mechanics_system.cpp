@@ -34,7 +34,16 @@ struct PairHash {
 // Persistent set of active collision pairs from previous frame
 static std::unordered_set<std::pair<std::uintptr_t, std::uintptr_t>, PairHash> g_prev_active_collisions;
 // 速度存储的全局变量
+// 添加了角速度和转动惯量部分
+// 线性速度（物体移动速度）
 static std::unordered_map<std::uintptr_t, ktm::fvec3> g_handle_to_velocity;
+// 角速度：控制物体旋转速度
+static std::unordered_map<std::uintptr_t, ktm::fvec3> g_handle_to_angular_vel;
+// 转动惯量：物体旋转难易程度，质量分布越远越难转
+static std::unordered_map<std::uintptr_t, float> g_handle_to_inertia;
+// 休眠系统：静止物体自动休眠，
+static std::unordered_map<std::uintptr_t, bool> g_handle_to_sleeping;      // 休眠状态
+static std::unordered_map<std::uintptr_t, float> g_handle_to_sleep_timer;  // 休眠计时器
 
 constexpr ktm::fvec3 make_fvec3(float x, float y, float z) {
     ktm::fvec3 result;
@@ -126,7 +135,7 @@ void octree_init_children(OctreeNode& node) {
     children[7].min_bounds = center;
     children[7].max_bounds = max;
 }
-
+// 八叉树插入物体
 void octree_insert(OctreeNode& node, std::uintptr_t handle,
                    const ktm::fvec3& obj_min, const ktm::fvec3& obj_max, int depth) {
     //物体不在当前节点范围内，return
@@ -206,7 +215,7 @@ void octree_insert(OctreeNode& node, std::uintptr_t handle,
         }
     }
 }
-
+// 收集所有可能碰撞的物体对
 void octree_collect_pairs(const OctreeNode& node,
                           std::vector<std::pair<std::uintptr_t, std::uintptr_t>>& out) {
     //非叶子节点：递归遍历子节点
@@ -242,6 +251,8 @@ struct MechanicsWorldAABB {
     ktm::fvec3 min_world;             // 世界AABB最小边界
     ktm::fvec3 max_world;             // 世界AABB最大边界
     ktm::fvec3 center_world;          // 世界AABB中心
+    ktm::fvec3 half_extents;         // （增）三个轴的半宽，用于转动惯量计算
+    ktm::fvec3 local_center;         // （增）   局部空间中心点
     float half_height;                // 物体Y轴半高（用于地板碰撞）
 };
 
@@ -250,7 +261,7 @@ struct MechanicsWorldAABB {
 namespace Corona::Systems {
 
 bool MechanicsSystem::initialize(Kernel::ISystemContext* ctx) {
-    CFW_LOG_NOTICE("MechanicsSystem: Initializing...");
+    CFW_LOG_INFO("MechanicsSystem initialized"); // 初始化日志（关键）
     return true;
 }
 
@@ -259,9 +270,13 @@ void MechanicsSystem::update() {
 }
 
 void MechanicsSystem::shutdown() {
-    CFW_LOG_NOTICE("MechanicsSystem: Shutting down...");
     g_prev_active_collisions.clear();
     g_handle_to_velocity.clear();
+    g_handle_to_angular_vel.clear();
+    g_handle_to_inertia.clear();
+    g_handle_to_sleeping.clear();
+    g_handle_to_sleep_timer.clear();
+    CFW_LOG_INFO("MechanicsSystem shutdown, all caches cleared"); // 关闭日志（关键）
 }
 
 // 物理系统核心每一帧都会执行
@@ -272,7 +287,12 @@ void MechanicsSystem::update_physics() {
     const float min_valid_dt = 1.0f / 120.0f; // 最小有效时间步
     const float max_valid_dt = 1.0f / 30.0f;  // 最大有效时间步
     const float zero_vel_threshold = 0.01f;  // 速度归零阈值
-
+    const float friction_coeff = 0.35f;      // 统一摩擦系数
+    const float sleep_threshold = 0.05f;       // 休眠速度阈值
+    const float sleep_threshold_sq = sleep_threshold * sleep_threshold; // 休眠速度阈值平方
+    const float sleep_time_needed = 0.4f;      // 静止多久后休眠
+    const float min_inertia = 0.0001f;        // 最小转动惯量，防止除零
+    const float rot_damping_factor = 0.97f;   // 基础旋转阻尼系数
     //物理属性缓存
     std::unordered_map<std::uintptr_t, float> handle_to_mass;
     std::unordered_map<std::uintptr_t, float> handle_to_damping;
@@ -317,14 +337,18 @@ void MechanicsSystem::update_physics() {
             if (auto actor = actor_storage.acquire_read(actor_handle)) {
                 for (auto profile_handle : actor->profile_handles) {
                     if (auto profile = profile_storage.acquire_read(profile_handle)) {
-                        if (profile->mechanics_handle != 0) {
-                            std::uintptr_t h = profile->mechanics_handle;
+                        if (auto h = profile->mechanics_handle) {
                             mechanics_handles.push_back(h);
                             mech_to_actor[h] = actor_handle;
 
-                            //初始化速度（首次出现的物体）
+                            //初始化速度和角速度（首次出现的物体）
                             if (g_handle_to_velocity.find(h) == g_handle_to_velocity.end()) {
+                                // 同时初始化 线速度 + 角速度
                                 g_handle_to_velocity[h] = make_fvec3(0.0f, 0.0f, 0.0f);
+                                g_handle_to_angular_vel[h] = make_fvec3(0.0f, 0.0f, 0.0f);
+                                // （增）休眠状态初始化
+                                g_handle_to_sleeping[h] = false;
+                                g_handle_to_sleep_timer[h] = 0.0f;
                             }
 
                             //读取物理属性（带默认值）
@@ -355,15 +379,16 @@ void MechanicsSystem::update_physics() {
 
     //无物理物体时直接返回
     if (mechanics_handles.empty()) {
-        CFW_LOG_TRACE("MechanicsSystem: No physics objects found.");
         return;
     }
-    CFW_LOG_TRACE("MechanicsSystem: {} physics objects found.", mechanics_handles.size());
 
     //只计算速度
     for (std::uintptr_t h : mechanics_handles) {
-        float damping = handle_to_damping[h];
+        // 休眠睡着的物体跳过物理更新
+        if (g_handle_to_sleeping[h]) continue;
 
+        float damping = handle_to_damping[h];
+        auto& av = g_handle_to_angular_vel[h]; // 新增：角速度
         // 重力直接作用于速度（去掉 / mass）
         g_handle_to_velocity[h].x += gravity.x * fixed_dt;
         g_handle_to_velocity[h].y += gravity.y * fixed_dt;
@@ -373,9 +398,14 @@ void MechanicsSystem::update_physics() {
         g_handle_to_velocity[h].x *= damping;
         g_handle_to_velocity[h].y *= damping;
         g_handle_to_velocity[h].z *= damping;
+        //旋转阻尼，和线性阻尼联动，让旋转自然停下
+        float rot_damping = std::max(damping * rot_damping_factor, 0.9f); // 保证最小阻尼
+        av.x *= rot_damping;
+        av.y *= rot_damping;
+        av.z *= rot_damping;
     }
 
-    //计算物体世界AABB（
+    //计算物体世界AABB
     std::vector<MechanicsWorldAABB> mechanics_data;
     mechanics_data.reserve(mechanics_handles.size());
     std::unordered_map<std::uintptr_t, std::size_t> handle_to_index;
@@ -429,9 +459,22 @@ void MechanicsSystem::update_physics() {
             entry.center_world.y + e_world.y,
             entry.center_world.z + e_world.z
         );
+        //增：保存三个轴的半宽，用于转动惯量 力矩计算
+        entry.half_extents = e_world;
+        entry.local_center = c_local;
 
         handle_to_index[h] = mechanics_data.size();
         mechanics_data.push_back(entry);
+        // 立方体转动惯量计算：越大/越重的物体越难旋转
+        float mass = handle_to_mass[h];
+        float w = entry.half_extents.x * 2;
+        float hh = entry.half_extents.y * 2;
+        float d = entry.half_extents.z * 2;
+        float Ix = mass * (hh*hh + d*d) / 12.0f;
+        float Iy = mass * (w*w + d*d) / 12.0f;
+        float Iz = mass * (w*w + hh*hh) / 12.0f;
+        // 转动惯量兜底：取平均值
+        g_handle_to_inertia[h] = std::max((Ix + Iy + Iz) / 3.0f, min_inertia);
     }
 
     //更新场景包围盒
@@ -447,6 +490,8 @@ void MechanicsSystem::update_physics() {
             scene_max.y = std::max(scene_max.y, e.max_world.y);
             scene_max.z = std::max(scene_max.z, e.max_world.z);
         }
+        //让包围盒包含地板，防止碰撞丢失
+        scene_min.y = std::min(scene_min.y, floor_y - floor_eps);
 
         ktm::fvec3 scene_center = make_fvec3(
             (scene_min.x + scene_max.x) * 0.5f,
@@ -476,8 +521,6 @@ void MechanicsSystem::update_physics() {
             root_max.y = std::max(root_max.y, e.max_world.y);
             root_max.z = std::max(root_max.z, e.max_world.z);
         }
-        //扩展根节点边界，包含地板
-        root_min.y = std::min(root_min.y, floor_y - floor_eps);
         const float pad = 0.01f;
         root_min = make_fvec3(root_min.x - pad, root_min.y - pad, root_min.z - pad);
         root_max = make_fvec3(root_max.x + pad, root_max.y + pad, root_max.z + pad);
@@ -497,14 +540,19 @@ void MechanicsSystem::update_physics() {
         octree_collect_pairs(octree_root, collision_pairs);
         octree_dedupe_pairs(collision_pairs);
 
+        CFW_LOG_DEBUG("Detected %lu potential collision pairs", collision_pairs.size());
+
         // 处理碰撞对（只修正速度）
         std::unordered_set<std::pair<std::uintptr_t, std::uintptr_t>, PairHash> curr_active_collisions;
-        constexpr float eps = 1e-6f; // 极小值，防止除零
+        constexpr float eps = 1e-8f; // 极小值，防止除零（扩大容差）
         constexpr float min_overlap = 0.001f; // 最小重叠深度，忽略微小重叠
 
         for (const auto& pair : collision_pairs) {
             std::uintptr_t ha = pair.first;
             std::uintptr_t hb = pair.second;
+            // 两个都休眠则跳过
+            if (g_handle_to_sleeping[ha] && g_handle_to_sleeping[hb])
+                continue;
 
             // 查找物体A/B的AABB数据
             auto it_a = handle_to_index.find(ha);
@@ -558,8 +606,8 @@ void MechanicsSystem::update_physics() {
             float v_b = g_handle_to_velocity[hb].x * normal.x + g_handle_to_velocity[hb].y * normal.y + g_handle_to_velocity[hb].z * normal.z;
 
             // 计算碰撞冲量（弹性碰撞公式）
-          float denominator = (1.0f/mass_a + 1.0f/mass_b) + 1e-8f; // 加极小值防除零
-          float j = (-(1.0f + rest) * (v_a - v_b)) / denominator;
+            float denominator = (1.0f/mass_a + 1.0f/mass_b) + eps; // 加极小值防除零
+            float j = (-(1.0f + rest) * (v_a - v_b)) / denominator;
 
             // 只更新速度
             g_handle_to_velocity[ha].x += normal.x * j / mass_a;
@@ -570,29 +618,115 @@ void MechanicsSystem::update_physics() {
             g_handle_to_velocity[hb].y -= normal.y * j / mass_b;
             g_handle_to_velocity[hb].z -= normal.z * j / mass_b;
 
-            // 记录活跃碰撞对（
+            //【增】摩擦冲量（防止无限打滑）
+            ktm::fvec3 tan = make_fvec3(
+                g_handle_to_velocity[ha].x - normal.x * (g_handle_to_velocity[ha].x * normal.x + g_handle_to_velocity[ha].y * normal.y + g_handle_to_velocity[ha].z * normal.z),
+                g_handle_to_velocity[ha].y - normal.y * (g_handle_to_velocity[ha].x * normal.x + g_handle_to_velocity[ha].y * normal.y + g_handle_to_velocity[ha].z * normal.z),
+                g_handle_to_velocity[ha].z - normal.z * (g_handle_to_velocity[ha].x * normal.x + g_handle_to_velocity[ha].y * normal.y + g_handle_to_velocity[ha].z * normal.z)
+            );
+            float tlen = std::sqrt(tan.x * tan.x + tan.y * tan.y + tan.z * tan.z);
+            if (tlen > eps) {
+                tan.x = tan.x / tlen;
+                tan.y = tan.y / tlen;
+                tan.z = tan.z / tlen;
+            }
+
+            float vt = (g_handle_to_velocity[ha].x - g_handle_to_velocity[hb].x) * tan.x
+                     + (g_handle_to_velocity[ha].y - g_handle_to_velocity[hb].y) * tan.y
+                     + (g_handle_to_velocity[ha].z - g_handle_to_velocity[hb].z) * tan.z;
+
+            float jt = -vt * friction_coeff * fabsf(j);
+
+            g_handle_to_velocity[ha].x += tan.x * jt / mass_a;
+            g_handle_to_velocity[ha].y += tan.y * jt / mass_a;
+            g_handle_to_velocity[ha].z += tan.z * jt / mass_a;
+
+            g_handle_to_velocity[hb].x -= tan.x * jt / mass_b;
+            g_handle_to_velocity[hb].y -= tan.y * jt / mass_b;
+            g_handle_to_velocity[hb].z -= tan.z * jt / mass_b;
+
+            //力矩计算修正开始
+            // 力矩计算碰撞产生旋转
+            ktm::fvec3 ra = make_fvec3(
+                a.half_extents.x * normal.x,
+                a.half_extents.y * normal.y,
+                a.half_extents.z * normal.z
+            );
+            ktm::fvec3 rb = make_fvec3(
+                -b.half_extents.x * normal.x,
+                -b.half_extents.y * normal.y,
+                -b.half_extents.z * normal.z
+            );
+
+            // 力矩公式，F是碰撞力向量（冲量j*法线normal）
+            ktm::fvec3 force_a = make_fvec3(normal.x * j, normal.y * j, normal.z * j); // A物体受的碰撞力
+            ktm::fvec3 tau_a = make_fvec3(
+                ra.y * force_a.z - ra.z * force_a.y,  // x轴力矩 = ry*Fz - rz*Fy
+                ra.z * force_a.x - ra.x * force_a.z,  // y轴力矩 = rz*Fx - rx*Fz
+                ra.x * force_a.y - ra.y * force_a.x   // z轴力矩 = rx*Fy - ry*Fx
+            );
+
+            ktm::fvec3 force_b = make_fvec3(-normal.x * j, -normal.y * j, -normal.z * j); // B物体受的碰撞力（反向）
+            ktm::fvec3 tau_b = make_fvec3(
+                rb.y * force_b.z - rb.z * force_b.y,
+                rb.z * force_b.x - rb.x * force_b.z,
+                rb.x * force_b.y - rb.y * force_b.x
+            );
+
+            // 角速度更新
+            // 转动惯量：如果不存在则用默认值1.0f
+            float Ia = g_handle_to_inertia.count(ha) ? g_handle_to_inertia[ha] : 1.0f;
+            float Ib = g_handle_to_inertia.count(hb) ? g_handle_to_inertia[hb] : 1.0f;
+            // 避免转动惯量为0导致除零崩溃
+            Ia = std::max(Ia, min_inertia);
+            Ib = std::max(Ib, min_inertia);
+
+            g_handle_to_angular_vel[ha].x += tau_a.x / Ia * fixed_dt;
+            g_handle_to_angular_vel[ha].y += tau_a.y / Ia * fixed_dt;
+            g_handle_to_angular_vel[ha].z += tau_a.z / Ia * fixed_dt;
+
+            g_handle_to_angular_vel[hb].x += tau_b.x / Ib * fixed_dt;
+            g_handle_to_angular_vel[hb].y += tau_b.y / Ib * fixed_dt;
+            g_handle_to_angular_vel[hb].z += tau_b.z / Ib * fixed_dt;
+
+            // 休眠碰撞后唤醒物体
+            g_handle_to_sleeping[ha] = false;
+            g_handle_to_sleeping[hb] = false;
+            g_handle_to_sleep_timer[ha] = 0.0f;
+            g_handle_to_sleep_timer[hb] = 0.0f;
+
+            // 记录活跃碰撞对
             auto actor_a = mech_to_actor.count(ha) ? mech_to_actor[ha] : ha;
             auto actor_b = mech_to_actor.count(hb) ? mech_to_actor[hb] : hb;
             auto sorted_pair = (actor_a < actor_b) ? std::make_pair(actor_a, actor_b) : std::make_pair(actor_b, actor_a);
             curr_active_collisions.insert(sorted_pair);
+
         }
 
         // 更新上一帧碰撞对
         g_prev_active_collisions.swap(curr_active_collisions);
     }
 
-    // 统一更新位置
+    // 统一更新位置 + 旋转 + 地板碰撞
     for (std::size_t i = 0; i < mechanics_data.size(); ++i) {
         const auto& data = mechanics_data[i];
         std::uintptr_t h = data.handle;
+        // 休眠物体跳过更新
+        if (g_handle_to_sleeping[h])
+            continue;
 
         auto tx_w = transform_storage.acquire_write(data.transform_handle);
         if (!tx_w) continue;
 
-
+        //位置更新
         tx_w->position.x += g_handle_to_velocity[h].x * fixed_dt;
         tx_w->position.y += g_handle_to_velocity[h].y * fixed_dt;
         tx_w->position.z += g_handle_to_velocity[h].z * fixed_dt;
+
+        //角速度驱动旋转 （已用，包含rotation字段）
+        tx_w->rotation.x += g_handle_to_angular_vel[h].x * fixed_dt;
+        tx_w->rotation.y += g_handle_to_angular_vel[h].y * fixed_dt;
+        tx_w->rotation.z += g_handle_to_angular_vel[h].z * fixed_dt;
 
         // 精准地板碰撞检测（基于物体底部高度）
         float object_bottom_y = tx_w->position.y - data.half_height; // 物体实际底部Y坐标
@@ -604,18 +738,55 @@ void MechanicsSystem::update_physics() {
             float y_vel = g_handle_to_velocity[h].y; // 把速度提取为临时变量
             if (y_vel < -low_vel_threshold) {
                 g_handle_to_velocity[h].y = -y_vel * floor_restitution;
-            }else {
-                // 低速时直接归零，彻底消除抖动
+            } else {
+                // 低速时直接归零，消除抖动
                 if (std::abs(g_handle_to_velocity[h].y) < zero_vel_threshold) {
                     g_handle_to_velocity[h].y = 0.0f;
                 } else {
                     // 逐步衰减到零
-                    g_handle_to_velocity[h].y *= 0.1f;
+                    g_handle_to_velocity[h].y *= 0.15f;
                 }
+
+                // 地面摩擦减速（线性+旋转）
+                g_handle_to_velocity[h].x *= 0.8f;
+                g_handle_to_velocity[h].z *= 0.8f;
+                g_handle_to_angular_vel[h].x *= 0.7f;
+                g_handle_to_angular_vel[h].y *= 0.7f;
+                g_handle_to_angular_vel[h].z *= 0.7f;
             }
+
+            // 地板碰撞后重置休眠计时器，避免假静止
+            g_handle_to_sleep_timer[h] = 0.0f;
         }
     }
 
+    // 休眠系统：静止物体自动休眠
+    for (std::uintptr_t h : mechanics_handles) {
+        if (g_handle_to_sleeping[h]) continue;
+
+        const auto& v = g_handle_to_velocity[h];
+        const auto& av = g_handle_to_angular_vel[h];
+
+        float v_sq = v.x*v.x + v.y*v.y + v.z*v.z;
+        float av_sq = av.x*av.x + av.y*av.y + av.z*av.z;
+
+        // 速度足够小开始计时
+        if (v_sq < sleep_threshold_sq && av_sq < sleep_threshold_sq) {
+            g_handle_to_sleep_timer[h] += fixed_dt;
+            // 计时满足 休眠
+            if (g_handle_to_sleep_timer[h] >= sleep_time_needed) {
+                g_handle_to_sleeping[h] = true;
+                g_handle_to_velocity[h] = make_fvec3(0.0f, 0.0f, 0.0f);
+                g_handle_to_angular_vel[h] = make_fvec3(0.0f, 0.0f, 0.0f);
+            }
+        } else {
+            // 还在动 重置休眠计时器
+            g_handle_to_sleep_timer[h] = 0.0f;
+        }
+    }
+
+
+    // 清理无效句柄缓存
     std::unordered_set<std::uintptr_t> alive_handles(mechanics_handles.begin(), mechanics_handles.end());
     auto clean_cache = [&](auto& cache) {
         for (auto it = cache.begin(); it != cache.end(); ) {
@@ -628,6 +799,10 @@ void MechanicsSystem::update_physics() {
     };
 
     clean_cache(g_handle_to_velocity);
+    clean_cache(g_handle_to_angular_vel);
+    clean_cache(g_handle_to_inertia);
+    clean_cache(g_handle_to_sleeping);
+    clean_cache(g_handle_to_sleep_timer);
     clean_cache(handle_to_mass);
     clean_cache(handle_to_damping);
     clean_cache(handle_to_restitution);
