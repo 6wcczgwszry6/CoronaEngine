@@ -35,6 +35,7 @@ constexpr ktm::fvec3 make_fvec3(float x, float y, float z) {
     return result;     // 按值传出
 }
 
+<<<<<<< Updated upstream
 // 取 3×3 矩阵第 row 行 col 列（数学下标），等价 M[col][row]
 inline float mat3_at_rc(const ktm::fmat3x3& M, std::size_t row, std::size_t col) {
     return M[col][row];
@@ -43,6 +44,20 @@ inline float mat4_at_rc(const ktm::fmat4x4& M, std::size_t row, std::size_t col)
     return M[col][row];
 }
 
+=======
+
+//封装构造四元数
+constexpr ktm::fvec4 make_fvec4(float x, float y, float z,float w) {
+    ktm::fvec4 result2; // 返回值缓冲
+    result2.x = x;      // X
+    result2.y = y;      // Y
+    result2.z = z;      // Z
+    result2.w = w;
+    return result2;     // 按值传出
+}
+
+
+>>>>>>> Stashed changes
 inline ktm::fvec3 vec3_add(const ktm::fvec3& a, const ktm::fvec3& b) {
     return make_fvec3(a.x+b.x, a.y+b.y, a.z+b.z); // 逐分量加
 }
@@ -55,9 +70,16 @@ inline ktm::fvec3 vec3_mul(const ktm::fvec3& v, float s) {
 
 // local：局部点；返回：同一几何点在世界的坐标
 inline ktm::fvec3 transform_local_point_to_world(const Corona::ModelTransform& t, const ktm::fvec3& local) {
+<<<<<<< Updated upstream
     const ktm::fmat4x4 M = t.compute_matrix();   // 4×4 TRS
     const ktm::fvec4 local_h(local, 1.0f);       // w=1 表示点而非方向
     const ktm::fvec4 world_h = M * local_h;      // 齐次乘法
+=======
+    ktm::fmat4x4 M = t.compute_matrix();   // 4×4 TRS
+    ktm::fvec4 local_h  = make_fvec4(local.x, local.y, local.z, 1.0f);
+    // w=1 表示点而非方向
+    ktm::fvec4 world_h = M * local_h;      // 齐次乘法
+>>>>>>> Stashed changes
     return make_fvec3(world_h.x, world_h.y, world_h.z); // 透视下 w 应为 1，取 xyz 即可
 }
 
@@ -105,12 +127,17 @@ inline ktm::fquat quat_from_model_euler(const ktm::fvec3& euler) {
 
 // R：旋转矩阵；euler：输出的 XYZ 欧拉（弧度）
 inline void euler_xyz_from_rot_mat(const ktm::fmat3x3& R, ktm::fvec3& euler) {
+<<<<<<< Updated upstream
     const float sy = mat3_at_rc(R, 0, 2);    // 用于 asin 的元素
+=======
+    const float sy = R[0][2];    // 用于 asin 的元素
+>>>>>>> Stashed changes
     const float pi = 3.1415926535f;          // π
 
     if (sy > 0.999f) {                      // 俯仰近 +90°，万向节锁
         euler.x = 0;                        // 俯仰锁定下 x 置 0
         euler.y = pi * 0.5f;                // y = +π/2
+<<<<<<< Updated upstream
         euler.z = std::atan2(mat3_at_rc(R, 1, 0), mat3_at_rc(R, 1, 1)); // 用 atan2 定 z
     } else if (sy < -0.999f) {              // 俯仰近 -90°
         euler.x = 0;
@@ -120,6 +147,17 @@ inline void euler_xyz_from_rot_mat(const ktm::fmat3x3& R, ktm::fvec3& euler) {
         euler.y = std::asin(sy);            // 一般情形：求中间角
         euler.x = std::atan2(-mat3_at_rc(R, 1, 2), mat3_at_rc(R, 2, 2));
         euler.z = std::atan2(-mat3_at_rc(R, 0, 1), mat3_at_rc(R, 0, 0));
+=======
+        euler.z = std::atan2(R[1][0],R[1, 1]); // 用 atan2 定 z
+    } else if (sy < -0.999f) {              // 俯仰近 -90°
+        euler.x = 0;
+        euler.y = -pi * 0.5f;
+        euler.z = std::atan2(R[1][0], R[1][1]);
+    } else {
+        euler.y = std::asin(sy);            // 一般情形：求中间角
+        euler.x = std::atan2(R[1][2],R[2][2]);
+        euler.z = std::atan2(R[0][1],R[0][0]);
+>>>>>>> Stashed changes
     }
 }
 // q：四元数缓存；euler：写回 Transform 的欧拉角
