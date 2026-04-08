@@ -118,7 +118,7 @@ inline void euler_xyz_from_rot_mat(const ktm::fmat3x3& R, ktm::fvec3& euler) {
     if (sy > 0.999f) {                      // 俯仰近 +90°，万向节锁
         euler.x = 0;                        // 俯仰锁定下 x 置 0
         euler.y = pi * 0.5f;                // y = +π/2
-  euler.z = std::atan2(R[1][0],R[1, 1]); // 用 atan2 定 z
+        euler.z = std::atan2(R[1][0], R[1][1]); // 用 atan2 定 z
     } else if (sy < -0.999f) {              // 俯仰近 -90°
         euler.x = 0;
         euler.y = -pi * 0.5f;
