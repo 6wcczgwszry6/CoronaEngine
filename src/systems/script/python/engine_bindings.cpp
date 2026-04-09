@@ -94,11 +94,43 @@ void BindAll(nanobind::module_& m) {
                     }
                 };
 
-                 self.set_collision_callback(cb);
-             },
+                 self.set_collision_callback(cb); },
 
-             nb::arg("callback"),
-             "Set collision callback. Callback receives (other_handle, normal, point) where normal and point are (x,y,z) tuples.");
+             nb::arg("callback"), "Set collision callback. Callback receives (other_handle, normal, point) where normal and point are (x,y,z) tuples.")
+        .def("set_on_move_callback", [](Mechanics& self, nb::object callback) {
+                using CallbackType = std::function<void()>;
+                 
+                if (callback.is_none()) {
+                    // 清除回调
+                    self.set_on_move_callback(CallbackType{});
+                    return;
+                }
+                 
+                // 捕获 Python 可调用对象
+                auto func_ptr = std::shared_ptr<nb::object>(new nb::object(callback), [](nb::object* p) {
+                    try {
+                        nb::gil_scoped_acquire gil;
+                        delete p;
+                    } catch (...) {
+                        delete p;
+                    }
+                });
+                 
+                CallbackType cb = [func_ptr]() mutable {
+                    // 获取 Python GIL，因为回调可能从其他线程调用
+                    nb::gil_scoped_acquire gil;
+                    try {
+                        // 调用 Python 回调
+                        (*func_ptr).attr("__call__")();
+                    } catch (const std::exception& e) {
+                        CFW_LOG_ERROR("[Bindings::move_callback] std::exception when invoking Python callback: {}", e.what());
+                    } catch (...) {
+                        CFW_LOG_ERROR("[Bindings::move_callback] Unknown exception when invoking Python callback");
+                    }
+                };
+                 
+                self.set_on_move_callback(cb); },
+            nb::arg("callback"), "Set move callback for geometry.");
 
     // ============================================================================
     // Optics: 光学/渲染组件

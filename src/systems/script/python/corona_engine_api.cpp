@@ -1138,6 +1138,21 @@ void Corona::API::Mechanics::set_collision_callback(
     }
 }
 
+void Corona::API::Mechanics::set_on_move_callback(
+    std::function<void()> callback) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Mechanics::set_on_move_callback] Invalid mechanics handle");
+        return;
+    }
+
+    if (auto accessor = SharedDataHub::instance().mechanics_storage().acquire_write(handle_)) {
+        accessor->on_move_callback = std::move(callback);
+        CFW_LOG_DEBUG("[Mechanics::set_on_move_callback] Callback set for handle {}", handle_);
+    } else {
+        CFW_LOG_ERROR("[Mechanics::set_on_move_callback] Failed to acquire write access");
+    }
+}
+
 // ########################
 //       Acoustics
 // ########################

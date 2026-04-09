@@ -91,10 +91,11 @@ struct MechanicsDevice {
     float restitution{0.8f};
     float damping{0.99f};
 
-    // Use std::array<float,3> for callback parameters so scripting bindings (nanobind)
-    // can convert Python tuples/lists directly without depending on engine internal types.
-    // New signature includes a "began" flag to indicate collision start (true) or end (false).
+    // 碰撞回调函数
     std::function<void(std::uintptr_t, bool, const std::array<float, 3>&, const std::array<float, 3>&)> collision_callback;
+
+    // 移动回调函数
+    std::function<void()> on_move_callback;
 };
 
 struct AcousticsDevice {
