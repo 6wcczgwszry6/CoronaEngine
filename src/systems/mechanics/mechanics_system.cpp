@@ -20,6 +20,10 @@
 
 #include "corona/shared_data_hub.h"
 #include "ktm/ktm.h"
+
+// Resource layer — 用于加载 LOD 碰撞网格
+#include <corona/resource/resource_manager.h>
+#include <corona/resource/types/scene.h>
 // Note: do not depend on nanobind in the mechanics system. Callbacks provided
 // from the scripting layer are expected to manage GIL acquisition themselves.
 
@@ -264,7 +268,364 @@ struct MechanicsWorldAABB {
     ktm::fvec3 max_world;             // 世界AABB最大边界
     ktm::fvec3 center_world;          // 世界AABB中心
     float half_height;                // 物体Y轴半高（用于地板碰撞）
+    std::uint64_t model_id = 0;       // 对应的模型资源ID（用于碰撞网格查找）
 };
+
+// ============================================================================
+// 碰撞网格（基于最低级 LOD 的三角形碰撞检测）
+// ============================================================================
+
+/// 碰撞网格：存储局部空间顶点和三角形索引
+struct CollisionMesh {
+    std::vector<ktm::fvec3> vertices;                    // 局部空间顶点
+    std::vector<std::array<std::uint16_t, 3>> triangles; // 三角形索引三元组
+    float min_local_y = 0.0f;                            // 最低点Y（精确地板碰撞）
+};
+
+/// 碰撞网格缓存（key = model_id，同模型多实例共享）
+static std::unordered_map<std::uint64_t, CollisionMesh> g_collision_mesh_cache;
+
+/// 三角形碰撞检测结果
+struct TriangleContactResult {
+    bool has_contact = false;
+    ktm::fvec3 normal;           // 碰撞法线（从 A 指向 B）
+    float penetration = 0.0f;    // 穿透深度
+    ktm::fvec3 contact_point;    // 接触点
+};
+
+// ============================================================================
+// 碰撞网格加载
+// ============================================================================
+
+/// 从 Resource 层加载最低级 LOD 碰撞网格
+/// 返回 true 表示成功加载（或已在缓存中）
+bool ensure_collision_mesh(std::uint64_t model_id) {
+    if (model_id == 0) return false;
+    if (g_collision_mesh_cache.count(model_id)) return true;
+
+    auto scene = Corona::Resource::ResourceManager::get_instance()
+                     .acquire_read<Corona::Resource::Scene>(model_id);
+    if (!scene) return false;
+
+    CollisionMesh mesh;
+    std::uint16_t vertex_offset = 0;
+
+    for (std::uint32_t mi = 0; mi < static_cast<std::uint32_t>(scene->data.meshes.size()); ++mi) {
+        const std::vector<Corona::Resource::Vertex>* src_verts = nullptr;
+        const std::vector<std::uint16_t>* src_indices = nullptr;
+
+        std::uint32_t lod_count = scene->get_mesh_lod_count(mi);
+        if (lod_count > 0) {
+            // 取最后一级 LOD（最简化）
+            const auto& lod = scene->get_mesh_lod(mi, lod_count - 1);
+            src_verts = &lod.vertices;
+            src_indices = &lod.indices;
+        } else {
+            // 无 LOD，回退原始网格
+            src_verts = &scene->get_mesh_vertices(mi);
+            src_indices = &scene->get_mesh_indices(mi);
+        }
+
+        if (!src_verts || src_verts->empty() || !src_indices || src_indices->empty()) continue;
+
+        // 三角形数过多时跳过此 mesh（降级为 AABB）
+        constexpr std::size_t kMaxTrianglesPerMesh = 500;
+        if (src_indices->size() / 3 > kMaxTrianglesPerMesh && lod_count == 0) continue;
+
+        // 复制顶点
+        for (const auto& v : *src_verts) {
+            ktm::fvec3 pos;
+            pos.x = v.position[0];
+            pos.y = v.position[1];
+            pos.z = v.position[2];
+            mesh.vertices.push_back(pos);
+        }
+
+        // 复制三角形索引（加偏移）
+        for (std::size_t i = 0; i + 2 < src_indices->size(); i += 3) {
+            mesh.triangles.push_back({
+                static_cast<std::uint16_t>((*src_indices)[i] + vertex_offset),
+                static_cast<std::uint16_t>((*src_indices)[i + 1] + vertex_offset),
+                static_cast<std::uint16_t>((*src_indices)[i + 2] + vertex_offset),
+            });
+        }
+
+        vertex_offset = static_cast<std::uint16_t>(mesh.vertices.size());
+    }
+
+    if (mesh.vertices.empty() || mesh.triangles.empty()) return false;
+
+    // 预计算最低点Y
+    mesh.min_local_y = mesh.vertices[0].y;
+    for (const auto& v : mesh.vertices) {
+        mesh.min_local_y = std::min(mesh.min_local_y, v.y);
+    }
+
+    g_collision_mesh_cache[model_id] = std::move(mesh);
+    return true;
+}
+
+/// 获取 mechanics handle 对应的 model_id
+std::uint64_t get_model_id_for_mechanics(std::uintptr_t mech_handle) {
+    auto& mechanics_storage = Corona::SharedDataHub::instance().mechanics_storage();
+    auto& geometry_storage = Corona::SharedDataHub::instance().geometry_storage();
+    auto& model_resource_storage = Corona::SharedDataHub::instance().model_resource_storage();
+
+    auto m_acc = mechanics_storage.acquire_read(mech_handle);
+    if (!m_acc) return 0;
+    auto geom_acc = geometry_storage.acquire_read(m_acc->geometry_handle);
+    if (!geom_acc) return 0;
+    auto res_acc = model_resource_storage.acquire_read(geom_acc->model_resource_handle);
+    if (!res_acc) return 0;
+    return res_acc->model_id;
+}
+
+// ============================================================================
+// 三角形工具函数
+// ============================================================================
+
+inline ktm::fvec3 cross(const ktm::fvec3& a, const ktm::fvec3& b) {
+    return make_fvec3(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x
+    );
+}
+
+inline float dot(const ktm::fvec3& a, const ktm::fvec3& b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+inline ktm::fvec3 sub(const ktm::fvec3& a, const ktm::fvec3& b) {
+    return make_fvec3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+inline float vec_length(const ktm::fvec3& v) {
+    return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+inline ktm::fvec3 normalize_safe(const ktm::fvec3& v) {
+    float len = vec_length(v);
+    if (len < 1e-8f) return make_fvec3(0.0f, 1.0f, 0.0f);
+    return make_fvec3(v.x / len, v.y / len, v.z / len);
+}
+
+/// 将局部空间碰撞网格顶点变换到世界空间
+void transform_vertices_to_world(
+    const std::vector<ktm::fvec3>& local_verts,
+    const Corona::ModelTransform& tx,
+    std::vector<ktm::fvec3>& world_verts) {
+    world_verts.resize(local_verts.size());
+
+    // 如果有旋转，使用完整矩阵变换
+    bool has_rotation = (std::abs(tx.euler_rotation.x) > 1e-6f ||
+                         std::abs(tx.euler_rotation.y) > 1e-6f ||
+                         std::abs(tx.euler_rotation.z) > 1e-6f);
+
+    if (has_rotation) {
+        ktm::fmat4x4 mat = tx.compute_matrix();
+        for (std::size_t i = 0; i < local_verts.size(); ++i) {
+            const auto& v = local_verts[i];
+            // mat * (v, 1)
+            world_verts[i] = make_fvec3(
+                mat[0][0] * v.x + mat[1][0] * v.y + mat[2][0] * v.z + mat[3][0],
+                mat[0][1] * v.x + mat[1][1] * v.y + mat[2][1] * v.z + mat[3][1],
+                mat[0][2] * v.x + mat[1][2] * v.y + mat[2][2] * v.z + mat[3][2]
+            );
+        }
+    } else {
+        // 无旋转：简单缩放+平移
+        for (std::size_t i = 0; i < local_verts.size(); ++i) {
+            const auto& v = local_verts[i];
+            world_verts[i] = make_fvec3(
+                v.x * tx.scale.x + tx.position.x,
+                v.y * tx.scale.y + tx.position.y,
+                v.z * tx.scale.z + tx.position.z
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Möller 三角形-三角形相交测试
+// 基于分离轴定理 (SAT) 的实现
+// ============================================================================
+
+/// 将三角形的三个顶点投影到轴上，返回 [min, max]
+inline void project_triangle(const ktm::fvec3& axis,
+                             const ktm::fvec3& v0, const ktm::fvec3& v1, const ktm::fvec3& v2,
+                             float& out_min, float& out_max) {
+    float d0 = dot(axis, v0);
+    float d1 = dot(axis, v1);
+    float d2 = dot(axis, v2);
+    out_min = std::min({d0, d1, d2});
+    out_max = std::max({d0, d1, d2});
+}
+
+/// 测试两个三角形在给定轴上的投影是否分离
+/// 若不分离，返回重叠量
+inline bool test_axis(const ktm::fvec3& axis,
+                      const ktm::fvec3 a[3], const ktm::fvec3 b[3],
+                      float& overlap) {
+    float axis_len_sq = dot(axis, axis);
+    if (axis_len_sq < 1e-12f) {
+        // 退化轴（平行边），不作为分离轴
+        overlap = std::numeric_limits<float>::max();
+        return false; // 不分离
+    }
+
+    float a_min, a_max, b_min, b_max;
+    project_triangle(axis, a[0], a[1], a[2], a_min, a_max);
+    project_triangle(axis, b[0], b[1], b[2], b_min, b_max);
+
+    if (a_max < b_min || b_max < a_min) {
+        return true; // 分离
+    }
+
+    // 计算重叠深度
+    float inv_len = 1.0f / std::sqrt(axis_len_sq);
+    overlap = (std::min(a_max, b_max) - std::max(a_min, b_min)) * inv_len;
+    return false; // 不分离
+}
+
+/// SAT 三角形-三角形相交测试
+/// 返回是否相交，并输出穿透法线和深度
+bool triangle_triangle_sat(const ktm::fvec3 tri_a[3], const ktm::fvec3 tri_b[3],
+                           ktm::fvec3& out_normal, float& out_depth) {
+    // 计算三角形边向量
+    ktm::fvec3 edge_a[3] = {
+        sub(tri_a[1], tri_a[0]),
+        sub(tri_a[2], tri_a[1]),
+        sub(tri_a[0], tri_a[2])
+    };
+    ktm::fvec3 edge_b[3] = {
+        sub(tri_b[1], tri_b[0]),
+        sub(tri_b[2], tri_b[1]),
+        sub(tri_b[0], tri_b[2])
+    };
+
+    // 面法线
+    ktm::fvec3 normal_a = cross(edge_a[0], edge_a[1]);
+    ktm::fvec3 normal_b = cross(edge_b[0], edge_b[1]);
+
+    float min_overlap = std::numeric_limits<float>::max();
+    ktm::fvec3 min_axis = make_fvec3(0.0f, 1.0f, 0.0f);
+
+    // 测试轴：面法线A
+    float overlap;
+    if (test_axis(normal_a, tri_a, tri_b, overlap)) return false;
+    if (overlap < min_overlap) { min_overlap = overlap; min_axis = normal_a; }
+
+    // 测试轴：面法线B
+    if (test_axis(normal_b, tri_a, tri_b, overlap)) return false;
+    if (overlap < min_overlap) { min_overlap = overlap; min_axis = normal_b; }
+
+    // 测试轴：9 个边叉积
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            ktm::fvec3 axis = cross(edge_a[i], edge_b[j]);
+            if (test_axis(axis, tri_a, tri_b, overlap)) return false;
+            if (overlap < min_overlap) { min_overlap = overlap; min_axis = axis; }
+        }
+    }
+
+    // 所有轴均未分离 → 相交
+    out_normal = normalize_safe(min_axis);
+    out_depth = min_overlap;
+    return true;
+}
+
+/// 执行两个碰撞网格之间的三角形精确碰撞检测
+/// world_verts_a/b: 已变换到世界空间的顶点
+/// mesh_a/b: 碰撞网格（提供三角形索引）
+/// result: 输出接触信息
+void triangle_narrowphase(
+    const std::vector<ktm::fvec3>& world_verts_a,
+    const CollisionMesh& mesh_a,
+    const std::vector<ktm::fvec3>& world_verts_b,
+    const CollisionMesh& mesh_b,
+    const ktm::fvec3& center_a,
+    const ktm::fvec3& center_b,
+    TriangleContactResult& result) {
+
+    result.has_contact = false;
+    float best_depth = std::numeric_limits<float>::max();
+    ktm::fvec3 best_normal = make_fvec3(0.0f, 1.0f, 0.0f);
+    ktm::fvec3 best_point = make_fvec3(0.0f, 0.0f, 0.0f);
+    int contact_count = 0;
+    ktm::fvec3 contact_sum = make_fvec3(0.0f, 0.0f, 0.0f);
+
+    for (const auto& tri_a_idx : mesh_a.triangles) {
+        // 三角形 A 的世界空间顶点
+        const ktm::fvec3& a0 = world_verts_a[tri_a_idx[0]];
+        const ktm::fvec3& a1 = world_verts_a[tri_a_idx[1]];
+        const ktm::fvec3& a2 = world_verts_a[tri_a_idx[2]];
+
+        // 三角形 A 的 mini-AABB
+        ktm::fvec3 a_min = make_fvec3(
+            std::min({a0.x, a1.x, a2.x}), std::min({a0.y, a1.y, a2.y}), std::min({a0.z, a1.z, a2.z}));
+        ktm::fvec3 a_max = make_fvec3(
+            std::max({a0.x, a1.x, a2.x}), std::max({a0.y, a1.y, a2.y}), std::max({a0.z, a1.z, a2.z}));
+
+        for (const auto& tri_b_idx : mesh_b.triangles) {
+            // 三角形 B 的世界空间顶点
+            const ktm::fvec3& b0 = world_verts_b[tri_b_idx[0]];
+            const ktm::fvec3& b1 = world_verts_b[tri_b_idx[1]];
+            const ktm::fvec3& b2 = world_verts_b[tri_b_idx[2]];
+
+            // Mini-AABB 预筛选
+            ktm::fvec3 b_min = make_fvec3(
+                std::min({b0.x, b1.x, b2.x}), std::min({b0.y, b1.y, b2.y}), std::min({b0.z, b1.z, b2.z}));
+            ktm::fvec3 b_max = make_fvec3(
+                std::max({b0.x, b1.x, b2.x}), std::max({b0.y, b1.y, b2.y}), std::max({b0.z, b1.z, b2.z}));
+
+            if (!aabb_overlap(a_min, a_max, b_min, b_max)) continue;
+
+            // SAT 精确测试
+            ktm::fvec3 tri_a_verts[3] = {a0, a1, a2};
+            ktm::fvec3 tri_b_verts[3] = {b0, b1, b2};
+
+            ktm::fvec3 normal;
+            float depth;
+            if (!triangle_triangle_sat(tri_a_verts, tri_b_verts, normal, depth)) continue;
+
+            // 累积接触点（两三角形中心的平均）
+            ktm::fvec3 tri_center = make_fvec3(
+                (a0.x + a1.x + a2.x + b0.x + b1.x + b2.x) / 6.0f,
+                (a0.y + a1.y + a2.y + b0.y + b1.y + b2.y) / 6.0f,
+                (a0.z + a1.z + a2.z + b0.z + b1.z + b2.z) / 6.0f
+            );
+            contact_sum.x += tri_center.x;
+            contact_sum.y += tri_center.y;
+            contact_sum.z += tri_center.z;
+            ++contact_count;
+
+            // 取穿透最浅的法线和深度
+            if (depth < best_depth) {
+                best_depth = depth;
+                best_normal = normal;
+                best_point = tri_center;
+            }
+        }
+    }
+
+    if (contact_count == 0) return;
+
+    result.has_contact = true;
+    result.penetration = best_depth;
+    result.contact_point = make_fvec3(
+        contact_sum.x / static_cast<float>(contact_count),
+        contact_sum.y / static_cast<float>(contact_count),
+        contact_sum.z / static_cast<float>(contact_count)
+    );
+
+    // 确保法线方向从 A 指向 B
+    ktm::fvec3 a_to_b = sub(center_b, center_a);
+    if (dot(best_normal, a_to_b) < 0.0f) {
+        best_normal = make_fvec3(-best_normal.x, -best_normal.y, -best_normal.z);
+    }
+    result.normal = best_normal;
+}
 
 }  // namespace
 
@@ -306,6 +667,7 @@ void MechanicsSystem::shutdown() {
 
     g_prev_active_collisions.clear();
     g_handle_to_velocity.clear();
+    g_collision_mesh_cache.clear();
     g_handle_to_last_move_callback_time.clear();
     g_global_simulation_time = 0.0f;
     g_handle_to_last_move_callback_pos.clear();
@@ -337,6 +699,7 @@ void MechanicsSystem::update_physics() {
     auto& mechanics_storage = SharedDataHub::instance().mechanics_storage();
     auto& geometry_storage = SharedDataHub::instance().geometry_storage();
     auto& transform_storage = SharedDataHub::instance().model_transform_storage();
+    auto& model_resource_storage = SharedDataHub::instance().model_resource_storage();
     auto& scene_storage = SharedDataHub::instance().scene_storage();
     auto& actor_storage = SharedDataHub::instance().actor_storage();
     auto& profile_storage = SharedDataHub::instance().profile_storage();
@@ -458,10 +821,17 @@ void MechanicsSystem::update_physics() {
             (m.max_xyz.y - m.min_xyz.y) * 0.5f,
             (m.max_xyz.z - m.min_xyz.z) * 0.5f);
 
+        // 获取 model_id 用于碰撞网格查找
+        std::uint64_t entry_model_id = 0;
+        if (auto res_acc = model_resource_storage.acquire_read(geom_acc->model_resource_handle)) {
+            entry_model_id = res_acc->model_id;
+        }
+
         // 计算世界空间AABB（新增半高计算）
         MechanicsWorldAABB entry;
         entry.handle = h;
         entry.transform_handle = geom_acc->transform_handle;
+        entry.model_id = entry_model_id;
         entry.center_world = make_fvec3(
             c_local.x + t.position.x,
             c_local.y + t.position.y,
@@ -512,6 +882,13 @@ void MechanicsSystem::update_physics() {
         }
     }
 
+    // 预加载所有物理物体的碰撞网格（用于三角形碰撞检测和精确地板碰撞）
+    for (const auto& entry : mechanics_data) {
+        if (entry.model_id != 0) {
+            ensure_collision_mesh(entry.model_id);
+        }
+    }
+
     // 碰撞检测与速度修正
     if (mechanics_data.size() >= 2) {
         // 构建八叉树
@@ -546,10 +923,13 @@ void MechanicsSystem::update_physics() {
         octree_collect_pairs(octree_root, collision_pairs);
         octree_dedupe_pairs(collision_pairs);
 
-        // 处理碰撞对（只修正速度）
+        // 处理碰撞对：Phase 1 (AABB) → Phase 2 (三角形精确) → Phase 3 (碰撞响应)
         std::unordered_set<std::pair<std::uintptr_t, std::uintptr_t>, PairHash> curr_active_collisions;
         constexpr float eps = 1e-6f;           // 极小值，防止除零
         constexpr float min_overlap = 0.001f;  // 最小重叠深度，忽略微小重叠
+
+        // 惰性缓存：仅对候选对涉及的物体计算世界空间碰撞网格
+        std::unordered_map<std::uintptr_t, std::vector<ktm::fvec3>> world_verts_cache;
 
         for (const auto& pair : collision_pairs) {
             std::uintptr_t ha = pair.first;
@@ -565,33 +945,82 @@ void MechanicsSystem::update_physics() {
             const MechanicsWorldAABB& a = mechanics_data[it_a->second];
             const MechanicsWorldAABB& b = mechanics_data[it_b->second];
 
-            // 检测AABB重叠
+            // ===== Phase 1: AABB 碰撞检测（Broadphase 确认）=====
             if (!aabb_overlap(a.min_world, a.max_world, b.min_world, b.max_world)) {
                 continue;
             }
 
-            // 计算碰撞法线（从A指向B）
-            ktm::fvec3 diff = make_fvec3(
-                b.center_world.x - a.center_world.x,
-                b.center_world.y - a.center_world.y,
-                b.center_world.z - a.center_world.z);
-            float diff_len = std::sqrt(diff.x * diff.x + diff.y * diff.y + diff.z * diff.z);
-            if (diff_len < eps) {
-                continue;  // 避免零长度法线
-            }
-            ktm::fvec3 normal = make_fvec3(
-                diff.x / diff_len,
-                diff.y / diff_len,
-                diff.z / diff_len);
+            // ===== Phase 2: 三角形精确碰撞检测（Narrowphase）=====
+            ktm::fvec3 normal;
+            float penetration;
+            bool use_triangle_result = false;
 
-            // 计算重叠深度（只处理有效重叠）
-            float overlap_x = (a.max_world.x - a.min_world.x) / 2 + (b.max_world.x - b.min_world.x) / 2 - std::abs(diff.x);
-            float overlap_y = (a.max_world.y - a.min_world.y) / 2 + (b.max_world.y - b.min_world.y) / 2 - std::abs(diff.y);
-            float overlap_z = (a.max_world.z - a.min_world.z) / 2 + (b.max_world.z - b.min_world.z) / 2 - std::abs(diff.z);
-            float min_ov = std::min({overlap_x, overlap_y, overlap_z});
-            if (min_ov < min_overlap) {
-                continue;
+            // 尝试加载双方碰撞网格
+            bool has_mesh_a = (a.model_id != 0) && ensure_collision_mesh(a.model_id);
+            bool has_mesh_b = (b.model_id != 0) && ensure_collision_mesh(b.model_id);
+
+            if (has_mesh_a && has_mesh_b) {
+                const CollisionMesh& cm_a = g_collision_mesh_cache[a.model_id];
+                const CollisionMesh& cm_b = g_collision_mesh_cache[b.model_id];
+
+                // 惰性变换到世界空间
+                if (world_verts_cache.find(ha) == world_verts_cache.end()) {
+                    auto tx_a = transform_storage.acquire_read(a.transform_handle);
+                    if (tx_a) {
+                        transform_vertices_to_world(cm_a.vertices, *tx_a, world_verts_cache[ha]);
+                    }
+                }
+                if (world_verts_cache.find(hb) == world_verts_cache.end()) {
+                    auto tx_b = transform_storage.acquire_read(b.transform_handle);
+                    if (tx_b) {
+                        transform_vertices_to_world(cm_b.vertices, *tx_b, world_verts_cache[hb]);
+                    }
+                }
+
+                auto wv_a_it = world_verts_cache.find(ha);
+                auto wv_b_it = world_verts_cache.find(hb);
+                if (wv_a_it != world_verts_cache.end() && wv_b_it != world_verts_cache.end()) {
+                    TriangleContactResult tri_result;
+                    triangle_narrowphase(
+                        wv_a_it->second, cm_a,
+                        wv_b_it->second, cm_b,
+                        a.center_world, b.center_world,
+                        tri_result);
+
+                    if (tri_result.has_contact) {
+                        // Phase 2 确认碰撞：使用精确法线和穿透深度
+                        normal = tri_result.normal;
+                        penetration = tri_result.penetration;
+                        use_triangle_result = true;
+                    } else {
+                        // AABB 重叠但三角形未相交 → 假阳性，跳过
+                        continue;
+                    }
+                }
             }
+
+            // 如果没有碰撞网格数据，回退到 AABB 碰撞
+            if (!use_triangle_result) {
+                ktm::fvec3 diff = make_fvec3(
+                    b.center_world.x - a.center_world.x,
+                    b.center_world.y - a.center_world.y,
+                    b.center_world.z - a.center_world.z);
+                float diff_len = std::sqrt(diff.x * diff.x + diff.y * diff.y + diff.z * diff.z);
+                if (diff_len < eps) {
+                    continue;
+                }
+                normal = make_fvec3(diff.x / diff_len, diff.y / diff_len, diff.z / diff_len);
+
+                float overlap_x = (a.max_world.x - a.min_world.x) / 2 + (b.max_world.x - b.min_world.x) / 2 - std::abs(diff.x);
+                float overlap_y = (a.max_world.y - a.min_world.y) / 2 + (b.max_world.y - b.min_world.y) / 2 - std::abs(diff.y);
+                float overlap_z = (a.max_world.z - a.min_world.z) / 2 + (b.max_world.z - b.min_world.z) / 2 - std::abs(diff.z);
+                penetration = std::min({overlap_x, overlap_y, overlap_z});
+                if (penetration < min_overlap) {
+                    continue;
+                }
+            }
+
+            // ===== Phase 3: 碰撞响应 =====
 
             // 获取物体质量和弹性
             float mass_a = handle_to_mass[ha];
@@ -693,11 +1122,20 @@ void MechanicsSystem::update_physics() {
         tx_w->position.y += g_handle_to_velocity[h].y * fixed_dt;
         tx_w->position.z += g_handle_to_velocity[h].z * fixed_dt;
 
-        // 精准地板碰撞检测（基于物体底部高度）
-        float object_bottom_y = tx_w->position.y - data.half_height;  // 物体实际底部Y坐标
+        // 精准地板碰撞检测（优先使用碰撞网格最低点，回退 AABB 半高）
+        float effective_half_height = data.half_height;
+        if (data.model_id != 0) {
+            auto cm_it = g_collision_mesh_cache.find(data.model_id);
+            if (cm_it != g_collision_mesh_cache.end()) {
+                // 使用碰撞网格预计算的局部最低Y * 缩放
+                // min_local_y 通常为负值，所以 -min_local_y * scale 得到正的半高
+                effective_half_height = std::abs(cm_it->second.min_local_y * tx_w->scale.y);
+            }
+        }
+        float object_bottom_y = tx_w->position.y - effective_half_height;
         if (object_bottom_y < floor_y + floor_eps) {
             // 修正位置：避免穿透地板
-            tx_w->position.y = floor_y + data.half_height + floor_eps;
+            tx_w->position.y = floor_y + effective_half_height + floor_eps;
 
             // 处理反弹（仅当向下速度足够大时）
             float y_vel = g_handle_to_velocity[h].y;  // 把速度提取为临时变量
