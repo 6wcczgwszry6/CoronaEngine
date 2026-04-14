@@ -1220,10 +1220,91 @@ void MechanicsSystem::update_physics() {
         }
         } // 内层：collision_pairs；外层：impulse_iter
 
+        // ===== 碰撞结束检测：遍历上帧活跃但本帧消失的碰撞对，触发 end 回调 =====
+        for (const auto& old_pair : g_prev_active_collisions) {
+            if (curr_active_collisions.find(old_pair) != curr_active_collisions.end()) {
+                continue; // 仍在碰撞，不触发 end
+            }
+
+            std::uintptr_t actor_a = old_pair.first;
+            std::uintptr_t actor_b = old_pair.second;
+
+            // 反查 actor_handle → mechanics_handle
+            std::uintptr_t mech_ha = 0, mech_hb = 0;
+            for (const auto& [mh, ah] : mech_to_actor) {
+                if (ah == actor_a && mech_ha == 0) mech_ha = mh;
+                if (ah == actor_b && mech_hb == 0) mech_hb = mh;
+            }
+
+            std::array<float, 3> zero_normal = {0.f, 0.f, 0.f};
+            std::array<float, 3> zero_point = {0.f, 0.f, 0.f};
+
+            if (mech_ha != 0) {
+                if (auto m_acc = mechanics_storage.acquire_read(mech_ha)) {
+                    if (m_acc->collision_callback) {
+                        try {
+                            m_acc->collision_callback(actor_b, false, zero_normal, zero_point);
+                        } catch (...) {
+                            CFW_LOG_ERROR("MechanicsSystem: Exception in collision end callback for actor {}.", actor_a);
+                        }
+                    }
+                }
+            }
+
+            if (mech_hb != 0) {
+                if (auto m_acc = mechanics_storage.acquire_read(mech_hb)) {
+                    if (m_acc->collision_callback) {
+                        try {
+                            m_acc->collision_callback(actor_a, false, zero_normal, zero_point);
+                        } catch (...) {
+                            CFW_LOG_ERROR("MechanicsSystem: Exception in collision end callback for actor {}.", actor_b);
+                        }
+                    }
+                }
+            }
+        }
+
         // 更新上一帧碰撞对
         g_prev_active_collisions.swap(curr_active_collisions);
     } else {
-        // 物体数量不足2个时，清空上一帧碰撞记录，防止旧碰撞对残留
+        // 物体数量不足2个时，为残留的碰撞对发送 collision end 回调
+        for (const auto& old_pair : g_prev_active_collisions) {
+            std::uintptr_t actor_a = old_pair.first;
+            std::uintptr_t actor_b = old_pair.second;
+
+            std::uintptr_t mech_ha = 0, mech_hb = 0;
+            for (const auto& [mh, ah] : mech_to_actor) {
+                if (ah == actor_a && mech_ha == 0) mech_ha = mh;
+                if (ah == actor_b && mech_hb == 0) mech_hb = mh;
+            }
+
+            std::array<float, 3> zero_normal = {0.f, 0.f, 0.f};
+            std::array<float, 3> zero_point = {0.f, 0.f, 0.f};
+
+            if (mech_ha != 0) {
+                if (auto m_acc = mechanics_storage.acquire_read(mech_ha)) {
+                    if (m_acc->collision_callback) {
+                        try {
+                            m_acc->collision_callback(actor_b, false, zero_normal, zero_point);
+                        } catch (...) {
+                            CFW_LOG_ERROR("MechanicsSystem: Exception in collision end callback for actor {}.", actor_a);
+                        }
+                    }
+                }
+            }
+
+            if (mech_hb != 0) {
+                if (auto m_acc = mechanics_storage.acquire_read(mech_hb)) {
+                    if (m_acc->collision_callback) {
+                        try {
+                            m_acc->collision_callback(actor_a, false, zero_normal, zero_point);
+                        } catch (...) {
+                            CFW_LOG_ERROR("MechanicsSystem: Exception in collision end callback for actor {}.", actor_b);
+                        }
+                    }
+                }
+            }
+        }
         g_prev_active_collisions.clear();
     }
 
