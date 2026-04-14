@@ -1140,10 +1140,21 @@ void MechanicsSystem::update_physics() {
                     }
                 }
 
-                g_handle_to_sleeping[ha] = false; // 发生过接触则唤醒（避免「睡着还叠压」）
-                g_handle_to_sleeping[hb] = false;
-                g_handle_to_sleep_timer[ha] = 0.0f;
-                g_handle_to_sleep_timer[hb] = 0.0f;
+                // 只有当法向冲量导致的速度变化超过休眠阈值时才唤醒
+                {
+                    const float wake_impulse_threshold = sleep_threshold * 2.0f;
+                    const float delta_v_a = std::abs(j) * inv_ma;
+                    const float delta_v_b = std::abs(j) * inv_mb;
+
+                    if (delta_v_a > wake_impulse_threshold) {
+                        g_handle_to_sleeping[ha] = false;
+                        g_handle_to_sleep_timer[ha] = 0.0f;
+                    }
+                    if (delta_v_b > wake_impulse_threshold) {
+                        g_handle_to_sleeping[hb] = false;
+                        g_handle_to_sleep_timer[hb] = 0.0f;
+                    }
+                }
 
                 // 记录活跃碰撞对
                 auto actor_a = mech_to_actor.count(ha) ? mech_to_actor[ha] : ha;
