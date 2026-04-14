@@ -1222,6 +1222,9 @@ void MechanicsSystem::update_physics() {
 
         // 更新上一帧碰撞对
         g_prev_active_collisions.swap(curr_active_collisions);
+    } else {
+        // 物体数量不足2个时，清空上一帧碰撞记录，防止旧碰撞对残留
+        g_prev_active_collisions.clear();
     }
 
     // --- 阶段 6：半隐式位姿积分（用冲量后的 v,ω）+ 无穷地板 + 休眠累计 + 缓存淘汰 ---
