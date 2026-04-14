@@ -1243,6 +1243,7 @@ void MechanicsSystem::update_physics() {
             float y_vel = g_handle_to_velocity[h].y; // 向上为正
             if (y_vel < -low_vel_threshold) {
                 g_handle_to_velocity[h].y = -y_vel * floor_restitution; // 下行且够快则反弹
+                g_handle_to_sleep_timer[h] = 0.0f; // 显著弹跳才打断休眠计时
             } else {
                 if (std::abs(g_handle_to_velocity[h].y) < zero_vel_threshold) {
                     g_handle_to_velocity[h].y = 0.0f; // 粘地：贴住时竖直速度清零
@@ -1255,9 +1256,8 @@ void MechanicsSystem::update_physics() {
                 g_handle_to_angular_vel[h].x *= 0.7f; // 滚阻：略拖慢角速度防永转
                 g_handle_to_angular_vel[h].y *= 0.7f;
                 g_handle_to_angular_vel[h].z *= 0.7f;
+                // 静接触不打断休眠计时，让休眠检测正常累积
             }
-
-            g_handle_to_sleep_timer[h] = 0.0f; // 碰地视为仍在扰动，休眠累计清零
         }
     }
 
