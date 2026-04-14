@@ -11,10 +11,8 @@
 #include <cstddef>      // size_t
 #include <cstdint>      // 固定宽度整数
 #include <functional>   // std::function（回调）
-#include <future>       // std::async / std::future（异步回调）
 #include <limits>       // numeric_limits（SAT）
 #include <memory>       // unique_ptr,make_unique
-#include <mutex>        // g_callback_mutex
 #include <unordered_map> // 各 handle→数据 映射
 #include <unordered_set> // alive_handles
 #include <utility>      // pair, move
@@ -371,9 +369,8 @@ static std::unordered_map<std::uintptr_t, ktm::fvec3> g_handle_to_last_move_call
 // 移动回调最小位移阈值（单位：米/坐标单位）
 constexpr float kMoveCallbackMinDistance = 0.1f;
 
-// ========== 异步回调执行相关 ==========
-static std::vector<std::future<void>> g_pending_callbacks;
-static std::mutex g_callback_mutex;
+// ========== 延迟回调队列（同步执行，避免跨线程竞争） ==========
+static std::vector<std::function<void()>> g_deferred_move_callbacks;
 static std::atomic<bool> g_shutdown_requested{false};
 
 /*
@@ -553,6 +550,8 @@ void octree_dedupe_pairs(std::vector<std::pair<std::uintptr_t, std::uintptr_t>>&
     pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end()); // 删除连续重复
 }
 
+// 以下全局变量仅由 MechanicsSystem::update_physics() 访问（单线程）
+// 如需跨系统读取，请通过 EventBus/EventStream 传递
 static std::unordered_map<std::uintptr_t, ktm::fvec3> g_handle_to_velocity;   // 线速度 m/s
 static std::unordered_map<std::uintptr_t, ktm::fvec3> g_handle_to_angular_vel; // 角速度 rad/s 世界系
 static std::unordered_map<std::uintptr_t, ktm::fquat> g_handle_orientation_quat; // 与欧拉同步的朝向
@@ -578,22 +577,8 @@ void MechanicsSystem::shutdown() {
     // 标记关闭请求，不再接受新的回调任务
     g_shutdown_requested = true;
 
-    // 等待所有正在执行的异步回调完成
-    {
-        std::lock_guard<std::mutex> lock(g_callback_mutex);
-        if (!g_pending_callbacks.empty()) {
-            CFW_LOG_INFO("MechanicsSystem: Waiting for {} pending callbacks to complete...", g_pending_callbacks.size());
-            for (auto& fut : g_pending_callbacks) {
-                if (fut.valid()) {
-                    auto status = fut.wait_for(std::chrono::seconds(5));
-                    if (status == std::future_status::timeout) {
-                        CFW_LOG_WARNING("MechanicsSystem: Callback timeout, forcing shutdown...");
-                    }
-                }
-            }
-            g_pending_callbacks.clear();
-        }
-    }
+    // 清空延迟回调队列
+    g_deferred_move_callbacks.clear();
 
     g_prev_active_collisions.clear();
     g_handle_to_velocity.clear();
@@ -1428,36 +1413,26 @@ void MechanicsSystem::update_physics() {
                         g_handle_to_last_move_callback_time[h] = g_global_simulation_time;
                         g_handle_to_last_move_callback_pos[h] = cur_pos;
 
-                        // 捕获回调函数和句柄，异步执行
-                        // 使用 std::async 启动异步任务
-                        auto future = std::async(std::launch::async, [cb_move, h]() {
-                            try {
-                                cb_move();
-                            } catch (const std::exception& e) {
-                                CFW_LOG_ERROR("MechanicsSystem: Exception in async on_move callback for actor {}: {}", h, e.what());
-                            } catch (...) {
-                                CFW_LOG_ERROR("MechanicsSystem: Unknown exception in async on_move callback for actor {}.", h);
-                            }
-                        });
-
-                        // 存储future以便shutdown时等待
-                        std::lock_guard<std::mutex> lock(g_callback_mutex);
-                        g_pending_callbacks.push_back(std::move(future));
-
-                        // 定期清理已完成的future，避免无限增长
-                        g_pending_callbacks.erase(
-                            std::remove_if(g_pending_callbacks.begin(), g_pending_callbacks.end(),
-                                           [](std::future<void>& f) {
-                                               return !f.valid() ||
-                                                      f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-                                           }),
-                            g_pending_callbacks.end());
+                        // 收集到延迟队列，帧末统一同步执行
+                        g_deferred_move_callbacks.push_back(std::move(cb_move));
                     }
                 }
             }
         }
         // =============================================================
     }
+
+    // 帧末统一同步执行延迟的 on_move 回调
+    for (auto& cb : g_deferred_move_callbacks) {
+        try {
+            cb();
+        } catch (const std::exception& e) {
+            CFW_LOG_ERROR("MechanicsSystem: on_move callback exception: {}", e.what());
+        } catch (...) {
+            CFW_LOG_ERROR("MechanicsSystem: on_move callback unknown exception");
+        }
+    }
+    g_deferred_move_callbacks.clear();
 
     // 清理无效句柄的缓存
     std::unordered_set<std::uintptr_t> alive_handles(mechanics_handles.begin(), mechanics_handles.end());
