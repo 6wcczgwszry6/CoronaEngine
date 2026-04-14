@@ -5,8 +5,8 @@
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/kernel/system/system_base.h>
 
-#include <memory>
 #include <chrono>
+#include <memory>
 
 namespace Corona::Systems {
 

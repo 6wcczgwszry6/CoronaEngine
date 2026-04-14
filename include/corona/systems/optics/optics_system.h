@@ -72,8 +72,7 @@ class OpticsSystem : public Kernel::SystemBase {
     std::unique_ptr<Hardware> hardware_;
     std::uintptr_t image_handle_{};
 
-    struct PendingScreenshot
-    {
+    struct PendingScreenshot {
         void* surface = nullptr;
         std::string file_path;
         std::shared_ptr<std::promise<bool>> completion_promise;

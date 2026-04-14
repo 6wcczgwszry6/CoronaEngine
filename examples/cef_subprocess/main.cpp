@@ -96,8 +96,3 @@ int main(int argc, char* argv[]) {
     // 这将阻塞直到子进程结束
     return CefExecuteProcess(main_args, app.get(), nullptr);
 }
-
-
-
-
-

@@ -2,11 +2,11 @@
 
 #include <array>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <functional>
 
 namespace Corona {
 class Model;
@@ -79,6 +79,7 @@ class Mechanics {
 
     // 设置移动回调
     void set_on_move_callback(std::function<void()> callback);
+
    private:
     friend class Actor;
 
@@ -205,12 +206,11 @@ class Actor {
     void set_active_profile(const Profile* profile);
     [[nodiscard]] Profile* get_active_profile();
     [[nodiscard]] std::size_t profile_count() const;
-    
+
     [[nodiscard]] std::uintptr_t get_handle() const;
 
    private:
     friend class Scene;
-
 
     std::uintptr_t handle_{};
     std::unordered_map<std::uintptr_t, Profile> profiles_;

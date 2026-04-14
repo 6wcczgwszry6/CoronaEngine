@@ -129,8 +129,7 @@ void BindAll(nanobind::module_& m) {
                     }
                 };
                  
-                self.set_on_move_callback(cb); },
-            nb::arg("callback"), "Set move callback for geometry.");
+                self.set_on_move_callback(cb); }, nb::arg("callback"), "Set move callback for geometry.");
 
     // ============================================================================
     // Optics: 光学/渲染组件
@@ -251,23 +250,13 @@ void BindAll(nanobind::module_& m) {
         .def("get_forward", &Camera::get_forward, "Get camera forward direction [x, y, z]")
         .def("get_world_up", &Camera::get_world_up, "Get camera world up vector [x, y, z]")
         .def("get_fov", &Camera::get_fov, "Get field of view in degrees")
-        .def("set_image_effects", &Camera::set_image_effects, nb::arg("effects"),
-             "Set image effects for this camera")
-        .def("get_image_effects", &Camera::get_image_effects,
-             "Get image effects attached to this camera",
-             nb::rv_policy::reference)
-        .def("has_image_effects", &Camera::has_image_effects,
-             "Check if camera has image effects")
-        .def("remove_image_effects", &Camera::remove_image_effects,
-             "Remove image effects from this camera")
-        .def("set_size", &Camera::set_size, nb::arg("width"), nb::arg("height"),
-             "Set camera render dimensions")
-        .def("set_viewport_rect", &Camera::set_viewport_rect,
-             nb::arg("x"), nb::arg("y"), nb::arg("width"), nb::arg("height"),
-             "Set viewport rectangle")
-        .def("pick_actor_at_pixel", &Camera::pick_actor_at_pixel,
-             nb::arg("x"), nb::arg("y"),
-             "Pick actor at pixel coordinates");
+        .def("set_image_effects", &Camera::set_image_effects, nb::arg("effects"), "Set image effects for this camera")
+        .def("get_image_effects", &Camera::get_image_effects, "Get image effects attached to this camera", nb::rv_policy::reference)
+        .def("has_image_effects", &Camera::has_image_effects, "Check if camera has image effects")
+        .def("remove_image_effects", &Camera::remove_image_effects, "Remove image effects from this camera")
+        .def("set_size", &Camera::set_size, nb::arg("width"), nb::arg("height"), "Set camera render dimensions")
+        .def("set_viewport_rect", &Camera::set_viewport_rect, nb::arg("x"), nb::arg("y"), nb::arg("width"), nb::arg("height"), "Set viewport rectangle")
+        .def("pick_actor_at_pixel", &Camera::pick_actor_at_pixel, nb::arg("x"), nb::arg("y"), "Pick actor at pixel coordinates");
 
     // ============================================================================
     // ImageEffects: 图像效果类

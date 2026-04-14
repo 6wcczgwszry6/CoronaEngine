@@ -36,8 +36,7 @@ struct OpticsToEngineDemoEvent {
 /**
  * @brief Screenshot request (published by Camera/Viewport API, consumed by OpticsSystem)
  */
-struct ScreenshotRequestEvent
-{
+struct ScreenshotRequestEvent {
     void* surface = nullptr;
     std::string file_path;
     std::shared_ptr<std::promise<bool>> completion_promise;

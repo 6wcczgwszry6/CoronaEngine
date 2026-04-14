@@ -1,6 +1,11 @@
 ﻿#include "corona/engine.h"
 
 #include <corona/events/engine_events.h>
+#include <corona/kernel/core/i_logger.h>
+#include <corona/resource/resource_manager.h>
+#include <corona/resource/types/image.h>
+#include <corona/resource/types/scene.h>
+#include <corona/resource/types/text.h>
 #include <corona/systems/acoustics/acoustics_system.h>
 #include <corona/systems/display/display_system.h>
 #include <corona/systems/geometry/geometry_system.h>
@@ -9,12 +14,6 @@
 #include <corona/systems/optics/optics_system.h>
 #include <corona/systems/script/script_system.h>
 #include <corona/systems/ui/imgui_system.h>
-#include <corona/kernel/core/i_logger.h>
-
-#include <corona/resource/resource_manager.h>
-#include <corona/resource/types/text.h>
-#include <corona/resource/types/scene.h>
-#include <corona/resource/types/image.h>
 
 #include <chrono>
 #include <memory>

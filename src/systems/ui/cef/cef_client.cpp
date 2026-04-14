@@ -1,12 +1,12 @@
 ﻿#include "cef_client.h"
 
 #include <corona/kernel/core/i_logger.h>
+#include <windows.h>
 
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
-#include <windows.h>
 
 #include "browser_manager.h"
 
@@ -165,7 +165,7 @@ void OffscreenRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser, PaintElement
 
 bool OffscreenRenderHandler::GetScreenPoint(CefRefPtr<CefBrowser> browser, int viewX, int viewY, int& screenX, int& screenY) {
     if (!tab) return false;
-    
+
     // 将局部坐标转换成屏幕绝对坐标
     POINT mouse_pt;
     GetCursorPos(&mouse_pt);
@@ -267,11 +267,20 @@ bool OffscreenCefClient::OnConsoleMessage(CefRefPtr<CefBrowser> browser,
                                           int line) {
     const char* levelStr = "LOG";
     switch (level) {
-        case LOGSEVERITY_DEBUG:   levelStr = "DEBUG"; break;
-        case LOGSEVERITY_INFO:    levelStr = "INFO"; break;
-        case LOGSEVERITY_WARNING: levelStr = "WARNING"; break;
-        case LOGSEVERITY_ERROR:   levelStr = "ERROR"; break;
-        default: break;
+        case LOGSEVERITY_DEBUG:
+            levelStr = "DEBUG";
+            break;
+        case LOGSEVERITY_INFO:
+            levelStr = "INFO";
+            break;
+        case LOGSEVERITY_WARNING:
+            levelStr = "WARNING";
+            break;
+        case LOGSEVERITY_ERROR:
+            levelStr = "ERROR";
+            break;
+        default:
+            break;
     }
 
     // if (!source.empty()) {
@@ -327,7 +336,6 @@ void OffscreenCefClient::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
 
     // 添加刷新菜单项
     model->AddItem(MENU_ID_REFRESH, "刷新页面");
-
 }
 
 bool OffscreenCefClient::OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
@@ -423,8 +431,7 @@ bool initialize_cef() {
         CFW_LOG_WARNING("CEF: cef_subprocess.exe not found, using main executable as subprocess");
     }
 
-    CefString(&settings.user_agent).FromASCII(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    CefString(&settings.user_agent).FromASCII("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
     settings.background_color = CefColorSetARGB(255, 255, 255, 255);
     settings.persist_session_cookies = true;
 

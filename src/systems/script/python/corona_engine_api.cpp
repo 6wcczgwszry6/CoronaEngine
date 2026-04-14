@@ -1,7 +1,3 @@
-#include <algorithm>
-#include <atomic>
-#include <chrono>
-#include <iterator>
 #include <CabbageHardware.h>
 #include <corona/events/display_system_events.h>
 #include <corona/events/optics_system_events.h>
@@ -13,11 +9,15 @@
 #include <corona/systems/script/corona_engine_api.h>
 #include <corona/utils/path_utils.h>
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <iterator>
+
 #include "corona/resource/types/image.h"
 
-namespace
-{
-    std::atomic<void*> g_default_surface{nullptr};
+namespace {
+std::atomic<void*> g_default_surface{nullptr};
 }
 
 // ########################
@@ -231,8 +231,8 @@ void Corona::API::Scene::remove_camera(Camera* camera) {
     auto camera_it = std::find(cameras_.begin(), cameras_.end(), camera);
     const bool existed_in_vector = camera_it != cameras_.end();
     const std::size_t camera_pos = existed_in_vector
-                                         ? static_cast<std::size_t>(std::distance(cameras_.begin(), camera_it))
-                                         : 0;
+                                       ? static_cast<std::size_t>(std::distance(cameras_.begin(), camera_it))
+                                       : 0;
     const bool existed_in_index = cameras_index_.contains(camera);
 
     if (!existed_in_vector && !existed_in_index) {
@@ -1141,7 +1141,7 @@ float Corona::API::Mechanics::get_damping() const {
 }
 
 void Corona::API::Mechanics::set_collision_callback(
-    std::function<void(std::uintptr_t, bool, const std::array<float,3>&, const std::array<float,3>&)> callback) {
+    std::function<void(std::uintptr_t, bool, const std::array<float, 3>&, const std::array<float, 3>&)> callback) {
     if (handle_ == 0) {
         CFW_LOG_WARNING("[Mechanics::set_collision_callback] Invalid mechanics handle");
         return;
@@ -1149,7 +1149,7 @@ void Corona::API::Mechanics::set_collision_callback(
 
     if (auto accessor = SharedDataHub::instance().mechanics_storage().acquire_write(handle_)) {
         // Store a callback that accepts std::array<float,3> to match nanobind-convertible types.
-        accessor->collision_callback = [callback](std::uintptr_t other, bool began, const std::array<float,3>& normal_arr, const std::array<float,3>& point_arr) {
+        accessor->collision_callback = [callback](std::uintptr_t other, bool began, const std::array<float, 3>& normal_arr, const std::array<float, 3>& point_arr) {
             if (callback) {
                 callback(other, began, normal_arr, point_arr);
             }
@@ -1604,7 +1604,6 @@ std::uintptr_t Corona::API::Camera::get_handle() const {
     return handle_;
 }
 
-
 void Corona::API::Camera::set_surface(void* surface) {
     if (handle_ == 0) {
         CFW_LOG_WARNING("[Camera::set_surface] Invalid camera handle");
@@ -1712,12 +1711,18 @@ std::string Corona::API::Camera::get_output_mode() const {
 
     if (auto accessor = SharedDataHub::instance().camera_storage().acquire_read(handle_)) {
         switch (accessor->output_mode) {
-            case CameraOutputMode::BaseColor:     return "base_color";
-            case CameraOutputMode::Normal:        return "normal";
-            case CameraOutputMode::WorldPosition: return "position";
-            case CameraOutputMode::ObjectID:      return "object_id";
-            case CameraOutputMode::FinalColor:    [[fallthrough]];
-            default:                              return "final_color";
+            case CameraOutputMode::BaseColor:
+                return "base_color";
+            case CameraOutputMode::Normal:
+                return "normal";
+            case CameraOutputMode::WorldPosition:
+                return "position";
+            case CameraOutputMode::ObjectID:
+                return "object_id";
+            case CameraOutputMode::FinalColor:
+                [[fallthrough]];
+            default:
+                return "final_color";
         }
     }
     return "final_color";
@@ -1731,7 +1736,7 @@ Corona::API::ImageEffects::ImageEffects()
 }
 
 Corona::API::ImageEffects::~ImageEffects() {
-    if (handle_ != 0) { 
+    if (handle_ != 0) {
         // Corona::SharedDataHub::instance().image_effects_storage().deallocate(handle_);
         handle_ = 0;
     }
@@ -1783,23 +1788,17 @@ void Corona::API::Camera::pick_actor_at_pixel(int x, int y) const {
     CFW_LOG_WARNING("[Camera::pick_actor_at_pixel] Not implemented yet");
 }
 
-namespace Corona::API
-{
-void set_default_surface(void* surface)
-{
+namespace Corona::API {
+void set_default_surface(void* surface) {
     g_default_surface.store(surface, std::memory_order_relaxed);
 
     // 句柄到达时，补写到已存在的相机，避免“先有 camera 后有 surface”的空窗。
-    for (auto& camera : SharedDataHub::instance().camera_storage())
-    {
+    for (auto& camera : SharedDataHub::instance().camera_storage()) {
         camera.surface = surface;
     }
 }
 
-void* get_default_surface()
-{
+void* get_default_surface() {
     return g_default_surface.load(std::memory_order_relaxed);
 }
-} // namespace Corona::API
-
-
+}  // namespace Corona::API
