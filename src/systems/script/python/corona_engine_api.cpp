@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <iterator>
 #include <CabbageHardware.h>
 #include <corona/events/display_system_events.h>
@@ -297,6 +298,26 @@ std::array<float, 6> Corona::API::Scene::get_aabb() const {
                 accessor->max_world.x, accessor->max_world.y, accessor->max_world.z};
     }
     return {0, 0, 0, 0, 0, 0};
+}
+
+void Corona::API::Scene::set_enabled(bool enabled) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Scene::set_enabled] Invalid scene handle");
+        return;
+    }
+    if (auto accessor = SharedDataHub::instance().scene_storage().acquire_write(handle_)) {
+        accessor->enabled = enabled;
+    } else {
+        CFW_LOG_ERROR("[Scene::set_enabled] Failed to acquire write access to scene storage");
+    }
+}
+
+bool Corona::API::Scene::is_enabled() const {
+    if (handle_ == 0) return false;
+    if (auto accessor = SharedDataHub::instance().scene_storage().try_acquire_read(handle_)) {
+        return accessor->enabled;
+    }
+    return false;
 }
 
 // ########################
@@ -1619,9 +1640,44 @@ void Corona::API::Camera::save_screenshot(const std::string& path) const {
     }
 
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
-        event_bus->publish<Events::ScreenshotRequestEvent>({surface, path});
+        event_bus->publish<Events::ScreenshotRequestEvent>({surface, path, nullptr});
         CFW_LOG_INFO("[Camera::save_screenshot] Screenshot request queued: {}", path);
     }
+}
+
+bool Corona::API::Camera::save_screenshot_sync(const std::string& path) const {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Camera::save_screenshot_sync] Invalid camera handle");
+        return false;
+    }
+
+    void* surface = nullptr;
+    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_read(handle_)) {
+        surface = accessor->surface;
+    }
+
+    if (surface == nullptr) {
+        CFW_LOG_WARNING("[Camera::save_screenshot_sync] Camera has no associated surface");
+        return false;
+    }
+
+    auto promise = std::make_shared<std::promise<bool>>();
+    auto future = promise->get_future();
+
+    if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
+        event_bus->publish<Events::ScreenshotRequestEvent>({surface, path, std::move(promise)});
+        CFW_LOG_INFO("[Camera::save_screenshot_sync] Screenshot request queued (sync): {}", path);
+    } else {
+        return false;
+    }
+
+    // Block until OpticsSystem processes this screenshot
+    auto status = future.wait_for(std::chrono::seconds(10));
+    if (status == std::future_status::timeout) {
+        CFW_LOG_WARNING("[Camera::save_screenshot_sync] Timeout waiting for screenshot: {}", path);
+        return false;
+    }
+    return future.get();
 }
 
 void Corona::API::Camera::set_output_mode(const std::string& mode) {

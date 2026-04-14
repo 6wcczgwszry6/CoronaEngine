@@ -174,7 +174,7 @@ namespace Corona::Systems
                         return;
                     }
                     std::lock_guard<std::mutex> lock(screenshot_mutex_);
-                    pending_screenshots_.push_back({event.surface, event.file_path});
+                    pending_screenshots_.push_back({event.surface, event.file_path, event.completion_promise});
                 });
         }
 
@@ -209,6 +209,9 @@ namespace Corona::Systems
 
         for (const auto& scene : SharedDataHub::instance().scene_storage())
         {
+            if (!scene.enabled)
+                continue;
+
             for (auto cam_handle : scene.camera_handles)
             {
                 if (auto camera = SharedDataHub::instance().camera_storage().acquire_read(cam_handle))
@@ -226,6 +229,7 @@ namespace Corona::Systems
 
                     // ================================================================
                     // 2. Build per-frame Instance Table & Material Table
+                    //    仅遍历本场景 actor → profile → optics，隔离多场景数据
                     // ================================================================
                     hardware_->instanceInfoData.clear();
                     hardware_->materialTableData.clear();
@@ -234,84 +238,101 @@ namespace Corona::Systems
                     visibility.visibilityData = hardware_->visibilityImage;
                     visibility.setDepthImage(hardware_->depthImage);
 
+                    auto& actor_storage   = SharedDataHub::instance().actor_storage();
+                    auto& profile_storage = SharedDataHub::instance().profile_storage();
+                    auto& optics_storage  = SharedDataHub::instance().optics_storage();
+                    auto& geom_storage    = SharedDataHub::instance().geometry_storage();
+                    auto& transform_storage = SharedDataHub::instance().model_transform_storage();
+
                     uint32_t object_id = 1;
-                    for (const auto& optics : SharedDataHub::instance().optics_storage())
+                    for (auto actor_handle : scene.actor_handles)
                     {
-                        if (!optics.visible) { ++object_id; continue; }
-                        if (auto geom = SharedDataHub::instance().geometry_storage().acquire_write(
-                            optics.geometry_handle))
+                        auto actor = actor_storage.acquire_read(actor_handle);
+                        if (!actor) { ++object_id; continue; }
+
+                        for (auto profile_handle : actor->profile_handles)
                         {
-                            ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
-                            if (auto transform = SharedDataHub::instance().model_transform_storage().acquire_read(
-                                geom->transform_handle))
+                            auto profile = profile_storage.acquire_read(profile_handle);
+                            if (!profile || profile->optics_handle == 0) continue;
+
+                            auto optics_acc = optics_storage.acquire_read(profile->optics_handle);
+                            if (!optics_acc) continue;
+                            const auto& optics = *optics_acc;
+
+                            if (!optics.visible) { ++object_id; continue; }
+                            if (auto geom = geom_storage.acquire_write(optics.geometry_handle))
                             {
-                                model_matrix = transform->compute_matrix();
+                                ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
+                                if (auto transform = transform_storage.acquire_read(geom->transform_handle))
+                                {
+                                    model_matrix = transform->compute_matrix();
+                                }
+
+                                for (auto& m : geom->mesh_handles)
+                                {
+                                    // --- Collect material info ---
+                                    auto materialID = static_cast<uint32_t>(hardware_->materialTableData.size());
+                                    {
+                                        Hardware::MaterialInfo mat_info{};
+                                        mat_info.textureDescriptor = m.textureBuffer
+                                            ? m.textureBuffer.storeDescriptor()
+                                            : 0;
+                                        mat_info.metallic = optics.metallic;
+                                        mat_info.roughness = optics.roughness;
+                                        mat_info.subsurface = optics.subsurface;
+                                        mat_info.specular = optics.specular;
+                                        mat_info.specularTint = optics.specularTint;
+                                        mat_info.anisotropic = optics.anisotropic;
+                                        mat_info.sheen = optics.sheen;
+                                        mat_info.sheenTint = optics.sheenTint;
+                                        mat_info.clearcoat = optics.clearcoat;
+                                        mat_info.clearcoatGloss = optics.clearcoatGloss;
+                                        mat_info.padding0 = 0.0f;
+                                        mat_info.materialColor = ktm::fvec4{
+                                            m.materialColor[0], m.materialColor[1],
+                                            m.materialColor[2], m.materialColor[3]
+                                        };
+                                        hardware_->materialTableData.push_back(mat_info);
+                                    }
+
+                                    // --- Collect instance info ---
+                                    auto instanceID = static_cast<uint32_t>(hardware_->instanceInfoData.size());
+                                    {
+                                        Hardware::InstanceInfo inst{};
+                                        inst.modelMatrix = model_matrix;
+                                        inst.vertexBufferIndex = m.vertexStorageBuffer
+                                            ? m.vertexStorageBuffer.storeDescriptor()
+                                            : 0;
+                                        inst.indexBufferIndex = m.indexStorageBuffer
+                                            ? m.indexStorageBuffer.storeDescriptor()
+                                            : 0;
+                                        inst.materialID = materialID;
+                                        inst.objectID = object_id;
+                                        hardware_->instanceInfoData.push_back(inst);
+                                    }
+
+                                    // --- Record visibility draw call ---
+                                    visibility.pushConsts.modelMatrix = model_matrix;
+                                    visibility.pushConsts.uniformBufferIndex =
+                                        hardware_->vpUniformBuffer.storeDescriptor();
+                                    // VBuffer uses 1-based instanceID (0 = background sentinel after clear)
+                                    visibility.pushConsts.instanceID = instanceID + 1;
+                                    // Alpha-cutout: pass texture descriptor for discard test
+                                    if (m.textureBuffer)
+                                    {
+                                        visibility[visibility_frag_glsl::pushConsts::textureIndex] =
+                                            m.textureBuffer.storeDescriptor();
+                                    }
+                                    else
+                                    {
+                                        visibility[visibility_frag_glsl::pushConsts::textureIndex] =
+                                            static_cast<uint32_t>(0);
+                                    }
+                                    visibility.record(m.indexBuffer, m.vertexBuffer);
+                                }
                             }
-
-                            for (auto& m : geom->mesh_handles)
-                            {
-                                // --- Collect material info ---
-                                auto materialID = static_cast<uint32_t>(hardware_->materialTableData.size());
-                                {
-                                    Hardware::MaterialInfo mat_info{};
-                                    mat_info.textureDescriptor = m.textureBuffer
-                                        ? m.textureBuffer.storeDescriptor()
-                                        : 0;
-                                    mat_info.metallic = optics.metallic;
-                                    mat_info.roughness = optics.roughness;
-                                    mat_info.subsurface = optics.subsurface;
-                                    mat_info.specular = optics.specular;
-                                    mat_info.specularTint = optics.specularTint;
-                                    mat_info.anisotropic = optics.anisotropic;
-                                    mat_info.sheen = optics.sheen;
-                                    mat_info.sheenTint = optics.sheenTint;
-                                    mat_info.clearcoat = optics.clearcoat;
-                                    mat_info.clearcoatGloss = optics.clearcoatGloss;
-                                    mat_info.padding0 = 0.0f;
-                                    mat_info.materialColor = ktm::fvec4{
-                                        m.materialColor[0], m.materialColor[1],
-                                        m.materialColor[2], m.materialColor[3]
-                                    };
-                                    hardware_->materialTableData.push_back(mat_info);
-                                }
-
-                                // --- Collect instance info ---
-                                auto instanceID = static_cast<uint32_t>(hardware_->instanceInfoData.size());
-                                {
-                                    Hardware::InstanceInfo inst{};
-                                    inst.modelMatrix = model_matrix;
-                                    inst.vertexBufferIndex = m.vertexStorageBuffer
-                                        ? m.vertexStorageBuffer.storeDescriptor()
-                                        : 0;
-                                    inst.indexBufferIndex = m.indexStorageBuffer
-                                        ? m.indexStorageBuffer.storeDescriptor()
-                                        : 0;
-                                    inst.materialID = materialID;
-                                    inst.objectID = object_id;
-                                    hardware_->instanceInfoData.push_back(inst);
-                                }
-
-                                // --- Record visibility draw call ---
-                                visibility.pushConsts.modelMatrix = model_matrix;
-                                visibility.pushConsts.uniformBufferIndex =
-                                    hardware_->vpUniformBuffer.storeDescriptor();
-                                // VBuffer uses 1-based instanceID (0 = background sentinel after clear)
-                                visibility.pushConsts.instanceID = instanceID + 1;
-                                // Alpha-cutout: pass texture descriptor for discard test
-                                if (m.textureBuffer)
-                                {
-                                    visibility[visibility_frag_glsl::pushConsts::textureIndex] =
-                                        m.textureBuffer.storeDescriptor();
-                                }
-                                else
-                                {
-                                    visibility[visibility_frag_glsl::pushConsts::textureIndex] =
-                                        static_cast<uint32_t>(0);
-                                }
-                                visibility.record(m.indexBuffer, m.vertexBuffer);
-                            }
+                            ++object_id;
                         }
-                        ++object_id;
                     }
 
                     // ================================================================
@@ -542,6 +563,9 @@ namespace Corona::Systems
         const uint32_t h = hardware_->gbufferSize.y;
         if (w == 0 || h == 0) {
             CFW_LOG_WARNING("OpticsSystem: Cannot take screenshot - zero render dimensions");
+            for (auto& req : matched) {
+                if (req.completion_promise) req.completion_promise->set_value(false);
+            }
             return;
         }
 
@@ -550,6 +574,9 @@ namespace Corona::Systems
         HardwareBuffer staging_buffer(static_cast<uint32_t>(buffer_size), BufferUsage::StorageBuffer);
         if (!staging_buffer) {
             CFW_LOG_ERROR("OpticsSystem: Failed to create staging buffer for screenshot");
+            for (auto& req : matched) {
+                if (req.completion_promise) req.completion_promise->set_value(false);
+            }
             return;
         }
 
@@ -559,6 +586,9 @@ namespace Corona::Systems
         std::vector<uint16_t> half_data(pixel_count * 4);
         if (!staging_buffer.copyToData(half_data.data(), buffer_size)) {
             CFW_LOG_ERROR("OpticsSystem: Failed to read screenshot data from GPU");
+            for (auto& req : matched) {
+                if (req.completion_promise) req.completion_promise->set_value(false);
+            }
             return;
         }
 
@@ -581,8 +611,14 @@ namespace Corona::Systems
 
             if (manager.export_sync(rid, file_path)) {
                 CFW_LOG_INFO("OpticsSystem: Screenshot saved to {}", req.file_path);
+                if (req.completion_promise) {
+                    req.completion_promise->set_value(true);
+                }
             } else {
                 CFW_LOG_ERROR("OpticsSystem: Failed to save screenshot to {}", req.file_path);
+                if (req.completion_promise) {
+                    req.completion_promise->set_value(false);
+                }
             }
         }
     }

@@ -244,6 +244,7 @@ class Camera {
              const std::array<float, 3>& world_up, float fov);
     void set_surface(void* surface);
     void save_screenshot(const std::string& path) const;
+    bool save_screenshot_sync(const std::string& path) const;
 
     void set_output_mode(const std::string& mode);
     [[nodiscard]] std::string get_output_mode() const;
@@ -334,6 +335,11 @@ class Scene {
 
     /// 获取场景世界 AABB，返回 {min_x, min_y, min_z, max_x, max_y, max_z}
     [[nodiscard]] std::array<float, 6> get_aabb() const;
+
+    // ========== 场景启用/禁用 ==========
+    /// 启用或禁用场景（禁用后跳过渲染与物理模拟）
+    void set_enabled(bool enabled);
+    [[nodiscard]] bool is_enabled() const;
 
    private:
     std::uintptr_t handle_{};

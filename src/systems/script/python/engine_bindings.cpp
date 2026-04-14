@@ -239,7 +239,9 @@ void BindAll(nanobind::module_& m) {
              nb::arg("position"), nb::arg("forward"), nb::arg("world_up"), nb::arg("fov"),
              "Set all camera parameters at once")
         .def("save_screenshot", &Camera::save_screenshot, nb::arg("path"),
-             "Save a screenshot from this camera's perspective to file")
+             "Save a screenshot from this camera's perspective to file (async)")
+        .def("save_screenshot_sync", &Camera::save_screenshot_sync, nb::arg("path"),
+             "Save a screenshot and block until it completes. Returns True on success.")
         .def("set_output_mode", &Camera::set_output_mode, nb::arg("mode"),
              "Set camera output mode. mode: 'final_color', 'base_color', 'normal', 'position', 'object_id'")
         .def("get_output_mode", &Camera::get_output_mode,
@@ -337,7 +339,12 @@ void BindAll(nanobind::module_& m) {
         .def("has_camera", &Scene::has_camera, nb::arg("camera"),
              "Check if camera is in the scene")
         .def("get_aabb", &Scene::get_aabb,
-             "Get scene world AABB as [min_x, min_y, min_z, max_x, max_y, max_z]");
+             "Get scene world AABB as [min_x, min_y, min_z, max_x, max_y, max_z]")
+        // Scene enable/disable
+        .def("set_enabled", &Scene::set_enabled, nb::arg("enabled"),
+             "Enable or disable the scene (disabled scenes skip rendering and physics)")
+        .def("is_enabled", &Scene::is_enabled,
+             "Return True if the scene is currently enabled");
 
     // ============================================================================
     // Scene I/O utilities
