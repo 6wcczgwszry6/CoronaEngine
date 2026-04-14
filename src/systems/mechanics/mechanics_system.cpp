@@ -570,7 +570,30 @@ bool MechanicsSystem::initialize(Kernel::ISystemContext* ctx) {
 }
 
 void MechanicsSystem::update() {
-    update_physics(); // 单帧物理 tick 入口
+    // 用高精度计时器测量真实 dt
+    auto now = std::chrono::steady_clock::now();
+    if (m_first_update) {
+        m_last_update_time = now;
+        m_first_update = false;
+        update_physics();
+        return;
+    }
+
+    float actual_dt = std::chrono::duration<float>(now - m_last_update_time).count();
+    m_last_update_time = now;
+
+    // 钳制防止巨幅跳帧
+    const float max_frame_time = 0.1f;
+    actual_dt = std::min(actual_dt, max_frame_time);
+
+    m_time_accumulator += actual_dt;
+
+    // 固定步长迭代（与 update_physics 内的 fixed_dt 保持一致，默认 1/60）
+    const float fixed_dt = 1.0f / 60.0f;
+    while (m_time_accumulator >= fixed_dt) {
+        update_physics();
+        m_time_accumulator -= fixed_dt;
+    }
 }
 
 void MechanicsSystem::shutdown() {
