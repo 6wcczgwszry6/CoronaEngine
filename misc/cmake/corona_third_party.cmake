@@ -49,7 +49,7 @@ FetchContent_Declare(nanobind
 
 FetchContent_Declare(CoronaResource
     GIT_REPOSITORY https://github.com/CoronaEngine/CoronaResource.git
-    GIT_TAG fe1f7bdeb887b4937e284c0bd220def31674a8e8
+    GIT_TAG 7bfdaa50488f9411f63498d1aa2cee808c5bf2fe
     EXCLUDE_FROM_ALL
 )
 
