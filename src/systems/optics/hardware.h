@@ -10,12 +10,14 @@
 // in SSBO struct members. Provide the missing typedef.
 using uint = uint32_t;
 
-#include GLSL(../../../ assets / shaders / visibility.vert.glsl)
-#include GLSL(../../../ assets / shaders / visibility.frag.glsl)
-#include GLSL(../../../ assets / shaders / lighting.comp.glsl)
-#include GLSL(../../../ assets / shaders / sky.comp.glsl)
-#include GLSL(../../../ assets / shaders / tonemap.comp.glsl)
-#include GLSL(../../../ assets / shaders / debug_resolve.comp.glsl)
+// clang-format off
+#include GLSL(../../../assets/shaders/visibility.vert.glsl)
+#include GLSL(../../../assets/shaders/visibility.frag.glsl)
+#include GLSL(../../../assets/shaders/lighting.comp.glsl)
+#include GLSL(../../../assets/shaders/sky.comp.glsl)
+#include GLSL(../../../assets/shaders/tonemap.comp.glsl)
+#include GLSL(../../../assets/shaders/debug_resolve.comp.glsl)
+// clang-format on
 
 struct Hardware {
     // === Visibility Buffer (replaces GBuffer rasterization output) ===

@@ -2,8 +2,10 @@
 
 #include <CabbageHardware.h>
 #include <corona/shader_include.h>
-#include GLSL(../../../../ assets / shaders / imgui.vert.glsl)
-#include GLSL(../../../../ assets / shaders / imgui.frag.glsl)
+// clang-format off
+#include GLSL(../../../../assets/shaders/imgui.vert.glsl)
+#include GLSL(../../../../assets/shaders/imgui.frag.glsl)
+// clang-format on
 #include <SDL3/SDL.h>
 #include <imgui.h>
 
