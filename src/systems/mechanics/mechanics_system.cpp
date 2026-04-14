@@ -31,6 +31,10 @@
 #define CORONA_MECHANICS_USE_OBB_SAT 1
 #endif
 
+#ifndef CORONA_MECHANICS_USE_TRIANGLE_NARROWPHASE
+#define CORONA_MECHANICS_USE_TRIANGLE_NARROWPHASE 1
+#endif
+
 namespace {
 
 // 按分量构造 fvec3（result：输出向量）
@@ -1487,6 +1491,49 @@ void MechanicsSystem::update_physics() {
             } else {
                 penetration = overlap_z;
                 normal = make_fvec3(0.f, 0.f, mtd_axis_sign(diff_z));
+            }
+#endif
+
+            // ===== 三角形窄相精化（可选）=====
+            // 当双方都有碰撞网格且三角形数在限制内时，用三角形级 SAT 替换 AABB/OBB 的法线和穿透
+#if CORONA_MECHANICS_USE_TRIANGLE_NARROWPHASE
+            if (a.model_id != 0 && b.model_id != 0) {
+                auto it_mesh_a = g_collision_mesh_cache.find(a.model_id);
+                auto it_mesh_b = g_collision_mesh_cache.find(b.model_id);
+                if (it_mesh_a != g_collision_mesh_cache.end() &&
+                    it_mesh_b != g_collision_mesh_cache.end()) {
+
+                    // 惰性计算世界空间顶点（每物体每帧最多算一次）
+                    if (world_verts_cache.find(ha) == world_verts_cache.end()) {
+                        auto tx_a = transform_storage.acquire_read(a.transform_handle);
+                        if (tx_a) {
+                            transform_vertices_to_world(
+                                it_mesh_a->second.vertices, *tx_a, world_verts_cache[ha]);
+                        }
+                    }
+                    if (world_verts_cache.find(hb) == world_verts_cache.end()) {
+                        auto tx_b = transform_storage.acquire_read(b.transform_handle);
+                        if (tx_b) {
+                            transform_vertices_to_world(
+                                it_mesh_b->second.vertices, *tx_b, world_verts_cache[hb]);
+                        }
+                    }
+
+                    auto& wv_a = world_verts_cache[ha];
+                    auto& wv_b = world_verts_cache[hb];
+                    if (!wv_a.empty() && !wv_b.empty()) {
+                        TriangleContactResult tri_result;
+                        triangle_narrowphase(wv_a, it_mesh_a->second,
+                                             wv_b, it_mesh_b->second,
+                                             a.center_world, b.center_world, tri_result);
+                        if (tri_result.has_contact) {
+                            normal = tri_result.normal;
+                            penetration = tri_result.penetration;
+                        } else {
+                            continue; // 三角形级无接触，跳过此对
+                        }
+                    }
+                }
             }
 #endif
 
