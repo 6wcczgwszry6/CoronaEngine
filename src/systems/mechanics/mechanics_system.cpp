@@ -348,9 +348,11 @@ inline bool sat_obb_obb(const ktm::fvec3& ca, const ktm::fvec3& ua, const ktm::f
 // 碰撞对哈希（用于 unordered_set 去重）
 struct PairHash {
     std::size_t operator()(const std::pair<std::uintptr_t, std::uintptr_t>& p) const noexcept {
+        // Fibonacci hashing 混合
         std::size_t h1 = std::hash<std::uintptr_t>{}(p.first);
         std::size_t h2 = std::hash<std::uintptr_t>{}(p.second);
-        return h1 ^ (h2 << 1);
+        h1 ^= h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2);
+        return h1;
     }
 };
 
@@ -1350,8 +1352,13 @@ void MechanicsSystem::update_physics() {
             sync_euler_from_orientation_quat(q_it->second, tx_w->euler_rotation);         // 写回 XYZ 欧拉（约定与引擎一致）
         }
 
-        const float object_bottom_y =
-            world_aabb_min_y(*tx_w, data.local_min, data.local_max); // 当前姿态下局部 AABB 的世界 min.y
+        // 复用 Phase 3 已计算的世界 AABB min.y，避免重新计算完整 world AABB
+        // 积分后 position 偏移量与 Phase 3 的预测一致，因此可直接复用
+        float object_bottom_y = data.min_world.y;
+        // 若有位置校正，补偿底面高度
+        if (corr_it != position_correction.end()) {
+            object_bottom_y += corr_it->second.y;
+        }
 
         // 水平 floor_y：穿插时整体上抬，并做法向/切向「处方」（非完整接触流形）
         if (object_bottom_y < floor_y + floor_eps) {
