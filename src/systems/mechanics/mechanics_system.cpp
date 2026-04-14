@@ -534,6 +534,42 @@ void octree_insert(OctreeNode& node, std::uintptr_t handle,
         }
     }
 }
+// 从八叉树中移除指定 handle 的所有条目（递归遍历所有叶子）
+void octree_remove(OctreeNode& node, std::uintptr_t handle) {
+    if (node.children) {
+        for (int i = 0; i < 8; ++i) {
+            octree_remove((*node.children)[i], handle);
+        }
+        // 如果所有子节点都为空，回收子节点数组
+        bool all_empty = true;
+        for (int i = 0; i < 8; ++i) {
+            if (!(*node.children)[i].entries.empty() ||
+                (*node.children)[i].children != nullptr) {
+                all_empty = false;
+                break;
+            }
+        }
+        if (all_empty) node.children.reset();
+        return;
+    }
+    // 叶子节点：移除匹配条目
+    node.entries.erase(
+        std::remove_if(node.entries.begin(), node.entries.end(),
+                       [handle](const OctreeEntry& e) { return e.handle == handle; }),
+        node.entries.end());
+}
+
+// 清空八叉树所有节点
+void octree_clear(OctreeNode& node) {
+    node.entries.clear();
+    if (node.children) {
+        for (int i = 0; i < 8; ++i) {
+            octree_clear((*node.children)[i]);
+        }
+        node.children.reset();
+    }
+}
+
 // 收集所有可能碰撞的物体对
 void octree_collect_pairs(const OctreeNode& node,
                           std::vector<std::pair<std::uintptr_t, std::uintptr_t>>& out) {
@@ -569,6 +605,15 @@ static std::unordered_map<std::uintptr_t, ktm::fvec3> g_handle_to_angular_vel; /
 static std::unordered_map<std::uintptr_t, ktm::fquat> g_handle_orientation_quat; // 与欧拉同步的朝向
 static std::unordered_map<std::uintptr_t, bool> g_handle_to_sleeping;      // true 则本帧不积分
 static std::unordered_map<std::uintptr_t, float> g_handle_to_sleep_timer;  // 低速累计时长
+
+// 增量八叉树：跨帧复用，避免每帧全量重建
+static OctreeNode g_persistent_octree;
+static bool g_octree_initialized = false;
+struct PrevAABB {
+    ktm::fvec3 min_bounds;
+    ktm::fvec3 max_bounds;
+};
+static std::unordered_map<std::uintptr_t, PrevAABB> g_prev_aabb; // 上帧每物体 AABB
 
 // Warm-Starting 缓存：跨帧保存接触对的累积冲量
 struct CachedContact {
@@ -990,6 +1035,10 @@ void MechanicsSystem::shutdown() {
     g_handle_to_last_move_callback_time.clear();
     g_handle_to_last_move_callback_pos.clear();
     g_global_simulation_time = 0.0f;
+    g_warm_start_cache.clear();
+    octree_clear(g_persistent_octree);
+    g_octree_initialized = false;
+    g_prev_aabb.clear();
     CFW_LOG_INFO("MechanicsSystem shutdown, all caches cleared");
 }
 
@@ -1248,7 +1297,17 @@ void MechanicsSystem::update_physics() {
 
     // --- 阶段 5：八叉树粗测 → 世界 AABB 再筛 → 窄相（AABB 或 OBB+SAT）→ 顺序冲量 + 摩擦 + 末轮位置校正 ---
     if (mechanics_data.size() >= 2) {
-        // 5.1 用全体物体世界 AABB 建略大于一切的轴对齐根盒子（pad 防边界物体漏分桶）
+        // 5.1 增量八叉树更新（跨帧复用，仅对 AABB 变化超阈值的物体做 remove + re-insert）
+        constexpr float kOctreeUpdateThreshold = 0.05f; // 米：AABB 移动小于此值不更新
+
+        // 收集当前帧所有 handle
+        std::unordered_set<std::uintptr_t> curr_handles;
+        curr_handles.reserve(mechanics_data.size());
+        for (const auto& e : mechanics_data) {
+            curr_handles.insert(e.handle);
+        }
+
+        // 计算当前帧场景 AABB
         ktm::fvec3 root_min = mechanics_data[0].min_world;
         ktm::fvec3 root_max = mechanics_data[0].max_world;
         for (const auto& e : mechanics_data) {
@@ -1259,25 +1318,82 @@ void MechanicsSystem::update_physics() {
             root_max.y = std::max(root_max.y, e.max_world.y);
             root_max.z = std::max(root_max.z, e.max_world.z);
         }
-        // 扩展根节点边界，包含地板
         root_min.y = std::min(root_min.y, floor_y - floor_eps);
-        const float pad = 0.01f; // 米级小膨胀；过小可能使 AABB 贴边物体跨层不稳
+        const float pad = 0.01f;
         root_min = make_fvec3(root_min.x - pad, root_min.y - pad, root_min.z - pad);
         root_max = make_fvec3(root_max.x + pad, root_max.y + pad, root_max.z + pad);
 
-        OctreeNode octree_root;         // 栈上根；子节点在 vector 内持有
-        octree_root.min_bounds = root_min;
-        octree_root.max_bounds = root_max;
-
-        // 5.2 每个 mechanics 插入同一棵树；相交叶子记下「可能与谁碰」的候选对
-        for (const auto& e : mechanics_data) {
-            octree_insert(octree_root, e.handle, e.min_world, e.max_world, 0);
+        // 判断是否需要全量重建（首帧、根边界扩张超出旧根、或物体数量剧变）
+        bool need_full_rebuild = !g_octree_initialized;
+        if (g_octree_initialized) {
+            // 新场景 AABB 超出旧根边界 → 必须重建
+            if (root_min.x < g_persistent_octree.min_bounds.x ||
+                root_min.y < g_persistent_octree.min_bounds.y ||
+                root_min.z < g_persistent_octree.min_bounds.z ||
+                root_max.x > g_persistent_octree.max_bounds.x ||
+                root_max.y > g_persistent_octree.max_bounds.y ||
+                root_max.z > g_persistent_octree.max_bounds.z) {
+                need_full_rebuild = true;
+            }
         }
+
+        if (need_full_rebuild) {
+            // 全量重建
+            octree_clear(g_persistent_octree);
+            g_persistent_octree.min_bounds = root_min;
+            g_persistent_octree.max_bounds = root_max;
+            for (const auto& e : mechanics_data) {
+                octree_insert(g_persistent_octree, e.handle, e.min_world, e.max_world, 0);
+            }
+            g_prev_aabb.clear();
+            for (const auto& e : mechanics_data) {
+                g_prev_aabb[e.handle] = {e.min_world, e.max_world};
+            }
+            g_octree_initialized = true;
+        } else {
+            // 增量更新
+            // 移除已不存在的物体
+            std::vector<std::uintptr_t> to_remove;
+            for (const auto& [h, _] : g_prev_aabb) {
+                if (curr_handles.find(h) == curr_handles.end()) {
+                    to_remove.push_back(h);
+                }
+            }
+            for (std::uintptr_t h : to_remove) {
+                octree_remove(g_persistent_octree, h);
+                g_prev_aabb.erase(h);
+            }
+
+            // 新增或移动的物体
+            for (const auto& e : mechanics_data) {
+                auto it = g_prev_aabb.find(e.handle);
+                if (it == g_prev_aabb.end()) {
+                    // 新物体：直接插入
+                    octree_insert(g_persistent_octree, e.handle, e.min_world, e.max_world, 0);
+                    g_prev_aabb[e.handle] = {e.min_world, e.max_world};
+                } else {
+                    // 已有物体：检查 AABB 变化是否超阈值
+                    float dx = std::abs(e.min_world.x - it->second.min_bounds.x)
+                             + std::abs(e.min_world.y - it->second.min_bounds.y)
+                             + std::abs(e.min_world.z - it->second.min_bounds.z);
+                    float dxm = std::abs(e.max_world.x - it->second.max_bounds.x)
+                              + std::abs(e.max_world.y - it->second.max_bounds.y)
+                              + std::abs(e.max_world.z - it->second.max_bounds.z);
+                    if (dx + dxm > kOctreeUpdateThreshold) {
+                        octree_remove(g_persistent_octree, e.handle);
+                        octree_insert(g_persistent_octree, e.handle, e.min_world, e.max_world, 0);
+                        it->second = {e.min_world, e.max_world};
+                    }
+                }
+            }
+        }
+
+        // 5.2 从持久八叉树收集候选碰撞对
 
         // 5.3 深度优先扫叶子，拉出所有候选对；dedupe 避免 (a,b)/(b,a) 重复与同对多叶重复
         std::vector<std::pair<std::uintptr_t, std::uintptr_t>> collision_pairs;
         collision_pairs.reserve(mechanics_data.size() * 4);
-        octree_collect_pairs(octree_root, collision_pairs);
+        octree_collect_pairs(g_persistent_octree, collision_pairs);
         octree_dedupe_pairs(collision_pairs);
 
         // CFW_LOG_DEBUG("Detected {} potential collision pairs", collision_pairs.size());
