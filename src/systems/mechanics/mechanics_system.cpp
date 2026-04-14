@@ -841,6 +841,9 @@ void MechanicsSystem::update_physics() {
         }
     }
 
+    // 临时校正表：记录 Phase 5 末轮的位置校正量，在 Phase 6 积分后统一应用
+    std::unordered_map<std::uintptr_t, ktm::fvec3> position_correction;
+
     // --- 阶段 5：八叉树粗测 → 世界 AABB 再筛 → 窄相（AABB 或 OBB+SAT）→ 顺序冲量 + 摩擦 + 末轮位置校正 ---
     if (mechanics_data.size() >= 2) {
         // 5.1 用全体物体世界 AABB 建略大于一切的轴对齐根盒子（pad 防边界物体漏分桶）
@@ -1124,23 +1127,21 @@ void MechanicsSystem::update_physics() {
             }
 
             if (impulse_iter == k_impulse_iterations - 1) {
-                // 末轮：按穿透深度做一次软位置投影（非物理 LCP；只为减轻长期穿透）
+                // 末轮：按穿透深度记录软位置校正（延迟到 Phase 6 积分后统一应用，避免抖动）
                 const float pen = std::max(0.f, penetration - k_positional_slop);
                 if (pen > 0.f) {
                     const float inv_sum = inv_ma + inv_mb; // 按逆质量比例分摊平移
                     if (inv_sum > eps) {
-                        const float corr_scale = k_positional_percent * pen / inv_sum; // 总位移幅度再乘 percent
-                        const auto apply_corr = [&](std::uintptr_t transform_handle, float inv_eff, float sign) {
-                            if (inv_eff <= eps) return; // 静/sleep 物体不移动
-                            if (auto tx = transform_storage.acquire_write(transform_handle)) {
-                                // A 侧 sign=-1 沿 -n 推，B 侧 +1 沿 +n 推，逐渐分开
-                                tx->position.x += sign * normal.x * corr_scale * inv_eff;
-                                tx->position.y += sign * normal.y * corr_scale * inv_eff;
-                                tx->position.z += sign * normal.z * corr_scale * inv_eff;
-                            }
+                        const float corr_scale = k_positional_percent * pen / inv_sum;
+                        const auto record_corr = [&](std::uintptr_t handle, float inv_eff, float sign) {
+                            if (inv_eff <= eps) return;
+                            auto& corr = position_correction[handle]; // 默认初始化为 {0,0,0}
+                            corr.x += sign * normal.x * corr_scale * inv_eff;
+                            corr.y += sign * normal.y * corr_scale * inv_eff;
+                            corr.z += sign * normal.z * corr_scale * inv_eff;
                         };
-                        apply_corr(a.transform_handle, inv_ma, -1.f);
-                        apply_corr(b.transform_handle, inv_mb, +1.f);
+                        record_corr(ha, inv_ma, -1.f);
+                        record_corr(hb, inv_mb, +1.f);
                     }
                 }
 
@@ -1322,6 +1323,14 @@ void MechanicsSystem::update_physics() {
         tx_w->position.x += g_handle_to_velocity[h].x * fixed_dt;
         tx_w->position.y += g_handle_to_velocity[h].y * fixed_dt;
         tx_w->position.z += g_handle_to_velocity[h].z * fixed_dt;
+
+        // 应用 Phase 5 累积的位置校正（积分后统一应用，避免校正与积分不一致导致抖动）
+        auto corr_it = position_correction.find(h);
+        if (corr_it != position_correction.end()) {
+            tx_w->position.x += corr_it->second.x;
+            tx_w->position.y += corr_it->second.y;
+            tx_w->position.z += corr_it->second.z;
+        }
 
         { // 朝向：以四元数为真值源，欧拉仅用于与渲染/资产管线对齐
             auto q_it = g_handle_orientation_quat.find(h);
