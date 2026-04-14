@@ -28,7 +28,7 @@
 // from the scripting layer are expected to manage GIL acquisition themselves.
 
 #ifndef CORONA_MECHANICS_USE_OBB_SAT
-#define CORONA_MECHANICS_USE_OBB_SAT 0
+#define CORONA_MECHANICS_USE_OBB_SAT 1
 #endif
 
 namespace {
