@@ -31,6 +31,10 @@
 #define CORONA_MECHANICS_USE_OBB_SAT 0
 #endif
 
+#ifndef CORONA_MECHANICS_USE_TRIANGLE_NARROWPHASE
+#define CORONA_MECHANICS_USE_TRIANGLE_NARROWPHASE 1
+#endif
+
 namespace {
 
 // 按分量构造 fvec3（result：输出向量）
@@ -773,7 +777,8 @@ inline bool test_axis(const ktm::fvec3& axis,
     project_triangle(axis, a[0], a[1], a[2], a_min, a_max);
     project_triangle(axis, b[0], b[1], b[2], b_min, b_max);
 
-    if (a_max < b_min || b_max < a_min) {
+    constexpr float sep_eps = 1e-5f; // 浮点容差，避免擦边接触被误判为分离
+    if (a_max < b_min - sep_eps || b_max < a_min - sep_eps) {
         return true; // 分离
     }
 
@@ -844,7 +849,7 @@ void triangle_narrowphase(
     TriangleContactResult& result) {
 
     result.has_contact = false;
-    float best_depth = std::numeric_limits<float>::max();
+    float best_depth = 0.0f;
     ktm::fvec3 best_normal = make_fvec3(0.0f, 1.0f, 0.0f);
     ktm::fvec3 best_point = make_fvec3(0.0f, 0.0f, 0.0f);
     int contact_count = 0;
@@ -895,8 +900,8 @@ void triangle_narrowphase(
             contact_sum.z += tri_center.z;
             ++contact_count;
 
-            // 取穿透最浅的法线和深度
-            if (depth < best_depth) {
+            // 取穿透最深的法线和深度（最深接触代表主碰撞方向）
+            if (depth > best_depth) {
                 best_depth = depth;
                 best_normal = normal;
                 best_point = tri_center;
@@ -1385,6 +1390,54 @@ void MechanicsSystem::update_physics() {
             } else {
                 penetration = overlap_z;
                 normal = make_fvec3(0.f, 0.f, mtd_axis_sign(diff_z));
+            }
+#endif
+
+            // ===== 三角形窄相精化（可选）=====
+            // 当双方都有碰撞网格且三角形数在限制内时，用三角形级 SAT 替换 AABB/OBB 的法线和穿透
+#if CORONA_MECHANICS_USE_TRIANGLE_NARROWPHASE
+            if (a.model_id != 0 && b.model_id != 0) {
+                auto it_mesh_a = g_collision_mesh_cache.find(a.model_id);
+                auto it_mesh_b = g_collision_mesh_cache.find(b.model_id);
+                if (it_mesh_a != g_collision_mesh_cache.end() &&
+                    it_mesh_b != g_collision_mesh_cache.end()) {
+
+                    // 惰性计算世界空间顶点（每物体每帧最多算一次）
+                    if (world_verts_cache.find(ha) == world_verts_cache.end()) {
+                        auto tx_a = transform_storage.acquire_read(a.transform_handle);
+                        if (tx_a) {
+                            transform_vertices_to_world(
+                                it_mesh_a->second.vertices, *tx_a, world_verts_cache[ha]);
+                        }
+                    }
+                    if (world_verts_cache.find(hb) == world_verts_cache.end()) {
+                        auto tx_b = transform_storage.acquire_read(b.transform_handle);
+                        if (tx_b) {
+                            transform_vertices_to_world(
+                                it_mesh_b->second.vertices, *tx_b, world_verts_cache[hb]);
+                        }
+                    }
+
+                    auto wit_a = world_verts_cache.find(ha);
+                    auto wit_b = world_verts_cache.find(hb);
+                    if (wit_a != world_verts_cache.end() && wit_b != world_verts_cache.end()
+                        && !wit_a->second.empty() && !wit_b->second.empty()) {
+                        auto& wv_a = wit_a->second;
+                        auto& wv_b = wit_b->second;
+                        TriangleContactResult tri_result;
+                        triangle_narrowphase(wv_a, it_mesh_a->second,
+                                             wv_b, it_mesh_b->second,
+                                             a.center_world, b.center_world, tri_result);
+                        if (tri_result.has_contact) {
+                            normal = tri_result.normal;
+                            // 保留 AABB/OBB 级别的穿透深度；三角形 SAT 深度只反映
+                            // 单个三角形对的局部重叠，远小于物体级实际穿透，会导致严重穿模。
+                            // 三角形窄相的价值在于提供更精确的碰撞法线方向。
+                        } else {
+                            continue; // 三角形级无接触，跳过此对
+                        }
+                    }
+                }
             }
 #endif
 
