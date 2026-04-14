@@ -28,7 +28,7 @@
 // from the scripting layer are expected to manage GIL acquisition themselves.
 
 #ifndef CORONA_MECHANICS_USE_OBB_SAT
-#define CORONA_MECHANICS_USE_OBB_SAT 1
+#define CORONA_MECHANICS_USE_OBB_SAT 0
 #endif
 
 #ifndef CORONA_MECHANICS_USE_TRIANGLE_NARROWPHASE
@@ -534,42 +534,6 @@ void octree_insert(OctreeNode& node, std::uintptr_t handle,
         }
     }
 }
-// 从八叉树中移除指定 handle 的所有条目（递归遍历所有叶子）
-void octree_remove(OctreeNode& node, std::uintptr_t handle) {
-    if (node.children) {
-        for (int i = 0; i < 8; ++i) {
-            octree_remove((*node.children)[i], handle);
-        }
-        // 如果所有子节点都为空，回收子节点数组
-        bool all_empty = true;
-        for (int i = 0; i < 8; ++i) {
-            if (!(*node.children)[i].entries.empty() ||
-                (*node.children)[i].children != nullptr) {
-                all_empty = false;
-                break;
-            }
-        }
-        if (all_empty) node.children.reset();
-        return;
-    }
-    // 叶子节点：移除匹配条目
-    node.entries.erase(
-        std::remove_if(node.entries.begin(), node.entries.end(),
-                       [handle](const OctreeEntry& e) { return e.handle == handle; }),
-        node.entries.end());
-}
-
-// 清空八叉树所有节点
-void octree_clear(OctreeNode& node) {
-    node.entries.clear();
-    if (node.children) {
-        for (int i = 0; i < 8; ++i) {
-            octree_clear((*node.children)[i]);
-        }
-        node.children.reset();
-    }
-}
-
 // 收集所有可能碰撞的物体对
 void octree_collect_pairs(const OctreeNode& node,
                           std::vector<std::pair<std::uintptr_t, std::uintptr_t>>& out) {
@@ -605,24 +569,6 @@ static std::unordered_map<std::uintptr_t, ktm::fvec3> g_handle_to_angular_vel; /
 static std::unordered_map<std::uintptr_t, ktm::fquat> g_handle_orientation_quat; // 与欧拉同步的朝向
 static std::unordered_map<std::uintptr_t, bool> g_handle_to_sleeping;      // true 则本帧不积分
 static std::unordered_map<std::uintptr_t, float> g_handle_to_sleep_timer;  // 低速累计时长
-
-// 增量八叉树：跨帧复用，避免每帧全量重建
-static OctreeNode g_persistent_octree;
-static bool g_octree_initialized = false;
-struct PrevAABB {
-    ktm::fvec3 min_bounds;
-    ktm::fvec3 max_bounds;
-};
-static std::unordered_map<std::uintptr_t, PrevAABB> g_prev_aabb; // 上帧每物体 AABB
-
-// Warm-Starting 缓存：跨帧保存接触对的累积冲量
-struct CachedContact {
-    ktm::fvec3 normal;           // 上帧接触法线
-    float accumulated_jn;        // 累积法向冲量
-};
-static std::unordered_map<
-    std::pair<std::uintptr_t, std::uintptr_t>,
-    CachedContact, PairHash> g_warm_start_cache;
 
 // ============================================================================
 // 碰撞网格（基于最低级 LOD 的三角形碰撞检测）
@@ -1035,10 +981,6 @@ void MechanicsSystem::shutdown() {
     g_handle_to_last_move_callback_time.clear();
     g_handle_to_last_move_callback_pos.clear();
     g_global_simulation_time = 0.0f;
-    g_warm_start_cache.clear();
-    octree_clear(g_persistent_octree);
-    g_octree_initialized = false;
-    g_prev_aabb.clear();
     CFW_LOG_INFO("MechanicsSystem shutdown, all caches cleared");
 }
 
@@ -1297,17 +1239,7 @@ void MechanicsSystem::update_physics() {
 
     // --- 阶段 5：八叉树粗测 → 世界 AABB 再筛 → 窄相（AABB 或 OBB+SAT）→ 顺序冲量 + 摩擦 + 末轮位置校正 ---
     if (mechanics_data.size() >= 2) {
-        // 5.1 增量八叉树更新（跨帧复用，仅对 AABB 变化超阈值的物体做 remove + re-insert）
-        constexpr float kOctreeUpdateThreshold = 0.05f; // 米：AABB 移动小于此值不更新
-
-        // 收集当前帧所有 handle
-        std::unordered_set<std::uintptr_t> curr_handles;
-        curr_handles.reserve(mechanics_data.size());
-        for (const auto& e : mechanics_data) {
-            curr_handles.insert(e.handle);
-        }
-
-        // 计算当前帧场景 AABB
+        // 5.1 用全体物体世界 AABB 建略大于一切的轴对齐根盒子（pad 防边界物体漏分桶）
         ktm::fvec3 root_min = mechanics_data[0].min_world;
         ktm::fvec3 root_max = mechanics_data[0].max_world;
         for (const auto& e : mechanics_data) {
@@ -1318,82 +1250,25 @@ void MechanicsSystem::update_physics() {
             root_max.y = std::max(root_max.y, e.max_world.y);
             root_max.z = std::max(root_max.z, e.max_world.z);
         }
+        // 扩展根节点边界，包含地板
         root_min.y = std::min(root_min.y, floor_y - floor_eps);
-        const float pad = 0.01f;
+        const float pad = 0.01f; // 米级小膨胀；过小可能使 AABB 贴边物体跨层不稳
         root_min = make_fvec3(root_min.x - pad, root_min.y - pad, root_min.z - pad);
         root_max = make_fvec3(root_max.x + pad, root_max.y + pad, root_max.z + pad);
 
-        // 判断是否需要全量重建（首帧、根边界扩张超出旧根、或物体数量剧变）
-        bool need_full_rebuild = !g_octree_initialized;
-        if (g_octree_initialized) {
-            // 新场景 AABB 超出旧根边界 → 必须重建
-            if (root_min.x < g_persistent_octree.min_bounds.x ||
-                root_min.y < g_persistent_octree.min_bounds.y ||
-                root_min.z < g_persistent_octree.min_bounds.z ||
-                root_max.x > g_persistent_octree.max_bounds.x ||
-                root_max.y > g_persistent_octree.max_bounds.y ||
-                root_max.z > g_persistent_octree.max_bounds.z) {
-                need_full_rebuild = true;
-            }
+        OctreeNode octree_root;         // 栈上根；子节点在 vector 内持有
+        octree_root.min_bounds = root_min;
+        octree_root.max_bounds = root_max;
+
+        // 5.2 每个 mechanics 插入同一棵树；相交叶子记下「可能与谁碰」的候选对
+        for (const auto& e : mechanics_data) {
+            octree_insert(octree_root, e.handle, e.min_world, e.max_world, 0);
         }
-
-        if (need_full_rebuild) {
-            // 全量重建
-            octree_clear(g_persistent_octree);
-            g_persistent_octree.min_bounds = root_min;
-            g_persistent_octree.max_bounds = root_max;
-            for (const auto& e : mechanics_data) {
-                octree_insert(g_persistent_octree, e.handle, e.min_world, e.max_world, 0);
-            }
-            g_prev_aabb.clear();
-            for (const auto& e : mechanics_data) {
-                g_prev_aabb[e.handle] = {e.min_world, e.max_world};
-            }
-            g_octree_initialized = true;
-        } else {
-            // 增量更新
-            // 移除已不存在的物体
-            std::vector<std::uintptr_t> to_remove;
-            for (const auto& [h, _] : g_prev_aabb) {
-                if (curr_handles.find(h) == curr_handles.end()) {
-                    to_remove.push_back(h);
-                }
-            }
-            for (std::uintptr_t h : to_remove) {
-                octree_remove(g_persistent_octree, h);
-                g_prev_aabb.erase(h);
-            }
-
-            // 新增或移动的物体
-            for (const auto& e : mechanics_data) {
-                auto it = g_prev_aabb.find(e.handle);
-                if (it == g_prev_aabb.end()) {
-                    // 新物体：直接插入
-                    octree_insert(g_persistent_octree, e.handle, e.min_world, e.max_world, 0);
-                    g_prev_aabb[e.handle] = {e.min_world, e.max_world};
-                } else {
-                    // 已有物体：检查 AABB 变化是否超阈值
-                    float dx = std::abs(e.min_world.x - it->second.min_bounds.x)
-                             + std::abs(e.min_world.y - it->second.min_bounds.y)
-                             + std::abs(e.min_world.z - it->second.min_bounds.z);
-                    float dxm = std::abs(e.max_world.x - it->second.max_bounds.x)
-                              + std::abs(e.max_world.y - it->second.max_bounds.y)
-                              + std::abs(e.max_world.z - it->second.max_bounds.z);
-                    if (dx + dxm > kOctreeUpdateThreshold) {
-                        octree_remove(g_persistent_octree, e.handle);
-                        octree_insert(g_persistent_octree, e.handle, e.min_world, e.max_world, 0);
-                        it->second = {e.min_world, e.max_world};
-                    }
-                }
-            }
-        }
-
-        // 5.2 从持久八叉树收集候选碰撞对
 
         // 5.3 深度优先扫叶子，拉出所有候选对；dedupe 避免 (a,b)/(b,a) 重复与同对多叶重复
         std::vector<std::pair<std::uintptr_t, std::uintptr_t>> collision_pairs;
         collision_pairs.reserve(mechanics_data.size() * 4);
-        octree_collect_pairs(g_persistent_octree, collision_pairs);
+        octree_collect_pairs(octree_root, collision_pairs);
         octree_dedupe_pairs(collision_pairs);
 
         // CFW_LOG_DEBUG("Detected {} potential collision pairs", collision_pairs.size());
@@ -1410,99 +1285,6 @@ void MechanicsSystem::update_physics() {
         constexpr float k_positional_slop = 0.004f;     // Baumgarte 式校正：小穿透只靠冲量，不修位姿
         constexpr float k_positional_percent = 0.35f;   // 仅末轮按穿透拆分平移，且只推一部分，防过冲
         constexpr int k_impulse_iterations = 5;         // 轮数↑ 堆叠更稳、成本↑；典型 3~8
-
-        // Warm-Starting：每对接触的累积法向冲量（本帧跨迭代）
-        std::unordered_map<std::pair<std::uintptr_t, std::uintptr_t>, float, PairHash> contact_accumulated_jn;
-
-        // 用上帧缓存的累积冲量预推速度，加速收敛
-        constexpr float warm_factor = 0.85f;
-        for (const auto& pair : collision_pairs) {
-            auto sorted = (pair.first < pair.second) ? pair : std::make_pair(pair.second, pair.first);
-            auto cache_it = g_warm_start_cache.find(sorted);
-            if (cache_it == g_warm_start_cache.end()) continue;
-
-            const auto& cached = cache_it->second;
-            std::uintptr_t ha = pair.first;
-            std::uintptr_t hb = pair.second;
-            if (g_handle_to_sleeping[ha] && g_handle_to_sleeping[hb]) continue;
-
-            auto it_a = handle_to_index.find(ha);
-            auto it_b = handle_to_index.find(hb);
-            if (it_a == handle_to_index.end() || it_b == handle_to_index.end()) continue;
-
-            const MechanicsWorldAABB& a = mechanics_data[it_a->second];
-            const MechanicsWorldAABB& b = mechanics_data[it_b->second];
-
-            // 确认 AABB 仍重叠
-            if (!aabb_overlap(a.min_world, a.max_world, b.min_world, b.max_world)) continue;
-
-            // 计算本帧法线用于一致性检查
-            ktm::fvec3 curr_normal{};
-            float curr_pen = 0.f;
-#if CORONA_MECHANICS_USE_OBB_SAT
-            if (!sat_obb_obb(a.obb_center, a.obb_u, a.obb_v, a.obb_w, a.obb_hu, a.obb_hv, a.obb_hw,
-                             b.obb_center, b.obb_u, b.obb_v, b.obb_w, b.obb_hu, b.obb_hv, b.obb_hw,
-                             curr_normal, curr_pen))
-                continue;
-#else
-            continue; // AABB 模式暂不 warm-start（法线不稳定）
-#endif
-
-            // 法线一致性检查（余弦 > 0.9 才复用）
-            float dot_n = ktm::dot(cached.normal, curr_normal);
-            if (dot_n < 0.9f) continue;
-
-            const float j_warm = cached.accumulated_jn * warm_factor;
-            if (j_warm <= 0.f) continue;
-
-            const bool sleep_a = g_handle_to_sleeping[ha];
-            const bool sleep_b = g_handle_to_sleeping[hb];
-            const float inv_ma = sleep_a ? 0.f : 1.0f / handle_to_mass[ha];
-            const float inv_mb = sleep_b ? 0.f : 1.0f / handle_to_mass[hb];
-
-            ktm::fvec3& va = g_handle_to_velocity[ha];
-            ktm::fvec3& vb = g_handle_to_velocity[hb];
-            ktm::fvec3& wa = g_handle_to_angular_vel[ha];
-            ktm::fvec3& wb = g_handle_to_angular_vel[hb];
-
-            // 预施加法向冲量
-            va.x += cached.normal.x * j_warm * inv_ma;
-            va.y += cached.normal.y * j_warm * inv_ma;
-            va.z += cached.normal.z * j_warm * inv_ma;
-            vb.x -= cached.normal.x * j_warm * inv_mb;
-            vb.y -= cached.normal.y * j_warm * inv_mb;
-            vb.z -= cached.normal.z * j_warm * inv_mb;
-
-            // 角速度 warm-start
-#if CORONA_MECHANICS_USE_OBB_SAT
-            const ktm::fvec3 p_a_ws = obb_support_point(a.obb_center, a.obb_u, a.obb_v, a.obb_w,
-                                                        a.obb_hu, a.obb_hv, a.obb_hw, cached.normal);
-            const ktm::fvec3 p_b_ws = obb_support_point(b.obb_center, b.obb_u, b.obb_v, b.obb_w,
-                                                        b.obb_hu, b.obb_hv, b.obb_hw,
-                                                        make_fvec3(-cached.normal.x, -cached.normal.y, -cached.normal.z));
-            const ktm::fvec3 p_contact_ws = vec3_mul(vec3_add(p_a_ws, p_b_ws), 0.5f);
-            const ktm::fvec3 r_a_ws = vec3_sub(p_contact_ws, a.obb_center);
-            const ktm::fvec3 r_b_ws = vec3_sub(p_contact_ws, b.obb_center);
-#else
-            const ktm::fvec3 r_a_ws = make_fvec3(0.f, 0.f, 0.f);
-            const ktm::fvec3 r_b_ws = make_fvec3(0.f, 0.f, 0.f);
-#endif
-            const ktm::fvec3 Jn_ws = vec3_mul(cached.normal, j_warm);
-            if (!sleep_a) {
-                const ktm::fvec3 dw = world_inertia_inv_apply(
-                    a.rot_body_to_world, a.inertia_inv_body, ktm::cross(r_a_ws, Jn_ws));
-                wa.x += dw.x; wa.y += dw.y; wa.z += dw.z;
-            }
-            if (!sleep_b) {
-                const ktm::fvec3 dw = world_inertia_inv_apply(
-                    b.rot_body_to_world, b.inertia_inv_body,
-                    ktm::cross(r_b_ws, make_fvec3(-Jn_ws.x, -Jn_ws.y, -Jn_ws.z)));
-                wb.x += dw.x; wb.y += dw.y; wb.z += dw.z;
-            }
-
-            // 初始化本帧累积量为 warm-start 值
-            contact_accumulated_jn[sorted] = j_warm;
-        }
 
         for (int impulse_iter = 0; impulse_iter < k_impulse_iterations; ++impulse_iter) {
         for (const auto& pair : collision_pairs) {        // 内层：单对接触解一次（顺序依赖）
@@ -1708,13 +1490,7 @@ void MechanicsSystem::update_physics() {
             if (denom_n <= 1e-12f) {
                 continue; // 近奇异（例如双臂共线且惯量项异常）
             }
-            // 增量式累积冲量：保证法向冲量非负（防止分离中的接触对产生吸力）
-            const float j_delta = -(1.0f + rest_use) * v_n / denom_n;
-            auto sorted_pair_jn = (ha < hb) ? std::make_pair(ha, hb) : std::make_pair(hb, ha);
-            float old_accumulated = contact_accumulated_jn[sorted_pair_jn]; // 默认 0
-            float new_accumulated = std::max(0.f, old_accumulated + j_delta);
-            const float j = new_accumulated - old_accumulated; // 实际本次增量
-            contact_accumulated_jn[sorted_pair_jn] = new_accumulated;
+            const float j = -(1.0f + rest_use) * v_n / denom_n; // 法向冲量标量；约定 J = j·n 作用于 B 的正向
 
             va.x += normal.x * j * inv_ma;
             va.y += normal.y * j * inv_ma;
@@ -1884,39 +1660,6 @@ void MechanicsSystem::update_physics() {
         }
         } // 内层：collision_pairs；外层：impulse_iter
 
-        // 帧末写回 warm-start 缓存
-        g_warm_start_cache.clear();
-        for (const auto& [pair_key, jn] : contact_accumulated_jn) {
-            if (jn <= 0.f) continue;
-            // 取本帧实际碰撞法线（需重新计算）
-            auto it_a2 = handle_to_index.find(pair_key.first);
-            auto it_b2 = handle_to_index.find(pair_key.second);
-            if (it_a2 == handle_to_index.end() || it_b2 == handle_to_index.end()) continue;
-            const auto& a2 = mechanics_data[it_a2->second];
-            const auto& b2 = mechanics_data[it_b2->second];
-            ktm::fvec3 cache_normal{};
-            float cache_pen = 0.f;
-#if CORONA_MECHANICS_USE_OBB_SAT
-            if (!sat_obb_obb(a2.obb_center, a2.obb_u, a2.obb_v, a2.obb_w, a2.obb_hu, a2.obb_hv, a2.obb_hw,
-                             b2.obb_center, b2.obb_u, b2.obb_v, b2.obb_w, b2.obb_hu, b2.obb_hv, b2.obb_hw,
-                             cache_normal, cache_pen))
-                continue;
-#else
-            // AABB MTD 法线（简化：用中心差取主轴）
-            float dx = b2.center_world.x - a2.center_world.x;
-            float dy = b2.center_world.y - a2.center_world.y;
-            float dz = b2.center_world.z - a2.center_world.z;
-            float adx2 = std::abs(dx), ady2 = std::abs(dy), adz2 = std::abs(dz);
-            if (ady2 >= adx2 && ady2 >= adz2)
-                cache_normal = make_fvec3(0.f, dy > 0 ? 1.f : -1.f, 0.f);
-            else if (adx2 >= adz2)
-                cache_normal = make_fvec3(dx > 0 ? 1.f : -1.f, 0.f, 0.f);
-            else
-                cache_normal = make_fvec3(0.f, 0.f, dz > 0 ? 1.f : -1.f);
-#endif
-            g_warm_start_cache[pair_key] = CachedContact{cache_normal, jn};
-        }
-
         // ===== 碰撞结束检测：遍历上帧活跃但本帧消失的碰撞对，触发 end 回调 =====
         for (const auto& old_pair : g_prev_active_collisions) {
             if (curr_active_collisions.find(old_pair) != curr_active_collisions.end()) {
@@ -2003,131 +1746,9 @@ void MechanicsSystem::update_physics() {
             }
         }
         g_prev_active_collisions.clear();
-        g_warm_start_cache.clear(); // 无碰撞对时清除缓存
     }
 
-    // --- 阶段 5b：地板接触冲量（统一到冲量求解器，替代 Phase 6 的硬编码启发式） ---
-    {
-        constexpr float eps_floor = 1e-8f;
-        constexpr float k_floor_positional_slop = 0.004f;
-        constexpr float k_floor_positional_percent = 0.35f;
-        constexpr int k_floor_impulse_iterations = 5;
-        const ktm::fvec3 floor_normal = make_fvec3(0.0f, 1.0f, 0.0f);
-
-        // 收集地板接触
-        struct FloorContact {
-            std::uintptr_t handle;
-            float penetration;
-            ktm::fvec3 contact_point;
-            std::size_t data_index;
-        };
-        std::vector<FloorContact> floor_contacts;
-        floor_contacts.reserve(mechanics_data.size());
-
-        for (std::size_t i = 0; i < mechanics_data.size(); ++i) {
-            const auto& entry = mechanics_data[i];
-            float bottom_y = entry.min_world.y;
-            float pen = (floor_y + floor_eps) - bottom_y;
-            if (pen > 0.0f) {
-                floor_contacts.push_back({
-                    entry.handle,
-                    pen,
-                    make_fvec3(entry.center_world.x, floor_y, entry.center_world.z),
-                    i
-                });
-            }
-        }
-
-        // 地板冲量迭代（地板质量无穷大：inv_mass = 0）
-        for (int iter = 0; iter < k_floor_impulse_iterations; ++iter) {
-            for (const auto& fc : floor_contacts) {
-                std::uintptr_t h = fc.handle;
-                if (g_handle_to_sleeping[h]) continue;
-
-                auto idx_it = handle_to_index.find(h);
-                if (idx_it == handle_to_index.end()) continue;
-                const auto& body = mechanics_data[idx_it->second];
-
-                const float inv_m = 1.0f / handle_to_mass[h];
-                const float rest_use = (iter == k_floor_impulse_iterations - 1) ? floor_restitution : 0.0f;
-
-                // 接触点处的力臂
-                const ktm::fvec3 r = vec3_sub(fc.contact_point, body.center_world);
-
-                ktm::fvec3& v = g_handle_to_velocity[h];
-                ktm::fvec3& w = g_handle_to_angular_vel[h];
-
-                // 接触点速度
-                const ktm::fvec3 v_p = velocity_at_point_world(v, w, r);
-                const float v_n = ktm::dot(v_p, floor_normal);
-
-                // v_n > 0 表示远离地板（向上），无需冲量
-                if (v_n < -1e-4f) continue;
-
-                // 有效质量（地板 inv_mass = 0，仅有物体侧贡献）
-                const ktm::fvec3 rxn = ktm::cross(r, floor_normal);
-                const float ang_term = ktm::dot(rxn,
-                    world_inertia_inv_apply(body.rot_body_to_world, body.inertia_inv_body, rxn));
-                const float denom = inv_m + ang_term + eps_floor;
-                if (denom <= 1e-12f) continue;
-
-                float j = -(1.0f + rest_use) * v_n / denom;
-                j = std::max(j, 0.0f); // 地板只推不吸
-
-                // 施加法向冲量
-                v.x += floor_normal.x * j * inv_m;
-                v.y += floor_normal.y * j * inv_m;
-                v.z += floor_normal.z * j * inv_m;
-
-                const ktm::fvec3 Jn = vec3_mul(floor_normal, j);
-                const ktm::fvec3 dw_n = world_inertia_inv_apply(
-                    body.rot_body_to_world, body.inertia_inv_body, ktm::cross(r, Jn));
-                w.x += dw_n.x; w.y += dw_n.y; w.z += dw_n.z;
-
-                // 切向摩擦（与物体间碰撞使用相同的库仑锥公式）
-                const ktm::fvec3 v_p2 = velocity_at_point_world(v, w, r);
-                const float v_n2 = ktm::dot(v_p2, floor_normal);
-                const ktm::fvec3 v_t = make_fvec3(
-                    v_p2.x - floor_normal.x * v_n2,
-                    v_p2.y - floor_normal.y * v_n2,
-                    v_p2.z - floor_normal.z * v_n2);
-                const float vt_len = ktm::length(v_t);
-                if (vt_len > eps_floor) {
-                    const ktm::fvec3 tdir = make_fvec3(v_t.x / vt_len, v_t.y / vt_len, v_t.z / vt_len);
-                    const float v_slip = ktm::dot(v_p2, tdir);
-                    const ktm::fvec3 rxt = ktm::cross(r, tdir);
-                    const float ang_t = ktm::dot(rxt,
-                        world_inertia_inv_apply(body.rot_body_to_world, body.inertia_inv_body, rxt));
-                    const float denom_t = inv_m + ang_t + eps_floor;
-                    if (denom_t > 1e-12f) {
-                        const float jt_free = -v_slip / denom_t;
-                        const float jt_cap = friction_coeff * std::fabs(j);
-                        const float jt = std::max(-jt_cap, std::min(jt_cap, jt_free));
-
-                        v.x += tdir.x * jt * inv_m;
-                        v.y += tdir.y * jt * inv_m;
-                        v.z += tdir.z * jt * inv_m;
-
-                        const ktm::fvec3 Jt = vec3_mul(tdir, jt);
-                        const ktm::fvec3 dw_t = world_inertia_inv_apply(
-                            body.rot_body_to_world, body.inertia_inv_body, ktm::cross(r, Jt));
-                        w.x += dw_t.x; w.y += dw_t.y; w.z += dw_t.z;
-                    }
-                }
-
-                // 末轮位置校正
-                if (iter == k_floor_impulse_iterations - 1) {
-                    float pen_corr = std::max(0.f, fc.penetration - k_floor_positional_slop);
-                    if (pen_corr > 0.f) {
-                        auto& corr = position_correction[h];
-                        corr.y += k_floor_positional_percent * pen_corr;
-                    }
-                }
-            }
-        }
-    }
-
-    // --- 阶段 6：半隐式位姿积分（用冲量后的 v,ω）+ 休眠累计 + 缓存淘汰 ---
+    // --- 阶段 6：半隐式位姿积分（用冲量后的 v,ω）+ 无穷地板 + 休眠累计 + 缓存淘汰 ---
     for (std::size_t i = 0; i < mechanics_data.size(); ++i) {
         const auto& data = mechanics_data[i];        // 与阶段 3 同一套 per-body 缓存
         std::uintptr_t h = data.handle;
@@ -2167,10 +1788,28 @@ void MechanicsSystem::update_physics() {
             object_bottom_y += corr_it->second.y;
         }
 
-        // 安全网：冲量求解后仍穿透较深时做硬修正（正常情况下不应触发）
-        if (object_bottom_y < floor_y - 0.01f) {
-            tx_w->position.y += (floor_y + floor_eps) - object_bottom_y;
-            g_handle_to_velocity[h].y = std::max(g_handle_to_velocity[h].y, 0.0f);
+        // 水平 floor_y：穿插时整体上抬，并做法向/切向「处方」（非完整接触流形）
+        if (object_bottom_y < floor_y + floor_eps) {
+            tx_w->position.y += (floor_y + floor_eps) - object_bottom_y; // 消穿（单轴，近似静接触）
+
+            float y_vel = g_handle_to_velocity[h].y; // 向上为正
+            if (y_vel < -low_vel_threshold) {
+                g_handle_to_velocity[h].y = -y_vel * floor_restitution; // 下行且够快则反弹
+                g_handle_to_sleep_timer[h] = 0.0f; // 显著弹跳才打断休眠计时
+            } else {
+                if (std::abs(g_handle_to_velocity[h].y) < zero_vel_threshold) {
+                    g_handle_to_velocity[h].y = 0.0f; // 粘地：贴住时竖直速度清零
+                } else {
+                    g_handle_to_velocity[h].y *= 0.15f; // 弱弹簧感衰减残余弹跳
+                }
+
+                g_handle_to_velocity[h].x *= 0.8f; // 水平滑动摩擦（与对体摩擦系数独立，属地板启发式）
+                g_handle_to_velocity[h].z *= 0.8f;
+                g_handle_to_angular_vel[h].x *= 0.7f; // 滚阻：略拖慢角速度防永转
+                g_handle_to_angular_vel[h].y *= 0.7f;
+                g_handle_to_angular_vel[h].z *= 0.7f;
+                // 静接触不打断休眠计时，让休眠检测正常累积
+            }
         }
     }
 
