@@ -154,11 +154,11 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
     if (auto* event_bus = ctx->event_bus()) {
         screenshot_request_sub_id_ = event_bus->subscribe<Events::ScreenshotRequestEvent>(
             [this](const Events::ScreenshotRequestEvent& event) {
-                if (event.surface == nullptr || event.file_path.empty()) {
+                if (event.camera_handle == 0 || event.file_path.empty()) {
                     return;
                 }
                 std::lock_guard<std::mutex> lock(screenshot_mutex_);
-                pending_screenshots_.push_back({event.surface, event.file_path, event.completion_promise});
+                pending_screenshots_.push_back({event.camera_handle, event.file_path, event.completion_promise});
             });
     }
 
@@ -353,7 +353,25 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                                       sizeof(hardware_->uniformBufferObjects));
                 const uint32_t uboDescriptor = hardware_->uniformBuffer.storeDescriptor();
                 const uint32_t depthDescriptor = visibility.getDepthImage().storeDescriptor();
-                const uint32_t finalOutputDescriptor = hardware_->finalOutputImage.storeDescriptor();
+
+                // Offscreen cameras (no surface) render to a dedicated image so
+                // they never overwrite the display pipeline's finalOutputImage.
+                const bool is_offscreen = (camera->surface == nullptr);
+                if (is_offscreen) {
+                    if (!offscreen_image_ ||
+                        offscreen_w_ != hardware_->gbufferSize.x ||
+                        offscreen_h_ != hardware_->gbufferSize.y) {
+                        offscreen_image_ = HardwareImage(
+                            hardware_->gbufferSize.x, hardware_->gbufferSize.y,
+                            ImageFormat::RGBA16_FLOAT, ImageUsage::StorageImage);
+                        offscreen_w_ = hardware_->gbufferSize.x;
+                        offscreen_h_ = hardware_->gbufferSize.y;
+                    }
+                }
+                HardwareImage& render_target = is_offscreen
+                                                   ? offscreen_image_
+                                                   : hardware_->finalOutputImage;
+                const uint32_t finalOutputDescriptor = render_target.storeDescriptor();
 
                 // ================================================================
                 // 5. Lighting pass: VBuffer decode + PBR direct illumination
@@ -471,13 +489,13 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 hardware_->executor << hardware_->executor.commit();
 
                 if (image_handle_ != 0) {
-                    if (auto image_device = SharedDataHub::instance().image_storage().acquire_write(image_handle_)) {
-                        image_device->image = hardware_->finalOutputImage;
-                        image_device->executor = hardware_->executor;
-                    }
+                    process_pending_screenshots(cam_handle, render_target);
 
                     if (camera->surface != nullptr) {
-                        process_pending_screenshots(camera->surface);
+                        if (auto image_device = SharedDataHub::instance().image_storage().acquire_write(image_handle_)) {
+                            image_device->image = hardware_->finalOutputImage;
+                            image_device->executor = hardware_->executor;
+                        }
 
                         if (auto* event_bus = context()->event_bus()) {
                             event_bus->publish<Events::OpticsFrameReadyEvent>({camera->surface,
@@ -518,12 +536,12 @@ float half_to_float(uint16_t h) {
 
 }  // namespace
 
-void OpticsSystem::process_pending_screenshots(void* surface) {
+void OpticsSystem::process_pending_screenshots(std::uintptr_t camera_handle, HardwareImage& render_target) {
     std::vector<PendingScreenshot> matched;
     {
         std::lock_guard<std::mutex> lock(screenshot_mutex_);
         auto it = std::remove_if(pending_screenshots_.begin(), pending_screenshots_.end(),
-                                 [surface](const PendingScreenshot& req) { return req.surface == surface; });
+                                 [camera_handle](const PendingScreenshot& req) { return req.camera_handle == camera_handle; });
         matched.assign(std::make_move_iterator(it), std::make_move_iterator(pending_screenshots_.end()));
         pending_screenshots_.erase(it, pending_screenshots_.end());
     }
@@ -553,7 +571,7 @@ void OpticsSystem::process_pending_screenshots(void* surface) {
         return;
     }
 
-    hardware_->executor << hardware_->finalOutputImage.copyTo(staging_buffer)
+    hardware_->executor << render_target.copyTo(staging_buffer)
                         << hardware_->executor.commit();
 
     std::vector<uint16_t> half_data(pixel_count * 4);
@@ -610,6 +628,7 @@ void OpticsSystem::shutdown() {
         image_handle_ = 0;
     }
 
+    offscreen_image_ = HardwareImage();
     hardware_.reset();
 
     CFW_LOG_INFO("OpticsSystem: Hardware resources released");

@@ -237,6 +237,7 @@ void BindAll(nanobind::module_& m) {
         .def("get_output_mode", &Camera::get_output_mode,
              "Get current camera output mode as string")
         .def("set_surface", [](Camera& self, std::uintptr_t surface) { self.set_surface(reinterpret_cast<void*>(surface)); }, nb::arg("surface"), "Set render surface (pass window ID as integer)")
+        .def("get_surface", [](const Camera& self) -> std::uintptr_t { return reinterpret_cast<std::uintptr_t>(self.get_surface()); }, "Get render surface handle as integer (0 if none)")
         .def("get_position", &Camera::get_position, "Get camera position [x, y, z]")
         .def("get_forward", &Camera::get_forward, "Get camera forward direction [x, y, z]")
         .def("get_world_up", &Camera::get_world_up, "Get camera world up vector [x, y, z]")

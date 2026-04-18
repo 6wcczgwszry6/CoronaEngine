@@ -1682,24 +1682,28 @@ void Corona::API::Camera::set_surface(void* surface) {
     }
 }
 
+void* Corona::API::Camera::get_surface() const {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Camera::get_surface] Invalid camera handle");
+        return nullptr;
+    }
+
+    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_read(handle_)) {
+        return accessor->surface;
+    }
+
+    CFW_LOG_ERROR("[Camera::get_surface] Failed to acquire read access to camera storage");
+    return nullptr;
+}
+
 void Corona::API::Camera::save_screenshot(const std::string& path) const {
     if (handle_ == 0) {
         CFW_LOG_WARNING("[Camera::save_screenshot] Invalid camera handle");
         return;
     }
 
-    void* surface = nullptr;
-    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_read(handle_)) {
-        surface = accessor->surface;
-    }
-
-    if (surface == nullptr) {
-        CFW_LOG_WARNING("[Camera::save_screenshot] Camera has no associated surface");
-        return;
-    }
-
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
-        event_bus->publish<Events::ScreenshotRequestEvent>({surface, path, nullptr});
+        event_bus->publish<Events::ScreenshotRequestEvent>({handle_, path, nullptr});
         CFW_LOG_INFO("[Camera::save_screenshot] Screenshot request queued: {}", path);
     }
 }
@@ -1710,21 +1714,11 @@ bool Corona::API::Camera::save_screenshot_sync(const std::string& path) const {
         return false;
     }
 
-    void* surface = nullptr;
-    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_read(handle_)) {
-        surface = accessor->surface;
-    }
-
-    if (surface == nullptr) {
-        CFW_LOG_WARNING("[Camera::save_screenshot_sync] Camera has no associated surface");
-        return false;
-    }
-
     auto promise = std::make_shared<std::promise<bool>>();
     auto future = promise->get_future();
 
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
-        event_bus->publish<Events::ScreenshotRequestEvent>({surface, path, std::move(promise)});
+        event_bus->publish<Events::ScreenshotRequestEvent>({handle_, path, std::move(promise)});
         CFW_LOG_INFO("[Camera::save_screenshot_sync] Screenshot request queued (sync): {}", path);
     } else {
         return false;
