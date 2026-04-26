@@ -85,7 +85,7 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                                    CefRefPtr<Callback> callback) {
     CEF_REQUIRE_UI_THREAD();
     std::string req = request.ToString();
-    VUE_LOG_INFO("Received query: {}", req.c_str());
+    VUE_LOG_DEBUG("Received query: {}", req.c_str());
 
     if (!Py_IsInitialized()) {
         Py_Initialize();
