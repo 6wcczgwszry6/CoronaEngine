@@ -245,6 +245,7 @@ class Camera {
 
     void set(const std::array<float, 3>& position, const std::array<float, 3>& forward,
              const std::array<float, 3>& world_up, float fov);
+    [[nodiscard]] std::uintptr_t get_handle() const;
     void set_surface(void* surface);
     [[nodiscard]] void* get_surface() const;
     void save_screenshot(const std::string& path) const;
@@ -270,8 +271,6 @@ class Camera {
 
    private:
     friend class Scene;
-
-    [[nodiscard]] std::uintptr_t get_handle() const;
 
     std::uintptr_t handle_{};
     ImageEffects* image_effects_{nullptr};

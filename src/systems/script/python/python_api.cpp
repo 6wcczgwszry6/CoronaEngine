@@ -4,6 +4,8 @@
 #include <corona/kernel/core/kernel_context.h>
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/systems/script/python_api.h>
+#include <corona/systems/script/python/python_error_handler.h>
+#include <corona/systems/script/python/python_path_config.h>
 #include <nanobind/stl/string.h>
 #include <windows.h>
 
@@ -13,8 +15,6 @@
 #include <set>
 #include <unordered_map>
 
-#include "python_error_handler.cpp"
-#include "python_path_config.cpp"
 
 extern "C" PyObject* PyInit_CoronaEngine();
 

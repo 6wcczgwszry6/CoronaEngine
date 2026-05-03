@@ -228,6 +228,7 @@ void BindAll(nanobind::module_& m) {
         .def("set", &Camera::set,
              nb::arg("position"), nb::arg("forward"), nb::arg("world_up"), nb::arg("fov"),
              "Set all camera parameters at once")
+        .def("get_handle", &Camera::get_handle, "Get camera handle")
         .def("save_screenshot", &Camera::save_screenshot, nb::arg("path"),
              "Save a screenshot from this camera's perspective to file (async)")
         .def("save_screenshot_sync", &Camera::save_screenshot_sync, nb::arg("path"),
