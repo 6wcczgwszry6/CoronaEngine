@@ -1,161 +1,15 @@
 ﻿#include "cef_client.h"
 
-#include <corona/kernel/core/i_logger.h>
-#include <corona/shared_data_hub.h>
-#include <include/cef_values.h>
 #include <windows.h>
 
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
-#include <iostream>
 
 #include "browser_manager.h"
+#include "cef_bridge_helpers.h"
 
 namespace Corona::Systems::UI {
-
-namespace {
-bool parse_vec3_list(const CefRefPtr<CefListValue>& list, ktm::fvec3& out) {
-    if (!list || list->GetSize() != 3) {
-        return false;
-    }
-
-    auto read_value = [list](size_t index, float& value) -> bool {
-        const auto type = list->GetType(index);
-        if (type == VTYPE_INT) {
-            value = static_cast<float>(list->GetInt(index));
-            return true;
-        }
-        if (type == VTYPE_DOUBLE) {
-            value = static_cast<float>(list->GetDouble(index));
-            return true;
-        }
-        return false;
-    };
-
-    return read_value(0, out.x) && read_value(1, out.y) && read_value(2, out.z);
-}
-}  // namespace
-
-// ============================================================================
-// BrowserSideJSHandler 实现
-// ============================================================================
-
-BrowserSideJSHandler::~BrowserSideJSHandler() {
-    PyGILState_STATE state = PyGILState_Ensure();
-    Py_XDECREF(pFunc_);
-    PyGILState_Release(state);
-}
-
-void BrowserSideJSHandler::initialize_python() {
-    if (!Py_IsInitialized()) {
-        Py_Initialize();
-        PyEval_SaveThread();
-    }
-
-    PyGILState_STATE state = PyGILState_Ensure();
-    PyObject* pModule = nullptr;
-
-    try {
-        PyRun_SimpleString("import sys");
-        PyRun_SimpleString("import os");
-        PyRun_SimpleString("sys.path.insert(0, os.path.join(os.getcwd(), 'CabbageEditor'))");
-
-        PyObject* pName = PyUnicode_FromString("main");
-        if (!pName) {
-            throw std::runtime_error("Failed to create module name");
-        }
-
-        pModule = PyImport_Import(pName);
-        Py_DECREF(pName);
-
-        if (!pModule) {
-            PyErr_Print();
-            PyGILState_Release(state);
-            throw std::runtime_error("Failed to import Python module 'main'");
-        }
-
-        PyObject* pClass = PyObject_GetAttrString(pModule, "editor");
-        if (!pClass) {
-            Py_DECREF(pModule);
-            PyErr_Print();
-            PyGILState_Release(state);
-            throw std::runtime_error("Failed to get 'editor' attribute from module");
-        }
-
-        if (PyCallable_Check(pClass)) {
-            pFunc_ = PyObject_GetAttrString(pClass, "deal_func_from_js");
-        }
-
-        Py_DECREF(pClass);
-        Py_DECREF(pModule);
-
-    } catch (const std::exception&) {
-        if (pModule) {
-            Py_DECREF(pModule);
-        }
-        PyErr_Print();
-        PyGILState_Release(state);
-        throw;
-    }
-
-    PyGILState_Release(state);
-}
-
-bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
-                                   CefRefPtr<CefFrame> frame,
-                                   int64_t query_id,
-                                   const CefString& request,
-                                   bool persistent,
-                                   CefRefPtr<Callback> callback) {
-    CEF_REQUIRE_UI_THREAD();
-    std::string req = request.ToString();
-    VUE_LOG_DEBUG("Received query: {}", req.c_str());
-
-    if (!Py_IsInitialized()) {
-        Py_Initialize();
-        PyEval_SaveThread();
-    }
-
-    PyGILState_STATE gstate = PyGILState_Ensure();
-
-    try {
-        if (!pFunc_) {
-            initialize_python();
-        }
-
-        PyObject* args = PyTuple_Pack(1, PyUnicode_FromString(req.c_str()));
-        PyObject* object = PyObject_CallObject(pFunc_, args);
-        Py_DECREF(args);
-
-        if (!object) {
-            PyErr_Print();
-            VUE_LOG_ERROR("Python function call failed for request");
-            callback->Failure(0, "Python function call failed");
-        } else {
-            if (PyUnicode_Check(object)) {
-                const char* result = PyUnicode_AsUTF8(object);
-                callback->Success(result);
-            } else {
-                if (PyObject* str_obj = PyObject_Str(object)) {
-                    const char* result = PyUnicode_AsUTF8(str_obj);
-                    callback->Success(result);
-                    Py_DECREF(str_obj);
-                }
-            }
-            Py_DECREF(object);
-        }
-
-    } catch (const std::exception& e) {
-        std::cerr << "Exception in OnQuery: " << e.what() << std::endl;
-        callback->Failure(0, e.what());
-        PyGILState_Release(gstate);
-        return false;
-    }
-
-    PyGILState_Release(gstate);
-    return true;
-}
 
 // ============================================================================
 // OffscreenRenderHandler 实现
@@ -331,40 +185,7 @@ bool OffscreenCefClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
                                                   CefProcessId source_process,
                                                   CefRefPtr<CefProcessMessage> message) {
     CEF_REQUIRE_UI_THREAD();
-    if (message->GetName() == "CameraMoveFast") {
-        auto args = message->GetArgumentList();
-        if (args && args->GetSize() >= 5) {
-            const auto handle_type = args->GetType(0);
-            if (handle_type == VTYPE_INT || handle_type == VTYPE_DOUBLE) {
-                const auto handle_value =
-                    handle_type == VTYPE_INT ? static_cast<double>(args->GetInt(0)) : args->GetDouble(0);
-                const auto camera_handle = static_cast<std::uintptr_t>(handle_value);
-                if (camera_handle != 0) {
-                    ktm::fvec3 position{};
-                    ktm::fvec3 forward{};
-                    ktm::fvec3 world_up{};
-                    if (parse_vec3_list(args->GetList(1), position) &&
-                        parse_vec3_list(args->GetList(2), forward) &&
-                        parse_vec3_list(args->GetList(3), world_up)) {
-                        float fov = 45.0f;
-                        const auto fov_type = args->GetType(4);
-                        if (fov_type == VTYPE_INT) {
-                            fov = static_cast<float>(args->GetInt(4));
-                        } else if (fov_type == VTYPE_DOUBLE) {
-                            fov = static_cast<float>(args->GetDouble(4));
-                        }
-
-                        if (auto accessor = Corona::SharedDataHub::instance().camera_storage().acquire_write(camera_handle)) {
-                            accessor->position = position;
-                            accessor->forward = forward;
-                            accessor->world_up = world_up;
-                            accessor->fov = fov;
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
+    if (handle_realtime_process_message(message)) {
         return true;
     }
     if (message->GetName() == "RendererMessage") {
@@ -372,10 +193,8 @@ bool OffscreenCefClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
         CFW_LOG_INFO("CEF: Received message from Renderer: {}", msg);
         return true;
     }
-    if (browser_side_router_) {
-        return browser_side_router_->OnProcessMessageReceived(browser, frame, source_process, message);
-    }
-    return false;
+
+    return forward_process_message_to_router(browser_side_router_, browser, frame, source_process, message);
 }
 
 // ============================================================================
