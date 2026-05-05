@@ -22,7 +22,7 @@ include(FetchContent)
 # ------------------------------------------------------------------------------
 FetchContent_Declare(Horizon
     GIT_REPOSITORY https://github.com/CoronaEngine/Horizon.git
-    GIT_TAG 5a81c090ebaf4632ba0a989d1d6bdbc7d3e1b4a7
+    GIT_TAG 96a08385e553c09cf595a8916094d26ebaa83988
     EXCLUDE_FROM_ALL
 )
 
