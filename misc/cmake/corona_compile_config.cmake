@@ -91,18 +91,6 @@ if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
 endif()
 
 # ------------------------------------------------------------------------------
-# MSVC charset configuration
-# ------------------------------------------------------------------------------
-if(MSVC)
-    add_compile_options(
-        $<$<COMPILE_LANGUAGE:C>:/utf-8>
-        $<$<COMPILE_LANGUAGE:C>:/utf-8>
-        $<$<COMPILE_LANGUAGE:CXX>:/utf-8>
-        $<$<COMPILE_LANGUAGE:CXX>:/utf-8>
-    )
-endif()
-
-# ------------------------------------------------------------------------------
 # Summary
 # ------------------------------------------------------------------------------
 message(STATUS "[Compile] MSVC runtime=${CMAKE_MSVC_RUNTIME_LIBRARY}")
