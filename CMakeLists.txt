@@ -85,7 +85,3 @@ message(STATUS "  Build editor          : ${BUILD_CORONA_EDITOR}")
 message(STATUS "  Auto install deps     : ${CORONA_AUTO_INSTALL_PY_DEPS}")
 message(STATUS "================================================================================")
 message(STATUS "")
-
-if(MSVC)
-    add_compile_options(/utf-8)
-endif()
