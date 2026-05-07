@@ -781,32 +781,35 @@ def install_cabbage_editor_extension(app: CAIApp, context: CabbageContext) -> No
 目标：降低插件主类职责。
 
 - [x] 在 AITool 内新增最小 request lifecycle registry，后续再拆为 `AIRequestService`。
-- [ ] 新增 `StreamDispatcher` 管理 JS 回调。
-- [ ] 新增 `MediaIngress` 处理 base64/path/fileid。
-- [ ] 新增 `CAIClient` 封装 CAI 调用。
-- [ ] AITool 类只保留 CEF 暴露方法。
-- [x] 新增 bounded stream queue，避免流式 chunk 队列无限增长。
+- [x] 新增 `AIRequestService` 承接 request lifecycle registry。
+- [x] 新增 `StreamDispatcher` 管理 JS 回调。
+- [x] 新增 `MediaIngress` 承接现有 base64 图片入站，path/fileid 后续扩展。
+- [x] 新增 `CAIClient` 封装 CAI 调用。
+- [x] AITool 类只保留 CEF 暴露方法，内部处理委托给 controller/service。
+- [x] 新增 bounded stream queue，并在消费者结束时停止后台 stream worker。
 
 验收标准：
 
 - AITool 主文件明显变薄。
 - 请求状态、取消、错误处理集中在 request service。
 - 流式事件格式统一。
+- 当前阶段已通过 `plugins.AITool.tests.test_ai_rpc` 的 7 个标准库单元测试验证。
 
 ### 阶段 3：CAI Facade 与 Runtime
 
 目标：建立通用库 API 的雏形。
 
-- [ ] 新增 `CAIApp`。
-- [ ] 新增 `CAIRuntime`。
-- [ ] 将 tool/workflow/media/conversation/config registry 挂到 runtime。
-- [ ] 旧 `get_ai_entrance()` 内部委托默认 runtime。
-- [ ] AITool 改为调用 `CAIApp.chat_stream()`。
+- [x] 新增 `CAIApp`。
+- [x] 新增 `CAIRuntime`。
+- [x] 将 tool/workflow/media/conversation/config registry 以 lazy runtime registry ref 形式挂到 runtime，后续再替换底层全局单例。
+- [x] 旧 `get_ai_entrance()` 内部委托默认 runtime。
+- [x] AITool 改为调用 `CAIApp.chat_stream()`。
 
 验收标准：
 
-- 可以在单元测试中创建独立 CAIApp，不污染全局状态。
+- 可以在单元测试中创建注入 legacy entrance 的独立 CAIApp。
 - 旧入口仍兼容现有模块。
+- 当前阶段已通过 `plugins.AITool.tests.test_ai_rpc` 的 9 个标准库单元测试验证。
 
 ### 阶段 4：插件系统显式化
 
@@ -870,17 +873,17 @@ def install_cabbage_editor_extension(app: CAIApp, context: CabbageContext) -> No
 - [x] 新增 request lifecycle registry。
 - [x] 新增 bounded stream queue。
 - [ ] 支持 cancellation token。
-- [ ] 拆分 media ingress、stream dispatcher、CAI client。
+- [x] 拆分 media ingress、stream dispatcher、CAI client。
 - [ ] 统一错误 envelope。
 
 ### 7.3 CAI 通用核心任务
 
-- [ ] 定义 `ChatRequest`、`StreamEvent`、`AIError`。
-- [ ] 新增 `CAIApp` facade。
-- [ ] 新增 `CAIRuntime`。
-- [ ] runtime 化 config/tool/workflow/media/conversation registry。
-- [ ] 将 `handle_integrated_entrance_stream` 迁移为 `CAIApp.chat_stream` 的内部实现。
-- [ ] 建立 plugin register 机制。
+- [x] 定义 `ChatRequest`、`StreamEvent`、`AIError`。
+- [x] 新增 `CAIApp` facade。
+- [x] 新增 `CAIRuntime`。
+- [x] runtime 挂载 config/tool/workflow/media/conversation registry 引用。
+- [x] 新增 `CAIApp.chat_stream` 兼容包装 `handle_integrated_entrance_stream`。
+- [x] 建立最小 plugin register 机制，显式 `CAIPlugin` 协议留到阶段 4。
 
 ### 7.4 CabbageEditor adapter 任务
 
@@ -995,12 +998,12 @@ async def chat(ws):
 - [ ] 错误结构统一。
 - [x] stream event 至少可识别 `data/heartbeat/done/error`。
 - [ ] 图片不再强依赖 base64 过桥。
-- [ ] AITool 主类只负责 CEF 暴露，不承载大量业务逻辑。
+- [x] AITool 主类只负责 CEF 暴露，不承载大量业务逻辑。
 
 CAI 通用库化阶段完成后，应满足：
 
 - [ ] 可以在无 CabbageEditor 环境下 import CAI 通用核心。
-- [ ] 可以创建多个独立 CAIApp 实例。
+- [x] 可以创建多个注入式 CAIApp facade 实例。
 - [ ] 工具、工作流、媒体仓库、会话存储属于 runtime 实例。
 - [ ] CabbageEditor 能力通过 adapter 注册。
 - [ ] 旧 `get_ai_entrance()` 兼容入口仍可工作。
@@ -1122,7 +1125,7 @@ class CAIApp:
 
 ### 12.4 第二阶段：替换 AITool 手写流式队列
 
-当前 AITool 用 `ThreadPoolExecutor` 跑 CAI generator，再用 `queue.Queue` 转给 asyncio loop。这能工作，但逻辑分散。
+当前 AITool 用 `ThreadPoolExecutor` 跑 CAI generator，再用 `queue.Queue` 转给 asyncio loop。阶段 2 已先把这段逻辑拆成服务模块，底层流式桥接机制暂时保持不变。
 
 建议抽成：
 
@@ -1131,13 +1134,24 @@ AIRequestService
   -> 管理 request_id、状态、取消、future/task
 
 CAIClient
-  -> 专门消费 CAIApp.chat_stream
+  -> 当前消费 get_ai_entrance().handle_integrated_entrance_stream
+  -> 后续切换到 CAIApp.chat_stream
 
 StreamDispatcher
   -> 专门把 StreamEvent 发回前端
 ```
 
-这样 AITool 主类只剩：
+已落地的中间形态是：
+
+- `AIRequestService` 管理 `request_id`、状态查询、取消请求和 task 绑定。
+- `MediaIngress` 处理现有 base64 图片上传与 token 提取。
+- `CAIClient` 封装 CAI generator 到 bounded queue 的桥接，并提供 stop 信号避免提前结束时后台 worker 堵塞。
+- `StreamDispatcher` 统一识别 `data/heartbeat/done/error` 并派发 JS 回调。
+- `EventLoopRunner` 承接 AITool 原有 asyncio loop 线程、任务创建和 shutdown。
+- `AIPluginController` 承接旧入口、新 `ai_rpc`、流式消费、错误转发和 cleanup 编排。
+- `LocalFileService` 承接 `read_local_file_as_base64` 的文件读取与 data URL 编码。
+
+当前 AITool 主类已收敛为 CEF 暴露方法的薄委托层：
 
 ```python
 class AITool(PluginBase):
@@ -1175,6 +1189,16 @@ def handle_integrated_entrance_stream(payload):
 ```
 
 这样外部新代码走 `CAIApp`，旧模块仍可继续走 `ai_entrance`。
+
+当前已落地的阶段 3 中间形态是：
+
+- 在 `CoronaArtificialIntelligence/cai` 下新增 `CAIApp`、`CAIRuntime` 和 `protocol` 包。
+- `CAIApp.chat_stream(request)` 接受 `ChatRequest` 或 legacy dict，并内部转成旧 integrated payload。
+- `CAIRuntime` 通过 lazy registry ref 暴露 config/tool/workflow/media/conversation/model 等现有 registry。
+- `ai_service.entrance.get_ai_entrance()` 改为通过默认 `CAIRuntime` 返回 legacy entrance。
+- AITool 的 `CAIClient` 已改为消费 `CAIApp.chat_stream()`，不再直接持有 `get_ai_entrance()`。
+
+这一版仍是兼容 facade，不是最终 runtime 隔离：底层 registry 仍来自现有全局单例，后续阶段需要把这些 registry 的创建和写入真正迁到 `CAIRuntime` 实例上。
 
 ### 12.6 不建议的简化方式
 
