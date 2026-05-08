@@ -550,6 +550,44 @@ CAI 内部统一转换为 media registry 的 `fileid://...`。
 
 这样可以避免重复 done 或漏 done。
 
+### 4.8 前端消息界面支持富文本
+
+当前 `AITalkBar.vue` 对 text part 主要使用纯文本渲染。AI 输出通常包含 Markdown、代码块、表格、列表、引用、链接和工具执行摘要，因此前端消息模型需要从“纯字符串气泡”升级为“富文本 part 渲染”。
+
+建议分两层处理：
+
+- 协议层仍保留 `content_type: "text"` 兼容旧 chunk，并通过 `metadata.format` 或 part 字段标记文本格式。
+- 渲染层将 text part 解析为安全的富文本视图，避免直接信任模型输出的 HTML。
+
+推荐 part 扩展：
+
+```json
+{
+  "content_type": "text",
+  "content_text": "## 方案\n\n```cpp\n...\n```",
+  "metadata": {
+    "format": "markdown"
+  }
+}
+```
+
+前端渲染建议：
+
+- 默认把 `text/plain` 按当前 `whitespace-pre-wrap` 渲染。
+- 对 `markdown` 文本使用 Markdown parser 转为受限 HTML，再经 sanitizer 清洗后渲染。
+- 支持标题、段落、列表、引用、行内代码、代码块、表格、链接和分隔线。
+- 代码块支持语言标记、复制按钮和横向滚动，避免撑破聊天面板。
+- 链接默认只允许 `http/https/file` 等白名单协议，并统一使用安全打开方式。
+- 流式输出时先以增量文本缓存，按节流策略重新解析，避免每个 token 都触发完整重排。
+- review/image/video/audio/file 等非文本 part 继续按现有组件渲染，不混入 Markdown HTML。
+
+安全要求：
+
+- 不允许模型输出的 `<script>`、事件属性、内联危险 URL 执行。
+- 不直接对未清洗内容使用 `v-html`。
+- 富文本样式限制在 AI 消息容器内，避免影响编辑器全局样式。
+- Markdown 解析失败时回退为纯文本渲染。
+
 ---
 
 ## 5. CAI 通用库化目标架构
@@ -894,6 +932,12 @@ def install_cabbage_editor_extension(app: CAIApp, context: CabbageContext) -> No
 - [ ] 把 `window.receiveAIMessageChunk` 降级为事件总线入口。
 - [ ] 增加请求取消按钮和超时状态展示。
 - [ ] 媒体输入优先传 path/resource，而不是 base64。
+- [x] 将 AI 消息文本界面升级为富文本渲染，支持 Markdown、代码块、表格、链接、列表和引用。
+- [x] 为 text part 增加格式识别：兼容旧 `content_text`，新增 `metadata.format` / `part.format`，默认 `plain`，可选 `markdown`。
+- [x] 引入本地受限 Markdown parser 与输出 sanitizer，禁止未清洗内容直接 `v-html`。
+- [x] 抽出 `RichTextPart` 组件承接 text part 渲染，避免 `AITalkBar.vue` 继续膨胀。
+- [x] 流式 Markdown 渲染增加节流与失败回退，保证半截代码块、表格或列表不会导致界面闪烁或报错。
+- [x] 代码块支持语言标签、复制按钮、横向滚动和长行换行策略。
 
 ### 7.2 Python AITool 任务
 
@@ -932,6 +976,7 @@ def install_cabbage_editor_extension(app: CAIApp, context: CabbageContext) -> No
 - [ ] media fileid resolve 测试。
 - [ ] workflow route 测试。
 - [ ] tool recoverable error 测试。
+- [x] 前端富文本渲染测试：Markdown、代码块、表格、链接 sanitizer、流式半截 Markdown 和纯文本回退。
 - [x] Cabbage adapter smoke test。
 - [x] CAI core 独立 import smoke test。
 
@@ -1029,6 +1074,8 @@ async def chat(ws):
 - [ ] 错误结构统一。
 - [x] stream event 至少可识别 `data/heartbeat/done/error`。
 - [ ] 图片不再强依赖 base64 过桥。
+- [x] AI 文本消息支持安全富文本渲染，Markdown、代码块、表格、链接、列表和引用在流式与完成态下都能稳定显示。
+- [x] 富文本渲染具备 sanitizer、链接协议白名单和纯文本回退，不允许模型输出执行脚本或污染全局样式。
 - [x] AITool 主类只负责 CEF 暴露，不承载大量业务逻辑。
 
 CAI 通用库化阶段完成后，应满足：
