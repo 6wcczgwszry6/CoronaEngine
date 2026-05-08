@@ -1,12 +1,14 @@
 #include <corona/events/engine_events.h>
 #include <corona/kernel/core/i_logger.h>
 #include <corona/shared_data_hub.h>
+#include <corona/kernel/utils/storage.h>
 #include <corona/spatial/octree.h>
 #include <corona/systems/scene/scene_system.h>
 
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace Corona::Systems {
 
@@ -64,6 +66,116 @@ void SceneSystem::update() {
     //      - 写回 SceneDevice.{min_world,max_world,center_world}（迁移阶段先不动，
     //        与 MechanicsSystem 重复计算可接受）。
     //   2) 收集本帧所有相机的可见集并集，更新 invisible_frames，按阈值发 Evict 事件。
+
+    auto& hub = SharedDataHub::instance();
+    auto& scene_storage = hub.scene_storage();
+    std::vector<std::uintptr_t> scene_handles;
+    {
+        for (auto it = scene_storage.cbegin(); it != scene_storage.cend(); ++it) {
+            const SceneDevice& scene_dev = *it;
+            scene_handles.push_back(reinterpret_cast<std::uintptr_t>(&scene_dev));
+        }
+    }
+
+    for (std::uintptr_t scene_handle : scene_handles) {
+        auto scene_read = scene_storage.try_acquire_read(scene_handle);
+        if ( !scene_read.valid() )  continue;
+        const SceneDevice& scene_dev = *scene_read;
+
+        Impl::SceneState& scene_state = impl_->get_or_create(scene_handle);
+        std::vector<typename Spatial::Octree<Impl::Payload>::Entry> octree_entries;
+
+        for (std::uintptr_t actor_handle : scene_dev.actor_handles) {
+            auto& actor_storage = hub.actor_storage();
+            auto actor_read = actor_storage.try_acquire_read(actor_handle);
+            if ( !actor_read ) continue;
+            const ActorDevice& actor_dev = *actor_read;
+
+            for (std::uintptr_t profile_handle : actor_dev.profile_handles) {
+                auto& profile_storage = hub.profile_storage();
+                auto profile_read = profile_storage.try_acquire_read(profile_handle);
+                if (!profile_read.valid()) continue;
+                const ProfileDevice& profile_dev = *profile_read;
+
+                std::uintptr_t mechanics_handle = profile_dev.mechanics_handle;
+                if ( !mechanics_handle ) continue;
+
+                auto& mechanics_storage = hub.mechanics_storage();
+                auto mechanics_read = mechanics_storage.try_acquire_read(mechanics_handle);
+                if (!mechanics_read.valid()) continue;
+                const MechanicsDevice& mechanics_dev = *mechanics_read;
+
+                Spatial::AABB aabb;
+                aabb.min = mechanics_dev.min_xyz;
+                aabb.max = mechanics_dev.max_xyz;
+                octree_entries.push_back({actor_handle,aabb});
+            }
+        }
+
+        Spatial::AABB root_aabb;
+        if ( !octree_entries.empty() ) {
+            root_aabb = octree_entries[0].bounds;
+            for (const auto& entry : octree_entries) {
+                root_aabb = root_aabb.merged(entry.bounds);
+            }
+            ktm::fvec3 extent = root_aabb.extent();
+
+            //padding 添加10%的内边距
+            float max_extent = std::max({extent.x,extent.y,extent.z});
+            float padding = max_extent * 0.1f;
+            root_aabb = root_aabb.expanded(padding);
+        }else {
+            root_aabb.min = ktm::fvec3{-1.0f, -1.0f, -1.0f};
+            root_aabb.max = ktm::fvec3{1.0f, 1.0f, 1.0f};
+        }
+
+        scene_state.tree.rebuild(root_aabb,octree_entries);
+
+        std::unordered_set<Impl::Payload> visible_actors;
+        for (std::uintptr_t camera_handle : scene_dev.camera_handles) {
+            auto cam_read = scene_storage.try_acquire_read(camera_handle);
+            if ( !cam_read.valid() ) continue;
+
+            std::vector<Impl::Payload> visible_for_camera = query_visible_for_camera(scene_handle,camera_handle);
+            visible_actors.insert(visible_for_camera.begin(),visible_for_camera.end());
+        }
+
+        {
+            std::unique_lock lock(impl_->mtx);
+
+            for (std::uintptr_t actor_handle : scene_dev.actor_handles) {
+                if ( visible_actors.count(actor_handle) ) {
+                    scene_state.invisible_frames[actor_handle] = 0;
+                }else {
+                    uint32_t cnt = ++scene_state.invisible_frames[actor_handle];
+
+                    if ( scene_state.invisible_frames[actor_handle] >= static_cast<uint32_t>(scene_state.cfg.invisible_frames_to_evict) ) {
+                        if ( impl_->ctx && impl_->ctx->event_bus()) {
+                            Events::ActorEvictRequestedEvent evict_event{actor_handle};
+                            impl_->ctx->event_bus()->publish(evict_event);
+
+                            CFW_LOG_NOTICE("SceneSystem: Evict requested for actor {} (invisible {} frames)",
+                                   actor_handle, cnt);
+                        }
+                        scene_state.invisible_frames[actor_handle] = 0;
+                    }
+                }
+            }
+        }
+
+        scene_state.stats.actor_total = scene_dev.actor_handles.size();
+        scene_state.stats.actor_visible = visible_actors.size();
+        scene_state.stats.octree_entries = octree_entries.size();
+
+        auto scene_write = scene_storage.try_acquire_write(scene_handle);
+        if (scene_write.valid()) {
+            SceneDevice& scene_dev_write = *scene_write;
+            scene_dev_write.min_world = root_aabb.min;
+            scene_dev_write.max_world = root_aabb.max;
+            scene_dev_write.center_world = root_aabb.center();
+        }
+    }
+
 }
 
 void SceneSystem::shutdown() {
