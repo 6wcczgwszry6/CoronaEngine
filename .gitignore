@@ -27,3 +27,4 @@ Makefile
 
 # Log files
 *.log
+.claude/
