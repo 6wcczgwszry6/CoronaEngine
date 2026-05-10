@@ -3,6 +3,7 @@
 #include <corona/kernel/core/i_logger.h>
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
+#include <corona/spatial/octree.h>
 #include <corona/systems/mechanics/mechanics_system.h>
 
 #include <algorithm>      // min,max,clamp,sort,unique
@@ -65,6 +66,14 @@ inline ktm::fvec3 vec3_sub(const ktm::fvec3& a, const ktm::fvec3& b) {
 }
 inline ktm::fvec3 vec3_mul(const ktm::fvec3& v, float s) {
     return make_fvec3(v.x * s, v.y * s, v.z * s);  // 标量乘向量
+}
+
+// 检测两个 AABB 是否重叠（世界/局部复用）
+inline bool aabb_overlap(const ktm::fvec3& a_min, const ktm::fvec3& a_max,
+                         const ktm::fvec3& b_min, const ktm::fvec3& b_max) {
+    return (a_min.x <= b_max.x && a_max.x >= b_min.x) &&
+           (a_min.y <= b_max.y && a_max.y >= b_min.y) &&
+           (a_min.z <= b_max.z && a_max.z >= b_min.z);
 }
 
 // local：局部点；返回：同一几何点在世界的坐标
@@ -378,181 +387,8 @@ constexpr float kMoveCallbackMinDistance = 0.1f;
 static std::vector<std::function<void()>> g_deferred_move_callbacks;
 static std::atomic<bool> g_shutdown_requested{false};
 
-/*
- 八叉树节点中的物体数据结构
- 存储物体句柄和AABB包围盒
- */
-struct OctreeEntry {
-    std::uintptr_t handle;  // 物体唯一标识句柄
-    ktm::fvec3 min_bounds;  // AABB包围盒最小边界
-    ktm::fvec3 max_bounds;  // AABB包围盒最大边界
-};
-
-/*
- 八叉树节点结构
- 八叉树是节点包含8个子节点
- */
-struct OctreeNode {
-    ktm::fvec3 min_bounds;                                // 当前节点的AABB最小边界
-    ktm::fvec3 max_bounds;                                // 当前节点的AABB最大边界
-    std::vector<OctreeEntry> entries;                     // 叶子节点存储的物体列表
-    std::unique_ptr<std::array<OctreeNode, 8>> children;  // 子节点（8个，非叶子节点才有）
-};
-
-// 八叉树常量
-constexpr int kOctreeMaxDepth = 6;           // 八叉树最大深度（防止过深）
-constexpr int kOctreeMaxObjectsPerLeaf = 4;  // 叶子节点最大物体数（超过分裂）
-
-/*
- 检测两个AABB包围盒是否重叠
- a_min A物体AABB最小边界
- a_max A物体AABB最大边界
- b_min B物体AABB最小边界
- b_max B物体AABB最大边界
-*/
-inline bool aabb_overlap(const ktm::fvec3& a_min, const ktm::fvec3& a_max,
-                         const ktm::fvec3& b_min, const ktm::fvec3& b_max) {
-    // 三个轴都有重叠才视为重叠
-    return (a_min.x <= b_max.x && a_max.x >= b_min.x) &&
-           (a_min.y <= b_max.y && a_max.y >= b_min.y) &&
-           (a_min.z <= b_max.z && a_max.z >= b_min.z);
-}
-
-/*
-  初始化八叉树节点的8个子节点
- */
-void octree_init_children(OctreeNode& node) {
-    node.children = std::make_unique<std::array<OctreeNode, 8>>();  // 分配 8 子节点数组
-    auto& children = *node.children;                                // 解引用便于书写
-
-    const ktm::fvec3 center = make_fvec3(  // 父 AABB 的几何中心，八分划分的交点
-        (node.min_bounds.x + node.max_bounds.x) * 0.5f,
-        (node.min_bounds.y + node.max_bounds.y) * 0.5f,
-        (node.min_bounds.z + node.max_bounds.z) * 0.5f);
-    const auto& min = node.min_bounds;  // 父 min 角
-    const auto& max = node.max_bounds;  // 父 max 角
-
-    children[0].min_bounds = min;  // 卦限 x∈[min,center] 等（靠近 min 角那一块）
-    children[0].max_bounds = center;
-
-    children[1].min_bounds = make_fvec3(center.x, min.y, min.z);  // +X 侧下半块
-    children[1].max_bounds = make_fvec3(max.x, center.y, center.z);
-
-    children[2].min_bounds = make_fvec3(min.x, center.y, min.z);  // +Y 侧
-    children[2].max_bounds = make_fvec3(center.x, max.y, center.z);
-
-    children[3].min_bounds = make_fvec3(center.x, center.y, min.z);  // +X+Y 底面象限
-    children[3].max_bounds = make_fvec3(max.x, max.y, center.z);
-
-    children[4].min_bounds = make_fvec3(min.x, min.y, center.z);  // +Z 侧近 min
-    children[4].max_bounds = make_fvec3(center.x, center.y, max.z);
-
-    children[5].min_bounds = make_fvec3(center.x, min.y, center.z);  // +X+Z
-    children[5].max_bounds = make_fvec3(max.x, center.y, max.z);
-
-    children[6].min_bounds = make_fvec3(min.x, center.y, center.z);  // +Y+Z
-    children[6].max_bounds = make_fvec3(center.x, max.y, max.z);
-
-    children[7].min_bounds = center;  // 靠近 max 角那一块
-    children[7].max_bounds = max;
-}
-// 八叉树插入物体
-// handle：物体 id；obj_min/max：物体世界 AABB；depth：当前树深（根为 0）
-void octree_insert(OctreeNode& node, std::uintptr_t handle,
-                   const ktm::fvec3& obj_min, const ktm::fvec3& obj_max, int depth) {
-    if (!aabb_overlap(obj_min, obj_max, node.min_bounds, node.max_bounds)) {
-        return;  // 与本节点无关
-    }
-
-    const bool is_leaf = (node.children == nullptr);  // nullptr 表示尚未分裂的叶
-
-    if (is_leaf) {
-        const bool should_split =                                               // 是否达到分裂条件
-            depth < kOctreeMaxDepth &&                                          // 未超过最大深度
-            static_cast<int>(node.entries.size()) >= kOctreeMaxObjectsPerLeaf;  // 叶内物体够多
-
-        if (!should_split) {
-            node.entries.push_back({handle, obj_min, obj_max});  // 直接堆在叶子里
-            return;
-        }
-        octree_init_children(node);  // 生成立即 8 子
-
-        for (const OctreeEntry& e : node.entries) {  // 旧物体重新插入（可能进多个子──跨子节点）
-            for (int i = 0; i < 8; ++i) {
-                octree_insert((*node.children)[i], e.handle, e.min_bounds, e.max_bounds, depth + 1);
-            }
-        }
-        node.entries.clear();  // 叶改内节点后清空本层列表
-
-        for (int i = 0; i < 8; ++i) {  // 当前新插入物体同样可能进多子
-            octree_insert((*node.children)[i], handle, obj_min, obj_max, depth + 1);
-        }
-        return;
-    }
-
-    const ktm::fvec3 center = make_fvec3(  // 内节点再次计算中心（与 init 时一致）
-        (node.min_bounds.x + node.max_bounds.x) * 0.5f,
-        (node.min_bounds.y + node.max_bounds.y) * 0.5f,
-        (node.min_bounds.z + node.max_bounds.z) * 0.5f);
-
-    const ktm::fvec3& min_bounds = node.min_bounds;  // 别名，少打字
-    const ktm::fvec3& max_bounds = node.max_bounds;
-
-    const bool overlap[8] = {// 物体 AABB 与 8 个子盒是否相交
-                             aabb_overlap(obj_min, obj_max, min_bounds, center),
-                             aabb_overlap(obj_min, obj_max,
-                                          make_fvec3(center.x, min_bounds.y, min_bounds.z),
-                                          make_fvec3(max_bounds.x, center.y, center.z)),
-                             aabb_overlap(obj_min, obj_max,
-                                          make_fvec3(min_bounds.x, center.y, min_bounds.z),
-                                          make_fvec3(center.x, max_bounds.y, center.z)),
-                             aabb_overlap(obj_min, obj_max,
-                                          make_fvec3(center.x, center.y, min_bounds.z),
-                                          make_fvec3(max_bounds.x, max_bounds.y, center.z)),
-                             aabb_overlap(obj_min, obj_max,
-                                          make_fvec3(min_bounds.x, min_bounds.y, center.z),
-                                          make_fvec3(center.x, center.y, max_bounds.z)),
-                             aabb_overlap(obj_min, obj_max,
-                                          make_fvec3(center.x, min_bounds.y, center.z),
-                                          make_fvec3(max_bounds.x, center.y, max_bounds.z)),
-                             aabb_overlap(obj_min, obj_max,
-                                          make_fvec3(min_bounds.x, center.y, center.z),
-                                          make_fvec3(center.x, max_bounds.y, max_bounds.z)),
-                             aabb_overlap(obj_min, obj_max, center, max_bounds)};
-
-    for (int i = 0; i < 8; ++i) {  // 只递归进与物体有交的子树
-        if (overlap[i]) {
-            octree_insert((*node.children)[i], handle, obj_min, obj_max, depth + 1);
-        }
-    }
-}
-// 收集所有可能碰撞的物体对
-void octree_collect_pairs(const OctreeNode& node,
-                          std::vector<std::pair<std::uintptr_t, std::uintptr_t>>& out) {
-    // 非叶子节点：递归遍历子节点
-    if (node.children) {
-        for (int i = 0; i < 8; ++i) {
-            octree_collect_pairs((*node.children)[i], out);
-        }
-        return;
-    }
-
-    // 叶子节点：生成所有物体对（i<j，避免重复）
-    for (std::size_t i = 0; i < node.entries.size(); ++i) {
-        for (std::size_t j = i + 1; j < node.entries.size(); ++j) {
-            std::uintptr_t a = node.entries[i].handle;
-            std::uintptr_t b = node.entries[j].handle;
-            if (a > b) std::swap(a, b);  // 保证a<=b，统一碰撞对顺序
-            out.emplace_back(a, b);
-        }
-    }
-}
-
-void octree_dedupe_pairs(std::vector<std::pair<std::uintptr_t, std::uintptr_t>>& pairs) {
-    if (pairs.empty()) return;                                          // 空则无需排序
-    std::sort(pairs.begin(), pairs.end());                              // pair 字典序，相同对相邻
-    pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());  // 删除连续重复
-}
+// 注意：八叉树实现已迁移到 include/corona/spatial/octree.h，由 SceneSystem 持有并维护。
+// MechanicsSystem 仅作为消费者使用（宽相候选对生成仍可复用该通用实现）。
 
 // 以下全局变量仅由 MechanicsSystem::update_physics() 访问（单线程）
 // 如需跨系统读取，请通过 EventBus/EventStream 传递
@@ -1252,20 +1088,26 @@ void MechanicsSystem::update_physics() {
         root_min = make_fvec3(root_min.x - pad, root_min.y - pad, root_min.z - pad);
         root_max = make_fvec3(root_max.x + pad, root_max.y + pad, root_max.z + pad);
 
-        OctreeNode octree_root;  // 栈上根；子节点在 vector 内持有
-        octree_root.min_bounds = root_min;
-        octree_root.max_bounds = root_max;
+        // 5.2 使用通用 Octree 生成宽相候选对（Octree 模块已迁移出 MechanicsSystem）
+        Spatial::Octree<std::uintptr_t> tree;
+        std::vector<Spatial::Octree<std::uintptr_t>::Entry> entries;
+        entries.reserve(mechanics_data.size());
 
-        // 5.2 每个 mechanics 插入同一棵树；相交叶子记下「可能与谁碰」的候选对
         for (const auto& e : mechanics_data) {
-            octree_insert(octree_root, e.handle, e.min_world, e.max_world, 0);
+            Spatial::AABB b;
+            b.min = e.min_world;
+            b.max = e.max_world;
+            entries.push_back({e.handle, b});
         }
 
-        // 5.3 深度优先扫叶子，拉出所有候选对；dedupe 避免 (a,b)/(b,a) 重复与同对多叶重复
+        Spatial::AABB root;
+        root.min = root_min;
+        root.max = root_max;
+        tree.rebuild(root, entries);
+
         std::vector<std::pair<std::uintptr_t, std::uintptr_t>> collision_pairs;
         collision_pairs.reserve(mechanics_data.size() * 4);
-        octree_collect_pairs(octree_root, collision_pairs);
-        octree_dedupe_pairs(collision_pairs);
+        tree.collect_pairs(collision_pairs);
 
         // CFW_LOG_DEBUG("Detected {} potential collision pairs", collision_pairs.size());
 
