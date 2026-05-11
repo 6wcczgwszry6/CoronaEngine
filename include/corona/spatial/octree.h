@@ -63,7 +63,6 @@ class Octree {
         clear();
         root_bounds_ = root;
         entries_.assign(entries.begin(), entries.end());
-        // TODO(M1.2): 构造真实的八叉树节点结构
 
         if (entries.empty()) {
             return;
@@ -125,7 +124,7 @@ class Octree {
      * @brief 收集所有可能碰撞的 payload 对（i<j，已 dedupe）
      */
     void collect_pairs(std::vector<std::pair<TPayload, TPayload>>& out) const {
-        if (!root_ || entries_.empty() < 2) {
+        if (!root_ || entries_.size() < 2) {
             return;
         }
 
@@ -178,8 +177,8 @@ class Octree {
     std::unique_ptr<Node> root_; //根节点
 
     // 递归插入条目到八叉树
-    void insert_recursive(const Node& node,const Entry& entry,int depth) {
-        if (!node.bounds.overlaps(entries_.bounds)) {
+    void insert_recursive(Node& node,const Entry& entry,int depth) {
+        if (!node.bounds.overlaps(entry.bounds)) {
             return;
         }
 
@@ -330,7 +329,7 @@ class Octree {
         }
 
         for (int i = 0 ; i < 8 ; i ++ ) {
-            collect_pair_recursive((*node.children)[i],out);
+            collect_pairs_recursive((*node.children)[i],out);
         }
     }
 

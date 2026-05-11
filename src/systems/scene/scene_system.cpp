@@ -58,15 +58,6 @@ bool SceneSystem::initialize(Kernel::ISystemContext* ctx) {
 }
 
 void SceneSystem::update() {
-    // M1.1 TODO:
-    //   1) 遍历 SharedDataHub::scene_storage()，对每个 scene：
-    //      - 从 actor_handles 出发，沿 ActorDevice → ProfileDevice → MechanicsDevice
-    //        读取 (min_xyz, max_xyz)，构造 Octree::Entry 列表；
-    //      - 计算 root AABB（merge + padding），调用 tree.rebuild(root, entries)；
-    //      - 写回 SceneDevice.{min_world,max_world,center_world}（迁移阶段先不动，
-    //        与 MechanicsSystem 重复计算可接受）。
-    //   2) 收集本帧所有相机的可见集并集，更新 invisible_frames，按阈值发 Evict 事件。
-
     auto& hub = SharedDataHub::instance();
     auto& scene_storage = hub.scene_storage();
     std::vector<std::uintptr_t> scene_handles;
@@ -195,7 +186,7 @@ void SceneSystem::set_visibility_config(std::uintptr_t scene, SceneVisibilityCon
 }
 
 // ============================================================================
-// 查询接口（骨架：返回空集；保持线程安全）
+// 查询接口（骨架：返回空集；保持线程安全）(已实现)
 // ============================================================================
 
 std::vector<std::uintptr_t> SceneSystem::query_aabb(

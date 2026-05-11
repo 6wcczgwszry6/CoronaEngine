@@ -13,6 +13,7 @@ cmake-build-*/
 Makefile
 *.vcxproj*
 *.sln
+.cmake/
 
 # Local IDE settings
 .vscode/
