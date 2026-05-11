@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(gh api *)",
+      "WebFetch(domain:github.com)",
+      "Bash(git clone *)",
+      "Bash(git fetch *)",
+      "Bash(git merge *)"
+    ]
+  }
+}
