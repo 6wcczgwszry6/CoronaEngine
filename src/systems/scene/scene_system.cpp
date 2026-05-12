@@ -28,6 +28,7 @@ struct SceneSystem::Impl {
         std::unordered_map<Payload, std::uint32_t>          invisible_frames;
         SceneVisibilityConfig                               cfg;
         SceneStats                                          stats;
+        std::unordered_map<Payload,ActorLoadState>          actor_load_states;
     };
 
     mutable std::shared_mutex                               mtx;
@@ -60,6 +61,7 @@ bool SceneSystem::initialize(Kernel::ISystemContext* ctx) {
 void SceneSystem::update() {
     auto& hub = SharedDataHub::instance();
     auto& scene_storage = hub.scene_storage();
+    auto& camera_storage = hub.camera_storage();
     std::vector<std::uintptr_t> scene_handles;
     {
         for (auto it = scene_storage.cbegin(); it != scene_storage.cend(); ++it) {
@@ -124,7 +126,7 @@ void SceneSystem::update() {
 
         std::unordered_set<Impl::Payload> visible_actors;
         for (std::uintptr_t camera_handle : scene_dev.camera_handles) {
-            auto cam_read = scene_storage.try_acquire_read(camera_handle);
+            auto cam_read = camera_storage.try_acquire_read(camera_handle);
             if ( !cam_read.valid() ) continue;
 
             std::vector<Impl::Payload> visible_for_camera = query_visible_for_camera(scene_handle,camera_handle);

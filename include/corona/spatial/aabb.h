@@ -43,6 +43,12 @@ struct AABB {
                p.z >= min.z && p.z <= max.z;
     }
 
+    [[nodiscard]] bool contains(const AABB& o) const noexcept {
+        return min.x <= o.min.x && max.x >= o.max.x &&
+           min.y <= o.min.y && max.y >= o.max.y &&
+           min.z <= o.min.z && max.z >= o.max.z;
+    }
+
     [[nodiscard]] AABB merged(const AABB& o) const noexcept {
         AABB r;
         r.min.x = std::min(min.x, o.min.x);

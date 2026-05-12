@@ -143,7 +143,7 @@ class Octree {
 
     struct Stats {
         std::size_t entries        = 0;
-        int         nodes          = 0;   // M1.2 后填入
+        int         nodes          = 0;
         int         leaves         = 0;
         int         max_depth_used = 0;
     };
@@ -182,20 +182,30 @@ class Octree {
             return;
         }
 
-        if (node.is_leaf()) {
-            bool should_split = depth < cfg_.max_depth &&
-                static_cast<int>(node.entries.size()) >= cfg_.max_objects_per_leaf;
-
-            if (!should_split) {
-                node.entries.push_back(&entry);
-                return;
+        // 尝试找到完全包含该条目的子节点
+        if (!node.is_leaf()) {
+            for (int i = 0 ; i < 8 ; i ++) {
+                Node& child = (*node.children)[i];
+                if (child.bounds.contains(entry.bounds)) {
+                    insert_recursive(child,entry,depth+1);
+                    return;  //仅插入完全包含的单个子节点
+                }
             }
-            split_node(node);
+            //跨多个子节点保留在当前节点
+            node.entries.push_back(&entry);
+            return;
         }
 
-        for (int i = 0 ; i < 8 ; i ++ ) {
-            insert_recursive((*node.children)[i],entry,depth+1);
+        //判断是否需要分裂
+        bool should_split = depth < cfg_.max_depth &&
+            static_cast<int>(node.entries.size()) >= cfg_.max_objects_per_leaf;
+
+        if (!should_split) {
+            node.entries.push_back(&entry);
+            return;
         }
+        split_node(node);
+        insert_recursive(node,entry,depth);
     }
 
     // 分裂节点为8个子节点
@@ -231,21 +241,30 @@ class Octree {
         children[7].bounds.min = center;
         children[7].bounds.max = max;
 
+        std::vector<const Entry*> remaining_entries;
+        remaining_entries.reserve(node.entries.size());
+
         for (const Entry* e : node.entries) {
-            for (int i = 0 ; i < 8 ; i ++ ) {
-                if ( children[i].bounds.overlaps(e->bounds)) {
+            bool assigned = false;
+            for (int i = 0; i < 8; ++i) {
+                if (children[i].bounds.contains(e->bounds)) {
                     children[i].entries.push_back(e);
+                    assigned = true;
+                    break;
                 }
+            }
+            if (!assigned) {
+                remaining_entries.push_back(e);
             }
         }
 
-        node.entries.clear();
+        node.entries.swap(remaining_entries);
     }
 
     // 递归查询AABB相交的条目
     void query_aabb_recursive(const Node& node,const AABB& box,
                             std::vector<TPayload>& out) const {
-        if ( node.is_leaf()) {
+        if (node.is_leaf()) {
             for (const Entry* e : node.entries) {
                 if ( e->bounds.overlaps(box)) {
                     out.push_back(e->payload);
@@ -309,27 +328,54 @@ class Octree {
         }
     }
 
+    // 收集指定条目与子树中所有条目的碰撞对
+    void collect_pairs_with_subtree(const Node& subtree_root, const Entry* entry,
+                                    std::vector<std::pair<TPayload, TPayload>>& out) const {
+        // 检查与当前子树根节点条目的重叠
+        for (const Entry* e : subtree_root.entries) {
+            if (entry->bounds.overlaps(e->bounds)) {
+                if (entry->payload < e->payload) {
+                    out.emplace_back(entry->payload, e->payload);
+                } else if (e->payload < entry->payload) {
+                    out.emplace_back(e->payload, entry->payload);
+                }
+            }
+        }
+
+        // 递归检查子节点
+        if (!subtree_root.is_leaf()) {
+            for (int i = 0; i < 8; ++i) {
+                collect_pairs_with_subtree((*subtree_root.children)[i], entry, out);
+            }
+        }
+    }
+
     // 递归收集所有可能碰撞的对
     void collect_pairs_recursive(const Node& node,
                             std::vector<std::pair<TPayload,TPayload>>& out) const {
-        if (node.is_leaf()) {
-            for (std::size_t i = 0 ; i < node.entries.size() ; i ++ ) {
-                for (std::size_t j = i + 1; j < node.entries.size() ; j ++ ) {
-                    const Entry* a = node.entries[i];
-                    const Entry* b = node.entries[j];
-
+        for (std::size_t i = 0 ; i < node.entries.size(); ++i) {
+            const Entry* a = node.entries[i];
+            for (std::size_t j = i+1; j < node.entries.size(); ++j) {
+                const Entry* b = node.entries[j];
+                if (a->bounds.overlaps(b->bounds)) {
                     if (a->payload < b->payload) {
-                        out.emplace_back(a->payload,b->payload);
-                    }else if ( b->payload < a->payload ) {
-                        out.emplace_back(b->payload,a->payload);
+                        out.emplace_back(a->payload, b->payload);
+                    }else if (b->payload < a->payload) {
+                        out.emplace_back(b->payload, a->payload);
                     }
                 }
             }
-            return;
+            if (!node.is_leaf()) {
+                for (int i_child = 0; i_child < 8 ; i_child++) {
+                    collect_pairs_with_subtree((*node.children)[i_child],a,out);
+                }
+            }
         }
 
-        for (int i = 0 ; i < 8 ; i ++ ) {
-            collect_pairs_recursive((*node.children)[i],out);
+        if (!node.is_leaf()) {
+            for (int i = 0; i < 8; i ++ ) {
+                collect_pairs_recursive((*node.children)[i],out);
+            }
         }
     }
 
