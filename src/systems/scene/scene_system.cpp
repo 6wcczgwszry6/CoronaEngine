@@ -34,6 +34,7 @@ struct SceneSystem::Impl {
     mutable std::shared_mutex                               mtx;
     std::unordered_map<std::uintptr_t /*scene*/, SceneState> scenes;
     std::unordered_map<Payload, bool>                       offline_actors;
+    std::vector<Kernel::EventId>                            event_subscriptions;
     Kernel::ISystemContext*                                 ctx = nullptr;
 
     SceneState& get_or_create(std::uintptr_t scene) {
@@ -55,6 +56,7 @@ SceneSystem::~SceneSystem() = default;
 bool SceneSystem::initialize(Kernel::ISystemContext* ctx) {
     impl_->ctx = ctx;
     CFW_LOG_NOTICE("SceneSystem: Initializing (skeleton, queries return empty)");
+
     return true;
 }
 
