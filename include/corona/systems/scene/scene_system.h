@@ -119,7 +119,7 @@ class SceneSystem : public Kernel::SystemBase {
     void               mark_actor_restored(std::uintptr_t actor);
 
     /// 加载状态查询接口
-    [[nodiscard]] ActorLoadState get_actor_load_state(std::uintptr_t actor) const;
+    [[nodiscard]] ActorLoadState get_actor_load_state(std::uintptr_t actor,std::uintptr_t scene) const;
 
     // ========================================
     // 统计
@@ -127,6 +127,10 @@ class SceneSystem : public Kernel::SystemBase {
     [[nodiscard]] SceneStats stats(std::uintptr_t scene) const;
 
    private:
+
+    void on_load_complete(const Events::ActorLoadCompletedEvent& event);
+    void on_unload_complete(const Events::ActorUnloadCompletedEvent& event);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
