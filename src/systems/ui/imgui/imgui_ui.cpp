@@ -74,6 +74,39 @@ bool initialize_sdl_imgui(SDL_Window*& window, ImGuiIO*& io, std::unique_ptr<Vul
     io->BackendFlags &= ~ImGuiBackendFlags_RendererHasTextures;
 
     io->Fonts->AddFontDefault();
+
+    // 加载中文字体（微软雅黑），合并到默认字体图集中
+    {
+        ImFontConfig cfg;
+        cfg.MergeMode = true;
+        cfg.OversampleH = 2;
+        cfg.OversampleV = 2;
+        static const ImWchar cjk_ranges[] = {
+            0x0020, 0x00FF,   // Basic Latin + Latin Supplement
+            0x2000, 0x206F,   // General Punctuation
+            0x3000, 0x30FF,   // CJK Symbols and Punctuations, Hiragana, Katakana
+            0x31F0, 0x31FF,   // Katakana Phonetic Extensions
+            0xFF00, 0xFFEF,   // Half-width characters
+            0x4E00, 0x9FFF,   // CJK Unified Ideographs
+            0,
+        };
+        const char* cjk_fonts[] = {
+            "C:\\Windows\\Fonts\\msyh.ttc",   // 微软雅黑 Win10+
+            "C:\\Windows\\Fonts\\simhei.ttf", // 黑体（备选）
+            "C:\\Windows\\Fonts\\simsun.ttc", // 宋体（备选）
+        };
+        bool loaded = false;
+        for (const char* path : cjk_fonts) {
+            if (ImFont* f = io->Fonts->AddFontFromFileTTF(path, 18.0f, &cfg, cjk_ranges)) {
+                loaded = true;
+                break;
+            }
+        }
+        if (!loaded) {
+            CFW_LOG_WARNING("Failed to load any CJK font, Chinese text may display as '?'");
+        }
+    }
+
     io->Fonts->Build();
 
     ImGui::StyleColorsDark();

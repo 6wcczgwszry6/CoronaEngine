@@ -58,7 +58,7 @@ corona_add_system(imgui
 )
 
 target_compile_definitions(corona_imgui_system PUBLIC VK_NO_PROTOTYPES)
-target_compile_options(corona_imgui_system PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
+target_compile_options(corona_imgui_system PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/source-charset:utf-8>")
 
 helicon_compile_shaders(corona_imgui_system
     OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
