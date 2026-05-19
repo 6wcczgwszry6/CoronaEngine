@@ -4,13 +4,19 @@
 #include <corona/shared_data_hub.h>
 #include <corona/spatial/octree.h>
 #include <corona/systems/scene/scene_system.h>
+#include <corona/shared_data_hub.h>
+#include <corona/utils/path_utils.h>
 
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <filesystem>
+#include <future>
 
 #include "quill/backend/StringFromTime.h"
+#include "../modules/corona_resource/include/corona/resource/resource.h"
+#include "../modules/corona_resource/include/corona/resource/resource_manager.h"
 
 namespace Corona::Systems {
 
@@ -27,10 +33,15 @@ struct SceneSystem::Impl {
 
     struct SceneState {
         Spatial::Octree<Payload>                            tree;
+        std::unordered_map<Payload,Spatial::AABB> actor_to_entry; //Actor到AABB映射
         std::unordered_map<Payload, std::uint32_t>          invisible_frames;
         SceneVisibilityConfig                               cfg;
         SceneStats                                          stats;
         std::unordered_map<Payload,ActorLoadState>          actor_load_states;
+
+        std::unordered_map<Payload,std::future<std::uint64_t>> loading_tasks;
+        std::unordered_map<Payload,std::future<bool>>       unloading_tasks;
+        std::unordered_map<Payload,int>                     unload_retry_counts; //卸载重试次数
     };
 
     mutable std::shared_mutex                               mtx;
@@ -68,9 +79,16 @@ bool SceneSystem::initialize(Kernel::ISystemContext* ctx) {
            [this](const Events::ActorUnloadCompletedEvent& e) {
                this->on_unload_completed(e);
            });
+        auto id3 = ctx->event_bus()->subscribe<Events::ActorLoadRequestedEvent>(
+            [this](const Events::ActorLoadRequestedEvent& e) {
+                this->on_load_requested(e);
+            });
+        auto id4 = ctx->event_bus()->subscribe<Events::ActorUnloadRequestedEvent>(
+            [this](const Events::ActorUnloadRequestedEvent& e) {
+                this->on_unload_requested(e);
+            });
 
-        impl_->event_subscriptions.push_back(id1);
-        impl_->event_subscriptions.push_back(id2);
+        impl_->event_subscriptions = {id1,id2,id3,id4};
     }
 
     return true;
@@ -89,15 +107,20 @@ void SceneSystem::update() {
     }
 
     for (std::uintptr_t scene_handle : scene_handles) {
-        auto scene_read = scene_storage.try_acquire_read(scene_handle);
-        if ( !scene_read.valid() )  continue;
-        const SceneDevice& scene_dev = *scene_read;
+        std::vector<std::uintptr_t> actor_handles;
+        std::vector<std::uintptr_t> camera_handles;
+        {
+            auto scene_read = scene_storage.try_acquire_read(scene_handle);
+            if ( !scene_read.valid() )  continue;
+            actor_handles = scene_read->actor_handles;
+            camera_handles = scene_read->camera_handles;
+        }
 
-        Impl::SceneState& scene_state = impl_->get_or_create(scene_handle);
+        process_async_tasks();
+
         std::vector<typename Spatial::Octree<Impl::Payload>::Entry> octree_entries;
-
         std::unordered_set<Impl::Payload> added_actors;
-        for (std::uintptr_t actor_handle : scene_dev.actor_handles) {
+        for (std::uintptr_t actor_handle : actor_handles) {
             if (added_actors.count(actor_handle)) continue;
 
             auto& actor_storage = hub.actor_storage();
@@ -107,8 +130,8 @@ void SceneSystem::update() {
 
             {
                 std::unique_lock lock(impl_->mtx);
-                if (!scene_state.actor_load_states.count(actor_handle)) {
-                    scene_state.actor_load_states[actor_handle] = ActorLoadState::Loaded;
+                if (!impl_->get_or_create(scene_handle).actor_load_states.count(actor_handle)) {
+                    impl_->get_or_create(scene_handle).actor_load_states[actor_handle] = ActorLoadState::Unloaded;
                 }
             }
 
@@ -116,8 +139,8 @@ void SceneSystem::update() {
                 auto& profile_storage = hub.profile_storage();
                 auto profile_read = profile_storage.try_acquire_read(profile_handle);
                 if (!profile_read.valid()) continue;
-                const ProfileDevice& profile_dev = *profile_read;
 
+                const ProfileDevice& profile_dev = *profile_read;
                 std::uintptr_t mechanics_handle = profile_dev.mechanics_handle;
                 if ( !mechanics_handle ) continue;
 
@@ -125,8 +148,8 @@ void SceneSystem::update() {
                 auto& mechanics_storage = hub.mechanics_storage();
                 auto mechanics_read = mechanics_storage.try_acquire_read(mechanics_handle);
                 if (!mechanics_read.valid()) continue;
-                const MechanicsDevice& mechanics_dev = *mechanics_read;
 
+                const MechanicsDevice& mechanics_dev = *mechanics_read;
                 Spatial::AABB aabb;
                 aabb.min = mechanics_dev.min_xyz;
                 aabb.max = mechanics_dev.max_xyz;
@@ -153,11 +176,34 @@ void SceneSystem::update() {
             root_aabb.max = ktm::fvec3{1.0f, 1.0f, 1.0f};
         }
 
-        scene_state.tree.rebuild(root_aabb,octree_entries);
+        {
+            std::unique_lock lock(impl_->mtx);
+            impl_->get_or_create(scene_handle).tree.rebuild(root_aabb,octree_entries);
+            impl_->get_or_create(scene_handle).actor_to_entry.clear();
+            for (const auto& entry : octree_entries) {
+                impl_->get_or_create(scene_handle).actor_to_entry[entry.payload] = entry.bounds;
+            }
+
+            // 清理已经从场景中删除的Actor的状态
+            std::unordered_set<Impl::Payload> current_actors(actor_handles.begin(),
+                                                actor_handles.end());
+            auto it = impl_->get_or_create(scene_handle).actor_load_states.begin();
+            while (it != impl_->get_or_create(scene_handle).actor_load_states.end()) {
+                if (!current_actors.count(it->first)) {
+                    impl_->get_or_create(scene_handle).loading_tasks.erase(it->first);
+                    impl_->get_or_create(scene_handle).unloading_tasks.erase(it->first);
+                    impl_->get_or_create(scene_handle).unload_retry_counts.erase(it->first);
+                    impl_->get_or_create(scene_handle).invisible_frames.erase(it->first);
+                    it = impl_->get_or_create(scene_handle).actor_load_states.erase(it);
+                }else {
+                    ++it;
+                }
+            }
+        }
 
         std::vector<std::pair<ktm::fvec3,Math::Frustum>> cameras;
         std::unordered_set<Impl::Payload> visible_actors;
-        for (std::uintptr_t camera_handle : scene_dev.camera_handles) {
+        for (std::uintptr_t camera_handle : camera_handles) {
             auto cam_read = camera_storage.try_acquire_read(camera_handle);
             if ( !cam_read.valid() ) continue;
 
@@ -170,45 +216,67 @@ void SceneSystem::update() {
             visible_actors.insert(visible_for_camera.begin(),visible_for_camera.end());
         }
 
-        if (scene_state.cfg.enable_distance_culling && !cameras.empty()) {
+        if (impl_->get_or_create(scene_handle).cfg.enable_distance_culling && !cameras.empty()) {
             std::unique_lock lock(impl_->mtx);
+            std::unordered_set<Impl::Payload> candidates;
 
-            for (const auto& entry : octree_entries) {
-                Impl::Payload actor_handle = entry.payload;
-                ActorLoadState& current_state = scene_state.actor_load_states[actor_handle];
+            //仅收集预加载范围内的物体
+            for (const auto& [cam_pos, _] : cameras) {
+                std::vector<Impl::Payload> sphere_results;
+                impl_->get_or_create(scene_handle).tree.query_sphere(cam_pos,impl_->get_or_create(scene_handle).cfg.preload_distance,sphere_results);
+                for (auto actor : sphere_results) {
+                    candidates.insert(actor);
+                }
+            }
 
+            //保留所有非Unloaded状态的物体
+            for (const auto& [actor,state] : impl_->get_or_create(scene_handle).actor_load_states) {
+                if (state != ActorLoadState::Unloaded) {
+                    candidates.insert(actor);
+                }
+            }
+
+            //仅处理候选物体
+            for (auto actor : candidates) {
+                auto entry_it = impl_->get_or_create(scene_handle).actor_to_entry.find(actor);
+                if (entry_it == impl_->get_or_create(scene_handle).actor_to_entry.end()) {
+                    continue;
+                }
+
+                const auto& aabb = entry_it->second;
+                auto& state = impl_->get_or_create(scene_handle).actor_load_states[actor];
                 // 计算物体到最近相机的欧氏距离
-                ktm::fvec3 actor_center = entry.bounds.center();
+                ktm::fvec3 center = aabb.center();
                 float min_distance = std::numeric_limits<float>::max();
                 for (const auto& [cam_pos,_] : cameras) {
-                    min_distance = std::min(min_distance,ktm::distance(actor_center,cam_pos));
+                    min_distance = std::min(min_distance,ktm::distance(center,cam_pos));
                 }
 
                 // 状态机转换
-                switch (current_state) {
+                switch (state) {
                     case ActorLoadState::Loaded:
                         // 超过卸载距离 + 不在任何相机视锥内
-                        if (min_distance > scene_state.cfg.unload_distance &&
-                            !visible_actors.count(actor_handle)) {
-                            current_state = ActorLoadState::Unloading;
+                        if (min_distance > impl_->get_or_create(scene_handle).cfg.unload_distance &&
+                            !visible_actors.count(actor)) {
+                            state = ActorLoadState::Unloading;
                             if (impl_->ctx && impl_->ctx->event_bus()) {
-                                Events::ActorUnloadRequestedEvent unload_event{scene_handle,actor_handle};
+                                Events::ActorUnloadRequestedEvent unload_event{scene_handle,actor};
                                 impl_->ctx->event_bus()->publish(unload_event);
-                                CFW_LOG_NOTICE("SceneSystem: Published unload request for actor {} (scene: {}, distance: {:.2f}m)",
-                                              actor_handle, scene_handle, min_distance);
+                                CFW_LOG_NOTICE("[SceneSystem] Published unload request for actor {} (distance: {:.2f}m)",
+                                              actor, min_distance);
                             }
                             }
                         break;
 
                     case ActorLoadState::Unloaded:
-                        // 触发条件：进入预加载距离范围
-                        if (min_distance < scene_state.cfg.preload_distance) {
-                            current_state = ActorLoadState::Loading;
+                        // 进入预加载距离范围
+                        if (min_distance < impl_->get_or_create(scene_handle).cfg.preload_distance) {
+                            state = ActorLoadState::Loading;
                             if (impl_->ctx && impl_->ctx->event_bus()) {
-                                Events::ActorLoadRequestedEvent load_event{scene_handle,actor_handle};
+                                Events::ActorLoadRequestedEvent load_event{scene_handle,actor};
                                 impl_->ctx->event_bus()->publish(load_event);
-                                CFW_LOG_NOTICE("SceneSystem: Published preload request for actor {} (scene: {}, distance: {:.2f}m)",
-                                              actor_handle, scene_handle, min_distance);
+                                CFW_LOG_NOTICE("[SceneSystem] Published preload request for actor {} (distance: {:.2f}m)",
+                                              actor, min_distance);
                             }
                         }
                         break;
@@ -223,8 +291,8 @@ void SceneSystem::update() {
 
         {
             std::unique_lock lock(impl_->mtx);
-
-            for (std::uintptr_t actor_handle : scene_dev.actor_handles) {
+            Impl::SceneState& scene_state = impl_->get_or_create(scene_handle);
+            for (std::uintptr_t actor_handle : actor_handles) {
                 // 跳过未加载和正在加载/卸载的Actor
                 if (scene_state.actor_load_states[actor_handle] != ActorLoadState::Loaded) {
                     continue;
@@ -251,7 +319,8 @@ void SceneSystem::update() {
 
         {
             std::unique_lock lock(impl_->mtx);
-            scene_state.stats.actor_total = scene_dev.actor_handles.size();
+            Impl::SceneState& scene_state = impl_->get_or_create(scene_handle);
+            scene_state.stats.actor_total = actor_handles.size();
             scene_state.stats.actor_visible = visible_actors.size();
             scene_state.stats.octree_entries = octree_entries.size();
 
@@ -293,6 +362,38 @@ void SceneSystem::shutdown() {
     impl_->event_subscriptions.clear();
 
     std::unique_lock lock(impl_->mtx);
+    std::vector<std::future<std::uint64_t>> load_futures;
+    std::vector<std::future<bool>> unload_futures;
+    for (auto& [scene,state] : impl_->scenes) {
+        for (auto& [actor,future] : state.loading_tasks) {
+            if (future.valid()) {
+                load_futures.push_back(std::move(future));
+            }
+        }
+        for (auto& [actor, future] : state.unloading_tasks) {
+            if (future.valid()) {
+                unload_futures.push_back(std::move(future));
+            }
+        }
+    }
+    lock.unlock();
+
+    for (auto& f : load_futures) {
+        if ( f.valid() ) {
+            f.wait();
+        }
+    }
+    for (auto& f : unload_futures) {
+        if ( f.valid() ) {
+            f.wait();
+        }
+    }
+    lock.lock();
+    for (auto& [scene,state] : impl_->scenes) {
+        state.loading_tasks.clear();
+        state.unloading_tasks.clear();
+    }
+
     impl_->scenes.clear();
     impl_->offline_actors.clear();
 }
@@ -300,6 +401,7 @@ void SceneSystem::shutdown() {
 // ============================================================================
 // 配置
 // ============================================================================
+
 
 void SceneSystem::set_visibility_config(std::uintptr_t scene, SceneVisibilityConfig cfg) {
     std::unique_lock lock(impl_->mtx);
@@ -320,30 +422,44 @@ void SceneSystem::set_distance_config(std::uintptr_t scene, float unload_dist,
 // ============================================================================
 
 void SceneSystem::on_load_completed(const Events::ActorLoadCompletedEvent& event) {
-   std::unique_lock lock(impl_->mtx);
-    auto scene_it = impl_->scenes.find(event.scene);
-    if (scene_it == impl_->scenes.end()) return;
-
-    auto& state_map = scene_it->second.actor_load_states;
-    auto actor_it = state_map.find(event.actor);
-    if (actor_it != state_map.end() && actor_it->second == ActorLoadState::Loading) {
-        actor_it->second = ActorLoadState::Loaded;
-        impl_->offline_actors[event.actor] = false;
+    ActorLoadState old_state = ActorLoadState::Unloaded;
+    {
+        std::unique_lock lock(impl_->mtx);
+        auto scene_it = impl_->scenes.find(event.scene);
+        if (scene_it != impl_->scenes.end()) {
+            auto& state_map = scene_it->second.actor_load_states;
+            auto actor_it = state_map.find(event.actor);
+            if (actor_it != state_map.end() && actor_it->second == ActorLoadState::Loading) {
+                old_state = actor_it->second;
+                actor_it->second = ActorLoadState::Loaded;
+                impl_->offline_actors[event.actor] = false;
+            }
+        }
+    } // 释放锁后发布事件
+    if (old_state == ActorLoadState::Loading) {
         CFW_LOG_NOTICE("SceneSystem: Actor {} (scene: {}) load completed", event.actor, event.scene);
+        impl_->ctx->event_bus()->publish(event);
     }
 }
 
 void SceneSystem::on_unload_completed(const Events::ActorUnloadCompletedEvent& event) {
-    std::unique_lock lock(impl_->mtx);
-    auto scene_it = impl_->scenes.find(event.scene);
-    if (scene_it == impl_->scenes.end()) return;
+    ActorLoadState old_state = ActorLoadState::Loaded;
+    {
+        std::unique_lock lock(impl_->mtx);
+        auto scene_it = impl_->scenes.find(event.scene);
+        if (scene_it == impl_->scenes.end()) return;
 
-    auto& state_map = scene_it->second.actor_load_states;
-    auto actor_it = state_map.find(event.actor);
-    if (actor_it != state_map.end() && actor_it->second == ActorLoadState::Unloading) {
-        actor_it->second = ActorLoadState::Unloaded;
-        impl_->offline_actors[event.actor] = true;
+        auto& state_map = scene_it->second.actor_load_states;
+        auto actor_it = state_map.find(event.actor);
+        if (actor_it != state_map.end() && actor_it->second == ActorLoadState::Unloading) {
+            old_state = actor_it->second;
+            actor_it->second = ActorLoadState::Unloaded;
+            impl_->offline_actors[event.actor] = false;
+        }
+    }
+    if (old_state == ActorLoadState::Unloading) {
         CFW_LOG_NOTICE("SceneSystem: Actor {} (scene: {}) unload completed", event.actor, event.scene);
+        impl_->ctx->event_bus()->publish(event);
     }
 }
 
@@ -517,4 +633,211 @@ SceneStats SceneSystem::stats(std::uintptr_t scene) const {
     return s;
 }
 
+// ============================================================================
+// 异步资源任务处理
+// ============================================================================
+
+void SceneSystem::process_async_tasks() {
+    auto& hub = SharedDataHub::instance();
+    auto& actor_storage = hub.actor_storage();
+
+    struct CompletedLoadTask {
+        std::uintptr_t scene_handle;
+        std::uintptr_t actor;
+        std::uint64_t rid;
+    };
+    struct CompletedUnloadTask {
+        std::uintptr_t scene_handle;
+        std::uintptr_t actor;
+        bool success;
+    };
+
+    std::vector<CompletedLoadTask> completed_loads;
+    std::vector<CompletedUnloadTask> completed_unloads;
+
+    {
+        std::unique_lock lock(impl_->mtx);
+        for (auto& [scene_handle, scene_state] : impl_->scenes) {
+            auto load_it = scene_state.loading_tasks.begin();
+            while (load_it != scene_state.loading_tasks.end()) {
+                if (load_it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                    const uint64_t rid = load_it->second.get();
+                    completed_loads.push_back({scene_handle,load_it->first,rid});
+                    load_it = scene_state.loading_tasks.erase(load_it);
+                }else {
+                    ++load_it;
+                }
+            }
+
+            auto unload_it = scene_state.unloading_tasks.begin();
+            while (unload_it != scene_state.unloading_tasks.end()) {
+                if (unload_it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                    const bool success = unload_it->second.get();
+                    completed_unloads.push_back({scene_handle, unload_it->first, success});
+                    unload_it = scene_state.unloading_tasks.erase(unload_it);
+                } else {
+                    ++unload_it;
+                }
+            }
+        }
+    }
+
+    for (const auto& task : completed_loads) {
+        if (task.rid != Resource::IResource::INVALID_UID) {
+            if (auto actor_write = actor_storage.try_acquire_write(task.actor)) {
+                actor_write->resource_id = task.rid;
+            }
+
+            impl_->ctx->event_bus()->publish(Events::ActorLoadCompletedEvent{task.scene_handle,task.actor});
+            CFW_LOG_DEBUG("[SceneSystem] Actor {} loaded (resource: {})", task.actor, task.rid);
+        }else {
+            CFW_LOG_ERROR("[SceneSystem] Failed to load actor {}", task.actor);
+            // 加载失败，回滚到Unloaded状态
+            {
+                std::unique_lock lock(impl_->mtx);
+                auto scene_it = impl_->scenes.find(task.scene_handle);
+                if (scene_it != impl_->scenes.end()) {
+                    scene_it->second.actor_load_states[task.actor] = ActorLoadState::Unloaded;
+                }
+            }
+            impl_->ctx->event_bus()->publish(Events::ActorUnloadCompletedEvent{task.scene_handle, task.actor});
+        }
+    }
+
+    std::vector<CompletedUnloadTask> failed_unloads;
+    for (const auto& task : completed_unloads) {
+        if (task.success) {
+            // 卸载成功，清空资源ID
+            if (auto actor_write = actor_storage.try_acquire_write(task.actor)) {
+                actor_write->resource_id = Resource::IResource::INVALID_UID;
+            }
+            {
+                std::unique_lock lock(impl_->mtx);
+                auto scene_it = impl_->scenes.find(task.scene_handle);
+                if (scene_it != impl_->scenes.end()) {
+                    scene_it->second.unload_retry_counts.erase(task.actor);
+                }
+            }
+            impl_->ctx->event_bus()->publish(Events::ActorUnloadCompletedEvent{task.scene_handle, task.actor});
+            CFW_LOG_DEBUG("[SceneSystem] Actor {} unloaded", task.actor);
+        } else {
+            // 卸载失败，保存到列表中后续处理重试
+            failed_unloads.push_back(task);
+        }
+    }
+
+    //卸载失败重试
+    if (!failed_unloads.empty()) {
+        std::unique_lock lock(impl_->mtx);
+        for (const auto& task : failed_unloads) {
+            auto scene_it = impl_->scenes.find(task.scene_handle);
+            if (scene_it == impl_->scenes.end()) {
+                continue;
+            }
+            auto& scene_state = scene_it->second;
+
+            auto state_it = scene_state.actor_load_states.find(task.actor);
+            if (state_it == scene_state.actor_load_states.end()) {
+                continue;
+            }
+
+            int& retry_count = scene_state.unload_retry_counts[task.actor];
+            CFW_LOG_WARNING("[SceneSystem] Actor 0x%lx unload delayed (resource in use), retry %d/10",
+                           (unsigned long)task.actor, retry_count + 1);
+
+            if (++retry_count >= 10) {
+                CFW_LOG_ERROR("[SceneSystem] Actor 0x%lx unload failed after 10 retries, resource is permanently in use",
+                             (unsigned long)task.actor);
+                scene_state.unload_retry_counts.erase(task.actor);
+                // 不强制设为Loaded，保留Unloading状态，由业务层处理
+                // 同时不发布任何事件，避免状态混乱
+            } else {
+                auto actor_read = actor_storage.try_acquire_read(task.actor);
+                if (actor_read.valid()) {
+                    if (actor_read->resource_id != Resource::IResource::INVALID_UID) {
+                        scene_state.unloading_tasks[task.actor] =
+                            Resource::ResourceManager::get_instance().remove_cache_async(
+                                actor_read->resource_id);
+                    } else {
+                        CFW_LOG_WARNING("[SceneSystem] Actor 0x%lx resource already invalid, mark as unloaded",
+                                       (unsigned long)task.actor);
+                        scene_state.unload_retry_counts.erase(task.actor);
+                        scene_state.actor_load_states[task.actor] = ActorLoadState::Unloaded;
+                        lock.unlock();
+                        impl_->ctx->event_bus()->publish(Events::ActorUnloadCompletedEvent{task.scene_handle, task.actor});
+                        lock.lock();
+                    }
+                } else {
+                    CFW_LOG_WARNING("[SceneSystem] Actor 0x%lx handle invalid, clean up all states",
+                                   (unsigned long)task.actor);
+                    scene_state.unload_retry_counts.erase(task.actor);
+                    scene_state.actor_load_states.erase(task.actor);
+                    impl_->offline_actors.erase(task.actor);
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 资源请求事件处理
+// ============================================================================
+
+void SceneSystem::on_load_requested(const Events::ActorLoadRequestedEvent& e) {
+    std::unique_lock lock(impl_->mtx);
+    auto scene_it = impl_->scenes.find(e.scene);
+    if (scene_it == impl_->scenes.end()) {
+        return;
+    }
+
+    auto& scene_state = scene_it->second;
+    if (scene_state.loading_tasks.count(e.actor) || scene_state.unloading_tasks.count(e.actor)) {
+        return;
+    }
+
+    auto& actor_storage = SharedDataHub::instance().actor_storage();
+    auto actor_read = actor_storage.try_acquire_read(e.actor);
+    if (!actor_read.valid() || actor_read->model_path.empty()) {
+        CFW_LOG_ERROR("[SceneSystem] Invalid actor or empty model path: {}", e.actor);
+        scene_state.actor_load_states[e.actor] = ActorLoadState::Unloaded;
+        impl_->ctx->event_bus()->publish(Events::ActorUnloadCompletedEvent{e.scene,e.actor});
+        return;
+    }
+
+    CFW_LOG_NOTICE("[SceneSystem] Start loading actor {} (path: {})",
+                  e.actor, Utils::path_to_utf8(actor_read->model_path));
+    scene_state.loading_tasks[e.actor] = Resource::ResourceManager::get_instance().import_async(actor_read->model_path);
+}
+
+void SceneSystem::on_unload_requested(const Events::ActorUnloadRequestedEvent& e) {
+    std::unique_lock lock(impl_->mtx);
+    auto scene_it = impl_->scenes.find(e.scene);
+    if (scene_it == impl_->scenes.end()) return;
+
+    auto& scene_state = scene_it->second;
+    if (scene_state.loading_tasks.count(e.actor) || scene_state.unloading_tasks.count(e.actor)) {
+        if (scene_state.unloading_tasks.count(e.actor)) {
+            scene_state.unloading_tasks.erase(e.actor);
+            scene_state.unload_retry_counts.erase(e.actor);
+            scene_state.actor_load_states[e.actor] = ActorLoadState::Loaded;
+            CFW_LOG_NOTICE("[SceneSystem] Cancelled pending unload for actor {}", e.actor);
+        }
+
+        return;
+    }
+
+    auto& actor_storage = SharedDataHub::instance().actor_storage();
+    auto actor_read = actor_storage.try_acquire_read(e.actor);
+    if (!actor_read.valid() || actor_read->resource_id == Resource::IResource::INVALID_UID) {
+        scene_state.actor_load_states[e.actor] = ActorLoadState::Unloaded;
+        impl_->ctx->event_bus()->publish(Events::ActorUnloadCompletedEvent{e.scene, e.actor});
+        return;
+    }
+
+    CFW_LOG_NOTICE("[SceneSystem] Start unloading actor {} (resource: {})",
+                  e.actor, actor_read->resource_id);
+    scene_state.unload_retry_counts[e.actor] = 0;
+    scene_state.unloading_tasks[e.actor] = Resource::ResourceManager::get_instance().remove_cache_async(
+        actor_read->resource_id);
+}
 }  // namespace Corona::Systems
