@@ -44,6 +44,7 @@ include(CTest)
 # ------------------------------------------------------------------------------
 # Subdirectories
 # ------------------------------------------------------------------------------
+add_subdirectory(modules/corona_resource)  # Resource management module
 add_subdirectory(src)               # Core engine static library
 
 if(BUILD_CORONA_EXAMPLES)
@@ -85,7 +86,3 @@ message(STATUS "  Build editor          : ${BUILD_CORONA_EDITOR}")
 message(STATUS "  Auto install deps     : ${CORONA_AUTO_INSTALL_PY_DEPS}")
 message(STATUS "================================================================================")
 message(STATUS "")
-
-if(MSVC)
-    add_compile_options(/utf-8)
-endif()
