@@ -61,7 +61,9 @@ bool BrowserManager::show_tab(int tab_id) {
     BrowserTab* tab = it->second.get();
 
     if (tab->minimized) {
-        tab->client->GetBrowser()->Reload();
+        if (tab->client && tab->client->GetBrowser()) {
+            tab->client->GetBrowser()->Reload();
+        }
     }
 
     tab->minimized = false;
