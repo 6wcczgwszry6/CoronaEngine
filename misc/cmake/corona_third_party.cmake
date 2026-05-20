@@ -49,7 +49,7 @@ FetchContent_Declare(nanobind
 
 FetchContent_Declare(Vision
     GIT_REPOSITORY https://github.com/CoronaEngine/Vision.git
-    GIT_TAG master
+    GIT_TAG e0ae25aad585243e1c02147a9e00c43681734d7b
     GIT_SHALLOW TRUE
     EXCLUDE_FROM_ALL
 )
