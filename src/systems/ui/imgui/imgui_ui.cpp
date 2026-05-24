@@ -260,7 +260,7 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
                 if (c == '\\') file_url += '/';
                 else file_url += c;
             }
-            settings_tab_id_ = mgr.create_tab(file_url, "", "right_top", 420, 650, false);
+            settings_tab_id_ = mgr.create_tab(file_url, "", "center", 420, 650, false);
             CFW_LOG_INFO("[ESC] Created settings tab: id={} url={}", settings_tab_id_, file_url);
         } else {
             BrowserTab* tab = mgr.get_tab(settings_tab_id_);
