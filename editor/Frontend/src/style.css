@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Blockly 与 TailwindCSS 兼容修复：Tailwind preflight 对 SVG 设置 display: block
+   会覆盖 Blockly 通过 display="none" 属性隐藏滚动条的机制
+   参考：https://github.com/RaspberryPiFoundation/blockly/issues/5840 */
+svg[display="none"] {
+  display: none;
+}
+
+/* Hide scrollbars but keep scrolling */
+.no-scrollbar {
+  -ms-overflow-style: none; /* IE and Edge */
+  scrollbar-width: none; /* Firefox */
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none; /* Chrome, Safari, Opera */
+}

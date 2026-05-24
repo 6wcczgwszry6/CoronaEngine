@@ -1,0 +1,233 @@
+﻿"""CabbageEditor adapter for CAI.
+
+This module keeps the physical ``cai_extensions`` location stable while exposing
+host capabilities as CAI runtime plugins. The old ``install()`` entry remains
+compatible and installs the adapter into the default CAI app.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from dataclasses import dataclass
+from importlib import import_module
+from pathlib import Path
+from typing import Iterable
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class CabbageContext:
+    aitool_dir: Path
+    cai_dir: Path
+
+    @classmethod
+    def from_default_locations(cls) -> "CabbageContext":
+        aitool_dir = Path(__file__).resolve().parents[1]
+        return cls(
+            aitool_dir=aitool_dir,
+            cai_dir=aitool_dir / "CoronaArtificialIntelligence",
+        )
+
+
+def bootstrap_paths(context: CabbageContext | None = None) -> CabbageContext:
+    return context or CabbageContext.from_default_locations()
+
+
+class CabbagePathsPlugin:
+    name = "cabbage.paths"
+    enabled = True
+
+    def __init__(self, context: CabbageContext):
+        self.context = context
+
+    def register(self, runtime) -> dict:
+        from CoronaArtificialIntelligence.ai_config.paths_config import set_paths_resolver
+
+        from .paths_provider import CabbageEditorPathsResolver
+
+        resolver = CabbageEditorPathsResolver()
+        runtime.set_capability("paths_resolver", resolver)
+        set_paths_resolver(resolver)
+        runtime.metadata.setdefault("cabbage_adapter", {})[self.name] = True
+        logger.debug("[cai_extensions] paths resolver installed")
+        return {"name": self.name}
+
+
+class CabbageAppConfigPlugin:
+    name = "cabbage.app_config"
+    enabled = True
+
+    def __init__(self, context: CabbageContext):
+        self.context = context
+
+    def register(self, runtime) -> dict:
+        from CoronaArtificialIntelligence.ai_tools.warmup import set_app_config_provider
+
+        from .app_config_provider import get_app_config_for_cai
+
+        runtime.set_capability("app_config_provider", get_app_config_for_cai)
+        set_app_config_provider(get_app_config_for_cai)
+        runtime.metadata.setdefault("cabbage_adapter", {})[self.name] = True
+        logger.debug("[cai_extensions] app_config provider installed")
+        return {"name": self.name}
+
+
+class CabbageEngineToolsPlugin:
+    name = "cabbage.engine_tools"
+    enabled = True
+
+    def __init__(self, context: CabbageContext):
+        self.context = context
+
+    def register(self, runtime) -> dict:
+        from .engine_tools import register_engine_loaders
+
+        tool_registry = runtime.get_registry("tool")
+        runtime.register_tool_loader_registrar(register_engine_loaders)
+        register_engine_loaders(tool_registry)
+        setattr(tool_registry, "_discovered", False)
+        runtime.metadata.setdefault("cabbage_adapter", {})[self.name] = True
+        logger.debug("[cai_extensions] engine loaders registered")
+        return {"name": self.name}
+
+
+class CabbageWorkflowPlugin:
+    name = "cabbage.workflows"
+    enabled = True
+
+    flow_modules = (
+        ".flows.scene_composition_workflow",
+        ".flows.model_retrieval_workflow",
+        ".flows.full_pipeline_workflow",
+        ".flows.integrated_multi_scene_workflow",
+        ".flows.multi_scene_parallel_workflow",
+    )
+
+    def __init__(self, context: CabbageContext):
+        self.context = context
+
+    def register(self, runtime) -> dict:
+        registry = runtime.get_registry("workflow")
+        command_registry = runtime.get_registry("workflow_command")
+        registered_flows: list[int] = []
+        registered_commands: list[str] = []
+
+        for module_name in self.flow_modules:
+            try:
+                module = import_module(module_name, __package__)
+            except Exception as exc:
+                logger.warning("[cai_extensions] import flow %s failed: %s", module_name, exc)
+                continue
+
+            workflows = getattr(module, "WORKFLOWS", None)
+            if isinstance(workflows, dict):
+                for function_id, graph in workflows.items():
+                    if not isinstance(function_id, int):
+                        continue
+                    try:
+                        registry.register(function_id, graph, overwrite=True)
+                        registered_flows.append(function_id)
+                    except Exception as exc:
+                        logger.warning(
+                            "[cai_extensions] register flow %s fid=%s failed: %s",
+                            module_name,
+                            function_id,
+                            exc,
+                        )
+
+            commands = getattr(module, "WORKFLOW_COMMANDS", None)
+            if isinstance(commands, dict):
+                for command, function_id in commands.items():
+                    if not isinstance(command, str) or not isinstance(function_id, int):
+                        continue
+                    try:
+                        command_registry.register(command, function_id, overwrite=True)
+                        registered_commands.append(command)
+                    except Exception as exc:
+                        logger.warning(
+                            "[cai_extensions] register command %s -> %s failed: %s",
+                            command,
+                            function_id,
+                            exc,
+                        )
+
+        runtime.metadata.setdefault("cabbage_adapter", {})[self.name] = {
+            "flows": registered_flows,
+            "commands": registered_commands,
+        }
+        logger.info("[cai_extensions] commands registered: %s", registered_commands)
+        return {"name": self.name, "flows": registered_flows, "commands": registered_commands}
+
+
+class CabbageEngineModulesPlugin:
+    name = "cabbage.engine_modules"
+    enabled = True
+
+    targets = {
+        "mcp": (
+            ".mcp.configs.settings",
+            ".mcp.tools.scene_tools",
+        ),
+        "scene_placement": (
+            ".scene_placement.configs.settings",
+            ".scene_placement.tools.loader",
+        ),
+    }
+
+    def __init__(self, context: CabbageContext, modules: Iterable[str] = ("mcp", "scene_placement")):
+        self.context = context
+        self.modules = tuple(modules)
+
+    def register(self, runtime) -> dict:
+        imported: list[str] = []
+        for name in self.modules:
+            for module_name in self.targets.get(name, ()):
+                try:
+                    import_module(module_name, __package__)
+                    imported.append(module_name)
+                except Exception as exc:
+                    logger.debug(
+                        "[cai_extensions] preload %s failed (ok if not exists): %s",
+                        module_name,
+                        exc,
+                    )
+        runtime.metadata.setdefault("cabbage_adapter", {})[self.name] = imported
+        return {"name": self.name, "imported": imported}
+
+
+_INSTALL_LOCK = threading.Lock()
+_INSTALLED_KEYS: set[int] = set()
+
+
+def create_plugins(context: CabbageContext | None = None):
+    context = bootstrap_paths(context)
+    return [
+        CabbagePathsPlugin(context),
+        CabbageAppConfigPlugin(context),
+        CabbageEngineToolsPlugin(context),
+        CabbageWorkflowPlugin(context),
+        CabbageEngineModulesPlugin(context),
+    ]
+
+
+def install(app=None, context: CabbageContext | None = None) -> None:
+    """Install CabbageEditor host capabilities into a CAI app/runtime."""
+    context = bootstrap_paths(context)
+    if app is None:
+        from CoronaArtificialIntelligence.cai import get_default_app
+
+        app = get_default_app()
+
+    install_key = id(app)
+    if install_key in _INSTALLED_KEYS:
+        return
+
+    with _INSTALL_LOCK:
+        if install_key in _INSTALLED_KEYS:
+            return
+        for plugin in create_plugins(context):
+            app.register_plugin(plugin)
+        _INSTALLED_KEYS.add(install_key)
+        logger.info("[cai_extensions] install() complete")
