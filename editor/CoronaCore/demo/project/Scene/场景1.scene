@@ -1,0 +1,20 @@
+[base]
+name = 场景1
+
+[sun]
+sun_direction = 1.0, 1.0, 1.0
+enabled = true
+
+[actors]
+Ball.actor_type = actor
+Ball.route = Resource/三轴.obj
+Ball.geometry.position = 0.0, 0.0, 0.0
+Ball.geometry.rotation = 0.0, 0.0, 0.0
+Ball.geometry.scale = 1.0, 1.0, 1.0
+
+[scripts]
+path = Scripts/scene_script.py
+
+[terrain]
+type =
+path =
