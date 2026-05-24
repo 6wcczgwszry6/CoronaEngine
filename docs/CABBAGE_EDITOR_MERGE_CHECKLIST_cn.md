@@ -175,7 +175,23 @@ sys.path.insert(0, os.path.join(os.getcwd(), 'CabbageEditor'))
 
 如果后续想把运行时目录也改成 `editor`，需要同步改 C++、CMake、Python 配置和已有构建产物目录，影响面更大。
 
-### 4. 保持 CAI submodule 路径一致
+### 4. 迁移 editor 模型资源到引擎 assets
+
+原 `editor/assets/` 下的模型资源已经迁移到根资源目录：
+
+```text
+assets/editor/
+```
+
+这类文件是运行时模型资源，不属于 Vite 前端源码资源。灯光和相机的默认模型路径同步改为：
+
+```text
+assets/editor/Ball.obj
+```
+
+注意不要迁移 `editor/Frontend/src/assets/`。该目录保存前端构建资源，仍应留在前端源码树内。
+
+### 5. 保持 CAI submodule 路径一致
 
 当前 `editor/.gitmodules` 中 submodule 路径为：
 
@@ -194,7 +210,7 @@ plugins/AITool/CoronaArtificialIntelligence
 git submodule update --init --recursive
 ```
 
-### 5. 检查 CMake 复制脚本的忽略列表
+### 6. 检查 CMake 复制脚本的忽略列表
 
 文件：`misc/pytools/editor_copy_and_build.py`
 
