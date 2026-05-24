@@ -1,0 +1,241 @@
+//
+// Created by Zero on 04/09/2022.
+//
+
+#include "pipeline.h"
+#include "interactive_runtime_switches.h"
+#include "base/sensor/photosensory.h"
+#include "base/color/spectrum.h"
+#include "window/window.h"
+
+namespace vision {
+using namespace ocarina;
+
+namespace {
+
+[[nodiscard]] bool output_requires_gamma(const OutputDesc &desc) noexcept {
+    return !(desc.fn.ends_with("exr") || desc.fn.ends_with("hdr"));
+}
+
+[[nodiscard]] bool should_gamma_correct_for_display(const OutputDesc &desc, const Window *window) noexcept {
+    return window != nullptr || output_requires_gamma(desc);
+}
+
+}// namespace
+
+Pipeline::Pipeline(const vision::PipelineDesc &desc)
+    : Node(desc),
+      device_(&Global::instance().device()),
+      stream_(device().create_stream()),
+      bindless_array_(device().create_bindless_array()) {
+    scene_.geometry_.init(this);
+}
+
+void Pipeline::initialize_(const vision::NodeDesc &node_desc) noexcept {
+    const Desc &desc = static_cast<const Desc &>(node_desc);
+    Global::instance().set_pipeline(shared_from_this());
+    Env::printer().init(device());
+    Env::debugger().init(device());
+    Env::set_code_obfuscation(desc["obfuscation"].as_bool(false));
+    Env::set_valid_check(desc["valid_check"].as_bool(false));
+    renderer_.set_frame_buffer(Node::create_shared<FrameBuffer>(desc.frame_buffer_desc));
+}
+
+void Pipeline::init() noexcept {
+}
+
+void Pipeline::sync_output_denoise() noexcept {
+    /// output.denoise is the runtime switch; the integrator-owned denoiser consumes it.
+    renderer_.integrator()->set_denoise_enabled(output_desc_.denoise);
+}
+
+void Pipeline::prepare() noexcept {
+    renderer_.frame_buffer()->prepare();
+}
+
+void Pipeline::on_touch(ocarina::uint2 pos) noexcept {
+    Env::debugger().set_lower(pos);
+    auto *fb = renderer_.frame_buffer();
+    auto &buffer = fb->hit_buffer();
+    stream_ << fb->compute_hit(0, pos);
+    stream_ << fb->hit_buffer().download(0, 1);
+    stream_ << synchronize() << commit();
+    TriangleHit hit = buffer[0];
+    mark_selected(hit);
+}
+
+void Pipeline::mark_selected(TriangleHit hit) noexcept {
+    if (hit.is_miss()) {
+        ui().set_cur_node(scene_.light_manager().env_light());
+        return;
+    }
+    ShapeInstance *instance = scene_.get_instance(hit.inst_id);
+    ui().set_cur_node(instance);
+}
+
+void Pipeline::register_encoded_object(vision::EncodedObject *object) noexcept {
+    if (std::find(encoded_objects.cbegin(), encoded_objects.cend(), object) != encoded_objects.cend()) {
+        return;
+    }
+    encoded_objects.push_back(object);
+}
+
+void Pipeline::deregister_encoded_object(vision::EncodedObject *object) noexcept {
+    erase_if(encoded_objects, [&](const EncodedObject *iter) -> bool {
+        return object == iter;
+    });
+}
+
+void Pipeline::offline_rendering() noexcept {
+    invalidate();
+}
+
+void Pipeline::save_result() noexcept {
+    OutputDesc desc = output_desc_;
+    vector<float4> vec;
+    vec.resize(pixel_num());
+    final_picture(desc, vec.data());
+    Image::save_image(Global::instance().scene_path() / desc.fn, PixelStorage::FLOAT4,
+                      resolution(), vec.data());
+    if (desc.save_exit) {
+        printf("VISION_RENDER_TIME_MS=%.2f\n", integrator()->render_time());
+        exit(0);
+    }
+    need_save_ = false;
+}
+
+void Pipeline::check_and_save() noexcept {
+    if ((frame_index() == output_desc_.spp && output_desc_.spp != 0) || need_save_) {
+        save_result();
+    }
+}
+
+void Pipeline::update_runtime_object(const vision::IObjectConstructor *constructor) noexcept {
+    auto &fb = renderer_.frame_buffer_sp();
+    std::tuple tp = {addressof(fb)};
+    HotfixSystem::replace_objects(constructor, tp);
+}
+
+void Pipeline::invalidate() noexcept {
+    integrator()->invalidation();
+    if (frame_buffer()->enable_accumulation()) {
+        total_time_ = 0;
+    }
+}
+
+void Pipeline::change_resolution(uint2 res) noexcept {
+    OC_INFO_FORMAT("Pipeline::change_resolution request=({}, {}), current=({}, {})",
+                   res.x, res.y, resolution().x, resolution().y);
+    if (all(res == resolution())) { return; }
+    frame_buffer()->update_resolution(res);
+    scene_.update_resolution(res);
+    renderer_.integrator()->update_resolution(res);
+    OC_INFO_FORMAT("Pipeline::change_resolution applied framebuffer=({}, {}), raytracing=({}, {})",
+                   frame_buffer()->resolution().x, frame_buffer()->resolution().y,
+                   frame_buffer()->raytracing_resolution().x, frame_buffer()->raytracing_resolution().y);
+    pipeline()->upload_bindless_array();
+}
+
+void Pipeline::prepare_geometry() noexcept {
+    scene_.update_geometry_instances();
+    scene_.geometry_.reset_device_buffer();
+    scene_.geometry_.upload();
+    scene_.geometry_.build_accel();
+}
+
+void Pipeline::update_geometry() noexcept {
+    scene_.update_geometry_instances();
+    scene_.geometry_.upload();
+    scene_.geometry_.update_accel();
+}
+
+void Pipeline::clear_geometry() noexcept {
+    scene_.geometry_.clear();
+    scene_.clear_shapes();
+    scene_.geometry_.data()->clear_meshes();
+}
+
+void Pipeline::upload_bindless_array() noexcept {
+    stream_ << bindless_array_.update_slotSOA() << synchronize() << commit();
+    stream_ << bindless_array_.upload_handles() << synchronize() << commit();
+}
+
+void Pipeline::deregister_buffer(handle_ty index) noexcept {
+    bindless_array_->remove_buffer(index);
+}
+
+void Pipeline::deregister_texture3d(handle_ty index) noexcept {
+    bindless_array_->remove_texture3d(index);
+}
+
+void Pipeline::deregister_texture2d(handle_ty index) noexcept {
+    bindless_array_->remove_texture2d(index);
+}
+
+void Pipeline::before_render() noexcept {
+    sync_output_denoise();
+    stream_ << Env::debugger().upload();
+}
+
+void Pipeline::set_output_denoise(bool denoise) noexcept {
+    output_desc_.denoise = denoise;
+    sync_output_denoise();
+}
+
+void Pipeline::after_render() noexcept {
+    Env::debugger().reset_range();
+    scene_.sensor()->after_render();
+    renderer_.frame_buffer()->after_render();
+}
+
+void Pipeline::upload_data() noexcept {
+    renderer_.upload_data(scene_);
+    if (scene_.has_changed() || renderer_.has_changed()) {
+        upload_bindless_array();
+    }
+    for (EncodedObject *object : encoded_objects) {
+        object->update_device_data();
+    }
+}
+
+void Pipeline::commit_command() noexcept {
+    if (should_gamma_correct_for_display(output_desc_, window_)) {
+        stream_ << renderer_.frame_buffer()->gamma_correct();
+    }
+    stream_ << synchronize();
+    stream_ << commit();
+}
+
+void Pipeline::display(double dt) noexcept {
+    delta_time_ = dt;
+    total_time_ += dt;
+    Clock clk;
+    before_render();
+    render(dt);
+    commit_command();
+    after_render();
+    double ms = clk.elapse_ms();
+    integrator()->accumulate_render_time(ms);
+#if VISION_INTERACTIVE_AUX_WORK
+    Env::printer().retrieve_immediately();
+#endif
+}
+
+void Pipeline::final_picture(const OutputDesc &desc, float4 *data) noexcept {
+    bool gamma = output_requires_gamma(desc);
+    if (window_ != nullptr) {
+        window_->download_background(data);
+    } else {
+        frame_buffer()->download_final_picture(data);
+    }
+    if (!gamma && should_gamma_correct_for_display(desc, window_)) {
+        auto func = [](float4 *ptr, size_t num) {
+            for (size_t i = 0; i < num; ++i) {
+                ptr[i] = srgb_to_linear(ptr[i]);
+            }
+        };
+        func(data, pixel_num());
+    }
+}
+
+}// namespace vision

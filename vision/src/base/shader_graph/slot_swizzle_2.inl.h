@@ -1,0 +1,16 @@
+case 0x00: return node_->evaluate(ctx, swl).array.xx();
+case 0x01: return node_->evaluate(ctx, swl).array.xy();
+case 0x02: return node_->evaluate(ctx, swl).array.xz();
+case 0x03: return node_->evaluate(ctx, swl).array.xw();
+case 0x10: return node_->evaluate(ctx, swl).array.yx();
+case 0x11: return node_->evaluate(ctx, swl).array.yy();
+case 0x12: return node_->evaluate(ctx, swl).array.yz();
+case 0x13: return node_->evaluate(ctx, swl).array.yw();
+case 0x20: return node_->evaluate(ctx, swl).array.zx();
+case 0x21: return node_->evaluate(ctx, swl).array.zy();
+case 0x22: return node_->evaluate(ctx, swl).array.zz();
+case 0x23: return node_->evaluate(ctx, swl).array.zw();
+case 0x30: return node_->evaluate(ctx, swl).array.wx();
+case 0x31: return node_->evaluate(ctx, swl).array.wy();
+case 0x32: return node_->evaluate(ctx, swl).array.wz();
+case 0x33: return node_->evaluate(ctx, swl).array.ww();

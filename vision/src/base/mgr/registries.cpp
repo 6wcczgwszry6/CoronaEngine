@@ -1,0 +1,213 @@
+//
+// Created by Zero on 2023/8/6.
+//
+
+#include "registries.h"
+#include "pipeline.h"
+#include "base/import/project_desc.h"
+
+namespace vision {
+
+template<typename T>
+bool TRegistry<T>::render_UI(Widgets *widgets) noexcept {
+    bool open = widgets->use_folding_header(UI_title().data(), [&] {
+        render_sub_UI(widgets);
+        uint type_num = elements().topology_num();
+        widgets->text(ocarina::format("type num is {}", type_num));
+        elements().render_UI(widgets);
+    });
+    return open;
+}
+
+template<typename T>
+void TRegistry<T>::update_runtime_object(const vision::IObjectConstructor *constructor) noexcept {
+    for (int i = 0; i < elements_.size(); ++i) {
+        SP<element_ty> element = elements_[i];
+        if (!constructor->match(element.get())) {
+            continue;
+        }
+        SP<element_ty> new_element = constructor->construct_shared<element_ty>();
+        new_element->restore(element.get());
+        elements_.replace(i, new_element);
+    }
+}
+
+template<typename T>
+void TRegistry<T>::push_back(SP<element_ty> element) noexcept {
+    elements_.push_back(ocarina::move(element));
+}
+
+template<typename T>
+void TRegistry<T>::upload_device_data() noexcept {
+    if (has_changed()) {
+        elements_.upload_immediately();
+    }
+}
+
+template<typename T>
+void TRegistry<T>::prepare() noexcept {
+    elements_.for_each_instance([&](const SP<element_ty> &element) noexcept {
+        element->prepare();
+    });
+    auto rp = Global::instance().pipeline();
+    elements_.prepare(rp->bindless_array(), rp->device());
+}
+
+template<typename T>
+void TRegistry<T>::tidy_up() noexcept {
+    elements_.for_each_instance([&](SP<element_ty> element, uint i) {
+        element->set_index(i);
+    });
+}
+
+template<typename T>
+void TRegistry<T>::remedy() noexcept {
+    elements_.remedy();
+    auto rp = Global::instance().pipeline();
+    elements_.prepare(rp->bindless_array(), rp->device());
+}
+
+template<typename T>
+void TRegistry<T>::remove_unused_elements() noexcept {
+    for (auto iter = elements_.begin(); iter != elements_.end();) {
+        if (iter->use_count() == 1) {
+            iter = elements_.erase(iter);
+        } else {
+            ++iter;
+        }
+    }
+    tidy_up();
+}
+
+template<typename T>
+SP<T> TRegistry<T>::register_(SP<T> material) noexcept {
+    uint64_t hash = material->hash();
+    auto iter = std::find_if(elements_.begin(), elements_.end(), [&](SP<T> mat) {
+        return mat->hash() == hash;
+    });
+    if (iter == elements_.cend()) {
+        elements_.push_back(material);
+        return material;
+    }
+    return *iter;
+}
+
+template<typename T>
+SP<T> TRegistry<T>::get_element(uint64_t hash) noexcept {
+    auto iter = std::find_if(elements_.begin(), elements_.end(), [&](SP<T> mat) {
+        return mat->hash() == hash;
+    });
+    if (iter == elements_.cend()) {
+        return nullptr;
+    }
+    return *iter;
+}
+
+template class TRegistry<Material>;
+template class TRegistry<Medium>;
+
+///#region material registry
+
+OC_MAKE_INSTANCE_FUNC_DEF_WITH_HOTFIX(MaterialRegistry, s_material_registry)
+
+bool MaterialRegistry::has_dispersive() const noexcept {
+    return std::any_of(elements_.begin(), elements_.end(),
+                       [&](const SP<Material> &mat) {
+                           return mat->is_dispersive();
+                       });
+}
+
+
+namespace detail {
+[[nodiscard]] std::string second_to_time(double f_total_seconds) {
+    int total_seconds = floor(f_total_seconds);
+    float decimal = f_total_seconds - total_seconds;
+    int minutes = total_seconds / 60;
+    int seconds = total_seconds % 60;
+    std::ostringstream oss;
+    oss << minutes << ":" << std::setw(2)
+        << std::setfill('0')
+        << ocarina::format("{:.3f}", seconds + decimal);
+    return oss.str();
+}
+
+[[nodiscard]] std::string current_date_time() noexcept {
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_time_t = std::chrono::system_clock::to_time_t(now);
+    std::tm local_time{};
+    localtime_s(&local_time, &now_time_t);
+    auto time_str = std::put_time(&local_time, "%Y-%m-%d %H:%M:%S");
+    std::ostringstream oss;
+    oss << time_str;
+    return oss.str();
+}
+}// namespace detail
+
+void MaterialRegistry::render_sub_UI(Widgets *widgets) noexcept {
+    widgets->check_box("flatten lobes", addressof(flatten_lobes_));
+    widgets->check_box("individual ns", addressof(individual_ns_));
+    TRegistry<Material>::render_sub_UI(widgets);
+}
+
+void MaterialRegistry::precompute_albedo() noexcept {
+    vector<PrecomputedLobeTable> configs;
+
+    Clock clock;
+    clock.start();
+    elements().for_each_instance([&](SP<Material> material, uint i) {
+        auto lst = material->precompute();
+        configs.insert(configs.end(), lst.begin(), lst.end());
+    });
+    clock.end();
+
+    string fn = "precomputed_table.h";
+    fs::path target_path = FileTool::project_src_path() / "base" / "scattering" / fn;
+    std::ofstream output(target_path);
+
+    output << ocarina::format("\n// this file was generated by vision-precompute.exe at {}\n", detail::current_date_time());
+    string elapse_time = detail::second_to_time(clock.elapse_s());
+    output << ocarina::format("// the number of sample is {}, it took {} s\n",
+                              Material::precompute_sample_num, elapse_time);
+    output << "// please do not manually modify \n\n";
+    output << "#pragma once \n"
+           << std::endl;
+    output << "#include \"math/basic_types.h\" \n\n";
+    output << "namespace vision { \n";
+    output << "using namespace ocarina;\n";
+    for (const PrecomputedLobeTable &table : configs) {
+        output << table.to_string() << std::endl
+               << std::endl;
+    }
+    output << "} //namespace";
+    output.close();
+}
+///#endregion
+
+OC_MAKE_INSTANCE_FUNC_DEF_WITH_HOTFIX(MediumRegistry, s_medium_registry)
+
+bool MediumRegistry::process_mediums() const noexcept {
+    return process_mediums_ && !elements_.empty();
+}
+
+void MediumRegistry::render_sub_UI(Widgets *widgets) noexcept {
+    widgets->check_box("process_mediums_", addressof(process_mediums_));
+    TRegistry<Medium>::render_sub_UI(widgets);
+}
+
+void MediumRegistry::load_mediums(const MediumsDesc &md) noexcept {
+    global_medium_.name = md.global;
+    for (uint i = 0; i < md.mediums.size(); ++i) {
+        const MediumDesc &desc = md.mediums[i];
+        auto medium = Node::create_shared<Medium>(desc);
+        medium->set_index(i);
+        push_back(medium);
+    }
+    uint index = elements_.get_index([&](const SP<Medium> &medium) {
+        return medium->name() == global_medium_.name;
+    });
+    if (index != InvalidUI32) {
+        global_medium_.init(elements_[index]);
+    }
+}
+
+}// namespace vision
