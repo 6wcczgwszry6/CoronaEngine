@@ -1,0 +1,91 @@
+add_subdirectory(cxxopts)
+target_include_directories(cxxopts INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/cxxopts/include)
+
+set(ASSIMP_BUILD_ZLIB ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
+set(ASSIMP_INJECT_DEBUG_POSTFIX OFF CACHE BOOL "" FORCE)
+set(ASSIMP_NO_EXPORT ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT ON CACHE BOOL "" FORCE)
+
+add_subdirectory(glfw)
+
+if (TARGET glfw AND WIN32)
+        target_compile_definitions(glfw PRIVATE
+                        _CRT_SECURE_NO_WARNINGS
+                        _CRT_NONSTDC_NO_DEPRECATE)
+endif ()
+
+if (MSVC)
+    add_compile_options(
+            /wd4819
+    )
+
+endif ()
+
+if(NOT TARGET assimp)
+    add_subdirectory(assimp)
+endif()
+
+if (TARGET zlibstatic AND WIN32)
+        target_compile_definitions(zlibstatic PRIVATE
+                        _CRT_SECURE_NO_WARNINGS
+                        _CRT_NONSTDC_NO_DEPRECATE)
+endif ()
+
+if (TARGET zlibstatic AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+        target_compile_options(zlibstatic PRIVATE
+                        -Wno-deprecated-non-prototype)
+endif ()
+
+set_target_properties(assimp PROPERTIES UNITY_BUILD OFF)
+if (UNIX AND NOT APPLE)
+    target_compile_definitions(assimp PRIVATE USE_FILE32API=1)
+endif ()
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND
+        CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15.0)
+    target_compile_options(assimp PRIVATE -Wno-deprecated-non-prototype)
+endif ()
+add_library(vision-ext-assimp_config INTERFACE)
+target_link_libraries(vision-ext-assimp_config INTERFACE assimp::assimp)
+
+if (${OIDN_ON})
+    set(OIDN_DEVICE_CUDA ON)
+
+    add_subdirectory(oidn)
+
+    set_target_properties(OpenImageDenoise
+            PROPERTIES RUNTIME_OUTPUT_DIRECTORY
+            ${CMAKE_BINARY_DIR}/bin/
+    )
+
+    set_target_properties(OpenImageDenoise_core
+            PROPERTIES RUNTIME_OUTPUT_DIRECTORY
+            ${CMAKE_BINARY_DIR}/bin/
+    )
+
+    set_target_properties(OpenImageDenoise_device_cpu
+            PROPERTIES RUNTIME_OUTPUT_DIRECTORY
+            ${CMAKE_BINARY_DIR}/bin/
+    )
+
+    set_target_properties(OpenImageDenoise_device_cuda
+            PROPERTIES RUNTIME_OUTPUT_DIRECTORY
+            ${CMAKE_BINARY_DIR}/bin/
+    )
+
+    add_library(vision-ext-oidn INTERFACE)
+    target_link_libraries(vision-ext-oidn INTERFACE OpenImageDenoise)
+endif ()
+
+add_subdirectory(xatlas)
+add_library(vision-ext-xatlas INTERFACE)
+target_link_libraries(vision-ext-xatlas INTERFACE xatlas)
+
+add_subdirectory(window)
+
+add_library(vision-ext INTERFACE)
+target_link_libraries(vision-ext INTERFACE
+        cxxopts)
+
