@@ -1,0 +1,21 @@
+﻿
+file(GLOB_RECURSE HEADER_FILES *.h*)
+file(GLOB_RECURSE SOURCE_FILES *.c*)
+
+add_library(vision-base SHARED ${SOURCE_FILES})
+target_link_libraries(vision-base PUBLIC
+        ocarina
+        vision-window
+        vision-hotfix-all
+        vision-UI
+        vision-ext
+        ocarina-include)
+
+target_compile_definitions(vision-base PRIVATE
+        VISION_BASE_EXPORT_DLL=1
+        VISION_INTERACTIVE_AUX_WORK=$<BOOL:${VISION_INTERACTIVE_AUX_WORK}>)
+set_target_properties(vision-base PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+        WINDOWS_EXPORT_ALL_SYMBOLS ON)
+

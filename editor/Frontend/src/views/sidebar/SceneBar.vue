@@ -656,8 +656,8 @@ const generateUniqueName = (baseName) => {
   return name;
 };
 
-const LIGHT_MODEL_PATH = 'assets/Ball.obj';
-const CAMERA_MODEL_PATH = 'assets/Ball.obj';
+const LIGHT_MODEL_PATH = 'assets/editor/Ball.obj';
+const CAMERA_MODEL_PATH = 'assets/editor/Ball.obj';
 
 const ImportLightSource = async () => {
   ShowModelDropdown.value = false;
