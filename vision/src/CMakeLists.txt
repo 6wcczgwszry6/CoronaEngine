@@ -22,20 +22,17 @@ function(vision_add_plugin name)
             DEBUG_POSTFIX "")
 endfunction()
 
-include(FetchContent)
-FetchContent_Declare(
-    Horizon
-    GIT_REPOSITORY https://github.com/CoronaEngine/Horizon
-    GIT_TAG        2a1b7f1113aaf675e9dcebbb51cf0c042ea36644
-    GIT_SHALLOW    FALSE
-)
-FetchContent_MakeAvailable(Horizon)
+# Horizon (ocarina) is fetched at the CoronaEngine root level
+# (see misc/cmake/corona_third_party.cmake). Do not re-declare here.
+
 add_subdirectory(ext)
 add_subdirectory(window)
 add_subdirectory(UI)
 add_subdirectory(base)
 add_subdirectory(math)
-add_subdirectory(apps)
+if (VISION_BUILD_APPS)
+    add_subdirectory(apps)
+endif ()
 add_subdirectory(render_graph)
 add_subdirectory(importers)
 add_subdirectory(pipelines)
@@ -43,7 +40,7 @@ add_subdirectory(render_core)
 add_subdirectory(hotfix)
 add_subdirectory(sdk)
 
-if (${OCARINA_BUILD_TESTS})
+if (VISION_BUILD_TESTS)
     add_subdirectory(tests)
 endif ()
 
