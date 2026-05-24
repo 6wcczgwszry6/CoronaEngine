@@ -321,14 +321,14 @@
 **目标**: 完善文档，提供使用示例
 
 #### 7.1 更新架构文档
-- [ ] 更新 `docs/ARCHITECTURE_cn.md`
+- [ ] 更新 `docs/architecture/ARCHITECTURE_cn.md`
   - [ ] 添加 ScriptSystem 章节
   - [ ] 更新系统交互图
   - [ ] 说明脚本事件流
-- [ ] 更新 `docs/ARCHITECTURE_en.md`（英文版）
+- [ ] 更新 `docs/architecture/ARCHITECTURE_en.md`（英文版）
 
 #### 7.2 编写脚本系统文档
-- [ ] 创建 `docs/SCRIPT_SYSTEM_cn.md`
+- [ ] 更新 `docs/scripting/SCRIPT_SYSTEM_cn.md`
   - [ ] 系统概述
   - [ ] 配置说明
   - [ ] API 参考
@@ -353,7 +353,7 @@
   - [ ] 性能优化技巧
 
 #### 7.4 更新开发者指南
-- [ ] 更新 `docs/DEVELOPER_GUIDE_cn.md`
+- [ ] 更新 `docs/development/DEVELOPER_GUIDE_cn.md`
   - [ ] 添加脚本系统开发指南
   - [ ] 如何扩展脚本 API
   - [ ] 如何添加新的脚本语言支持

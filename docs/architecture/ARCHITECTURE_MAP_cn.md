@@ -238,9 +238,9 @@ flowchart LR
 建议顺序：
 
 1. 先看本文件的 4 张主图
-2. 再读 `docs/QUICK_START_cn.md`
-3. 然后根据目标读 `docs/SYSTEMS_OVERVIEW_cn.md` 或 `docs/DATA_FLOW_OVERVIEW_cn.md`
-4. 最后进入 `docs/SOURCE_INDEX_cn.md` 定位源码
+2. 再读 `docs/overview/QUICK_START_cn.md`
+3. 然后根据目标读 `docs/architecture/SYSTEMS_OVERVIEW_cn.md` 或 `docs/architecture/DATA_FLOW_OVERVIEW_cn.md`
+4. 最后进入 `docs/architecture/SOURCE_INDEX_cn.md` 定位源码
 
 ## 10. 一句话结论
 

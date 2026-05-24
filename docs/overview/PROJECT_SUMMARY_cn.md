@@ -209,22 +209,22 @@ Windows + MSVC 的典型流程是：
 
 如果后续要继续开发，建议按下面顺序阅读：
 
-1. `docs/ONE_PAGE_OVERVIEW_cn.md`：先用单页快速理解项目定位、主链路和当前成熟度。
-2. `docs/QUICK_START_cn.md`：用最短时间建立对项目主链路的认识。
-3. `docs/ARCHITECTURE_MAP_cn.md`：用图快速理解系统关系、主链路和数据模型。
-4. `docs/DEVELOPER_GUIDE_cn.md`：了解入门流程与常规开发任务。
-5. `docs/ARCHITECTURE_cn.md`：理解高层架构和系统设计。
-6. `docs/SYSTEMS_OVERVIEW_cn.md`：按当前代码实现理解各系统职责和成熟度。
-7. `docs/DATA_FLOW_OVERVIEW_cn.md`：理解 `SharedDataHub`、渲染帧、UI 和脚本之间的数据流。
-8. `docs/SOURCE_INDEX_cn.md`：按入口文件、关键类、关键函数和关键事件快速定位源码。
-9. `docs/PYTHON_API_STORAGE_MAPPING_cn.md`：理解 Python API 如何映射到 `SharedDataHub` 与各组件 storage。
-10. `docs/CAPABILITY_STATUS_cn.md`：快速判断哪些能力已经可用、哪些仍是部分可用或占位实现。
-11. `docs/ISSUES_AND_RECOMMENDATIONS_cn.md`：了解当前已确认的问题、偏差和建议修复顺序。
-12. `docs/CMAKE_GUIDE_cn.md`：掌握配置、构建和依赖管理。
-13. `docs/CODE_STYLE_cn.md`：遵循项目代码规范。
-14. `docs/PYTHON_API_EXAMPLES.md`：理解脚本层对象模型。
-15. `docs/LOG_CALLBACK_DESIGN_cn.md`：了解日志到前端链路的设计方向。
-16. `docs/SCRIPT_REFACTORING_TODO_cn.md`：掌握脚本系统未来重构计划。
+1. `docs/overview/ONE_PAGE_OVERVIEW_cn.md`：先用单页快速理解项目定位、主链路和当前成熟度。
+2. `docs/overview/QUICK_START_cn.md`：用最短时间建立对项目主链路的认识。
+3. `docs/architecture/ARCHITECTURE_MAP_cn.md`：用图快速理解系统关系、主链路和数据模型。
+4. `docs/development/DEVELOPER_GUIDE_cn.md`：了解入门流程与常规开发任务。
+5. `docs/architecture/ARCHITECTURE_cn.md`：理解高层架构和系统设计。
+6. `docs/architecture/SYSTEMS_OVERVIEW_cn.md`：按当前代码实现理解各系统职责和成熟度。
+7. `docs/architecture/DATA_FLOW_OVERVIEW_cn.md`：理解 `SharedDataHub`、渲染帧、UI 和脚本之间的数据流。
+8. `docs/architecture/SOURCE_INDEX_cn.md`：按入口文件、关键类、关键函数和关键事件快速定位源码。
+9. `docs/scripting/PYTHON_API_STORAGE_MAPPING_cn.md`：理解 Python API 如何映射到 `SharedDataHub` 与各组件 storage。
+10. `docs/overview/CAPABILITY_STATUS_cn.md`：快速判断哪些能力已经可用、哪些仍是部分可用或占位实现。
+11. `docs/overview/ISSUES_AND_RECOMMENDATIONS_cn.md`：了解当前已确认的问题、偏差和建议修复顺序。
+12. `docs/development/CMAKE_GUIDE_cn.md`：掌握配置、构建和依赖管理。
+13. `docs/development/CODE_STYLE_cn.md`：遵循项目代码规范。
+14. `docs/scripting/PYTHON_API_EXAMPLES.md`：理解脚本层对象模型。
+15. `docs/editor/LOG_CALLBACK_DESIGN_cn.md`：了解日志到前端链路的设计方向。
+16. `docs/scripting/SCRIPT_REFACTORING_TODO_cn.md`：掌握脚本系统未来重构计划。
 
 ## 11. 当前项目状态判断
 

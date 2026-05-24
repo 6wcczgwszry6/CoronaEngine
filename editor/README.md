@@ -15,4 +15,5 @@
 - 前端构建由顶层 CMake post-build 步骤触发，使用 `third_party/node-v22.19.0-win-x64` 中的 Node/npm。
 - 程序入口为 `main.py`，运行时由引擎从 `CabbageEditor/` 目录加载。
 - Blockly 生成脚本位于运行时的 `Backend/script/`。
+- 编辑器专项文档统一维护在 `../docs/editor/`。
 

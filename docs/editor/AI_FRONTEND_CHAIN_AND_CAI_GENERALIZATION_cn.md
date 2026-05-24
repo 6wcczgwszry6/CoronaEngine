@@ -920,7 +920,7 @@ def install_cabbage_editor_extension(app: CAIApp, context: CabbageContext) -> No
 - optional dependencies 已按能力拆为 `langchain`、`workflow`、`media`、`cabbage`、`web`、`object-recognition` 和 `all`；其中 `cabbage` 保持为空，因为 CabbageEditor adapter 位于 submodule 外侧的 `plugins/AITool/cai_extensions`。
 - 新增 console script `cai-chat`，入口为 `CoronaArtificialIntelligence.cai.cli:main`。
 - 新增 `examples/cli_chat.py` 与 `examples/fastapi_websocket.py`，用于演示编辑器外直接调用 `CAIApp.chat_stream()`。
-- 新增 `docs/API_REFERENCE.md`，记录 `CAIApp`、`CAIRuntime`、`ChatRequest`、`StreamEvent` 与 plugin API。
+- 新增 `docs/editor/CAI_API_REFERENCE.md`，记录 `CAIApp`、`CAIRuntime`、`ChatRequest`、`StreamEvent` 与 plugin API 的入口说明。
 
 ---
 

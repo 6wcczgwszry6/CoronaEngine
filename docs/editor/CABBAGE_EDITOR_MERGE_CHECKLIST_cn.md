@@ -131,7 +131,7 @@ editor/screenshots/
 以下文档此前出现过 `editor/CabbageEditor`，本轮已按源码新位置更新：
 
 ```text
-docs/AI_FRONTEND_CHAIN_AND_CAI_GENERALIZATION_cn.md
+docs/editor/AI_FRONTEND_CHAIN_AND_CAI_GENERALIZATION_cn.md
 .github/skills/input-pipeline-refactor/SKILL.md
 .github/skills/input-pipeline-refactor/references/*.md
 editor/plugins/AITool/cai_extensions/*.py 的 docstring
