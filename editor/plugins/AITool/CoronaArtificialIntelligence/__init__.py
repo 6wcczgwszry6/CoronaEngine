@@ -1,1 +1,0 @@
-"""Corona Artificial Intelligence package."""
