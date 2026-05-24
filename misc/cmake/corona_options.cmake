@@ -24,7 +24,44 @@ option(BUILD_CORONA_RUNTIME "Build Corona runtime" ON)
 option(BUILD_CORONA_TESTING "Build Corona test suite" ${PROJECT_IS_TOP_LEVEL})
 option(BUILD_CORONA_EXAMPLES "Build example programs" ${PROJECT_IS_TOP_LEVEL})
 option(CORONA_BUILD_HARDWARE "Build Corona Hardware features" ON)
-option(CORONA_BUILD_VISION "Build Corona Vision features" OFF)
+
+# ------------------------------------------------------------------------------
+# Vision feature gate
+#
+# Vision requires the CUDA SDK. Mirror Horizon's behaviour (cmake/HorizonOcarina.cmake)
+# and auto-detect a usable CUDA toolkit:
+#   1. Respect the `CUDA_PATH` environment variable when present.
+#   2. Otherwise fall back to `find_package(CUDAToolkit QUIET)`.
+# Users may still force the option via `-DCORONA_BUILD_VISION=ON/OFF`.
+# ------------------------------------------------------------------------------
+set(_corona_vision_default OFF)
+if(DEFINED ENV{CUDA_PATH} AND EXISTS "$ENV{CUDA_PATH}")
+    set(_corona_vision_default ON)
+    message(STATUS "[Options] CUDA SDK detected via CUDA_PATH=$ENV{CUDA_PATH}")
+else()
+    find_package(CUDAToolkit QUIET)
+    if(CUDAToolkit_FOUND)
+        set(_corona_vision_default ON)
+        message(STATUS "[Options] CUDA SDK detected via find_package(CUDAToolkit) (${CUDAToolkit_VERSION})")
+    endif()
+endif()
+option(CORONA_BUILD_VISION "Build Corona Vision features" ${_corona_vision_default})
+unset(_corona_vision_default)
+
+# If the user explicitly enabled Vision but no CUDA SDK is present, downgrade
+# the option with a warning rather than failing deep in vision/ subdirectories.
+if(CORONA_BUILD_VISION)
+    if(NOT DEFINED ENV{CUDA_PATH} OR NOT EXISTS "$ENV{CUDA_PATH}")
+        find_package(CUDAToolkit QUIET)
+        if(NOT CUDAToolkit_FOUND)
+            message(WARNING
+                "[Options] CORONA_BUILD_VISION=ON but no CUDA SDK was found "
+                "(neither CUDA_PATH env nor CUDAToolkit). Disabling Vision.")
+            set(CORONA_BUILD_VISION OFF CACHE BOOL "Build Corona Vision features" FORCE)
+        endif()
+    endif()
+endif()
+
 # Vision sub-options (only meaningful when CORONA_BUILD_VISION=ON)
 option(VISION_BUILD_APPS    "Build Vision sample apps (vision-gui, viewers, ...)" OFF)
 option(VISION_BUILD_TESTS   "Build Vision test executables"                       OFF)
