@@ -1,0 +1,3 @@
+[submodule "editor/plugins/AITool/Quasar"]
+	path = editor/plugins/AITool/Quasar
+	url = https://github.com/CoronaEngine/Quasar.git
