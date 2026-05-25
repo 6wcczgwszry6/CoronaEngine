@@ -11,7 +11,7 @@ corona_add_system(optics
         corona::resource::manager
         $<$<BOOL:${CORONA_BUILD_VISION}>:vision-all_libs>
     INCLUDE_DIRS
-    	$<$<BOOL:${CORONA_BUILD_VISION}>:${Vision_SOURCE_DIR}/src>
+    	$<$<BOOL:${CORONA_BUILD_VISION}>:${CMAKE_SOURCE_DIR}/vision/src>
 )
 
 helicon_compile_shaders(corona_optics_system
