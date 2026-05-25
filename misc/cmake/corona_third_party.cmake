@@ -44,11 +44,25 @@ set(_CORONA_ASSIMP_FETCH_REQUIRED TRUE)
 
 if(WIN32 AND EXISTS "${_CORONA_ASSIMP_PREBUILT_LIB}" AND EXISTS "${_CORONA_ASSIMP_PREBUILT_INCLUDE}/assimp")
     if(NOT TARGET assimp)
+        # assimp prebuilt 自带 zlibstatic，需要一起链接
+        set(_CORONA_ASSIMP_ZLIB "${CORONA_ASSIMP_PREBUILT_ROOT}/contrib/zlib/zlibstatic.lib")
+        if(EXISTS "${_CORONA_ASSIMP_ZLIB}")
+            add_library(assimp_zlibstatic STATIC IMPORTED GLOBAL)
+            set_target_properties(assimp_zlibstatic PROPERTIES
+                IMPORTED_LOCATION "${_CORONA_ASSIMP_ZLIB}"
+            )
+        endif()
+
         add_library(assimp STATIC IMPORTED GLOBAL)
         set_target_properties(assimp PROPERTIES
             IMPORTED_LOCATION "${_CORONA_ASSIMP_PREBUILT_LIB}"
             INTERFACE_INCLUDE_DIRECTORIES "${_CORONA_ASSIMP_PREBUILT_INCLUDE}"
         )
+        if(TARGET assimp_zlibstatic)
+            set_target_properties(assimp PROPERTIES
+                INTERFACE_LINK_LIBRARIES "assimp_zlibstatic"
+            )
+        endif()
     endif()
     if(NOT TARGET assimp::assimp)
         add_library(assimp::assimp ALIAS assimp)

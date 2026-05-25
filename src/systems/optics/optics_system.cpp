@@ -161,6 +161,15 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
 }
 
 void OpticsSystem::update() {
+#ifdef CORONA_ENABLE_VISION
+    // Vision 模式不依赖 Native 管线资源，提前进入渲染
+    if (current_backend_ == RenderBackend::Vision) {
+        static float vc = 0.f; static uint64_t vi = 0;
+        vc += delta_time(); ++vi;
+        optics_pipeline(vc, vi);
+        return;
+    }
+#endif
     if (!hardware_->shaderHasInit || !hardware_->visibilityPipeline ||
         !hardware_->lightingPipeline || !hardware_->skyPipeline || !hardware_->tonemapPipeline ||
         !hardware_->debugResolvePipeline) {
@@ -171,6 +180,7 @@ void OpticsSystem::update() {
     int pending = pending_backend_.load(std::memory_order_relaxed);
     RenderBackend requested = static_cast<RenderBackend>(pending);
     if (requested != current_backend_) {
+#ifdef CORONA_ENABLE_VISION
         if (requested == RenderBackend::Vision) {
             if (!init_vision_lazy()) {
                 CFW_LOG_WARNING("OpticsSystem: Vision init failed, staying on Native");
@@ -180,9 +190,12 @@ void OpticsSystem::update() {
                 CFW_LOG_INFO("OpticsSystem: Switched to Vision backend");
             }
         } else {
+#endif
             current_backend_ = RenderBackend::Native;
             CFW_LOG_INFO("OpticsSystem: Switched to Native backend");
+#ifdef CORONA_ENABLE_VISION
         }
+#endif
     }
 
     static float frame_count = 0.0f;
@@ -707,33 +720,43 @@ bool OpticsSystem::init_vision_lazy() {
 void OpticsSystem::update_vision_camera(const CameraDevice* camera) {
     if (!renderPipeline || !camera) return;
     auto& sensor = renderPipeline->scene().sensor();
-    float px = camera->position.x;
-    float py = camera->position.y;
-    float pz = camera->position.z;
-    float fx = camera->forward.x;
-    float fy = camera->forward.y;
-    float fz = camera->forward.z;
-    float ux = camera->world_up.x;
-    float uy = camera->world_up.y;
-    float uz = camera->world_up.z;
-    // Build camera-to-world matrix (RHS: camera looks along -Z)
+
+    // --- 从 CoronaEngine 相机构建 camera-to-world 矩阵 ---
+    // Vision 使用右手系，相机沿 -Z 看，float4x4 为列主序：
+    //   col[0] = right (x_axis)
+    //   col[1] = up    (y_axis)
+    //   col[2] = -forward (z_axis, 朝相机背面)
+    //   col[3] = position (w=1)
+
+    float fx = camera->forward.x, fy = camera->forward.y, fz = camera->forward.z;
+    float ux = camera->world_up.x, uy = camera->world_up.y, uz = camera->world_up.z;
+
     // z_axis = normalize(-forward)
     float zx = -fx, zy = -fy, zz = -fz;
     float zlen = std::sqrt(zx*zx + zy*zy + zz*zz);
-    if (zlen > 0.0001f) { zx /= zlen; zy /= zlen; zz /= zlen; }
+    if (zlen > 1e-6f) { zx /= zlen; zy /= zlen; zz /= zlen; }
+
     // x_axis = normalize(cross(up, z_axis))
-    float xx = uy*zz - uz*zy;
-    float xy = uz*zx - ux*zz;
-    float xz = ux*zy - uy*zx;
+    float xx = uy*zz - uz*zy, xy = uz*zx - ux*zz, xz = ux*zy - uy*zx;
     float xlen = std::sqrt(xx*xx + xy*xy + xz*xz);
-    if (xlen > 0.0001f) { xx /= xlen; xy /= xlen; xz /= xlen; }
-    // y_axis = cross(z_axis, x_axis)
-    float yx = zy*xz - zz*xy;
-    float yy = zz*xx - zx*xz;
-    float yz = zx*xy - zy*xx;
-    sensor.set_position(make_float3(px, py, pz));
+    if (xlen > 1e-6f) { xx /= xlen; xy /= xlen; xz /= xlen; }
+
+    // y_axis = cross(z_axis, x_axis)  — 已是单位向量，无需再归一化
+    float yx = zy*xz - zz*xy, yy = zz*xx - zx*xz, yz = zx*xy - zy*xx;
+
+    float px = camera->position.x, py = camera->position.y, pz = camera->position.z;
+
+    // 构造列主序 float4x4 (ocarina::Matrix<float,4,4>)
+    // 每列是一个 float4；构造函数按列顺序接受 4 个 float4 参数
+    ocarina::float4x4 c2w{
+        make_float4(xx, xy, xz, 0.f),   // col 0: right
+        make_float4(yx, yy, yz, 0.f),   // col 1: up
+        make_float4(zx, zy, zz, 0.f),   // col 2: -forward
+        make_float4(px, py, pz, 1.f)    // col 3: position
+    };
+
+    sensor.set_mat(c2w);
     sensor.set_fov_y(camera->fov);
-    // TODO: set_mat with full c2w matrix when Vision API supports float4x4 directly
     sensor.update_device_data();
 }
 
@@ -755,7 +778,10 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
             uint32_t h = res.y;
             fb->fill_window_buffer(fb->view_texture_);
             const auto& wbuf = fb->window_buffer_;
-            // Upload float4 RGBA32F -> RGBA16F HardwareImage
+            // window_buffer_ 是 vector<float4>，展开为连续 float 数组再上传
+            // float4 是 POD，内存布局等价于 4 个连续 float，reinterpret_cast 安全
+            static_assert(sizeof(wbuf[0]) == sizeof(float) * 4,
+                "float4 must be 16 bytes for reinterpret_cast to float* to be valid");
             const float* raw = reinterpret_cast<const float*>(wbuf.data());
             Vision::VisionOutputBridge::upload_to_hardware_image(raw, w, h, hardware_->finalOutputImage, hardware_->executor);
             last_render_cam_handle_ = cam_handle;

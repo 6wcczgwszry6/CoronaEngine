@@ -90,10 +90,12 @@ class OpticsSystem : public Kernel::SystemBase {
     void optics_pipeline(float frame_count, uint64_t frame_index);
     void process_pending_screenshots(std::uintptr_t camera_handle, HardwareImage& render_target);
 
+#ifdef CORONA_ENABLE_VISION
     // Vision 相关私有方法（在 CORONA_ENABLE_VISION 宏保护下实现）
     bool init_vision_lazy();  ///< 首次切换到 Vision 时的 lazy 初始化
     void run_vision_frame(float frame_count, uint64_t frame_index);
     void update_vision_camera(const struct CameraDevice* camera);
+#endif  // CORONA_ENABLE_VISION
 
     std::unique_ptr<Hardware> hardware_;
     std::uintptr_t image_handle_{};
