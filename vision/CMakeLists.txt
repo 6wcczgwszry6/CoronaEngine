@@ -17,6 +17,28 @@ find_package(CUDAToolkit 11.0 REQUIRED)
 
 add_compile_definitions(_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING)
 
+# ------------------------------------------------------------------------------
+# Output directory layout (scoped to the Vision subtree only)
+#
+# Vision's per-target CMakeLists reference `${CMAKE_RUNTIME_OUTPUT_DIRECTORY}`
+# and `${CMAKE_LIBRARY_OUTPUT_DIRECTORY}` directly, e.g.
+#     set_target_properties(<tgt> PROPERTIES
+#         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
+#         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+# If those variables are empty (CoronaEngine does not set them globally), CMake
+# collapses the argument list and parses the property name `LIBRARY_OUTPUT_DIRECTORY`
+# as if its value were the literal string `RUNTIME_OUTPUT_DIRECTORY`. That produces
+# DLLs under `build/vision/.../RUNTIME_OUTPUT_DIRECTORY/<Config>/...`, while
+# `vision-gui.exe` (hardcoded to `${CMAKE_BINARY_DIR}/bin/`) cannot find them at runtime.
+#
+# Force the same `build/bin` / `build/lib` layout used by the standalone Vision
+# project. Because `set()` here is plain (no PARENT_SCOPE / CACHE), the override is
+# confined to the Vision subtree and leaves CoronaEngine's other targets alone.
+# ------------------------------------------------------------------------------
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+
 # Bridge legacy Vision option names to the new CoronaEngine-controlled options.
 # Vision sub-CMake scripts still test these legacy names; aliasing here means
 # we do not have to mass-rewrite the deeper tree.
