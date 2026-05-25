@@ -58,7 +58,7 @@ struct SceneStats {
 /**
  * @brief 场景管理系统（八叉树宿主 / 空间查询服务）
  *
- * 职责（参见 docs/SCENE_OCTREE_CULLING_LRU_TODO_cn.md）：
+ * 职责（参见 docs/planning/SCENE_OCTREE_CULLING_LRU_TODO_cn.md）：
  * - 每帧重建场景八叉树（M1）；
  * - 提供线程安全的 AABB / 球 / 视锥查询（M1 ~ M2）；
  * - 维护 actor 可见性热度并发出 LRU evict/restore 事件（M3）。
