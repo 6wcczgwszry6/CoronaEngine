@@ -7,6 +7,7 @@
 #include <corona/resource/types/scene.h>
 #include <corona/shared_data_hub.h>
 #include <corona/systems/script/corona_engine_api.h>
+#include <corona/systems/optics/optics_system.h>
 #include <corona/utils/path_utils.h>
 
 #include <algorithm>
@@ -1883,3 +1884,44 @@ void* get_default_surface() {
 }
 
 }  // namespace Corona::API
+void Corona::API::set_render_backend(const std::string& backend_name) {
+    auto* sys_mgr = Kernel::KernelContext::instance().system_manager();
+    if (!sys_mgr) {
+        CFW_LOG_ERROR("[API] set_render_backend: system manager unavailable");
+        return;
+    }
+    auto sys = sys_mgr->get_system("Optics");
+    if (!sys) {
+        CFW_LOG_ERROR("[API] set_render_backend: OpticsSystem not found");
+        return;
+    }
+    auto* optics = dynamic_cast<Systems::OpticsSystem*>(sys.get());
+    if (!optics) {
+        CFW_LOG_ERROR("[API] set_render_backend: cast to OpticsSystem failed");
+        return;
+    }
+    if (backend_name == "vision") {
+        optics->set_render_backend(Systems::RenderBackend::Vision);
+    } else {
+        optics->set_render_backend(Systems::RenderBackend::Native);
+    }
+}
+
+std::string Corona::API::get_render_backend() {
+    auto* sys_mgr = Kernel::KernelContext::instance().system_manager();
+    if (!sys_mgr) return "native";
+    auto sys = sys_mgr->get_system("Optics");
+    if (!sys) return "native";
+    auto* optics = dynamic_cast<Systems::OpticsSystem*>(sys.get());
+    if (!optics) return "native";
+    return optics->get_render_backend() == Systems::RenderBackend::Vision ? "vision" : "native";
+}
+
+void Corona::API::set_vision_scene_path(const std::string& path) {
+    auto* sys_mgr = Kernel::KernelContext::instance().system_manager();
+    if (!sys_mgr) return;
+    auto sys = sys_mgr->get_system("Optics");
+    if (!sys) return;
+    auto* optics = dynamic_cast<Systems::OpticsSystem*>(sys.get());
+    if (optics) optics->set_vision_scene_path(path);
+}

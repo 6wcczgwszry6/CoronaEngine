@@ -373,5 +373,15 @@ class Scene {
 // ============================================================================
 Scene* read_scene(const std::filesystem::path& scene_path);
 void write_scene(Scene* scene, const std::filesystem::path& scene_path);
+// ============================================================================
+// Render Backend API
+// ============================================================================
+/// Switch render backend: "native" or "vision"
+void set_render_backend(const std::string& backend_name);
+/// Get current render backend name: "native" or "vision"
+std::string get_render_backend();
+/// Set Vision scene JSON file path (must be set before switching to Vision)
+void set_vision_scene_path(const std::string& path);
+
 }  // namespace API
 }  // namespace Corona

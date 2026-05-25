@@ -6,6 +6,8 @@ corona_add_system(optics
     SOURCES
         optics_system.cpp
         hardware.h
+        vision/vision_output_bridge.cpp
+        vision/vision_output_bridge.h
     DEPENDENCIES 
         Horizon
         corona::resource::manager
