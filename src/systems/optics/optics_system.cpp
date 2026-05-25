@@ -27,6 +27,8 @@
 #include "base/sensor/frame_buffer.h"
 #include "base/sensor/sensor.h"
 #include "rhi/context.h"
+#include "vision/vision_geometry_adapter.h"
+#include "vision/vision_light_adapter.h"
 #include "vision/vision_output_bridge.h"
 #endif
 
@@ -703,6 +705,30 @@ bool OpticsSystem::init_vision_lazy() {
             vision::Global::instance().set_scene_path(p.parent_path().string());
             renderPipeline = vision::Importer::import_scene(vision_scene_path_);
             renderPipeline->init();
+
+            // Phase B: populate Vision scene from CoronaEngine scene data
+            auto& scene = renderPipeline->scene();
+            int geom_count = Vision::build_vision_geometry(scene);
+
+            // Collect environment data for lights
+            Corona::EnvironmentDevice env{};
+            bool env_found = false;
+            for (const auto& sd : SharedDataHub::instance().scene_storage()) {
+                if (!sd.enabled) continue;
+                if (sd.environment != 0) {
+                    if (auto e = SharedDataHub::instance().environment_storage().acquire_read(sd.environment)) {
+                        env = *e;
+                        env_found = true;
+                        break;
+                    }
+                }
+            }
+            if (env_found) {
+                Vision::setup_vision_lights(scene, env);
+            }
+
+            CFW_LOG_INFO("OpticsSystem: Vision adapters finished ({} geometry instances)", geom_count);
+
             renderPipeline->prepare();
         } else {
             CFW_LOG_WARNING("OpticsSystem: No Vision scene path set, cannot init Vision pipeline");
