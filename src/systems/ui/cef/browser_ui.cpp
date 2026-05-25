@@ -237,9 +237,6 @@ void BrowserRenderer::setup_window_transform(BrowserTab* tab,
         } else if (tab->docking_pos == "bottom_right") {
             final_pos.x = work_pos.x + work_size.x - target_w - 300.f;
             final_pos.y = work_pos.y + work_size.y - target_h;
-        } else if (tab->docking_pos == "center") {
-            final_pos.x = work_pos.x + (work_size.x - target_w) * 0.5f;
-            final_pos.y = work_pos.y + (work_size.y - target_h) * 0.5f;
         } else {
             final_pos.x = work_pos.x + 300.f;
             final_pos.y = work_pos.y + 50.f;
@@ -360,32 +357,19 @@ void BrowserRenderer::render_single_tab(int tab_id,
         if (!is_main_tab) {
             bool in_drag_region = false;
 
-            // 检测鼠标是否在拖拽区域内
-            // - 若 drag_regions 不为空，按指定区域检测
-            // - 若为空（如 Vue 页面未通过 CEF 设置拖拽区域），顶部 30px 作为默认拖拽句柄
+            // 检测鼠标是否在拖拽区域内（若为空则全区域可拖拽）
             {
                 std::lock_guard<std::mutex> lock(tab->drag_mutex);
 
-                if (tab->drag_regions.empty()) {
-                    ImRect default_handle(
-                        cef_origin.x,
-                        cef_origin.y,
-                        cef_origin.x + static_cast<float>(tab->width),
-                        cef_origin.y + 30.0f);
-                    if (default_handle.Contains(io->MousePos)) {
+                for (const auto& region : tab->drag_regions) {
+                    ImRect abs_region(
+                        cef_origin.x + region.x,
+                        cef_origin.y + region.y,
+                        cef_origin.x + region.x + region.width,
+                        cef_origin.y + region.y + region.height);
+                    if (abs_region.Contains(io->MousePos)) {
                         in_drag_region = true;
-                    }
-                } else {
-                    for (const auto& region : tab->drag_regions) {
-                        ImRect abs_region(
-                            cef_origin.x + region.x,
-                            cef_origin.y + region.y,
-                            cef_origin.x + region.x + region.width,
-                            cef_origin.y + region.y + region.height);
-                        if (abs_region.Contains(io->MousePos)) {
-                            in_drag_region = true;
-                            break;
-                        }
+                        break;
                     }
                 }
             }
