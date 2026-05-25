@@ -63,7 +63,9 @@ if(CORONA_BUILD_VISION)
 endif()
 
 # Vision sub-options (only meaningful when CORONA_BUILD_VISION=ON)
-option(VISION_BUILD_APPS    "Build Vision sample apps (vision-gui, viewers, ...)" OFF)
+# When Vision is enabled (which already implies CUDA is present), default the
+# sample apps ON so that `vision-gui` builds out-of-the-box.
+option(VISION_BUILD_APPS    "Build Vision sample apps (vision-gui, viewers, ...)" ${CORONA_BUILD_VISION})
 option(VISION_BUILD_TESTS   "Build Vision test executables"                       OFF)
 option(VISION_BUILD_OIDN    "Fetch and build Intel Open Image Denoise for Vision" OFF)
 option(VISION_UNITY_BUILD   "Enable unity build for Vision plugin sources"        OFF)
