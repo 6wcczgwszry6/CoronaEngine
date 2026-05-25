@@ -8,10 +8,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_compile_options(
-    $<$<CXX_COMPILER_ID:MSVC>:/source-charset:utf-8>
-    $<$<CXX_COMPILER_ID:MSVC>:/execution-charset:utf-8>
-)
+# UTF-8 source/execution charset is enforced globally in
+# misc/cmake/corona_compile_config.cmake via /utf-8.
 
 add_compile_definitions(
     NOMINMAX
