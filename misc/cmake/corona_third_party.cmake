@@ -103,10 +103,16 @@ FetchContent_Declare(nanobind
     EXCLUDE_FROM_ALL
 )
 
-FetchContent_Declare(Vision
-    GIT_REPOSITORY https://github.com/CoronaEngine/Vision.git
-    GIT_TAG e0ae25aad585243e1c02147a9e00c43681734d7b
+FetchContent_Declare(cxxopts
+    GIT_REPOSITORY https://github.com/jarro2783/cxxopts.git
+    GIT_TAG v3.2.1
     GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL
+)
+
+FetchContent_Declare(oidn
+    GIT_REPOSITORY https://github.com/OpenImageDenoise/oidn.git
+    GIT_TAG master
     EXCLUDE_FROM_ALL
 )
 
@@ -158,6 +164,19 @@ FetchContent_Declare(
 # ------------------------------------------------------------------------------
 
 set(BUILD_TESTING OFF CACHE BOOL "Disable building tests for 3rd party dependencies" FORCE)
+
+# When Vision is enabled, assimp must build with all importers + zlib to satisfy
+# Vision's mesh import paths. Only override these knobs in that case so default
+# CoronaEngine builds keep assimp lightweight.
+if(CORONA_BUILD_VISION)
+    set(ASSIMP_BUILD_ZLIB                       ON  CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_ASSIMP_TOOLS               OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_TESTS                      OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_INSTALL                          OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_INJECT_DEBUG_POSTFIX             OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_NO_EXPORT                        ON  CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT   ON  CACHE BOOL "" FORCE)
+endif()
 
 if(_CORONA_ASSIMP_FETCH_REQUIRED)
     FetchContent_MakeAvailable(assimp)
@@ -211,6 +230,18 @@ endif()
 if(CORONA_BUILD_VISION)
     set(SDL_SHARED ON CACHE BOOL "" FORCE)
     set(VISION_BUILD_VULKAN OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(Vision)
-    message(STATUS "[3rdparty] Vision module enabled")
+
+    # cxxopts: required by Vision (replaces submodule src/ext/cxxopts)
+    set(CXXOPTS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(CXXOPTS_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    set(CXXOPTS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(cxxopts)
+    message(STATUS "[3rdparty] cxxopts module enabled")
+
+    # OIDN: optional, on demand (replaces submodule src/ext/oidn)
+    if(VISION_BUILD_OIDN)
+        set(OIDN_DEVICE_CUDA ON CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(oidn)
+        message(STATUS "[3rdparty] oidn module enabled")
+    endif()
 endif()

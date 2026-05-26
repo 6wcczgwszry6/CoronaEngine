@@ -55,6 +55,10 @@ include(CTest)
 add_subdirectory(modules/corona_resource)  # Resource management module
 add_subdirectory(src)               # Core engine static library
 
+if(CORONA_BUILD_VISION)
+    add_subdirectory(vision)        # Vision renderer module (local source)
+endif()
+
 if(BUILD_CORONA_EXAMPLES)
     add_subdirectory(examples)      # Example applications
 endif()
