@@ -91,7 +91,46 @@ if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
 endif()
 
 # ------------------------------------------------------------------------------
+# Unified UTF-8 policy
+#
+# Effective scope (directory COMPILE_OPTIONS are snapshotted into a target at
+# add_library/add_executable time, and into child directories at
+# add_subdirectory time):
+#
+#   COVERED (created in or under the root scope AFTER this file is included):
+#     - modules/corona_resource and its FetchContent children (e.g. OpenUSD)
+#     - src/  (engine library + systems)
+#     - vision/  (when CORONA_BUILD_VISION=ON)
+#     - examples/
+#
+#   NOT COVERED (created BEFORE this file is included, by corona_third_party):
+#     - Horizon's Helicon target (uses its own long-form
+#       /source-charset:utf-8 /execution-charset:utf-8 PUBLIC; we strip the
+#       INTERFACE side in corona_third_party.cmake to avoid D8016 in our
+#       consumers, while Helicon's own TU compilation keeps the long form).
+#     - SDL, glfw, volk, assimp, Vulkan-Headers, VMA, etc. — these manage
+#       their own encoding policy via upstream CMake.
+#     - imgui — manually defined in corona_third_party.cmake; /utf-8 is
+#       applied there directly via target_compile_options(imgui PRIVATE ...).
+#
+# We deliberately use the shortcut /utf-8 (== /source-charset:utf-8 +
+# /execution-charset:utf-8) because OpenUSD also injects /utf-8 on every pxr
+# target. Mixing /utf-8 with the long form triggers MSVC D8016.
+#
+# COMPILE_LANGUAGE filter prevents the flag from being forwarded to nvcc when
+# building CUDA device code. For CUDA we additionally route /utf-8 to the
+# host compiler (cl.exe) via -Xcompiler so that non-ASCII literals in the
+# host portion of .cu files are also interpreted as UTF-8.
+# ------------------------------------------------------------------------------
+if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>
+    )
+endif()
+
+# ------------------------------------------------------------------------------
 # Summary
 # ------------------------------------------------------------------------------
 message(STATUS "[Compile] MSVC runtime=${CMAKE_MSVC_RUNTIME_LIBRARY}")
-message(STATUS "[Compile] Charset=UTF-8 (source+execution)")
+message(STATUS "[Compile] Charset=UTF-8 via /utf-8 (C/CXX only, downstream of this file)")
