@@ -6,13 +6,24 @@ corona_add_system(optics
     SOURCES
         optics_system.cpp
         hardware.h
-    DEPENDENCIES 
+    DEPENDENCIES
         Horizon
         corona::resource::manager
-        $<$<BOOL:${CORONA_BUILD_VISION}>:vision-all_libs>
     INCLUDE_DIRS
     	$<$<BOOL:${CORONA_BUILD_VISION}>:${CMAKE_SOURCE_DIR}/vision/src>
 )
+
+# vision-all_libs is linked PRIVATEly here on purpose: vision bundles its own
+# copy of Dear ImGui v1.80 under vision/src/ext/window/imgui and exposes it via
+# PUBLIC include directories on vision-window-imgui. If propagated transitively
+# to CoronaEngine, that include path is searched before build/_deps/imgui-src
+# (v1.92.5), causing <imgui.h> to resolve to the old bundled copy and breaking
+# headers that depend on newer types such as ImGuiViewport (C2061). The optics
+# system's public headers do not use any vision symbols, so PRIVATE linkage is
+# sufficient.
+if(CORONA_BUILD_VISION)
+    target_link_libraries(corona_optics_system PRIVATE vision-all_libs)
+endif()
 
 helicon_compile_shaders(corona_optics_system
     OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"

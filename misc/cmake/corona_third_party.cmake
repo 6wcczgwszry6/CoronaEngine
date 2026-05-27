@@ -18,6 +18,34 @@ include_guard(GLOBAL)
 include(FetchContent)
 
 # ------------------------------------------------------------------------------
+# Helper: strip MSVC long-form UTF-8 charset flags from a target's
+# INTERFACE_COMPILE_OPTIONS so they are not forwarded to consumers that already
+# receive the short-form /utf-8 from corona_compile_config.cmake. MSVC treats
+# /utf-8 and /source-charset:utf-8 (or /execution-charset:utf-8) as mutually
+# exclusive (D8016), so the two cannot coexist on a single compile command.
+#
+# The target's own COMPILE_OPTIONS are intentionally left untouched: the target
+# is built in its own directory scope, which is processed BEFORE
+# corona_compile_config.cmake is included, so /utf-8 is not present there.
+# ------------------------------------------------------------------------------
+function(corona_strip_msvc_charset_interface target_name)
+    if(NOT MSVC OR NOT TARGET ${target_name})
+        return()
+    endif()
+    get_target_property(_iface_opts ${target_name} INTERFACE_COMPILE_OPTIONS)
+    if(NOT _iface_opts)
+        return()
+    endif()
+    list(REMOVE_ITEM _iface_opts
+        "/source-charset:utf-8"
+        "/execution-charset:utf-8"
+    )
+    set_target_properties(${target_name} PROPERTIES
+        INTERFACE_COMPILE_OPTIONS "${_iface_opts}"
+    )
+endfunction()
+
+# ------------------------------------------------------------------------------
 # Core dependency declarations
 # ------------------------------------------------------------------------------
 FetchContent_Declare(Horizon
@@ -132,6 +160,12 @@ FetchContent_MakeAvailable(nanobind)
 message(STATUS "[3rdparty] nanobind module enabled")
 
 FetchContent_MakeAvailable(Horizon)
+# Horizon's Helicon / corona_pal targets publish /source-charset:utf-8 and
+# /execution-charset:utf-8 via PUBLIC compile options. Strip the INTERFACE
+# side so downstream consumers (which already get /utf-8 globally) do not
+# trigger MSVC D8016 from mixing the long and short UTF-8 charset flags.
+corona_strip_msvc_charset_interface(Helicon)
+corona_strip_msvc_charset_interface(corona_pal)
 message(STATUS "[3rdparty] Horizon module enabled")
 
 FetchContent_MakeAvailable(glfw)
