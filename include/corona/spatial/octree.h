@@ -226,7 +226,7 @@ class Octree {
     }
 
     template <typename Predicate>
-    static void query_if_impl(const Node* node, Predicate& pred,
+    static void query_if_impl(const Node* node, const Predicate& pred,
                               std::vector<TPayload>& out) {
         if (!pred(node->bounds)) return;
         for (const auto& e : node->entries) {
@@ -289,6 +289,23 @@ class Octree {
                         auto a = straddle.payload;
                         auto b = e->payload;
                         out.emplace_back(a < b ? a : b, a < b ? b : a);
+                    }
+                }
+            }
+        }
+
+        // 不同子树条目之间的对（边界接触）
+        for (int ci = 0; ci < 8; ++ci) {
+            if (child_entries[ci].empty()) continue;
+            for (int cj = ci + 1; cj < 8; ++cj) {
+                if (child_entries[cj].empty()) continue;
+                for (const auto* ea : child_entries[ci]) {
+                    for (const auto* eb : child_entries[cj]) {
+                        if (ea->bounds.overlaps(eb->bounds)) {
+                            auto a = ea->payload;
+                            auto b = eb->payload;
+                            out.emplace_back(a < b ? a : b, a < b ? b : a);
+                        }
                     }
                 }
             }
