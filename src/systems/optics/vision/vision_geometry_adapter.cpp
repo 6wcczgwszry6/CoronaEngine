@@ -15,13 +15,17 @@
 #include "base/shape.h"
 #include "base/using.h"
 #include "math/basic_types.h"
-#include "vision/vision_material_adapter.h"
+#include "vision_material_adapter.h"
 
 namespace Corona::Systems::Vision {
 
 namespace {
 
-    struct CpuMeshData {  
+struct CpuMeshData {
+    std::vector<Corona::Resource::Vertex> vertices;
+    std::vector<uint32_t> indices;
+};
+
 [[nodiscard]] auto load_cpu_mesh_from_resource(const GeometryDevice& geometry,
                                                std::size_t mesh_index,
                                                CpuMeshData& out_mesh) -> bool {

@@ -62,31 +62,31 @@ namespace {
     float yz = zx * xy - zy * xx;
 
     return ocarina::float4x4{
-        make_float4(xx, xy, xz, 0.f),
-        make_float4(yx, yy, yz, 0.f),
-        make_float4(zx, zy, zz, 0.f),
-        make_float4(camera.position.x, camera.position.y, camera.position.z, 1.f)};
+        ocarina::make_float4(xx, xy, xz, 0.f),
+        ocarina::make_float4(yx, yy, yz, 0.f),
+        ocarina::make_float4(zx, zy, zz, 0.f),
+        ocarina::make_float4(camera.position.x, camera.position.y, camera.position.z, 1.f)};
 }
 
 }  // namespace
 
 void sync_vision_camera(::vision::Pipeline& pipeline, const CameraDevice& camera) {
     auto& sensor = pipeline.scene().sensor();
-    const auto requested_resolution = make_uint2(std::max(camera.width, 1u), std::max(camera.height, 1u));
+    const auto requested_resolution = ocarina::make_uint2(std::max(camera.width, 1u), std::max(camera.height, 1u));
     const auto camera_to_world = make_camera_to_world(camera);
 
     bool invalidate = false;
-    if (any(pipeline.resolution() != requested_resolution)) {
+    if (ocarina::any(pipeline.resolution() != requested_resolution)) {
         pipeline.change_resolution(requested_resolution);
         invalidate = true;
     }
-    if (!nearly_equal(sensor.fov_y(), camera.fov) || !matrix_equal(sensor.host_c2w(), camera_to_world)) {
+    if (!nearly_equal(sensor->fov_y(), camera.fov) || !matrix_equal(sensor->host_c2w(), camera_to_world)) {
         invalidate = true;
     }
 
-    sensor.set_mat(camera_to_world);
-    sensor.set_fov_y(camera.fov);
-    sensor.update_device_data();
+    sensor->set_mat(camera_to_world);
+    sensor->set_fov_y(camera.fov);
+    sensor->update_device_data();
 
     if (invalidate) {
         pipeline.invalidate();

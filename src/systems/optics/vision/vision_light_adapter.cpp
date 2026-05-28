@@ -28,8 +28,8 @@ void setup_vision_lights(::vision::Scene& scene, const EnvironmentDevice& env) {
     // Vision DirectionalLight "direction" field is the *light direction vector*
     // (from surface toward light, i.e. toward the sun):
     ::vision::LightDesc dir_desc("directional");
-    dir_desc.init();
-    dir_desc.set_value("direction", ocarina::DataWrap::array({sx, sy, sz}));
+    dir_desc.init(::vision::ParameterSet{});
+    dir_desc.set_value("direction", ::vision::DataWrap::array({sx, sy, sz}));
     dir_desc.set_value("scale", env.sun_intensity);
 
     // color: {channels:"xyz", node:{type:"number", param:{value:[r,g,b]}}}
@@ -38,7 +38,7 @@ void setup_vision_lights(::vision::Scene& scene, const EnvironmentDevice& env) {
     float cb = env.sun_color.z;
     ::vision::ShaderNodeDesc color_node(ocarina::make_float3(cr, cg, cb), ::vision::AttrTag::Albedo);
     ::vision::SlotDesc color_slot(color_node, 3u, ::vision::AttrTag::Albedo);
-    dir_desc.set_value("color", ocarina::DataWrap::array({cr, cg, cb}));
+    dir_desc.set_value("color", ::vision::DataWrap::array({cr, cg, cb}));
     dir_desc.set_value("strength", env.sun_intensity);
 
     auto dir_light = scene.load_light(dir_desc);
@@ -56,9 +56,9 @@ void setup_vision_lights(::vision::Scene& scene, const EnvironmentDevice& env) {
     if (sky < 0.f) sky = 0.f;
 
     ::vision::LightDesc sky_desc("spherical");
-    sky_desc.init();
+    sky_desc.init(::vision::ParameterSet{});
     // Uniform white colour; the strength node controls the total radiance
-    sky_desc.set_value("color", ocarina::DataWrap::array({1.f, 1.f, 1.f}));
+    sky_desc.set_value("color", ::vision::DataWrap::array({1.f, 1.f, 1.f}));
     sky_desc.set_value("strength", sky);
     sky_desc.set_value("scale", 1.f);
 

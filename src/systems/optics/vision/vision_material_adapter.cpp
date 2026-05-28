@@ -15,13 +15,13 @@ std::shared_ptr<::vision::Material> create_vision_material(
 
     // Build a MaterialDesc for principled_bsdf
     ::vision::MaterialDesc desc("principled_bsdf");
-    desc.init();
+    desc.init(::vision::ParameterSet{});
 
     // baseColor from MeshDevice::materialColor (RGBA, use RGB)
     float r = mesh_dev.materialColor[0];
     float g = mesh_dev.materialColor[1];
     float b = mesh_dev.materialColor[2];
-    desc.set_value("color", ocarina::DataWrap::array({r, g, b}));
+    desc.set_value("color", ::vision::DataWrap::array({r, g, b}));
 
     // roughness and metallic from OpticsDevice
     desc.set_value("roughness", optics.roughness);
