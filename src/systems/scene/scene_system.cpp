@@ -7,6 +7,8 @@
 #include <corona/utils/path_utils.h>
 
 #include <algorithm>
+#include <cmath>
+#include <algorithm>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -861,5 +863,28 @@ void SceneSystem::on_unload_requested(const Events::ActorUnloadRequestedEvent& e
                   e.actor, Utils::path_to_utf8(actor_read->model_path));
     scene_state.unload_retry_counts[e.actor] = 0;
     scene_state.unloading_tasks[e.actor] = Resource::ResourceManager::get_instance().remove_cache_async(rid);
+}
+
+// ============================================================================
+// LOD 工具
+// ============================================================================
+
+float SceneSystem::compute_screen_ratio(const ktm::fvec3& camera_pos,
+                                        float              camera_fov_deg,
+                                        const ktm::fvec3& world_center,
+                                        float              bounding_radius) {
+    float d = ktm::distance(camera_pos, world_center);
+    if (d < 1e-4f) d = 1e-4f;
+    return bounding_radius / (d * std::tan(ktm::radians(camera_fov_deg) * 0.5f));
+}
+
+int SceneSystem::select_lod_level(float                     screen_ratio,
+                                   const std::vector<float>& thresholds) {
+    for (int i = static_cast<int>(thresholds.size()) - 1; i >= 0; --i) {
+        if (screen_ratio <= thresholds[i]) {
+            return i + 1;
+        }
+    }
+    return 0;
 }
 }  // namespace Corona::Systems

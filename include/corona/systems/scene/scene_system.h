@@ -124,6 +124,19 @@ class SceneSystem : public Kernel::SystemBase {
     [[nodiscard]] ActorLoadState get_actor_load_state(std::uintptr_t actor,std::uintptr_t scene) const;
 
     // ========================================
+    // LOD 工具
+    // ========================================
+    /// 计算物体包围球在屏幕上的占比（0~1）
+    static float compute_screen_ratio(const ktm::fvec3& camera_pos,
+                                      float              camera_fov_deg,
+                                      const ktm::fvec3& world_center,
+                                      float              bounding_radius);
+
+    /// 根据屏幕占比选择 LOD 等级（0 = 原始网格）
+    static int select_lod_level(float                     screen_ratio,
+                                const std::vector<float>& thresholds);
+
+    // ========================================
     // 统计
     // ========================================
     [[nodiscard]] SceneStats stats(std::uintptr_t scene) const;
