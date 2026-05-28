@@ -2,6 +2,20 @@
 
 namespace Corona {
 
+ktm::fmat4x4 ModelTransform::compute_matrix() const {
+    ktm::fquat qx = ktm::fquat::from_angle_x(euler_rotation.x);
+    ktm::fquat qy = ktm::fquat::from_angle_y(euler_rotation.y);
+    ktm::fquat qz = ktm::fquat::from_angle_z(euler_rotation.z);
+    ktm::fquat rot_quat = qz * qy * qx;
+
+    ktm::faffine3d affine;
+    affine.translate(position).rotate(rot_quat).scale(scale);
+
+    ktm::fmat4x4 result;
+    affine >> result;
+    return result;
+}
+
 SharedDataHub& SharedDataHub::instance() {
     static SharedDataHub instance;
     return instance;

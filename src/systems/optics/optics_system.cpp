@@ -16,11 +16,12 @@
 
 #include "hardware.h"
 
-// NOTE: Define CORONA_ENABLE_VISION in CMake or here to enable Vision path-tracing backend.
-// #define CORONA_ENABLE_VISION
+// CORONA_ENABLE_VISION is controlled by CMake (-DCORONA_ENABLE_VISION).
+
 
 #ifdef CORONA_ENABLE_VISION
 #include "base/import/importer.h"
+#include "base/import/parameter_set.h"
 #include "base/import/project_desc.h"
 #include "base/mgr/global.h"
 #include "base/mgr/pipeline.h"
@@ -36,24 +37,29 @@
 
 namespace {
 #ifdef CORONA_ENABLE_VISION
-SP<vision::Pipeline> renderPipeline;
+ocarina::SP<vision::Pipeline> renderPipeline;
 vision::Device* visionDevicePtr = nullptr;
 
 [[nodiscard]] auto make_default_vision_project_desc() -> vision::ProjectDesc {
+    // Each *Desc has in-class default initializers; the overridden
+    // init(const ParameterSet&) is only used for JSON-driven configuration.
+    // An empty ParameterSet keeps the in-class defaults while still letting
+    // each Desc run any side-effects it may perform during init().
+    const vision::ParameterSet empty_ps{};
     vision::ProjectDesc project_desc;
-    project_desc.pipeline_desc.init();
-    project_desc.renderer_desc.sampler_desc.init();
-    project_desc.renderer_desc.spectrum_desc.init();
-    project_desc.renderer_desc.light_sampler_desc.init();
-    project_desc.renderer_desc.integrator_desc.init();
-    project_desc.renderer_desc.warper_desc.init();
-    project_desc.renderer_desc.render_setting.init();
-    project_desc.scene_desc.sensor_desc.init();
-    project_desc.output_desc.init();
+    project_desc.pipeline_desc.init(empty_ps);
+    project_desc.renderer_desc.sampler_desc.init(empty_ps);
+    project_desc.renderer_desc.spectrum_desc.init(empty_ps);
+    project_desc.renderer_desc.light_sampler_desc.init(empty_ps);
+    project_desc.renderer_desc.integrator_desc.init(empty_ps);
+    project_desc.renderer_desc.warper_desc.init(empty_ps);
+    project_desc.renderer_desc.render_setting.init(empty_ps);
+    project_desc.scene_desc.sensor_desc.init(empty_ps);
+    project_desc.output_desc.init(empty_ps);
     return project_desc;
 }
 
-[[nodiscard]] auto create_vision_pipeline() -> SP<vision::Pipeline> {
+[[nodiscard]] auto create_vision_pipeline() -> ocarina::SP<vision::Pipeline> {
     auto project_desc = make_default_vision_project_desc();
     auto pipeline = vision::Node::create_shared<vision::Pipeline>(project_desc.pipeline_desc);
     if (!pipeline) {
@@ -725,7 +731,9 @@ void OpticsSystem::shutdown() {
 bool OpticsSystem::init_vision_lazy() {
     if (vision_initialized_) return true;
     try {
-        static vision::Device s_device = RHIContext::instance().create_device("cuda");
+        // ocarina::Device is non-default-constructible; use auto so the type is
+        // deduced from create_device(). Function-local static ensures single init.
+        static auto s_device = ocarina::RHIContext::instance().create_device("cuda");
         visionDevicePtr = &s_device;
         visionDevicePtr->init_rtx();
         vision::Global::instance().set_device(visionDevicePtr);
@@ -789,11 +797,11 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 renderPipeline->render(1.0 / 60.0);
 
                 auto* fb = renderPipeline->frame_buffer();
-                uint2 res = fb->raytracing_resolution();
+                auto res = fb->raytracing_resolution();  // ocarina::uint2
                 uint32_t w = res.x;
                 uint32_t h = res.y;
-                fb->fill_window_buffer(fb->view_texture_);
-                const auto& wbuf = fb->window_buffer_;
+                fb->fill_window_buffer(fb->view_texture());
+                const auto& wbuf = fb->window_buffer();
                 static_assert(sizeof(wbuf[0]) == sizeof(float) * 4,
                     "float4 must be 16 bytes for reinterpret_cast to float* to be valid");
                 const float* raw = reinterpret_cast<const float*>(wbuf.data());

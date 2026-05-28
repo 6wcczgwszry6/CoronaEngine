@@ -50,19 +50,11 @@ struct ModelTransform {
         scale.z = 1.0f;
     }
 
-    [[nodiscard]] ktm::fmat4x4 compute_matrix() const {
-        ktm::fquat qx = ktm::fquat::from_angle_x(euler_rotation.x);
-        ktm::fquat qy = ktm::fquat::from_angle_y(euler_rotation.y);
-        ktm::fquat qz = ktm::fquat::from_angle_z(euler_rotation.z);
-        ktm::fquat rot_quat = qz * qy * qx;
-
-        ktm::faffine3d affine;
-        affine.translate(position).rotate(rot_quat).scale(scale);
-
-        ktm::fmat4x4 result;
-        affine >> result;
-        return result;
-    }
+    // Definition lives in shared_data_hub.cpp to avoid instantiating
+    // ktm::affine3d::rotate in translation units that also pull in
+    // ocarina/vision headers (which define a global operator* on iterable
+    // types and would cause ambiguous-overload errors against ktm).
+    [[nodiscard]] ktm::fmat4x4 compute_matrix() const;
 };
 
 struct ModelResource {
