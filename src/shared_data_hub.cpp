@@ -2,6 +2,20 @@
 
 namespace Corona {
 
+ktm::fmat4x4 ModelTransform::compute_matrix() const {
+    ktm::fquat qx = ktm::fquat::from_angle_x(euler_rotation.x);
+    ktm::fquat qy = ktm::fquat::from_angle_y(euler_rotation.y);
+    ktm::fquat qz = ktm::fquat::from_angle_z(euler_rotation.z);
+    ktm::fquat rot_quat = qz * qy * qx;
+
+    ktm::faffine3d affine;
+    affine.translate(position).rotate(rot_quat).scale(scale);
+
+    ktm::fmat4x4 result;
+    affine >> result;
+    return result;
+}
+
 SharedDataHub& SharedDataHub::instance() {
     static SharedDataHub instance;
     return instance;
@@ -37,6 +51,9 @@ const SharedDataHub::ActorStorage& SharedDataHub::actor_storage() const { return
 
 SharedDataHub::CameraStorage& SharedDataHub::camera_storage() { return camera_storage_; }
 const SharedDataHub::CameraStorage& SharedDataHub::camera_storage() const { return camera_storage_; }
+
+SharedDataHub::ActorPickStorage& SharedDataHub::actor_pick_storage() { return actor_pick_storage_; }
+const SharedDataHub::ActorPickStorage& SharedDataHub::actor_pick_storage() const { return actor_pick_storage_; }
 
 SharedDataHub::EnvironmentStorage& SharedDataHub::environment_storage() { return environment_storage_; }
 const SharedDataHub::EnvironmentStorage& SharedDataHub::environment_storage() const { return environment_storage_; }

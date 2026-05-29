@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include <filesystem>
 
 #include "Horizon.h"
 
@@ -50,19 +51,11 @@ struct ModelTransform {
         scale.z = 1.0f;
     }
 
-    [[nodiscard]] ktm::fmat4x4 compute_matrix() const {
-        ktm::fquat qx = ktm::fquat::from_angle_x(euler_rotation.x);
-        ktm::fquat qy = ktm::fquat::from_angle_y(euler_rotation.y);
-        ktm::fquat qz = ktm::fquat::from_angle_z(euler_rotation.z);
-        ktm::fquat rot_quat = qz * qy * qx;
-
-        ktm::faffine3d affine;
-        affine.translate(position).rotate(rot_quat).scale(scale);
-
-        ktm::fmat4x4 result;
-        affine >> result;
-        return result;
-    }
+    // Definition lives in shared_data_hub.cpp to avoid instantiating
+    // ktm::affine3d::rotate in translation units that also pull in
+    // ocarina/vision headers (which define a global operator* on iterable
+    // types and would cause ambiguous-overload errors against ktm).
+    [[nodiscard]] ktm::fmat4x4 compute_matrix() const;
 };
 
 struct ModelResource {
@@ -77,6 +70,7 @@ struct GeometryDevice {
 
 struct KinematicsDevice {
     std::uintptr_t geometry_handle{};
+    bool animation_enabled{true};
 };
 
 struct MechanicsDevice {
@@ -105,6 +99,7 @@ struct MechanicsDevice {
 struct AcousticsDevice {
     std::uintptr_t geometry_handle{};
     float volume{1.0f};
+    bool audio_enabled{true};
 };
 
 struct OpticsDevice {
@@ -144,6 +139,7 @@ struct ProfileDevice {
 
 struct ActorDevice {
     std::vector<std::uintptr_t> profile_handles;
+    std::filesystem::path model_path;  //Actor文件路径，同时作为Actor的唯一标识
 };
 
 enum class CameraOutputMode : uint8_t {
@@ -165,7 +161,10 @@ struct CameraDevice {
     float aspect{16.0f / 9.0f};
     float near_plane{0.1f};
     float far_plane{100.0f};
+    std::uint32_t width{1920};
+    std::uint32_t height{1080};
     CameraOutputMode output_mode{CameraOutputMode::FinalColor};
+    std::uintptr_t actor_pick_handle{};
 
     CameraDevice() {
         position.x = 0.0f;
@@ -196,6 +195,16 @@ struct CameraDevice {
     [[nodiscard]] ktm::fmat4x4 compute_view_proj_matrix() const {
         return compute_projection_matrix() * compute_view_matrix();
     }
+};
+
+struct ActorPickDevice {
+    std::uint32_t x{0};
+    std::uint32_t y{0};
+    std::uint32_t result_x{0};
+    std::uint32_t result_y{0};
+    std::uintptr_t actor_handle{0};
+    bool pending{false};
+    bool result_ready{false};
 };
 
 struct EnvironmentDevice {
@@ -261,6 +270,7 @@ class SharedDataHub {
     using ProfileStorage = Kernel::Utils::Storage<ProfileDevice, 128, 2>;
     using ActorStorage = Kernel::Utils::Storage<ActorDevice, 128, 2>;
     using CameraStorage = Kernel::Utils::Storage<CameraDevice, 128, 2>;
+    using ActorPickStorage = Kernel::Utils::Storage<ActorPickDevice, 128, 2>;
     using EnvironmentStorage = Kernel::Utils::Storage<EnvironmentDevice, 128, 2>;
     using SceneStorage = Kernel::Utils::Storage<SceneDevice, 128, 2>;
     using ImageStorage = Kernel::Utils::Storage<ImageDevice, 128, 2>;
@@ -295,6 +305,9 @@ class SharedDataHub {
     CameraStorage& camera_storage();
     const CameraStorage& camera_storage() const;
 
+    ActorPickStorage& actor_pick_storage();
+    const ActorPickStorage& actor_pick_storage() const;
+
     EnvironmentStorage& environment_storage();
     const EnvironmentStorage& environment_storage() const;
 
@@ -316,6 +329,7 @@ class SharedDataHub {
     ActorStorage actor_storage_;
     EnvironmentStorage environment_storage_;
     CameraStorage camera_storage_;
+    ActorPickStorage actor_pick_storage_;
     SceneStorage scene_storage_;
     ImageStorage image_storage_;
 };
