@@ -388,6 +388,16 @@ void BindAll(nanobind::module_& m) {
                   PY_LOG_INFO("{}", message.c_str());  // Default to INFO
               } }, nb::arg("level"), nb::arg("message"), "Send a log message to the engine logger with specified level");
 
+    // ============================================================================
+    // Render backend control (Native vs Vision)
+    // ============================================================================
+    m.def("is_vision_available", &is_vision_available,
+          "Return True if the engine was compiled with Vision (CORONA_ENABLE_VISION) support");
+    m.def("set_render_backend", &set_render_backend, nb::arg("mode"),
+          "Request a render backend switch. mode: 'native' or 'vision'. Only effective when Vision is available.");
+    m.def("get_render_backend", &get_render_backend,
+          "Get the currently requested render backend as 'native' or 'vision'");
+
 }
 
 }  // namespace EngineScripts

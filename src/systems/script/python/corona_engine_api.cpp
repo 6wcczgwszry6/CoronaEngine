@@ -1981,4 +1981,41 @@ void* get_default_surface() {
     return g_default_surface.load(std::memory_order_relaxed);
 }
 
+bool is_vision_available() {
+#ifdef CORONA_ENABLE_VISION
+    return true;
+#else
+    return false;
+#endif
+}
+
+namespace {
+// Tracks the last requested backend so get_render_backend() can report UI state
+// without reaching into the OpticsSystem render thread. 0 = Native, 1 = Vision.
+#ifdef CORONA_ENABLE_VISION
+std::atomic<int> g_requested_backend{1};
+#else
+std::atomic<int> g_requested_backend{0};
+#endif
+}  // namespace
+
+void set_render_backend(const std::string& mode) {
+    if (!is_vision_available()) {
+        CFW_LOG_WARNING("[set_render_backend] Vision not compiled in; request ignored");
+        return;
+    }
+
+    int backend = (mode == "vision") ? 1 : 0;
+    g_requested_backend.store(backend, std::memory_order_relaxed);
+
+    if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
+        event_bus->publish<Events::RenderBackendSwitchEvent>({backend});
+        CFW_LOG_INFO("[set_render_backend] Requested backend: {}", backend == 1 ? "vision" : "native");
+    }
+}
+
+std::string get_render_backend() {
+    return g_requested_backend.load(std::memory_order_relaxed) == 1 ? "vision" : "native";
+}
+
 }  // namespace Corona::API

@@ -139,6 +139,7 @@ class OpticsSystem : public Kernel::SystemBase {
     std::vector<PendingScreenshot> pending_screenshots_;
     std::mutex screenshot_mutex_;
     Kernel::EventId screenshot_request_sub_id_ = 0;
+    Kernel::EventId backend_switch_sub_id_ = 0;
 };
 
 }  // namespace Corona::Systems

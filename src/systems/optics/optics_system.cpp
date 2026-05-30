@@ -186,6 +186,21 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
                 std::lock_guard<std::mutex> lock(screenshot_mutex_);
                 pending_screenshots_.push_back({event.camera_handle, event.file_path, event.completion_promise});
             });
+
+        backend_switch_sub_id_ = event_bus->subscribe<Events::RenderBackendSwitchEvent>(
+            [this](const Events::RenderBackendSwitchEvent& event) {
+#ifdef CORONA_ENABLE_VISION
+                RenderBackend requested = (event.backend == static_cast<int>(RenderBackend::Vision))
+                                              ? RenderBackend::Vision
+                                              : RenderBackend::Native;
+                pending_backend_.store(static_cast<int>(requested), std::memory_order_relaxed);
+                CFW_LOG_INFO("OpticsSystem: Backend switch requested -> {}",
+                             requested == RenderBackend::Vision ? "Vision" : "Native");
+#else
+                (void)event;
+                CFW_LOG_WARNING("OpticsSystem: Backend switch ignored (CORONA_ENABLE_VISION not defined)");
+#endif
+            });
     }
 
     return true;
@@ -788,6 +803,9 @@ void OpticsSystem::shutdown() {
         if (screenshot_request_sub_id_ != 0) {
             event_bus->unsubscribe(screenshot_request_sub_id_);
         }
+        if (backend_switch_sub_id_ != 0) {
+            event_bus->unsubscribe(backend_switch_sub_id_);
+        }
     }
 
     if (image_handle_ != 0) {
@@ -886,22 +904,24 @@ void OpticsSystem::rebuild_vision_scene() {
         auto& scene = renderPipeline->scene();
 
         // 1. Rebuild shapes + materials from the current Corona scene data.
-        //    build_vision_geometry() starts with scene.clear_shapes(), which drops
-        //    the previous ShapeInstances and releases their material references.
+        CFW_LOG_INFO("[VTrace] rebuild: build_vision_geometry begin");
         const int geom_count = Vision::build_vision_geometry(scene);
+        CFW_LOG_INFO("[VTrace] rebuild: build_vision_geometry done ({} instances)", geom_count);
 
-        // 2. Reclaim orphaned materials (use_count==1) and re-encode material/light/
-        //    mesh ids + upload material device data. remove_unused_elements() inside
-        //    Scene::prepare() prevents unbounded material accumulation across rebuilds.
-        //    Lights are intentionally NOT re-injected (sky-only, unchanged) to avoid
-        //    duplicating entries in the LightManager.
+        // 2. Reclaim orphaned materials + re-encode ids + upload material device data.
+        CFW_LOG_INFO("[VTrace] rebuild: scene.prepare() begin");
         scene.prepare();
+        CFW_LOG_INFO("[VTrace] rebuild: scene.prepare() done");
 
         // 3. Reset geometry device buffers, upload and rebuild the acceleration structure.
+        CFW_LOG_INFO("[VTrace] rebuild: prepare_geometry() begin");
         renderPipeline->prepare_geometry();
+        CFW_LOG_INFO("[VTrace] rebuild: prepare_geometry() done");
 
         // 4. Reset path-tracing accumulation so the new scene does not ghost over the old.
+        CFW_LOG_INFO("[VTrace] rebuild: invalidate() begin");
         renderPipeline->invalidate();
+        CFW_LOG_INFO("[VTrace] rebuild: invalidate() done");
 
         CFW_LOG_INFO("OpticsSystem: Vision scene rebuilt ({} geometry instances)", geom_count);
     } catch (const std::exception& e) {
@@ -976,7 +996,15 @@ bool OpticsSystem::init_vision_lazy() {
 
         renderPipeline->prepare();
 
-        // Camera sync MUST run after prepare(): sync_vision_camera() calls
+        // Pipeline::prepare() allocates the internal per-pixel device buffers but
+        // does NOT create FrameBuffer::view_texture_ (only prepare_view_texture()
+        // does). The render path tone-maps into view_texture_ and we later read it
+        // via fill_window_buffer(view_texture()). Without this the first frame uses
+        // an uninitialized texture. The official vision-gui/vision-eval apps also
+        // call prepare_view_texture() right after prepare().
+        renderPipeline->frame_buffer()->prepare_view_texture();
+
+
         // sensor->update_device_data()/change_resolution()/invalidate(), all of
         // which upload to GPU device buffers. Those device buffers are only
         // allocated during Pipeline::prepare() (Scene::prepare -> Sensor::prepare
@@ -1013,7 +1041,9 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
 
     // Detect and apply dynamic scene changes (object import/export, transform,
     // material params, per-mesh color) before rendering this frame.
+    CFW_LOG_INFO("[VTrace] run_vision_frame[{}]: sync_vision_dynamic_scene begin", frame_index);
     sync_vision_dynamic_scene();
+    CFW_LOG_INFO("[VTrace] run_vision_frame[{}]: sync_vision_dynamic_scene done", frame_index);
 
     for (const auto& scene : SharedDataHub::instance().scene_storage()) {
         if (!scene.enabled) continue;
@@ -1021,20 +1051,27 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
             auto camera = SharedDataHub::instance().camera_storage().acquire_read(cam_handle);
             if (!camera) continue;
             try {
+                CFW_LOG_INFO("[VTrace] frame[{}]: sync_vision_camera begin", frame_index);
                 Vision::sync_vision_camera(*renderPipeline, *camera);
+                CFW_LOG_INFO("[VTrace] frame[{}]: render begin", frame_index);
                 renderPipeline->render(1.0 / 60.0);
+                CFW_LOG_INFO("[VTrace] frame[{}]: render done", frame_index);
 
                 auto* fb = renderPipeline->frame_buffer();
                 auto res = fb->raytracing_resolution();  // ocarina::uint2
                 uint32_t w = res.x;
                 uint32_t h = res.y;
+                CFW_LOG_INFO("[VTrace] frame[{}]: fill_window_buffer begin (res {}x{})", frame_index, w, h);
                 fb->fill_window_buffer(fb->view_texture());
+                CFW_LOG_INFO("[VTrace] frame[{}]: fill_window_buffer done", frame_index);
                 const auto& wbuf = fb->window_buffer();
                 static_assert(sizeof(wbuf[0]) == sizeof(float) * 4,
                     "float4 must be 16 bytes for reinterpret_cast to float* to be valid");
                 const float* raw = reinterpret_cast<const float*>(wbuf.data());
+                CFW_LOG_INFO("[VTrace] frame[{}]: upload_to_hardware_image begin", frame_index);
                 const bool uploaded = Vision::VisionOutputBridge::upload_to_hardware_image(
                     raw, w, h, hardware_->finalOutputImage, hardware_->executor);
+                CFW_LOG_INFO("[VTrace] frame[{}]: upload_to_hardware_image done (ok={})", frame_index, uploaded);
                 if (!uploaded) {
                     throw std::runtime_error("Vision output upload failed");
                 }
