@@ -83,6 +83,11 @@ class OpticsSystem : public Kernel::SystemBase {
     bool init_vision_lazy();  ///< 首次切换到 Vision 时的 lazy 初始化
     void run_vision_frame(float frame_count, uint64_t frame_index);
 
+    /// 将 Vision 内部 float4 device buffer 通过 external handle 导入为 Corona
+    /// HardwareBuffer，并在尺寸/句柄变化时(重)建目标 RGBA32_FLOAT image。
+    /// 返回是否成功，使 run_vision_frame 可据此走 copyTo 转换。
+    bool ensure_vision_shared_output(uint32_t width, uint32_t height);
+
     /// 计算当前 SharedDataHub 场景的轻量签名，用于检测动态变化
     /// （几何拓扑 / transform / 材质参数 / materialColor / visible）。
     std::size_t compute_vision_scene_signature() const;
@@ -124,6 +129,18 @@ class OpticsSystem : public Kernel::SystemBase {
     bool has_last_vision_frame_{false};
     uint32_t last_vision_frame_width_{0};
     uint32_t last_vision_frame_height_{0};
+
+    // Vision 专用输出图像：不复用 native 预分配的 1920x1080 finalOutputImage，
+    // 由 VisionOutputBridge 按当前光追分辨率创建/复用；分辨率变化时置空触发重建。
+    HardwareImage vision_output_image_;
+    uint32_t vision_output_width_{0};
+    uint32_t vision_output_height_{0};
+
+    // Vision 零拷贝共享：Vision 把渲染结果写入 CUDA float4 device buffer，
+    // 通过 Win32 external handle 导入为 Corona HardwareBuffer，再用 copyTo 在
+    // GPU 端转换为 vision_output_image_(RGBA32_FLOAT)，避免 CPU 回读。
+    HardwareBuffer vision_imported_buffer_;   ///< 从 Vision rt_buffer 导入的 float4 buffer
+    uint64_t vision_imported_handle_{0};       ///< 上次导入所用的 Vision device handle（变化即重建）
 
     // ---- Vision 动态场景同步（脏标记 + 去抖全量重建）----
     std::size_t vision_applied_signature_{0};   ///< 已同步到 Vision 的场景签名基线

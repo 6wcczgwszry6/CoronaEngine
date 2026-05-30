@@ -857,7 +857,7 @@ std::size_t OpticsSystem::compute_vision_scene_signature() const {
             mix(static_cast<std::size_t>(actor_handle));
             for (auto profile_handle : actor->profile_handles) {
                 auto profile = profile_storage.try_acquire_read(profile_handle);
-                if (!profile || profile->optics_handle == 0 || profile->geometry_handle == 0) continue;
+                if (!profile || profile->optics_handle == 0) continue;
 
                 auto optics = optics_storage.try_acquire_read(profile->optics_handle);
                 if (!optics) continue;
@@ -865,6 +865,7 @@ std::size_t OpticsSystem::compute_vision_scene_signature() const {
                 // visible toggle changes topology of the Vision scene.
                 mix(optics->visible ? 0x1u : 0x2u);
                 if (!optics->visible) continue;
+                if (optics->geometry_handle == 0) continue;
 
                 // Material parameters bridged into the Vision principled BSDF.
                 mix_float(optics->metallic);
@@ -1058,7 +1059,15 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 CFW_LOG_INFO("[VTrace] frame[{}]: sync_vision_camera begin", frame_index);
                 Vision::sync_vision_camera(*renderPipeline, *camera);
                 CFW_LOG_INFO("[VTrace] frame[{}]: render begin", frame_index);
-                renderPipeline->render(1.0 / 60.0);
+                // 必须走 display() 而非裸 render()：FixedRenderPipeline::render() 只把
+                // path tracing 命令排进 stream_，并不提交/同步。display() 会执行
+                // before_render -> render -> commit_command(synchronize+commit) ->
+                // after_render，真正让 GPU 完成渲染并写入 view_texture_，否则随后的
+                // fill_window_buffer(view_texture()) 下载到的是未初始化的全黑纹理。
+                // upload_data() 保证每帧场景/编码对象的 device 数据同步（与官方
+                // vision-eval 帧循环一致）。
+                renderPipeline->upload_data();
+                renderPipeline->display(1.0 / 60.0);
                 CFW_LOG_INFO("[VTrace] frame[{}]: render done", frame_index);
 
                 auto* fb = renderPipeline->frame_buffer();
@@ -1072,9 +1081,47 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 static_assert(sizeof(wbuf[0]) == sizeof(float) * 4,
                     "float4 must be 16 bytes for reinterpret_cast to float* to be valid");
                 const float* raw = reinterpret_cast<const float*>(wbuf.data());
+                // [方案C 诊断] 定量统计 view_texture_ 下载到 CPU 的像素数据，区分黑屏根因：
+                // - 若 nonzero==0 / max≈0 → 上游问题（Vision 渲染或 view_texture_ 未写入）
+                // - 若数据非黑 → 下游问题（转换/上传/display 合成/surface 匹配）
+                {
+                    const uint64_t channels = static_cast<uint64_t>(w) * h * 4;
+                    uint64_t nonzero = 0;
+                    float max_v = 0.0f;
+                    double sum_v = 0.0;
+                    // 采样首像素 RGBA 便于核对
+                    const float r0 = channels >= 4 ? raw[0] : 0.0f;
+                    const float g0 = channels >= 4 ? raw[1] : 0.0f;
+                    const float b0 = channels >= 4 ? raw[2] : 0.0f;
+                    const float a0 = channels >= 4 ? raw[3] : 0.0f;
+                    for (uint64_t i = 0; i < channels; ++i) {
+                        const float v = raw[i];
+                        if (v != 0.0f) ++nonzero;
+                        if (v > max_v) max_v = v;
+                        sum_v += static_cast<double>(v);
+                    }
+                    const double mean_v = channels ? sum_v / static_cast<double>(channels) : 0.0;
+                    CFW_LOG_INFO(
+                        "[VDiag] frame[{}]: view_texture CPU stats: {}x{} nonzero={}/{} max={:.4f} mean={:.6f} px0=({:.4f},{:.4f},{:.4f},{:.4f})",
+                        frame_index, w, h, nonzero, channels, max_v, mean_v, r0, g0, b0, a0);
+                    if (nonzero == 0) {
+                        CFW_LOG_WARNING(
+                            "[VDiag] frame[{}]: view_texture is ALL-BLACK on CPU -> upstream issue (Vision render / view_texture_ not written). Downstream upload/display is NOT the cause.",
+                            frame_index);
+                    }
+                }
                 CFW_LOG_INFO("[VTrace] frame[{}]: upload_to_hardware_image begin", frame_index);
+                // 关键修复：Vision 的光追分辨率（由相机决定）通常 != native 预分配的
+                // 1920x1080 finalOutputImage。若复用那张 image，copyFrom 的数据量与
+                // image 尺寸不匹配，导致拷贝错位/全黑。这里使用 Vision 专用 image，
+                // 并在分辨率变化时置空以触发 bridge 按当前尺寸重建。
+                if (vision_output_width_ != w || vision_output_height_ != h) {
+                    vision_output_image_ = HardwareImage();
+                    vision_output_width_ = w;
+                    vision_output_height_ = h;
+                }
                 const bool uploaded = Vision::VisionOutputBridge::upload_to_hardware_image(
-                    raw, w, h, hardware_->finalOutputImage, hardware_->executor);
+                    raw, w, h, vision_output_image_, hardware_->executor);
                 CFW_LOG_INFO("[VTrace] frame[{}]: upload_to_hardware_image done (ok={})", frame_index, uploaded);
                 if (!uploaded) {
                     throw std::runtime_error("Vision output upload failed");
@@ -1088,10 +1135,14 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
 
                 if (image_handle_ != 0 && camera->surface != nullptr) {
                     if (auto image_device = SharedDataHub::instance().image_storage().acquire_write(image_handle_)) {
-                        image_device->image = hardware_->finalOutputImage;
+                        image_device->image = vision_output_image_;
                         image_device->executor = hardware_->executor;
                     }
                     if (auto* event_bus = context()->event_bus()) {
+                        CFW_LOG_INFO(
+                            "[VDiag] frame[{}]: publish OpticsFrameReadyEvent surface={} image_handle={} size={}x{} img_valid={}",
+                            frame_index, static_cast<const void*>(camera->surface), image_handle_, w, h,
+                            static_cast<bool>(vision_output_image_));
                         event_bus->publish<Events::OpticsFrameReadyEvent>(
                             {camera->surface, image_handle_, frame_index, w, h});
                     }
