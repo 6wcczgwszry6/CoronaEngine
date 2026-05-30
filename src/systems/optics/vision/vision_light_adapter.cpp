@@ -27,8 +27,14 @@ void setup_vision_lights(::vision::Scene& scene, const EnvironmentDevice& env) {
 
     // Vision DirectionalLight "direction" field is the *light direction vector*
     // (from surface toward light, i.e. toward the sun):
+    // NOTE: LightDesc::init() ultimately calls NodeDesc::set_parameter(), which
+    // asserts the payload is a JSON object and uses nlohmann value()/at() helpers.
+    // A default-constructed ParameterSet wraps a JSON *null*, which trips the
+    // assertion / raises a nlohmann type_error. Because nlohmann is built with
+    // JSON_NOEXCEPTION, that surfaces as abort()/SIGABRT (not a catchable
+    // std::exception). Always pass an empty JSON object instead.
     ::vision::LightDesc dir_desc("directional");
-    dir_desc.init(::vision::ParameterSet{});
+    dir_desc.init(::vision::ParameterSet{::vision::DataWrap::object()});
     dir_desc.set_value("direction", ::vision::DataWrap::array({sx, sy, sz}));
     dir_desc.set_value("scale", env.sun_intensity);
 
@@ -41,10 +47,10 @@ void setup_vision_lights(::vision::Scene& scene, const EnvironmentDevice& env) {
     dir_desc.set_value("color", ::vision::DataWrap::array({cr, cg, cb}));
     dir_desc.set_value("strength", env.sun_intensity);
 
-    auto dir_light = scene.load_light(dir_desc);
-    if (dir_light) {
-        scene.add_light(std::move(dir_light));
-    }
+    // Scene::load_light already registers the light with the scene's LightManager,
+    // so it must NOT be added a second time (the previous add_light also passed a
+    // moved-from object, duplicating/corrupting the light list).
+    scene.load_light(dir_desc);
 
     // -------------------------------------------------------------------------
     // 2. Constant environment light for ambient sky
@@ -56,16 +62,14 @@ void setup_vision_lights(::vision::Scene& scene, const EnvironmentDevice& env) {
     if (sky < 0.f) sky = 0.f;
 
     ::vision::LightDesc sky_desc("spherical");
-    sky_desc.init(::vision::ParameterSet{});
+    sky_desc.init(::vision::ParameterSet{::vision::DataWrap::object()});
     // Uniform white colour; the strength node controls the total radiance
     sky_desc.set_value("color", ::vision::DataWrap::array({1.f, 1.f, 1.f}));
     sky_desc.set_value("strength", sky);
     sky_desc.set_value("scale", 1.f);
 
-    auto sky_light = scene.load_light(sky_desc);
-    if (sky_light) {
-        scene.add_light(std::move(sky_light));
-    }
+    // load_light already registers with the LightManager; do not add again.
+    scene.load_light(sky_desc);
 }
 
 }  // namespace Corona::Systems::Vision

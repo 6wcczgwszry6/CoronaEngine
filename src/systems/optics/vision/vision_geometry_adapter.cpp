@@ -120,7 +120,15 @@ struct CpuMeshData {
 }  // namespace
 
 int build_vision_geometry(::vision::Scene& scene) {
+    // Full clear so repeated rebuilds (dynamic import/export) do not accumulate
+    // orphaned meshes. clear_shapes() only drops instances_/groups_; the mesh
+    // registry (mesh_map_/meshes_) must also be cleared, otherwise meshes of
+    // removed objects survive across rebuilds and keep getting re-indexed and
+    // re-uploaded by prepare_geometry() -> tidy_up_meshes()/upload(), leaking
+    // GPU memory that grows monotonically with each import. The subsequent loop
+    // re-registers every currently-present mesh via register_mesh() (hash-deduped).
     scene.clear_shapes();
+    scene.geometry().data()->clear_meshes();
 
     auto& hub = SharedDataHub::instance();
     auto& actor_storage = hub.actor_storage();
@@ -202,12 +210,16 @@ int build_vision_geometry(::vision::Scene& scene) {
 
                     // Create material and ShapeInstance
                     auto material = create_vision_material(*optics, mesh_dev);
+                    if (!material) {
+                        // Fallback so the instance always has a valid material id.
+                        // Without this, fill_instances() leaves material_id unset and
+                        // shading reads an invalid/empty material entry -> crash.
+                        material = scene.obtain_black_body();
+                    }
                     auto instance = std::make_shared<::vision::ShapeInstance>(mesh);
                     instance->set_o2w(o2w);
-                    if (material) {
-                        instance->set_material(material);
-                        scene.add_material(material);
-                    }
+                    instance->set_material(material);
+                    scene.add_material(material);
 
                     group->add_instance(*instance);
                     ++shape_count;
@@ -221,11 +233,12 @@ int build_vision_geometry(::vision::Scene& scene) {
         }
     }
 
-    // Finalize: encode material/mesh IDs into instance handles, register with geometry, build BVH
+    // Finalize: encode material/mesh IDs into instance handles and register with geometry.
+    // BVH build + device upload are intentionally left to Pipeline::prepare_geometry(),
+    // which runs reset_device_buffer() + upload() + build_accel() during prepare();
+    // building here as well would just be a redundant full BVH rebuild.
     scene.fill_instances();
     scene.update_geometry_instances();
-    scene.geometry().build_accel();
-    scene.geometry().upload();
 
     CFW_LOG_INFO("Vision geometry adapter: added {} ShapeInstances", shape_count);
     return shape_count;

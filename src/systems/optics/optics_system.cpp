@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <vector>
 
 #include "hardware.h"
@@ -43,9 +44,13 @@ vision::Device* visionDevicePtr = nullptr;
 [[nodiscard]] auto make_default_vision_project_desc() -> vision::ProjectDesc {
     // Each *Desc has in-class default initializers; the overridden
     // init(const ParameterSet&) is only used for JSON-driven configuration.
-    // An empty ParameterSet keeps the in-class defaults while still letting
-    // each Desc run any side-effects it may perform during init().
-    const vision::ParameterSet empty_ps{};
+    // The ParameterSet MUST wrap an empty JSON *object* (not a default-
+    // constructed null): NodeDesc::set_parameter() asserts is_object() and the
+    // various init() helpers call ps.value("param", ...)/set_parameter(), which
+    // raise nlohmann type_errors on a null payload. Because nlohmann is built
+    // with JSON_NOEXCEPTION here, that surfaces as abort()/SIGABRT instead of a
+    // catchable std::exception, crashing before any pipeline plugin is created.
+    const vision::ParameterSet empty_ps{vision::DataWrap::object()};
     vision::ProjectDesc project_desc;
     project_desc.pipeline_desc.init(empty_ps);
     project_desc.renderer_desc.sampler_desc.init(empty_ps);
@@ -796,6 +801,140 @@ void OpticsSystem::shutdown() {
     CFW_LOG_INFO("OpticsSystem: Hardware resources released");
 }
 #ifdef CORONA_ENABLE_VISION
+std::size_t OpticsSystem::compute_vision_scene_signature() const {
+    // Lightweight per-frame change detector. Traverses the same hierarchy as
+    // build_vision_geometry (enabled scene → actor → profile → optics → geometry)
+    // and folds the topology/transform/material-relevant fields into one hash.
+    // Any meaningful change to imported/removed geometry, transforms, material
+    // params or per-mesh color flips this signature, triggering a rebuild.
+    std::size_t sig = 0;
+    auto mix = [&sig](std::size_t v) {
+        // 64-bit hash_combine (boost-style golden ratio constant).
+        sig ^= v + 0x9e3779b97f4a7c15ULL + (sig << 6) + (sig >> 2);
+    };
+    auto mix_float = [&mix](float f) {
+        // Hash the raw bit pattern so small value changes are detected.
+        std::uint32_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(f), "float must be 32-bit");
+        std::memcpy(&bits, &f, sizeof(bits));
+        mix(static_cast<std::size_t>(bits));
+    };
+
+    auto& hub = SharedDataHub::instance();
+    auto& actor_storage = hub.actor_storage();
+    auto& profile_storage = hub.profile_storage();
+    auto& optics_storage = hub.optics_storage();
+    auto& geom_storage = hub.geometry_storage();
+    auto& transform_storage = hub.model_transform_storage();
+
+    for (const auto& scene_dev : hub.scene_storage()) {
+        if (!scene_dev.enabled) continue;
+        for (auto actor_handle : scene_dev.actor_handles) {
+            auto actor = actor_storage.try_acquire_read(actor_handle);
+            if (!actor) continue;
+            mix(static_cast<std::size_t>(actor_handle));
+            for (auto profile_handle : actor->profile_handles) {
+                auto profile = profile_storage.try_acquire_read(profile_handle);
+                if (!profile || profile->optics_handle == 0 || profile->geometry_handle == 0) continue;
+
+                auto optics = optics_storage.try_acquire_read(profile->optics_handle);
+                if (!optics) continue;
+
+                // visible toggle changes topology of the Vision scene.
+                mix(optics->visible ? 0x1u : 0x2u);
+                if (!optics->visible) continue;
+
+                // Material parameters bridged into the Vision principled BSDF.
+                mix_float(optics->metallic);
+                mix_float(optics->roughness);
+
+                auto geom = geom_storage.try_acquire_read(optics->geometry_handle);
+                if (!geom) continue;
+                mix(static_cast<std::size_t>(optics->geometry_handle));
+                mix(static_cast<std::size_t>(geom->model_resource_handle));
+                mix(geom->mesh_handles.size());
+
+                // Per-mesh material color (texture-color replacement detection).
+                for (const auto& mesh_dev : geom->mesh_handles) {
+                    mix_float(mesh_dev.materialColor[0]);
+                    mix_float(mesh_dev.materialColor[1]);
+                    mix_float(mesh_dev.materialColor[2]);
+                    mix_float(mesh_dev.materialColor[3]);
+                }
+
+                // Object-to-world transform (position / rotation / scale).
+                if (auto transform = transform_storage.try_acquire_read(geom->transform_handle)) {
+                    mix_float(transform->position.x);
+                    mix_float(transform->position.y);
+                    mix_float(transform->position.z);
+                    mix_float(transform->euler_rotation.x);
+                    mix_float(transform->euler_rotation.y);
+                    mix_float(transform->euler_rotation.z);
+                    mix_float(transform->scale.x);
+                    mix_float(transform->scale.y);
+                    mix_float(transform->scale.z);
+                }
+            }
+        }
+    }
+    return sig;
+}
+
+void OpticsSystem::rebuild_vision_scene() {
+    if (!renderPipeline) return;
+    try {
+        auto& scene = renderPipeline->scene();
+
+        // 1. Rebuild shapes + materials from the current Corona scene data.
+        //    build_vision_geometry() starts with scene.clear_shapes(), which drops
+        //    the previous ShapeInstances and releases their material references.
+        const int geom_count = Vision::build_vision_geometry(scene);
+
+        // 2. Reclaim orphaned materials (use_count==1) and re-encode material/light/
+        //    mesh ids + upload material device data. remove_unused_elements() inside
+        //    Scene::prepare() prevents unbounded material accumulation across rebuilds.
+        //    Lights are intentionally NOT re-injected (sky-only, unchanged) to avoid
+        //    duplicating entries in the LightManager.
+        scene.prepare();
+
+        // 3. Reset geometry device buffers, upload and rebuild the acceleration structure.
+        renderPipeline->prepare_geometry();
+
+        // 4. Reset path-tracing accumulation so the new scene does not ghost over the old.
+        renderPipeline->invalidate();
+
+        CFW_LOG_INFO("OpticsSystem: Vision scene rebuilt ({} geometry instances)", geom_count);
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("OpticsSystem: Vision scene rebuild failed: {}", e.what());
+    }
+}
+
+void OpticsSystem::sync_vision_dynamic_scene() {
+    if (!vision_initialized_) return;
+
+    const std::size_t sig = compute_vision_scene_signature();
+
+    // Debounce: only rebuild after the signature has stayed stable for a few frames,
+    // batching bursts of edits (e.g. importing several objects) into one rebuild.
+    if (sig != vision_pending_signature_) {
+        vision_pending_signature_ = sig;
+        vision_stable_frames_ = 0;
+        return;
+    }
+
+    if (sig == vision_applied_signature_) {
+        return;  // nothing changed since the last applied rebuild
+    }
+
+    if (++vision_stable_frames_ < kVisionRebuildDebounceFrames) {
+        return;  // still settling
+    }
+
+    rebuild_vision_scene();
+    vision_applied_signature_ = sig;
+    vision_stable_frames_ = 0;
+}
+
 bool OpticsSystem::init_vision_lazy() {
     if (vision_initialized_) return true;
     try {
@@ -816,22 +955,34 @@ bool OpticsSystem::init_vision_lazy() {
         auto& scene = renderPipeline->scene();
         int geom_count = Vision::build_vision_geometry(scene);
 
+        // Always inject lights. Vision's UniformLightSampler divides by light_num()
+        // and indexes the light buffer; an empty light set (no environment in the
+        // Corona scene) causes a 1/0 PMF and an out-of-bounds GPU read -> device crash.
+        // When no environment is found we fall back to a default EnvironmentDevice so
+        // the scene still receives a directional sun + sky light.
         Corona::EnvironmentDevice env{};
-        bool env_found = false;
         for (const auto& sd : SharedDataHub::instance().scene_storage()) {
             if (!sd.enabled) continue;
             if (sd.environment != 0) {
                 if (auto e = SharedDataHub::instance().environment_storage().acquire_read(sd.environment)) {
                     env = *e;
-                    env_found = true;
                     break;
                 }
             }
         }
-        if (env_found) {
-            Vision::setup_vision_lights(scene, env);
-        }
+        Vision::setup_vision_lights(scene, env);
 
+        CFW_LOG_INFO("OpticsSystem: Vision adapters finished ({} geometry instances)", geom_count);
+
+        renderPipeline->prepare();
+
+        // Camera sync MUST run after prepare(): sync_vision_camera() calls
+        // sensor->update_device_data()/change_resolution()/invalidate(), all of
+        // which upload to GPU device buffers. Those device buffers are only
+        // allocated during Pipeline::prepare() (Scene::prepare -> Sensor::prepare
+        // -> EncodedObject::prepare_data -> reset_device_buffer). Running it
+        // before prepare() uploads into unallocated device memory and crashes the
+        // CUDA device deterministically.
         for (const auto& sd : SharedDataHub::instance().scene_storage()) {
             if (!sd.enabled) continue;
             if (sd.camera_handles.empty()) continue;
@@ -841,10 +992,14 @@ bool OpticsSystem::init_vision_lazy() {
             break;
         }
 
-        CFW_LOG_INFO("OpticsSystem: Vision adapters finished ({} geometry instances)", geom_count);
-
-        renderPipeline->prepare();
         vision_initialized_ = true;
+
+        // Establish the dynamic-scene signature baseline so subsequent edits are
+        // detected as changes against the initially-built scene.
+        vision_applied_signature_ = compute_vision_scene_signature();
+        vision_pending_signature_ = vision_applied_signature_;
+        vision_stable_frames_ = 0;
+
         CFW_LOG_INFO("OpticsSystem: Vision backend initialized successfully");
         return true;
     } catch (const std::exception& e) {
@@ -855,6 +1010,11 @@ bool OpticsSystem::init_vision_lazy() {
 
 void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
     if (!renderPipeline) return;
+
+    // Detect and apply dynamic scene changes (object import/export, transform,
+    // material params, per-mesh color) before rendering this frame.
+    sync_vision_dynamic_scene();
+
     for (const auto& scene : SharedDataHub::instance().scene_storage()) {
         if (!scene.enabled) continue;
         for (auto cam_handle : scene.camera_handles) {

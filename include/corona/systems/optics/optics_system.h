@@ -82,6 +82,19 @@ class OpticsSystem : public Kernel::SystemBase {
     // Vision 相关私有方法（在 CORONA_ENABLE_VISION 宏保护下实现）
     bool init_vision_lazy();  ///< 首次切换到 Vision 时的 lazy 初始化
     void run_vision_frame(float frame_count, uint64_t frame_index);
+
+    /// 计算当前 SharedDataHub 场景的轻量签名，用于检测动态变化
+    /// （几何拓扑 / transform / 材质参数 / materialColor / visible）。
+    std::size_t compute_vision_scene_signature() const;
+
+    /// 以"全量重建"方式把当前场景数据重新同步到 Vision：
+    /// build_vision_geometry → scene.prepare → prepare_geometry → invalidate。
+    /// 复用现有 pipeline（材质类型固定，无需重编译着色器），并通过
+    /// scene.prepare() 内部的 remove_unused_elements() 回收旧材质，避免累积泄漏。
+    void rebuild_vision_scene();
+
+    /// 去抖检测：若签名变化则触发（延迟）重建，覆盖导入/导出/参数调整等动态操作。
+    void sync_vision_dynamic_scene();
 #endif  // CORONA_ENABLE_VISION
     struct ActorPickRequest {
         std::uintptr_t pick_handle{0};
@@ -111,6 +124,12 @@ class OpticsSystem : public Kernel::SystemBase {
     bool has_last_vision_frame_{false};
     uint32_t last_vision_frame_width_{0};
     uint32_t last_vision_frame_height_{0};
+
+    // ---- Vision 动态场景同步（脏标记 + 去抖全量重建）----
+    std::size_t vision_applied_signature_{0};   ///< 已同步到 Vision 的场景签名基线
+    std::size_t vision_pending_signature_{0};   ///< 最近一次检测到的（可能仍在变化的）签名
+    uint32_t vision_stable_frames_{0};          ///< 签名保持稳定的连续帧数，用于去抖
+    static constexpr uint32_t kVisionRebuildDebounceFrames = 3;  ///< 稳定该帧数后才重建
 
     struct PendingScreenshot {
         std::uintptr_t camera_handle = 0;
