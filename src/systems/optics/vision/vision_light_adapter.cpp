@@ -13,11 +13,51 @@
 namespace Corona::Systems::Vision {
 
 void setup_vision_lights(::vision::Scene& scene, const EnvironmentDevice& env) {
+    // =========================================================================
+    // Vision lighting model constraints (learned the hard way):
+    //
+    //  * Both "directional" (DirectionalLight) and "spherical" (SphericalMap)
+    //    derive from vision::Environment and carry LightType::Infinite.
+    //  * An Infinite light only contributes when registered as the scene's
+    //    env_light_, and the ONLY path that assigns env_light_ is
+    //    LightManager::init() (for each Infinite LightDesc it does
+    //    `env_light_ = dynamic_object_cast<Environment>(light)`).
+    //  * The scene supports exactly ONE environment light. Registering TWO
+    //    Infinite lights (e.g. directional + spherical) makes the second
+    //    overwrite env_light_ while the first stays orphaned in the light list,
+    //    corrupting the light sampler's env index / PMF bookkeeping and
+    //    crashing the CUDA device (observed: process exit code -1 right after
+    //    "Vision scene rebuilt").
+    //
+    // Therefore: register a SINGLE Infinite "spherical" light as the sky dome
+    // (this is what lights the whole scene and fixes the all-black frame), plus
+    // an optional NON-Infinite "point" light to act as the directional "sun".
+    // The point light is freely combinable because it is not an Environment.
+    // =========================================================================
+
     // -------------------------------------------------------------------------
-    // 1. DirectionalLight from sun_position + sun_color + sun_intensity
+    // 1. Spherical environment light (the sole env_light_ / sky dome)
+    //    A constant white colour scaled by sky_intensity gives uniform ambient
+    //    illumination; SphericalMap::prepare() safely falls back to a 1x1
+    //    importance map when the colour node is a constant (no HDRI).
     // -------------------------------------------------------------------------
-    // sun_position is a world-space point; compute a normalised direction from
-    // origin to that point to get the "direction toward the sun".
+    float sky = env.sky_intensity;
+    if (sky < 0.f) sky = 0.f;
+    // Guarantee a non-zero ambient floor so the frame is never fully black even
+    // if the scene environment reports a zero sky intensity.
+    if (sky < 1.f) sky = 1.f;
+
+    ::vision::LightDesc sky_desc("spherical");
+    sky_desc.init(::vision::ParameterSet{::vision::DataWrap::object()});
+    sky_desc.set_value("color", ::vision::DataWrap::array({1.f, 1.f, 1.f}));
+    sky_desc.set_value("scale", sky);
+
+    // -------------------------------------------------------------------------
+    // 2. Point light approximating the directional sun (NON-Infinite)
+    //    sun_position is a world-space direction-ish point; place a bright point
+    //    light far along that direction. PointLight falls off with 1/distance^2,
+    //    so push it out and boost the scale accordingly.
+    // -------------------------------------------------------------------------
     float sx = env.sun_position.x;
     float sy = env.sun_position.y;
     float sz = env.sun_position.z;
@@ -25,51 +65,33 @@ void setup_vision_lights(::vision::Scene& scene, const EnvironmentDevice& env) {
     if (slen < 1e-6f) { sx = 0.f; sy = 1.f; sz = 0.f; }
     else { sx /= slen; sy /= slen; sz /= slen; }
 
-    // Vision DirectionalLight "direction" field is the *light direction vector*
-    // (from surface toward light, i.e. toward the sun):
-    // NOTE: LightDesc::init() ultimately calls NodeDesc::set_parameter(), which
-    // asserts the payload is a JSON object and uses nlohmann value()/at() helpers.
-    // A default-constructed ParameterSet wraps a JSON *null*, which trips the
-    // assertion / raises a nlohmann type_error. Because nlohmann is built with
-    // JSON_NOEXCEPTION, that surfaces as abort()/SIGABRT (not a catchable
-    // std::exception). Always pass an empty JSON object instead.
-    ::vision::LightDesc dir_desc("directional");
-    dir_desc.init(::vision::ParameterSet{::vision::DataWrap::object()});
-    dir_desc.set_value("direction", ::vision::DataWrap::array({sx, sy, sz}));
-    dir_desc.set_value("scale", env.sun_intensity);
+    // Distance to place the "sun" point light, and the intensity boost needed to
+    // counter the inverse-square falloff at that distance.
+    constexpr float kSunDistance = 50.f;
+    const float px = sx * kSunDistance;
+    const float py = sy * kSunDistance;
+    const float pz = sz * kSunDistance;
 
-    // color: {channels:"xyz", node:{type:"number", param:{value:[r,g,b]}}}
+    float sun = env.sun_intensity;
+    if (sun < 0.f) sun = 0.f;
+    // Compensate inverse-square falloff (Le divides by distance^2).
+    const float sun_scale = sun * kSunDistance * kSunDistance;
+
     float cr = env.sun_color.x;
     float cg = env.sun_color.y;
     float cb = env.sun_color.z;
-    ::vision::ShaderNodeDesc color_node(ocarina::make_float3(cr, cg, cb), ::vision::AttrTag::Albedo);
-    ::vision::SlotDesc color_slot(color_node, 3u, ::vision::AttrTag::Albedo);
-    dir_desc.set_value("color", ::vision::DataWrap::array({cr, cg, cb}));
-    dir_desc.set_value("strength", env.sun_intensity);
 
-    // Scene::load_light already registers the light with the scene's LightManager,
-    // so it must NOT be added a second time (the previous add_light also passed a
-    // moved-from object, duplicating/corrupting the light list).
-    scene.load_light(dir_desc);
+    ::vision::LightDesc sun_desc("point");
+    sun_desc.init(::vision::ParameterSet{::vision::DataWrap::object()});
+    sun_desc.set_value("color", ::vision::DataWrap::array({cr, cg, cb}));
+    sun_desc.set_value("position", ::vision::DataWrap::array({px, py, pz}));
+    sun_desc.set_value("scale", sun_scale);
 
-    // -------------------------------------------------------------------------
-    // 2. Constant environment light for ambient sky
-    //    Use a spherical light with a constant grey color scaled by sky_intensity
-    //    (Vision "spherical" with a "number" color node acts as a sky dome).
-    // -------------------------------------------------------------------------
-    float sky = env.sky_intensity;
-    // Clamp to a reasonable range to avoid blown-out results
-    if (sky < 0.f) sky = 0.f;
-
-    ::vision::LightDesc sky_desc("spherical");
-    sky_desc.init(::vision::ParameterSet{::vision::DataWrap::object()});
-    // Uniform white colour; the strength node controls the total radiance
-    sky_desc.set_value("color", ::vision::DataWrap::array({1.f, 1.f, 1.f}));
-    sky_desc.set_value("strength", sky);
-    sky_desc.set_value("scale", 1.f);
-
-    // load_light already registers with the LightManager; do not add again.
-    scene.load_light(sky_desc);
+    // Register the single Infinite (spherical) env light through LightManager::init
+    // so env_light_ is assigned exactly like a JSON-loaded scene. The point sun is
+    // safe to add afterwards because it is NOT an Environment.
+    scene.light_manager().init({sky_desc});
+    scene.load_light(sun_desc);
 }
 
 }  // namespace Corona::Systems::Vision

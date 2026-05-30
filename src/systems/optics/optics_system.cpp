@@ -1083,6 +1083,28 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 const auto& wbuf = fb->window_buffer();
                 static_assert(sizeof(wbuf[0]) == sizeof(float) * 4,
                     "float4 must be 16 bytes for reinterpret_cast to float* to be valid");
+
+                // [DIAG] Probe the just-rendered window buffer so we can tell apart
+                // "integrator produced black" from "upload/display lost the image".
+                // Logged only for the first few frames to avoid spamming.
+                if (frame_index < 5) {
+                    const float* probe = reinterpret_cast<const float*>(wbuf.data());
+                    const uint64_t channels = static_cast<uint64_t>(w) * h * 4ull;
+                    uint64_t non_zero = 0;
+                    float max_v = 0.f;
+                    double sum_v = 0.0;
+                    for (uint64_t i = 0; i < channels; ++i) {
+                        const float v = probe[i];
+                        if (v > 0.f) ++non_zero;
+                        if (v > max_v) max_v = v;
+                        sum_v += v;
+                    }
+                    const double avg_v = channels ? (sum_v / static_cast<double>(channels)) : 0.0;
+                    CFW_LOG_INFO(
+                        "OpticsSystem: [DIAG] Vision window buffer {}x{}: non_zero_channels={} max={:.4f} avg={:.6f}",
+                        w, h, non_zero, max_v, avg_v);
+                }
+
                 const float* raw = reinterpret_cast<const float*>(wbuf.data());
                 const bool uploaded = Vision::VisionOutputBridge::upload_to_hardware_image(
                     raw, w, h, hardware_->finalOutputImage, hardware_->executor);
