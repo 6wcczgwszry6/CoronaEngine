@@ -78,6 +78,12 @@ void sync_vision_camera(::vision::Pipeline& pipeline, const CameraDevice& camera
     bool invalidate = false;
     if (ocarina::any(pipeline.resolution() != requested_resolution)) {
         pipeline.change_resolution(requested_resolution);
+        // change_resolution()/FrameBuffer::update_resolution() reallocates all
+        // internal per-pixel buffers but does NOT recreate view_texture_, which is
+        // only built by prepare_view_texture(). Without rebuilding it here the
+        // render-time tone_mapping writes the new (larger) resolution into the stale
+        // smaller view texture, causing an out-of-bounds GPU access (ACCESS_VIOLATION).
+        pipeline.frame_buffer()->prepare_view_texture();
         invalidate = true;
     }
     if (!nearly_equal(sensor->fov_y(), camera.fov) || !matrix_equal(sensor->host_c2w(), camera_to_world)) {

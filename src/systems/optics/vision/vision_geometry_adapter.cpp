@@ -120,7 +120,15 @@ struct CpuMeshData {
 }  // namespace
 
 int build_vision_geometry(::vision::Scene& scene) {
+    // Full clear so repeated rebuilds (dynamic import/export) do not accumulate
+    // orphaned meshes. clear_shapes() only drops instances_/groups_; the mesh
+    // registry (mesh_map_/meshes_) must also be cleared, otherwise meshes of
+    // removed objects survive across rebuilds and keep getting re-indexed and
+    // re-uploaded by prepare_geometry() -> tidy_up_meshes()/upload(), leaking
+    // GPU memory that grows monotonically with each import. The subsequent loop
+    // re-registers every currently-present mesh via register_mesh() (hash-deduped).
     scene.clear_shapes();
+    scene.geometry().data()->clear_meshes();
 
     auto& hub = SharedDataHub::instance();
     auto& actor_storage = hub.actor_storage();
@@ -195,19 +203,29 @@ int build_vision_geometry(::vision::Scene& scene) {
                     }
 
                     // Create Vision Mesh and upload to Vision GPU device
+                    CFW_LOG_INFO("[VTrace] geom: mesh {} verts={} tris={} upload_immediately begin",
+                                 mesh_index, vertices.size(), triangles.size());
                     auto mesh = std::make_shared<::vision::Mesh>(
                         std::move(vertices), std::move(triangles));
                     mesh->upload_immediately();
                     scene.geometry().data()->register_mesh(mesh);
+                    CFW_LOG_INFO("[VTrace] geom: mesh {} registered", mesh_index);
 
                     // Create material and ShapeInstance
+                    CFW_LOG_INFO("[VTrace] geom: create_vision_material begin");
                     auto material = create_vision_material(*optics, mesh_dev);
+                    CFW_LOG_INFO("[VTrace] geom: create_vision_material done (ok={})",
+                                 material ? "yes" : "no");
+                    if (!material) {
+                        // Fallback so the instance always has a valid material id.
+                        // Without this, fill_instances() leaves material_id unset and
+                        // shading reads an invalid/empty material entry -> crash.
+                        material = scene.obtain_black_body();
+                    }
                     auto instance = std::make_shared<::vision::ShapeInstance>(mesh);
                     instance->set_o2w(o2w);
-                    if (material) {
-                        instance->set_material(material);
-                        scene.add_material(material);
-                    }
+                    instance->set_material(material);
+                    scene.add_material(material);
 
                     group->add_instance(*instance);
                     ++shape_count;
@@ -221,11 +239,15 @@ int build_vision_geometry(::vision::Scene& scene) {
         }
     }
 
-    // Finalize: encode material/mesh IDs into instance handles, register with geometry, build BVH
+    // Finalize: encode material/mesh IDs into instance handles and register with geometry.
+    // BVH build + device upload are intentionally left to Pipeline::prepare_geometry(),
+    // which runs reset_device_buffer() + upload() + build_accel() during prepare();
+    // building here as well would just be a redundant full BVH rebuild.
+    CFW_LOG_INFO("[VTrace] geom: fill_instances begin ({} shapes)", shape_count);
     scene.fill_instances();
+    CFW_LOG_INFO("[VTrace] geom: update_geometry_instances begin");
     scene.update_geometry_instances();
-    scene.geometry().build_accel();
-    scene.geometry().upload();
+    CFW_LOG_INFO("[VTrace] geom: finalize done");
 
     CFW_LOG_INFO("Vision geometry adapter: added {} ShapeInstances", shape_count);
     return shape_count;
