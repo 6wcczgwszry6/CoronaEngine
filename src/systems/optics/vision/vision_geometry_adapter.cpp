@@ -151,10 +151,10 @@ int build_vision_geometry(::vision::Scene& scene) {
 
             for (auto profile_handle : actor->profile_handles) {
                 auto profile = profile_storage.acquire_read(profile_handle);
-                if (!profile || profile->optics_handle == 0) continue;
+                if (!profile || profile->optics_handle == 0 || profile->geometry_handle == 0) continue;
 
                 auto optics = optics_storage.acquire_read(profile->optics_handle);
-                if (!optics || !optics->visible || optics->geometry_handle == 0) continue;
+                if (!optics || !optics->visible) continue;
 
                 auto geom = geom_storage.acquire_read(optics->geometry_handle);
                 if (!geom) continue;
