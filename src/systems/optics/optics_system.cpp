@@ -221,12 +221,16 @@ void OpticsSystem::update() {
                 CFW_LOG_INFO("OpticsSystem: Switched to Vision backend");
             }
         } else {
-            renderPipeline.reset();
-            vision_initialized_ = false;
+            // 切回 Native：不要销毁 Vision pipeline / CUDA 资源。
+            // 之前在这里调用 renderPipeline.reset() 并将 vision_initialized_ 置为
+            // false，导致再次切回 Vision 时 init_vision_lazy() 重新执行
+            // create_vision_pipeline()/scene.prepare() 等重建逻辑。由于底层 CUDA
+            // device 是 function-local static（只创建一次），在残留状态上重建
+            // 会造成 CUDA 资源冲突并崩溃。改为“挂起”Vision：保留 pipeline 与
+            // vision_initialized_，仅停止渲染 Vision 帧；切回 Vision 时直接复用。
             consecutive_vision_failures_ = 0;
-            has_last_vision_frame_ = false;
             current_backend_ = RenderBackend::Native;
-            CFW_LOG_INFO("OpticsSystem: Switched to Native backend");
+            CFW_LOG_INFO("OpticsSystem: Switched to Native backend (Vision suspended)");
         }
 #else
         current_backend_ = RenderBackend::Native;
