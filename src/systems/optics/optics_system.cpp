@@ -882,6 +882,16 @@ std::size_t OpticsSystem::compute_vision_scene_signature() const {
                     mix_float(mesh_dev.materialColor[1]);
                     mix_float(mesh_dev.materialColor[2]);
                     mix_float(mesh_dev.materialColor[3]);
+
+                    // Mesh data readiness: for procedurally-generated geometry the
+                    // vertex/index buffers are uploaded asynchronously, so the
+                    // element count flips 0 -> N once the GPU upload completes.
+                    // Folding it into the signature makes that transition trigger
+                    // one more rebuild even though no logical field changed.
+                    const auto& vbuf = mesh_dev.vertexBuffer
+                                           ? mesh_dev.vertexBuffer
+                                           : mesh_dev.vertexStorageBuffer;
+                    mix(static_cast<std::size_t>(vbuf.getElementCount()));
                 }
 
                 // Object-to-world transform (position / rotation / scale).
@@ -902,20 +912,24 @@ std::size_t OpticsSystem::compute_vision_scene_signature() const {
     return sig;
 }
 
-void OpticsSystem::rebuild_vision_scene() {
-    if (!renderPipeline) return;
+Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene() {
+    Vision::VisionBuildResult result;
+    if (!renderPipeline) return result;
     try {
         auto& scene = renderPipeline->scene();
-        const int geom_count = Vision::build_vision_geometry(scene);
+        result = Vision::build_vision_geometry(scene);
         scene.prepare();
 
         renderPipeline->prepare_geometry();
         renderPipeline->invalidate();
 
-        CFW_LOG_INFO("OpticsSystem: Vision scene rebuilt ({} geometry instances)", geom_count);
+        CFW_LOG_INFO(
+            "OpticsSystem: Vision scene rebuilt ({} geometry instances, {} candidates, {} skipped)",
+            result.instance_count, result.candidate_count, result.skipped_no_data);
     } catch (const std::exception& e) {
         CFW_LOG_ERROR("OpticsSystem: Vision scene rebuild failed: {}", e.what());
     }
+    return result;
 }
 
 void OpticsSystem::sync_vision_dynamic_scene() {
@@ -928,6 +942,7 @@ void OpticsSystem::sync_vision_dynamic_scene() {
     if (sig != vision_pending_signature_) {
         vision_pending_signature_ = sig;
         vision_stable_frames_ = 0;
+        vision_rebuild_retries_ = 0;  // 内容发生变化，清零重试计数
         return;
     }
 
@@ -938,10 +953,28 @@ void OpticsSystem::sync_vision_dynamic_scene() {
     if (++vision_stable_frames_ < kVisionRebuildDebounceFrames) {
         return;  // still settling
     }
-
-    rebuild_vision_scene();
-    vision_applied_signature_ = sig;
     vision_stable_frames_ = 0;
+
+    const Vision::VisionBuildResult result = rebuild_vision_scene();
+
+    if (result.instance_count > 0 || result.candidate_count == 0) {
+        // 重建成功，或场景本就为空（candidate_count==0 是合法的 0）：接受签名，
+        // 停止重试，避免对空场景每帧空转重建。
+        vision_applied_signature_ = sig;
+        vision_rebuild_retries_ = 0;
+    } else {
+        // 有候选物体但 0 实例 → 网格数据尚未就绪：不锁定签名，下一帧继续重试。
+        if (++vision_rebuild_retries_ >= kVisionRebuildMaxRetries) {
+            CFW_LOG_ERROR(
+                "OpticsSystem: Vision rebuild produced 0 instances from {} candidates after {} "
+                "retries; accepting empty result to avoid busy-loop",
+                result.candidate_count, vision_rebuild_retries_);
+            vision_applied_signature_ = sig;  // 兜底：达到上限后接受，停止重试
+            vision_rebuild_retries_ = 0;
+        }
+        // 否则保持 vision_applied_signature_ 不变；由于签名未变，下一帧去抖立即满足，
+        // 会再次触发 rebuild，直到数据就绪或达到上限。
+    }
 }
 
 bool OpticsSystem::init_vision_lazy() {
@@ -962,7 +995,8 @@ bool OpticsSystem::init_vision_lazy() {
 
         // Populate Vision scene directly from CoronaEngine scene data.
         auto& scene = renderPipeline->scene();
-        int geom_count = Vision::build_vision_geometry(scene);
+        Vision::VisionBuildResult build_result = Vision::build_vision_geometry(scene);
+        int geom_count = build_result.instance_count;
 
         // Always inject lights. Vision's UniformLightSampler divides by light_num()
         // and indexes the light buffer; an empty light set (no environment in the

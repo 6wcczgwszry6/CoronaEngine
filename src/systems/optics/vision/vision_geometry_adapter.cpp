@@ -119,7 +119,7 @@ struct CpuMeshData {
 
 }  // namespace
 
-int build_vision_geometry(::vision::Scene& scene) {
+VisionBuildResult build_vision_geometry(::vision::Scene& scene) {
     // Full clear so repeated rebuilds (dynamic import/export) do not accumulate
     // orphaned meshes. clear_shapes() only drops instances_/groups_; the mesh
     // registry (mesh_map_/meshes_) must also be cleared, otherwise meshes of
@@ -137,7 +137,7 @@ int build_vision_geometry(::vision::Scene& scene) {
     auto& geom_storage = hub.geometry_storage();
     auto& transform_storage = hub.model_transform_storage();
 
-    int shape_count = 0;
+    VisionBuildResult result;
 
     for (const auto& scene_dev : hub.scene_storage()) {
         if (!scene_dev.enabled) continue;
@@ -151,13 +151,25 @@ int build_vision_geometry(::vision::Scene& scene) {
 
             for (auto profile_handle : actor->profile_handles) {
                 auto profile = profile_storage.acquire_read(profile_handle);
-                if (!profile || profile->optics_handle == 0 || profile->geometry_handle == 0) continue;
+                if (!profile || profile->optics_handle == 0) continue;
 
                 auto optics = optics_storage.acquire_read(profile->optics_handle);
                 if (!optics || !optics->visible) continue;
 
+                // Drive geometry lookup from the OpticsDevice's own handle to stay
+                // consistent with optics_pipeline()/compute_vision_scene_signature().
+                // The profile->geometry_handle guard alone is insufficient: the two
+                // handles may diverge and indexing geometry by the wrong one silently
+                // drops the object.
+                if (optics->geometry_handle == 0) continue;
+
                 auto geom = geom_storage.acquire_read(optics->geometry_handle);
                 if (!geom) continue;
+
+                // This object is a render candidate: it passed every visibility /
+                // linkage filter and is expected to contribute geometry. Count it so
+                // the caller can tell "empty scene" from "data not ready yet".
+                ++result.candidate_count;
 
                 // Build the object-to-world transform
                 ::vision::float4x4 o2w = ::vision::make_float4x4(1.f);
@@ -176,7 +188,12 @@ int build_vision_geometry(::vision::Scene& scene) {
                     CpuMeshData cpu_mesh;
                     if (!load_cpu_mesh_from_resource(*geom, mesh_index, cpu_mesh) &&
                         !load_cpu_mesh_from_buffers(mesh_dev, cpu_mesh)) {
-                        CFW_LOG_WARNING("Vision geometry adapter: no CPU mesh data available, skipping mesh");
+                        ++result.skipped_no_data;
+                        CFW_LOG_WARNING(
+                            "Vision geometry adapter: no CPU mesh data available, skipping mesh "
+                            "(actor={}, geometry_handle={}, model_resource_handle={}, mesh_index={})",
+                            actor_handle, optics->geometry_handle, geom->model_resource_handle,
+                            mesh_index);
                         continue;
                     }
 
@@ -228,7 +245,7 @@ int build_vision_geometry(::vision::Scene& scene) {
                     scene.add_material(material);
 
                     group->add_instance(*instance);
-                    ++shape_count;
+                    ++result.instance_count;
                     group_has_instances = true;
                 }
             }
@@ -243,14 +260,16 @@ int build_vision_geometry(::vision::Scene& scene) {
     // BVH build + device upload are intentionally left to Pipeline::prepare_geometry(),
     // which runs reset_device_buffer() + upload() + build_accel() during prepare();
     // building here as well would just be a redundant full BVH rebuild.
-    CFW_LOG_INFO("[VTrace] geom: fill_instances begin ({} shapes)", shape_count);
+    CFW_LOG_INFO("[VTrace] geom: fill_instances begin ({} shapes)", result.instance_count);
     scene.fill_instances();
     CFW_LOG_INFO("[VTrace] geom: update_geometry_instances begin");
     scene.update_geometry_instances();
     CFW_LOG_INFO("[VTrace] geom: finalize done");
 
-    CFW_LOG_INFO("Vision geometry adapter: added {} ShapeInstances", shape_count);
-    return shape_count;
+    CFW_LOG_INFO(
+        "Vision geometry adapter: added {} ShapeInstances ({} candidates, {} skipped for missing data)",
+        result.instance_count, result.candidate_count, result.skipped_no_data);
+    return result;
 }
 
 }  // namespace Corona::Systems::Vision

@@ -19,6 +19,12 @@ struct Hardware;
 
 namespace Corona::Systems {
 
+#ifdef CORONA_ENABLE_VISION
+namespace Vision {
+struct VisionBuildResult;  // 定义见 vision/vision_geometry_adapter.h
+}  // namespace Vision
+#endif
+
 /**
  * @brief 光学系统 (Optics System)
  *
@@ -91,7 +97,8 @@ class OpticsSystem : public Kernel::SystemBase {
     /// build_vision_geometry → scene.prepare → prepare_geometry → invalidate。
     /// 复用现有 pipeline（材质类型固定，无需重编译着色器），并通过
     /// scene.prepare() 内部的 remove_unused_elements() 回收旧材质，避免累积泄漏。
-    void rebuild_vision_scene();
+    /// 返回本次重建的统计结果，供去抖/重试逻辑区分"空场景"与"数据未就绪"。
+    Vision::VisionBuildResult rebuild_vision_scene();
 
     /// 去抖检测：若签名变化则触发（延迟）重建，覆盖导入/导出/参数调整等动态操作。
     void sync_vision_dynamic_scene();
@@ -130,6 +137,11 @@ class OpticsSystem : public Kernel::SystemBase {
     std::size_t vision_pending_signature_{0};   ///< 最近一次检测到的（可能仍在变化的）签名
     uint32_t vision_stable_frames_{0};          ///< 签名保持稳定的连续帧数，用于去抖
     static constexpr uint32_t kVisionRebuildDebounceFrames = 3;  ///< 稳定该帧数后才重建
+
+    // 当一次重建检测到"有候选物体但 0 实例"（数据尚未就绪）时，不锁定签名并在
+    // 后续帧重试，直到数据就绪或达到上限后兜底接受，避免每帧空转重建。
+    uint32_t vision_rebuild_retries_{0};        ///< 数据未就绪导致的连续重试次数
+    static constexpr uint32_t kVisionRebuildMaxRetries = 30;  ///< 重试上限（约 0.5s @60fps）
 
     struct PendingScreenshot {
         std::uintptr_t camera_handle = 0;
