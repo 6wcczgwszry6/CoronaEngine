@@ -37,6 +37,13 @@ def collect_models_node(state) -> Dict[str, Any]:
                 "total_models": len(DEFAULT_MODELS),
                 "valid_models": len(DEFAULT_MODELS),
                 "skipped_models": 0,
+                "scene_name": metadata.get("scene_name", "test_scene"),
+            },
+            # test 模式下补齐 metadata，确保输出路径确定
+            "metadata": {
+                **metadata,
+                "scene_name": metadata.get("scene_name", "test_scene"),
+                "room_size": metadata.get("room_size", [5, 3, 3]),
             },
         }
         if not state.get("prompt"):

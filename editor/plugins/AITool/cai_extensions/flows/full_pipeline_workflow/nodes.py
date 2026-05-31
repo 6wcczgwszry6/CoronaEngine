@@ -23,6 +23,7 @@ from Quasar.ai_workflow.streaming import build_node_dialogue_entry
 _logger = logging.getLogger(__name__)
 
 FUNCTION_ID = 21000
+from .constants import FULL_PIPELINE_V2_FUNCTION_ID  # noqa: E402
 
 
 def _push_pipeline_progress(
@@ -138,17 +139,30 @@ def run_model_retrieval_node(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def run_scene_composition_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """阶段 3/3：场景组合，将 3D 模型导入并编排最终场景。"""
+def _resolve_composition_workflow(state: Dict[str, Any]):
+    """根据 function_id 选择场景组装版本。"""
+    fid = state.get("function_id", 0)
+    if fid == FULL_PIPELINE_V2_FUNCTION_ID:
+        from ..scene_composition_workflow_v2 import (
+            WORKFLOWS as _SC_WORKFLOWS,
+            SCENE_COMPOSITION_V2_FUNCTION_ID as _SC_FID,
+        )
+        return _SC_WORKFLOWS, _SC_FID, "v2"
     from ..scene_composition_workflow import (
         WORKFLOWS as _SC_WORKFLOWS,
-        SCENE_COMPOSITION_FUNCTION_ID,
+        SCENE_COMPOSITION_FUNCTION_ID as _SC_FID,
     )
+    return _SC_WORKFLOWS, _SC_FID, "v1"
 
-    _logger.info("[Pipeline] ▶ 阶段 3/3 scene_composition_workflow 开始")
-    _push_pipeline_progress(state, "正在进行场景布局与模型导入...", "scene_composition")
 
-    sub_state: SceneCompositionWorkflowState = _make_sub_state(state, SCENE_COMPOSITION_FUNCTION_ID)  # type: ignore[assignment]
+def run_scene_composition_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    """阶段 3/3：场景组合，将 3D 模型导入并编排最终场景。"""
+    sc_workflows, sc_fid, sc_version = _resolve_composition_workflow(state)
+
+    _logger.info("[Pipeline] ▶ 阶段 3/3 scene_composition_%s 开始", sc_version)
+    _push_pipeline_progress(state, f"正在进行场景布局与模型导入 ({sc_version})...", "scene_composition")
+
+    sub_state: SceneCompositionWorkflowState = _make_sub_state(state, sc_fid)  # type: ignore[assignment]
 
     # 优先使用 multi_scene 阶段生成的详细布局描述作为 compose prompt，
     # 其中包含每个物品的位置、风格、搭配等信息，比原始用户输入更精准。
@@ -162,12 +176,12 @@ def run_scene_composition_node(state: Dict[str, Any]) -> Dict[str, Any]:
             len(layout_text),
         )
 
-    graph = _SC_WORKFLOWS[SCENE_COMPOSITION_FUNCTION_ID]
+    graph = sc_workflows[sc_fid]
     final = graph.invoke(sub_state)
 
     scene_path = final.get("global_assets", {}).get("scene_composition", {}).get("scene_path", "")
-    _logger.info("[Pipeline] ✔ 阶段 3/3 完成，scene_path=%s", scene_path)
-    _push_pipeline_progress(state, f"场景生成完毕 ✓", "scene_composition")
+    _logger.info("[Pipeline] ✔ 阶段 3/3 (%s) 完成，scene_path=%s", sc_version, scene_path)
+    _push_pipeline_progress(state, f"场景生成完毕 ({sc_version}) ✓", "scene_composition")
 
     return {
         "global_assets": final.get("global_assets", {}),

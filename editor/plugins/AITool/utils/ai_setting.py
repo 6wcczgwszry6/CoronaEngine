@@ -10,8 +10,9 @@ try:
     @ai_entrance.collector.register_setting("chat")
     def CHAT_SETTINGS() -> Dict[str, Any]:
         return {
-            "provider": "deepseek",
-            "model": "deepseek-v4-pro",
+            "provider": "dmxapi",
+            "model": "gpt-5.5",
+            "layout_model": "o3-mini",
             "system_prompt": """你是一个 AI 助手，可以帮助用户完成各种任务。""",
         }
 
@@ -22,13 +23,19 @@ try:
                 "name": "deepseek",
                 "type": "openai-compatible",
                 "base_url": "https://api.deepseek.com/v1",
-                "api_key": "sk-68a6647098a84721bc532e6c327a1401",
+                "api_key": "sk-dac4cbc187de44c492f0344726920a7f",
             },
             {
                 "name": "grsai_image",
                 "type": "grsai",
                 "base_url": "https://grsai.dakka.com.cn/v1/api/generate",
-                "api_key": "sk-bfe3d4ab3e2a4d58b232a6f711802059",
+                "api_key": "sk-80273654ab784f109b88011c006a774d",
+            },
+            {
+                "name": "dmxapi",
+                "type": "openai-compatible",
+                "base_url": "https://www.dmxapi.cn/v1",
+                "api_key": "sk-eHsdOCb3raIkIs8IQNySuzeJXt9XsWpvbpPPvNFe2QgJqUj9",
             },
         ]
 
@@ -41,11 +48,21 @@ try:
             "base_url": "https://grsai.dakka.com.cn/v1/api/generate",
         }
 
+    @ai_entrance.collector.register_setting("omni")
+    def OMNI_SETTINGS() -> Dict[str, Any]:
+        return {
+            "enable": True,
+            "provider": "dmxapi",
+            "model": "gpt-5.5",
+            "request_timeout": 60.0,
+            "image_detail": "auto",
+        }
+
     @ai_entrance.collector.register_setting("hunyuan3d")
     def HUNYUAN_3D_SETTINGS() -> Dict[str, Any]:
         return {
             "enable": True,
-            "api_key": "sk-S9Nf0bVYBYp4FrAqSbbjqn7viE4790PaEwx9xgwaHCpwEqMh",
+            "api_key": "sk-OGJiMLkWmzdbE9r1WZ0njMWR4GbEehuxwhMA1MWQF91vx6S3",
             "region": "ap-guangzhou",
             "endpoint": "api.ai3d.cloud.tencent.com",
             "version": "pro",
@@ -57,7 +74,7 @@ try:
             "request_timeout": 300.0,
             "poll_interval": 3.0,
             "poll_timeout": 600.0,
-            "max_concurrent_generations": 3,
+            "max_concurrent_generations": 2,
         }
 
     reload_ai_config()
