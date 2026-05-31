@@ -189,7 +189,36 @@ def apply_corrections(review_result, scene):
 
 ---
 
-## 五、实施路线
+## 五、实施风险标注 ⚠️
+
+### 🔴 高风险
+
+| 风险点 | 位置 | 说明 | 缓解 |
+|--------|------|------|------|
+| **Tier1 prompt 改 relation** | `nodes_tier_place.py` TIER1_INITIAL_PROMPT | o3-mini 可能输出不合法 JSON（relation 字段拼错/缺少 target） | 先验证 3 次 LLM 输出再接入, 加 JSON schema 校验 |
+| **Constraint Solver 依赖顺序** | `constraint_solver.py` | `in_front` 的 target 可能还没放置→None→求解失败 | solver 执行前拓扑排序, 检测循环依赖 |
+| **LLM 输出 relation 不稳定** | Tier1/Tier2 prompt | 不同场景的物体名不同, LLM 可能输出不存在的 target | 强制 target 白名单校验(只允许 anchor 列表中的名字) |
+
+### 🟡 中风险
+
+| 风险点 | 位置 | 说明 | 缓解 |
+|--------|------|------|------|
+| **trimesh 不能解析所有模型** | `asset_metadata.py` | Hunyuan3D 产出的 zip/obj/glb 格式不统一, trimesh 可能失败 | try/except → fallback DEFAULT_SCALES表 |
+| **Relative Scale 需要 anchor 先有 scale** | `relative_scale.py` | 锚点本身 scale 还没定→相对计算无参照 | Tier1 先用 DEFAULT_SCALES 定锚点 scale |
+| **VLM corrections 数量爆炸** | `nodes_tier_review.py` | 8件×3retry=24次 corrections 可能冲突 | 每次只修正 problem_actors 中的物体 |
+| **Rule Correction 映射不全** | `_apply_corrections` | VLM 可能输出新 issue 不在 RULE_MAP 中 | 未知 issue → physics fallback |
+
+### 🟢 低风险
+
+| 风险点 | 说明 |
+|--------|------|
+| **现有静默吞异常(10处)** | `except Exception: pass` 可能掩盖真实 bug, 大改前应加 log.warning |
+| **GPU 崩溃** | VK_ERROR 依然可能在截图密集时出现 |
+| **物理沉降盲等** | sleep(1.2s) 不可靠, 但作为最后兜底可接受 |
+
+---
+
+## 六、实施路线
 
 ### Week 1: 基础闭环
 
