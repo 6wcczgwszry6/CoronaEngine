@@ -48,8 +48,19 @@ bool VisionOutputBridge::upload_to_hardware_image(
     for (uint64_t i = 0; i < channel_count; ++i) {
         half_data[i] = float_to_half(rgba32f_data[i]);
     }
-    if (!out_image) {
+
+    // HardwareImage does not expose its dimensions, so we track the size used to
+    // create out_image here. The image must be (re)created whenever it is null or
+    // when the requested dimensions differ from the last created ones; otherwise
+    // copyFrom() would upload width*height*4 halfs into an image of a different
+    // size (e.g. the Native-mode 1920x1080 finalOutputImage), producing a black
+    // or garbled frame when the Vision render resolution differs.
+    static uint32_t s_last_width = 0;
+    static uint32_t s_last_height = 0;
+    if (!out_image || width != s_last_width || height != s_last_height) {
         out_image = HardwareImage(width, height, ImageFormat::RGBA16_FLOAT, ImageUsage::StorageImage);
+        s_last_width = width;
+        s_last_height = height;
     }
     executor << out_image.copyFrom(half_data.data())
              << executor.commit();

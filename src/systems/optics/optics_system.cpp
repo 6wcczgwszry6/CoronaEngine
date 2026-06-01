@@ -918,9 +918,66 @@ Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene() {
     try {
         auto& scene = renderPipeline->scene();
         result = Vision::build_vision_geometry(scene);
-        scene.prepare();
 
+        // build_vision_geometry() clears and rebuilds the scene's meshes/shapes,
+        // which also tears down the light manager state established during
+        // init_vision_lazy(). If we don't re-register the lights here, the
+        // following scene.prepare() reinitialises the light sampler with a missing
+        // (or geometry-introduced area-light only) env_light_, corrupting the
+        // light sampler's env index / PMF bookkeeping and crashing the CUDA device
+        // (observed: process exit code -1 right after "Vision scene rebuilt").
+        // Mirror the initialization path: always re-inject a single Infinite sky
+        // light (+ optional point sun) from the current Corona environment so the
+        // env_light_ assignment stays valid across rebuilds.
+        Corona::EnvironmentDevice env{};
+        for (const auto& sd : SharedDataHub::instance().scene_storage()) {
+            if (!sd.enabled) continue;
+            if (sd.environment != 0) {
+                if (auto e = SharedDataHub::instance().environment_storage().acquire_read(sd.environment)) {
+                    env = *e;
+                    break;
+                }
+            }
+        }
+        Vision::setup_vision_lights(scene, env);
+
+        // A scene rebuild changes topology: new meshes, materials (and therefore
+        // new bindless texture handles) and a freshly rebuilt light manager.
+        //
+        // We must NOT call the full renderPipeline->prepare() here. That method is
+        // a one-shot initialisation path (FixedRenderPipeline::prepare() runs
+        // Pipeline::prepare() -> scene_.prepare() -> renderer_.prepare(scene_) ->
+        // image_pool().prepare() -> ...). Re-running it on an already-initialised
+        // pipeline reallocates the framebuffer / sensor / image-pool device buffers
+        // that the render loop is already holding references to, which crashes the
+        // CUDA device (observed: crash on the following prepare_view_texture()).
+        //
+        // The correct runtime update is an INCREMENTAL sequence that only refreshes
+        // the parts affected by the topology change, while leaving the framebuffer,
+        // view texture and sensor (resolution unchanged) untouched:
+        //   scene.prepare()         -> re-encode materials/sensor for the new scene
+        //   prepare_geometry()      -> rebuild geometry device buffers + accel
+        //   prepare_lights()        -> rebuild the light sampler's device buffers
+        //   upload_bindless_array() -> publish the new material texture handles
+        //   compile()               -> recompile the integrator for the new
+        //                              light/material/instance counts
+        //   invalidate()            -> reset accumulation
+        //
+        // prepare_lights() is CRITICAL: setup_vision_lights() above changed the light
+        // set, but Scene::prepare() does NOT touch the light sampler. The official init
+        // path runs renderer_.prepare(scene_) -> prepare_lights() ->
+        // light_sampler_->prepare(), which rebuilds the on-device light count / PMF /
+        // env-index buffers. Skipping it leaves the UniformLightSampler indexing a stale
+        // light buffer with the new (different) light_num(), so the very first render()
+        // after the rebuild performs an out-of-bounds GPU read and crashes the CUDA
+        // device (observed: process exit -1 right after "Vision scene rebuilt", with no
+        // "This scene contains N light types" log emitted during the rebuild).
+        // It must run AFTER prepare_geometry() because area lights reference shapes.
+        scene.prepare();
         renderPipeline->prepare_geometry();
+        renderPipeline->renderer().prepare_lights();
+        renderPipeline->upload_bindless_array();
+        renderPipeline->compile();
         renderPipeline->invalidate();
 
         CFW_LOG_INFO(
