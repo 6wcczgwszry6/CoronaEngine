@@ -51,6 +51,18 @@
         >
           <span class="select-none font-medium">模型</span>
         </div>
+
+        <!-- 时间轴标签 -->
+        <div
+          class="flex-1 px-4 py-2 cursor-pointer transition-all duration-200 ease-in-out text-center text-xs"
+          :class="{
+            'bg-[#264f78]/60 text-white border-b-2 border-[#84a65b]': mainActiveTab === 'timeline',
+            'hover:bg-[#545454] text-[#e0e0e0]': mainActiveTab !== 'timeline',
+          }"
+          @click="switchMainTab('timeline')"
+        >
+          <span class="select-none font-medium">时间轴</span>
+        </div>
       </div>
     </div>
 
@@ -634,6 +646,146 @@
             </div>
           </template>
 
+          <!-- ===== 时间轴内容 ===== -->
+          <template v-else-if="mainActiveTab === 'timeline'">
+            <div class="flex flex-col h-full bg-[#1e1e1e]">
+              <!-- 播放控制栏 -->
+              <div class="flex items-center gap-1 px-2 py-1.5 bg-[#383838] border-b border-[#555] shrink-0">
+                <div class="flex items-center gap-0.5">
+                  <button class="w-6 h-6 flex items-center justify-center rounded hover:bg-[#4a4a4a] text-[#ccc] hover:text-white transition-colors" title="跳到开始">
+                    <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+                  </button>
+                  <button class="w-6 h-6 flex items-center justify-center rounded hover:bg-[#4a4a4a] text-[#ccc] hover:text-white transition-colors" title="上一帧">
+                    <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 6h2v12H6zm4 6l8-6v12z"/></svg>
+                  </button>
+                  <button
+                    class="w-7 h-7 flex items-center justify-center rounded-full bg-[#84a65b] hover:bg-[#9bc46d] text-white transition-colors mx-0.5"
+                    :title="timelineState.playing ? '暂停' : '播放'"
+                    @click="timelineState.playing = !timelineState.playing"
+                  >
+                    <svg v-if="!timelineState.playing" class="w-3.5 h-3.5 ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                    <svg v-else class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                  </button>
+                  <button class="w-6 h-6 flex items-center justify-center rounded hover:bg-[#4a4a4a] text-[#ccc] hover:text-white transition-colors" title="下一帧">
+                    <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M16 18h2V6h-2zm-9-6l8 6V6z"/></svg>
+                  </button>
+                  <button class="w-6 h-6 flex items-center justify-center rounded hover:bg-[#4a4a4a] text-[#ccc] hover:text-white transition-colors" title="跳到结尾">
+                    <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+                  </button>
+                </div>
+                <div class="w-px h-5 bg-[#555] mx-1"></div>
+                <button
+                  class="w-6 h-6 flex items-center justify-center rounded-full transition-colors"
+                  :class="timelineState.recording ? 'bg-red-600 text-white' : 'text-red-400 hover:bg-[#4a4a4a]'"
+                  title="录制"
+                  @click="timelineState.recording = !timelineState.recording"
+                >
+                  <div class="w-2.5 h-2.5 rounded-sm" :class="timelineState.recording ? 'bg-white' : 'bg-red-400'"></div>
+                </button>
+                <div class="w-px h-5 bg-[#555] mx-1"></div>
+                <div class="flex items-center gap-1 text-xs">
+                  <span class="text-[#909090] text-[10px]">时间</span>
+                  <input type="text" :value="formatTimelineTime(timelineState.currentTime)" readonly
+                    class="w-20 bg-[#2d2d2d] text-[#e0e0e0] text-xs text-center rounded px-1 py-0.5 border border-[#555] font-mono" />
+                </div>
+                <div class="flex items-center gap-1 text-xs ml-2">
+                  <span class="text-[#909090] text-[10px]">帧</span>
+                  <input type="text" :value="timelineState.currentFrame" readonly
+                    class="w-14 bg-[#2d2d2d] text-[#e0e0e0] text-xs text-center rounded px-1 py-0.5 border border-[#555] font-mono" />
+                </div>
+                <div class="flex-1"></div>
+                <div class="flex items-center gap-1 text-xs">
+                  <span class="text-[#909090] text-[10px]">FPS</span>
+                  <select v-model="timelineState.fps"
+                    class="bg-[#2d2d2d] text-[#e0e0e0] text-xs rounded px-1 py-0.5 border border-[#555]">
+                    <option :value="24">24</option>
+                    <option :value="30">30</option>
+                    <option :value="60">60</option>
+                    <option :value="120">120</option>
+                  </select>
+                </div>
+                <div class="flex items-center gap-1 text-xs ml-2">
+                  <span class="text-[#909090] text-[10px]">总帧</span>
+                  <input type="text" :value="timelineState.totalFrames" readonly
+                    class="w-14 bg-[#2d2d2d] text-[#e0e0e0] text-xs text-center rounded px-1 py-0.5 border border-[#555] font-mono" />
+                </div>
+              </div>
+
+              <!-- 时间标尺行 -->
+              <div class="flex shrink-0 border-b border-[#444]">
+                <div class="w-32 shrink-0 bg-[#2d2d2d] border-r border-[#444] px-2 py-1">
+                  <div class="h-5"></div>
+                </div>
+                <div class="flex-1 relative bg-[#2a2a2a] h-5 overflow-hidden">
+                  <div class="absolute inset-0 flex items-end">
+                    <div v-for="tick in timelineTicks" :key="tick.time"
+                      class="absolute bottom-0 flex flex-col items-center"
+                      :style="{ left: tick.left + '%' }">
+                      <div class="h-2 w-px" :class="tick.major ? 'bg-[#888]' : 'bg-[#555]'"></div>
+                      <span v-if="tick.major" class="text-[9px] text-[#999] mt-0.5 font-mono select-none">{{ tick.label }}</span>
+                    </div>
+                  </div>
+                  <div class="absolute top-0 bottom-0 w-0.5 bg-red-500 z-10 pointer-events-none"
+                    :style="{ left: playheadPosition + '%' }">
+                    <div class="w-0 h-0 border-l-[5px] border-r-[5px] border-t-[6px] border-l-transparent border-r-transparent border-t-red-500 -ml-[4.5px]"></div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 轨道区域 -->
+              <div class="flex-1 flex overflow-auto">
+                <div class="w-32 shrink-0 bg-[#2d2d2d] border-r border-[#444]">
+                  <div v-for="track in timelineTracks" :key="track.id"
+                    class="h-10 flex items-center px-2 border-b border-[#3a3a3a] cursor-pointer hover:bg-[#3a3a3a] transition-colors select-none"
+                    :class="{ 'bg-[#3a3a3a]': timelineState.selectedTrack === track.id }"
+                    @click="timelineState.selectedTrack = track.id">
+                    <span class="text-xs mr-1.5">{{ track.icon }}</span>
+                    <span class="text-[10px] text-[#888] mr-1">{{ track.expanded ? '▼' : '▶' }}</span>
+                    <span class="text-[11px] text-[#ccc] truncate">{{ track.name }}</span>
+                  </div>
+                  <div class="h-10 flex items-center justify-center border-b border-[#3a3a3a]">
+                    <button class="text-[10px] text-[#84a65b] hover:text-[#9bc46d] hover:bg-[#3a3a3a] rounded py-1 px-2 transition-colors">＋ 添加轨道</button>
+                  </div>
+                </div>
+                <div class="flex-1 relative bg-[#1e1e1e]">
+                  <div v-for="tick in timelineTicks" :key="'g'+tick.time"
+                    class="absolute top-0 bottom-0"
+                    :class="tick.major ? 'border-l border-[#333]' : 'border-l border-[#2a2a2a]'"
+                    :style="{ left: tick.left + '%' }"></div>
+                  <div v-for="track in timelineTracks" :key="track.id"
+                    class="h-10 relative border-b border-[#2a2a2a]"
+                    :class="{ 'bg-[#252525]': timelineState.selectedTrack === track.id }">
+                    <div v-for="(clip, ci) in track.clips" :key="ci"
+                      class="absolute top-1 bottom-1 rounded-sm cursor-pointer group"
+                      :class="clipColorClass(track.type)"
+                      :style="{ left: clipTimeToPercent(clip.startFrame) + '%', width: Math.max(clipTimeToPercent(clip.durationFrames) - clipTimeToPercent(0), 1.5) + '%' }"
+                      :title="clip.name + ' (' + clip.startFrame + '-' + (clip.startFrame+clip.durationFrames) + ')'">
+                      <span class="text-[9px] text-white/90 truncate px-1 leading-6 select-none block">{{ clip.name }}</span>
+                    </div>
+                    <div v-for="(kf, ki) in track.keyframes" :key="'kf'+ki"
+                      class="absolute top-1/2 -translate-y-1/2 w-2.5 h-2.5 rotate-45 cursor-pointer z-10 hover:scale-125 transition-transform"
+                      :class="keyframeColorClass(track.type)"
+                      :style="{ left: 'calc(' + clipTimeToPercent(kf.frame) + '% - 5px)' }"
+                      :title="'帧 ' + kf.frame + ': ' + (kf.value || '')"></div>
+                  </div>
+                  <div class="absolute top-0 bottom-0 w-0.5 bg-red-500 z-20 pointer-events-none"
+                    :style="{ left: playheadPosition + '%' }"></div>
+                </div>
+              </div>
+
+              <!-- 底部状态栏 -->
+              <div class="flex items-center gap-3 px-2 py-1 bg-[#383838] border-t border-[#555] text-[10px] text-[#888] shrink-0">
+                <span>时长: {{ formatTimelineTime(timelineState.duration) }}</span>
+                <span class="w-px h-3 bg-[#555]"></span>
+                <span>帧范围: 0 - {{ timelineState.totalFrames }}</span>
+                <span class="w-px h-3 bg-[#555]"></span>
+                <span>选中: {{ timelineState.selectedTrack ? (timelineTracks.find(t => t.id === timelineState.selectedTrack) || {}).name || '-' : '-' }}</span>
+                <span class="flex-1"></span>
+                <span class="text-[#84a65b]/60">{{ timelineState.recording ? '● 录制中' : '' }}</span>
+              </div>
+            </div>
+          </template>
+
           <!-- ===== 模型内容 ===== -->
           <template v-else-if="mainActiveTab === 'model'">
             <!-- 模型 - 基础信息 -->
@@ -890,7 +1042,7 @@
 
 <script setup>
 import NumberInputWithSlider from '@/components/ui/NumberInputWithSlider.vue';
-import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue';
+import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick } from 'vue';
 import { useRoute } from 'vue-router';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import BlocklyWorkspace from '@/blockly/components/BlocklyWorkspace.vue';
@@ -932,6 +1084,117 @@ const modelTabs = [
   { id: 'Basic', label: '基础' },
   { id: 'Model', label: '模型' },
 ];
+
+// ========== 时间轴状态 ==========
+const timelineState = reactive({
+  playing: false,
+  recording: false,
+  currentTime: 1.5,
+  currentFrame: 45,
+  totalFrames: 300,
+  duration: 10.0,
+  fps: 30,
+  selectedTrack: 'track-anim',
+});
+
+const timelineTracks = reactive([
+  {
+    id: 'track-anim', name: '动画轨道', type: 'animation', icon: '🎬', expanded: true,
+    clips: [
+      { name: '行走动画', startFrame: 0, durationFrames: 90 },
+      { name: '跳跃动画', startFrame: 120, durationFrames: 45 },
+      { name: '攻击动画', startFrame: 200, durationFrames: 60 },
+    ],
+    keyframes: [
+      { frame: 0, value: 'idle' }, { frame: 30, value: 'walk_start' },
+      { frame: 60, value: 'walk_loop' }, { frame: 90, value: 'walk_end' },
+      { frame: 120, value: 'jump_start' }, { frame: 165, value: 'jump_end' },
+      { frame: 200, value: 'attack' }, { frame: 260, value: 'attack_end' },
+    ],
+  },
+  {
+    id: 'track-audio', name: '音频轨道', type: 'audio', icon: '🔊', expanded: true,
+    clips: [
+      { name: '背景音乐', startFrame: 0, durationFrames: 300 },
+      { name: '脚步声', startFrame: 30, durationFrames: 60 },
+      { name: '跳跃音效', startFrame: 120, durationFrames: 10 },
+      { name: '攻击音效', startFrame: 200, durationFrames: 15 },
+    ],
+    keyframes: [
+      { frame: 0, value: 'bgm_start' }, { frame: 120, value: 'sfx_jump' },
+      { frame: 200, value: 'sfx_attack' },
+    ],
+  },
+  {
+    id: 'track-video', name: '视频轨道', type: 'video', icon: '🎥', expanded: false,
+    clips: [
+      { name: '开场动画', startFrame: 0, durationFrames: 60 },
+      { name: '过场动画', startFrame: 180, durationFrames: 90 },
+    ],
+    keyframes: [
+      { frame: 0, value: 'intro' }, { frame: 180, value: 'cutscene' },
+    ],
+  },
+  {
+    id: 'track-keyframe', name: '关键帧轨道', type: 'keyframe', icon: '🔑', expanded: true,
+    clips: [],
+    keyframes: [
+      { frame: 0, value: 'start' }, { frame: 45, value: 'event_A' },
+      { frame: 90, value: 'event_B' }, { frame: 150, value: 'event_C' },
+      { frame: 220, value: 'event_D' }, { frame: 280, value: 'event_E' },
+    ],
+  },
+]);
+
+const timelineTicks = computed(() => {
+  const ticks = [];
+  const totalFrames = timelineState.totalFrames;
+  const fps = timelineState.fps;
+  const totalSeconds = totalFrames / fps;
+  for (let t = 0; t <= totalSeconds + 0.001; t += 0.5) {
+    const isMajor = Math.abs(Math.round(t) - t) < 0.001;
+    ticks.push({ time: t, left: (t / totalSeconds) * 100, major: isMajor, label: isMajor ? formatTimelineTime(t) : '' });
+  }
+  return ticks;
+});
+
+const playheadPosition = computed(() => {
+  if (timelineState.totalFrames <= 0) return 0;
+  return (timelineState.currentFrame / timelineState.totalFrames) * 100;
+});
+
+function formatTimelineTime(seconds) {
+  const t = Math.max(0, seconds);
+  const m = Math.floor(t / 60);
+  const s = Math.floor(t % 60);
+  const ms = Math.floor((t % 1) * 1000);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+}
+
+function clipTimeToPercent(frame) {
+  if (timelineState.totalFrames <= 0) return 0;
+  return (frame / timelineState.totalFrames) * 100;
+}
+
+function clipColorClass(type) {
+  switch (type) {
+    case 'animation': return 'bg-blue-600/70 border border-blue-400/50 hover:bg-blue-500/80';
+    case 'audio': return 'bg-green-700/70 border border-green-500/50 hover:bg-green-600/80';
+    case 'video': return 'bg-purple-700/70 border border-purple-500/50 hover:bg-purple-600/80';
+    case 'keyframe': return 'bg-yellow-600/50 border border-yellow-500/30 hover:bg-yellow-500/60';
+    default: return 'bg-gray-600/70 border border-gray-500/50';
+  }
+}
+
+function keyframeColorClass(type) {
+  switch (type) {
+    case 'animation': return 'bg-blue-400 border border-blue-200';
+    case 'audio': return 'bg-green-400 border border-green-200';
+    case 'video': return 'bg-purple-400 border border-purple-200';
+    case 'keyframe': return 'bg-yellow-400 border border-yellow-200';
+    default: return 'bg-gray-400 border border-gray-200';
+  }
+}
 
 // ========== 当前打开的文件 ==========
 const currentActorFile = ref('');
@@ -1024,6 +1287,8 @@ const currentFileInfo = computed(() => {
   } else if (mainActiveTab.value === 'actor') {
     const fileName = currentActorFile.value ? actorData.value.name : '未打开';
     return `👤 单位: ${fileName}`;
+  } else if (mainActiveTab.value === 'timeline') {
+    return `⏱ 时间轴: ${formatTimelineTime(timelineState.currentTime)} / ${formatTimelineTime(timelineState.duration)}`;
   } else {
     const fileName = currentModelFile.value ? modelData.value.name : '未打开';
     return `📦 模型: ${fileName}`;
