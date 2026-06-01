@@ -154,8 +154,47 @@ void SceneSystem::update() {
 
                 const MechanicsDevice& mechanics_dev = *mechanics_read;
                 Spatial::AABB aabb;
-                aabb.min = mechanics_dev.min_xyz;
-                aabb.max = mechanics_dev.max_xyz;
+                // 通过 geometry→transform 链条将局部AABB变换到世界空间
+                // 否则所有物体的局部包围盒挤在原点附近，八叉树剪枝完全失效
+                {
+                    auto& geom_storage = hub.geometry_storage();
+                    auto geom_read = geom_storage.try_acquire_read(mechanics_dev.geometry_handle);
+                    if (geom_read.valid()) {
+                        auto& tx_storage = hub.model_transform_storage();
+                        auto tx_read = tx_storage.try_acquire_read(geom_read->transform_handle);
+                        if (tx_read.valid()) {
+                            ktm::fmat4x4 M = tx_read->compute_matrix();
+                            const ktm::fvec3& lmin = mechanics_dev.min_xyz;
+                            const ktm::fvec3& lmax = mechanics_dev.max_xyz;
+                            const ktm::fvec3 corners[8] = {
+                                {lmin.x, lmin.y, lmin.z}, {lmax.x, lmin.y, lmin.z},
+                                {lmin.x, lmax.y, lmin.z}, {lmax.x, lmax.y, lmin.z},
+                                {lmin.x, lmin.y, lmax.z}, {lmax.x, lmin.y, lmax.z},
+                                {lmin.x, lmax.y, lmax.z}, {lmax.x, lmax.y, lmax.z},
+                            };
+                            for (int ci = 0; ci < 8; ++ci) {
+                                ktm::fvec4 wh = M * ktm::fvec4{corners[ci].x, corners[ci].y, corners[ci].z, 1.0f};
+                                ktm::fvec3 wp{wh.x, wh.y, wh.z};
+                                if (ci == 0) {
+                                    aabb.min = aabb.max = wp;
+                                } else {
+                                    aabb.min.x = std::min(aabb.min.x, wp.x);
+                                    aabb.min.y = std::min(aabb.min.y, wp.y);
+                                    aabb.min.z = std::min(aabb.min.z, wp.z);
+                                    aabb.max.x = std::max(aabb.max.x, wp.x);
+                                    aabb.max.y = std::max(aabb.max.y, wp.y);
+                                    aabb.max.z = std::max(aabb.max.z, wp.z);
+                                }
+                            }
+                        } else {
+                            aabb.min = mechanics_dev.min_xyz;
+                            aabb.max = mechanics_dev.max_xyz;
+                        }
+                    } else {
+                        aabb.min = mechanics_dev.min_xyz;
+                        aabb.max = mechanics_dev.max_xyz;
+                    }
+                }
                 octree_entries.push_back({actor_handle,aabb});
                 added_actors.insert(actor_handle);
                 break;
