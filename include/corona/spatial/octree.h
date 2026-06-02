@@ -508,11 +508,24 @@ class Octree {
                 }
             }
         }
-        // ③ 如果两个节点都是叶子 → 没有子节点可以继续比较，结束
+        // ③ A的跨面条目 vs B的深层子节点
+        for (const auto& ea : a->entries) {
+            for (const auto& cb : b->children) {
+                if (cb) query_straddle_in_subtree(ea, cb.get(), out);
+            }
+        }
+        // B的跨面条目 vs A的深层子节点
+        for (const auto& eb : b->entries) {
+            for (const auto& ca : a->children) {
+                if (ca) query_straddle_in_subtree(eb, ca.get(), out);
+            }
+        }
+
+        // ④ 如果两个节点都是叶子 → 没有子节点可以继续比较，结束
         if (a->is_leaf && b->is_leaf) return;
 
-        // ④ 根据两棵子树的结构，选择不同的递归策略
-       
+        // ⑤ 根据两棵子树的结构，选择不同的递归策略
+
         // 情况1：两边都不是叶子 → 递归比较各自子节点的所有组合
         //        （A的8个子节点 × B的8个子节点 = 最多64种组合）
         if (!a->is_leaf && !b->is_leaf) {
@@ -542,7 +555,8 @@ class Octree {
     // ============================================================================
     // collect_pairs_impl() —— 碰撞对收集的核心递归实现
     // ============================================================================
-    
+
+
     static void collect_pairs_impl(const Node* node,
                                    std::vector<std::pair<TPayload, TPayload>>& out) {
         // 空节点检查

@@ -244,6 +244,15 @@ void SceneSystem::update() {
             }
         }
 
+        // 发布粗筛碰撞候选对：SceneSystem 仅负责空间划分，不依赖物理系统
+        {
+            auto pairs = query_pairs(scene_handle);
+            if (impl_->ctx && impl_->ctx->event_bus()) {
+                impl_->ctx->event_bus()->publish(
+                    Events::BroadphasePairsEvent{scene_handle, std::move(pairs)});
+            }
+        }
+
         std::vector<std::pair<ktm::fvec3,Math::Frustum>> cameras;
         std::unordered_set<Impl::Payload> visible_actors;
         for (std::uintptr_t camera_handle : camera_handles) {
