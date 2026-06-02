@@ -118,10 +118,10 @@ void SceneSystem::update() {
             if ( !scene_read.valid() )  continue;
             actor_handles = scene_read->actor_handles;
             camera_handles = scene_read->camera_handles;
-        }
+        }//初始化scene里所有的actor和camera
 
         std::vector<typename Spatial::Octree<Impl::Payload>::Entry> octree_entries;
-        std::unordered_set<Impl::Payload> added_actors;
+        std::unordered_set<Impl::Payload> added_actors; //去重actor
         for (std::uintptr_t actor_handle : actor_handles) {
             if (added_actors.count(actor_handle)) continue;
 
@@ -129,14 +129,6 @@ void SceneSystem::update() {
             auto actor_read = actor_storage.try_acquire_read(actor_handle);
             if ( !actor_read ) continue;
             const ActorDevice& actor_dev = *actor_read;
-
-            {
-                std::unique_lock lock(impl_->mtx);
-                auto& scene_state = impl_->get_or_create(scene_handle);
-                if (!scene_state.actor_load_states.count(actor_handle)) {
-                    scene_state.actor_load_states[actor_handle] = ActorLoadState::Unloaded;
-                }
-            }
 
             for (std::uintptr_t profile_handle : actor_dev.profile_handles) {
                 auto& profile_storage = hub.profile_storage();
@@ -159,6 +151,15 @@ void SceneSystem::update() {
                 octree_entries.push_back({actor_handle,aabb});
                 added_actors.insert(actor_handle);
                 break;
+            }
+        }
+
+        // 批量初始化 Actor 加载状态（单次加锁替代逐 Actor 加锁）
+        {
+            std::unique_lock lock(impl_->mtx);
+            auto& scene_state = impl_->get_or_create(scene_handle);
+            for (auto actor_handle : added_actors) {
+                scene_state.actor_load_states.try_emplace(actor_handle, ActorLoadState::Unloaded);
             }
         }
 
@@ -220,10 +221,13 @@ void SceneSystem::update() {
             visible_actors.insert(visible_for_camera.begin(),visible_for_camera.end());
         }
 
+        // 距离剔除：Phase 1 读锁计算决策 → Phase 2 写锁应用转换
+        // 将长持锁拆分为两阶段，避免写锁阻塞其他线程的查询和事件处理
         std::vector<Events::ActorUnloadRequestedEvent> pending_unloads;
         std::vector<Events::ActorLoadRequestedEvent> pending_loads;
         {
-            std::unique_lock lock(impl_->mtx);
+            // Phase 1: shared_lock — 收集候选、计算距离、决定转换（只读不写）
+            std::shared_lock lock(impl_->mtx);
             auto& scene_state = impl_->get_or_create(scene_handle);
             if (scene_state.cfg.enable_distance_culling && !cameras.empty()) {
                 std::unordered_set<Impl::Payload> candidates;
@@ -244,58 +248,76 @@ void SceneSystem::update() {
                     }
                 }
 
-            //仅处理候选物体
-            for (auto actor : candidates) {
-                auto entry_it = scene_state.actor_to_entry.find(actor);
-                if (entry_it == scene_state.actor_to_entry.end()) {
-                    continue;
-                }
+                //仅处理候选物体
+                for (auto actor : candidates) {
+                    auto entry_it = scene_state.actor_to_entry.find(actor);
+                    if (entry_it == scene_state.actor_to_entry.end()) continue;
 
-                const auto& aabb = entry_it->second;
-                auto state_it = scene_state.actor_load_states.find(actor);
-                if (state_it == scene_state.actor_load_states.end()) {
-                    continue;
-                }
-                ActorLoadState& state = state_it->second;
+                    const auto& aabb = entry_it->second;
+                    auto state_it = scene_state.actor_load_states.find(actor);
+                    if (state_it == scene_state.actor_load_states.end()) continue;
+                    ActorLoadState state = state_it->second;  // 值拷贝，只读
 
+                    // 计算物体到最近相机的欧氏距离
+                    ktm::fvec3 center = aabb.center();
+                    float min_distance = std::numeric_limits<float>::max();
+                    for (const auto& [cam_pos,_] : cameras) {
+                        min_distance = std::min(min_distance,ktm::distance(center,cam_pos));
+                    }
 
-                // 计算物体到最近相机的欧氏距离
-                ktm::fvec3 center = aabb.center();
-                float min_distance = std::numeric_limits<float>::max();
-                for (const auto& [cam_pos,_] : cameras) {
-                    min_distance = std::min(min_distance,ktm::distance(center,cam_pos));
-                }
+                    // 状态机转换（只记录决策，不修改状态 — 由 Phase 2 统一应用）
+                    switch (state) {
+                        case ActorLoadState::Loaded:
+                            if (min_distance > scene_state.cfg.unload_distance &&
+                                !visible_actors.count(actor)) {
+                                pending_unloads.push_back({scene_handle, actor});
+                                }
+                            break;
 
-                // 状态机转换
-                switch (state) {
-                    case ActorLoadState::Loaded:
-                        // 超过卸载距离 + 不在任何相机视锥内
-                        if (min_distance > scene_state.cfg.unload_distance &&
-                            !visible_actors.count(actor)) {
-                            state = ActorLoadState::Unloading;
-                            pending_unloads.push_back({scene_handle, actor});
-                            CFW_LOG_NOTICE("[SceneSystem] Published unload request for actor {} (distance: {:.2f}m)",
-                                          actor, min_distance);
+                        case ActorLoadState::Unloaded:
+                            if (min_distance < scene_state.cfg.preload_distance) {
+                                pending_loads.push_back({scene_handle, actor});
                             }
-                        break;
+                            break;
 
-                    case ActorLoadState::Unloaded:
-                        // 进入预加载距离范围
-                        if (min_distance < scene_state.cfg.preload_distance) {
-                            state = ActorLoadState::Loading;
-                            pending_loads.push_back({scene_handle, actor});
-                            CFW_LOG_NOTICE("[SceneSystem] Published preload request for actor {} (distance: {:.2f}m)",
-                                          actor, min_distance);
-                        }
-                        break;
-
-                    case  ActorLoadState::Loading:
-                    case  ActorLoadState::Unloading:
-                        // 过渡状态不做任何操作，等待资源系统的完成事件
-                        break;
+                        default:
+                            // 过渡状态不做任何操作，等待资源系统的完成事件
+                            break;
+                    }
                 }
             }
         }
+
+        // Phase 2: unique_lock — 应用状态转换（带 TOCTOU 重校验）
+        if (!pending_unloads.empty() || !pending_loads.empty()) {
+            std::unique_lock lock(impl_->mtx);
+            auto& scene_state = impl_->get_or_create(scene_handle);
+
+            for (auto it = pending_unloads.begin(); it != pending_unloads.end(); ) {
+                auto state_it = scene_state.actor_load_states.find(it->actor);
+                if (state_it != scene_state.actor_load_states.end() &&
+                    state_it->second == ActorLoadState::Loaded) {
+                    state_it->second = ActorLoadState::Unloading;
+                    CFW_LOG_NOTICE("[SceneSystem] Published unload request for actor {} (distance culling)",
+                                  it->actor);
+                    ++it;
+                } else {
+                    it = pending_unloads.erase(it);  // 状态已被异步事件改变，取消此事件
+                }
+            }
+
+            for (auto it = pending_loads.begin(); it != pending_loads.end(); ) {
+                auto state_it = scene_state.actor_load_states.find(it->actor);
+                if (state_it != scene_state.actor_load_states.end() &&
+                    state_it->second == ActorLoadState::Unloaded) {
+                    state_it->second = ActorLoadState::Loading;
+                    CFW_LOG_NOTICE("[SceneSystem] Published preload request for actor {} (distance culling)",
+                                  it->actor);
+                    ++it;
+                } else {
+                    it = pending_loads.erase(it);
+                }
+            }
         }
         for (const auto& evt : pending_unloads) {
             if (impl_->ctx && impl_->ctx->event_bus())
@@ -491,7 +513,7 @@ void SceneSystem::on_unload_completed(const Events::ActorUnloadCompletedEvent& e
 }
 
 // ============================================================================
-// 查询接口（骨架：返回空集；保持线程安全）(已实现)
+// 查询接口
 // ============================================================================
 
 std::vector<std::uintptr_t> SceneSystem::query_aabb(
@@ -678,19 +700,30 @@ void SceneSystem::process_async_tasks() {
         bool success;
     };
 
-    std::vector<CompletedLoadTask> completed_loads;
-    std::vector<CompletedUnloadTask> completed_unloads;
+    struct DeferredLoadTask {
+        std::uintptr_t scene_handle;
+        std::uintptr_t actor;
+        std::future<std::uint64_t> future;
+    };
+    struct DeferredUnloadTask {
+        std::uintptr_t scene_handle;
+        std::uintptr_t actor;
+        std::future<bool> future;
+    };
 
+    std::vector<DeferredLoadTask> deferred_loads;
+    std::vector<DeferredUnloadTask> deferred_unloads;
+
+    // 持锁阶段只做 swap-out，不调用 future.get()，最小化锁持有时间
     {
         std::unique_lock lock(impl_->mtx);
         for (auto& [scene_handle, scene_state] : impl_->scenes) {
             auto load_it = scene_state.loading_tasks.begin();
             while (load_it != scene_state.loading_tasks.end()) {
                 if (load_it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-                    const uint64_t rid = load_it->second.get();
-                    completed_loads.push_back({scene_handle,load_it->first,rid});
+                    deferred_loads.push_back({scene_handle, load_it->first, std::move(load_it->second)});
                     load_it = scene_state.loading_tasks.erase(load_it);
-                }else {
+                } else {
                     ++load_it;
                 }
             }
@@ -698,14 +731,23 @@ void SceneSystem::process_async_tasks() {
             auto unload_it = scene_state.unloading_tasks.begin();
             while (unload_it != scene_state.unloading_tasks.end()) {
                 if (unload_it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-                    const bool success = unload_it->second.get();
-                    completed_unloads.push_back({scene_handle, unload_it->first, success});
+                    deferred_unloads.push_back({scene_handle, unload_it->first, std::move(unload_it->second)});
                     unload_it = scene_state.unloading_tasks.erase(unload_it);
                 } else {
                     ++unload_it;
                 }
             }
         }
+    }
+
+    // 无锁阶段调用 future.get()，处理结果
+    std::vector<CompletedLoadTask> completed_loads;
+    std::vector<CompletedUnloadTask> completed_unloads;
+    for (auto& task : deferred_loads) {
+        completed_loads.push_back({task.scene_handle, task.actor, task.future.get()});
+    }
+    for (auto& task : deferred_unloads) {
+        completed_unloads.push_back({task.scene_handle, task.actor, task.future.get()});
     }
 
     for (const auto& task : completed_loads) {
