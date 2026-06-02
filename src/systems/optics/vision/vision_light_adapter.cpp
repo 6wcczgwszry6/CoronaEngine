@@ -3,6 +3,7 @@
 #ifdef CORONA_ENABLE_VISION
 
 #include <cmath>
+#include <vector>
 
 #include <corona/shared_data_hub.h>
 
@@ -87,10 +88,66 @@ void setup_vision_lights(::vision::Scene& scene, const EnvironmentDevice& env) {
     sun_desc.set_value("position", ::vision::DataWrap::array({px, py, pz}));
     sun_desc.set_value("scale", sun_scale);
 
+    // -------------------------------------------------------------------------
+    // 3. Clear any previously-registered lights BEFORE re-registering.
+    //
+    //    Root cause (observed crash / no-image after a Vision scene rebuild):
+    //    LightManager::init() and add_light() are PURE APPEND operations - they
+    //    only push_back into lights_ and never clear the existing list. Calling
+    //    setup_vision_lights() again on every rebuild therefore accumulated the
+    //    lights (2 -> 4 -> 6 ...), as proven by the log going from
+    //    "1 light types with 2 light instances" (initial) to "... 4 light
+    //    instances" (after first rebuild).
+    //
+    //    Worse, each rebuild added a SECOND Infinite "spherical" light. Only the
+    //    last one becomes env_light_, leaving the previous Infinite light as an
+    //    orphan in lights_. This corrupts the light sampler's env index / PMF
+    //    bookkeeping and crashes the CUDA device - exactly the failure mode the
+    //    comment at the top of this function warns about, just triggered across
+    //    rebuilds instead of within a single call.
+    //
+    //    remove_light() erases by underlying pointer and resets env_light_ when
+    //    the removed light is the current environment, so draining the snapshot
+    //    leaves a clean slate (lights_ empty, env_light_ == nullptr).
+    // -------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // CRITICAL: only remove the lights WE previously injected (the Infinite sky
+    // env light and the non-Area point sun). We must NOT touch Area lights.
+    //
+    // build_vision_geometry() runs BEFORE this function and registers Area lights
+    // that are owned by - and back-referenced from - geometry ShapeInstances
+    // (LightManager::init() does emission->instance()->set_emission(emission), so
+    // the ShapeInstance keeps a pointer to its emission Light). If we blindly drain
+    // EVERY light here we erase those Area lights while their ShapeInstances still
+    // reference them, leaving the geometry's emission pointers dangling. The very
+    // next light_sampler_->prepare() (inside renderer().prepare_lights()) then walks
+    // an inconsistent light set whose Area entries point at freed objects, producing
+    // an out-of-bounds / use-after-free GPU access and crashing the CUDA device
+    // (observed: process exit -1 right after "task build_accel ...", with NO
+    // "This scene contains N light types" log emitted - i.e. crash inside
+    // light->prepare()).
+    //
+    // Removing only the non-Area lights still guarantees a single Infinite env_light_
+    // (avoiding the duplicate-env crash) and prevents the per-rebuild accumulation of
+    // sky/sun lights, while leaving the geometry-owned Area lights intact.
+    // -------------------------------------------------------------------------
+    auto& light_mgr = scene.light_manager();
+    {
+        std::vector<::vision::TLight> to_remove;
+        for (auto& light : light_mgr.lights()) {
+            if (!light->match(::vision::LightType::Area)) {
+                to_remove.push_back(light);
+            }
+        }
+        for (auto& light : to_remove) {
+            light_mgr.remove_light(light);
+        }
+    }
+
     // Register the single Infinite (spherical) env light through LightManager::init
     // so env_light_ is assigned exactly like a JSON-loaded scene. The point sun is
     // safe to add afterwards because it is NOT an Environment.
-    scene.light_manager().init({sky_desc});
+    light_mgr.init({sky_desc});
     scene.load_light(sun_desc);
 }
 
