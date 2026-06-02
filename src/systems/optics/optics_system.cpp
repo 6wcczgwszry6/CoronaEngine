@@ -1,4 +1,4 @@
-﻿#include <corona/events/display_system_events.h>
+#include <corona/events/display_system_events.h>
 #include <corona/events/optics_system_events.h>
 #include <corona/kernel/core/i_logger.h>
 #include <corona/kernel/event/i_event_bus.h>
@@ -12,24 +12,106 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <vector>
 
 #include "hardware.h"
 
-#undef CORONA_ENABLE_VISION
+// CORONA_ENABLE_VISION is controlled by CMake (-DCORONA_ENABLE_VISION).
+
+#define CORONA_VISION_IMPORT_DEMO
 
 #ifdef CORONA_ENABLE_VISION
 #include "base/import/importer.h"
+#include "base/import/parameter_set.h"
+#include "base/import/project_desc.h"
+#include "base/mgr/global.h"
 #include "base/mgr/pipeline.h"
+#include "base/mgr/scene.h"
+#include "base/sensor/frame_buffer.h"
+#include "base/sensor/sensor.h"
 #include "rhi/context.h"
+#include "vision/vision_geometry_adapter.h"
+#include "vision/vision_camera_adapter.h"
+#include "vision/vision_light_adapter.h"
+#include "vision/vision_output_bridge.h"
 #endif
 
 namespace {
 #ifdef CORONA_ENABLE_VISION
-HardwareBuffer importedViewBuffer;
-HardwareImage importedViewImage;
-SP<vision::Pipeline> renderPipeline;
-vision::Device visionDevice = RHIContext::instance().create_device("cuda");
+ocarina::SP<vision::Pipeline> renderPipeline;
+vision::Device* visionDevicePtr = nullptr;
+
+[[nodiscard]] auto make_default_vision_project_desc() -> vision::ProjectDesc {
+    // Each *Desc has in-class default initializers; the overridden
+    // init(const ParameterSet&) is only used for JSON-driven configuration.
+    // The ParameterSet MUST wrap an empty JSON *object* (not a default-
+    // constructed null): NodeDesc::set_parameter() asserts is_object() and the
+    // various init() helpers call ps.value("param", ...)/set_parameter(), which
+    // raise nlohmann type_errors on a null payload. Because nlohmann is built
+    // with JSON_NOEXCEPTION here, that surfaces as abort()/SIGABRT instead of a
+    // catchable std::exception, crashing before any pipeline plugin is created.
+    const vision::ParameterSet empty_ps{vision::DataWrap::object()};
+    vision::ProjectDesc project_desc;
+    project_desc.pipeline_desc.init(empty_ps);
+    project_desc.renderer_desc.sampler_desc.init(empty_ps);
+    project_desc.renderer_desc.spectrum_desc.init(empty_ps);
+    project_desc.renderer_desc.light_sampler_desc.init(empty_ps);
+    project_desc.renderer_desc.integrator_desc.init(empty_ps);
+    project_desc.renderer_desc.warper_desc.init(empty_ps);
+    project_desc.renderer_desc.render_setting.init(empty_ps);
+    project_desc.scene_desc.sensor_desc.init(empty_ps);
+    project_desc.output_desc.init(empty_ps);
+    return project_desc;
+}
+
+[[nodiscard]] auto create_vision_pipeline() -> ocarina::SP<vision::Pipeline> {
+    auto project_desc = make_default_vision_project_desc();
+    auto pipeline = vision::Node::create_shared<vision::Pipeline>(project_desc.pipeline_desc);
+    if (!pipeline) {
+        return {};
+    }
+    pipeline->init_project(project_desc);
+    pipeline->init_postprocessor(project_desc.renderer_desc.denoiser_desc);
+    pipeline->init();
+    return pipeline;
+}
+
+#ifdef CORONA_VISION_IMPORT_DEMO
+// Absolute path to a known-good Vision scene used purely to verify that the
+// Vision backend can produce a picture in isolation (i.e. without the
+// CoronaEngine->Vision scene-building adapters). Change this to point at any
+// local *.json scene. Kept as a constant so it is trivial to edit/relocate.
+constexpr const char* kVisionDemoScenePath =
+    R"(E:\CoronaExample\test_vision\render_scene\cbox\vision_scene.json)";
+
+// Loads the demo scene from disk and brings it to a renderable state, mirroring
+// the reference snippet (import_scene -> init -> prepare -> prepare_view_texture).
+// Returns an empty pointer if the file is missing or import fails so the caller
+// can skip the demo without crashing.
+[[nodiscard]] auto import_vision_demo_pipeline() -> ocarina::SP<vision::Pipeline> {
+    const std::filesystem::path scene_path{kVisionDemoScenePath};
+    std::error_code ec;
+    if (!std::filesystem::exists(scene_path, ec)) {
+        CFW_LOG_ERROR("OpticsSystem: Vision demo scene not found: {}", scene_path.string());
+        return {};
+    }
+    // Resolve relative texture/mesh references against the scene's own folder.
+    vision::Global::instance().set_scene_path(scene_path.parent_path());
+    auto pipeline = vision::Importer::import_scene(scene_path);
+    if (!pipeline) {
+        CFW_LOG_ERROR("OpticsSystem: Vision demo import_scene returned null for {}",
+                      scene_path.string());
+        return {};
+    }
+    pipeline->init();
+    pipeline->prepare();
+    // prepare() does not create FrameBuffer::view_texture_; the render path tone
+    // maps into it and we later read it back, so create it explicitly here.
+    pipeline->frame_buffer()->prepare_view_texture();
+    return pipeline;
+}
+#endif
 #endif
 }  // namespace
 
@@ -41,29 +123,8 @@ OpticsSystem::OpticsSystem() {
 OpticsSystem::~OpticsSystem() = default;
 
 bool OpticsSystem::initialize_vision_backend_if_enabled() {
-#ifdef CORONA_ENABLE_VISION
-    visionDevice.init_rtx();
-    vision::Global::instance().set_device(&visionDevice);
-    vision::Global::instance().set_scene_path("E:\\CoronaTestScenes\\test_vision\\render_scene\\kitchen");
-    auto str = "E:\\CoronaTestScenes\\test_vision\\render_scene\\kitchen\\vision_scene.json";
-    renderPipeline = vision::Importer::import_scene(str);
-    renderPipeline->init();
-    renderPipeline->prepare();
-    renderPipeline->display(1 / 30);
-
-    uint2 imageSize = renderPipeline->frame_buffer()->raytracing_resolution();
-    importedViewImage = HardwareImage(imageSize.x, imageSize.y, ImageFormat::RGBA32_FLOAT,
-                                      ImageUsage::StorageImage);
-
-    RegistrableBuffer<float4>* cudaViewBuffer = &renderPipeline->frame_buffer()->view_buffer();
-    uint64_t viewBufferHandleWin = visionDevice.export_handle(cudaViewBuffer->handle());
-
-    ExternalHandle handle;
-    handle.handle = reinterpret_cast<HANDLE>(viewBufferHandleWin);
-    importedViewBuffer = HardwareBuffer(handle, imageSize.x * imageSize.y, sizeof(float) * 4,
-                                        visionDevice.get_aligned_memory_size(cudaViewBuffer->handle()),
-                                        BufferUsage::StorageBuffer);
-#endif
+    // Vision backend is lazily initialized on first switch to Vision mode.
+    CFW_LOG_INFO("OpticsSystem: Vision backend ready for lazy init");
     return true;
 }
 
@@ -105,6 +166,7 @@ bool OpticsSystem::initialize_hardware_resources() {
         hardware_->materialTableBuffer = HardwareBuffer(
             kMaxMaterials * static_cast<uint32_t>(sizeof(Hardware::MaterialInfo)),
             BufferUsage::StorageBuffer);
+        hardware_->actorPickBuffer = HardwareBuffer(sizeof(std::uint32_t), BufferUsage::StorageBuffer);
 
         hardware_->finalOutputImage = HardwareImage(w, h, ImageFormat::RGBA16_FLOAT, ImageUsage::StorageImage);
     } catch (const std::exception&) {
@@ -122,6 +184,7 @@ bool OpticsSystem::initialize_render_pipelines() {
         hardware_->skyPipeline.emplace();
         hardware_->tonemapPipeline.emplace();
         hardware_->debugResolvePipeline.emplace();
+        hardware_->actorPickPipeline.emplace();
         hardware_->shaderHasInit = true;
         CFW_LOG_INFO(
             "OpticsSystem: VBuffer pipelines created successfully "
@@ -160,12 +223,67 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
                 std::lock_guard<std::mutex> lock(screenshot_mutex_);
                 pending_screenshots_.push_back({event.camera_handle, event.file_path, event.completion_promise});
             });
+
+        backend_switch_sub_id_ = event_bus->subscribe<Events::RenderBackendSwitchEvent>(
+            [this](const Events::RenderBackendSwitchEvent& event) {
+#ifdef CORONA_ENABLE_VISION
+                RenderBackend requested = (event.backend == static_cast<int>(RenderBackend::Vision))
+                                              ? RenderBackend::Vision
+                                              : RenderBackend::Native;
+                pending_backend_.store(static_cast<int>(requested), std::memory_order_relaxed);
+                CFW_LOG_INFO("OpticsSystem: Backend switch requested -> {}",
+                             requested == RenderBackend::Vision ? "Vision" : "Native");
+#else
+                (void)event;
+                CFW_LOG_WARNING("OpticsSystem: Backend switch ignored (CORONA_ENABLE_VISION not defined)");
+#endif
+            });
     }
 
     return true;
 }
 
 void OpticsSystem::update() {
+    // Check for pending backend switch request before executing either render path.
+    int pending = pending_backend_.load(std::memory_order_relaxed);
+    RenderBackend requested = static_cast<RenderBackend>(pending);
+    if (requested != current_backend_) {
+#ifdef CORONA_ENABLE_VISION
+        if (requested == RenderBackend::Vision) {
+            if (!init_vision_lazy()) {
+                CFW_LOG_WARNING("OpticsSystem: Vision init failed, staying on Native");
+                pending_backend_.store(static_cast<int>(RenderBackend::Native), std::memory_order_relaxed);
+            } else {
+                current_backend_ = RenderBackend::Vision;
+                CFW_LOG_INFO("OpticsSystem: Switched to Vision backend");
+            }
+        } else {
+            // 切回 Native：不要销毁 Vision pipeline / CUDA 资源。
+            // 之前在这里调用 renderPipeline.reset() 并将 vision_initialized_ 置为
+            // false，导致再次切回 Vision 时 init_vision_lazy() 重新执行
+            // create_vision_pipeline()/scene.prepare() 等重建逻辑。由于底层 CUDA
+            // device 是 function-local static（只创建一次），在残留状态上重建
+            // 会造成 CUDA 资源冲突并崩溃。改为“挂起”Vision：保留 pipeline 与
+            // vision_initialized_，仅停止渲染 Vision 帧；切回 Vision 时直接复用。
+            consecutive_vision_failures_ = 0;
+            current_backend_ = RenderBackend::Native;
+            CFW_LOG_INFO("OpticsSystem: Switched to Native backend (Vision suspended)");
+        }
+#else
+        current_backend_ = RenderBackend::Native;
+        CFW_LOG_INFO("OpticsSystem: Switched to Native backend");
+#endif
+    }
+
+#ifdef CORONA_ENABLE_VISION
+    // Vision 模式不依赖 Native 管线资源，提前进入渲染
+    if (current_backend_ == RenderBackend::Vision) {
+        static float vc = 0.f; static uint64_t vi = 0;
+        vc += delta_time(); ++vi;
+        optics_pipeline(vc, vi);
+        return;
+    }
+#endif
     if (!hardware_->shaderHasInit || !hardware_->visibilityPipeline ||
         !hardware_->lightingPipeline || !hardware_->skyPipeline || !hardware_->tonemapPipeline ||
         !hardware_->debugResolvePipeline) {
@@ -183,6 +301,16 @@ void OpticsSystem::update() {
 }
 
 void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
+#ifdef CORONA_ENABLE_VISION
+    if (current_backend_ == RenderBackend::Vision) {
+        if (vision_initialized_) {
+            run_vision_frame(frame_count, frame_index);
+        } else {
+            CFW_LOG_WARNING("OpticsSystem: Vision backend not initialized, falling back to Native");
+        }
+        return;
+    }
+#endif
     auto& visibility = *hardware_->visibilityPipeline;
     auto& lighting = *hardware_->lightingPipeline;
     auto& sky = *hardware_->skyPipeline;
@@ -210,6 +338,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 //    仅遍历本场景 actor → profile → optics，隔离多场景数据
                 // ================================================================
                 hardware_->instanceInfoData.clear();
+                hardware_->instanceActorHandles.clear();
                 hardware_->materialTableData.clear();
 
                 // Configure visibility pipeline render targets
@@ -308,6 +437,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                     inst.materialID = materialID;
                                     inst.objectID = object_id;
                                     hardware_->instanceInfoData.push_back(inst);
+                                    hardware_->instanceActorHandles.push_back(actor_handle);
                                 }
 
                                 // --- Record visibility draw call ---
@@ -452,6 +582,16 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 const uint32_t dispatchY = hardware_->gbufferSize.y / 8;
 
                 const bool is_debug_mode = camera->output_mode != CameraOutputMode::FinalColor;
+                const auto actor_pick_request = take_pending_actor_pick(cam_handle);
+
+                if (actor_pick_request) {
+                    auto& actorPick = *hardware_->actorPickPipeline;
+                    actorPick.pushConsts.pixel = ktm::uvec2{actor_pick_request->x, actor_pick_request->y};
+                    actorPick.pushConsts.visibilityImageIndex =
+                        hardware_->visibilityImage.storeDescriptor();
+                    actorPick.pushConsts.outputBufferIndex =
+                        hardware_->actorPickBuffer.storeDescriptor();
+                }
 
                 if (is_debug_mode) {
                     // ============================================================
@@ -507,7 +647,15 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                         << tonemap(dispatchX, dispatchY, 1);
                 }
 
+                if (actor_pick_request) {
+                    hardware_->executor << (*hardware_->actorPickPipeline)(1, 1, 1);
+                }
+
                 hardware_->executor << hardware_->executor.commit();
+
+                if (actor_pick_request) {
+                    complete_actor_pick(*actor_pick_request);
+                }
 
                 if (image_handle_ != 0) {
                     process_pending_screenshots(cam_handle, render_target);
@@ -529,7 +677,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 }
 
 #ifdef CORONA_ENABLE_VISION
-                // Vision backend integration placeholder (currently disabled)
+                // (Vision render path runs in run_vision_frame below)
 #endif
             }
         }
@@ -556,6 +704,60 @@ float half_to_float(uint16_t h) {
 }
 
 }  // namespace
+
+std::optional<OpticsSystem::ActorPickRequest> OpticsSystem::take_pending_actor_pick(std::uintptr_t camera_handle) {
+    std::uintptr_t pick_handle = 0;
+    if (auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(camera_handle)) {
+        pick_handle = camera->actor_pick_handle;
+    }
+    if (pick_handle == 0) {
+        return std::nullopt;
+    }
+
+    auto pick = SharedDataHub::instance().actor_pick_storage().try_acquire_write(pick_handle);
+    if (!pick || !pick->pending) {
+        return std::nullopt;
+    }
+
+    ActorPickRequest request;
+    request.pick_handle = pick_handle;
+    request.x = pick->x;
+    request.y = pick->y;
+    pick->pending = false;
+
+    if (request.x >= hardware_->gbufferSize.x || request.y >= hardware_->gbufferSize.y) {
+        pick->actor_handle = 0;
+        pick->result_x = request.x;
+        pick->result_y = request.y;
+        pick->result_ready = true;
+        return std::nullopt;
+    }
+
+    pick->result_ready = false;
+    return request;
+}
+
+void OpticsSystem::complete_actor_pick(const ActorPickRequest& request) {
+    std::uint32_t instance_id = 0;
+    if (!hardware_->actorPickBuffer.copyToData(&instance_id, sizeof(instance_id))) {
+        CFW_LOG_ERROR("OpticsSystem: Failed to read actor pick result from GPU");
+    }
+
+    std::uintptr_t actor_handle = 0;
+    if (instance_id > 0) {
+        const auto instance_index = static_cast<std::size_t>(instance_id - 1);
+        if (instance_index < hardware_->instanceActorHandles.size()) {
+            actor_handle = hardware_->instanceActorHandles[instance_index];
+        }
+    }
+
+    if (auto pick = SharedDataHub::instance().actor_pick_storage().try_acquire_write(request.pick_handle)) {
+        pick->actor_handle = actor_handle;
+        pick->result_x = request.x;
+        pick->result_y = request.y;
+        pick->result_ready = true;
+    }
+}
 
 void OpticsSystem::process_pending_screenshots(std::uintptr_t camera_handle, HardwareImage& render_target) {
     std::vector<PendingScreenshot> matched;
@@ -642,6 +844,9 @@ void OpticsSystem::shutdown() {
         if (screenshot_request_sub_id_ != 0) {
             event_bus->unsubscribe(screenshot_request_sub_id_);
         }
+        if (backend_switch_sub_id_ != 0) {
+            event_bus->unsubscribe(backend_switch_sub_id_);
+        }
     }
 
     if (image_handle_ != 0) {
@@ -654,4 +859,485 @@ void OpticsSystem::shutdown() {
 
     CFW_LOG_INFO("OpticsSystem: Hardware resources released");
 }
+#ifdef CORONA_ENABLE_VISION
+std::size_t OpticsSystem::compute_vision_scene_signature() const {
+    // Lightweight per-frame change detector. Traverses the same hierarchy as
+    // build_vision_geometry (enabled scene → actor → profile → optics → geometry)
+    // and folds the topology/transform/material-relevant fields into one hash.
+    // Any meaningful change to imported/removed geometry, transforms, material
+    // params or per-mesh color flips this signature, triggering a rebuild.
+    std::size_t sig = 0;
+    auto mix = [&sig](std::size_t v) {
+        // 64-bit hash_combine (boost-style golden ratio constant).
+        sig ^= v + 0x9e3779b97f4a7c15ULL + (sig << 6) + (sig >> 2);
+    };
+    auto mix_float = [&mix](float f) {
+        // Hash the raw bit pattern so small value changes are detected.
+        std::uint32_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(f), "float must be 32-bit");
+        std::memcpy(&bits, &f, sizeof(bits));
+        mix(static_cast<std::size_t>(bits));
+    };
+
+    auto& hub = SharedDataHub::instance();
+    auto& actor_storage = hub.actor_storage();
+    auto& profile_storage = hub.profile_storage();
+    auto& optics_storage = hub.optics_storage();
+    auto& geom_storage = hub.geometry_storage();
+    auto& transform_storage = hub.model_transform_storage();
+
+    for (const auto& scene_dev : hub.scene_storage()) {
+        if (!scene_dev.enabled) continue;
+        for (auto actor_handle : scene_dev.actor_handles) {
+            auto actor = actor_storage.try_acquire_read(actor_handle);
+            if (!actor) continue;
+            mix(static_cast<std::size_t>(actor_handle));
+            for (auto profile_handle : actor->profile_handles) {
+                auto profile = profile_storage.try_acquire_read(profile_handle);
+                if (!profile || profile->optics_handle == 0 || profile->geometry_handle == 0) continue;
+
+                auto optics = optics_storage.try_acquire_read(profile->optics_handle);
+                if (!optics) continue;
+
+                // visible toggle changes topology of the Vision scene.
+                mix(optics->visible ? 0x1u : 0x2u);
+                if (!optics->visible) continue;
+
+                // Material parameters bridged into the Vision principled BSDF.
+                mix_float(optics->metallic);
+                mix_float(optics->roughness);
+
+                auto geom = geom_storage.try_acquire_read(optics->geometry_handle);
+                if (!geom) continue;
+                mix(static_cast<std::size_t>(optics->geometry_handle));
+                mix(static_cast<std::size_t>(geom->model_resource_handle));
+                mix(geom->mesh_handles.size());
+
+                // Per-mesh material color (texture-color replacement detection).
+                for (const auto& mesh_dev : geom->mesh_handles) {
+                    mix_float(mesh_dev.materialColor[0]);
+                    mix_float(mesh_dev.materialColor[1]);
+                    mix_float(mesh_dev.materialColor[2]);
+                    mix_float(mesh_dev.materialColor[3]);
+
+                    // Mesh data readiness: for procedurally-generated geometry the
+                    // vertex/index buffers are uploaded asynchronously, so the
+                    // element count flips 0 -> N once the GPU upload completes.
+                    // Folding it into the signature makes that transition trigger
+                    // one more rebuild even though no logical field changed.
+                    const auto& vbuf = mesh_dev.vertexBuffer
+                                           ? mesh_dev.vertexBuffer
+                                           : mesh_dev.vertexStorageBuffer;
+                    mix(static_cast<std::size_t>(vbuf.getElementCount()));
+                }
+
+                // Object-to-world transform (position / rotation / scale).
+                if (auto transform = transform_storage.try_acquire_read(geom->transform_handle)) {
+                    mix_float(transform->position.x);
+                    mix_float(transform->position.y);
+                    mix_float(transform->position.z);
+                    mix_float(transform->euler_rotation.x);
+                    mix_float(transform->euler_rotation.y);
+                    mix_float(transform->euler_rotation.z);
+                    mix_float(transform->scale.x);
+                    mix_float(transform->scale.y);
+                    mix_float(transform->scale.z);
+                }
+            }
+        }
+    }
+    return sig;
+}
+
+Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene() {
+    Vision::VisionBuildResult result;
+    if (!renderPipeline) return result;
+    try {
+        auto& scene = renderPipeline->scene();
+        result = Vision::build_vision_geometry(scene);
+
+        // build_vision_geometry() clears and rebuilds the scene's meshes/shapes,
+        // which also tears down the light manager state established during
+        // init_vision_lazy(). If we don't re-register the lights here, the
+        // following scene.prepare() reinitialises the light sampler with a missing
+        // (or geometry-introduced area-light only) env_light_, corrupting the
+        // light sampler's env index / PMF bookkeeping and crashing the CUDA device
+        // (observed: process exit code -1 right after "Vision scene rebuilt").
+        // Mirror the initialization path: always re-inject a single Infinite sky
+        // light (+ optional point sun) from the current Corona environment so the
+        // env_light_ assignment stays valid across rebuilds.
+        Corona::EnvironmentDevice env{};
+        for (const auto& sd : SharedDataHub::instance().scene_storage()) {
+            if (!sd.enabled) continue;
+            if (sd.environment != 0) {
+                if (auto e = SharedDataHub::instance().environment_storage().acquire_read(sd.environment)) {
+                    env = *e;
+                    break;
+                }
+            }
+        }
+        Vision::setup_vision_lights(scene, env);
+
+        // A scene rebuild changes topology: new meshes, materials (and therefore
+        // new bindless texture handles) and a freshly rebuilt light manager.
+        //
+        // We must NOT call the full renderPipeline->prepare() here. That method is
+        // a one-shot initialisation path (FixedRenderPipeline::prepare() runs
+        // Pipeline::prepare() -> scene_.prepare() -> renderer_.prepare(scene_) ->
+        // image_pool().prepare() -> ...). Re-running it on an already-initialised
+        // pipeline reallocates the framebuffer / sensor / image-pool device buffers
+        // that the render loop is already holding references to, which crashes the
+        // CUDA device (observed: crash on the following prepare_view_texture()).
+        //
+        // The correct runtime update is an INCREMENTAL sequence that only refreshes
+        // the parts affected by the topology change, while leaving the framebuffer,
+        // view texture and sensor (resolution unchanged) untouched:
+        //   scene.prepare()         -> re-encode materials/sensor for the new scene
+        //   prepare_geometry()      -> rebuild geometry device buffers + accel
+        //   prepare_lights()        -> rebuild the light sampler's device buffers
+        //   upload_bindless_array() -> publish the new material texture handles
+        //   compile()               -> recompile the integrator for the new
+        //                              light/material/instance counts
+        //   invalidate()            -> reset accumulation
+        //
+        // prepare_lights() is CRITICAL: setup_vision_lights() above changed the light
+        // set, but Scene::prepare() does NOT touch the light sampler. The official init
+        // path runs renderer_.prepare(scene_) -> prepare_lights() ->
+        // light_sampler_->prepare(), which rebuilds the on-device light count / PMF /
+        // env-index buffers. Skipping it leaves the UniformLightSampler indexing a stale
+        // light buffer with the new (different) light_num(), so the very first render()
+        // after the rebuild performs an out-of-bounds GPU read and crashes the CUDA
+        // device (observed: process exit -1 right after "Vision scene rebuilt", with no
+        // "This scene contains N light types" log emitted during the rebuild).
+        // It must run AFTER prepare_geometry() because area lights reference shapes.
+        scene.prepare();
+        renderPipeline->prepare_geometry();
+        renderPipeline->renderer().prepare_lights();
+        renderPipeline->upload_bindless_array();
+        renderPipeline->compile();
+        renderPipeline->invalidate();
+
+        CFW_LOG_INFO(
+            "OpticsSystem: Vision scene rebuilt ({} geometry instances, {} candidates, {} skipped)",
+            result.instance_count, result.candidate_count, result.skipped_no_data);
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("OpticsSystem: Vision scene rebuild failed: {}", e.what());
+    }
+    return result;
+}
+
+void OpticsSystem::sync_vision_dynamic_scene() {
+    if (!vision_initialized_) return;
+
+    const std::size_t sig = compute_vision_scene_signature();
+
+    // Debounce: only rebuild after the signature has stayed stable for a few frames,
+    // batching bursts of edits (e.g. importing several objects) into one rebuild.
+    if (sig != vision_pending_signature_) {
+        vision_pending_signature_ = sig;
+        vision_stable_frames_ = 0;
+        vision_rebuild_retries_ = 0;  // 内容发生变化，清零重试计数
+        return;
+    }
+
+    if (sig == vision_applied_signature_) {
+        return;  // nothing changed since the last applied rebuild
+    }
+
+    if (++vision_stable_frames_ < kVisionRebuildDebounceFrames) {
+        return;  // still settling
+    }
+    vision_stable_frames_ = 0;
+
+    const Vision::VisionBuildResult result = rebuild_vision_scene();
+
+    if (result.instance_count > 0 || result.candidate_count == 0) {
+        // 重建成功，或场景本就为空（candidate_count==0 是合法的 0）：接受签名，
+        // 停止重试，避免对空场景每帧空转重建。
+        vision_applied_signature_ = sig;
+        vision_rebuild_retries_ = 0;
+    } else {
+        // 有候选物体但 0 实例 → 网格数据尚未就绪：不锁定签名，下一帧继续重试。
+        if (++vision_rebuild_retries_ >= kVisionRebuildMaxRetries) {
+            CFW_LOG_ERROR(
+                "OpticsSystem: Vision rebuild produced 0 instances from {} candidates after {} "
+                "retries; accepting empty result to avoid busy-loop",
+                result.candidate_count, vision_rebuild_retries_);
+            vision_applied_signature_ = sig;  // 兜底：达到上限后接受，停止重试
+            vision_rebuild_retries_ = 0;
+        }
+        // 否则保持 vision_applied_signature_ 不变；由于签名未变，下一帧去抖立即满足，
+        // 会再次触发 rebuild，直到数据就绪或达到上限。
+    }
+}
+
+bool OpticsSystem::init_vision_lazy() {
+    if (vision_initialized_) return true;
+    try {
+        // ocarina::Device is non-default-constructible; use auto so the type is
+        // deduced from create_device(). Function-local static ensures single init.
+        static auto s_device = ocarina::RHIContext::instance().create_device("cuda");
+        visionDevicePtr = &s_device;
+        visionDevicePtr->init_rtx();
+        vision::Global::instance().set_device(visionDevicePtr);
+        vision::Global::instance().set_scene_path(std::filesystem::current_path());
+
+#ifdef CORONA_VISION_IMPORT_DEMO
+        // Verification demo: load a known-good scene straight from disk instead of
+        // building the Vision scene from CoronaEngine data. This isolates the
+        // Vision render path so we can confirm it produces a picture at all.
+        renderPipeline = import_vision_demo_pipeline();
+        if (!renderPipeline) {
+            CFW_LOG_ERROR("OpticsSystem: Vision demo pipeline import failed");
+            return false;
+        }
+        vision_initialized_ = true;
+        CFW_LOG_INFO("OpticsSystem: Vision import-scene demo initialized successfully");
+        return true;
+#else
+        renderPipeline = create_vision_pipeline();
+        if (!renderPipeline) {
+            CFW_LOG_ERROR("OpticsSystem: Failed to create Vision pipeline without external scene import");
+            return false;
+        }
+
+        // Populate Vision scene directly from CoronaEngine scene data.
+        auto& scene = renderPipeline->scene();
+        Vision::VisionBuildResult build_result = Vision::build_vision_geometry(scene);
+        int geom_count = build_result.instance_count;
+
+        // Always inject lights. Vision's UniformLightSampler divides by light_num()
+        // and indexes the light buffer; an empty light set (no environment in the
+        // Corona scene) causes a 1/0 PMF and an out-of-bounds GPU read -> device crash.
+        // When no environment is found we fall back to a default EnvironmentDevice so
+        // the scene still receives a directional sun + sky light.
+        Corona::EnvironmentDevice env{};
+        for (const auto& sd : SharedDataHub::instance().scene_storage()) {
+            if (!sd.enabled) continue;
+            if (sd.environment != 0) {
+                if (auto e = SharedDataHub::instance().environment_storage().acquire_read(sd.environment)) {
+                    env = *e;
+                    break;
+                }
+            }
+        }
+        Vision::setup_vision_lights(scene, env);
+
+        CFW_LOG_INFO("OpticsSystem: Vision adapters finished ({} geometry instances)", geom_count);
+
+        renderPipeline->prepare();
+
+        // Pipeline::prepare() allocates the internal per-pixel device buffers but
+        // does NOT create FrameBuffer::view_texture_ (only prepare_view_texture()
+        // does). The render path tone-maps into view_texture_ and we later read it
+        // via fill_window_buffer(view_texture()). Without this the first frame uses
+        // an uninitialized texture. The official vision-gui/vision-eval apps also
+        // call prepare_view_texture() right after prepare().
+        renderPipeline->frame_buffer()->prepare_view_texture();
+
+
+        // sensor->update_device_data()/change_resolution()/invalidate(), all of
+        // which upload to GPU device buffers. Those device buffers are only
+        // allocated during Pipeline::prepare() (Scene::prepare -> Sensor::prepare
+        // -> EncodedObject::prepare_data -> reset_device_buffer). Running it
+        // before prepare() uploads into unallocated device memory and crashes the
+        // CUDA device deterministically.
+        for (const auto& sd : SharedDataHub::instance().scene_storage()) {
+            if (!sd.enabled) continue;
+            if (sd.camera_handles.empty()) continue;
+            auto camera = SharedDataHub::instance().camera_storage().acquire_read(sd.camera_handles.front());
+            if (!camera) continue;
+            Vision::sync_vision_camera(*renderPipeline, *camera);
+            break;
+        }
+
+        vision_initialized_ = true;
+
+        // Establish the dynamic-scene signature baseline so subsequent edits are
+        // detected as changes against the initially-built scene.
+        vision_applied_signature_ = compute_vision_scene_signature();
+        vision_pending_signature_ = vision_applied_signature_;
+        vision_stable_frames_ = 0;
+
+        CFW_LOG_INFO("OpticsSystem: Vision backend initialized successfully");
+        return true;
+#endif  // CORONA_VISION_IMPORT_DEMO
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("OpticsSystem: Vision init failed: {}", e.what());
+        return false;
+    }
+}
+
+void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
+    if (!renderPipeline) return;
+
+#ifndef CORONA_VISION_IMPORT_DEMO
+    // Detect and apply dynamic scene changes (object import/export, transform,
+    // material params, per-mesh color) before rendering this frame.
+    sync_vision_dynamic_scene();
+#endif
+
+    // [VDIAG-B0] Entry/loop probe: tells apart "run_vision_frame never iterates a
+    // camera" (no enabled scene / empty camera_handles -> nothing rendered -> black)
+    // from "renders but is not displayed". Rate-limited to once per 120 frames.
+    //bool vdiag_rendered_any = false;
+
+    for (const auto& scene : SharedDataHub::instance().scene_storage()) {
+        if (!scene.enabled) continue;
+        for (auto cam_handle : scene.camera_handles) {
+            auto camera = SharedDataHub::instance().camera_storage().acquire_read(cam_handle);
+            if (!camera) continue;
+            try {
+                // [VDIAG-B2] Bracket the CUDA calls so an exit-code crash can be pinned
+                // to the exact stage (sync_vision_camera vs render vs readback). The
+                // process exited -1 right after "Vision scene rebuilt", so we want to
+                // know whether the first render() after a rebuild is the crash site.
+                //if ((frame_index % 120) == 0) {
+                //    CFW_LOG_INFO("OpticsSystem: [VDIAG-B2] frame={} stage=sync_camera cam={}",
+                //                 frame_index, cam_handle);
+                //}
+                #ifndef CORONA_VISION_IMPORT_DEMO
+                                Vision::sync_vision_camera(*renderPipeline, *camera);
+                #endif
+                 /*               if ((frame_index % 120) == 0) {
+                                    CFW_LOG_INFO("OpticsSystem: [VDIAG-B2] frame={} stage=render begin", frame_index);
+                                }*/
+                                // IMPORTANT: render() only RECORDS commands into the Vision
+                                // stream (the default, non-profiling submit path does NOT
+                                // synchronize/commit). Downloading view_texture() right after a
+                                // bare render() therefore reads stale (black) GPU memory.
+                                // Use the full pipeline lifecycle instead:
+                                //   upload_data() -> display(dt)
+                                // display() runs before_render -> render -> commit_command
+                                // (which performs synchronize() + commit()) -> after_render,
+                                // matching the reference apps (vision-gui / vision-eval).
+                                renderPipeline->upload_data();
+                                renderPipeline->display(1.0 / 60.0);
+                //vdiag_rendered_any = true;
+                //if ((frame_index % 120) == 0) {
+                //    CFW_LOG_INFO("OpticsSystem: [VDIAG-B2] frame={} stage=render done", frame_index);
+                //}
+
+                auto* fb = renderPipeline->frame_buffer();
+                auto res = fb->raytracing_resolution();  // ocarina::uint2
+                uint32_t w = res.x;
+                uint32_t h = res.y;
+
+                // [MANUAL-READBACK] Manually expand fill_window_buffer() for debuggability.
+                // fill_window_buffer() internally does:
+                //     view_texture_.download_immediately(window_buffer_.data());
+                //     visualizer_->draw(window_buffer_.data());   // overlays (gizmos etc.)
+                // Here we download view_texture() directly into a locally-owned buffer and
+                // SKIP visualizer_->draw(), so the bytes we inspect/upload are exactly the
+                // raytraced + tone-mapped final picture (mirrors the reference snippet's
+                // view_buffer()/download_immediately() flow, since this workspace's Vision
+                // FrameBuffer exposes view_texture() rather than view_buffer()).
+                // view_texture() holds the FINAL tone-mapped color (see render_final()).
+                const ocarina::Texture2D& view_tex = fb->view_texture();
+                const uint64_t pixel_count = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
+                // vision_readback_buffer_ is a flat std::vector<float> (4 floats = 1 RGBA pixel),
+                // owned by this system to avoid leaking ocarina::float4 into the public header.
+                vision_readback_buffer_.resize(pixel_count * 4ull);
+                view_tex.download_immediately(
+                    reinterpret_cast<ocarina::float4*>(vision_readback_buffer_.data()));
+                const auto& wbuf = vision_readback_buffer_;
+                static_assert(sizeof(wbuf[0]) == sizeof(float),
+                    "vision_readback_buffer_ must be a flat float buffer (4 floats per pixel)");
+
+                // Upload the REAL tone-mapped Vision pixels to the display image.
+                hardware_->executor << hardware_->finalOutputImage.copyFrom(vision_readback_buffer_.data())
+                                    << hardware_->executor.commit();
+
+                last_render_cam_handle_ = cam_handle;
+                consecutive_vision_failures_ = 0;
+                has_last_vision_frame_ = true;
+                last_vision_frame_width_ = w;
+                last_vision_frame_height_ = h;
+
+                
+                if (image_handle_ != 0) {
+                    if (camera->surface != nullptr) {
+                        if (auto image_device = SharedDataHub::instance().image_storage().acquire_write(image_handle_)) {
+                            image_device->image = hardware_->finalOutputImage;
+                            image_device->executor = hardware_->executor;
+                        }
+
+                        if (auto* event_bus = context()->event_bus()) {
+                            event_bus->publish<Events::OpticsFrameReadyEvent>({camera->surface,
+                                                                               image_handle_,
+                                                                               frame_index,
+                                                                               hardware_->gbufferSize.x,
+                                                                               hardware_->gbufferSize.y});
+                        }
+                    }
+                }
+
+                // [VDIAG-B1] Publish-gate probe: an offscreen camera (surface==nullptr)
+                // or a zero image_handle silently skips the OpticsFrameReadyEvent and the
+                // frame never reaches DisplaySystem -> black screen. Gated the same way as
+                // [DIAG] so it keeps reporting after a project/scene is loaded.
+                //{
+                //    static uint32_t s_b1_count = 0;
+                //    static uint32_t s_b1_w = 0, s_b1_h = 0;
+                //    const bool b1_dim_changed = (w != s_b1_w || h != s_b1_h);
+                //    if (b1_dim_changed) { s_b1_w = w; s_b1_h = h; s_b1_count = 0; }
+                //    if (s_b1_count < 5 || (frame_index % 120) == 0) {
+                //        ++s_b1_count;
+                //        CFW_LOG_INFO(
+                //            "OpticsSystem: [VDIAG-B1] publish-gate: image_handle={} surface={} frame={} {}x{}",
+                //            image_handle_, static_cast<const void*>(camera->surface), frame_index, w, h);
+                //    }
+                //}
+
+                //if (image_handle_ != 0 && camera->surface != nullptr) {
+                //    if (auto image_device = SharedDataHub::instance().image_storage().acquire_write(image_handle_)) {
+                //        image_device->image = vision_output_image_;
+                //        image_device->executor = hardware_->executor;
+                //    }
+                //    if (auto* event_bus = context()->event_bus()) {
+                //        event_bus->publish<Events::OpticsFrameReadyEvent>(
+                //            {camera->surface, image_handle_, frame_index, w, h});
+                //    }
+                //} else if ((frame_index % 120) == 0) {
+                //    // [VDIAG-B1b] Publish was SKIPPED. This is the prime suspect for a
+                //    // black screen: the frame is rendered+uploaded but never published to
+                //    // DisplaySystem because the handle/surface gate failed.
+                //    CFW_LOG_WARNING(
+                //        "OpticsSystem: [VDIAG-B1b] publish SKIPPED frame={} image_handle={} surface={}",
+                //        frame_index, image_handle_, static_cast<const void*>(camera->surface));
+                //}
+            } catch (const std::exception& e) {
+                //++consecutive_vision_failures_;
+                //CFW_LOG_ERROR("OpticsSystem: Vision frame failed: {}", e.what());
+                //if (consecutive_vision_failures_ >= 3) {
+                //    CFW_LOG_WARNING("OpticsSystem: Vision backend failed {} consecutive frames; manual fallback to native is recommended",
+                //                    consecutive_vision_failures_);
+                //}
+                //if (has_last_vision_frame_ && image_handle_ != 0 && camera->surface != nullptr) {
+                //    if (auto* event_bus = context()->event_bus()) {
+                //        event_bus->publish<Events::OpticsFrameReadyEvent>({
+                //            camera->surface,
+                //            image_handle_,
+                //            frame_index,
+                //            last_vision_frame_width_,
+                //            last_vision_frame_height_});
+                //    }
+                //}
+            }
+            break; // process first camera only for Vision
+        }
+        break; // process first scene only for Vision
+    }
+
+    // [VDIAG-B0] If no enabled scene/camera was iterated, run_vision_frame produced
+    // nothing this frame. A persistent "rendered=false" while in Vision mode means the
+    // scene/camera storage is empty or all scenes are disabled -> guaranteed black.
+    //if (!vdiag_rendered_any && (frame_index % 120) == 0) {
+    //    CFW_LOG_WARNING(
+    //        "OpticsSystem: [VDIAG-B0] frame={} rendered NO camera (no enabled scene or empty camera_handles)",
+    //        frame_index);
+    //}
+}
+#endif  // CORONA_ENABLE_VISION
+
 }  // namespace Corona::Systems

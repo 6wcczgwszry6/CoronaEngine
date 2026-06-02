@@ -178,24 +178,11 @@ void BindAll(nanobind::module_& m) {
         .def("set_volume", &Acoustics::set_volume, nb::arg("volume"),
              "Set audio volume")
         .def("get_volume", &Acoustics::get_volume,
-             "Get audio volume");
-
-    // ============================================================================
-    // Kinematics: 运动学/动画组件
-    // ============================================================================
-    nb::class_<Kinematics>(m, "Kinematics")
-        .def(nb::init<Geometry&>(), nb::arg("geometry"),
-             "Create a Kinematics component attached to a Geometry")
-        .def("set_animation", &Kinematics::set_animation, nb::arg("animation_index"),
-             "Set active animation by index")
-        .def("play_animation", &Kinematics::play_animation, nb::arg("speed") = 1.0f,
-             "Play the current animation at specified speed")
-        .def("stop_animation", &Kinematics::stop_animation,
-             "Stop the current animation")
-        .def("get_animation_index", &Kinematics::get_animation_index,
-             "Get current animation index")
-        .def("get_current_time", &Kinematics::get_current_time,
-             "Get current animation time");
+             "Get audio volume")
+        .def("set_audio_enabled", &Acoustics::set_audio_enabled, nb::arg("enabled"),
+             "Enable or disable audio for this object")
+        .def("get_audio_enabled", &Acoustics::get_audio_enabled,
+             "Get whether audio is enabled for this object");
 
     // ============================================================================
     // Actor: OOP 风格的实体类，支持多套组件配置（Profile）
@@ -205,7 +192,6 @@ void BindAll(nanobind::module_& m) {
         .def_rw("optics", &Actor::Profile::optics, "Optics component")
         .def_rw("acoustics", &Actor::Profile::acoustics, "Acoustics component")
         .def_rw("mechanics", &Actor::Profile::mechanics, "Mechanics component")
-        .def_rw("kinematics", &Actor::Profile::kinematics, "Kinematics component")
         .def_rw("geometry", &Actor::Profile::geometry, "Geometry anchor");
 
     nb::class_<Actor>(m, "Actor")
@@ -379,6 +365,16 @@ void BindAll(nanobind::module_& m) {
               } else {
                   PY_LOG_INFO("{}", message.c_str());  // Default to INFO
               } }, nb::arg("level"), nb::arg("message"), "Send a log message to the engine logger with specified level");
+
+    // ============================================================================
+    // Render backend control (Native vs Vision)
+    // ============================================================================
+    m.def("is_vision_available", &is_vision_available,
+          "Return True if the engine was compiled with Vision (CORONA_ENABLE_VISION) support");
+    m.def("set_render_backend", &set_render_backend, nb::arg("mode"),
+          "Request a render backend switch. mode: 'native' or 'vision'. Only effective when Vision is available.");
+    m.def("get_render_backend", &get_render_backend,
+          "Get the currently requested render backend as 'native' or 'vision'");
 
 }
 

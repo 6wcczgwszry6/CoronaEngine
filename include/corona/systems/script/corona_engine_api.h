@@ -46,7 +46,6 @@ class Geometry {
     friend class Mechanics;
     friend class Optics;
     friend class Acoustics;
-    friend class Kinematics;
 
    protected:
     [[nodiscard]] std::uintptr_t get_handle() const;
@@ -161,6 +160,8 @@ class Acoustics {
 
     void set_volume(float volume);
     [[nodiscard]] float get_volume() const;
+    void set_audio_enabled(bool enabled);
+    [[nodiscard]] bool get_audio_enabled() const;
 
    private:
     friend class Actor;
@@ -170,31 +171,6 @@ class Acoustics {
 
     Geometry* geometry_;
     std::uintptr_t handle_{};
-};
-
-// ============================================================================
-// Kinematics: 运动学组件，依赖 Geometry
-// ============================================================================
-class Kinematics {
-   public:
-    explicit Kinematics(Geometry& geo);
-    ~Kinematics();
-
-    void set_animation(std::uint32_t animation_index);
-    void play_animation(float speed = 1.0f);
-    void stop_animation();
-
-    [[nodiscard]] std::uint32_t get_animation_index() const;
-    [[nodiscard]] float get_current_time() const;
-
-   private:
-    friend class Actor;
-
-    [[nodiscard]] std::uintptr_t get_handle() const;
-    [[nodiscard]] Geometry* get_geometry() const;
-
-    Geometry* geometry_;
-    std::uintptr_t handle_{0};
 };
 
 // ============================================================================
@@ -209,7 +185,6 @@ class Actor {
         Optics* optics{nullptr};
         Acoustics* acoustics{nullptr};
         Mechanics* mechanics{nullptr};
-        Kinematics* kinematics{nullptr};
         Geometry* geometry{nullptr};
     };
 
@@ -276,7 +251,7 @@ class Camera {
 
     void set_size(int width, int height);
     void set_viewport_rect(int x, int y, int width, int height);
-    void pick_actor_at_pixel(int x, int y) const;
+    [[nodiscard]] std::uintptr_t pick_actor_at_pixel(int x, int y) const;
 
    private:
     friend class Scene;
@@ -373,5 +348,19 @@ class Scene {
 // ============================================================================
 Scene* read_scene(const std::filesystem::path& scene_path);
 void write_scene(Scene* scene, const std::filesystem::path& scene_path);
+
+// ============================================================================
+// Render backend control (Native vs Vision)
+// ============================================================================
+/// 是否在编译期启用了 Vision 后端（CORONA_ENABLE_VISION）。
+[[nodiscard]] bool is_vision_available();
+
+/// 请求切换光学渲染后端。mode: "native" 或 "vision"。
+/// 仅当 is_vision_available() 为 true 时生效，否则被忽略。
+void set_render_backend(const std::string& mode);
+
+/// 获取当前请求的渲染后端，返回 "native" 或 "vision"。
+[[nodiscard]] std::string get_render_backend();
+
 }  // namespace API
 }  // namespace Corona

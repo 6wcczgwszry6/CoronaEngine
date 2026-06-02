@@ -7,6 +7,7 @@
 #include <corona/resource/types/scene.h>
 #include <corona/shared_data_hub.h>
 #include <corona/systems/script/corona_engine_api.h>
+#include <corona/systems/optics/optics_system.h>
 #include <corona/utils/path_utils.h>
 
 #include <algorithm>
@@ -1309,55 +1310,32 @@ float Corona::API::Acoustics::get_volume() const {
     return result;
 }
 
+void Corona::API::Acoustics::set_audio_enabled(bool enabled) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Acoustics::set_audio_enabled] Invalid acoustics handle");
+        return;
+    }
+
+    if (auto accessor = SharedDataHub::instance().acoustics_storage().acquire_write(handle_)) {
+        accessor->audio_enabled = enabled;
+    } else {
+        CFW_LOG_ERROR("[Acoustics::set_audio_enabled] Failed to acquire write access to acoustics storage");
+    }
+}
+
+bool Corona::API::Acoustics::get_audio_enabled() const {
+    if (handle_ == 0) return true;
+    if (auto accessor = SharedDataHub::instance().acoustics_storage().try_acquire_read(handle_)) {
+        return accessor->audio_enabled;
+    }
+    return true;
+}
+
 std::uintptr_t Corona::API::Acoustics::get_handle() const {
     return handle_;
 }
 
 Corona::API::Geometry* Corona::API::Acoustics::get_geometry() const {
-    return geometry_;
-}
-
-// ########################
-//       Kinematics
-// ########################
-Corona::API::Kinematics::Kinematics(Geometry& geo)
-    : geometry_(&geo), handle_(0) {
-    handle_ = SharedDataHub::instance().kinematics_storage().allocate();
-}
-
-Corona::API::Kinematics::~Kinematics() {
-    if (handle_ != 0) {
-        SharedDataHub::instance().kinematics_storage().deallocate(handle_);
-    }
-}
-
-void Corona::API::Kinematics::set_animation(std::uint32_t animation_index) {
-    CFW_LOG_WARNING("[Kinematics::set_animation] Not implemented yet");
-}
-
-void Corona::API::Kinematics::play_animation(float speed) {
-    CFW_LOG_WARNING("[Kinematics::play_animation] Not implemented yet");
-}
-
-void Corona::API::Kinematics::stop_animation() {
-    CFW_LOG_WARNING("[Kinematics::stop_animation] Not implemented yet");
-}
-
-std::uint32_t Corona::API::Kinematics::get_animation_index() const {
-    CFW_LOG_WARNING("[Kinematics::get_animation_index] Not implemented yet");
-    return 0;
-}
-
-float Corona::API::Kinematics::get_current_time() const {
-    CFW_LOG_WARNING("[Kinematics::get_current_time] Not implemented yet");
-    return 0.0f;
-}
-
-std::uintptr_t Corona::API::Kinematics::get_handle() const {
-    return handle_;
-}
-
-Corona::API::Geometry* Corona::API::Kinematics::get_geometry() const {
     return geometry_;
 }
 
@@ -1396,11 +1374,6 @@ Corona::API::Actor::Profile* Corona::API::Actor::add_profile(const Profile& prof
         return nullptr;
     }
 
-    if (profile.kinematics && profile.kinematics->geometry_ != profile.geometry) {
-        CFW_LOG_CRITICAL("[Actor::add_profile] Kinematics references a different Geometry");
-        return nullptr;
-    }
-
     std::uintptr_t profile_handle = next_profile_handle_++;
     profiles_[profile_handle] = profile;
 
@@ -1415,7 +1388,6 @@ Corona::API::Actor::Profile* Corona::API::Actor::add_profile(const Profile& prof
         p->optics_handle = profile.optics ? profile.optics->get_handle() : 0;
         p->acoustics_handle = profile.acoustics ? profile.acoustics->get_handle() : 0;
         p->mechanics_handle = profile.mechanics ? profile.mechanics->get_handle() : 0;
-        p->kinematics_handle = profile.kinematics ? profile.kinematics->get_handle() : 0;
         p->geometry_handle = 0;
     } else {
         CFW_LOG_ERROR("[Actor::add_profile] Failed to acquire write access to profile storage");
@@ -1458,10 +1430,6 @@ void Corona::API::Actor::remove_profile(const Profile* profile) {
     auto it = profiles_.find(profile_handle);
     if (it == profiles_.end()) {
         return;
-    }
-
-    if (it->second.kinematics) {
-        it->second.kinematics->stop_animation();
     }
 
     profiles_.erase(it);
@@ -1533,16 +1501,22 @@ Corona::API::Camera::Camera()
 
     float fov = 45.0f;
 
+    auto actor_pick_handle = SharedDataHub::instance().actor_pick_storage().allocate();
     handle_ = SharedDataHub::instance().camera_storage().allocate();
     if (auto accessor = SharedDataHub::instance().camera_storage().acquire_write(handle_)) {
         accessor->position = pos_vec;
         accessor->forward = fwd_vec;
         accessor->world_up = up_vec;
         accessor->fov = fov;
+        accessor->width = static_cast<std::uint32_t>(width_);
+        accessor->height = static_cast<std::uint32_t>(height_);
+        accessor->aspect = static_cast<float>(width_) / static_cast<float>(height_);
         accessor->surface = get_default_surface();
+        accessor->actor_pick_handle = actor_pick_handle;
     } else {
         CFW_LOG_ERROR("[Camera::Camera] Failed to acquire write access to camera storage");
         SharedDataHub::instance().camera_storage().deallocate(handle_);
+        SharedDataHub::instance().actor_pick_storage().deallocate(actor_pick_handle);
         handle_ = 0;
     }
 }
@@ -1564,22 +1538,33 @@ Corona::API::Camera::Camera(const std::array<float, 3>& position, const std::arr
     up_vec.y = world_up[1];
     up_vec.z = world_up[2];
 
+    auto actor_pick_handle = SharedDataHub::instance().actor_pick_storage().allocate();
     handle_ = SharedDataHub::instance().camera_storage().allocate();
     if (auto accessor = SharedDataHub::instance().camera_storage().acquire_write(handle_)) {
         accessor->position = pos_vec;
         accessor->forward = fwd_vec;
         accessor->world_up = up_vec;
         accessor->fov = fov;
+        accessor->width = static_cast<std::uint32_t>(width_);
+        accessor->height = static_cast<std::uint32_t>(height_);
+        accessor->aspect = static_cast<float>(width_) / static_cast<float>(height_);
         accessor->surface = get_default_surface();
+        accessor->actor_pick_handle = actor_pick_handle;
     } else {
         CFW_LOG_ERROR("[Camera::Camera] Failed to acquire write access to camera storage");
         SharedDataHub::instance().camera_storage().deallocate(handle_);
+        SharedDataHub::instance().actor_pick_storage().deallocate(actor_pick_handle);
         handle_ = 0;
     }
 }
 
 Corona::API::Camera::~Camera() {
     if (handle_) {
+        if (auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(handle_)) {
+            if (camera->actor_pick_handle != 0) {
+                SharedDataHub::instance().actor_pick_storage().deallocate(camera->actor_pick_handle);
+            }
+        }
         SharedDataHub::instance().camera_storage().deallocate(handle_);
         handle_ = 0;
     }
@@ -1611,6 +1596,7 @@ void Corona::API::Camera::set(const std::array<float, 3>& position, const std::a
         accessor->forward = fwd_vec;
         accessor->world_up = up_vec;
         accessor->fov = fov;
+        accessor->aspect = static_cast<float>(width_) / static_cast<float>(height_);
     } else {
         CFW_LOG_ERROR("[Camera::set] Failed to acquire write access to camera storage");
     }
@@ -1856,6 +1842,14 @@ void Corona::API::Camera::set_size(int width, int height) {
 
     width_ = width;
     height_ = height;
+
+    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_write(handle_)) {
+        accessor->width = static_cast<std::uint32_t>(width_);
+        accessor->height = static_cast<std::uint32_t>(height_);
+        accessor->aspect = static_cast<float>(width_) / static_cast<float>(height_);
+    } else {
+        CFW_LOG_ERROR("[Camera::set_size] Failed to acquire write access to camera storage");
+    }
 }
 
 void Corona::API::Camera::set_viewport_rect(int x, int y, int width, int height) {
@@ -1863,9 +1857,42 @@ void Corona::API::Camera::set_viewport_rect(int x, int y, int width, int height)
     CFW_LOG_WARNING("[Camera::set_viewport_rect] Not implemented yet");
 }
 
-void Corona::API::Camera::pick_actor_at_pixel(int x, int y) const {
-    // TODO: Implement pixel picking for actor selection
-    CFW_LOG_WARNING("[Camera::pick_actor_at_pixel] Not implemented yet");
+std::uintptr_t Corona::API::Camera::pick_actor_at_pixel(int x, int y) const {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Camera::pick_actor_at_pixel] Invalid camera handle");
+        return 0;
+    }
+
+    if (x < 0 || y < 0) {
+        return 0;
+    }
+
+    std::uintptr_t actor_pick_handle = 0;
+    if (auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(handle_)) {
+        actor_pick_handle = camera->actor_pick_handle;
+    }
+    if (actor_pick_handle == 0) {
+        return 0;
+    }
+
+    auto pick = SharedDataHub::instance().actor_pick_storage().try_acquire_write(actor_pick_handle);
+    if (!pick) {
+        return 0;
+    }
+
+    const auto ux = static_cast<std::uint32_t>(x);
+    const auto uy = static_cast<std::uint32_t>(y);
+    const std::uintptr_t completed_actor =
+        (pick->result_ready && pick->result_x == ux && pick->result_y == uy)
+            ? pick->actor_handle
+            : 0;
+
+    pick->x = ux;
+    pick->y = uy;
+    pick->pending = true;
+    pick->result_ready = false;
+
+    return completed_actor;
 }
 
 namespace Corona::API {
@@ -1880,6 +1907,43 @@ void set_default_surface(void* surface) {
 
 void* get_default_surface() {
     return g_default_surface.load(std::memory_order_relaxed);
+}
+
+bool is_vision_available() {
+#ifdef CORONA_ENABLE_VISION
+    return true;
+#else
+    return false;
+#endif
+}
+
+namespace {
+// Tracks the last requested backend so get_render_backend() can report UI state
+// without reaching into the OpticsSystem render thread. 0 = Native, 1 = Vision.
+#ifdef CORONA_ENABLE_VISION
+std::atomic<int> g_requested_backend{1};
+#else
+std::atomic<int> g_requested_backend{0};
+#endif
+}  // namespace
+
+void set_render_backend(const std::string& mode) {
+    if (!is_vision_available()) {
+        CFW_LOG_WARNING("[set_render_backend] Vision not compiled in; request ignored");
+        return;
+    }
+
+    int backend = (mode == "vision") ? 1 : 0;
+    g_requested_backend.store(backend, std::memory_order_relaxed);
+
+    if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
+        event_bus->publish<Events::RenderBackendSwitchEvent>({backend});
+        CFW_LOG_INFO("[set_render_backend] Requested backend: {}", backend == 1 ? "vision" : "native");
+    }
+}
+
+std::string get_render_backend() {
+    return g_requested_backend.load(std::memory_order_relaxed) == 1 ? "vision" : "native";
 }
 
 }  // namespace Corona::API

@@ -527,6 +527,7 @@
                           type="radio"
                           value="none"
                           class="rounded bg-[#1a1a1a] border-[#3c3c3c] checked:bg-[#84a65b]"
+                          @change="updateActorCollision"
                         />
                         <span>无</span>
                       </label>
@@ -536,6 +537,7 @@
                           type="radio"
                           value="box"
                           class="rounded bg-[#1a1a1a] border-[#3c3c3c] checked:bg-[#84a65b]"
+                          @change="updateActorCollision"
                         />
                         <span>包围盒</span>
                       </label>
@@ -545,6 +547,7 @@
                           type="radio"
                           value="mesh"
                           class="rounded bg-[#1a1a1a] border-[#3c3c3c] checked:bg-[#84a65b]"
+                          @change="updateActorCollision"
                         />
                         <span>网格</span>
                       </label>
@@ -606,6 +609,19 @@
                 class="bg-[#3c3c3c]/50 p-4 rounded text-center text-[#909090] text-[10px]"
               >
                 请先选择模型文件
+              </div>
+            </div>
+
+            <!-- 单位 - 积木 -->
+            <div v-show="ActiveSubTab === 'Blockly'" style="height: 400px;">
+              <BlocklyWorkspace
+                v-if="actorData.name"
+                :actorName="actorData.name"
+                :sceneName="actorData.parentScene || sceneData.name"
+                embedded
+              />
+              <div v-else class="flex items-center justify-center h-full text-[#909090] text-xs">
+                请先选中一个物体
               </div>
             </div>
 
@@ -812,6 +828,7 @@
                         type="radio"
                         value="none"
                         class="rounded bg-[#1a1a1a] border-[#3c3c3c] checked:bg-[#84a65b]"
+                        @change="updateModelCollision"
                       />
                       <span>无</span>
                     </label>
@@ -821,6 +838,7 @@
                         type="radio"
                         value="box"
                         class="rounded bg-[#1a1a1a] border-[#3c3c3c] checked:bg-[#84a65b]"
+                        @change="updateModelCollision"
                       />
                       <span>包围盒</span>
                     </label>
@@ -830,6 +848,7 @@
                         type="radio"
                         value="mesh"
                         class="rounded bg-[#1a1a1a] border-[#3c3c3c] checked:bg-[#84a65b]"
+                        @change="updateModelCollision"
                       />
                       <span>网格</span>
                     </label>
@@ -881,6 +900,19 @@
                 </div>
               </div>
             </div>
+
+            <!-- 模型 - 积木 -->
+            <div v-show="ActiveSubTab === 'Blockly'" style="height: 400px;">
+              <BlocklyWorkspace
+                v-if="modelData.name"
+                :actorName="modelData.name"
+                :sceneName="modelData.targetScene || sceneData.name"
+                embedded
+              />
+              <div v-else class="flex items-center justify-center h-full text-[#909090] text-xs">
+                请先选中一个物体
+              </div>
+            </div>
           </template>
         </div>
       </template>
@@ -925,12 +957,14 @@ const sceneTabs = [
 const actorTabs = [
   { id: 'Basic', label: '基础' },
   { id: 'Model', label: '模型' },
+  { id: 'Blockly', label: '积木' },
   { id: 'Script', label: '脚本' },
 ];
 
 const modelTabs = [
   { id: 'Basic', label: '基础' },
   { id: 'Model', label: '模型' },
+  { id: 'Blockly', label: '积木' },
 ];
 
 // ========== 当前打开的文件 ==========
@@ -1452,6 +1486,23 @@ const updateActorMechanics = (operationType) => {
   });
 };
 
+// 更新单位碰撞类型
+const updateActorCollision = () => {
+  if (!currentActorFile.value || !actorData.value.parentScene) return;
+  debounced('actor_collision', async () => {
+    try {
+      await sceneService.actorOperation(
+        actorData.value.parentScene,
+        currentActorFile.value,
+        'SetCollision',
+        [actorData.value.collision.type]
+      );
+    } catch (e) {
+      logError('更新单位碰撞类型失败', e);
+    }
+  });
+};
+
 // 更新相机锁定
 const updateCameraLock = () => {
   if (!currentActorFile.value || !actorData.value.parentScene) return;
@@ -1587,6 +1638,23 @@ const updateModelMechanics = (operationType) => {
       );
     } catch (e) {
       logError('更新模型物理属性失败', e);
+    }
+  });
+};
+
+// 更新模型碰撞类型
+const updateModelCollision = () => {
+  if (!currentModelFile.value || !modelData.value.targetScene) return;
+  debounced('model_collision', async () => {
+    try {
+      await sceneService.actorOperation(
+        modelData.value.targetScene,
+        currentModelFile.value,
+        'SetCollision',
+        [modelData.value.collision.type]
+      );
+    } catch (e) {
+      logError('更新模型碰撞类型失败', e);
     }
   });
 };

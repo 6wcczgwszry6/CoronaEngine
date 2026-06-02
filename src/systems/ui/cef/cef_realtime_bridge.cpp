@@ -67,7 +67,7 @@ bool handle_camera_move_fast(const CefRefPtr<CefProcessMessage>& message) {
         fov = static_cast<float>(args->GetDouble(4));
     }
 
-    if (auto accessor = Corona::SharedDataHub::instance().camera_storage().try_acquire_write(camera_handle)) {
+    if (auto accessor = Corona::SharedDataHub::instance().camera_storage().try_acquire_write_nowait(camera_handle)) {
         accessor->position = position;
         accessor->forward = forward;
         accessor->world_up = world_up;
@@ -105,9 +105,6 @@ std::vector<std::uintptr_t> resolve_actor_geometry_handles(std::uintptr_t actor_
             }
             if (auto acoustics = hub.acoustics_storage().try_acquire_read(profile->acoustics_handle)) {
                 append_geometry_handle(geometry_handles, acoustics->geometry_handle);
-            }
-            if (auto kinematics = hub.kinematics_storage().try_acquire_read(profile->kinematics_handle)) {
-                append_geometry_handle(geometry_handles, kinematics->geometry_handle);
             }
         }
     }

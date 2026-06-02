@@ -3,8 +3,8 @@
 #include <corona/kernel/core/i_logger.h>
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
-#include <corona/spatial/octree.h>
 #include <corona/systems/mechanics/mechanics_system.h>
+#include <corona/systems/geometry/geometry_system.h>
 
 #include <algorithm>      // min,max,clamp,sort,unique
 #include <array>          // std::array（八叉树子节点）
@@ -89,18 +89,22 @@ inline ktm::fvec3 transform_local_point_to_world(const Corona::ModelTransform& t
 inline void world_aabb_from_local_bounds(const Corona::ModelTransform& t,
                                          const ktm::fvec3& lmin, const ktm::fvec3& lmax,
                                          ktm::fvec3& out_min, ktm::fvec3& out_max, ktm::fvec3& out_center) {
-    ktm::fvec3 c0 = transform_local_point_to_world(t, make_fvec3(lmin.x, lmin.y, lmin.z));  // 角点 (min,min,min)
-    out_min = c0;                                                                           // 初始化 min
-    out_max = c0;                                                                           // 初始化 max
-    for (int i = 1; i < 8; ++i) {                                                           // i 从 1 到 7：其余顶点
-        const float x = (i & 1) != 0 ? lmax.x : lmin.x;                                     // 按位选 min 或 max
-        const float y = (i & 2) != 0 ? lmax.y : lmin.y;
-        const float z = (i & 4) != 0 ? lmax.z : lmin.z;
-        const ktm::fvec3 wp = transform_local_point_to_world(t, make_fvec3(x, y, z));  // 世界顶点
-        out_min.x = std::min(out_min.x, wp.x);                                         // 扩张 min.x
+    // 局部 AABB 的 8 个角点：min/max 各分量组合 → 世界空间 → 取包络
+    const ktm::fvec3 corners[8] = {
+        {lmin.x, lmin.y, lmin.z}, {lmax.x, lmin.y, lmin.z},
+        {lmin.x, lmax.y, lmin.z}, {lmax.x, lmax.y, lmin.z},
+        {lmin.x, lmin.y, lmax.z}, {lmax.x, lmin.y, lmax.z},
+        {lmin.x, lmax.y, lmax.z}, {lmax.x, lmax.y, lmax.z},
+    };
+    ktm::fvec3 wp0 = transform_local_point_to_world(t, corners[0]);
+    out_min = wp0;
+    out_max = wp0;
+    for (int i = 1; i < 8; ++i) {
+        const ktm::fvec3 wp = transform_local_point_to_world(t, corners[i]);
+        out_min.x = std::min(out_min.x, wp.x);
         out_min.y = std::min(out_min.y, wp.y);
         out_min.z = std::min(out_min.z, wp.z);
-        out_max.x = std::max(out_max.x, wp.x);  // 扩张 max.x
+        out_max.x = std::max(out_max.x, wp.x);
         out_max.y = std::max(out_max.y, wp.y);
         out_max.z = std::max(out_max.z, wp.z);
     }
@@ -387,7 +391,7 @@ constexpr float kMoveCallbackMinDistance = 0.1f;
 static std::vector<std::function<void()>> g_deferred_move_callbacks;
 static std::atomic<bool> g_shutdown_requested{false};
 
-// 注意：八叉树实现已迁移到 include/corona/spatial/octree.h，由 SceneSystem 持有并维护。
+// 注意：八叉树实现已迁移到 include/corona/spatial/octree.h，由 GeometrySystem 持有并维护。
 // MechanicsSystem 仅作为消费者使用（宽相候选对生成仍可复用该通用实现）。
 
 // 以下全局变量仅由 MechanicsSystem::update_physics() 访问（单线程）
@@ -761,13 +765,18 @@ void triangle_narrowphase(
 namespace Corona::Systems {
 
 bool MechanicsSystem::initialize(Kernel::ISystemContext* ctx) {
-    (void)ctx;
+    m_ctx = ctx;
     g_shutdown_requested = false;
+
     CFW_LOG_INFO("MechanicsSystem initialized");
     return true;
 }
 
 void MechanicsSystem::update() {
+    if (g_shutdown_requested.load(std::memory_order_acquire)) {
+        return;
+    }
+
     // 用高精度计时器测量真实 dt
     auto now = std::chrono::steady_clock::now();
     if (m_first_update) {
@@ -788,15 +797,21 @@ void MechanicsSystem::update() {
 
     // 固定步长迭代（与 update_physics 内的 fixed_dt 保持一致，默认 1/60）
     const float fixed_dt = 1.0f / 60.0f;
-    while (m_time_accumulator >= fixed_dt) {
+    while (m_time_accumulator >= fixed_dt &&
+           !g_shutdown_requested.load(std::memory_order_acquire)) {
         update_physics();
         m_time_accumulator -= fixed_dt;
     }
 }
 
+void MechanicsSystem::stop() {
+    g_shutdown_requested.store(true, std::memory_order_release);
+    Kernel::SystemBase::stop();
+}
+
 void MechanicsSystem::shutdown() {
     // 标记关闭请求，不再接受新的回调任务
-    g_shutdown_requested = true;
+    g_shutdown_requested.store(true, std::memory_order_release);
 
     // 清空延迟回调队列
     g_deferred_move_callbacks.clear();
@@ -817,7 +832,7 @@ void MechanicsSystem::shutdown() {
 // 物理主循环（单帧）：搜集物体 → 积分外力(重力/阻尼) → 建世界 AABB → 粗/细碰撞改速度 → 积分位姿 → 地板 → 休眠 → 清理缓存
 void MechanicsSystem::update_physics() {
     // 如果正在关闭，不再处理新的物理更新
-    if (g_shutdown_requested) {
+    if (g_shutdown_requested.load(std::memory_order_acquire)) {
         return;
     }
 
@@ -863,6 +878,9 @@ void MechanicsSystem::update_physics() {
 
     // --- 阶段 1：遍历场景 → 读环境(gravity/floor/dt) → 展开 Actor/Profile → 收集 mechanics_handle ---
     for (const auto& scene : scene_storage) {
+        if (g_shutdown_requested.load(std::memory_order_acquire)) {
+            return;
+        }
         if (!scene.enabled)
             continue;
 
@@ -883,8 +901,14 @@ void MechanicsSystem::update_physics() {
         }
 
         for (auto actor_handle : scene.actor_handles) {
+            if (g_shutdown_requested.load(std::memory_order_acquire)) {
+                return;
+            }
             if (auto actor = actor_storage.acquire_read(actor_handle)) {
                 for (auto profile_handle : actor->profile_handles) {
+                    if (g_shutdown_requested.load(std::memory_order_acquire)) {
+                        return;
+                    }
                     if (auto profile = profile_storage.acquire_read(profile_handle)) {
                         if (auto h = profile->mechanics_handle) {
                             // 读 MechanicsDevice：检查物理开关 + 质量/阻尼/恢复；读失败则用默认值
@@ -898,6 +922,7 @@ void MechanicsSystem::update_physics() {
                                 handle_to_mass[h] = 1.0f;
                                 handle_to_damping[h] = 0.99f;
                                 handle_to_restitution[h] = 0.8f;
+                                handle_to_collision_enabled[h] = true;  // 读失败时默认开启碰撞
                             }
 
                             mechanics_handles.push_back(h);
@@ -933,6 +958,9 @@ void MechanicsSystem::update_physics() {
 
     // --- 阶段 2：半隐式前推速度（仅非休眠体）：先阻尼旧速度，再叠加重力加速度 ---
     for (std::uintptr_t h : mechanics_handles) {  // 对存活列表逐个施力
+        if (g_shutdown_requested.load(std::memory_order_acquire)) {
+            return;
+        }
         if (g_handle_to_sleeping[h]) continue;    // 休眠体本阶段不改速度
 
         float damping = handle_to_damping[h];   // 线性阻尼乘子（以 60Hz 为基准的每步保留系数）
@@ -963,6 +991,9 @@ void MechanicsSystem::update_physics() {
     std::unordered_map<std::uintptr_t, std::size_t> handle_to_index;
 
     for (std::uintptr_t h : mechanics_handles) {         // 为每个力学体准备碰撞与惯量数据
+        if (g_shutdown_requested.load(std::memory_order_acquire)) {
+            return;
+        }
         auto m_acc = mechanics_storage.acquire_read(h);  // mechanics 组件读锁
         if (!m_acc) continue;                            // 无数据则跳过
         const auto& m = *m_acc;                          // 其 min/max、geometry_handle
@@ -1032,37 +1063,11 @@ void MechanicsSystem::update_physics() {
         mechanics_data.push_back(entry);
     }
 
-    // --- 阶段 4：把所有物体的世界 AABB 并起来写入 Scene（供裁剪/调试等），并把 floor_y 纳入场景包围，避免物体落地面却被剔除 ---
-    if (!mechanics_data.empty()) {
-        ktm::fvec3 scene_min = mechanics_data[0].min_world;  // 世界 AABB 最小角
-        ktm::fvec3 scene_max = mechanics_data[0].max_world;  // 世界 AABB 最大角
-
-        for (const auto& e : mechanics_data) {
-            scene_min.x = std::min(scene_min.x, e.min_world.x);  // 逐轴扩张包络
-            scene_min.y = std::min(scene_min.y, e.min_world.y);
-            scene_min.z = std::min(scene_min.z, e.min_world.z);
-            scene_max.x = std::max(scene_max.x, e.max_world.x);
-            scene_max.y = std::max(scene_max.y, e.max_world.y);
-            scene_max.z = std::max(scene_max.z, e.max_world.z);
-        }
-        scene_min.y = std::min(scene_min.y, floor_y - floor_eps);  // 下移 min.y，保证地板带进入 Scene AABB
-
-        ktm::fvec3 scene_center = make_fvec3(
-            (scene_min.x + scene_max.x) * 0.5f,
-            (scene_min.y + scene_max.y) * 0.5f,
-            (scene_min.z + scene_max.z) * 0.5f);
-
-        for (auto sh : scene_handles) {  // 每个被遍历过的 scene 写同一套包围（多场景时行为一致）
-            if (auto s_w = scene_storage.acquire_write(sh)) {
-                s_w->min_world = scene_min;
-                s_w->max_world = scene_max;
-                s_w->center_world = scene_center;
-            }
-        }
-    }
-
     // 预加载所有物理物体的碰撞网格（用于三角形碰撞检测和精确地板碰撞）
     for (const auto& entry : mechanics_data) {
+        if (g_shutdown_requested.load(std::memory_order_acquire)) {
+            return;
+        }
         if (entry.model_id != 0) {
             ensure_collision_mesh(entry.model_id);
         }
@@ -1071,48 +1076,48 @@ void MechanicsSystem::update_physics() {
     // 临时校正表：记录 Phase 5 末轮的位置校正量，在 Phase 6 积分后统一应用
     std::unordered_map<std::uintptr_t, ktm::fvec3> position_correction;
 
-    // --- 阶段 5：八叉树粗测 → 世界 AABB 再筛 → 窄相（AABB 或 OBB+SAT）→ 顺序冲量 + 摩擦 + 末轮位置校正 ---
+    // 阶段 5：从 GeometrySystem 获取宽相候选对 → 窄相（AABB 或 OBB+SAT）→ 顺序冲量 + 摩擦 + 末轮位置校正 ---
+    //GeometrySystem 八叉树 payload 是 actor_handle，query_pairs() 返回 (actor_a, actor_b)
+    //一个 actor 可能挂多个含 mechanics 的 profile，故用 vector 存储所有 mechanics_handle
+    //转换时展开笛卡尔积；遍历 actor_a 的每个 mechanics vs actor_b 的每个 mechanics
+
+    // 构建 actor_handle → vector<mechanics_handle> 反向映射
+    std::unordered_map<std::uintptr_t, std::vector<std::uintptr_t>> actor_to_mech;
+    for (const auto& [mh, ah] : mech_to_actor) {
+        actor_to_mech[ah].push_back(mh);
+    }
+
+    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> collision_pairs;
+    collision_pairs.reserve(mechanics_data.size() * 4);
+
+    // 通过 ISystemContext 获取 GeometrySystem 指针，调用其八叉树的 query_pairs()
+    // 宽相阶段由 GeometrySystem 维护的八叉树统一服务，MechanicsSystem 不再自建本地 octree。
+    // GeometrySystem(85) 优先级高于 MechanicsSystem(75)，八叉树在同帧物理前已重建。
+    auto* geometry_sys = dynamic_cast<GeometrySystem*>(m_ctx->get_system("Geometry"));
+    if (geometry_sys) {
+        for (auto sh : scene_handles) {
+            if (g_shutdown_requested.load(std::memory_order_acquire)) {
+                return;
+            }
+            auto actor_pairs = geometry_sys->query_pairs(sh);
+            for (const auto& [ah, bh] : actor_pairs) {
+                if (g_shutdown_requested.load(std::memory_order_acquire)) {
+                    return;
+                }
+                auto it_a = actor_to_mech.find(ah);
+                auto it_b = actor_to_mech.find(bh);
+                if (it_a == actor_to_mech.end() || it_b == actor_to_mech.end()) continue;
+
+                for (auto mh_a : it_a->second) {
+                    for (auto mh_b : it_b->second) {
+                        collision_pairs.emplace_back(mh_a, mh_b);
+                    }
+                }
+            }
+        }
+    }
+
     if (mechanics_data.size() >= 2) {
-        // 5.1 用全体物体世界 AABB 建略大于一切的轴对齐根盒子（pad 防边界物体漏分桶）
-        ktm::fvec3 root_min = mechanics_data[0].min_world;
-        ktm::fvec3 root_max = mechanics_data[0].max_world;
-        for (const auto& e : mechanics_data) {
-            root_min.x = std::min(root_min.x, e.min_world.x);
-            root_min.y = std::min(root_min.y, e.min_world.y);
-            root_min.z = std::min(root_min.z, e.min_world.z);
-            root_max.x = std::max(root_max.x, e.max_world.x);
-            root_max.y = std::max(root_max.y, e.max_world.y);
-            root_max.z = std::max(root_max.z, e.max_world.z);
-        }
-        // 扩展根节点边界，包含地板
-        root_min.y = std::min(root_min.y, floor_y - floor_eps);
-        const float pad = 0.01f;  // 米级小膨胀；过小可能使 AABB 贴边物体跨层不稳
-        root_min = make_fvec3(root_min.x - pad, root_min.y - pad, root_min.z - pad);
-        root_max = make_fvec3(root_max.x + pad, root_max.y + pad, root_max.z + pad);
-
-        // 5.2 使用通用 Octree 生成宽相候选对（Octree 模块已迁移出 MechanicsSystem）
-        Spatial::Octree<std::uintptr_t> tree;
-        std::vector<Spatial::Octree<std::uintptr_t>::Entry> entries;
-        entries.reserve(mechanics_data.size());
-
-        for (const auto& e : mechanics_data) {
-            Spatial::AABB b;
-            b.min = e.min_world;
-            b.max = e.max_world;
-            entries.push_back({e.handle, b});
-        }
-
-        Spatial::AABB root;
-        root.min = root_min;
-        root.max = root_max;
-        tree.rebuild(root, entries);
-
-        std::vector<std::pair<std::uintptr_t, std::uintptr_t>> collision_pairs;
-        collision_pairs.reserve(mechanics_data.size() * 4);
-        tree.collect_pairs(collision_pairs);
-
-        // CFW_LOG_DEBUG("Detected {} potential collision pairs", collision_pairs.size());
-
         // 碰撞对跟踪（用于回调通知 collision start/end）
         std::unordered_set<std::pair<std::uintptr_t, std::uintptr_t>, PairHash> curr_active_collisions;
 
@@ -1125,9 +1130,14 @@ void MechanicsSystem::update_physics() {
         constexpr float k_positional_slop = 0.004f;    // Baumgarte 式校正：小穿透只靠冲量，不修位姿
         constexpr float k_positional_percent = 0.35f;  // 仅末轮按穿透拆分平移，且只推一部分，防过冲
         constexpr int k_impulse_iterations = 5;        // 轮数↑ 堆叠更稳、成本↑；典型 3~8
-
         for (int impulse_iter = 0; impulse_iter < k_impulse_iterations; ++impulse_iter) {
+            if (g_shutdown_requested.load(std::memory_order_acquire)) {
+                return;
+            }
             for (const auto& pair : collision_pairs) {  // 内层：单对接触解一次（顺序依赖）
+                if (g_shutdown_requested.load(std::memory_order_acquire)) {
+                    return;
+                }
                 std::uintptr_t ha = pair.first;
                 std::uintptr_t hb = pair.second;
                 // 两个都休眠则跳过
@@ -1145,8 +1155,14 @@ void MechanicsSystem::update_physics() {
                 const MechanicsWorldAABB& b = mechanics_data[it_b->second];
 
                 // 碰撞检测开关判断：任一物体关闭碰撞则跳过此对
-                if (!handle_to_collision_enabled[ha] || !handle_to_collision_enabled[hb]) {
-                    continue;
+                // 使用 find() 而非 operator[] 避免默认构造 false 导致碰撞被静默跳过
+                {
+                    bool col_a = true, col_b = true;
+                    auto it_col_a = handle_to_collision_enabled.find(ha);
+                    if (it_col_a != handle_to_collision_enabled.end()) col_a = it_col_a->second;
+                    auto it_col_b = handle_to_collision_enabled.find(hb);
+                    if (it_col_b != handle_to_collision_enabled.end()) col_b = it_col_b->second;
+                    if (!col_a || !col_b) continue;
                 }
 
                 // ===== Phase 1: AABB 碰撞检测（Broadphase 确认）=====
@@ -1486,7 +1502,7 @@ void MechanicsSystem::update_physics() {
 
                         bool was_active = (g_prev_active_collisions.find(sorted_pair) != g_prev_active_collisions.end());
 
-                        if (!was_active) {
+                        if (!was_active && !g_shutdown_requested.load(std::memory_order_acquire)) {
                             if (cb_a) {
                                 try {
                                     cb_a(actor_b, true, normal_arr, point_arr);
@@ -1512,6 +1528,9 @@ void MechanicsSystem::update_physics() {
 
         // ===== 碰撞结束检测：遍历上帧活跃但本帧消失的碰撞对，触发 end 回调 =====
         for (const auto& old_pair : g_prev_active_collisions) {
+            if (g_shutdown_requested.load(std::memory_order_acquire)) {
+                return;
+            }
             if (curr_active_collisions.find(old_pair) != curr_active_collisions.end()) {
                 continue;  // 仍在碰撞，不触发 end
             }
@@ -1531,7 +1550,7 @@ void MechanicsSystem::update_physics() {
 
             if (mech_ha != 0) {
                 if (auto m_acc = mechanics_storage.acquire_read(mech_ha)) {
-                    if (m_acc->collision_callback) {
+                    if (m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
                         try {
                             m_acc->collision_callback(actor_b, false, zero_normal, zero_point);
                         } catch (...) {
@@ -1543,7 +1562,7 @@ void MechanicsSystem::update_physics() {
 
             if (mech_hb != 0) {
                 if (auto m_acc = mechanics_storage.acquire_read(mech_hb)) {
-                    if (m_acc->collision_callback) {
+                    if (m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
                         try {
                             m_acc->collision_callback(actor_a, false, zero_normal, zero_point);
                         } catch (...) {
@@ -1559,6 +1578,9 @@ void MechanicsSystem::update_physics() {
     } else {
         // 物体数量不足2个时，为残留的碰撞对发送 collision end 回调
         for (const auto& old_pair : g_prev_active_collisions) {
+            if (g_shutdown_requested.load(std::memory_order_acquire)) {
+                return;
+            }
             std::uintptr_t actor_a = old_pair.first;
             std::uintptr_t actor_b = old_pair.second;
 
@@ -1573,7 +1595,7 @@ void MechanicsSystem::update_physics() {
 
             if (mech_ha != 0) {
                 if (auto m_acc = mechanics_storage.acquire_read(mech_ha)) {
-                    if (m_acc->collision_callback) {
+                    if (m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
                         try {
                             m_acc->collision_callback(actor_b, false, zero_normal, zero_point);
                         } catch (...) {
@@ -1585,7 +1607,7 @@ void MechanicsSystem::update_physics() {
 
             if (mech_hb != 0) {
                 if (auto m_acc = mechanics_storage.acquire_read(mech_hb)) {
-                    if (m_acc->collision_callback) {
+                    if (m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
                         try {
                             m_acc->collision_callback(actor_a, false, zero_normal, zero_point);
                         } catch (...) {
@@ -1600,6 +1622,9 @@ void MechanicsSystem::update_physics() {
 
     // --- 阶段 6：半隐式位姿积分（用冲量后的 v,ω）+ 无穷地板 + 休眠累计 + 缓存淘汰 ---
     for (std::size_t i = 0; i < mechanics_data.size(); ++i) {
+        if (g_shutdown_requested.load(std::memory_order_acquire)) {
+            return;
+        }
         const auto& data = mechanics_data[i];  // 与阶段 3 同一套 per-body 缓存
         std::uintptr_t h = data.handle;
         if (g_handle_to_sleeping[h])
@@ -1671,6 +1696,9 @@ void MechanicsSystem::update_physics() {
     }
 
     for (std::uintptr_t h : mechanics_handles) {
+        if (g_shutdown_requested.load(std::memory_order_acquire)) {
+            return;
+        }
         if (g_handle_to_sleeping[h]) continue;
 
         const auto& v = g_handle_to_velocity[h];
@@ -1739,6 +1767,9 @@ void MechanicsSystem::update_physics() {
 
     // 帧末统一同步执行延迟的 on_move 回调
     for (auto& cb : g_deferred_move_callbacks) {
+        if (g_shutdown_requested.load(std::memory_order_acquire)) {
+            break;
+        }
         try {
             cb();
         } catch (const std::exception& e) {
@@ -1762,9 +1793,6 @@ void MechanicsSystem::update_physics() {
         }
     };
 
-    clean_cache(g_handle_to_velocity);
-    clean_cache(g_handle_to_angular_vel);
-    clean_cache(g_handle_orientation_quat);
     clean_cache(g_handle_to_sleeping);
     clean_cache(g_handle_to_sleep_timer);
     clean_cache(handle_to_mass);
@@ -1773,6 +1801,7 @@ void MechanicsSystem::update_physics() {
     clean_cache(handle_to_collision_enabled);
     clean_cache(g_handle_to_last_move_callback_time);
     clean_cache(g_handle_to_last_move_callback_pos);
+
 }
 
 }  // namespace Corona::Systems

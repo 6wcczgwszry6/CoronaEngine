@@ -1,12 +1,17 @@
 #pragma once
 
 #include <corona/events/mechanics_system_events.h>
+#include <corona/events/scene_system_events.h>
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/kernel/system/system_base.h>
+#include <corona/events/scene_system_events.h>
 
 #include <chrono>
 #include <memory>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace Corona::Systems {
 
@@ -55,12 +60,15 @@ class MechanicsSystem : public Kernel::SystemBase {
      *
      * 清理所有物理资源
      */
+    void stop() override;
+
     void shutdown() override;
 
    private:
     // 力学系统私有成员
     void update_physics();
 
+    Kernel::ISystemContext* m_ctx = nullptr;
     float m_time_accumulator{0.0f};
     std::chrono::steady_clock::time_point m_last_update_time{};
     bool m_first_update{true};
