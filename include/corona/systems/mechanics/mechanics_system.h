@@ -15,6 +15,9 @@
 
 namespace Corona::Systems {
 
+// 前向声明，避免每帧通过 ISystemContext::get_system() 获取
+class GeometrySystem;
+
 /**
  * @brief 力学系统 (Mechanics System)
  *
@@ -69,6 +72,7 @@ class MechanicsSystem : public Kernel::SystemBase {
     void update_physics();
 
     Kernel::ISystemContext* m_ctx = nullptr;
+    GeometrySystem* m_geometry_sys = nullptr;  // 首次 update_physics() 时懒缓存，避免每帧加锁查询
     float m_time_accumulator{0.0f};
     std::chrono::steady_clock::time_point m_last_update_time{};
     bool m_first_update{true};

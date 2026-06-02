@@ -389,6 +389,16 @@ constexpr float kMoveCallbackMinDistance = 0.1f;
 
 // ========== 延迟回调队列（同步执行，避免跨线程竞争） ==========
 static std::vector<std::function<void()>> g_deferred_move_callbacks;
+
+struct DeferredCollisionCallback {
+	std::function<void(std::uintptr_t, bool, const std::array<float, 3>&, const std::array<float, 3>&)> callback;
+	std::uintptr_t other_actor;
+	bool is_start;
+	std::array<float, 3> normal;
+	std::array<float, 3> point;
+};
+static std::vector<DeferredCollisionCallback> g_deferred_collision_callbacks;
+
 static std::atomic<bool> g_shutdown_requested{false};
 
 // 注意：八叉树实现已迁移到 include/corona/spatial/octree.h，由 GeometrySystem 持有并维护。
@@ -768,6 +778,10 @@ bool MechanicsSystem::initialize(Kernel::ISystemContext* ctx) {
     m_ctx = ctx;
     g_shutdown_requested = false;
 
+    // GeometrySystem 指针缓存移到 update_physics() 首次调用时完成，
+    // 因为 initialize() 在 SystemManager::initialize_all() 的锁内调用，
+    // 此时 get_system() 会尝试重入同一把非递归 mutex，导致未定义行为/崩溃。
+
     CFW_LOG_INFO("MechanicsSystem initialized");
     return true;
 }
@@ -815,6 +829,7 @@ void MechanicsSystem::shutdown() {
 
     // 清空延迟回调队列
     g_deferred_move_callbacks.clear();
+    g_deferred_collision_callbacks.clear();
 
     g_prev_active_collisions.clear();
     g_handle_to_velocity.clear();
@@ -834,6 +849,13 @@ void MechanicsSystem::update_physics() {
     // 如果正在关闭，不再处理新的物理更新
     if (g_shutdown_requested.load(std::memory_order_acquire)) {
         return;
+    }
+
+    // 首次调用时懒缓存 GeometrySystem 指针（不在 initialize() 中做，
+    // 因为 initialize() 在 SystemManager::initialize_all() 的锁内执行，
+    // get_system() 会重入同一把非递归 mutex）。
+    if (!m_geometry_sys && m_ctx) {
+        m_geometry_sys = dynamic_cast<GeometrySystem*>(m_ctx->get_system("Geometry"));
     }
 
     // 常量：时间步、摩擦、休眠、惯量下限等（可按手感调参）
@@ -1093,13 +1115,13 @@ void MechanicsSystem::update_physics() {
     // 通过 ISystemContext 获取 GeometrySystem 指针，调用其八叉树的 query_pairs()
     // 宽相阶段由 GeometrySystem 维护的八叉树统一服务，MechanicsSystem 不再自建本地 octree。
     // GeometrySystem(85) 优先级高于 MechanicsSystem(75)，八叉树在同帧物理前已重建。
-    auto* geometry_sys = dynamic_cast<GeometrySystem*>(m_ctx->get_system("Geometry"));
-    if (geometry_sys) {
+    // 指针在 initialize() 中缓存，避免每帧通过 get_system() 加锁查询。
+    if (m_geometry_sys) {
         for (auto sh : scene_handles) {
             if (g_shutdown_requested.load(std::memory_order_acquire)) {
                 return;
             }
-            auto actor_pairs = geometry_sys->query_pairs(sh);
+            auto actor_pairs = m_geometry_sys->query_pairs(sh);
             for (const auto& [ah, bh] : actor_pairs) {
                 if (g_shutdown_requested.load(std::memory_order_acquire)) {
                     return;
@@ -1473,7 +1495,7 @@ void MechanicsSystem::update_physics() {
                     auto sorted_pair = (actor_a < actor_b) ? std::make_pair(actor_a, actor_b) : std::make_pair(actor_b, actor_a);
                     curr_active_collisions.insert(sorted_pair);
 
-                    // ==================== 碰撞回调 ================================
+                    // ==================== 碰撞回调（延迟到帧末执行，避免在物理循环中持有锁时调用） ========================
                     {
                         ktm::fvec3 point;
                         point.x = (a.center_world.x + b.center_world.x) * 0.5f;
@@ -1504,20 +1526,12 @@ void MechanicsSystem::update_physics() {
 
                         if (!was_active && !g_shutdown_requested.load(std::memory_order_acquire)) {
                             if (cb_a) {
-                                try {
-                                    cb_a(actor_b, true, normal_arr, point_arr);
-                                } catch (...) {
-                                    CFW_LOG_ERROR("MechanicsSystem: Exception occurred in collision callback for actor {}.", actor_a);
-                                }
+                                g_deferred_collision_callbacks.push_back({std::move(cb_a), actor_b, true, normal_arr, point_arr});
                             }
 
                             if (cb_b) {
                                 std::array<float, 3> reverse_normal_arr = {-normal.x, -normal.y, -normal.z};
-                                try {
-                                    cb_b(actor_a, true, reverse_normal_arr, point_arr);
-                                } catch (...) {
-                                    CFW_LOG_ERROR("MechanicsSystem: Exception occurred in collision callback for actor {}.", actor_b);
-                                }
+                                g_deferred_collision_callbacks.push_back({std::move(cb_b), actor_a, true, reverse_normal_arr, point_arr});
                             }
                         }
                     }
@@ -1526,7 +1540,7 @@ void MechanicsSystem::update_physics() {
             }
         }  // 内层：collision_pairs；外层：impulse_iter
 
-        // ===== 碰撞结束检测：遍历上帧活跃但本帧消失的碰撞对，触发 end 回调 =====
+        // ===== 碰撞结束检测：遍历上帧活跃但本帧消失的碰撞对，延迟触发 end 回调 =====
         for (const auto& old_pair : g_prev_active_collisions) {
             if (g_shutdown_requested.load(std::memory_order_acquire)) {
                 return;
@@ -1549,26 +1563,28 @@ void MechanicsSystem::update_physics() {
             std::array<float, 3> zero_point = {0.f, 0.f, 0.f};
 
             if (mech_ha != 0) {
-                if (auto m_acc = mechanics_storage.acquire_read(mech_ha)) {
-                    if (m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
-                        try {
-                            m_acc->collision_callback(actor_b, false, zero_normal, zero_point);
-                        } catch (...) {
-                            CFW_LOG_ERROR("MechanicsSystem: Exception in collision end callback for actor {}.", actor_a);
-                        }
+                std::function<void(std::uintptr_t, bool, const std::array<float, 3>&, const std::array<float, 3>&)> cb;
+                {
+                    auto m_acc = mechanics_storage.acquire_read(mech_ha);
+                    if (m_acc && m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
+                        cb = m_acc->collision_callback;
                     }
+                }
+                if (cb) {
+                    g_deferred_collision_callbacks.push_back({std::move(cb), actor_b, false, zero_normal, zero_point});
                 }
             }
 
             if (mech_hb != 0) {
-                if (auto m_acc = mechanics_storage.acquire_read(mech_hb)) {
-                    if (m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
-                        try {
-                            m_acc->collision_callback(actor_a, false, zero_normal, zero_point);
-                        } catch (...) {
-                            CFW_LOG_ERROR("MechanicsSystem: Exception in collision end callback for actor {}.", actor_b);
-                        }
+                std::function<void(std::uintptr_t, bool, const std::array<float, 3>&, const std::array<float, 3>&)> cb;
+                {
+                    auto m_acc = mechanics_storage.acquire_read(mech_hb);
+                    if (m_acc && m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
+                        cb = m_acc->collision_callback;
                     }
+                }
+                if (cb) {
+                    g_deferred_collision_callbacks.push_back({std::move(cb), actor_a, false, zero_normal, zero_point});
                 }
             }
         }
@@ -1576,7 +1592,7 @@ void MechanicsSystem::update_physics() {
         // 更新上一帧碰撞对
         g_prev_active_collisions.swap(curr_active_collisions);
     } else {
-        // 物体数量不足2个时，为残留的碰撞对发送 collision end 回调
+        // 物体数量不足2个时，为残留的碰撞对延迟发送 collision end 回调
         for (const auto& old_pair : g_prev_active_collisions) {
             if (g_shutdown_requested.load(std::memory_order_acquire)) {
                 return;
@@ -1594,26 +1610,28 @@ void MechanicsSystem::update_physics() {
             std::array<float, 3> zero_point = {0.f, 0.f, 0.f};
 
             if (mech_ha != 0) {
-                if (auto m_acc = mechanics_storage.acquire_read(mech_ha)) {
-                    if (m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
-                        try {
-                            m_acc->collision_callback(actor_b, false, zero_normal, zero_point);
-                        } catch (...) {
-                            CFW_LOG_ERROR("MechanicsSystem: Exception in collision end callback for actor {}.", actor_a);
-                        }
+                std::function<void(std::uintptr_t, bool, const std::array<float, 3>&, const std::array<float, 3>&)> cb;
+                {
+                    auto m_acc = mechanics_storage.acquire_read(mech_ha);
+                    if (m_acc && m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
+                        cb = m_acc->collision_callback;
                     }
+                }
+                if (cb) {
+                    g_deferred_collision_callbacks.push_back({std::move(cb), actor_b, false, zero_normal, zero_point});
                 }
             }
 
             if (mech_hb != 0) {
-                if (auto m_acc = mechanics_storage.acquire_read(mech_hb)) {
-                    if (m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
-                        try {
-                            m_acc->collision_callback(actor_a, false, zero_normal, zero_point);
-                        } catch (...) {
-                            CFW_LOG_ERROR("MechanicsSystem: Exception in collision end callback for actor {}.", actor_b);
-                        }
+                std::function<void(std::uintptr_t, bool, const std::array<float, 3>&, const std::array<float, 3>&)> cb;
+                {
+                    auto m_acc = mechanics_storage.acquire_read(mech_hb);
+                    if (m_acc && m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
+                        cb = m_acc->collision_callback;
                     }
+                }
+                if (cb) {
+                    g_deferred_collision_callbacks.push_back({std::move(cb), actor_a, false, zero_normal, zero_point});
                 }
             }
         }
@@ -1779,6 +1797,21 @@ void MechanicsSystem::update_physics() {
         }
     }
     g_deferred_move_callbacks.clear();
+
+    // 帧末统一同步执行延迟的碰撞回调（在 Storage 锁外执行，避免死锁）
+    for (auto& cb : g_deferred_collision_callbacks) {
+        if (g_shutdown_requested.load(std::memory_order_acquire)) {
+            break;
+        }
+        try {
+            cb.callback(cb.other_actor, cb.is_start, cb.normal, cb.point);
+        } catch (const std::exception& e) {
+            CFW_LOG_ERROR("MechanicsSystem: collision callback exception: {}", e.what());
+        } catch (...) {
+            CFW_LOG_ERROR("MechanicsSystem: collision callback unknown exception");
+        }
+    }
+    g_deferred_collision_callbacks.clear();
 
     // 清理无效句柄的缓存
     std::unordered_set<std::uintptr_t> alive_handles(mechanics_handles.begin(), mechanics_handles.end());
