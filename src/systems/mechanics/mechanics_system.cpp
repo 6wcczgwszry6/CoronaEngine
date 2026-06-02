@@ -4,6 +4,7 @@
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/systems/mechanics/mechanics_system.h>
+#include <corona/systems/scene/scene_system.h>
 
 #include <algorithm>      // min,max,clamp,sort,unique
 #include <array>          // std::array（八叉树子节点）
@@ -1108,19 +1109,6 @@ void MechanicsSystem::update_physics() {
 
     // 从 EventBus 缓存读取 SceneSystem 发布的粗筛碰撞候选对
     // 宽相阶段由 SceneSystem 维护的八叉树统一服务，MechanicsSystem 不再自建本地 octree
-    for (auto sh : scene_handles) {
-        if (g_shutdown_requested.load(std::memory_order_acquire)) {
-            return;
-        }
-        auto it_cache = m_broadphase_cache.find(sh);
-        if (it_cache == m_broadphase_cache.end()) continue;
-        for (const auto& [ah, bh] : it_cache->second) {
-            if (g_shutdown_requested.load(std::memory_order_acquire)) {
-                return;
-            }
-            auto it_a = actor_to_mech.find(ah);
-            auto it_b = actor_to_mech.find(bh);
-            if (it_a == actor_to_mech.end() || it_b == actor_to_mech.end()) continue;
     bool broadphase_cache_available = false;
     for (auto sh : scene_handles) {
         if (g_shutdown_requested.load(std::memory_order_acquire)) {
@@ -1164,10 +1152,6 @@ void MechanicsSystem::update_physics() {
                     auto it_b = actor_to_mech.find(bh);
                     if (it_a == actor_to_mech.end() || it_b == actor_to_mech.end()) continue;
 
-            // 展开一个 actor 挂多个 mechanics 的所有组合（笛卡尔积）
-            for (auto mh_a : it_a->second) {
-                for (auto mh_b : it_b->second) {
-                    collision_pairs.emplace_back(mh_a, mh_b);
                     for (auto mh_a : it_a->second) {
                         for (auto mh_b : it_b->second) {
                             collision_pairs.emplace_back(mh_a, mh_b);
@@ -1176,6 +1160,7 @@ void MechanicsSystem::update_physics() {
                 }
             }
         }
+    }
 
     if (mechanics_data.size() >= 2) {
         // 碰撞对跟踪（用于回调通知 collision start/end）
