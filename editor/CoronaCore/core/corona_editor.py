@@ -1,4 +1,4 @@
-import json
+﻿import json
 import math
 import os
 import sys
@@ -520,7 +520,7 @@ class CoronaEditor:
                 # 取水平分量
                 fwd_xz = cls._normalize([look_dir[0], 0.0, look_dir[2]])
                 # 用世界 up 叉乘 forward 得到 right
-                right_xz = cls._normalize(cls._cross(fwd_xz, [0.0, 1.0, 0.0]))
+                right_xz = cls._normalize(cls._cross([0.0, 1.0, 0.0], fwd_xz))
                 move = [0.0, 0.0, 0.0]
                 step = 0.5
                 if w_down: move[0] += fwd_xz[0] * step; move[2] += fwd_xz[2] * step
@@ -542,7 +542,7 @@ class CoronaEditor:
                 cur_mouse = None
                 try:
                     class POINT(ctypes.Structure):
-                        _fields_ = [(x, ctypes.c_long), (y, ctypes.c_long)]
+                        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
                     pt = POINT()
                     ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
                     cur_mouse = (pt.x, pt.y)
@@ -561,7 +561,7 @@ class CoronaEditor:
                             ox, oy, oz = cls._camera_follow_offset
                             look_dir = cls._normalize([-ox, -oy, -oz])
                             fwd_xz = cls._normalize([look_dir[0], 0.0, look_dir[2]])
-                            right_xz = cls._normalize(cls._cross(fwd_xz, [0.0, 1.0, 0.0]))
+                            right_xz = cls._normalize(cls._cross([0.0, 1.0, 0.0], fwd_xz))
                             rmb_speed = 0.02
                             move = [0.0, 0.0, 0.0]
                             if dx != 0:
