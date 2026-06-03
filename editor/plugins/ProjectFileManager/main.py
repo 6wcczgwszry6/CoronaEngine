@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 
 from CoronaCore.core.corona_editor import CoronaEditor
-from CoronaCore.core.managers import scene_manager, actor_manager
+from CoronaCore.core.managers import scene_manager
 from CoronaCore.utils.proejct_utils import create_scene_from_template, create_actor_from_template
 from CoronaPlugin.core.corona_plugin_base import PluginBase
 
@@ -181,11 +181,12 @@ class FileManager(PluginBase):
                 CoronaEditor.js_call_func("scene-rename", [old_path, new_path, scene.name])
                 CoronaEditor.js_call_func("actor-change", ['scene', new_path, "", old_path])
             elif old_path.endswith(".actor"):
-                actor = actor_manager.get_or_create(old_path)
+                actor = scene_manager.find_actor_by_route(old_path)
+                if actor is None:
+                    logger.warning("Rename actor: '%s' not found in any scene", old_path)
+                    return False
                 new_path = os.path.normpath(os.path.join(os.path.dirname(old_path), new_name)).replace('\\', '/')
                 actor.set_route(new_path)
-                actor_manager.remove(old_path)
-                actor_manager.register(new_path, actor)
 
                 CoronaEditor.js_call_func("actor-change", ['actor', '',  new_path, old_path])
             return True
@@ -203,7 +204,10 @@ class FileManager(PluginBase):
                 CoronaEditor.js_call_func("scene-add", [scene.name, scene.route])
                 CoronaEditor.js_call_func("actor-change", ['scene', scene.route, ""])
             elif file_type == "actor":
-                actor = actor_manager.get_or_create(path)
+                actor = scene_manager.find_actor_by_route(path)
+                if actor is None:
+                    from CoronaCore.core.entities import Actor
+                    actor = Actor(route=path, actor_type="actor")
                 CoronaEditor.js_call_func("actor-change", ['actor', "", actor.route])
             else:
                 logger.error(f"No file type: {file_type}")

@@ -1,5 +1,5 @@
 from CoronaCore.core.corona_editor import CoronaEditor
-from CoronaCore.core.managers import scene_manager, actor_manager
+from CoronaCore.core.managers import scene_manager
 from CoronaCore.utils.file_handler import FileHandler, _FILE_TYPE_CONFIG
 from CoronaPlugin.core.corona_plugin_base import PluginBase
 import logging
@@ -53,7 +53,7 @@ class SceneDatas(PluginBase):
             scene = scene_manager.get(scene_name)
             actor = scene.get_actor(actor_name)
         else:
-            actor = actor_manager.get(actor_name)
+            actor = scene_manager.find_actor(actor_name)
         return actor.to_dict()
 
     @staticmethod
@@ -63,7 +63,7 @@ class SceneDatas(PluginBase):
             scene = scene_manager.get(scene_name)
             actor = scene.find_actor(actor_name)
         else:
-            actor = actor_manager.get(actor_name)
+            actor = scene_manager.find_actor(actor_name)
         if actor is None:
             raise ValueError(f"Actor '{actor_name}' not found")
 
@@ -117,7 +117,7 @@ class SceneDatas(PluginBase):
         if scene:
             actor = scene.get_actor(actor_name)
         else:
-            actor = actor_manager.get(actor_name)
+            actor = scene_manager.find_actor(actor_name)
         if file_type == "model":
             if actor:
                 actor.set_model(file_path)

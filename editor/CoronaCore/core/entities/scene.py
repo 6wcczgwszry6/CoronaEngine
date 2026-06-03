@@ -559,6 +559,13 @@ class Scene:
                 return candidate
         return None
 
+    def find_actor_by_route(self, route: str):
+        """按文件路径查找 Actor"""
+        for actor in self._actors:
+            if actor.route == route:
+                return actor
+        return None
+
     def _build_actor_json(self, actors_section: configparser.SectionProxy, actor_name: str) -> Dict[str, Any]:
         """
         从INI配置构建actor的JSON数据
