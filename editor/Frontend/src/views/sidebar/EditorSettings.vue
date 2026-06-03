@@ -1,5 +1,5 @@
 <template>
-  <div class="h-full rounded-lg overflow-hidden relative bg-[#282828]/90 flex flex-col text-white font-sans">
+  <div class="flex-1 min-h-0 w-full rounded-lg overflow-hidden relative bg-[#282828]/90 flex flex-col text-white font-sans">
     <DockTitleBar
       v-if="!isDocked"
       title="编辑器设置"

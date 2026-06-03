@@ -1,6 +1,6 @@
 <template>
   <div
-    class="h-full rounded-lg overflow-hidden flex flex-col bg-[#1e1e1e] text-gray-300 font-mono text-xs"
+    class="flex-1 min-h-0 w-full rounded-lg overflow-hidden flex flex-col bg-[#1e1e1e] text-gray-300 font-mono text-xs"
   >
     <DockTitleBar v-if="!isDocked" title="日志" extraClass="bg-[#84A65B]" routePath="/LogView" @close="closeFloat" />
 

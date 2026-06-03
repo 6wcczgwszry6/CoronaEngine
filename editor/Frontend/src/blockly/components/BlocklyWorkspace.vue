@@ -1,6 +1,6 @@
 <template>
   <div
-    :class="embedded ? 'h-full' : 'h-screen'"
+    :class="embedded ? 'flex-1 min-h-0 w-full' : 'h-screen'"
     class="rounded-lg overflow-hidden relative bg-[#282828]/90 flex flex-col text-white font-sans"
   >
     <DockTitleBar

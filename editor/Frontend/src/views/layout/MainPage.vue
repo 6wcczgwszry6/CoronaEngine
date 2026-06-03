@@ -1,5 +1,5 @@
 <template>
-  <div class="relative h-full w-full" tabindex="0">
+  <div class="relative flex-1 min-h-0 w-full" tabindex="0">
     <!-- 顶部菜单栏 -->
     <div
       class="w-full bg-[#2d2d2d] text-gray-200 border-b border-gray-700 h-10 flex items-center px-4 space-x-6 text-sm shadow-md"
