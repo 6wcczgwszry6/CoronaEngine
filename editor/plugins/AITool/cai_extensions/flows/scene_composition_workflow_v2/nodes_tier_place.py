@@ -186,25 +186,32 @@ TIER1_INITIAL_PROMPT = """你是室内设计师。为以下大件家具规划空
 
 只输出 JSON 数组, 不要其他文字。"""
 
-TIER1_RETRY_PROMPT = """你是室内设计师。修正以下有问题的物体。
+TIER1_RETRY_PROMPT = """你是室内设计师。VLM 审查发现以下物体有问题, 请修改它们的**语义关系**。
 
 房间: {room_w}×{room_d}×{room_h}m
 
-【已确定物体 (位置锁定, 不可修改, 含 AABB)】:
+【已锁定物体 (不可修改)】:
 {locked_text}
 
-【VLM 审查反馈】:
+【VLM 反馈 (据此调整)】:
 {vlm_feedback}
 
 【需修正的物体】:
 {problem_items_text}
 
-约束:
-1. 已确定物体的 AABB 不可侵占
-2. 修正后物体必须在房间边界内
-3. VLM 反馈是 2D 截图判断的, 深度可能不准, 不要盲目按数值偏移
+## 可用关系
+- against_wall: wall=back/front/left/right, offset=0.2~1.0, offset_along=-2.5~2.5
+- in_front: target=参照物名, distance=0.3~2.0
+- near_anchor: target=参照物名, side=left/right, distance=0.2~0.8
+- between: target_a=物体A, target_b=物体B
 
-只输出需修正物体的 JSON 数组 (格式同初始布局):"""
+## 修正策略
+- VLM 说 too_far: 减小 distance 或改用 near_anchor
+- VLM 说 misaligned: 用 in_front 对准正确参照物
+- VLM 说 overlap: 增大 offset_along 或换 side
+- **target 只能使用锁定物体的完整名称**
+
+只输出需修正物体的 JSON 数组 (语义关系, 非坐标):"""
 
 TIER2_PLACE_PROMPT = """你是室内设计师。当前场景已有以下物体 (位置已确定):
 
@@ -402,14 +409,16 @@ def _solve_and_apply(
     relations: List[Dict[str, Any]],
     room_size: List[float],
     asset_meta: Dict[str, Any],
+    placed: Dict[str, Dict[str, Any]] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """用 Constraint Solver 将语义关系转为坐标, 应用到 items 上。
 
+    placed: retry 时传入已锁定物体的 {name: {pos, scale}}, 作为 solver 的锚点参考。
     返回设置了 pos 的 items 列表, solver 失败时返回 None (回退 _apply_layout)。
     """
     try:
         from .constraint_solver import solve_relations
-        solved = solve_relations(relations, room_size, asset_meta)
+        solved = solve_relations(relations, room_size, asset_meta, placed=placed)
     except ImportError:
         logger.warning("_solve_and_apply: constraint_solver 导入失败, 回退 LLM 坐标")
         return None
@@ -1220,8 +1229,12 @@ def tier1_place_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     asset_meta = intermediate.get("asset_metadata", {})
     if is_retry:
-        # retry: LLM 输出坐标, 直接应用 (后续会被 corrections 机制替换)
-        items_to_place = _apply_layout(items_to_place, relations)
+        # retry: 也使用语义关系 → Constraint Solver
+        # locked 物体的 pos 从 intermediate.locked_actors 传入 solver 作为 placed 参考
+        locked_actors = intermediate.get("locked_actors", [])
+        placed_refs = {a["name"]: {"pos": a["pos"], "scale": a.get("scale", [1,1,1])} for a in locked_actors if a.get("name")}
+        solved = _solve_and_apply(items_to_place, relations, room_size, asset_meta, placed=placed_refs)
+        items_to_place = solved if solved else _apply_layout(items_to_place, relations)
     else:
         # 初始布局: LLM 输出语义关系 → Constraint Solver 计算坐标
         solved = _solve_and_apply(tier1_items, relations, room_size, asset_meta)
