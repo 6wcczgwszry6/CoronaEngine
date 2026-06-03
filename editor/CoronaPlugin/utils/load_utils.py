@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 import logging
 
-from CoronaPlugin.utils.settings import core_path
+from utils.settings import core_path
 
 logger = logging.getLogger(__name__)
 

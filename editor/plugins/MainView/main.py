@@ -14,9 +14,8 @@ from CoronaCore.utils.proejct_utils import (
     set_project_scenes,
     append_project_scene,
 )
-from CoronaPlugin.utils.settings import core_path
+from utils.settings import core_path, settings_manager
 from plugins.SceneTools.main import SceneTools
-from utils.settings import settings_manager
 
 logger = logging.getLogger(__name__)
 

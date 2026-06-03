@@ -4,7 +4,7 @@ import os
 import sys
 
 from CoronaCore.core.corona_engine import get_corona_engine
-from CoronaCore.utils import settings
+from utils.settings import core_path
 from CoronaCore.utils.response_utils import *
 
 import logging
@@ -20,7 +20,7 @@ _NOISY_FUNCTIONS = frozenset({
 
 class CoronaEditor:
     CoronaEngine = get_corona_engine()
-    url = settings.core_path.frontend_dist
+    url = core_path.frontend_dist
     module_list = {}
 
     _selected_scene = None
@@ -131,13 +131,13 @@ class CoronaEditor:
         if not scene_name and not actor_name:
             return {"ok": False, "error": "请先在Object面板选中一个物体"}
         try:
-            from CoronaCore.core.managers import scene_manager, actor_manager
+            from CoronaCore.core.managers import scene_manager
             if scene_name:
                 scene = scene_manager.get(scene_name)
                 actor = scene.find_actor(actor_name) if scene else None
             else:
                 scene = None
-                actor = actor_manager.get(actor_name)
+                actor = scene_manager.find_actor(actor_name)
             if actor is None:
                 return {"ok": False, "error": f"未找到物体: {actor_name}"}
             if scene:
@@ -202,7 +202,7 @@ class CoronaEditor:
         if cls._follow_frame_count % 60 == 0:
             logger.info("[CAMFOLLOW] actor=%s held_keys=%s offset=%s", cls._camera_follow_actor, cls._held_keys, cls._camera_follow_offset)
         try:
-            from CoronaCore.core.managers import scene_manager, actor_manager
+            from CoronaCore.core.managers import scene_manager
             actor = None
             scene = None
             if cls._camera_follow_scene:
@@ -210,7 +210,7 @@ class CoronaEditor:
                 if scene:
                     actor = scene.find_actor(cls._camera_follow_actor)
             if actor is None:
-                actor = actor_manager.get(cls._camera_follow_actor)
+                actor = scene_manager.find_actor(cls._camera_follow_actor)
             if actor is None:
                 return
             if scene:

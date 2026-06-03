@@ -7,7 +7,7 @@ from CoronaCore.core.corona_editor import CoronaEditor
 import logging
 
 from CoronaPlugin.core.corona_plugin_base import PluginBase
-from CoronaPlugin.utils.settings import core_path
+from utils.settings import core_path
 
 logger = logging.getLogger(__name__)
 
