@@ -232,6 +232,12 @@ class CoronaEditor:
     _camera_follow_offset = [0.0, 0.0, 2.0]  # 世界空间偏移（摄像机 - 物体）
     _held_keys = set()  # JS端填充的WASD按键状态
 
+    # 鼠标右键环绕相关
+    _follow_rmb_down = False
+    _follow_prev_mouse = None       # 上一帧鼠标屏幕坐标 (x, y)
+    _follow_orbit_sensitivity = 0.004  # 每像素弧度
+    _follow_cam_look_at = True      # 是否让相机始终注视锁定物体
+
     @classmethod
     def object_key_down(cls, key):
         """JS调用：按下WASD键"""
@@ -508,11 +514,13 @@ class CoronaEditor:
                 elif k == 'd': d_down = 0x8000
 
             if w_down or a_down or s_down or d_down:
-                cam_fwd = cls._normalize(cam.get_forward())
-                cam_up = cam.get_world_up()
-                cam_right = cls._normalize(cls._cross(cam_fwd, cam_up))
-                fwd_xz = cls._normalize([cam_fwd[0], 0.0, cam_fwd[2]])
-                right_xz = cls._normalize([cam_right[0], 0.0, cam_right[2]])
+                # 从 offset 推断相机朝向，确保 WASD 方向与观察方向一致
+                ox, oy, oz = cls._camera_follow_offset
+                look_dir = cls._normalize([-ox, -oy, -oz])
+                # 取水平分量
+                fwd_xz = cls._normalize([look_dir[0], 0.0, look_dir[2]])
+                # 用世界 up 叉乘 forward 得到 right
+                right_xz = cls._normalize(cls._cross(fwd_xz, [0.0, 1.0, 0.0]))
                 move = [0.0, 0.0, 0.0]
                 step = 0.5
                 if w_down: move[0] += fwd_xz[0] * step; move[2] += fwd_xz[2] * step
@@ -523,9 +531,78 @@ class CoronaEditor:
                 actor.set_position(obj_pos, if_init=True)
                 logger.info("[CAMFOLLOW] WASD move to %s", obj_pos)
 
-            # 摄像机跟随
+            # === 鼠标右键：围绕物体环绕相机（轨道控制）===
+            rmb_down = False
+            try:
+                rmb_down = ctypes.windll.user32.GetAsyncKeyState(0x02) & 0x8000
+            except Exception:
+                pass
+
+            if rmb_down:
+                # 获取当前鼠标屏幕位置
+                cur_mouse = None
+                try:
+                    class POINT(ctypes.Structure):
+                        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+                    pt = POINT()
+                    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                    cur_mouse = (pt.x, pt.y)
+                except Exception:
+                    pass
+
+                if not cls._follow_rmb_down:
+                    # RMB 刚按下：记录起始位置
+                    cls._follow_rmb_down = True
+                    cls._follow_prev_mouse = cur_mouse
+                else:
+                    # RMB 持续按下：计算鼠标增量，环绕相机
+                    if cur_mouse and cls._follow_prev_mouse:
+                        dx = cur_mouse[0] - cls._follow_prev_mouse[0]
+                        dy = cur_mouse[1] - cls._follow_prev_mouse[1]
+                        cls._follow_prev_mouse = cur_mouse
+
+                        if dx != 0 or dy != 0:
+                            sensitivity = cls._follow_orbit_sensitivity
+                            ox, oy, oz = cls._camera_follow_offset
+
+                            # Yaw（水平）：绕世界 Y 轴旋转 offset
+                            angle_y = -dx * sensitivity
+                            cos_y = math.cos(angle_y)
+                            sin_y = math.sin(angle_y)
+                            new_ox = ox * cos_y - oz * sin_y
+                            new_oz = ox * sin_y + oz * cos_y
+                            ox, oz = new_ox, new_oz
+
+                            # Pitch（俯仰）：绕水平 right 轴旋转 offset
+                            horiz = math.sqrt(ox * ox + oz * oz)
+                            if horiz > 1e-8:
+                                # right = normalize(cross([ox,0,oz], [0,1,0]))
+                                rx = oz / horiz
+                                rz = -ox / horiz
+                                angle_x = -dy * sensitivity
+                                cos_x = math.cos(angle_x)
+                                sin_x = math.sin(angle_x)
+                                new_h = horiz * cos_x - oy * sin_x
+                                new_oy = horiz * sin_x + oy * cos_x
+                                ox = ox / horiz * new_h
+                                oz = oz / horiz * new_h
+                                oy = new_oy
+
+                            cls._camera_follow_offset = [ox, oy, oz]
+            else:
+                cls._follow_rmb_down = False
+                cls._follow_prev_mouse = None
+
+            # 摄像机跟随（位置 + 注视）
             ox, oy, oz = cls._camera_follow_offset
             cam.set_position([obj_pos[0] + ox, obj_pos[1] + oy, obj_pos[2] + oz])
+
+            # 让摄像机始终注视物体
+            if cls._follow_cam_look_at:
+                look_dir = cls._normalize([-ox, -oy, -oz])
+                cam.set_forward(look_dir)
+                cam.set_world_up([0.0, 1.0, 0.0])
+
         except Exception as e:
             logger.error("[CAMFOLLOW] error: %s", e)
 
