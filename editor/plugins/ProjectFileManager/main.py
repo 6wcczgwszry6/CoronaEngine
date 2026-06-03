@@ -15,7 +15,7 @@ from utils.settings import settings_manager
 logger = logging.getLogger(__name__)
 
 
-@PluginBase.register_web("FileManager", "/FileManager", "文件管理器", 0, "left_bottom", 300, 600, False, True)
+@PluginBase.register_web("FileManager", "/FileManager", "文件管理器", 1, "left_bottom", 300, 600, False, False)
 class FileManager(PluginBase):
     """文件管理器插件"""
 

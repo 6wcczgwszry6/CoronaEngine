@@ -6,7 +6,7 @@ from CoronaPlugin.core.corona_plugin_base import PluginBase
 logger = logging.getLogger(__name__)
 
 
-@PluginBase.register_web("LogTool", "/LogView", "日志工具", 0, "bottom_left", 1100, 200, False, True)
+@PluginBase.register_web("LogTool", "/LogView", "日志工具", 1, "bottom_left", 1100, 200, False, False)
 class LogTool(PluginBase):
     ready = False
 

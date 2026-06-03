@@ -380,6 +380,9 @@ class SceneTools(PluginBase):
             if actor is None:
                 logger.error(f"open_actor: actor '{actor_name}' not found in scene '{scene_name}'")
                 return False
+            # 确保详情窗口已打开（双击场景列表时自动唤出）
+            if "/Object" not in CoronaEditor.tab_list:
+                CoronaEditor.open_browser("/Object", "right_bottom", 300, 400, False)
             CoronaEditor.js_call_func("/Object", "onActorChange", [actor.actor_type, scene_name, actor_name])
             return True
         except Exception as e:
