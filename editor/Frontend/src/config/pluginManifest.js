@@ -5,6 +5,7 @@
 export const PLUGIN_MANIFEST = [
   {
     id: 'SceneTools',
+    routePath: '/SceneBar',
     displayName: '场景工具',
     pageType: 'view',
     defaultDock: 'right',
@@ -15,6 +16,7 @@ export const PLUGIN_MANIFEST = [
   },
   {
     id: 'SceneDatas',
+    routePath: '/Object',
     displayName: '详情工具',
     pageType: 'view',
     defaultDock: 'right',
@@ -25,6 +27,7 @@ export const PLUGIN_MANIFEST = [
   },
   {
     id: 'AITool',
+    routePath: '/Pet',
     displayName: '白菜助手',
     pageType: 'plugin',
     defaultDock: 'bottom',
@@ -35,6 +38,7 @@ export const PLUGIN_MANIFEST = [
   },
   {
     id: 'LogTool',
+    routePath: '/LogView',
     displayName: '日志工具',
     pageType: 'view',
     defaultDock: 'bottom',
@@ -45,6 +49,7 @@ export const PLUGIN_MANIFEST = [
   },
   {
     id: 'FileManager',
+    routePath: '/FileManager',
     displayName: '文件管理器',
     pageType: 'view',
     defaultDock: 'left',
@@ -55,6 +60,7 @@ export const PLUGIN_MANIFEST = [
   },
   {
     id: 'ProjectSettings',
+    routePath: '/ProjectSettings',
     displayName: '项目设置',
     pageType: 'special',
     defaultDock: 'center',
@@ -65,6 +71,7 @@ export const PLUGIN_MANIFEST = [
   },
   {
     id: 'ScratchTool',
+    routePath: '/ScratchTool',
     displayName: '积木插件',
     pageType: 'plugin',
     defaultDock: 'center',
@@ -75,6 +82,7 @@ export const PLUGIN_MANIFEST = [
   },
   {
     id: 'AITalkBar',
+    routePath: '/AITalkBar',
     displayName: 'AI 对话',
     pageType: 'plugin',
     defaultDock: 'right',
@@ -85,6 +93,7 @@ export const PLUGIN_MANIFEST = [
   },
   {
     id: 'EditorSettings',
+    routePath: '/SetUp',
     displayName: '编辑器设置',
     pageType: 'special',
     defaultDock: 'center',

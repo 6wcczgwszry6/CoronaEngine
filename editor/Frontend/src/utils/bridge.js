@@ -165,11 +165,11 @@ export const projectService = {
 };
 
 export const appService = {
-  // Migrated: panel creation via C++ __cross_tab__ (no Python involved)
+  // C++ __cross_tab__ handlers (no Python involved)
   createPanelTab: (panelId, routePath, width, height) =>
     Bridge.callCEF('__cross_tab__', 'create-panel-tab', [panelId, routePath, width, height]),
-  closePanelTab: (tabId, panelId) =>
-    Bridge.callCEF('__cross_tab__', 'close-panel-tab', [tabId, panelId]),
+  closeThisTab: (panelId) =>
+    Bridge.callCEF('__cross_tab__', 'close-this-tab', [panelId]),
   crossTabBroadcast: (event, payload) =>
     Bridge.callCEF('__cross_tab__', 'broadcast', [event, payload]),
 

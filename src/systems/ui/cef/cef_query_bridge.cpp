@@ -133,7 +133,12 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                 int w = args.size() > 2 ? args[2].get<int>() : 400;
                 int h = args.size() > 3 ? args[3].get<int>() : 600;
 
-                // Construct full URL from current browser's base + route hash
+                // Strip leading # if present
+                if (!route.empty() && route[0] == '#')
+                    route = route.substr(1);
+
+                // Construct full URL with standalone marker from current
+                // browser's URL, so the new tab knows it is a pop-out
                 std::string main_url =
                     browser->GetMainFrame()->GetURL().ToString();
                 auto hash_pos = main_url.find('#');
@@ -141,18 +146,41 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     (hash_pos != std::string::npos)
                         ? main_url.substr(0, hash_pos)
                         : main_url;
-                if (!route.empty() && route[0] == '#')
-                    route = route.substr(1);
-                std::string full_url = base_url;
-                if (!route.empty()) full_url += "#" + route;
+                std::string full_url =
+                    base_url + "#" + route + "?standalone=1";
 
-                int tab_id = bm.create_tab(full_url, route, "right_top", w, h,
-                                           false);
+                int tab_id = bm.create_tab(full_url, route + "?standalone=1",
+                                           "right_top", w, h, false);
                 nlohmann::json result;
                 result["tab_id"] = tab_id;
                 result["panel_id"] = panel_id;
                 callback->Success(
                     create_success_json("create-panel-tab", result));
+                return true;
+            }
+
+            if (func == "close-this-tab") {
+                // Find tab belonging to the calling browser and remove it
+                auto& tabs = bm.get_tabs();
+                int found_id = -1;
+                int bid = browser->GetIdentifier();
+                for (auto& [id, tab] : tabs) {
+                    if (tab->client && tab->client->GetBrowser() &&
+                        tab->client->GetBrowser()->GetIdentifier() == bid) {
+                        found_id = id;
+                        break;
+                    }
+                }
+                if (found_id >= 0) {
+                    bm.remove_tab(found_id);
+                }
+                std::string panel_id =
+                    args.size() > 0 ? args[0].get<std::string>() : "";
+                nlohmann::json payload;
+                payload["panelId"] = panel_id;
+                do_broadcast("panel-closed", payload);
+                callback->Success(
+                    create_success_json("close-this-tab", payload));
                 return true;
             }
 

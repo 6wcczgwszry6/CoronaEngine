@@ -1,9 +1,11 @@
 import { inject } from 'vue';
 import { useDockStore } from '@/stores/dockStore.js';
+import { appService } from '@/utils/bridge.js';
 
 /**
- * 面板组件在 Dock 内时使用的 composable
- * 返回 isDocked 标志和 closePanel 函数
+ * 面板组件在使用时的 composable
+ * dock 模式（DockPanel 内）：isDocked=true，closePanel 关闭 dock 面板
+ * standalone 模式（独立 CEF Tab）：isDocked=false，closePanel 调用 C++ close-this-tab 关闭浮窗
  */
 export function useDockPanel() {
   const dockPanelId = inject('dockPanelId', null);
@@ -11,8 +13,14 @@ export function useDockPanel() {
   const dockStore = inDock ? useDockStore() : null;
 
   function closePanel() {
-    if (dockPanelId && dockStore) {
+    if (inDock && dockPanelId && dockStore) {
       dockStore.closePanel(dockPanelId);
+    } else if (!inDock) {
+      // 独立浮窗 Tab：通知 C++ 关闭自身并广播 panel-closed
+      const id = dockPanelId || getPanelIdFromRoute();
+      if (id) {
+        appService.closeThisTab(id).catch(() => {});
+      }
     }
   }
 
@@ -21,4 +29,21 @@ export function useDockPanel() {
     dockPanelId,
     closePanel,
   };
+}
+
+function getPanelIdFromRoute() {
+  const hash = window.location.hash || '';
+  const path = hash.replace('#', '').split('?')[0];
+  const map = {
+    '/SceneBar': 'SceneTools',
+    '/Object': 'SceneDatas',
+    '/Pet': 'AITool',
+    '/LogView': 'LogTool',
+    '/FileManager': 'FileManager',
+    '/ProjectSettings': 'ProjectSettings',
+    '/ScratchTool': 'ScratchTool',
+    '/AITalkBar': 'AITalkBar',
+    '/SetUp': 'EditorSettings',
+  };
+  return map[path] || null;
 }
