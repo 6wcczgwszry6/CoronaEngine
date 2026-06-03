@@ -135,12 +135,13 @@ def _filter_tier(items: List[Dict[str, Any]], tier: int) -> List[Dict[str, Any]]
 # Prompt 模板
 # ===========================================================================
 
-TIER1_INITIAL_PROMPT = """你是专业的室内设计师。为以下大件家具规划位置。
+TIER1_INITIAL_PROMPT = """你是室内设计师。为以下大件家具规划空间关系。
+
+**不要输出坐标。输出语义关系, 系统会自动计算精确坐标。**
 
 ## 场景信息
 房间: {room_w}×{room_d}×{room_h}m
-坐标: X轴左右, Y轴上下(Y=0地面), Z轴前后。原点=房间中心地面。
-边界: X∈[{neg_x:.1f}, {x_half:.1f}], Z∈[{neg_z:.1f}, {z_half:.1f}]
+原点=房间中心地面, X∈[{neg_x:.1f}, {x_half:.1f}], Z∈[{neg_z:.1f}, {z_half:.1f}]
 
 ## 设计意图
 {design_intent}
@@ -148,41 +149,42 @@ TIER1_INITIAL_PROMPT = """你是专业的室内设计师。为以下大件家具
 ## 大件列表 ({n} 个)
 {items_text}
 
-## 布局原则 (必须遵守)
+## 可用关系 (每个物体选一个)
 
-### 1. 靠墙原则
-- 沙发/柜子/床等大件**必须靠墙**, X或Z坐标接近边界(距离<0.5m)
-- 示例: 房间X∈[-2.5,2.5], 沙发靠右墙→ X≈2.0
+| 关系 | target 参数 | 说明 | 参数范围 |
+|------|------------|------|---------|
+| against_wall | wall: back/front/left/right | 贴墙放置 | offset: 0.2~1.0m, offset_along: -2.5~2.5m |
+| in_front | target: 参照物名 | 放在参照物正前方 | distance: 0.3~2.0m |
+| near_anchor | target: 参照物名, side: left/right | 放在参照物侧边 | distance: 0.2~0.8m |
+| between | target_a: 物体A, target_b: 物体B | 放在两个物体中点 | — |
 
-### 2. 错开布局原则 (重要!)
-- **禁止所有家具X=0** (拥挤不自然)
-- 至少50%家具X坐标≠0, 错开±1.0~±2.0
-- 示例: 沙发X=2.0(靠右), 茶几X=0.5(略偏右), 单椅X=-1.5(靠左)
+## 布局原则
 
-### 3. 功能分区原则
-- 客厅: 沙发靠墙→茶几在沙发前0.8-1.5m→单椅在侧面或对面
-- 卧室: 床靠墙→床头柜床两侧0.2-0.4m→衣柜靠另一面墙
-- 书房: 书桌靠窗/墙→书柜靠墙→椅子在桌前
+1. 沙发/柜子等大件用 against_wall, 贴后墙(back)或前墙(front)或侧墙(left/right)
+2. offset_along 用于沿墙错开: 正=右/后, 负=左/前。不同家具用不同 offset_along 避免居中堆叠
+3. 茶几/咖啡桌用 in_front 放在沙发前方, distance 0.6~1.0m
+4. 单椅可放在茶几侧边用 near_anchor
 
-### 4. 动线与间距
-- 门口到家具路径宽度≥0.8m, 家具间距≥0.5m
-
-## 客厅参考模板
-模式A 对称式: 沙发靠后墙(Z≈z_half-0.5), 茶几居中, 单椅对称放两侧
-模式B L型: 沙发靠后墙, 单椅靠右墙(X≈x_half-0.5), 茶几在交点内侧
-模式C 一字型: 沙发靠后墙, 茶几在正前方1.2m, 单椅靠侧墙错开
-
-## 输出 JSON
+## 输出 JSON (语义关系, 非坐标)
 [
-  {{"object_id": "...", "pos": [x,y,z], "rot": [rx,ry,rz], "scale": [sx,sy,sz], "reason": "沙发靠后墙(Z≈{z_half:.1f}-0.5)"}},
-  ...
+  {{
+    "object_id": "沙发",
+    "relation": "against_wall",
+    "target": "back",
+    "offset": 0.3,
+    "offset_along": 0.5,
+    "reason": "沙发靠后墙, 右偏0.5m"
+  }},
+  {{
+    "object_id": "茶几",
+    "relation": "in_front",
+    "target": "沙发",
+    "distance": 0.8,
+    "reason": "茶几在沙发前0.8m"
+  }}
 ]
 
-## 自检清单 (输出前检查, 不通过则重新规划)
-□ 是否有≥1个大件靠墙(distance to wall<0.5m)?
-□ 是否>50%家具X=0? 如果是→错开
-□ 茶几和沙发|Z差|是否0.8-1.5m?
-□ 有重叠(distance<0.5m)或超界?"""
+只输出 JSON 数组, 不要其他文字。"""
 
 TIER1_RETRY_PROMPT = """你是室内设计师。修正以下有问题的物体。
 
@@ -395,6 +397,42 @@ def _format_locked_actors(locked: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _solve_and_apply(
+    items: List[Dict[str, Any]],
+    relations: List[Dict[str, Any]],
+    room_size: List[float],
+    asset_meta: Dict[str, Any],
+) -> Optional[List[Dict[str, Any]]]:
+    """用 Constraint Solver 将语义关系转为坐标, 应用到 items 上。
+
+    返回设置了 pos 的 items 列表, solver 失败时返回 None (回退 _apply_layout)。
+    """
+    try:
+        from .constraint_solver import solve_relations
+        solved = solve_relations(relations, room_size, asset_meta)
+    except ImportError:
+        logger.warning("_solve_and_apply: constraint_solver 导入失败, 回退 LLM 坐标")
+        return None
+
+    if not solved:
+        return None
+
+    result = []
+    for item in items:
+        oid = str(item.get("object_id", ""))
+        if oid in solved:
+            item_copy = dict(item)
+            item_copy["pos"] = solved[oid]["pos"]
+            item_copy["rot"] = solved[oid].get("rot", [0, 0, 0])
+            item_copy["scale"] = solved[oid].get("scale", item.get("scale", [1, 1, 1]))
+            result.append(item_copy)
+        else:
+            result.append(dict(item))
+
+    logger.info("_solve_and_apply: %d/%d 物体求解成功", len(solved), len(items))
+    return result
+
+
 def _apply_layout(
     items: List[Dict[str, Any]],
     layouts: List[Dict[str, Any]],
@@ -590,21 +628,86 @@ def _calculate_semantic_position(
 
 def _check_overlap(
     new_pos: List[float], new_scale: List[float],
-    existing: List[Dict[str, Any]], threshold: float = 0.05,
+    existing: List[Dict[str, Any]], threshold: float = 0.15,
+    asset_meta: Dict[str, Any] = None,
+    new_name: str = "",
 ) -> bool:
-    """检查新位置是否与已有物体重叠 (>threshold 米视为重叠)。"""
-    hx = 0.4 * new_scale[0]
-    hz = 0.4 * new_scale[2]
+    """检查新位置是否与已有物体重叠 (>threshold 米视为重叠)。
+
+    优先使用 asset_meta 中的真实 bbox 尺寸, 回退到 0.4*scale 估算。
+    """
+    hx, hz = _get_bbox_half(new_name, new_scale, asset_meta)
     for ex in existing:
         ep = ex.get("pos", [0, 0, 0])
         es = ex.get("scale", [1, 1, 1])
-        ehx = 0.4 * es[0]
-        ehz = 0.4 * es[2]
+        ex_name = ex.get("name", "") or ex.get("object_id", "")
+        ehx, ehz = _get_bbox_half(ex_name, es, asset_meta)
         ox = (hx + ehx) - abs(new_pos[0] - ep[0])
         oz = (hz + ehz) - abs(new_pos[2] - ep[2])
         if ox > threshold and oz > threshold:
             return True
     return False
+
+
+def _get_bbox_half(
+    name: str, scale: List[float], asset_meta: Dict[str, Any] = None,
+) -> tuple:
+    """从 asset_meta 获取真实半尺寸 (X, Z), 回退到 0.4*scale 估算。"""
+    if asset_meta and name:
+        meta = asset_meta.get(name, {})
+        if meta and meta.get("size"):
+            s = meta["size"]
+            return s[0] / 2, s[2] / 2
+    sc = scale or [1, 1, 1]
+    return 0.4 * sc[0], 0.4 * sc[2]
+
+
+def _resolve_tier_overlaps(
+    items: List[Dict[str, Any]],
+    asset_meta: Dict[str, Any] = None,
+    locked: List[Dict[str, Any]] = None,
+) -> int:
+    """检测并解决物品间碰撞重叠。对重叠物体尝试 X/Z 偏移。
+
+    返回解决的碰撞数量。
+    """
+    if len(items) <= 1 and not locked:
+        return 0
+
+    existing = list(locked or [])  # 已锁定的先行物体
+    resolved = 0
+
+    offsets = (
+        [(dx, 0) for dx in (0.3, -0.3, 0.6, -0.6, 0.9, -0.9, 1.2)] +
+        [(0, dz) for dz in (0.3, -0.3, 0.6, -0.6, 0.9)] +
+        [(dx, dz) for dx in (0.5, -0.5) for dz in (0.4, -0.4)]
+    )
+
+    for item in items:
+        pos = item.get("pos")
+        scl = item.get("scale", [1, 1, 1])
+        name = item.get("name", "") or item.get("object_id", "")
+        if not pos or len(pos) < 3:
+            existing.append(item)
+            continue
+
+        if _check_overlap(pos, scl, existing, asset_meta=asset_meta, new_name=name):
+            found = False
+            for dx, dz in offsets:
+                test_pos = [pos[0] + dx, pos[1], pos[2] + dz]
+                if not _check_overlap(test_pos, scl, existing, asset_meta=asset_meta, new_name=name):
+                    pos[0], pos[2] = test_pos[0], test_pos[2]
+                    logger.info("[overlap] %s 偏移 dx=%.1f dz=%.1f 解决重叠", name, dx, dz)
+                    found = True
+                    resolved += 1
+                    break
+            if not found:
+                logger.warning("[overlap] %s 无法避开重叠, 保持原位置 [%.2f, %.2f]",
+                             name, pos[0], pos[2])
+
+        existing.append(item)
+
+    return resolved
 
 
 _FLOOR_KEYWORDS = {"沙发", "床", "桌", "茶几", "柜", "灯", "地毯", "椅", "凳", "几", "架"}
@@ -1081,13 +1184,22 @@ def tier1_place_node(state: Dict[str, Any]) -> Dict[str, Any]:
     if text is None:
         return {"error": "tier1 LLM 调用失败"}
 
-    layouts = _parse_llm_json(text)
-    if layouts is None:
+    relations = _parse_llm_json(text)
+    if relations is None:
         return {"error": "tier1 LLM 输出解析失败"}
 
-    items_to_place = _apply_layout(items_to_place, layouts)
+    asset_meta = intermediate.get("asset_metadata", {})
+    if is_retry:
+        # retry: LLM 输出坐标, 直接应用 (后续会被 corrections 机制替换)
+        items_to_place = _apply_layout(items_to_place, relations)
+    else:
+        # 初始布局: LLM 输出语义关系 → Constraint Solver 计算坐标
+        solved = _solve_and_apply(tier1_items, relations, room_size, asset_meta)
+        items_to_place = solved if solved else _apply_layout(tier1_items, relations)
+
     _apply_default_scale(items_to_place)
     _validate_positions(items_to_place, room_size)
+    _resolve_tier_overlaps(items_to_place, asset_meta)
     _dump_layout_result(state, 1, intermediate.get("tier1_retry_count", 0), items_to_place, is_retry)
 
     # 合并: 已锁定的 + 新布局的
@@ -1147,6 +1259,7 @@ def tier2_place_node(state: Dict[str, Any]) -> Dict[str, Any]:
     metadata = state.get("metadata", {})
     room_size = metadata.get("room_size", [5, 3, 3])
     scene_name = metadata.get("scene_name", "composed_scene")
+    asset_meta = intermediate.get("asset_metadata", {})
 
     # 获取场景对象用于语义位置计算
     scene = None
@@ -1233,10 +1346,10 @@ def tier2_place_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 ex_copy["scale"] = [1, 1, 1]
             all_existing.append(ex_copy)
 
-        if _check_overlap(pos, scl, all_existing):
+        if _check_overlap(pos, scl, all_existing, asset_meta=asset_meta, new_name=oid):
             for offset in [0.3, 0.6, -0.3, -0.6, 0.9]:
                 test_pos = [pos[0] + offset, pos[1], pos[2]]
-                if not _check_overlap(test_pos, scl, all_existing):
+                if not _check_overlap(test_pos, scl, all_existing, asset_meta=asset_meta, new_name=oid):
                     pos = test_pos
                     logger.info("tier2: %s 碰撞偏移 +%.1fm", oid, offset)
                     break
@@ -1339,6 +1452,8 @@ def tier3_place_node(state: Dict[str, Any]) -> Dict[str, Any]:
     items_to_place = _apply_layout(items_to_place, layouts)
     _apply_default_scale(items_to_place)
     _validate_positions(items_to_place, room_size)
+    asset_meta = intermediate.get("asset_metadata", {})
+    _resolve_tier_overlaps(items_to_place, asset_meta, locked=locked)
 
     # 合并已有 + 新装饰
     if is_retry:

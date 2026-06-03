@@ -28,6 +28,17 @@ MAX_TIER_RETRIES = 2
 _DEFAULT_VIEW_ANGLES = [0, 45, 90, 135, 180, 225, 270, 315]
 _DEFAULT_ELEVATION = 35.0
 
+# VLM issue → solver action 映射 (Week 2: 执行逻辑待接入 solver)
+RULE_ACTION_MAP = {
+    "too_far": "near_anchor",       # 太远 → 移到参照物附近
+    "too_close": "near_anchor",     # 太近 → 移到参照物附近
+    "overlap": "near_anchor",       # 重叠 → 偏移
+    "floating": "bottom_align",     # 悬空 → 对齐底面
+    "wrong_scale": "normalize_scale",  # 比例错 → 重新归一化
+    "misaligned": "in_front",       # 未对齐 → 放在参照物前方
+    "off_center": "center_under_group",  # 偏离中心 → 居中
+}
+
 # LLM 提取 problem_actors 的系统提示
 _EXTRACT_ACTORS_SYSTEM_PROMPT = """你是场景分析助手。VLM 审查了 3D 场景并提出了自然语言反馈。
 
@@ -625,7 +636,19 @@ def _tier_review(state: Dict[str, Any], tier: int) -> Dict[str, Any]:
     logger.info("tier%d_review: overall=%s decision=%s retry=%d/%d problems=%d corrections=%d",
                 tier, overall, decision, new_count, MAX_TIER_RETRIES, len(problem_names), corrections_applied)
 
-    # 4b. corrections 未覆盖时, 回退差量修正: remove problem actors
+    # 4b. Rule Correction Fallback (Week 2: 诊断日志, 执行逻辑待接入 solver)
+    if decision == "fail" and not corrections_applied and problem_actors_raw:
+        for pa in problem_actors_raw:
+            issue = pa.get("issue", "")
+            action = RULE_ACTION_MAP.get(issue)
+            if action:
+                logger.info("[rule_map] %s: '%s' → solver action '%s' (Week 2 接入)",
+                           pa.get("actor", "?"), issue, action)
+            else:
+                logger.info("[rule_map] %s: '%s' → 无匹配 action, 回退 diff",
+                           pa.get("actor", "?"), issue)
+
+    # 4c. corrections 未覆盖时, 回退差量修正: remove problem actors
     if decision == "fail" and problem_names:
         _apply_diff_correction(state, tier, problem_names, feedback)
 
