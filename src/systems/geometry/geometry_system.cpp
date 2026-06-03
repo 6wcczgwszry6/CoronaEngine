@@ -188,36 +188,27 @@ void GeometrySystem::update() {
             if (added_actors.count(actor_handle)) continue;
 
             auto& actor_storage = hub.actor_storage();
-            auto actor_read = actor_storage.try_acquire_read(actor_handle);
+            auto actor_read = actor_storage.acquire_read(actor_handle);
             if ( !actor_read ) continue;
             const ActorDevice& actor_dev = *actor_read;
 
-            {
-                std::unique_lock lock(impl_->mtx);
-                auto& scene_state = impl_->get_or_create(scene_handle);
-                if (!scene_state.actor_load_states.count(actor_handle)) {
-                    scene_state.actor_load_states[actor_handle] = ActorLoadState::Unloaded;
-                }
-            }
-
             for (std::uintptr_t profile_handle : actor_dev.profile_handles) {
                 auto& profile_storage = hub.profile_storage();
-                auto profile_read = profile_storage.try_acquire_read(profile_handle);
+                auto profile_read = profile_storage.acquire_read(profile_handle);
                 if (!profile_read.valid()) continue;
 
                 const ProfileDevice& profile_dev = *profile_read;
                 std::uintptr_t mechanics_handle = profile_dev.mechanics_handle;
                 if ( !mechanics_handle ) continue;
 
-
                 auto& mechanics_storage = hub.mechanics_storage();
-                auto mechanics_read = mechanics_storage.try_acquire_read(mechanics_handle);
+                auto mechanics_read = mechanics_storage.acquire_read(mechanics_handle);
                 if (!mechanics_read.valid()) continue;
 
-                auto geometry_read = geometry_storage.try_acquire_read(mechanics_read->geometry_handle);
+                auto geometry_read = geometry_storage.acquire_read(mechanics_read->geometry_handle);
                 if (!geometry_read.valid() || geometry_read->transform_handle == 0) continue;
 
-                auto transform_read = transform_storage.try_acquire_read(geometry_read->transform_handle);
+                auto transform_read = transform_storage.acquire_read(geometry_read->transform_handle);
                 if (!transform_read.valid()) continue;
 
                 const MechanicsDevice& mechanics_dev = *mechanics_read;
