@@ -90,9 +90,13 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
     std::string req = request.ToString();
 
     // ── __cross_tab__ 跨窗口通信：C++ 直接处理，不走 Python ──
-    try {
-        auto j = nlohmann::json::parse(req);
-        if (j.value("module", "") == "__cross_tab__") {
+    // 快速路径：用字符串搜索代替完整 JSON parse，避免对每个高频
+    // cefQuery（update_drag_regions 等）都在 UI 线程上做全量 JSON 解析。
+    // __cross_tab__ 请求很少（仅 pop-out/close/broadcast），先搜再 parse。
+    if (req.find("\"__cross_tab__\"") != std::string::npos) {
+        try {
+            auto j = nlohmann::json::parse(req);
+            if (j.value("module", "") == "__cross_tab__") {
             std::string func = j.value("function", "");
             auto args = j.value("args", nlohmann::json::array());
             auto& bm = BrowserManager::instance();

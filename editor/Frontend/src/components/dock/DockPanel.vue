@@ -63,6 +63,7 @@ async function handlePopOut() {
   min-height: 0;
   border-bottom: 1px solid #3c3c3c;
   background: #1e1e1e;
+  contain: layout style;
 }
 .dock-panel-header {
   display: flex;

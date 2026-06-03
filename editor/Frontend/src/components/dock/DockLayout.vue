@@ -119,6 +119,7 @@ onUnmounted(() => {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
+  contain: layout style;
 }
 
 .dock-row {
@@ -126,6 +127,7 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  contain: layout style;
 }
 
 .dock-zone-v {
@@ -134,6 +136,7 @@ onUnmounted(() => {
   overflow: hidden;
   flex-shrink: 0;
   background: #1a1a2e;
+  contain: layout style;
 }
 
 .dock-zone-center {
@@ -142,12 +145,14 @@ onUnmounted(() => {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  contain: layout style;
 }
 
 .dock-zone-bottom {
   overflow: hidden;
   flex-shrink: 0;
   background: #1a1a2e;
+  contain: layout style;
 }
 
 .dock-bottom-row {
