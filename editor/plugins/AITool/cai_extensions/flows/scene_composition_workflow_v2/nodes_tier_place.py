@@ -1247,7 +1247,14 @@ def tier1_place_node(state: Dict[str, Any]) -> Dict[str, Any]:
     # 合并: 已锁定的 + 新布局的
     if is_retry:
         problem_ids = set(intermediate.get("tier1_retry_actors", []))
-        locked = [it for it in tier1_items if it.get("object_id") not in problem_ids]
+        # 用 locked_actors (含 pos) 而非 tier1_items (无 pos)
+        locked_actors = intermediate.get("locked_actors", [])
+        locked = [
+            {"object_id": a["name"], "name": a["name"], "pos": a["pos"],
+             "rot": a.get("rot", [0,0,0]), "scale": a.get("scale", [1,1,1])}
+            for a in locked_actors
+            if a.get("name") and a["name"] not in problem_ids
+        ]
         merged = locked + items_to_place
     else:
         merged = items_to_place

@@ -218,31 +218,48 @@ def apply_corrections(review_result, scene):
 
 ---
 
-## 六、实施路线
+## 六、实施状态 (2026-06-04 更新)
 
 ### Week 1: 基础闭环
 
-| 天 | 任务 | 验收 |
-|----|------|------|
-| Day 1 | Asset Metadata Builder + 缓存 | 3个模型 bbox 正确 |
-| Day 2 | Constraint Solver 6关系 | 单元测试通过 |
-| Day 3 | Tier1 prompt → relation | LLM 输出合法关系 |
-| Day 4 | Relative Scale Normalizer | 台灯/地毯/落地灯 scale 合理 |
-| Day 5 | 全链路联调, 跑3次 | 坐标由 solver 产出 |
+| 天 | 任务 | 状态 | 备注 |
+|----|------|------|------|
+| Day 1 | Asset Metadata Builder | ✅ 完成 | trimesh bbox, collect_models 集成 |
+| Day 2 | Constraint Solver | ✅ 完成 | 6 关系 + scale normalizer |
+| Day 3 | Tier1 prompt → relation | ✅ 初始 | LLM 稳定输出语义关系；**retry merge bug 已修复** |
+| Day 4 | Relative Scale Normalizer | ⚠️ 定义未集成 | solver 中有 `normalize_relative_scale`，placement 管线未调用 |
+| Day 5 | 全链路联调 | ⚠️ 部分 | 坐标由 solver 产出 ✅；retry 待验证；tier3 未执行 |
 
 ### Week 2: 修正闭环
 
-| 天 | 任务 | 验收 |
-|----|------|------|
-| Day 1 | Rule Correction Fallback | issue→action 映射正确 |
-| Day 2 | Tier3 绑定规则 | 地毯不再随机放 |
-| Day 3 | 全链路联调, 跑5次 | corrections + rule 都触发 |
-| Day 4 | 日志+统计 | 评分趋势、retry 次数 |
-| Day 5 | Code Review + 清理 | 移除废弃代码 |
+| 天 | 任务 | 状态 | 备注 |
+|----|------|------|------|
+| Day 1 | Rule Correction Fallback | ⚠️ 诊断日志 | RULE_ACTION_MAP 已定义，执行逻辑未接 |
+| Day 2 | Tier3 绑定规则 | ❌ 未开始 | Tier3 prompt 仍是旧格式 |
+| Day 3 | 全链路联调 | ❌ | 待 retry + tier3 修复 |
+| Day 4 | 日志+统计 | ⚠️ | llm_raw dump 已加，retry dump 待验证 |
+| Day 5 | Code Review + 清理 | ❌ | 待管线稳定 |
+
+### 🔴 当前阻塞
+
+| 问题 | 原因 | 修复 |
+|------|------|------|
+| **Retry 退化到 Z=-1.0** | merge 用 tier1_items (无 pos) 而非 locked_actors (有 pos) | ✅ 已修复 |
+| **Tier3 不执行** | retry 卡住导致 chain 断裂 | 待 retry 修复后验证 |
+| **截图偶发中断** | 引擎线程修复后连续截图不稳定 | 8→4 角度缓解 |
+| **评分 62-68 < 目标 75** | 布局 X 分散不够，retry 未改善 | 待 retry 修复后重评 |
+
+### ⚠️ 中期待办
+
+- Relative Scale Normalizer 接入 placement 管线
+- Tier2/Tier3 prompt 改为语义关系格式
+- RULE_ACTION_MAP 执行逻辑接入 (Week 2)
+- get_world_aabb() 仍返回 null，trimesh bbox 作为替代
+- 引擎碰撞修复 (90a62c9c) 是物理刚体碰撞，非 AABB API
 
 ---
 
-## 六、验收标准
+## 七、验收标准 (目标)
 
 ```
 □ 不调用 get_world_aabb()
