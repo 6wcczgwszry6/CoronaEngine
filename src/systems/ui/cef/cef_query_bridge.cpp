@@ -100,9 +100,23 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
 
             auto do_broadcast = [&](const std::string& event,
                                     const nlohmann::json& payload) {
+                // Spread array elements individually, pass objects as-is.
+                // Tail with {_fromCross:1} to prevent relay loops in Vue.
+                std::string args_js;
+                if (payload.is_array()) {
+                    for (size_t i = 0; i < payload.size(); i++) {
+                        if (i > 0) args_js += ",";
+                        args_js += payload[i].dump();
+                    }
+                    if (!args_js.empty()) args_js += ",";
+                } else {
+                    args_js = payload.dump();
+                    args_js += ",";
+                }
+                args_js += "{\"_fromCross\":1}";
                 std::string js =
                     "if(window.__coronaEmit)window.__coronaEmit('" + event +
-                    "'," + payload.dump() + ")";
+                    "'," + args_js + ")";
                 for (auto& [id, tab] : bm.get_tabs()) {
                     if (!tab->minimized && tab->client &&
                         tab->client->GetBrowser()) {

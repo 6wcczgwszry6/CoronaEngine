@@ -1,7 +1,17 @@
+import { Bridge } from '@/utils/bridge.js';
+
 /**
  * 事件总线 —— 同一 JS 上下文内的发布-订阅
- * Python 通过 execute_javascript 调用 window.__coronaEmit(event, ...args)
- * 所有订阅该事件的 Vue 组件都会收到通知
+ *
+ * 消息流：
+ *   Python js_call_func → execute_javascript(_main_tab_id)
+ *     → window.__coronaEmit(event, ...args)        ← 仅主 Tab 收到
+ *     → 内部 emit → dock 内所有面板组件收到
+ *     → 自动 relay 到 C++ __cross_tab__ broadcast  → 所有 pop-out Tab 也收到
+ *   pop-out Tab 收到 C++ cross-tab broadcast:
+ *     → window.__coronaEmit(event, ...args, {_fromCross:1})
+ *     → 内部 emit → pop-out Tab 内的面板组件收到
+ *     → 不再 relay（避免广播风暴）
  */
 export const coronaEventBus = {
   _handlers: {},
@@ -42,11 +52,34 @@ export const coronaEventBus = {
   },
 };
 
+let _relayTimer = null;
+
 /**
- * C++ __cross_tab__ 广播 + Python js_call_func 推送的统一入口
- * 被 C++ 的 ExecuteJavaScript 或 Python 的 execute_javascript 调用
+ * 统一入口：C++ ExecuteJavaScript 或 Python execute_javascript 调用
+ * 主 Tab 收到 Python 推送后，通过 C++ __cross_tab__ 中转给所有 pop-out Tab
  */
-window.__coronaEmit = (event, ...args) => {
-  console.log(`[coronaEventBus] __coronaEmit got "${event}" from native`);
+window.__coronaEmit = (event, ...rest) => {
+  // 检查最后一个参数是否为选项对象 {_fromCross: 1}
+  const last = rest.length > 0 ? rest[rest.length - 1] : undefined;
+  const isCross = last && typeof last === 'object' && last._fromCross;
+  const args = isCross ? rest.slice(0, -1) : rest;
+
+  console.log(`[coronaEventBus] __coronaEmit got "${event}" from ${isCross ? 'cross-tab' : 'python'}, args:`, args);
+
+  // 1. 本地 emit（所有在同一 Tab 内的 Vue 组件都会收到）
   coronaEventBus.emit(event, ...args);
+
+  // 2. 如果是 Python 推送（不是 cross-tab 中继），则通过 C++ 广播给其他 Tab
+  if (!isCross && (event === 'actor-change' || event === 'log-batch' ||
+      event === 'scene-tree-changed' || event === 'scene-rename' ||
+      event === 'scene-add' || event === 'transform-update' ||
+      event === 'ai-chunk' || event === 'engine-started')) {
+    // C++ __cross_tab__ 广播：C++ 遍历所有 Tab 执行 window.__coronaEmit
+    // 传 _fromCross=1 避免其他 Tab 再次 relay
+    clearTimeout(_relayTimer);
+    _relayTimer = setTimeout(() => {
+      Bridge.callCEF('__cross_tab__', 'broadcast', [event, args])
+        .catch(() => {});
+    }, 0);
+  }
 };
