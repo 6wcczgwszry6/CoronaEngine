@@ -21,27 +21,19 @@ export const coronaEventBus = {
       this._handlers[event] = [];
     }
     this._handlers[event].push(handler);
-    console.log(`[coronaEventBus] +handler for "${event}" (total: ${this._handlers[event].length})`);
   },
 
   off(event, handler) {
     if (!this._handlers[event]) return;
     if (!handler) {
-      console.log(`[coronaEventBus] clear ALL handlers for "${event}"`);
       delete this._handlers[event];
     } else {
-      const before = this._handlers[event].length;
       this._handlers[event] = this._handlers[event].filter((h) => h !== handler);
-      console.log(`[coronaEventBus] -handler for "${event}" (removed: ${before - this._handlers[event].length})`);
     }
   },
 
   emit(event, ...args) {
-    if (!this._handlers[event]) {
-      console.warn(`[coronaEventBus] emit "${event}" but NO handlers registered`);
-      return;
-    }
-    console.log(`[coronaEventBus] emit "${event}" → ${this._handlers[event].length} handlers, args:`, args);
+    if (!this._handlers[event]) return;
     for (const h of this._handlers[event]) {
       try {
         h(...args);
@@ -51,8 +43,6 @@ export const coronaEventBus = {
     }
   },
 };
-
-let _relayTimer = null;
 
 /**
  * 统一入口：C++ ExecuteJavaScript 或 Python execute_javascript 调用
@@ -64,8 +54,6 @@ window.__coronaEmit = (event, ...rest) => {
   const isCross = last && typeof last === 'object' && last._fromCross;
   const args = isCross ? rest.slice(0, -1) : rest;
 
-  console.log(`[coronaEventBus] __coronaEmit got "${event}" from ${isCross ? 'cross-tab' : 'python'}, args:`, args);
-
   // 1. 本地 emit（所有在同一 Tab 内的 Vue 组件都会收到）
   coronaEventBus.emit(event, ...args);
 
@@ -74,12 +62,7 @@ window.__coronaEmit = (event, ...rest) => {
       event === 'scene-tree-changed' || event === 'scene-rename' ||
       event === 'scene-add' || event === 'transform-update' ||
       event === 'ai-chunk' || event === 'engine-started')) {
-    // C++ __cross_tab__ 广播：C++ 遍历所有 Tab 执行 window.__coronaEmit
-    // 传 _fromCross=1 避免其他 Tab 再次 relay
-    clearTimeout(_relayTimer);
-    _relayTimer = setTimeout(() => {
-      Bridge.callCEF('__cross_tab__', 'broadcast', [event, args])
-        .catch(() => {});
-    }, 0);
+    Bridge.callCEF('__cross_tab__', 'broadcast', [event, args])
+      .catch(() => {});
   }
 };
