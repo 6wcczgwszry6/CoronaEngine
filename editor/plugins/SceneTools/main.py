@@ -14,7 +14,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-@PluginBase.register_web("SceneTools", "/SceneBar", "场景工具", 0, "right_top", 300, 600, False, True)
+@PluginBase.register_web("SceneTools")
 class SceneTools(PluginBase):
 
     @staticmethod
@@ -380,7 +380,7 @@ class SceneTools(PluginBase):
             if actor is None:
                 logger.error(f"open_actor: actor '{actor_name}' not found in scene '{scene_name}'")
                 return False
-            CoronaEditor.js_call_func("/Object", "onActorChange", [actor.actor_type, scene_name, actor_name])
+            CoronaEditor.js_call_func("actor-change", [actor.actor_type, scene_name, actor_name])
             return True
         except Exception as e:
             logger.error(f"open actor error: {e}")

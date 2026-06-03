@@ -6,7 +6,7 @@ from CoronaPlugin.core.corona_plugin_base import PluginBase
 logger = logging.getLogger(__name__)
 
 
-@PluginBase.register_web("LogTool", "/LogView", "日志工具", 0, "bottom_left", 1100, 200, False, True)
+@PluginBase.register_web("LogTool")
 class LogTool(PluginBase):
     ready = False
 
@@ -30,7 +30,7 @@ class LogTool(PluginBase):
                         "message": log.message
                     })
             if len(result) > 0:
-                CoronaEditor.js_call_func("/LogView", "onReceiveLogBatch", [result])
+                CoronaEditor.js_call_func("log-batch", [result])
 
     @classmethod
     def set_log_ready(cls):

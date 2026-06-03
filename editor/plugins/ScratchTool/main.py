@@ -12,7 +12,7 @@ from CoronaPlugin.utils.settings import core_path
 logger = logging.getLogger(__name__)
 
 
-@PluginBase.register_web("ScratchTool", "/ScratchTool", "积木插件", 1, "", 600, 500, False, False)
+@PluginBase.register_web("ScratchTool")
 class ScratchTool(PluginBase):
     # 脚本存放目录：Backend/script/（与 runScript.py 的 import 路径一致）
     script_dir = core_path.repo_root / "Backend" / "script"

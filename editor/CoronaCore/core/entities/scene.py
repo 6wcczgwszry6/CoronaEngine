@@ -260,7 +260,7 @@ class Scene:
         """通知 SceneBar 前端刷新场景树"""
         try:
             scene_name = getattr(self, 'route', '') or getattr(self, 'name', '')
-            CoronaEditor.js_call_func("/SceneBar", "onSceneTreeChanged", [scene_name])
+            CoronaEditor.js_call_func("scene-tree-changed", [scene_name])
         except Exception:
             pass
 

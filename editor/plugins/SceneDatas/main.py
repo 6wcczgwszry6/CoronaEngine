@@ -8,7 +8,7 @@ import threading
 logger = logging.getLogger(__name__)
 
 
-@PluginBase.register_web("SceneDatas", "/Object", "详情工具", 0, "right_bottom", 300, 400, False, True)
+@PluginBase.register_web("SceneDatas")
 class SceneDatas(PluginBase):
 
     _save_timers = {}

@@ -165,6 +165,15 @@ export const projectService = {
 };
 
 export const appService = {
+  // Migrated: panel creation via C++ __cross_tab__ (no Python involved)
+  createPanelTab: (panelId, routePath, width, height) =>
+    Bridge.callCEF('__cross_tab__', 'create-panel-tab', [panelId, routePath, width, height]),
+  closePanelTab: (tabId, panelId) =>
+    Bridge.callCEF('__cross_tab__', 'close-panel-tab', [tabId, panelId]),
+  crossTabBroadcast: (event, payload) =>
+    Bridge.callCEF('__cross_tab__', 'broadcast', [event, payload]),
+
+  // Deprecated: old Python-managed window APIs, kept for backward compat during migration
   addDockWidget: (route_path, pos, width, height, fixed) =>
     Bridge.callCEF('CoronaEditor', 'open_browser', [route_path, pos, width, height, fixed]),
   removeDockWidget: (tool_name) =>

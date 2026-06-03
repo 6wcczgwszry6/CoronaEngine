@@ -1,9 +1,23 @@
+#include "browser_manager.h"
 #include "cef_client.h"
 
 #include <iostream>
 #include <stdexcept>
 
+#include <nlohmann/json.hpp>
+
 namespace Corona::Systems::UI {
+
+namespace {
+std::string create_success_json(const std::string& func,
+                                const nlohmann::json& data) {
+    nlohmann::json r;
+    r["success"] = true;
+    r["data"] = data;
+    r["function"] = func;
+    return r.dump();
+}
+}  // namespace
 
 BrowserSideJSHandler::~BrowserSideJSHandler() {
     PyGILState_STATE state = PyGILState_Ensure();
@@ -75,6 +89,95 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
     CEF_REQUIRE_UI_THREAD();
     std::string req = request.ToString();
     VUE_LOG_DEBUG("Received query: {}", req.c_str());
+
+    // ── __cross_tab__ 跨窗口通信：C++ 直接处理，不走 Python ──
+    try {
+        auto j = nlohmann::json::parse(req);
+        if (j.value("module", "") == "__cross_tab__") {
+            std::string func = j.value("function", "");
+            auto args = j.value("args", nlohmann::json::array());
+            auto& bm = BrowserManager::instance();
+
+            auto do_broadcast = [&](const std::string& event,
+                                    const nlohmann::json& payload) {
+                std::string js =
+                    "if(window.__coronaEmit)window.__coronaEmit('" + event +
+                    "'," + payload.dump() + ")";
+                for (auto& [id, tab] : bm.get_tabs()) {
+                    if (!tab->minimized && tab->client &&
+                        tab->client->GetBrowser()) {
+                        tab->client->GetBrowser()
+                            ->GetMainFrame()
+                            ->ExecuteJavaScript(js, "", 0);
+                    }
+                }
+            };
+
+            if (func == "broadcast") {
+                // args: [event, payload]
+                std::string event =
+                    args.size() > 0 ? args[0].get<std::string>() : "";
+                nlohmann::json payload = args.size() > 1 ? args[1]
+                                                         : nlohmann::json::object();
+                do_broadcast(event, payload);
+                callback->Success(create_success_json("broadcast", event));
+                return true;
+            }
+
+            if (func == "create-panel-tab") {
+                // args: [panelId, routePath, width, height]
+                std::string panel_id =
+                    args.size() > 0 ? args[0].get<std::string>() : "";
+                std::string route =
+                    args.size() > 1 ? args[1].get<std::string>() : "";
+                int w = args.size() > 2 ? args[2].get<int>() : 400;
+                int h = args.size() > 3 ? args[3].get<int>() : 600;
+
+                // Construct full URL from current browser's base + route hash
+                std::string main_url =
+                    browser->GetMainFrame()->GetURL().ToString();
+                auto hash_pos = main_url.find('#');
+                std::string base_url =
+                    (hash_pos != std::string::npos)
+                        ? main_url.substr(0, hash_pos)
+                        : main_url;
+                if (!route.empty() && route[0] == '#')
+                    route = route.substr(1);
+                std::string full_url = base_url;
+                if (!route.empty()) full_url += "#" + route;
+
+                int tab_id = bm.create_tab(full_url, route, "right_top", w, h,
+                                           false);
+                nlohmann::json result;
+                result["tab_id"] = tab_id;
+                result["panel_id"] = panel_id;
+                callback->Success(
+                    create_success_json("create-panel-tab", result));
+                return true;
+            }
+
+            if (func == "close-panel-tab") {
+                // args: [tabId, panelId]
+                int tab_id = args.size() > 0 ? args[0].get<int>() : -1;
+                std::string panel_id =
+                    args.size() > 1 ? args[1].get<std::string>() : "";
+                if (tab_id >= 0) {
+                    bm.remove_tab(tab_id);
+                }
+                nlohmann::json payload;
+                payload["panelId"] = panel_id;
+                do_broadcast("panel-closed", payload);
+                callback->Success(
+                    create_success_json("close-panel-tab", payload));
+                return true;
+            }
+
+            callback->Failure(1, "Unknown __cross_tab__ function: " + func);
+            return true;
+        }
+    } catch (const nlohmann::json::parse_error&) {
+        // 不是合法 JSON 或非 __cross_tab__，继续走 Python 路径
+    }
 
     if (!Py_IsInitialized()) {
         Py_Initialize();

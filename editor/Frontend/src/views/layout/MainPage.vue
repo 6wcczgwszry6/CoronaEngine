@@ -1,5 +1,5 @@
 <template>
-  <div class="relative min-h-screen w-full bg-white/5" tabindex="0">
+  <div class="relative h-full w-full" tabindex="0">
     <!-- 顶部菜单栏 -->
     <div
       class="w-full bg-[#2d2d2d] text-gray-200 border-b border-gray-700 h-10 flex items-center px-4 space-x-6 text-sm shadow-md"
@@ -277,7 +277,6 @@
             'text-gray-800': activeTab === index,
           }"
           @click="switchTab(index, false)"
-          @dblclick="openSceneBar(index)"
         >
           <span class="max-w-[140px] truncate px-2 py-1 select-none font-medium">
             {{ tab.name }}
@@ -444,12 +443,16 @@ import { useRouter } from 'vue-router';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
 import { Bridge, appService, sceneService, projectService } from '@/utils/bridge.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
+import { useDockStore } from '@/stores/dockStore.js';
+import { PLUGIN_MANIFEST } from '@/config/pluginManifest.js';
+import { coronaEventBus } from '@/utils/eventBus.js';
 import AIHintBubble from '@/components/ui/AIHintBubble.vue';
 import { startStageHints, stopStageHints, setHintShowMs } from '@/services/aiHintGenerator.js';
 
 const { error: logError } = useErrorHandler('MainPage');
 
 const router = useRouter();
+const dockStore = useDockStore();
 
 const goToHome = () => {
   router.push('/');
@@ -533,11 +536,21 @@ const physicsParams = ref({
   fixedDt: 1.0 / 60.0,
 });
 
-// 新增：视图工具状态（√×标识）
-const viewStates = ref([]);
-
-// 新增：插件状态（√×标识）
-const pluginStates = ref([]);
+// 视图/插件菜单状态：从 Pinia dockStore + pluginManifest 派生
+const viewStates = computed(() =>
+  PLUGIN_MANIFEST.filter((p) => p.pageType === 'view').map((p) => ({
+    id: p.id,
+    name: p.displayName,
+    open: dockStore.panels[p.id]?.open ?? false,
+  }))
+);
+const pluginStates = computed(() =>
+  PLUGIN_MANIFEST.filter((p) => p.pageType === 'plugin').map((p) => ({
+    id: p.id,
+    name: p.displayName,
+    open: dockStore.panels[p.id]?.open ?? false,
+  }))
+);
 
 // ── 包菜提示气泡状态 ──
 const STORAGE_KEY = 'corona_editor_settings';
@@ -582,9 +595,6 @@ const toggleMenu = (menu) => {
     activeMenu.value = null;
   } else {
     activeMenu.value = menu;
-    if (menu === 'view' || menu === 'plugin') {
-      fetchMenuData();
-    }
     if (menu === 'physics') {
       loadPhysicsParams();
     }
@@ -1201,26 +1211,11 @@ const switchTab = async (index, if_new) => {
 
   await projectService.sceneSwitch(current_name, to_name);
 
-  await openSceneBar(index);
   await syncSceneCameraBinding(to_name);
 };
 
-const startEngine = async () => {
-  try {
-    await appService.start_engine();
-  } catch (e) {
-    logError('Failed to add Pet dock', e);
-  }
-};
-
-const openSceneBar = async (index) => {
-  const sceneId = tabs.value[index]?.id || DEFAULT_SCENE_NAME;
-  const routePath = `/SceneBar?sceneName=${encodeURIComponent(sceneId)}`;
-  try {
-    await appService.addDockWidget(routePath);
-  } catch (e) {
-    logError('Failed to open SceneBar', e);
-  }
+const startEngine = () => {
+  dockStore.initDefaultLayout();
 };
 
 const createScene = async () => {
@@ -1248,14 +1243,9 @@ const handleOpenProject = () => {
   // TODO: 实现打开项目逻辑
 };
 
-const handleProjectSettings = async () => {
-  console.log('项目设置');
+const handleProjectSettings = () => {
+  dockStore.openPanel('ProjectSettings');
   activeMenu.value = null;
-  try {
-    await appService.addDockWidget('/ProjectSettings', '', 600, 800, false);
-  } catch (error) {
-    logError('打开项目设置失败', error);
-  }
 };
 
 const handleSaveProject = () => {
@@ -1264,58 +1254,9 @@ const handleSaveProject = () => {
   // TODO: 实现保存项目逻辑
 };
 
-// 新增：从 Python 端获取菜单数据
-const fetchMenuData = async () => {
-  try {
-    isLoadingMenu.value = true;
-    const result = await projectService.getMenuData();
-
-    if (result.success) {
-      // 更新视图工具状态
-      viewStates.value = result.data.view_states;
-
-      // 更新插件状态
-      pluginStates.value = result.data.plugin_states;
-
-      console.log('菜单数据已加载:', result);
-    }
-  } catch (error) {
-    logError('获取菜单数据失败', error);
-  } finally {
-    isLoadingMenu.value = false;
-  }
-};
-
-// 修改：视图工具 - 切换状态（现在同步到 Python 端）
-const toggleViewTool = async (tool) => {
-  try {
-    const newState = !tool.open;
-
-    // 先更新本地状态（乐观更新）
-    tool.open = newState;
-
-    // 调用 Python 端更新状态
-    const result = await projectService.updateViewToolState(tool.id, newState);
-
-    if (result.success) {
-      console.log(`视图工具 ${tool.id} 状态已更新:`, newState);
-
-      // 如果返回了完整的菜单数据，直接更新
-      if (result.data.menu_data) {
-        viewStates.value = result.data.menu_data.view_states;
-        pluginStates.value = result.data.menu_data.plugin_states;
-      }
-    } else {
-      // 如果更新失败，回滚状态
-      tool.open = !newState;
-    }
-  } catch (error) {
-    logError(`切换视图工具状态失败: ${tool.id}`, error);
-    // 回滚状态
-    tool.open = !tool.open;
-  } finally {
-    activeMenu.value = null;
-  }
+// 视图工具/插件切换：由 Pinia dockStore 管理
+const toggleViewTool = (tool) => {
+  dockStore.togglePanel(tool.id);
 };
 
 // 修改：运行菜单的处理函数
@@ -1430,7 +1371,6 @@ const setupListener = () => {
 
       if (activeTab.value === tabIndex) {
         cameraBindingState.value.sceneId = newId;
-        openSceneBar(tabIndex);
         syncSceneCameraBinding(newId);
       }
 
@@ -1469,12 +1409,12 @@ onMounted(async () => {
   activeTab.value = activeIndex;
 
   await startEngine();
+  // 等待 Vue 渲染 dock 面板（SceneBar/Object 等），确保 eventBus 监听就绪
+  await nextTick();
   const initialSceneId = tabs.value[activeIndex]?.id || DEFAULT_SCENE_NAME;
   await projectService.sceneSwitch(null, initialSceneId);
-  await openSceneBar(activeIndex);
   await syncSceneCameraBinding(tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME);
 
-  await fetchMenuData();
   document.addEventListener('keydown', handleKeyDown);
   document.addEventListener('keyup', handleKeyUp);
   document.addEventListener('click', handleClickOutside);
@@ -1483,6 +1423,18 @@ onMounted(async () => {
   document.addEventListener('mouseup', onMouseUp);
   document.addEventListener('contextmenu', onContextMenu);
   setupListener();
+
+  // 跨窗口事件监听：scene-add / scene-rename / panel-closed
+  coronaEventBus.on('scene-add', (name, id) => {
+    if (window.addTab) window.addTab(name, id);
+  });
+  coronaEventBus.on('scene-rename', (oldId, newId, newName) => {
+    if (window.renameTab) window.renameTab(oldId, newId, newName);
+  });
+  coronaEventBus.on('panel-closed', (payload) => {
+    const panelId = payload?.panelId;
+    if (panelId) dockStore.popIn(panelId);
+  });
 
   // 启动阶段性包菜提示：每隔一段时间根据用户操作自动弹出 AI 提示气泡
   startStageHints(
@@ -1501,6 +1453,9 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopStageHints();
+  coronaEventBus.off('scene-add');
+  coronaEventBus.off('scene-rename');
+  coronaEventBus.off('panel-closed');
   window.removeEventListener('storage', onStorageChange);
   stopMoveLoop();
   document.removeEventListener('keydown', handleKeyDown);

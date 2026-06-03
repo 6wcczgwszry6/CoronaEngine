@@ -1,0 +1,101 @@
+/**
+ * 面板静态注册表 - 替代 Python register_web 装饰器中的 UI 元数据
+ * 每个面板的 id 必须与 Python 端 module_name 一致（用于 cefQuery 路由）
+ */
+export const PLUGIN_MANIFEST = [
+  {
+    id: 'SceneTools',
+    displayName: '场景工具',
+    pageType: 'view',
+    defaultDock: 'right',
+    defaultWidth: 300,
+    defaultHeight: 600,
+    autoInit: true,
+    component: () => import('@/views/sidebar/SceneBar.vue'),
+  },
+  {
+    id: 'SceneDatas',
+    displayName: '详情工具',
+    pageType: 'view',
+    defaultDock: 'right',
+    defaultWidth: 300,
+    defaultHeight: 400,
+    autoInit: true,
+    component: () => import('@/views/sidebar/Object.vue'),
+  },
+  {
+    id: 'AITool',
+    displayName: '白菜助手',
+    pageType: 'plugin',
+    defaultDock: 'bottom',
+    defaultWidth: 200,
+    defaultHeight: 200,
+    autoInit: true,
+    component: () => import('@/views/tools/Pet.vue'),
+  },
+  {
+    id: 'LogTool',
+    displayName: '日志工具',
+    pageType: 'view',
+    defaultDock: 'bottom',
+    defaultWidth: 1100,
+    defaultHeight: 200,
+    autoInit: true,
+    component: () => import('@/views/sidebar/LogView.vue'),
+  },
+  {
+    id: 'FileManager',
+    displayName: '文件管理器',
+    pageType: 'view',
+    defaultDock: 'left',
+    defaultWidth: 300,
+    defaultHeight: 600,
+    autoInit: false,
+    component: () => import('@/views/sidebar/FileManager.vue'),
+  },
+  {
+    id: 'ProjectSettings',
+    displayName: '项目设置',
+    pageType: 'special',
+    defaultDock: 'center',
+    defaultWidth: 600,
+    defaultHeight: 800,
+    autoInit: false,
+    component: () => import('@/views/sidebar/ProjectSettings.vue'),
+  },
+  {
+    id: 'ScratchTool',
+    displayName: '积木插件',
+    pageType: 'plugin',
+    defaultDock: 'center',
+    defaultWidth: 600,
+    defaultHeight: 500,
+    autoInit: false,
+    component: () => import('@/blockly/components/BlocklyWorkspace.vue'),
+  },
+  {
+    id: 'AITalkBar',
+    displayName: 'AI 对话',
+    pageType: 'plugin',
+    defaultDock: 'right',
+    defaultWidth: 400,
+    defaultHeight: 600,
+    autoInit: false,
+    component: () => import('@/views/sidebar/AITalkBar.vue'),
+  },
+  {
+    id: 'EditorSettings',
+    displayName: '编辑器设置',
+    pageType: 'special',
+    defaultDock: 'center',
+    defaultWidth: 450,
+    defaultHeight: 550,
+    autoInit: false,
+    component: () => import('@/views/sidebar/EditorSettings.vue'),
+  },
+];
+
+/** 按 id 快速查找 */
+export function getPluginManifest(id) {
+  return PLUGIN_MANIFEST.find((p) => p.id === id);
+}

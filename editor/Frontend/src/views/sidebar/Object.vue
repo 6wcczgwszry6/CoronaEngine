@@ -1,6 +1,7 @@
 <template>
-  <div class="rounded-lg overflow-hidden relative bg-[#282828]/70 min-h-screen flex flex-col">
+  <div class="rounded-lg overflow-hidden relative bg-[#282828]/70 h-full flex flex-col">
     <DockTitleBar
+      v-if="!isDocked"
       title="详情"
       extraClass="bg-[#84A65B] rounded-t-md text-sm"
       routePath="/Object"
@@ -930,6 +931,10 @@ import { appService, sceneService, projectService } from '@/utils/bridge.js';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
+import { coronaEventBus } from '@/utils/eventBus.js';
+import { useDockPanel } from '@/composables/useDockPanel.js';
+
+const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 
 const { error: logError, warn: logWarn } = useErrorHandler('Object');
 
@@ -1722,6 +1727,7 @@ const selectActorScript = async () => {
 };
 
 const CloseFloat = async () => {
+  if (closeDockPanel) { closeDockPanel(); return; }
   try {
     await appService.removeDockWidget('SceneDatas');
   } catch (e) {
@@ -1872,10 +1878,23 @@ const setupWindowListener = () => {
 onMounted(async () => {
   // 场景默认存在，直接加载场景数据
   const result = await projectService.OnInit();
-  await loadSceneData(result.data.path || DEFAULT_SCENE_NAME);
+  const initData = result?.data ?? result;
+  const activeScene = initData?.scenes?.[initData?.active_index ?? 0];
+  await loadSceneData(activeScene?.path || DEFAULT_SCENE_NAME);
 
   setupWindowListener();
+
+  // 事件总线：接收 Python 推送的 actor-change
+  coronaEventBus.on('actor-change', (type, sceneId, actorId, oldPath) => {
+    if (window.onActorChange) window.onActorChange(type, sceneId, actorId, oldPath);
+  });
+  coronaEventBus.on('transform-update', (sceneName, actorName, position, rotation, scale, type) => {
+    if (window.onTransformUpdate) window.onTransformUpdate(sceneName, actorName, position, rotation, scale, type);
+  });
 });
 
-onUnmounted(() => {});
+onUnmounted(() => {
+  coronaEventBus.off('actor-change');
+  coronaEventBus.off('transform-update');
+});
 </script>

@@ -1,6 +1,7 @@
 <template>
-  <div class="min-h-screen rounded-lg overflow-hidden relative bg-[#282828]/90">
+  <div class="h-full rounded-lg overflow-hidden relative bg-[#282828]/90">
     <DockTitleBar
+      v-if="!isDocked"
       title="助手"
       extraClass="bg-[#84A65B]"
       routePath="/AITalkBar"
@@ -467,7 +468,9 @@ import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import RichTextPart from '@/components/ui/RichTextPart.vue';
 import { appService, aiClient, aiService } from '@/utils/bridge.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
+import { useDockPanel } from '@/composables/useDockPanel.js';
 
+const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 const { error: logError, warn: logWarn } = useErrorHandler('AITalkBar');
 
 const messages = ref([{ sender: 'AI', text: '你好！我是 AI。', status: 'success' }]);
@@ -1540,6 +1543,7 @@ window.receiveAIMessage = async (data) => {
 };
 
 const closeFloat = async () => {
+  if (closeDockPanel) { closeDockPanel(); return; }
   try {
     await appService.removeDockWidgetByRoute('/AITalkBar');
   } catch (e) {

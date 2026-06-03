@@ -4,7 +4,7 @@
     class="rounded-lg overflow-hidden relative bg-[#282828]/90 flex flex-col text-white font-sans"
   >
     <DockTitleBar
-      v-if="!embedded"
+      v-if="!embedded && !isDocked"
       :title="editingTarget ? `积木编辑器 - ${editingTarget}` : '积木编辑器'"
       extraClass="bg-[#84A65B]"
       routePath="/ScratchTool"
@@ -78,7 +78,10 @@ let pollTimer = null;
 <script setup>
 import { ref, watch, onMounted, onUnmounted } from 'vue';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
+import { useDockPanel } from '@/composables/useDockPanel.js';
 import { appService, scriptingService } from '@/utils/bridge.js';
+
+const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import Navigat from './Navigat.vue';
 import Search from './Search.vue';
@@ -519,6 +522,7 @@ const resizeBlockly = () => {
 };
 
 const handleClose = async () => {
+  if (closeDockPanel) { closeDockPanel(); return; }
   try {
     await appService.removeDockWidget('ScratchTool');
   } catch (e) {

@@ -15,7 +15,7 @@ from utils.settings import settings_manager
 logger = logging.getLogger(__name__)
 
 
-@PluginBase.register_web("FileManager", "/FileManager", "文件管理器", 0, "left_bottom", 300, 600, False, True)
+@PluginBase.register_web("FileManager")
 class FileManager(PluginBase):
     """文件管理器插件"""
 
@@ -178,8 +178,8 @@ class FileManager(PluginBase):
                 scene_manager.remove(old_path)
                 scene_manager.register(new_path, scene)
 
-                CoronaEditor.js_call_func("", "renameTab", [old_path, new_path, scene.name])
-                CoronaEditor.js_call_func("/Object", "onActorChange", ['scene', new_path, "", old_path])
+                CoronaEditor.js_call_func("scene-rename", [old_path, new_path, scene.name])
+                CoronaEditor.js_call_func("actor-change", ['scene', new_path, "", old_path])
             elif old_path.endswith(".actor"):
                 actor = actor_manager.get_or_create(old_path)
                 new_path = os.path.normpath(os.path.join(os.path.dirname(old_path), new_name)).replace('\\', '/')
@@ -187,7 +187,7 @@ class FileManager(PluginBase):
                 actor_manager.remove(old_path)
                 actor_manager.register(new_path, actor)
 
-                CoronaEditor.js_call_func("/Object", "onActorChange", ['actor', '',  new_path, old_path])
+                CoronaEditor.js_call_func("actor-change", ['actor', '',  new_path, old_path])
             return True
         except Exception as e:
             logger.error(f"Rename error: {e}")
@@ -200,11 +200,11 @@ class FileManager(PluginBase):
             if file_type == "scene":
                 scene = scene_manager.get_or_create(path)
                 scene.ensure_default_camera()
-                CoronaEditor.js_call_func("", "addTab", [scene.name, scene.route])
-                CoronaEditor.js_call_func("/Object", "onActorChange", ['scene', scene.route, ""])
+                CoronaEditor.js_call_func("scene-add", [scene.name, scene.route])
+                CoronaEditor.js_call_func("actor-change", ['scene', scene.route, ""])
             elif file_type == "actor":
                 actor = actor_manager.get_or_create(path)
-                CoronaEditor.js_call_func("/Object", "onActorChange", ['actor', "", actor.route])
+                CoronaEditor.js_call_func("actor-change", ['actor', "", actor.route])
             else:
                 logger.error(f"No file type: {file_type}")
                 return False
