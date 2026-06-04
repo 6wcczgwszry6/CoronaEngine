@@ -447,6 +447,10 @@ def _apply_layout(
     layouts: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """用 LLM 输出的布局覆盖 items 的 pos/rot/scale, 优先 object_id 精确匹配。"""
+    # 检测 LLM 输出格式: 语义关系 (无 pos) vs 坐标 (有 pos)
+    has_pos = any("pos" in l for l in layouts)
+    if not has_pos:
+        logger.warning("_apply_layout: LLM 输出无 pos 字段 (可能是语义关系格式), 前100字: %s", str(layouts)[:100])
     layout_map = {str(l["object_id"]): l for l in layouts}
     matched = 0
     for item in items:
@@ -1233,8 +1237,16 @@ def tier1_place_node(state: Dict[str, Any]) -> Dict[str, Any]:
         # locked 物体的 pos 从 intermediate.locked_actors 传入 solver 作为 placed 参考
         locked_actors = intermediate.get("locked_actors", [])
         placed_refs = {a["name"]: {"pos": a["pos"], "scale": a.get("scale", [1,1,1])} for a in locked_actors if a.get("name")}
+        logger.info("tier1_retry: LLM 原始输出 (前200字): %s", (_llm_raw_text or "")[:200])
+        logger.info("tier1_retry: placed_refs keys=%s", list(placed_refs.keys()))
         solved = _solve_and_apply(items_to_place, relations, room_size, asset_meta, placed=placed_refs)
-        items_to_place = solved if solved else _apply_layout(items_to_place, relations)
+        if solved:
+            items_to_place = solved
+            logger.info("tier1_retry: solver 成功, %d 个物体", len(solved))
+        else:
+            logger.warning("tier1_retry: solver 失败! 回退 _apply_layout, LLM 输出前200字: %s", (_llm_raw_text or "")[:200])
+            items_to_place = _apply_layout(items_to_place, relations)
+            logger.info("tier1_retry: _apply_layout 后 items pos=%s", [it.get("pos") for it in items_to_place])
     else:
         # 初始布局: LLM 输出语义关系 → Constraint Solver 计算坐标
         solved = _solve_and_apply(tier1_items, relations, room_size, asset_meta)
