@@ -749,6 +749,12 @@ const addActorToList = async (actor) => {
 };
 
 const HandleFileImport = async () => {
+  // 测试 window.cefQuery 是否存在
+  if (typeof window.cefQuery === 'undefined') {
+    alert('错误：window.cefQuery 未定义！CEF bridge 未初始化。');
+    return;
+  }
+
   ShowModelDropdown.value = false;
   await appService.callDockFunction('', 'showLoading', ['加载中', '请稍候...', 0]);
   try {
@@ -759,6 +765,7 @@ const HandleFileImport = async () => {
     }
   } catch (e) {
     logError('File import failed', e);
+    alert('导入失败：' + e.message);
   }
   await appService.callDockFunction('', 'hideLoading', []);
 };

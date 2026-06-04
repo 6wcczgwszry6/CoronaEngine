@@ -181,8 +181,14 @@ export const appService = {
   removeDockWidgetByRoute: (route_name) =>
     Bridge.callCEF('CoronaEditor', 'minimize_browser', [route_name]),
   closeProcess: () => Bridge.callCEF('CoronaEditor', 'close_process'),
-  callDockFunction: (routename, functionname, args) =>
-    Bridge.callCEF('CoronaEditor', 'js_call_func', [routename, functionname, args]),
+  callDockFunction: (routename, functionname, args) => {
+    // 单 CEF Tab 架构：直接调 window.xxx，不需要 Python 中转
+    const fn = window[functionname];
+    if (typeof fn === 'function') {
+      try { fn(...(args || [])); } catch (e) { /* ignore */ }
+    }
+    return Promise.resolve({ success: true });
+  },
   start_engine: () => Bridge.callCEF('CoronaEditor', 'start_corona_engine', []),
 };
 

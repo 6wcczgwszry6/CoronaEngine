@@ -157,6 +157,7 @@ class MainView(PluginBase):
             read_content = False
 
             init_path = CoronaEditor.CoronaEngine.active_project_path if CoronaEditor.CoronaEngine.active_project_path else None
+
             content, file_path = FileHandler.open_file(title, filter_str, init_path, read_content=read_content,
                                                        return_relative_path=True)
 
@@ -173,6 +174,7 @@ class MainView(PluginBase):
                 return {"status": "canceled"}
             return {"status": "success", **payload}
         except Exception as exc:
+            logger.error("import_resource_file failed: %s", exc)
             return {"status": "error", "message": str(exc)}
 
     @staticmethod
