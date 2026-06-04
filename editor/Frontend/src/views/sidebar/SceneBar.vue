@@ -1048,17 +1048,50 @@ const addActorToList = async (actor) => {
 
 const HandleFileImport = async () => {
   ShowModelDropdown.value = false;
-  await appService.callDockFunction('', 'showLoading', ['加载中', '请稍候...', 0]);
+  if (!currentSceneName.value) {
+    logWarn('File import aborted: no active scene');
+    return;
+  }
+  try {
+    await appService.callDockFunction('', 'showLoading', ['加载中', '请稍候...', 0]);
+  } catch (e) {
+    // showLoading 失败不阻塞主流程
+  }
   try {
     const result = await projectService.importResourceFileByDialog(currentSceneName.value, 'model');
-    if (result.success && result.data.actor) {
-      await addActorToList(result.data.actor);
-      await appService.callDockFunction('', 'updateLoading', ['导入完成', 100]);
+    // 兼容两种返回形态:
+    //   1) 包装型 { success, data: { status, actor, ... } }
+    //   2) 直返型 { status, actor, ... }
+    const payload = result?.data ?? result;
+    const status = payload?.status;
+    if (result?.success === false || status === 'error') {
+      logError('File import failed', payload?.message || result?.error || 'unknown error');
+      return;
+    }
+    if (status === 'canceled') {
+      // 用户主动取消,无需弹错
+      return;
+    }
+    const actor = payload?.actor;
+    if (actor && actor.name) {
+      await addActorToList(actor);
+      try {
+        await appService.callDockFunction('', 'updateLoading', ['导入完成', 100]);
+      } catch (e) {
+        // 忽略加载条更新失败
+      }
+    } else {
+      logWarn('File import returned without actor payload', payload);
     }
   } catch (e) {
     logError('File import failed', e);
+  } finally {
+    try {
+      await appService.callDockFunction('', 'hideLoading', []);
+    } catch (e) {
+      // 忽略关闭加载条失败
+    }
   }
-  await appService.callDockFunction('', 'hideLoading', []);
 };
 
 const HandleActorImport = async () => {

@@ -160,8 +160,15 @@ class MainView(PluginBase):
             content, file_path = FileHandler.open_file(title, filter_str, init_path, read_content=read_content,
                                                        return_relative_path=True)
 
+            # 模型导入修复:用户取消文件选择时,显式返回 canceled 状态,
+            # 让前端能正确区分"未选择"和"导入失败",避免静默无反馈
             if not file_path:
-                return {}
+                logger.info("import_resource_file: user canceled file selection (scene=%s, type=%s)",
+                            scene_name, file_type)
+                return {"status": "canceled", "message": "用户取消了文件选择"}
+
+            if not scene_name:
+                return {"status": "error", "message": "scene_name is required", "code": "scene_name_missing"}
 
             # 场景文件通过路径解析
             if file_type == "scene":
@@ -170,14 +177,25 @@ class MainView(PluginBase):
                 # model 和 multimedia 都使用 import_model
                 payload = MainView.import_model(scene_name, file_path, file_type)
             if payload is None:
-                return {"status": "canceled"}
+                return {"status": "canceled", "message": "导入已取消"}
+            if isinstance(payload, dict) and payload.get("status") == "error":
+                # 下游 import_model/create_actor 已经显式返回错误,直接透传
+                return payload
             return {"status": "success", **payload}
         except Exception as exc:
-            return {"status": "error", "message": str(exc)}
+            logger.exception("import_resource_file 失败 (scene=%s, type=%s)", scene_name, file_type)
+            return {"status": "error", "message": str(exc), "code": "internal_error"}
 
     @staticmethod
     def import_model(scene_name: str, model_path: str, file_type: str) -> dict:
-        payload = SceneTools.create_actor(scene_name, model_path, file_type)
+        try:
+            payload = SceneTools.create_actor(scene_name, model_path, file_type)
+        except Exception as exc:
+            logger.exception("import_model 失败 (scene=%s, path=%s)", scene_name, model_path)
+            return {"status": "error", "message": str(exc), "code": "create_actor_failed"}
+        # 透传 create_actor 的 status/error 状态
+        if isinstance(payload, dict) and payload.get("status") == "error":
+            return payload
         return payload
 
     @staticmethod

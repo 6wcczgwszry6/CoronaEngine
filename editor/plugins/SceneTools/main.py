@@ -19,9 +19,32 @@ class SceneTools(PluginBase):
 
     @staticmethod
     def create_actor(scene_name: str, asset_path: str, actor_type: str = 'model', actor_data=None) -> dict:
+        # B-1 + 模型导入修复:场景不存在时不再崩溃,
+        # 改为通过 get_or_create 自动补建并返回明确错误信息,避免前端静默失败
         scene = scene_manager.get(scene_name)
+        if scene is None:
+            try:
+                scene = scene_manager.get_or_create(scene_name)
+            except Exception as exc:
+                logger.error("create_actor: 场景 '%s' 不存在且无法创建: %s", scene_name, exc)
+                return {"status": "error",
+                        "message": f"Scene '{scene_name}' not found",
+                        "code": "scene_not_found"}
+        if scene is None:
+            logger.error("create_actor: scene '%s' still None after get_or_create", scene_name)
+            return {"status": "error",
+                    "message": f"Scene '{scene_name}' not found",
+                    "code": "scene_not_found"}
+
+        existing_count = 0
+        try:
+            existing_count = sum(1 for a in scene._actors if a.route == asset_path)
+        except Exception as exc:
+            logger.warning("create_actor: 统计同路径 actor 失败 (%s),按 0 处理: %s", scene_name, exc)
+            existing_count = 0
+
         actor = Actor(route=asset_path,
-                      source_index=sum(1 for a in scene._actors if a.route == asset_path),
+                      source_index=existing_count,
                       actor_type=actor_type,
                       parent_scene=scene,
                       actor_data=actor_data)
