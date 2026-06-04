@@ -15,8 +15,12 @@ CoronaEngine Scratch 兼容层
 import random as _random
 import time as _time
 import logging
+import threading as _threading
 
 _logger = logging.getLogger(__name__)
+
+# 线程安全锁：保护对 C++ 引擎对象的访问
+_engine_lock = _threading.Lock()
 
 # ============================================================
 # 内部状态（模块级单例）
@@ -25,6 +29,9 @@ _logger = logging.getLogger(__name__)
 _x = 0.0
 _y = 0.0
 _z = 0.0
+_rot_x = 0.0
+_rot_y = 0.0
+_rot_z = 0.0
 _size_val = 100.0
 _cartoon_index = 0
 _visible = True
@@ -170,7 +177,7 @@ def _init_internal_actor():
     _actor = None
     _scene = None
 
-    print("[ScratchWrapper] 独立模式（无渲染）", flush=True)
+    _logger.debug("[ScratchWrapper] 独立模式（无渲染）")
 
 
 # ============================================================
@@ -185,38 +192,108 @@ def move(steps):
     _sync_position()
 
 
+def _apply_rotation():
+    """将内部旋转状态同步到引擎
+    优先走 kinematics 增量旋转（与物理系统兼容），
+    其次走 geometry/actor 绝对设置。
+    """
+    check_stop()
+    rot = [_rot_x, _rot_y, _rot_z]
+    with _engine_lock:
+        # 1. 优先：kinematics set_rotation 绝对设置
+        if _kinematics is not None and hasattr(_kinematics, 'set_rotation'):
+            try:
+                _kinematics.set_rotation(rot)
+                return
+            except Exception:
+                pass
+        # 2. geometry 绝对设置
+        if _geometry is not None:
+            try:
+                _geometry.set_rotation(rot)
+                return
+            except Exception:
+                pass
+        # 3. actor 绝对设置
+        if _actor is not None and hasattr(_actor, 'set_rotation'):
+            try:
+                _actor.set_rotation(rot)
+                return
+            except Exception:
+                pass
+    # 独立模式：仅追踪内部状态
+
+
 def rotateX(angle):
     """绕X轴旋转"""
     _init_engine()
-    if _kinematics is not None:
+    global _rot_x
+    _rot_x += float(angle)
+    # 优先走 kinematics 增量旋转（与物理系统兼容）
+    if _kinematics is not None and hasattr(_kinematics, 'rotate_x'):
         try:
             _kinematics.rotate_x(float(angle))
         except Exception:
-            pass
-    _logger.debug(f"[ScratchWrapper] rotateX({angle})")
+            _apply_rotation()
+    else:
+        _apply_rotation()
+    _logger.debug(f"[ScratchWrapper] rotateX({angle}) -> rot_x={_rot_x:.1f}")
 
 
 def rotateY(angle):
     """绕Y轴旋转"""
     _init_engine()
-    if _kinematics is not None:
+    global _rot_y
+    _rot_y += float(angle)
+    if _kinematics is not None and hasattr(_kinematics, 'rotate_y'):
         try:
             _kinematics.rotate_y(float(angle))
         except Exception:
-            pass
-    _logger.debug(f"[ScratchWrapper] rotateY({angle})")
+            _apply_rotation()
+    else:
+        _apply_rotation()
+    _logger.debug(f"[ScratchWrapper] rotateY({angle}) -> rot_y={_rot_y:.1f}")
+
+
+def rotateZ(angle):
+    """绕Z轴旋转（2D平面旋转）"""
+    _init_engine()
+    global _rot_z
+    _rot_z += float(angle)
+    if _kinematics is not None and hasattr(_kinematics, 'rotate_z'):
+        try:
+            _kinematics.rotate_z(float(angle))
+        except Exception:
+            _apply_rotation()
+    else:
+        _apply_rotation()
+    _logger.debug(f"[ScratchWrapper] rotateZ({angle}) -> rot_z={_rot_z:.1f}")
 
 
 def face(direction):
-    """面向某个方向（0=右, 90=前, 180=左, 270=后，使用 Y 轴欧拉角设置绝对朝向）"""
+    """面向某个方向（0=右, 90=前, 180=左, 270=后，设置绝对朝向）"""
     _init_engine()
-    if _geometry is not None:
-        try:
-            # Geometry.set_rotation 使用欧拉角 ZYX: [pitch, yaw, roll]
-            _geometry.set_rotation([0.0, float(direction), 0.0])
-            print(f"[ScratchWrapper] face({direction}) -> set_rotation ok", flush=True)
-        except Exception as e:
-            print(f"[ScratchWrapper] face({direction}) FAILED: {e}", flush=True)
+    global _rot_y
+    _rot_y = float(direction)
+    _apply_rotation()
+
+
+def rotationX():
+    """获取当前X轴旋转角度"""
+    _init_engine()
+    return _rot_x
+
+
+def rotationY():
+    """获取当前Y轴旋转角度"""
+    _init_engine()
+    return _rot_y
+
+
+def rotationZ():
+    """获取当前Z轴旋转角度"""
+    _init_engine()
+    return _rot_z
 
 
 def moveto(position):
@@ -323,20 +400,20 @@ def Z():
 
 def _sync_position():
     """将内部坐标同步到引擎 Geometry"""
-    if _geometry is not None:
-        try:
-            _geometry.set_position([_x, _y, _z])
-            print(f"[ScratchWrapper] _sync_position: ({_x:.2f}, {_y:.2f}, {_z:.2f})", flush=True)
-        except Exception as e:
-            print(f"[ScratchWrapper] _sync_position FAILED: {e}", flush=True)
-    elif _actor is not None and hasattr(_actor, 'set_position'):
-        try:
-            _actor.set_position([_x, _y, _z])
-            print(f"[ScratchWrapper] _sync_position(actor): ({_x:.2f}, {_y:.2f}, {_z:.2f})", flush=True)
-        except Exception as e:
-            print(f"[ScratchWrapper] _sync_position(actor) FAILED: {e}", flush=True)
-    else:
-        print(f"[ScratchWrapper] _sync_position: SKIP (no geometry/actor)", flush=True)
+    check_stop()  # 旧代码无 check_stop 时，这里兜底检查
+    with _engine_lock:
+        if _geometry is not None:
+            try:
+                _geometry.set_position([_x, _y, _z])
+                return
+            except Exception as e:
+                _logger.debug(f"_sync_position FAILED: {e}")
+        if _actor is not None and hasattr(_actor, 'set_position'):
+            try:
+                _actor.set_position([_x, _y, _z])
+                return
+            except Exception as e:
+                _logger.debug(f"_sync_position(actor) FAILED: {e}")
 
 
 # ============================================================
@@ -463,25 +540,45 @@ def size():
 
 def _sync_scale():
     s = _size_val / 100.0
-    if _geometry is not None:
-        try:
-            _geometry.set_scale([s, s, s])
-            print(f"[ScratchWrapper] _sync_scale: {s:.3f} (from _size_val={_size_val:.1f})", flush=True)
-        except Exception as e:
-            print(f"[ScratchWrapper] _sync_scale FAILED: {e}", flush=True)
-    elif _actor is not None and hasattr(_actor, 'set_scale'):
-        try:
-            _actor.set_scale([s, s, s])
-            print(f"[ScratchWrapper] _sync_scale(actor): {s:.3f}", flush=True)
-        except Exception as e:
-            print(f"[ScratchWrapper] _sync_scale(actor) FAILED: {e}", flush=True)
-    else:
-        print(f"[ScratchWrapper] _sync_scale: SKIP (no geometry/actor, _size_val={_size_val:.1f})", flush=True)
+    check_stop()  # 旧代码无 check_stop 时，这里兜底检查
+    with _engine_lock:
+        if _geometry is not None:
+            try:
+                _geometry.set_scale([s, s, s])
+                return
+            except Exception as e:
+                _logger.debug(f"_sync_scale FAILED: {e}")
+        if _actor is not None and hasattr(_actor, 'set_scale'):
+            try:
+                _actor.set_scale([s, s, s])
+                return
+            except Exception as e:
+                _logger.debug(f"_sync_scale(actor) FAILED: {e}")
 
 
 # ============================================================
 # 侦测 (Detect) — 8 个函数
 # ============================================================
+
+# 全局输入状态（由 CEF 桥接或独立 demo 更新）
+_key_state = {}       # 按键名 → bool (是否按下)
+_mouse_pressed = False
+_mouse_x = 0.0
+_mouse_y = 0.0
+
+
+def update_key_state(key, pressed):
+    """更新按键状态（由外部事件系统调用）"""
+    _key_state[key] = bool(pressed)
+
+
+def update_mouse_state(pressed, x, y):
+    """更新鼠标状态（由外部事件系统调用）"""
+    global _mouse_pressed, _mouse_x, _mouse_y
+    _mouse_pressed = bool(pressed)
+    _mouse_x = float(x)
+    _mouse_y = float(y)
+
 
 def touch(target):
     """检测是否碰到目标"""
@@ -504,26 +601,47 @@ def ask(question):
 
 def keyboard(key):
     """检测按键是否按下"""
-    return False
+    return _key_state.get(key, False)
 
 
 def keyboard0(key):
     """检测按键是否未按下"""
-    return False
+    return not _key_state.get(key, False)
 
 
 def mouse1():
     """检测鼠标是否按下"""
-    return False
+    return _mouse_pressed
 
 
 def mouse0():
     """检测鼠标是否未按下"""
-    return False
+    return not _mouse_pressed
 
 
 def attribute(name):
-    """获取属性值"""
+    """获取属性值
+    支持: X, Y, Z, SIZE, DIRECTION, NAME, ID
+    """
+    _init_engine()
+    if name == 'X':
+        return _x
+    elif name == 'Y':
+        return _y
+    elif name == 'Z':
+        return _z
+    elif name == 'SIZE':
+        return _size_val
+    elif name == 'DIRECTION':
+        return _rot_y
+    elif name == 'ROTX':
+        return _rot_x
+    elif name == 'ROTY':
+        return _rot_y
+    elif name == 'ROTZ':
+        return _rot_z
+    elif name in ('NAME', 'ID'):
+        return _cartoon_index
     return 0.0
 
 
@@ -531,9 +649,20 @@ def attribute(name):
 # 控制 (Control) — 7 个函数
 # ============================================================
 
+def check_stop():
+    """检查停止标志，如果已请求停止则抛出 SystemExit"""
+    if _stop_requested:
+        raise SystemExit(0)
+
+
 def wait(seconds):
-    """等待指定秒数"""
-    _time.sleep(float(seconds))
+    """等待指定秒数，每 0.1 秒检查一次停止标志"""
+    remaining = float(seconds)
+    while remaining > 0:
+        if _stop_requested:
+            raise SystemExit(0)
+        _time.sleep(min(0.1, remaining))
+        remaining -= 0.1
 
 
 def stop(option):
@@ -648,6 +777,43 @@ def list_hide(name):
 # ============================================================
 # 脚本停止控制
 # ============================================================
+
+def reset_state():
+    """重置所有运行时状态（新脚本执行前调用）"""
+    global _x, _y, _z, _rot_x, _rot_y, _rot_z, _size_val, _cartoon_index, _visible
+    global _variables, _initialized, _external_target
+    global _stop_requested, _key_state, _mouse_pressed, _mouse_x, _mouse_y
+    global _target_scene_name, _target_actor_name, _target_scene, _target_actor
+    global _geometry, _optics, _kinematics, _actor, _scene
+
+    _x = 0.0
+    _y = 0.0
+    _z = 0.0
+    _rot_x = 0.0
+    _rot_y = 0.0
+    _rot_z = 0.0
+    _size_val = 100.0
+    _cartoon_index = 0
+    _visible = True
+    _variables = {}
+    _initialized = False
+    _external_target = False
+    _stop_requested = False
+    _key_state = {}
+    _mouse_pressed = False
+    _mouse_x = 0.0
+    _mouse_y = 0.0
+    _target_scene_name = None
+    _target_actor_name = None
+    _target_scene = None
+    _target_actor = None
+    _geometry = None
+    _optics = None
+    _kinematics = None
+    _actor = None
+    _scene = None
+    _logger.info("[ScratchWrapper] 状态已重置")
+
 
 def request_stop():
     """请求停止当前正在执行的脚本"""

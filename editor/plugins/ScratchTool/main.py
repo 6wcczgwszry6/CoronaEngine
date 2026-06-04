@@ -1,3 +1,4 @@
+import ctypes
 import json
 import os
 import sys
@@ -10,6 +11,34 @@ from CoronaPlugin.core.corona_plugin_base import PluginBase
 from CoronaPlugin.utils.settings import core_path
 
 logger = logging.getLogger(__name__)
+
+
+def _force_kill_thread(thread: threading.Thread, timeout: float = 3.0):
+    """强制终止线程：先 request_stop，等待 timeout 秒，未退出则注入 SystemExit"""
+    from CoronaCore.utils import corona_engine_scratch
+
+    corona_engine_scratch.request_stop()
+
+    thread.join(timeout=timeout)
+    if not thread.is_alive():
+        return True  # 正常退出
+
+    # 仍未退出 → 用 ctypes 注入异常强制终止
+    logger.warning(f"[ScratchTool] 线程 {timeout}s 内未退出，强制注入 SystemExit")
+    tid = thread.ident
+    if tid is not None:
+        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(tid), ctypes.py_object(SystemExit)
+        )
+        if res == 0:
+            logger.error(f"[ScratchTool] 强制终止失败：无效线程 ID {tid}")
+        elif res > 1:
+            # 多线程状态被修改，需要恢复
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(tid), None)
+            logger.error(f"[ScratchTool] 强制终止异常：修改了多个线程状态，已回滚")
+
+    thread.join(timeout=1.0)
+    return not thread.is_alive()
 
 
 @PluginBase.register_web("ScratchTool", "/ScratchTool", "积木插件", 1, "", 600, 500, False, False)
@@ -103,11 +132,13 @@ class ScratchTool(PluginBase):
             target_info = f", target={scene_name}/{actor_name}" if scene_name and actor_name else ""
             logger.info(f"[ScratchTool] 脚本保存完成: {elapsed_save:.1f}ms -> {filepath}{target_info}")
 
-            # 5. 先在主线程中清除模块缓存 + 重置停止标志
+            # 5. 清除 Backend 命名空间包的所有缓存模块
+            #    Backend/ 和 Backend/script/ 没有 __init__.py，是命名空间包
+            #    必须连命名空间包本身一起清除，否则子模块 import 会使用过期缓存
             import importlib
             modules_to_clear = [
                 name for name in sys.modules.keys()
-                if name.startswith('Backend.script.blockly_code') or name == 'runScript'
+                if name == 'Backend' or name.startswith('Backend.')
             ]
             for mod_name in modules_to_clear:
                 try:
@@ -119,9 +150,20 @@ class ScratchTool(PluginBase):
             if backend_root not in sys.path:
                 sys.path.insert(0, backend_root)
 
-            # 重置 corona_engine_scratch 的停止标志
-            from CoronaCore.utils import corona_engine_scratch
-            corona_engine_scratch.reset_stop()
+            # 重置 corona_engine_scratch 的全部运行时状态
+            try:
+                from CoronaCore.utils import corona_engine_scratch
+                corona_engine_scratch.reset_state()
+                # 开启 fallback 静默模式（抑制 Geometry.set_position 等打印）
+                from CoronaCore.utils import corona_engine_fallback
+                corona_engine_fallback.set_quiet(True)
+                logger.debug("[ScratchTool] 运行时状态已重置")
+            except Exception as reset_err:
+                logger.warning(f"[ScratchTool] 状态重置失败（使用旧API降级）: {reset_err}")
+                try:
+                    corona_engine_scratch.reset_stop()
+                except Exception:
+                    pass
 
             # 6. 在后台线程中执行脚本（主线程立即返回，不阻塞 UI）
             def _run_in_thread():
@@ -132,6 +174,10 @@ class ScratchTool(PluginBase):
                     runScript.run()
                     elapsed_exec = (time.perf_counter() - exec_start) * 1000
                     logger.info(f"[ScratchTool] 脚本执行完成: {elapsed_exec:.1f}ms")
+                except SystemExit:
+                    # 正常的停止流程（check_stop 触发），不是错误
+                    elapsed_exec = (time.perf_counter() - exec_start) * 1000
+                    logger.info(f"[ScratchTool] 脚本被停止: {elapsed_exec:.1f}ms")
                 except Exception as exec_err:
                     elapsed_exec = (time.perf_counter() - exec_start) * 1000
                     logger.exception(
@@ -143,11 +189,15 @@ class ScratchTool(PluginBase):
                             cls._exec_thread = None
 
             # 取消上一个未完成的线程
+            old_thread = None
             with cls._exec_lock:
                 if cls._exec_thread and cls._exec_thread.is_alive():
-                    from CoronaCore.utils import corona_engine_scratch
-                    corona_engine_scratch.request_stop()
-                    cls._exec_thread.join(timeout=2.0)
+                    old_thread = cls._exec_thread
+
+            if old_thread is not None:
+                _force_kill_thread(old_thread, timeout=0.5)
+
+            with cls._exec_lock:
                 cls._exec_thread = threading.Thread(
                     target=_run_in_thread, daemon=True, name="blockly-exec"
                 )
@@ -164,18 +214,25 @@ class ScratchTool(PluginBase):
         """
         停止当前正在执行的脚本
 
-        设置 corona_engine_scratch 的停止标志并等待线程结束
+        1. 设置停止标志 → 循环内的 check_stop() 抛出 SystemExit
+        2. 等待 0.5s → 如未退出，用 ctypes 注入 SystemExit
         """
-        from CoronaCore.utils import corona_engine_scratch
-
-        corona_engine_scratch.request_stop()
-
+        thread_to_stop = None
         with cls._exec_lock:
             if cls._exec_thread and cls._exec_thread.is_alive():
-                cls._exec_thread.join(timeout=2.0)
-                cls._exec_thread = None
+                thread_to_stop = cls._exec_thread
 
-        logger.info("[ScratchTool] 脚本已停止")
+        if thread_to_stop is not None:
+            killed = _force_kill_thread(thread_to_stop, timeout=0.5)
+            if killed:
+                logger.info("[ScratchTool] 脚本已停止")
+            else:
+                logger.error("[ScratchTool] 脚本停止失败（线程未响应）")
+
+            with cls._exec_lock:
+                if cls._exec_thread is thread_to_stop:
+                    cls._exec_thread = None
+
         return json.dumps({"status": "stopped"})
 
     @classmethod
