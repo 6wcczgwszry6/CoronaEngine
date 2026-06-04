@@ -109,6 +109,8 @@ def _capture_for_review(state: Dict[str, Any], tier: int) -> Optional[str]:
         logger.warning("tier%d_review: 拍摄工具缺失", tier)
         return None
 
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
     saved = []
     for az in _DEFAULT_VIEW_ANGLES:
         pose = _calc_camera_pose(center, distance, az, _DEFAULT_ELEVATION)
@@ -120,9 +122,22 @@ def _capture_for_review(state: Dict[str, Any], tier: int) -> Optional[str]:
             })
             time.sleep(0.3)
             filepath = os.path.join(output_dir, f"t{tier}_az{az:03d}.png")
-            shot_tool.invoke({"output_path": filepath, "output_mode": "base_color"})
-            time.sleep(0.5)  # 等待截图管线完全释放, 避免连续截图竞态死锁
-            saved.append(filepath)
+
+            # 截图在独立线程执行, 超时 5s 则跳过 (引擎截屏偶发死锁)
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(
+                shot_tool.invoke,
+                {"output_path": filepath, "output_mode": "base_color"},
+            )
+            try:
+                future.result(timeout=5.0)
+                saved.append(filepath)
+            except FuturesTimeoutError:
+                logger.warning("tier%d_review: az=%d 截图超时 5s, 跳过 (引擎截屏管线死锁)", tier, az)
+                executor.shutdown(wait=False, cancel_futures=True)
+            else:
+                executor.shutdown(wait=False)
+            time.sleep(0.3)
         except Exception as e:
             logger.warning("tier%d_review: az=%d 截图异常: %s", tier, az, e)
 
