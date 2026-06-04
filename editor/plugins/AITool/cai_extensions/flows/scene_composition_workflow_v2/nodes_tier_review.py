@@ -25,7 +25,7 @@ from ..scene_composition_workflow.helpers import get_tool, parse_review_result
 logger = logging.getLogger(__name__)
 
 MAX_TIER_RETRIES = 2
-_DEFAULT_VIEW_ANGLES = [0, 90, 180, 270]  # 4 正方向, 避免引擎截图管线死锁
+_DEFAULT_VIEW_ANGLES = [0, 45, 90, 135, 180, 225, 270, 315]  # 8 角度
 _DEFAULT_ELEVATION = 35.0
 
 # VLM issue → solver action 映射 (Week 2: 执行逻辑待接入 solver)
@@ -118,9 +118,10 @@ def _capture_for_review(state: Dict[str, Any], tier: int) -> Optional[str]:
                 "forward": pose["forward"],
                 "up": pose["up"],
             })
-            time.sleep(0.15)
+            time.sleep(0.3)
             filepath = os.path.join(output_dir, f"t{tier}_az{az:03d}.png")
             shot_tool.invoke({"output_path": filepath, "output_mode": "base_color"})
+            time.sleep(0.5)  # 等待截图管线完全释放, 避免连续截图竞态死锁
             saved.append(filepath)
         except Exception as e:
             logger.warning("tier%d_review: az=%d 截图异常: %s", tier, az, e)
@@ -547,7 +548,7 @@ def _tier_review(state: Dict[str, Any], tier: int) -> Dict[str, Any]:
         raw = review_tool.invoke({
             "output_dir": screenshot_dir,
             "scene_description": scene_desc,
-            "max_images": 4,
+            "max_images": 8,
         })
         parsed = parse_review_result(raw)
     except Exception as e:
