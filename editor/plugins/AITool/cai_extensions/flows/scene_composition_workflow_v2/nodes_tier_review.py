@@ -346,48 +346,38 @@ def _apply_corrections(
     corrections: List[Dict[str, Any]],
     room_size: List[float],
 ) -> int:
-    """执行 VLM 的 corrections 指令: 直接用 set_actor_transform 修正坐标。
+    """执行 corrections: 只应用 scale (视觉可靠), 不应用 position (2D 截图不可靠)。
 
-    不再删除+重导入, 而是直接设置 position/rotation。
-    失败的 correction 回退到 diff correction 逻辑。
+    Position 修正由 semantic retry + solver 负责。
     """
     if not corrections:
         return 0
 
-    x_half = room_size[0] / 2
-    z_half = (room_size[1] / 2) if len(room_size) > 1 else 1.5
-
     transform_tool = get_tool("set_actor_transform")
     if transform_tool is None:
-        logger.warning("_apply_corrections: set_actor_transform 不可用, 回退 diff")
+        logger.warning("_apply_corrections: set_actor_transform 不可用")
         return 0
 
     applied = 0
     for corr in corrections:
         oid = corr.get("object_id", "")
-        pos = corr.get("position", [0, 0, 0])
-        rot = corr.get("rotation", [0, 0, 0])
         scl = corr.get("scale")
         reason = corr.get("reason", "")
 
-        if not oid or len(pos) < 3:
+        if not oid:
             logger.warning("_apply_corrections: 无效 correction: %s", corr)
             continue
 
-        # 边界校验 + clamp
-        pos[0] = max(-x_half + 0.1, min(x_half - 0.1, pos[0]))
-        pos[1] = max(0.0, pos[1])
-        pos[2] = max(-z_half + 0.1, min(z_half - 0.1, pos[2]))
+        # 只应用 scale (VLM 能判断比例, 但判断不了精确 3D 位置)
+        if not scl or len(scl) != 3:
+            continue
 
         try:
-            invoke_args = {"actor_name": oid, "position": pos, "rotation": rot}
-            if scl and len(scl) == 3:
-                invoke_args["scale"] = scl
-            transform_tool.invoke(invoke_args)
+            transform_tool.invoke({"actor_name": oid, "scale": scl})
             applied += 1
-            logger.info("_apply_corrections: %s → pos=%s rot=%s scale=%s (%s)", oid, pos, rot, scl, reason)
+            logger.info("_apply_corrections: %s → scale=%s (%s)", oid, scl, reason)
         except Exception as e:
-            logger.warning("_apply_corrections: %s 执行失败: %s", oid, e)
+            logger.warning("_apply_corrections: %s scale 执行失败: %s", oid, e)
 
     if applied:
         logger.info("_apply_corrections: 成功执行 %d/%d 个修正", applied, len(corrections))
@@ -636,14 +626,11 @@ def _tier_review(state: Dict[str, Any], tier: int) -> Dict[str, Any]:
     if corrections_raw and overall != "PASS":
         corrections_applied = _apply_corrections(state, tier, corrections_raw, room_size)
         if corrections_applied > 0:
-            if corrections_from_vlm:
-                # VLM 有视觉, 直接修正可信 → 跳过 retry
-                logger.info("tier%d_review: VLM corrections 成功 %d 个, 跳过 retry", tier, corrections_applied)
-                overall = "PASS"
-            else:
-                # 文本 LLM 猜坐标不可靠 → 仍执行 semantic retry
-                logger.info("tier%d_review: text LLM corrections 应用 %d 个 (位置可能不准), 仍执行 retry", tier, corrections_applied)
-                # overall 保持 NEEDS_IMPROVEMENT → retry 触发 → solver 算正确位置
+            # _apply_corrections 只应用 scale, 不应用 position
+            # position 始终由 semantic retry + solver 负责
+            logger.info("tier%d_review: scale corrections 应用 %d 个, 仍执行 retry (位置由 solver 修正)",
+                       tier, corrections_applied)
+            # overall 保持 NEEDS_IMPROVEMENT → retry 触发
 
     if overall in ("PASS", "SKIPPED", "ERROR") or exceeded:
         decision = "pass"
