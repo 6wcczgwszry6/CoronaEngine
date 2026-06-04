@@ -1080,10 +1080,14 @@ def _place_with_absolute_coords(
 
     items = _apply_layout(list(items), layouts)
 
-    # 合并: 已锁定的 tier1 items + 新 items
-    all_items_list = intermediate.get("placement_items", [])
-    existing_tier1 = _filter_tier(all_items_list, 1)
-    merged = existing_tier1 + items
+    # 合并: 已锁定的 actors (有 pos) + 新 items
+    locked_actors = intermediate.get("locked_actors", [])
+    existing_locked = [
+        {"object_id": a["name"], "name": a["name"], "pos": a["pos"],
+         "rot": a.get("rot", [0,0,0]), "scale": a.get("scale", [1,1,1])}
+        for a in locked_actors if a.get("name")
+    ]
+    merged = existing_locked + items
 
     parsed = _run_place_scene(merged, state)
     if parsed is None:
@@ -1426,10 +1430,15 @@ def tier2_place_node(state: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("tier2: %s = %s.%s + %.2fm → [%.2f, %.2f, %.2f]",
                     oid, ref, rel, dist, pos[0], pos[1], pos[2])
 
-    # 合并 tier1 (locked) + tier2 (new) → place_scene_from_items → 更新 scene.json
+    # 合并 tier1 (locked, 有 pos) + tier2 (new) → place_scene_from_items → 更新 scene.json
     _apply_default_scale(new_items)
-    existing_tier1 = _filter_tier(all_items, 1)
-    merged = existing_tier1 + new_items
+    # 用 locked_actors (有 pos) 而非 _filter_tier(all_items) (无 pos)
+    locked_with_pos = [
+        {"object_id": a["name"], "name": a["name"], "pos": a["pos"],
+         "rot": a.get("rot", [0,0,0]), "scale": a.get("scale", [1,1,1])}
+        for a in locked if a.get("name")
+    ]
+    merged = locked_with_pos + new_items
     parsed = _run_place_scene(merged, state)
     prev_names = intermediate.get("imported_names", set())
     if parsed:
@@ -1529,9 +1538,13 @@ def tier3_place_node(state: Dict[str, Any]) -> Dict[str, Any]:
     else:
         new_tier3 = items_to_place
 
-    tier1_items = _filter_tier(all_items, 1)
-    tier2_items_in_state = _filter_tier(all_items, 2)
-    final_items = tier1_items + tier2_items_in_state + new_tier3
+    # 用 locked_actors (有 pos) 而非 _filter_tier(all_items) (无 pos)
+    locked_with_pos = [
+        {"object_id": a["name"], "name": a["name"], "pos": a["pos"],
+         "rot": a.get("rot", [0,0,0]), "scale": a.get("scale", [1,1,1])}
+        for a in locked if a.get("name")
+    ]
+    final_items = locked_with_pos + new_tier3
 
     parsed = _run_place_scene(final_items, state)
     if parsed is None:
