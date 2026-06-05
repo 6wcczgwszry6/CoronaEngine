@@ -188,6 +188,55 @@ function teardownCefFieldInputFix() {
   }
 }
 
+// ============================================================
+// 积木键盘事件转发：将按键发送到 Python handle()
+// ============================================================
+let scriptKeyHandler = null;
+let scriptKeyUpHandler = null;
+
+function setupScriptKeyForwarding() {
+  scriptKeyHandler = (e) => {
+    // 焦点在输入框时跳过（不干扰文字输入）
+    const activeEl = document.activeElement;
+    if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
+      return;
+    }
+
+    const code = e.code || e.key;
+    const displayKey = e.key || code;
+    const mods = [];
+    if (e.ctrlKey || e.metaKey) mods.push('Ctrl');
+    if (e.shiftKey) mods.push('Shift');
+    if (e.altKey) mods.push('Alt');
+
+    // 发送 code(物理码,如KeyA/Digit0/BracketRight) + key(显示字符,如a/0/])
+    scriptingService.sendKeyEvent(code, mods.join(','), displayKey).catch(() => {});
+  };
+
+  scriptKeyUpHandler = (e) => {
+    const activeEl = document.activeElement;
+    if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
+      return;
+    }
+    // 通知 Python 按键已释放（同时发送 code 和 display key）
+    scriptingService.sendKeyUpEvent(e.code || e.key, e.key || e.code).catch(() => {});
+  };
+
+  document.addEventListener('keydown', scriptKeyHandler, true);
+  document.addEventListener('keyup', scriptKeyUpHandler, true);
+}
+
+function teardownScriptKeyForwarding() {
+  if (scriptKeyHandler) {
+    document.removeEventListener('keydown', scriptKeyHandler, true);
+    scriptKeyHandler = null;
+  }
+  if (scriptKeyUpHandler) {
+    document.removeEventListener('keyup', scriptKeyUpHandler, true);
+    scriptKeyUpHandler = null;
+  }
+}
+
 async function updateGeneratedCode() {
   if (!workspace || !pythonGenerator) {
     generatedCode.value = '';
@@ -569,6 +618,8 @@ const initBlockly = async () => {
   store.workspace.value = workspace;
   store.workspaceSvg.value = workspace.workspaceSvg || workspace;
 
+  // 积木键盘事件转发到 Python（必须在 setupCefFieldInputFix 之前注册）
+  setupScriptKeyForwarding();
   // CEF OSR 键盘转发修复
   setupCefFieldInputFix();
 
@@ -700,6 +751,8 @@ onUnmounted(() => {
   if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null; }
   // 清理 CEF 键盘转发
   teardownCefFieldInputFix();
+  // 清理积木键盘转发
+  teardownScriptKeyForwarding();
   // 清理状态轮询
   clearPollTimer();
   // 清理自动保存定时器

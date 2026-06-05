@@ -242,3 +242,34 @@ class ScratchTool(PluginBase):
             if cls._exec_thread and cls._exec_thread.is_alive():
                 return json.dumps({"status": "running"})
             return json.dumps({"status": "idle"})
+
+    @classmethod
+    def key_event(cls, key: str, modifiers: str = "", display_key: str = "") -> str:
+        """CEF 桥接：分发键盘按下事件
+        Args:
+            key: 物理键码 (e.code, 如 'KeyA', 'Digit0', 'BracketRight')
+            modifiers: 修饰键 (如 'Ctrl,Shift')
+            display_key: 显示字符 (e.key, 如 'a', '0', ']')
+        """
+        from CoronaCore.utils import corona_engine_scratch
+
+        mods = [m.strip() for m in modifiers.split(",") if m.strip()] if modifiers else []
+        corona_engine_scratch.handle_key_event(key, mods, display_key or key)
+        return json.dumps({"status": "ok"})
+
+    @classmethod
+    def key_release(cls, key: str, display_key: str = "") -> str:
+        """CEF 桥接：分发键盘释放事件"""
+        from CoronaCore.utils import corona_engine_scratch
+
+        corona_engine_scratch.handle_key_release(key, display_key or key)
+        return json.dumps({"status": "ok"})
+
+    @classmethod
+    def mouse_event(cls, event_type: str, button: str = "",
+                    x: float = 0.0, y: float = 0.0) -> str:
+        """CEF 桥接：分发鼠标事件到积木脚本的 handle_mouse()"""
+        from CoronaCore.utils import corona_engine_scratch
+
+        corona_engine_scratch.handle_mouse_event(event_type, button, x, y)
+        return json.dumps({"status": "ok"})

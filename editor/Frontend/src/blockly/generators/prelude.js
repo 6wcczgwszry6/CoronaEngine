@@ -14,72 +14,31 @@ const _required = new Set();
 // - 或对象：{ global?: string, runPrologue?: string, runEpilogue?: string }
 const PRELUDE_SNIPPETS = {
   // 键盘事件支持：当使用键盘事件积木时加入
+  // 通过 CEF bridge (ScratchTool.key_event) → CE.handle_key_event → handle()
   keyboard: {
     global: [
-      '# 键盘/事件桥接初始化',
-      'import logging as _logging',
-      '_kl = _logging.getLogger("BlocklyKeyboard")',
-      PYTHON_IMPORTS.PYTHON_SLOT_IMPORT,
-      `try:
-    ${PYTHON_IMPORTS.MAIN_WINDOW_IMPORT}
-except ImportError:
-    _kl.warning("get_window 导入失败，键盘事件不可用")
-    get_window = None`,
+      '# 键盘事件桥接：注册 handle 到 CE 模块',
+      'from CoronaCore.utils import corona_engine_scratch as _CE',
     ].join('\n'),
     runPrologue: [
-      'if callable(get_window):',
-      '    try:',
-      '        wb = get_window()',
-      '        bw = wb.browser_widget',
-      '        if bw is None:',
-      '            _kl.warning("browser_widget 为空，键盘事件不可用")',
-      '        else:',
-      '            prev = getattr(bw, "_blockly_handle_slot", None)',
-      '            if prev is not None:',
-      '                try: bw.code_input_changed.disconnect(prev)',
-      '                except Exception: pass',
-      '            bw.code_input_changed.connect(handle)',
-      '            bw._blockly_handle_slot = handle',
-      '            _kl.info("键盘事件桥接成功")',
-      '    except Exception as _e:',
-      '        _kl.warning(f"键盘事件桥接失败: {_e}")',
-      'else:',
-      '    _kl.warning("get_window 不可调用，键盘事件不可用")',
+      '# 将 handle 注册到 CE，CEF bridge 收到键盘事件后会调用它',
+      '_CE.register_key_handler(handle)',
+      'print("[Blockly] 键盘处理器已注册: " + handle.__name__)',
     ].join('\n'),
-    runEpilogue: ['# 键盘事件已就绪'].join('\n'),
+    runEpilogue: [],
   },
 
   // 鼠标事件支持：当使用鼠标事件积木时加入
   mouse: {
     global: [
-      '# 鼠标状态追踪变量',
-      PYTHON_IMPORTS.PYTHON_SLOT_IMPORT,
+      '# 鼠标事件桥接：注册 handle_mouse 到 CE 模块',
       'from CoronaCore.utils import corona_engine_scratch as _CE',
-      'import threading as _threading',
     ].join('\n'),
     runPrologue: [
-      '# 鼠标事件桥接',
-      '_ce_lock = _threading.Lock()',
-      'if callable(get_window):',
-      '    try:',
-      '        wb = get_window()',
-      '        bw = wb.browser_widget',
-      '        if bw is None:',
-      '            _kl.warning("browser_widget 为空，鼠标事件不可用")',
-      '        else:',
-      '            prev_mouse = getattr(bw, "_blockly_mouse_slot", None)',
-      '            if prev_mouse is not None:',
-      '                try: bw.mouse_event_changed.disconnect(prev_mouse)',
-      '                except Exception: pass',
-      '            bw.mouse_event_changed.connect(handle_mouse)',
-      '            bw._blockly_mouse_slot = handle_mouse',
-      '            _kl.info("鼠标事件桥接成功")',
-      '    except Exception as _e:',
-      '        _kl.warning(f"鼠标事件桥接失败: {_e}")',
-      'else:',
-      '    _kl.warning("get_window 不可调用，鼠标事件不可用")',
+      '# 将 handle_mouse 注册到 CE，CEF bridge 收到鼠标事件后会调用它',
+      '_CE.register_mouse_handler(handle_mouse)',
     ].join('\n'),
-    runEpilogue: '# 鼠标事件收尾',
+    runEpilogue: [],
   },
 };
 

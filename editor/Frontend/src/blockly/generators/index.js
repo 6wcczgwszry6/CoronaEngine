@@ -138,7 +138,7 @@ pythonGenerator.workspaceToCode = function customWorkspaceToCode(workspace) {
   // 键盘事件 handler
   if (handlerCode.trim()) {
     parts.push('');
-    parts.push('@Slot(str)\n' + 'def handle(key):' + '\n    print("key:", key)');
+    parts.push('def handle(key, _mods=None):' + '\n    print("key:", key)');
     const indentedHandlers = indentBlock(handlerCode);
     if (indentedHandlers) parts.push(indentedHandlers);
   }
@@ -147,8 +147,7 @@ pythonGenerator.workspaceToCode = function customWorkspaceToCode(workspace) {
   if (mouseHandlerCode.trim()) {
     parts.push('');
     parts.push(
-      '@Slot(str, str, float, float)\n' +
-        'def handle_mouse(_event_type, _button, _x, _y):' +
+      'def handle_mouse(_event_type, _button, _x, _y):' +
         '\n    print("mouse:", _event_type, _button, _x, _y)'
     );
     const indentedMouseHandlers = indentBlock(mouseHandlerCode);

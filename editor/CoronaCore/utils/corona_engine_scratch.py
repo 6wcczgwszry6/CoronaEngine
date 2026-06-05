@@ -57,6 +57,87 @@ _external_target = False
 # 脚本执行停止标志（线程安全）
 _stop_requested = False
 
+# 键盘/鼠标事件处理器注册表（由生成的积木代码 register）
+_key_handler = None
+_mouse_handler = None
+
+
+def register_key_handler(handler):
+    """注册键盘事件处理器"""
+    global _key_handler
+    _key_handler = handler
+    _logger.info(f"[ScratchWrapper] 键盘处理器已注册: {handler.__name__ if handler else 'None'}")
+
+
+def unregister_key_handler():
+    """取消注册键盘事件处理器"""
+    global _key_handler
+    _key_handler = None
+    _logger.info("[ScratchWrapper] 键盘处理器已取消注册")
+
+
+def register_mouse_handler(handler):
+    """注册鼠标事件处理器"""
+    global _mouse_handler
+    _mouse_handler = handler
+
+
+def handle_key_event(key, mods=None, display_key=None):
+    """分发键盘事件到注册的处理器，同时更新 _key_state"""
+    if display_key is None:
+        display_key = key
+    # 存储所有可能的形式供 detect 积木匹配
+    keys_to_set = {key, display_key}
+    if len(display_key) == 1:
+        keys_to_set.add(display_key.lower())
+        keys_to_set.add(display_key.upper())
+    for k in keys_to_set:
+        _key_state[k] = True
+
+    # 打印当前按键信息，帮助用户确认积木配置
+    print(f"[KeyDebug] code={key} key={display_key} stored={sorted(keys_to_set)}", flush=True)
+
+    # 调用注册的 handler
+    if _key_handler is None:
+        _logger.warning(f"[ScratchWrapper] 收到按键 {key} 但无注册的 handler！")
+        return
+    try:
+        _logger.info(f"[ScratchWrapper] 转发按键 code={key} display={display_key} 到 handler")
+        _key_handler(key, mods or [])
+    except SystemExit:
+        raise
+    except Exception as e:
+        _logger.warning(f"[ScratchWrapper] 键盘事件处理异常: {e}")
+
+
+def handle_key_release(key, display_key=None):
+    """键盘释放事件：同时清除 code 和 key 形式的状态"""
+    _key_state[key] = False
+    if display_key:
+        _key_state[display_key] = False
+        if len(display_key) == 1:
+            _key_state[display_key.lower()] = False
+            _key_state[display_key.upper()] = False
+
+
+def handle_mouse_event(event_type, button, x, y):
+    """分发鼠标事件到注册的处理器，同时更新鼠标状态"""
+    global _mouse_pressed, _mouse_x, _mouse_y
+    if event_type in ('click', 'mousedown'):
+        _mouse_pressed = True
+    elif event_type in ('mouseup',):
+        _mouse_pressed = False
+    _mouse_x = float(x)
+    _mouse_y = float(y)
+    # 调用注册的 handler
+    if _mouse_handler is not None:
+        try:
+            _mouse_handler(event_type, button, x, y)
+        except SystemExit:
+            raise
+        except Exception as e:
+            _logger.warning(f"[ScratchWrapper] 鼠标事件处理异常: {e}")
+
 
 def set_target(scene_name: str, actor_name: str):
     """设置该模块操作的目标 Actor（绑定到场景中的真实物体）
@@ -188,7 +269,9 @@ def move(steps):
     """向前移动 steps 步"""
     _init_engine()
     global _x
+    old_x = _x
     _x += float(steps)
+    print(f"[ScratchWrapper] move({steps}): X {old_x:.1f} -> {_x:.1f}", flush=True)
     _sync_position()
 
 
@@ -785,6 +868,7 @@ def reset_state():
     global _stop_requested, _key_state, _mouse_pressed, _mouse_x, _mouse_y
     global _target_scene_name, _target_actor_name, _target_scene, _target_actor
     global _geometry, _optics, _kinematics, _actor, _scene
+    global _key_handler, _mouse_handler
 
     _x = 0.0
     _y = 0.0
@@ -812,6 +896,8 @@ def reset_state():
     _kinematics = None
     _actor = None
     _scene = None
+    _key_handler = None
+    _mouse_handler = None
     _logger.info("[ScratchWrapper] 状态已重置")
 
 

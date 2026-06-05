@@ -21,10 +21,16 @@ export const defineEventGenerators = () => {
 
   pythonGenerator.forBlock['event_keyboard'] = function (block) {
     need('keyboard');
-    const key = block.getFieldValue('x') || '';
+    const keyCode = block.getFieldValue('x') || '';  // e.code 值: 'KeyA', 'Digit0' 等
+    // 同时获取下拉框显示文本，用于非美式键盘兜底 (e.key 值: 'a', '0' 等)
+    const field = block.getField('x');
+    const displayKey = (field && field.getText) ? field.getText() : keyCode;
     let branch = pythonGenerator.statementToCode(block, 'DO');
     if (!branch) branch = pythonGenerator.INDENT + 'pass\n';
-    return `if key == '${key}':\n` + indent(branch);
+    // 双路匹配: e.code (美式键盘) 或 _key_state (非美式键盘的 e.key)
+    return (
+      `if key == '${keyCode}' or _CE.keyboard('${displayKey}'):\n` + indent(branch)
+    );
   };
 
   pythonGenerator.forBlock['event_keyboard_combo'] = function (block) {
@@ -33,8 +39,13 @@ export const defineEventGenerators = () => {
     let branch = pythonGenerator.statementToCode(block, 'DO');
     if (!branch) branch = pythonGenerator.INDENT + 'pass\n';
     const parts = combo.split('+').map(s => s.trim());
-    const checks = parts.map(p => `'${p}' in _mods`).join(' and ');
-    return `if key == '${parts[parts.length - 1]}' and ${checks}:\n` + indent(branch);
+    const keyPart = parts[parts.length - 1];  // 用户输入的最后一段
+    const checks = parts.map(p => `'${p}' in (_mods or [])`).join(' and ');
+    // 双路匹配: e.code 或 _key_state (兼容非美式键盘)
+    return (
+      `if (key == '${keyPart}' or _CE.keyboard('${keyPart}')) and ${checks}:\n` +
+      indent(branch)
+    );
   };
 
   pythonGenerator.forBlock['event_RB'] = function (block) {
