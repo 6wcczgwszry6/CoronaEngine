@@ -1851,34 +1851,14 @@ const updateModelTransformFast = (operationType, axis = null, value = null) => {
   });
 };
 
-// 更新单位变换
+// 更新单位变换——快速通道已写入 SharedDataHub，此处仅触发写盘
 const updateActorTransform = (operationType) => {
   if (!currentActorFile.value || !actorData.value.parentScene) return;
   debounced(`actor_transform_${operationType}`, async () => {
     try {
-      let operation = '';
-      const vector = getActorTransformVector(operationType);
-      if (!vector) return;
-
-      switch (operationType) {
-        case 'Move':
-          operation = 'Move';
-          break;
-        case 'Rotate':
-          operation = 'Rotate';
-          break;
-        case 'Scale':
-          operation = 'Scale';
-          break;
-        default:
-          return;
-      }
-
-      await sceneService.actorOperation(
+      await sceneService.saveActor(
         actorData.value.parentScene,
-        currentActorFile.value,
-        operation,
-        vector
+        currentActorFile.value
       );
     } catch (e) {
       logError('更新单位变换失败', e);
@@ -1993,48 +1973,14 @@ const updateCameraLockRotation = () => {
   });
 };
 
-// 更新模型变换
+// 更新模型变换——快速通道已写入 SharedDataHub，此处仅触发写盘
 const updateModelTransform = (operationType) => {
   if (!currentModelFile.value || !modelData.value.targetScene) return;
   debounced(`model_transform_${operationType}`, async () => {
     try {
-      let vector = [];
-      let operation = '';
-
-      switch (operationType) {
-        case 'Move':
-          vector = [
-            Number(modelData.value.defaultTransform.position.x),
-            Number(modelData.value.defaultTransform.position.y),
-            Number(modelData.value.defaultTransform.position.z),
-          ];
-          operation = 'Move';
-          break;
-        case 'Rotate':
-          vector = [
-            Number(modelData.value.defaultTransform.rotation.x),
-            Number(modelData.value.defaultTransform.rotation.y),
-            Number(modelData.value.defaultTransform.rotation.z),
-          ];
-          operation = 'Rotate';
-          break;
-        case 'Scale':
-          vector = [
-            Number(modelData.value.defaultTransform.scale.x),
-            Number(modelData.value.defaultTransform.scale.y),
-            Number(modelData.value.defaultTransform.scale.z),
-          ];
-          operation = 'Scale';
-          break;
-        default:
-          return;
-      }
-
-      await sceneService.actorOperation(
+      await sceneService.saveActor(
         modelData.value.targetScene,
-        currentModelFile.value,
-        operation,
-        vector
+        currentModelFile.value
       );
     } catch (e) {
       logError('更新模型变换失败', e);
