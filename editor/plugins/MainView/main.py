@@ -157,6 +157,7 @@ class MainView(PluginBase):
             read_content = False
 
             init_path = CoronaEditor.CoronaEngine.active_project_path if CoronaEditor.CoronaEngine.active_project_path else None
+
             content, file_path = FileHandler.open_file(title, filter_str, init_path, read_content=read_content,
                                                        return_relative_path=True)
 

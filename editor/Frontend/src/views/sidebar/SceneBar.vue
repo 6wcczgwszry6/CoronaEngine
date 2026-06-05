@@ -1047,6 +1047,12 @@ const addActorToList = async (actor) => {
 };
 
 const HandleFileImport = async () => {
+  // 测试 window.cefQuery 是否存在
+  if (typeof window.cefQuery === 'undefined') {
+    alert('错误：window.cefQuery 未定义！CEF bridge 未初始化。');
+    return;
+  }
+
   ShowModelDropdown.value = false;
   if (!currentSceneName.value) {
     logWarn('File import aborted: no active scene');
