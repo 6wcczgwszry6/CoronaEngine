@@ -47,6 +47,7 @@ _target_actor = None
 _geometry = None
 _optics = None
 _kinematics = None
+_mechanics = None
 _actor = None
 _scene = None
 _initialized = False
@@ -218,6 +219,9 @@ def _init_external_target():
         if hasattr(_target_actor, '_kinematics') and _target_actor._kinematics is not None:
             _kinematics = _target_actor._kinematics
 
+        if hasattr(_target_actor, '_mechanics') and _target_actor._mechanics is not None:
+            _mechanics = _target_actor._mechanics
+
         # 同步内部状态到实际 Actor 的当前值
         try:
             pos = _target_actor.get_position()
@@ -268,6 +272,7 @@ def _init_internal_actor():
     _geometry = None
     _optics = None
     _kinematics = None
+    _mechanics = None
     _actor = None
     _scene = None
 
@@ -289,11 +294,20 @@ def move(steps):
 
 
 def _apply_rotation():
-    """将内部旋转状态同步到引擎"""
+    """将内部旋转状态同步到引擎。重力开启时临时暂停物理防止覆盖。"""
     check_stop()
     rot = [_rot_x, _rot_y, _rot_z]
-    kine_ok = geo_ok = actor_ok = False
+    kine_ok = geo_ok = actor_ok = mech_was_enabled = False
     with _engine_lock:
+        # 如果物理系统启用，临时暂停防止覆盖手动旋转
+        if _mechanics is not None and hasattr(_mechanics, 'set_physics_enabled'):
+            try:
+                mech_was_enabled = _mechanics.get_physics_enabled()
+                if mech_was_enabled:
+                    _mechanics.set_physics_enabled(False)
+            except Exception:
+                pass
+
         if _kinematics is not None and hasattr(_kinematics, 'set_rotation'):
             try:
                 _kinematics.set_rotation(rot)
@@ -312,7 +326,15 @@ def _apply_rotation():
                 actor_ok = True
             except Exception as e:
                 print(f"[ROT-DIAG] _apply_rotation: actor.set FAILED: {e}", flush=True)
-    print(f"[ROT-DIAG] _apply_rotation #{_run_count}: rot={rot} kine_ok={kine_ok} geo_ok={geo_ok} actor_ok={actor_ok}", flush=True)
+
+        # 恢复物理
+        if mech_was_enabled and _mechanics is not None:
+            try:
+                _mechanics.set_physics_enabled(True)
+            except Exception:
+                pass
+
+    print(f"[ROT-DIAG] _apply_rotation #{_run_count}: rot={rot} kine_ok={kine_ok} geo_ok={geo_ok} actor_ok={actor_ok} mech_suspended={mech_was_enabled}", flush=True)
 
 
 def rotateX(angle):
@@ -877,7 +899,7 @@ def reset_state():
     global _variables, _initialized, _external_target
     global _stop_requested, _key_state, _mouse_pressed, _mouse_x, _mouse_y
     global _target_scene_name, _target_actor_name, _target_scene, _target_actor
-    global _geometry, _optics, _kinematics, _actor, _scene
+    global _geometry, _optics, _kinematics, _mechanics, _actor, _scene
     global _key_handler, _mouse_handler
 
     _x = 0.0
@@ -904,6 +926,7 @@ def reset_state():
     _geometry = None
     _optics = None
     _kinematics = None
+    _mechanics = None
     _actor = None
     _scene = None
     _key_handler = None
