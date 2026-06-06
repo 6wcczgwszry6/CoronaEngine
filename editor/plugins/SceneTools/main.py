@@ -327,3 +327,79 @@ class SceneTools(PluginBase):
         except Exception as e:
             logger.error(f"open actor error: {e}")
             return False
+
+    @staticmethod
+    def pick_actor_at_pixel(scene_name: str, x: float, y: float,
+                            vp_width: float, vp_height: float) -> dict:
+        """
+        鼠标在3D视口中拾取物体。
+
+        引擎的 pick_actor_at_pixel 是异步的：第一次调用设置GPU拾取请求并返回0，
+        需要等待一帧（约16ms）后再次调用才能获取拾取结果。
+        前端应在第一次调用后等待约50ms再重试。
+
+        Args:
+            scene_name: 场景名称
+            x, y: 浏览器视口中的鼠标坐标 (event.clientX, event.clientY)
+            vp_width, vp_height: 浏览器视口尺寸 (window.innerWidth, innerHeight)
+        Returns:
+            {"status": "success", "actor": {...}}  拾取成功
+            {"status": "miss"}                      该位置没有物体
+            {"status": "pending"}                   结果尚未就绪，需重试
+            {"status": "error", "message": "..."}   出错
+        """
+        try:
+            # 获取当前场景和活动摄像机
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                return {"status": "error", "message": f"场景 '{scene_name}' 未找到"}
+
+            camera = scene.get_active_camera()
+            if camera is None:
+                return {"status": "error", "message": "没有可用的摄像机"}
+
+            # 坐标缩放：浏览器视口坐标 -> 摄像机渲染分辨率坐标
+            cam_w = camera.width
+            cam_h = camera.height
+            if vp_width <= 0 or vp_height <= 0:
+                return {"status": "error", "message": "无效的视口尺寸"}
+            pick_x = int(x * cam_w / vp_width)
+            pick_y = int(y * cam_h / vp_height)
+
+            # 边界检查
+            if pick_x < 0 or pick_x >= cam_w or pick_y < 0 or pick_y >= cam_h:
+                return {"status": "miss"}
+
+            # 调用引擎拾取API（第一次调用设置拾取请求，返回0或缓存的命中结果）
+            handle = camera.pick_actor_at_pixel(pick_x, pick_y)
+
+            if handle != 0:
+                # 命中物体：通过handle查找对应的Python Actor对象
+                from CoronaCore.core.entities.actor import _handle_to_actor
+                actor = _handle_to_actor.get(handle)
+                if actor is not None:
+                    # 设置选中状态并通知前端更新属性面板
+                    CoronaEditor._selected_scene = scene_name
+                    CoronaEditor._selected_actor = actor.name
+                    CoronaEditor.js_call_func(
+                        "actor-change",
+                        [actor.actor_type, scene_name, actor.name]
+                    )
+                    logger.info(
+                        "Viewport pick hit: actor='%s' at pixel (%d, %d)",
+                        actor.name, pick_x, pick_y
+                    )
+                    return {"status": "success", "actor": actor.to_dict()}
+                else:
+                    # handle存在但Python对象已被GC回收
+                    logger.warning(
+                        "Viewport pick: handle %d 未找到对应的 Python Actor", handle
+                    )
+                    return {"status": "miss"}
+
+            # handle == 0：无缓存结果，拾取请求已提交，需等待下一帧
+            return {"status": "pending"}
+
+        except Exception as e:
+            logger.error("pick_actor_at_pixel error: %s", e)
+            return {"status": "error", "message": str(e)}
