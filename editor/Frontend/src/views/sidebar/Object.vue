@@ -626,7 +626,7 @@
             </div>
 
             <!-- 单位 - 积木 -->
-            <div v-show="ActiveSubTab === 'Blockly'" style="height: 400px;">
+            <div v-show="ActiveSubTab === 'Blockly'" class="flex flex-col" style="height: 400px;">
               <BlocklyWorkspace
                 v-if="actorData.name"
                 :actorName="actorData.name"
@@ -1065,7 +1065,7 @@
             </div>
 
             <!-- 模型 - 积木 -->
-            <div v-show="ActiveSubTab === 'Blockly'" style="height: 400px;">
+            <div v-show="ActiveSubTab === 'Blockly'" class="flex flex-col" style="height: 400px;">
               <BlocklyWorkspace
                 v-if="modelData.name"
                 :actorName="modelData.name"

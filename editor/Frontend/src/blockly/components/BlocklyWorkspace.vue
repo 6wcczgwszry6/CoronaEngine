@@ -294,8 +294,9 @@ async function handleToggleRun() {
       scene,
       actor,
     );
-    if (result?.status === 'error') {
-      alert('代码执行出错：' + (result.message || '未知错误'));
+    const execResult = result?.data ?? result;
+    if (execResult?.status === 'error') {
+      alert('代码执行出错：' + (execResult.message || '未知错误'));
       codeRunning.value = false;
     } else {
       // 脚本已在后台线程启动，开始轮询状态
@@ -332,7 +333,8 @@ function startPollTimer() {
 
     try {
       const status = await scriptingService.getScriptStatus();
-      if (status?.status === 'idle') {
+      const pollResult = status?.data ?? status;
+      if (pollResult?.status === 'idle') {
         codeRunning.value = false;
         return;
       }

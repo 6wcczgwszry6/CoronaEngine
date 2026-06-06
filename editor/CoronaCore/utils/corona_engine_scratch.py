@@ -267,7 +267,7 @@ def _init_internal_actor():
     仅使用内部变量 _x/_y/_z/_size_val 追踪状态。
     所有 getter/setter 函数已对 None 做了安全保护。
     """
-    global _geometry, _optics, _kinematics, _actor, _scene
+    global _geometry, _optics, _kinematics, _mechanics, _actor, _scene
 
     _geometry = None
     _optics = None
