@@ -108,6 +108,8 @@ class SceneDatas(PluginBase):
             actor.set_camera_lock_rotation_offset(vector)
         elif operation == "SetCollision":
             actor.set_collision_enabled(str(vector[0]))
+        elif operation == "SetPhysicsEnabled":
+            actor.set_physics_enabled(bool(vector[0]))
         else:
             raise ValueError(f"Unsupported operation '{operation}'")
 
