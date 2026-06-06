@@ -1004,13 +1004,73 @@ const handleMouseRotate = (dx, dy) => {
   cameraState.value.forward = vec3.normalize(newFwd);
 };
 
+// 鼠标左键拾取3D物体的两阶段重试
+let _pickRetryTimer = null;
+const PICK_RETRY_DELAY_MS = 60; // 等待引擎处理拾取请求（约一帧时间）
+
+const handleViewportPick = async (event) => {
+  const sceneId = tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
+  const vpW = window.innerWidth;
+  const vpH = window.innerHeight;
+  // 捕获坐标，避免setTimeout闭包中event对象被浏览器回收
+  const clientX = event.clientX;
+  const clientY = event.clientY;
+
+  try {
+    console.log('[Pick] 请求拾取 scene=%s pos=(%d,%d) vp=(%d,%d)', sceneId, clientX, clientY, vpW, vpH);
+    const result = await sceneService.pickActor(
+      sceneId, clientX, clientY, vpW, vpH
+    );
+    // 检查实际数据（桥接层可能将结果包装在 .data 中）
+    const data = result?.data ?? result;
+    console.log('[Pick] 第一次响应:', JSON.stringify(data));
+    if (data?.status === 'pending') {
+      // 拾取请求已提交，等待一帧后重试
+      if (_pickRetryTimer) clearTimeout(_pickRetryTimer);
+      _pickRetryTimer = setTimeout(async () => {
+        _pickRetryTimer = null;
+        try {
+          const retryResult = await sceneService.pickActor(
+            sceneId, clientX, clientY, vpW, vpH
+          );
+          const retryData = retryResult?.data ?? retryResult;
+          if (retryData?.status === 'success') {
+            // Python侧已通过 js_call_func 推送 actor-change 事件
+            console.log('[Pick] 选中物体:', retryData.actor?.name);
+          }
+        } catch (e) {
+          // 重试失败静默忽略
+        }
+      }, PICK_RETRY_DELAY_MS);
+    } else if (data?.status === 'success') {
+      // 命中缓存结果
+      console.log('[Pick] 命中缓存:', data.actor?.name);
+    }
+    // status === 'miss' 或 'error' 时静默忽略
+  } catch (e) {
+    // 拾取失败静默忽略（如点击了UI区域导致无效坐标）
+  }
+};
+
 const onMouseDown = (event) => {
-  // 右键拖拽旋转
+  // 右键拖拽旋转（原有逻辑不变）
   if (event.button === 2) {
     mouseRotate.active = true;
     mouseRotate.lastX = event.clientX;
     mouseRotate.lastY = event.clientY;
     event.preventDefault();
+    return;
+  }
+
+  // 左键：在3D视口中拾取物体
+  if (event.button === 0) {
+    // 忽略UI交互元素上的点击（菜单栏、按钮、输入框、场景标签等）
+    const interactiveEl = event.target.closest(
+      'button, a, input, select, textarea, [role="button"], [role="menubar"]'
+    );
+    if (interactiveEl) return;
+
+    handleViewportPick(event);
   }
 };
 
@@ -1444,6 +1504,11 @@ onUnmounted(() => {
   coronaEventBus.off('panel-closed');
   window.removeEventListener('storage', onStorageChange);
   stopMoveLoop();
+  // 清理拾取重试定时器
+  if (_pickRetryTimer) {
+    clearTimeout(_pickRetryTimer);
+    _pickRetryTimer = null;
+  }
   document.removeEventListener('keydown', handleKeyDown);
   document.removeEventListener('keyup', handleKeyUp);
   document.removeEventListener('click', handleClickOutside);

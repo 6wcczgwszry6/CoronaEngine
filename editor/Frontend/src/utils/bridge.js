@@ -84,6 +84,9 @@ export const sceneService = {
     Bridge.callCEF('SceneTools', 'open_actor', [sceneName, actorName]),
   focusActor: (sceneName, actorName, cameraName) =>
     Bridge.callCEF('SceneTools', 'focus_actor', [sceneName, actorName, cameraName]),
+  /** 鼠标在3D视口中拾取物体（异步：首次调用设置拾取，~50ms后重试获取结果） */
+  pickActor: (sceneName, x, y, vpWidth, vpHeight) =>
+    Bridge.callCEF('SceneTools', 'pick_actor_at_pixel', [sceneName, x, y, vpWidth, vpHeight]),
 
   getScene: (sceneId) => Bridge.callCEF('SceneDatas', 'get_scene', [sceneId]),
   getActor: (sceneId, actorId) => Bridge.callCEF('SceneDatas', 'get_actor', [sceneId, actorId]),
@@ -207,6 +210,26 @@ export const scriptingService = {
    */
   getScriptStatus: () =>
     Bridge.callCEF('ScratchTool', 'get_script_status', []),
+
+  /**
+   * 发送键盘事件到积木脚本
+   * @param {string} key - 按键名 (如 'KeyA', 'Space', 'ArrowUp')
+   * @param {string} modifiers - 修饰键 (如 'Ctrl,Shift')
+   */
+  sendKeyEvent: (key, modifiers, displayKey) =>
+    Bridge.callCEF('ScratchTool', 'key_event', [key, modifiers || '', displayKey || key]),
+
+  /**
+   * 发送键盘释放事件到积木脚本
+   */
+  sendKeyUpEvent: (key, displayKey) =>
+    Bridge.callCEF('ScratchTool', 'key_release', [key, displayKey || key]),
+
+  /**
+   * 发送鼠标事件到积木脚本
+   */
+  sendMouseEvent: (eventType, button, x, y) =>
+    Bridge.callCEF('ScratchTool', 'mouse_event', [eventType, button || '', x || 0, y || 0]),
 };
 
 export const projectLauncherService = {
