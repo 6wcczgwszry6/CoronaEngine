@@ -84,6 +84,9 @@ export const sceneService = {
     Bridge.callCEF('SceneTools', 'open_actor', [sceneName, actorName]),
   focusActor: (sceneName, actorName, cameraName) =>
     Bridge.callCEF('SceneTools', 'focus_actor', [sceneName, actorName, cameraName]),
+  /** 鼠标在3D视口中拾取物体（异步：首次调用设置拾取，~50ms后重试获取结果） */
+  pickActor: (sceneName, x, y, vpWidth, vpHeight) =>
+    Bridge.callCEF('SceneTools', 'pick_actor_at_pixel', [sceneName, x, y, vpWidth, vpHeight]),
 
   getScene: (sceneId) => Bridge.callCEF('SceneDatas', 'get_scene', [sceneId]),
   getActor: (sceneId, actorId) => Bridge.callCEF('SceneDatas', 'get_actor', [sceneId, actorId]),
