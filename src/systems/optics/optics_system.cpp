@@ -21,7 +21,10 @@
 
 // CORONA_ENABLE_VISION is controlled by CMake (-DCORONA_ENABLE_VISION).
 
+#define CORONA_VISION_IMPORT_DEMO
+
 #ifdef CORONA_ENABLE_VISION
+#include "base/import/importer.h"
 #include "base/import/parameter_set.h"
 #include "base/import/project_desc.h"
 #include "base/mgr/global.h"
@@ -30,7 +33,6 @@
 #include "base/sensor/frame_buffer.h"
 #include "base/sensor/sensor.h"
 #include "rhi/context.h"
-#include "rhi/resources/buffer.h"  // ocarina::Buffer<T> for the interop smoke test
 #include "vision/vision_geometry_adapter.h"
 #include "vision/vision_camera_adapter.h"
 #include "vision/vision_light_adapter.h"
@@ -77,6 +79,41 @@ vision::Device* visionDevicePtr = nullptr;
     return pipeline;
 }
 
+#ifdef CORONA_VISION_IMPORT_DEMO
+// Absolute path to a known-good Vision scene used purely to verify that the
+// Vision backend can produce a picture in isolation (i.e. without the
+// CoronaEngine->Vision scene-building adapters). Change this to point at any
+// local *.json scene. Kept as a constant so it is trivial to edit/relocate.
+constexpr const char* kVisionDemoScenePath =
+    R"(E:\CoronaExample\test_vision\render_scene\cbox\vision_scene.json)";
+
+// Loads the demo scene from disk and brings it to a renderable state, mirroring
+// the reference snippet (import_scene -> init -> prepare -> prepare_view_texture).
+// Returns an empty pointer if the file is missing or import fails so the caller
+// can skip the demo without crashing.
+[[nodiscard]] auto import_vision_demo_pipeline() -> ocarina::SP<vision::Pipeline> {
+    const std::filesystem::path scene_path{kVisionDemoScenePath};
+    std::error_code ec;
+    if (!std::filesystem::exists(scene_path, ec)) {
+        CFW_LOG_ERROR("OpticsSystem: Vision demo scene not found: {}", scene_path.string());
+        return {};
+    }
+    // Resolve relative texture/mesh references against the scene's own folder.
+    vision::Global::instance().set_scene_path(scene_path.parent_path());
+    auto pipeline = vision::Importer::import_scene(scene_path);
+    if (!pipeline) {
+        CFW_LOG_ERROR("OpticsSystem: Vision demo import_scene returned null for {}",
+                      scene_path.string());
+        return {};
+    }
+    pipeline->init();
+    pipeline->prepare();
+    // prepare() does not create FrameBuffer::view_texture_; the render path tone
+    // maps into it and we later read it back, so create it explicitly here.
+    pipeline->frame_buffer()->prepare_view_texture();
+    return pipeline;
+}
+#endif
 #endif
 }  // namespace
 
@@ -1121,86 +1158,19 @@ bool OpticsSystem::init_vision_lazy() {
         vision::Global::instance().set_device(visionDevicePtr);
         vision::Global::instance().set_scene_path(std::filesystem::current_path());
 
-#ifdef CORONA_VISION_INTEROP_SMOKETEST
-        // ============================================================
-        // CUDA <-> Vulkan 零拷贝传输层一次性自检（与渲染 / Vision 出图完全无关）。
-        //
-        // 目的：在投入完整零拷贝集成前，仅用【现有接口】证明那个唯一的未知数——
-        //       "CUDA 与 Vulkan 能否别名同一块显存：一边写，另一边读到相同字节"。
-        // 刻意剥离 Vision 渲染、显示、格式转换、跨 API 信号量：upload_immediately +
-        // executor.commit() 均为阻塞调用，一次性测试天然有序。探针是我们自己分配的
-        // 可导出 buffer，不碰 Vision 的 FrameBuffer，因此无需改动 Vision 一行。
-        //   CUDA   : 分配可导出 buffer -> 写入已知图案 -> 导出 OS 句柄 + 对齐尺寸
-        //   Vulkan : 以同一句柄导入 -> GPU 拷到 host-visible staging -> 读回比对
-        // 失败仅记日志，绝不影响后续初始化。
-        try {
-            constexpr uint32_t kProbeN = 1024;
-            constexpr uint32_t kProbeBytes = kProbeN * static_cast<uint32_t>(sizeof(uint32_t));
-
-            // 1) CUDA 侧：分配【可导出】buffer，灌入已知图案（阻塞式 H2D 上传）。
-            auto probe = visionDevicePtr->create<ocarina::Buffer<uint32_t>>(
-                kProbeN, "corona_interop_probe", /*exported=*/true);
-            std::vector<uint32_t> pattern(kProbeN);
-            for (uint32_t i = 0; i < kProbeN; ++i) {
-                pattern[i] = 0xC0DE0000u ^ (i * 2654435761u);
-            }
-            probe.upload_immediately(pattern.data());
-
-            // 2) CUDA 侧：导出 Win32 共享句柄 + 真实对齐分配尺寸。
-            const uint64_t os_handle = visionDevicePtr->export_handle(probe.handle());
-            const uint64_t aligned_size = visionDevicePtr->get_aligned_memory_size(probe.handle());
-
-            if (os_handle == 0 || aligned_size < kProbeBytes) {
-                CFW_LOG_ERROR(
-                    "[INTEROP-SMOKE] FAIL: export_handle/get_aligned_memory_size 异常 "
-                    "(handle={}, aligned={}, need>={})",
-                    os_handle, aligned_size, kProbeBytes);
-            } else {
-                // 3) Vulkan 侧：以【同一块物理内存】导入为 HardwareBuffer。
-                ExternalHandle ext{};
-                ext.handle = reinterpret_cast<decltype(ext.handle)>(
-                    static_cast<uintptr_t>(os_handle));
-                HardwareBuffer imported(ext, kProbeN, static_cast<uint32_t>(sizeof(uint32_t)),
-                                        static_cast<uint32_t>(aligned_size),
-                                        BufferUsage::StorageBuffer);
-
-                // 4) Vulkan 侧：GPU 拷到 host-visible staging（导入的专用内存不可映射），
-                //    再读回主机。convertBufferUsage 对所有 buffer 恒含 TRANSFER_SRC/DST。
-                HardwareBuffer staging(kProbeBytes, BufferUsage::StorageBuffer);
-                hardware_->executor << imported.copyTo(staging)
-                                    << hardware_->executor.commit();
-                std::vector<uint32_t> readback(kProbeN, 0u);
-                const bool read_ok = staging.copyToData(readback.data(), kProbeBytes);
-
-                // 5) 判定别名是否成立：CUDA 写的字节，Vulkan 是否原样读到。
-                if (!read_ok) {
-                    CFW_LOG_ERROR("[INTEROP-SMOKE] FAIL: staging 回读失败");
-                } else {
-                    uint32_t mismatches = 0;
-                    for (uint32_t i = 0; i < kProbeN; ++i) {
-                        mismatches += (readback[i] != pattern[i]) ? 1u : 0u;
-                    }
-                    if (mismatches == 0) {
-                        CFW_LOG_NOTICE(
-                            "[INTEROP-SMOKE] PASS: CUDA->Vulkan 零拷贝别名成立 "
-                            "({} x u32, aligned={} bytes) -> 传输层地基稳固",
-                            kProbeN, aligned_size);
-                    } else {
-                        CFW_LOG_ERROR(
-                            "[INTEROP-SMOKE] FAIL: {}/{} 个 u32 不一致 "
-                            "(疑似 CUDA/Vulkan 非同一物理 GPU / 缺 UUID 匹配，或尺寸不符)",
-                            mismatches, kProbeN);
-                    }
-                }
-            }
-            // 注：os_handle 是本进程拥有的 NT 句柄，生产代码应在导入后 CloseHandle()。
-            // 此一次性自检刻意不引入 <windows.h>（避免 min/max 宏污染本 TU），仅泄漏
-            // 一个内核句柄至进程结束，可接受。
-        } catch (const std::exception& e) {
-            CFW_LOG_ERROR("[INTEROP-SMOKE] FAIL: 抛出异常: {}", e.what());
+#ifdef CORONA_VISION_IMPORT_DEMO
+        // Verification demo: load a known-good scene straight from disk instead of
+        // building the Vision scene from CoronaEngine data. This isolates the
+        // Vision render path so we can confirm it produces a picture at all.
+        renderPipeline = import_vision_demo_pipeline();
+        if (!renderPipeline) {
+            CFW_LOG_ERROR("OpticsSystem: Vision demo pipeline import failed");
+            return false;
         }
-#endif  // CORONA_VISION_INTEROP_SMOKETEST
-
+        vision_initialized_ = true;
+        CFW_LOG_INFO("OpticsSystem: Vision import-scene demo initialized successfully");
+        return true;
+#else
         renderPipeline = create_vision_pipeline();
         if (!renderPipeline) {
             CFW_LOG_ERROR("OpticsSystem: Failed to create Vision pipeline without external scene import");
@@ -1267,6 +1237,7 @@ bool OpticsSystem::init_vision_lazy() {
 
         CFW_LOG_INFO("OpticsSystem: Vision backend initialized successfully");
         return true;
+#endif  // CORONA_VISION_IMPORT_DEMO
     } catch (const std::exception& e) {
         CFW_LOG_ERROR("OpticsSystem: Vision init failed: {}", e.what());
         return false;
@@ -1276,9 +1247,11 @@ bool OpticsSystem::init_vision_lazy() {
 void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
     if (!renderPipeline) return;
 
+#ifndef CORONA_VISION_IMPORT_DEMO
     // Detect and apply dynamic scene changes (object import/export, transform,
     // material params, per-mesh color) before rendering this frame.
     sync_vision_dynamic_scene();
+#endif
 
     // [VDIAG-B0] Entry/loop probe: tells apart "run_vision_frame never iterates a
     // camera" (no enabled scene / empty camera_handles -> nothing rendered -> black)
