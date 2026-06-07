@@ -61,7 +61,8 @@ window.__coronaEmit = (event, ...rest) => {
   if (!isCross && (event === 'actor-change' || event === 'log-batch' ||
       event === 'scene-tree-changed' || event === 'scene-rename' ||
       event === 'scene-add' || event === 'transform-update' ||
-      event === 'ai-chunk' || event === 'engine-started')) {
+      event === 'ai-chunk' || event === 'engine-started' ||
+      event === 'lanchat-event')) {
     Bridge.callCEF('__cross_tab__', 'broadcast', [event, args])
       .catch(() => {});
   }

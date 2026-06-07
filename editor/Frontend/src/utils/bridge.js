@@ -182,6 +182,41 @@ export const aiClient = {
     ]),
 };
 
+// 局域网聊天室：所有跨机传输在 Python 侧完成，前端只通过 cefQuery 调用本机插件。
+// Python 侧通过 js_call_func('lanchat-event', [event]) 把房间消息推回前端
+// （coronaEventBus.on('lanchat-event')），事件信封带 channel: 'lanchat'。
+//
+// 注意：deal_func_from_js 用 create_success_response 把返回值包成
+// { success, data, timestamp }，业务结果在 .data 里。这里统一解包，
+// 让 store 直接拿到 { ok, ip, ... } 业务对象（约定同 SceneBar：result?.data ?? result）。
+const _unwrap = (res) => (res && res.data !== undefined ? res.data : res);
+
+export const lanChatService = {
+  // 房主开房：{ room, password, port? } -> { ok, ip, port, room } | { ok:false, error }
+  startRoom: (payload) =>
+    Bridge.callCEF('LANChat', 'start_room', [payload]).then(_unwrap),
+  // 房主关房 -> { ok }
+  stopRoom: () => Bridge.callCEF('LANChat', 'stop_room', [{}]).then(_unwrap),
+  // 加入房间：{ ip, port, room, password, nickname } -> { ok, members, history } | { ok:false, code }
+  joinRoom: (payload) =>
+    Bridge.callCEF('LANChat', 'join_room', [payload]).then(_unwrap),
+  // 离开房间 -> { ok }
+  leaveRoom: () => Bridge.callCEF('LANChat', 'leave_room', [{}]).then(_unwrap),
+  // 发送消息：{ text } -> { ok } | { ok:false, error }
+  sendMessage: (text) =>
+    Bridge.callCEF('LANChat', 'send_message', [{ text }]).then(_unwrap),
+  // 获取本机局域网 IP -> { ok, ip, port }
+  getLocalIp: () => Bridge.callCEF('LANChat', 'get_local_ip', [{}]).then(_unwrap),
+  // 添加 AI 助手：{ name, persona } -> { ok, agent_id, name } | { ok:false, error }
+  addAgent: (payload) =>
+    Bridge.callCEF('LANChat', 'add_agent', [payload]).then(_unwrap),
+  // 移除 AI 助手：{ agent_id } -> { ok }
+  removeAgent: (agentId) =>
+    Bridge.callCEF('LANChat', 'remove_agent', [{ agent_id: agentId }]).then(_unwrap),
+  // 列出 agent 名册 -> { ok, agents:[{agent_id,name,owner}] }
+  listAgents: () => Bridge.callCEF('LANChat', 'list_agents', [{}]).then(_unwrap),
+};
+
 export const scriptingService = {
   /**
    * 执行 Blockly 生成的 Python 代码
