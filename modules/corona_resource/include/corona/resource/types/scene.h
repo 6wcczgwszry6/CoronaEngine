@@ -73,32 +73,6 @@ struct AssimpImportOptions {
     ImageImportOptions image_options;    // 纹理导入选项
 };
 
-// USD 导入选项
-struct UsdImportOptions {
-    bool simplify_mesh = true;           // 是否启用网格简化
-    float simplification_error = 0.01f;  // 简化误差阈值
-    bool apply_world_transform = true;   // 是否将变换烘焙到顶点
-
-    // Phase 1: 数据验证与清理
-    bool remove_degenerate_triangles = true;   // 移除退化三角形（面积=0）
-    float degenerate_area_threshold = 1e-12f;  // 退化面积阈值的平方
-    bool validate_data = true;                 // 检测并修复 NaN/Inf 值
-
-    // Phase 1: 法线处理
-    bool generate_normals_if_missing = true;  // 缺失时生成平滑法线
-    bool always_regenerate_normals = false;   // 强制重新生成所有法线
-
-    // Phase 2: UV 处理
-    bool flip_uvs = false;  // 翻转 UV 的 V 坐标 (1 - v)
-
-    // Phase 2: 坐标系转换
-    bool convert_to_engine_coords = true;  // 转换到引擎坐标系
-    bool flip_winding_order = true;        // 坐标系转换时自动翻转绕序
-
-    LODGenerationOptions lod_options;  // LOD 生成配置
-    ImageImportOptions image_options;  // 纹理导入选项
-};
-
 // 透明度混合模式
 enum class AlphaMode : std::uint32_t {
     Opaque = 0,  // 完全不透明，忽略 alpha
@@ -221,11 +195,8 @@ class SceneParser : public IParser {
 
     /// 设置 Assimp 导入选项（在 import 之前调用）
     AssimpImportOptions assimp_options;
-    /// 设置 USD 导入选项（在 import 之前调用）
-    UsdImportOptions usd_options;
 
    protected:
-    std::shared_ptr<IResource> parse_usd(const std::filesystem::path& path);
     std::shared_ptr<IResource> parse_assimp(const std::filesystem::path& path);
 };
 

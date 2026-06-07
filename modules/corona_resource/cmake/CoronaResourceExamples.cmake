@@ -21,16 +21,14 @@ include_guard(GLOBAL)
 #       NAME SceneExample
 #       SOURCES scene_example.cpp
 #       LIBRARIES corona::resource::manager corona::resource::scene
-#       USD_MODULES usdLux
 #       NEEDS_TBB ON
 #       NEEDS_ASSIMP ON
-#       NEEDS_USD_COPY ON
 #   )
 function(corona_add_example)
     # Parse arguments
-    set(options NEEDS_TBB NEEDS_ASSIMP NEEDS_USD_COPY)
+    set(options NEEDS_TBB NEEDS_ASSIMP)
     set(oneValueArgs NAME)
-    set(multiValueArgs SOURCES LIBRARIES USD_MODULES)
+    set(multiValueArgs SOURCES LIBRARIES)
     cmake_parse_arguments(EXAMPLE "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     # Validate required arguments
@@ -45,20 +43,9 @@ function(corona_add_example)
     # Create executable
     add_executable(${EXAMPLE_NAME} ${EXAMPLE_SOURCES})
 
-    # Add USD auto install dependency if needed
-    if(EXAMPLE_USD_MODULES AND TARGET usd_auto_install)
-        add_dependencies(${EXAMPLE_NAME} usd_auto_install)
-        message(STATUS "[corona_add_example] ${EXAMPLE_NAME} depends on usd_auto_install")
-    endif()
-
     # Link libraries
     if(EXAMPLE_LIBRARIES)
         target_link_libraries(${EXAMPLE_NAME} PRIVATE ${EXAMPLE_LIBRARIES})
-    endif()
-
-    # Link USD modules
-    if(EXAMPLE_USD_MODULES)
-        corona_link_usd(${EXAMPLE_NAME} ${EXAMPLE_USD_MODULES})
     endif()
 
     # Set C++ standard
@@ -88,16 +75,6 @@ function(corona_add_example)
     # Copy Assimp runtime artifacts if needed (if not already copied via LIBRARIES)
     if(EXAMPLE_NEEDS_ASSIMP AND NOT "assimp::assimp" IN_LIST EXAMPLE_LIBRARIES)
         corona_copy_runtime_files(assimp::assimp ${EXAMPLE_NAME})
-    endif()
-
-    # Copy USD runtime files if needed
-    if(EXAMPLE_NEEDS_USD_COPY)
-        # Copy USD modules explicitly specified
-        foreach(_usd_module ${EXAMPLE_USD_MODULES})
-            corona_copy_runtime_files(${_usd_module} ${EXAMPLE_NAME})
-        endforeach()
-        # Copy USD configuration files (plugInfo.json, etc.)
-        corona_copy_usd(${EXAMPLE_NAME})
     endif()
 
     message(STATUS "[corona_add_example] Added example: ${EXAMPLE_NAME}")

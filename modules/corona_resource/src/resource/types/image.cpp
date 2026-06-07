@@ -16,9 +16,6 @@
 
 #define TINYEXR_IMPLEMENTATION
 #include <astcenc.h>
-#include <pxr/usd/ar/asset.h>
-#include <pxr/usd/ar/resolvedPath.h>
-#include <pxr/usd/ar/resolver.h>
 
 #include <iostream>
 
@@ -432,31 +429,7 @@ std::shared_ptr<IResource> ImageParser::parse_usd_asset(const std::string& resol
         return nullptr;
     }
 
-    bool is_packaged_asset = resolved_path.find('[') != std::string::npos;
-
-    if (is_packaged_asset) {
-        pxr::ArResolver& resolver = pxr::ArGetResolver();
-        pxr::ArResolvedPath ar_resolved_path(resolved_path);
-
-        std::shared_ptr<pxr::ArAsset> asset = resolver.OpenAsset(ar_resolved_path);
-        if (!asset) {
-            std::cerr << "[ImageParser] ArResolver could not open asset: " << resolved_path << std::endl;
-            return nullptr;
-        }
-
-        std::shared_ptr<const char> buffer = asset->GetBuffer();
-        size_t buffer_size = asset->GetSize();
-
-        if (!buffer || buffer_size == 0) {
-            std::cerr << "[ImageParser] Empty asset buffer: " << resolved_path << std::endl;
-            return nullptr;
-        }
-
-        std::span<const std::byte> data_span(
-            reinterpret_cast<const std::byte*>(buffer.get()), buffer_size);
-        return parse_from_memory(data_span, resolved_path, options);
-    }
-
+    // 直接通过文件系统加载（tinyusdz 已将包内资源解出或使用文件路径）
     if (!std::filesystem::exists(resolved_path)) {
         std::cerr << "[ImageParser] File not found: " << resolved_path << std::endl;
         return nullptr;

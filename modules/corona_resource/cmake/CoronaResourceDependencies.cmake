@@ -3,7 +3,6 @@
 # =============================================================================
 
 include(FetchContent)
-include(CoronaResourceUSD)
 
 # Fetch ktm math library
 message(STATUS "Fetching ktm math library...")
@@ -57,16 +56,6 @@ else()
     )
 endif()
 
-# Fetch OpenUSD library
-message(STATUS "Fetching OpenUSD library...")
-FetchContent_Declare(
-    OpenUSD
-    GIT_REPOSITORY https://github.com/PixarAnimationStudios/OpenUSD.git
-    GIT_TAG release
-    GIT_SHALLOW TRUE
-    EXCLUDE_FROM_ALL
-)
-
 # Fetch tinyexr library
 message(STATUS "Fetching tinyexr library...")
 FetchContent_Declare(
@@ -91,18 +80,6 @@ FetchContent_Declare(
     GIT_TAG 5.3.0  # Recommend locking to a specific commit hash or release tag (e.g., 4.6.0)
 )
 
-# Configure OpenUSD cache flags ahead of population so imaging stays disabled
-set(NO_DX TRUE CACHE BOOL "" FORCE)
-set(PXR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(PXR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(PXR_BUILD_TUTORIALS OFF CACHE BOOL "" FORCE)
-set(PXR_BUILD_IMAGING OFF CACHE BOOL "" FORCE)
-set(PXR_ENABLE_PYTHON_SUPPORT OFF CACHE BOOL "" FORCE)
-set(PXR_ENABLE_PRECOMPILED_HEADERS OFF CACHE BOOL "" FORCE)
-
-# Configure SDL2 options before making it available
-set(SDL_SHARED ON CACHE BOOL "" FORCE)
-
 # Configure Assimp options before making it available
 set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
@@ -111,7 +88,7 @@ set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
 set(ASSIMP_INJECT_DEBUG_POSTFIX OFF CACHE BOOL "" FORCE)
 set(ASSIMP_NO_EXPORT ON CACHE BOOL "" FORCE)
 set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_USD_IMPORTER OFF CACHE BOOL "" FORCE)   # Temp enable USD importer
+set(ASSIMP_BUILD_USD_IMPORTER ON CACHE BOOL "" FORCE)
 
 # Configure tinyexr options before making it available
 set(TINYEXR_BUILD_SAMPLE OFF CACHE BOOL "" FORCE)
@@ -127,7 +104,6 @@ set(_CORONA_RESOURCE_FETCH_DEPS
     assimp
     stb
     nlohmann_json
-    OpenUSD
     tinyexr
     meshoptimizer
     astc-encoder
@@ -148,5 +124,3 @@ endif ()
 
 add_library(stb_headers INTERFACE)
 target_include_directories(stb_headers INTERFACE ${stb_SOURCE_DIR})
-
-corona_install_usd(usdGeom)
