@@ -1,18 +1,5 @@
-# Try to include from CoronaEngine's misc/cmake directory first (snake_case naming)
-if(EXISTS "${CMAKE_SOURCE_DIR}/misc/cmake/corona_resource_usd.cmake")
-    include(${CMAKE_SOURCE_DIR}/misc/cmake/corona_resource_usd.cmake)
-# Fallback to CoronaResource's cmake directory (for standalone builds)
-elseif(EXISTS "${CMAKE_SOURCE_DIR}/cmake/CoronaResourceUSD.cmake")
-    include(${CMAKE_SOURCE_DIR}/cmake/CoronaResourceUSD.cmake)
-# Fallback to current project's cmake directory
-elseif(EXISTS "${PROJECT_SOURCE_DIR}/cmake/CoronaResourceUSD.cmake")
-    include(${PROJECT_SOURCE_DIR}/cmake/CoronaResourceUSD.cmake)
-elseif(EXISTS "${PROJECT_SOURCE_DIR}/cmake/corona_resource_usd.cmake")
-    include(${PROJECT_SOURCE_DIR}/cmake/corona_resource_usd.cmake)
-else()
-    message(FATAL_ERROR "Could not find corona_resource_usd.cmake or CoronaResourceUSD.cmake")
-endif()
-
+# CoronaResource - Scene Resource Manager
+# =============================================================================
 
 set(CORONA_RESOURCE_MANAGER_SOURCE_FILES
     ### top-level source files ###
@@ -33,7 +20,6 @@ set(CORONA_RESOURCE_MANAGER_SOURCE_FILES
     types/json.cpp
     # scene
     types/parse_assimp.h
-    types/parse_usd.h
     types/scene.cpp
     # video
     types/video.cpp
@@ -88,14 +74,10 @@ target_include_directories(CoronaResourceManager
 
     ${ktm_SOURCE_DIR}
     PRIVATE
-    ${openusd_BINARY_DIR}/include
     ${tinyexr_SOURCE_DIR}
     ${astc-encoder_SOURCE_DIR}/Source
 )
 
-find_package(TBB REQUIRED)
-
-corona_link_usd(CoronaResourceManager usdLux)
 # Link dependencies
 target_link_libraries(CoronaResourceManager
     PRIVATE
@@ -105,7 +87,6 @@ target_link_libraries(CoronaResourceManager
     astcenc-native-static
     PUBLIC
     corona::kernel
-    TBB::tbb
     INTERFACE
     ktm
 )

@@ -13,7 +13,6 @@
 
 #include "corona/resource/types/image.h"
 #include "parse_assimp.h"
-#include "parse_usd.h"
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -263,10 +262,10 @@ std::uint32_t Scene::add_mesh(MeshData&& mesh) {
 }
 
 SceneParser::SceneParser() {
-    register_extension(".usd", [this](const auto& path, ResourceCache& cache) { return parse_usd(path); });
-    register_extension(".usda", [this](const auto& path, ResourceCache& cache) { return parse_usd(path); });
-    register_extension(".usdc", [this](const auto& path, ResourceCache& cache) { return parse_usd(path); });
-    register_extension(".usdz", [this](const auto& path, ResourceCache& cache) { return parse_usd(path); });
+    register_extension(".usd", [this](const auto& path, ResourceCache& cache) { return parse_assimp(path); });
+    register_extension(".usda", [this](const auto& path, ResourceCache& cache) { return parse_assimp(path); });
+    register_extension(".usdc", [this](const auto& path, ResourceCache& cache) { return parse_assimp(path); });
+    register_extension(".usdz", [this](const auto& path, ResourceCache& cache) { return parse_assimp(path); });
 
     register_extension(".fbx", [this](const auto& path, ResourceCache& cache) { return parse_assimp(path); });
     register_extension(".obj", [this](const auto& path, ResourceCache& cache) { return parse_assimp(path); });
@@ -277,21 +276,6 @@ SceneParser::SceneParser() {
     register_extension(".3ds", [this](const auto& path, ResourceCache& cache) { return parse_assimp(path); });
     // register_extension(".ply", [this](const auto& path, ResourceCache& cache) { return parse_assimp(path); });
     register_extension(".stl", [this](const auto& path, ResourceCache& cache) { return parse_assimp(path); });
-}
-
-std::shared_ptr<IResource> SceneParser::parse_usd(const std::filesystem::path& path) {
-    // FIX: Convert path to UTF-8 for OpenUSD on Windows
-    pxr::UsdStageRefPtr stage = pxr::UsdStage::Open(path_to_utf8(path));
-    if (!stage) {
-        CFW_LOG_ERROR("Failed to open USD stage: {}", path_to_utf8(path));
-        return nullptr;
-    }
-    auto scene = std::make_shared<Scene>(path);
-    std::filesystem::path scene_dir = path.parent_path();
-
-    process_usd_scene(stage, *scene, scene_dir, usd_options);
-
-    return scene;
 }
 
 std::shared_ptr<IResource> SceneParser::parse_assimp(const std::filesystem::path& path) {

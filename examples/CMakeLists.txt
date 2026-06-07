@@ -93,12 +93,7 @@ function(corona_add_example)
 
     corona_install_runtime_deps(${CORONA_EX_NAME})
     corona_copy_tbb_runtime_artifacts(${CORONA_EX_NAME})
-    corona_copy_runtime_files(gf ${CORONA_EX_NAME})
     corona_copy_runtime_files(assimp::assimp ${CORONA_EX_NAME})
-    
-    if(COMMAND corona_copy_usd)
-        corona_copy_usd(${CORONA_EX_NAME})
-    endif()
 
     if(BUILD_CORONA_EDITOR)
         corona_install_corona_editor(${CORONA_EX_NAME} CoronaEngine)
