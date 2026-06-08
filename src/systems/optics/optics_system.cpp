@@ -36,7 +36,6 @@
 #include "vision/vision_geometry_adapter.h"
 #include "vision/vision_camera_adapter.h"
 #include "vision/vision_light_adapter.h"
-#include "vision/vision_output_bridge.h"
 #include "vision/vision_zero_copy_bridge.h"
 #endif
 
@@ -730,59 +729,6 @@ float half_to_float(uint16_t h) {
     }
     return sign ? -result : result;
 }
-
-// Convert single-precision float to IEEE 754 half-precision (16-bit), round-to-nearest-even.
-// Vision's view_texture() is float32 RGBA but finalOutputImage is RGBA16_FLOAT (half);
-// HardwareImage::copyFrom() raw-copies sized by the destination format, so the float32
-// readback MUST be narrowed to half here or the bytes get reinterpreted and the image scrambles.
-uint16_t float_to_half(float f) {
-    uint32_t x;
-    static_assert(sizeof(x) == sizeof(f), "float must be 32-bit");
-    std::memcpy(&x, &f, sizeof(x));
-
-    const uint32_t sign = (x >> 16) & 0x8000u;
-    int32_t exponent = static_cast<int32_t>((x >> 23) & 0xFF) - 127 + 15;
-    uint32_t mantissa = x & 0x7FFFFFu;
-
-    if (((x >> 23) & 0xFF) == 0xFF) {
-        // Inf / NaN: preserve (NaN keeps a non-zero mantissa).
-        return static_cast<uint16_t>(sign | 0x7C00u | (mantissa ? 0x200u : 0u));
-    }
-    if (exponent >= 0x1F) {
-        return static_cast<uint16_t>(sign | 0x7C00u);  // overflow -> half inf
-    }
-    if (exponent <= 0) {
-        if (exponent < -10) {
-            return static_cast<uint16_t>(sign);  // underflow -> signed zero
-        }
-        // Subnormal half: add implicit leading 1, then shift into place with rounding.
-        mantissa |= 0x800000u;
-        const int32_t shift = 14 - exponent;
-        const uint32_t halfMant = mantissa >> shift;
-        const uint32_t remainder = mantissa & ((1u << shift) - 1u);
-        const uint32_t roundBias = (1u << (shift - 1));
-        uint32_t rounded = halfMant;
-        if (remainder > roundBias || (remainder == roundBias && (halfMant & 1u))) {
-            ++rounded;  // round-to-nearest-even
-        }
-        return static_cast<uint16_t>(sign | rounded);
-    }
-    // Normalized half: round mantissa to 10 bits, round-to-nearest-even.
-    uint32_t halfMant = mantissa >> 13;
-    const uint32_t remainder = mantissa & 0x1FFFu;
-    if (remainder > 0x1000u || (remainder == 0x1000u && (halfMant & 1u))) {
-        ++halfMant;
-        if (halfMant == 0x400u) {  // mantissa overflow carries into exponent
-            halfMant = 0;
-            ++exponent;
-            if (exponent >= 0x1F) {
-                return static_cast<uint16_t>(sign | 0x7C00u);
-            }
-        }
-    }
-    return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exponent) << 10) | halfMant);
-}
-
 
 }  // namespace
 
