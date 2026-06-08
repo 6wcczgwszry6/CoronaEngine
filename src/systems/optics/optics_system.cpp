@@ -339,12 +339,14 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
     auto& sky = *hardware_->skyPipeline;
     auto& tonemap = *hardware_->tonemapPipeline;
 
-    for (const auto& scene : SharedDataHub::instance().scene_storage()) {
+    for (auto scene_it = SharedDataHub::instance().scene_storage().cbegin();
+         scene_it != SharedDataHub::instance().scene_storage().cend(); ++scene_it) {
+        const auto& scene = *scene_it;
         if (!scene.enabled)
             continue;
 
         for (auto cam_handle : scene.camera_handles) {
-            if (auto camera = SharedDataHub::instance().camera_storage().acquire_read(cam_handle)) {
+            if (auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(cam_handle)) {
                 if (image_handle_ != 0) {
                     if (auto consumed_device = SharedDataHub::instance().image_storage().acquire_write(image_handle_)) {
                         hardware_->executor.wait(consumed_device->consumed_executor);
@@ -383,17 +385,17 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
 
                 uint32_t object_id = 1;
                 for (auto actor_handle : scene.actor_handles) {
-                    auto actor = actor_storage.acquire_read(actor_handle);
+                    auto actor = actor_storage.try_acquire_read(actor_handle);
                     if (!actor) {
                         ++object_id;
                         continue;
                     }
 
                     for (auto profile_handle : actor->profile_handles) {
-                        auto profile = profile_storage.acquire_read(profile_handle);
+                        auto profile = profile_storage.try_acquire_read(profile_handle);
                         if (!profile || profile->optics_handle == 0) continue;
 
-                        auto optics_acc = optics_storage.acquire_read(profile->optics_handle);
+                        auto optics_acc = optics_storage.try_acquire_read(profile->optics_handle);
                         if (!optics_acc) continue;
                         const auto& optics = *optics_acc;
 
@@ -401,9 +403,13 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                             ++object_id;
                             continue;
                         }
-                        if (auto geom = geom_storage.acquire_write(optics.geometry_handle)) {
+                        // 阻塞写锁：mesh 的 textureBuffer.storeDescriptor() 是非 const，
+                        // 必须持写句柄。此处绝不能用 _nowait——拿不到锁就跳过会导致该物体
+                        // 本帧不进 instance/material 表（模型没上 GPU），表现为闪烁。用阻塞
+                        // 版 try_acquire_write 等锁（不漏帧），槽位失效时返回无效句柄而非抛异常。
+                        if (auto geom = geom_storage.try_acquire_write(optics.geometry_handle)) {
                             ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
-                            if (auto transform = transform_storage.acquire_read(geom->transform_handle)) {
+                            if (auto transform = transform_storage.try_acquire_read(geom->transform_handle)) {
                                 model_matrix = transform->compute_matrix();
                             }
 
@@ -518,7 +524,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 float sky_intensity = 20.0f;
                 float exposure = 1.0f;
                 if (scene.environment != 0) {
-                    if (auto env = SharedDataHub::instance().environment_storage().acquire_read(
+                    if (auto env = SharedDataHub::instance().environment_storage().try_acquire_read(
                             scene.environment)) {
                         sun_dir = env->sun_position;
                         floor_grid_enabled = env->floor_grid_enabled;
@@ -962,7 +968,8 @@ std::size_t OpticsSystem::compute_vision_scene_signature() const {
     auto& geom_storage = hub.geometry_storage();
     auto& transform_storage = hub.model_transform_storage();
 
-    for (const auto& scene_dev : hub.scene_storage()) {
+    for (auto scene_it = hub.scene_storage().cbegin(); scene_it != hub.scene_storage().cend(); ++scene_it) {
+        const auto& scene_dev = *scene_it;
         if (!scene_dev.enabled) continue;
         for (auto actor_handle : scene_dev.actor_handles) {
             auto actor = actor_storage.try_acquire_read(actor_handle);
@@ -1043,10 +1050,12 @@ Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene() {
         // light (+ optional point sun) from the current Corona environment so the
         // env_light_ assignment stays valid across rebuilds.
         Corona::EnvironmentDevice env{};
-        for (const auto& sd : SharedDataHub::instance().scene_storage()) {
+        for (auto sd_it = SharedDataHub::instance().scene_storage().cbegin();
+             sd_it != SharedDataHub::instance().scene_storage().cend(); ++sd_it) {
+            const auto& sd = *sd_it;
             if (!sd.enabled) continue;
             if (sd.environment != 0) {
-                if (auto e = SharedDataHub::instance().environment_storage().acquire_read(sd.environment)) {
+                if (auto e = SharedDataHub::instance().environment_storage().try_acquire_read(sd.environment)) {
                     env = *e;
                     break;
                 }
@@ -1188,10 +1197,12 @@ bool OpticsSystem::init_vision_lazy() {
         // When no environment is found we fall back to a default EnvironmentDevice so
         // the scene still receives a directional sun + sky light.
         Corona::EnvironmentDevice env{};
-        for (const auto& sd : SharedDataHub::instance().scene_storage()) {
+        for (auto sd_it = SharedDataHub::instance().scene_storage().cbegin();
+             sd_it != SharedDataHub::instance().scene_storage().cend(); ++sd_it) {
+            const auto& sd = *sd_it;
             if (!sd.enabled) continue;
             if (sd.environment != 0) {
-                if (auto e = SharedDataHub::instance().environment_storage().acquire_read(sd.environment)) {
+                if (auto e = SharedDataHub::instance().environment_storage().try_acquire_read(sd.environment)) {
                     env = *e;
                     break;
                 }
@@ -1218,10 +1229,12 @@ bool OpticsSystem::init_vision_lazy() {
         // -> EncodedObject::prepare_data -> reset_device_buffer). Running it
         // before prepare() uploads into unallocated device memory and crashes the
         // CUDA device deterministically.
-        for (const auto& sd : SharedDataHub::instance().scene_storage()) {
+        for (auto sd_it = SharedDataHub::instance().scene_storage().cbegin();
+             sd_it != SharedDataHub::instance().scene_storage().cend(); ++sd_it) {
+            const auto& sd = *sd_it;
             if (!sd.enabled) continue;
             if (sd.camera_handles.empty()) continue;
-            auto camera = SharedDataHub::instance().camera_storage().acquire_read(sd.camera_handles.front());
+            auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(sd.camera_handles.front());
             if (!camera) continue;
             Vision::sync_vision_camera(*renderPipeline, *camera);
             break;
@@ -1258,10 +1271,12 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
     // from "renders but is not displayed". Rate-limited to once per 120 frames.
     //bool vdiag_rendered_any = false;
 
-    for (const auto& scene : SharedDataHub::instance().scene_storage()) {
+    for (auto scene_it = SharedDataHub::instance().scene_storage().cbegin();
+         scene_it != SharedDataHub::instance().scene_storage().cend(); ++scene_it) {
+        const auto& scene = *scene_it;
         if (!scene.enabled) continue;
         for (auto cam_handle : scene.camera_handles) {
-            auto camera = SharedDataHub::instance().camera_storage().acquire_read(cam_handle);
+            auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(cam_handle);
             if (!camera) continue;
             try {
                 // [VDIAG-B2] Bracket the CUDA calls so an exit-code crash can be pinned

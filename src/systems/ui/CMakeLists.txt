@@ -33,6 +33,7 @@ corona_add_system(imgui
     SOURCES ${IMGUI_SYSTEM_SOURCES}
     DEPENDENCIES
         Horizon
+        corona::system::network
         libcef_dll_wrapper
         debug "${CEF_LIBCEF_DEBUG}"
         optimized "${CEF_LIBCEF_RELEASE}"

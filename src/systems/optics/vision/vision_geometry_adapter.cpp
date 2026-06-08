@@ -33,7 +33,7 @@ struct CpuMeshData {
         return false;
     }
 
-    auto resource = SharedDataHub::instance().model_resource_storage().acquire_read(geometry.model_resource_handle);
+    auto resource = SharedDataHub::instance().model_resource_storage().try_acquire_read(geometry.model_resource_handle);
     if (!resource || resource->model_id == 0) {
         return false;
     }
@@ -139,21 +139,23 @@ VisionBuildResult build_vision_geometry(::vision::Scene& scene) {
 
     VisionBuildResult result;
 
-    for (const auto& scene_dev : hub.scene_storage()) {
+    // 用 cbegin/cend 显式取只读迭代器（共享读锁），避免非 const range-for 命中写迭代器。
+    for (auto scene_it = hub.scene_storage().cbegin(); scene_it != hub.scene_storage().cend(); ++scene_it) {
+        const auto& scene_dev = *scene_it;
         if (!scene_dev.enabled) continue;
 
         auto group = std::make_shared<::vision::ShapeGroup>();
         bool group_has_instances = false;
 
         for (auto actor_handle : scene_dev.actor_handles) {
-            auto actor = actor_storage.acquire_read(actor_handle);
+            auto actor = actor_storage.try_acquire_read(actor_handle);
             if (!actor) continue;
 
             for (auto profile_handle : actor->profile_handles) {
-                auto profile = profile_storage.acquire_read(profile_handle);
+                auto profile = profile_storage.try_acquire_read(profile_handle);
                 if (!profile || profile->optics_handle == 0) continue;
 
-                auto optics = optics_storage.acquire_read(profile->optics_handle);
+                auto optics = optics_storage.try_acquire_read(profile->optics_handle);
                 if (!optics || !optics->visible) continue;
 
                 // Drive geometry lookup from the OpticsDevice's own handle to stay
@@ -163,7 +165,7 @@ VisionBuildResult build_vision_geometry(::vision::Scene& scene) {
                 // drops the object.
                 if (optics->geometry_handle == 0) continue;
 
-                auto geom = geom_storage.acquire_read(optics->geometry_handle);
+                auto geom = geom_storage.try_acquire_read(optics->geometry_handle);
                 if (!geom) continue;
 
                 // This object is a render candidate: it passed every visibility /
@@ -173,7 +175,7 @@ VisionBuildResult build_vision_geometry(::vision::Scene& scene) {
 
                 // Build the object-to-world transform
                 ::vision::float4x4 o2w = ::vision::make_float4x4(1.f);
-                if (auto transform = transform_storage.acquire_read(geom->transform_handle)) {
+                if (auto transform = transform_storage.try_acquire_read(geom->transform_handle)) {
                     ktm::fmat4x4 corona_mat = transform->compute_matrix();
                     // Both ktm::fmat4x4 and ocarina::float4x4 are column-major 4x4
                     for (int col = 0; col < 4; ++col) {
