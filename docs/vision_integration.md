@@ -218,3 +218,50 @@ target_compile_definitions(corona_engine PRIVATE CORONA_ENABLE_VISION)
 ```
 
 源文件层面由 `CORONA_BUILD_VISION` 在 `src/systems/optics/CMakeLists.txt` 中按条件加入编译，并 `PRIVATE` 链接 `vision-all_libs`。未启用时上述适配代码均不参与编译，引擎退回 Native Vulkan 管线。
+
+---
+
+## 差分诊断实验（排查"非 DEMO 路径黑屏"）
+
+**现象**：开启 `CORONA_VISION_IMPORT_DEMO`（从磁盘 import 已知正确的 `.json` 场景）时画面正常、相机可控；关闭它（走 `create_vision_pipeline` + `build_vision_geometry` 适配器）时画面全黑。
+
+**核心思路**：DEMO 路径与非 DEMO 路径**共享 `run_vision_frame` 的输出链路**。DEMO 能出图且能操控相机，已一次性证明零拷贝桥 / `vision_resolve` / `display` / 上屏 / 相机 yaw-pitch 模型全部正常。故二者差异只剩 4 个变量：① pipeline 创建（import vs create）② 几何来源（json vs `build_vision_geometry`）③ 光源 ④ 相机同步。把这些逐个搬进 DEMO 这个"可工作的台子"即可二分定位。
+
+相关开关与探针实现在 [optics_system.cpp](../src/systems/optics/optics_system.cpp) 顶部匿名命名空间（`CORONA_ENABLE_VISION` 保护下）：
+
+| 开关 | 默认 | 作用 |
+|------|------|------|
+| `CORONA_VISION_EXP_PROBE` | **开** | 只读状态探针 `dump_vision_state()`，在关键生命周期点 dump 几何(host/device)/光源/相机/累积帧。开销极小，可常开 |
+| `CORONA_VISION_EXP_SKIP_GEOMETRY` | 关 | Stage 1.5：非 DEMO 下跳过 `build_vision_geometry`，做"空几何天光测试" |
+| `CORONA_VISION_EXP_GRAFT_GEOMETRY` | 关 | Stage 2：DEMO 下渲染 N 帧后调 `rebuild_vision_scene()` 把 demo 几何嫁接成 Corona 几何 |
+
+### "mesh 导入成功"的判据（主机侧 vs 设备侧）
+
+探针日志 `[VPROBE <tag>]` 分两段，二者**同时**满足才算导入成功：
+
+- **HOST**（`build_vision_geometry` 之后即生效）：`inst > 0` 且 `mesh_reg > 0`，且适配器日志 `skipped == 0`。
+- **DEV**（`prepare`/`prepare_geometry` 之后才生效）：`accel tri > 0` 且 `mesh > 0`。
+- **world r**：合理（非 0、非天文数字）。退化 0 或天文数字 ⇒ transform 拷贝 bug 把几何甩飞。
+
+探针标签：`demo.after_prepare`（DEMO 基线）/ `prod.host_built`（非DEMO，prepare 前）/ `prod.after_prepare`（非DEMO，prepare 后）/ `runtime`（每 120 帧）/ `graft.before` `graft.after`（Stage 2）。
+
+### 实验阶梯
+
+```
+Stage 0  读现有日志        build_vision_geometry 已打 "added N ShapeInstances (C candidates, S skipped)"
+                          S>0 或 N==0 → 主机侧就失败，根因在 load_cpu_mesh_*
+
+Stage 1  对比 VPROBE       prod.after_prepare vs demo.after_prepare：
+                          prod 的 DEV tri==0 而 demo tri>0 → 设备侧上传/BVH 失败
+                          prod 与 demo 同量级 → mesh 导入成功，黑屏在下游 → Stage 2
+
+Stage 1.5 空几何天光       开 CORONA_VISION_EXP_SKIP_GEOMETRY，非 DEMO 构建：
+                          看见灰色天空 → 输出/光/相机均正常，问题 100% 在几何
+                          仍全黑 → 问题在 env_light_/输出/相机，而非几何
+
+Stage 2  几何嫁接          开 CORONA_VISION_EXP_GRAFT_GEOMETRY，DEMO 构建：跑 120 帧后自动嫁接
+                          看见 Corona 物体并可飞行 → 几何路径无罪，根因 = create_vision_pipeline / 首次 prepare
+                          变全黑 → Corona 几何本身有问题，回看 graft.after 的 HOST/DEV 数字
+```
+
+> 先验建议：**全黑（连天空都没有）**更像 `env_light_` 未赋值或输出/相机问题——因为天光是白色、强度≥1，空场景也应是灰的。故建议**从 Stage 1.5 开局**（只改一个宏，最快切开"几何问题"与"光/输出问题"）；若专门验证 mesh 导入，则 **Stage 1 探针 + Stage 2 嫁接**是直接答案。`runtime` 探针还可揭示 `frame_idx` 是否每帧归 0（`sync_vision_camera` 每帧误触发 `invalidate()` ⇒ 路径追踪永不累积）。
