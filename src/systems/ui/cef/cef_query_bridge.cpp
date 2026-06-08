@@ -1,7 +1,11 @@
 #include "browser_manager.h"
 #include "cef_client.h"
 
+#include <corona/kernel/core/kernel_context.h>
+#include <corona/systems/network/network_system.h>
+
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
@@ -16,6 +20,15 @@ std::string create_success_json(const std::string& func,
     r["data"] = data;
     r["function"] = func;
     return r.dump();
+}
+
+// Resolve the NetworkSystem from the kernel's system manager.
+// Returns nullptr if unavailable.
+std::shared_ptr<Corona::Systems::NetworkSystem> get_network_system() {
+    auto sys_mgr = Corona::Kernel::KernelContext::instance().system_manager();
+    if (!sys_mgr) return nullptr;
+    return std::dynamic_pointer_cast<Corona::Systems::NetworkSystem>(
+        sys_mgr->get_system("Network"));
 }
 }  // namespace
 
@@ -88,6 +101,59 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                                    CefRefPtr<Callback> callback) {
     CEF_REQUIRE_UI_THREAD();
     std::string req = request.ToString();
+
+    // ── Network 模块：C++ 直接处理，不走 Python ──
+    // LAN 协同编辑的 start/stop/peer_count 全部由 C++ 直接响应，避免高频
+    // get_peer_count 轮询在持有 GIL 时阻塞 SystemManager 锁导致的关闭死锁。
+    if (req.find("\"Network\"") != std::string::npos) {
+        try {
+            auto j = nlohmann::json::parse(req);
+            if (j.value("module", "") == "Network") {
+                std::string func = j.value("function", "");
+                auto args = j.value("args", nlohmann::json::array());
+
+                auto sys = get_network_system();
+                if (!sys) {
+                    callback->Failure(2, "NetworkSystem unavailable");
+                    return true;
+                }
+
+                if (func == "start_session") {
+                    // args: [instance_name, project_id, port]
+                    std::string name = args.size() > 0 ? args[0].get<std::string>() : "";
+                    uint64_t project_id = args.size() > 1 ? args[1].get<uint64_t>() : 0;
+                    uint16_t port = args.size() > 2 ? args[2].get<uint16_t>() : 27960;
+
+                    bool ok = sys->start_session(name, project_id, port);
+                    nlohmann::json payload;
+                    payload["ok"] = ok;
+                    callback->Success(create_success_json("start_session", payload));
+                    return true;
+                }
+
+                if (func == "stop_session") {
+                    sys->stop_session();
+                    nlohmann::json payload;
+                    payload["ok"] = true;
+                    callback->Success(create_success_json("stop_session", payload));
+                    return true;
+                }
+
+                if (func == "get_peer_count") {
+                    nlohmann::json payload;
+                    payload["ok"] = true;
+                    payload["peer_count"] = static_cast<int>(sys->peer_count());
+                    callback->Success(create_success_json("get_peer_count", payload));
+                    return true;
+                }
+
+                callback->Failure(1, "Unknown Network function: " + func);
+                return true;
+            }
+        } catch (const nlohmann::json::parse_error&) {
+            // 非合法 JSON，继续走后续路径
+        }
+    }
 
     // ── __cross_tab__ 跨窗口通信：C++ 直接处理，不走 Python ──
     // 快速路径：用字符串搜索代替完整 JSON parse，避免对每个高频

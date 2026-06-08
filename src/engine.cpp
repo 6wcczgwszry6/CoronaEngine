@@ -256,7 +256,7 @@ bool Engine::register_systems() {
     sys_mgr->register_system(std::make_shared<Systems::ScriptSystem>());
     CFW_LOG_INFO("  - ScriptSystem registered (priority 60)");
 
-    // Network System (Omniverse Nucleus 协作骨架)
+    // Network System (ENet LAN collaborative editing)
     sys_mgr->register_system(std::make_shared<Systems::NetworkSystem>());
     CFW_LOG_INFO("  - NetworkSystem registered (priority 55)");
 

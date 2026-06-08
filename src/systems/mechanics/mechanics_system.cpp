@@ -512,11 +512,11 @@ std::uint64_t get_model_id_for_mechanics(std::uintptr_t mech_handle) {
     auto& geometry_storage = Corona::SharedDataHub::instance().geometry_storage();
     auto& model_resource_storage = Corona::SharedDataHub::instance().model_resource_storage();
 
-    auto m_acc = mechanics_storage.acquire_read(mech_handle);
+    auto m_acc = mechanics_storage.try_acquire_read(mech_handle);
     if (!m_acc) return 0;
-    auto geom_acc = geometry_storage.acquire_read(m_acc->geometry_handle);
+    auto geom_acc = geometry_storage.try_acquire_read(m_acc->geometry_handle);
     if (!geom_acc) return 0;
-    auto res_acc = model_resource_storage.acquire_read(geom_acc->model_resource_handle);
+    auto res_acc = model_resource_storage.try_acquire_read(geom_acc->model_resource_handle);
     if (!res_acc) return 0;
     return res_acc->model_id;
 }
@@ -883,7 +883,7 @@ void MechanicsSystem::update_physics() {
     auto& geometry_storage = SharedDataHub::instance().geometry_storage();              // 网格/包围体句柄
     auto& transform_storage = SharedDataHub::instance().model_transform_storage();      // 位姿写回目标
     auto& model_resource_storage = SharedDataHub::instance().model_resource_storage();  // 模型资源数据
-    auto& scene_storage = SharedDataHub::instance().scene_storage();                    // 场景与 actor 列表
+    const auto& scene_storage = SharedDataHub::instance().scene_storage();              // 场景与 actor 列表（const → cbegin/cend 读锁遍历）
     auto& actor_storage = SharedDataHub::instance().actor_storage();
     auto& profile_storage = SharedDataHub::instance().profile_storage();          // actor→mechanics 映射
     auto& environment_storage = SharedDataHub::instance().environment_storage();  // 全局 dt/重力等
@@ -913,7 +913,7 @@ void MechanicsSystem::update_physics() {
 
         // 若绑定了 environment：覆盖重力、地板参数，并钳制 fixed_dt
         if (scene.environment != 0) {
-            if (auto env = environment_storage.acquire_read(scene.environment)) {
+            if (auto env = environment_storage.try_acquire_read(scene.environment)) {
                 gravity = env->gravity;
                 floor_y = env->floor_y;
                 floor_restitution = env->floor_restitution;
@@ -926,15 +926,15 @@ void MechanicsSystem::update_physics() {
             if (g_shutdown_requested.load(std::memory_order_acquire)) {
                 return;
             }
-            if (auto actor = actor_storage.acquire_read(actor_handle)) {
+            if (auto actor = actor_storage.try_acquire_read(actor_handle)) {
                 for (auto profile_handle : actor->profile_handles) {
                     if (g_shutdown_requested.load(std::memory_order_acquire)) {
                         return;
                     }
-                    if (auto profile = profile_storage.acquire_read(profile_handle)) {
+                    if (auto profile = profile_storage.try_acquire_read(profile_handle)) {
                         if (auto h = profile->mechanics_handle) {
                             // 读 MechanicsDevice：检查物理开关 + 质量/阻尼/恢复；读失败则用默认值
-                            if (auto m_acc = mechanics_storage.acquire_read(h)) {
+                            if (auto m_acc = mechanics_storage.try_acquire_read(h)) {
                                 if (!m_acc->physics_enabled) continue;  // 物理已禁用，跳过本 mechanics
                                 handle_to_mass[h] = m_acc->mass;
                                 handle_to_damping[h] = m_acc->damping;
@@ -1016,14 +1016,14 @@ void MechanicsSystem::update_physics() {
         if (g_shutdown_requested.load(std::memory_order_acquire)) {
             return;
         }
-        auto m_acc = mechanics_storage.acquire_read(h);  // mechanics 组件读锁
+        auto m_acc = mechanics_storage.try_acquire_read(h);  // mechanics 组件读锁
         if (!m_acc) continue;                            // 无数据则跳过
         const auto& m = *m_acc;                          // 其 min/max、geometry_handle
 
-        auto geom_acc = geometry_storage.acquire_read(m.geometry_handle);
+        auto geom_acc = geometry_storage.try_acquire_read(m.geometry_handle);
         if (!geom_acc) continue;
 
-        auto tx_acc = transform_storage.acquire_read(geom_acc->transform_handle);
+        auto tx_acc = transform_storage.try_acquire_read(geom_acc->transform_handle);
         if (!tx_acc) continue;
         const auto& t = *tx_acc;  // 只读当前变换（复制后做预测）
 
@@ -1034,7 +1034,7 @@ void MechanicsSystem::update_physics() {
 
         // 获取 model_id 用于碰撞网格查找
         std::uint64_t entry_model_id = 0;
-        if (auto res_acc = model_resource_storage.acquire_read(geom_acc->model_resource_handle)) {
+        if (auto res_acc = model_resource_storage.try_acquire_read(geom_acc->model_resource_handle)) {
             entry_model_id = res_acc->model_id;
         }
 
@@ -1288,14 +1288,14 @@ void MechanicsSystem::update_physics() {
                         it_mesh_b != g_collision_mesh_cache.end()) {
                         // 惰性计算世界空间顶点（每物体每帧最多算一次）
                         if (world_verts_cache.find(ha) == world_verts_cache.end()) {
-                            auto tx_a = transform_storage.acquire_read(a.transform_handle);
+                            auto tx_a = transform_storage.try_acquire_read(a.transform_handle);
                             if (tx_a) {
                                 transform_vertices_to_world(
                                     it_mesh_a->second.vertices, *tx_a, world_verts_cache[ha]);
                             }
                         }
                         if (world_verts_cache.find(hb) == world_verts_cache.end()) {
-                            auto tx_b = transform_storage.acquire_read(b.transform_handle);
+                            auto tx_b = transform_storage.try_acquire_read(b.transform_handle);
                             if (tx_b) {
                                 transform_vertices_to_world(
                                     it_mesh_b->second.vertices, *tx_b, world_verts_cache[hb]);
@@ -1506,14 +1506,14 @@ void MechanicsSystem::update_physics() {
                         std::function<void(std::uintptr_t, bool, const std::array<float, 3>&, const std::array<float, 3>&)> cb_b;
 
                         {
-                            auto mech_a_acc = mechanics_storage.acquire_read(ha);
+                            auto mech_a_acc = mechanics_storage.try_acquire_read(ha);
                             if (mech_a_acc && mech_a_acc->collision_callback) {
                                 cb_a = mech_a_acc->collision_callback;
                             }
                         }
 
                         {
-                            auto mech_b_acc = mechanics_storage.acquire_read(hb);
+                            auto mech_b_acc = mechanics_storage.try_acquire_read(hb);
                             if (mech_b_acc && mech_b_acc->collision_callback) {
                                 cb_b = mech_b_acc->collision_callback;
                             }
@@ -1565,7 +1565,7 @@ void MechanicsSystem::update_physics() {
             if (mech_ha != 0) {
                 std::function<void(std::uintptr_t, bool, const std::array<float, 3>&, const std::array<float, 3>&)> cb;
                 {
-                    auto m_acc = mechanics_storage.acquire_read(mech_ha);
+                    auto m_acc = mechanics_storage.try_acquire_read(mech_ha);
                     if (m_acc && m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
                         cb = m_acc->collision_callback;
                     }
@@ -1578,7 +1578,7 @@ void MechanicsSystem::update_physics() {
             if (mech_hb != 0) {
                 std::function<void(std::uintptr_t, bool, const std::array<float, 3>&, const std::array<float, 3>&)> cb;
                 {
-                    auto m_acc = mechanics_storage.acquire_read(mech_hb);
+                    auto m_acc = mechanics_storage.try_acquire_read(mech_hb);
                     if (m_acc && m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
                         cb = m_acc->collision_callback;
                     }
@@ -1612,7 +1612,7 @@ void MechanicsSystem::update_physics() {
             if (mech_ha != 0) {
                 std::function<void(std::uintptr_t, bool, const std::array<float, 3>&, const std::array<float, 3>&)> cb;
                 {
-                    auto m_acc = mechanics_storage.acquire_read(mech_ha);
+                    auto m_acc = mechanics_storage.try_acquire_read(mech_ha);
                     if (m_acc && m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
                         cb = m_acc->collision_callback;
                     }
@@ -1625,7 +1625,7 @@ void MechanicsSystem::update_physics() {
             if (mech_hb != 0) {
                 std::function<void(std::uintptr_t, bool, const std::array<float, 3>&, const std::array<float, 3>&)> cb;
                 {
-                    auto m_acc = mechanics_storage.acquire_read(mech_hb);
+                    auto m_acc = mechanics_storage.try_acquire_read(mech_hb);
                     if (m_acc && m_acc->collision_callback && !g_shutdown_requested.load(std::memory_order_acquire)) {
                         cb = m_acc->collision_callback;
                     }
@@ -1648,7 +1648,9 @@ void MechanicsSystem::update_physics() {
         if (g_handle_to_sleeping[h])
             continue;  // 休眠体不再推进变换
 
-        auto tx_w = transform_storage.acquire_write(data.transform_handle);
+        // 阻塞写锁：位置积分每帧都要写回，_nowait 拿不到锁会跳过本帧导致物体卡顿/抖动。
+        // 用阻塞版等锁（不漏帧），槽位失效时返回无效句柄而非抛异常。
+        auto tx_w = transform_storage.try_acquire_write(data.transform_handle);
         if (!tx_w) continue;
 
         // 速度 × dt 平移（显式欧拉；与阶段 3 预测一致）
@@ -1738,7 +1740,7 @@ void MechanicsSystem::update_physics() {
 
         // ========== 异步执行移动回调 ==========
         {
-            auto mech_acc = mechanics_storage.acquire_read(h);
+            auto mech_acc = mechanics_storage.try_acquire_read(h);
             if (mech_acc && mech_acc->on_move_callback) {
                 std::function<void()> cb_move = mech_acc->on_move_callback;
 
@@ -1746,8 +1748,8 @@ void MechanicsSystem::update_physics() {
                     // 获取当前位置用于位移检查
                     ktm::fvec3 cur_pos = make_fvec3(0.f, 0.f, 0.f);
                     bool has_pos = false;
-                    if (auto geom = geometry_storage.acquire_read(mech_acc->geometry_handle)) {
-                        if (auto tx_r = transform_storage.acquire_read(geom->transform_handle)) {
+                    if (auto geom = geometry_storage.try_acquire_read(mech_acc->geometry_handle)) {
+                        if (auto tx_r = transform_storage.try_acquire_read(geom->transform_handle)) {
                             cur_pos = tx_r->position;
                             has_pos = true;
                         }

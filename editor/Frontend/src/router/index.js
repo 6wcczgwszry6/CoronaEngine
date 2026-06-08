@@ -11,6 +11,7 @@ import Pet from '../views/tools/Pet.vue';
 import ProjectSettings from '../views/sidebar/ProjectSettings.vue';
 import BlocklyWorkspace from '../blockly/components/BlocklyWorkspace.vue';
 import EditorSettings from '../views/sidebar/EditorSettings.vue';
+import NetworkPanel from '../views/sidebar/Network.vue';
 
 const routes = [
   {
@@ -77,6 +78,11 @@ const routes = [
     path: '/SetUp',
     name: 'SetUp',
     component: EditorSettings,
+  },
+  {
+    path: '/Network',
+    name: 'Network',
+    component: NetworkPanel,
   },
   {
     path: '/ProjectSettings',
