@@ -1,0 +1,202 @@
+<template>
+  <div class="flex-1 min-h-0 w-full rounded-lg overflow-hidden relative bg-[#282828]/90 flex flex-col text-white font-sans">
+    <DockTitleBar
+      v-if="!isDocked"
+      title="网络协作"
+      extraClass="bg-[#4a9eff]"
+      routePath="/Network"
+      @close="closeFloat"
+    />
+
+    <div class="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4 text-xs">
+      <!-- ═══ 会话控制 ═══ -->
+      <div class="space-y-3">
+        <div class="flex flex-col gap-1">
+          <label class="text-gray-400">实例名称</label>
+          <input
+            v-model="instanceName"
+            type="text"
+            maxlength="31"
+            placeholder="输入名称..."
+            class="bg-[#1e1e1e] border border-gray-600 rounded px-2 py-1 text-white focus:border-[#4a9eff] focus:outline-none"
+          />
+        </div>
+
+        <div class="flex flex-col gap-1">
+          <label class="text-gray-400">端口 (UDP)</label>
+          <input
+            v-model.number="port"
+            type="number"
+            min="1024"
+            max="65535"
+            class="bg-[#1e1e1e] border border-gray-600 rounded px-2 py-1 text-white w-24 focus:border-[#4a9eff] focus:outline-none"
+          />
+        </div>
+
+        <div class="flex gap-2">
+          <button
+            v-if="!sessionActive"
+            @click="startSession"
+            class="px-4 py-1.5 bg-[#4a9eff] hover:bg-[#3a8eef] rounded text-white font-medium transition-colors"
+          >
+            启动会话
+          </button>
+          <button
+            v-else
+            @click="stopSession"
+            class="px-4 py-1.5 bg-red-600 hover:bg-red-500 rounded text-white font-medium transition-colors"
+          >
+            停止会话
+          </button>
+        </div>
+
+        <div v-if="sessionActive" class="flex items-center gap-2 text-green-400">
+          <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
+          会话运行中 — 端口 {{ port }}
+        </div>
+        <div v-if="errorMsg" class="text-red-400">{{ errorMsg }}</div>
+      </div>
+
+      <!-- ═══ Peer 列表 ═══ -->
+      <div class="border-t border-gray-700 pt-4">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-gray-400">在线用户</span>
+          <span class="text-gray-500 tabular-nums">{{ peers.length }}</span>
+        </div>
+
+        <div v-if="peers.length === 0" class="text-gray-500 italic">
+          {{ sessionActive ? '等待其他用户加入...' : '启动会话后可邀请他人加入' }}
+        </div>
+
+        <div v-else class="space-y-1">
+          <div
+            v-for="peer in peers"
+            :key="peer.name"
+            class="flex items-center gap-2 px-2 py-1 bg-[#1e1e1e] rounded"
+          >
+            <span class="w-2 h-2 rounded-full bg-green-400"></span>
+            <span class="text-gray-300 truncate">{{ peer.name }}</span>
+            <span class="text-gray-600 text-[10px] ml-auto">{{ peer.id }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ 说明 ═══ -->
+      <div class="border-t border-gray-700 pt-3 text-gray-500 leading-relaxed">
+        <p class="mb-1 font-medium text-gray-400">使用说明</p>
+        <ul class="list-disc list-inside space-y-1">
+          <li>同一局域网内启动引擎的多个实例</li>
+          <li>所有人输入同样的端口号，点击"启动会话"</li>
+          <li>引擎会自动发现彼此并同步场景编辑</li>
+          <li>同时编辑同一物体时，最后写入者胜出 (LWW)</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref, onMounted, onUnmounted } from 'vue';
+import DockTitleBar from '@/components/ui/DockTitleBar.vue';
+import { networkService } from '@/utils/bridge';
+import { useDockStore } from '@/stores/dockStore';
+
+const dock = useDockStore();
+const isDocked = ref(true);
+const instanceName = ref('');
+const port = ref(27960);
+const sessionActive = ref(false);
+const errorMsg = ref('');
+const peers = ref([]);
+
+let pollTimer = null;
+
+async function startSession() {
+  errorMsg.value = '';
+  try {
+    // Generate a simple project_id from the instance name
+    const projectId = hashString(instanceName.value || 'corona-project');
+    const res = await networkService.startSession(instanceName.value, projectId, port.value);
+    if (res && res.ok) {
+      sessionActive.value = true;
+      startPolling();
+    } else {
+      errorMsg.value = (res && res.error) || '启动失败';
+    }
+  } catch (e) {
+    errorMsg.value = e.message;
+  }
+}
+
+async function stopSession() {
+  errorMsg.value = '';
+  try {
+    await networkService.stopSession();
+    sessionActive.value = false;
+    peers.value = [];
+    stopPolling();
+  } catch (e) {
+    errorMsg.value = e.message;
+  }
+}
+
+async function pollPeers() {
+  try {
+    const res = await networkService.getPeerCount();
+    // In future, replace with a full peer list API
+    if (res && res.peer_count !== undefined) {
+      const count = res.peer_count;
+      if (peers.value.length < count) {
+        // Add placeholder peers (real names will come from peer events)
+        while (peers.value.length < count) {
+          peers.value.push({
+            name: `Peer ${peers.value.length + 1}`,
+            id: '...',
+          });
+        }
+      } else while (peers.value.length > count) {
+        peers.value.pop();
+      }
+    }
+  } catch (e) {
+    // ignore polling errors
+  }
+}
+
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(pollPeers, 2000);
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function hashString(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + ch;
+    hash |= 0;
+  }
+  return hash >>> 0;
+}
+
+function closeFloat() {
+  // handled by DockLayout
+}
+
+onMounted(() => {
+  // Try to auto-fill a default name
+  if (!instanceName.value) {
+    instanceName.value = 'Editor-' + Math.random().toString(36).slice(2, 8);
+  }
+});
+
+onUnmounted(() => {
+  stopPolling();
+});
+</script>

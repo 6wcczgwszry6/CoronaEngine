@@ -1,8 +1,10 @@
 ﻿#include <corona/kernel/core/callback_sink.h>
 #include <corona/kernel/core/i_logger.h>
+#include <corona/kernel/core/kernel_context.h>
 #include <corona/systems/script/camera_follow_controller.h>
 #include <corona/systems/script/corona_engine_api.h>
 #include <corona/systems/script/engine_scripts.h>
+#include <corona/systems/network/network_system.h>
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/string.h>
@@ -451,6 +453,38 @@ void BindAll(nanobind::module_& m) {
     m.def("drain_input_events", []() -> std::vector<Corona::Systems::UI::InputEvent> {
         return Corona::Systems::UI::drain_input_events();
     }, "Drain all pending input events from the CEF InputInject queue");
+
+    // ============================================================================
+    // NetworkSystem: LAN collaborative editing
+    // ============================================================================
+    m.def("network_start_session", [](const std::string& instance_name,
+                                      uint64_t project_id, uint16_t port) -> bool {
+        auto sys_mgr = Corona::Kernel::KernelContext::instance().system_manager();
+        auto sys = std::dynamic_pointer_cast<Corona::Systems::NetworkSystem>(
+            sys_mgr->get_system("Network"));
+        if (!sys) return false;
+        return sys->start_session(instance_name, project_id, port);
+    }, nb::arg("instance_name"), nb::arg("project_id"),
+       nb::arg("port") = Corona::Network::kDefaultPort,
+       "Start a LAN collaborative editing session. "
+       "instance_name: display name (max 31 chars), "
+       "project_id: scene hash for same-project filtering, "
+       "port: UDP port (default 27960)");
+
+    m.def("network_stop_session", []() {
+        auto sys_mgr = Corona::Kernel::KernelContext::instance().system_manager();
+        auto sys = std::dynamic_pointer_cast<Corona::Systems::NetworkSystem>(
+            sys_mgr->get_system("Network"));
+        if (sys) sys->stop_session();
+    }, "Stop the LAN collaborative editing session");
+
+    m.def("network_peer_count", []() -> int {
+        auto sys_mgr = Corona::Kernel::KernelContext::instance().system_manager();
+        auto sys = std::dynamic_pointer_cast<Corona::Systems::NetworkSystem>(
+            sys_mgr->get_system("Network"));
+        if (!sys) return 0;
+        return static_cast<int>(sys->peer_count());
+    }, "Get the number of currently connected peers");
 
 }
 

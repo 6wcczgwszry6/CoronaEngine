@@ -352,3 +352,13 @@ export const projectSettingsService = {
   // 浏览当前项目中的场景文件
   browseSceneFile: () => Bridge.callCEF('ProjectSettings', 'browse_scene_file', []),
 };
+
+export const networkService = {
+  /** 启动 LAN 协同编辑会话 */
+  startSession: (instanceName, projectId, port = 27960) =>
+    Bridge.callCEF('Network', 'start_session', [instanceName, projectId, port]),
+  /** 停止会话 */
+  stopSession: () => Bridge.callCEF('Network', 'stop_session'),
+  /** 获取当前 peer 数量 */
+  getPeerCount: () => Bridge.callCEF('Network', 'get_peer_count'),
+};

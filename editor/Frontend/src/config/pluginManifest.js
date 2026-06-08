@@ -11,6 +11,7 @@ import ProjectSettings from '@/views/sidebar/ProjectSettings.vue';
 import BlocklyWorkspace from '@/blockly/components/BlocklyWorkspace.vue';
 import AITalkBar from '@/views/sidebar/AITalkBar.vue';
 import EditorSettings from '@/views/sidebar/EditorSettings.vue';
+import NetworkPanel from '@/views/sidebar/Network.vue';
 
 export const PLUGIN_MANIFEST = [
   {
@@ -111,6 +112,17 @@ export const PLUGIN_MANIFEST = [
     defaultHeight: 550,
     autoInit: false,
     component: EditorSettings,
+  },
+  {
+    id: 'Network',
+    routePath: '/Network',
+    displayName: '网络协作',
+    pageType: 'plugin',
+    defaultDock: 'right',
+    defaultWidth: 300,
+    defaultHeight: 400,
+    autoInit: false,
+    component: NetworkPanel,
   },
 ];
 
