@@ -451,6 +451,22 @@
                     />
                   </svg>
                 </template>
+                <template v-else-if="scene.type === 'video'">
+                  <!-- 视频：胶片/播放图标 -->
+                  <svg class="w-4 h-4 text-[#c586c0]" fill="currentColor" viewBox="0 0 24 24">
+                    <path
+                      d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm6 4v8l6-4-6-4z"
+                    />
+                  </svg>
+                </template>
+                <template v-else-if="scene.type === 'audio'">
+                  <!-- 音频：音符图标 -->
+                  <svg class="w-4 h-4 text-[#dcdcaa]" fill="currentColor" viewBox="0 0 24 24">
+                    <path
+                      d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"
+                    />
+                  </svg>
+                </template>
                 <template v-else>
                   <svg class="w-4 h-4 text-[#e0e0e0]" fill="currentColor" viewBox="0 0 24 24">
                     <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
@@ -580,6 +596,8 @@ const getTypeShort = (type) => {
     mov: 'Video',
     mp3: 'Audio',
     wav: 'Audio',
+    video: 'Video',
+    audio: 'Audio',
     actor: 'Actor',
     model: 'Model',
     mesh: 'Mesh',
@@ -775,7 +793,11 @@ const OnLocateSearchItem = async (item) => {
   }
 };
 
+const isMediaItem = (scene) => scene && (scene.type === 'video' || scene.type === 'audio');
+
 const ControlObject = async (scene) => {
+  // 音视频是独立资源，没有可操作的 Actor
+  if (isMediaItem(scene)) return;
   try {
     await sceneService.openSceneActor(currentSceneName.value, scene.name);
   } catch (e) {
@@ -785,6 +807,8 @@ const ControlObject = async (scene) => {
 
 const FocusOnActor = async (scene) => {
   selectedItem.value = scene.name;
+  // 音视频是独立资源，仅作选中，不触发相机聚焦/积木上下文
+  if (isMediaItem(scene)) return;
   // 通知积木编辑器当前选中的物体
   setActorContext(currentSceneName.value, scene.name);
   try {
@@ -799,6 +823,8 @@ const FocusOnActor = async (scene) => {
 const ToggleVisible = async (scene) => {
   const newVisible = scene.visible === false ? true : false;
   scene.visible = newVisible;
+  // 音视频资源没有对应 Actor，仅在前端切换可见标记
+  if (isMediaItem(scene)) return;
   try {
     await sceneService.actorOperation(currentSceneName.value, scene.name, 'SetVisible', [
       newVisible ? 1 : 0,
@@ -1123,14 +1149,45 @@ const HandleMultimediaImport = async () => {
       currentSceneName.value,
       'multimedia'
     );
-    if (result.success && result.data.actor) {
-      await addActorToList(result.data.actor);
+    // 兼容包装型 { success, data } 与直返型两种形态
+    const payload = result?.data ?? result;
+    const status = payload?.status;
+    if (result?.success === false || status === 'error') {
+      logError('Multimedia import failed', payload?.message || result?.error || 'unknown error');
+      return;
+    }
+    if (status === 'canceled') {
+      return;
+    }
+    // 音视频是独立资源（非 Actor），加入资源列表
+    const media = payload?.media;
+    if (media && media.name) {
+      await addMediaToList(media);
       await appService.callDockFunction('', 'updateLoading', ['导入完成', 100]);
     }
   } catch (e) {
     logError('Multimedia import failed', e);
   }
   await appService.callDockFunction('', 'hideLoading', []);
+};
+
+const addMediaToList = async (media) => {
+  if (!media || !media.name) return;
+  // media.type 为 'video' / 'audio'
+  sceneImages.value.push({
+    name: media.name,
+    path: media.path,
+    type: media.type || 'multimedia',
+    visible: true,
+    resourceId: media.resource_id,
+    duration: media.duration,
+    codec: media.codec,
+    width: media.width,
+    height: media.height,
+    fps: media.fps,
+    sampleRate: media.sample_rate,
+    channels: media.channels,
+  });
 };
 
 const HandleSceneImport = async () => {

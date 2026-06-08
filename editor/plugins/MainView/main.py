@@ -174,8 +174,11 @@ class MainView(PluginBase):
             # 场景文件通过路径解析
             if file_type == "scene":
                 payload = MainView.import_scene_file(scene_name, file_path)
+            elif file_type == "multimedia":
+                # 音视频是独立资源，不创建 Actor（不走 Geometry/Scene 模型加载路径）
+                payload = MainView.import_media(scene_name, file_path)
             else:
-                # model 和 multimedia 都使用 import_model
+                # model 使用 import_model
                 payload = MainView.import_model(scene_name, file_path, file_type)
             if payload is None:
                 return {"status": "canceled", "message": "导入已取消"}
@@ -198,6 +201,57 @@ class MainView(PluginBase):
         if isinstance(payload, dict) and payload.get("status") == "error":
             return payload
         return payload
+
+    @staticmethod
+    def import_media(scene_name: str, file_path: str) -> dict:
+        """导入音频/视频文件作为独立资源（不创建 Actor）
+
+        通过 CoronaEngine.import_media 加载，返回资源 ID 与元数据，
+        供前端加入资源列表。
+        """
+        # 相对路径转绝对路径（与 import_scene_file 保持一致）
+        abs_path = file_path
+        if not os.path.isabs(abs_path):
+            project_path = CoronaEditor.CoronaEngine.active_project_path or ''
+            abs_path = os.path.join(project_path, abs_path)
+
+        import_media_fn = getattr(CoronaEditor.CoronaEngine, 'import_media', None)
+        if import_media_fn is None:
+            logger.error("import_media: CoronaEngine 未提供 import_media 接口")
+            return {"status": "error",
+                    "message": "engine import_media unavailable",
+                    "code": "import_media_unavailable"}
+
+        try:
+            info = import_media_fn(abs_path)
+        except Exception as exc:
+            logger.exception("import_media 失败 (scene=%s, path=%s)", scene_name, file_path)
+            return {"status": "error", "message": str(exc), "code": "import_media_failed"}
+
+        media_type = getattr(info, 'media_type', '') or ''
+        resource_id = getattr(info, 'resource_id', 0) or 0
+        if not media_type or resource_id == 0:
+            logger.error("import_media: 引擎无法解析为音视频 (path=%s)", file_path)
+            return {"status": "error",
+                    "message": f"无法识别的音视频文件: {file_path}",
+                    "code": "media_unrecognized"}
+
+        name = os.path.splitext(os.path.basename(file_path))[0]
+        media = {
+            "name": name,
+            "path": file_path,
+            "type": media_type,  # "video" / "audio"
+            "resource_id": resource_id,
+            "duration": getattr(info, 'duration_seconds', 0.0),
+            "codec": getattr(info, 'codec', ''),
+            "width": getattr(info, 'width', 0),
+            "height": getattr(info, 'height', 0),
+            "fps": getattr(info, 'fps', 0.0),
+            "sample_rate": getattr(info, 'sample_rate', 0),
+            "channels": getattr(info, 'channels', 0),
+        }
+        logger.info("import_media: 已导入 %s 资源 '%s' (id=%s)", media_type, name, resource_id)
+        return {"media": media}
 
     @staticmethod
     def import_scene_file(scene_name: str, file_path: str) -> dict:

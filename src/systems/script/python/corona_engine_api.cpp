@@ -15,7 +15,9 @@
 #include <chrono>
 #include <iterator>
 
+#include "corona/resource/types/audio.h"
 #include "corona/resource/types/image.h"
+#include "corona/resource/types/video.h"
 
 namespace {
 std::atomic<void*> g_default_surface{nullptr};
@@ -1960,6 +1962,57 @@ void set_render_backend(const std::string& mode) {
 
 std::string get_render_backend() {
     return g_requested_backend.load(std::memory_order_relaxed) == 1 ? "vision" : "native";
+}
+
+// ########################
+//          Media
+// ########################
+MediaInfo import_media(const std::string& path) {
+    MediaInfo info{};
+
+    auto rid = Resource::ResourceManager::get_instance().import_sync(Utils::utf8_to_path(path));
+    if (rid == Resource::IResource::INVALID_UID) {
+        CFW_LOG_ERROR("[import_media] Failed to import media: {}", path);
+        return info;
+    }
+
+    // acquire_read<T> does an unchecked static_cast, so acquire the base
+    // resource and dynamic_cast to determine the concrete media type.
+    auto handle = Resource::ResourceManager::get_instance().acquire_read<Resource::IResource>(rid);
+    if (!handle) {
+        CFW_LOG_ERROR("[import_media] Imported resource is not ready: {}", path);
+        return info;
+    }
+
+    const Resource::IResource* res = &(*handle);
+
+    if (const auto* video = dynamic_cast<const Resource::Video*>(res)) {
+        const auto& m = video->metadata();
+        info.resource_id = rid;
+        info.media_type = "video";
+        info.duration_seconds = m.duration_seconds;
+        info.codec = m.codec_name;
+        info.width = m.width;
+        info.height = m.height;
+        info.fps = m.fps;
+        CFW_LOG_INFO("[import_media] Video loaded: {} ({}x{}, {:.2f}s)", path, m.width, m.height, m.duration_seconds);
+        return info;
+    }
+
+    if (const auto* audio = dynamic_cast<const Resource::Audio*>(res)) {
+        const auto& m = audio->metadata();
+        info.resource_id = rid;
+        info.media_type = "audio";
+        info.duration_seconds = m.duration_seconds;
+        info.codec = m.codec_name;
+        info.sample_rate = m.sample_rate;
+        info.channels = m.channels;
+        CFW_LOG_INFO("[import_media] Audio loaded: {} ({}Hz, {}ch, {:.2f}s)", path, m.sample_rate, m.channels, m.duration_seconds);
+        return info;
+    }
+
+    CFW_LOG_ERROR("[import_media] Imported resource is neither video nor audio: {}", path);
+    return info;
 }
 
 }  // namespace Corona::API
