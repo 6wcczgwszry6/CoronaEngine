@@ -22,6 +22,7 @@ namespace Corona::Systems {
 #ifdef CORONA_ENABLE_VISION
 namespace Vision {
 struct VisionBuildResult;  // 定义见 vision/vision_geometry_adapter.h
+class VisionZeroCopyBridge;  // 定义见 vision/vision_zero_copy_bridge.h
 }  // namespace Vision
 #endif
 
@@ -131,6 +132,11 @@ class OpticsSystem : public Kernel::SystemBase {
     // the destination format, so we must convert float32 -> half here before upload;
     // otherwise the float32 bytes are reinterpreted as half and the picture scrambles.
     std::vector<uint16_t> vision_half_buffer_;
+
+    // Zero-copy path: shares Vision's pre-tonemap linear color buffer with Vulkan
+    // (CUDA exported buffer -> imported HardwareBuffer) and resolves it via the
+    // vision_resolve compute pass, replacing the [MANUAL-READBACK] download/upload.
+    std::unique_ptr<Vision::VisionZeroCopyBridge> vision_zero_copy_bridge_;
 
     // 启用 Vision 编译时，首帧 update() 检测到 pending != current 会自动触发
     // init_vision_lazy() 切换到 Vision；若初始化失败仍会回退 Native。

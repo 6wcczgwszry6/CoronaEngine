@@ -37,6 +37,7 @@
 #include "vision/vision_camera_adapter.h"
 #include "vision/vision_light_adapter.h"
 #include "vision/vision_output_bridge.h"
+#include "vision/vision_zero_copy_bridge.h"
 #endif
 
 namespace {
@@ -187,6 +188,9 @@ bool OpticsSystem::initialize_render_pipelines() {
         hardware_->tonemapPipeline.emplace();
         hardware_->debugResolvePipeline.emplace();
         hardware_->actorPickPipeline.emplace();
+#ifdef CORONA_ENABLE_VISION
+        hardware_->visionResolvePipeline.emplace();
+#endif
         hardware_->shaderHasInit = true;
         CFW_LOG_INFO(
             "OpticsSystem: VBuffer pipelines created successfully "
@@ -779,6 +783,7 @@ uint16_t float_to_half(float f) {
     return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exponent) << 10) | halfMant);
 }
 
+
 }  // namespace
 
 std::optional<OpticsSystem::ActorPickRequest> OpticsSystem::take_pending_actor_pick(std::uintptr_t camera_handle) {
@@ -931,6 +936,12 @@ void OpticsSystem::shutdown() {
     }
 
     offscreen_image_ = HardwareImage();
+#ifdef CORONA_ENABLE_VISION
+    // Release the zero-copy bridge (imported Vulkan buffer + exported CUDA buffer)
+    // before the Vision pipeline/device is torn down, so the import never outlives
+    // its backing allocation.
+    vision_zero_copy_bridge_.reset();
+#endif
     hardware_.reset();
 
     CFW_LOG_INFO("OpticsSystem: Hardware resources released");
@@ -1297,40 +1308,26 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 uint32_t w = res.x;
                 uint32_t h = res.y;
 
-                // [MANUAL-READBACK] Manually expand fill_window_buffer() for debuggability.
-                // fill_window_buffer() internally does:
-                //     view_texture_.download_immediately(window_buffer_.data());
-                //     visualizer_->draw(window_buffer_.data());   // overlays (gizmos etc.)
-                // Here we download view_texture() directly into a locally-owned buffer and
-                // SKIP visualizer_->draw(), so the bytes we inspect/upload are exactly the
-                // raytraced + tone-mapped final picture (mirrors the reference snippet's
-                // view_buffer()/download_immediately() flow, since this workspace's Vision
-                // FrameBuffer exposes view_texture() rather than view_buffer()).
-                // view_texture() holds the FINAL tone-mapped color (see render_final()).
-                const ocarina::Texture2D& view_tex = fb->view_texture();
-                const uint64_t pixel_count = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
-                // vision_readback_buffer_ is a flat std::vector<float> (4 floats = 1 RGBA pixel),
-                // owned by this system to avoid leaking ocarina::float4 into the public header.
-                vision_readback_buffer_.resize(pixel_count * 4ull);
-                view_tex.download_immediately(
-                    reinterpret_cast<ocarina::float4*>(vision_readback_buffer_.data()));
-                static_assert(sizeof(vision_readback_buffer_[0]) == sizeof(float),
-                    "vision_readback_buffer_ must be a flat float buffer (4 floats per pixel)");
-
-                // Vision's view_texture() is PixelStorage::FLOAT4 (float32 RGBA), but the
-                // display image is RGBA16_FLOAT (half). HardwareImage::copyFrom() raw-copies
-                // sized by the DESTINATION format, so we must narrow float32 -> half here;
-                // uploading the float32 bytes directly makes copyFrom reinterpret them as
-                // half (and read only the first half of the buffer) -> scrambled picture.
-                vision_half_buffer_.resize(pixel_count * 4ull);
-                for (uint64_t i = 0; i < pixel_count * 4ull; ++i) {
-                    vision_half_buffer_[i] = float_to_half(vision_readback_buffer_[i]);
+                // [ZERO-COPY] Share Vision's pre-tonemap linear color buffer with
+                // Vulkan instead of the GPU->CPU->half->GPU readback. The bridge
+                // copies accumulation_buffer_/rt_buffer_ on-device into a CUDA
+                // exportable buffer, exports its Win32 handle, and imports it as a
+                // Vulkan HardwareBuffer; the vision_resolve compute pass below
+                // applies Vision's exposure+ACES and writes finalOutputImage.
+                // NOTE: no cross-API semaphore yet (tearing/flicker possible).
+                if (!vision_zero_copy_bridge_) {
+                    vision_zero_copy_bridge_ =
+                        std::make_unique<Vision::VisionZeroCopyBridge>();
+                }
+                if (!vision_zero_copy_bridge_->ensure(*renderPipeline, w, h) ||
+                    !vision_zero_copy_bridge_->copy_from_framebuffer(*renderPipeline)) {
+                    CFW_LOG_WARNING(
+                        "OpticsSystem: Vision zero-copy bridge unavailable this frame "
+                        "(w={} h={}), skipping frame", w, h);
+                    ++consecutive_vision_failures_;
+                    break;
                 }
 
-                // Vision is synchronized to camera.width/camera.height above, and both
-                // backends intentionally reuse hardware_->finalOutputImage so switching
-                // Native/Vision compares the same output surface. copyFrom() strides by
-                // destination size, so keep the image exactly matched to the Vision frame.
                 if (image_handle_ != 0) {
                     if (auto consumed_device = SharedDataHub::instance().image_storage().acquire_write(image_handle_)) {
                         hardware_->executor.wait(consumed_device->consumed_executor);
@@ -1338,9 +1335,21 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 }
                 ensure_camera_render_resources(w, h);
 
-                // Upload the REAL tone-mapped Vision pixels to the shared display image.
-                hardware_->executor << hardware_->finalOutputImage.copyFrom(vision_half_buffer_.data())
-                                    << hardware_->executor.commit();
+                // Resolve: imported linear float4 -> exposure+ACES -> finalOutputImage.
+                {
+                    auto& visionResolve = *hardware_->visionResolvePipeline;
+                    visionResolve.pushConsts.gbufferSize = hardware_->gbufferSize;
+                    visionResolve.pushConsts.srcBufferIndex =
+                        vision_zero_copy_bridge_->imported().storeDescriptor();
+                    visionResolve.pushConsts.outputImage =
+                        hardware_->finalOutputImage.storeDescriptor();
+                    visionResolve.pushConsts.exposure = 1.0f;  // Vision FrameBuffer default
+
+                    const uint32_t dispatchX = (w + 7u) / 8u;
+                    const uint32_t dispatchY = (h + 7u) / 8u;
+                    hardware_->executor << visionResolve(dispatchX, dispatchY, 1)
+                                        << hardware_->executor.commit();
+                }
 
                 last_render_cam_handle_ = cam_handle;
                 consecutive_vision_failures_ = 0;
