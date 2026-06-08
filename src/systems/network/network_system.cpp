@@ -174,9 +174,12 @@ void NetworkSystem::stop_session() {
     if (impl_->session_state != SessionState::Active &&
         impl_->session_state != SessionState::Error) return;
 
-    impl_->discovery.stop();
-    impl_->sync_engine.shutdown();
+    // Stop ENet host FIRST (it relies on WinSock, which discovery owns the
+    // WSAStartup/WSACleanup for). Tearing down discovery first would call
+    // WSACleanup() while ENet sockets are still open, hanging enet_host_destroy.
     impl_->peer_manager.stop();
+    impl_->sync_engine.shutdown();
+    impl_->discovery.stop();
 
     impl_->session_state = SessionState::Idle;
 

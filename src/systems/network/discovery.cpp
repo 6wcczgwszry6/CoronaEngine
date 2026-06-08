@@ -170,6 +170,7 @@ bool Discovery::start(uint16_t port, const std::string& instance_name, uint64_t 
 
     // Start broadcast thread
     impl_->broadcast_thread = std::thread([this]() {
+        int elapsed = 0;
         while (impl_->running.load()) {
             sendto(impl_->sock,
                    reinterpret_cast<const char*>(&impl_->outgoing_packet),
@@ -177,8 +178,13 @@ bool Discovery::start(uint16_t port, const std::string& instance_name, uint64_t 
                    reinterpret_cast<const struct sockaddr*>(&impl_->broadcast_addr),
                    sizeof(impl_->broadcast_addr));
 
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(kDiscoveryIntervalMs));
+            // Sleep in short chunks so stop() joins quickly instead of
+            // waiting up to a full kDiscoveryIntervalMs.
+            elapsed = 0;
+            while (elapsed < kDiscoveryIntervalMs && impl_->running.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                elapsed += 50;
+            }
         }
     });
 

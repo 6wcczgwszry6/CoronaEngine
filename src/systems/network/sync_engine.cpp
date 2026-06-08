@@ -164,26 +164,39 @@ struct SyncEngine::Impl {
 
     // Rebuild seq_id → ObjectId maps for all tracked storages.
     // Called once per tick before dirty polling.
+    //
+    // IMPORTANT: use cbegin()/cend() (ConstIterator → shared read locks).
+    // The non-const begin()/end() returns a write Iterator that takes an
+    // EXCLUSIVE lock per slot; under 60fps rendering many other systems hold
+    // shared read locks on these transforms continuously, so an exclusive
+    // retry-lock would block forever and hang the update thread (and thus
+    // shutdown's thread join).
     void rebuild_entity_maps() {
         mt_seq_to_id.clear();
-        for (auto it = hub.model_transform_storage().begin();
-             it != hub.model_transform_storage().end(); ++it) {
-            auto obj_id = reinterpret_cast<std::uintptr_t>(&(*it));
-            mt_seq_to_id[hub.model_transform_storage().seq_id(obj_id)] = obj_id;
+        {
+            auto& store = hub.model_transform_storage();
+            for (auto it = store.cbegin(); it != store.cend(); ++it) {
+                auto obj_id = reinterpret_cast<std::uintptr_t>(&(*it));
+                mt_seq_to_id[store.seq_id(obj_id)] = obj_id;
+            }
         }
 
         cam_seq_to_id.clear();
-        for (auto it = hub.camera_storage().begin();
-             it != hub.camera_storage().end(); ++it) {
-            auto obj_id = reinterpret_cast<std::uintptr_t>(&(*it));
-            cam_seq_to_id[hub.camera_storage().seq_id(obj_id)] = obj_id;
+        {
+            auto& store = hub.camera_storage();
+            for (auto it = store.cbegin(); it != store.cend(); ++it) {
+                auto obj_id = reinterpret_cast<std::uintptr_t>(&(*it));
+                cam_seq_to_id[store.seq_id(obj_id)] = obj_id;
+            }
         }
 
         env_seq_to_id.clear();
-        for (auto it = hub.environment_storage().begin();
-             it != hub.environment_storage().end(); ++it) {
-            auto obj_id = reinterpret_cast<std::uintptr_t>(&(*it));
-            env_seq_to_id[hub.environment_storage().seq_id(obj_id)] = obj_id;
+        {
+            auto& store = hub.environment_storage();
+            for (auto it = store.cbegin(); it != store.cend(); ++it) {
+                auto obj_id = reinterpret_cast<std::uintptr_t>(&(*it));
+                env_seq_to_id[store.seq_id(obj_id)] = obj_id;
+            }
         }
     }
 
@@ -241,7 +254,7 @@ void SyncEngine::poll_and_sync() {
     // --- ModelTransform ---
     {
         auto& store = hub.model_transform_storage();
-        for (auto it = store.begin(); it != store.end(); ++it) {
+        for (auto it = store.cbegin(); it != store.cend(); ++it) {
             const ModelTransform& data = *it;
             auto obj_id = reinterpret_cast<std::uintptr_t>(&data);
             auto ent_seq = store.seq_id(obj_id);
@@ -259,7 +272,7 @@ void SyncEngine::poll_and_sync() {
     // --- CameraDevice ---
     {
         auto& store = hub.camera_storage();
-        for (auto it = store.begin(); it != store.end(); ++it) {
+        for (auto it = store.cbegin(); it != store.cend(); ++it) {
             const CameraDevice& data = *it;
             auto obj_id = reinterpret_cast<std::uintptr_t>(&data);
             auto ent_seq = store.seq_id(obj_id);
@@ -277,7 +290,7 @@ void SyncEngine::poll_and_sync() {
     // --- EnvironmentDevice ---
     {
         auto& store = hub.environment_storage();
-        for (auto it = store.begin(); it != store.end(); ++it) {
+        for (auto it = store.cbegin(); it != store.cend(); ++it) {
             const EnvironmentDevice& data = *it;
             auto obj_id = reinterpret_cast<std::uintptr_t>(&data);
             auto ent_seq = store.seq_id(obj_id);
@@ -351,7 +364,7 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                 // Resolve entity_seq → ObjectId
                 auto map_it = impl_->mt_seq_to_id.find(entity_seq);
                 if (map_it != impl_->mt_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write(map_it->second);
+                    auto handle = store.try_acquire_write_nowait(map_it->second);
                     if (handle.valid()) {
                         deserialize_mt(*handle, value_ptr, value_len);
                     }
@@ -362,7 +375,7 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                 auto& store = hub.camera_storage();
                 auto map_it = impl_->cam_seq_to_id.find(entity_seq);
                 if (map_it != impl_->cam_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write(map_it->second);
+                    auto handle = store.try_acquire_write_nowait(map_it->second);
                     if (handle.valid()) {
                         deserialize_cam(*handle, value_ptr, value_len);
                     }
@@ -373,7 +386,7 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                 auto& store = hub.environment_storage();
                 auto map_it = impl_->env_seq_to_id.find(entity_seq);
                 if (map_it != impl_->env_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write(map_it->second);
+                    auto handle = store.try_acquire_write_nowait(map_it->second);
                     if (handle.valid()) {
                         deserialize_env(*handle, value_ptr, value_len);
                     }

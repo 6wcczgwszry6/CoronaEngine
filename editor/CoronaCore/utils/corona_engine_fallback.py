@@ -483,16 +483,3 @@ class CoronaEngine:
     ImageEffects = ImageEffects
     Environment = Environment
     Scene = Scene
-
-    @staticmethod
-    def network_start_session(instance_name: str, project_id: int, port: int = 27960) -> bool:
-        _log(f"network_start_session not available in fallback mode")
-        return False
-
-    @staticmethod
-    def network_stop_session():
-        _log(f"network_stop_session not available in fallback mode")
-
-    @staticmethod
-    def network_peer_count() -> int:
-        return 0

@@ -10,6 +10,7 @@ namespace Corona::Network {
 
 struct PeerManager::Impl {
     ENetHost* host = nullptr;
+    bool enet_initialized = false;
     std::string local_id;
     std::string instance_name;
 
@@ -56,6 +57,16 @@ bool PeerManager::start(uint16_t port, const std::string& instance_name) {
         return true;
     }
 
+    // Initialize ENet (refcounted internally by ENet on most platforms; we
+    // guard with our own flag to pair exactly one init with one deinit).
+    if (!impl_->enet_initialized) {
+        if (enet_initialize() != 0) {
+            CFW_LOG_ERROR("PeerManager: enet_initialize() failed");
+            return false;
+        }
+        impl_->enet_initialized = true;
+    }
+
     impl_->instance_name = instance_name;
 
     // Build local ID from a placeholder IP (we don't know our LAN IP yet;
@@ -88,7 +99,14 @@ bool PeerManager::start(uint16_t port, const std::string& instance_name) {
 }
 
 void PeerManager::stop() {
-    if (!impl_->host) return;
+    if (!impl_->host) {
+        // Even with no host, release ENet if we initialized it.
+        if (impl_->enet_initialized) {
+            enet_deinitialize();
+            impl_->enet_initialized = false;
+        }
+        return;
+    }
 
     // Disconnect all peers (forceful, no wait)
     {
@@ -108,6 +126,12 @@ void PeerManager::stop() {
     {
         std::lock_guard lock(impl_->peer_mutex);
         impl_->peer_list.clear();
+    }
+
+    // Release ENet (and its WinSock refcount) now that the host is gone.
+    if (impl_->enet_initialized) {
+        enet_deinitialize();
+        impl_->enet_initialized = false;
     }
 
     CFW_LOG_INFO("PeerManager: Stopped");
