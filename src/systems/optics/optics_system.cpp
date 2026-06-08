@@ -21,7 +21,7 @@
 
 // CORONA_ENABLE_VISION is controlled by CMake (-DCORONA_ENABLE_VISION).
 
-#define CORONA_VISION_IMPORT_DEMO
+//#define CORONA_VISION_IMPORT_DEMO
 
 #ifdef CORONA_ENABLE_VISION
 #include "base/import/importer.h"
