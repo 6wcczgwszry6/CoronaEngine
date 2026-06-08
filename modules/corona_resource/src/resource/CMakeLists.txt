@@ -23,6 +23,8 @@ set(CORONA_RESOURCE_MANAGER_SOURCE_FILES
     types/scene.cpp
     # video
     types/video.cpp
+    # audio / video shared ffmpeg helpers
+    types/ffmpeg_common.h
     # model
     types/model.cpp
     # text
@@ -90,3 +92,12 @@ target_link_libraries(CoronaResourceManager
     INTERFACE
     ktm
 )
+
+# Optional FFmpeg-backed video/audio import/export
+if(CORONA_RESOURCE_HAVE_FFMPEG)
+    target_link_libraries(CoronaResourceManager PRIVATE corona::ffmpeg)
+    target_compile_definitions(CoronaResourceManager PRIVATE CORONA_RESOURCE_HAVE_FFMPEG=1)
+    message(STATUS "[CoronaResource] FFmpeg video/audio support: ENABLED")
+else()
+    message(STATUS "[CoronaResource] FFmpeg video/audio support: DISABLED")
+endif()
