@@ -76,6 +76,47 @@ public:
     /// 已连接的 peer 数量。
     [[nodiscard]] size_t peer_count() const;
 
+    /// 手动连接到指定 IP 的 peer（绕过自动发现）。
+    /// 要求会话已启动。force=true 跳过 ID 排序，由主动方发起连接。
+    bool connect_to_peer(const std::string& ip, uint16_t port,
+                         const std::string& peer_name);
+
+    /**
+     * @brief 向所有已连接的 peer 广播 Actor 创建事件。
+     * @param scene_name 场景路径（如 "Scene/场景1.scene"）
+     * @param model_path 模型相对路径（如 "Resource/ball.obj"）
+     * @param transform  9 个 float: position(3) + rotation(3) + scale(3)
+     * @param optics_packed 打包的 OpticsPacked 结构 (72 字节)
+     * @param optics_size   optics_packed 的大小
+     */
+    void broadcast_actor_create(const std::string& scene_name,
+                                const std::string& model_path,
+                                const float* transform,
+                                const void* optics_packed, size_t optics_size);
+
+    /// 检查是否有待完成的文件传输（需要在 update 中处理）
+    [[nodiscard]] bool has_pending_transfers() const;
+
+    /**
+     * @brief 设置当前项目的绝对路径（用于文件传输的目标目录）。
+     * 接收到的模型文件将写入 active_project_path + model_path。
+     * @param project_root 项目根目录的绝对路径
+     */
+    void set_project_root(const std::string& project_root);
+
+    /**
+     * @brief 处理收到的 FILE_CHUNK。由 on_custom_message 调用。
+     * 所有 chunk 收齐后自动写入文件。
+     */
+    void handle_file_chunk(const std::string& sender_peer_id,
+                           const uint8_t* data, size_t len);
+
+    /**
+     * @brief 响应 FILE_REQUEST，发送请求的文件。
+     */
+    void handle_file_request(const std::string& sender_peer_id,
+                             const uint8_t* data, size_t len);
+
 private:
     // ========================================
     // 内部回调
@@ -85,6 +126,7 @@ private:
     void on_peer_connected(const Network::PeerManager::PeerInfo& info);
     void on_peer_disconnected(const Network::PeerManager::PeerInfo& info);
     void on_data_received(const std::string& peer_id, const uint8_t* data, size_t len);
+    void on_custom_message(const std::string& sender_peer_id, const uint8_t* data, size_t len);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

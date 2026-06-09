@@ -367,4 +367,13 @@ export const networkService = {
   stopSession: () => Bridge.callCEF('Network', 'stop_session').then(_unwrap),
   /** 获取当前 peer 数量 */
   getPeerCount: () => Bridge.callCEF('Network', 'get_peer_count').then(_unwrap),
+  /** 手动连接到指定 IP 的 peer */
+  connectToPeer: (ip, port, peerName) =>
+    Bridge.callCEF('Network', 'connect_to_peer', [ip, port, peerName]).then(_unwrap),
+  /** 设置项目根目录（用于文件传输的目标目录） */
+  setProjectRoot: (projectRoot) =>
+    Bridge.callCEF('Network', 'set_project_root', [projectRoot]).then(_unwrap),
+  /** 广播 Actor 创建事件 */
+  broadcastActorCreate: (sceneName, modelPath, actorData) =>
+    Bridge.callCEF('Network', 'broadcast_actor_create', [sceneName, modelPath, actorData]).then(_unwrap),
 };

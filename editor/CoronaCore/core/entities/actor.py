@@ -175,6 +175,20 @@ class Actor:
             raise RuntimeError("无法向 Actor 添加默认 Profile（几何/组件不一致）")
         self.engine_obj.set_active_profile(stored)
 
+        # 网络同步：广播 Actor 创建事件到所有已连接的 peer
+        self._broadcast_actor_created()
+
+    def _broadcast_actor_created(self):
+        """通过 NetworkSystem 广播 Actor 创建事件到已连接的 peer。"""
+        try:
+            from CoronaCore.utils.bridge import networkService
+            import json as _json
+            # Use the same format as to_dict() for the actor data
+            actor_data = self.to_dict()
+            CoronaEditor.js_call_func("actor-sync-broadcast", [actor_data])
+        except Exception:
+            pass  # 静默失败，不影响本地创建
+
     def save_data(self):
         if self.parent:
             self.parent.save_data()

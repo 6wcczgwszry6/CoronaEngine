@@ -139,13 +139,29 @@ void PeerManager::stop() {
 
 // ============================================================================
 void PeerManager::connect_to_peer(const std::string& ip, uint16_t port,
-                                  const std::string& peer_name) {
-    if (!impl_->host) return;
+                                  const std::string& peer_name, bool force) {
+    if (!impl_->host) {
+        CFW_LOG_WARNING("PeerManager: Cannot connect — host not started");
+        return;
+    }
+
+    // Reject empty or invalid IPs
+    if (ip.empty() || ip == "0.0.0.0" || ip == "127.0.0.1") {
+        CFW_LOG_WARNING("PeerManager: Reject connection to invalid IP '{}'", ip);
+        return;
+    }
 
     // ID-based connection ordering: smaller ID waits, larger ID initiates
     std::string remote_id = make_peer_id(ip.c_str(), port);
 
-    if (impl_->local_id < remote_id) {
+    // Reject self-connection (same IP:port as local)
+    if (remote_id == impl_->local_id) {
+        CFW_LOG_WARNING("PeerManager: Reject self-connection to {}", remote_id);
+        return;
+    }
+
+    // Skip ID-ordering when force=true (manual connection).
+    if (!force && impl_->local_id < remote_id) {
         // We have the smaller ID — wait for them to connect to us
         CFW_LOG_DEBUG("PeerManager: {} < {} — waiting for inbound connection",
                       impl_->local_id, remote_id);
@@ -195,7 +211,11 @@ void PeerManager::disconnect_peer(const std::string& peer_id) {
 // ============================================================================
 size_t PeerManager::peer_count() const {
     std::lock_guard lock(impl_->peer_mutex);
-    return impl_->peer_list.size();
+    size_t count = 0;
+    for (const auto& p : impl_->peer_list) {
+        if (p.connected) ++count;
+    }
+    return count;
 }
 
 std::vector<PeerManager::PeerInfo> PeerManager::peers() const {
