@@ -3,9 +3,11 @@
 #include <corona/events/engine_events.h>
 #include <corona/kernel/core/i_logger.h>
 #include <corona/resource/resource_manager.h>
+#include <corona/resource/types/audio.h>
 #include <corona/resource/types/image.h>
 #include <corona/resource/types/scene.h>
 #include <corona/resource/types/text.h>
+#include <corona/resource/types/video.h>
 #include <corona/systems/acoustics/acoustics_system.h>
 #include <corona/systems/display/display_system.h>
 #include <corona/systems/geometry/geometry_system.h>
@@ -72,6 +74,8 @@ bool Engine::initialize() {
     resource_manager.register_parser<Resource::TextParser>();
     resource_manager.register_parser<Resource::ImageParser>();
     resource_manager.register_parser<Resource::SceneParser>();
+    resource_manager.register_parser<Resource::VideoParser>();
+    resource_manager.register_parser<Resource::AudioParser>();
 
     // 3. 初始化所有系统
     auto* sys_mgr = kernel_.system_manager();

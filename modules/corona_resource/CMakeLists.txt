@@ -15,6 +15,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CoronaResourceOptions)
 include(CoronaResourceCompiler)
 include(CoronaResourceDependencies)
+include(CoronaResourceFFmpeg)
 include(CoronaResourceExamples)
 
 # Add subdirectories

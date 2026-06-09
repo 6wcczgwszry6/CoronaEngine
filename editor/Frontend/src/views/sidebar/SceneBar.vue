@@ -433,7 +433,7 @@
               class="group flex items-center px-2 py-0.5 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#84a65b]"
               :class="{ 'bg-[#264f78]/60': selectedItem === scene.name }"
               @click="FocusOnActor(scene)"
-              @dblclick="ControlObject(scene)"
+              @dblclick="scene.type === 'audio' ? handlePlayToggle(scene) : scene.type === 'video' ? null : ControlObject(scene)"
             >
               <!-- 图标 -->
               <span class="w-5 flex-shrink-0">
@@ -448,6 +448,22 @@
                   <svg class="w-4 h-4 text-[#90caf9]" fill="currentColor" viewBox="0 0 24 24">
                     <path
                       d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"
+                    />
+                  </svg>
+                </template>
+                <template v-else-if="scene.type === 'video'">
+                  <!-- 视频：胶片/播放图标 -->
+                  <svg class="w-4 h-4 text-[#c586c0]" fill="currentColor" viewBox="0 0 24 24">
+                    <path
+                      d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm6 4v8l6-4-6-4z"
+                    />
+                  </svg>
+                </template>
+                <template v-else-if="scene.type === 'audio'">
+                  <!-- 音频：音符图标 -->
+                  <svg class="w-4 h-4 text-[#dcdcaa]" fill="currentColor" viewBox="0 0 24 24">
+                    <path
+                      d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"
                     />
                   </svg>
                 </template>
@@ -511,6 +527,39 @@
                   />
                 </svg>
               </button>
+              <!-- 音频播放 / 停止按钮 -->
+              <button
+                v-if="scene.type === 'audio'"
+                class="w-5 h-5 flex items-center justify-center rounded transition-all mr-0.5"
+                :class="
+                  (playingStates[scene.name] ?? scene._playing)
+                    ? 'text-[#f48771] hover:text-[#f48771] hover:bg-red-400/20'
+                    : 'text-[#dcdcaa] hover:text-[#dcdcaa] hover:bg-yellow-400/20'
+                "
+                :title="
+                  (playingStates[scene.name] ?? scene._playing) ? '停止' : '播放'
+                "
+                @click.stop="handlePlayToggle(scene)"
+              >
+                <!-- 播放 ▶ -->
+                <svg
+                  v-if="!(playingStates[scene.name] ?? scene._playing)"
+                  class="w-3.5 h-3.5"
+                  fill="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path d="M8 5v14l11-7z" />
+                </svg>
+                <!-- 停止 ■ -->
+                <svg
+                  v-else
+                  class="w-3.5 h-3.5"
+                  fill="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path d="M6 6h12v12H6z" />
+                </svg>
+              </button>
               <!-- 删除按钮 -->
               <button
                 class="w-5 h-5 flex items-center justify-center text-[#666] hover:text-red-400 hover:bg-red-400/20 rounded transition-all"
@@ -549,7 +598,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from 'vue';
+import { ref, reactive, onMounted, onUnmounted, computed } from 'vue';
 import { useRoute } from 'vue-router';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import { appService, sceneService, projectService, resourceService } from '@/utils/bridge.js';
@@ -580,6 +629,8 @@ const getTypeShort = (type) => {
     mov: 'Video',
     mp3: 'Audio',
     wav: 'Audio',
+    video: 'Video',
+    audio: 'Audio',
     actor: 'Actor',
     model: 'Model',
     mesh: 'Mesh',
@@ -594,6 +645,7 @@ const camerasExpanded = ref(true);
 const actorsExpanded = ref(true);
 
 const sceneImages = ref([]);
+const playingStates = reactive({});  // { name: true/false } — 音频播放状态
 const route = useRoute();
 const currentSceneName = ref('');
 const px = ref('1.0'),
@@ -775,7 +827,11 @@ const OnLocateSearchItem = async (item) => {
   }
 };
 
+const isMediaItem = (scene) => scene && (scene.type === 'video' || scene.type === 'audio');
+
 const ControlObject = async (scene) => {
+  // 音视频是独立资源，没有可操作的 Actor
+  if (isMediaItem(scene)) return;
   try {
     await sceneService.openSceneActor(currentSceneName.value, scene.name);
   } catch (e) {
@@ -785,6 +841,8 @@ const ControlObject = async (scene) => {
 
 const FocusOnActor = async (scene) => {
   selectedItem.value = scene.name;
+  // 音视频是独立资源，仅作选中，不触发相机聚焦/积木上下文
+  if (isMediaItem(scene)) return;
   // 通知积木编辑器当前选中的物体
   setActorContext(currentSceneName.value, scene.name);
   try {
@@ -796,9 +854,41 @@ const FocusOnActor = async (scene) => {
   }
 };
 
+/// 切换音频播放/停止
+const handlePlayToggle = async (scene) => {
+  const rid = scene.resourceId;
+  if (!rid) {
+    logWarn('[audio] No resource_id for', scene.name);
+    return;
+  }
+  const key = scene.name;
+  const playing = playingStates[key] ?? scene._playing ?? false;
+  if (playing) {
+    // 停止
+    try {
+      await sceneService.stopAudio(rid);
+    } catch (e) {
+      logError('[audio] stop failed', e);
+    }
+    playingStates[key] = false;
+    if (scene._playing !== undefined) scene._playing = false;
+  } else {
+    // 播放（单次，不循环）
+    try {
+      await sceneService.playAudio(rid, false);
+    } catch (e) {
+      logError('[audio] play failed', e);
+    }
+    playingStates[key] = true;
+    if (scene._playing !== undefined) scene._playing = true;
+  }
+};
+
 const ToggleVisible = async (scene) => {
   const newVisible = scene.visible === false ? true : false;
   scene.visible = newVisible;
+  // 音视频资源没有对应 Actor，仅在前端切换可见标记
+  if (isMediaItem(scene)) return;
   try {
     await sceneService.actorOperation(currentSceneName.value, scene.name, 'SetVisible', [
       newVisible ? 1 : 0,
@@ -1123,14 +1213,45 @@ const HandleMultimediaImport = async () => {
       currentSceneName.value,
       'multimedia'
     );
-    if (result.success && result.data.actor) {
-      await addActorToList(result.data.actor);
+    // 兼容包装型 { success, data } 与直返型两种形态
+    const payload = result?.data ?? result;
+    const status = payload?.status;
+    if (result?.success === false || status === 'error') {
+      logError('Multimedia import failed', payload?.message || result?.error || 'unknown error');
+      return;
+    }
+    if (status === 'canceled') {
+      return;
+    }
+    // 音视频是独立资源（非 Actor），加入资源列表
+    const media = payload?.media;
+    if (media && media.name) {
+      await addMediaToList(media);
       await appService.callDockFunction('', 'updateLoading', ['导入完成', 100]);
     }
   } catch (e) {
     logError('Multimedia import failed', e);
   }
   await appService.callDockFunction('', 'hideLoading', []);
+};
+
+const addMediaToList = async (media) => {
+  if (!media || !media.name) return;
+  // media.type 为 'video' / 'audio'
+  sceneImages.value.push({
+    name: media.name,
+    path: media.path,
+    type: media.type || 'multimedia',
+    visible: true,
+    resourceId: media.resource_id,
+    duration: media.duration,
+    codec: media.codec,
+    width: media.width,
+    height: media.height,
+    fps: media.fps,
+    sampleRate: media.sample_rate,
+    channels: media.channels,
+  });
 };
 
 const HandleSceneImport = async () => {

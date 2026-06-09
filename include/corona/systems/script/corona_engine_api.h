@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -363,6 +364,46 @@ void set_render_backend(const std::string& mode);
 
 /// 获取当前请求的渲染后端，返回 "native" 或 "vision"。
 [[nodiscard]] std::string get_render_backend();
+
+// ============================================================================
+// Media (video/audio) import
+//
+// Audio/video files are standalone resources, NOT 3D actors. import_media
+// loads the file through the resource manager and returns its id + metadata
+// without going through Geometry/Scene.
+// ============================================================================
+struct MediaInfo {
+    std::uint64_t resource_id{0};  ///< 资源 ID（0 表示导入失败）
+    std::string media_type;        ///< "video" / "audio" / ""（失败）
+    double duration_seconds{0.0};  ///< 时长（秒）
+    std::string codec;             ///< 编码名
+
+    // 视频字段
+    int width{0};
+    int height{0};
+    double fps{0.0};
+
+    // 音频字段
+    int sample_rate{0};
+    int channels{0};
+};
+
+/// 导入音频或视频文件，返回资源信息。失败时 media_type 为空、resource_id 为 0。
+[[nodiscard]] MediaInfo import_media(const std::string& path);
+
+// ============================================================================
+// Audio playback (global, not spatialized)
+// ============================================================================
+
+/// 播放已导入的音频资源。resource_id 来自 import_media 返回的 MediaInfo。
+/// 通过 EventBus 通知 AcousticsSystem，在独立线程上播放。
+/// @param resource_id 音频资源 ID（由 import_media 返回）
+/// @param loop 是否循环播放（默认 false）
+void play_audio(std::uint64_t resource_id, bool loop = false);
+
+/// 停止播放指定资源。
+/// @param resource_id 音频资源 ID
+void stop_audio(std::uint64_t resource_id);
 
 }  // namespace API
 }  // namespace Corona
