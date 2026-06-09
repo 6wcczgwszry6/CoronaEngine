@@ -445,10 +445,6 @@ void PeerManager::handle_hello(ENetPeer* peer, const uint8_t* data, size_t len) 
     if (should_drop) {
         CFW_LOG_INFO("PeerManager: Duplicate connection to {} — dropping extra", stable_id);
         enet_peer_disconnect_later(peer, 0);
-        // Ensure the outbound entry is used for data routing
-        if (existing && existing->hello_done && impl_->on_connected) {
-            handle_connect(existing->peer, existing->id, existing->name);
-        }
         return;
     }
 
