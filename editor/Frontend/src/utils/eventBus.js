@@ -62,7 +62,8 @@ window.__coronaEmit = (event, ...rest) => {
       event === 'scene-tree-changed' || event === 'scene-rename' ||
       event === 'scene-add' || event === 'transform-update' ||
       event === 'ai-chunk' || event === 'engine-started' ||
-      event === 'lanchat-event')) {
+      event === 'lanchat-event' || event === 'actor-sync-broadcast' ||
+      event === 'file-sync-status' || event === 'import-asset-complete')) {
     Bridge.callCEF('__cross_tab__', 'broadcast', [event, args])
       .catch(() => {});
   }

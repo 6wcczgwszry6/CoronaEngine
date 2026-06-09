@@ -53,41 +53,154 @@ void deserialize_mt(ModelTransform& t, const uint8_t* value, uint16_t value_len)
     t.scale.x = f[6]; t.scale.y = f[7]; t.scale.z = f[8];
 }
 
-// ---- CameraDevice helpers ----
-std::string hash_cam(const CameraDevice& c, uint64_t entity_seq) {
+// ---- ModelResource helpers ----
+std::string hash_mr(const ModelResource& r, uint64_t entity_seq) {
     uint64_t h = entity_seq;
-    auto mix = [&](const void* p, size_t n) {
-        const auto* b = static_cast<const uint8_t*>(p);
-        for (size_t i = 0; i < n; ++i) h = h * 31 + b[i];
-    };
-    mix(&c.position, sizeof(c.position));
-    mix(&c.forward, sizeof(c.forward));
-    mix(&c.fov, sizeof(c.fov));
+    h = h * 31 + r.model_id;
     char buf[24];
     std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(h));
     return {buf};
 }
 
-void serialize_cam(const CameraDevice& c, uint64_t entity_seq,
-                   std::vector<uint8_t>& entries) {
-    const char* key = "cam";
-    uint16_t key_len = 3;
-    float data[7];
-    data[0] = c.position.x; data[1] = c.position.y; data[2] = c.position.z;
-    data[3] = c.forward.x; data[4] = c.forward.y; data[5] = c.forward.z;
-    data[6] = c.fov;
+void serialize_mr(const ModelResource& r, uint64_t entity_seq,
+                  std::vector<uint8_t>& entries) {
+    const char* key = "model";
+    uint16_t key_len = 5;
+    auto entry = build_dirty_entries(StorageID::ST_MODEL_RESOURCE, entity_seq,
+                                     key, key_len, &r.model_id, sizeof(r.model_id));
+    entries.insert(entries.end(), entry.begin(), entry.end());
+}
 
-    auto entry = build_dirty_entries(StorageID::ST_CAMERA, entity_seq,
+void deserialize_mr(ModelResource& r, const uint8_t* value, uint16_t value_len) {
+    if (value_len != 8) return;
+    r.model_id = *reinterpret_cast<const uint64_t*>(value);
+}
+
+// ---- GeometryDevice helpers ----
+// Serialize only pointer references (transform_handle, model_resource_handle).
+// GPU data (mesh_handles with HardwareBuffer/Image) is created locally via
+// the same deterministic code path on every peer and must NOT be synced.
+std::string hash_geo(const GeometryDevice& g, uint64_t entity_seq) {
+    uint64_t h = entity_seq;
+    h = h * 31 + g.transform_handle;
+    h = h * 31 + g.model_resource_handle;
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(h));
+    return {buf};
+}
+
+void serialize_geo(const GeometryDevice& g, uint64_t entity_seq,
+                   std::vector<uint8_t>& entries) {
+    const char* key = "geo";
+    uint16_t key_len = 3;
+    uint64_t data[2];
+    data[0] = static_cast<uint64_t>(g.transform_handle);
+    data[1] = static_cast<uint64_t>(g.model_resource_handle);
+    auto entry = build_dirty_entries(StorageID::ST_GEOMETRY, entity_seq,
                                      key, key_len, data, sizeof(data));
     entries.insert(entries.end(), entry.begin(), entry.end());
 }
 
-void deserialize_cam(CameraDevice& c, const uint8_t* value, uint16_t value_len) {
-    if (value_len != 28) return;
-    const auto* f = reinterpret_cast<const float*>(value);
-    c.position.x = f[0]; c.position.y = f[1]; c.position.z = f[2];
-    c.forward.x = f[3]; c.forward.y = f[4]; c.forward.z = f[5];
-    c.fov = f[6];
+void deserialize_geo(GeometryDevice& g, const uint8_t* value, uint16_t value_len) {
+    if (value_len != 16) return;
+    const auto* d = reinterpret_cast<const uint64_t*>(value);
+    // Only update if handles are zero (unlinked). Once linked they are stable.
+    if (g.transform_handle == 0) g.transform_handle = static_cast<std::uintptr_t>(d[0]);
+    if (g.model_resource_handle == 0) g.model_resource_handle = static_cast<std::uintptr_t>(d[1]);
+}
+
+// ---- OpticsDevice helpers ----
+struct OpticsPacked {
+    bool visible;
+    bool bEnableLighting;
+    float metallic;
+    float roughness;
+    float subsurface;
+    float specular;
+    float specularTint;
+    float anisotropic;
+    float sheen;
+    float sheenTint;
+    float clearcoat;
+    float clearcoatGloss;
+    float ambient[3];
+    float diffuse[3];
+    float specular_color[3];
+    float shininess;
+};
+
+std::string hash_opt(const OpticsDevice& o, uint64_t entity_seq) {
+    uint64_t h = entity_seq;
+    auto mix = [&](const void* p, size_t n) {
+        const auto* b = static_cast<const uint8_t*>(p);
+        for (size_t i = 0; i < n; ++i) h = h * 31 + b[i];
+    };
+    mix(&o.visible, sizeof(o.visible));
+    mix(&o.bEnableLighting, sizeof(o.bEnableLighting));
+    mix(&o.metallic, sizeof(o.metallic));
+    mix(&o.roughness, sizeof(o.roughness));
+    mix(&o.subsurface, sizeof(o.subsurface));
+    mix(&o.specular, sizeof(o.specular));
+    mix(&o.specularTint, sizeof(o.specularTint));
+    mix(&o.anisotropic, sizeof(o.anisotropic));
+    mix(&o.sheen, sizeof(o.sheen));
+    mix(&o.sheenTint, sizeof(o.sheenTint));
+    mix(&o.clearcoat, sizeof(o.clearcoat));
+    mix(&o.clearcoatGloss, sizeof(o.clearcoatGloss));
+    mix(&o.ambient, sizeof(o.ambient));
+    mix(&o.diffuse, sizeof(o.diffuse));
+    mix(&o.specular_color, sizeof(o.specular_color));
+    mix(&o.shininess, sizeof(o.shininess));
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(h));
+    return {buf};
+}
+
+void serialize_opt(const OpticsDevice& o, uint64_t entity_seq,
+                   std::vector<uint8_t>& entries) {
+    const char* key = "opt";
+    uint16_t key_len = 3;
+    OpticsPacked p;
+    p.visible = o.visible;
+    p.bEnableLighting = o.bEnableLighting;
+    p.metallic = o.metallic;
+    p.roughness = o.roughness;
+    p.subsurface = o.subsurface;
+    p.specular = o.specular;
+    p.specularTint = o.specularTint;
+    p.anisotropic = o.anisotropic;
+    p.sheen = o.sheen;
+    p.sheenTint = o.sheenTint;
+    p.clearcoat = o.clearcoat;
+    p.clearcoatGloss = o.clearcoatGloss;
+    p.ambient[0] = o.ambient.x;  p.ambient[1] = o.ambient.y;  p.ambient[2] = o.ambient.z;
+    p.diffuse[0] = o.diffuse.x;  p.diffuse[1] = o.diffuse.y;  p.diffuse[2] = o.diffuse.z;
+    p.specular_color[0] = o.specular_color.x; p.specular_color[1] = o.specular_color.y; p.specular_color[2] = o.specular_color.z;
+    p.shininess = o.shininess;
+    auto entry = build_dirty_entries(StorageID::ST_OPTICS, entity_seq,
+                                     key, key_len, &p, sizeof(p));
+    entries.insert(entries.end(), entry.begin(), entry.end());
+}
+
+void deserialize_opt(OpticsDevice& o, const uint8_t* value, uint16_t value_len) {
+    if (value_len != sizeof(OpticsPacked)) return;
+    const auto* p = reinterpret_cast<const OpticsPacked*>(value);
+    o.visible = p->visible;
+    o.bEnableLighting = p->bEnableLighting;
+    o.metallic = p->metallic;
+    o.roughness = p->roughness;
+    o.subsurface = p->subsurface;
+    o.specular = p->specular;
+    o.specularTint = p->specularTint;
+    o.anisotropic = p->anisotropic;
+    o.sheen = p->sheen;
+    o.sheenTint = p->sheenTint;
+    o.clearcoat = p->clearcoat;
+    o.clearcoatGloss = p->clearcoatGloss;
+    o.ambient = ktm::fvec3{p->ambient[0], p->ambient[1], p->ambient[2]};
+    o.diffuse = ktm::fvec3{p->diffuse[0], p->diffuse[1], p->diffuse[2]};
+    o.specular_color = ktm::fvec3{p->specular_color[0], p->specular_color[1], p->specular_color[2]};
+    o.shininess = p->shininess;
 }
 
 // ---- EnvironmentDevice helpers ----
@@ -142,12 +255,12 @@ struct SyncEngine::Impl {
     mutable std::mutex snapshot_mutex;
 
     // Entity mapping: seq_id → ObjectId for each storage, rebuilt each tick.
-    // This allows us to resolve entity_seq from remote sync packets back to
-    // the local ObjectId handle.
     using ObjMap = std::unordered_map<uint64_t, std::uintptr_t>;
 
     ObjMap mt_seq_to_id;   // ModelTransform
-    ObjMap cam_seq_to_id;  // CameraDevice
+    ObjMap mr_seq_to_id;   // ModelResource
+    ObjMap geo_seq_to_id;  // GeometryDevice
+    ObjMap opt_seq_to_id;  // OpticsDevice
     ObjMap env_seq_to_id;  // EnvironmentDevice
 
     // Callbacks
@@ -162,15 +275,6 @@ struct SyncEngine::Impl {
 
     Impl(SharedDataHub& h) : hub(h) {}
 
-    // Rebuild seq_id → ObjectId maps for all tracked storages.
-    // Called once per tick before dirty polling.
-    //
-    // IMPORTANT: use cbegin()/cend() (ConstIterator → shared read locks).
-    // The non-const begin()/end() returns a write Iterator that takes an
-    // EXCLUSIVE lock per slot; under 60fps rendering many other systems hold
-    // shared read locks on these transforms continuously, so an exclusive
-    // retry-lock would block forever and hang the update thread (and thus
-    // shutdown's thread join).
     void rebuild_entity_maps() {
         mt_seq_to_id.clear();
         {
@@ -181,12 +285,30 @@ struct SyncEngine::Impl {
             }
         }
 
-        cam_seq_to_id.clear();
+        mr_seq_to_id.clear();
         {
-            auto& store = hub.camera_storage();
+            auto& store = hub.model_resource_storage();
             for (auto it = store.cbegin(); it != store.cend(); ++it) {
                 auto obj_id = reinterpret_cast<std::uintptr_t>(&(*it));
-                cam_seq_to_id[store.seq_id(obj_id)] = obj_id;
+                mr_seq_to_id[store.seq_id(obj_id)] = obj_id;
+            }
+        }
+
+        geo_seq_to_id.clear();
+        {
+            auto& store = hub.geometry_storage();
+            for (auto it = store.cbegin(); it != store.cend(); ++it) {
+                auto obj_id = reinterpret_cast<std::uintptr_t>(&(*it));
+                geo_seq_to_id[store.seq_id(obj_id)] = obj_id;
+            }
+        }
+
+        opt_seq_to_id.clear();
+        {
+            auto& store = hub.optics_storage();
+            for (auto it = store.cbegin(); it != store.cend(); ++it) {
+                auto obj_id = reinterpret_cast<std::uintptr_t>(&(*it));
+                opt_seq_to_id[store.seq_id(obj_id)] = obj_id;
             }
         }
 
@@ -209,7 +331,6 @@ struct SyncEngine::Impl {
         return {buf};
     }
 
-    // Returns true if data changed since last poll
     bool check_snapshot(const std::string& snap_key, const std::string& cur_hash) {
         std::lock_guard lock(snapshot_mutex);
         auto it = last_synced.find(snap_key);
@@ -244,7 +365,6 @@ void SyncEngine::shutdown() {
 void SyncEngine::poll_and_sync() {
     if (impl_->syncing_from_remote) return;
 
-    // Rebuild entity maps so outbound entries carry correct seq_ids
     impl_->rebuild_entity_maps();
 
     auto& hub = impl_->hub;
@@ -269,19 +389,55 @@ void SyncEngine::poll_and_sync() {
         }
     }
 
-    // --- CameraDevice ---
+    // --- ModelResource ---
     {
-        auto& store = hub.camera_storage();
+        auto& store = hub.model_resource_storage();
         for (auto it = store.cbegin(); it != store.cend(); ++it) {
-            const CameraDevice& data = *it;
+            const ModelResource& data = *it;
             auto obj_id = reinterpret_cast<std::uintptr_t>(&data);
             auto ent_seq = store.seq_id(obj_id);
 
-            std::string cur_hash = hash_cam(data, ent_seq);
-            std::string snap_key = impl_->make_key(StorageID::ST_CAMERA, ent_seq, "cam");
+            std::string cur_hash = hash_mr(data, ent_seq);
+            std::string snap_key = impl_->make_key(StorageID::ST_MODEL_RESOURCE, ent_seq, "model");
 
             if (impl_->check_snapshot(snap_key, cur_hash)) {
-                serialize_cam(data, ent_seq, entries_payload);
+                serialize_mr(data, ent_seq, entries_payload);
+                ++dirty_count;
+            }
+        }
+    }
+
+    // --- GeometryDevice ---
+    {
+        auto& store = hub.geometry_storage();
+        for (auto it = store.cbegin(); it != store.cend(); ++it) {
+            const GeometryDevice& data = *it;
+            auto obj_id = reinterpret_cast<std::uintptr_t>(&data);
+            auto ent_seq = store.seq_id(obj_id);
+
+            std::string cur_hash = hash_geo(data, ent_seq);
+            std::string snap_key = impl_->make_key(StorageID::ST_GEOMETRY, ent_seq, "geo");
+
+            if (impl_->check_snapshot(snap_key, cur_hash)) {
+                serialize_geo(data, ent_seq, entries_payload);
+                ++dirty_count;
+            }
+        }
+    }
+
+    // --- OpticsDevice ---
+    {
+        auto& store = hub.optics_storage();
+        for (auto it = store.cbegin(); it != store.cend(); ++it) {
+            const OpticsDevice& data = *it;
+            auto obj_id = reinterpret_cast<std::uintptr_t>(&data);
+            auto ent_seq = store.seq_id(obj_id);
+
+            std::string cur_hash = hash_opt(data, ent_seq);
+            std::string snap_key = impl_->make_key(StorageID::ST_OPTICS, ent_seq, "opt");
+
+            if (impl_->check_snapshot(snap_key, cur_hash)) {
+                serialize_opt(data, ent_seq, entries_payload);
                 ++dirty_count;
             }
         }
@@ -340,7 +496,6 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
         (void)r.read_u64();  // remote_ts
         uint32_t count = r.read_u32();
 
-        // Rebuild maps so we can resolve incoming entity_seq → ObjectId
         impl_->rebuild_entity_maps();
         auto& hub = impl_->hub;
 
@@ -354,14 +509,13 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
             if (!r.has_remaining(key_len + value_len)) break;
             /*std::string key =*/ r.read_string(key_len);
             const uint8_t* value_ptr = r.data + r.pos;
-            r.read_string(value_len); // advance past value
+            r.read_string(value_len);
 
             impl_->syncing_from_remote = true;
 
             switch (storage_id) {
             case StorageID::ST_MODEL_TRANSFORM: {
                 auto& store = hub.model_transform_storage();
-                // Resolve entity_seq → ObjectId
                 auto map_it = impl_->mt_seq_to_id.find(entity_seq);
                 if (map_it != impl_->mt_seq_to_id.end()) {
                     auto handle = store.try_acquire_write_nowait(map_it->second);
@@ -371,13 +525,35 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                 }
                 break;
             }
-            case StorageID::ST_CAMERA: {
-                auto& store = hub.camera_storage();
-                auto map_it = impl_->cam_seq_to_id.find(entity_seq);
-                if (map_it != impl_->cam_seq_to_id.end()) {
+            case StorageID::ST_MODEL_RESOURCE: {
+                auto& store = hub.model_resource_storage();
+                auto map_it = impl_->mr_seq_to_id.find(entity_seq);
+                if (map_it != impl_->mr_seq_to_id.end()) {
                     auto handle = store.try_acquire_write_nowait(map_it->second);
                     if (handle.valid()) {
-                        deserialize_cam(*handle, value_ptr, value_len);
+                        deserialize_mr(*handle, value_ptr, value_len);
+                    }
+                }
+                break;
+            }
+            case StorageID::ST_GEOMETRY: {
+                auto& store = hub.geometry_storage();
+                auto map_it = impl_->geo_seq_to_id.find(entity_seq);
+                if (map_it != impl_->geo_seq_to_id.end()) {
+                    auto handle = store.try_acquire_write_nowait(map_it->second);
+                    if (handle.valid()) {
+                        deserialize_geo(*handle, value_ptr, value_len);
+                    }
+                }
+                break;
+            }
+            case StorageID::ST_OPTICS: {
+                auto& store = hub.optics_storage();
+                auto map_it = impl_->opt_seq_to_id.find(entity_seq);
+                if (map_it != impl_->opt_seq_to_id.end()) {
+                    auto handle = store.try_acquire_write_nowait(map_it->second);
+                    if (handle.valid()) {
+                        deserialize_opt(*handle, value_ptr, value_len);
                     }
                 }
                 break;
@@ -406,7 +582,6 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
         uint32_t count = r.read_u32();
         CFW_LOG_INFO("SyncEngine: Received SYNC_FULL ({} entries) from {}",
                      count, sender_peer_id);
-        // Recurse with remaining payload (same entry format)
         handle_incoming(sender_peer_id, data + 1 + 8, len - 1 - 8);
     }
     else if (type == MessageType::HEARTBEAT) {

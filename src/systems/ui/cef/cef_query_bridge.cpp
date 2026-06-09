@@ -203,6 +203,85 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     return true;
                 }
 
+                if (func == "connect_to_peer") {
+                    // args: [ip, port, peer_name]
+                    std::string ip = args.size() > 0 ? args[0].get<std::string>() : "";
+                    uint16_t port = args.size() > 1 ? args[1].get<uint16_t>() : 27960;
+                    std::string peer_name = args.size() > 2 ? args[2].get<std::string>() : "";
+
+                    bool ok = sys->connect_to_peer(ip, port, peer_name);
+                    nlohmann::json payload;
+                    payload["ok"] = ok;
+                    callback->Success(create_success_json("connect_to_peer", payload));
+                    return true;
+                }
+
+                if (func == "set_project_root") {
+                    // args: [project_root_path]
+                    std::string root = args.size() > 0 ? args[0].get<std::string>() : "";
+                    if (!root.empty()) {
+                        sys->set_project_root(root);
+                    }
+                    nlohmann::json payload;
+                    payload["ok"] = true;
+                    callback->Success(create_success_json("set_project_root", payload));
+                    return true;
+                }
+
+                if (func == "broadcast_actor_create") {
+                    // args: [scene_name, model_path, actor_data_dict]
+                    std::string scene_name = args.size() > 0 ? args[0].get<std::string>() : "";
+                    std::string model_path = args.size() > 1 ? args[1].get<std::string>() : "";
+                    // actor_data is a dict with geometry.position/rotation/scale
+                    // Extract transform (9 floats) — default to identity
+                    float transform[9] = {0,0,0, 0,0,0, 1,1,1};
+                    if (args.size() > 2 && args[2].is_object()) {
+                        auto& ad = args[2];
+                        if (ad.contains("geometry")) {
+                            auto& geo = ad["geometry"];
+                            if (geo.contains("position") && geo["position"].is_array() && geo["position"].size() >= 3) {
+                                transform[0] = geo["position"][0].get<float>();
+                                transform[1] = geo["position"][1].get<float>();
+                                transform[2] = geo["position"][2].get<float>();
+                            }
+                            if (geo.contains("rotation") && geo["rotation"].is_array() && geo["rotation"].size() >= 3) {
+                                transform[3] = geo["rotation"][0].get<float>();
+                                transform[4] = geo["rotation"][1].get<float>();
+                                transform[5] = geo["rotation"][2].get<float>();
+                            }
+                            if (geo.contains("scale") && geo["scale"].is_array() && geo["scale"].size() >= 3) {
+                                transform[6] = geo["scale"][0].get<float>();
+                                transform[7] = geo["scale"][1].get<float>();
+                                transform[8] = geo["scale"][2].get<float>();
+                            }
+                        }
+                    }
+                    // Build default optics (all defaults)
+                    Network::ActorCreatePacked opt;
+                    std::memset(&opt, 0, sizeof(opt));
+                    opt.visible = true;
+                    opt.bEnableLighting = true;
+                    opt.metallic = 0.0f;
+                    opt.roughness = 0.5f;
+                    opt.specular = 0.5f;
+                    opt.specularTint = 0.0f;
+                    opt.sheen = 0.0f;
+                    opt.sheenTint = 0.5f;
+                    opt.clearcoat = 0.0f;
+                    opt.clearcoatGloss = 1.0f;
+                    opt.ambient[0] = 0.2f; opt.ambient[1] = 0.2f; opt.ambient[2] = 0.2f;
+                    opt.diffuse[0] = 0.8f; opt.diffuse[1] = 0.8f; opt.diffuse[2] = 0.8f;
+                    opt.specular_color[0] = 1.0f; opt.specular_color[1] = 1.0f; opt.specular_color[2] = 1.0f;
+                    opt.shininess = 32.0f;
+
+                    sys->broadcast_actor_create(scene_name, model_path, transform,
+                                                &opt, sizeof(opt));
+                    nlohmann::json payload;
+                    payload["ok"] = true;
+                    callback->Success(create_success_json("broadcast_actor_create", payload));
+                    return true;
+                }
+
                 callback->Failure(1, "Unknown Network function: " + func);
                 return true;
             }

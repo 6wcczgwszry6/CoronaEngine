@@ -34,6 +34,10 @@ struct Discovery::Impl {
     DiscoveryPacket outgoing_packet;
     OnPeerDiscovered callback;
 
+    // Own sender IP (cached after first broadcast) so we can filter
+    // out our own packets even when instance_name collision might occur.
+    uint32_t own_ip = 0;
+
     std::atomic<bool> running{false};
     std::thread broadcast_thread;
     struct sockaddr_in broadcast_addr{};
@@ -109,6 +113,20 @@ struct Discovery::Impl {
         broadcast_addr.sin_family = AF_INET;
         broadcast_addr.sin_port = htons(port);
         broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
+
+        // Cache own IP so we can filter our own echo in poll()
+        char hostname[256];
+        if (gethostname(hostname, sizeof(hostname)) == 0) {
+            struct addrinfo hints{}, *info = nullptr;
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_DGRAM;
+            hints.ai_flags = AI_PASSIVE;
+            if (getaddrinfo(hostname, nullptr, &hints, &info) == 0 && info) {
+                auto* sa = reinterpret_cast<struct sockaddr_in*>(info->ai_addr);
+                own_ip = sa->sin_addr.s_addr;
+                freeaddrinfo(info);
+            }
+        }
 
         return true;
     }
@@ -231,6 +249,12 @@ void Discovery::poll() {
         if (std::strncmp(incoming.instance_name,
                          impl_->outgoing_packet.instance_name,
                          sizeof(incoming.instance_name)) == 0) {
+            continue;
+        }
+
+        // Filter: ignore packets from our own IP (belt-and-suspenders with
+        // instance_name check above — catches edge cases like empty names).
+        if (sender_addr.sin_addr.s_addr == impl_->own_ip) {
             continue;
         }
 

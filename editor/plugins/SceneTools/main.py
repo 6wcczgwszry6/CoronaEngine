@@ -21,6 +21,18 @@ class SceneTools(PluginBase):
     def create_actor(scene_name: str, asset_path: str, actor_type: str = 'model', actor_data=None) -> dict:
         # B-1 + 模型导入修复:场景不存在时不再崩溃,
         # 改为通过 get_or_create 自动补建并返回明确错误信息,避免前端静默失败
+        return SceneTools._create_actor_impl(scene_name, asset_path, actor_type, actor_data)
+
+    @staticmethod
+    def create_actor_internal(scene_name: str, asset_path: str, actor_type: str = 'model', actor_data=None) -> dict:
+        """纯后端 Actor 创建（不发 JS 回调，避免远程同步时触发前端死循环）。
+        文件传输完成后由 C++ CEF bridge 调用此方法。"""
+        return SceneTools._create_actor_impl(scene_name, asset_path, actor_type, actor_data,
+                                             notify_frontend=False)
+
+    @staticmethod
+    def _create_actor_impl(scene_name: str, asset_path: str, actor_type: str = 'model',
+                           actor_data=None, notify_frontend: bool = True) -> dict:
         scene = scene_manager.get(scene_name)
         if scene is None:
             try:
@@ -50,6 +62,8 @@ class SceneTools(PluginBase):
                       actor_data=actor_data)
         scene.add_actor(actor)
         logger.info("Actor %s added to %s type %s", actor.name, scene_name, actor_type)
+        if notify_frontend:
+            CoronaEditor.js_call_func("import-asset-complete", actor.to_dict())
         return {"scene": scene_name, "actor": actor.to_dict()}
 
     @staticmethod

@@ -49,9 +49,12 @@ constexpr int kChannelUnreliable = 1;  // HEARTBEAT
 // Message types (single byte prefix on every packet)
 // ============================================================================
 enum class MessageType : uint8_t {
-    SYNC_DIRTY = 0x01,  // Incremental dirty sync
-    SYNC_FULL  = 0x02,  // Full state snapshot (new peer joins)
-    HEARTBEAT  = 0x03,  // Keep-alive
+    SYNC_DIRTY    = 0x01,  // Incremental dirty sync
+    SYNC_FULL     = 0x02,  // Full state snapshot (new peer joins)
+    HEARTBEAT     = 0x03,  // Keep-alive
+    ACTOR_CREATE  = 0x10,  // Actor creation event (scene_name + model_path + transform + optics)
+    FILE_REQUEST  = 0x11,  // Request model file from peer
+    FILE_CHUNK    = 0x12,  // File chunk transfer
 };
 
 // ============================================================================
@@ -67,6 +70,7 @@ enum class StorageID : uint16_t {
     ST_CAMERA          = 6,
     ST_ACTOR           = 7,
     ST_ENVIRONMENT     = 8,
+    ST_MODEL_RESOURCE  = 9,
 };
 
 // ============================================================================
@@ -251,6 +255,92 @@ inline std::vector<uint8_t> build_heartbeat(uint32_t seq) {
     buf.reserve(1 + 4);
     write_u8(buf, static_cast<uint8_t>(MessageType::HEARTBEAT));
     write_u32(buf, seq);
+    return buf;
+}
+
+// ============================================================================
+// ACTOR_CREATE message builder
+// ============================================================================
+// Wire format:
+//   [1B type] [2B scene_name_len] [scene_name] [2B model_path_len] [model_path]
+//   [36B transform (9 floats)] [72B optics (OpticsPacked)]
+// ============================================================================
+struct ActorCreatePacked {
+    float transform[9];  // pos(3) + rot(3) + scale(3)
+    // OpticsPacked — see sync_engine.cpp
+    bool visible;
+    bool bEnableLighting;
+    float metallic;
+    float roughness;
+    float subsurface;
+    float specular;
+    float specularTint;
+    float anisotropic;
+    float sheen;
+    float sheenTint;
+    float clearcoat;
+    float clearcoatGloss;
+    float ambient[3];
+    float diffuse[3];
+    float specular_color[3];
+    float shininess;
+};
+
+inline std::vector<uint8_t> build_actor_create(
+    const std::string& scene_name,
+    const std::string& model_path,
+    const float* transform,  // 9 floats
+    const void* optics_packed, size_t optics_size)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 2 + scene_name.size() + 2 + model_path.size() + 36 + optics_size);
+
+    write_u8(buf, static_cast<uint8_t>(MessageType::ACTOR_CREATE));
+    write_string(buf, scene_name);
+    write_string(buf, model_path);
+    write_bytes(buf, transform, 36);
+    write_bytes(buf, optics_packed, optics_size);
+
+    return buf;
+}
+
+// ============================================================================
+// FILE_REQUEST message builder
+// ============================================================================
+inline std::vector<uint8_t> build_file_request(const std::string& model_path) {
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 2 + model_path.size());
+    write_u8(buf, static_cast<uint8_t>(MessageType::FILE_REQUEST));
+    write_string(buf, model_path);
+    return buf;
+}
+
+// ============================================================================
+// FILE_CHUNK message builder
+// ============================================================================
+// Wire format:
+//   [1B type] [2B model_path_len] [model_path]
+//   [4B total_size] [4B chunk_index] [4B chunk_count]
+//   [4B chunk_data_len] [chunk_data]
+// ============================================================================
+inline std::vector<uint8_t> build_file_chunk(
+    const std::string& model_path,
+    uint32_t total_size,
+    uint32_t chunk_index,
+    uint32_t chunk_count,
+    const void* chunk_data, uint32_t chunk_data_len)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 2 + model_path.size() + 4 + 4 + 4 + 4 + chunk_data_len);
+
+    write_u8(buf, static_cast<uint8_t>(MessageType::FILE_CHUNK));
+    write_string(buf, model_path);
+    write_u32(buf, total_size);
+    write_u32(buf, chunk_index);
+    write_u32(buf, chunk_count);
+    write_u32(buf, chunk_data_len);
+    write_bytes(buf, chunk_data, chunk_data_len);
+
     return buf;
 }
 

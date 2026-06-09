@@ -72,7 +72,7 @@ public:
      * Applies the ID-ordering rule: only connect if local ID < remote ID.
      */
     void connect_to_peer(const std::string& ip, uint16_t port,
-                         const std::string& peer_name);
+                         const std::string& peer_name, bool force = false);
 
     /// Disconnect a specific peer by ID.
     void disconnect_peer(const std::string& peer_id);
