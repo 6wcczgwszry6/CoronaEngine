@@ -95,6 +95,14 @@ function(corona_add_example)
     corona_copy_tbb_runtime_artifacts(${CORONA_EX_NAME})
     corona_copy_runtime_files(assimp::assimp ${CORONA_EX_NAME})
 
+    # Copy FFmpeg runtime DLLs (video/audio support in corona_resource).
+    # These are IMPORTED SHARED targets reached through a PRIVATE link chain,
+    # which corona_copy_runtime_files cannot resolve; $<TARGET_RUNTIME_DLLS>
+    # (used by corona_resource_copy_runtime_dlls) handles them.
+    if(CORONA_RESOURCE_HAVE_FFMPEG AND COMMAND corona_resource_copy_runtime_dlls)
+        corona_resource_copy_runtime_dlls(${CORONA_EX_NAME})
+    endif()
+
     if(BUILD_CORONA_EDITOR)
         corona_install_corona_editor(${CORONA_EX_NAME} CoronaEngine)
     endif()

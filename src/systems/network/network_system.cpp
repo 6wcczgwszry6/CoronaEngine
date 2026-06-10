@@ -5,6 +5,9 @@
 #include <corona/systems/network/network_system.h>
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <unordered_map>
 
 namespace Corona::Systems {
 
@@ -33,6 +36,42 @@ struct NetworkSystem::Impl {
 
     // Event subscription IDs
     std::vector<Kernel::EventId> event_subscriptions;
+
+    // File transfer state
+    struct IncomingTransfer {
+        std::string model_path;
+        std::string sender_peer_id;  // isolate chunks from multi-sender
+        uint32_t total_size = 0;
+        uint32_t chunk_count = 0;
+        std::vector<bool> received_chunks;
+        std::vector<uint8_t> buffer;
+        Clock::time_point last_chunk_time;
+        bool complete = false;
+    };
+    // key = sender_peer_id + "/" + model_path (first responder wins)
+    std::unordered_map<std::string, IncomingTransfer> incoming_transfers;
+
+    // Outgoing transfer: for each model_path, cache the file data
+    // so we don't re-read on every FILE_REQUEST
+    struct CachedFileData {
+        std::vector<uint8_t> data;
+        Clock::time_point load_time;
+    };
+    std::unordered_map<std::string, CachedFileData> outgoing_cache;
+
+    // Project root for file write destination
+    std::string project_root;
+
+    // Sync pause (suppress poll_and_sync during incoming actor creation)
+    bool sync_paused = false;
+
+    // Deferred actions to execute in update() (avoid GIL in network thread)
+    struct PendingAction {
+        std::string scene_name;
+        std::string model_path;
+        Network::ActorCreatePacked actor_packed;
+    };
+    std::vector<PendingAction> pending_actor_creates;
 };
 
 // ============================================================================
@@ -60,7 +99,18 @@ bool NetworkSystem::initialize(Kernel::ISystemContext* ctx) {
     // Wire up PeerManager → SyncEngine inbound path
     impl_->peer_manager.set_on_data_received(
         [this](const std::string& peer_id, const uint8_t* data, size_t len) {
-            on_data_received(peer_id, data, len);
+            // Route: SYNC_DIRTY/SYNC_FULL/HEARTBEAT → sync engine
+            //         ACTOR_CREATE/FILE_REQUEST/FILE_CHUNK → custom handler
+            if (len >= 1) {
+                using Network::MessageType;
+                auto mt = static_cast<MessageType>(data[0]);
+                if (mt == MessageType::SYNC_DIRTY || mt == MessageType::SYNC_FULL ||
+                    mt == MessageType::HEARTBEAT) {
+                    on_data_received(peer_id, data, len);
+                } else {
+                    on_custom_message(peer_id, data, len);
+                }
+            }
         });
 
     // Wire up PeerManager connect/disconnect → events
@@ -98,8 +148,9 @@ void NetworkSystem::update() {
         impl_->last_discovery_poll = now;
     }
 
-    // Sync engine tick (~60 Hz)
-    if (now - impl_->last_sync_time >=
+    // Sync engine tick (~60 Hz) — paused during remote actor creation
+    // to ensure both peers build identical storage layouts (seq_id alignment).
+    if (!impl_->sync_paused && now - impl_->last_sync_time >=
         std::chrono::milliseconds(Network::kSyncIntervalMs)) {
         impl_->sync_engine.poll_and_sync();
         impl_->last_sync_time = now;
@@ -149,10 +200,20 @@ bool NetworkSystem::start_session(const std::string& instance_name,
     impl_->sync_engine.initialize(impl_->peer_manager.local_peer_id());
 
     // 3. Discovery (use port + 1 to avoid bind conflict with ENet)
-    if (!impl_->discovery.start(port + Network::kDiscoveryPortOffset, instance_name, project_id)) {
+    // If Discovery fails (port already in use by another instance), retry
+    // with port+2, port+3 (same-machine multi-instance).
+    uint16_t disc_port = port + Network::kDiscoveryPortOffset;
+    bool disc_ok = impl_->discovery.start(disc_port, instance_name, project_id);
+    for (int retry = 1; !disc_ok && retry <= 2; ++retry) {
+        disc_port = port + Network::kDiscoveryPortOffset + static_cast<uint16_t>(retry);
+        CFW_LOG_WARNING("NetworkSystem: Discovery port {} in use, retrying on {}",
+                         port + Network::kDiscoveryPortOffset, disc_port);
+        disc_ok = impl_->discovery.start(disc_port, instance_name, project_id);
+    }
+    if (!disc_ok) {
         impl_->peer_manager.stop();
         impl_->session_state = SessionState::Error;
-        CFW_LOG_ERROR("NetworkSystem: Failed to start Discovery");
+        CFW_LOG_ERROR("NetworkSystem: Failed to start Discovery on any port");
         return false;
     }
 
@@ -200,6 +261,58 @@ size_t NetworkSystem::peer_count() const {
     return impl_->peer_manager.peer_count();
 }
 
+bool NetworkSystem::connect_to_peer(const std::string& ip, uint16_t port,
+                                    const std::string& peer_name) {
+    if (impl_->session_state != SessionState::Active) {
+        CFW_LOG_WARNING("NetworkSystem: Cannot connect — session not active");
+        return false;
+    }
+    impl_->peer_manager.connect_to_peer(ip, port, peer_name, /*force=*/true);
+    return true;
+}
+
+void NetworkSystem::broadcast_actor_create(const std::string& scene_name,
+                                           const std::string& model_path,
+                                           const float* transform,
+                                           const void* optics_packed, size_t optics_size) {
+    if (impl_->session_state != SessionState::Active) return;
+    if (impl_->peer_manager.peer_count() == 0) {
+        CFW_LOG_DEBUG("NetworkSystem: No peers — skipping actor create broadcast");
+        return;
+    }
+    auto pkt = Network::build_actor_create(scene_name, model_path, transform,
+                                           optics_packed, optics_size);
+    impl_->peer_manager.broadcast(Network::kChannelReliable, pkt.data(), pkt.size(), true);
+    CFW_LOG_INFO("NetworkSystem: Broadcast actor create — scene='{}' model='{}'",
+                 scene_name, model_path);
+}
+
+bool NetworkSystem::has_pending_transfers() const {
+    return !impl_->pending_actor_creates.empty();
+}
+
+void NetworkSystem::set_sync_paused(bool paused) {
+    impl_->sync_paused = paused;
+}
+
+bool NetworkSystem::pop_pending_actor_create(std::string& scene_name,
+                                              std::string& model_path,
+                                              void* actor_packed_out, size_t packed_size) {
+    if (impl_->pending_actor_creates.empty()) return false;
+    auto& pa = impl_->pending_actor_creates.front();
+    scene_name = pa.scene_name;
+    model_path = pa.model_path;
+    if (actor_packed_out && packed_size <= sizeof(Network::ActorCreatePacked)) {
+        std::memcpy(actor_packed_out, &pa.actor_packed, packed_size);
+    }
+    impl_->pending_actor_creates.erase(impl_->pending_actor_creates.begin());
+    return true;
+}
+
+void NetworkSystem::set_project_root(const std::string& project_root) {
+    impl_->project_root = project_root;
+}
+
 // ============================================================================
 // Callbacks
 // ============================================================================
@@ -207,7 +320,6 @@ size_t NetworkSystem::peer_count() const {
 void NetworkSystem::on_peer_discovered(const std::string& ip,
                                        const std::string& name,
                                        uint64_t /*project_id*/) {
-    CFW_LOG_DEBUG("NetworkSystem: Discovered peer {} at {}", name, ip);
     impl_->peer_manager.connect_to_peer(ip, impl_->port, name);
 }
 
@@ -237,6 +349,179 @@ void NetworkSystem::on_data_received(const std::string& peer_id,
         Events::RemoteSyncReceivedEvent ev{peer_id};
         impl_->ctx->event_bus()->publish(ev);
     }
+}
+
+void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
+                                        const uint8_t* data, size_t len) {
+    if (len < 1) return;
+    using Network::MessageType;
+    auto mt = static_cast<MessageType>(data[0]);
+
+    if (mt == MessageType::ACTOR_CREATE) {
+        Network::BufferReader r(data + 1, len - 1);
+        uint16_t sn_len = r.read_u16();
+        std::string scene_name = r.read_string(sn_len);
+        uint16_t mp_len = r.read_u16();
+        std::string model_path = r.read_string(mp_len);
+
+        if (r.has_remaining(36 + sizeof(Network::ActorCreatePacked))) {
+            const float* transform = reinterpret_cast<const float*>(r.data + r.pos);
+            r.pos += 36;
+            const auto* opt_packed = reinterpret_cast<const Network::ActorCreatePacked*>(r.data + r.pos);
+
+            CFW_LOG_INFO("NetworkSystem: Received ACTOR_CREATE from {} — scene='{}' model='{}'",
+                         sender_peer_id, scene_name, model_path);
+
+            // Check if local file exists
+            namespace fs = std::filesystem;
+            fs::path full_path = fs::path(impl_->project_root) / model_path;
+            if (fs::exists(full_path) && fs::is_regular_file(full_path)) {
+                // File exists — queue actor creation
+                Impl::PendingAction pa;
+                pa.scene_name = scene_name;
+                pa.model_path = model_path;
+                pa.actor_packed = *opt_packed;
+                impl_->pending_actor_creates.push_back(pa);
+            } else {
+                // File missing — request from peer
+                auto pkt = Network::build_file_request(model_path);
+                impl_->peer_manager.broadcast(Network::kChannelReliable,
+                                              pkt.data(), pkt.size(), true);
+            }
+        }
+    } else if (mt == MessageType::FILE_REQUEST) {
+        handle_file_request(sender_peer_id, data, len);
+    } else if (mt == MessageType::FILE_CHUNK) {
+        handle_file_chunk(sender_peer_id, data, len);
+    }
+}
+
+void NetworkSystem::handle_file_request(const std::string& sender_peer_id,
+                                        const uint8_t* data, size_t len) {
+    if (len < 3) return;
+    Network::BufferReader r(data + 1, len - 1);
+    uint16_t mp_len = r.read_u16();
+    if (!r.has_remaining(mp_len)) return;
+    std::string model_path = r.read_string(mp_len);
+
+    namespace fs = std::filesystem;
+    fs::path full_path = fs::path(impl_->project_root) / model_path;
+
+    auto& cache = impl_->outgoing_cache[model_path];
+    if (cache.data.empty()) {
+        std::ifstream file(full_path, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            CFW_LOG_ERROR("NetworkSystem: Cannot open file '{}' for FILE_REQUEST", full_path.string());
+            impl_->outgoing_cache.erase(model_path);
+            return;
+        }
+        cache.data.resize(static_cast<size_t>(file.tellg()));
+        file.seekg(0);
+        file.read(reinterpret_cast<char*>(cache.data.data()), cache.data.size());
+        cache.load_time = Impl::Clock::now();
+    }
+
+    if (cache.data.empty()) return;
+
+    constexpr uint32_t kChunkSize = 512 * 1024; // 512KB
+    uint32_t total_size = static_cast<uint32_t>(cache.data.size());
+    uint32_t chunk_count = (total_size + kChunkSize - 1) / kChunkSize;
+
+    // Find sender's peer
+    const auto* peer_info = impl_->peer_manager.find_peer(sender_peer_id);
+    if (!peer_info || !peer_info->peer) {
+        CFW_LOG_ERROR("NetworkSystem: Cannot find peer {} for FILE_CHUNK send", sender_peer_id);
+        return;
+    }
+
+    for (uint32_t i = 0; i < chunk_count; ++i) {
+        uint32_t offset = i * kChunkSize;
+        uint32_t chunk_len = std::min(kChunkSize, total_size - offset);
+
+        auto pkt = Network::build_file_chunk(
+            model_path, total_size, i, chunk_count,
+            cache.data.data() + offset, chunk_len);
+
+        impl_->peer_manager.send_to(peer_info->peer, Network::kChannelReliable,
+                                    pkt.data(), pkt.size(), true);
+    }
+}
+
+void NetworkSystem::handle_file_chunk(const std::string& sender_peer_id,
+                                      const uint8_t* data, size_t len) {
+    if (len < 1 + 2) return;
+    Network::BufferReader r(data + 1, len - 1);
+
+    uint16_t mp_len = r.read_u16();
+    if (!r.has_remaining(mp_len)) return;
+    std::string model_path = r.read_string(mp_len);
+
+    if (!r.has_remaining(4 + 4 + 4 + 4)) return;
+    uint32_t total_size = r.read_u32();
+    uint32_t chunk_index = r.read_u32();
+    uint32_t chunk_count = r.read_u32();
+    uint32_t chunk_data_len = r.read_u32();
+
+    if (!r.has_remaining(chunk_data_len)) return;
+    const uint8_t* chunk_data = r.data + r.pos;
+
+    // Get or create transfer state — isolate by sender+path to prevent
+    // chunk interleaving when multiple peers respond to one FILE_REQUEST.
+    std::string tx_key = sender_peer_id + "/" + model_path;
+    auto& tx = impl_->incoming_transfers[tx_key];
+    if (tx.model_path.empty()) {
+        tx.model_path = model_path;
+        tx.sender_peer_id = sender_peer_id;
+        tx.total_size = total_size;
+        tx.chunk_count = chunk_count;
+        tx.received_chunks.resize(chunk_count, false);
+        tx.buffer.resize(total_size);
+        tx.last_chunk_time = Impl::Clock::now();
+    }
+
+    // Write chunk into buffer
+    uint32_t offset = chunk_index * 512 * 1024;
+    if (offset + chunk_data_len <= total_size) {
+        std::memcpy(tx.buffer.data() + offset, chunk_data, chunk_data_len);
+        tx.received_chunks[chunk_index] = true;
+        tx.last_chunk_time = Impl::Clock::now();
+    }
+
+    // Check if all chunks received
+    bool all_received = true;
+    for (bool rcvd : tx.received_chunks) {
+        if (!rcvd) { all_received = false; break; }
+    }
+
+    if (!all_received) {
+        return;
+    }
+
+    // All chunks received — write to disk
+    namespace fs = std::filesystem;
+    fs::path dest = fs::path(impl_->project_root) / model_path;
+    std::error_code ec;
+    fs::create_directories(dest.parent_path(), ec);
+
+    std::ofstream out(dest, std::ios::binary);
+    if (out.is_open()) {
+        out.write(reinterpret_cast<const char*>(tx.buffer.data()), total_size);
+        out.close();
+    } else {
+        CFW_LOG_ERROR("NetworkSystem: Failed to write file '{}'", dest.string());
+        impl_->incoming_transfers.erase(model_path);
+        return;
+    }
+
+    impl_->incoming_transfers.erase(tx_key);
+
+    // Re-broadcast FILE_REQUEST to request ACTOR_CREATE re-send.
+    // The peer that originally sent ACTOR_CREATE will re-send it, and
+    // this time the file exists locally, so the handler will push a
+    // PendingAction which the frontend will poll and create the actor.
+    auto pkt = Network::build_file_request(model_path);
+    impl_->peer_manager.broadcast(Network::kChannelReliable,
+                                  pkt.data(), pkt.size(), true);
 }
 
 }  // namespace Corona::Systems

@@ -1,6 +1,7 @@
 #include "browser_manager.h"
 #include "cef_client.h"
 
+#include <corona/events/acoustics_system_events.h>
 #include <corona/kernel/core/kernel_context.h>
 #include <corona/systems/network/network_system.h>
 
@@ -102,6 +103,61 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
     CEF_REQUIRE_UI_THREAD();
     std::string req = request.ToString();
 
+    // ── SceneTools.play_audio / stop_audio：C++ 快速通道，不走 Python ──
+    // 前端 Bridge.callCEF(\"SceneTools\", \"play_audio\", [rid, loop]) 直接在此处理，
+    // 避免持有 GIL 阻塞 Python 线程。
+    if (req.find("\"SceneTools\"") != std::string::npos) {
+        try {
+            auto j = nlohmann::json::parse(req);
+            if (j.value("module", "") == "SceneTools") {
+                std::string func = j.value("function", "");
+                auto args = j.value("args", nlohmann::json::array());
+
+                if (func == "play_audio" || func == "stop_audio") {
+                    auto* event_bus = Corona::Kernel::KernelContext::instance().event_bus();
+                    if (!event_bus) {
+                        callback->Failure(2, "event_bus unavailable");
+                        return true;
+                    }
+
+                    // resource_id 以字符串传递（JS number 无法精确表示 64 位整数）。
+                    // 兼容字符串和数字两种 JSON 形态。
+                    uint64_t rid = 0;
+                    if (args.size() > 0) {
+                        if (args[0].is_string()) {
+                            try {
+                                rid = std::stoull(args[0].get<std::string>());
+                            } catch (...) {
+                                rid = 0;
+                            }
+                        } else if (args[0].is_number_unsigned()) {
+                            rid = args[0].get<uint64_t>();
+                        }
+                    }
+                    if (rid == 0) {
+                        callback->Failure(2, "invalid resource_id");
+                        return true;
+                    }
+
+                    if (func == "play_audio") {
+                        bool loop = args.size() > 1 ? args[1].get<bool>() : false;
+                        event_bus->publish<::Corona::Events::PlayAudioEvent>({rid, loop});
+                    } else {
+                        event_bus->publish<::Corona::Events::StopAudioEvent>({rid});
+                    }
+
+                    nlohmann::json payload;
+                    payload["ok"] = true;
+                    callback->Success(create_success_json(func, payload));
+                    return true;
+                }
+            }
+        } catch (...) {
+            callback->Failure(2, "SceneTools fast path error");
+            return true;
+        }
+    }
+
     // ── Network 模块：C++ 直接处理，不走 Python ──
     // LAN 协同编辑的 start/stop/peer_count 全部由 C++ 直接响应，避免高频
     // get_peer_count 轮询在持有 GIL 时阻塞 SystemManager 锁导致的关闭死锁。
@@ -144,6 +200,126 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     payload["ok"] = true;
                     payload["peer_count"] = static_cast<int>(sys->peer_count());
                     callback->Success(create_success_json("get_peer_count", payload));
+                    return true;
+                }
+
+                if (func == "connect_to_peer") {
+                    // args: [ip, port, peer_name]
+                    std::string ip = args.size() > 0 ? args[0].get<std::string>() : "";
+                    uint16_t port = args.size() > 1 ? args[1].get<uint16_t>() : 27960;
+                    std::string peer_name = args.size() > 2 ? args[2].get<std::string>() : "";
+
+                    bool ok = sys->connect_to_peer(ip, port, peer_name);
+                    nlohmann::json payload;
+                    payload["ok"] = ok;
+                    callback->Success(create_success_json("connect_to_peer", payload));
+                    return true;
+                }
+
+                if (func == "set_project_root") {
+                    // args: [project_root_path]
+                    std::string root = args.size() > 0 ? args[0].get<std::string>() : "";
+                    if (!root.empty()) {
+                        sys->set_project_root(root);
+                    }
+                    nlohmann::json payload;
+                    payload["ok"] = true;
+                    callback->Success(create_success_json("set_project_root", payload));
+                    return true;
+                }
+
+                if (func == "poll_pending_actor_create") {
+                    // Called by frontend every ~500ms when session is active.
+                    // Returns the next pending actor create entry, so Python
+                    // can call SceneTools.create_actor_internal.
+                    nlohmann::json payload;
+                    std::string scene_name, model_path;
+                    Network::ActorCreatePacked packed;
+                    if (sys->pop_pending_actor_create(scene_name, model_path,
+                                                       &packed, sizeof(packed))) {
+                        payload["has_pending"] = true;
+                        payload["scene_name"] = scene_name;
+                        payload["model_path"] = model_path;
+                        // Convert transform (9 floats) and optics for Python
+                        nlohmann::json actor_data;
+                        actor_data["geometry"]["position"] = {
+                            packed.transform[0], packed.transform[1], packed.transform[2]
+                        };
+                        actor_data["geometry"]["rotation"] = {
+                            packed.transform[3], packed.transform[4], packed.transform[5]
+                        };
+                        actor_data["geometry"]["scale"] = {
+                            packed.transform[6], packed.transform[7], packed.transform[8]
+                        };
+                        payload["actor_data"] = actor_data;
+                    } else {
+                        payload["has_pending"] = false;
+                    }
+                    payload["ok"] = true;
+                    callback->Success(create_success_json("poll_pending_actor_create", payload));
+                    return true;
+                }
+
+                if (func == "set_sync_paused") {
+                    bool paused = args.size() > 0 ? args[0].get<bool>() : false;
+                    sys->set_sync_paused(paused);
+                    nlohmann::json payload;
+                    payload["ok"] = true;
+                    callback->Success(create_success_json("set_sync_paused", payload));
+                    return true;
+                }
+
+                if (func == "broadcast_actor_create") {
+                    // args: [scene_name, model_path, actor_data_dict]
+                    std::string scene_name = args.size() > 0 ? args[0].get<std::string>() : "";
+                    std::string model_path = args.size() > 1 ? args[1].get<std::string>() : "";
+                    // actor_data is a dict with geometry.position/rotation/scale
+                    // Extract transform (9 floats) — default to identity
+                    float transform[9] = {0,0,0, 0,0,0, 1,1,1};
+                    if (args.size() > 2 && args[2].is_object()) {
+                        auto& ad = args[2];
+                        if (ad.contains("geometry")) {
+                            auto& geo = ad["geometry"];
+                            if (geo.contains("position") && geo["position"].is_array() && geo["position"].size() >= 3) {
+                                transform[0] = geo["position"][0].get<float>();
+                                transform[1] = geo["position"][1].get<float>();
+                                transform[2] = geo["position"][2].get<float>();
+                            }
+                            if (geo.contains("rotation") && geo["rotation"].is_array() && geo["rotation"].size() >= 3) {
+                                transform[3] = geo["rotation"][0].get<float>();
+                                transform[4] = geo["rotation"][1].get<float>();
+                                transform[5] = geo["rotation"][2].get<float>();
+                            }
+                            if (geo.contains("scale") && geo["scale"].is_array() && geo["scale"].size() >= 3) {
+                                transform[6] = geo["scale"][0].get<float>();
+                                transform[7] = geo["scale"][1].get<float>();
+                                transform[8] = geo["scale"][2].get<float>();
+                            }
+                        }
+                    }
+                    // Build default optics (all defaults)
+                    Network::ActorCreatePacked opt;
+                    std::memset(&opt, 0, sizeof(opt));
+                    opt.visible = true;
+                    opt.bEnableLighting = true;
+                    opt.metallic = 0.0f;
+                    opt.roughness = 0.5f;
+                    opt.specular = 0.5f;
+                    opt.specularTint = 0.0f;
+                    opt.sheen = 0.0f;
+                    opt.sheenTint = 0.5f;
+                    opt.clearcoat = 0.0f;
+                    opt.clearcoatGloss = 1.0f;
+                    opt.ambient[0] = 0.2f; opt.ambient[1] = 0.2f; opt.ambient[2] = 0.2f;
+                    opt.diffuse[0] = 0.8f; opt.diffuse[1] = 0.8f; opt.diffuse[2] = 0.8f;
+                    opt.specular_color[0] = 1.0f; opt.specular_color[1] = 1.0f; opt.specular_color[2] = 1.0f;
+                    opt.shininess = 32.0f;
+
+                    sys->broadcast_actor_create(scene_name, model_path, transform,
+                                                &opt, sizeof(opt));
+                    nlohmann::json payload;
+                    payload["ok"] = true;
+                    callback->Success(create_success_json("broadcast_actor_create", payload));
                     return true;
                 }
 

@@ -471,6 +471,20 @@ class Scene:
 # ================================
 # Facade（保持与旧加载器兼容）
 # ================================
+class MediaInfo:
+    """Fallback MediaInfo：与 C++ 绑定的 MediaInfo 字段对齐。"""
+    def __init__(self):
+        self.resource_id = 0
+        self.media_type = ""
+        self.duration_seconds = 0.0
+        self.codec = ""
+        self.width = 0
+        self.height = 0
+        self.fps = 0.0
+        self.sample_rate = 0
+        self.channels = 0
+
+
 class CoronaEngine:
     Geometry = Geometry
     Mechanics = Mechanics
@@ -483,3 +497,20 @@ class CoronaEngine:
     ImageEffects = ImageEffects
     Environment = Environment
     Scene = Scene
+    MediaInfo = MediaInfo
+
+    @staticmethod
+    def import_media(path):
+        _log(f"[Fallback][import_media] path={path}")
+        # 无引擎后端时返回空 MediaInfo（resource_id=0 / media_type=''），上层据此报错
+        return MediaInfo()
+
+    @staticmethod
+    def play_audio(resource_id, loop=False):
+        _log(f"[Fallback][play_audio] rid={resource_id} loop={loop}")
+        # 无引擎后端时无声，不报错
+
+    @staticmethod
+    def stop_audio(resource_id):
+        _log(f"[Fallback][stop_audio] rid={resource_id}")
+

@@ -35,7 +35,6 @@ class FileHandler:
         """
         import logging
         logger = logging.getLogger(__name__)
-        logger.info(f"[FileHandler.open_file] Called with caption={caption}, default_dir={default_dir}")
 
         if default_dir is None:
             default_dir = os.getcwd()
@@ -47,11 +46,9 @@ class FileHandler:
             file_types = FileHandler._parse_file_types(file_types)
 
         # 初始化tkinter
-        logger.info(f"[FileHandler.open_file] Initializing tkinter...")
         root = FileHandler.init_tkinter()
 
         try:
-            logger.info(f"[FileHandler.open_file] Showing file dialog...")
             # 显示文件对话框
             file_path = filedialog.askopenfilename(
                 title=caption,
@@ -59,10 +56,8 @@ class FileHandler:
                 filetypes=file_types,
                 parent=root
             )
-            logger.info(f"[FileHandler.open_file] Dialog returned: {file_path}")
         finally:
             root.destroy()  # 确保窗口被销毁
-            logger.info(f"[FileHandler.open_file] Tkinter destroyed")
 
         if not file_path:
             return None, None

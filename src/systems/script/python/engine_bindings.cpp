@@ -82,6 +82,16 @@ void BindAll(nanobind::module_& m) {
              "Enable or disable collision detection for this object")
         .def("get_collision_enabled", &Mechanics::get_collision_enabled,
              "Get whether collision detection is enabled for this object")
+        .def("set_linear_lock", &Mechanics::set_linear_lock,
+             nb::arg("lock_x"), nb::arg("lock_y"), nb::arg("lock_z"),
+             "Lock/unlock linear movement on X/Y/Z axes")
+        .def("get_linear_lock", &Mechanics::get_linear_lock,
+             "Get linear axis lock state as (lock_x, lock_y, lock_z) tuple")
+        .def("set_angular_lock", &Mechanics::set_angular_lock,
+             nb::arg("lock_x"), nb::arg("lock_y"), nb::arg("lock_z"),
+             "Lock/unlock angular rotation on X/Y/Z axes")
+        .def("get_angular_lock", &Mechanics::get_angular_lock,
+             "Get angular axis lock state as (lock_x, lock_y, lock_z) tuple")
         .def("set_collision_callback",
              [](Mechanics& self, nb::object callback) {
                  using CallbackType = std::function<void(std::uintptr_t, bool, const std::array<float, 3>&, const std::array<float, 3>&)>;
@@ -397,6 +407,29 @@ void BindAll(nanobind::module_& m) {
           "Request a render backend switch. mode: 'native' or 'vision'. Only effective when Vision is available.");
     m.def("get_render_backend", &get_render_backend,
           "Get the currently requested render backend as 'native' or 'vision'");
+
+    // ============================================================================
+    // Media (video/audio) import — standalone resources, not 3D actors
+    // ============================================================================
+    nb::class_<MediaInfo>(m, "MediaInfo")
+        .def_ro("resource_id", &MediaInfo::resource_id, "Resource ID (0 means import failed)")
+        .def_ro("media_type", &MediaInfo::media_type, "'video' / 'audio' / '' (failed)")
+        .def_ro("duration_seconds", &MediaInfo::duration_seconds, "Duration in seconds")
+        .def_ro("codec", &MediaInfo::codec, "Codec name")
+        .def_ro("width", &MediaInfo::width, "Video width in pixels")
+        .def_ro("height", &MediaInfo::height, "Video height in pixels")
+        .def_ro("fps", &MediaInfo::fps, "Video frames per second")
+        .def_ro("sample_rate", &MediaInfo::sample_rate, "Audio sample rate in Hz")
+        .def_ro("channels", &MediaInfo::channels, "Audio channel count");
+
+    m.def("import_media", &import_media, nb::arg("path"),
+          "Import an audio or video file as a standalone resource. "
+          "Returns a MediaInfo (resource_id is 0 / media_type is '' on failure).");
+
+    m.def("play_audio", &play_audio, nb::arg("resource_id"), nb::arg("loop") = false,
+          "Play an imported audio resource. Pass the resource_id from MediaInfo.");
+    m.def("stop_audio", &stop_audio, nb::arg("resource_id"),
+          "Stop playing an audio resource.");
 
     // ============================================================================
     // Engine lifecycle

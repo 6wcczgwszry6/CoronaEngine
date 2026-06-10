@@ -34,7 +34,7 @@ class CoronaEditor:
             module_name = request.get('module', None)
             func_name = request.get('function', None)
             args = request.get('args', [])
-            log_level = logging.DEBUG if func_name in _NOISY_FUNCTIONS else logging.INFO
+            log_level = logging.DEBUG  # 全量降为 DEBUG，默认静默
             logger.log(log_level, f"func_name: {func_name} module_name: {module_name} args: {args}")
             if not module_name or not func_name:
                 return create_error_response(f"Please input module and function")
@@ -132,7 +132,7 @@ class CoronaEditor:
             cls._camera_follow_actor = None
             cls._camera_follow_scene = None
             cls._held_keys.clear()
-            logger.info("Camera follow disabled")
+            logger.debug("Camera follow disabled")
             return {"ok": True}
         scene_name = cls._selected_scene
         actor_name = cls._selected_actor
@@ -219,11 +219,11 @@ class CoronaEditor:
         cls._follow_frame_count += 1
         if not cls._follow_logged_init:
             cls._follow_logged_init = True
-            logger.info("[CAMFOLLOW] _update_camera_follow is being called")
+            logger.debug("[CAMFOLLOW] _update_camera_follow is being called")
         if not cls._camera_follow_actor:
             return
         if cls._follow_frame_count % 60 == 0:
-            logger.info("[CAMFOLLOW] actor=%s held_keys=%s offset=%s", cls._camera_follow_actor, cls._held_keys, cls._camera_follow_offset)
+            logger.debug("[CAMFOLLOW] actor=%s held_keys=%s offset=%s", cls._camera_follow_actor, cls._held_keys, cls._camera_follow_offset)
         try:
             from CoronaCore.core.managers import scene_manager
             actor = None
@@ -278,7 +278,7 @@ class CoronaEditor:
                 if d_down: move[0] += right_xz[0] * step; move[2] += right_xz[2] * step
                 obj_pos = [obj_pos[0] + move[0], obj_pos[1] + move[1], obj_pos[2] + move[2]]
                 actor.set_position(obj_pos, if_init=True)
-                logger.info("[CAMFOLLOW] WASD move to %s", obj_pos)
+                logger.debug("[CAMFOLLOW] WASD move to %s", obj_pos)
 
             # 鼠标右键拖动物体
             rmb_down = False
@@ -321,7 +321,7 @@ class CoronaEditor:
                                 move[2] += fwd_xz[2] * (-dy) * rmb_speed
                             obj_pos = [obj_pos[0] + move[0], obj_pos[1] + move[1], obj_pos[2] + move[2]]
                             actor.set_position(obj_pos, if_init=True)
-                            logger.info("[CAMFOLLOW] RMB move to %s", obj_pos)
+                            logger.debug("[CAMFOLLOW] RMB move to %s", obj_pos)
             else:
                 cls._follow_rmb_down = False
                 cls._follow_prev_mouse = None
@@ -378,7 +378,7 @@ class CoronaEditor:
                         scene = scene_manager.get(scenes[0])
                         if scene:
                             cls.scripts_mgr.initialize_project(project_script, scene)
-                            logger.info(f"ScriptsManager: 懒初始化完成，场景={scene.name}")
+                            logger.debug("ScriptsManager: 懒初始化完成，场景=%s", scene.name)
                         cls._scripts_initialized = True
             except Exception:
                 pass
