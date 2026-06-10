@@ -235,40 +235,30 @@ bool Engine::register_systems() {
     // 注册核心系统（按优先级自动排序）
     // Geometry(85) > Mechanics(75)：八叉树在同帧物理前重建，query_pairs() 时序正确
 
-    CFW_LOG_INFO("Registering core systems...");
-
     // Display System - 最高优先级
     sys_mgr->register_system(std::make_shared<Systems::DisplaySystem>());
-    CFW_LOG_INFO("  - DisplaySystem registered (priority 100)");
 
     // Optics System (光学系统)
     sys_mgr->register_system(std::make_shared<Systems::OpticsSystem>());
-    CFW_LOG_INFO("  - OpticsSystem registered (priority 90)");
 
     // Geometry System (几何 + 八叉树宿主，原 SceneSystem 职责已并入)
     sys_mgr->register_system(std::make_shared<Systems::GeometrySystem>());
-    CFW_LOG_INFO("  - GeometrySystem registered (priority 85, octree host)");
 
     // Mechanics System (力学系统)
     sys_mgr->register_system(std::make_shared<Systems::MechanicsSystem>());
-    CFW_LOG_INFO("  - MechanicsSystem registered (priority 75)");
 
     // Acoustics System (声学系统)
     sys_mgr->register_system(std::make_shared<Systems::AcousticsSystem>());
-    CFW_LOG_INFO("  - AcousticsSystem registered (priority 70)");
 
     sys_mgr->register_system(std::make_shared<Systems::ScriptSystem>());
-    CFW_LOG_INFO("  - ScriptSystem registered (priority 60)");
 
     // Network System (ENet LAN collaborative editing)
     sys_mgr->register_system(std::make_shared<Systems::NetworkSystem>());
-    CFW_LOG_INFO("  - NetworkSystem registered (priority 55)");
 
     // ImguiSystem - 运行在主线程
     auto imgui_system = std::make_shared<Systems::ImguiSystem>();
     g_imgui_system_ = imgui_system.get();  // 保存指针用于主循环
     sys_mgr->register_system(imgui_system);
-    CFW_LOG_INFO("  - ImguiSystem registered (priority 40, main thread mode)");
 
     CFW_LOG_NOTICE("All core systems registered successfully");
 

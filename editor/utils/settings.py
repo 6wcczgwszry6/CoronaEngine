@@ -193,7 +193,7 @@ class CoronaSettings:
         try:
             with open(ini_path, 'w', encoding='utf-8') as f:
                 self.active_project_config.write(f)
-            logger.info(f"项目配置保存成功: {ini_path}")
+            logger.debug("项目配置保存成功: %s", ini_path)
             return True
         except Exception as e:
             logger.error(f"保存项目配置文件失败: {e}")

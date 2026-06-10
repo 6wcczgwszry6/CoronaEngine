@@ -293,11 +293,6 @@ bool NetworkSystem::has_pending_transfers() const {
 
 void NetworkSystem::set_sync_paused(bool paused) {
     impl_->sync_paused = paused;
-    if (paused) {
-        CFW_LOG_DEBUG("NetworkSystem: Sync paused (actor creation in progress)");
-    } else {
-        CFW_LOG_DEBUG("NetworkSystem: Sync resumed");
-    }
 }
 
 bool NetworkSystem::pop_pending_actor_create(std::string& scene_name,
@@ -316,7 +311,6 @@ bool NetworkSystem::pop_pending_actor_create(std::string& scene_name,
 
 void NetworkSystem::set_project_root(const std::string& project_root) {
     impl_->project_root = project_root;
-    CFW_LOG_INFO("NetworkSystem: Project root set to '{}'", project_root);
 }
 
 // ============================================================================
@@ -326,7 +320,6 @@ void NetworkSystem::set_project_root(const std::string& project_root) {
 void NetworkSystem::on_peer_discovered(const std::string& ip,
                                        const std::string& name,
                                        uint64_t /*project_id*/) {
-    CFW_LOG_DEBUG("NetworkSystem: Discovered peer {} at {}", name, ip);
     impl_->peer_manager.connect_to_peer(ip, impl_->port, name);
 }
 
@@ -389,14 +382,11 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
                 pa.model_path = model_path;
                 pa.actor_packed = *opt_packed;
                 impl_->pending_actor_creates.push_back(pa);
-                CFW_LOG_INFO("NetworkSystem: Model file exists locally — queue actor creation");
             } else {
                 // File missing — request from peer
                 auto pkt = Network::build_file_request(model_path);
                 impl_->peer_manager.broadcast(Network::kChannelReliable,
                                               pkt.data(), pkt.size(), true);
-                CFW_LOG_INFO("NetworkSystem: Model file not found — sent FILE_REQUEST for '{}'",
-                             model_path);
             }
         }
     } else if (mt == MessageType::FILE_REQUEST) {
@@ -417,12 +407,8 @@ void NetworkSystem::handle_file_request(const std::string& sender_peer_id,
     namespace fs = std::filesystem;
     fs::path full_path = fs::path(impl_->project_root) / model_path;
 
-    CFW_LOG_INFO("NetworkSystem: FILE_REQUEST for '{}' — reading from disk", model_path);
-
-    // Check cache first
     auto& cache = impl_->outgoing_cache[model_path];
     if (cache.data.empty()) {
-        // Load file from disk
         std::ifstream file(full_path, std::ios::binary | std::ios::ate);
         if (!file.is_open()) {
             CFW_LOG_ERROR("NetworkSystem: Cannot open file '{}' for FILE_REQUEST", full_path.string());
@@ -447,9 +433,6 @@ void NetworkSystem::handle_file_request(const std::string& sender_peer_id,
         CFW_LOG_ERROR("NetworkSystem: Cannot find peer {} for FILE_CHUNK send", sender_peer_id);
         return;
     }
-
-    CFW_LOG_INFO("NetworkSystem: Sending {} chunks ({} bytes) of '{}' to {}",
-                 chunk_count, total_size, model_path, sender_peer_id);
 
     for (uint32_t i = 0; i < chunk_count; ++i) {
         uint32_t offset = i * kChunkSize;
@@ -511,11 +494,6 @@ void NetworkSystem::handle_file_chunk(const std::string& sender_peer_id,
     }
 
     if (!all_received) {
-        float pct = 0;
-        for (bool rcvd : tx.received_chunks) { if (rcvd) pct += 1.0f; }
-        pct = pct / tx.chunk_count * 100.0f;
-        CFW_LOG_DEBUG("NetworkSystem: File '{}' chunk {}/{} ({:.0f}%) from {}",
-                      model_path, chunk_index + 1, chunk_count, pct, sender_peer_id);
         return;
     }
 
@@ -529,8 +507,6 @@ void NetworkSystem::handle_file_chunk(const std::string& sender_peer_id,
     if (out.is_open()) {
         out.write(reinterpret_cast<const char*>(tx.buffer.data()), total_size);
         out.close();
-        CFW_LOG_INFO("NetworkSystem: File '{}' ({:.1f} KB) written to '{}'",
-                     model_path, total_size / 1024.0, dest.string());
     } else {
         CFW_LOG_ERROR("NetworkSystem: Failed to write file '{}'", dest.string());
         impl_->incoming_transfers.erase(model_path);
@@ -546,9 +522,6 @@ void NetworkSystem::handle_file_chunk(const std::string& sender_peer_id,
     auto pkt = Network::build_file_request(model_path);
     impl_->peer_manager.broadcast(Network::kChannelReliable,
                                   pkt.data(), pkt.size(), true);
-    CFW_LOG_INFO("NetworkSystem: File '{}' transfer complete from {} — "
-                 "requesting ACTOR_CREATE re-send for actor creation",
-                 model_path, sender_peer_id);
 }
 
 }  // namespace Corona::Systems

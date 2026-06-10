@@ -43,7 +43,6 @@ bool ImguiSystem::initialize(Kernel::ISystemContext* ctx) {
                 // SDL_MaximizeWindow(window_);
                 SDL_ShowWindow(window_);
             });
-        CFW_LOG_DEBUG("ImguiSystem: EventBus subscriptions ready");
     } else {
         CFW_LOG_WARNING("ImguiSystem: No event bus available");
     }
@@ -54,7 +53,6 @@ bool ImguiSystem::initialize(Kernel::ISystemContext* ctx) {
 void ImguiSystem::start() {
     // 主线程系统不需要启动独立线程
     // ImguiSystem 由 Engine::tick() 在主线程中调用 update()
-    CFW_LOG_INFO("ImguiSystem: Running in main thread mode (no separate thread)");
     state_ = Kernel::SystemState::running;
 }
 

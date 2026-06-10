@@ -321,27 +321,6 @@ std::shared_ptr<IResource> SceneParser::parse_assimp(const std::filesystem::path
         return nullptr;
     }
 
-    // === 调试日志：场景概览 ===
-    CFW_LOG_INFO("[Assimp] Loading scene: {}", path_to_utf8(path));
-    CFW_LOG_INFO("[Assimp] Scene stats: {} meshes, {} materials, {} textures",
-                 ai_scene->mNumMeshes, ai_scene->mNumMaterials, ai_scene->mNumTextures);
-
-    // === 调试日志：列出所有材质 ===
-    CFW_LOG_INFO("[Assimp] Materials in scene:");
-    for (unsigned int i = 0; i < ai_scene->mNumMaterials; ++i) {
-        aiString name;
-        ai_scene->mMaterials[i]->Get(AI_MATKEY_NAME, name);
-        CFW_LOG_INFO("  [{}] {}", i, name.C_Str());
-    }
-
-    // === 调试日志：列出所有Mesh及其材质索引 ===
-    CFW_LOG_INFO("[Assimp] Meshes in scene:");
-    for (unsigned int i = 0; i < ai_scene->mNumMeshes; ++i) {
-        aiMesh* mesh = ai_scene->mMeshes[i];
-        CFW_LOG_INFO("  [{}] '{}': {} verts, {} faces, materialIndex={}",
-                     i, mesh->mName.C_Str(), mesh->mNumVertices, mesh->mNumFaces, mesh->mMaterialIndex);
-    }
-
     auto scene = std::make_shared<Scene>(path);
     std::vector<std::uint32_t> material_map;
 
@@ -363,7 +342,6 @@ std::shared_ptr<IResource> SceneParser::parse_assimp(const std::filesystem::path
             0.0f, 0.0f, -1.0f, 0.0f,
             0.0f, 1.0f, 0.0f, 0.0f,
             0.0f, 0.0f, 0.0f, 1.0f);
-        CFW_LOG_INFO("[Assimp] STL format detected, applying Z-up to Y-up coordinate transform");
     }
 
     // 计算全局归一化参数，确保所有子网格使用相同的变换

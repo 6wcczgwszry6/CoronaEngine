@@ -187,15 +187,11 @@ bool Discovery::start(uint16_t port, const std::string& instance_name, uint64_t 
             }
         }
     });
-
-    CFW_LOG_INFO("Discovery: Started on port {}, instance='{}'",
-                 port, instance_name);
     return true;
 }
 
 void Discovery::stop() {
     impl_->stop();
-    CFW_LOG_INFO("Discovery: Stopped");
 }
 
 void Discovery::set_on_peer_discovered(OnPeerDiscovered cb) {

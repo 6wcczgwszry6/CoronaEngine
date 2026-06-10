@@ -56,7 +56,7 @@ class ScriptsManager:
                             # 找到ProjectScript子类，实例化并初始化
                             self.project_script = attr(f"Project_{Path(project_script_path).stem}")
                             self.project_script.initialize()
-                            self.logger.info(f"Global script loaded: {self.project_script.name}")
+                            self.logger.debug("Global script loaded: %s", self.project_script.name)
                             break
 
             if scene.script_path:
@@ -82,8 +82,8 @@ class ScriptsManager:
                                 # 找到SceneScript子类，实例化并初始化
                                 self.current_scene_script = attr(f"Scene_{scene.name}", scene)
                                 self.current_scene_script.initialize()
-                                self.logger.info(
-                                    f"Scene script loaded for {scene.name}: {self.current_scene_script.name}")
+                                self.logger.debug(
+                                    "Scene script loaded for %s: %s", scene.name, self.current_scene_script.name)
                                 break
 
             for actor in scene._actors:
@@ -112,7 +112,7 @@ class ScriptsManager:
                                     # 如果是 CameraLockedObject，关联到 Actor
                                     if isinstance(actor_script, CameraLockedObject):
                                         actor.set_camera_locked_script(actor_script)
-                                    self.logger.info(f"Actor script loaded for {actor.name}: {actor_script.name}")
+                                    self.logger.debug("Actor script loaded for %s: %s", actor.name, actor_script.name)
                                     break
 
             self.logger.info("Script system initialized successfully")
@@ -152,4 +152,4 @@ class ScriptsManager:
             script.shutdown()
 
         self.actor_scripts.clear()
-        self.logger.info("Script system shutdown")
+        self.logger.debug("Script system shutdown")

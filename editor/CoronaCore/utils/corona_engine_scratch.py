@@ -70,14 +70,13 @@ def register_key_handler(handler):
     """注册键盘事件处理器"""
     global _key_handler
     _key_handler = handler
-    _logger.info(f"[ScratchWrapper] 键盘处理器已注册: {handler.__name__ if handler else 'None'}")
-
+    _logger.debug(f"[ScratchWrapper] 键盘处理器已注册: {handler.__name__ if handler else 'None'}")
 
 def unregister_key_handler():
     """取消注册键盘事件处理器"""
     global _key_handler
     _key_handler = None
-    _logger.info("[ScratchWrapper] 键盘处理器已取消注册")
+    _logger.debug("[ScratchWrapper] 键盘处理器已取消注册")
 
 
 def register_mouse_handler(handler):
@@ -99,14 +98,13 @@ def handle_key_event(key, mods=None, display_key=None):
         _key_state[k] = True
 
     # 打印当前按键信息，帮助用户确认积木配置
-    print(f"[KeyDebug] code={key} key={display_key} stored={sorted(keys_to_set)}", flush=True)
+    # KeyDebug 信息改为 logger.debug，默认静默
 
     # 调用注册的 handler
     if _key_handler is None:
         _logger.warning(f"[ScratchWrapper] 收到按键 {key} 但无注册的 handler！")
         return
     try:
-        _logger.info(f"[ScratchWrapper] 转发按键 code={key} display={display_key} 到 handler")
         _key_handler(key, mods or [])
     except SystemExit:
         raise
@@ -158,7 +156,7 @@ def set_target(scene_name: str, actor_name: str):
     _target_actor_name = actor_name
     _external_target = True
     _initialized = False  # 强制重新初始化
-    print(f"[ScratchWrapper] set_target: scene={scene_name}, actor={actor_name}", flush=True)
+    _logger.debug("[ScratchWrapper] set_target: scene=%s actor=%s", scene_name, actor_name)
 
 
 def _init_engine():
@@ -185,24 +183,26 @@ def _init_external_target():
     global _geometry, _optics, _kinematics, _actor, _scene
     global _target_scene, _target_actor
 
-    print(f"[ScratchWrapper] _init_external_target: scene={_target_scene_name} actor={_target_actor_name}", flush=True)
+    _logger.debug("[ScratchWrapper] _init_external_target: scene=%s actor=%s",
+                 _target_scene_name, _target_actor_name)
 
     try:
         from CoronaCore.core.managers import scene_manager
 
         _target_scene = scene_manager.get(_target_scene_name)
         if _target_scene is None:
-            print(f"[ScratchWrapper] 场景未找到，回退独立模式", flush=True)
+            _logger.warning("[ScratchWrapper] 场景未找到，回退独立模式")
             _init_internal_actor()
             return
 
         _target_actor = _target_scene.find_actor(_target_actor_name)
         if _target_actor is None:
-            print(f"[ScratchWrapper] Actor未找到，回退独立模式", flush=True)
+            _logger.warning("[ScratchWrapper] Actor未找到，回退独立模式")
             _init_internal_actor()
             return
 
-        print(f"[ScratchWrapper] Actor找到: type={type(_target_actor).__name__} id={id(_target_actor)}", flush=True)
+        _logger.debug("[ScratchWrapper] Actor找到: type=%s id=%s",
+                     type(_target_actor).__name__, id(_target_actor))
 
         # 获取真实 Actor 的组件
         _actor = _target_actor
@@ -210,9 +210,9 @@ def _init_external_target():
 
         if hasattr(_target_actor, '_geometry') and _target_actor._geometry is not None:
             _geometry = _target_actor._geometry
-            print(f"[ScratchWrapper] _geometry绑定: type={type(_geometry).__name__}", flush=True)
+            _logger.debug("[ScratchWrapper] _geometry绑定: type=%s", type(_geometry).__name__)
         else:
-            print(f"[ScratchWrapper] _geometry未找到 (hasattr={hasattr(_target_actor, '_geometry')})", flush=True)
+            _logger.debug("[ScratchWrapper] _geometry未找到 (hasattr=%s)", hasattr(_target_actor, '_geometry'))
 
         if hasattr(_target_actor, '_optics') and _target_actor._optics is not None:
             _optics = _target_actor._optics
@@ -244,19 +244,18 @@ def _init_external_target():
                 cpp_rot = _target_actor.get_rotation()
                 global _rot_x, _rot_y, _rot_z
                 _rot_x, _rot_y, _rot_z = float(cpp_rot[0]), float(cpp_rot[1]), float(cpp_rot[2])
-                print(f"[ScratchWrapper] 同步C++ rotation=({_rot_x:.1f},{_rot_y:.1f},{_rot_z:.1f})", flush=True)
+                _logger.debug("[ScratchWrapper] 同步C++ rotation=(%.1f,%.1f,%.1f)", _rot_x, _rot_y, _rot_z)
         except Exception:
             pass
 
-        print(
-            f"[ScratchWrapper] 已绑定: scene={_target_scene_name} "
-            f"actor={_target_actor_name} pos=({_x:.2f},{_y:.2f},{_z:.2f}) size={_size_val:.1f}",
-            flush=True,
+        _logger.debug(
+            "[ScratchWrapper] 已绑定: scene=%s actor=%s pos=(%.2f,%.2f,%.2f) size=%.1f",
+            _target_scene_name, _target_actor_name, _x, _y, _z, _size_val,
         )
     except Exception as e:
         import traceback
         traceback.print_exc()
-        print(f"[ScratchWrapper] 绑定外部Actor异常: {e}", flush=True)
+        _logger.warning("[ScratchWrapper] 绑定外部Actor异常: %s", e)
         _init_internal_actor()
 
 
@@ -289,7 +288,7 @@ def move(steps):
     global _x
     old_x = _x
     _x += float(steps)
-    print(f"[ScratchWrapper] move({steps}): X {old_x:.1f} -> {_x:.1f}", flush=True)
+    _logger.debug("[ScratchWrapper] move(%s): X %.1f -> %.1f", steps, old_x, _x)
     _sync_position()
 
 
@@ -313,19 +312,19 @@ def _apply_rotation():
                 _kinematics.set_rotation(rot)
                 kine_ok = True
             except Exception as e:
-                print(f"[ROT-DIAG] _apply_rotation: kine.set FAILED: {e}", flush=True)
+                _logger.debug("[ROT-DIAG] _apply_rotation: kine.set FAILED: %s", e)
         if _geometry is not None:
             try:
                 _geometry.set_rotation(rot)
                 geo_ok = True
             except Exception as e:
-                print(f"[ROT-DIAG] _apply_rotation: geo.set FAILED: {e}", flush=True)
+                _logger.debug("[ROT-DIAG] _apply_rotation: geo.set FAILED: %s", e)
         if _actor is not None and hasattr(_actor, 'set_rotation'):
             try:
                 _actor.set_rotation(rot)
                 actor_ok = True
             except Exception as e:
-                print(f"[ROT-DIAG] _apply_rotation: actor.set FAILED: {e}", flush=True)
+                _logger.debug("[ROT-DIAG] _apply_rotation: actor.set FAILED: %s", e)
 
         # 恢复物理
         if mech_was_enabled and _mechanics is not None:
@@ -334,7 +333,8 @@ def _apply_rotation():
             except Exception:
                 pass
 
-    print(f"[ROT-DIAG] _apply_rotation #{_run_count}: rot={rot} kine_ok={kine_ok} geo_ok={geo_ok} actor_ok={actor_ok} mech_suspended={mech_was_enabled}", flush=True)
+    _logger.debug("[ROT-DIAG] _apply_rotation #%d: rot=%s kine_ok=%s geo_ok=%s actor_ok=%s mech_suspended=%s",
+                 _run_count, rot, kine_ok, geo_ok, actor_ok, mech_was_enabled)
 
 
 def rotateX(angle):
@@ -375,13 +375,14 @@ def rotateZ(angle):
     _rot_z += float(angle)
     has_kine = _kinematics is not None and hasattr(_kinematics, 'rotate_z')
     has_geo = _geometry is not None
-    print(f"[ROT-DIAG] rotateZ({angle}) #{_run_count}: _rot_z {old:.1f}->{_rot_z:.1f} has_kine={has_kine} has_geo={has_geo}", flush=True)
+    _logger.debug("[ROT-DIAG] rotateZ(%s) #%d: _rot_z %.1f->%.1f has_kine=%s has_geo=%s",
+                 angle, _run_count, old, _rot_z, has_kine, has_geo)
     if has_kine:
         try:
             _kinematics.rotate_z(float(angle))
-            print(f"[ROT-DIAG] rotateZ: kinematics.rotate_z OK", flush=True)
+            _logger.debug("[ROT-DIAG] rotateZ: kinematics.rotate_z OK")
         except Exception as e:
-            print(f"[ROT-DIAG] rotateZ: kinematics.rotate_z FAILED: {e}", flush=True)
+            _logger.debug("[ROT-DIAG] rotateZ: kinematics.rotate_z FAILED: %s", e)
     _apply_rotation()
 
 
@@ -425,11 +426,11 @@ def moveto(position):
     elif position == 'sight_position':
         _x, _y, _z = 0.0, 0.0, 0.0
     else:
-        print(f"[ScratchWrapper] moveto 未知位置: {position}", flush=True)
+        _logger.debug("[ScratchWrapper] moveto 未知位置: %s", position)
         return
 
     _sync_position()
-    print(f"[ScratchWrapper] moveto({position}) -> ({_x:.2f}, {_y:.2f}, {_z:.2f})", flush=True)
+    _logger.debug("[ScratchWrapper] moveto(%s) -> (%.2f, %.2f, %.2f)", position, _x, _y, _z)
 
 
 def movetoXYZ(position):
@@ -933,7 +934,8 @@ def reset_state():
     _mouse_handler = None
     global _run_count
     _run_count += 1
-    print(f"[ROT-DIAG] reset_state #{_run_count}: _rot_z={_rot_z:.1f} _initialized={_initialized} _geometry={_geometry is not None} _kinematics={_kinematics is not None}", flush=True)
+    _logger.debug("[ROT-DIAG] reset_state #%d: _rot_z=%.1f _initialized=%s _geometry=%s _kinematics=%s",
+                 _run_count, _rot_z, _initialized, _geometry is not None, _kinematics is not None)
 
 
 def request_stop():

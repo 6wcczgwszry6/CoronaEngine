@@ -101,8 +101,6 @@ bool PeerManager::start(uint16_t port, const std::string& instance_name) {
         return false;
     }
 
-    CFW_LOG_INFO("PeerManager: Started on port {} (local_id={})", port,
-                 impl_->local_id);
     return true;
 }
 
@@ -141,8 +139,6 @@ void PeerManager::stop() {
         enet_deinitialize();
         impl_->enet_initialized = false;
     }
-
-    CFW_LOG_INFO("PeerManager: Stopped");
 }
 
 // ============================================================================
@@ -176,8 +172,6 @@ void PeerManager::connect_to_peer(const std::string& ip, uint16_t port,
     if (!force && !peer_name.empty() && !impl_->instance_name.empty()
         && impl_->instance_name != peer_name) {
         if (impl_->instance_name < peer_name) {
-            CFW_LOG_DEBUG("PeerManager: '{}' < '{}' — waiting for inbound connection",
-                          impl_->instance_name, peer_name);
             return;
         }
     }
@@ -210,8 +204,6 @@ void PeerManager::connect_to_peer(const std::string& ip, uint16_t port,
         info.outbound = true;  // we initiated this connection
         impl_->peer_list.push_back(info);
     }
-
-    CFW_LOG_INFO("PeerManager: Connecting to {} ({})", remote_id, peer_name);
 }
 
 void PeerManager::disconnect_peer(const std::string& peer_id) {
@@ -219,7 +211,6 @@ void PeerManager::disconnect_peer(const std::string& peer_id) {
     auto* p = impl_->find_peer_by_id_unsafe(peer_id);
     if (p && p->peer) {
         enet_peer_disconnect(p->peer, 0);
-        CFW_LOG_INFO("PeerManager: Disconnecting peer {}", peer_id);
     }
 }
 
@@ -313,7 +304,6 @@ void PeerManager::poll() {
             // deferred until we receive the peer's HELLO and rekey.
             auto hello = build_hello(impl_->instance_name, impl_->listen_port);
             send_to(event.peer, kChannelReliable, hello.data(), hello.size(), true);
-            CFW_LOG_DEBUG("PeerManager: Sent HELLO to {} (provisional)", remote_id);
             break;
         }
 
@@ -443,13 +433,13 @@ void PeerManager::handle_hello(ENetPeer* peer, const uint8_t* data, size_t len) 
     }
 
     if (should_drop) {
-        CFW_LOG_INFO("PeerManager: Duplicate connection to {} — dropping extra", stable_id);
+        CFW_LOG_DEBUG("PeerManager: Duplicate connection to {} — dropping extra", stable_id);
         enet_peer_disconnect_later(peer, 0);
         return;
     }
 
     if (should_notify) {
-        CFW_LOG_INFO("PeerManager: HELLO from {} — peer rekeyed and ready", stable_id);
+        CFW_LOG_DEBUG("PeerManager: HELLO from {} — peer rekeyed and ready", stable_id);
         handle_connect(peer, notify_info.id, notify_info.name);
     }
 }
