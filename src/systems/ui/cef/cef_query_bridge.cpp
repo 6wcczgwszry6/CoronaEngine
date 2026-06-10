@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -307,10 +308,18 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     // actor_data is a dict with geometry.position/rotation/scale
                     // Extract transform (9 floats) — default to identity
                     float transform[9] = {0,0,0, 0,0,0, 1,1,1};
+                    std::vector<std::string> dependency_paths;
                     if (args.size() > 3 && args[3].is_object()) {
                         auto& ad = args[3];
                         if (actor_guid.empty() && ad.contains("actor_guid") && ad["actor_guid"].is_string()) {
                             actor_guid = ad["actor_guid"].get<std::string>();
+                        }
+                        if (ad.contains("model_dependencies") && ad["model_dependencies"].is_array()) {
+                            for (const auto& dep : ad["model_dependencies"]) {
+                                if (dep.is_string()) {
+                                    dependency_paths.push_back(dep.get<std::string>());
+                                }
+                            }
                         }
                         if (ad.contains("geometry")) {
                             auto& geo = ad["geometry"];
@@ -352,7 +361,8 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     opt.specular_color[0] = 1.0f; opt.specular_color[1] = 1.0f; opt.specular_color[2] = 1.0f;
                     opt.shininess = 32.0f;
 
-                    sys->broadcast_actor_create(actor_guid, scene_name, model_path, transform,
+                    sys->broadcast_actor_create(actor_guid, scene_name, model_path,
+                                                dependency_paths, transform,
                                                 &opt, sizeof(opt));
                     nlohmann::json payload;
                     payload["ok"] = true;

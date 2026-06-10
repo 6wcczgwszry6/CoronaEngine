@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace Corona::Systems {
 
@@ -95,6 +96,7 @@ public:
     void broadcast_actor_create(const std::string& actor_guid,
                                 const std::string& scene_name,
                                 const std::string& model_path,
+                                const std::vector<std::string>& dependency_paths,
                                 const float* transform,
                                 const void* optics_packed, size_t optics_size);
 

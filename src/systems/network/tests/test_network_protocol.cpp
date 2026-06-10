@@ -62,6 +62,34 @@ void test_actor_create_carries_actor_guid() {
                 "actor create model path payload");
 }
 
+void test_actor_create_carries_dependency_paths() {
+    float transform[9] = {};
+    Corona::Network::ActorCreatePacked optics{};
+    const std::vector<std::string> deps{
+        "Resource/mesh.mtl",
+        "Resource/texture.png",
+    };
+
+    auto packet = Corona::Network::build_actor_create(
+        "actor-deps", "Scene/main.scene", "Resource/mesh.obj",
+        transform, &optics, sizeof(optics), deps);
+
+    Corona::Network::BufferReader reader(packet.data(), packet.size());
+    expect_true(static_cast<Corona::Network::MessageType>(reader.read_u8()) ==
+                    Corona::Network::MessageType::ACTOR_CREATE,
+                "actor create dependency message type");
+    reader.read_string(reader.read_u16());  // actor_guid
+    reader.read_string(reader.read_u16());  // scene_name
+    reader.read_string(reader.read_u16());  // model_path
+    reader.pos += 36 + sizeof(optics);
+
+    expect_true(reader.read_u16() == deps.size(), "actor create dependency count");
+    expect_true(reader.read_string(reader.read_u16()) == deps[0],
+                "actor create first dependency path");
+    expect_true(reader.read_string(reader.read_u16()) == deps[1],
+                "actor create second dependency path");
+}
+
 void test_file_chunk_carries_transfer_id_and_offset() {
     constexpr uint64_t transfer_id = 0x8877665544332211ull;
     constexpr uint32_t total_size = 4096;
@@ -239,6 +267,7 @@ void test_sync_engine_marks_actor_dirty_entries_with_guid() {
 
 int main() {
     test_actor_create_carries_actor_guid();
+    test_actor_create_carries_dependency_paths();
     test_file_request_carries_transfer_id();
     test_file_chunk_carries_transfer_id_and_offset();
     test_project_relative_path_validation();

@@ -313,11 +313,16 @@ inline std::vector<uint8_t> build_actor_create(
     const std::string& scene_name,
     const std::string& model_path,
     const float* transform,  // 9 floats
-    const void* optics_packed, size_t optics_size)
+    const void* optics_packed, size_t optics_size,
+    const std::vector<std::string>& dependency_paths = {})
 {
     std::vector<uint8_t> buf;
+    size_t deps_size = 2;
+    for (const auto& dep : dependency_paths) {
+        deps_size += 2 + dep.size();
+    }
     buf.reserve(1 + 2 + actor_guid.size() + 2 + scene_name.size() +
-                2 + model_path.size() + 36 + optics_size);
+                2 + model_path.size() + 36 + optics_size + deps_size);
 
     write_u8(buf, static_cast<uint8_t>(MessageType::ACTOR_CREATE));
     write_string(buf, actor_guid);
@@ -325,6 +330,10 @@ inline std::vector<uint8_t> build_actor_create(
     write_string(buf, model_path);
     write_bytes(buf, transform, 36);
     write_bytes(buf, optics_packed, optics_size);
+    write_u16(buf, static_cast<uint16_t>(dependency_paths.size()));
+    for (const auto& dep : dependency_paths) {
+        write_string(buf, dep);
+    }
 
     return buf;
 }

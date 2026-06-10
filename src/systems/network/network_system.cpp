@@ -75,6 +75,7 @@ struct NetworkSystem::Impl {
         std::string actor_guid;
         std::string scene_name;
         std::string model_path;
+        std::vector<std::string> dependency_paths;
         Network::ActorCreatePacked actor_packed;
     };
     std::vector<PendingAction> pending_actor_creates;
@@ -86,9 +87,13 @@ struct NetworkSystem::Impl {
         std::string actor_guid;
         std::string scene_name;
         std::string model_path;
+        std::vector<std::string> dependency_paths;
+        std::vector<uint64_t> transfer_ids;
+        uint32_t remaining_files = 0;
         Network::ActorCreatePacked actor_packed;
     };
-    std::unordered_map<uint64_t, PendingFileTransfer> pending_file_transfers;
+    std::unordered_map<uint64_t, PendingFileTransfer> pending_file_transfer_groups;
+    std::unordered_map<uint64_t, uint64_t> transfer_to_group;
     uint64_t next_transfer_id = 1;
 };
 
@@ -301,6 +306,7 @@ bool NetworkSystem::connect_to_peer(const std::string& ip, uint16_t port,
 void NetworkSystem::broadcast_actor_create(const std::string& actor_guid,
                                            const std::string& scene_name,
                                            const std::string& model_path,
+                                           const std::vector<std::string>& dependency_paths,
                                            const float* transform,
                                            const void* optics_packed, size_t optics_size) {
     if (impl_->session_state != SessionState::Active) return;
@@ -309,10 +315,10 @@ void NetworkSystem::broadcast_actor_create(const std::string& actor_guid,
         return;
     }
     auto pkt = Network::build_actor_create(actor_guid, scene_name, model_path, transform,
-                                           optics_packed, optics_size);
+                                           optics_packed, optics_size, dependency_paths);
     impl_->peer_manager.broadcast(Network::kChannelReliable, pkt.data(), pkt.size(), true);
-    CFW_LOG_INFO("NetworkSystem: Broadcast actor create — actor='{}' scene='{}' model='{}'",
-                 actor_guid, scene_name, model_path);
+    CFW_LOG_INFO("NetworkSystem: Broadcast actor create — actor='{}' scene='{}' model='{}' deps={}",
+                 actor_guid, scene_name, model_path, dependency_paths.size());
 }
 
 bool NetworkSystem::has_pending_transfers() const {
@@ -418,36 +424,79 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
             const float* transform = reinterpret_cast<const float*>(r.data + r.pos);
             r.pos += 36;
             const auto* opt_packed = reinterpret_cast<const Network::ActorCreatePacked*>(r.data + r.pos);
+            r.pos += sizeof(Network::ActorCreatePacked);
 
-            CFW_LOG_INFO("NetworkSystem: Received ACTOR_CREATE from {} — actor='{}' scene='{}' model='{}'",
-                         sender_peer_id, actor_guid, scene_name, model_path);
+            std::vector<std::string> dependency_paths;
+            if (r.has_remaining(2)) {
+                uint16_t dep_count = r.read_u16();
+                for (uint16_t i = 0; i < dep_count; ++i) {
+                    if (!r.has_remaining(2)) break;
+                    uint16_t dep_len = r.read_u16();
+                    if (!r.has_remaining(dep_len)) break;
+                    dependency_paths.push_back(r.read_string(dep_len));
+                }
+            }
 
-            // Check if local file exists
-            auto full_path = Network::resolve_project_relative_path(
-                impl_->project_root, model_path);
-            if (full_path && std::filesystem::exists(*full_path) &&
-                std::filesystem::is_regular_file(*full_path)) {
-                // File exists — queue actor creation
+            CFW_LOG_INFO("NetworkSystem: Received ACTOR_CREATE from {} — actor='{}' scene='{}' model='{}' deps={}",
+                         sender_peer_id, actor_guid, scene_name, model_path, dependency_paths.size());
+
+            auto file_exists = [this](const std::string& path) {
+                auto full_path = Network::resolve_project_relative_path(
+                    impl_->project_root, path);
+                return full_path && std::filesystem::exists(*full_path) &&
+                       std::filesystem::is_regular_file(*full_path);
+            };
+
+            std::vector<std::string> missing_paths;
+            if (!file_exists(model_path)) {
+                missing_paths.push_back(model_path);
+            }
+            for (const auto& dep : dependency_paths) {
+                if (!file_exists(dep)) {
+                    missing_paths.push_back(dep);
+                }
+            }
+
+            if (missing_paths.empty()) {
                 Impl::PendingAction pa;
                 pa.actor_guid = actor_guid;
                 pa.scene_name = scene_name;
                 pa.model_path = model_path;
+                pa.dependency_paths = dependency_paths;
                 pa.actor_packed = *opt_packed;
                 impl_->pending_actor_creates.push_back(pa);
             } else {
-                // File missing — save actor data and request file from peers
-                uint64_t transfer_id = impl_->next_transfer_id++;
-                impl_->pending_file_transfers[transfer_id] = {
-                    actor_guid, scene_name, model_path, *opt_packed
+                uint64_t group_id = impl_->next_transfer_id++;
+                Impl::PendingFileTransfer group;
+                group.actor_guid = actor_guid;
+                group.scene_name = scene_name;
+                group.model_path = model_path;
+                group.dependency_paths = dependency_paths;
+                group.actor_packed = *opt_packed;
+                group.remaining_files = static_cast<uint32_t>(missing_paths.size());
+
+                auto send_request = [&](uint64_t transfer_id, const std::string& path) {
+                    auto pkt = Network::build_file_request(transfer_id, path);
+                    const auto* peer_info = impl_->peer_manager.find_peer(sender_peer_id);
+                    if (peer_info && peer_info->peer) {
+                        impl_->peer_manager.send_to(peer_info->peer, Network::kChannelReliable,
+                                                    pkt.data(), pkt.size(), true);
+                    } else {
+                        impl_->peer_manager.broadcast(Network::kChannelReliable,
+                                                      pkt.data(), pkt.size(), true);
+                    }
                 };
-                auto pkt = Network::build_file_request(transfer_id, model_path);
-                const auto* peer_info = impl_->peer_manager.find_peer(sender_peer_id);
-                if (peer_info && peer_info->peer) {
-                    impl_->peer_manager.send_to(peer_info->peer, Network::kChannelReliable,
-                                                pkt.data(), pkt.size(), true);
-                } else {
-                    impl_->peer_manager.broadcast(Network::kChannelReliable,
-                                                  pkt.data(), pkt.size(), true);
+
+                std::vector<std::pair<uint64_t, std::string>> requests;
+                for (const auto& path : missing_paths) {
+                    uint64_t transfer_id = impl_->next_transfer_id++;
+                    group.transfer_ids.push_back(transfer_id);
+                    impl_->transfer_to_group[transfer_id] = group_id;
+                    requests.emplace_back(transfer_id, path);
+                }
+                impl_->pending_file_transfer_groups[group_id] = std::move(group);
+                for (const auto& [transfer_id, path] : requests) {
+                    send_request(transfer_id, path);
                 }
             }
         }
@@ -607,19 +656,29 @@ void NetworkSystem::handle_file_chunk(const std::string& sender_peer_id,
 
     impl_->incoming_transfers.erase(tx_key);
 
-    // If this transfer was triggered by an ACTOR_CREATE, push the
-    // saved actor data as a PendingAction so the frontend creates the
-    // actor.  No need to re-request ACTOR_CREATE from the original
-    // sender — we already have everything.
-    auto ft_it = impl_->pending_file_transfers.find(transfer_id);
-    if (ft_it != impl_->pending_file_transfers.end()) {
+    auto group_id_it = impl_->transfer_to_group.find(transfer_id);
+    if (group_id_it != impl_->transfer_to_group.end()) {
+        uint64_t group_id = group_id_it->second;
+        impl_->transfer_to_group.erase(group_id_it);
+        auto ft_it = impl_->pending_file_transfer_groups.find(group_id);
+        if (ft_it == impl_->pending_file_transfer_groups.end()) {
+            return;
+        }
+        if (ft_it->second.remaining_files > 0) {
+            --ft_it->second.remaining_files;
+        }
+        if (ft_it->second.remaining_files != 0) {
+            return;
+        }
+
         Impl::PendingAction pa;
         pa.actor_guid = ft_it->second.actor_guid;
         pa.scene_name = ft_it->second.scene_name;
         pa.model_path = ft_it->second.model_path;
+        pa.dependency_paths = ft_it->second.dependency_paths;
         pa.actor_packed = ft_it->second.actor_packed;
         impl_->pending_actor_creates.push_back(pa);
-        impl_->pending_file_transfers.erase(ft_it);
+        impl_->pending_file_transfer_groups.erase(ft_it);
     }
 }
 

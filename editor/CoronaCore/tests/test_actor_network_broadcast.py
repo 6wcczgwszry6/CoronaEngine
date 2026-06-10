@@ -89,6 +89,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
         actor_data = events[0][1][0]
         self.assertEqual(actor_data["handle"], 1234)
         self.assertTrue(actor_data["actor_guid"])
+        self.assertEqual(actor_data["scene"], "Scene/main.scene")
 
     def test_external_model_path_is_copied_into_project_resource_before_broadcast(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -98,7 +99,11 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
             project_root.mkdir()
             external_root.mkdir()
             source_model = external_root / "Ball.obj"
-            source_model.write_text("mesh-data", encoding="utf-8")
+            source_model.write_text("mtllib Ball.mtl\nmesh-data", encoding="utf-8")
+            (external_root / "Ball.mtl").write_text(
+                "map_Kd textures/Ball.png\n", encoding="utf-8")
+            (external_root / "textures").mkdir()
+            (external_root / "textures" / "Ball.png").write_bytes(b"png-data")
 
             events = []
             fake_editor = SimpleNamespace(
@@ -125,9 +130,16 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
             actor_data = events[0][1][0]
             self.assertEqual(actor_data["path"], "Resource/Ball.obj")
             self.assertEqual(actor_data["model"], "Resource/Ball.obj")
+            self.assertEqual(actor_data["scene"], "Scene/main.scene")
+            self.assertEqual(actor_data["model_dependencies"], [
+                "Resource/Ball.mtl",
+                "Resource/textures/Ball.png",
+            ])
             self.assertTrue((project_root / "Resource" / "Ball.obj").exists())
             self.assertEqual((project_root / "Resource" / "Ball.obj").read_text(encoding="utf-8"),
-                             "mesh-data")
+                             "mtllib Ball.mtl\nmesh-data")
+            self.assertTrue((project_root / "Resource" / "Ball.mtl").exists())
+            self.assertTrue((project_root / "Resource" / "textures" / "Ball.png").exists())
 
 
 if __name__ == "__main__":

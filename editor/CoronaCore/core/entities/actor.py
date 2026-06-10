@@ -40,6 +40,7 @@ class Actor:
             self.name = f"{self.name}_{source_index}"
 
         self.model_path = ""
+        self.model_dependencies = []
         self.script_path = ""
         self.actor_guid = ""
         self._suppress_network_broadcast = bool(
@@ -241,16 +242,92 @@ class Actor:
                             source_path)
             return
 
+        copied_paths = self._copy_model_asset_bundle_to_project(source_path, project_root)
+        if not copied_paths:
+            return
+
+        self.route = copied_paths[0]
+        self.model_path = copied_paths[0]
+        self.final_model_path = str(project_root / copied_paths[0])
+        self.model_dependencies = copied_paths[1:]
+
+    def _copy_model_asset_bundle_to_project(self, source_path: Path,
+                                            project_root: Path) -> List[str]:
         resource_dir = project_root / "Resource"
         resource_dir.mkdir(parents=True, exist_ok=True)
-        dest_path = resource_dir / source_path.name
-        if source_path != dest_path:
-            shutil.copy2(source_path, dest_path)
 
-        rel_path = dest_path.relative_to(project_root).as_posix()
-        self.route = rel_path
-        self.model_path = rel_path
-        self.final_model_path = str(dest_path)
+        copied = []
+
+        def copy_relative(src: Path, relative_to_source_dir: Path = None):
+            rel_under_source = (src.name if relative_to_source_dir is None
+                                else src.relative_to(relative_to_source_dir).as_posix())
+            dst = resource_dir / rel_under_source
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.resolve() != dst.resolve():
+                shutil.copy2(src, dst)
+            rel_project = dst.relative_to(project_root).as_posix()
+            if rel_project not in copied:
+                copied.append(rel_project)
+            return dst
+
+        copied_model_path = copy_relative(source_path)
+
+        if source_path.suffix.lower() == ".obj":
+            source_dir = source_path.parent
+            for mtl_path in self._read_obj_material_libraries(source_path):
+                mtl_source = (source_dir / mtl_path).resolve()
+                if not mtl_source.is_file():
+                    logging.warning("OBJ material library missing: %s", mtl_source)
+                    continue
+                copied_mtl_path = copy_relative(mtl_source)
+                for texture_path in self._read_mtl_texture_paths(mtl_source):
+                    texture_source = (mtl_source.parent / texture_path).resolve()
+                    if not texture_source.is_file():
+                        logging.warning("MTL texture missing: %s", texture_source)
+                        continue
+                    copy_relative(texture_source, source_dir)
+
+        if copied and copied[0] != copied_model_path.relative_to(project_root).as_posix():
+            copied.insert(0, copied_model_path.relative_to(project_root).as_posix())
+        return copied
+
+    @staticmethod
+    def _read_obj_material_libraries(obj_path: Path) -> List[Path]:
+        libraries = []
+        try:
+            with obj_path.open("r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    parts = stripped.split(maxsplit=1)
+                    if len(parts) == 2 and parts[0] == "mtllib":
+                        libraries.append(Path(parts[1]))
+        except Exception as exc:
+            logging.warning("Failed to parse OBJ dependencies for %s: %s", obj_path, exc)
+        return libraries
+
+    @staticmethod
+    def _read_mtl_texture_paths(mtl_path: Path) -> List[Path]:
+        texture_keys = {
+            "map_Ka", "map_Kd", "map_Ks", "map_Ke", "map_Ns",
+            "map_d", "map_bump", "bump", "disp", "decal", "refl",
+            "norm", "map_Pr", "map_Pm", "map_Ps", "map_Bump",
+        }
+        textures = []
+        try:
+            with mtl_path.open("r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    parts = stripped.split()
+                    if len(parts) < 2 or parts[0] not in texture_keys:
+                        continue
+                    textures.append(Path(parts[-1]))
+        except Exception as exc:
+            logging.warning("Failed to parse MTL dependencies for %s: %s", mtl_path, exc)
+        return textures
 
     def save_data(self):
         if self.parent:
@@ -574,8 +651,10 @@ class Actor:
             "actor_guid": self.actor_guid,
             "handle": int(self.handle),
             "path": self.route,
+            "scene": self.parent.route if self.parent else "",
             "type": ext.lstrip("."),
             "model": self.model_path,
+            "model_dependencies": list(self.model_dependencies),
             "actor_type": self.actor_type,
             "collision": self.get_collision_enabled(),
             "visible": self.get_visible(),
