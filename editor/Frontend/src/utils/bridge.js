@@ -231,13 +231,29 @@ export const scriptingService = {
    * @param {string} sceneName - 目标场景名称（可选）
    * @param {string} actorName - 目标 Actor 名称（可选）
    */
-  executePythonCode: (code, mode, sceneName, actorName) =>
+  executePythonCode: (code, mode, sceneName, actorName, targetType = 'actor') =>
     Bridge.callCEF('ScratchTool', 'execute_python_code', [
       code,
       mode ?? 0,
       sceneName ?? '',
       actorName ?? '',
+      targetType || 'actor',
     ]),
+
+  saveBlocklyTarget: (payload) =>
+    Bridge.callCEF('ScratchTool', 'save_blockly_target', [payload || {}]),
+
+  loadBlocklyTarget: (payload) =>
+    Bridge.callCEF('ScratchTool', 'load_blockly_target', [payload || {}]),
+
+  startGamePreview: (payload = { scope: 'project' }) =>
+    Bridge.callCEF('ScratchTool', 'start_game_preview', [payload]),
+
+  stopGamePreview: () =>
+    Bridge.callCEF('ScratchTool', 'stop_game_preview', []),
+
+  getGamePreviewStatus: () =>
+    Bridge.callCEF('ScratchTool', 'get_game_preview_status', []),
 
   /**
    * 停止当前正在执行的脚本
@@ -360,20 +376,20 @@ export const projectSettingsService = {
 };
 
 export const networkService = {
-  /** 启动 LAN 协同编辑会话 */
   startSession: (instanceName, projectId, port = 27960) =>
     Bridge.callCEF('Network', 'start_session', [instanceName, projectId, port]).then(_unwrap),
-  /** 停止会话 */
   stopSession: () => Bridge.callCEF('Network', 'stop_session').then(_unwrap),
-  /** 获取当前 peer 数量 */
   getPeerCount: () => Bridge.callCEF('Network', 'get_peer_count').then(_unwrap),
-  /** 手动连接到指定 IP 的 peer */
   connectToPeer: (ip, port, peerName) =>
     Bridge.callCEF('Network', 'connect_to_peer', [ip, port, peerName]).then(_unwrap),
-  /** 设置项目根目录（用于文件传输的目标目录） */
   setProjectRoot: (projectRoot) =>
     Bridge.callCEF('Network', 'set_project_root', [projectRoot]).then(_unwrap),
-  /** 广播 Actor 创建事件 */
   broadcastActorCreate: (sceneName, modelPath, actorData) =>
     Bridge.callCEF('Network', 'broadcast_actor_create', [sceneName, modelPath, actorData]).then(_unwrap),
+  /** 轮询待创建的远程 Actor（文件传输完成后触发创建） */
+  pollPendingActorCreate: () =>
+    Bridge.callCEF('Network', 'poll_pending_actor_create', []).then(_unwrap),
+  /** 暂停/恢复同步（Actor 创建期间避免 seq_id 碰撞） */
+  setSyncPaused: (paused) =>
+    Bridge.callCEF('Network', 'set_sync_paused', [paused]).then(_unwrap),
 };

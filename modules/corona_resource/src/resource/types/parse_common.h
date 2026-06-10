@@ -74,13 +74,6 @@ inline bool finalize_normalization_params(
     params.scale_factor = (max_axis > 0.0f) ? 1.0f / max_axis : 1.0f;
     params.computed = true;
 
-    CFW_LOG_INFO("[{}] Global AABB: [({},{},{}) to ({},{},{})], center=({},{},{}), scale={}",
-                 source_name,
-                 global_min[0], global_min[1], global_min[2],
-                 global_max[0], global_max[1], global_max[2],
-                 params.center[0], params.center[1], params.center[2],
-                 params.scale_factor);
-
     return true;
 }
 
@@ -282,9 +275,6 @@ inline size_t remove_degenerate_triangles(const std::vector<Vertex>& vertices,
     }
 
     if (removed_count > 0) {
-        CFW_LOG_INFO("[MeshValidate] Mesh '{}': removed {} degenerate triangles ({}% of total)",
-                     mesh_name, removed_count,
-                     static_cast<int>(removed_count * 100.0f / triangle_count));
         indices = std::move(valid_indices);
     }
 
@@ -426,9 +416,6 @@ inline void generate_smooth_normals(std::vector<Vertex>& vertices,
     for (auto& v : vertices) {
         normalize_vec3(v.normal);
     }
-
-    CFW_LOG_INFO("[MeshValidate] Mesh '{}': generated smooth normals for {} vertices",
-                 mesh_name, vertices.size());
 }
 
 /// 验证并修复法线（确保所有法线都是单位向量）
@@ -724,9 +711,6 @@ inline std::vector<SingleMeshResult> split_mesh_uniformly(
 
     size_t triangles_per_split = (triangle_count + num_splits - 1) / num_splits;
 
-    CFW_LOG_INFO("[MeshOpt] Mesh '{}': splitting into {} parts, ~{} triangles each",
-                 mesh_name, num_splits, triangles_per_split);
-
     // 执行拆分
     for (size_t split_idx = 0; split_idx < num_splits; ++split_idx) {
         size_t start_tri = split_idx * triangles_per_split;
@@ -786,7 +770,6 @@ inline std::vector<SingleMeshResult> split_mesh_uniformly(
         results.push_back(std::move(split_result));
     }
 
-    CFW_LOG_INFO("[MeshOpt] Mesh '{}': split into {} sub-meshes", mesh_name, results.size());
     return results;
 }
 
@@ -905,7 +888,6 @@ inline MeshOptimizeResult optimize_mesh_pipeline(
         result.success = true;
     } else {
         // Phase 2: 对网格进行均匀拆分
-        CFW_LOG_INFO("[MeshOpt] Mesh '{}': Phase 1 failed, entering Phase 2 (mesh splitting)", mesh_name);
 
         auto split_results = split_mesh_uniformly(unindexed_vertices, indices,
                                                   phase1_result.unique_vertex_count, mesh_name);
@@ -926,13 +908,9 @@ inline MeshOptimizeResult optimize_mesh_pipeline(
         result.was_split = true;
         result.success = true;
 
-        CFW_LOG_INFO("[MeshOpt] Mesh '{}': split into {} sub-meshes", mesh_name, result.sub_meshes.size());
     }
 
-    CFW_LOG_DEBUG("[MeshOpt] Mesh '{}' optimized: {} -> {} vertices, {} -> {} indices",
-                  mesh_name,
-                  unindexed_vertices.size(), result.vertices.size(),
-                  indices.size(), result.indices.size());
+    (void)mesh_name;
 
     result.success = true;
     return result;
@@ -1020,8 +998,6 @@ inline std::vector<LODLevel> generate_lod_levels(
         if (i < options.max_triangles.size() && options.max_triangles[i] > 0) {
             size_t cap = static_cast<size_t>(options.max_triangles[i]) * 3;
             if (target_index_count > cap) {
-                CFW_LOG_INFO("[LOD] Mesh '{}' LOD {}: capping target from {} to {} indices (max_triangles={})",
-                             mesh_name, i + 1, target_index_count, cap, options.max_triangles[i]);
                 target_index_count = cap;
             }
         }
@@ -1050,8 +1026,6 @@ inline std::vector<LODLevel> generate_lod_levels(
         // 使用 meshopt_simplifySloppy 强制达到目标面数
         // （不保拓扑，但能保证面数，适合物理碰撞等用途）
         if (simplified_count > target_index_count * 2) {
-            CFW_LOG_INFO("[LOD] Mesh '{}' LOD {}: simplify produced {} indices (target {}), falling back to simplifySloppy",
-                         mesh_name, i + 1, simplified_count, target_index_count);
 
             float sloppy_error = 0.0f;
             size_t sloppy_count = meshopt_simplifySloppy(
@@ -1068,8 +1042,6 @@ inline std::vector<LODLevel> generate_lod_levels(
             if (sloppy_count > 0 && sloppy_count < simplified_count) {
                 simplified_count = sloppy_count;
                 result_error = sloppy_error;
-                CFW_LOG_INFO("[LOD] Mesh '{}' LOD {}: simplifySloppy produced {} indices, error={:.6f}",
-                             mesh_name, i + 1, sloppy_count, sloppy_error);
             }
         }
 
@@ -1120,10 +1092,9 @@ inline std::vector<LODLevel> generate_lod_levels(
         // 屏幕阈值：误差越大，阈值越小（越远才使用）
         level.screen_threshold = (result_error > 0.0f) ? std::min(1.0f, result_error * 10.0f) : 0.0f;
 
-        CFW_LOG_INFO("[LOD] Mesh '{}' LOD {}: {} vertices, {} indices (ratio={:.1f}%, error={:.6f})",
-                     mesh_name, i + 1,
-                     level.vertices.size(), level.indices.size(),
-                     ratio * 100.0f, result_error);
+        (void)mesh_name;
+        (void)ratio;
+        (void)result_error;
 
         levels.push_back(std::move(level));
     }

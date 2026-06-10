@@ -99,8 +99,6 @@ inline std::uint64_t load_embedded_texture(const aiTexture* embedded_tex,
         image_resource = parser.parse_from_memory(data_span, virtual_path, options);
 
         if (image_resource) {
-            CFW_LOG_DEBUG("[Assimp] Loaded embedded texture '{}' (compressed {}, {} bytes)",
-                          cache_key, format_hint.empty() ? "unknown" : format_hint, embedded_tex->mWidth);
         }
     } else {
         // 未压缩的 ARGB8888 格式
@@ -125,9 +123,6 @@ inline std::uint64_t load_embedded_texture(const aiTexture* embedded_tex,
             image->compress(options.format);
         }
         image_resource = image;
-
-        CFW_LOG_DEBUG("[Assimp] Loaded embedded texture '{}' (raw ARGB8888, {}x{})",
-                      cache_key, embedded_tex->mWidth, embedded_tex->mHeight);
     }
 
     if (!image_resource) {
@@ -187,7 +182,6 @@ inline std::uint64_t load_assimp_texture(aiMaterial* ai_mat, aiTextureType type,
         // FBX 内嵌纹理的路径可能是文件名格式，需要通过 GetEmbeddedTexture 来获取
         const aiTexture* embedded_tex = ai_scene->GetEmbeddedTexture(tex_path.C_Str());
         if (embedded_tex != nullptr) {
-            CFW_LOG_DEBUG("[Assimp] Found embedded texture via GetEmbeddedTexture: '{}'", tex_path_str);
             return load_embedded_texture(embedded_tex, tex_path_str, texture_cache, scene_path, options);
         }
     }
@@ -218,8 +212,6 @@ inline std::uint64_t load_assimp_texture(aiMaterial* ai_mat, aiTextureType type,
                 }
             }
         }
-        CFW_LOG_DEBUG("[Assimp] Texture path resolved: '{}' -> '{}'",
-                      tex_path.C_Str(), full_path.string());
     }
     std::string path_str = full_path.string();
 
@@ -261,15 +253,11 @@ inline void process_assimp_materials(const aiScene* ai_scene, Scene& scene,
         if (ai_mat->Get(AI_MATKEY_BASE_COLOR, color) == AI_SUCCESS) {
             mat_data.base_color = {color.r, color.g, color.b, color.a};
             color_found = true;
-            CFW_LOG_DEBUG("[Assimp] Material '{}': using BASE_COLOR ({}, {}, {}, {})",
-                          mat_data.name, color.r, color.g, color.b, color.a);
         }
         // 然后尝试传统漫反射颜色 (OBJ, 3DS 等格式)
         else if (ai_mat->Get(AI_MATKEY_COLOR_DIFFUSE, color) == AI_SUCCESS) {
             mat_data.base_color = {color.r, color.g, color.b, color.a};
             color_found = true;
-            CFW_LOG_DEBUG("[Assimp] Material '{}': using COLOR_DIFFUSE ({}, {}, {}, {})",
-                          mat_data.name, color.r, color.g, color.b, color.a);
         }
 
         // 如果没有找到任何颜色，记录警告
@@ -303,8 +291,6 @@ inline void process_assimp_materials(const aiScene* ai_scene, Scene& scene,
                 // 将 shininess (通常 0-1000) 转换为 roughness (0-1)
                 // 使用简单的经验公式：roughness = 1 - sqrt(shininess / 1000)
                 mat_data.roughness = 1.0f - std::sqrt(std::min(shininess, 1000.0f) / 1000.0f);
-                CFW_LOG_DEBUG("[Assimp] Material '{}': converted shininess {} to roughness {}",
-                              mat_data.name, shininess, mat_data.roughness);
             }
         }
 
@@ -334,8 +320,6 @@ inline void process_assimp_materials(const aiScene* ai_scene, Scene& scene,
             if (count > 0) {
                 aiString path;
                 ai_mat->GetTexture(type, 0, &path);
-                CFW_LOG_DEBUG("[Assimp] Material '{}': {} texture(s) of type {} (path: '{}')",
-                              mat_data.name, count, type_name, path.C_Str());
             }
         }
 
@@ -363,8 +347,6 @@ inline void process_assimp_materials(const aiScene* ai_scene, Scene& scene,
                             mat_data.name);
             mat_data.albedo_texture = load_embedded_texture(ai_scene->mTextures[0], "__fallback_embedded_0", texture_cache, scene_path, options);
         }
-        CFW_LOG_INFO("[Assimp] Material '{}': albedo_texture = {} (InvalidTextureId = {})",
-                     mat_data.name, mat_data.albedo_texture, InvalidTextureId);
 
         mat_data.normal_texture = load_assimp_texture(ai_mat, aiTextureType_NORMALS, scene_dir, texture_cache, scene_path, ai_scene, options);
         if (mat_data.normal_texture == InvalidTextureId) {
@@ -388,7 +370,6 @@ inline void process_assimp_materials(const aiScene* ai_scene, Scene& scene,
                 // glTF 的 metallicRoughness 纹理同时包含两个通道
                 mat_data.metallic_texture = mr_texture;
                 mat_data.roughness_texture = mr_texture;
-                CFW_LOG_DEBUG("[Assimp] Material '{}': using combined metallicRoughness texture", mat_data.name);
             }
         }
 
@@ -402,10 +383,8 @@ inline void process_assimp_materials(const aiScene* ai_scene, Scene& scene,
             std::string mode = alpha_mode_str.C_Str();
             if (mode == "MASK") {
                 mat_data.alpha_mode = AlphaMode::Mask;
-                CFW_LOG_DEBUG("[Assimp] Material '{}': glTF alphaMode = MASK", mat_data.name);
             } else if (mode == "BLEND") {
                 mat_data.alpha_mode = AlphaMode::Blend;
-                CFW_LOG_DEBUG("[Assimp] Material '{}': glTF alphaMode = BLEND", mat_data.name);
             }
             // "OPAQUE" 是默认值，无需处理
         }
@@ -418,7 +397,7 @@ inline void process_assimp_materials(const aiScene* ai_scene, Scene& scene,
             if (mat_data.alpha_mode == AlphaMode::Opaque && alpha_cutoff > 0.0f) {
                 mat_data.alpha_mode = AlphaMode::Mask;
             }
-            CFW_LOG_DEBUG("[Assimp] Material '{}': alphaCutoff = {}", mat_data.name, alpha_cutoff);
+            (void)mat_data.name;
         }
 
         // 如果没有明确的 alphaMode，根据其他属性推断
@@ -426,13 +405,10 @@ inline void process_assimp_materials(const aiScene* ai_scene, Scene& scene,
             // 如果有 opacity 纹理，使用 Blend 模式
             if (mat_data.opacity_texture != InvalidTextureId) {
                 mat_data.alpha_mode = AlphaMode::Blend;
-                CFW_LOG_DEBUG("[Assimp] Material '{}': has opacity texture, using Blend mode", mat_data.name);
             }
             // 如果 base_color alpha < 1，使用 Blend 模式
             else if (mat_data.base_color[3] < 1.0f) {
                 mat_data.alpha_mode = AlphaMode::Blend;
-                CFW_LOG_DEBUG("[Assimp] Material '{}': base_color alpha = {}, using Blend mode",
-                              mat_data.name, mat_data.base_color[3]);
             }
         }
 
@@ -492,10 +468,6 @@ inline void process_assimp_mesh(aiMesh* ai_mesh, Scene& scene, std::uint32_t nod
         }
     }
 
-    CFW_LOG_DEBUG("[Assimp] Mesh '{}' loaded: {} vertices, {} indices",
-                  mesh_name, unindexed_vertices.size(), indices.size());
-
-    // 使用公共优化流水线
     MeshOptimizeResult opt_result = optimize_mesh_pipeline(
         unindexed_vertices,
         indices,
@@ -535,11 +507,7 @@ inline void process_assimp_mesh(aiMesh* ai_mesh, Scene& scene, std::uint32_t nod
         // 转换索引为 uint16
         std::vector<std::uint16_t> final_indices = convert_indices_to_uint16(mesh_indices);
 
-        CFW_LOG_DEBUG("[Assimp] Mesh '{}' assigned vertices {}, indices {}, material index {}",
-                      sub_mesh_name,
-                      vertices.size(),
-                      final_indices.size(),
-                      material_index);
+        (void)sub_mesh_name;
 
         // 构建 MeshData
         MeshData mesh_data = build_mesh_data(
