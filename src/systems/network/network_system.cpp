@@ -72,6 +72,15 @@ struct NetworkSystem::Impl {
         Network::ActorCreatePacked actor_packed;
     };
     std::vector<PendingAction> pending_actor_creates;
+
+    // Pending file transfers: model_path → actor data from the original
+    // ACTOR_CREATE that triggered the transfer.  When the file arrives,
+    // we reconstruct the PendingAction without requiring a re-send.
+    struct PendingFileTransfer {
+        std::string scene_name;
+        Network::ActorCreatePacked actor_packed;
+    };
+    std::unordered_map<std::string, PendingFileTransfer> pending_file_transfers;
 };
 
 // ============================================================================
@@ -383,7 +392,10 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
                 pa.actor_packed = *opt_packed;
                 impl_->pending_actor_creates.push_back(pa);
             } else {
-                // File missing — request from peer
+                // File missing — save actor data and request file from peers
+                impl_->pending_file_transfers[model_path] = {
+                    scene_name, *opt_packed
+                };
                 auto pkt = Network::build_file_request(model_path);
                 impl_->peer_manager.broadcast(Network::kChannelReliable,
                                               pkt.data(), pkt.size(), true);
@@ -515,13 +527,19 @@ void NetworkSystem::handle_file_chunk(const std::string& sender_peer_id,
 
     impl_->incoming_transfers.erase(tx_key);
 
-    // Re-broadcast FILE_REQUEST to request ACTOR_CREATE re-send.
-    // The peer that originally sent ACTOR_CREATE will re-send it, and
-    // this time the file exists locally, so the handler will push a
-    // PendingAction which the frontend will poll and create the actor.
-    auto pkt = Network::build_file_request(model_path);
-    impl_->peer_manager.broadcast(Network::kChannelReliable,
-                                  pkt.data(), pkt.size(), true);
+    // If this transfer was triggered by an ACTOR_CREATE, push the
+    // saved actor data as a PendingAction so the frontend creates the
+    // actor.  No need to re-request ACTOR_CREATE from the original
+    // sender — we already have everything.
+    auto ft_it = impl_->pending_file_transfers.find(model_path);
+    if (ft_it != impl_->pending_file_transfers.end()) {
+        Impl::PendingAction pa;
+        pa.scene_name = ft_it->second.scene_name;
+        pa.model_path = model_path;
+        pa.actor_packed = ft_it->second.actor_packed;
+        impl_->pending_actor_creates.push_back(pa);
+        impl_->pending_file_transfers.erase(ft_it);
+    }
 }
 
 }  // namespace Corona::Systems

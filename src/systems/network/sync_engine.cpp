@@ -516,11 +516,13 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                 auto& store = hub.model_transform_storage();
                 auto map_it = impl_->mt_seq_to_id.find(entity_seq);
                 if (map_it != impl_->mt_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write_nowait(map_it->second);
+                    // Blocking write — must not silently drop transform updates
+                    // or remote objects will jitter.  Render threads hold shared
+                    // read locks only briefly; the block is O(µs).
+                    auto handle = store.try_acquire_write(map_it->second);
                     if (handle.valid()) {
                         deserialize_mt(*handle, value_ptr, value_len);
                     }
-                } else {
                 }
                 break;
             }
@@ -528,11 +530,10 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                 auto& store = hub.model_resource_storage();
                 auto map_it = impl_->mr_seq_to_id.find(entity_seq);
                 if (map_it != impl_->mr_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write_nowait(map_it->second);
+                    auto handle = store.try_acquire_write(map_it->second);
                     if (handle.valid()) {
                         deserialize_mr(*handle, value_ptr, value_len);
                     }
-                } else {
                 }
                 break;
             }
@@ -540,11 +541,10 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                 auto& store = hub.geometry_storage();
                 auto map_it = impl_->geo_seq_to_id.find(entity_seq);
                 if (map_it != impl_->geo_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write_nowait(map_it->second);
+                    auto handle = store.try_acquire_write(map_it->second);
                     if (handle.valid()) {
                         deserialize_geo(*handle, value_ptr, value_len);
                     }
-                } else {
                 }
                 break;
             }
@@ -552,11 +552,10 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                 auto& store = hub.optics_storage();
                 auto map_it = impl_->opt_seq_to_id.find(entity_seq);
                 if (map_it != impl_->opt_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write_nowait(map_it->second);
+                    auto handle = store.try_acquire_write(map_it->second);
                     if (handle.valid()) {
                         deserialize_opt(*handle, value_ptr, value_len);
                     }
-                } else {
                 }
                 break;
             }
@@ -564,11 +563,10 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                 auto& store = hub.environment_storage();
                 auto map_it = impl_->env_seq_to_id.find(entity_seq);
                 if (map_it != impl_->env_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write_nowait(map_it->second);
+                    auto handle = store.try_acquire_write(map_it->second);
                     if (handle.valid()) {
                         deserialize_env(*handle, value_ptr, value_len);
                     }
-                } else {
                 }
                 break;
             }
