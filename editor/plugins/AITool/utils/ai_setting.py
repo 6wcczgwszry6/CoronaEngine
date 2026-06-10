@@ -62,7 +62,7 @@ try:
     def HUNYUAN_3D_SETTINGS() -> Dict[str, Any]:
         return {
             "enable": True,
-            "api_key": "sk-OGJiMLkWmzdbE9r1WZ0njMWR4GbEehuxwhMA1MWQF91vx6S3",
+            "api_key": "sk-XO2PvXfsKNBL72sphgi5VEc2Gycw3mTXj9Pis3emFzZROAAz",
             "region": "ap-guangzhou",
             "endpoint": "api.ai3d.cloud.tencent.com",
             "version": "pro",
