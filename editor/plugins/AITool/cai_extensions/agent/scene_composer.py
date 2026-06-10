@@ -245,7 +245,10 @@ class SceneComposer:
 
         state = {
             "session_id": f"compose_{int(__import__('time').time())}",
-            "metadata": {"scene_name": self.scene_name, "room_size": self.room_size},
+            "metadata": {
+                "scene_name": self.scene_name, "room_size": self.room_size,
+                "skip_six_view_capture": True,  # 跳过截图，避免引擎渲染死锁导致页面卡死
+            },
             "global_assets": {
                 "multi_scene": {
                     "approved_elements": approved,
@@ -408,6 +411,19 @@ class SceneComposer:
                 failed = [a.get("name", "?") for a in imp_inter.get("failed_actors", [])]
                 logger.info("[SceneComposer] import 完成: 成功 %d, 失败 %d",
                             len(imported), len(failed))
+
+                # 物理沉降：导入后打开物理 → 重力落至地面 → 关物理
+                # 防止紧密摆放的物体因碰撞弹开导致最终布局散乱
+                if imported:
+                    try:
+                        from ..flows.scene_composition_workflow_v2.nodes_tier_place import (
+                            _apply_physics_settlement,
+                        )
+                        settled = _apply_physics_settlement(self.scene_name, imported)
+                        logger.info("[SceneComposer] 物理沉降完成: %d/%d",
+                                    settled, len(imported))
+                    except Exception as e:
+                        logger.warning("[SceneComposer] 物理沉降失败（忽略）: %s", e)
             except Exception as e:
                 logger.exception("[SceneComposer] import_to_engine 异常: %s", e)
                 failed = [it["name"] for it in resolved]
