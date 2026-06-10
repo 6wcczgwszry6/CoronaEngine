@@ -345,11 +345,9 @@ class MasterAgent:
         self,
         fallback_chat: Callable[[str, List[str]], str] = None,
         global_style: Dict[str, Any] = None,
-        scene_max_items: int = 8,
     ) -> None:
         self._fallback_chat = fallback_chat
         self._global_style = global_style or {}
-        self._scene_max_items = max(1, int(scene_max_items))  # 单次场景生成物体数上限
         self._router = PersonaRouter()
         self._coordinator = None
         self._group_agent = None
@@ -582,8 +580,7 @@ class MasterAgent:
         compose_text = self._gather_compose_text(user_text, messages)
         image_url = self._extract_image_url(messages)
 
-        composer = SceneComposer(room_size=[5.0, 3.0, 3.0], scene_name="lanchat_scene",
-                                 max_items=self._scene_max_items)
+        composer = SceneComposer(room_size=[5.0, 3.0, 3.0], scene_name="lanchat_scene")
         result = composer.compose(compose_text, image_url=image_url, do_import=True)
 
         # 记录到 GroupAgent
@@ -598,12 +595,9 @@ class MasterAgent:
         model_count = result.get("model_count", 0)
         imported = result.get("imported", [])
         failed = result.get("failed", [])
-        truncated = result.get("truncated", 0)
 
         lines = [f"{tag} 🏗️ 场景组合完成"]
         lines.append(f"  • 识别物体：{extracted} 个")
-        if truncated > 0:
-            lines.append(f"  • ⚠️ 单次生成上限 {self._scene_max_items} 个，本次先做前 {self._scene_max_items} 个（剩 {truncated} 个可稍后继续）")
         lines.append(f"  • 获取模型：{model_count} 个")
         lines.append(f"  • 导入引擎：{len(imported)} 个")
         if imported:
@@ -613,50 +607,19 @@ class MasterAgent:
         return "\n".join(lines)
 
     def _gather_compose_text(self, user_text: str, messages: List[str]) -> str:
-        """收集用于组合的文本：清单 + 布局/风格描述 + 当前指令。
-
-        不仅回溯数字清单，也抓取 AI 之前给出的完整设计方案（布局要点/风格/空间关系），
-        让 compose_scene 的 LLM 布局节点拿到足够语义（"床头柜靠床、衣柜靠墙"等）。
-        """
+        """收集用于组合的文本：当前指令 + 最近含清单的历史消息。"""
+        # 若当前指令本身就含清单（数字列表），直接用
         import re as _re
-
-        # 若当前指令本身就含清单 → 直接用
         if len(_re.findall(r"^\s*\d+[\.、)]", user_text, _re.MULTILINE)) >= 3:
             return user_text
-
-        # 否则从历史里收集：清单文本 + 设计方案文本
-        list_body = ""
-        design_body = ""
+        # 否则回溯最近的长消息（很可能是 AI 给出的物品清单）
         for msg in reversed(messages):
             if msg.startswith("[此前对话摘要]") or msg.startswith("[摘要]"):
                 continue
             body = msg.split(": ", 1)[-1] if ": " in msg else msg
-            body = body.strip()
-            if not body or len(body) < 10:
-                continue
-            # 数字清单（≥3 项）= 物体目录
-            if not list_body and len(_re.findall(r"^\s*\d+[\.、)]", body, _re.MULTILINE)) >= 3:
-                list_body = body
-                continue
-            # 长文本含布局/风格/位置关系关键词 = 设计方案
-            if not design_body and len(body) > 80:
-                design_score = sum(kw in body for kw in (
-                    "布局", "靠墙", "居中", "放置", "对称", "走道", "动线",
-                    "风格", "色调", "氛围", "地面", "窗户", "床尾", "床头",
-                    "左侧", "右侧", "旁边", "上方", "下方", "对面", "附近",
-                ))
-                if design_score >= 3:
-                    design_body = body
-
-        if list_body:
-            parts = [f"## 物体清单\n{list_body}"]
-            if design_body:
-                parts.append(f"## 设计描述\n{design_body}")
-            parts.append(f"## 用户指令\n{user_text}")
-            result = "\n\n".join(parts)
-            logger.info("[MasterAgent] compose: 拼装布局上下文 (list=%d, design=%d, total=%d)",
-                        len(list_body), len(design_body), len(result))
-            return result
+            if len(_re.findall(r"^\s*\d+[\.、)]", body, _re.MULTILINE)) >= 3 or "清单" in body:
+                logger.info("[MasterAgent] compose: 使用历史清单文本 (len=%d)", len(body))
+                return body + "\n\n" + user_text
         return user_text
 
     def _handle_scene_single(self, user_text: str, scene_state: Dict[str, Any],
@@ -879,18 +842,14 @@ class MasterAgent:
 def create_master_agent(
     global_style: Dict[str, Any] = None,
     fallback_chat: Callable[[str, List[str]], str] = None,
-    scene_max_items: int = 8,
 ) -> MasterAgent:
     """创建 MasterAgent — 替换 LANChat 的 _make_agent_ai_chat()。
 
     用法 (在 LANChat main.py 中):
         from cai_extensions.agent.agent_adapter import create_master_agent
         server._agent_runner = AgentRunner(ai_chat=create_master_agent())
-
-    scene_max_items: 单次场景组合生成的物体数量上限（默认 8）。
     """
-    return MasterAgent(fallback_chat=fallback_chat, global_style=global_style,
-                       scene_max_items=scene_max_items)
+    return MasterAgent(fallback_chat=fallback_chat, global_style=global_style)
 
 
 def create_summary_agent(

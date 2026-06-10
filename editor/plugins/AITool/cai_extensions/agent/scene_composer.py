@@ -29,37 +29,14 @@ _COMPOSE_PATTERNS = [
     r"一键(?:生成|布置|组合)",
 ]
 
-_EXTRACT_SYSTEM_PROMPT = """你是场景物品清单解析器。从用户文字中提取需要放入 3D 场景的【主要独立家具/物件】。
+_EXTRACT_SYSTEM_PROMPT = """你是场景物品清单解析器。从用户文字中提取需要放入 3D 场景的物体清单。
 输出 JSON 数组，每项: {"name":"物体名","quantity":数量,"keywords":"英文关键词(用于3D生成prompt)"}
 规则:
-- 只提取能独立建模、有体积的【大件物体】：如 床、衣柜、沙发、桌、椅、柜、台灯、地毯、绿植、挂画、镜子等
-- 必须合并/忽略以下琐碎项，不要单独列出：
-  * 床的附属：床垫、被子、枕头、靠枕、床旗、床品 → 都并入"床"，不单列
-  * 墙面/背景：背景墙、软包、护墙板、石膏线、墙面 → 不是物体，忽略
-  * 建筑设施：空调出风口、新风口、筒灯、灯带、顶灯（嵌入式）→ 忽略
-  * 小件杂物：收纳篮、收纳盒、护肤品 → 忽略
-  * 同类合并：左右床头柜=1种"床头柜"(quantity:2)，台灯/壁灯择一
-- 忽略所有尺寸/颜色/风格/材质描述
-- name 用简洁中文（2-6字），quantity 默认1
+- 只提取实体物体（家具/灯具/装饰/植物等），忽略尺寸/颜色/风格描述
+- name 用简洁中文，quantity 默认1
 - keywords 给出适合 3D 生成的英文描述
-- 控制在 8 个以内，只保留最重要的大件
+- 最多 20 个物体
 只输出 JSON 数组，不要解释。"""
-
-# 不该单独建模的物体（关键词黑名单，双保险过滤 LLM 漏网项）
-_ITEM_BLACKLIST = [
-    "床垫", "被子", "被褥", "枕头", "靠枕", "抱枕", "床旗", "床品", "床单", "被",
-    "背景墙", "软包", "护墙板", "石膏线", "墙面", "墙",
-    "空调", "新风", "出风口", "筒灯", "灯带", "顶灯", "嵌灯",
-    "收纳篮", "收纳盒", "收纳", "护肤品", "摆件杂物",
-]
-
-
-def _is_blacklisted(name: str) -> bool:
-    """判断物体名是否在黑名单（不该单独建模的琐碎/附属/建筑项）。"""
-    n = (name or "").strip()
-    if not n:
-        return True
-    return any(bad in n for bad in _ITEM_BLACKLIST)
 
 
 def is_compose_request(text: str) -> bool:
@@ -79,14 +56,9 @@ def is_compose_request(text: str) -> bool:
 class SceneComposer:
     """场景组合器。"""
 
-    # 单次场景生成的物体数量上限（防止一次生成过多 3D 模型，耗时/占用过大）
-    DEFAULT_MAX_ITEMS = 8
-
-    def __init__(self, room_size: List[float] = None, scene_name: str = "lanchat_scene",
-                 max_items: int = DEFAULT_MAX_ITEMS) -> None:
+    def __init__(self, room_size: List[float] = None, scene_name: str = "lanchat_scene") -> None:
         self.room_size = room_size or [5.0, 3.0, 3.0]
         self.scene_name = scene_name
-        self.max_items = max(1, int(max_items))
         self._provider = None
 
     @property
@@ -99,28 +71,14 @@ class SceneComposer:
     # ── 步骤1: 提取物体清单 ──────────────────────────────────────
 
     def extract_items(self, text: str) -> List[Dict[str, Any]]:
-        """从文字中提取物体清单。优先 LLM，失败回退正则，再过滤黑名单。"""
+        """从文字中提取物体清单。优先 LLM，失败回退正则。"""
         logger.info("[SceneComposer] 提取物体清单, 文本长度=%d", len(text))
         items = self._llm_extract(text)
         if not items:
             items = self._regex_extract(text)
-
-        # 黑名单过滤 + 去重（剔除床品/背景墙/建筑设施等不该单独建模的琐碎项）
-        filtered: List[Dict[str, Any]] = []
-        seen = set()
-        for it in items:
-            name = (it.get("name") or "").strip()
-            if _is_blacklisted(name):
-                logger.info("[SceneComposer] 过滤琐碎项: %s", name)
-                continue
-            if name in seen:
-                continue
-            seen.add(name)
-            filtered.append(it)
-
-        logger.info("[SceneComposer] 提取到 %d 个物体（过滤前 %d）: %s",
-                    len(filtered), len(items), [it.get("name") for it in filtered])
-        return filtered
+        logger.info("[SceneComposer] 提取到 %d 个物体: %s",
+                    len(items), [it.get("name") for it in items])
+        return items
 
     def _llm_extract(self, text: str) -> List[Dict[str, Any]]:
         try:
@@ -184,7 +142,6 @@ class SceneComposer:
                        image_url: str = "") -> List[Dict[str, Any]]:
         """为每个物体获取 3D 模型路径。返回带 model_path 的物体列表。"""
         logger.info("[SceneComposer] === 批量获取 %d 个物体模型 ===", len(items))
-        self._last_fail_reasons: List[str] = []
         resolved: List[Dict[str, Any]] = []
         for idx, item in enumerate(items, 1):
             name = item["name"]
@@ -203,97 +160,11 @@ class SceneComposer:
                     logger.info("[SceneComposer] (%d/%d) ✓ %s → %s",
                                 idx, len(items), name, result.local_path)
                 else:
-                    self._last_fail_reasons.append(f"{name}: {result.error}")
                     logger.warning("[SceneComposer] (%d/%d) ✗ %s: %s",
                                    idx, len(items), name, result.error)
             except Exception as e:
-                self._last_fail_reasons.append(f"{name}: {e}")
                 logger.exception("[SceneComposer] 获取模型异常 %s: %s", name, e)
         logger.info("[SceneComposer] === 模型获取完成: %d/%d 成功 ===",
-                    len(resolved), len(items))
-        return resolved
-
-    # ── 步骤2(方案A): 调用原 model_retrieval workflow ──────────────
-    def _run_model_retrieval(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """调用原 model_retrieval workflow，为每个物体「文生图→图生3D/检索」。
-
-        完全复用原系统：构造 state.global_assets.multi_scene.approved_elements
-        （只给 item_name + image_prompt，不给图，dispatch 会自动文生图补偿），
-        invoke 编译好的 DAG，取回 global_assets.model_retrieval.model_results。
-
-        不修改原 workflow 任何代码，仅作为调用方。失败时回退到 acquire_models。
-        """
-        self._last_fail_reasons = []
-        try:
-            from ..flows.model_retrieval_workflow import (
-                WORKFLOWS, MODEL_RETRIEVAL_FUNCTION_ID,
-            )
-            graph = WORKFLOWS.get(MODEL_RETRIEVAL_FUNCTION_ID)
-            if graph is None:
-                raise RuntimeError("model_retrieval workflow 未注册")
-        except Exception as e:
-            logger.warning("[SceneComposer] 无法加载 model_retrieval workflow: %s，回退本地获取", e)
-            return self.acquire_models(items)
-
-        # 组装 approved_elements：每项 {item_name, image_prompt}
-        approved = []
-        for it in items:
-            approved.append({
-                "item_name": it["name"],
-                "image_prompt": it.get("keywords") or it["name"],
-            })
-
-        state = {
-            "session_id": f"compose_{int(__import__('time').time())}",
-            "metadata": {"scene_name": self.scene_name, "room_size": self.room_size},
-            "global_assets": {
-                "multi_scene": {
-                    "approved_elements": approved,
-                    "generated_images": {},  # 不预置图，让 dispatch 自动文生图
-                }
-            },
-            "intermediate": {},
-        }
-
-        logger.info("[SceneComposer] 调用原 model_retrieval workflow（%d 个物体，文生图→图生3D）...",
-                    len(approved))
-        try:
-            out = graph.invoke(state)
-        except Exception as e:
-            logger.exception("[SceneComposer] model_retrieval workflow 执行异常: %s", e)
-            self._last_fail_reasons.append(f"workflow异常: {e}")
-            return self.acquire_models(items)  # 兜底
-
-        # 取回 model_results
-        model_results = (out.get("global_assets", {})
-                            .get("model_retrieval", {})
-                            .get("model_results", []))
-        if not model_results:
-            logger.warning("[SceneComposer] model_retrieval 无结果，回退本地获取")
-            return self.acquire_models(items)
-
-        # 转成 SceneComposer 内部结构（带 model_path）
-        resolved: List[Dict[str, Any]] = []
-        from ..flows.model_retrieval_workflow.helpers import resolve_model_file
-        for row in model_results:
-            name = row.get("item_name", "")
-            err = row.get("error")
-            if err:
-                self._last_fail_reasons.append(f"{name}: {err}")
-                continue
-            raw_path = row.get("model_path", "")
-            local_path = resolve_model_file(raw_path) if raw_path else ""
-            if not local_path:
-                self._last_fail_reasons.append(f"{name}: 模型路径无效({raw_path})")
-                continue
-            resolved.append({
-                "name": name,
-                "model_path": local_path,
-                "source": row.get("source", "generation"),
-                "object_id": row.get("object_id", name),
-            })
-
-        logger.info("[SceneComposer] model_retrieval 完成: %d/%d 成功",
                     len(resolved), len(items))
         return resolved
 
@@ -314,32 +185,13 @@ class SceneComposer:
             return {"items": [], "imported": [], "failed": [],
                     "extracted_count": 0, "model_count": 0,
                     "error": "未能从描述中提取出物体清单"}
-
-        # 数量上限控制：超出则只取前 max_items 个，避免一次生成过多 3D 模型
-        extracted_total = len(items)
-        truncated = 0
-        if extracted_total > self.max_items:
-            truncated = extracted_total - self.max_items
-            items = items[:self.max_items]
-            logger.info("[SceneComposer] 物体数 %d 超过上限 %d，截断为前 %d 个（丢弃 %d）",
-                        extracted_total, self.max_items, self.max_items, truncated)
-
-        # 调用原 model_retrieval workflow：每个物体「文生图 → 图生3D / 检索复用」
-        # 完全复用原系统成熟管线（dispatch 自带文生图补偿 + retrieve + generate）
-        resolved = self._run_model_retrieval(items)
+        resolved = self.acquire_models(items, image_url=image_url)
         if not resolved:
-            reasons = getattr(self, "_last_fail_reasons", [])
-            detail = ("；".join(reasons[:3]) + ("…" if len(reasons) > 3 else "")) if reasons else "未知原因"
             return {"items": items, "imported": [],
                     "failed": [it["name"] for it in items],
-                    "extracted_count": extracted_total, "model_count": 0,
-                    "truncated": truncated,
-                    "fail_reasons": reasons,
-                    "error": f"所有物体的 3D 模型获取失败（{detail}）"}
-        result = self._run_original_workflow(text, resolved, items, do_import)
-        result["extracted_count"] = extracted_total  # 报告真实识别总数
-        result["truncated"] = truncated
-        return result
+                    "extracted_count": len(items), "model_count": 0,
+                    "error": "所有物体的 3D 模型获取失败"}
+        return self._run_original_workflow(text, resolved, items, do_import)
 
     def _run_original_workflow(self, prompt: str, resolved: List[Dict[str, Any]],
                                all_items: List[Dict[str, Any]],
