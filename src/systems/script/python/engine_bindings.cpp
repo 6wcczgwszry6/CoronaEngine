@@ -407,6 +407,10 @@ void BindAll(nanobind::module_& m) {
           "Request a render backend switch. mode: 'native' or 'vision'. Only effective when Vision is available.");
     m.def("get_render_backend", &get_render_backend,
           "Get the currently requested render backend as 'native' or 'vision'");
+    m.def("load_vision_scene", &load_vision_scene, nb::arg("path"),
+          "Load an external Vision scene file (.json). Pass an empty string to "
+          "unload and restore the engine-built scene. Only effective when Vision "
+          "is available and the Vision backend is active.");
 
     // ============================================================================
     // Media (video/audio) import — standalone resources, not 3D actors

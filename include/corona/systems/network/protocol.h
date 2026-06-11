@@ -13,18 +13,18 @@ namespace Corona::Network {
 constexpr uint8_t kProtocolVersion = 1;
 
 // ============================================================================
-// Default port for discovery and ENet communication
+// Default port for ENet communication
 // ============================================================================
 constexpr uint16_t kDefaultPort = 27960;
 
 // ============================================================================
-// Discovery uses a separate port to avoid bind conflict with ENet host.
-// Discovery port = main_port + 1 (e.g. 27960 → 27961)
+// Legacy discovery constants. NetworkSystem no longer starts LAN broadcast
+// discovery; direct IP joining is the active connection path.
 // ============================================================================
 constexpr uint16_t kDiscoveryPortOffset = 1;
 
 // ============================================================================
-// Discovery broadcast interval (ms)
+// Legacy discovery broadcast interval (ms)
 // ============================================================================
 constexpr int kDiscoveryIntervalMs = 500;
 
@@ -56,6 +56,7 @@ enum class MessageType : uint8_t {
     ACTOR_CREATE  = 0x10,  // Actor creation event (scene_name + model_path + transform + optics)
     FILE_REQUEST  = 0x11,  // Request model file from peer
     FILE_CHUNK    = 0x12,  // File chunk transfer
+    OWNERSHIP_CLAIM = 0x13, // Actor ownership handoff claim
 };
 
 // ============================================================================
@@ -283,8 +284,11 @@ inline std::vector<uint8_t> build_hello(const std::string& instance_name,
 // ACTOR_CREATE message builder
 // ============================================================================
 // Wire format:
-//   [1B type] [2B scene_name_len] [scene_name] [2B model_path_len] [model_path]
-//   [36B transform (9 floats)] [72B optics (OpticsPacked)]
+//   [1B type] [2B actor_guid_len] [actor_guid]
+//   [2B scene_name_len] [scene_name] [2B model_path_len] [model_path]
+//   [36B transform (9 floats)] [ActorCreatePacked payload]
+// The payload keeps legacy optics fields in ActorCreatePacked layout; receivers
+// must copy the leading 36B wire transform into ActorCreatePacked::transform.
 // ============================================================================
 struct ActorCreatePacked {
     float transform[9];  // pos(3) + rot(3) + scale(3)
@@ -308,19 +312,31 @@ struct ActorCreatePacked {
 };
 
 inline std::vector<uint8_t> build_actor_create(
+    const std::string& actor_guid,
     const std::string& scene_name,
     const std::string& model_path,
     const float* transform,  // 9 floats
-    const void* optics_packed, size_t optics_size)
+    const void* optics_packed, size_t optics_size,
+    const std::vector<std::string>& dependency_paths = {})
 {
     std::vector<uint8_t> buf;
-    buf.reserve(1 + 2 + scene_name.size() + 2 + model_path.size() + 36 + optics_size);
+    size_t deps_size = 2;
+    for (const auto& dep : dependency_paths) {
+        deps_size += 2 + dep.size();
+    }
+    buf.reserve(1 + 2 + actor_guid.size() + 2 + scene_name.size() +
+                2 + model_path.size() + 36 + optics_size + deps_size);
 
     write_u8(buf, static_cast<uint8_t>(MessageType::ACTOR_CREATE));
+    write_string(buf, actor_guid);
     write_string(buf, scene_name);
     write_string(buf, model_path);
     write_bytes(buf, transform, 36);
     write_bytes(buf, optics_packed, optics_size);
+    write_u16(buf, static_cast<uint16_t>(dependency_paths.size()));
+    for (const auto& dep : dependency_paths) {
+        write_string(buf, dep);
+    }
 
     return buf;
 }
@@ -328,11 +344,29 @@ inline std::vector<uint8_t> build_actor_create(
 // ============================================================================
 // FILE_REQUEST message builder
 // ============================================================================
-inline std::vector<uint8_t> build_file_request(const std::string& model_path) {
+// Wire format:
+//   [1B type] [8B transfer_id] [2B model_path_len] [model_path]
+inline std::vector<uint8_t> build_file_request(uint64_t transfer_id,
+                                               const std::string& model_path) {
     std::vector<uint8_t> buf;
-    buf.reserve(1 + 2 + model_path.size());
+    buf.reserve(1 + 8 + 2 + model_path.size());
     write_u8(buf, static_cast<uint8_t>(MessageType::FILE_REQUEST));
+    write_u64(buf, transfer_id);
     write_string(buf, model_path);
+    return buf;
+}
+
+// ============================================================================
+// OWNERSHIP_CLAIM message builder
+// ============================================================================
+// Wire format:
+//   [1B type] [2B actor_guid_len] [actor_guid]
+// ============================================================================
+inline std::vector<uint8_t> build_ownership_claim(const std::string& actor_guid) {
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 2 + actor_guid.size());
+    write_u8(buf, static_cast<uint8_t>(MessageType::OWNERSHIP_CLAIM));
+    write_string(buf, actor_guid);
     return buf;
 }
 
@@ -340,23 +374,27 @@ inline std::vector<uint8_t> build_file_request(const std::string& model_path) {
 // FILE_CHUNK message builder
 // ============================================================================
 // Wire format:
-//   [1B type] [2B model_path_len] [model_path]
-//   [4B total_size] [4B chunk_index] [4B chunk_count]
+//   [1B type] [8B transfer_id] [2B model_path_len] [model_path]
+//   [4B total_size] [4B offset] [4B chunk_index] [4B chunk_count]
 //   [4B chunk_data_len] [chunk_data]
 // ============================================================================
 inline std::vector<uint8_t> build_file_chunk(
+    uint64_t transfer_id,
     const std::string& model_path,
     uint32_t total_size,
+    uint32_t offset,
     uint32_t chunk_index,
     uint32_t chunk_count,
     const void* chunk_data, uint32_t chunk_data_len)
 {
     std::vector<uint8_t> buf;
-    buf.reserve(1 + 2 + model_path.size() + 4 + 4 + 4 + 4 + chunk_data_len);
+    buf.reserve(1 + 8 + 2 + model_path.size() + 4 + 4 + 4 + 4 + 4 + chunk_data_len);
 
     write_u8(buf, static_cast<uint8_t>(MessageType::FILE_CHUNK));
+    write_u64(buf, transfer_id);
     write_string(buf, model_path);
     write_u32(buf, total_size);
+    write_u32(buf, offset);
     write_u32(buf, chunk_index);
     write_u32(buf, chunk_count);
     write_u32(buf, chunk_data_len);

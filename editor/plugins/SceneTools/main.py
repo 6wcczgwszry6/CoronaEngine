@@ -232,6 +232,32 @@ class SceneTools(PluginBase):
             return {"status": "error", "message": str(exc)}
 
     @staticmethod
+    def load_vision_scene(path: str = "") -> dict:
+        try:
+            if not CoronaEditor.CoronaEngine.is_vision_available():
+                return {"status": "error", "message": "Vision backend is not available in this build"}
+            CoronaEditor.CoronaEngine.load_vision_scene(path)
+            logger.info("Vision scene load requested: %s", path or "<unload>")
+            return {"status": "success", "path": path}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def select_vision_scene_path() -> dict:
+        try:
+            _content, path = FileHandler.open_file(
+                caption="打开 Vision 场景",
+                file_types="Vision 场景 (*.json)",
+                read_content=False,
+                return_relative_path=False,
+            )
+            if not path:
+                return {"status": "canceled", "path": ""}
+            return {"status": "success", "path": path}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
     def select_screenshot_path(scene_name: str, camera_name: str = None) -> dict:
         try:
             init_path = CoronaEditor.CoronaEngine.active_project_path if CoronaEditor.CoronaEngine.active_project_path else None

@@ -270,6 +270,22 @@
             />
           </svg>
         </button>
+        <!-- 打开外部 Vision 场景文件（仅 Vision 后端激活时显示） -->
+        <button
+          v-if="visionAvailable && activeRenderBackend === 'vision'"
+          class="p-1.5 hover:bg-[#545454] rounded flex items-center gap-0.5 text-[#e0e0e0]"
+          title="打开 Vision 场景文件 (.json)"
+          @click.stop="OpenVisionScene"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="2"
+              d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"
+            />
+          </svg>
+        </button>
         <!-- GBuffer 输出模式切换 -->
         <div class="relative">
           <button
@@ -986,6 +1002,28 @@ const ToggleRenderBackend = async () => {
     }
   } catch (e) {
     logError('Failed to switch render backend', e);
+  }
+};
+
+const OpenVisionScene = async () => {
+  try {
+    const sel = await sceneService.selectVisionScenePath();
+    const selPayload = sel?.data ?? sel;
+    if (selPayload?.status === 'canceled') {
+      return;
+    }
+    if (sel?.success === false || selPayload?.status === 'error' || !selPayload?.path) {
+      logError('Select Vision scene failed', selPayload?.message || sel?.error || 'no path selected');
+      return;
+    }
+
+    const result = await sceneService.loadVisionScene(selPayload.path);
+    const payload = result?.data ?? result;
+    if (result?.success === false || payload?.status === 'error') {
+      logError('Load Vision scene failed', payload?.message || result?.error || 'unknown error');
+    }
+  } catch (e) {
+    logError('Failed to open Vision scene', e);
   }
 };
 

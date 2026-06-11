@@ -91,6 +91,19 @@ class OpticsSystem : public Kernel::SystemBase {
     bool init_vision_lazy();  ///< 首次切换到 Vision 时的 lazy 初始化
     void run_vision_frame(float frame_count, uint64_t frame_index);
 
+    /// Vision 场景来源：引擎构建（默认，随 SharedDataHub 动态同步）或外部文件
+    /// （独立模式，导入期间禁用动态同步 / 相机对齐，使用场景自带 sensor）。
+    enum class VisionSceneSource { EngineBuilt, ExternalFile };
+    VisionSceneSource vision_scene_source_{VisionSceneSource::EngineBuilt};
+
+    /// 渲染线程起始处消费：若存在 pending 加载请求则切换 Vision 场景。
+    /// 仅在 Vision 已初始化后执行；空路径表示卸载外部场景、回到引擎构建场景。
+    void apply_pending_vision_scene_load();
+
+    /// 从磁盘 .json 导入一个 Vision 场景并带到可渲染状态（替换全局
+    /// renderPipeline）。失败返回 false 且不改动现有 pipeline。
+    bool load_external_vision_scene(const std::string& scene_path);
+
     /// 计算当前 SharedDataHub 场景的轻量签名，用于检测动态变化
     /// （几何拓扑 / transform / 材质参数 / materialColor / visible）。
     std::size_t compute_vision_scene_signature() const;
@@ -181,6 +194,12 @@ class OpticsSystem : public Kernel::SystemBase {
     uint32_t vision_rebuild_retries_{0};        ///< 数据未就绪导致的连续重试次数
     static constexpr uint32_t kVisionRebuildMaxRetries = 30;  ///< 重试上限（约 0.5s @60fps）
 
+    // ---- Vision 外部场景加载（跨线程：事件写路径，渲染线程消费）----
+    // VisionSceneLoadEvent 只携带路径写入此处；实际 import 在 run_vision_frame
+    // 起始的渲染线程执行，避免在 Python/CEF 线程触碰 CUDA pipeline。
+    std::mutex vision_scene_load_mutex_;
+    std::optional<std::string> pending_vision_scene_load_;
+
     struct PendingScreenshot {
         std::uintptr_t camera_handle = 0;
         std::string file_path;
@@ -190,6 +209,7 @@ class OpticsSystem : public Kernel::SystemBase {
     std::mutex screenshot_mutex_;
     Kernel::EventId screenshot_request_sub_id_ = 0;
     Kernel::EventId backend_switch_sub_id_ = 0;
+    Kernel::EventId vision_scene_load_sub_id_ = 0;
 };
 
 }  // namespace Corona::Systems

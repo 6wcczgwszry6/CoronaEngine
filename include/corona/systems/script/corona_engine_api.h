@@ -374,6 +374,12 @@ void set_render_backend(const std::string& mode);
 /// 获取当前请求的渲染后端，返回 "native" 或 "vision"。
 [[nodiscard]] std::string get_render_backend();
 
+/// 请求加载一个外部 Vision 场景文件（.json）。仅当 Vision 后端可用且处于激活
+/// 状态时生效；实际导入在光学系统渲染线程执行。
+/// @param path 外部 Vision 场景 .json 的绝对路径；传空字符串表示卸载外部场景、
+///             恢复由引擎数据构建的场景。
+void load_vision_scene(const std::string& path);
+
 // ============================================================================
 // Media (video/audio) import
 //
