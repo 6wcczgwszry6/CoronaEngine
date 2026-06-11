@@ -79,30 +79,23 @@ vision::Device* visionDevicePtr = nullptr;
     return pipeline;
 }
 
-#ifdef CORONA_VISION_IMPORT_DEMO
-// Absolute path to a known-good Vision scene used purely to verify that the
-// Vision backend can produce a picture in isolation (i.e. without the
-// CoronaEngine->Vision scene-building adapters). Change this to point at any
-// local *.json scene. Kept as a constant so it is trivial to edit/relocate.
-constexpr const char* kVisionDemoScenePath =
-    R"(E:\CoronaExample\test_vision\render_scene\cbox\vision_scene.json)";
-
-// Loads the demo scene from disk and brings it to a renderable state, mirroring
+// Loads a Vision scene from disk and brings it to a renderable state, mirroring
 // the reference snippet (import_scene -> init -> prepare -> prepare_view_texture).
+// Resolves relative texture/mesh references against the scene's own folder.
 // Returns an empty pointer if the file is missing or import fails so the caller
-// can skip the demo without crashing.
-[[nodiscard]] auto import_vision_demo_pipeline() -> ocarina::SP<vision::Pipeline> {
-    const std::filesystem::path scene_path{kVisionDemoScenePath};
+// can skip without crashing.
+[[nodiscard]] auto import_vision_scene_from_file(const std::filesystem::path& scene_path)
+    -> ocarina::SP<vision::Pipeline> {
     std::error_code ec;
     if (!std::filesystem::exists(scene_path, ec)) {
-        CFW_LOG_ERROR("OpticsSystem: Vision demo scene not found: {}", scene_path.string());
+        CFW_LOG_ERROR("OpticsSystem: Vision scene not found: {}", scene_path.string());
         return {};
     }
     // Resolve relative texture/mesh references against the scene's own folder.
     vision::Global::instance().set_scene_path(scene_path.parent_path());
     auto pipeline = vision::Importer::import_scene(scene_path);
     if (!pipeline) {
-        CFW_LOG_ERROR("OpticsSystem: Vision demo import_scene returned null for {}",
+        CFW_LOG_ERROR("OpticsSystem: Vision import_scene returned null for {}",
                       scene_path.string());
         return {};
     }
@@ -113,8 +106,16 @@ constexpr const char* kVisionDemoScenePath =
     pipeline->frame_buffer()->prepare_view_texture();
     return pipeline;
 }
+
+#ifdef CORONA_VISION_IMPORT_DEMO
+// Absolute path to a known-good Vision scene used purely to verify that the
+// Vision backend can produce a picture in isolation (i.e. without the
+// CoronaEngine->Vision scene-building adapters). Change this to point at any
+// local *.json scene. Kept as a constant so it is trivial to edit/relocate.
+constexpr const char* kVisionDemoScenePath =
+    R"(E:\CoronaExample\test_vision\render_scene\cbox\vision_scene.json)";
 #endif
-#endif
+#endif  // CORONA_ENABLE_VISION
 }  // namespace
 
 namespace Corona::Systems {
@@ -292,6 +293,17 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
                 CFW_LOG_WARNING("OpticsSystem: Backend switch ignored (CORONA_ENABLE_VISION not defined)");
 #endif
             });
+
+#ifdef CORONA_ENABLE_VISION
+        vision_scene_load_sub_id_ = event_bus->subscribe<Events::VisionSceneLoadEvent>(
+            [this](const Events::VisionSceneLoadEvent& event) {
+                // Only stash the path here (any thread). The actual import touches
+                // the CUDA pipeline and MUST run on the render thread, so it is
+                // deferred to apply_pending_vision_scene_load() in update().
+                std::lock_guard<std::mutex> lock(vision_scene_load_mutex_);
+                pending_vision_scene_load_ = event.scene_path;
+            });
+#endif
     }
 
     return true;
@@ -914,6 +926,11 @@ void OpticsSystem::shutdown() {
         if (backend_switch_sub_id_ != 0) {
             event_bus->unsubscribe(backend_switch_sub_id_);
         }
+#ifdef CORONA_ENABLE_VISION
+        if (vision_scene_load_sub_id_ != 0) {
+            event_bus->unsubscribe(vision_scene_load_sub_id_);
+        }
+#endif
     }
 
     // 释放所有 per-surface 渲染目标的存储句柄与 GPU 图（改造1）。
@@ -1159,12 +1176,13 @@ bool OpticsSystem::init_vision_lazy() {
         // Verification demo: load a known-good scene straight from disk instead of
         // building the Vision scene from CoronaEngine data. This isolates the
         // Vision render path so we can confirm it produces a picture at all.
-        renderPipeline = import_vision_demo_pipeline();
+        renderPipeline = import_vision_scene_from_file(std::filesystem::path{kVisionDemoScenePath});
         if (!renderPipeline) {
             CFW_LOG_ERROR("OpticsSystem: Vision demo pipeline import failed");
             return false;
         }
         vision_initialized_ = true;
+        vision_scene_source_ = VisionSceneSource::ExternalFile;
         return true;
 #else
         renderPipeline = create_vision_pipeline();
@@ -1241,10 +1259,19 @@ bool OpticsSystem::init_vision_lazy() {
 void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
     if (!renderPipeline) return;
 
+    // Apply any pending external-scene load request on the render thread before
+    // anything else this frame (this can replace renderPipeline).
+    apply_pending_vision_scene_load();
+    if (!renderPipeline) return;
+
 #ifndef CORONA_VISION_IMPORT_DEMO
     // Detect and apply dynamic scene changes (object import/export, transform,
     // material params, per-mesh color) before rendering this frame.
-    sync_vision_dynamic_scene();
+    // Skipped for externally-loaded scenes: they render standalone and must NOT
+    // be overwritten by the Corona->Vision rebuild path.
+    if (vision_scene_source_ == VisionSceneSource::EngineBuilt) {
+        sync_vision_dynamic_scene();
+    }
 #endif
 
     for (auto scene_it = SharedDataHub::instance().scene_storage().cbegin();
@@ -1255,7 +1282,13 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
             auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(cam_handle);
             if (!camera) continue;
             try {
-                Vision::sync_vision_camera(*renderPipeline, *camera);
+                // External scenes carry their own sensor (camera) from the JSON;
+                // aligning it to the Corona camera would override the authored view
+                // and reset accumulation every frame. Only drive the sensor from
+                // the Corona camera for engine-built scenes.
+                if (vision_scene_source_ == VisionSceneSource::EngineBuilt) {
+                    Vision::sync_vision_camera(*renderPipeline, *camera);
+                }
                 // IMPORTANT: render() only RECORDS commands into the Vision
                 // stream (the default, non-profiling submit path does NOT
                 // synchronize/commit). Downloading view_texture() right after a
@@ -1359,6 +1392,90 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
             break; // process first camera only for Vision
         }
         break; // process first scene only for Vision
+    }
+}
+
+void OpticsSystem::apply_pending_vision_scene_load() {
+    std::optional<std::string> request;
+    {
+        std::lock_guard<std::mutex> lock(vision_scene_load_mutex_);
+        if (!pending_vision_scene_load_) return;
+        request.swap(pending_vision_scene_load_);
+    }
+
+    const std::string& path = *request;
+
+    // Releasing the zero-copy bridge BEFORE swapping the pipeline keeps the
+    // Vulkan-before-CUDA ordering: the imported consumer must never outlive the
+    // CUDA buffer backing it (which is owned by the old pipeline's device state).
+    vision_zero_copy_bridge_.reset();
+    has_last_vision_frame_ = false;
+    consecutive_vision_failures_ = 0;
+
+    if (path.empty()) {
+        // Unload external scene -> rebuild the engine-driven scene from scratch.
+        // create_vision_pipeline() reuses the already-initialized CUDA device
+        // (function-local static in init_vision_lazy), so we only replace the
+        // pipeline and repopulate it from SharedDataHub.
+        try {
+            renderPipeline = create_vision_pipeline();
+            if (!renderPipeline) {
+                CFW_LOG_ERROR("OpticsSystem: Failed to recreate engine Vision pipeline on unload");
+                vision_initialized_ = false;
+                return;
+            }
+            auto& scene = renderPipeline->scene();
+            Vision::build_vision_geometry(scene);
+
+            Corona::EnvironmentDevice env{};
+            for (auto sd_it = SharedDataHub::instance().scene_storage().cbegin();
+                 sd_it != SharedDataHub::instance().scene_storage().cend(); ++sd_it) {
+                const auto& sd = *sd_it;
+                if (!sd.enabled) continue;
+                if (sd.environment != 0) {
+                    if (auto e = SharedDataHub::instance().environment_storage().try_acquire_read(sd.environment)) {
+                        env = *e;
+                        break;
+                    }
+                }
+            }
+            Vision::setup_vision_lights(scene, env);
+
+            renderPipeline->prepare();
+            renderPipeline->frame_buffer()->prepare_view_texture();
+
+            vision_scene_source_ = VisionSceneSource::EngineBuilt;
+            // Reset the dynamic-scene baseline so future edits are detected.
+            vision_applied_signature_ = compute_vision_scene_signature();
+            vision_pending_signature_ = vision_applied_signature_;
+            vision_stable_frames_ = 0;
+            CFW_LOG_INFO("OpticsSystem: Unloaded external Vision scene, restored engine scene");
+        } catch (const std::exception& e) {
+            CFW_LOG_ERROR("OpticsSystem: Failed to restore engine Vision scene: {}", e.what());
+        }
+        return;
+    }
+
+    if (load_external_vision_scene(path)) {
+        vision_scene_source_ = VisionSceneSource::ExternalFile;
+        CFW_LOG_INFO("OpticsSystem: Loaded external Vision scene: {}", path);
+    }
+}
+
+bool OpticsSystem::load_external_vision_scene(const std::string& scene_path) {
+    try {
+        auto pipeline = import_vision_scene_from_file(std::filesystem::u8path(scene_path));
+        if (!pipeline) {
+            CFW_LOG_ERROR("OpticsSystem: External Vision scene import failed: {}", scene_path);
+            return false;
+        }
+        // Replace only after a successful import so a bad path leaves the current
+        // scene intact.
+        renderPipeline = std::move(pipeline);
+        return true;
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("OpticsSystem: External Vision scene import threw: {}", e.what());
+        return false;
     }
 }
 #endif  // CORONA_ENABLE_VISION

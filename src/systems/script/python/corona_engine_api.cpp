@@ -1949,6 +1949,17 @@ std::string get_render_backend() {
     return g_requested_backend.load(std::memory_order_relaxed) == 1 ? "vision" : "native";
 }
 
+void load_vision_scene(const std::string& path) {
+    if (!is_vision_available()) {
+        CFW_LOG_WARNING("[load_vision_scene] Vision not compiled in; request ignored");
+        return;
+    }
+
+    if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
+        event_bus->publish<Events::VisionSceneLoadEvent>({path});
+    }
+}
+
 // ########################
 //          Media
 // ########################
