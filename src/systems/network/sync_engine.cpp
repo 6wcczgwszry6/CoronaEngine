@@ -433,65 +433,10 @@ void SyncEngine::poll_and_sync() {
         }
     }
 
-    // --- ModelResource ---
-    {
-        auto& store = hub.model_resource_storage();
-        for (auto it = store.cbegin(); it != store.cend(); ++it) {
-            const ModelResource& data = *it;
-            auto obj_id = reinterpret_cast<std::uintptr_t>(&data);
-            auto ent_seq = store.seq_id(obj_id);
-
-            std::string cur_hash = hash_mr(data, ent_seq);
-            std::string snap_key = impl_->make_key(StorageID::ST_MODEL_RESOURCE, ent_seq, "model");
-
-            if (impl_->check_snapshot(snap_key, cur_hash)) {
-                serialize_mr(data, ent_seq,
-                             impl_->make_wire_key(StorageID::ST_MODEL_RESOURCE, ent_seq, "model"),
-                             entries_payload);
-                ++dirty_count;
-            }
-        }
-    }
-
-    // --- GeometryDevice ---
-    {
-        auto& store = hub.geometry_storage();
-        for (auto it = store.cbegin(); it != store.cend(); ++it) {
-            const GeometryDevice& data = *it;
-            auto obj_id = reinterpret_cast<std::uintptr_t>(&data);
-            auto ent_seq = store.seq_id(obj_id);
-
-            std::string cur_hash = hash_geo(data, ent_seq);
-            std::string snap_key = impl_->make_key(StorageID::ST_GEOMETRY, ent_seq, "geo");
-
-            if (impl_->check_snapshot(snap_key, cur_hash)) {
-                serialize_geo(data, ent_seq,
-                              impl_->make_wire_key(StorageID::ST_GEOMETRY, ent_seq, "geo"),
-                              entries_payload);
-                ++dirty_count;
-            }
-        }
-    }
-
-    // --- OpticsDevice ---
-    {
-        auto& store = hub.optics_storage();
-        for (auto it = store.cbegin(); it != store.cend(); ++it) {
-            const OpticsDevice& data = *it;
-            auto obj_id = reinterpret_cast<std::uintptr_t>(&data);
-            auto ent_seq = store.seq_id(obj_id);
-
-            std::string cur_hash = hash_opt(data, ent_seq);
-            std::string snap_key = impl_->make_key(StorageID::ST_OPTICS, ent_seq, "opt");
-
-            if (impl_->check_snapshot(snap_key, cur_hash)) {
-                serialize_opt(data, ent_seq,
-                              impl_->make_wire_key(StorageID::ST_OPTICS, ent_seq, "opt"),
-                              entries_payload);
-                ++dirty_count;
-            }
-        }
-    }
+    // Geometry, model resource, and optics are intentionally not synced here.
+    // Actor creation and file transfer build those local objects on each peer;
+    // syncing handle-bearing structures afterward can overwrite valid local
+    // links with seq/handle values from another process and make meshes vanish.
 
     // --- EnvironmentDevice ---
     {
@@ -585,45 +530,16 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                 break;
             }
             case StorageID::ST_MODEL_RESOURCE: {
-                auto& store = hub.model_resource_storage();
-                auto map_it = impl_->mr_seq_to_id.find(target_seq);
-                if (map_it != impl_->mr_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write(map_it->second);
-                    if (handle.valid()) {
-                        deserialize_mr(*handle, value_ptr, value_len);
-                        impl_->set_snapshot(
-                            impl_->make_key(storage_id, target_seq, field_key),
-                            hash_mr(*handle, target_seq));
-                    }
-                }
+                // Model resources are created by the actor/file-transfer path.
+                // Ignore remote handle-bearing updates to avoid breaking local links.
                 break;
             }
             case StorageID::ST_GEOMETRY: {
-                auto& store = hub.geometry_storage();
-                auto map_it = impl_->geo_seq_to_id.find(target_seq);
-                if (map_it != impl_->geo_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write(map_it->second);
-                    if (handle.valid()) {
-                        deserialize_geo(*handle, value_ptr, value_len);
-                        impl_->set_snapshot(
-                            impl_->make_key(storage_id, target_seq, field_key),
-                            hash_geo(*handle, target_seq));
-                    }
-                }
+                // Geometry stores local object handles; actor creation owns it.
                 break;
             }
             case StorageID::ST_OPTICS: {
-                auto& store = hub.optics_storage();
-                auto map_it = impl_->opt_seq_to_id.find(target_seq);
-                if (map_it != impl_->opt_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write(map_it->second);
-                    if (handle.valid()) {
-                        deserialize_opt(*handle, value_ptr, value_len);
-                        impl_->set_snapshot(
-                            impl_->make_key(storage_id, target_seq, field_key),
-                            hash_opt(*handle, target_seq));
-                    }
-                }
+                // Keep optics local for now; transform-only object sync is safer.
                 break;
             }
             case StorageID::ST_ENVIRONMENT: {

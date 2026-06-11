@@ -46,6 +46,7 @@ class Actor:
         self._suppress_network_broadcast = bool(
             actor_data and actor_data.get("_suppress_network_broadcast")
         )
+        self.network_remote = self._suppress_network_broadcast
         self._collision_callback = None
 
         self.file_data = configparser.ConfigParser()
@@ -85,6 +86,8 @@ class Actor:
         self._collision_type = 'box'           # 碰撞检测类型：'none'（关闭）/ 'box'（包围盒）/ 'mesh'（网格）
         self._camera_locked_script = None  # CameraLockedObject 脚本引用
         if self.parent:
+            if self.network_remote:
+                self._disable_local_physics_for_remote_actor()
             self._setup_collision_callback()
             self._setup_on_move_callback()
             if (self.actor_type != "actor" and
@@ -211,6 +214,15 @@ class Actor:
             CoronaEditor.js_call_func("actor-sync-broadcast", [actor_data])
         except Exception as exc:
             logging.warning("Actor network create broadcast failed for %s: %s",
+                            self.name or self.route, exc)
+
+    def _disable_local_physics_for_remote_actor(self):
+        if not hasattr(self, '_mechanics') or self._mechanics is None:
+            return
+        try:
+            self._mechanics.set_physics_enabled(False)
+        except Exception as exc:
+            logging.warning("Failed to disable local physics for remote actor %s: %s",
                             self.name or self.route, exc)
 
     def _ensure_network_model_path_in_project(self):

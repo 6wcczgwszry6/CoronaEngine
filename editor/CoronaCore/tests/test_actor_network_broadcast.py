@@ -35,11 +35,20 @@ class FakeGeometry:
     def get_position(self):
         return self.position
 
+    def set_position(self, position):
+        self.position = position
+
     def get_rotation(self):
         return self.rotation
 
+    def set_rotation(self, rotation):
+        self.rotation = rotation
+
     def get_scale(self):
         return self.scale
+
+    def set_scale(self, scale):
+        self.scale = scale
 
 
 class FakeOptics:
@@ -53,12 +62,19 @@ class FakeOptics:
 class FakeComponent:
     def __init__(self, geometry):
         self.engine_obj = object()
+        self.physics_enabled = True
 
     def set_collision_callback(self, callback):
         self.collision_callback = callback
 
     def set_on_move_callback(self, callback):
         self.on_move_callback = callback
+
+    def set_physics_enabled(self, enabled):
+        self.physics_enabled = enabled
+
+    def get_physics_enabled(self):
+        return self.physics_enabled
 
 
 class ActorNetworkBroadcastTests(unittest.TestCase):
@@ -140,6 +156,44 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                              "mtllib Ball.mtl\nmesh-data")
             self.assertTrue((project_root / "Resource" / "Ball.mtl").exists())
             self.assertTrue((project_root / "Resource" / "textures" / "Ball.png").exists())
+
+    def test_remote_actor_disables_local_physics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            (project_root / "Resource").mkdir()
+            (project_root / "Resource" / "cube.obj").write_text("mesh", encoding="utf-8")
+            fake_editor = SimpleNamespace(
+                CoronaEngine=SimpleNamespace(
+                    active_project_path=str(project_root),
+                    Actor=FakeActorEngineObject,
+                    ActorProfile=SimpleNamespace,
+                ),
+                js_call_func=lambda name, args: None,
+            )
+            parent = SimpleNamespace(route="Scene/main.scene")
+
+            with patch.object(actor_module, "CoronaEditor", fake_editor), \
+                 patch.object(actor_module, "CoronaEngine", fake_editor.CoronaEngine), \
+                 patch.object(actor_module, "Geometry", FakeGeometry), \
+                 patch.object(actor_module, "Optics", FakeOptics), \
+                 patch.object(actor_module, "Mechanics", FakeComponent), \
+                 patch.object(actor_module, "Acoustics", FakeComponent):
+                actor = actor_module.Actor(
+                    route="Resource/cube.obj",
+                    actor_type="model",
+                    parent_scene=parent,
+                    actor_data={
+                        "actor_guid": "actor-remote",
+                        "_suppress_network_broadcast": True,
+                        "geometry": {
+                            "position": [0, 0, 0],
+                            "rotation": [0, 0, 0],
+                            "scale": [1, 1, 1],
+                        },
+                    },
+                )
+
+            self.assertFalse(actor._mechanics.get_physics_enabled())
 
 
 if __name__ == "__main__":

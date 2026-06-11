@@ -263,6 +263,90 @@ void test_sync_engine_marks_actor_dirty_entries_with_guid() {
     hub.model_transform_storage().deallocate(transform);
 }
 
+void test_sync_engine_does_not_emit_geometry_resource_or_optics_entries() {
+    auto& hub = Corona::SharedDataHub::instance();
+
+    auto transform = hub.model_transform_storage().allocate();
+    auto model_resource = hub.model_resource_storage().allocate();
+    auto geometry = hub.geometry_storage().allocate();
+    auto optics = hub.optics_storage().allocate();
+    auto profile = hub.profile_storage().allocate();
+    auto actor = hub.actor_storage().allocate();
+
+    {
+        auto mr = hub.model_resource_storage().acquire_write(model_resource);
+        mr->model_id = 7;
+    }
+    {
+        auto g = hub.geometry_storage().acquire_write(geometry);
+        g->transform_handle = transform;
+        g->model_resource_handle = model_resource;
+    }
+    {
+        auto o = hub.optics_storage().acquire_write(optics);
+        o->geometry_handle = geometry;
+    }
+    {
+        auto p = hub.profile_storage().acquire_write(profile);
+        p->geometry_handle = geometry;
+        p->optics_handle = optics;
+    }
+    {
+        auto a = hub.actor_storage().acquire_write(actor);
+        a->profile_handles.push_back(profile);
+    }
+
+    Corona::Network::NetworkIdentityRegistry registry(hub);
+    expect_true(registry.register_actor("actor-transform-only", actor),
+                "actor guid registration for transform-only sync succeeds");
+
+    Corona::Network::SyncEngine sync;
+    std::vector<uint8_t> outgoing;
+    sync.initialize("local-peer");
+    sync.set_identity_mapping_callbacks(
+        [&](Corona::Network::StorageID sid, uint64_t seq) {
+            return registry.actor_guid_for_storage_seq(sid, seq);
+        },
+        [&](Corona::Network::StorageID sid, const std::string& guid)
+            -> std::optional<uint64_t> {
+            return registry.storage_seq_for_actor_guid(sid, guid);
+        });
+    sync.set_on_outgoing([&](const std::vector<uint8_t>& packet) {
+        outgoing = packet;
+    });
+    sync.poll_and_sync();
+
+    expect_true(!outgoing.empty(), "transform-only sync dirty packet exists");
+    if (!outgoing.empty()) {
+        Corona::Network::BufferReader reader(outgoing.data(), outgoing.size());
+        (void)reader.read_u8();
+        (void)reader.read_u32();
+        (void)reader.read_u64();
+        uint32_t count = reader.read_u32();
+        for (uint32_t i = 0; i < count; ++i) {
+            auto sid = static_cast<Corona::Network::StorageID>(reader.read_u16());
+            (void)reader.read_u64();
+            uint16_t key_len = reader.read_u16();
+            uint16_t value_len = reader.read_u16();
+            reader.pos += key_len + value_len;
+            expect_true(sid != Corona::Network::StorageID::ST_GEOMETRY,
+                        "sync dirty does not emit geometry entries");
+            expect_true(sid != Corona::Network::StorageID::ST_MODEL_RESOURCE,
+                        "sync dirty does not emit model resource entries");
+            expect_true(sid != Corona::Network::StorageID::ST_OPTICS,
+                        "sync dirty does not emit optics entries");
+        }
+    }
+
+    sync.shutdown();
+    hub.actor_storage().deallocate(actor);
+    hub.profile_storage().deallocate(profile);
+    hub.optics_storage().deallocate(optics);
+    hub.geometry_storage().deallocate(geometry);
+    hub.model_resource_storage().deallocate(model_resource);
+    hub.model_transform_storage().deallocate(transform);
+}
+
 }  // namespace
 
 int main() {
@@ -273,6 +357,7 @@ int main() {
     test_project_relative_path_validation();
     test_network_identity_registry_resolves_actor_components();
     test_sync_engine_marks_actor_dirty_entries_with_guid();
+    test_sync_engine_does_not_emit_geometry_resource_or_optics_entries();
 
     if (g_failed != 0) {
         std::cerr << g_failed << " network protocol test(s) failed\n";
