@@ -222,19 +222,13 @@ VisionBuildResult build_vision_geometry(::vision::Scene& scene) {
                     }
 
                     // Create Vision Mesh and upload to Vision GPU device
-                    CFW_LOG_INFO("[VTrace] geom: mesh {} verts={} tris={} upload_immediately begin",
-                                 mesh_index, vertices.size(), triangles.size());
                     auto mesh = std::make_shared<::vision::Mesh>(
                         std::move(vertices), std::move(triangles));
                     mesh->upload_immediately();
                     scene.geometry().data()->register_mesh(mesh);
-                    CFW_LOG_INFO("[VTrace] geom: mesh {} registered", mesh_index);
 
                     // Create material and ShapeInstance
-                    CFW_LOG_INFO("[VTrace] geom: create_vision_material begin");
                     auto material = create_vision_material(*optics, mesh_dev);
-                    CFW_LOG_INFO("[VTrace] geom: create_vision_material done (ok={})",
-                                 material ? "yes" : "no");
                     if (!material) {
                         // Fallback so the instance always has a valid material id.
                         // Without this, fill_instances() leaves material_id unset and
@@ -262,15 +256,8 @@ VisionBuildResult build_vision_geometry(::vision::Scene& scene) {
     // BVH build + device upload are intentionally left to Pipeline::prepare_geometry(),
     // which runs reset_device_buffer() + upload() + build_accel() during prepare();
     // building here as well would just be a redundant full BVH rebuild.
-    CFW_LOG_INFO("[VTrace] geom: fill_instances begin ({} shapes)", result.instance_count);
     scene.fill_instances();
-    CFW_LOG_INFO("[VTrace] geom: update_geometry_instances begin");
     scene.update_geometry_instances();
-    CFW_LOG_INFO("[VTrace] geom: finalize done");
-
-    CFW_LOG_INFO(
-        "Vision geometry adapter: added {} ShapeInstances ({} candidates, {} skipped for missing data)",
-        result.instance_count, result.candidate_count, result.skipped_no_data);
     return result;
 }
 
