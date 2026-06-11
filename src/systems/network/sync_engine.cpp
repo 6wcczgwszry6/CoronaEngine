@@ -350,12 +350,10 @@ void SyncEngine::initialize(const std::string& local_peer_id) {
     impl_->local_peer_id = local_peer_id;
     impl_->last_synced.clear();
     impl_->seq = 0;
-    CFW_LOG_INFO("SyncEngine: Initialized (peer={})", local_peer_id);
 }
 
 void SyncEngine::shutdown() {
     impl_->last_synced.clear();
-    CFW_LOG_INFO("SyncEngine: Shut down");
 }
 
 // ============================================================================
@@ -522,6 +520,7 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                     if (handle.valid()) {
                         deserialize_mt(*handle, value_ptr, value_len);
                     }
+                } else {
                 }
                 break;
             }
@@ -533,6 +532,7 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                     if (handle.valid()) {
                         deserialize_mr(*handle, value_ptr, value_len);
                     }
+                } else {
                 }
                 break;
             }
@@ -544,6 +544,7 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                     if (handle.valid()) {
                         deserialize_geo(*handle, value_ptr, value_len);
                     }
+                } else {
                 }
                 break;
             }
@@ -555,6 +556,7 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                     if (handle.valid()) {
                         deserialize_opt(*handle, value_ptr, value_len);
                     }
+                } else {
                 }
                 break;
             }
@@ -566,6 +568,7 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
                     if (handle.valid()) {
                         deserialize_env(*handle, value_ptr, value_len);
                     }
+                } else {
                 }
                 break;
             }
@@ -580,8 +583,6 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
         if (!r.has_remaining(8)) return;
         (void)r.read_u32();  // seq
         uint32_t count = r.read_u32();
-        CFW_LOG_INFO("SyncEngine: Received SYNC_FULL ({} entries) from {}",
-                     count, sender_peer_id);
         handle_incoming(sender_peer_id, data + 1 + 8, len - 1 - 8);
     }
     else if (type == MessageType::HEARTBEAT) {

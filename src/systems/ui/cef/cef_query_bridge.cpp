@@ -228,6 +228,47 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     return true;
                 }
 
+                if (func == "poll_pending_actor_create") {
+                    // Called by frontend every ~500ms when session is active.
+                    // Returns the next pending actor create entry, so Python
+                    // can call SceneTools.create_actor_internal.
+                    nlohmann::json payload;
+                    std::string scene_name, model_path;
+                    Network::ActorCreatePacked packed;
+                    if (sys->pop_pending_actor_create(scene_name, model_path,
+                                                       &packed, sizeof(packed))) {
+                        payload["has_pending"] = true;
+                        payload["scene_name"] = scene_name;
+                        payload["model_path"] = model_path;
+                        // Convert transform (9 floats) and optics for Python
+                        nlohmann::json actor_data;
+                        actor_data["geometry"]["position"] = {
+                            packed.transform[0], packed.transform[1], packed.transform[2]
+                        };
+                        actor_data["geometry"]["rotation"] = {
+                            packed.transform[3], packed.transform[4], packed.transform[5]
+                        };
+                        actor_data["geometry"]["scale"] = {
+                            packed.transform[6], packed.transform[7], packed.transform[8]
+                        };
+                        payload["actor_data"] = actor_data;
+                    } else {
+                        payload["has_pending"] = false;
+                    }
+                    payload["ok"] = true;
+                    callback->Success(create_success_json("poll_pending_actor_create", payload));
+                    return true;
+                }
+
+                if (func == "set_sync_paused") {
+                    bool paused = args.size() > 0 ? args[0].get<bool>() : false;
+                    sys->set_sync_paused(paused);
+                    nlohmann::json payload;
+                    payload["ok"] = true;
+                    callback->Success(create_success_json("set_sync_paused", payload));
+                    return true;
+                }
+
                 if (func == "broadcast_actor_create") {
                     // args: [scene_name, model_path, actor_data_dict]
                     std::string scene_name = args.size() > 0 ? args[0].get<std::string>() : "";
@@ -287,142 +328,6 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
             }
         } catch (const nlohmann::json::parse_error&) {
             // 非合法 JSON，继续走后续路径
-        }
-    }
-
-    // ── __cross_tab__ 跨窗口通信：C++ 直接处理，不走 Python ──
-    // 快速路径：用字符串搜索代替完整 JSON parse，避免对每个高频
-    // cefQuery（update_drag_regions 等）都在 UI 线程上做全量 JSON 解析。
-    // __cross_tab__ 请求很少（仅 pop-out/close/broadcast），先搜再 parse。
-    if (req.find("\"__cross_tab__\"") != std::string::npos) {
-        try {
-            auto j = nlohmann::json::parse(req);
-            if (j.value("module", "") == "__cross_tab__") {
-            std::string func = j.value("function", "");
-            auto args = j.value("args", nlohmann::json::array());
-            auto& bm = BrowserManager::instance();
-
-            auto do_broadcast = [&](const std::string& event,
-                                    const nlohmann::json& payload) {
-                // Spread array elements individually, pass objects as-is.
-                // Tail with {_fromCross:1} to prevent relay loops in Vue.
-                std::string args_js;
-                if (payload.is_array()) {
-                    for (size_t i = 0; i < payload.size(); i++) {
-                        if (i > 0) args_js += ",";
-                        args_js += payload[i].dump();
-                    }
-                    if (!args_js.empty()) args_js += ",";
-                } else {
-                    args_js = payload.dump();
-                    args_js += ",";
-                }
-                args_js += "{\"_fromCross\":1}";
-                std::string js =
-                    "if(window.__coronaEmit)window.__coronaEmit('" + event +
-                    "'," + args_js + ")";
-                for (auto& [id, tab] : bm.get_tabs()) {
-                    if (!tab->minimized && tab->client &&
-                        tab->client->GetBrowser()) {
-                        tab->client->GetBrowser()
-                            ->GetMainFrame()
-                            ->ExecuteJavaScript(js, "", 0);
-                    }
-                }
-            };
-
-            if (func == "broadcast") {
-                // args: [event, payload]
-                std::string event =
-                    args.size() > 0 ? args[0].get<std::string>() : "";
-                nlohmann::json payload = args.size() > 1 ? args[1]
-                                                         : nlohmann::json::object();
-                do_broadcast(event, payload);
-                callback->Success(create_success_json("broadcast", event));
-                return true;
-            }
-
-            if (func == "create-panel-tab") {
-                // args: [panelId, routePath, width, height]
-                std::string panel_id =
-                    args.size() > 0 ? args[0].get<std::string>() : "";
-                std::string route =
-                    args.size() > 1 ? args[1].get<std::string>() : "";
-                int w = args.size() > 2 ? args[2].get<int>() : 400;
-                int h = args.size() > 3 ? args[3].get<int>() : 600;
-
-                // Strip leading # if present
-                if (!route.empty() && route[0] == '#')
-                    route = route.substr(1);
-
-                // Construct full URL with standalone marker from current
-                // browser's URL, so the new tab knows it is a pop-out
-                std::string main_url =
-                    browser->GetMainFrame()->GetURL().ToString();
-                auto hash_pos = main_url.find('#');
-                std::string base_url =
-                    (hash_pos != std::string::npos)
-                        ? main_url.substr(0, hash_pos)
-                        : main_url;
-                std::string full_url =
-                    base_url + "#" + route + "?standalone=1";
-
-                int tab_id = bm.create_tab(full_url, route + "?standalone=1",
-                                           "right_top", w, h, false);
-                nlohmann::json result;
-                result["tab_id"] = tab_id;
-                result["panel_id"] = panel_id;
-                callback->Success(
-                    create_success_json("create-panel-tab", result));
-                return true;
-            }
-
-            if (func == "close-this-tab") {
-                // Find tab belonging to the calling browser and remove it
-                auto& tabs = bm.get_tabs();
-                int found_id = -1;
-                int bid = browser->GetIdentifier();
-                for (auto& [id, tab] : tabs) {
-                    if (tab->client && tab->client->GetBrowser() &&
-                        tab->client->GetBrowser()->GetIdentifier() == bid) {
-                        found_id = id;
-                        break;
-                    }
-                }
-                if (found_id >= 0) {
-                    bm.remove_tab(found_id);
-                }
-                std::string panel_id =
-                    args.size() > 0 ? args[0].get<std::string>() : "";
-                nlohmann::json payload;
-                payload["panelId"] = panel_id;
-                do_broadcast("panel-closed", payload);
-                callback->Success(
-                    create_success_json("close-this-tab", payload));
-                return true;
-            }
-
-            if (func == "close-panel-tab") {
-                // args: [tabId, panelId]
-                int tab_id = args.size() > 0 ? args[0].get<int>() : -1;
-                std::string panel_id =
-                    args.size() > 1 ? args[1].get<std::string>() : "";
-                if (tab_id >= 0) {
-                    bm.remove_tab(tab_id);
-                }
-                nlohmann::json payload;
-                payload["panelId"] = panel_id;
-                do_broadcast("panel-closed", payload);
-                callback->Success(
-                    create_success_json("close-panel-tab", payload));
-                return true;
-            }
-
-            callback->Failure(1, "Unknown __cross_tab__ function: " + func);
-            return true;
-            }
-        } catch (const nlohmann::json::parse_error&) {
-            // 不是合法 JSON 或非 __cross_tab__，继续走 Python 路径
         }
     }
 

@@ -164,7 +164,7 @@ class MainView(PluginBase):
             # 模型导入修复:用户取消文件选择时,显式返回 canceled 状态,
             # 让前端能正确区分"未选择"和"导入失败",避免静默无反馈
             if not file_path:
-                logger.info("import_resource_file: user canceled file selection (scene=%s, type=%s)",
+                logger.debug("import_resource_file: user canceled file selection (scene=%s, type=%s)",
                             scene_name, file_type)
                 return {"status": "canceled", "message": "用户取消了文件选择"}
 
@@ -327,7 +327,7 @@ class MainView(PluginBase):
                     from Backend import runScript
                     importlib.reload(runScript)
                     runScript.run()
-                    logger.info("Blockly 脚本执行完成")
+                    logger.debug("Blockly 脚本执行完成")
                     blockly_result = "executed"
                 except Exception as e:
                     logger.exception(f"Blockly 脚本执行失败: {e}")

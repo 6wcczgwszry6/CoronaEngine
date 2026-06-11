@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 # 高频 UI 心跳类回调，日志降到 DEBUG，避免淹没业务日志
 _NOISY_FUNCTIONS = frozenset({
-    "update_drag_regions",
     "on_init",
 })
 
@@ -34,7 +33,7 @@ class CoronaEditor:
             module_name = request.get('module', None)
             func_name = request.get('function', None)
             args = request.get('args', [])
-            log_level = logging.DEBUG if func_name in _NOISY_FUNCTIONS else logging.INFO
+            log_level = logging.DEBUG  # 全量降为 DEBUG，默认静默
             logger.log(log_level, f"func_name: {func_name} module_name: {module_name} args: {args}")
             if not module_name or not func_name:
                 return create_error_response(f"Please input module and function")
@@ -80,16 +79,6 @@ class CoronaEditor:
         cls.js_call_func("engine-started", [])
 
     @classmethod
-    def close_browser_for_js(cls, module_name, if_close=False):
-        """兼容旧调用：Vue launcher 关闭自身面板，单 Tab 架构下为 no-op"""
-        return "ok"
-
-    @classmethod
-    def minimize_browser(cls, route_path, if_close=False):
-        """兼容旧调用：单 Tab 架构下为 no-op"""
-        return "ok"
-
-    @classmethod
     def register_page(cls, module_name: str, c_cls: object):
         if module_name not in cls.module_list:
             cls.module_list[module_name] = c_cls
@@ -132,7 +121,7 @@ class CoronaEditor:
             cls._camera_follow_actor = None
             cls._camera_follow_scene = None
             cls._held_keys.clear()
-            logger.info("Camera follow disabled")
+            logger.debug("Camera follow disabled")
             return {"ok": True}
         scene_name = cls._selected_scene
         actor_name = cls._selected_actor
@@ -219,11 +208,11 @@ class CoronaEditor:
         cls._follow_frame_count += 1
         if not cls._follow_logged_init:
             cls._follow_logged_init = True
-            logger.info("[CAMFOLLOW] _update_camera_follow is being called")
+            logger.debug("[CAMFOLLOW] _update_camera_follow is being called")
         if not cls._camera_follow_actor:
             return
         if cls._follow_frame_count % 60 == 0:
-            logger.info("[CAMFOLLOW] actor=%s held_keys=%s offset=%s", cls._camera_follow_actor, cls._held_keys, cls._camera_follow_offset)
+            logger.debug("[CAMFOLLOW] actor=%s held_keys=%s offset=%s", cls._camera_follow_actor, cls._held_keys, cls._camera_follow_offset)
         try:
             from CoronaCore.core.managers import scene_manager
             actor = None
@@ -278,7 +267,7 @@ class CoronaEditor:
                 if d_down: move[0] += right_xz[0] * step; move[2] += right_xz[2] * step
                 obj_pos = [obj_pos[0] + move[0], obj_pos[1] + move[1], obj_pos[2] + move[2]]
                 actor.set_position(obj_pos, if_init=True)
-                logger.info("[CAMFOLLOW] WASD move to %s", obj_pos)
+                logger.debug("[CAMFOLLOW] WASD move to %s", obj_pos)
 
             # 鼠标右键拖动物体
             rmb_down = False
@@ -321,7 +310,7 @@ class CoronaEditor:
                                 move[2] += fwd_xz[2] * (-dy) * rmb_speed
                             obj_pos = [obj_pos[0] + move[0], obj_pos[1] + move[1], obj_pos[2] + move[2]]
                             actor.set_position(obj_pos, if_init=True)
-                            logger.info("[CAMFOLLOW] RMB move to %s", obj_pos)
+                            logger.debug("[CAMFOLLOW] RMB move to %s", obj_pos)
             else:
                 cls._follow_rmb_down = False
                 cls._follow_prev_mouse = None
@@ -378,7 +367,7 @@ class CoronaEditor:
                         scene = scene_manager.get(scenes[0])
                         if scene:
                             cls.scripts_mgr.initialize_project(project_script, scene)
-                            logger.info(f"ScriptsManager: 懒初始化完成，场景={scene.name}")
+                            logger.debug("ScriptsManager: 懒初始化完成，场景=%s", scene.name)
                         cls._scripts_initialized = True
             except Exception:
                 pass
@@ -413,14 +402,3 @@ class CoronaEditor:
         if "LogTool" in cls.module_list and cls.CoronaEngine:
             cls.module_list["LogTool"].show_log()
         return True
-
-    @classmethod
-    def update_drag_regions(cls, path, x, y, w, h):
-        """设置主 Tab 的拖拽区域（path 参数保留兼容旧调用方）"""
-        if cls.CoronaEngine and cls._main_tab_id is not None:
-            try:
-                cls.CoronaEngine.set_tab_drag_regions(cls._main_tab_id, [{'x': x, 'y': y, 'w': w, 'h': h}])
-                return "Regions updated"
-            except Exception as e:
-                return str(e)
-        return "CoronaEngine not available"

@@ -163,8 +163,6 @@ void Corona::API::Scene::remove_actor(Actor* actor) {
 void Corona::API::Scene::clear_actors() {
     if (handle_ == 0) return;
 
-    CFW_LOG_INFO("[Scene::clear_actors] Clearing {} actors", actors_.size());
-
     const auto actors_backup = actors_;
     const auto actors_index_backup = actors_index_;
 
@@ -267,8 +265,6 @@ void Corona::API::Scene::remove_camera(Camera* camera) {
 void Corona::API::Scene::clear_cameras() {
     if (handle_ == 0) return;
 
-    CFW_LOG_INFO("[Scene::clear_cameras] Clearing {} cameras", cameras_.size());
-
     const auto cameras_backup = cameras_;
     const auto cameras_index_backup = cameras_index_;
 
@@ -356,8 +352,6 @@ Corona::API::Environment::Environment()
             accessor->sun_position.y = 1.0f;
             accessor->sun_position.z = 1.0f;
             accessor->floor_grid_enabled = 1;
-
-            CFW_LOG_INFO("[Environment::Environment] Created {} handle", handle_);
         }
     }
 }
@@ -528,38 +522,6 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
         CFW_LOG_WARNING("[Geometry::Geometry] Scene has no meshes, checking nodes for mesh references...");
         for (std::uint32_t i = 0; i < scene->data.nodes.size(); ++i) {
             const auto& node = scene->data.nodes[i];
-            CFW_LOG_DEBUG("  - Node {}: mesh_index={}", i, node.mesh_index);
-        }
-    }
-
-    // 输出模型的基础变换数据
-    CFW_LOG_INFO("[Geometry::Geometry] Model loaded from: {}", model_path);
-    CFW_LOG_INFO("[Geometry::Geometry] Scene contains {} nodes, {} meshes, {} materials",
-                 scene->data.nodes.size(), scene->data.meshes.size(), scene->data.materials.size());
-
-    if (!scene->data.nodes.empty()) {
-        const auto& root_node = scene->data.nodes[0];
-        const auto& t = root_node.transform;
-        CFW_LOG_INFO("[Geometry::Geometry] Root Node: '{}' | Pos({:.3f}, {:.3f}, {:.3f}) | Rot({:.3f}, {:.3f}, {:.3f}) | Scale({:.3f}, {:.3f}, {:.3f})",
-                     scene->get_node_name(0),
-                     t.position[0], t.position[1], t.position[2],
-                     t.rotation[0], t.rotation[1], t.rotation[2],
-                     t.scale[0], t.scale[1], t.scale[2]);
-    }
-
-    // 输出网格的归一化信息（如果有）
-    if (!scene->data.meshes.empty()) {
-        CFW_LOG_INFO("[Geometry::Geometry] Mesh Normalization Data:");
-        for (std::uint32_t i = 0; i < scene->data.meshes.size(); ++i) {
-            const auto& mesh = scene->data.meshes[i];
-            if (mesh.is_normalized) {
-                CFW_LOG_INFO("  - Mesh {}: Normalized | Original Center({:.3f}, {:.3f}, {:.3f}) | Scale Factor: {:.3f}",
-                             i,
-                             mesh.original_center[0], mesh.original_center[1], mesh.original_center[2],
-                             mesh.original_scale_factor);
-            } else {
-                CFW_LOG_INFO("  - Mesh {}: Original Size (not normalized)", i);
-            }
         }
     }
 
@@ -590,7 +552,6 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
         HardwareImage texture(placeholder_info);
         HardwareExecutor temp_executor;
         temp_executor << texture.copyFrom(white_pixel) << temp_executor.commit();
-        CFW_LOG_INFO("[Geometry::Geometry] Created shared default white placeholder texture (1x1)");
         return texture;
     }();
 
@@ -615,9 +576,6 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
             mesh.material_index < scene->data.materials.size()) {
             const auto& material = scene->data.materials[mesh.material_index];
             dev.materialColor = material.base_color;
-            CFW_LOG_DEBUG("[Geometry::Geometry] Mesh {} using material color: ({}, {}, {}, {})",
-                          mesh_idx, dev.materialColor[0], dev.materialColor[1],
-                          dev.materialColor[2], dev.materialColor[3]);
         }
 
         bool texture_created = false;
@@ -626,8 +584,6 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
         if (mesh.material_index != Resource::InvalidIndex &&
             mesh.material_index < scene->data.materials.size()) {
             auto texture_id = scene->data.materials[mesh.material_index].albedo_texture;
-            CFW_LOG_DEBUG("[Geometry::Geometry] Mesh {} material {} texture_id: {}, InvalidTextureId: {}",
-                          mesh_idx, mesh.material_index, texture_id, Resource::InvalidTextureId);
 
             if (texture_id != Resource::InvalidTextureId) {
                 auto texture_data = Resource::ResourceManager::get_instance().acquire_read<Resource::Image>(texture_id);
@@ -645,8 +601,6 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
                     const int tex_width = texture_data->get_width();
                     const int tex_height = texture_data->get_height();
                     const int tex_channels = texture_data->get_channels();
-                    CFW_LOG_DEBUG("[Geometry::Geometry] Mesh {} texture info: {}x{} channels={}",
-                                  mesh_idx, tex_width, tex_height, tex_channels);
 
                     if (tex_width > 0 && tex_height > 0 && tex_channels > 0) {
                         constexpr bool use_compressed = false;  // TODO: 测试模型兼容性  先不走压缩纹理
@@ -757,9 +711,6 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
 
     // 第二阶段：批量上传所有纹理（减少GPU命令提交次数）
     if (!pending_uploads.empty()) {
-        CFW_LOG_INFO("[Geometry::Geometry] Batch uploading {} textures...", pending_uploads.size());
-
-        // 分批提交，每批最多处理一定数量的纹理，避免单次命令过大
         constexpr size_t kBatchSize = 32;
         for (size_t batch_start = 0; batch_start < pending_uploads.size(); batch_start += kBatchSize) {
             size_t batch_end = std::min(batch_start + kBatchSize, pending_uploads.size());
@@ -775,12 +726,7 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
 
             // 强制等待每一批上传完成，防止短时间内提交过多 CommandBuffer 导致 Device Lost (TDR) 或内存问题
             batch_executor.waitForDeferredResources();
-
-            CFW_LOG_DEBUG("[Geometry::Geometry] Uploaded texture batch {}-{}/{}",
-                          batch_start, batch_end - 1, pending_uploads.size());
         }
-
-        CFW_LOG_INFO("[Geometry::Geometry] Texture batch upload complete");
     }
 
     handle_ = SharedDataHub::instance().geometry_storage().allocate();
@@ -788,8 +734,6 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
         handle->transform_handle = transform_handle_;
         handle->model_resource_handle = model_resource_handle_;
         handle->mesh_handles = std::move(mesh_devices);
-        CFW_LOG_INFO("[Geometry::Geometry] Successfully created geometry with {} meshes from: {}",
-                     handle->mesh_handles.size(), model_path);
     } else {
         CFW_LOG_CRITICAL("[Geometry::Geometry] Failed to acquire write access to geometry storage");
         // 清理已分配的资源
@@ -1502,10 +1446,8 @@ void Corona::API::Actor::remove_profile(const Profile* profile) {
     if (active_profile_handle_ == profile_handle) {
         if (!profiles_.empty()) {
             active_profile_handle_ = profiles_.begin()->first;
-            CFW_LOG_INFO("[Actor::remove_profile] Switched to first available profile");
         } else {
             active_profile_handle_ = 0;
-            CFW_LOG_INFO("[Actor::remove_profile] No profiles remaining");
         }
     }
 
@@ -1781,7 +1723,6 @@ void Corona::API::Camera::save_screenshot(const std::string& path) const {
 
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
         event_bus->publish<Events::ScreenshotRequestEvent>({handle_, path, nullptr});
-        CFW_LOG_INFO("[Camera::save_screenshot] Screenshot request queued: {}", path);
     }
 }
 
@@ -1796,7 +1737,6 @@ bool Corona::API::Camera::save_screenshot_sync(const std::string& path) const {
 
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
         event_bus->publish<Events::ScreenshotRequestEvent>({handle_, path, std::move(promise)});
-        CFW_LOG_INFO("[Camera::save_screenshot_sync] Screenshot request queued (sync): {}", path);
     } else {
         return false;
     }
@@ -1832,7 +1772,6 @@ void Corona::API::Camera::set_output_mode(const std::string& mode) {
     if (auto accessor = SharedDataHub::instance().camera_storage().acquire_write(handle_)) {
         accessor->output_mode = output_mode;
     }
-    CFW_LOG_INFO("[Camera::set_output_mode] Mode set to '{}'", mode);
 }
 
 std::string Corona::API::Camera::get_output_mode() const {
@@ -2003,7 +1942,6 @@ void set_render_backend(const std::string& mode) {
 
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
         event_bus->publish<Events::RenderBackendSwitchEvent>({backend});
-        CFW_LOG_INFO("[set_render_backend] Requested backend: {}", backend == 1 ? "vision" : "native");
     }
 }
 
@@ -2042,7 +1980,6 @@ MediaInfo import_media(const std::string& path) {
         info.width = m.width;
         info.height = m.height;
         info.fps = m.fps;
-        CFW_LOG_INFO("[import_media] Video loaded: {} ({}x{}, {:.2f}s)", path, m.width, m.height, m.duration_seconds);
         return info;
     }
 
@@ -2054,7 +1991,6 @@ MediaInfo import_media(const std::string& path) {
         info.codec = m.codec_name;
         info.sample_rate = m.sample_rate;
         info.channels = m.channels;
-        CFW_LOG_INFO("[import_media] Audio loaded: {} ({}Hz, {}ch, {:.2f}s)", path, m.sample_rate, m.channels, m.duration_seconds);
         return info;
     }
 
@@ -2075,7 +2011,6 @@ void play_audio(std::uint64_t resource_id, bool loop) {
         CFW_LOG_ERROR("[play_audio] event_bus not available");
         return;
     }
-    CFW_LOG_INFO("[play_audio] Playing resource {} loop={}", resource_id, loop);
     event_bus->publish<Events::PlayAudioEvent>({resource_id, loop});
 }
 
@@ -2089,7 +2024,6 @@ void stop_audio(std::uint64_t resource_id) {
         CFW_LOG_ERROR("[stop_audio] event_bus not available");
         return;
     }
-    CFW_LOG_INFO("[stop_audio] Stopping resource {}", resource_id);
     event_bus->publish<Events::StopAudioEvent>({resource_id});
 }
 

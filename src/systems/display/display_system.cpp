@@ -12,8 +12,6 @@
 namespace Corona::Systems {
 
 bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
-    CFW_LOG_NOTICE("DisplaySystem: Initializing...");
-
     auto* event_bus = ctx->event_bus();
     if (event_bus == nullptr) {
         CFW_LOG_WARNING("DisplaySystem: No event bus available");
@@ -30,6 +28,27 @@ bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
             pending_surfaces_.push_back(event.surface);
         });
 
+    // Published synchronously on the MAIN thread when an ImGui secondary viewport window
+    // is being destroyed. We only buffer the request (+ promise) here and return; the
+    // actual GPU-idle + displayer teardown happens in update() on the Display thread,
+    // which then fulfills the promise. The publisher (main thread) blocks on that promise
+    // so the OS window is not destroyed until our swapchain is gone. Must NOT block here:
+    // this handler runs on the main thread, and blocking while holding frame_mutex_ would
+    // deadlock against update()'s own frame_mutex_ acquisition.
+    surface_removed_sub_id_ = event_bus->subscribe<Events::DisplaySurfaceRemovedEvent>(
+        [this](const Events::DisplaySurfaceRemovedEvent& event) {
+            if (event.surface == nullptr) {
+                // Nothing to tear down; fulfill immediately so the publisher does not hang.
+                if (event.done) {
+                    event.done->set_value();
+                }
+                return;
+            }
+
+            std::lock_guard<std::mutex> lock(frame_mutex_);
+            pending_removals_.push_back({event.surface, event.done});
+        });
+
     optics_frame_sub_id_ = event_bus->subscribe<Events::OpticsFrameReadyEvent>(
         [this](const Events::OpticsFrameReadyEvent& event) {
             if (event.surface == nullptr ||
@@ -40,21 +59,6 @@ bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
             const auto surface_id = reinterpret_cast<uint64_t>(event.surface);
             std::lock_guard<std::mutex> lock(frame_mutex_);
             auto& layer = surface_states_[surface_id].optics;
-            // [VDIAG-B3] Confirm DisplaySystem actually receives Vision optics frames
-            // (and that they are not dropped by the monotonic frame_index guard below).
-            // Gated periodically + first few so it keeps reporting after a scene loads
-            // (Vision frame_index is already in the hundreds by then).
-            {
-                static uint32_t s_b3_count = 0;
-                if (s_b3_count < 5 || (event.frame_index % 120) == 0) {
-                    ++s_b3_count;
-                    CFW_LOG_INFO(
-                        "DisplaySystem: [VDIAG-B3] recv optics: surface={} (id={}) handle={} frame={} {}x{} (prev_frame={}, accepted={})",
-                        static_cast<const void*>(event.surface), surface_id, event.image_handle,
-                        event.frame_index, event.width, event.height, layer.frame_index,
-                        (event.frame_index >= layer.frame_index));
-                }
-            }
             if (event.frame_index >= layer.frame_index) {
                 layer.image_handle = event.image_handle;
                 layer.frame_index = event.frame_index;
@@ -81,8 +85,6 @@ bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
             }
         });
 
-    CFW_LOG_DEBUG("DisplaySystem: EventBus subscriptions ready (optics + ui)");
-
     // Create 1x1 transparent fallback images for single-layer compositing.
     // Porter-Duff Source Over with a transparent layer is an identity operation.
     // Two images needed because Optics outputs StorageImage and UI outputs SampledImage,
@@ -104,17 +106,53 @@ void DisplaySystem::update() {
     // then release before GPU work. displayers_ is only modified here, so
     // iterating it after the lock is safe.
     std::unordered_map<uint64_t, SurfaceState> states_snapshot;
+    std::vector<PendingRemoval> removals;
     {
         std::lock_guard<std::mutex> lock(frame_mutex_);
+
+        // Drain teardown requests first. Drop any matching state and any not-yet-created
+        // surface so the creation loop below does not resurrect a surface being removed.
+        removals.swap(pending_removals_);
+        if (!removals.empty()) {
+            for (const auto& r : removals) {
+                const auto surface_id = reinterpret_cast<uint64_t>(r.surface);
+                surface_states_.erase(surface_id);
+            }
+            pending_surfaces_.erase(
+                std::remove_if(pending_surfaces_.begin(), pending_surfaces_.end(),
+                               [&](void* s) {
+                                   const auto sid = reinterpret_cast<uint64_t>(s);
+                                   for (const auto& r : removals) {
+                                       if (reinterpret_cast<uint64_t>(r.surface) == sid) {
+                                           return true;
+                                       }
+                                   }
+                                   return false;
+                               }),
+                pending_surfaces_.end());
+        }
+
         for (auto* surface : pending_surfaces_) {
             const auto surface_id = reinterpret_cast<uint64_t>(surface);
             if (!displayers_.contains(surface_id)) {
-                CFW_LOG_INFO("DisplaySystem: Creating new displayer for surface {}", surface_id);
                 displayers_.emplace(surface_id, HardwareDisplayer(surface));
             }
         }
         pending_surfaces_.clear();
         states_snapshot = surface_states_;
+    }
+
+    // Destroy displayers OUTSIDE the lock (displayers_ is touched only on this thread).
+    // ~HardwareDisplayer → cleanUpDisplayManager() runs vkDeviceWaitIdle before destroying
+    // the swapchain + VkSurfaceKHR, so no present is in flight and the surface is gone
+    // before the main thread destroys the OS window. Fulfilling the promise unblocks the
+    // main thread (the publisher of DisplaySurfaceRemovedEvent) to proceed with that.
+    for (auto& r : removals) {
+        const auto surface_id = reinterpret_cast<uint64_t>(r.surface);
+        displayers_.erase(surface_id);
+        if (r.done) {
+            r.done->set_value();
+        }
     }
 
     for (auto& [surface_id, displayer] : displayers_) {
@@ -126,30 +164,6 @@ void DisplaySystem::update() {
         auto& state = it->second;
         const bool has_optics = state.optics.image_handle != 0;
         const bool has_ui = state.ui.image_handle != 0;
-
-        // [VDIAG-B5] Surface-binding probe: confirm whether the surface being composed
-        // actually has an optics layer bound. A black screen with bg(optics)=0x0 means
-        // this displayer's surface_id never received an OpticsFrameReadyEvent (mismatch
-        // between the surface used for display vs. the surface Vision renders to).
-        {
-            static uint32_t s_b5_count = 0;
-            // Log the first few, then every 120 UI frames, AND always log the first
-            // 5 iterations where optics actually carries a handle. The previous
-            // s_b5_count<8 gate only fired during early frames (before Vision started
-            // publishing), so it never captured the loaded-scene compose path.
-            static uint32_t s_b5_optics_seen = 0;
-            const bool optics_present = state.optics.image_handle != 0;
-            const bool optics_edge = optics_present && s_b5_optics_seen < 5;
-            if (s_b5_count < 8 || optics_edge || (state.ui.frame_index % 120) == 0) {
-                ++s_b5_count;
-                if (optics_present) { ++s_b5_optics_seen; }
-                CFW_LOG_INFO(
-                    "DisplaySystem: [VDIAG-B5] compose-iter surface_id={} optics(handle={} {}x{} frame={}) ui(handle={} {}x{} frame={})",
-                    surface_id,
-                    state.optics.image_handle, state.optics.width, state.optics.height, state.optics.frame_index,
-                    state.ui.image_handle, state.ui.width, state.ui.height, state.ui.frame_index);
-            }
-        }
 
         if (!has_optics && !has_ui) {
             continue;
@@ -183,22 +197,6 @@ void DisplaySystem::update() {
         HardwareImage& bg_image = (optics_img_ptr && *optics_img_ptr) ? *optics_img_ptr : transparent_storage_;
         HardwareImage& fg_image = (ui_img_ptr && *ui_img_ptr) ? *ui_img_ptr : transparent_sampled_;
 
-        // [VDIAG-B6] Resolve probe: distinguish "snapshot missing optics" from
-        // "image_storage acquire failed" from "stored image invalid". Logged the
-        // first few times optics is present so we capture the loaded-scene path.
-        if (has_optics) {
-            static uint32_t s_b6_count = 0;
-            if (s_b6_count < 8) {
-                ++s_b6_count;
-                CFW_LOG_INFO(
-                    "DisplaySystem: [VDIAG-B6] resolve: optics_handle={} acquire_ok={} stored_image_valid={} using_bg_optics={}",
-                    state.optics.image_handle,
-                    static_cast<bool>(optics_frame),
-                    (optics_img_ptr ? static_cast<bool>(*optics_img_ptr) : false),
-                    (optics_img_ptr && *optics_img_ptr));
-            }
-        }
-
         if (!bg_image || !fg_image) {
             continue;
         }
@@ -227,7 +225,6 @@ bool DisplaySystem::ensure_composite_resources(uint32_t width, uint32_t height) 
             CFW_LOG_ERROR("DisplaySystem: Failed to create typed composite pipeline");
             return false;
         }
-        CFW_LOG_INFO("DisplaySystem: Typed composite compute pipeline created");
     }
 
     if (composite_width_ != width || composite_height_ != height || !composite_output_) {
@@ -238,7 +235,6 @@ bool DisplaySystem::ensure_composite_resources(uint32_t width, uint32_t height) 
         }
         composite_width_ = width;
         composite_height_ = height;
-        CFW_LOG_INFO("DisplaySystem: Composite output image created ({}x{})", width, height);
     }
 
     return true;
@@ -270,23 +266,6 @@ void DisplaySystem::compose_and_present(HardwareDisplayer& displayer,
     const uint32_t dispatch_x = (state.ui.width + 7u) / 8u;
     const uint32_t dispatch_y = (state.ui.height + 7u) / 8u;
 
-    // [VDIAG-B4] Composite probe: a mismatch between the optics (bg) resolution and
-    // the output resolution forces the shader to rescale. Dispatch is ceil-divided so
-    // non-multiple-of-8 UI sizes still cover the right/bottom edge pixels.
-    {
-        static uint32_t s_vdiag_compose_count = 0;
-        static uint32_t s_vdiag_compose_optics = 0;
-        const bool b4_optics_present = state.optics.image_handle != 0;
-        if (s_vdiag_compose_count < 5 || (b4_optics_present && s_vdiag_compose_optics < 5)) {
-            ++s_vdiag_compose_count;
-            if (b4_optics_present) { ++s_vdiag_compose_optics; }
-            CFW_LOG_INFO(
-                "DisplaySystem: [VDIAG-B4] compose: out={}x{} bg(optics)={}x{} dispatch={}x{}",
-                state.ui.width, state.ui.height, state.optics.width, state.optics.height,
-                dispatch_x, dispatch_y);
-        }
-    }
-
     // GPU sync: wait for each producer's rendering to finish before reading their images
     if (optics_executor) {
         compositor_executor_.wait(*optics_executor);
@@ -303,11 +282,12 @@ void DisplaySystem::compose_and_present(HardwareDisplayer& displayer,
 }
 
 void DisplaySystem::shutdown() {
-    CFW_LOG_NOTICE("DisplaySystem: Shutting down...");
-
     if (auto* event_bus = context()->event_bus()) {
         if (surface_changed_sub_id_ != 0) {
             event_bus->unsubscribe(surface_changed_sub_id_);
+        }
+        if (surface_removed_sub_id_ != 0) {
+            event_bus->unsubscribe(surface_removed_sub_id_);
         }
         if (optics_frame_sub_id_ != 0) {
             event_bus->unsubscribe(optics_frame_sub_id_);
@@ -317,13 +297,24 @@ void DisplaySystem::shutdown() {
         }
     }
 
+    // Fulfill any outstanding teardown promises so a main thread blocked in
+    // renderer_destroy_window cannot hang past Display-thread shutdown.
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        for (auto& r : pending_removals_) {
+            if (r.done) {
+                r.done->set_value();
+            }
+        }
+        pending_removals_.clear();
+    }
+
     composite_pipeline_ready_ = false;
     composite_output_ = HardwareImage();
     composite_pipeline_ = ComputePipeline<composite_comp_glsl>();
 
     surface_states_.clear();
     displayers_.clear();
-    CFW_LOG_DEBUG("DisplaySystem: Shutdown complete");
 }
 
 }  // namespace Corona::Systems

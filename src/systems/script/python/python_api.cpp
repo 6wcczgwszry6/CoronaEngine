@@ -23,7 +23,6 @@ namespace Corona::Script::Python {
 const std::string codePath = PathCfg::engine_root();
 
 PythonAPI::PythonAPI() {
-    CFW_LOG_DEBUG("PythonAPI: Constructor called");
 }
 
 PythonAPI::~PythonAPI() {
@@ -44,21 +43,16 @@ void PythonAPI::shutdown() {
     shutting_down_.store(true);
 
     if (!Py_IsInitialized()) {
-        CFW_LOG_INFO("PythonAPI: Python not initialized, skipping shutdown");
         return;
     }
 
     CFW_LOG_INFO("PythonAPI: Shutting down Python interpreter...");
 
-    CFW_LOG_INFO("PythonAPI: Releasing ownership of Python objects...");
     (void)pStartFunc.release();
     (void)pJsCallFunc.release();
     (void)messageFunc.release();
     (void)pModule.release();
     (void)pFunc.release();
-    CFW_LOG_INFO("PythonAPI: Python object ownership released");
-
-    CFW_LOG_INFO("PythonAPI: Skipping Py_FinalizeEx (process will clean up on exit)");
 
     PyConfig_Clear(&config);
 
