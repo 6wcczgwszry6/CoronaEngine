@@ -32,16 +32,16 @@ std::string hash_mt(const ModelTransform& t, uint64_t entity_seq) {
 }
 
 void serialize_mt(const ModelTransform& t, uint64_t entity_seq,
+                  const std::string& key,
                   std::vector<uint8_t>& entries) {
-    const char* key = "xform";
-    uint16_t key_len = 5;
     float xform[9];
     xform[0] = t.position.x; xform[1] = t.position.y; xform[2] = t.position.z;
     xform[3] = t.euler_rotation.x; xform[4] = t.euler_rotation.y; xform[5] = t.euler_rotation.z;
     xform[6] = t.scale.x; xform[7] = t.scale.y; xform[8] = t.scale.z;
 
     auto entry = build_dirty_entries(StorageID::ST_MODEL_TRANSFORM, entity_seq,
-                                     key, key_len, xform, sizeof(xform));
+                                     key.c_str(), static_cast<uint16_t>(key.size()),
+                                     xform, sizeof(xform));
     entries.insert(entries.end(), entry.begin(), entry.end());
 }
 
@@ -63,11 +63,11 @@ std::string hash_mr(const ModelResource& r, uint64_t entity_seq) {
 }
 
 void serialize_mr(const ModelResource& r, uint64_t entity_seq,
+                  const std::string& key,
                   std::vector<uint8_t>& entries) {
-    const char* key = "model";
-    uint16_t key_len = 5;
     auto entry = build_dirty_entries(StorageID::ST_MODEL_RESOURCE, entity_seq,
-                                     key, key_len, &r.model_id, sizeof(r.model_id));
+                                     key.c_str(), static_cast<uint16_t>(key.size()),
+                                     &r.model_id, sizeof(r.model_id));
     entries.insert(entries.end(), entry.begin(), entry.end());
 }
 
@@ -90,14 +90,14 @@ std::string hash_geo(const GeometryDevice& g, uint64_t entity_seq) {
 }
 
 void serialize_geo(const GeometryDevice& g, uint64_t entity_seq,
+                   const std::string& key,
                    std::vector<uint8_t>& entries) {
-    const char* key = "geo";
-    uint16_t key_len = 3;
     uint64_t data[2];
     data[0] = static_cast<uint64_t>(g.transform_handle);
     data[1] = static_cast<uint64_t>(g.model_resource_handle);
     auto entry = build_dirty_entries(StorageID::ST_GEOMETRY, entity_seq,
-                                     key, key_len, data, sizeof(data));
+                                     key.c_str(), static_cast<uint16_t>(key.size()),
+                                     data, sizeof(data));
     entries.insert(entries.end(), entry.begin(), entry.end());
 }
 
@@ -157,9 +157,8 @@ std::string hash_opt(const OpticsDevice& o, uint64_t entity_seq) {
 }
 
 void serialize_opt(const OpticsDevice& o, uint64_t entity_seq,
+                   const std::string& key,
                    std::vector<uint8_t>& entries) {
-    const char* key = "opt";
-    uint16_t key_len = 3;
     OpticsPacked p;
     p.visible = o.visible;
     p.bEnableLighting = o.bEnableLighting;
@@ -178,7 +177,8 @@ void serialize_opt(const OpticsDevice& o, uint64_t entity_seq,
     p.specular_color[0] = o.specular_color.x; p.specular_color[1] = o.specular_color.y; p.specular_color[2] = o.specular_color.z;
     p.shininess = o.shininess;
     auto entry = build_dirty_entries(StorageID::ST_OPTICS, entity_seq,
-                                     key, key_len, &p, sizeof(p));
+                                     key.c_str(), static_cast<uint16_t>(key.size()),
+                                     &p, sizeof(p));
     entries.insert(entries.end(), entry.begin(), entry.end());
 }
 
@@ -219,16 +219,16 @@ std::string hash_env(const EnvironmentDevice& e, uint64_t entity_seq) {
 }
 
 void serialize_env(const EnvironmentDevice& e, uint64_t entity_seq,
+                   const std::string& key,
                    std::vector<uint8_t>& entries) {
-    const char* key = "env";
-    uint16_t key_len = 3;
     float data[5];
     data[0] = e.sun_position.x; data[1] = e.sun_position.y; data[2] = e.sun_position.z;
     data[3] = e.sun_intensity;
     data[4] = e.exposure;
 
     auto entry = build_dirty_entries(StorageID::ST_ENVIRONMENT, entity_seq,
-                                     key, key_len, data, sizeof(data));
+                                     key.c_str(), static_cast<uint16_t>(key.size()),
+                                     data, sizeof(data));
     entries.insert(entries.end(), entry.begin(), entry.end());
 }
 
@@ -266,6 +266,9 @@ struct SyncEngine::Impl {
     // Callbacks
     OnSyncOutgoing on_outgoing;
     OnFullSyncRequest on_full_sync_request;
+    ResolveActorGuidForEntity guid_for_entity;
+    ResolveEntitySeqForActorGuid entity_for_guid;
+    ResolveLocalOwnershipForEntity ownership_for_entity;
 
     // Sequence counter for outgoing packets
     uint32_t seq = 0;
@@ -331,12 +334,44 @@ struct SyncEngine::Impl {
         return {buf};
     }
 
+    struct ResolvedDirtyKey {
+        uint64_t entity_seq = 0;
+        std::string field;
+        bool valid = true;
+    };
+
+    ResolvedDirtyKey resolve_dirty_key(StorageID sid, uint64_t remote_entity_seq,
+                                       const std::string& key) const {
+        constexpr const char* kPrefix = "actor:";
+        const std::string prefix{kPrefix};
+        if (key.rfind(prefix, 0) == 0) {
+            auto field_sep = key.rfind(':');
+            if (field_sep != std::string::npos && field_sep > prefix.size()) {
+                auto guid = key.substr(prefix.size(), field_sep - prefix.size());
+                auto field = key.substr(field_sep + 1);
+                if (entity_for_guid) {
+                    auto local_seq = entity_for_guid(sid, guid);
+                    if (local_seq) {
+                        return {*local_seq, field};
+                    }
+                }
+                return {0, field, false};
+            }
+        }
+        return {remote_entity_seq, key};
+    }
+
     bool check_snapshot(const std::string& snap_key, const std::string& cur_hash) {
         std::lock_guard lock(snapshot_mutex);
         auto it = last_synced.find(snap_key);
         if (it != last_synced.end() && it->second == cur_hash) return false;
         last_synced[snap_key] = cur_hash;
         return true;
+    }
+
+    void set_snapshot(const std::string& snap_key, const std::string& cur_hash) {
+        std::lock_guard lock(snapshot_mutex);
+        last_synced[snap_key] = cur_hash;
     }
 };
 
@@ -377,69 +412,38 @@ void SyncEngine::poll_and_sync() {
             auto obj_id = reinterpret_cast<std::uintptr_t>(&data);
             auto ent_seq = store.seq_id(obj_id);
 
+            std::string wire_key = "xform";
+            if (impl_->guid_for_entity) {
+                auto actor_guid = impl_->guid_for_entity(
+                    StorageID::ST_MODEL_TRANSFORM, ent_seq);
+                if (actor_guid.empty()) {
+                    continue;
+                }
+                wire_key = "actor:" + actor_guid + ":xform";
+            }
+
+            if (impl_->ownership_for_entity) {
+                auto locally_owned = impl_->ownership_for_entity(
+                    StorageID::ST_MODEL_TRANSFORM, ent_seq);
+                if (locally_owned && !*locally_owned) {
+                    continue;
+                }
+            }
+
             std::string cur_hash = hash_mt(data, ent_seq);
             std::string snap_key = impl_->make_key(StorageID::ST_MODEL_TRANSFORM, ent_seq, "xform");
 
             if (impl_->check_snapshot(snap_key, cur_hash)) {
-                serialize_mt(data, ent_seq, entries_payload);
+                serialize_mt(data, ent_seq, wire_key, entries_payload);
                 ++dirty_count;
             }
         }
     }
 
-    // --- ModelResource ---
-    {
-        auto& store = hub.model_resource_storage();
-        for (auto it = store.cbegin(); it != store.cend(); ++it) {
-            const ModelResource& data = *it;
-            auto obj_id = reinterpret_cast<std::uintptr_t>(&data);
-            auto ent_seq = store.seq_id(obj_id);
-
-            std::string cur_hash = hash_mr(data, ent_seq);
-            std::string snap_key = impl_->make_key(StorageID::ST_MODEL_RESOURCE, ent_seq, "model");
-
-            if (impl_->check_snapshot(snap_key, cur_hash)) {
-                serialize_mr(data, ent_seq, entries_payload);
-                ++dirty_count;
-            }
-        }
-    }
-
-    // --- GeometryDevice ---
-    {
-        auto& store = hub.geometry_storage();
-        for (auto it = store.cbegin(); it != store.cend(); ++it) {
-            const GeometryDevice& data = *it;
-            auto obj_id = reinterpret_cast<std::uintptr_t>(&data);
-            auto ent_seq = store.seq_id(obj_id);
-
-            std::string cur_hash = hash_geo(data, ent_seq);
-            std::string snap_key = impl_->make_key(StorageID::ST_GEOMETRY, ent_seq, "geo");
-
-            if (impl_->check_snapshot(snap_key, cur_hash)) {
-                serialize_geo(data, ent_seq, entries_payload);
-                ++dirty_count;
-            }
-        }
-    }
-
-    // --- OpticsDevice ---
-    {
-        auto& store = hub.optics_storage();
-        for (auto it = store.cbegin(); it != store.cend(); ++it) {
-            const OpticsDevice& data = *it;
-            auto obj_id = reinterpret_cast<std::uintptr_t>(&data);
-            auto ent_seq = store.seq_id(obj_id);
-
-            std::string cur_hash = hash_opt(data, ent_seq);
-            std::string snap_key = impl_->make_key(StorageID::ST_OPTICS, ent_seq, "opt");
-
-            if (impl_->check_snapshot(snap_key, cur_hash)) {
-                serialize_opt(data, ent_seq, entries_payload);
-                ++dirty_count;
-            }
-        }
-    }
+    // Geometry, model resource, and optics are intentionally not synced here.
+    // Actor creation and file transfer build those local objects on each peer;
+    // syncing handle-bearing structures afterward can overwrite valid local
+    // links with seq/handle values from another process and make meshes vanish.
 
     // --- EnvironmentDevice ---
     {
@@ -453,7 +457,7 @@ void SyncEngine::poll_and_sync() {
             std::string snap_key = impl_->make_key(StorageID::ST_ENVIRONMENT, ent_seq, "env");
 
             if (impl_->check_snapshot(snap_key, cur_hash)) {
-                serialize_env(data, ent_seq, entries_payload);
+                serialize_env(data, ent_seq, "env", entries_payload);
                 ++dirty_count;
             }
         }
@@ -505,70 +509,60 @@ void SyncEngine::handle_incoming(const std::string& sender_peer_id,
             uint16_t value_len = r.read_u16();
 
             if (!r.has_remaining(key_len + value_len)) break;
-            /*std::string key =*/ r.read_string(key_len);
+            std::string key = r.read_string(key_len);
             const uint8_t* value_ptr = r.data + r.pos;
             r.read_string(value_len);
+            const auto resolved_key = impl_->resolve_dirty_key(storage_id, entity_seq, key);
+            if (!resolved_key.valid) {
+                continue;
+            }
+            const uint64_t target_seq = resolved_key.entity_seq;
+            const std::string& field_key = resolved_key.field;
 
             impl_->syncing_from_remote = true;
 
             switch (storage_id) {
             case StorageID::ST_MODEL_TRANSFORM: {
                 auto& store = hub.model_transform_storage();
-                auto map_it = impl_->mt_seq_to_id.find(entity_seq);
+                auto map_it = impl_->mt_seq_to_id.find(target_seq);
                 if (map_it != impl_->mt_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write_nowait(map_it->second);
+                    // Blocking write — must not silently drop transform updates
+                    // or remote objects will jitter.  Render threads hold shared
+                    // read locks only briefly; the block is O(µs).
+                    auto handle = store.try_acquire_write(map_it->second);
                     if (handle.valid()) {
                         deserialize_mt(*handle, value_ptr, value_len);
+                        impl_->set_snapshot(
+                            impl_->make_key(storage_id, target_seq, field_key),
+                            hash_mt(*handle, target_seq));
                     }
-                } else {
                 }
                 break;
             }
             case StorageID::ST_MODEL_RESOURCE: {
-                auto& store = hub.model_resource_storage();
-                auto map_it = impl_->mr_seq_to_id.find(entity_seq);
-                if (map_it != impl_->mr_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write_nowait(map_it->second);
-                    if (handle.valid()) {
-                        deserialize_mr(*handle, value_ptr, value_len);
-                    }
-                } else {
-                }
+                // Model resources are created by the actor/file-transfer path.
+                // Ignore remote handle-bearing updates to avoid breaking local links.
                 break;
             }
             case StorageID::ST_GEOMETRY: {
-                auto& store = hub.geometry_storage();
-                auto map_it = impl_->geo_seq_to_id.find(entity_seq);
-                if (map_it != impl_->geo_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write_nowait(map_it->second);
-                    if (handle.valid()) {
-                        deserialize_geo(*handle, value_ptr, value_len);
-                    }
-                } else {
-                }
+                // Geometry stores local object handles; actor creation owns it.
                 break;
             }
             case StorageID::ST_OPTICS: {
-                auto& store = hub.optics_storage();
-                auto map_it = impl_->opt_seq_to_id.find(entity_seq);
-                if (map_it != impl_->opt_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write_nowait(map_it->second);
-                    if (handle.valid()) {
-                        deserialize_opt(*handle, value_ptr, value_len);
-                    }
-                } else {
-                }
+                // Keep optics local for now; transform-only object sync is safer.
                 break;
             }
             case StorageID::ST_ENVIRONMENT: {
                 auto& store = hub.environment_storage();
-                auto map_it = impl_->env_seq_to_id.find(entity_seq);
+                auto map_it = impl_->env_seq_to_id.find(target_seq);
                 if (map_it != impl_->env_seq_to_id.end()) {
-                    auto handle = store.try_acquire_write_nowait(map_it->second);
+                    auto handle = store.try_acquire_write(map_it->second);
                     if (handle.valid()) {
                         deserialize_env(*handle, value_ptr, value_len);
+                        impl_->set_snapshot(
+                            impl_->make_key(storage_id, target_seq, field_key),
+                            hash_env(*handle, target_seq));
                     }
-                } else {
                 }
                 break;
             }
@@ -597,6 +591,15 @@ void SyncEngine::set_on_outgoing(OnSyncOutgoing cb) {
 
 void SyncEngine::set_on_full_sync_request(OnFullSyncRequest cb) {
     impl_->on_full_sync_request = std::move(cb);
+}
+
+void SyncEngine::set_identity_mapping_callbacks(
+    ResolveActorGuidForEntity guid_for_entity,
+    ResolveEntitySeqForActorGuid entity_for_guid,
+    ResolveLocalOwnershipForEntity ownership_for_entity) {
+    impl_->guid_for_entity = std::move(guid_for_entity);
+    impl_->entity_for_guid = std::move(entity_for_guid);
+    impl_->ownership_for_entity = std::move(ownership_for_entity);
 }
 
 }  // namespace Corona::Network

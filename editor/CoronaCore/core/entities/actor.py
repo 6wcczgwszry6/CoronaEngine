@@ -1,6 +1,8 @@
 import configparser
 import logging
+import shutil
 import time
+import uuid
 import weakref
 from pathlib import Path
 from typing import Any, Dict, Optional, List
@@ -38,7 +40,13 @@ class Actor:
             self.name = f"{self.name}_{source_index}"
 
         self.model_path = ""
+        self.model_dependencies = []
         self.script_path = ""
+        self.actor_guid = ""
+        self._suppress_network_broadcast = bool(
+            actor_data and actor_data.get("_suppress_network_broadcast")
+        )
+        self.network_remote = self._suppress_network_broadcast
         self._collision_callback = None
 
         self.file_data = configparser.ConfigParser()
@@ -63,8 +71,13 @@ class Actor:
             self._load_from_config(data_path)
         else:
             self.final_model_path = data_path
+            if not self.actor_guid:
+                self.actor_guid = f"actor-{uuid.uuid4().hex}"
             self._geometry = Geometry(self.final_model_path)
             self._create_and_add_profile()
+
+        if not self.actor_guid:
+            self.actor_guid = f"actor-{uuid.uuid4().hex}"
 
         self.handle = self.engine_obj.get_handle()
         _handle_to_actor[self.handle] = self
@@ -73,8 +86,14 @@ class Actor:
         self._collision_type = 'box'           # 碰撞检测类型：'none'（关闭）/ 'box'（包围盒）/ 'mesh'（网格）
         self._camera_locked_script = None  # CameraLockedObject 脚本引用
         if self.parent:
+            if self.network_remote:
+                self._disable_local_physics_for_remote_actor()
             self._setup_collision_callback()
             self._setup_on_move_callback()
+            if (self.actor_type != "actor" and
+                    not self._suppress_network_broadcast and
+                    hasattr(self, '_geometry')):
+                self._broadcast_actor_created()
 
     def _resolve_data_path(self) -> Optional[str]:
         """解析数据文件的完整路径"""
@@ -92,6 +111,9 @@ class Actor:
 
         # 读取模型路径
         self.model_path = self.file_data['base']['path']
+        self.actor_guid = self.file_data['base'].get('actor_guid', '')
+        if not self.actor_guid:
+            self.actor_guid = f"actor-{uuid.uuid4().hex}"
         if self.model_path:
             self.final_model_path = os.path.join(CoronaEngine.active_project_path, self.model_path)
             if self.parent:
@@ -104,11 +126,19 @@ class Actor:
         if self.actor_type == "actor":
             self.file_data.read(data_path, encoding='utf-8')
             self.model_path = self.file_data['base']['path']
+            self.actor_guid = actor_data.get(
+                'actor_guid',
+                self.file_data['base'].get('actor_guid', '')
+            )
             self.script_path = self.file_data['scripts']["path"]
             self.final_model_path = os.path.join(CoronaEngine.active_project_path,
                                                  self.model_path) if self.model_path else ""
         else:
             self.final_model_path = data_path
+            self.actor_guid = actor_data.get('actor_guid', '')
+
+        if not self.actor_guid:
+            self.actor_guid = f"actor-{uuid.uuid4().hex}"
 
         if self.final_model_path:
             self._create_components_from_actor_data(actor_data)
@@ -175,18 +205,141 @@ class Actor:
             raise RuntimeError("无法向 Actor 添加默认 Profile（几何/组件不一致）")
         self.engine_obj.set_active_profile(stored)
 
-        # 网络同步：广播 Actor 创建事件到所有已连接的 peer
-        self._broadcast_actor_created()
-
     def _broadcast_actor_created(self):
         """通过 NetworkSystem 广播 Actor 创建事件到已连接的 peer。"""
         try:
-            import json as _json
+            self._ensure_network_model_path_in_project()
             # Use the same format as to_dict() for the actor data
             actor_data = self.to_dict()
             CoronaEditor.js_call_func("actor-sync-broadcast", [actor_data])
-        except Exception:
-            pass  # 静默失败，不影响本地创建
+        except Exception as exc:
+            logging.warning("Actor network create broadcast failed for %s: %s",
+                            self.name or self.route, exc)
+
+    def _disable_local_physics_for_remote_actor(self):
+        if not hasattr(self, '_mechanics') or self._mechanics is None:
+            return
+        try:
+            self._mechanics.set_physics_enabled(False)
+        except Exception as exc:
+            logging.warning("Failed to disable local physics for remote actor %s: %s",
+                            self.name or self.route, exc)
+
+    def _ensure_network_model_path_in_project(self):
+        """Ensure network-created model paths are project-relative and transferable."""
+        if self.actor_type == "actor" or not self.route:
+            return
+
+        project_root_raw = getattr(CoronaEngine, "active_project_path", None)
+        if not project_root_raw:
+            return
+
+        project_root = Path(project_root_raw).resolve()
+        route_path = Path(self.route)
+        source_path = route_path if route_path.is_absolute() else (project_root / route_path)
+        source_path = source_path.resolve()
+
+        try:
+            source_path.relative_to(project_root)
+            rel_path = source_path.relative_to(project_root).as_posix()
+            self.route = rel_path
+            self.model_path = rel_path
+            self.final_model_path = str(source_path)
+            return
+        except ValueError:
+            pass
+
+        if not source_path.is_file():
+            logging.warning("Actor network model path is outside project but missing: %s",
+                            source_path)
+            return
+
+        copied_paths = self._copy_model_asset_bundle_to_project(source_path, project_root)
+        if not copied_paths:
+            return
+
+        self.route = copied_paths[0]
+        self.model_path = copied_paths[0]
+        self.final_model_path = str(project_root / copied_paths[0])
+        self.model_dependencies = copied_paths[1:]
+
+    def _copy_model_asset_bundle_to_project(self, source_path: Path,
+                                            project_root: Path) -> List[str]:
+        resource_dir = project_root / "Resource"
+        resource_dir.mkdir(parents=True, exist_ok=True)
+
+        copied = []
+
+        def copy_relative(src: Path, relative_to_source_dir: Path = None):
+            rel_under_source = (src.name if relative_to_source_dir is None
+                                else src.relative_to(relative_to_source_dir).as_posix())
+            dst = resource_dir / rel_under_source
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.resolve() != dst.resolve():
+                shutil.copy2(src, dst)
+            rel_project = dst.relative_to(project_root).as_posix()
+            if rel_project not in copied:
+                copied.append(rel_project)
+            return dst
+
+        copied_model_path = copy_relative(source_path)
+
+        if source_path.suffix.lower() == ".obj":
+            source_dir = source_path.parent
+            for mtl_path in self._read_obj_material_libraries(source_path):
+                mtl_source = (source_dir / mtl_path).resolve()
+                if not mtl_source.is_file():
+                    logging.warning("OBJ material library missing: %s", mtl_source)
+                    continue
+                copied_mtl_path = copy_relative(mtl_source)
+                for texture_path in self._read_mtl_texture_paths(mtl_source):
+                    texture_source = (mtl_source.parent / texture_path).resolve()
+                    if not texture_source.is_file():
+                        logging.warning("MTL texture missing: %s", texture_source)
+                        continue
+                    copy_relative(texture_source, source_dir)
+
+        if copied and copied[0] != copied_model_path.relative_to(project_root).as_posix():
+            copied.insert(0, copied_model_path.relative_to(project_root).as_posix())
+        return copied
+
+    @staticmethod
+    def _read_obj_material_libraries(obj_path: Path) -> List[Path]:
+        libraries = []
+        try:
+            with obj_path.open("r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    parts = stripped.split(maxsplit=1)
+                    if len(parts) == 2 and parts[0] == "mtllib":
+                        libraries.append(Path(parts[1]))
+        except Exception as exc:
+            logging.warning("Failed to parse OBJ dependencies for %s: %s", obj_path, exc)
+        return libraries
+
+    @staticmethod
+    def _read_mtl_texture_paths(mtl_path: Path) -> List[Path]:
+        texture_keys = {
+            "map_Ka", "map_Kd", "map_Ks", "map_Ke", "map_Ns",
+            "map_d", "map_bump", "bump", "disp", "decal", "refl",
+            "norm", "map_Pr", "map_Pm", "map_Ps", "map_Bump",
+        }
+        textures = []
+        try:
+            with mtl_path.open("r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    parts = stripped.split()
+                    if len(parts) < 2 or parts[0] not in texture_keys:
+                        continue
+                    textures.append(Path(parts[-1]))
+        except Exception as exc:
+            logging.warning("Failed to parse MTL dependencies for %s: %s", mtl_path, exc)
+        return textures
 
     def save_data(self):
         if self.parent:
@@ -194,6 +347,7 @@ class Actor:
         else:
             self.file_data['base']['name'] = self.name
             self.file_data['base']['path'] = self.model_path
+            self.file_data['base']['actor_guid'] = self.actor_guid
             if self.model_path:
                 position = self.get_position()
                 rotation = self.get_rotation()
@@ -442,6 +596,9 @@ class Actor:
         CoronaEditor.js_call_func("transform-update",
                                   [self.parent.route if self.parent else "", self.name, self.get_position(),
                                    self.get_rotation(), self.get_scale(), self.actor_type])
+        if self.actor_guid:
+            CoronaEditor.js_call_func("actor-ownership-claim",
+                                      [{"actor_guid": self.actor_guid}])
         self.save_data()
 
 
@@ -506,10 +663,13 @@ class Actor:
 
         result_dict = {
             "name": self.name,
+            "actor_guid": self.actor_guid,
             "handle": int(self.handle),
             "path": self.route,
+            "scene": self.parent.route if self.parent else "",
             "type": ext.lstrip("."),
             "model": self.model_path,
+            "model_dependencies": list(self.model_dependencies),
             "actor_type": self.actor_type,
             "collision": self.get_collision_enabled(),
             "visible": self.get_visible(),

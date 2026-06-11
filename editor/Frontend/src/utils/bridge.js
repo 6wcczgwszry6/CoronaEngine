@@ -414,20 +414,27 @@ export const projectSettingsService = {
 };
 
 export const networkService = {
-  startSession: (instanceName, projectId, port = 27960) =>
-    Bridge.callCEF('Network', 'start_session', [instanceName, projectId, port]).then(_unwrap),
+  startSession: (instanceName, projectId, port = 27960, role = 'host') =>
+    Bridge.callCEF('Network', 'start_session', [instanceName, projectId, port, role]).then(_unwrap),
   stopSession: () => Bridge.callCEF('Network', 'stop_session').then(_unwrap),
   getPeerCount: () => Bridge.callCEF('Network', 'get_peer_count').then(_unwrap),
+  getSessionInfo: () => Bridge.callCEF('Network', 'get_session_info').then(_unwrap),
   connectToPeer: (ip, port, peerName) =>
     Bridge.callCEF('Network', 'connect_to_peer', [ip, port, peerName]).then(_unwrap),
   setProjectRoot: (projectRoot) =>
     Bridge.callCEF('Network', 'set_project_root', [projectRoot]).then(_unwrap),
-  broadcastActorCreate: (sceneName, modelPath, actorData) =>
-    Bridge.callCEF('Network', 'broadcast_actor_create', [sceneName, modelPath, actorData]).then(_unwrap),
+  broadcastActorCreate: (actorGuid, sceneName, modelPath, actorData) =>
+    Bridge.callCEF('Network', 'broadcast_actor_create', [actorGuid, sceneName, modelPath, actorData]).then(_unwrap),
   /** 轮询待创建的远程 Actor（文件传输完成后触发创建） */
   pollPendingActorCreate: () =>
     Bridge.callCEF('Network', 'poll_pending_actor_create', []).then(_unwrap),
   /** 暂停/恢复同步（Actor 创建期间避免 seq_id 碰撞） */
   setSyncPaused: (paused) =>
     Bridge.callCEF('Network', 'set_sync_paused', [paused]).then(_unwrap),
+  /** 注册 actor_guid -> 本地 Actor handle 映射，作为后续稳定同步的锚点 */
+  registerActorIdentity: (actorGuid, actorHandle, locallyOwned = true) =>
+    Bridge.callCEF('Network', 'register_actor_identity',
+      [actorGuid, String(actorHandle || ''), Boolean(locallyOwned)]).then(_unwrap),
+  claimActorOwnership: (actorGuid) =>
+    Bridge.callCEF('Network', 'claim_actor_ownership', [actorGuid]).then(_unwrap),
 };
