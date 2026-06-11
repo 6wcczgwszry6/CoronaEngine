@@ -244,11 +244,18 @@ class SceneComposer:
             return self.acquire_models(items)
 
         # 组装 approved_elements：每项 {item_name, image_prompt}
+        # 强化 prompt 避免不同物品生成相似图片 → 模型检索混淆
         approved = []
         for it in items:
+            name = it["name"]
+            kw = (it.get("keywords") or "").strip()
+            # 用英文前缀 + 物品名构建区分度更高的 prompt
+            prompt = (kw if kw and len(kw) > 6
+                      else f"high quality 3D model of {name}, standalone, white background, "
+                           f"photorealistic, product photography, {name}")
             approved.append({
-                "item_name": it["name"],
-                "image_prompt": it.get("keywords") or it["name"],
+                "item_name": name,
+                "image_prompt": prompt,
             })
 
         state = {
