@@ -665,6 +665,23 @@ class MasterAgent:
         """单步场景编辑 — 含协同感知（意图预览 / 冲突检测 / 物体锁）。"""
         sender = self._extract_sender(messages)
 
+        # 注入引擎场景中已有的物体列表（供 LLM 感知当前状态，实现渐进式交互）
+        try:
+            from CoronaCore.core.managers import scene_manager
+            sc = scene_manager.get("")
+            if sc is None:
+                routes = scene_manager.list_all()
+                sc = scene_manager.get(routes[0]) if routes else None
+            if sc is not None:
+                actors = [{"name": a.name, "position": list(a.get_position())}
+                          for a in sc.get_actors()
+                          if not a.name.startswith("__room_")]
+                if actors:
+                    scene_state.setdefault("intermediate", {})["locked_actors"] = actors
+                    logger.info("[MasterAgent] scene: 注入 %d 个已有物体到 LLM 上下文", len(actors))
+        except Exception:
+            pass
+
         # 注入参考图 URL（用于 3D 模型生成）
         image_url = self._extract_image_url(messages)
         if image_url:

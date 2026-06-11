@@ -51,7 +51,17 @@ class AgentCoordinator:
 
     def handle(self, user_text: str, scene_state=None, style_bible=None) -> Dict[str, Any]:
         start = time.time(); scene = scene_state or {}
-        intent = self.intent_agent.analyze(user_text, scene_state=scene, style_bible=style_bible)
+
+        # 对话历史（渐进式交互：让 LLM 知道之前说了什么、做了什么）
+        conv_hist = ""
+        try:
+            from .memory import get_memory_manager
+            conv_hist = get_memory_manager().session.get_recent_conversation(5)
+        except Exception:
+            pass
+
+        intent = self.intent_agent.analyze(user_text, scene_state=scene, style_bible=style_bible,
+                                           conversation_history=conv_hist)
 
         # ── 记忆增强：回忆相似历史操作，注入推断 ──
         memory_hint = self._recall_similar(intent)
