@@ -163,6 +163,29 @@ class CabbageWorkflowPlugin:
         return {"name": self.name, "flows": registered_flows, "commands": registered_commands}
 
 
+class CabbageWorkflowSyncPlugin:
+    name = "cabbage.workflow_sync"
+    enabled = True
+
+    def __init__(self, context: CabbageContext):
+        self.context = context
+
+    def register(self, runtime) -> dict:
+        from Quasar.ai_workflow import register_workflow_execution_scope_factory
+        from CoronaCore.core import network_sync_policy
+
+        def create_scope(workflow_context):
+            return network_sync_policy.deferred_actor_broadcasts(
+                pause_engine_sync=True,
+                transaction_key=workflow_context.session_id,
+            )
+
+        register_workflow_execution_scope_factory(create_scope)
+        runtime.metadata.setdefault("cabbage_adapter", {})[self.name] = True
+        logger.debug("[cai_extensions] workflow sync scope installed")
+        return {"name": self.name}
+
+
 class CabbageEngineModulesPlugin:
     name = "cabbage.engine_modules"
     enabled = True
@@ -210,6 +233,7 @@ def create_plugins(context: CabbageContext | None = None):
         CabbageAppConfigPlugin(context),
         CabbageEngineToolsPlugin(context),
         CabbageWorkflowPlugin(context),
+        CabbageWorkflowSyncPlugin(context),
         CabbageEngineModulesPlugin(context),
     ]
 

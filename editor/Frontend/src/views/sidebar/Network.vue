@@ -344,6 +344,23 @@ function hashString(str) {
   return hash >>> 0;
 }
 
+function lastPathPart(value) {
+  return String(value || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || '';
+}
+
+function isInternalSyncName(value) {
+  const text = String(value || '').trim();
+  return text.startsWith('__') || lastPathPart(text).startsWith('__');
+}
+
+function isActorSyncable(actorData) {
+  if (!actorData) return false;
+  if (actorData._suppress_network_broadcast) return false;
+  if (isInternalSyncName(actorData.name)) return false;
+  if (isInternalSyncName(actorData.scene)) return false;
+  return Boolean(actorData.path || actorData.model);
+}
+
 function closeFloat() {
   // handled by DockLayout
 }
@@ -374,6 +391,7 @@ onMounted(() => {
   // needs to be forwarded to remote peers)
   coronaEventBus.on('actor-sync-broadcast', (actorData) => {
     if (!sessionActive.value) return;
+    if (!isActorSyncable(actorData)) return;
     const modelPath = actorData.path || actorData.model || '';
     if (!modelPath) return;
     // Get scene name from the actor's parent scene if available
@@ -383,6 +401,10 @@ onMounted(() => {
     actorData.actor_guid = actorGuid;
     registerActorIdentityFromData(actorData);
     networkService.broadcastActorCreate(actorGuid, sceneName, modelPath, actorData).catch(() => {});
+  });
+
+  coronaEventBus.on('network-sync-pause-request', ({ paused } = {}) => {
+    networkService.setSyncPaused(Boolean(paused)).catch(() => {});
   });
 
   coronaEventBus.on('actor-ownership-claim', ({ actor_guid }) => {
@@ -422,6 +444,7 @@ onUnmounted(() => {
   ownershipClaimTimes.clear();
   // Clean up event listeners
   coronaEventBus.off('actor-sync-broadcast');
+  coronaEventBus.off('network-sync-pause-request');
   coronaEventBus.off('actor-ownership-claim');
   coronaEventBus.off('file-sync-status');
   coronaEventBus.off('import-asset-complete');

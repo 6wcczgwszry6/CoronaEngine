@@ -13,6 +13,7 @@ from ..components.mechanics import Mechanics
 from ..components.acoustics import Acoustics
 from ..components.optics import Optics
 from ..corona_editor import CoronaEditor
+from .. import network_sync_policy
 from ...utils.proejct_utils import auto_save
 
 CoronaEngine = CoronaEditor.CoronaEngine
@@ -208,10 +209,14 @@ class Actor:
     def _broadcast_actor_created(self):
         """通过 NetworkSystem 广播 Actor 创建事件到已连接的 peer。"""
         try:
-            self._ensure_network_model_path_in_project()
-            # Use the same format as to_dict() for the actor data
-            actor_data = self.to_dict()
-            CoronaEditor.js_call_func("actor-sync-broadcast", [actor_data])
+            network_sync_policy.publish_actor_created(
+                self,
+                prepare=lambda actor: actor._ensure_network_model_path_in_project(),
+                emit=lambda actor_data: CoronaEditor.js_call_func(
+                    "actor-sync-broadcast",
+                    [actor_data],
+                ),
+            )
         except Exception as exc:
             logging.warning("Actor network create broadcast failed for %s: %s",
                             self.name or self.route, exc)
