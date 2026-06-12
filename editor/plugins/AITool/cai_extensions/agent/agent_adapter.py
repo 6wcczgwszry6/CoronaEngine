@@ -345,7 +345,7 @@ class MasterAgent:
         self,
         fallback_chat: Callable[[str, List[str]], str] = None,
         global_style: Dict[str, Any] = None,
-        scene_max_items: int = 8,
+        scene_max_items: int = 12,
     ) -> None:
         self._fallback_chat = fallback_chat
         self._global_style = global_style or {}
@@ -951,7 +951,7 @@ class MasterAgent:
 def create_master_agent(
     global_style: Dict[str, Any] = None,
     fallback_chat: Callable[[str, List[str]], str] = None,
-    scene_max_items: int = 8,
+    scene_max_items: int = 12,
 ) -> MasterAgent:
     """创建 MasterAgent — 替换 LANChat 的 _make_agent_ai_chat()。
 
