@@ -15,6 +15,7 @@
 #include "base/shape.h"
 #include "base/using.h"
 #include "math/basic_types.h"
+#include "vision_coordinate_adapter.h"
 #include "vision_material_adapter.h"
 
 namespace Corona::Systems::Vision {
@@ -177,12 +178,7 @@ VisionBuildResult build_vision_geometry(::vision::Scene& scene) {
                 ::vision::float4x4 o2w = ::vision::make_float4x4(1.f);
                 if (auto transform = transform_storage.try_acquire_read(geom->transform_handle)) {
                     ktm::fmat4x4 corona_mat = transform->compute_matrix();
-                    // Both ktm::fmat4x4 and ocarina::float4x4 are column-major 4x4
-                    for (int col = 0; col < 4; ++col) {
-                        for (int row = 0; row < 4; ++row) {
-                            o2w[col][row] = corona_mat[col][row];
-                        }
-                    }
+                    copy_corona_o2w_to_vision(corona_mat, o2w);
                 }
 
                 for (std::size_t mesh_index = 0; mesh_index < geom->mesh_handles.size(); ++mesh_index) {
@@ -203,8 +199,8 @@ VisionBuildResult build_vision_geometry(::vision::Scene& scene) {
                     vertices.reserve(cpu_mesh.vertices.size());
                     for (const auto& src_vertex : cpu_mesh.vertices) {
                         ::vision::Vertex v;
-                        v.pos = {src_vertex.position[0], src_vertex.position[1], src_vertex.position[2]};
-                        v.n   = {src_vertex.normal[0], src_vertex.normal[1], src_vertex.normal[2]};
+                        v.pos = {src_vertex.position[0], src_vertex.position[1], -src_vertex.position[2]};
+                        v.n   = {src_vertex.normal[0], src_vertex.normal[1], -src_vertex.normal[2]};
                         v.uv  = {src_vertex.tex_coords[0], src_vertex.tex_coords[1]};
                         v.uv2 = {0.f, 0.f};
                         vertices.push_back(v);
@@ -217,8 +213,8 @@ VisionBuildResult build_vision_geometry(::vision::Scene& scene) {
                     }
                     for (std::size_t triangle_index = 0; triangle_index + 2 < cpu_mesh.indices.size(); triangle_index += 3) {
                         triangles.emplace_back(cpu_mesh.indices[triangle_index],
-                                               cpu_mesh.indices[triangle_index + 1],
-                                               cpu_mesh.indices[triangle_index + 2]);
+                                               cpu_mesh.indices[triangle_index + 2],
+                                               cpu_mesh.indices[triangle_index + 1]);
                     }
 
                     // Create Vision Mesh and upload to Vision GPU device
