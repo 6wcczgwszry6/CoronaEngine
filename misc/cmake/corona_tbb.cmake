@@ -9,8 +9,8 @@ get_filename_component(
 if(NOT DEFINED TBB_DIR
    OR TBB_DIR STREQUAL ""
    OR NOT EXISTS "${TBB_DIR}/TBBConfig.cmake"
-   OR TBB_DIR MATCHES [[[/\\]build[/\\]_deps[/\\]horizon-src[/\\]modules[/\\]corona[/\\]]]
-   OR TBB_DIR MATCHES [[[/\\]build[/\\]_deps[/\\]coronaframework-src[/\\]]])
+   OR TBB_DIR MATCHES [=[[/\\]build[/\\]_deps[/\\]horizon-src[/\\]modules[/\\]corona[/\\]]=]
+   OR TBB_DIR MATCHES [=[[/\\]build[/\\]_deps[/\\]coronaframework-src[/\\]]=])
     set(TBB_DIR "${_corona_default_tbb_dir}" CACHE PATH "Path to TBB cmake configuration directory" FORCE)
 endif()
 
