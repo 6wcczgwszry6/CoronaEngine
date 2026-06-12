@@ -8,7 +8,6 @@
 
 #include "base/mgr/pipeline.h"
 #include "base/sensor/sensor.h"
-#include "vision_coordinate_adapter.h"
 
 namespace Corona::Systems::Vision {
 
@@ -43,10 +42,9 @@ void sync_vision_camera(::vision::Pipeline& pipeline, const CameraDevice& camera
     // match Native's screen-space movement instead of producing a horizontal mirror.
     // (Roll / arbitrary world_up cannot be expressed by Vision's yaw/pitch-only model
     // and is intentionally ignored; world up is assumed +Y.)
-    const auto vision_forward = corona_to_vision_vector(camera.forward);
-    float fx = vision_forward.x;
-    float fy = vision_forward.y;
-    float fz = vision_forward.z;
+    float fx = camera.forward.x;
+    float fy = camera.forward.y;
+    float fz = -camera.forward.z;
     const float flen = std::sqrt(fx * fx + fy * fy + fz * fz);
     if (flen > 1e-6f) {
         fx /= flen;
@@ -63,8 +61,7 @@ void sync_vision_camera(::vision::Pipeline& pipeline, const CameraDevice& camera
     constexpr float kRadToDeg = 57.295779513082320876f;
     const float pitch_deg = std::asin(sin_pitch) * kRadToDeg;
     const float yaw_deg = std::atan2(fx, -fz) * kRadToDeg;
-    const auto vision_position = corona_to_vision_point(camera.position);
-    const auto position = ocarina::make_float3(vision_position.x, vision_position.y, vision_position.z);
+    const auto position = ocarina::make_float3(camera.position.x, camera.position.y, -camera.position.z);
 
     bool invalidate = false;
     if (ocarina::any(pipeline.resolution() != requested_resolution)) {

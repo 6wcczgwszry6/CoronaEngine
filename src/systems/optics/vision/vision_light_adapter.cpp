@@ -10,7 +10,6 @@
 #include "base/illumination/light.h"
 #include "base/import/node_desc.h"
 #include "base/mgr/scene.h"
-#include "vision_coordinate_adapter.h"
 
 namespace Corona::Systems::Vision {
 
@@ -70,12 +69,9 @@ void setup_vision_lights(::vision::Scene& scene, const EnvironmentDevice& env) {
     // Distance to place the "sun" point light, and the intensity boost needed to
     // counter the inverse-square falloff at that distance.
     constexpr float kSunDistance = 50.f;
-    const auto sun_position = corona_to_vision_point(ktm::fvec3{sx * kSunDistance,
-                                                                 sy * kSunDistance,
-                                                                 sz * kSunDistance});
-    const float px = sun_position.x;
-    const float py = sun_position.y;
-    const float pz = sun_position.z;
+    const float px = sx * kSunDistance;
+    const float py = sy * kSunDistance;
+    const float pz = -sz * kSunDistance;
 
     float sun = env.sun_intensity;
     if (sun < 0.f) sun = 0.f;

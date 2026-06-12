@@ -15,7 +15,6 @@
 #include "base/shape.h"
 #include "base/using.h"
 #include "math/basic_types.h"
-#include "vision_coordinate_adapter.h"
 #include "vision_material_adapter.h"
 
 namespace Corona::Systems::Vision {
@@ -178,7 +177,17 @@ VisionBuildResult build_vision_geometry(::vision::Scene& scene) {
                 ::vision::float4x4 o2w = ::vision::make_float4x4(1.f);
                 if (auto transform = transform_storage.try_acquire_read(geom->transform_handle)) {
                     ktm::fmat4x4 corona_mat = transform->compute_matrix();
-                    copy_corona_o2w_to_vision(corona_mat, o2w);
+                    // Corona/Native uses +Z-forward left-handed coordinates.
+                    // Vision uses -Z-forward coordinates, so convert object
+                    // transforms by F * M * F where F = diag(1, 1, -1, 1).
+                    for (int col = 0; col < 4; ++col) {
+                        for (int row = 0; row < 4; ++row) {
+                            float value = corona_mat[col][row];
+                            if (row == 2) value = -value;
+                            if (col == 2) value = -value;
+                            o2w[col][row] = value;
+                        }
+                    }
                 }
 
                 for (std::size_t mesh_index = 0; mesh_index < geom->mesh_handles.size(); ++mesh_index) {
