@@ -20,6 +20,73 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _build_room_box_obj(width: float, height: float, depth: float,
+                        door: Optional[Dict[str, float]] = None) -> str:
+    """构建房间盒子 OBJ 字符串（单位立方体，缩放由 Actor 完成）。
+
+    M2 步骤 14b-i：纯函数，可离线几何验证（共面 + 法向内向）。
+    - door=None  → 闭合六面盒子（与旧 _generate_room_box 几何完全一致，零损失）
+    - door={width, height} → 前墙(z=+0.5)拆成左柱+右柱+门楣，包住一个落地门洞，
+      camera 可从门洞走进去。门洞横向居中、底边贴地。
+
+    单位立方体边长 1（中心原点），door 尺寸以"米"给出，按 width/height 归一化到
+    单位坐标。所有面法向指向盒内（背面剔除后摄像机能看进内部）。
+    """
+    # 8 基础顶点 + 6 法向（与旧表一致）
+    head = (
+        "mtllib box.mtl\nusemtl wall\n"
+        "# 8 vertices of a 1x1x1 cube centered at origin\n"
+        "v -0.5 -0.5 -0.5\nv  0.5 -0.5 -0.5\nv  0.5  0.5 -0.5\nv -0.5  0.5 -0.5\n"
+        "v -0.5 -0.5  0.5\nv  0.5 -0.5  0.5\nv  0.5  0.5  0.5\nv -0.5  0.5  0.5\n"
+        "vn  0.0  0.0 -1.0\nvn  1.0  0.0  0.0\nvn  0.0  0.0  1.0\nvn -1.0  0.0  0.0\n"
+        "vn  0.0  1.0  0.0\nvn  0.0 -1.0  0.0\n"
+    )
+    # 背/左/右/底/顶 5 面（门洞只改前墙，这 5 面恒定，法向内向）
+    common_faces = (
+        "f 1//3 2//3 3//3 4//3\n"   # back   z=-0.5 inward +Z
+        "f 1//2 4//2 8//2 5//2\n"   # left   x=-0.5 inward +X
+        "f 2//4 6//4 7//4 3//4\n"   # right  x=+0.5 inward -X
+        "f 1//5 5//5 6//5 2//5\n"   # bottom y=-0.5 inward +Y
+        "f 4//6 3//6 7//6 8//6\n"   # top    y=+0.5 inward -Y
+    )
+
+    if not door:
+        # 闭合：前墙整面一块（与旧表完全一致）
+        front = "f 5//1 8//1 7//1 6//1\n"   # front z=+0.5 inward -Z
+        return head + (
+            "# 6 faces (quads): each is a planar quad, normals inward.\n"
+            "# verified by cross-product: 4 coplanar verts + inward normal.\n"
+        ) + common_faces + front
+
+    # 门洞：归一化到单位坐标，横向居中、底边贴地，留 5% 余量防止退化
+    dw = max(0.05, min(0.9, float(door.get("width", 1.0)) / width))
+    dh = max(0.05, min(0.9, float(door.get("height", 2.0)) / height))
+    dl = -dw / 2.0          # door left  x
+    dr = dw / 2.0           # door right x
+    dt = -0.5 + dh          # door top   y（底边在 y=-0.5 地面）
+    # 前墙新增 6 顶点（z=+0.5）：v9..v14
+    extra_v = (
+        "# front-wall door frame verts (z=+0.5)\n"
+        f"v {dl:.4f} -0.5 0.5\n"    # v9  door bottom-left
+        f"v {dr:.4f} -0.5 0.5\n"    # v10 door bottom-right
+        f"v {dr:.4f} {dt:.4f} 0.5\n"  # v11 door top-right
+        f"v {dl:.4f} {dt:.4f} 0.5\n"  # v12 door top-left
+        f"v {dl:.4f} 0.5 0.5\n"     # v13 wall-top at door-left x
+        f"v {dr:.4f} 0.5 0.5\n"     # v14 wall-top at door-right x
+    )
+    # 前墙拆 3 块（全在 z=+0.5，法向 -Z 内向，缠绕 bl->tl->tr->br）
+    front_frame = (
+        "# front wall as frame around door hole (normal -Z inward)\n"
+        "f 5//1 8//1 13//1 9//1\n"     # left strip   x in [-0.5, dl]
+        "f 10//1 14//1 7//1 6//1\n"    # right strip  x in [dr, 0.5]
+        "f 12//1 13//1 14//1 11//1\n"  # top lintel   y in [dt, 0.5]
+    )
+    return head + extra_v + (
+        "# walls: back/left/right/bottom/top + front-frame (door hole).\n"
+    ) + common_faces + front_frame
+
+
 # 触发场景组合的关键词
 _COMPOSE_PATTERNS = [
     r"物品清单", r"清单", r"组合(?:场景|这个|整个)", r"布置(?:整个|这个|好这)",
@@ -492,22 +559,17 @@ class SceneComposer:
         with open(mtl_path, "w", encoding="ascii") as f:
             f.write("newmtl wall\nKa 0.85 0.85 0.85\nKd 0.92 0.92 0.92\n"
                     "Ks 0.0 0.0 0.0\nNs 0.0\nd 1.0\n")
-        # 1×1×1 中心在原点，面法向内（从外面看逆时针=法向外；我们需要法向内）
+        # M2 步骤 14b-i：OBJ 由纯函数生成（支持门洞）。门洞从根 Zone 的首个
+        # connector 读；当前无 Zone 声明门洞 → door=None → 闭合盒子（与现状一致）。
+        door = None
+        if zone.connectors:
+            c = zone.connectors[0]
+            sz = getattr(c, "size", None)
+            if sz and len(sz) >= 2:
+                door = {"width": sz[0], "height": sz[1]}
+        obj_text = _build_room_box_obj(width, height, depth, door=door)
         with open(obj_path, "w", encoding="ascii") as f:
-            f.write("mtllib box.mtl\nusemtl wall\n"
-                    "# 8 vertices of a 1x1x1 cube centered at origin\n"
-                    "v -0.5 -0.5 -0.5\nv  0.5 -0.5 -0.5\nv  0.5  0.5 -0.5\nv -0.5  0.5 -0.5\n"
-                    "v -0.5 -0.5  0.5\nv  0.5 -0.5  0.5\nv  0.5  0.5  0.5\nv -0.5  0.5  0.5\n"
-                    "vn  0.0  0.0 -1.0\nvn  1.0  0.0  0.0\nvn  0.0  0.0  1.0\nvn -1.0  0.0  0.0\n"
-                    "vn  0.0  1.0  0.0\nvn  0.0 -1.0  0.0\n"
-                    "# 6 faces (quads): each is a planar quad, normals inward.\n"
-                    "# verified by cross-product: 4 coplanar verts + inward normal.\n"
-                    "f 1//3 2//3 3//3 4//3\n"   # 背墙 z=-0.5  法向内向 +Z
-                    "f 5//1 8//1 7//1 6//1\n"   # 前墙 z=+0.5  法向内向 -Z (旧表缺失)
-                    "f 1//2 4//2 8//2 5//2\n"   # 左墙 x=-0.5  法向内向 +X
-                    "f 2//4 6//4 7//4 3//4\n"   # 右墙 x=+0.5  法向内向 -X
-                    "f 1//5 5//5 6//5 2//5\n"   # 底面 y=-0.5  法向内向 +Y
-                    "f 4//6 3//6 7//6 8//6\n")  # 顶面 y=+0.5  法向内向 -Y (旧表缺失)
+            f.write(obj_text)
 
         # 2. 场景 + Actor
         try:
