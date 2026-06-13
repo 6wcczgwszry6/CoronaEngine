@@ -78,7 +78,7 @@ import { appService } from '@/utils/bridge.js';
 const router = useRouter();
 
 function handleStoryMode() {
-  router.push('/StoryMode');
+  router.push('/NewGame');
 }
 
 function handleCreativeMode() {
