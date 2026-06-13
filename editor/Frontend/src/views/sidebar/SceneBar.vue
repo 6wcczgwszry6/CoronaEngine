@@ -24,7 +24,6 @@
             type="text"
             placeholder="🔍 搜索资源(名称/中文/拼音,支持模糊)"
             class="w-full pl-2 pr-7 py-1 text-xs bg-[#1e1e1e] text-[#e0e0e0] border border-[#3a3a3a] rounded focus:border-[#84a65b] focus:outline-none"
-            :disabled="searchLoading"
             data-testid="resource-search-input"
             @input="onSearchInput"
             @keydown.enter="onSearchEnter"
@@ -89,9 +88,12 @@
         </div>
         <!-- 命中计数 -->
         <div v-else class="px-2 py-1 text-[10px] text-[#909090] border-b border-[#1a1a1a]/30">
-          找到 <span class="text-[#84a65b] font-bold">{{ searchResults.length }}</span> 项
-          <span v-if="searchLastQuery" class="ml-2">query=“{{ searchLastQuery }}”</span>
-          <span v-if="searchElapsedMs" class="ml-2 text-[#666]">{{ searchElapsedMs }}ms</span>
+          <span v-if="searchIndexing" class="text-[#84a65b]">正在准备资源索引...</span>
+          <template v-else>
+            找到 <span class="text-[#84a65b] font-bold">{{ searchResults.length }}</span> 项
+            <span v-if="searchLastQuery" class="ml-2">query=“{{ searchLastQuery }}”</span>
+            <span v-if="searchElapsedMs" class="ml-2 text-[#666]">{{ searchElapsedMs }}ms</span>
+          </template>
         </div>
         <!-- 命中列表 -->
         <div
@@ -128,7 +130,7 @@
           </button>
         </div>
         <div
-          v-if="!searchError && searchResults.length === 0"
+          v-if="!searchError && !searchIndexing && searchResults.length === 0"
           class="px-4 py-8 text-center text-[#666] text-xs"
         >
           暂无匹配结果
@@ -689,17 +691,21 @@ let lastActorFocusPose = null;
 // ===========================================================================
 const searchInput = ref('');
 const searchLoading = ref(false);
+const searchIndexing = ref(false);
 const searchError = ref('');
 const searchResults = ref([]);
 const searchLastQuery = ref('');
 const searchElapsedMs = ref(0);
 const searchSeq = ref(0);        // B-2 竞态保护
-const searchDebounce = ref(null);
 const imageInputRef = ref(null);
-const SEARCH_DEBOUNCE_MS = 250;
+const SEARCH_DEBOUNCE_MS = 600;
+const SEARCH_INDEX_RETRY_MS = 250;
+const SEARCH_INDEX_MAX_RETRIES = 120;
+let searchDebounce = null;
+let searchIndexRetry = null;
 
 const searchActive = computed(() => {
-  return searchLoading.value || searchResults.value.length > 0
+  return searchLoading.value || searchIndexing.value || searchResults.value.length > 0
     || !!searchError.value || !!searchLastQuery.value;
 });
 
@@ -719,27 +725,61 @@ const typeColorClass = (type) => ({
 })[type] || 'text-[#808080]';
 
 const onSearchInput = () => {
-  if (searchDebounce.value) clearTimeout(searchDebounce.value);
-  searchDebounce.value = setTimeout(() => {
+  if (searchDebounce) clearTimeout(searchDebounce);
+  if (searchIndexRetry) {
+    clearTimeout(searchIndexRetry);
+    searchIndexRetry = null;
+  }
+  searchSeq.value++;
+  searchLoading.value = false;
+  searchIndexing.value = false;
+
+  if (!searchInput.value.trim()) {
+    searchResults.value = [];
+    searchError.value = '';
+    searchLastQuery.value = '';
+    searchElapsedMs.value = 0;
+    return;
+  }
+
+  searchDebounce = setTimeout(() => {
+    searchDebounce = null;
     doFuzzySearch(searchInput.value);
   }, SEARCH_DEBOUNCE_MS);
 };
 
 const onSearchEnter = () => {
-  if (searchDebounce.value) clearTimeout(searchDebounce.value);
+  if (searchDebounce) {
+    clearTimeout(searchDebounce);
+    searchDebounce = null;
+  }
+  if (searchIndexRetry) {
+    clearTimeout(searchIndexRetry);
+    searchIndexRetry = null;
+  }
   doFuzzySearch(searchInput.value);
 };
 
 const onSearchClear = () => {
   searchInput.value = '';
-  if (searchDebounce.value) clearTimeout(searchDebounce.value);
+  if (searchDebounce) {
+    clearTimeout(searchDebounce);
+    searchDebounce = null;
+  }
+  if (searchIndexRetry) {
+    clearTimeout(searchIndexRetry);
+    searchIndexRetry = null;
+  }
+  searchSeq.value++;
+  searchLoading.value = false;
+  searchIndexing.value = false;
   searchResults.value = [];
   searchError.value = '';
   searchLastQuery.value = '';
   searchElapsedMs.value = 0;
 };
 
-const doFuzzySearch = async (query) => {
+const doFuzzySearch = async (query, retryCount = 0) => {
   const mySeq = ++searchSeq.value;
   if (!query || !query.trim()) {
     searchResults.value = [];
@@ -748,6 +788,7 @@ const doFuzzySearch = async (query) => {
     return;
   }
   searchLoading.value = true;
+  searchIndexing.value = false;
   searchError.value = '';
   try {
     const resp = await resourceService.fuzzySearch(query.trim(), 30);
@@ -758,6 +799,22 @@ const doFuzzySearch = async (query) => {
         searchResults.value = Array.isArray(data.items) ? data.items : [];
         searchLastQuery.value = query.trim();
         searchElapsedMs.value = data.elapsed_ms || 0;
+      } else if (data.status === 'indexing') {
+        searchIndexing.value = true;
+        searchResults.value = [];
+        searchLastQuery.value = query.trim();
+        searchElapsedMs.value = 0;
+        if (retryCount < SEARCH_INDEX_MAX_RETRIES) {
+          searchIndexRetry = setTimeout(() => {
+            searchIndexRetry = null;
+            if (mySeq === searchSeq.value && searchInput.value.trim() === query.trim()) {
+              doFuzzySearch(query, retryCount + 1);
+            }
+          }, SEARCH_INDEX_RETRY_MS);
+        } else {
+          searchIndexing.value = false;
+          searchError.value = '资源索引准备超时，请稍后重试';
+        }
       } else {
         searchError.value = data.message || '搜索失败';
         searchResults.value = [];
@@ -769,6 +826,7 @@ const doFuzzySearch = async (query) => {
   } catch (e) {
     if (mySeq !== searchSeq.value) return;
     searchError.value = e?.message || '网络错误';
+    searchIndexing.value = false;
     searchResults.value = [];
   } finally {
     if (mySeq === searchSeq.value) searchLoading.value = false;
@@ -827,8 +885,7 @@ const onRebuildIndex = async () => {
     const resp = await resourceService.rebuildIndex();
     if (mySeq !== searchSeq.value) return;
     if (resp && resp.success !== false && resp.data && resp.data.status === 'success') {
-      const t = resp.data.text || {};
-      searchLastQuery.value = `[重建] ${t.count || 0} 项, ${t.elapsed_seconds || 0}s`;
+      searchLastQuery.value = '[重建] 已安排后台刷新';
     } else {
       searchError.value = (resp && resp.data && resp.data.message) || '重建索引失败';
     }
@@ -1684,6 +1741,9 @@ onMounted(async () => {
   window.__coronaFocusPoseResult = handleFocusPoseResult;
 
   const result = await projectService.OnInit();
+  resourceService.prepareIndex().catch((error) => {
+    logWarn('资源索引预热失败', error);
+  });
   const queryString = window.location.hash?.split('?')[1] || window.location.search?.slice(1);
   const urlSceneName = queryString ? new URLSearchParams(queryString).get('sceneName') : null;
 
@@ -1716,6 +1776,14 @@ const onSceneTreeChangedEvent = (sceneName) => {
 };
 
 onUnmounted(() => {
+  if (searchDebounce) {
+    clearTimeout(searchDebounce);
+    searchDebounce = null;
+  }
+  if (searchIndexRetry) {
+    clearTimeout(searchIndexRetry);
+    searchIndexRetry = null;
+  }
   clearFocusPoseCache();
   clearActorSingleClickTimer();
   actorFocusSeq++;
