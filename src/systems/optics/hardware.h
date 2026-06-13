@@ -29,6 +29,8 @@ struct Hardware {
     // === Visibility Buffer (replaces GBuffer rasterization output) ===
     HardwareImage visibilityImage;  // RGBA32_UINT: R=instanceID, G=primitiveID
     HardwareImage depthImage;       // D32_FLOAT: depth (kept from GBuffer)
+    HardwareImage uiVisibilityImage;  // Pass 2 visibility, isolated from scene pass
+    HardwareImage uiDepthImage;        // Pass 2 depth, isolated from scene pass
 
     // === Final composited output ===
     HardwareImage finalOutputImage;
@@ -37,15 +39,19 @@ struct Hardware {
     // === Uniform buffers ===
     HardwareBuffer uniformBuffer;
     HardwareBuffer vpUniformBuffer;  // renamed: view-projection matrix
+    HardwareBuffer uiVpUniformBuffer;  // Pass 2 orthographic view-projection matrix
 
     // === Instance & Material tables (uploaded per frame) ===
     HardwareBuffer instanceInfoBuffer;
     HardwareBuffer materialTableBuffer;
+    HardwareBuffer uiInstanceInfoBuffer;
+    HardwareBuffer uiMaterialTableBuffer;
     HardwareBuffer actorPickBuffer;
 
     // === Shader pipelines ===
     bool shaderHasInit = false;
     std::optional<RasterizerPipeline<visibility_vert_glsl, visibility_frag_glsl>> visibilityPipeline;
+    std::optional<RasterizerPipeline<visibility_vert_glsl, visibility_frag_glsl>> uiVisibilityPipeline;
     std::optional<ComputePipeline<lighting_comp_glsl>> lightingPipeline;
     std::optional<ComputePipeline<sky_comp_glsl>> skyPipeline;
     std::optional<ComputePipeline<tonemap_comp_glsl>> tonemapPipeline;

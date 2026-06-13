@@ -131,7 +131,7 @@ class OpticsSystem : public Kernel::SystemBase {
     // ========================================================================
     // 每个被绑定到某个 surface 的相机拥有独立的最终输出图与共享存储句柄，
     // 这样逐相机遍历时不再互相覆盖；DisplaySystem 也已按 surface 独立合成。
-    // visibility/depth 仍是逐相机的中间产物，继续由 hardware_ 共享。
+    // Pass 1 scene 与 Pass 2 UI 使用各自的 visibility/depth 中间产物。
     struct SurfaceRenderTarget {
         HardwareImage final_output;        ///< 该 surface 专属的 RGBA16F 最终输出
         HardwareImage ui_overlay;          ///< Pass 2 camera-follow actor overlay

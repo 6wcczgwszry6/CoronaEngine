@@ -226,12 +226,16 @@ bool OpticsSystem::initialize_hardware_resources() {
         // --- Visibility Buffer (逐相机共享的中间产物) ---
         hardware_->visibilityImage = HardwareImage(w, h, ImageFormat::RGBA32_UINT, ImageUsage::StorageImage);
         hardware_->depthImage = HardwareImage(w, h, ImageFormat::D32_FLOAT, ImageUsage::DepthImage);
+        hardware_->uiVisibilityImage = HardwareImage(w, h, ImageFormat::RGBA32_UINT, ImageUsage::StorageImage);
+        hardware_->uiDepthImage = HardwareImage(w, h, ImageFormat::D32_FLOAT, ImageUsage::DepthImage);
 
         // --- Uniform buffers ---
         hardware_->uniformBuffer =
             HardwareBuffer(sizeof(Hardware::UniformBufferObject), BufferUsage::StorageBuffer);
         hardware_->vpUniformBuffer = HardwareBuffer(sizeof(Hardware::VPUniformBufferObject),
                                                     BufferUsage::StorageBuffer);
+        hardware_->uiVpUniformBuffer = HardwareBuffer(sizeof(Hardware::VPUniformBufferObject),
+                                                      BufferUsage::StorageBuffer);
 
         // --- Instance & Material table buffers (pre-allocate reasonable capacity) ---
         constexpr uint32_t kMaxInstances = 4096;
@@ -239,7 +243,13 @@ bool OpticsSystem::initialize_hardware_resources() {
         hardware_->instanceInfoBuffer = HardwareBuffer(
             kMaxInstances * static_cast<uint32_t>(sizeof(Hardware::InstanceInfo)),
             BufferUsage::StorageBuffer);
+        hardware_->uiInstanceInfoBuffer = HardwareBuffer(
+            kMaxInstances * static_cast<uint32_t>(sizeof(Hardware::InstanceInfo)),
+            BufferUsage::StorageBuffer);
         hardware_->materialTableBuffer = HardwareBuffer(
+            kMaxMaterials * static_cast<uint32_t>(sizeof(Hardware::MaterialInfo)),
+            BufferUsage::StorageBuffer);
+        hardware_->uiMaterialTableBuffer = HardwareBuffer(
             kMaxMaterials * static_cast<uint32_t>(sizeof(Hardware::MaterialInfo)),
             BufferUsage::StorageBuffer);
         hardware_->actorPickBuffer = HardwareBuffer(sizeof(std::uint32_t), BufferUsage::StorageBuffer);
@@ -257,6 +267,7 @@ bool OpticsSystem::initialize_hardware_resources() {
 bool OpticsSystem::initialize_render_pipelines() {
     try {
         hardware_->visibilityPipeline.emplace();
+        hardware_->uiVisibilityPipeline.emplace();
         hardware_->lightingPipeline.emplace();
         hardware_->skyPipeline.emplace();
         hardware_->tonemapPipeline.emplace();
@@ -281,7 +292,8 @@ void OpticsSystem::ensure_camera_render_resources(uint32_t width, uint32_t heigh
     height = std::max(height, 1u);
 
     if (hardware_->gbufferSize.x == width && hardware_->gbufferSize.y == height &&
-        hardware_->visibilityImage && hardware_->depthImage) {
+        hardware_->visibilityImage && hardware_->depthImage &&
+        hardware_->uiVisibilityImage && hardware_->uiDepthImage) {
         return;
     }
 
@@ -291,6 +303,10 @@ void OpticsSystem::ensure_camera_render_resources(uint32_t width, uint32_t heigh
                                                ImageUsage::StorageImage);
     hardware_->depthImage = HardwareImage(width, height, ImageFormat::D32_FLOAT,
                                           ImageUsage::DepthImage);
+    hardware_->uiVisibilityImage = HardwareImage(width, height, ImageFormat::RGBA32_UINT,
+                                                 ImageUsage::StorageImage);
+    hardware_->uiDepthImage = HardwareImage(width, height, ImageFormat::D32_FLOAT,
+                                            ImageUsage::DepthImage);
 }
 
 OpticsSystem::SurfaceRenderTarget& OpticsSystem::acquire_surface_target(void* surface,
@@ -472,6 +488,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
     auto& tonemap = *hardware_->tonemapPipeline;
     auto& opticsOverlay = *hardware_->opticsOverlayPipeline;
     auto& opticsComposite = *hardware_->opticsCompositePipeline;
+    auto& uiVisibility = *hardware_->uiVisibilityPipeline;
 
     for (auto scene_it = SharedDataHub::instance().scene_storage().cbegin();
          scene_it != SharedDataHub::instance().scene_storage().cend(); ++scene_it) {
@@ -518,7 +535,9 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 auto& transform_storage = SharedDataHub::instance().model_transform_storage();
 
                 auto collect_actor_instances =
-                    [&](bool follow_camera_pass,
+                    [&](auto& target_visibility,
+                        uint32_t target_vp_descriptor,
+                        bool follow_camera_pass,
                         const ktm::fmat4x4* camera_basis) -> bool {
                     hardware_->instanceInfoData.clear();
                     hardware_->instanceActorHandles.clear();
@@ -628,20 +647,20 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                     }
 
                                     // --- Record visibility draw call ---
-                                    visibility.pushConsts.modelMatrix = model_matrix;
-                                    visibility.pushConsts.uniformBufferIndex =
-                                        hardware_->vpUniformBuffer.storeDescriptor();
+                                    target_visibility.pushConsts.modelMatrix = model_matrix;
+                                    target_visibility.pushConsts.uniformBufferIndex =
+                                        target_vp_descriptor;
                                     // VBuffer uses 1-based instanceID (0 = background sentinel after clear)
-                                    visibility.pushConsts.instanceID = instanceID + 1;
+                                    target_visibility.pushConsts.instanceID = instanceID + 1;
                                     // Alpha-cutout: pass texture descriptor for discard test
                                     if (m.textureBuffer) {
-                                        visibility[visibility_frag_glsl::pushConsts::textureIndex] =
+                                        target_visibility[visibility_frag_glsl::pushConsts::textureIndex] =
                                             m.textureBuffer.storeDescriptor();
                                     } else {
-                                        visibility[visibility_frag_glsl::pushConsts::textureIndex] =
+                                        target_visibility[visibility_frag_glsl::pushConsts::textureIndex] =
                                             static_cast<uint32_t>(0);
                                     }
-                                    visibility.record(m.indexBuffer, m.vertexBuffer);
+                                    target_visibility.record(m.indexBuffer, m.vertexBuffer);
                                 }
                             }
                             ++object_id;
@@ -650,21 +669,24 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     return has_instances;
                 };
 
-                auto upload_instance_tables = [&]() {
+                auto upload_instance_tables = [&](HardwareBuffer& instance_buffer,
+                                                  HardwareBuffer& material_buffer) {
                     if (!hardware_->instanceInfoData.empty()) {
-                        hardware_->instanceInfoBuffer.copyFromData(
+                        instance_buffer.copyFromData(
                             hardware_->instanceInfoData.data(),
                             hardware_->instanceInfoData.size() * sizeof(Hardware::InstanceInfo));
                     }
                     if (!hardware_->materialTableData.empty()) {
-                        hardware_->materialTableBuffer.copyFromData(
+                        material_buffer.copyFromData(
                             hardware_->materialTableData.data(),
                             hardware_->materialTableData.size() * sizeof(Hardware::MaterialInfo));
                     }
                 };
 
-                collect_actor_instances(false, nullptr);
-                upload_instance_tables();
+                const uint32_t sceneVpDescriptor = hardware_->vpUniformBuffer.storeDescriptor();
+                collect_actor_instances(visibility, sceneVpDescriptor, false, nullptr);
+                upload_instance_tables(hardware_->instanceInfoBuffer,
+                                       hardware_->materialTableBuffer);
 
                 // ================================================================
                 // 4. Environment parameters
@@ -856,29 +878,32 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                              kFollowCameraNear,
                                              kFollowCameraFar);
 
-                    hardware_->uniformBufferObjects.eyeProjMatrix = ortho_proj;
                     hardware_->vpUniformBufferObjects.viewProjMatrix =
                         multiply_ktm_mat4(ortho_proj, camera->compute_view_matrix());
-                    hardware_->uniformBuffer.copyFromData(&hardware_->uniformBufferObjects,
-                                                          sizeof(hardware_->uniformBufferObjects));
-                    hardware_->vpUniformBuffer.copyFromData(&hardware_->vpUniformBufferObjects,
-                                                            sizeof(hardware_->vpUniformBufferObjects));
+                    hardware_->uiVpUniformBuffer.copyFromData(&hardware_->vpUniformBufferObjects,
+                                                              sizeof(hardware_->vpUniformBufferObjects));
+                    const uint32_t uiVpDescriptor =
+                        hardware_->uiVpUniformBuffer.storeDescriptor();
+
+                    uiVisibility.visibilityData = hardware_->uiVisibilityImage;
+                    uiVisibility.setDepthImage(hardware_->uiDepthImage);
 
                     const bool has_follow_camera_instances =
-                        collect_actor_instances(true, &camera_basis);
+                        collect_actor_instances(uiVisibility, uiVpDescriptor, true, &camera_basis);
                     if (has_follow_camera_instances) {
-                        upload_instance_tables();
+                        upload_instance_tables(hardware_->uiInstanceInfoBuffer,
+                                               hardware_->uiMaterialTableBuffer);
 
                         const uint32_t overlayDescriptor = target.ui_overlay.storeDescriptor();
                         opticsOverlay.pushConsts.gbufferSize = hardware_->gbufferSize;
                         opticsOverlay.pushConsts.visibilityImageIndex =
-                            hardware_->visibilityImage.storeDescriptor();
+                            hardware_->uiVisibilityImage.storeDescriptor();
                         opticsOverlay.pushConsts.instanceInfoBufferIndex =
-                            hardware_->instanceInfoBuffer.storeDescriptor();
+                            hardware_->uiInstanceInfoBuffer.storeDescriptor();
                         opticsOverlay.pushConsts.materialTableBufferIndex =
-                            hardware_->materialTableBuffer.storeDescriptor();
+                            hardware_->uiMaterialTableBuffer.storeDescriptor();
                         opticsOverlay.pushConsts.vpBufferIndex =
-                            hardware_->vpUniformBuffer.storeDescriptor();
+                            uiVpDescriptor;
                         opticsOverlay.pushConsts.outputImage = overlayDescriptor;
 
                         opticsComposite.pushConsts.bgImage = render_target.storeDescriptor();
@@ -888,8 +913,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                         opticsComposite.pushConsts.outputWidth = hardware_->gbufferSize.x;
                         opticsComposite.pushConsts.outputHeight = hardware_->gbufferSize.y;
 
-                        hardware_->executor << visibility(hardware_->gbufferSize.x,
-                                                          hardware_->gbufferSize.y)
+                        hardware_->executor << uiVisibility(hardware_->gbufferSize.x,
+                                                            hardware_->gbufferSize.y)
                                             << opticsOverlay(dispatchX, dispatchY, 1)
                                             << opticsComposite(dispatchX, dispatchY, 1)
                                             << hardware_->executor.commit();
