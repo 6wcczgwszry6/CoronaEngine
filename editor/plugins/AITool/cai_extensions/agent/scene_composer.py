@@ -91,11 +91,33 @@ class SceneComposer:
     DEFAULT_MAX_ITEMS = 8
 
     def __init__(self, room_size: List[float] = None, scene_name: str = "lanchat_scene",
-                 max_items: int = DEFAULT_MAX_ITEMS) -> None:
+                 max_items: int = DEFAULT_MAX_ITEMS, zone_tree=None) -> None:
         self.room_size = room_size or [5.0, 3.0, 3.0]
         self.scene_name = scene_name
         self.max_items = max(1, int(max_items))
         self._provider = None
+        # M2 步骤 14a：ZoneTree（可选）。为 None 时退化成单 Zone + enclosure=box，
+        # 几何与旧 room_size 逻辑完全一致，零功能损失。
+        self.zone_tree = zone_tree
+
+    def _get_room_zone(self):
+        """返回当前场景的根 Zone。无 zone_tree 时按 room_size 构造默认单 Zone（退化形态）。
+
+        这是 M2 把现有 room_box 逻辑"重新表达"成 Zone 的落地点——所有场景都走 Zone
+        这条路，默认是单 Zone + enclosure=box。
+        """
+        if self.zone_tree is not None and self.zone_tree.root is not None:
+            return self.zone_tree.root
+        # 退化：构造默认单 Zone（center/size 与旧 _generate_room_box 完全一致）
+        from ..data_model.zone_tree import Zone, Volume
+        w, d, h = self.room_size[0], self.room_size[1], self.room_size[2]
+        return Zone(
+            zone_id="zone_root",
+            name=self.scene_name,
+            role="indoor",
+            volume=Volume(center=[0.0, h / 2.0, 0.0], size=[w, d, h]),
+            enclosure="box",
+        )
 
     @property
     def provider(self):
@@ -458,7 +480,9 @@ class SceneComposer:
         """
         import os as _os, tempfile as _tf, time as _t
 
-        width, depth, height = self.room_size[0], self.room_size[1], self.room_size[2]
+        # M2 步骤 14a：尺寸从根 Zone 的 Volume 读（退化时等价于旧 room_size）。
+        zone = self._get_room_zone()
+        width, depth, height = zone.volume.size[0], zone.volume.size[1], zone.volume.size[2]
 
         # 1. 生成空心盒子 OBJ（六面体，面法向内）
         tmp_dir = _os.path.join(_tf.gettempdir(), "corona_room_box")
