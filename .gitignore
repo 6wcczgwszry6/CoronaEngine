@@ -34,3 +34,7 @@ __pycache__/
 *.log
 .claude/
 .codex/
+
+# CodeGraph (本地代码索引工具产物 + 含机器绝对路径，仅本地使用)
+.codegraph/
+.mcp.json
