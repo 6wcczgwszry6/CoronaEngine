@@ -198,6 +198,19 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         context.vulkan_backend->request_rebuild();
     }
 
+    // Forward text input before texture uploads and GPU presentation can block
+    // this main-thread UI frame.
+    if (*context.active_tab_id != -1 && url_input_active_tab_ == -1) {
+        auto* tab = BrowserManager::instance().get_tab(*context.active_tab_id);
+        if (tab && tab->client && tab->client->GetBrowser()) {
+            input_handler_.send_key_events_to_browser(tab->client->GetBrowser());
+        } else {
+            input_handler_.clear_pending_events();
+        }
+    } else {
+        input_handler_.clear_pending_events();
+    }
+
     if (context.vulkan_backend->is_rebuild_needed()) {
         int width = 0;
         int height = 0;
@@ -221,17 +234,6 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
     std::vector<int> tabs_to_close = browser_renderer_.render_browser_tabs(dock_space_id, *context.active_tab_id, url_input_active_tab_, context.io);
 
     layout_manager_.end_dockspace();
-
-    if (*context.active_tab_id != -1 && url_input_active_tab_ == -1) {
-        auto* tab = BrowserManager::instance().get_tab(*context.active_tab_id);
-        if (tab && tab->client && tab->client->GetBrowser()) {
-            input_handler_.send_key_events_to_browser(tab->client->GetBrowser());
-        } else {
-            input_handler_.clear_pending_events();
-        }
-    } else {
-        input_handler_.clear_pending_events();
-    }
 
     for (auto tab_id : tabs_to_close) {
         BrowserManager::instance().remove_tab(tab_id);

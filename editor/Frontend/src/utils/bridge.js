@@ -383,6 +383,8 @@ export const logService = {
 const CURRENT_CALLER = 'SceneBar';
 
 export const resourceService = {
+  prepareIndex: () =>
+    Bridge.callCEF('ResourceSearch', 'prepare_index', [CURRENT_CALLER]),
   fuzzySearch: (query, topK = 20, typeFilter = null) =>
     Bridge.callCEF('ResourceSearch', 'fuzzy_search',
       [query, topK, typeFilter, CURRENT_CALLER]),
