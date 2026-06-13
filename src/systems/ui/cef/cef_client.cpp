@@ -320,7 +320,6 @@ void CefAppConfig::OnBeforeCommandLineProcessing(const CefString& process_type,
     command_line->AppendSwitch("disable-pdf-viewer");
     command_line->AppendSwitch("disable-component-update");
     command_line->AppendSwitch("disable-background-networking");
-    command_line->AppendSwitchWithValue("disable-features", "PushMessaging");
     command_line->AppendSwitch("disable-d3d11");
     command_line->AppendSwitch("disable-accelerated-video-decode");
 }
@@ -343,7 +342,7 @@ bool initialize_cef() {
     settings.windowless_rendering_enabled = true;
     settings.no_sandbox = true;
     settings.remote_debugging_port = 9222;
-    settings.log_severity = LOGSEVERITY_INFO;
+    settings.log_severity = LOGSEVERITY_FATAL;
     settings.uncaught_exception_stack_size = 10;
 
     CefString(&settings.locale).FromASCII("zh-CN");
