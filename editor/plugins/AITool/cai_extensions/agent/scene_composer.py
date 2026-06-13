@@ -87,6 +87,58 @@ def _build_room_box_obj(width: float, height: float, depth: float,
     ) + common_faces + front_frame
 
 
+def _build_floor_obj() -> str:
+    """构建一块朝上的地面 quad（单位 1×1，XZ 平面，缩放由 Actor 完成）。
+
+    M2 步骤 14b-ii：enclosure=terrain 的最简实现——一片平地，无墙无顶。
+    法向 +Y（朝上），camera 站在上面。Actor 缩放成 [w, 1, d]、置于 y=0。
+    """
+    return (
+        "mtllib box.mtl\nusemtl wall\n"
+        "# unit floor quad in XZ plane, normal +Y (up)\n"
+        "v -0.5 0.0 -0.5\nv  0.5 0.0 -0.5\nv  0.5 0.0  0.5\nv -0.5 0.0  0.5\n"
+        "vn  0.0  1.0  0.0\n"
+        "f 1//1 4//1 3//1 2//1\n"   # top face, CCW from above → normal +Y up
+    )
+
+
+# M2 步骤 14b-ii：把任意场景描述分解成一棵 Zone 树。开放性在这一步——
+# LLM 读 prompt 成空间结构，代码不枚举场景类型（不写 if 教堂/if 蒙古包）。
+# 退化：纯室内 → 返回单 box（走旧路径，零回归）；只有真·室内外混合才建两层树。
+_ZONE_DECOMPOSE_SYSTEM_PROMPT = """你是空间场景分解器。把用户的场景描述分解成一棵"空间区域(Zone)树"。
+不要枚举场景类型，只忠实描述空间结构。
+
+输出 JSON：
+{
+  "zones": [
+    {
+      "id": "z0",
+      "name": "区域名(中文)",
+      "role": "outdoor" | "indoor",
+      "enclosure": "terrain" | "box",
+      "size": [宽, 深, 高],
+      "parent": null | "父zone的id",
+      "has_door": true | false
+    }
+  ]
+}
+
+字段说明：
+- enclosure: terrain=开放平地(无墙无顶); box=带墙带顶的盒子(可开门洞走进去)
+- size: 单位米 [宽, 深, 高]; terrain 的高填 0
+- parent: 顶层 zone 填 null; 嵌套在某区域内填父 zone 的 id
+- has_door: 该 box 是否朝父区域开一个门洞(仅 box 有意义, terrain 填 false)
+
+规则：
+- 纯室内场景（客厅/卧室/教堂内部/办公室）→ 只输出 1 个 box，role=indoor，parent=null，has_door=false。
+- 室内外混合（草原上的蒙古包 / 院子里的小屋 / 森林中的木屋）→ 输出 2 个：
+  外层 terrain(role=outdoor, parent=null) + 内层 box(role=indoor, parent=外层id, has_door=true)。
+- 纯室外（一片草原 / 广场，无可进入建筑）→ 只输出 1 个 terrain，role=outdoor，parent=null。
+- 最多 2 层。内层 box 是"人活动的房间"(宽深 4~6 米、高 2.5~3 米)；外层 terrain 是一大片(15~25 米)。
+只输出 JSON，不要解释。"""
+
+
+
 # 触发场景组合的关键词
 _COMPOSE_PATTERNS = [
     r"物品清单", r"清单", r"组合(?:场景|这个|整个)", r"布置(?:整个|这个|好这)",
@@ -168,12 +220,17 @@ class SceneComposer:
         self.zone_tree = zone_tree
 
     def _get_room_zone(self):
-        """返回当前场景的根 Zone。无 zone_tree 时按 room_size 构造默认单 Zone（退化形态）。
+        """返回用于"物体布局"的 Zone（物体摆进它的体积里）。
 
-        这是 M2 把现有 room_box 逻辑"重新表达"成 Zone 的落地点——所有场景都走 Zone
-        这条路，默认是单 Zone + enclosure=box。
+        无 zone_tree 时按 room_size 构造默认单 Zone（退化形态）。
+        有 zone_tree 时返回第一个 indoor/box/shell Zone（物体进室内），无则 root。
+        注意：indoor 盒子恒在原点（center=[0,h/2,0]），所以现有"原点布局 + room_size"
+        逻辑无需改动就落在盒内——这是 14b-ii 不动布局代码的关键。
         """
         if self.zone_tree is not None and self.zone_tree.root is not None:
+            for z in self.zone_tree.list_all_zones():
+                if (z.enclosure or "") in ("box", "shell") or z.role == "indoor":
+                    return z
             return self.zone_tree.root
         # 退化：构造默认单 Zone（center/size 与旧 _generate_room_box 完全一致）
         from ..data_model.zone_tree import Zone, Volume
@@ -185,6 +242,131 @@ class SceneComposer:
             volume=Volume(center=[0.0, h / 2.0, 0.0], size=[w, d, h]),
             enclosure="box",
         )
+
+    def decompose_zone_tree(self, text: str):
+        """M2 步骤 14b-ii：把场景描述分解成 ZoneTree。开放性在这一步（LLM 读结构）。
+
+        返回 ZoneTree 或 None：
+        - None → 纯室内单房间（走旧 _generate_room_box 单盒路径，零回归）
+        - ZoneTree → 真·室内外混合（terrain + box + 门洞）或纯室外（单 terrain）
+
+        代码不枚举场景类型——分解判断全在 LLM，本函数只把 LLM 输出实例化成树。
+        失败/格式错误 → 返回 None（保守退化到单盒，不影响主链路）。
+        """
+        zones_spec = self._llm_decompose(text)
+        if not zones_spec:
+            return None
+        try:
+            tree = self._build_zone_tree(zones_spec)
+        except Exception as e:
+            logger.warning("[SceneComposer] ZoneTree 构建失败，退化单盒: %s", e)
+            return None
+        if tree is None:
+            return None
+        # 纯单室内盒（1 个 box、无 terrain、无门洞）→ 等价旧路径，返回 None 省一层
+        zones = tree.list_all_zones()
+        if len(zones) == 1 and zones[0].enclosure == "box" and not zones[0].connectors:
+            return None
+        logger.info("[SceneComposer] 场景分解为 %d 个 Zone: %s",
+                    len(zones), [f"{z.name}({z.enclosure})" for z in zones])
+        return tree
+
+    def _llm_decompose(self, text: str) -> List[Dict[str, Any]]:
+        """调 LLM 把场景拆成 zones 列表。失败返回 []。"""
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FTimeout
+        from Quasar.ai_models.base_pool.registry import get_chat_model
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        def _call():
+            llm = get_chat_model(temperature=0, request_timeout=60.0)
+            return llm.invoke([
+                SystemMessage(content=_ZONE_DECOMPOSE_SYSTEM_PROMPT),
+                HumanMessage(content=text[:2000]),
+            ])
+
+        try:
+            ex = ThreadPoolExecutor(max_workers=1)
+            fut = ex.submit(_call)
+            try:
+                resp = fut.result(timeout=65.0)
+            except FTimeout:
+                ex.shutdown(wait=False, cancel_futures=True)
+                logger.warning("[SceneComposer] Zone 分解超时，退化单盒")
+                return []
+            finally:
+                ex.shutdown(wait=False)
+
+            raw = (resp.content if hasattr(resp, "content") else str(resp)).strip()
+            if "```" in raw:
+                s = raw.find("{"); e = raw.rfind("}")
+                if s != -1 and e != -1:
+                    raw = raw[s:e + 1]
+            data = json.loads(raw)
+            zones = data.get("zones") if isinstance(data, dict) else None
+            return zones if isinstance(zones, list) else []
+        except Exception as e:
+            logger.warning("[SceneComposer] Zone 分解失败，退化单盒: %s", e)
+            return []
+
+    def _build_zone_tree(self, zones_spec: List[Dict[str, Any]]):
+        """把 LLM 的 zones 列表实例化成 ZoneTree。
+
+        坐标约定（14b-ii 不动布局代码的关键）：
+        - indoor box 恒置原点 → 现有"原点布局"逻辑无需改动就落在盒内。
+        - outdoor terrain 也置原点（一大片，盒子嵌在中间）。
+        - box 朝父 terrain 开门洞（has_door）→ 写进 connector，_generate_room_box 读它。
+        """
+        from ..data_model.zone_tree import Zone, ZoneTree, Volume, Connector
+
+        if not zones_spec:
+            return None
+
+        nodes: Dict[str, Zone] = {}
+        order: List[str] = []
+        for i, spec in enumerate(zones_spec[:2]):  # 最多两层
+            zid = str(spec.get("id") or f"z{i}")
+            enclosure = spec.get("enclosure") or "box"
+            if enclosure not in ("box", "terrain"):
+                enclosure = "box"
+            role = spec.get("role") or ("outdoor" if enclosure == "terrain" else "indoor")
+            size = spec.get("size") or ([20.0, 20.0, 0.0] if enclosure == "terrain"
+                                        else list(self.room_size))
+            try:
+                w, d, h = float(size[0]), float(size[1]), float(size[2] if len(size) > 2 else 0.0)
+            except Exception:
+                w, d, h = (20.0, 20.0, 0.0) if enclosure == "terrain" else tuple(self.room_size)
+            center = [0.0, h / 2.0 if enclosure == "box" else 0.0, 0.0]
+            nodes[zid] = Zone(
+                zone_id=zid, name=str(spec.get("name") or zid),
+                role=role, enclosure=enclosure,
+                volume=Volume(center=center, size=[w, d, h]),
+            )
+            nodes[zid].metadata["has_door"] = bool(spec.get("has_door"))
+            nodes[zid].metadata["parent"] = spec.get("parent")
+            order.append(zid)
+
+        # 挂树 + 门洞
+        root = None
+        for zid in order:
+            z = nodes[zid]
+            parent_id = z.metadata.get("parent")
+            if parent_id and parent_id in nodes and parent_id != zid:
+                nodes[parent_id].sub_zones.append(z)
+                # box 朝父开门洞：宽 = min(房宽*0.5, 1.2)，高 = min(房高*0.8, 2.2)
+                if z.enclosure == "box" and z.metadata.get("has_door"):
+                    dw = min(z.volume.size[0] * 0.5, 1.2)
+                    dh = min((z.volume.size[2] or 2.5) * 0.8, 2.2)
+                    z.connectors.append(Connector(
+                        connector_id=f"door_{zid}", type="door",
+                        position=[0.0, 0.0, z.volume.size[1] / 2.0],
+                        size=[dw, dh], target_zone_id=zid,
+                    ))
+            else:
+                if root is None:
+                    root = z
+        if root is None:
+            root = nodes[order[0]]
+        return ZoneTree(root=root)
 
     @property
     def provider(self):
@@ -448,6 +630,15 @@ class SceneComposer:
             logger.info("[SceneComposer] 物体数 %d 超过上限 %d，截断为前 %d 个（丢弃 %d）",
                         extracted_total, self.max_items, self.max_items, truncated)
 
+        # ── Phase 0: 场景空间分解（开放性在这一步，LLM 读结构）──
+        # 纯室内单房间 → None（走旧单盒路径）；真·室内外混合 → ZoneTree（terrain+box+门洞）
+        if self.zone_tree is None:
+            try:
+                self.zone_tree = self.decompose_zone_tree(text)
+            except Exception as e:
+                logger.warning("[SceneComposer] 场景分解异常，退化单盒: %s", e)
+                self.zone_tree = None
+
         # ── Phase 1: generate_all (并行, 纯 API) ──
         resolved = self._run_model_retrieval(items)
         if not resolved:
@@ -610,6 +801,87 @@ class SceneComposer:
         except Exception as e:
             logger.warning("[SceneComposer] 房间盒子创建失败: %s", e)
 
+    def _generate_terrain(self, zone) -> None:
+        """M2 步骤 14b-ii：为 enclosure=terrain 的 Zone 生成一块平地（无墙无顶）。
+
+        镜像 _generate_room_box 的 Actor 套路：单 quad OBJ + 静态碰撞体。
+        terrain 置原点、铺在 y=0，盒子嵌在它中间——camera 站在地上看到一大片。
+        """
+        import os as _os, tempfile as _tf, time as _t
+
+        size = zone.volume.size
+        width = size[0] if len(size) > 0 else 20.0
+        depth = size[1] if len(size) > 1 else 20.0
+
+        tmp_dir = _os.path.join(_tf.gettempdir(), "corona_room_box")
+        _os.makedirs(tmp_dir, exist_ok=True)
+        mtl_path = _os.path.join(tmp_dir, "box.mtl")
+        floor_path = _os.path.join(tmp_dir, "floor.obj")
+        if not _os.path.exists(mtl_path):
+            with open(mtl_path, "w", encoding="ascii") as f:
+                f.write("newmtl wall\nKa 0.85 0.85 0.85\nKd 0.92 0.92 0.92\n"
+                        "Ks 0.0 0.0 0.0\nNs 0.0\nd 1.0\n")
+        with open(floor_path, "w", encoding="ascii") as f:
+            f.write(_build_floor_obj())
+
+        try:
+            from CoronaCore.core.managers import scene_manager as _sm
+            from CoronaCore.core.entities.actor import Actor
+        except ImportError:
+            return
+
+        scene = _sm.get("")
+        if scene is None:
+            routes = _sm.list_all()
+            scene = _sm.get(routes[0]) if routes else None
+        if scene is None:
+            return
+
+        existing = {a.name for a in scene.get_actors()}
+        if "__room_terrain" in existing:
+            return
+
+        try:
+            actor = Actor(name="__room_terrain", route=floor_path, actor_type="mesh",
+                          parent_scene=scene)
+            actor.set_position([0.0, 0.0, 0.0], True)
+            actor.set_scale([width, 1.0, depth], True)
+            mech = getattr(actor, "_mechanics", None)
+            if mech is not None:
+                try:
+                    mech.set_physics_enabled(False)
+                except Exception:
+                    pass
+            scene.add_actor(actor)
+            _t.sleep(0.3)
+            logger.info("[SceneComposer] 地面(terrain)已创建: %.1f×%.1f m", width, depth)
+        except Exception as e:
+            logger.warning("[SceneComposer] 地面创建失败: %s", e)
+
+    def _generate_scene_framework(self, prompt: str) -> None:
+        """M2 步骤 14b-ii：按 ZoneTree 生成场景框架（terrain + box，或退化单盒）。
+
+        - 有 zone_tree（混合/室外）→ 遍历各 Zone：terrain 铺地、box 建盒（带门洞）。
+        - 无 zone_tree（纯室内单房间）→ 走旧 _detect_scene_indoor + 单盒路径，零回归。
+        """
+        if self.zone_tree is not None and self.zone_tree.root is not None:
+            zones = self.zone_tree.list_all_zones()
+            has_terrain = any((z.enclosure or "") == "terrain" for z in zones)
+            has_box = any((z.enclosure or "") in ("box", "shell") for z in zones)
+            for z in zones:
+                if (z.enclosure or "") == "terrain":
+                    self._generate_terrain(z)
+            if has_box:
+                # _generate_room_box 内部用 _get_room_zone() 取 indoor 盒并读其门洞
+                self._generate_room_box()
+            elif not has_terrain:
+                # 树里既无 terrain 又无 box（异常）→ 兜底单盒
+                self._generate_room_box()
+            return
+        # 退化：纯室内单房间走旧路径
+        if self._detect_scene_indoor(prompt):
+            self._generate_room_box()
+
     def _run_original_workflow(self, prompt: str, resolved: List[Dict[str, Any]],
                                all_items: List[Dict[str, Any]],
                                do_import: bool,
@@ -619,9 +891,8 @@ class SceneComposer:
         reviews: Phase 2 审查结果, 注入布局 prompt 让 LLM 考虑旋转/比例建议。
         """
 
-        # 室内场景框架：先放置房间盒子（地板+4墙），再往里面摆物体
-        if self._detect_scene_indoor(prompt):
-            self._generate_room_box()
+        # 场景框架：按 ZoneTree 生成（terrain/box，或退化单盒），再往里面摆物体
+        self._generate_scene_framework(prompt)
 
         extracted = len(all_items)
         model_count = len(resolved)
