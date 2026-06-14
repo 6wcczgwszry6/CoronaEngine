@@ -143,8 +143,13 @@ function updateOffset() {
   Bridge.callCEF('CoronaEditor', 'camera_lock_set', [true, ox.value, oy.value, oz.value, 0, 0, 0]);
 }
 
+function isGamePreviewInputLocked() {
+  return Boolean(window.__coronaGamePreviewInputLocked);
+}
+
 // ── WASD ──
 function onKeyDown(e) {
+  if (isGamePreviewInputLocked()) return;
   const k = e.key.toLowerCase();
   if (k === 'escape' && following.value) {
     e.preventDefault();
@@ -161,6 +166,7 @@ function onKeyDown(e) {
 }
 
 function onKeyUp(e) {
+  if (isGamePreviewInputLocked()) return;
   const k = e.key.toLowerCase();
   if (['w', 'a', 's', 'd'].includes(k) && following.value) {
     e.preventDefault();

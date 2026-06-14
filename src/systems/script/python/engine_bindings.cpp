@@ -469,6 +469,11 @@ void BindAll(nanobind::module_& m) {
         Corona::Systems::CameraFollowController::instance().clear_target();
     }, "Clear the camera follow target");
 
+    m.def("camera_follow_set_input_enabled", [](bool enabled) {
+        Corona::Systems::CameraFollowController::instance().set_input_enabled(enabled);
+    }, nb::arg("enabled"),
+       "Enable or disable editor camera-follow keyboard/mouse input");
+
     m.def("camera_follow_inject_rmb", [](bool down, int x, int y) {
         Corona::Systems::CameraFollowController::instance().inject_rmb(down, x, y);
     }, nb::arg("down"), nb::arg("screen_x"), nb::arg("screen_y"),
