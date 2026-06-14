@@ -555,6 +555,7 @@ const previewRunning = ref(false);
 const previewBusy = ref(false);
 const previewStatusText = ref('');
 let previewPollTimer = null;
+window.__coronaGamePreviewInputLocked = false;
 
 // 物理参数状态
 const physicsParams = ref({
@@ -768,6 +769,7 @@ const restoreCameraViews = async (sceneId) => {
 };
 
 const handleWheel = (event) => {
+  if (isGamePreviewInputLocked()) return;
   if (event.shiftKey) {
     // Shift+滚轮：调节摄像头速度
     const delta = event.deltaY > 0 ? -0.02 : 0.02;
@@ -788,6 +790,10 @@ const handleKeyDown = (event) => {
   }
   const tag = event.target?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (isGamePreviewInputLocked()) {
+    resetRealtimeCameraInput();
+    return;
+  }
 
   const key = event.key.toLowerCase();
   if (movementKeys[key] !== undefined) {
@@ -798,6 +804,11 @@ const handleKeyDown = (event) => {
 };
 
 const handleKeyUp = (event) => {
+  if (isGamePreviewInputLocked()) {
+    resetRealtimeCameraInput();
+    return;
+  }
+
   const key = event.key.toLowerCase();
   if (movementKeys[key] !== undefined) {
     movementKeys[key] = false;
@@ -837,7 +848,29 @@ const stopMoveLoop = () => {
   }
 };
 
+const isGamePreviewInputLocked = () => Boolean(window.__coronaGamePreviewInputLocked);
+
+const resetRealtimeCameraInput = () => {
+  Object.keys(movementKeys).forEach((key) => {
+    movementKeys[key] = false;
+  });
+  stopMoveLoop();
+  mouseRotate.active = false;
+};
+
+const setGamePreviewInputLocked = (locked) => {
+  window.__coronaGamePreviewInputLocked = Boolean(locked);
+  if (locked) {
+    resetRealtimeCameraInput();
+  }
+};
+
 const moveLoop = (now) => {
+  if (isGamePreviewInputLocked()) {
+    resetRealtimeCameraInput();
+    return;
+  }
+
   const dt = Math.min((now - lastMoveTime) / 1000, 0.1); // 秒，上限 0.1s
   lastMoveTime = now;
 
@@ -1106,6 +1139,7 @@ const handleViewportPick = async (event) => {
 const onMouseDown = (event) => {
   // 右键拖拽旋转（原有逻辑不变）
   if (event.button === 2) {
+    if (isGamePreviewInputLocked()) return;
     mouseRotate.active = true;
     mouseRotate.lastX = event.clientX;
     mouseRotate.lastY = event.clientY;
@@ -1126,6 +1160,10 @@ const onMouseDown = (event) => {
 };
 
 const onMouseMove = (event) => {
+  if (isGamePreviewInputLocked()) {
+    mouseRotate.active = false;
+    return;
+  }
   if (!mouseRotate.active) return;
   const dx = event.clientX - mouseRotate.lastX;
   const dy = event.clientY - mouseRotate.lastY;
@@ -1138,6 +1176,10 @@ const onMouseMove = (event) => {
 };
 
 const onMouseUp = (event) => {
+  if (isGamePreviewInputLocked()) {
+    mouseRotate.active = false;
+    return;
+  }
   if (event.button === 2 && mouseRotate.active) {
     mouseRotate.active = false;
     if (!sendCameraUpdateFast()) {
@@ -1148,6 +1190,7 @@ const onMouseUp = (event) => {
 };
 
 const onContextMenu = (event) => {
+  if (isGamePreviewInputLocked()) return;
   event.preventDefault();
 };
 
@@ -1182,6 +1225,8 @@ const sendCameraUpdateFast = () => {
 /** 发送当前 cameraState 到引擎——已移除，全部走快速通道 */
 
 const handleCameraMove = (direction) => {
+  if (isGamePreviewInputLocked()) return;
+
   const speed = cameraSpeed.value;
   const { position, forward, up } = cameraState.value;
 
@@ -1386,6 +1431,7 @@ const pollGamePreviewStatus = () => {
       const count = status?.running_count || 0;
       const hasSnapshot = !!status?.has_snapshot;
       previewRunning.value = state === 'running' || state === 'stopping' || count > 0 || hasSnapshot;
+      setGamePreviewInputLocked(Boolean(status?.input_locked ?? previewRunning.value));
       previewStatusText.value = previewRunning.value
         ? (count > 0 ? `预览中 ${count}` : '预览已停止，等待恢复')
         : state === 'error'
@@ -1396,6 +1442,7 @@ const pollGamePreviewStatus = () => {
       }
     } catch (error) {
       previewRunning.value = false;
+      setGamePreviewInputLocked(false);
       previewStatusText.value = '预览状态异常';
       logError('查询预览状态失败', error);
     }
@@ -1415,17 +1462,20 @@ const handleStartGamePreview = async () => {
     const payload = unwrapBridgeData(result);
     if (payload?.status === 'error') {
       previewRunning.value = false;
+      setGamePreviewInputLocked(false);
       previewStatusText.value = '预览启动失败';
       logError('开始预览失败', payload.message);
       return;
     }
     previewRunning.value = payload?.status === 'running' || (payload?.started_count || 0) > 0;
+    setGamePreviewInputLocked(Boolean(payload?.input_locked ?? previewRunning.value));
     previewStatusText.value = previewRunning.value
       ? `预览中 ${payload?.started_count || 0}`
       : '没有可运行积木';
     if (previewRunning.value) pollGamePreviewStatus();
   } catch (error) {
     previewRunning.value = false;
+    setGamePreviewInputLocked(false);
     previewStatusText.value = '预览启动失败';
     logError('开始预览失败', error);
   } finally {
@@ -1444,10 +1494,12 @@ const handleStopGamePreview = async () => {
     const payload = unwrapBridgeData(result);
     if (payload?.restore_error) {
       keepPreviewActive = true;
+      setGamePreviewInputLocked(Boolean(payload?.input_locked ?? true));
       previewStatusText.value = '预览恢复失败';
       logError('结束预览恢复失败', payload.restore_error);
       return;
     }
+    setGamePreviewInputLocked(Boolean(payload?.input_locked ?? false));
     if (payload?.restored) {
       previewStatusText.value = '已恢复预览前参数';
       setTimeout(() => {
@@ -1464,6 +1516,9 @@ const handleStopGamePreview = async () => {
   } finally {
     clearPreviewPoll();
     previewRunning.value = keepPreviewActive;
+    if (!keepPreviewActive) {
+      setGamePreviewInputLocked(false);
+    }
     previewBusy.value = false;
     activeMenu.value = null;
   }
@@ -1699,6 +1754,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   clearPreviewPoll();
+  setGamePreviewInputLocked(false);
   stopStageHints();
   coronaEventBus.off('scene-add');
   coronaEventBus.off('scene-rename');

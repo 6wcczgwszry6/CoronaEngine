@@ -66,6 +66,7 @@ class ScratchTool(PluginBase):
     _preview_errors: list[str] = []
     _preview_warnings: list[str] = []
     _preview_state_snapshot: Optional[dict[str, Any]] = None
+    _preview_input_locked = False
 
     # ------------------------------------------------------------------
     # Project Blockly persistence
@@ -369,6 +370,22 @@ class ScratchTool(PluginBase):
     # Project preview
     # ------------------------------------------------------------------
     @classmethod
+    def _set_preview_input_locked(cls, locked: bool) -> None:
+        with cls._preview_lock:
+            cls._preview_input_locked = bool(locked)
+        try:
+            CoronaEditor.set_editor_camera_input_enabled(not locked)
+        except Exception:
+            logger.debug("[ScratchTool] editor camera input gate unavailable", exc_info=True)
+        try:
+            import CoronaEngine
+            setter = getattr(CoronaEngine, "camera_follow_set_input_enabled", None)
+            if setter is not None:
+                setter(not locked)
+        except Exception:
+            logger.debug("[ScratchTool] camera follow input gate unavailable", exc_info=True)
+
+    @classmethod
     def start_game_preview(cls, payload: dict | str | None = None) -> dict:
         data = cls._normalize_payload(payload)
         scope = data.get("scope", "project")
@@ -391,11 +408,13 @@ class ScratchTool(PluginBase):
                 cls._preview_warnings = list(warnings)
                 cls._preview_threads = []
                 cls._preview_status = "idle"
+            cls._set_preview_input_locked(False)
             return {
                 "status": "idle",
                 "started_count": 0,
                 "errors": [],
                 "warnings": warnings,
+                "input_locked": False,
             }
 
         try:
@@ -410,6 +429,7 @@ class ScratchTool(PluginBase):
             cls._preview_threads = []
             cls._preview_status = "running" if targets else "idle"
             cls._preview_state_snapshot = state_snapshot
+        cls._set_preview_input_locked(True)
 
         for target in targets:
             code_path = cls._active_project_path() / target["code_path"]
@@ -428,6 +448,7 @@ class ScratchTool(PluginBase):
             "started_count": len(targets),
             "errors": [],
             "warnings": warnings,
+            "input_locked": True,
         }
 
     @classmethod
@@ -464,9 +485,11 @@ class ScratchTool(PluginBase):
                 "stopped_count": stopped,
                 "restored": False,
                 "restore_error": "preview threads are still running",
+                "input_locked": True,
             }
 
         restored, restore_error = cls._restore_preview_state_snapshot()
+        cls._set_preview_input_locked(False)
         with cls._preview_lock:
             if restore_error:
                 cls._preview_status = "error"
@@ -477,6 +500,7 @@ class ScratchTool(PluginBase):
             "status": cls._preview_status,
             "stopped_count": stopped,
             "restored": restored,
+            "input_locked": False,
             **({"restore_error": restore_error} if restore_error else {}),
         }
 
@@ -491,6 +515,7 @@ class ScratchTool(PluginBase):
                 "has_snapshot": cls._preview_state_snapshot is not None,
                 "errors": list(cls._preview_errors),
                 "warnings": list(cls._preview_warnings),
+                "input_locked": cls._preview_input_locked,
             }
 
     @classmethod
@@ -798,6 +823,7 @@ class ScratchTool(PluginBase):
         ]
         if not cls._preview_threads and cls._preview_status in ("running", "stopping"):
             cls._preview_status = "error" if cls._preview_errors else "idle"
+            cls._set_preview_input_locked(False)
 
     @staticmethod
     def _clear_backend_cache() -> None:

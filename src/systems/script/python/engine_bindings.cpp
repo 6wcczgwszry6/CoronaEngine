@@ -236,6 +236,10 @@ void BindAll(nanobind::module_& m) {
              nb::rv_policy::reference_internal)
         .def("profile_count", &Actor::profile_count,
              "Get number of profiles in this actor")
+        .def("set_follow_camera", &Actor::set_follow_camera, nb::arg("enabled"),
+             "Render this actor in camera-local orthographic pass 2")
+        .def("get_follow_camera", &Actor::get_follow_camera,
+             "Return whether this actor renders in camera-local orthographic pass 2")
         .def("get_handle", &Actor::get_handle, "Get the underlying handle of this actor");
 
     // ============================================================================
@@ -470,6 +474,11 @@ void BindAll(nanobind::module_& m) {
     m.def("camera_follow_clear", []() {
         Corona::Systems::CameraFollowController::instance().clear_target();
     }, "Clear the camera follow target");
+
+    m.def("camera_follow_set_input_enabled", [](bool enabled) {
+        Corona::Systems::CameraFollowController::instance().set_input_enabled(enabled);
+    }, nb::arg("enabled"),
+       "Enable or disable editor camera-follow keyboard/mouse input");
 
     m.def("camera_follow_inject_rmb", [](bool down, int x, int y) {
         Corona::Systems::CameraFollowController::instance().inject_rmb(down, x, y);
