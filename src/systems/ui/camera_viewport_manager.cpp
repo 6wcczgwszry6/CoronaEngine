@@ -16,6 +16,8 @@ void enqueue_update(const CameraViewportRecord& record, bool view_open) {
         .y = record.y,
         .width = record.width,
         .height = record.height,
+        .render_width = record.render_width,
+        .render_height = record.render_height,
     });
 }
 
@@ -42,7 +44,6 @@ bool CameraViewportManager::register_view(std::string scene_id, std::string came
         std::lock_guard lock(mutex_);
         views_[tab_id] = record;
     }
-    enqueue_update(record, true);
     return true;
 }
 
@@ -59,18 +60,20 @@ bool CameraViewportManager::bind_surface(int tab_id, void* surface, int x, int y
         }
         if (it->second.surface == surface &&
             it->second.x == x && it->second.y == y &&
-            it->second.width == safe_width && it->second.height == safe_height) {
+            it->second.render_width == safe_width && it->second.render_height == safe_height) {
             return true;
         }
         it->second.surface = surface;
         it->second.x = x;
         it->second.y = y;
-        it->second.width = safe_width;
-        it->second.height = safe_height;
+        it->second.render_width = safe_width;
+        it->second.render_height = safe_height;
         record = it->second;
     }
 
-    enqueue_update(record, true);
+    if (record.surface) {
+        enqueue_update(record, true);
+    }
     return true;
 }
 
@@ -95,7 +98,9 @@ bool CameraViewportManager::update_layout(int tab_id, int x, int y, int width, i
         record = it->second;
     }
 
-    enqueue_update(record, true);
+    if (record.surface) {
+        enqueue_update(record, true);
+    }
     return true;
 }
 

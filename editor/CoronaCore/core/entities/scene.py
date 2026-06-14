@@ -14,6 +14,16 @@ CoronaEngine = CoronaEditor.CoronaEngine
 logger = logging.getLogger(__name__)
 
 
+def _active_project_path():
+    try:
+        from ...utils.settings import settings_manager
+        if settings_manager.active_project_path:
+            return settings_manager.active_project_path
+    except Exception:
+        pass
+    return getattr(CoronaEngine, "active_project_path", None)
+
+
 class Scene:
     """
     场景包装类：仅管理对象引用，生命周期由外部管理。
@@ -74,7 +84,7 @@ class Scene:
         if os.path.isabs(self.route):
             data_path = self.route
         else:
-            data_path = os.path.join(CoronaEngine.active_project_path, self.route)
+            data_path = os.path.join(_active_project_path() or '', self.route)
 
         if os.path.exists(data_path):
             self.file_data.read(data_path, encoding='utf-8')
@@ -202,7 +212,7 @@ class Scene:
         if os.path.isabs(self.route):
             data_path = self.route
         else:
-            data_path = os.path.join(CoronaEngine.active_project_path, self.route)
+            data_path = os.path.join(_active_project_path() or '', self.route)
 
         # 确保必要的 section 存在
         for section in ('base', 'sun', 'actors', 'scripts', 'terrain'):

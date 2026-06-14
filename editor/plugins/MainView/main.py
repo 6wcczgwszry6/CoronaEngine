@@ -244,7 +244,7 @@ class MainView(PluginBase):
             # 对于场景文件，传路径即可由 import_scene_file 自行解析
             read_content = False
 
-            init_path = CoronaEditor.CoronaEngine.active_project_path if CoronaEditor.CoronaEngine.active_project_path else None
+            init_path = settings_manager.active_project_path
 
             content, file_path = FileHandler.open_file(title, filter_str, init_path, read_content=read_content,
                                                        return_relative_path=True)
@@ -300,7 +300,7 @@ class MainView(PluginBase):
         # 相对路径转绝对路径（与 import_scene_file 保持一致）
         abs_path = file_path
         if not os.path.isabs(abs_path):
-            project_path = CoronaEditor.CoronaEngine.active_project_path or ''
+            project_path = settings_manager.active_project_path or ''
             abs_path = os.path.join(project_path, abs_path)
 
         import_media_fn = getattr(CoronaEditor.CoronaEngine, 'import_media', None)
@@ -348,7 +348,7 @@ class MainView(PluginBase):
         """从 .json 导出文件导入场景内容到当前场景"""
         # 将相对路径转为绝对路径
         if not os.path.isabs(file_path):
-            project_path = CoronaEditor.CoronaEngine.active_project_path or ''
+            project_path = settings_manager.active_project_path or ''
             file_path = os.path.join(project_path, file_path)
 
         if not os.path.exists(file_path):

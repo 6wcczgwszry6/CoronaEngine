@@ -89,6 +89,14 @@ void apply_pending_camera_viewport_updates() {
             camera->view_y = update.y;
             camera->view_width = update.width;
             camera->view_height = update.height;
+            const auto render_width =
+                static_cast<std::uint32_t>(std::max(update.render_width, 1));
+            const auto render_height =
+                static_cast<std::uint32_t>(std::max(update.render_height, 1));
+            camera->width = render_width;
+            camera->height = render_height;
+            camera->aspect = static_cast<float>(render_width) /
+                             static_cast<float>(render_height);
         }
     }
 }

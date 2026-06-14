@@ -7,12 +7,15 @@
 #include <corona/systems/ui/camera_viewport_manager.h>
 #include <include/cef_values.h>
 #include <nlohmann/json.hpp>
+#include <SDL3/SDL.h>
+#include <windows.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "browser_manager.h"
@@ -24,6 +27,79 @@ namespace {
 
 static std::mutex s_input_mutex;
 static std::vector<InputEvent> s_input_queue;
+
+#ifdef _WIN32
+struct WindowedPlacement {
+    RECT rect{};
+    LONG_PTR style{0};
+};
+
+static std::unordered_map<HWND, WindowedPlacement> s_camera_windowed_placements;
+#endif
+
+struct CameraWindowModeState {
+    int mode{0};
+    int x{120};
+    int y{120};
+    int width{960};
+    int height{540};
+    bool saved{false};
+    bool saved_maximized{false};
+};
+
+static std::unordered_map<int, CameraWindowModeState> s_camera_window_modes;
+
+void request_camera_window_rect(int tab_id, BrowserTab* tab, int x, int y, int width, int height) {
+    tab->initial_x = x;
+    tab->initial_y = y;
+    tab->dock_width = std::max(width, 64);
+    tab->dock_height = std::max(height, 64);
+    tab->needs_reposition = true;
+    tab->needs_resize = true;
+    BrowserManager::instance().resize_tab(tab_id, tab->dock_width, tab->dock_height);
+}
+
+#ifdef _WIN32
+void save_windowed_placement(HWND hwnd) {
+    if (!hwnd || IsZoomed(hwnd)) {
+        return;
+    }
+
+    RECT rect{};
+    if (!GetWindowRect(hwnd, &rect)) {
+        return;
+    }
+
+    const LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+    if ((style & WS_OVERLAPPEDWINDOW) == 0) {
+        return;
+    }
+
+    s_camera_windowed_placements[hwnd] = {
+        .rect = rect,
+        .style = style,
+    };
+}
+
+bool restore_windowed_placement(HWND hwnd) {
+    auto it = s_camera_windowed_placements.find(hwnd);
+    if (it == s_camera_windowed_placements.end()) {
+        return false;
+    }
+
+    const auto placement = it->second;
+    s_camera_windowed_placements.erase(it);
+    SetWindowLongPtr(hwnd, GWL_STYLE, placement.style);
+    ShowWindow(hwnd, SW_RESTORE);
+    SetWindowPos(hwnd, nullptr,
+                 placement.rect.left,
+                 placement.rect.top,
+                 placement.rect.right - placement.rect.left,
+                 placement.rect.bottom - placement.rect.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    return true;
+}
+#endif
 
 [[nodiscard]] std::uintptr_t select_scene_camera_handle(const Corona::SceneDevice& scene) {
     if (scene.active_camera_handle != 0 &&
@@ -717,6 +793,25 @@ int find_tab_id_for_browser(const CefRefPtr<CefBrowser>& browser) {
     return -1;
 }
 
+int resolve_camera_tab_id(const nlohmann::json& command,
+                          const CefRefPtr<CefBrowser>& browser) {
+    const std::string scene_id = command.value("sceneId", "");
+    const std::string camera_id = command.value("cameraId", "");
+    if (!scene_id.empty() && !camera_id.empty()) {
+        if (auto existing = CameraViewportManager::instance().find_by_camera(scene_id, camera_id)) {
+            return existing->tab_id;
+        }
+    }
+    if (!camera_id.empty()) {
+        for (auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+            if (tab && tab->camera_view && tab->url.find(camera_id) != std::string::npos) {
+                return tab_id;
+            }
+        }
+    }
+    return find_tab_id_for_browser(browser);
+}
+
 std::string source_base_url(const CefRefPtr<CefBrowser>& browser) {
     if (!browser || !browser->GetMainFrame()) {
         return {};
@@ -805,6 +900,14 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
             const int x = command.value("x", 120);
             const int y = command.value("y", 120);
 
+            if (scene_id.empty() || camera_id.empty() || camera_id == "undefined" ||
+                camera_id == "null" || camera_handle == 0) {
+                nlohmann::json error;
+                error["message"] = "createCameraView requires a valid sceneId, cameraId, and cameraHandle";
+                send_dock_callback(frame, request_id, error, nullptr);
+                return true;
+            }
+
             if (auto existing = CameraViewportManager::instance().find_by_camera(
                     scene_id, camera_id)) {
                 nlohmann::json result;
@@ -860,6 +963,334 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
             }
             nlohmann::json result;
             result["closed"] = closed;
+            send_dock_callback(frame, request_id, nullptr, result);
+            return true;
+        }
+
+        if (cmd == "toggleMaximizeThisCameraView") {
+            const int tab_id = resolve_camera_tab_id(command, browser);
+            bm.enqueue_main_thread_task([tab_id] {
+                auto* tab = BrowserManager::instance().get_tab(tab_id);
+                if (!tab || !tab->camera_view) {
+                    CFW_LOG_WARNING("toggleMaximizeThisCameraView skipped: tab_id={}, tab={}, camera_view={}, window_id={}",
+                                    tab_id, tab != nullptr, tab ? tab->camera_view : false,
+                                    tab ? tab->platform_window_id : 0);
+                    return;
+                }
+                SDL_Window* window = tab->platform_window_id != 0
+                                         ? SDL_GetWindowFromID(tab->platform_window_id)
+                                         : nullptr;
+                if (!window) {
+                    auto* hwnd = static_cast<HWND>(tab->platform_handle_raw);
+                    if (!hwnd) {
+                        CFW_LOG_WARNING("toggleMaximizeThisCameraView skipped: no SDL window or HWND, tab_id={}, window_id={}",
+                                        tab_id, tab->platform_window_id);
+                        return;
+                    }
+                if (IsZoomed(hwnd)) {
+                    CFW_LOG_DEBUG("Restoring camera viewport HWND: tab_id={}, hwnd={}",
+                                  tab_id, tab->platform_handle_raw);
+                    if (!restore_windowed_placement(hwnd)) {
+                        ShowWindow(hwnd, SW_RESTORE);
+                    }
+                } else {
+                    CFW_LOG_DEBUG("Maximizing camera viewport HWND: tab_id={}, hwnd={}",
+                                  tab_id, tab->platform_handle_raw);
+                    save_windowed_placement(hwnd);
+                    ShowWindow(hwnd, SW_MAXIMIZE);
+                }
+                    return;
+                }
+                const auto flags = SDL_GetWindowFlags(window);
+                if ((flags & SDL_WINDOW_MAXIMIZED) != 0) {
+                    CFW_LOG_DEBUG("Restoring camera viewport window: tab_id={}, window_id={}",
+                                  tab_id, tab->platform_window_id);
+                    SDL_RestoreWindow(window);
+                } else {
+                    CFW_LOG_DEBUG("Maximizing camera viewport window: tab_id={}, window_id={}",
+                                  tab_id, tab->platform_window_id);
+                    SDL_MaximizeWindow(window);
+                }
+            });
+
+            nlohmann::json result;
+            result["queued"] = true;
+            send_dock_callback(frame, request_id, nullptr, result);
+            return true;
+        }
+
+        if (cmd == "cycleThisCameraViewWindowMode") {
+            const int tab_id = resolve_camera_tab_id(command, browser);
+            bm.enqueue_main_thread_task([tab_id] {
+                auto* tab = BrowserManager::instance().get_tab(tab_id);
+                if (!tab || !tab->camera_view) {
+                    CFW_LOG_WARNING("cycleThisCameraViewWindowMode skipped: tab_id={}, tab={}, camera_view={}, window_id={}",
+                                    tab_id, tab != nullptr, tab ? tab->camera_view : false,
+                                    tab ? tab->platform_window_id : 0);
+                    return;
+                }
+                SDL_Window* window = tab->platform_window_id != 0
+                                         ? SDL_GetWindowFromID(tab->platform_window_id)
+                                         : nullptr;
+                if (window) {
+                    auto& state = s_camera_window_modes[tab_id];
+                    if (state.mode == 2) {
+                        CFW_LOG_DEBUG("Restoring camera viewport from borderless before window toggle: tab_id={}, window_id={}",
+                                      tab_id, tab->platform_window_id);
+                        SDL_SetWindowFullscreen(window, false);
+                        SDL_SetWindowBordered(window, true);
+                        SDL_RestoreWindow(window);
+                        request_camera_window_rect(tab_id, tab, state.x, state.y, state.width, state.height);
+                        state.mode = state.saved_maximized ? 1 : 0;
+                        if (state.saved_maximized) {
+                            SDL_MaximizeWindow(window);
+                        }
+                        return;
+                    }
+                    if (state.mode == 0 && !state.saved) {
+                        SDL_GetWindowPosition(window, &state.x, &state.y);
+                        SDL_GetWindowSize(window, &state.width, &state.height);
+                        state.width = std::max(state.width, tab->dock_width);
+                        state.height = std::max(state.height, tab->dock_height);
+                        state.saved = true;
+                        state.saved_maximized = false;
+                    }
+
+                    const SDL_DisplayID display_id = SDL_GetDisplayForWindow(window);
+                    SDL_Rect usable{};
+                    if (!SDL_GetDisplayUsableBounds(display_id, &usable)) {
+                        usable = SDL_Rect{state.x, state.y, state.width, state.height};
+                    }
+
+                    if (state.mode == 1 || (SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED) != 0) {
+                        CFW_LOG_DEBUG("Restoring camera viewport window: tab_id={}, window_id={}",
+                                      tab_id, tab->platform_window_id);
+                        SDL_SetWindowBordered(window, true);
+                        SDL_RestoreWindow(window);
+                        request_camera_window_rect(tab_id, tab, state.x, state.y, state.width, state.height);
+                        state.mode = 0;
+                    } else {
+                        CFW_LOG_DEBUG("Maximizing camera viewport window: tab_id={}, window_id={}",
+                                      tab_id, tab->platform_window_id);
+                        SDL_SetWindowFullscreen(window, false);
+                        SDL_SetWindowBordered(window, true);
+                        request_camera_window_rect(tab_id, tab, usable.x, usable.y, usable.w, usable.h);
+                        SDL_MaximizeWindow(window);
+                        state.mode = 1;
+                    }
+                    return;
+                }
+
+                auto* hwnd = static_cast<HWND>(tab->platform_handle_raw);
+                if (!hwnd) {
+                    CFW_LOG_WARNING("cycleThisCameraViewWindowMode skipped: no SDL window or HWND, tab_id={}, window_id={}",
+                                    tab_id, tab->platform_window_id);
+                    return;
+                }
+
+                const LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+                const bool borderless = (style & WS_OVERLAPPEDWINDOW) == 0;
+                if (borderless) {
+                    CFW_LOG_DEBUG("Restoring camera viewport HWND from borderless fallback: tab_id={}, hwnd={}",
+                                  tab_id, tab->platform_handle_raw);
+                    if (!restore_windowed_placement(hwnd)) {
+                        SetWindowLongPtr(hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
+                        ShowWindow(hwnd, SW_RESTORE);
+                    }
+                    return;
+                }
+                if (IsZoomed(hwnd)) {
+                    CFW_LOG_DEBUG("Restoring camera viewport HWND from maximized fallback: tab_id={}, hwnd={}",
+                                  tab_id, tab->platform_handle_raw);
+                    if (!restore_windowed_placement(hwnd)) {
+                        ShowWindow(hwnd, SW_RESTORE);
+                    }
+                    request_camera_window_rect(tab_id, tab, tab->initial_x, tab->initial_y,
+                                               tab->dock_width, tab->dock_height);
+                    s_camera_window_modes[tab_id].mode = 0;
+                    return;
+                }
+
+                auto& state = s_camera_window_modes[tab_id];
+                state.mode = 1;
+                state.saved = true;
+                state.x = tab->initial_x;
+                state.y = tab->initial_y;
+                state.width = tab->dock_width;
+                state.height = tab->dock_height;
+                CFW_LOG_DEBUG("Maximizing camera viewport HWND fallback: tab_id={}, hwnd={}",
+                              tab_id, tab->platform_handle_raw);
+                save_windowed_placement(hwnd);
+                ShowWindow(hwnd, SW_MAXIMIZE);
+            });
+
+            nlohmann::json result;
+            result["queued"] = true;
+            send_dock_callback(frame, request_id, nullptr, result);
+            return true;
+        }
+
+        if (cmd == "toggleBorderlessThisCameraView") {
+            const int tab_id = resolve_camera_tab_id(command, browser);
+            bm.enqueue_main_thread_task([tab_id] {
+                auto* tab = BrowserManager::instance().get_tab(tab_id);
+                if (!tab || !tab->camera_view) {
+                    CFW_LOG_WARNING("toggleBorderlessThisCameraView skipped: tab_id={}, tab={}, camera_view={}, window_id={}",
+                                    tab_id, tab != nullptr, tab ? tab->camera_view : false,
+                                    tab ? tab->platform_window_id : 0);
+                    return;
+                }
+
+                SDL_Window* window = tab->platform_window_id != 0
+                                         ? SDL_GetWindowFromID(tab->platform_window_id)
+                                         : nullptr;
+                auto& state = s_camera_window_modes[tab_id];
+                if (window) {
+                    if (state.mode == 2) {
+                        CFW_LOG_DEBUG("Restoring camera viewport from borderless fullscreen: tab_id={}, window_id={}",
+                                      tab_id, tab->platform_window_id);
+                        SDL_SetWindowFullscreen(window, false);
+                        SDL_SetWindowBordered(window, true);
+                        SDL_RestoreWindow(window);
+                        request_camera_window_rect(tab_id, tab, state.x, state.y, state.width, state.height);
+                        if (state.saved_maximized) {
+                            SDL_MaximizeWindow(window);
+                            state.mode = 1;
+                        } else {
+                            state.mode = 0;
+                        }
+                        return;
+                    }
+
+                    SDL_GetWindowPosition(window, &state.x, &state.y);
+                    SDL_GetWindowSize(window, &state.width, &state.height);
+                    state.width = std::max(state.width, tab->dock_width);
+                    state.height = std::max(state.height, tab->dock_height);
+                    state.saved = true;
+                    state.saved_maximized = (SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED) != 0;
+
+                    const SDL_DisplayID display_id = SDL_GetDisplayForWindow(window);
+                    SDL_Rect bounds{};
+                    if (!SDL_GetDisplayBounds(display_id, &bounds)) {
+                        bounds = SDL_Rect{state.x, state.y, state.width, state.height};
+                    }
+
+                    CFW_LOG_DEBUG("Setting camera viewport borderless fullscreen: tab_id={}, window_id={}, x={}, y={}, w={}, h={}",
+                                  tab_id, tab->platform_window_id, bounds.x, bounds.y, bounds.w, bounds.h);
+                    SDL_SetWindowFullscreen(window, false);
+                    SDL_RestoreWindow(window);
+                    SDL_SetWindowBordered(window, false);
+                    request_camera_window_rect(tab_id, tab, bounds.x, bounds.y, bounds.w, bounds.h);
+                    SDL_SetWindowPosition(window, bounds.x, bounds.y);
+                    SDL_SetWindowSize(window, bounds.w, bounds.h);
+                    SDL_RaiseWindow(window);
+                    state.mode = 2;
+                    return;
+                }
+
+                auto* hwnd = static_cast<HWND>(tab->platform_handle_raw);
+                if (!hwnd) {
+                    CFW_LOG_WARNING("toggleBorderlessThisCameraView skipped: no SDL window or HWND, tab_id={}, window_id={}",
+                                    tab_id, tab->platform_window_id);
+                    return;
+                }
+
+                const LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+                const bool borderless = (style & WS_OVERLAPPEDWINDOW) == 0;
+                if (borderless || state.mode == 2) {
+                    CFW_LOG_DEBUG("Restoring camera viewport HWND from borderless fullscreen: tab_id={}, hwnd={}",
+                                  tab_id, tab->platform_handle_raw);
+                    if (!restore_windowed_placement(hwnd)) {
+                        SetWindowLongPtr(hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
+                        ShowWindow(hwnd, SW_RESTORE);
+                    }
+                    request_camera_window_rect(tab_id, tab, state.x, state.y, state.width, state.height);
+                    state.mode = 0;
+                    return;
+                }
+
+                RECT rect{};
+                if (GetWindowRect(hwnd, &rect)) {
+                    state.x = rect.left;
+                    state.y = rect.top;
+                    state.width = std::max(static_cast<int>(rect.right - rect.left), tab->dock_width);
+                    state.height = std::max(static_cast<int>(rect.bottom - rect.top), tab->dock_height);
+                    state.saved = true;
+                }
+                state.saved_maximized = IsZoomed(hwnd);
+                save_windowed_placement(hwnd);
+
+                HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                MONITORINFO monitor_info{};
+                monitor_info.cbSize = sizeof(monitor_info);
+                RECT monitor_rect = rect;
+                if (monitor && GetMonitorInfo(monitor, &monitor_info)) {
+                    monitor_rect = monitor_info.rcMonitor;
+                }
+                const int x = monitor_rect.left;
+                const int y = monitor_rect.top;
+                const int width = monitor_rect.right - monitor_rect.left;
+                const int height = monitor_rect.bottom - monitor_rect.top;
+                CFW_LOG_DEBUG("Setting camera viewport HWND borderless fullscreen: tab_id={}, hwnd={}, x={}, y={}, w={}, h={}",
+                              tab_id, tab->platform_handle_raw, x, y, width, height);
+                SetWindowLongPtr(hwnd, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
+                SetWindowPos(hwnd, HWND_TOP, x, y, width, height,
+                             SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+                request_camera_window_rect(tab_id, tab, x, y, width, height);
+                state.mode = 2;
+            });
+
+            nlohmann::json result;
+            result["queued"] = true;
+            send_dock_callback(frame, request_id, nullptr, result);
+            return true;
+        }
+
+        if (cmd == "resizeThisCameraView") {
+            const int tab_id = resolve_camera_tab_id(command, browser);
+            const int width = std::max(command.value("width", 960), 64);
+            const int height = std::max(command.value("height", 540), 64);
+            bm.enqueue_main_thread_task([tab_id, width, height] {
+                auto* tab = BrowserManager::instance().get_tab(tab_id);
+                if (!tab || !tab->camera_view) {
+                    CFW_LOG_WARNING("resizeThisCameraView skipped: tab_id={}, tab={}, camera_view={}, window_id={}",
+                                    tab_id, tab != nullptr, tab ? tab->camera_view : false,
+                                    tab ? tab->platform_window_id : 0);
+                    return;
+                }
+                SDL_Window* window = tab->platform_window_id != 0
+                                         ? SDL_GetWindowFromID(tab->platform_window_id)
+                                         : nullptr;
+                if (!window) {
+                    auto* hwnd = static_cast<HWND>(tab->platform_handle_raw);
+                    if (!hwnd) {
+                        CFW_LOG_WARNING("resizeThisCameraView skipped: no SDL window or HWND, tab_id={}, window_id={}",
+                                        tab_id, tab->platform_window_id);
+                        return;
+                    }
+                    tab->dock_width = width;
+                    tab->dock_height = height;
+                    tab->needs_resize = true;
+                    BrowserManager::instance().resize_tab(tab_id, width, height);
+                    CFW_LOG_DEBUG("Resizing camera viewport HWND: tab_id={}, hwnd={}, size={}x{}",
+                                  tab_id, tab->platform_handle_raw, width, height);
+                    SetWindowPos(hwnd, nullptr, 0, 0, width, height,
+                                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    return;
+                }
+                CFW_LOG_DEBUG("Resizing camera viewport window: tab_id={}, window_id={}, size={}x{}",
+                              tab_id, tab->platform_window_id, width, height);
+                tab->dock_width = width;
+                tab->dock_height = height;
+                tab->needs_resize = true;
+                BrowserManager::instance().resize_tab(tab_id, width, height);
+                SDL_SetWindowSize(window, width, height);
+            });
+
+            nlohmann::json result;
+            result["queued"] = true;
+            result["width"] = width;
+            result["height"] = height;
             send_dock_callback(frame, request_id, nullptr, result);
             return true;
         }

@@ -238,6 +238,8 @@ struct CameraViewportUpdateCommand {
     int y{120};
     int width{960};
     int height{540};
+    int render_width{960};
+    int render_height{540};
     std::uint64_t sequence{};
 };
 

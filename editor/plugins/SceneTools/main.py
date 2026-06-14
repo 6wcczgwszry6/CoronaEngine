@@ -15,6 +15,16 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _active_project_path():
+    try:
+        from utils.settings import settings_manager
+        if settings_manager.active_project_path:
+            return settings_manager.active_project_path
+    except Exception:
+        pass
+    return getattr(CoronaEditor.CoronaEngine, "active_project_path", None)
+
+
 @PluginBase.register_web("SceneTools")
 class SceneTools(PluginBase):
     @staticmethod
@@ -440,7 +450,7 @@ class SceneTools(PluginBase):
     @staticmethod
     def select_screenshot_path(scene_name: str, camera_name: str = None) -> dict:
         try:
-            init_path = CoronaEditor.CoronaEngine.active_project_path if CoronaEditor.CoronaEngine.active_project_path else None
+            init_path = _active_project_path()
             import datetime
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             default_filename = f"screenshot_{timestamp}.png"

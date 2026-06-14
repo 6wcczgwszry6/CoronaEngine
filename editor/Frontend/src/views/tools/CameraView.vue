@@ -1,6 +1,6 @@
 <template>
-  <div class="camera-overlay" @contextmenu.prevent>
-    <header class="toolbar camera-drag-region">
+  <div class="camera-overlay" :class="{ borderless: borderlessFullscreen }" @contextmenu.prevent>
+    <header v-if="!borderlessFullscreen" class="toolbar camera-drag-region">
       <div ref="dragHandle" class="drag-handle" aria-label="Move camera window">::</div>
       <input
         v-model="cameraName"
@@ -51,7 +51,8 @@
         <input v-model.number="renderHeight" type="number" min="64" step="16" @change="saveSettings" />
       </label>
       <button class="button no-drag" @click="takeScreenshot">Screenshot</button>
-      <button class="close no-drag" aria-label="Close camera view" @click="closeView">x</button>
+      <button class="window-action maximize no-drag" aria-label="Toggle camera window fullscreen" @click="cycleWindowMode">[]</button>
+      <button class="window-action close no-drag" aria-label="Close camera view" @click="closeView">x</button>
     </header>
     <div class="input-layer" @mousedown="beginLook" @mousemove="updateLook" @mouseup="endLook" />
     <div v-if="errorText" class="error">{{ errorText }}</div>
@@ -79,6 +80,8 @@ const errorText = ref('');
 const dragHandle = ref(null);
 const backendMenuOpen = ref(false);
 const outputMenuOpen = ref(false);
+const borderlessFullscreen = ref(false);
+let borderlessTogglePending = false;
 
 const outputModes = [
   { value: 'final_color', label: 'Final' },
@@ -162,16 +165,61 @@ const selectOutput = async (mode) => {
 
 const saveSettings = async () => {
   try {
+    const width = Math.max(Number(renderWidth.value) || 960, 64);
+    const height = Math.max(Number(renderHeight.value) || 540, 64);
     const result = unwrap(await sceneService.updateCameraView(sceneId, cameraId, {
       view_open: true,
       move_speed: Math.max(Number(moveSpeed.value) || 1, 0.01),
-      width: Math.max(Number(renderWidth.value) || 960, 64),
-      height: Math.max(Number(renderHeight.value) || 540, 64),
+      width,
+      height,
+      view_width: width,
+      view_height: height,
+    }));
+    camera.value = result.camera;
+    renderWidth.value = result.camera.width || width;
+    renderHeight.value = result.camera.height || height;
+    await appService.resizeThisCameraView(
+      renderWidth.value,
+      renderHeight.value,
+      sceneId,
+      cameraId,
+    ).catch(() => {});
+  } catch (error) {
+    errorText.value = error.message;
+  }
+};
+
+let resizeTimer = 0;
+let lastSyncedWidth = 0;
+let lastSyncedHeight = 0;
+
+const syncWindowSize = async (force = false) => {
+  if (!camera.value) return;
+  const width = Math.max(Math.round(window.innerWidth || renderWidth.value), 64);
+  const height = Math.max(Math.round(window.innerHeight || renderHeight.value), 64);
+  if (!force && width === lastSyncedWidth && height === lastSyncedHeight) return;
+  lastSyncedWidth = width;
+  lastSyncedHeight = height;
+  renderWidth.value = width;
+  renderHeight.value = height;
+  try {
+    const result = unwrap(await sceneService.updateCameraView(sceneId, cameraId, {
+      view_open: true,
+      width,
+      height,
+      view_width: width,
+      view_height: height,
+      move_speed: Math.max(Number(moveSpeed.value) || 1, 0.01),
     }));
     camera.value = result.camera;
   } catch (error) {
     errorText.value = error.message;
   }
+};
+
+const scheduleWindowSizeSync = () => {
+  window.clearTimeout(resizeTimer);
+  resizeTimer = window.setTimeout(() => syncWindowSize(false), 120);
 };
 
 const takeScreenshot = async () => {
@@ -181,6 +229,50 @@ const takeScreenshot = async () => {
     await sceneService.saveScreenshot(sceneId, selected.path, cameraId);
   } catch (error) {
     errorText.value = error.message;
+  }
+};
+
+const toggleMaximize = async () => {
+  await appService.toggleMaximizeThisCameraView(sceneId, cameraId).catch((error) => {
+    errorText.value = error.message;
+  });
+};
+
+const cycleWindowMode = async () => {
+  await appService.cycleThisCameraViewWindowMode(sceneId, cameraId).catch(async (error) => {
+    if (appService.toggleMaximizeThisCameraView) {
+      await toggleMaximize();
+      return;
+    }
+    errorText.value = error.message;
+  });
+};
+
+const toggleBorderlessFullscreen = async () => {
+  if (borderlessTogglePending) return;
+  borderlessTogglePending = true;
+  try {
+    await appService.toggleBorderlessThisCameraView(sceneId, cameraId);
+    borderlessFullscreen.value = !borderlessFullscreen.value;
+    await nextTick();
+    if (borderlessFullscreen.value) {
+      await projectService.setDragRegions('', 0, 0, 0, 0).catch(() => {});
+    } else {
+      const dragRect = dragHandle.value?.getBoundingClientRect();
+      if (dragRect) {
+        await projectService.setDragRegions(
+          '',
+          Math.floor(dragRect.x),
+          Math.floor(dragRect.y),
+          Math.floor(dragRect.width),
+          Math.floor(dragRect.height),
+        ).catch(() => {});
+      }
+    }
+  } catch (error) {
+    errorText.value = error.message;
+  } finally {
+    borderlessTogglePending = false;
   }
 };
 
@@ -289,6 +381,13 @@ const movementCode = (event) => {
 };
 
 const onKeyDown = (event) => {
+  if (event.key === 'F11' || event.code === 'F11') {
+    event.preventDefault();
+    if (!event.repeat) {
+      toggleBorderlessFullscreen();
+    }
+    return;
+  }
   const code = movementCode(event);
   if ([
     'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE',
@@ -346,9 +445,11 @@ onMounted(async () => {
   }
   try {
     await loadCamera();
+    await syncWindowSize(true);
   } catch (error) {
     errorText.value = error.message;
   }
+  window.addEventListener('resize', scheduleWindowSizeSync);
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
   animationFrame = requestAnimationFrame(movementFrame);
@@ -356,6 +457,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(animationFrame);
+  window.clearTimeout(resizeTimer);
+  window.removeEventListener('resize', scheduleWindowSizeSync);
   window.removeEventListener('keydown', onKeyDown);
   window.removeEventListener('keyup', onKeyUp);
 });
@@ -385,6 +488,7 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid rgba(255, 255, 255, 0.14);
 }
 .input-layer { position: absolute; inset: 34px 0 0; z-index: 1; }
+.camera-overlay.borderless .input-layer { inset: 0; }
 .drag-handle {
   width: 22px;
   height: 24px;
@@ -394,7 +498,7 @@ onBeforeUnmount(() => {
   color: #aaa;
   cursor: move;
 }
-.name-input, .control, .speed input, .resolution input, .button, .close {
+.name-input, .control, .speed input, .resolution input, .button, .window-action {
   height: 24px;
   border: 1px solid #555;
   border-radius: 4px;
@@ -438,7 +542,9 @@ onBeforeUnmount(() => {
 .speed input { width: 54px; padding: 0 4px; }
 .resolution input { width: 58px; padding: 0 4px; }
 .button { padding: 0 8px; cursor: pointer; }
-.close { width: 24px; margin-left: auto; cursor: pointer; color: #ffb4b4; }
+.window-action { width: 24px; cursor: pointer; }
+.maximize { margin-left: auto; }
+.close { color: #ffb4b4; }
 .error {
   position: absolute;
   z-index: 3;

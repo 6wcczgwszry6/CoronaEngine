@@ -20,6 +20,16 @@ CoronaEngine = CoronaEditor.CoronaEngine
 _handle_to_actor = weakref.WeakValueDictionary()
 
 
+def _active_project_path():
+    try:
+        from ...utils.settings import settings_manager
+        if settings_manager.active_project_path:
+            return settings_manager.active_project_path
+    except Exception:
+        pass
+    return getattr(CoronaEngine, "active_project_path", None)
+
+
 class Actor:
     """
     OOP API 包装：基于 CoronaEngine.Actor。
@@ -105,7 +115,7 @@ class Actor:
         if os.path.isabs(self.route):
             return self.route
         else:
-            return os.path.join(CoronaEngine.active_project_path, self.route)
+            return os.path.join(_active_project_path() or '', self.route)
 
     def _load_from_config(self, data_path: str):
         """从配置文件加载actor数据"""
@@ -118,7 +128,7 @@ class Actor:
         if not self.actor_guid:
             self.actor_guid = f"actor-{uuid.uuid4().hex}"
         if self.model_path:
-            self.final_model_path = os.path.join(CoronaEngine.active_project_path, self.model_path)
+            self.final_model_path = os.path.join(_active_project_path() or '', self.model_path)
             if self.parent:
                 self._create_components_from_config()
 
@@ -136,7 +146,7 @@ class Actor:
             )
             file_follow_camera = self.file_data['base'].getboolean('follow_camera', fallback=False)
             self.script_path = self.file_data['scripts']["path"]
-            self.final_model_path = os.path.join(CoronaEngine.active_project_path,
+            self.final_model_path = os.path.join(_active_project_path() or '',
                                                  self.model_path) if self.model_path else ""
         else:
             self.final_model_path = data_path
@@ -254,7 +264,7 @@ class Actor:
         if self.actor_type == "actor" or not self.route:
             return
 
-        project_root_raw = getattr(CoronaEngine, "active_project_path", None)
+        project_root_raw = _active_project_path()
         if not project_root_raw:
             return
 

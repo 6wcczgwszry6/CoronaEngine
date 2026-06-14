@@ -4,6 +4,9 @@
 
 #include <SDL3/SDL.h>
 
+#include <cstdlib>
+#include <cstdint>
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -255,6 +258,20 @@ void BrowserInputHandler::send_key_events_to_browser(const CefRefPtr<CefBrowser>
 
 static MouseUtils::MouseStateManager mouse_state;
 
+namespace {
+
+SDL_Window* sdl_window_from_viewport(ImGuiViewport* viewport) {
+    if (!viewport || !viewport->PlatformHandle) {
+        return nullptr;
+    }
+
+    auto window_id = static_cast<SDL_WindowID>(
+        reinterpret_cast<std::intptr_t>(viewport->PlatformHandle));
+    return SDL_GetWindowFromID(window_id);
+}
+
+}  // namespace
+
 void BrowserRenderer::setup_window_transform(BrowserTab* tab,
                                              ImGuiID dock_space_id,
                                              bool is_main_tab) {
@@ -264,10 +281,10 @@ void BrowserRenderer::setup_window_transform(BrowserTab* tab,
         if (tab->camera_view) {
             ImGui::SetNextWindowPos(
                 ImVec2(static_cast<float>(tab->initial_x), static_cast<float>(tab->initial_y)),
-                ImGuiCond_FirstUseEver);
+                tab->needs_reposition ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowSize(
                 ImVec2(static_cast<float>(tab->dock_width), static_cast<float>(tab->dock_height)),
-                ImGuiCond_FirstUseEver);
+                tab->needs_resize ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
             tab->dock_initialized = true;
             return;
         }
@@ -414,14 +431,30 @@ void BrowserRenderer::render_single_tab(int tab_id,
 
     setup_window_transform(tab, dock_space_id, is_main_tab);
 
+    if (tab->camera_view) {
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    }
+
     if (ImGui::Begin(window_id.c_str(), &tab->open, browser_window_flags)) {
         ImVec2 window_pos = ImGui::GetWindowPos();
         ImVec2 content_min = ImGui::GetWindowContentRegionMin();
         ImVec2 cef_origin = ImVec2(window_pos.x + content_min.x, window_pos.y + content_min.y);
+        const auto window_size = ImGui::GetWindowSize();
 
         ImVec2 avail_size = ImGui::GetContentRegionAvail();
         int new_width = static_cast<int>(avail_size.x);
         int new_height = static_cast<int>(avail_size.y);
+        if (tab->needs_reposition &&
+            std::abs(static_cast<int>(window_pos.x) - tab->initial_x) <= 4 &&
+            std::abs(static_cast<int>(window_pos.y) - tab->initial_y) <= 4) {
+            tab->needs_reposition = false;
+        }
+        if (tab->needs_resize && new_width > 0 && new_height > 0 &&
+            std::abs(new_width - tab->dock_width) <= 4 &&
+            std::abs(new_height - tab->dock_height) <= 4) {
+            tab->needs_resize = false;
+        }
         if (new_width > 0 && new_height > 0 &&
             (new_width != tab->width || new_height != tab->height)) {
             BrowserManager::instance().resize_tab(tab_id, new_width, new_height);
@@ -429,18 +462,25 @@ void BrowserRenderer::render_single_tab(int tab_id,
 
         if (tab->camera_view) {
             auto* viewport = ImGui::GetWindowViewport();
+            SDL_Window* platform_window = sdl_window_from_viewport(viewport);
+            void* native_surface = viewport ? viewport->PlatformHandleRaw : nullptr;
+            if (!native_surface && platform_window) {
+                native_surface = SDL_GetPointerProperty(
+                    SDL_GetWindowProperties(platform_window),
+                    SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+                    nullptr);
+            }
             tab->platform_handle_raw =
-                viewport ? viewport->PlatformHandleRaw : nullptr;
-            tab->platform_window_id =
-                viewport && viewport->PlatformHandle
-                    ? SDL_GetWindowID(
-                          static_cast<SDL_Window*>(viewport->PlatformHandle))
-                    : 0;
-            const auto window_size = ImGui::GetWindowSize();
-            CameraViewportManager::instance().bind_surface(
-                tab_id, viewport ? viewport->PlatformHandleRaw : nullptr,
-                static_cast<int>(window_pos.x), static_cast<int>(window_pos.y),
-                new_width, new_height);
+                native_surface;
+            tab->platform_window_id = platform_window
+                                          ? SDL_GetWindowID(platform_window)
+                                          : 0;
+            if (native_surface) {
+                CameraViewportManager::instance().bind_surface(
+                    tab_id, native_surface,
+                    static_cast<int>(window_pos.x), static_cast<int>(window_pos.y),
+                    new_width, new_height);
+            }
             CameraViewportManager::instance().update_layout(
                 tab_id, static_cast<int>(window_pos.x), static_cast<int>(window_pos.y),
                 static_cast<int>(window_size.x), static_cast<int>(window_size.y));
@@ -537,6 +577,9 @@ void BrowserRenderer::render_single_tab(int tab_id,
         }
     }
     ImGui::End();
+    if (tab->camera_view) {
+        ImGui::PopStyleVar(2);
+    }
 }
 
 std::vector<int> BrowserRenderer::render_browser_tabs(ImGuiID dock_space_id,

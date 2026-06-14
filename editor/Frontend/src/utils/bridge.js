@@ -201,6 +201,14 @@ export const appService = {
     Bridge.callDockCommand({ cmd: 'closeThisTab', panelId }),
   closePanelTab: (tabId, panelId) =>
     Bridge.callDockCommand({ cmd: 'closePanelTab', tabId, panelId }),
+  toggleMaximizeThisCameraView: (sceneId = '', cameraId = '') =>
+    Bridge.callDockCommand({ cmd: 'toggleMaximizeThisCameraView', sceneId, cameraId }),
+  cycleThisCameraViewWindowMode: (sceneId = '', cameraId = '') =>
+    Bridge.callDockCommand({ cmd: 'cycleThisCameraViewWindowMode', sceneId, cameraId }),
+  toggleBorderlessThisCameraView: (sceneId = '', cameraId = '') =>
+    Bridge.callDockCommand({ cmd: 'toggleBorderlessThisCameraView', sceneId, cameraId }),
+  resizeThisCameraView: (width, height, sceneId = '', cameraId = '') =>
+    Bridge.callDockCommand({ cmd: 'resizeThisCameraView', width, height, sceneId, cameraId }),
   createCameraView: (camera) =>
     Bridge.callDockCommand({
       cmd: 'createCameraView',
