@@ -115,7 +115,8 @@ _ZONE_DECOMPOSE_SYSTEM_PROMPT = """你是空间场景分解器。把用户的场
       "id": "z0",
       "name": "区域名(中文)",
       "role": "outdoor" | "indoor",
-      "enclosure": "terrain" | "box",
+      "enclosure": "terrain" | "box" | "shell",
+      "shell_asset": null | "建筑模型名(中文)",
       "size": [宽, 深, 高],
       "parent": null | "父zone的id",
       "has_door": true | false
@@ -124,17 +125,22 @@ _ZONE_DECOMPOSE_SYSTEM_PROMPT = """你是空间场景分解器。把用户的场
 }
 
 字段说明：
-- enclosure: terrain=开放平地(无墙无顶); box=带墙带顶的盒子(可开门洞走进去)
+- enclosure:
+  * terrain = 开放平地(无墙无顶)
+  * box = 合成的中性盒子(客厅/卧室/教堂内部这种"房间"，没有特定外观的建筑模型，由墙地顶围合)
+  * shell = 由一个生成的建筑模型包裹(蒙古包/帐篷/小木屋这种有标志性外观的建筑，模型本身就是外壳)
+- shell_asset: 仅当 enclosure=shell 时填，是那个建筑模型的名字(如"蒙古包")；其它情况填 null
 - size: 单位米 [宽, 深, 高]; terrain 的高填 0
 - parent: 顶层 zone 填 null; 嵌套在某区域内填父 zone 的 id
-- has_door: 该 box 是否朝父区域开一个门洞(仅 box 有意义, terrain 填 false)
+- has_door: box 是否朝父区域开门洞(仅 box 有意义; shell 用模型自带入口, terrain 无, 都填 false)
 
 规则：
-- 纯室内场景（客厅/卧室/教堂内部/办公室）→ 只输出 1 个 box，role=indoor，parent=null，has_door=false。
-- 室内外混合（草原上的蒙古包 / 院子里的小屋 / 森林中的木屋）→ 输出 2 个：
-  外层 terrain(role=outdoor, parent=null) + 内层 box(role=indoor, parent=外层id, has_door=true)。
-- 纯室外（一片草原 / 广场，无可进入建筑）→ 只输出 1 个 terrain，role=outdoor，parent=null。
-- 最多 2 层。内层 box 是"人活动的房间"(宽深 4~6 米、高 2.5~3 米)；外层 terrain 是一大片(15~25 米)。
+- 纯室内房间（客厅/卧室/办公室/教堂内部）→ 1 个 box，role=indoor，parent=null，has_door=false，shell_asset=null。
+- 室内外混合且内层是【标志性外观建筑】（草原上的蒙古包 / 院子里的小木屋 / 雪地里的帐篷）→ 2 个：
+  外层 terrain(role=outdoor, parent=null) + 内层 shell(role=indoor, parent=外层id, shell_asset="建筑名", has_door=false)。
+- 室内外混合但内层只是【普通房间】（院子里的一间客厅）→ 外层 terrain + 内层 box(has_door=true)。
+- 纯室外（一片草原 / 广场，无可进入建筑）→ 1 个 terrain，role=outdoor，parent=null。
+- 最多 2 层。内层(box/shell)是"人活动空间"(宽深 4~6 米、高 2.5~3 米)；外层 terrain 一大片(15~25 米)。
 只输出 JSON，不要解释。"""
 
 
@@ -312,9 +318,10 @@ class SceneComposer:
         """把 LLM 的 zones 列表实例化成 ZoneTree。
 
         坐标约定（14b-ii 不动布局代码的关键）：
-        - indoor box 恒置原点 → 现有"原点布局"逻辑无需改动就落在盒内。
-        - outdoor terrain 也置原点（一大片，盒子嵌在中间）。
+        - indoor box/shell 恒置原点 → 现有"原点布局"逻辑无需改动就落在体积内。
+        - outdoor terrain 也置原点（一大片，内层嵌在中间）。
         - box 朝父 terrain 开门洞（has_door）→ 写进 connector，_generate_room_box 读它。
+        - shell（15a）：用生成的建筑模型当围合体，模型自带入口，不开矩形门洞、不生成白盒。
         """
         from ..data_model.zone_tree import Zone, ZoneTree, Volume, Connector
 
@@ -326,7 +333,7 @@ class SceneComposer:
         for i, spec in enumerate(zones_spec[:2]):  # 最多两层
             zid = str(spec.get("id") or f"z{i}")
             enclosure = spec.get("enclosure") or "box"
-            if enclosure not in ("box", "terrain"):
+            if enclosure not in ("box", "terrain", "shell"):
                 enclosure = "box"
             role = spec.get("role") or ("outdoor" if enclosure == "terrain" else "indoor")
             size = spec.get("size") or ([20.0, 20.0, 0.0] if enclosure == "terrain"
@@ -335,17 +342,22 @@ class SceneComposer:
                 w, d, h = float(size[0]), float(size[1]), float(size[2] if len(size) > 2 else 0.0)
             except Exception:
                 w, d, h = (20.0, 20.0, 0.0) if enclosure == "terrain" else tuple(self.room_size)
-            center = [0.0, h / 2.0 if enclosure == "box" else 0.0, 0.0]
-            nodes[zid] = Zone(
+            center = [0.0, h / 2.0 if enclosure in ("box", "shell") else 0.0, 0.0]
+            zone = Zone(
                 zone_id=zid, name=str(spec.get("name") or zid),
                 role=role, enclosure=enclosure,
                 volume=Volume(center=center, size=[w, d, h]),
             )
-            nodes[zid].metadata["has_door"] = bool(spec.get("has_door"))
-            nodes[zid].metadata["parent"] = spec.get("parent")
+            # 15a：shell 记主外壳 asset 名（建筑模型），由 _place_shell 确定性包裹体积
+            if enclosure == "shell":
+                shell_name = (spec.get("shell_asset") or spec.get("name") or "").strip()
+                zone.primary_shell_asset_id = shell_name or None
+            zone.metadata["has_door"] = bool(spec.get("has_door"))
+            zone.metadata["parent"] = spec.get("parent")
+            nodes[zid] = zone
             order.append(zid)
 
-        # 挂树 + 门洞
+        # 挂树 + 门洞（仅 box；shell 用模型自带入口）
         root = None
         for zid in order:
             z = nodes[zid]
@@ -367,6 +379,16 @@ class SceneComposer:
         if root is None:
             root = nodes[order[0]]
         return ZoneTree(root=root)
+
+    def _collect_shell_assets(self) -> set:
+        """15a：从 zone_tree 收集所有 shell zone 的主外壳 asset 名（用于从家具清单剔除）。"""
+        names = set()
+        if self.zone_tree is None or self.zone_tree.root is None:
+            return names
+        for z in self.zone_tree.list_all_zones():
+            if (z.enclosure or "") == "shell" and z.primary_shell_asset_id:
+                names.add(z.primary_shell_asset_id.strip())
+        return names
 
     @property
     def provider(self):
@@ -622,30 +644,42 @@ class SceneComposer:
                     "extracted_count": 0, "model_count": 0,
                     "error": "未能从描述中提取出物体清单"}
 
-        extracted_total = len(items)
-        truncated = 0
-        if extracted_total > self.max_items:
-            truncated = extracted_total - self.max_items
-            items = items[:self.max_items]
-            logger.info("[SceneComposer] 物体数 %d 超过上限 %d，截断为前 %d 个（丢弃 %d）",
-                        extracted_total, self.max_items, self.max_items, truncated)
-
         # ── Phase 0: 场景空间分解（开放性在这一步，LLM 读结构）──
-        # 纯室内单房间 → None（走旧单盒路径）；真·室内外混合 → ZoneTree（terrain+box+门洞）
+        # 纯室内单房间 → None（走旧单盒路径）；真·室内外混合 → ZoneTree。
+        # 放在截断前：shell 建筑要从家具清单分离 + 保护不被截断（它是场景主体）。
         if self.zone_tree is None:
             try:
                 self.zone_tree = self.decompose_zone_tree(text)
             except Exception as e:
                 logger.warning("[SceneComposer] 场景分解异常，退化单盒: %s", e)
                 self.zone_tree = None
-        # 关键：建树后把 room_size 同步成 indoor box 的真实体积。下游布局 prompt 与
-        # 导入后钳制都读 self.room_size——同步后它们自动按真实盒尺寸工作，无需改布局代码。
+        # 关键：建树后把 room_size 同步成 indoor box/shell 的真实体积。下游布局 prompt 与
+        # 导入后钳制都读 self.room_size——同步后它们自动按真实体积工作，无需改布局代码。
         if self.zone_tree is not None:
             box = self._get_room_zone()
             if box is not None and getattr(box, "enclosure", "") in ("box", "shell"):
                 self.room_size = list(box.volume.size)
-                logger.info("[SceneComposer] room_size 同步为 indoor box 体积: %s",
+                logger.info("[SceneComposer] room_size 同步为 indoor 体积: %s",
                             self.room_size)
+
+        # 15a：shell 建筑（如蒙古包）当围合体不是家具。确保它在生成清单里（缺则补）。
+        shell_names = self._collect_shell_assets()
+        for sname in shell_names:
+            if not any((it.get("name") or "").strip() == sname for it in items):
+                items.insert(0, {"name": sname, "quantity": 1,
+                                 "keywords": f"{sname}, building exterior, architectural model"})
+
+        extracted_total = len(items)
+        truncated = 0
+        if extracted_total > self.max_items:
+            # 截断保护 shell 名：先留 shell，再用家具填满剩余额度
+            shells_kept = [it for it in items if (it.get("name") or "").strip() in shell_names]
+            furniture = [it for it in items if (it.get("name") or "").strip() not in shell_names]
+            keep_furniture = max(0, self.max_items - len(shells_kept))
+            items = shells_kept + furniture[:keep_furniture]
+            truncated = extracted_total - len(items)
+            logger.info("[SceneComposer] 物体数 %d 超过上限 %d，截断为 %d（保 shell %d，丢 %d）",
+                        extracted_total, self.max_items, len(items), len(shells_kept), truncated)
 
         # ── Phase 1: generate_all (并行, 纯 API) ──
         resolved = self._run_model_retrieval(items)
@@ -666,7 +700,19 @@ class SceneComposer:
             logger.info("[SceneComposer] 审查完成: %d/%d", len(reviews), len(resolved))
 
         # ── Phase 3: compose (布局 + 导入, 注入审查结果) ──
-        result = self._run_original_workflow(text, resolved, items, do_import,
+        # 15a：shell 建筑从家具里分出来——它走确定性围合放置（_place_shells），
+        # 绝不进布局 LLM（否则又被当家具摆中心，与白盒/terrain 双围合撕裂）。
+        shell_names = self._collect_shell_assets()
+        shell_models = [m for m in resolved
+                        if (m.get("name") or "").strip() in shell_names]
+        furniture = [m for m in resolved
+                     if (m.get("name") or "").strip() not in shell_names]
+        if shell_models:
+            self._shell_models = shell_models
+            logger.info("[SceneComposer] 分离出 %d 个外壳建筑（确定性放置，不进布局LLM）: %s",
+                        len(shell_models), [m.get("name") for m in shell_models])
+
+        result = self._run_original_workflow(text, furniture, items, do_import,
                                               reviews=reviews)
         result["extracted_count"] = extracted_total
         result["truncated"] = truncated
@@ -867,28 +913,110 @@ class SceneComposer:
             logger.warning("[SceneComposer] 地面创建失败: %s", e)
 
     def _generate_scene_framework(self, prompt: str) -> None:
-        """M2 步骤 14b-ii：按 ZoneTree 生成场景框架（terrain + box，或退化单盒）。
+        """M2 步骤 14b-ii/15a：按 ZoneTree 生成场景框架。
 
-        - 有 zone_tree（混合/室外）→ 遍历各 Zone：terrain 铺地、box 建盒（带门洞）。
+        - terrain zone → 铺地面。
+        - box zone → 合成白盒（带门洞），_generate_room_box 读它。
+        - shell zone → 不生成白盒：建筑模型本身就是围合体，由 _place_shells 确定性放置。
         - 无 zone_tree（纯室内单房间）→ 走旧 _detect_scene_indoor + 单盒路径，零回归。
         """
         if self.zone_tree is not None and self.zone_tree.root is not None:
             zones = self.zone_tree.list_all_zones()
             has_terrain = any((z.enclosure or "") == "terrain" for z in zones)
-            has_box = any((z.enclosure or "") in ("box", "shell") for z in zones)
+            has_box = any((z.enclosure or "") == "box" for z in zones)
+            has_shell = any((z.enclosure or "") == "shell" for z in zones)
             for z in zones:
                 if (z.enclosure or "") == "terrain":
                     self._generate_terrain(z)
             if has_box:
                 # _generate_room_box 内部用 _get_room_zone() 取 indoor 盒并读其门洞
                 self._generate_room_box()
-            elif not has_terrain:
-                # 树里既无 terrain 又无 box（异常）→ 兜底单盒
+            # shell zone：不建白盒——建筑模型本身当围合，在 _place_shells 里放置
+            elif not has_shell and not has_terrain:
+                # 树里既无 box 又无 shell 又无 terrain（异常）→ 兜底单盒
                 self._generate_room_box()
             return
         # 退化：纯室内单房间走旧路径
         if self._detect_scene_indoor(prompt):
             self._generate_room_box()
+
+    def _place_shells(self, shell_models: List[Dict[str, Any]]) -> None:
+        """15a：把 shell 建筑模型确定性放置成围合体（不经布局 LLM）。
+
+        用生成的建筑模型本身当外壳：居中、落地、按 AABB 缩放到包住对应 shell zone
+        的 volume。模型自带入口（如蒙古包门帘），不在它身上 punch 矩形门洞——这正是
+        修掉 F5 撕裂的关键（圆壳 + 方盒矩形洞 → 撕裂）。
+        几何精度（是否严丝合缝包住、入口朝向）只能 F5 目测，这里给确定性的合理缺省。
+        """
+        if not shell_models or self.zone_tree is None:
+            return
+        import time as _t
+        try:
+            from CoronaCore.core.managers import scene_manager as _sm
+            from CoronaCore.core.entities.actor import Actor
+        except ImportError:
+            return
+
+        # shell zone 按 asset 名索引（取各自 volume 算缩放）
+        shell_zones = {}
+        for z in self.zone_tree.list_all_zones():
+            if (z.enclosure or "") == "shell" and z.primary_shell_asset_id:
+                shell_zones[z.primary_shell_asset_id.strip()] = z
+
+        # 读 AABB 算缩放（trimesh size = [width, height, depth]）
+        asset_meta = {}
+        try:
+            from ..flows.scene_composition_workflow_v2.asset_metadata import (
+                build_asset_metadata_batch,
+            )
+            paths = [m["model_path"] for m in shell_models if m.get("model_path")]
+            asset_meta = build_asset_metadata_batch(paths)
+        except Exception as e:
+            logger.warning("[SceneComposer] shell AABB 读取失败（用缺省缩放）: %s", e)
+
+        scene = _sm.get("")
+        if scene is None:
+            routes = _sm.list_all()
+            scene = _sm.get(routes[0]) if routes else None
+        if scene is None:
+            return
+
+        WRAP = 1.25  # 外壳比 volume 略大，内部舒适包住（墙厚占比 + 留白）
+        for m in shell_models:
+            name = (m.get("name") or "").strip()
+            path = m.get("model_path", "")
+            if not path:
+                continue
+            zone = shell_zones.get(name)
+            if zone is None:
+                continue
+            vw, vd, vh = zone.volume.size[0], zone.volume.size[1], zone.volume.size[2]
+            scale = [1.0, 1.0, 1.0]
+            meta = asset_meta.get(name) or {}
+            size = meta.get("size")
+            if size and len(size) >= 3 and all(float(s) > 1e-6 for s in size[:3]):
+                scale = [vw / float(size[0]) * WRAP,
+                         vh / float(size[1]) * WRAP,
+                         vd / float(size[2]) * WRAP]
+            try:
+                actor = Actor(name=f"__shell_{name}", route=path, actor_type="mesh",
+                              parent_scene=scene)
+                # 落地居中（生成模型 pivot 多在底部中心）。入口朝向无法保证，rot=0，待 F5。
+                actor.set_position([0.0, 0.0, 0.0], True)
+                actor.set_scale(scale, True)
+                mech = getattr(actor, "_mechanics", None)
+                if mech is not None:
+                    try:
+                        mech.set_physics_enabled(False)
+                    except Exception:
+                        pass
+                scene.add_actor(actor)
+                _t.sleep(0.3)
+                logger.info("[SceneComposer] 外壳(shell)已放置: %s scale=%s",
+                            name, [round(s, 2) for s in scale])
+            except Exception as e:
+                logger.warning("[SceneComposer] 外壳放置失败 %s: %s", name, e)
+
 
     def _run_original_workflow(self, prompt: str, resolved: List[Dict[str, Any]],
                                all_items: List[Dict[str, Any]],
@@ -901,6 +1029,10 @@ class SceneComposer:
 
         # 场景框架：按 ZoneTree 生成（terrain/box，或退化单盒），再往里面摆物体
         self._generate_scene_framework(prompt)
+        # 15a：shell 建筑确定性放置成围合体（模型路径此时已生成，故在框架之后）。
+        shell_models = getattr(self, "_shell_models", None)
+        if shell_models:
+            self._place_shells(shell_models)
 
         extracted = len(all_items)
         model_count = len(resolved)
