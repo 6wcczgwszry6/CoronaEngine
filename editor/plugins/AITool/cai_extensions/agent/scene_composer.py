@@ -392,6 +392,40 @@ class SceneComposer:
                 names.add(z.primary_shell_asset_id.strip())
         return names
 
+    def _degrade_failed_shells_to_box(self, failed_asset_names: set) -> List[str]:
+        """15a 优雅降级：shell 模型生成失败的 zone → 退回 enclosure=box + 门洞。
+
+        文档哲学：volume 是事实源，建筑只是外壳 dressing。dressing（文生3D）失败时，
+        volume 仍需要一个兜底围合——box 是那个万能退化围合（=14b-i 的干净几何）。
+        没了圆模型后，方盒单独存在不撕裂，且仍可从门洞走进去。
+
+        返回被降级的 zone 名列表（供汇报）。
+        """
+        from ..data_model.zone_tree import Connector
+        degraded = []
+        if self.zone_tree is None or self.zone_tree.root is None:
+            return degraded
+        for z in self.zone_tree.list_all_zones():
+            if (z.enclosure or "") != "shell":
+                continue
+            asset = (z.primary_shell_asset_id or "").strip()
+            if asset not in failed_asset_names:
+                continue
+            # shell → box：清外壳 asset，补门洞（朝父区域），让 _generate_room_box 接管
+            z.enclosure = "box"
+            z.primary_shell_asset_id = None
+            if not z.connectors and z.metadata.get("parent"):
+                dw = min(z.volume.size[0] * 0.5, 1.2)
+                dh = min((z.volume.size[2] or 2.5) * 0.8, 2.2)
+                z.connectors.append(Connector(
+                    connector_id=f"door_{z.zone_id}", type="door",
+                    position=[0.0, 0.0, z.volume.size[1] / 2.0],
+                    size=[dw, dh], target_zone_id=z.zone_id,
+                ))
+            degraded.append(asset)
+            logger.info("[SceneComposer] 外壳 %s 模型生成失败 → 退回盒子兜底围合（带门洞）", asset)
+        return degraded
+
     @property
     def provider(self):
         if self._provider is None:
@@ -718,18 +752,25 @@ class SceneComposer:
         # shell_expected = 应该有的外壳；shell_models = 模型生成成功、待放置的外壳。
         shell_failed_gen = sorted(shell_names - {(m.get("name") or "").strip()
                                                  for m in shell_models})
+        # 15a 优雅降级：shell 模型生成失败（如文生图返回空）→ 该 zone 退回 box+门洞。
+        # 文档哲学：volume 是事实源，建筑只是外壳 dressing；dressing 失败时 volume
+        # 仍需兜底围合——box 是那个万能退化围合。无圆模型后方盒单独存在不撕裂。
+        degraded = self._degrade_failed_shells_to_box(set(shell_failed_gen)) if shell_failed_gen else []
 
         result = self._run_original_workflow(text, furniture, items, do_import,
                                               reviews=reviews)
         result["extracted_count"] = extracted_total
         result["truncated"] = truncated
         result["reviews"] = reviews
-        # shell 汇报：放置成功/失败（_place_shells 写的）+ 模型生成就失败的
+        # shell 汇报：放置成功/失败（_place_shells 写的）+ 模型生成就失败的（注明是否已兜底）
         shell_report = getattr(self, "_shell_report", {"placed": [], "failed": []})
         result["shell_placed"] = shell_report.get("placed", [])
         result["shell_failed"] = (shell_report.get("failed", [])
-                                  + [f"{n}: 模型生成失败" for n in shell_failed_gen])
+                                  + [f"{n}: 模型生成失败"
+                                     + ("（已退回盒子兜底）" if n in degraded else "")
+                                     for n in shell_failed_gen])
         result["shell_expected"] = sorted(shell_names)
+        result["shell_degraded"] = degraded
         return result
 
     def _review_models(self, resolved: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
