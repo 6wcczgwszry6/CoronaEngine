@@ -104,6 +104,33 @@ def _build_floor_obj(mtl_lib: str = "grass.mtl", mtl_name: str = "grass") -> str
     )
 
 
+def _build_disc_obj(segments: int = 48, mtl_lib: str = "carpet.mtl",
+                    mtl_name: str = "carpet") -> str:
+    """构建一块朝上的圆盘 disc（单位半径 0.5，XZ 平面，法向 +Y）。
+
+    M2：shell 主建筑（蒙古包）底是圆形，方形地板四角露在外面/不贴合——内皮地面
+    改用圆盘，跟圆底建筑一致。三角扇：中心点 + 环上 segments 个点。
+    单位半径 0.5（与 _build_floor_obj 同尺度，缩放语义一致：Actor scale=[w,1,d]
+    → footprint 方形时 w≈d 得圆，非方形退化成椭圆，通用不写死圆）。
+    """
+    import math
+    lines = [f"mtllib {mtl_lib}", f"usemtl {mtl_name}",
+             f"# unit disc r=0.5 in XZ plane, normal +Y, segments={segments}",
+             "vn 0.0 1.0 0.0",
+             "v 0.0 0.0 0.0"]   # v1 = center
+    seg = max(8, int(segments))
+    for i in range(seg):
+        a = 2.0 * math.pi * i / seg
+        # +Y 朝上、从上看 CCW：x=cos, z=-sin（与 floor quad 同向）
+        lines.append(f"v {0.5 * math.cos(a):.5f} 0.0 {-0.5 * math.sin(a):.5f}")
+    # 扇形三角：中心(1) → 环点(2+i) → 环点(2+next)，CCW 保证法向 +Y
+    for i in range(seg):
+        v1 = 2 + i
+        v2 = 2 + (i + 1) % seg
+        lines.append(f"f 1//1 {v1}//1 {v2}//1")
+    return "\n".join(lines) + "\n"
+
+
 def _terrain_height(x: float, z: float, profile, platform_radius: float) -> float:
     """通用高度场 h(x,z)：terrain zone 的参数化外皮（M2 步骤 15c-ii）。
 
@@ -143,7 +170,11 @@ def _terrain_height(x: float, z: float, profile, platform_radius: float) -> floa
                    + 0.3 * math.sin(freq * 2.3 * (x + z) + phase))
     else:  # flat 或未知 → 平
         h = 0.0
-    return h * ramp
+    # clamp 非负：平台(h=0)即全局地面 y=0，山丘只向上凸（不挖坑）。
+    # 修"底面不对齐穿模"根因——terrain 抬地按"最低点→y=0"，若有负谷底，
+    # 平台会被抬到 y≈+amp 而高于 shell/地毯/木栏(都吸附 y=0)，地形拱穿它们。
+    # 非负后最低点恒为平台 → 平台落在 y=0，与所有元素共面对齐。
+    return max(0.0, h * ramp)
 
 
 def _build_terrain_mesh_obj(width: float, depth: float, profile,
@@ -1440,7 +1471,9 @@ class SceneComposer:
             f.write(f"newmtl {floor_mat}\nKa 0.20 0.10 0.08\nKd 0.55 0.28 0.20\n"
                     "Ks 0.02 0.02 0.02\nNs 6.0\nd 1.0\n")
         with open(carpet_obj_path, "w", encoding="ascii") as f:
-            f.write(_build_floor_obj(mtl_lib="carpet.mtl", mtl_name=floor_mat))
+            # 圆盘地板：shell 主建筑（蒙古包）底是圆形，方地板四角露在外/不贴合 →
+            # 用圆盘跟圆底一致（footprint 方形时 scale[w,1,d] 退化成椭圆，通用）。
+            f.write(_build_disc_obj(mtl_lib="carpet.mtl", mtl_name=floor_mat))
 
         try:
             from CoronaCore.core.managers import scene_manager as _sm
