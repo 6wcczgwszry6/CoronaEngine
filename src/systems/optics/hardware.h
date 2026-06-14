@@ -4,7 +4,6 @@
 #include <corona/shader_include.h>
 
 #include <optional>
-#include <vector>
 
 // Helicon codegen translates GLSL `uint` to C++ `uint` (not `unsigned int`)
 // in SSBO struct members. Provide the missing typedef.
@@ -98,8 +97,6 @@ struct Hardware {
         uint32_t materialID;
         uint32_t objectID;
     };
-    std::vector<InstanceInfo> instanceInfoData;
-    std::vector<std::uintptr_t> instanceActorHandles;
 
     // === GPU-side material table (matches GLSL MaterialInfo layout) ===
     // 64 bytes = 16 uints per entry:
@@ -131,7 +128,6 @@ struct Hardware {
         float lightingEnabled;  // 光照开关：1.0=接收光照, 0.0=不受光（始终使用基础颜色）
         ktm::fvec4 materialColor;
     };
-    std::vector<MaterialInfo> materialTableData;
 
     // === Render dimensions ===
     ktm::uvec2 gbufferSize{};

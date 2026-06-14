@@ -611,11 +611,19 @@
                       <input
                         type="checkbox"
                         v-model="actorData.mechanics.physics_enabled"
-                        class="sr-only peer"
+                        class="sr-only"
                         @change="() => updateActorMechanics('SetPhysicsEnabled')"
                         @update:model-value="() => updateActorMechanicsFast(PROPERTY.PhysicsEnabled)"
                       />
-                      <div class="w-7 h-4 bg-[#1a1a1a] rounded-full peer-checked:bg-[#84a65b]/60 peer-checked:after:bg-[#84a65b] after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-[#555] after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-3"></div>
+                      <div
+                        class="relative w-7 h-4 rounded-full transition-colors"
+                        :class="actorData.mechanics.physics_enabled ? 'bg-[#84a65b]/60' : 'bg-[#1a1a1a]'"
+                      >
+                        <span
+                          class="absolute top-[2px] left-[2px] h-3 w-3 rounded-full transition-all"
+                          :class="actorData.mechanics.physics_enabled ? 'translate-x-3 bg-[#84a65b]' : 'translate-x-0 bg-[#555]'"
+                        ></span>
+                      </div>
                     </label>
                   </div>
                   <!-- 质量 -->
@@ -1160,11 +1168,19 @@
                     <input
                       type="checkbox"
                       v-model="modelData.mechanics.physics_enabled"
-                      class="sr-only peer"
+                      class="sr-only"
                       @change="() => updateModelMechanics('SetPhysicsEnabled')"
                       @update:model-value="() => updateModelMechanicsFast(PROPERTY.PhysicsEnabled)"
                     />
-                    <div class="w-7 h-4 bg-[#1a1a1a] rounded-full peer-checked:bg-[#84a65b]/60 peer-checked:after:bg-[#84a65b] after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-[#555] after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-3"></div>
+                    <div
+                      class="relative w-7 h-4 rounded-full transition-colors"
+                      :class="modelData.mechanics.physics_enabled ? 'bg-[#84a65b]/60' : 'bg-[#1a1a1a]'"
+                    >
+                      <span
+                        class="absolute top-[2px] left-[2px] h-3 w-3 rounded-full transition-all"
+                        :class="modelData.mechanics.physics_enabled ? 'translate-x-3 bg-[#84a65b]' : 'translate-x-0 bg-[#555]'"
+                      ></span>
+                    </div>
                   </label>
                 </div>
                 <!-- 质量 -->
@@ -2256,6 +2272,7 @@ const setActorRenderSpace = async (followCamera) => {
 
   const enabled = Boolean(followCamera);
   const previous = Boolean(actorData.value.follow_camera);
+  const previousPhysicsEnabled = Boolean(actorData.value.mechanics.physics_enabled);
   if (previous === enabled) return;
 
   actorData.value.follow_camera = enabled;
@@ -2268,9 +2285,13 @@ const setActorRenderSpace = async (followCamera) => {
       'SetFollowCamera',
       [enabled]
     );
+    if (enabled) {
+      actorData.value.mechanics.physics_enabled = false;
+    }
   } catch (e) {
     actorData.value.follow_camera = previous;
     actorData.value.render_space = previous ? 'ui' : 'scene';
+    actorData.value.mechanics.physics_enabled = previousPhysicsEnabled;
     logError('更新单位渲染空间失败', e);
   }
 };
@@ -2354,6 +2375,7 @@ const setModelRenderSpace = async (followCamera) => {
 
   const enabled = Boolean(followCamera);
   const previous = Boolean(modelData.value.follow_camera);
+  const previousPhysicsEnabled = Boolean(modelData.value.mechanics.physics_enabled);
   if (previous === enabled) return;
 
   modelData.value.follow_camera = enabled;
@@ -2366,9 +2388,13 @@ const setModelRenderSpace = async (followCamera) => {
       'SetFollowCamera',
       [enabled]
     );
+    if (enabled) {
+      modelData.value.mechanics.physics_enabled = false;
+    }
   } catch (e) {
     modelData.value.follow_camera = previous;
     modelData.value.render_space = previous ? 'ui' : 'scene';
+    modelData.value.mechanics.physics_enabled = previousPhysicsEnabled;
     logError('更新模型渲染空间失败', e);
   }
 };

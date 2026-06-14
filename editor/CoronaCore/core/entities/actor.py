@@ -499,6 +499,8 @@ class Actor:
         self._sync_follow_camera_to_engine()
         if if_init:
             return False
+        if self._follow_camera and hasattr(self, '_mechanics') and self._mechanics is not None:
+            self._mechanics.set_physics_enabled(False)
         return True
 
     def get_follow_camera(self) -> bool:

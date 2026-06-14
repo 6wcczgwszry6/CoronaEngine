@@ -41,6 +41,18 @@
 
 namespace {
 
+struct RenderInstanceBatch {
+    std::vector<Hardware::InstanceInfo> instances;
+    std::vector<Hardware::MaterialInfo> materials;
+    std::vector<std::uintptr_t> actorHandles;
+
+    void clear() {
+        instances.clear();
+        materials.clear();
+        actorHandles.clear();
+    }
+};
+
 void apply_pending_camera_moves() {
     auto& hub = Corona::SharedDataHub::instance();
     auto moves = hub.drain_camera_moves();
@@ -534,14 +546,16 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 auto& geom_storage = SharedDataHub::instance().geometry_storage();
                 auto& transform_storage = SharedDataHub::instance().model_transform_storage();
 
-                auto collect_actor_instances =
+                RenderInstanceBatch sceneBatch;
+                RenderInstanceBatch uiBatch;
+
+                auto collect_actor_instances_for_pass =
                     [&](auto& target_visibility,
                         uint32_t target_vp_descriptor,
                         bool follow_camera_pass,
-                        const ktm::fmat4x4* camera_basis) -> bool {
-                    hardware_->instanceInfoData.clear();
-                    hardware_->instanceActorHandles.clear();
-                    hardware_->materialTableData.clear();
+                        const ktm::fmat4x4* camera_basis,
+                        RenderInstanceBatch& batch) -> bool {
+                    batch.clear();
 
                     bool has_instances = false;
                     uint32_t object_id = 1;
@@ -584,7 +598,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
 
                                 for (auto& m : geom->mesh_handles) {
                                     // --- Collect material info ---
-                                    auto materialID = static_cast<uint32_t>(hardware_->materialTableData.size());
+                                    auto materialID = static_cast<uint32_t>(batch.materials.size());
                                     {
                                         Hardware::MaterialInfo mat_info{};
 
@@ -625,11 +639,11 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                         mat_info.materialColor = ktm::fvec4{
                                             m.materialColor[0], m.materialColor[1],
                                             m.materialColor[2], m.materialColor[3]};
-                                        hardware_->materialTableData.push_back(mat_info);
+                                        batch.materials.push_back(mat_info);
                                     }
 
                                     // --- Collect instance info ---
-                                    auto instanceID = static_cast<uint32_t>(hardware_->instanceInfoData.size());
+                                    auto instanceID = static_cast<uint32_t>(batch.instances.size());
                                     {
                                         Hardware::InstanceInfo inst{};
                                         inst.modelMatrix = model_matrix;
@@ -641,8 +655,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                                                     : 0;
                                         inst.materialID = materialID;
                                         inst.objectID = object_id;
-                                        hardware_->instanceInfoData.push_back(inst);
-                                        hardware_->instanceActorHandles.push_back(actor_handle);
+                                        batch.instances.push_back(inst);
+                                        batch.actorHandles.push_back(actor_handle);
                                         has_instances = true;
                                     }
 
@@ -669,23 +683,29 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     return has_instances;
                 };
 
-                auto upload_instance_tables = [&](HardwareBuffer& instance_buffer,
+                auto upload_instance_tables = [&](const RenderInstanceBatch& batch,
+                                                  HardwareBuffer& instance_buffer,
                                                   HardwareBuffer& material_buffer) {
-                    if (!hardware_->instanceInfoData.empty()) {
+                    if (!batch.instances.empty()) {
                         instance_buffer.copyFromData(
-                            hardware_->instanceInfoData.data(),
-                            hardware_->instanceInfoData.size() * sizeof(Hardware::InstanceInfo));
+                            batch.instances.data(),
+                            batch.instances.size() * sizeof(Hardware::InstanceInfo));
                     }
-                    if (!hardware_->materialTableData.empty()) {
+                    if (!batch.materials.empty()) {
                         material_buffer.copyFromData(
-                            hardware_->materialTableData.data(),
-                            hardware_->materialTableData.size() * sizeof(Hardware::MaterialInfo));
+                            batch.materials.data(),
+                            batch.materials.size() * sizeof(Hardware::MaterialInfo));
                     }
                 };
 
                 const uint32_t sceneVpDescriptor = hardware_->vpUniformBuffer.storeDescriptor();
-                collect_actor_instances(visibility, sceneVpDescriptor, false, nullptr);
-                upload_instance_tables(hardware_->instanceInfoBuffer,
+                collect_actor_instances_for_pass(visibility,
+                                                 sceneVpDescriptor,
+                                                 false,
+                                                 nullptr,
+                                                 sceneBatch);
+                upload_instance_tables(sceneBatch,
+                                       hardware_->instanceInfoBuffer,
                                        hardware_->materialTableBuffer);
 
                 // ================================================================
@@ -862,7 +882,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 hardware_->executor << hardware_->executor.commit();
 
                 if (actor_pick_request) {
-                    complete_actor_pick(*actor_pick_request);
+                    complete_actor_pick(*actor_pick_request, sceneBatch.actorHandles);
                 }
 
                 if (!is_debug_mode && !is_offscreen) {
@@ -889,9 +909,14 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     uiVisibility.setDepthImage(hardware_->uiDepthImage);
 
                     const bool has_follow_camera_instances =
-                        collect_actor_instances(uiVisibility, uiVpDescriptor, true, &camera_basis);
+                        collect_actor_instances_for_pass(uiVisibility,
+                                                         uiVpDescriptor,
+                                                         true,
+                                                         &camera_basis,
+                                                         uiBatch);
                     if (has_follow_camera_instances) {
-                        upload_instance_tables(hardware_->uiInstanceInfoBuffer,
+                        upload_instance_tables(uiBatch,
+                                               hardware_->uiInstanceInfoBuffer,
                                                hardware_->uiMaterialTableBuffer);
 
                         const uint32_t overlayDescriptor = target.ui_overlay.storeDescriptor();
@@ -1007,7 +1032,8 @@ std::optional<OpticsSystem::ActorPickRequest> OpticsSystem::take_pending_actor_p
     return request;
 }
 
-void OpticsSystem::complete_actor_pick(const ActorPickRequest& request) {
+void OpticsSystem::complete_actor_pick(const ActorPickRequest& request,
+                                       const std::vector<std::uintptr_t>& scene_actor_handles) {
     std::uint32_t instance_id = 0;
     if (!hardware_->actorPickBuffer.copyToData(&instance_id, sizeof(instance_id))) {
         CFW_LOG_ERROR("OpticsSystem: Failed to read actor pick result from GPU");
@@ -1016,8 +1042,8 @@ void OpticsSystem::complete_actor_pick(const ActorPickRequest& request) {
     std::uintptr_t actor_handle = 0;
     if (instance_id > 0) {
         const auto instance_index = static_cast<std::size_t>(instance_id - 1);
-        if (instance_index < hardware_->instanceActorHandles.size()) {
-            actor_handle = hardware_->instanceActorHandles[instance_index];
+        if (instance_index < scene_actor_handles.size()) {
+            actor_handle = scene_actor_handles[instance_index];
         }
     }
 

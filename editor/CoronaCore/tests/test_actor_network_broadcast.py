@@ -266,6 +266,42 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
             self.assertFalse(data["follow_camera"])
             self.assertEqual(data["render_space"], "scene")
 
+    def test_follow_camera_disables_physics_once_without_restore(self):
+        fake_editor = SimpleNamespace(
+            CoronaEngine=SimpleNamespace(
+                active_project_path="D:/project/test",
+                Actor=FakeActorEngineObject,
+                ActorProfile=SimpleNamespace,
+            ),
+            js_call_func=lambda name, args: None,
+        )
+        parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
+
+        with patch.object(actor_module, "CoronaEditor", fake_editor), \
+             patch.object(actor_module, "CoronaEngine", fake_editor.CoronaEngine), \
+             patch.object(actor_module, "Geometry", FakeGeometry), \
+             patch.object(actor_module, "Optics", FakeOptics), \
+             patch.object(actor_module, "Mechanics", FakeComponent), \
+             patch.object(actor_module, "Acoustics", FakeComponent):
+            actor = actor_module.Actor(route="Resource/cube.obj",
+                                       actor_type="model",
+                                       parent_scene=parent)
+
+            self.assertTrue(actor.get_physics_enabled())
+
+            actor.set_follow_camera(True)
+            self.assertTrue(actor.get_follow_camera())
+            self.assertFalse(actor.get_physics_enabled())
+
+            actor.set_follow_camera(False)
+            self.assertFalse(actor.get_follow_camera())
+            self.assertFalse(actor.get_physics_enabled())
+
+            actor.set_physics_enabled(True)
+            actor.set_follow_camera(True, if_init=True)
+            self.assertTrue(actor.get_follow_camera())
+            self.assertTrue(actor.get_physics_enabled())
+
     def test_scene_actor_follow_camera_persists_in_scene_actor_section(self):
         with tempfile.TemporaryDirectory() as tmp:
             scene_path = Path(tmp) / "main.scene"

@@ -124,7 +124,8 @@ class OpticsSystem : public Kernel::SystemBase {
         std::uint32_t y{0};
     };
     std::optional<ActorPickRequest> take_pending_actor_pick(std::uintptr_t camera_handle);
-    void complete_actor_pick(const ActorPickRequest& request);
+    void complete_actor_pick(const ActorPickRequest& request,
+                             const std::vector<std::uintptr_t>& scene_actor_handles);
 
     // ========================================================================
     // Per-surface render output (改造1: optics 输出 per-surface 化)
