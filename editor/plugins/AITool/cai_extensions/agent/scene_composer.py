@@ -87,15 +87,16 @@ def _build_room_box_obj(width: float, height: float, depth: float,
     ) + common_faces + front_frame
 
 
-def _build_floor_obj() -> str:
+def _build_floor_obj(mtl_lib: str = "grass.mtl", mtl_name: str = "grass") -> str:
     """构建一块朝上的地面 quad（单位 1×1，XZ 平面，缩放由 Actor 完成）。
 
     M2 步骤 14b-ii：enclosure=terrain 的最简实现——一片平地，无墙无顶。
     M2 步骤 15c：引用独立 grass.mtl（草地绿），不再借用 box 的灰墙材质。
+    M2 步骤 15b：材质参数化（mtl_lib/mtl_name），terrain 用草地、shell 内皮用地毯，共用此几何。
     法向 +Y（朝上），camera 站在上面。Actor 缩放成 [w, 1, d]、置于 y=0。
     """
     return (
-        "mtllib grass.mtl\nusemtl grass\n"
+        f"mtllib {mtl_lib}\nusemtl {mtl_name}\n"
         "# unit floor quad in XZ plane, normal +Y (up)\n"
         "v -0.5 0.0 -0.5\nv  0.5 0.0 -0.5\nv  0.5 0.0  0.5\nv -0.5 0.0  0.5\n"
         "vn  0.0  1.0  0.0\n"
@@ -913,6 +914,74 @@ class SceneComposer:
         except Exception as e:
             logger.warning("[SceneComposer] 地面创建失败: %s", e)
 
+    def _generate_interior_floor(self, zone) -> None:
+        """M2 步骤 15b：为 shell zone 铺一块内皮地面（interior_skin 的 floor 取值）。
+
+        shell 建筑模型（蒙古包）是实心外观团块，没有可用内表面——进去后地面是黑的、
+        物体悬空（F5 截图2）。这里按 volume 程序生成一块地面（地毯），不靠外壳内表面。
+        关键：内嵌（比 volume 略小 INSCRIBE 倍），避免方地面四角戳穿圆壳墙体。
+        墙/顶暂不补（外壳从内侧已挡住大部分视线）；interior_skin 的 wall/ceiling 后续可扩。
+        """
+        import os as _os, tempfile as _tf, time as _t
+
+        size = zone.volume.size
+        width = size[0] if len(size) > 0 else 4.0
+        depth = size[1] if len(size) > 1 else 4.0
+        INSCRIBE = 0.85  # 内嵌：方地面边长取 volume 的 0.85，四角不戳穿圆壳
+
+        # interior_skin 参数化材质（默认地毯暖色；zone.interior_skin 可覆盖）
+        floor_mat = "carpet"
+        skin = getattr(zone, "interior_skin", None)
+        if skin is not None and getattr(skin, "floor_material", None):
+            floor_mat = str(skin.floor_material)
+
+        tmp_dir = _os.path.join(_tf.gettempdir(), "corona_room_box")
+        _os.makedirs(tmp_dir, exist_ok=True)
+        carpet_mtl_path = _os.path.join(tmp_dir, "carpet.mtl")
+        carpet_obj_path = _os.path.join(tmp_dir, "carpet.obj")
+        # 地毯暖色（红棕），不透明
+        with open(carpet_mtl_path, "w", encoding="ascii") as f:
+            f.write(f"newmtl {floor_mat}\nKa 0.20 0.10 0.08\nKd 0.55 0.28 0.20\n"
+                    "Ks 0.02 0.02 0.02\nNs 6.0\nd 1.0\n")
+        with open(carpet_obj_path, "w", encoding="ascii") as f:
+            f.write(_build_floor_obj(mtl_lib="carpet.mtl", mtl_name=floor_mat))
+
+        try:
+            from CoronaCore.core.managers import scene_manager as _sm
+            from CoronaCore.core.entities.actor import Actor
+        except ImportError:
+            return
+
+        scene = _sm.get("")
+        if scene is None:
+            routes = _sm.list_all()
+            scene = _sm.get(routes[0]) if routes else None
+        if scene is None:
+            return
+
+        existing = {a.name for a in scene.get_actors()}
+        if "__interior_floor" in existing:
+            return
+
+        try:
+            actor = Actor(name="__interior_floor", route=carpet_obj_path,
+                          actor_type="mesh", parent_scene=scene)
+            # 略抬 1cm 压在 terrain 之上，避免与地面 z-fighting
+            actor.set_position([0.0, 0.01, 0.0], True)
+            actor.set_scale([width * INSCRIBE, 1.0, depth * INSCRIBE], True)
+            mech = getattr(actor, "_mechanics", None)
+            if mech is not None:
+                try:
+                    mech.set_physics_enabled(False)
+                except Exception:
+                    pass
+            scene.add_actor(actor)
+            _t.sleep(0.3)
+            logger.info("[SceneComposer] 内皮地面已铺设: %.1f×%.1f m (材质=%s)",
+                        width * INSCRIBE, depth * INSCRIBE, floor_mat)
+        except Exception as e:
+            logger.warning("[SceneComposer] 内皮地面铺设失败: %s", e)
+
     def _generate_scene_framework(self, prompt: str) -> None:
         """M2 步骤 14b-ii/15a：按 ZoneTree 生成场景框架。
 
@@ -932,8 +1001,12 @@ class SceneComposer:
             if has_box:
                 # _generate_room_box 内部用 _get_room_zone() 取 indoor 盒并读其门洞
                 self._generate_room_box()
-            # shell zone：不建白盒——建筑模型本身当围合，在 _place_shells 里放置
-            elif not has_shell and not has_terrain:
+            # shell zone：不建白盒——建筑模型本身当围合，在 _place_shells 里放置。
+            # 但要补内皮地面（15b）：外壳是实心团块没有可用内表面，进去地面是黑的。
+            for z in zones:
+                if (z.enclosure or "") == "shell":
+                    self._generate_interior_floor(z)
+            if not has_box and not has_shell and not has_terrain:
                 # 树里既无 box 又无 shell 又无 terrain（异常）→ 兜底单盒
                 self._generate_room_box()
             return
