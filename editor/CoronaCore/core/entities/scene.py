@@ -189,6 +189,10 @@ class Scene:
 
             self.file_data['actors'][f'{actor_key}.actor_type'] = getattr(actor, 'actor_type', 'actor')
             self.file_data['actors'][f'{actor_key}.route'] = getattr(actor, 'route', '')
+            if hasattr(actor, 'get_follow_camera'):
+                self.file_data['actors'][f'{actor_key}.follow_camera'] = (
+                    'true' if actor.get_follow_camera() else 'false'
+                )
 
             # 获取几何体属性
             if hasattr(actor, '_geometry'):
@@ -307,6 +311,10 @@ class Scene:
             return False
         self._cameras.append(camera)
         self.engine_scene.add_camera(getattr(camera, 'engine_obj', camera))
+        if self._main_camera is None:
+            self._main_camera = camera
+            if hasattr(self.engine_scene, 'set_active_camera'):
+                self.engine_scene.set_active_camera(getattr(camera, 'engine_obj', camera))
         return True
 
     @auto_save
@@ -315,12 +323,17 @@ class Scene:
             return False
         self._cameras.remove(camera)
         self.engine_scene.remove_camera(getattr(camera, 'engine_obj', camera))
+        if self._main_camera is camera:
+            self._main_camera = self._cameras[0] if self._cameras else None
+            if self._main_camera is not None and hasattr(self.engine_scene, 'set_active_camera'):
+                self.engine_scene.set_active_camera(getattr(self._main_camera, 'engine_obj', self._main_camera))
         return True
 
     @auto_save
     def clear_cameras(self) -> bool:
         for cam in self._cameras.copy():
             self.remove_camera_from_scene(cam)
+        self._main_camera = None
         return True
 
     def get_cameras(self) -> List[Camera]:
@@ -442,10 +455,14 @@ class Scene:
             self._cameras.append(camera)
             self.engine_scene.add_camera(getattr(camera, 'engine_obj', camera))
             self._main_camera = camera
+            if hasattr(self.engine_scene, 'set_active_camera'):
+                self.engine_scene.set_active_camera(getattr(camera, 'engine_obj', camera))
             created = True
 
         if self._main_camera is None:
             self._main_camera = self._cameras[0]
+            if hasattr(self.engine_scene, 'set_active_camera'):
+                self.engine_scene.set_active_camera(getattr(self._main_camera, 'engine_obj', self._main_camera))
 
         return created
 
@@ -479,6 +496,8 @@ class Scene:
 
         if camera is not None:
             self._main_camera = camera if isinstance(camera, Camera) else self._main_camera
+            if hasattr(self.engine_scene, 'set_active_camera'):
+                self.engine_scene.set_active_camera(getattr(camera, 'engine_obj', camera))
 
             logger.info("Scene.set_camera scene=%s camera=%s camera_type=%s",
                         self.name,
@@ -583,6 +602,9 @@ class Scene:
             "route": actors_section.get(f'{actor_name}.route', ''),
             "geometry": {}
         }
+        follow_camera_key = f'{actor_name}.follow_camera'
+        if follow_camera_key in actors_section:
+            actor_data["follow_camera"] = actors_section.getboolean(follow_camera_key)
 
         # 解析几何体属性
         pos_str = actors_section.get(f'{actor_name}.geometry.position', '0.0, 0.0, 0.0')

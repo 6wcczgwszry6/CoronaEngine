@@ -19,7 +19,9 @@ Makefile
 .idea/
 .vs/
 .claude/
+.codegraph/
 codex.md
+AGENTS.md
 
 # Tool caches
 **/.cache/
@@ -29,8 +31,21 @@ __pycache__/
 /third_party/*
 !/third_party/node-v22.19.0-win-x64/
 !/third_party/node-v22.19.0-win-x64/**
+!/third_party/tbb/
+!/third_party/tbb/**
 
 # Log files
 *.log
 .claude/
 .codex/
+.codegraph/
+
+# Thoth local dashboard/runtime cache
+/research.db
+/research.db-*
+/.pytest_cache/
+/.pre-commit-config.yaml
+/scripts/
+/tests/test_structure.py
+/tools/dashboard/
+*.py[cod]

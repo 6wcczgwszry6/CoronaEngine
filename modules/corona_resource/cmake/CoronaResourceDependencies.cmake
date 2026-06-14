@@ -43,26 +43,12 @@ FetchContent_Declare(
     EXCLUDE_FROM_ALL
 )
 
-if(TARGET corona::kernel)
-    message(STATUS "Using Corona framework provided by parent project")
-else()
-    message(STATUS "Fetching CoronaFramework library...")
-    FetchContent_Declare(
-        CoronaFramework
-        GIT_REPOSITORY https://github.com/CoronaEngine/CoronaFramework.git
-        GIT_TAG main
-        GIT_SHALLOW TRUE
-        EXCLUDE_FROM_ALL
-    )
-endif()
-
 # Fetch tinyexr library
 message(STATUS "Fetching tinyexr library...")
 FetchContent_Declare(
     tinyexr
     GIT_REPOSITORY https://github.com/syoyo/tinyexr.git
-    GIT_TAG release
-    GIT_SHALLOW TRUE
+    GIT_TAG 438361c2ec0b52dec940644bba677f0421a262e6
     EXCLUDE_FROM_ALL
 )
 

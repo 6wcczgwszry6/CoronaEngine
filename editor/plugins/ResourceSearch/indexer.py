@@ -24,6 +24,7 @@ ResourceIndex —— 多根内存倒排索引(场景栏资源智能搜索的核�
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -66,6 +67,7 @@ _BLOCKED_PATH_PREFIXES: Tuple[str, ...] = (
     # ---- 编辑器桥接层与内部工具(非资源)----
     "editor/CoronaPlugin/", "editor/CoronaPlugin\\",
     "editor/CoronaCore/utils/", "editor/CoronaCore/utils\\",
+    "CabbageEditor/", "CabbageEditor\\",
     # ---- 测试与备份 ----
     "editor/tests/", "editor/tests\\",
     "tests/", "tests\\",
@@ -86,7 +88,7 @@ _IGNORE_DIRS: FrozenSet[str] = frozenset({
     # 常见生成目录(Unity / UE / VS)
     "Library", "Temp", "tmp", "Logs", "log",
     "obj", "bin", "DerivedDataCache", "Intermediate", "Saved",
-    ".cache", "Cache", "SavedGames", "Build",
+    ".cache", "cache", "Cache", "SavedGames", "Build", "CabbageEditor",
     # 第三方依赖 / 工具链
     "third_party", "thirdparty", "ThirdParty", "vendor",
     "node-v22.19.0-win-x64",
@@ -151,6 +153,28 @@ def _is_ignored_dir(name: str) -> bool:
     return name in _IGNORE_DIRS or name.startswith(".")
 
 
+def _normalize_project_roots(project_roots: Iterable[str]) -> List[str]:
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for root in project_roots:
+        if not root:
+            continue
+        try:
+            absolute = os.path.abspath(root)
+        except (TypeError, ValueError):
+            logger.warning("扫描根路径无效,跳过: %r", root)
+            continue
+        if not os.path.isdir(absolute):
+            logger.warning("扫描根不存在或不是目录,跳过: %s", absolute)
+            continue
+        key = os.path.normcase(absolute)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(absolute)
+    return normalized
+
+
 @dataclass(slots=True)
 class ResourceItem:
     """单条资源索引项(用 __slots__ 节省内存,提升属性访问速度)"""
@@ -209,35 +233,19 @@ class ResourceIndex:
         Args:
             project_roots: 一个或多个扫描根(顺序敏感,后扫描的根覆盖先扫描的)
         """
-        normalized: List[str] = []
-        seen: Set[str] = set()
-        for r in project_roots:
-            if not r:
-                continue
-            try:
-                abs_r = os.path.abspath(r)
-            except (TypeError, ValueError):
-                logger.warning("扫描根路径无效,跳过: %r", r)
-                continue
-            if not os.path.isdir(abs_r):
-                logger.warning("扫描根不存在或不是目录,跳过: %s", abs_r)
-                continue
-            if abs_r in seen:
-                continue
-            seen.add(abs_r)
-            normalized.append(abs_r)
-
-        self.project_roots: List[str] = normalized
+        self.project_roots = _normalize_project_roots(project_roots)
         self._items: Dict[str, ResourceItem] = {}
         self._lock = threading.RLock()
         self._build_time: float = 0.0
         self._item_count: int = 0
         self._dirty: bool = True
         self._max_indexed_mtime: float = 0.0
+        self._last_mtime_check: float = 0.0
+        self._fingerprint: str = ""
         self._tokenize_cache: Dict[str, Tuple[str, ...]] = {}
 
-        logger.info("ResourceIndex 初始化, 扫描根: %s",
-                    self.project_roots or "(空)")
+        logger.debug("ResourceIndex 初始化, 扫描根: %s",
+                     self.project_roots or "(空)")
 
     # ------------------------------------------------------------------ #
     #  构建 / 刷新
@@ -260,11 +268,22 @@ class ResourceIndex:
             self._items = new_items
             self._build_time = time.perf_counter()
             self._item_count = len(new_items)
+            self._max_indexed_mtime = max(
+                (item.mtime for item in new_items.values()),
+                default=0.0,
+            )
+            self._fingerprint = self._fingerprint_items(new_items)
+            self._last_mtime_check = time.monotonic()
+            self._dirty = False
 
         elapsed = time.perf_counter() - start
-        logger.info("资源索引已重建: %d 项, 扫描 %d 个目录(根=%d 个), 耗时 %.3fs",
-                    self._item_count, visited_dirs,
-                    len(self.project_roots), elapsed)
+        logger.debug(
+            "资源索引构建完成: items=%d dirs=%d roots=%d elapsed=%.3fs",
+            self._item_count,
+            visited_dirs,
+            len(self.project_roots),
+            elapsed,
+        )
         return {
             "status": "ok",
             "count": self._item_count,
@@ -272,6 +291,143 @@ class ResourceIndex:
             "roots": list(self.project_roots),
             "elapsed_seconds": round(elapsed, 3),
         }
+
+    def to_snapshot(self) -> dict:
+        """导出可持久化快照。"""
+        with self._lock:
+            return {
+                "roots": list(self.project_roots),
+                "fingerprint": self._fingerprint,
+                "items": [
+                    {
+                        "name": item.name,
+                        "path": item.path,
+                        "root": item.root,
+                        "type": item.type,
+                        "ext": item.ext,
+                        "size": item.size,
+                        "mtime": item.mtime,
+                        "tags": list(item.tags),
+                        "pinyin": item.pinyin,
+                        "has_preview": item.has_preview,
+                    }
+                    for item in self._items.values()
+                ],
+            }
+
+    def fingerprint(self) -> str:
+        with self._lock:
+            return self._fingerprint
+
+    @classmethod
+    def from_snapshot(cls, project_roots: Iterable[str],
+                      payload: dict) -> "ResourceIndex":
+        """从可信度未知的磁盘快照恢复索引，并重新校验路径边界。"""
+        index = cls(project_roots)
+        roots = list(index.project_roots)
+        if payload.get("roots") != roots:
+            raise ValueError("索引快照根目录不匹配")
+
+        restored: Dict[str, ResourceItem] = {}
+        for raw in payload.get("items", []):
+            if not isinstance(raw, dict):
+                raise ValueError("索引快照包含无效条目")
+            root = raw.get("root")
+            rel = str(raw.get("path", "")).replace("\\", "/")
+            ext = str(raw.get("ext", "")).lower()
+            type_name = str(raw.get("type", ""))
+            if root not in roots or not rel or os.path.isabs(rel):
+                raise ValueError("索引快照包含越界路径")
+            if _is_path_blocked(rel) or _infer_type_by_ext(ext) != type_name:
+                raise ValueError("索引快照包含不可搜索资源")
+
+            full_path = os.path.abspath(os.path.join(root, rel))
+            if os.path.commonpath((root, full_path)) != root:
+                raise ValueError("索引快照包含越界路径")
+
+            restored[rel] = ResourceItem(
+                name=str(raw.get("name", ""))[:cls._MAX_NAME_LEN],
+                path=rel,
+                full_path=full_path,
+                root=root,
+                type=type_name,
+                ext=ext,
+                size=int(raw.get("size", 0)),
+                mtime=float(raw.get("mtime", 0.0)),
+                tags=[str(tag) for tag in raw.get("tags", [])],
+                pinyin=str(raw.get("pinyin", "")),
+                has_preview=bool(raw.get("has_preview", False)),
+            )
+
+        with index._lock:
+            index._items = restored
+            index._item_count = len(restored)
+            index._max_indexed_mtime = max(
+                (item.mtime for item in restored.values()),
+                default=0.0,
+            )
+            index._fingerprint = str(payload.get("fingerprint", ""))
+            index._build_time = time.perf_counter()
+            index._last_mtime_check = time.monotonic()
+            index._dirty = False
+        return index
+
+    @classmethod
+    def filesystem_fingerprint(cls, project_roots: Iterable[str]) -> str:
+        """计算当前可搜索资源集合的稳定指纹，不做分词或预览图处理。"""
+        metadata: Dict[str, Tuple[str, int, float]] = {}
+        normalized = _normalize_project_roots(project_roots)
+
+        def walk(dir_abs: str, root: str, depth: int) -> None:
+            if depth > cls._MAX_SCAN_DEPTH:
+                return
+            try:
+                entries = sorted(os.scandir(dir_abs), key=lambda entry: entry.name)
+            except OSError:
+                return
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        if not _is_ignored_dir(entry.name):
+                            walk(entry.path, root, depth + 1)
+                        continue
+                    _, ext = os.path.splitext(entry.name)
+                    if _infer_type_by_ext(ext) == "other":
+                        continue
+                    rel = os.path.relpath(entry.path, root).replace("\\", "/")
+                    if _is_path_blocked(rel):
+                        continue
+                    stat = entry.stat(follow_symlinks=False)
+                    metadata[rel] = (root, stat.st_size, stat.st_mtime)
+                except OSError:
+                    continue
+
+        for root in normalized:
+            walk(root, root, 0)
+        return cls._fingerprint_metadata(metadata)
+
+    @staticmethod
+    def _fingerprint_items(items: Dict[str, ResourceItem]) -> str:
+        metadata = {
+            rel: (item.root, item.size, item.mtime)
+            for rel, item in items.items()
+        }
+        return ResourceIndex._fingerprint_metadata(metadata)
+
+    @staticmethod
+    def _fingerprint_metadata(
+            metadata: Dict[str, Tuple[str, int, float]]) -> str:
+        digest = hashlib.sha256()
+        for rel, (root, size, mtime) in sorted(metadata.items()):
+            digest.update(root.encode("utf-8", errors="surrogatepass"))
+            digest.update(b"\0")
+            digest.update(rel.encode("utf-8", errors="surrogatepass"))
+            digest.update(b"\0")
+            digest.update(str(size).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(repr(mtime).encode("ascii"))
+            digest.update(b"\n")
+        return digest.hexdigest()
 
     # ------------------------------------------------------------------ #
     #  脏标记 / 智能重建
@@ -281,46 +437,58 @@ class ResourceIndex:
         """外部调用:标记索引为脏,下次访问触发重建"""
         with self._lock:
             if not self._dirty:
-                logger.info("资源索引被标记为脏:%s", reason or "(无原因)")
+                logger.debug("资源索引被标记为脏: %s", reason or "(无原因)")
             self._dirty = True
 
-    def rebuild_if_needed(self) -> bool:
+    def rebuild_if_needed(self, check_mtime: bool = True) -> bool:
         """如索引为脏(显式或 mtime 兜底),执行重建
+
+        Args:
+            check_mtime: 是否执行递归 mtime 兜底扫描。交互式搜索应关闭，
+                避免把目录扫描延迟放进输入热路径。
 
         Returns:
             是否真的重建了
         """
         with self._lock:
             dirty_explicit = self._dirty
-            dirty_mtime = self._has_newer_files()
+            dirty_mtime = (
+                self._has_newer_files()
+                if check_mtime and not dirty_explicit
+                else False
+            )
 
-        if not (dirty_explicit or dirty_mtime):
-            return False
+            if not (dirty_explicit or dirty_mtime):
+                return False
 
-        reason = "explicit mark" if dirty_explicit else "mtime 兜底检测到新文件"
-        logger.info("触发智能重建:%s", reason)
-        self.rebuild()
-        return True
+            reason = "explicit mark" if dirty_explicit else "mtime 兜底检测到新文件"
+            logger.debug("触发智能重建: %s", reason)
+            self.rebuild()
+            return True
 
     def _has_newer_files(self) -> bool:
         """快速检查所有根,判断是否有比索引更新的文件"""
         if self._build_time == 0.0:
             return True
+        now = time.monotonic()
+        if now - self._last_mtime_check < 5.0:
+            return False
+        self._last_mtime_check = now
         try:
             current_max = 0.0
             for root in self.project_roots:
                 current_max = max(
                     current_max,
-                    self._quick_max_mtime(root, current_depth=0))
+                    self._quick_max_mtime(root, root, current_depth=0))
             # 0.5s 缓冲,避免亚秒级时间精度抖动
             return current_max > (self._max_indexed_mtime + 0.5)
         except OSError as exc:
             logger.debug("_has_newer_files OSError: %s", exc)
             return False
 
-    def _quick_max_mtime(self, dir_abs: str,
+    def _quick_max_mtime(self, dir_abs: str, root: str,
                          current_depth: int = 0) -> float:
-        """快速扫描一个根,返回该根所有文件的最大 mtime"""
+        """快速扫描一个根,返回可索引资源文件的最大 mtime"""
         if current_depth > self._MAX_SCAN_DEPTH:
             return 0.0
         max_mt = 0.0
@@ -328,16 +496,24 @@ class ResourceIndex:
             with os.scandir(dir_abs) as it:
                 for entry in it:
                     try:
-                        st = entry.stat(follow_symlinks=False)
-                        if st.st_mtime > max_mt:
-                            max_mt = st.st_mtime
                         if entry.is_dir(follow_symlinks=False):
                             if _is_ignored_dir(entry.name):
                                 continue
                             sub_mt = self._quick_max_mtime(
-                                entry.path, current_depth + 1)
+                                entry.path, root, current_depth + 1)
                             if sub_mt > max_mt:
                                 max_mt = sub_mt
+                            continue
+
+                        _, ext = os.path.splitext(entry.name)
+                        if _infer_type_by_ext(ext) == "other":
+                            continue
+                        rel = os.path.relpath(entry.path, root).replace("\\", "/")
+                        if _is_path_blocked(rel):
+                            continue
+                        st = entry.stat(follow_symlinks=False)
+                        if st.st_mtime > max_mt:
+                            max_mt = st.st_mtime
                     except OSError:
                         continue
         except OSError:
@@ -359,7 +535,6 @@ class ResourceIndex:
             return 0
 
         count = 1
-        local_max = 0.0
         for entry in entries:
             try:
                 if entry.is_dir(follow_symlinks=False):
@@ -369,21 +544,10 @@ class ResourceIndex:
                         entry.path, root, sink, current_depth + 1)
                 else:
                     self._maybe_add_file(entry.path, root, sink)
-                    try:
-                        st = entry.stat(follow_symlinks=False)
-                        if st.st_mtime > local_max:
-                            local_mt = st.st_mtime  # noqa: F841 (保留以备调试)
-                    except OSError:
-                        pass
             except OSError as exc:
                 logger.debug("跳过 %s: %s", entry.path, exc)
                 continue
 
-        # 把单次 walk 的 max 合并到全局(仅用于 _has_newer_files)
-        if local_max > 0.0:
-            with self._lock:
-                if local_max > self._max_indexed_mtime:
-                    self._max_indexed_mtime = local_max
         return count
 
     def _maybe_add_file(self, full_path: str, root: str,

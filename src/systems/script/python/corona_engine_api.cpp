@@ -214,6 +214,9 @@ void Corona::API::Scene::add_camera(Camera* camera) {
 
     if (auto accessor = SharedDataHub::instance().scene_storage().acquire_write(handle_)) {
         accessor->camera_handles.push_back(camera_handle);
+        if (accessor->active_camera_handle == 0) {
+            accessor->active_camera_handle = camera_handle;
+        }
     } else {
         // Roll back local state to keep Scene cache and shared storage consistent.
         cameras_.pop_back();
@@ -251,6 +254,11 @@ void Corona::API::Scene::remove_camera(Camera* camera) {
 
     if (auto accessor = SharedDataHub::instance().scene_storage().acquire_write(handle_)) {
         std::erase(accessor->camera_handles, camera->get_handle());
+        if (accessor->active_camera_handle == camera->get_handle()) {
+            accessor->active_camera_handle = accessor->camera_handles.empty()
+                                                 ? 0
+                                                 : accessor->camera_handles.front();
+        }
     } else {
         if (existed_in_vector) {
             cameras_.insert(std::next(cameras_.begin(), static_cast<std::vector<Camera*>::difference_type>(camera_pos)), camera);
@@ -273,11 +281,41 @@ void Corona::API::Scene::clear_cameras() {
 
     if (auto accessor = SharedDataHub::instance().scene_storage().acquire_write(handle_)) {
         accessor->camera_handles.clear();
+        accessor->active_camera_handle = 0;
     } else {
         cameras_ = cameras_backup;
         cameras_index_ = cameras_index_backup;
         CFW_LOG_ERROR("[Scene::clear_cameras] Failed to acquire write access to scene storage, rolled back local camera clear");
     }
+}
+
+void Corona::API::Scene::set_active_camera(Camera* camera) {
+    if (handle_ == 0) return;
+
+    if (camera == nullptr || !has_camera(camera)) {
+        CFW_LOG_WARNING("[Scene::set_active_camera] Camera not found in scene");
+        return;
+    }
+
+    if (auto accessor = SharedDataHub::instance().scene_storage().acquire_write(handle_)) {
+        accessor->active_camera_handle = camera->get_handle();
+    } else {
+        CFW_LOG_ERROR("[Scene::set_active_camera] Failed to acquire write access to scene storage");
+    }
+}
+
+std::uintptr_t Corona::API::Scene::get_active_camera_handle() const {
+    if (handle_ == 0) return 0;
+
+    if (auto accessor = SharedDataHub::instance().scene_storage().try_acquire_read(handle_)) {
+        if (accessor->active_camera_handle != 0) {
+            return accessor->active_camera_handle;
+        }
+        return accessor->camera_handles.empty() ? 0 : accessor->camera_handles.front();
+    }
+
+    CFW_LOG_ERROR("[Scene::get_active_camera_handle] Failed to acquire read access to scene storage");
+    return 0;
 }
 
 std::size_t Corona::API::Scene::camera_count() const {
@@ -1357,6 +1395,13 @@ Corona::API::Actor::Actor()
 }
 
 Corona::API::Actor::~Actor() {
+    for (const auto& [_, storage_profile_handle] : profile_storage_handles_) {
+        if (storage_profile_handle != 0) {
+            SharedDataHub::instance().profile_storage().deallocate(storage_profile_handle);
+        }
+    }
+    profile_storage_handles_.clear();
+
     if (handle_ != 0) {
         SharedDataHub::instance().actor_storage().deallocate(handle_);
     }
@@ -1403,6 +1448,7 @@ Corona::API::Actor::Profile* Corona::API::Actor::add_profile(const Profile& prof
         SharedDataHub::instance().profile_storage().deallocate(storage_profile_handle);
         storage_profile_handle = 0;
     }
+    profile_storage_handles_[profile_handle] = storage_profile_handle;
 
     if (handle_ != 0) {
         if (auto accessor = SharedDataHub::instance().actor_storage().acquire_write(handle_)) {
@@ -1441,7 +1487,12 @@ void Corona::API::Actor::remove_profile(const Profile* profile) {
         return;
     }
 
+    const auto storage_profile_it = profile_storage_handles_.find(profile_handle);
+    const std::uintptr_t storage_profile_handle =
+        storage_profile_it != profile_storage_handles_.end() ? storage_profile_it->second : 0;
+
     profiles_.erase(it);
+    profile_storage_handles_.erase(profile_handle);
 
     if (active_profile_handle_ == profile_handle) {
         if (!profiles_.empty()) {
@@ -1452,7 +1503,13 @@ void Corona::API::Actor::remove_profile(const Profile* profile) {
     }
 
     if (auto accessor = SharedDataHub::instance().actor_storage().acquire_write(handle_)) {
-        std::erase(accessor->profile_handles, profile_handle);
+        if (storage_profile_handle != 0) {
+            std::erase(accessor->profile_handles, storage_profile_handle);
+        }
+    }
+
+    if (storage_profile_handle != 0) {
+        SharedDataHub::instance().profile_storage().deallocate(storage_profile_handle);
     }
 }
 
@@ -1480,6 +1537,33 @@ Corona::API::Actor::Profile* Corona::API::Actor::get_active_profile() {
 
 std::size_t Corona::API::Actor::profile_count() const {
     return profiles_.size();
+}
+
+void Corona::API::Actor::set_follow_camera(bool enabled) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Actor::set_follow_camera] Invalid actor handle");
+        return;
+    }
+
+    if (auto accessor = SharedDataHub::instance().actor_storage().acquire_write(handle_)) {
+        accessor->follow_camera = enabled;
+    } else {
+        CFW_LOG_ERROR("[Actor::set_follow_camera] Failed to acquire write access to actor storage");
+    }
+}
+
+bool Corona::API::Actor::get_follow_camera() const {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Actor::get_follow_camera] Invalid actor handle");
+        return false;
+    }
+
+    if (auto accessor = SharedDataHub::instance().actor_storage().try_acquire_read(handle_)) {
+        return accessor->follow_camera;
+    }
+
+    CFW_LOG_ERROR("[Actor::get_follow_camera] Failed to acquire read access to actor storage");
+    return false;
 }
 
 std::uintptr_t Corona::API::Actor::get_handle() const {

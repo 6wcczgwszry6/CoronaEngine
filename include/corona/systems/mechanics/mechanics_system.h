@@ -5,13 +5,8 @@
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/kernel/system/system_base.h>
-#include <corona/events/scene_system_events.h>
 
-#include <chrono>
 #include <memory>
-#include <unordered_map>
-#include <utility>
-#include <vector>
 
 namespace Corona::Systems {
 
@@ -26,11 +21,9 @@ class GeometrySystem;
  */
 class MechanicsSystem : public Kernel::SystemBase {
    public:
-    MechanicsSystem() {
-        set_target_fps(60);  // 力学系统运行在 60 FPS
-    }
+    MechanicsSystem();
 
-    ~MechanicsSystem() override = default;
+    ~MechanicsSystem() override;
 
     // ========================================
     // ISystem 接口实现
@@ -71,11 +64,8 @@ class MechanicsSystem : public Kernel::SystemBase {
     // 力学系统私有成员
     void update_physics();
 
-    Kernel::ISystemContext* m_ctx = nullptr;
-    GeometrySystem* m_geometry_sys = nullptr;  // 首次 update_physics() 时懒缓存，避免每帧加锁查询
-    float m_time_accumulator{0.0f};
-    std::chrono::steady_clock::time_point m_last_update_time{};
-    bool m_first_update{true};
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace Corona::Systems
