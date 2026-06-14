@@ -2,6 +2,7 @@
 
 #include <ktm/ktm.h>
 
+#include <atomic>
 #include <cstdint>
 
 namespace Corona::Systems {
@@ -19,6 +20,8 @@ class CameraFollowController {
                     float offset_x, float offset_y, float offset_z);
     void clear_target();
     bool is_active() const;
+    void set_input_enabled(bool enabled);
+    bool is_input_enabled() const;
 
     void update(float delta_time);
 
@@ -44,6 +47,7 @@ class CameraFollowController {
     bool rmb_down_{false};
     int prev_mouse_x_{0};
     int prev_mouse_y_{0};
+    std::atomic_bool input_enabled_{true};
 
     float elapsed_since_last_log_{0.0f};
 };

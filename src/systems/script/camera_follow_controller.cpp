@@ -39,6 +39,20 @@ bool CameraFollowController::is_active() const {
     return active_;
 }
 
+void CameraFollowController::set_input_enabled(bool enabled) {
+    const bool previous = input_enabled_.exchange(enabled);
+    if (!enabled) {
+        rmb_down_ = false;
+    }
+    if (previous != enabled) {
+        CFW_LOG_INFO("CameraFollowController: input {}", enabled ? "enabled" : "disabled");
+    }
+}
+
+bool CameraFollowController::is_input_enabled() const {
+    return input_enabled_.load();
+}
+
 void CameraFollowController::inject_key(int vk_code, bool down) {
     // Key injection from Vue/CEF for Blockly script input — handled in Phase 3
     (void)vk_code;
@@ -46,6 +60,10 @@ void CameraFollowController::inject_key(int vk_code, bool down) {
 }
 
 void CameraFollowController::inject_rmb(bool down, int screen_x, int screen_y) {
+    if (!input_enabled_.load()) {
+        rmb_down_ = false;
+        return;
+    }
     rmb_down_ = down;
     if (down) {
         prev_mouse_x_ = screen_x;
@@ -104,25 +122,29 @@ void CameraFollowController::update(float delta_time) {
     }
     if (!found_transform) return;
 
-    // WASD movement (modifies obj_pos directly)
-    update_wasd(obj_pos, offset_);
+    if (input_enabled_.load()) {
+        // WASD movement (modifies obj_pos directly)
+        update_wasd(obj_pos, offset_);
 
-    // RMB orbit (modifies obj_pos directly)
-    update_rmb_orbit(obj_pos, offset_);
+        // RMB orbit (modifies obj_pos directly)
+        update_rmb_orbit(obj_pos, offset_);
 
-    // Write back actor position and update camera
-    for (const auto profile_handle : profile_handles) {
-        if (auto profile = hub.profile_storage().try_acquire_read(profile_handle)) {
-            if (profile->geometry_handle != 0) {
-                if (auto geo = hub.geometry_storage().try_acquire_read(profile->geometry_handle)) {
-                    if (geo->transform_handle != 0) {
-                        if (auto transform = hub.model_transform_storage().try_acquire_write(geo->transform_handle)) {
-                            transform->position = obj_pos;
+        // Write back actor position only while editor input owns movement.
+        for (const auto profile_handle : profile_handles) {
+            if (auto profile = hub.profile_storage().try_acquire_read(profile_handle)) {
+                if (profile->geometry_handle != 0) {
+                    if (auto geo = hub.geometry_storage().try_acquire_read(profile->geometry_handle)) {
+                        if (geo->transform_handle != 0) {
+                            if (auto transform = hub.model_transform_storage().try_acquire_write(geo->transform_handle)) {
+                                transform->position = obj_pos;
+                            }
                         }
                     }
                 }
             }
         }
+    } else {
+        rmb_down_ = false;
     }
 
     // Update camera position and look-at
