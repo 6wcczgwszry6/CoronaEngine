@@ -91,10 +91,11 @@ def _build_floor_obj() -> str:
     """构建一块朝上的地面 quad（单位 1×1，XZ 平面，缩放由 Actor 完成）。
 
     M2 步骤 14b-ii：enclosure=terrain 的最简实现——一片平地，无墙无顶。
+    M2 步骤 15c：引用独立 grass.mtl（草地绿），不再借用 box 的灰墙材质。
     法向 +Y（朝上），camera 站在上面。Actor 缩放成 [w, 1, d]、置于 y=0。
     """
     return (
-        "mtllib box.mtl\nusemtl wall\n"
+        "mtllib grass.mtl\nusemtl grass\n"
         "# unit floor quad in XZ plane, normal +Y (up)\n"
         "v -0.5 0.0 -0.5\nv  0.5 0.0 -0.5\nv  0.5 0.0  0.5\nv -0.5 0.0  0.5\n"
         "vn  0.0  1.0  0.0\n"
@@ -869,12 +870,12 @@ class SceneComposer:
 
         tmp_dir = _os.path.join(_tf.gettempdir(), "corona_room_box")
         _os.makedirs(tmp_dir, exist_ok=True)
-        mtl_path = _os.path.join(tmp_dir, "box.mtl")
+        grass_mtl_path = _os.path.join(tmp_dir, "grass.mtl")
         floor_path = _os.path.join(tmp_dir, "floor.obj")
-        if not _os.path.exists(mtl_path):
-            with open(mtl_path, "w", encoding="ascii") as f:
-                f.write("newmtl wall\nKa 0.85 0.85 0.85\nKd 0.92 0.92 0.92\n"
-                        "Ks 0.0 0.0 0.0\nNs 0.0\nd 1.0\n")
+        # 15c：草地绿材质（不透明）。Kd 偏黄绿，Ka 略暗——比中性灰更像草原。
+        with open(grass_mtl_path, "w", encoding="ascii") as f:
+            f.write("newmtl grass\nKa 0.20 0.32 0.12\nKd 0.36 0.55 0.22\n"
+                    "Ks 0.02 0.02 0.02\nNs 4.0\nd 1.0\n")
         with open(floor_path, "w", encoding="ascii") as f:
             f.write(_build_floor_obj())
 
