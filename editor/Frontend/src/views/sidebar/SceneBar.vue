@@ -393,15 +393,22 @@
               />
             </svg>
             <span class="text-xs text-[#e0e0e0] font-medium">Cameras</span>
-            <span class="ml-auto text-xs text-[#666]">{{ sceneCameras.length }}</span>
+            <button
+              class="ml-auto mr-2 text-sm leading-none text-[#90caf9] hover:text-white"
+              title="Create camera view"
+              aria-label="Create camera view"
+              @click.stop="ImportCamera"
+            >+</button>
+            <span class="text-xs text-[#666]">{{ sceneCameras.length }}</span>
           </div>
           <div v-show="camerasExpanded" class="pl-2">
-            <div v-for="cam in sceneCameras" :key="'cam-' + cam.name">
+            <div v-for="cam in sceneCameras" :key="'cam-' + (cam.camera_id || cam.name)">
               <!-- Camera 行 -->
               <div
                 class="group flex items-center px-2 py-0.5 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#90caf9]"
                 :class="{ 'bg-[#264f78]/60': selectedItem === 'cam:' + cam.name }"
                 @click="SelectCamera(cam)"
+                @dblclick="OpenCameraView(cam)"
               >
                 <span class="w-5 flex-shrink-0">
                   <svg class="w-4 h-4 text-[#90caf9]" fill="currentColor" viewBox="0 0 24 24">
@@ -419,6 +426,13 @@
                 >
                   {{ cam.width }}x{{ cam.height }}
                 </span>
+                <button
+                  class="hidden group-hover:inline text-xs leading-none text-[#888] hover:text-[#ef5350] disabled:opacity-30 disabled:hover:text-[#888]"
+                  :disabled="sceneCameras.length <= 1"
+                  title="Delete camera"
+                  aria-label="Delete camera"
+                  @click.stop="DeleteCamera(cam)"
+                >x</button>
               </div>
             </div>
             <div v-if="sceneCameras.length === 0" class="px-4 py-2 text-center">
@@ -1024,6 +1038,37 @@ const SelectActor = (scene) => {
 const SelectCamera = (cam) => {
   selectedItem.value = 'cam:' + cam.name;
   selectedCameraName.value = cam.name;
+  RefreshRenderBackendState();
+};
+
+const OpenCameraView = async (cam) => {
+  try {
+    const cameraId = cam.camera_id || cam.id || cam.name;
+    const opened = await sceneService.openCameraView(currentSceneName.value, cameraId);
+    const payload = opened?.data ?? opened;
+    await appService.createCameraView({
+      ...(payload.camera || cam),
+      scene_id: currentSceneName.value,
+    });
+    await OnInitObjTree();
+  } catch (e) {
+    logError('Failed to open camera view', e);
+  }
+};
+
+const DeleteCamera = async (cam) => {
+  if (sceneCameras.value.length <= 1) return;
+  try {
+    const cameraId = cam.camera_id || cam.id || cam.name;
+    await appService.closeCameraView(currentSceneName.value, cameraId);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await sceneService.deleteCamera(currentSceneName.value, cameraId);
+    if (selectedCameraName.value === cam.name) selectedCameraName.value = null;
+    if (selectedItem.value === `cam:${cam.name}`) selectedItem.value = null;
+    await OnInitObjTree();
+  } catch (e) {
+    logError('Failed to delete camera', e);
+  }
 };
 
 const isActorRowActionEvent = (event) => !!event?.target?.closest?.('button');
@@ -1315,7 +1360,11 @@ const RefreshRenderBackendState = async () => {
     if (!visionAvailable.value) {
       return;
     }
-    const modeResult = await sceneService.getRenderBackend();
+    const target = getTargetCamera();
+    const modeResult = await sceneService.getRenderBackend(
+      currentSceneName.value,
+      target?.camera_id || target?.name || null,
+    );
     const modePayload = modeResult?.data ?? modeResult;
     if (modePayload?.mode) {
       activeRenderBackend.value = modePayload.mode;
@@ -1328,7 +1377,12 @@ const RefreshRenderBackendState = async () => {
 const ToggleRenderBackend = async () => {
   const next = activeRenderBackend.value === 'vision' ? 'native' : 'vision';
   try {
-    const result = await sceneService.setRenderBackend(next);
+    const target = getTargetCamera();
+    const result = await sceneService.setRenderBackend(
+      next,
+      currentSceneName.value,
+      target?.camera_id || target?.name || null,
+    );
     const payload = result?.data ?? result;
     if (result?.success === false || payload?.status === 'error') {
       logError('Switch render backend failed', payload?.message || result?.error || 'unknown error');
@@ -1477,7 +1531,6 @@ const generateUniqueName = (baseName) => {
 };
 
 const LIGHT_MODEL_PATH = 'assets/editor/Ball.obj';
-const CAMERA_MODEL_PATH = 'assets/editor/Ball.obj';
 
 const ImportLightSource = async () => {
   ShowModelDropdown.value = false;
@@ -1491,12 +1544,25 @@ const ImportLightSource = async () => {
 
 const ImportCamera = async () => {
   ShowModelDropdown.value = false;
-  const cameraName = generateUniqueName('Camera');
-  await addActorToList({
-    name: cameraName,
-    path: CAMERA_MODEL_PATH,
-    type: 'camera',
-  });
+  try {
+    const existingNames = new Set(sceneCameras.value.map((camera) => camera.name));
+    let cameraName = 'Camera';
+    let suffix = 1;
+    while (existingNames.has(cameraName)) {
+      cameraName = `Camera_${suffix++}`;
+    }
+    const result = await sceneService.createCameraView(currentSceneName.value, cameraName);
+    const payload = result?.data ?? result;
+    if (!payload?.camera) throw new Error(payload?.message || 'Camera creation failed');
+    await appService.createCameraView({
+      ...payload.camera,
+      scene_id: currentSceneName.value,
+    });
+    selectedCameraName.value = payload.camera.name;
+    await OnInitObjTree();
+  } catch (e) {
+    logError('Failed to create camera view', e);
+  }
 };
 
 const addActorToList = async (actor) => {
@@ -1720,11 +1786,21 @@ const OnInitObjTree = async () => {
 
       if (Array.isArray(data.cameras)) {
         sceneCameras.value = data.cameras.map((cam) => ({
+          id: cam.id || cam.camera_id || cam.name,
+          camera_id: cam.camera_id || cam.id || cam.name,
           name: cam.name || 'Camera',
           width: cam.width || 0,
           height: cam.height || 0,
           fov: cam.fov ?? null,
           handle: normalizeHandle(cam.handle ?? cam.camera_handle),
+          render_backend: cam.render_backend || 'native',
+          output_mode: cam.output_mode || 'final_color',
+          move_speed: cam.move_speed || 1,
+          view_open: !!cam.view_open,
+          view_x: cam.view_x || 120,
+          view_y: cam.view_y || 120,
+          view_width: cam.view_width || 960,
+          view_height: cam.view_height || 540,
         }));
         if (!sceneCameras.value.some((cam) => cam.name === selectedCameraName.value)) {
           selectedCameraName.value = sceneCameras.value[0]?.name || null;

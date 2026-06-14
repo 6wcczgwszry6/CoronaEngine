@@ -326,6 +326,12 @@ EventProcessResult SDLEventHandler::process_events(
                 result.should_quit = true;
                 break;
 
+            case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+                if (event.window.windowID == SDL_GetWindowID(window)) {
+                    result.should_quit = true;
+                }
+                break;
+
             case SDL_EVENT_WINDOW_FOCUS_GAINED:
                 if (SDL_Window* focused_window = SDL_GetWindowFromID(event.window.windowID);
                     focused_window && !SDL_TextInputActive(focused_window)) {

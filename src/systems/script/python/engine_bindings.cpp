@@ -259,6 +259,11 @@ void BindAll(nanobind::module_& m) {
              "Set camera output mode. mode: 'final_color', 'base_color', 'normal', 'position', 'object_id'")
         .def("get_output_mode", &Camera::get_output_mode,
              "Get current camera output mode as string")
+        .def("set_render_backend", &Camera::set_render_backend, nb::arg("mode"))
+        .def("get_render_backend", &Camera::get_render_backend)
+        .def("set_view_state", &Camera::set_view_state, nb::arg("open"), nb::arg("x"),
+             nb::arg("y"), nb::arg("width"), nb::arg("height"), nb::arg("move_speed"))
+        .def("get_view_state", &Camera::get_view_state)
         .def("set_surface", [](Camera& self, std::uintptr_t surface) { self.set_surface(reinterpret_cast<void*>(surface)); }, nb::arg("surface"), "Set render surface (pass window ID as integer)")
         .def("get_surface", [](const Camera& self) -> std::uintptr_t { return reinterpret_cast<std::uintptr_t>(self.get_surface()); }, "Get render surface handle as integer (0 if none)")
         .def("get_position", &Camera::get_position, "Get camera position [x, y, z]")
@@ -408,8 +413,9 @@ void BindAll(nanobind::module_& m) {
     m.def("is_vision_available", &is_vision_available,
           "Return True if the engine was compiled with Vision (CORONA_ENABLE_VISION) support");
     m.def("set_render_backend", &set_render_backend, nb::arg("mode"),
+          nb::arg("camera_handle") = 0,
           "Request a render backend switch. mode: 'native' or 'vision'. Only effective when Vision is available.");
-    m.def("get_render_backend", &get_render_backend,
+    m.def("get_render_backend", &get_render_backend, nb::arg("camera_handle") = 0,
           "Get the currently requested render backend as 'native' or 'vision'");
     m.def("load_vision_scene", &load_vision_scene, nb::arg("path"),
           "Load an external Vision scene file (.json). Pass an empty string to "

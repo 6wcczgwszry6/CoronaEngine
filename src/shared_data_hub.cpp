@@ -89,4 +89,103 @@ std::vector<CameraMoveCommand> SharedDataHub::drain_camera_moves() {
     });
     return moves;
 }
+
+void SharedDataHub::enqueue_camera_viewport_update(CameraViewportUpdateCommand command) {
+    if (command.camera_handle == 0) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(camera_viewport_update_mutex_);
+    command.sequence = ++camera_viewport_update_sequence_;
+    pending_camera_viewport_updates_[command.camera_handle] = command;
+}
+
+std::vector<CameraViewportUpdateCommand> SharedDataHub::drain_camera_viewport_updates() {
+    std::vector<CameraViewportUpdateCommand> updates;
+    {
+        std::lock_guard<std::mutex> lock(camera_viewport_update_mutex_);
+        updates.reserve(pending_camera_viewport_updates_.size());
+        for (auto& [_, command] : pending_camera_viewport_updates_) {
+            updates.push_back(command);
+        }
+        pending_camera_viewport_updates_.clear();
+    }
+
+    std::sort(updates.begin(), updates.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.sequence < rhs.sequence;
+    });
+    return updates;
+}
+
+void SharedDataHub::enqueue_camera_state_update(CameraStateUpdateCommand command) {
+    if (command.camera_handle == 0 ||
+        command.fields == CameraStateUpdateField::None) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(camera_state_update_mutex_);
+    auto& pending = pending_camera_state_updates_[command.camera_handle];
+    if (pending.camera_handle == 0) {
+        pending.camera_handle = command.camera_handle;
+    }
+    pending.sequence = ++camera_state_update_sequence_;
+    pending.fields = pending.fields | command.fields;
+
+    if (has_camera_state_field(command.fields, CameraStateUpdateField::Surface)) {
+        pending.surface = command.surface;
+    }
+    if (has_camera_state_field(command.fields, CameraStateUpdateField::Size)) {
+        pending.width = command.width;
+        pending.height = command.height;
+    }
+    if (has_camera_state_field(command.fields, CameraStateUpdateField::OutputMode)) {
+        pending.output_mode = command.output_mode;
+    }
+    if (has_camera_state_field(command.fields, CameraStateUpdateField::RenderBackend)) {
+        pending.render_backend = command.render_backend;
+    }
+    if (has_camera_state_field(command.fields, CameraStateUpdateField::ViewState)) {
+        pending.view_open = command.view_open;
+        pending.view_x = command.view_x;
+        pending.view_y = command.view_y;
+        pending.view_width = command.view_width;
+        pending.view_height = command.view_height;
+        pending.move_speed = command.move_speed;
+    }
+}
+
+std::vector<CameraStateUpdateCommand> SharedDataHub::drain_camera_state_updates() {
+    std::vector<CameraStateUpdateCommand> updates;
+    {
+        std::lock_guard<std::mutex> lock(camera_state_update_mutex_);
+        updates.reserve(pending_camera_state_updates_.size());
+        for (auto& [_, command] : pending_camera_state_updates_) {
+            updates.push_back(command);
+        }
+        pending_camera_state_updates_.clear();
+    }
+
+    std::sort(updates.begin(), updates.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.sequence < rhs.sequence;
+    });
+    return updates;
+}
+
+void SharedDataHub::enqueue_camera_release(CameraReleaseCommand command) {
+    if (command.camera_handle == 0) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(camera_release_mutex_);
+    pending_camera_releases_.push_back(command);
+}
+
+std::vector<CameraReleaseCommand> SharedDataHub::drain_camera_releases() {
+    std::vector<CameraReleaseCommand> releases;
+    {
+        std::lock_guard<std::mutex> lock(camera_release_mutex_);
+        releases.swap(pending_camera_releases_);
+    }
+    return releases;
+}
 }  // namespace Corona

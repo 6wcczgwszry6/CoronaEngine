@@ -6,6 +6,7 @@ from CoronaCore.core.components import Optics
 from CoronaCore.core.corona_editor import CoronaEditor
 from CoronaPlugin.core.corona_plugin_base import PluginBase
 from CoronaCore.core.entities import Actor
+from CoronaCore.core.entities.camera import Camera
 from CoronaCore.core.managers import scene_manager
 from CoronaCore.utils.file_handler import FileHandler
 
@@ -16,6 +17,11 @@ logger = logging.getLogger(__name__)
 
 @PluginBase.register_web("SceneTools")
 class SceneTools(PluginBase):
+    @staticmethod
+    def _camera_view_payload(scene, camera) -> dict:
+        payload = camera.to_dict()
+        payload["scene_id"] = scene.route
+        return payload
 
     @staticmethod
     def create_actor(scene_name: str, asset_path: str, actor_type: str = 'model', actor_data=None) -> dict:
@@ -213,21 +219,195 @@ class SceneTools(PluginBase):
             return {"status": "error", "message": str(exc)}
 
     @staticmethod
-    def set_render_backend(mode: str = "native") -> dict:
+    def set_render_backend(mode: str = "native", scene_name: str = None,
+                           camera_name: str = None) -> dict:
         try:
-            if not CoronaEditor.CoronaEngine.is_vision_available():
-                return {"status": "error", "message": "Vision backend is not available in this build"}
-            CoronaEditor.CoronaEngine.set_render_backend(mode)
-            logger.info("Render backend switch requested: %s", mode)
+            if scene_name:
+                scene = scene_manager.get(scene_name)
+                if scene is None:
+                    raise ValueError(f"Scene '{scene_name}' not found")
+                camera = scene.find_camera(camera_name)
+                if camera is None:
+                    raise ValueError(f"Camera '{camera_name}' not found")
+                camera.set_render_backend(mode)
+                scene.save_data()
+                actual = camera.get_render_backend()
+            else:
+                CoronaEditor.CoronaEngine.set_render_backend(mode)
+                actual = CoronaEditor.CoronaEngine.get_render_backend()
+            return {
+                "status": "success",
+                "mode": actual,
+                "fallback": mode == "vision" and actual != "vision",
+            }
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def get_render_backend(scene_name: str = None, camera_name: str = None) -> dict:
+        try:
+            if scene_name:
+                scene = scene_manager.get(scene_name)
+                if scene is None:
+                    raise ValueError(f"Scene '{scene_name}' not found")
+                camera = scene.find_camera(camera_name)
+                if camera is None:
+                    raise ValueError(f"Camera '{camera_name}' not found")
+                mode = camera.get_render_backend()
+            else:
+                mode = CoronaEditor.CoronaEngine.get_render_backend()
             return {"status": "success", "mode": mode}
         except Exception as exc:
             return {"status": "error", "message": str(exc)}
 
     @staticmethod
-    def get_render_backend() -> dict:
+    def create_camera_view(scene_name: str, name: str = None) -> dict:
         try:
-            mode = CoronaEditor.CoronaEngine.get_render_backend()
-            return {"status": "success", "mode": mode}
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                raise ValueError(f"Scene '{scene_name}' not found")
+            source = scene.get_active_camera()
+            if source is None:
+                raise ValueError("No source camera is available")
+
+            existing_names = {camera.name for camera in scene.get_cameras()}
+            base_name = name or "Camera"
+            candidate = base_name
+            suffix = 1
+            while candidate in existing_names:
+                candidate = f"{base_name}_{suffix}"
+                suffix += 1
+
+            index = len(scene.get_cameras())
+            camera = Camera(
+                position=list(source.get_position()),
+                forward=list(source.get_forward()),
+                world_up=list(source.get_world_up()),
+                fov=float(source.get_fov()),
+                name=candidate,
+                width=source.width,
+                height=source.height,
+                render_backend=source.get_render_backend(),
+                output_mode=source.get_output_mode(),
+                move_speed=source.move_speed,
+                view_open=True,
+                view_x=120 + index * 36,
+                view_y=120 + index * 36,
+                view_width=960,
+                view_height=540,
+            )
+            camera.set_surface(0)
+            scene.add_camera_to_scene(camera)
+            scene._notify_scene_tree_changed()
+            return {"status": "success", "camera": SceneTools._camera_view_payload(scene, camera)}
+        except Exception as exc:
+            logger.exception("create_camera_view failed")
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def open_camera_view(scene_name: str, camera_name: str) -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            camera = scene.find_camera(camera_name) if scene else None
+            if camera is None:
+                raise ValueError(f"Camera '{camera_name}' not found")
+            camera.set_view_state(
+                True, camera.view_x, camera.view_y,
+                camera.view_width, camera.view_height, camera.move_speed)
+            scene.save_data()
+            return {"status": "success", "camera": SceneTools._camera_view_payload(scene, camera)}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def close_camera_view(scene_name: str, camera_name: str) -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            camera = scene.find_camera(camera_name) if scene else None
+            if camera is None:
+                raise ValueError(f"Camera '{camera_name}' not found")
+            camera.refresh_view_state()
+            camera.set_view_state(
+                False, camera.view_x, camera.view_y,
+                camera.view_width, camera.view_height, camera.move_speed)
+            camera.set_surface(0)
+            scene.save_data()
+            return {"status": "success", "camera": SceneTools._camera_view_payload(scene, camera)}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def rename_camera_view(scene_name: str, camera_name: str, new_name: str) -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            camera = scene.find_camera(camera_name) if scene else None
+            if camera is None:
+                raise ValueError(f"Camera '{camera_name}' not found")
+            if not new_name.strip():
+                raise ValueError("Camera name cannot be empty")
+            if any(other is not camera and other.name == new_name.strip()
+                   for other in scene.get_cameras()):
+                raise ValueError(f"Camera name '{new_name}' already exists")
+            camera.name = new_name.strip()
+            scene.save_data()
+            scene._notify_scene_tree_changed()
+            return {"status": "success", "camera": SceneTools._camera_view_payload(scene, camera)}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def list_camera_views(scene_name: str) -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                raise ValueError(f"Scene '{scene_name}' not found")
+            return {
+                "status": "success",
+                "cameras": [
+                    SceneTools._camera_view_payload(scene, camera)
+                    for camera in scene.get_cameras()
+                ],
+            }
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def update_camera_view(scene_name: str, camera_name: str, state: dict) -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            camera = scene.find_camera(camera_name) if scene else None
+            if camera is None:
+                raise ValueError(f"Camera '{camera_name}' not found")
+            camera.set_view_state(
+                bool(state.get("view_open", camera.view_open)),
+                int(state.get("view_x", camera.view_x)),
+                int(state.get("view_y", camera.view_y)),
+                int(state.get("view_width", camera.view_width)),
+                int(state.get("view_height", camera.view_height)),
+                float(state.get("move_speed", camera.move_speed)),
+            )
+            if "width" in state or "height" in state:
+                camera.set_size(
+                    int(state.get("width", camera.width)),
+                    int(state.get("height", camera.height)))
+            scene.save_data()
+            return {"status": "success", "camera": SceneTools._camera_view_payload(scene, camera)}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def delete_camera(scene_name: str, camera_name: str) -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            camera = scene.find_camera(camera_name) if scene else None
+            if camera is None:
+                raise ValueError(f"Camera '{camera_name}' not found")
+            if len(scene.get_cameras()) <= 1:
+                raise ValueError("A scene must keep at least one camera")
+            camera.set_surface(0)
+            scene.remove_camera_from_scene(camera)
+            scene._notify_scene_tree_changed()
+            return {"status": "success", "camera_id": camera.camera_id}
         except Exception as exc:
             return {"status": "error", "message": str(exc)}
 

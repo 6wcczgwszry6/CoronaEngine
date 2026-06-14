@@ -204,6 +204,7 @@ class MainView(PluginBase):
         if current_scene_path:
             now_scene = scene_manager.get(current_scene_path)
             if now_scene:
+                now_scene.save_data()
                 now_scene.set_enabled(False)
 
         # 激活目标场景（若首次访问则自动创建并加载 actors）

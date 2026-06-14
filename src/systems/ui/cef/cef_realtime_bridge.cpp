@@ -4,6 +4,7 @@
 #include <corona/resource/resource_manager.h>
 #include <corona/resource/types/scene.h>
 #include <corona/shared_data_hub.h>
+#include <corona/systems/ui/camera_viewport_manager.h>
 #include <include/cef_values.h>
 #include <nlohmann/json.hpp>
 
@@ -792,6 +793,96 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
         request_id = command.value("requestId", "");
         const std::string cmd = command.value("cmd", "");
         auto& bm = BrowserManager::instance();
+
+        if (cmd == "createCameraView") {
+            const std::string scene_id = command.value("sceneId", "");
+            const std::string camera_id = command.value("cameraId", "");
+            const auto camera_handle =
+                command.value("cameraHandle", static_cast<std::uintptr_t>(0));
+            std::string route = command.value("routePath", "");
+            const int width = command.value("width", 960);
+            const int height = command.value("height", 540);
+            const int x = command.value("x", 120);
+            const int y = command.value("y", 120);
+
+            if (auto existing = CameraViewportManager::instance().find_by_camera(
+                    scene_id, camera_id)) {
+                nlohmann::json result;
+                result["tab_id"] = existing->tab_id;
+                result["existing"] = true;
+                send_dock_callback(frame, request_id, nullptr, result);
+                return true;
+            }
+
+            if (!route.empty() && route[0] == '#') {
+                route = route.substr(1);
+            }
+            route += (route.find('?') == std::string::npos) ? "?standalone=1" : "&standalone=1";
+
+            const std::string base_url = source_base_url(browser);
+            bm.enqueue_main_thread_task(
+                [base_url, route, scene_id, camera_id, camera_handle, width, height, x, y] {
+                    auto& browser_manager = BrowserManager::instance();
+                    if (CameraViewportManager::instance().find_by_camera(
+                            scene_id, camera_id)) {
+                        return;
+                    }
+                    const int tab_id = browser_manager.create_tab(
+                        base_url, route, "camera", width, height, false, true, x, y);
+                    if (!CameraViewportManager::instance().register_view(
+                            scene_id, camera_id, camera_handle, tab_id)) {
+                        browser_manager.remove_tab(tab_id);
+                        return;
+                    }
+                    if (auto* tab = browser_manager.get_tab(tab_id)) {
+                        tab->name = "Camera " + camera_id;
+                    }
+                });
+
+            nlohmann::json result;
+            result["queued"] = true;
+            result["existing"] = false;
+            send_dock_callback(frame, request_id, nullptr, result);
+            return true;
+        }
+
+        if (cmd == "closeCameraView") {
+            const std::string scene_id = command.value("sceneId", "");
+            const std::string camera_id = command.value("cameraId", "");
+            bool closed = false;
+            if (auto existing = CameraViewportManager::instance().find_by_camera(
+                    scene_id, camera_id)) {
+                const int tab_id = existing->tab_id;
+                bm.enqueue_main_thread_task([tab_id] {
+                    BrowserManager::instance().remove_tab(tab_id);
+                });
+                closed = true;
+            }
+            nlohmann::json result;
+            result["closed"] = closed;
+            send_dock_callback(frame, request_id, nullptr, result);
+            return true;
+        }
+
+        if (cmd == "suspendCameraViews") {
+            const std::string scene_id = command.value("sceneId", "");
+            const auto tab_ids = CameraViewportManager::instance().tabs_for_scene(scene_id);
+            bm.enqueue_main_thread_task([tab_ids, frame, request_id] {
+                auto& browser_manager = BrowserManager::instance();
+                for (const int tab_id : tab_ids) {
+                    if (auto* tab = browser_manager.get_tab(tab_id)) {
+                        tab->preserve_camera_open_on_close = true;
+                    }
+                    browser_manager.remove_tab(tab_id);
+                }
+                browser_manager.enqueue_main_thread_task([frame, request_id, closed = tab_ids.size()] {
+                    nlohmann::json result;
+                    result["closed"] = closed;
+                    send_dock_callback(frame, request_id, nullptr, result);
+                });
+            });
+            return true;
+        }
 
         if (cmd == "createPanelTab") {
             std::string panel_id = command.value("panelId", "");

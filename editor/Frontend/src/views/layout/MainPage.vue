@@ -751,6 +751,22 @@ const syncSceneCameraBinding = async (sceneId) => {
   }
 };
 
+const restoreCameraViews = async (sceneId) => {
+  if (!sceneId) return;
+  try {
+    const result = await sceneService.listCameraViews(sceneId);
+    const payload = result?.data ?? result;
+    const openCameras = Array.isArray(payload?.cameras)
+      ? payload.cameras.filter((camera) => camera.view_open)
+      : [];
+    for (const camera of openCameras) {
+      await appService.createCameraView({ ...camera, scene_id: sceneId });
+    }
+  } catch (e) {
+    logError('Failed to restore camera views', e);
+  }
+};
+
 const handleWheel = (event) => {
   if (event.shiftKey) {
     // Shift+滚轮：调节摄像头速度
@@ -1268,9 +1284,11 @@ const closeTab = async (index) => {
     tabs.value.splice(index, 1);
 
     if (wasActive) {
+      await appService.suspendCameraViews(removedId).catch(() => {});
       activeTab.value = nextActiveIndex;
       await projectService.sceneSwitch(removedId, tabs.value[nextActiveIndex]?.id);
       await syncSceneCameraBinding(tabs.value[nextActiveIndex]?.id || DEFAULT_SCENE_NAME);
+      await restoreCameraViews(tabs.value[nextActiveIndex]?.id || DEFAULT_SCENE_NAME);
     } else {
       activeTab.value = nextActiveIndex;
     }
@@ -1292,6 +1310,7 @@ const switchTab = async (index, if_new) => {
   }
   const current_name = tabs.value[activeTab.value]?.id;
   const to_name = tabs.value[index]?.id;
+  await appService.suspendCameraViews(current_name).catch(() => {});
   activeTab.value = index;
   if (if_new) {
     await createScene();
@@ -1300,6 +1319,7 @@ const switchTab = async (index, if_new) => {
   await projectService.sceneSwitch(current_name, to_name);
 
   await syncSceneCameraBinding(to_name);
+  await restoreCameraViews(to_name);
 };
 
 const startEngine = () => {
@@ -1639,6 +1659,7 @@ onMounted(async () => {
   const initialSceneId = tabs.value[resolvedActiveIndex]?.id || DEFAULT_SCENE_NAME;
   await projectService.sceneSwitch(null, initialSceneId);
   await syncSceneCameraBinding(tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME);
+  await restoreCameraViews(initialSceneId);
 
   document.addEventListener('keydown', handleKeyDown);
   document.addEventListener('keyup', handleKeyUp);

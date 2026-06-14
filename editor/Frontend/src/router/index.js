@@ -94,6 +94,11 @@ const routes = [
     name: 'ScratchTool',
     component: BlocklyWorkspace,
   },
+  {
+    path: '/CameraView',
+    name: 'CameraView',
+    component: () => import('../views/tools/CameraView.vue'),
+  },
 ];
 
 const router = createRouter({

@@ -1,12 +1,56 @@
 #include "browser_ui.h"
 
+#include <corona/systems/ui/camera_viewport_manager.h>
+
 #include <SDL3/SDL.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "browser_manager.h"
 #include "cef_client.h"
 #include "sdl/sdl_utils.h"
 
 namespace Corona::Systems::UI {
+
+namespace {
+#ifdef _WIN32
+bool is_extended_windows_key(int windows_key_code) {
+    switch (windows_key_code) {
+        case VK_LEFT:
+        case VK_UP:
+        case VK_RIGHT:
+        case VK_DOWN:
+        case VK_PRIOR:
+        case VK_NEXT:
+        case VK_END:
+        case VK_HOME:
+        case VK_INSERT:
+        case VK_DELETE:
+        case VK_DIVIDE:
+        case VK_RCONTROL:
+        case VK_RMENU:
+            return true;
+        default:
+            return false;
+    }
+}
+
+int make_windows_native_key_code(int windows_key_code, bool pressed) {
+    const UINT scan_code = MapVirtualKeyW(
+        static_cast<UINT>(windows_key_code), MAPVK_VK_TO_VSC);
+    int native_key_code = 1 | (static_cast<int>(scan_code) << 16);
+    if (is_extended_windows_key(windows_key_code)) {
+        native_key_code |= 1 << 24;
+    }
+    if (!pressed) {
+        native_key_code |= static_cast<int>(0xC0000000u);
+    }
+    return native_key_code;
+}
+#endif
+}  // namespace
 
 // ============================================================================
 // BrowserInputHandler 实现
@@ -86,10 +130,17 @@ void BrowserInputHandler::send_key_events_to_browser(const CefRefPtr<CefBrowser>
             CefKeyEvent cef_key_event;
             cef_key_event.type = pending_event.pressed ? KEYEVENT_RAWKEYDOWN : KEYEVENT_KEYUP;
             cef_key_event.windows_key_code = KeyUtils::convert_sdl_key_code_to_windows(pending_event.key_code);
+#ifdef _WIN32
+            cef_key_event.native_key_code = make_windows_native_key_code(
+                cef_key_event.windows_key_code, pending_event.pressed);
+#else
             cef_key_event.native_key_code = pending_event.scan_code;
-            cef_key_event.modifiers = pending_event.modifiers;
             cef_key_event.character = pending_event.key_code;
             cef_key_event.unmodified_character = pending_event.key_code;
+#endif
+            cef_key_event.modifiers = pending_event.modifiers;
+            cef_key_event.is_system_key =
+                (pending_event.modifiers & EVENTFLAG_ALT_DOWN) != 0;
 
             bool is_common_edit_shortcut = false;
             if (pending_event.modifiers & EVENTFLAG_CONTROL_DOWN) {
@@ -210,6 +261,17 @@ void BrowserRenderer::setup_window_transform(BrowserTab* tab,
     if (is_main_tab) {
         ImGui::SetNextWindowDockID(dock_space_id, ImGuiCond_Always);
     } else {
+        if (tab->camera_view) {
+            ImGui::SetNextWindowPos(
+                ImVec2(static_cast<float>(tab->initial_x), static_cast<float>(tab->initial_y)),
+                ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(
+                ImVec2(static_cast<float>(tab->dock_width), static_cast<float>(tab->dock_height)),
+                ImGuiCond_FirstUseEver);
+            tab->dock_initialized = true;
+            return;
+        }
+
         ImGuiViewport* browser_viewport = ImGui::GetMainViewport();
         ImVec2 work_pos = browser_viewport->WorkPos;
         ImVec2 work_size = browser_viewport->WorkSize;
@@ -340,6 +402,15 @@ void BrowserRenderer::render_single_tab(int tab_id,
     if (is_main_tab) {
         browser_window_flags |= ImGuiWindowFlags_NoMove;  // 主窗口始终禁止移动
     }
+    if (tab->camera_view) {
+        browser_window_flags |= ImGuiWindowFlags_NoDocking |
+                                ImGuiWindowFlags_NoBackground;
+        ImGuiWindowClass window_class;
+        window_class.ClassId = ImGui::GetID("CoronaCameraViewport");
+        window_class.DockingAllowUnclassed = false;
+        window_class.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge;
+        ImGui::SetNextWindowClass(&window_class);
+    }
 
     setup_window_transform(tab, dock_space_id, is_main_tab);
 
@@ -354,6 +425,25 @@ void BrowserRenderer::render_single_tab(int tab_id,
         if (new_width > 0 && new_height > 0 &&
             (new_width != tab->width || new_height != tab->height)) {
             BrowserManager::instance().resize_tab(tab_id, new_width, new_height);
+        }
+
+        if (tab->camera_view) {
+            auto* viewport = ImGui::GetWindowViewport();
+            tab->platform_handle_raw =
+                viewport ? viewport->PlatformHandleRaw : nullptr;
+            tab->platform_window_id =
+                viewport && viewport->PlatformHandle
+                    ? SDL_GetWindowID(
+                          static_cast<SDL_Window*>(viewport->PlatformHandle))
+                    : 0;
+            const auto window_size = ImGui::GetWindowSize();
+            CameraViewportManager::instance().bind_surface(
+                tab_id, viewport ? viewport->PlatformHandleRaw : nullptr,
+                static_cast<int>(window_pos.x), static_cast<int>(window_pos.y),
+                new_width, new_height);
+            CameraViewportManager::instance().update_layout(
+                tab_id, static_cast<int>(window_pos.x), static_cast<int>(window_pos.y),
+                static_cast<int>(window_size.x), static_cast<int>(window_size.y));
         }
 
         // ----------------- 拖拽区域检测与启动窗口移动 -----------------
@@ -454,6 +544,7 @@ std::vector<int> BrowserRenderer::render_browser_tabs(ImGuiID dock_space_id,
                                                       int& url_input_active_tab,
                                                       ImGuiIO* io) {
     std::vector<int> tabs_to_close;
+    BrowserManager::instance().update();
     auto& tabs = BrowserManager::instance().get_tabs();
 
     for (auto& [tab_id, tab] : tabs) {

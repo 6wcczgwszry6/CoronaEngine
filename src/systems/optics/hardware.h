@@ -43,7 +43,6 @@ struct Hardware {
 
     // === Shader pipelines ===
     bool shaderHasInit = false;
-    std::optional<RasterizerPipeline<visibility_vert_glsl, visibility_frag_glsl>> visibilityPipeline;
     std::optional<ComputePipeline<lighting_comp_glsl>> lightingPipeline;
     std::optional<ComputePipeline<sky_comp_glsl>> skyPipeline;
     std::optional<ComputePipeline<tonemap_comp_glsl>> tonemapPipeline;

@@ -247,6 +247,10 @@ class Camera {
 
     void set_output_mode(const std::string& mode);
     [[nodiscard]] std::string get_output_mode() const;
+    void set_render_backend(const std::string& mode);
+    [[nodiscard]] std::string get_render_backend() const;
+    void set_view_state(bool open, int x, int y, int width, int height, float move_speed);
+    [[nodiscard]] std::array<float, 6> get_view_state() const;
 
     [[nodiscard]] std::array<float, 3> get_position() const;
     [[nodiscard]] std::array<float, 3> get_forward() const;
@@ -371,10 +375,10 @@ void write_scene(Scene* scene, const std::filesystem::path& scene_path);
 
 /// 请求切换光学渲染后端。mode: "native" 或 "vision"。
 /// 仅当 is_vision_available() 为 true 时生效，否则被忽略。
-void set_render_backend(const std::string& mode);
+void set_render_backend(const std::string& mode, std::uintptr_t camera_handle = 0);
 
 /// 获取当前请求的渲染后端，返回 "native" 或 "vision"。
-[[nodiscard]] std::string get_render_backend();
+[[nodiscard]] std::string get_render_backend(std::uintptr_t camera_handle = 0);
 
 /// 请求加载一个外部 Vision 场景文件（.json）。仅当 Vision 后端可用且处于激活
 /// 状态时生效；实际导入在光学系统渲染线程执行。

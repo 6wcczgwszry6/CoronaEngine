@@ -6,6 +6,8 @@
 #include <corona/systems/script/corona_engine_api.h>
 #include <corona/systems/ui/vulkan_backend.h>
 
+#include "../cef/browser_manager.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -435,6 +437,7 @@ bool VulkanBackend::render_draw_data(
     }
 
     // --- Submit ---
+    UI::BrowserManager::instance().wait_for_texture_uploads(res.executor);
     res.executor << pipeline(static_cast<uint16_t>(fb_width), static_cast<uint16_t>(fb_height))
                  << res.executor.commit();
 
@@ -496,7 +499,7 @@ bool VulkanBackend::ensure_render_target(ViewportRenderResources& resources, uin
     // When the render target is used as a storage image (secondary viewports), use a
     // storage-capable format (RGBA16_FLOAT) to avoid VK_ERROR_FORMAT_NOT_SUPPORTED.
     const ImageFormat target_format =
-        (usage == ImageUsage::StorageImage) ? ImageFormat::RGBA16_FLOAT : ImageFormat::RGBA8_SRGB;
+        (usage == ImageUsage::StorageImage) ? ImageFormat::RGBA16_FLOAT : ImageFormat::RGBA8_UNORM;
 
     HardwareImage new_target(width, height, target_format, usage);
     if (!new_target) {
@@ -557,7 +560,7 @@ bool VulkanBackend::ensure_font_texture() {
     font_atlas_image_ = HardwareImage(
         static_cast<uint32_t>(width),
         static_cast<uint32_t>(height),
-        ImageFormat::RGBA8_SRGB,
+        ImageFormat::RGBA8_UNORM,
         ImageUsage::SampledImage);
 
     if (!font_atlas_image_) {

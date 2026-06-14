@@ -6,7 +6,6 @@
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/kernel/system/system_base.h>
 
-#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -83,7 +82,11 @@ class OpticsSystem : public Kernel::SystemBase {
     bool initialize_hardware_resources();
     bool initialize_render_pipelines();
 
-    void ensure_camera_render_resources(uint32_t width, uint32_t height);
+    void bind_native_view_resources(std::uintptr_t camera_handle,
+                                    uint32_t width,
+                                    uint32_t height,
+                                    uint64_t frame_index);
+    void evict_idle_native_view_resources(uint64_t frame_index);
     void optics_pipeline(float frame_count, uint64_t frame_index);
     void process_pending_screenshots(std::uintptr_t camera_handle, HardwareImage& render_target);
 #ifdef CORONA_ENABLE_VISION
@@ -131,7 +134,8 @@ class OpticsSystem : public Kernel::SystemBase {
     // ========================================================================
     // 每个被绑定到某个 surface 的相机拥有独立的最终输出图与共享存储句柄，
     // 这样逐相机遍历时不再互相覆盖；DisplaySystem 也已按 surface 独立合成。
-    // visibility/depth 仍是逐相机的中间产物，继续由 hardware_ 共享。
+    // visibility/depth 是按 camera 保留的中间产物，避免不同分辨率的 camera
+    // 在同一帧内反复重建全局 GBuffer。
     struct SurfaceRenderTarget {
         HardwareImage final_output;        ///< 该 surface 专属的 RGBA16F 最终输出
         std::uintptr_t image_handle = 0;   ///< 该 surface 专属的 image_storage 句柄
@@ -153,10 +157,10 @@ class OpticsSystem : public Kernel::SystemBase {
     /// 空闲多少帧后回收一个 surface 目标（约 2s @120fps）。
     static constexpr uint64_t kSurfaceTargetIdleEvictFrames = 240;
 
-    // 无 surface 的离屏相机（仅截图，不显示）继续共用一张离屏图：截图在渲染后
-    // 同步处理，逐相机串行，无需 per-surface。
-    HardwareImage offscreen_image_;
-    uint32_t offscreen_w_{0}, offscreen_h_{0};
+    struct NativeViewResources;
+    std::unordered_map<std::uintptr_t, std::unique_ptr<NativeViewResources>>
+        native_view_resources_;
+    static constexpr uint64_t kNativeViewIdleEvictFrames = 240;
 
     std::unique_ptr<Hardware> hardware_;
 
@@ -167,21 +171,10 @@ class OpticsSystem : public Kernel::SystemBase {
     // vision_resolve compute pass. This is the sole display path for Vision frames;
     // the previous GPU->CPU->GPU readback (download float4 -> float_to_half -> upload)
     // has been removed.
-    std::unique_ptr<Vision::VisionZeroCopyBridge> vision_zero_copy_bridge_;
-
-    // 启用 Vision 编译时，首帧 update() 检测到 pending != current 会自动触发
-    // init_vision_lazy() 切换到 Vision；若初始化失败仍会回退 Native。
-    std::atomic<int> pending_backend_{static_cast<int>(RenderBackend::Vision)};
-#else
-    std::atomic<int> pending_backend_{static_cast<int>(RenderBackend::Native)};
+    std::unordered_map<std::uintptr_t, std::unique_ptr<Vision::VisionZeroCopyBridge>>
+        vision_zero_copy_bridges_;
 #endif
-    RenderBackend current_backend_{RenderBackend::Native};
     bool vision_initialized_{false};
-    std::uintptr_t last_render_cam_handle_{0};
-    uint32_t consecutive_vision_failures_{0};
-    bool has_last_vision_frame_{false};
-    uint32_t last_vision_frame_width_{0};
-    uint32_t last_vision_frame_height_{0};
 
     // ---- Vision 动态场景同步（脏标记 + 去抖全量重建）----
     std::size_t vision_applied_signature_{0};   ///< 已同步到 Vision 的场景签名基线
