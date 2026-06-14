@@ -125,6 +125,10 @@ def _build_set_actor_transform_tool(scene_manager) -> StructuredTool:
 
             actor = scene.find_actor(actor_name)
             if actor is None:
+                # shell 外壳 actor 实际名带 __shell_ 前缀（如 "__shell_蒙古包"），
+                # 但用户/LLM 只说 "蒙古包"。精确匹配失败时回退到带前缀名。
+                actor = scene.find_actor(f"__shell_{actor_name}")
+            if actor is None:
                 return build_error_result(
                     error_message=f"Actor '{actor_name}' not found"
                 ).to_envelope(interface_type="scene")

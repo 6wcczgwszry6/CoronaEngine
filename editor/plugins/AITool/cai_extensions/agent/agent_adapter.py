@@ -519,17 +519,14 @@ class MasterAgent:
             if cmd == "patrol":
                 return self._handle_patrol(system)
 
-            # 2. 场景指令 → 分两路
+            # 2. 场景指令（生成 / 增删改移）→ 统一交给 _handle_scene 内部分流：
+            #    整场景组合（"生成欧式卧室"）→ SceneComposer；
+            #    单步编辑（"放大蒙古包""把矮桌往左移""删掉那盏灯"）→ coordinator 执行变换。
+            #    旧实现把单步编辑透传给 _handle_chat→CAIApp，只生成对话、不执行任何变换
+            #    （F5 实锤：8 次调整全部只回话，无 set_actor_transform 调用）→ 死路，已移除。
             if is_scene_command(trigger):
-                # 场景组合（"生成欧式卧室"等）→ 走我们的 SceneComposer
-                from .scene_composer import is_compose_request
-                compose_text = self._gather_compose_text(trigger, messages)
-                if is_compose_request(trigger) or is_compose_request(compose_text):
-                    logger.info("[MasterAgent] routing → compose (场景组合)")
-                    return self._handle_scene(trigger, system, messages)
-                # 简单增删改移 → 透传给 CAIApp 原生 agent（已有全套 MCP 工具）
-                logger.info("[MasterAgent] routing → cai (delegate to built-in agent)")
-                return self._handle_chat(system, messages)
+                logger.info("[MasterAgent] routing → scene (compose/编辑由 _handle_scene 内部分流)")
+                return self._handle_scene(trigger, system, messages)
 
             # 3. 关键词未命中 → 开放式意图判别（LLM）：可能是清单外的场景描述
             #    "做一个海底世界""来个蒙古包草原""暗黑游戏风教堂"等不含关键词的整场景生成在此捕获
