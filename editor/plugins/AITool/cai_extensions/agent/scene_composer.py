@@ -1118,13 +1118,18 @@ class SceneComposer:
         # 锚定链-2：存平台半径，供 _place_shells 夹回 + _generate_interior_floor 派生用。
         self._platform_radius = platform_radius
 
-        # 问题1（草原太小）：terrain 尺寸跟建筑足迹挂钩——建筑直径越大、草原越开阔。
-        # 平台直径(2×radius)外至少留 3 圈建筑宽度的坡地，避免放大建筑后草原只剩窄边。
-        # 通用：不写死场景尺寸，按 platform_radius 派生（无建筑 → 保持声明尺寸）。
-        if platform_radius > 1e-6:
-            min_extent = platform_radius * 8.0   # 建筑直径 ~8.8m → 草原 ~35m，开阔不局促
-            width = max(width, min_extent)
-            depth = max(depth, min_extent)
+        # 问题1（草原太小/看不到）：草原要足够开阔 + 随主建筑放大。
+        # 不依赖 platform_radius（可能为 0 导致不放大）——直接从子 zone 足迹估建筑尺寸。
+        # 绝对下限 40m 保证总是看得到大片草原；建筑越大草原越开阔（×6），通用不写死场景。
+        building_extent = 0.0
+        for sub in getattr(zone, "sub_zones", []) or []:
+            if (getattr(sub, "enclosure", "") or "") in ("shell", "box"):
+                sw = sub.volume.size[0] if sub.volume.size else 4.0
+                sd = sub.volume.size[1] if len(sub.volume.size) > 1 else 4.0
+                building_extent = max(building_extent, max(sw, sd))
+        min_extent = max(40.0, building_extent * 6.0)
+        width = max(width, min_extent)
+        depth = max(depth, min_extent)
 
         tmp_dir = _os.path.join(_tf.gettempdir(), "corona_room_box")
         _os.makedirs(tmp_dir, exist_ok=True)
