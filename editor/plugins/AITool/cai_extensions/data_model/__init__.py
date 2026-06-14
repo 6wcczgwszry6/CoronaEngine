@@ -7,7 +7,7 @@ M2：ZoneTree（室内外混合 + 多 Zone 嵌套）
 from .asset_pool import AssetPoolEntry, AssetPool
 from .layout import LayoutInstance, SceneLayout
 from .user_layer import UserLayer
-from .zone_tree import Zone, ZoneTree, Volume, InteriorSkin, Connector
+from .zone_tree import Zone, ZoneTree, Volume, InteriorSkin, Connector, TerrainProfile
 
 __all__ = [
     "AssetPoolEntry",
@@ -20,4 +20,5 @@ __all__ = [
     "Volume",
     "InteriorSkin",
     "Connector",
+    "TerrainProfile",
 ]

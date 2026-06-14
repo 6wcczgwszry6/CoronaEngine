@@ -104,6 +104,85 @@ def _build_floor_obj(mtl_lib: str = "grass.mtl", mtl_name: str = "grass") -> str
     )
 
 
+def _terrain_height(x: float, z: float, profile, platform_radius: float) -> float:
+    """通用高度场 h(x,z)：terrain zone 的参数化外皮（M2 步骤 15c-ii）。
+
+    type 是参数不是 if 分支（代码不写 if 草原）。中心平台强制 h=0（保护建筑/家具落点），
+    平台外按 type 起伏，过渡用 smoothstep 避免硬棱。确定性：seed 派生相位，不用 random。
+    """
+    import math
+    r = math.hypot(x, z)
+    if r <= platform_radius:
+        return 0.0  # 中心平台：主建筑/地毯/家具落点全在 y=0，零回归
+
+    typ = getattr(profile, "type", "flat") if profile is not None else "flat"
+    amp = float(getattr(profile, "amplitude", 0.0) or 0.0) if profile is not None else 0.0
+    freq = float(getattr(profile, "frequency", 1.0) or 1.0) if profile is not None else 1.0
+    seed = float(getattr(profile, "seed", 0) or 0) if profile is not None else 0.0
+
+    # 平台边缘 → 全起伏 的 smoothstep 过渡（带宽 ≈ 平台半径 0.4，至少 0.5m）
+    band = max(0.5, platform_radius * 0.4)
+    t = min(1.0, (r - platform_radius) / band)
+    ramp = t * t * (3.0 - 2.0 * t)
+
+    # seed → 确定性相位（fract(sin)，无随机源）
+    s = math.sin(seed * 12.9898) * 43758.5453
+    phase = (s - math.floor(s)) * 6.2831853
+
+    if typ == "rolling":
+        h = amp * (0.5 * math.sin(freq * x + phase) + 0.5 * math.sin(freq * z + phase * 1.3))
+    elif typ == "dunes":
+        h = amp * math.sin(freq * r + phase)
+    elif typ == "terraced":
+        ring = max(1.0, 1.0 / max(freq, 0.1))   # 每环宽度
+        steps = math.floor((r - platform_radius) / ring)
+        h = min(steps * max(0.2, amp), amp * 4.0)
+    elif typ == "noise":
+        h = amp * (0.4 * math.sin(freq * x + phase)
+                   + 0.3 * math.sin(freq * 1.7 * z + phase)
+                   + 0.3 * math.sin(freq * 2.3 * (x + z) + phase))
+    else:  # flat 或未知 → 平
+        h = 0.0
+    return h * ramp
+
+
+def _build_terrain_mesh_obj(width: float, depth: float, profile,
+                            platform_radius: float, grid: int = 32,
+                            mtl_lib: str = "grass.mtl", mtl_name: str = "grass") -> str:
+    """构建带坡度的地形 grid mesh（世界坐标，M2 步骤 15c-ii）。
+
+    纯函数，可离线验证（顶点共面性无意义，验法向朝上 + ASCII + 平台 h=0）。关键：
+    顶点用【世界坐标】（x,z,h 真实米），Actor 不再缩放（scale=[1,1,1]）——否则 x/z
+    缩放但 h 不缩放会比例错乱。中心 platform_radius 内 h=0（平台），平台外按 profile 起伏。
+    """
+    N = max(2, int(grid))
+    hw, hd = width / 2.0, depth / 2.0
+    lines = [f"mtllib {mtl_lib}", f"usemtl {mtl_name}",
+             f"# terrain grid {N}x{N} world-coords type="
+             f"{getattr(profile,'type','flat') if profile is not None else 'flat'} "
+             f"platform_r={platform_radius:.2f}"]
+    # 顶点 (N+1)×(N+1)，行优先（j 行 z，i 列 x）
+    for j in range(N + 1):
+        z = -hd + depth * j / N
+        for i in range(N + 1):
+            x = -hw + width * i / N
+            y = _terrain_height(x, z, profile, platform_radius)
+            lines.append(f"v {x:.3f} {y:.3f} {z:.3f}")
+    lines.append("vn 0.0 1.0 0.0")  # 简化：统一上法向（坡度靠轮廓显形；不够再升顶点法向）
+
+    def vid(i, j):
+        return j * (N + 1) + i + 1   # 1-based
+
+    # 每格两三角，缠绕保证 +Y 朝上（与 _build_floor_obj 同向）
+    for j in range(N):
+        for i in range(N):
+            a, b = vid(i, j), vid(i + 1, j)
+            c, d = vid(i + 1, j + 1), vid(i, j + 1)
+            lines.append(f"f {a}//1 {d}//1 {c}//1")
+            lines.append(f"f {a}//1 {c}//1 {b}//1")
+    return "\n".join(lines) + "\n"
+
+
 # M2 步骤 14b-ii：把任意场景描述分解成一棵 Zone 树。开放性在这一步——
 # LLM 读 prompt 成空间结构，代码不枚举场景类型（不写 if 教堂/if 蒙古包）。
 # 退化：纯室内 → 返回单 box（走旧路径，零回归）；只有真·室内外混合才建两层树。
@@ -910,10 +989,11 @@ class SceneComposer:
             logger.warning("[SceneComposer] 房间盒子创建失败: %s", e)
 
     def _generate_terrain(self, zone) -> None:
-        """M2 步骤 14b-ii：为 enclosure=terrain 的 Zone 生成一块平地（无墙无顶）。
+        """M2 步骤 15c-ii：为 enclosure=terrain 的 Zone 生成带坡度的地形 mesh。
 
-        镜像 _generate_room_box 的 Actor 套路：单 quad OBJ + 静态碰撞体。
-        terrain 置原点、铺在 y=0，盒子嵌在它中间——camera 站在地上看到一大片。
+        通用高度场（_terrain_height）：type 是参数不是 if 分支。中心平台（内嵌 shell/box
+        的 footprint 范围）强制 h=0，保护建筑/家具落点；平台外按 terrain_profile 起伏。
+        关键：mesh 用世界坐标，Actor scale=[1,1,1]（不再缩放，否则 h 不随 x/z 缩放会错乱）。
         """
         import os as _os, tempfile as _tf, time as _t
 
@@ -921,16 +1001,30 @@ class SceneComposer:
         width = size[0] if len(size) > 0 else 20.0
         depth = size[1] if len(size) > 1 else 20.0
 
+        # profile：zone 声明优先，未声明给默认 rolling（demo 草原够用；LLM 输出 type 留 15c-iii）
+        profile = getattr(zone, "terrain_profile", None)
+        if profile is None:
+            from ..data_model.zone_tree import TerrainProfile
+            profile = TerrainProfile(type="rolling", amplitude=0.8, frequency=0.35, seed=7)
+
+        # 平台半径：内嵌 shell/box 子 zone 的 footprint × 1.5（无子 zone → 无平台，纯地形）
+        platform_radius = 0.0
+        for sub in getattr(zone, "sub_zones", []) or []:
+            if (getattr(sub, "enclosure", "") or "") in ("shell", "box"):
+                sw = sub.volume.size[0] if sub.volume.size else 4.0
+                sd = sub.volume.size[1] if len(sub.volume.size) > 1 else 4.0
+                platform_radius = max(platform_radius, max(sw, sd) / 2.0 * 1.5)
+
         tmp_dir = _os.path.join(_tf.gettempdir(), "corona_room_box")
         _os.makedirs(tmp_dir, exist_ok=True)
         grass_mtl_path = _os.path.join(tmp_dir, "grass.mtl")
-        floor_path = _os.path.join(tmp_dir, "floor.obj")
+        terrain_path = _os.path.join(tmp_dir, "terrain.obj")
         # 15c：草地绿材质（不透明）。Kd 偏黄绿，Ka 略暗——比中性灰更像草原。
         with open(grass_mtl_path, "w", encoding="ascii") as f:
             f.write("newmtl grass\nKa 0.20 0.32 0.12\nKd 0.36 0.55 0.22\n"
                     "Ks 0.02 0.02 0.02\nNs 4.0\nd 1.0\n")
-        with open(floor_path, "w", encoding="ascii") as f:
-            f.write(_build_floor_obj())
+        with open(terrain_path, "w", encoding="ascii") as f:
+            f.write(_build_terrain_mesh_obj(width, depth, profile, platform_radius, grid=32))
 
         try:
             from CoronaCore.core.managers import scene_manager as _sm
@@ -950,10 +1044,11 @@ class SceneComposer:
             return
 
         try:
-            actor = Actor(name="__room_terrain", route=floor_path, actor_type="mesh",
+            actor = Actor(name="__room_terrain", route=terrain_path, actor_type="mesh",
                           parent_scene=scene)
+            # mesh 已是世界坐标 → 不缩放（缩放会让高度 h 与 x/z 比例错乱）
             actor.set_position([0.0, 0.0, 0.0], True)
-            actor.set_scale([width, 1.0, depth], True)
+            actor.set_scale([1.0, 1.0, 1.0], True)
             mech = getattr(actor, "_mechanics", None)
             if mech is not None:
                 try:
@@ -962,9 +1057,11 @@ class SceneComposer:
                     pass
             scene.add_actor(actor)
             _t.sleep(0.3)
-            logger.info("[SceneComposer] 地面(terrain)已创建: %.1f×%.1f m", width, depth)
+            logger.info("[SceneComposer] 地形(terrain)已创建: %.1f×%.1f m, type=%s, 平台半径=%.1f",
+                        width, depth, getattr(profile, "type", "?"), platform_radius)
         except Exception as e:
-            logger.warning("[SceneComposer] 地面创建失败: %s", e)
+            logger.warning("[SceneComposer] 地形创建失败: %s", e)
+
 
     def _generate_interior_floor(self, zone) -> None:
         """M2 步骤 15b：为 shell zone 铺一块内皮地面（interior_skin 的 floor 取值）。

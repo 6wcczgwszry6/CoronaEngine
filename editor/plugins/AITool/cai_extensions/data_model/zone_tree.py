@@ -47,6 +47,20 @@ class Connector:
 
 
 @dataclass
+class TerrainProfile:
+    """参数化地形高度场：outdoor zone 的"外皮"，与 InteriorSkin 对称（M2 步骤 15c-ii）。
+
+    地形不是某场景特例，是 terrain zone 的属性。任何地形 = 一个高度场 h(x,z)，
+    type 是参数不是 if 分支——代码不写 if 草原，让 decompose 输出 type。
+    """
+    type: str = "flat"               # "flat" | "rolling" | "terraced" | "dunes" | "noise"
+    amplitude: float = 0.0           # 起伏高度（米）
+    frequency: float = 1.0           # 起伏密度
+    seed: int = 0                    # 随机种子（确定性，派生相位用）
+
+
+
+@dataclass
 class Zone:
     """Zone：递归空间结构节点
 
@@ -69,6 +83,9 @@ class Zone:
 
     # 内皮（M2 步骤 15 实现）
     interior_skin: Optional[InteriorSkin] = None
+
+    # 地形外皮（M2 步骤 15c-ii 实现）：outdoor zone 的"外皮"，与 interior_skin 对称
+    terrain_profile: Optional[TerrainProfile] = None
 
     # 递归结构（M2 步骤 14 实现）
     sub_zones: List["Zone"] = field(default_factory=list)
