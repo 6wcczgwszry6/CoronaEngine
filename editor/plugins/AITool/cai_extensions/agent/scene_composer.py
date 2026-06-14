@@ -899,6 +899,27 @@ class SceneComposer:
         # 没法知道真实高度，返回 0 让调用方用 Y>=margin 兜底
         return 0.0
 
+    @staticmethod
+    def _get_placement_type(actor_name: str, asset_meta: Dict[str, Any],
+                            geo_map: Dict[str, Any]) -> str:
+        """读物体的放置类型（M2 步骤 15d）。
+
+        优先 asset_metadata 的 placement_type（trimesh + 名字推断，见 _infer_placement_type），
+        三路匹配兜 A-5 那种 key 撞车；再用名字关键词兜底（壁挂类）。
+        """
+        meta = (asset_meta.get(actor_name)
+                or asset_meta.get(geo_map.get(actor_name, {}).get("name", ""))
+                or {})
+        pt = str(meta.get("placement_type", "") or "")
+        if pt:
+            return pt
+        # 名字兜底：壁挂类关键词（标本/兽头/镜子/挂钟/壁灯等贴墙物）
+        n = actor_name or ""
+        for kw in ("标本", "兽头", "鹿头", "牛头", "镜子", "挂钟", "壁灯", "壁挂", "鹿角"):
+            if kw in n:
+                return "wall_hung"
+        return ""
+
     # ── 场景框架（室内盒子 / 室外 terrain）──────────────────────
 
     @staticmethod
@@ -1395,10 +1416,33 @@ class SceneComposer:
 
                         # 第一步：回设 LLM 位置 + 钳制 + 整平（物理全程关）
                         mecha, fixed, clamped, leveled = [], 0, 0, 0
+                        wall_hung_n = 0   # 15d：壁挂物计数（沿后墙横向错开）
                         for actor_name in imported:
                             actor = scene.find_actor(actor_name) if scene else None
                             if actor is None:
                                 continue
+
+                            # 15d：壁挂物（标本/兽头/镜子/挂钟等）→ 贴墙、定高、法向朝内，
+                            # 不落地、不入物理（否则被钳制砸到地面或物理撞下墙 → 悬空/朝向乱）。
+                            # wall_hung 之前是死分类：_infer_placement_type 算出但全代码零消费。
+                            ptype = self._get_placement_type(actor_name, asset_meta, geo_map)
+                            if ptype == "wall_hung":
+                                wmech = getattr(actor, "_mechanics", None)
+                                if wmech is not None:
+                                    try:
+                                        wmech.set_physics_enabled(False)
+                                    except Exception:
+                                        pass
+                                # 贴后墙（z=+hd），定高 0.55h，多个壁挂物沿 x 错开居中
+                                wx = (wall_hung_n - 0.5) * 0.9 if wall_hung_n > 0 else 0.0
+                                wx = max(-hw + margin, min(hw - margin, wx))
+                                actor.set_position([wx, h * 0.55, hd - 0.1])
+                                actor.set_rotation([0.0, 0.0, 0.0])  # 后墙法向 +Z 朝内
+                                wall_hung_n += 1
+                                logger.info("[SceneComposer] 壁挂物贴墙: %s → (%.1f, %.2f, %.1f)",
+                                            actor_name, wx, h * 0.55, hd - 0.1)
+                                continue
+
                             mech = getattr(actor, "_mechanics", None)
                             if mech is not None:
                                 try:
