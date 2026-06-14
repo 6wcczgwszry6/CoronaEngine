@@ -893,7 +893,7 @@ const moveLoop = (now) => {
     moved = true;
   }
 
-  if (moved) {
+  if (moved && !sendCameraUpdateFast()) {
     scheduleCameraUpdate();
   }
 

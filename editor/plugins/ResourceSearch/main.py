@@ -23,12 +23,13 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional
 
 from CoronaPlugin.core.corona_plugin_base import PluginBase
 from utils.settings import settings_manager
 
 from .image_search import DEFAULT_THRESHOLD, ImageIndex, _is_pil_available
+from .index_service import ResourceIndexService
 from .indexer import ResourceIndex
 
 logger = logging.getLogger(__name__)
@@ -78,58 +79,49 @@ ALLOWED_SEARCH_TYPES: FrozenSet[str] = frozenset({
 
 
 _index_lock = threading.Lock()
-_text_index: Optional[ResourceIndex] = None
+_index_service: Optional[ResourceIndexService] = None
 _image_index: Optional[ImageIndex] = None
+_image_index_generation = -1
 _last_resource_items: List[Dict[str, Any]] = []
-_index_roots_signature: Optional[Tuple[str, ...]] = None
 
 
-def _get_text_index() -> ResourceIndex:
-    """获取文本索引(惰性构建;活动项目根变化时自动重建)
+def _get_index_service() -> ResourceIndexService:
+    global _index_service
+    if _index_service is None:
+        with _index_lock:
+            if _index_service is None:
+                _index_service = ResourceIndexService(_resolve_search_roots)
+    return _index_service
 
-    Returns:
-        进程内单例 ResourceIndex
-    """
-    global _text_index, _index_roots_signature
-    roots = _resolve_search_roots()
-    sig = tuple(roots)
 
-    with _index_lock:
-        if _text_index is None:
-            logger.info("[ResourceSearch] 首次构建文本索引,根=%s", roots)
-            _text_index = ResourceIndex(roots)
-            _text_index.rebuild()
-            _index_roots_signature = sig
-        elif _index_roots_signature != sig:
-            logger.info("[ResourceSearch] 索引根签名变化(%s → %s),重建",
-                        _index_roots_signature, sig)
-            _text_index = ResourceIndex(roots)
-            _text_index.rebuild()
-            _index_roots_signature = sig
-    return _text_index
+def _get_text_index() -> Optional[ResourceIndex]:
+    """快速返回当前已发布索引；构建和刷新始终在后台执行。"""
+    return _get_index_service().current_index()
 
 
 def _get_image_index() -> ImageIndex:
     """获取图像索引(惰性构建)"""
-    global _image_index
-    if _image_index is None:
+    global _image_index, _image_index_generation
+    generation = _get_index_service().status()["generation"]
+    if _image_index is None or _image_index_generation != generation:
         with _index_lock:
-            if _image_index is None:
+            if _image_index is None or _image_index_generation != generation:
                 _image_index = ImageIndex()
-                if _text_index is not None:
-                    _image_index.build(_last_resource_items)
+                _image_index.build(_last_resource_items)
+                _image_index_generation = generation
     return _image_index
 
 
 def _refresh_cached_items() -> None:
     """将文本索引的当前 items 缓存,以便以图搜索回填元数据"""
     global _last_resource_items
-    if _text_index is None:
+    index = _get_text_index()
+    if index is None:
         _last_resource_items = []
         return
-    with _text_index._lock:
+    with index._lock:
         _last_resource_items = [
-            it.to_dict(score=0.0) for it in _text_index._items.values()
+            it.to_dict(score=0.0) for it in index._items.values()
         ]
 
 
@@ -152,7 +144,7 @@ def _check_caller(caller: str) -> Optional[Dict[str, Any]]:
 
     # 黑名单:硬拒绝 + 警告日志
     if caller in DENIED_CALLERS:
-        logger.warning("[fuzzy_search] 拒绝调用: caller=%r 在黑名单内", caller)
+        logger.warning("[ResourceSearch] 拒绝调用: caller=%r 在黑名单内", caller)
         return {
             "status": "error",
             "code": "permission_denied",
@@ -163,7 +155,7 @@ def _check_caller(caller: str) -> Optional[Dict[str, Any]]:
 
     # 白名单:必须命中
     if caller not in ALLOWED_CALLERS:
-        logger.warning("[fuzzy_search] 拒绝调用: caller=%r 不在白名单", caller)
+        logger.warning("[ResourceSearch] 拒绝调用: caller=%r 不在白名单", caller)
         return {
             "status": "error",
             "code": "permission_denied",
@@ -180,7 +172,7 @@ def _check_type(type_filter: Optional[str]) -> Optional[Dict[str, Any]]:
     if type_filter is None:
         return None
     if type_filter not in ALLOWED_SEARCH_TYPES:
-        logger.warning("[fuzzy_search] 拒绝类型: type_filter=%r 不在白名单",
+        logger.warning("[ResourceSearch] 拒绝类型: type_filter=%r 不在白名单",
                        type_filter)
         return {
             "status": "error",
@@ -293,6 +285,21 @@ class ResourceSearch(PluginBase):
     # ==================================================================
 
     @staticmethod
+    def prepare_index(caller: str = "anonymous") -> Dict[str, Any]:
+        """加载持久化快照并启动后台校验。"""
+        try:
+            err = _check_caller(caller)
+            if err is not None:
+                return err
+            return {
+                "status": "success",
+                "index": _get_index_service().prepare(),
+            }
+        except Exception as exc:
+            logger.exception("prepare_index 失败")
+            return _err("internal_error", str(exc))
+
+    @staticmethod
     def fuzzy_search(query: str, top_k: int = 20,
                      type_filter: Optional[str] = None,
                      caller: str = "anonymous") -> Dict[str, Any]:
@@ -310,7 +317,7 @@ class ResourceSearch(PluginBase):
             caller: 调用方标识,必须在 ALLOWED_CALLERS 内
 
         Returns:
-            标准响应 dict: {status, items, total, elapsed_ms, roots, rebuilt, query}
+            标准响应 dict: {status, items, total, elapsed_ms, roots, index, query}
         """
         t_start = time.perf_counter()
         try:
@@ -326,27 +333,47 @@ class ResourceSearch(PluginBase):
             if query is None:
                 return _err("invalid_param", "query 不能为空")
 
-            idx = _get_text_index()
-            roots = list(idx.project_roots)
-            logger.info("[fuzzy_search] caller=%s query=%r top_k=%s "
-                        "type_filter=%s roots=%s",
-                        caller, query, top_k, type_filter, roots)
+            service = _get_index_service()
+            idx = service.current_index()
+            index_status = service.status()
+            roots = index_status["roots"]
+            logger.debug(
+                "[ResourceSearch] 搜索开始: caller=%s query=%r top_k=%s "
+                "type=%s roots=%d",
+                caller,
+                query,
+                top_k,
+                type_filter,
+                len(roots),
+            )
 
-            # ---- 3. 索引自检(脏标记 + mtime 兜底) ----
-            rebuilt = idx.rebuild_if_needed()
-            if rebuilt:
-                logger.info("[fuzzy_search] 索引已自动重建,项数=%d",
-                            idx._item_count)
+            if idx is None:
+                elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+                return {
+                    "status": "indexing",
+                    "message": "资源索引正在后台准备",
+                    "items": [],
+                    "total": 0,
+                    "elapsed_ms": round(elapsed_ms, 2),
+                    "query": query,
+                    "roots": roots,
+                    "index": index_status,
+                }
 
-            # ---- 4. 模糊匹配 ----
+            # ---- 3. 模糊匹配 ----
             t_match = time.perf_counter()
             items = idx.fuzzy(query, top_k=top_k, type_filter=type_filter)
             match_ms = (time.perf_counter() - t_match) * 1000.0
 
             elapsed_ms = (time.perf_counter() - t_start) * 1000.0
-            logger.info("[fuzzy_search] 命中 %d 项, 匹配耗时 %.2fms, "
-                        "总耗时 %.2fms",
-                        len(items), match_ms, elapsed_ms)
+            logger.debug(
+                "[ResourceSearch] 搜索完成: query=%r hits=%d match=%.2fms "
+                "total=%.2fms",
+                query,
+                len(items),
+                match_ms,
+                elapsed_ms,
+            )
 
             return {
                 "status": "success",
@@ -355,7 +382,7 @@ class ResourceSearch(PluginBase):
                 "elapsed_ms": round(elapsed_ms, 2),
                 "query": query,
                 "roots": roots,
-                "rebuilt": rebuilt,
+                "index": index_status,
             }
         except Exception as exc:
             logger.exception("fuzzy_search 失败")
@@ -392,6 +419,13 @@ class ResourceSearch(PluginBase):
             if _decode_base64_image(image_b64) is None:
                 return _err("invalid_image", "图片数据无效或无法解码", t_start)
 
+            if _get_text_index() is None:
+                return {
+                    "status": "indexing",
+                    "message": "资源索引正在后台准备",
+                    "items": [],
+                    "total": 0,
+                }
             _refresh_cached_items()
             img_idx = _get_image_index()
             items = img_idx.search(
@@ -420,6 +454,12 @@ class ResourceSearch(PluginBase):
             if err is not None:
                 return err
             idx = _get_text_index()
+            if idx is None:
+                return {
+                    "status": "indexing",
+                    "types": [],
+                    "index": _get_index_service().status(),
+                }
             return {"status": "success", "types": idx.list_types()}
         except Exception as exc:
             logger.exception("list_types 失败")
@@ -432,25 +472,12 @@ class ResourceSearch(PluginBase):
             err = _check_caller(caller)
             if err is not None:
                 return err
-            global _text_index, _image_index, _index_roots_signature
-            roots = _resolve_search_roots()
-            with _index_lock:
-                _text_index = ResourceIndex(roots)
-                stats = _text_index.rebuild()
-                _index_roots_signature = tuple(roots)
-                _refresh_cached_items()
-                if _is_pil_available():
-                    if _image_index is None:
-                        _image_index = ImageIndex()
-                    img_stats = _image_index.build(_last_resource_items)
-                else:
-                    img_stats = {"status": "skipped",
-                                 "message": "Pillow 不可用"}
+            index_status = _get_index_service().request_refresh(force=True)
             return {
                 "status": "success",
-                "text": stats,
-                "image": img_stats,
-                "roots": roots,
+                "scheduled": True,
+                "index": index_status,
+                "roots": index_status["roots"],
             }
         except Exception as exc:
             logger.exception("rebuild_index 失败")
@@ -463,13 +490,16 @@ class ResourceSearch(PluginBase):
             err = _check_caller(caller)
             if err is not None:
                 return err
-            idx = _get_text_index()
-            img_idx = _get_image_index() if _is_pil_available() else None
+            service = _get_index_service()
+            idx = service.current_index()
+            index_status = service.status()
+            img_idx = _image_index if _is_pil_available() else None
             return {
                 "status": "success",
-                "text": idx.stats(),
+                "text": idx.stats() if idx else {"count": 0},
                 "image": img_idx.stats() if img_idx else {"image_count": 0},
-                "roots": list(idx.project_roots),
+                "index": index_status,
+                "roots": index_status["roots"],
                 "active_project": settings_manager.active_project_path,
                 "allowed_callers": sorted(ALLOWED_CALLERS),
                 "allowed_types": sorted(ALLOWED_SEARCH_TYPES),
@@ -500,9 +530,13 @@ class ResourceSearch(PluginBase):
             err = _check_caller(caller)
             if err is not None:
                 return err
-            idx = _get_text_index()
-            idx.mark_dirty(reason)
-            return {"status": "success", "dirty": True, "reason": reason}
+            index_status = _get_index_service().request_refresh(force=True)
+            return {
+                "status": "success",
+                "dirty": True,
+                "reason": reason,
+                "index": index_status,
+            }
         except Exception as exc:
             logger.exception("mark_index_dirty 失败")
             return _err("internal_error", str(exc))

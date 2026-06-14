@@ -38,3 +38,4 @@ __pycache__/
 *.log
 .claude/
 .codex/
+.codegraph/
