@@ -168,6 +168,99 @@ def is_compose_intent(text: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 意图三分类（compose / edit / chat）—— 取代关键词路由
+# ═══════════════════════════════════════════════════════════════════════════
+
+_INTENT_CLASSIFY_SYSTEM_PROMPT = """你是 LANChat 场景助手的意图分类器。把用户消息分成三类之一。
+
+compose（从无到有生成一个完整的 3D 场景/环境）：
+- "生成一个现代客厅" / "做一个赛博朋克酒吧街" / "来个蒙古包草原"
+- "搭一个海底世界" / "布置一个北欧风卧室" / "整一个篝火露营场景"
+
+edit（修改场景里【已有的】具体物体——有明确的操作对象 + 动作）：
+- 缩放: "放大蒙古包3倍" / "把矮桌变小" / "蒙古包调大一点"
+- 移动: "沙发往左移" / "把椅子挪到墙角"
+- 旋转/删除/增加单个: "旋转椅子90度" / "删掉那盏灯" / "加一个茶几"
+
+chat（闲聊/提问/评价/反馈——没有明确的"对某物做某操作"指令）：
+- "你好" / "谢谢" / "客厅一般放什么" / "这个配色好看吗"
+- "蒙古包没有调整好" / "感觉有点小" / "不太对"（只是评价/抱怨，没说具体怎么改）
+
+判别要点：
+- 明确"对哪个物体做什么操作（放大/缩小/移动/旋转/删除/加）" → edit
+- 只是抱怨/评价/没说具体怎么改 → chat（即使提到物体名）
+- 从零搭整个场景/环境 → compose
+
+只输出 JSON：{"intent":"compose"} 或 {"intent":"edit"} 或 {"intent":"chat"}"""
+
+
+def _llm_classify_intent(text: str, timeout: float = 20.0) -> Optional[str]:
+    """LLM 三分类：返回 "compose" | "edit" | "chat"；失败返回 None（交调用方兜底）。
+
+    超时同 _llm_is_compose_intent：future(20s) > HTTP request_timeout(18s)。
+    """
+    if not text or not text.strip():
+        return None
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from Quasar.ai_models.base_pool.registry import get_chat_model
+
+        def _do():
+            model = get_chat_model(temperature=0, request_timeout=18.0)
+            return model.invoke([
+                SystemMessage(content=_INTENT_CLASSIFY_SYSTEM_PROMPT),
+                HumanMessage(content=text.strip()[:500]),
+            ])
+
+        ex = ThreadPoolExecutor(max_workers=1)
+        try:
+            resp = ex.submit(_do).result(timeout=timeout)
+        finally:
+            ex.shutdown(wait=False)
+
+        raw = (resp.content if hasattr(resp, "content") else str(resp)).strip()
+        if "```" in raw:
+            s = raw.find("{")
+            e = raw.rfind("}")
+            if s != -1 and e != -1:
+                raw = raw[s:e + 1]
+        data = json.loads(raw)
+        intent = str(data.get("intent", "")).strip().lower()
+        if intent in ("compose", "edit", "chat"):
+            logger.info("[MasterAgent] LLM 意图分类: %s for %r", intent, text[:40])
+            return intent
+        return None
+    except Exception as e:
+        logger.warning("[MasterAgent] LLM 意图分类失败, 回退关键词: %s", e)
+        return None
+
+
+def classify_intent(text: str) -> str:
+    """意图三分类路由：compose（生成整场景）/ edit（改已有物体）/ chat（闲聊）。
+
+    优先 LLM 语义分类（关键词漏判/误判的根治）；明显闲聊走快速路径省延迟；
+    LLM 不可用时退回关键词兜底（is_scene_command 命中再用 is_compose_request 分 compose/edit）。
+    """
+    t = (text or "").strip()
+    if not t or len(t) < 2:
+        return "chat"
+    # 快速路径：明显问候/提问/致谢 → chat（零延迟，不调 LLM）
+    for pat in _NON_SCENE_PATTERNS:
+        if re.match(pat, t):
+            return "chat"
+    # LLM 三分类（权威）
+    r = _llm_classify_intent(t)
+    if r in ("compose", "edit", "chat"):
+        return r
+    # LLM 失败兜底：退回关键词。命中场景关键词再分 compose/edit，否则 chat
+    if is_scene_command(t):
+        from .scene_composer import is_compose_request
+        return "compose" if (is_compose_request(t)) else "edit"
+    return "chat"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Specialist 注册表
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -519,24 +612,21 @@ class MasterAgent:
             if cmd == "patrol":
                 return self._handle_patrol(system)
 
-            # 2. 场景指令（生成 / 增删改移）→ 统一交给 _handle_scene 内部分流：
-            #    整场景组合（"生成欧式卧室"）→ SceneComposer；
-            #    单步编辑（"放大蒙古包""把矮桌往左移""删掉那盏灯"）→ coordinator 执行变换。
-            #    旧实现把单步编辑透传给 _handle_chat→CAIApp，只生成对话、不执行任何变换
-            #    （F5 实锤：8 次调整全部只回话，无 set_actor_transform 调用）→ 死路，已移除。
-            if is_scene_command(trigger):
-                logger.info("[MasterAgent] routing → scene (compose/编辑由 _handle_scene 内部分流)")
+            # 2. 意图三分类（compose / edit / chat）——语义分类取代关键词路由。
+            #    关键词路由两类都翻车：真编辑漏判掉聊天（"把矮桌变小""蒙古包调大"），
+            #    抱怨误判进编辑（"蒙古包没有调整好"命中"调整"）。改用 LLM 语义分类。
+            intent_class = classify_intent(trigger)
+            if intent_class == "compose":
+                # 整场景生成（含清单外描述"海底世界""蒙古包草原"）→ force_compose 跳内层关键词门
+                logger.info("[MasterAgent] routing → compose (意图分类)")
+                return self._handle_scene(trigger, system, messages, force_compose=True)
+            if intent_class == "edit":
+                # 改已有物体（放大/移动/旋转/删除/加单个）→ _handle_scene 单步分流到 coordinator 执行变换
+                logger.info("[MasterAgent] routing → edit (意图分类，coordinator 执行变换)")
                 return self._handle_scene(trigger, system, messages)
 
-            # 3. 关键词未命中 → 开放式意图判别（LLM）：可能是清单外的场景描述
-            #    "做一个海底世界""来个蒙古包草原""暗黑游戏风教堂"等不含关键词的整场景生成在此捕获
-            #    force_compose=True：跳过 _handle_scene 内层的关键词二次过滤，直接走 compose
-            if is_compose_intent(trigger):
-                logger.info("[MasterAgent] routing → compose (开放式意图)")
-                return self._handle_scene(trigger, system, messages, force_compose=True)
-
-            # 4. 普通聊天
-            logger.info("[MasterAgent] routing → chat")
+            # 3. 普通聊天（含评价/抱怨/提问，无明确操作指令）
+            logger.info("[MasterAgent] routing → chat (意图分类)")
             return self._handle_chat(system, messages)
         except Exception as e:
             logger.exception("[MasterAgent] __call__ 异常, 返回兜底回复")
