@@ -182,6 +182,18 @@ class Actor:
 
         self._create_and_add_profile()
 
+        # 恢复持久化的物理开关（与 to_dict() 序列化的 mechanics.physics_enabled 对称）。
+        # 向后兼容：字段缺失时保持引擎默认（开启），只有显式存了的 actor 才生效——
+        # 否则 AI 摆放/已禁用物理的物体冷重载后又默认开启，进 play 模式被求解器推得
+        # 东歪西斜（甚至互相穿插导致求解器死循环）。零回归：老场景无此字段，行为不变。
+        mech_data = actor_data.get("mechanics")
+        if isinstance(mech_data, dict) and "physics_enabled" in mech_data:
+            if hasattr(self, "_mechanics") and self._mechanics is not None:
+                try:
+                    self._mechanics.set_physics_enabled(bool(mech_data["physics_enabled"]))
+                except Exception:
+                    pass
+
     def _create_and_add_profile(self):
         """创建组件、配置集合并添加到actor"""
         ActorProfile = getattr(CoronaEngine, 'ActorProfile', None)

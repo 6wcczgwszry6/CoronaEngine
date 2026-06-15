@@ -1443,7 +1443,8 @@ class SceneComposer:
         """
         import os as _os, tempfile as _tf, time as _t
 
-        INSCRIBE = 0.85  # 内嵌：地面比足迹略小，四角不戳穿圆壳
+        INSCRIBE = 0.96  # 贴边：地毯铺到 shell 真实足迹近边缘。圆盘地板配圆底建筑，
+        # 不再有"方角戳穿圆壳"顾虑，故从 0.85 放大到 0.96（留 4% 余量防曲面壁微穿）。
         # 锚定链：优先用 shell 真实足迹（half_x/half_z → full = 2×half）
         aabb = getattr(self, "_shell_aabb", {}).get(getattr(zone, "zone_id", ""), None)
         if aabb and aabb.get("half_x", 0) > 1e-6:
