@@ -92,6 +92,7 @@ struct NetworkSystem::Impl {
         std::vector<uint64_t> transfer_ids;
         uint32_t remaining_files = 0;
         Clock::time_point create_time;
+        Clock::time_point last_activity_time;
         Network::ActorCreatePacked actor_packed;
     };
     std::unordered_map<uint64_t, PendingFileTransfer> pending_file_transfer_groups;
@@ -211,9 +212,14 @@ void NetworkSystem::update() {
 
     for (auto it = impl_->pending_file_transfer_groups.begin();
          it != impl_->pending_file_transfer_groups.end(); ) {
-        if (now - it->second.create_time > kTransferTimeout) {
-            CFW_LOG_WARNING("NetworkSystem: Pending file group timed out — actor='{}' model='{}'",
-                            it->second.actor_guid, it->second.model_path);
+        if (Network::has_file_group_timed_out(
+                it->second.create_time, it->second.last_activity_time,
+                now, kTransferTimeout)) {
+            CFW_LOG_WARNING(
+                "NetworkSystem: Pending file group timed out — actor='{}' model='{}' "
+                "remaining={} transfers={}",
+                it->second.actor_guid, it->second.model_path,
+                it->second.remaining_files, it->second.transfer_ids.size());
             for (uint64_t transfer_id : it->second.transfer_ids) {
                 impl_->transfer_to_group.erase(transfer_id);
             }
@@ -545,14 +551,21 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
                 group.actor_packed = actor_packed;
                 group.remaining_files = static_cast<uint32_t>(missing_paths.size());
                 group.create_time = Impl::Clock::now();
+                group.last_activity_time = group.create_time;
 
                 auto send_request = [&](uint64_t transfer_id, const std::string& path) {
                     auto pkt = Network::build_file_request(transfer_id, path);
                     const auto* peer_info = impl_->peer_manager.find_peer(sender_peer_id);
                     if (peer_info && peer_info->peer) {
+                        CFW_LOG_INFO(
+                            "NetworkSystem: Requesting missing file from {} — id={} path='{}'",
+                            sender_peer_id, transfer_id, path);
                         impl_->peer_manager.send_to(peer_info->peer, Network::kChannelReliable,
                                                     pkt.data(), pkt.size(), true);
                     } else {
+                        CFW_LOG_WARNING(
+                            "NetworkSystem: FILE_REQUEST peer {} unavailable, broadcasting — id={} path='{}'",
+                            sender_peer_id, transfer_id, path);
                         impl_->peer_manager.broadcast(Network::kChannelReliable,
                                                       pkt.data(), pkt.size(), true);
                     }
@@ -599,15 +612,20 @@ void NetworkSystem::handle_file_request(const std::string& sender_peer_id,
     auto full_path = Network::resolve_project_relative_path(
         impl_->project_root, model_path);
     if (!full_path) {
-        CFW_LOG_ERROR("NetworkSystem: Reject unsafe FILE_REQUEST path '{}'", model_path);
+        CFW_LOG_ERROR("NetworkSystem: Reject unsafe FILE_REQUEST path '{}' id={} from {}",
+                      model_path, transfer_id, sender_peer_id);
         return;
     }
+
+    CFW_LOG_INFO("NetworkSystem: Received FILE_REQUEST from {} — id={} path='{}'",
+                 sender_peer_id, transfer_id, model_path);
 
     auto& cache = impl_->outgoing_cache[model_path];
     if (cache.data.empty()) {
         std::ifstream file(*full_path, std::ios::binary | std::ios::ate);
         if (!file.is_open()) {
-            CFW_LOG_ERROR("NetworkSystem: Cannot open file '{}' for FILE_REQUEST", full_path->string());
+            CFW_LOG_ERROR("NetworkSystem: Cannot open file '{}' for FILE_REQUEST id={} from {}",
+                          full_path->string(), transfer_id, sender_peer_id);
             impl_->outgoing_cache.erase(model_path);
             return;
         }
@@ -626,9 +644,14 @@ void NetworkSystem::handle_file_request(const std::string& sender_peer_id,
     // Find sender's peer
     const auto* peer_info = impl_->peer_manager.find_peer(sender_peer_id);
     if (!peer_info || !peer_info->peer) {
-        CFW_LOG_ERROR("NetworkSystem: Cannot find peer {} for FILE_CHUNK send", sender_peer_id);
+        CFW_LOG_ERROR("NetworkSystem: Cannot find peer {} for FILE_CHUNK send id={} path='{}'",
+                      sender_peer_id, transfer_id, model_path);
         return;
     }
+
+    CFW_LOG_INFO(
+        "NetworkSystem: Sending FILE_CHUNK batch to {} — id={} path='{}' size={} chunks={}",
+        sender_peer_id, transfer_id, model_path, total_size, chunk_count);
 
     for (uint32_t i = 0; i < chunk_count; ++i) {
         uint32_t offset = i * kChunkSize;
@@ -665,6 +688,12 @@ void NetworkSystem::handle_file_chunk(const std::string& sender_peer_id,
 
     if (chunk_index >= chunk_count) return;
 
+    if (chunk_index == 0) {
+        CFW_LOG_INFO(
+            "NetworkSystem: Receiving FILE_CHUNK batch from {} — id={} path='{}' size={} chunks={}",
+            sender_peer_id, transfer_id, model_path, total_size, chunk_count);
+    }
+
     // Get or create transfer state — isolate by sender+transfer_id to prevent
     // chunk interleaving when multiple peers respond to one FILE_REQUEST.
     std::string tx_key = Network::make_transfer_key(sender_peer_id, transfer_id);
@@ -692,6 +721,13 @@ void NetworkSystem::handle_file_chunk(const std::string& sender_peer_id,
         std::memcpy(tx.buffer.data() + offset, chunk_data, chunk_data_len);
         tx.received_chunks[chunk_index] = true;
         tx.last_chunk_time = Impl::Clock::now();
+        auto group_id_it = impl_->transfer_to_group.find(transfer_id);
+        if (group_id_it != impl_->transfer_to_group.end()) {
+            auto ft_it = impl_->pending_file_transfer_groups.find(group_id_it->second);
+            if (ft_it != impl_->pending_file_transfer_groups.end()) {
+                ft_it->second.last_activity_time = tx.last_chunk_time;
+            }
+        }
     }
 
     // Check if all chunks received
@@ -744,9 +780,13 @@ void NetworkSystem::handle_file_chunk(const std::string& sender_peer_id,
         if (ft_it == impl_->pending_file_transfer_groups.end()) {
             return;
         }
+        ft_it->second.last_activity_time = Impl::Clock::now();
         if (ft_it->second.remaining_files > 0) {
             --ft_it->second.remaining_files;
         }
+        CFW_LOG_INFO(
+            "NetworkSystem: Completed FILE_CHUNK transfer — id={} path='{}' remaining={}",
+            transfer_id, model_path, ft_it->second.remaining_files);
         if (ft_it->second.remaining_files != 0) {
             return;
         }

@@ -205,11 +205,15 @@ function handleEvent(event) {
       }
       break;
     case 'room_closed':
-      state.error = 'ROOM_CLOSED';
       _resetRoom();
+      state.error = 'ROOM_CLOSED';
       break;
     case 'error':
       state.error = event.code || 'ERROR';
+      if (event.code === 'RECONNECT_FAILED' || event.code === 'RECONNECT_REJECTED') {
+        state.connection = 'idle';
+        state.inRoom = false;
+      }
       break;
     default:
       break;

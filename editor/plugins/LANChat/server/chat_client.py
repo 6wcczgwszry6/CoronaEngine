@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
 from typing import Callable, Optional
 
 import websockets
@@ -33,6 +34,12 @@ EventCallback = Callable[[dict], None]
 _RECONNECT_MAX_ATTEMPTS = 6
 _RECONNECT_BASE_DELAY = 0.5  # 秒，指数退避起点
 _RECONNECT_MAX_DELAY = 8.0   # 秒，单次退避上限
+_WS_CONNECT_OPTIONS = {
+    "ping_interval": 30,
+    "ping_timeout": 90,
+    "open_timeout": 5,
+    "close_timeout": 2,
+}
 
 
 class ChatClient:
@@ -61,6 +68,7 @@ class ChatClient:
         self._main_task: Optional[asyncio.Task] = None
         self._final_name: str = nickname
         self._closing = False  # 主动离开标记，区分用户离开 vs 服务器断开
+        self._terminal_error_emitted = False
 
         # owner 侧：agent 执行器 + 本机持有的 agent（agent_id -> {"name","persona"}）
         self._agent_runner = None
@@ -146,7 +154,7 @@ class ChatClient:
             if not await self._retry_join_loop():
                 break
 
-        if not self._closing:
+        if not self._closing and not self._terminal_error_emitted:
             self._emit(protocol.build_frontend_event("room_closed"))
 
     async def _recv_loop(self) -> None:
@@ -163,6 +171,8 @@ class ChatClient:
     async def _retry_join_loop(self) -> bool:
         """指数退避重连 + join，成功 True，失败（耗尽或被拒）False。"""
         delay = _RECONNECT_BASE_DELAY
+        last_error = ""
+        last_probe = ""
         for attempt in range(1, _RECONNECT_MAX_ATTEMPTS + 1):
             if self._closing:
                 return False
@@ -192,18 +202,34 @@ class ChatClient:
                     return True
                 # join 被拒（房间已关 / 密码变更）→ 不再重试
                 logger.info("[LANChat] 重连后 join 被拒: %s", result.get("code"))
+                self._emit(protocol.build_frontend_event(
+                    "error",
+                    code="RECONNECT_REJECTED",
+                    reason=result.get("code", protocol.ErrorCode.BAD_REQUEST),
+                ))
+                self._terminal_error_emitted = True
                 return False
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                logger.info("[LANChat] 重连第 %d 次失败: %s", attempt, exc)
+                last_error = str(exc) or exc.__class__.__name__
+                last_probe = await self._probe_server()
+                logger.info("[LANChat] 重连第 %d 次失败: %s (probe=%s)",
+                            attempt, last_error, last_probe)
                 delay = min(delay * 2, _RECONNECT_MAX_DELAY)
+        self._emit(protocol.build_frontend_event(
+            "error",
+            code="RECONNECT_FAILED",
+            reason=last_probe or last_error or "unknown",
+            detail=last_error,
+        ))
+        self._terminal_error_emitted = True
         return False
 
     async def _try_join(self) -> dict:
         """建立 WebSocket 连接并完成一次 join 握手（首连与重连共用）。"""
         uri = f"ws://{self.ip}:{self.port}"
-        self._ws = await websockets.connect(uri)
+        self._ws = await websockets.connect(uri, **_WS_CONNECT_OPTIONS)
         await self._ws.send(
             json.dumps(
                 protocol.build_join(self.room, self.password, self.nickname),
@@ -225,6 +251,21 @@ class ChatClient:
             return {"ok": False, "code": msg.get("code", protocol.ErrorCode.BAD_REQUEST)}
         await self._close_ws()
         return {"ok": False, "code": protocol.ErrorCode.BAD_REQUEST}
+
+    async def _probe_server(self) -> str:
+        """轻量 TCP 探测房主端口，辅助区分重连失败原因。"""
+        def _probe() -> str:
+            try:
+                with socket.create_connection((self.ip, self.port), timeout=2.0):
+                    return "tcp_open"
+            except ConnectionRefusedError:
+                return "tcp_refused"
+            except TimeoutError:
+                return "tcp_timeout"
+            except OSError as exc:
+                return f"tcp_error:{exc.__class__.__name__}"
+
+        return await asyncio.to_thread(_probe)
 
     # ---- 消息处理 -------------------------------------------------------
     def _handle(self, msg: dict) -> None:

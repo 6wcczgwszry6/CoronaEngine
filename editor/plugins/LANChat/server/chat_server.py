@@ -28,6 +28,13 @@ from .room_manager import Agent, RoomManager, Room
 
 logger = logging.getLogger(__name__)
 
+_WS_SERVER_OPTIONS = {
+    "ping_interval": 30,
+    "ping_timeout": 90,
+    "open_timeout": 5,
+    "close_timeout": 2,
+}
+
 # 房主本机事件回调签名：接收一个前端事件 dict（已含 channel 标记）
 LocalEventCallback = Callable[[dict], None]
 
@@ -169,7 +176,8 @@ class ChatServer:
     # ---- 生命周期 -------------------------------------------------------
     async def start(self) -> None:
         """启动 WebSocket 服务。"""
-        self._server = await websockets.serve(self._handler, self.host, self.port)
+        self._server = await websockets.serve(
+            self._handler, self.host, self.port, **_WS_SERVER_OPTIONS)
         logger.info(
             "[LANChat] ChatServer 启动 room=%s host=%s port=%s",
             self.room.room_id,
