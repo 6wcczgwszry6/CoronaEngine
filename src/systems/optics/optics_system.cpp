@@ -1619,7 +1619,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
         }
         if (has_visible_vision_camera) break;
     }
-    if (has_visible_vision_camera) {
+    if (has_visible_vision_camera && vision_scene_source_ == VisionSceneSource::EngineBuilt) {
         sync_vision_dynamic_scene();
     }
 #endif
@@ -1777,9 +1777,69 @@ void OpticsSystem::apply_pending_vision_scene_load() {
 
     const std::string& path = *request;
     if (!path.empty()) {
-        CFW_LOG_WARNING(
-            "OpticsSystem: external Vision scenes are not used by camera viewports; "
-            "rendering the current Corona scene");
+        if (load_external_vision_scene(path)) {
+            vision_scene_source_ = VisionSceneSource::ExternalFile;
+            vision_applied_signature_ = 0;
+            vision_pending_signature_ = 0;
+            vision_stable_frames_ = 0;
+            vision_rebuild_retries_ = 0;
+            CFW_LOG_INFO("OpticsSystem: external Vision scene loaded: {}", path);
+        }
+        return;
+    }
+
+    try {
+        auto pipeline = create_vision_pipeline();
+        if (!pipeline) {
+            CFW_LOG_ERROR("OpticsSystem: failed to recreate engine-built Vision pipeline");
+            return;
+        }
+        auto& scene = pipeline->scene();
+        Vision::build_vision_geometry(scene);
+
+        Corona::EnvironmentDevice env{};
+        for (auto sd_it = SharedDataHub::instance().scene_storage().cbegin();
+             sd_it != SharedDataHub::instance().scene_storage().cend(); ++sd_it) {
+            const auto& sd = *sd_it;
+            if (!sd.enabled) continue;
+            if (sd.environment != 0) {
+                if (auto e = SharedDataHub::instance().environment_storage().try_acquire_read(sd.environment)) {
+                    env = *e;
+                    break;
+                }
+            }
+        }
+        Vision::setup_vision_lights(scene, env);
+        pipeline->prepare();
+        pipeline->frame_buffer()->prepare_view_texture();
+
+        for (auto sd_it = SharedDataHub::instance().scene_storage().cbegin();
+             sd_it != SharedDataHub::instance().scene_storage().cend(); ++sd_it) {
+            const auto& sd = *sd_it;
+            if (!sd.enabled) continue;
+            const auto camera_handle = select_scene_camera_handle(sd);
+            if (camera_handle == 0) continue;
+            auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(camera_handle);
+            if (!camera) continue;
+            Vision::sync_vision_camera(*pipeline, *camera);
+            break;
+        }
+
+        if (renderPipeline) {
+            renderPipeline->commit_command();
+            renderPipeline->clear_view_contexts();
+        }
+        vision_zero_copy_bridges_.clear();
+        retainedVisionContexts.clear();
+        renderPipeline = std::move(pipeline);
+        vision_scene_source_ = VisionSceneSource::EngineBuilt;
+        vision_applied_signature_ = compute_vision_scene_signature();
+        vision_pending_signature_ = vision_applied_signature_;
+        vision_stable_frames_ = 0;
+        vision_rebuild_retries_ = 0;
+        CFW_LOG_INFO("OpticsSystem: restored engine-built Vision scene");
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("OpticsSystem: restoring engine-built Vision scene failed: {}", e.what());
     }
 }
 
@@ -1792,6 +1852,12 @@ bool OpticsSystem::load_external_vision_scene(const std::string& scene_path) {
         }
         // Replace only after a successful import so a bad path leaves the current
         // scene intact.
+        if (renderPipeline) {
+            renderPipeline->commit_command();
+            renderPipeline->clear_view_contexts();
+        }
+        vision_zero_copy_bridges_.clear();
+        retainedVisionContexts.clear();
         renderPipeline = std::move(pipeline);
         return true;
     } catch (const std::exception& e) {

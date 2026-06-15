@@ -62,6 +62,8 @@ class Scene:
         self.terrain_type = ''
         self.terrain_path = ''
         self.script_path = ''
+        self.vision_source_path = ''
+        self.vision_import_mode = ''
 
         self.read_data()
         # 场景创建后补齐默认相机（幂等）
@@ -134,6 +136,10 @@ class Scene:
                 self.terrain_type = self.file_data['terrain'].get('type', '')
 
             # 读取相机数据（延迟到 ensure_default_camera 之后应用）
+            if 'vision' in self.file_data:
+                self.vision_source_path = self.file_data['vision'].get('source_path', '')
+                self.vision_import_mode = self.file_data['vision'].get('import_mode', '')
+
             self._pending_camera_data = {}
             if 'camera' in self.file_data:
                 self._pending_camera_data = dict(self.file_data['camera'])
@@ -274,6 +280,13 @@ class Scene:
 
         # 地形数据
         self.file_data['terrain']["path"] = self.terrain_path
+        self.file_data['terrain']["type"] = self.terrain_type
+
+        if self.vision_source_path or self.vision_import_mode:
+            if 'vision' not in self.file_data:
+                self.file_data['vision'] = {}
+            self.file_data['vision']['source_path'] = self.vision_source_path
+            self.file_data['vision']['import_mode'] = self.vision_import_mode or 'external'
 
         # 相机数据
         self.file_data['camera'] = {}
@@ -635,6 +648,10 @@ class Scene:
             "terrain": {
                 "path": self.terrain_path,
                 "type": self.terrain_type
+            },
+            "vision": {
+                "source_path": self.vision_source_path,
+                "import_mode": self.vision_import_mode,
             },
             "script": self.script_path,
             "actors": [actor.to_dict() for actor in self.get_actors()]

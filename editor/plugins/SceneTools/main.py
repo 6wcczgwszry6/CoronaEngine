@@ -25,6 +25,93 @@ def _active_project_path():
     return getattr(CoronaEditor.CoronaEngine, "active_project_path", None)
 
 
+def _as_float3(value):
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return None
+    try:
+        return [float(value[0]), float(value[1]), float(value[2])]
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_vec3(value):
+    vec = _as_float3(value)
+    if vec is None:
+        return None
+    length = math.sqrt(vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2])
+    if length <= 1e-8:
+        return None
+    return [vec[0] / length, vec[1] / length, vec[2] / length]
+
+
+def _extract_vision_camera_pose(document: dict):
+    scene_data = document.get("scene", document) if isinstance(document, dict) else {}
+    camera = None
+    cameras = scene_data.get("cameras")
+    if isinstance(cameras, list) and cameras:
+        camera = cameras[0]
+    if camera is None:
+        camera = scene_data.get("camera") or document.get("camera")
+    if not isinstance(camera, dict):
+        return None
+
+    params = camera.get("param") if isinstance(camera.get("param"), dict) else camera
+    transform = params.get("transform") if isinstance(params.get("transform"), dict) else {}
+    transform_params = (
+        transform.get("param") if isinstance(transform.get("param"), dict) else transform
+    )
+
+    position = (
+        _as_float3(transform_params.get("position"))
+        or _as_float3(params.get("position"))
+        or _as_float3(camera.get("position"))
+    )
+    up = (
+        _normalize_vec3(transform_params.get("up"))
+        or _normalize_vec3(params.get("up"))
+        or _normalize_vec3(params.get("world_up"))
+        or [0.0, 1.0, 0.0]
+    )
+    forward = (
+        _normalize_vec3(transform_params.get("forward"))
+        or _normalize_vec3(transform_params.get("direction"))
+        or _normalize_vec3(params.get("forward"))
+        or _normalize_vec3(params.get("direction"))
+    )
+    target = _as_float3(transform_params.get("target_pos") or transform_params.get("target"))
+    if forward is None and position is not None and target is not None:
+        forward = _normalize_vec3([
+            target[0] - position[0],
+            target[1] - position[1],
+            target[2] - position[2],
+        ])
+
+    fov = (
+        params.get("fov_y")
+        or params.get("fov")
+        or params.get("vfov")
+        or camera.get("fov")
+        or 45.0
+    )
+    try:
+        fov = float(fov)
+    except (TypeError, ValueError):
+        fov = 45.0
+    if 0.0 < fov <= math.pi:
+        fov = math.degrees(fov)
+
+    if position is None or forward is None:
+        return None
+
+    return {
+        "name": str(params.get("name") or camera.get("name") or "VisionCamera"),
+        "position": position,
+        "forward": forward,
+        "world_up": up,
+        "fov": fov,
+    }
+
+
 @PluginBase.register_web("SceneTools")
 class SceneTools(PluginBase):
     @staticmethod
@@ -432,6 +519,72 @@ class SceneTools(PluginBase):
             logger.info("Vision scene load requested: %s", path or "<unload>")
             return {"status": "success", "path": path}
         except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def import_vision_scene_into_current_scene(scene_name: str, path: str) -> dict:
+        try:
+            if not scene_name:
+                return {"status": "error", "message": "scene_name is required"}
+            if not path:
+                return {"status": "error", "message": "Vision scene path is required"}
+            if not CoronaEditor.CoronaEngine.is_vision_available():
+                return {"status": "error", "message": "Vision backend is not available in this build"}
+
+            abs_path = os.path.abspath(path)
+            if not os.path.isfile(abs_path):
+                return {"status": "error", "message": f"Vision scene file not found: {abs_path}"}
+
+            with open(abs_path, "r", encoding="utf-8") as f:
+                document = json.load(f)
+
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                return {"status": "error", "message": f"Scene '{scene_name}' not found"}
+
+            camera_pose = _extract_vision_camera_pose(document)
+            scene.ensure_default_camera()
+            active_camera = scene.get_active_camera()
+            camera_imported = False
+            if camera_pose is not None and active_camera is not None:
+                active_camera.name = camera_pose["name"] or active_camera.name
+                scene.set_camera(
+                    camera_pose["position"],
+                    camera_pose["forward"],
+                    camera_pose["world_up"],
+                    camera_pose["fov"],
+                    active_camera.camera_id,
+                )
+                camera_imported = True
+
+            active_camera = scene.get_active_camera()
+            if active_camera is not None:
+                active_camera.set_render_backend("vision")
+                if hasattr(scene.engine_scene, "set_active_camera"):
+                    scene.engine_scene.set_active_camera(getattr(active_camera, "engine_obj", active_camera))
+
+            if "vision" not in scene.file_data:
+                scene.file_data["vision"] = {}
+            scene.vision_source_path = abs_path
+            scene.vision_import_mode = "external"
+            scene.file_data["vision"]["source_path"] = abs_path
+            scene.file_data["vision"]["import_mode"] = "external"
+            scene.save_data()
+
+            CoronaEditor.CoronaEngine.load_vision_scene(abs_path)
+            scene._notify_scene_tree_changed()
+            logger.info("Vision scene imported into current scene %s: %s", scene_name, abs_path)
+            return {
+                "status": "success",
+                "scene": scene_name,
+                "path": abs_path,
+                "camera_imported": camera_imported,
+                "camera": active_camera.to_dict() if active_camera is not None else None,
+            }
+        except json.JSONDecodeError as exc:
+            return {"status": "error", "message": f"Invalid Vision JSON: {exc}"}
+        except Exception as exc:
+            logger.exception("import_vision_scene_into_current_scene failed")
             return {"status": "error", "message": str(exc)}
 
     @staticmethod

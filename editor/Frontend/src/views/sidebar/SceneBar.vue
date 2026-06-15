@@ -274,7 +274,7 @@
         </button>
         <!-- 打开外部 Vision 场景文件（仅 Vision 后端激活时显示） -->
         <button
-          v-if="visionAvailable && activeRenderBackend === 'vision'"
+          v-if="visionAvailable"
           class="p-1.5 hover:bg-[#545454] rounded flex items-center gap-0.5 text-[#e0e0e0]"
           title="打开 Vision 场景文件 (.json)"
           @click.stop="OpenVisionScene"
@@ -1409,11 +1409,20 @@ const OpenVisionScene = async () => {
       return;
     }
 
-    const result = await sceneService.loadVisionScene(selPayload.path);
+    const result = await sceneService.importVisionSceneIntoCurrentScene(
+      currentSceneName.value,
+      selPayload.path,
+    );
     const payload = result?.data ?? result;
     if (result?.success === false || payload?.status === 'error') {
       logError('Load Vision scene failed', payload?.message || result?.error || 'unknown error');
+      return;
     }
+    if (payload?.camera?.name) {
+      selectedCameraName.value = payload.camera.name;
+    }
+    await OnInitObjTree();
+    await RefreshRenderBackendState();
   } catch (e) {
     logError('Failed to open Vision scene', e);
   }
