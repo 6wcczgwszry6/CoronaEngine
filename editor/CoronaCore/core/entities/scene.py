@@ -158,7 +158,10 @@ class Scene:
             camera_count = max(indices, default=0) + 1
 
         while len(self._cameras) < camera_count:
-            camera = Camera(name=f"{self.name}_Camera{len(self._cameras)}")
+            camera_index = len(self._cameras)
+            camera = Camera(
+                name=f"{self.name}_Camera{camera_index}",
+                deletable=camera_index != 0)
             camera.set_surface(0)
             self._cameras.append(camera)
             self.engine_scene.add_camera(camera.engine_obj)
@@ -167,6 +170,9 @@ class Scene:
             prefix = f'camera{i}'
             cam.camera_id = data.get(f'{prefix}.id', cam.camera_id)
             cam.name = data.get(f'{prefix}.name', cam.name)
+            cam.deletable = data.get(
+                f'{prefix}.deletable',
+                'false' if i == 0 else 'true').lower() in ('1', 'true', 'yes', 'on')
             try:
                 pos_str = data.get(f'{prefix}.position')
                 fwd_str = data.get(f'{prefix}.forward')
@@ -279,6 +285,7 @@ class Scene:
             if cam is not None:
                 try:
                     cam.refresh_view_state()
+                    cam.refresh_size()
                     pos = cam.get_position()
                     fwd = cam.get_forward()
                     up = cam.get_world_up()
@@ -286,6 +293,7 @@ class Scene:
                     prefix = f'camera{i}'
                     self.file_data['camera'][f'{prefix}.id'] = cam.camera_id
                     self.file_data['camera'][f'{prefix}.name'] = cam.name
+                    self.file_data['camera'][f'{prefix}.deletable'] = str(cam.deletable).lower()
                     self.file_data['camera'][f'{prefix}.position'] = f"{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}"
                     self.file_data['camera'][f'{prefix}.forward'] = f"{fwd[0]:.4f}, {fwd[1]:.4f}, {fwd[2]:.4f}"
                     self.file_data['camera'][f'{prefix}.world_up'] = f"{up[0]:.4f}, {up[1]:.4f}, {up[2]:.4f}"
@@ -385,6 +393,7 @@ class Scene:
         self._cameras.append(camera)
         self.engine_scene.add_camera(getattr(camera, 'engine_obj', camera))
         if self._main_camera is None:
+            camera.deletable = False
             self._main_camera = camera
             if hasattr(self.engine_scene, 'set_active_camera'):
                 self.engine_scene.set_active_camera(getattr(camera, 'engine_obj', camera))
@@ -524,7 +533,7 @@ class Scene:
         created = False
 
         if not self._cameras:
-            camera = Camera(name=f"{self.name}_MainCamera")
+            camera = Camera(name=f"{self.name}_MainCamera", deletable=False)
             self._cameras.append(camera)
             self.engine_scene.add_camera(getattr(camera, 'engine_obj', camera))
             self._main_camera = camera
@@ -534,6 +543,7 @@ class Scene:
 
         if self._main_camera is None:
             self._main_camera = self._cameras[0]
+            self._main_camera.deletable = False
             if hasattr(self.engine_scene, 'set_active_camera'):
                 self.engine_scene.set_active_camera(getattr(self._main_camera, 'engine_obj', self._main_camera))
 

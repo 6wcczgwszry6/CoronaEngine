@@ -361,6 +361,9 @@ class Camera:
         _log(f"[Fallback][Camera.set_size] width={width}, height={height}")
         self._w, self._h = int(width), int(height)
 
+    def get_size(self):
+        return [self._w, self._h]
+
     def set_viewport_rect(self, x: int, y: int, width: int, height: int):
         _log(f"[Fallback][Camera.set_viewport_rect] x={x}, y={y}, width={width}, height={height}")
 

@@ -267,6 +267,7 @@ class Camera {
     void remove_image_effects();
 
     void set_size(int width, int height);
+    [[nodiscard]] std::array<int, 2> get_size() const;
     void set_viewport_rect(int x, int y, int width, int height);
     [[nodiscard]] std::uintptr_t pick_actor_at_pixel(int x, int y) const;
 

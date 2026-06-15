@@ -401,6 +401,7 @@ void OpticsSystem::bind_native_view_resources(std::uintptr_t camera_handle,
     auto& resources = *resources_ptr;
     if (resources.width != width || resources.height != height ||
         !resources.visibility || !resources.depth || !resources.visibility_pipeline) {
+        hardware_->executor.waitForDeferredResources();
         resources.visibility = HardwareImage(width, height, ImageFormat::RGBA32_UINT,
                                              ImageUsage::StorageImage);
         resources.depth = HardwareImage(width, height, ImageFormat::D32_FLOAT,
@@ -461,6 +462,13 @@ OpticsSystem::SurfaceRenderTarget& OpticsSystem::acquire_surface_target(void* su
     // 分辨率变化或首次：创建/重建该 surface 的 Optics 输出图。
     if (!target.final_output || !target.ui_overlay || !target.composite_output ||
         target.width != width || target.height != height) {
+        if (target.image_handle != 0) {
+            if (auto image_device =
+                    SharedDataHub::instance().image_storage().acquire_write(target.image_handle)) {
+                hardware_->executor.wait(image_device->consumed_executor);
+            }
+        }
+        hardware_->executor.waitForDeferredResources();
         target.final_output =
             HardwareImage(width, height, ImageFormat::RGBA16_FLOAT, ImageUsage::StorageImage);
         target.ui_overlay =

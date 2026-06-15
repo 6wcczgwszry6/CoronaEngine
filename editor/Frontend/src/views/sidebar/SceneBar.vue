@@ -427,6 +427,7 @@
                   {{ cam.width }}x{{ cam.height }}
                 </span>
                 <button
+                  v-if="isCameraDeletable(cam)"
                   class="hidden group-hover:inline text-xs leading-none text-[#888] hover:text-[#ef5350] disabled:opacity-30 disabled:hover:text-[#888]"
                   :disabled="sceneCameras.length <= 1"
                   title="Delete camera"
@@ -1056,8 +1057,10 @@ const OpenCameraView = async (cam) => {
   }
 };
 
+const isCameraDeletable = (cam) => cam?.deletable !== false;
+
 const DeleteCamera = async (cam) => {
-  if (sceneCameras.value.length <= 1) return;
+  if (sceneCameras.value.length <= 1 || !isCameraDeletable(cam)) return;
   try {
     const cameraId = cam.camera_id || cam.id || cam.name;
     await appService.closeCameraView(currentSceneName.value, cameraId);
@@ -1795,6 +1798,7 @@ const OnInitObjTree = async () => {
           handle: normalizeHandle(cam.handle ?? cam.camera_handle),
           render_backend: cam.render_backend || 'native',
           output_mode: cam.output_mode || 'final_color',
+          deletable: cam.deletable !== false,
           move_speed: cam.move_speed || 1,
           view_open: !!cam.view_open,
           view_x: cam.view_x || 120,

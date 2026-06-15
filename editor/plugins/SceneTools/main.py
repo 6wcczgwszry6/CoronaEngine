@@ -414,6 +414,8 @@ class SceneTools(PluginBase):
                 raise ValueError(f"Camera '{camera_name}' not found")
             if len(scene.get_cameras()) <= 1:
                 raise ValueError("A scene must keep at least one camera")
+            if not getattr(camera, 'deletable', True):
+                raise ValueError("The main camera cannot be deleted")
             camera.set_surface(0)
             scene.remove_camera_from_scene(camera)
             scene._notify_scene_tree_changed()

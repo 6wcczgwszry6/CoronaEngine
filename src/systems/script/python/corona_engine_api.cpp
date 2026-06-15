@@ -2011,6 +2011,23 @@ void Corona::API::Camera::set_size(int width, int height) {
     SharedDataHub::instance().enqueue_camera_state_update(command);
 }
 
+std::array<int, 2> Corona::API::Camera::get_size() const {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Camera::get_size] Invalid camera handle");
+        return {width_, height_};
+    }
+
+    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_read(handle_)) {
+        return {
+            static_cast<int>(accessor->width),
+            static_cast<int>(accessor->height),
+        };
+    }
+
+    CFW_LOG_ERROR("[Camera::get_size] Failed to acquire read access to camera storage");
+    return {width_, height_};
+}
+
 void Corona::API::Camera::set_viewport_rect(int x, int y, int width, int height) {
     // TODO: Implement viewport rectangle settings
     CFW_LOG_WARNING("[Camera::set_viewport_rect] Not implemented yet");

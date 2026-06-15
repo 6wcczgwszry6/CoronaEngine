@@ -18,7 +18,8 @@ class Camera:
                  render_backend: str = "native", output_mode: str = "final_color",
                  move_speed: float = 1.0, view_open: bool = False,
                  view_x: int = 120, view_y: int = 120,
-                 view_width: int = 960, view_height: int = 540):
+                 view_width: int = 960, view_height: int = 540,
+                 deletable: bool = True):
         if CoronaEngine is None:
             raise RuntimeError("CoronaEngine 未初始化")
 
@@ -51,6 +52,7 @@ class Camera:
         self.view_y = int(view_y)
         self.view_width = int(view_width)
         self.view_height = int(view_height)
+        self.deletable = bool(deletable)
         self.engine_obj.set_size(width, height)
         self.engine_obj.set_output_mode(output_mode)
         self.engine_obj.set_render_backend(render_backend)
@@ -153,6 +155,17 @@ class Camera:
             'move_speed': self.move_speed,
         }
 
+    def refresh_size(self):
+        if hasattr(self.engine_obj, 'get_size'):
+            size = self.engine_obj.get_size()
+            if size and len(size) >= 2:
+                self.width = max(int(size[0]), 1)
+                self.height = max(int(size[1]), 1)
+        return {
+            'width': self.width,
+            'height': self.height,
+        }
+
     # ========== 图像效果与尺寸管理 ==========
     def set_image_effects(self, effects: Any):
         """设置图像效果"""
@@ -192,6 +205,7 @@ class Camera:
 
     def to_dict(self) -> Dict[str, Any]:
         self.refresh_view_state()
+        self.refresh_size()
         return {
             'id': self.camera_id,
             'camera_id': self.camera_id,
@@ -211,6 +225,7 @@ class Camera:
             'view_y': self.view_y,
             'view_width': self.view_width,
             'view_height': self.view_height,
+            'deletable': self.deletable,
         }
 
     def __repr__(self):
