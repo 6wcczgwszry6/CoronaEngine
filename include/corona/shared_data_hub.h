@@ -7,6 +7,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <memory>
+#include <string>
 #include <vector>
 #include <filesystem>
 
@@ -212,6 +213,8 @@ struct CameraDevice {
 };
 
 struct ActorPickDevice {
+    std::string request_id;
+    std::string result_request_id;
     std::uint32_t x{0};
     std::uint32_t y{0};
     std::uint32_t result_x{0};

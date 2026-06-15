@@ -555,14 +555,25 @@ bool handle_actor_transform_fast(const CefRefPtr<CefProcessMessage>& message) {
     return true;
 }
 
-bool handle_viewport_pick(const CefRefPtr<CefProcessMessage>& message) {
+void send_viewport_pick_result(const CefRefPtr<CefFrame>& frame,
+                               const nlohmann::json& payload) {
+    if (!frame) {
+        return;
+    }
+
+    const std::string js = "window.__coronaEmit&&window.__coronaEmit(\"actor-pick-result\"," +
+                           payload.dump() + ")";
+    frame->ExecuteJavaScript(js, "", 0);
+}
+
+bool handle_viewport_pick(const CefRefPtr<CefFrame>& frame,
+                          const CefRefPtr<CefProcessMessage>& message) {
     auto args = message->GetArgumentList();
-    if (!args || args->GetSize() < 5) {
-        CFW_LOG_WARNING("ViewportPick dropped: expected 5 args");
+    if (!args || args->GetSize() < 7) {
+        CFW_LOG_WARNING("ViewportPick dropped: expected 7 args");
         return true;
     }
 
-    // args: [scene_handle: double, x: double, y: double, vp_width: double, vp_height: double]
     const auto read_double = [&](int index) -> double {
         const auto type = args->GetType(index);
         if (type == VTYPE_INT) return static_cast<double>(args->GetInt(index));
@@ -570,65 +581,109 @@ bool handle_viewport_pick(const CefRefPtr<CefProcessMessage>& message) {
         return 0.0;
     };
 
-    const auto scene_handle = static_cast<std::uintptr_t>(read_double(0));
-    const double x = read_double(1);
-    const double y = read_double(2);
-    const double vp_w = read_double(3);
-    const double vp_h = read_double(4);
+    const auto camera_handle = static_cast<std::uintptr_t>(read_double(0));
+    const std::string scene_id =
+        args->GetType(1) == VTYPE_STRING ? args->GetString(1).ToString() : std::string{};
+    const std::string request_id =
+        args->GetType(2) == VTYPE_STRING ? args->GetString(2).ToString() : std::string{};
+    const double x = read_double(3);
+    const double y = read_double(4);
+    const double vp_w = read_double(5);
+    const double vp_h = read_double(6);
 
-    if (scene_handle == 0 || vp_w <= 0.0 || vp_h <= 0.0) {
-        CFW_LOG_WARNING("ViewportPick: invalid params (scene={}, vp={}x{})", scene_handle, vp_w, vp_h);
+    auto emit = [&](const std::string& status,
+                    std::uintptr_t actor_handle,
+                    std::uint32_t result_x,
+                    std::uint32_t result_y,
+                    const char* message_text = nullptr) {
+        nlohmann::json payload;
+        payload["status"] = status;
+        payload["sceneId"] = scene_id;
+        payload["cameraHandle"] = static_cast<std::uint64_t>(camera_handle);
+        payload["requestId"] = request_id;
+        payload["actorHandle"] = static_cast<std::uint64_t>(actor_handle);
+        payload["x"] = result_x;
+        payload["y"] = result_y;
+        if (message_text) {
+            payload["message"] = message_text;
+        }
+        send_viewport_pick_result(frame, payload);
+    };
+
+    if (camera_handle == 0 || request_id.empty() || scene_id.empty() ||
+        vp_w <= 0.0 || vp_h <= 0.0 || !std::isfinite(x) || !std::isfinite(y)) {
+        CFW_LOG_WARNING("ViewportPick: invalid params (camera={}, scene='{}', request='{}', vp={}x{})",
+                        camera_handle, scene_id, request_id, vp_w, vp_h);
+        emit("error", 0, 0, 0, "invalid params");
         return true;
     }
 
     auto& hub = Corona::SharedDataHub::instance();
 
-    // Get the scene's active camera
-    std::uintptr_t camera_handle = 0;
-    if (auto scene = hub.scene_storage().try_acquire_read(scene_handle)) {
-        camera_handle = select_scene_camera_handle(*scene);
-    }
-    if (camera_handle == 0) {
-        CFW_LOG_WARNING("ViewportPick: no camera found for scene {}", scene_handle);
+    std::uintptr_t actor_pick_handle = 0;
+    double cam_w = 1920.0;
+    double cam_h = 1080.0;
+    if (auto cam = hub.camera_storage().try_acquire_read(camera_handle)) {
+        cam_w = static_cast<double>(cam->width);
+        cam_h = static_cast<double>(cam->height);
+        actor_pick_handle = cam->actor_pick_handle;
+    } else {
+        CFW_LOG_WARNING("ViewportPick: camera {} is unavailable", camera_handle);
+        emit("error", 0, 0, 0, "camera unavailable");
         return true;
     }
 
-    // Read camera dimensions for coordinate scaling
-    float cam_w = 1920.0f;
-    float cam_h = 1080.0f;
-    if (auto cam = hub.camera_storage().try_acquire_read(camera_handle)) {
-        cam_w = static_cast<float>(cam->width);
-        cam_h = static_cast<float>(cam->height);
+    if (actor_pick_handle == 0) {
+        CFW_LOG_WARNING("ViewportPick: camera {} has no actor pick storage", camera_handle);
+        emit("error", 0, 0, 0, "actor pick unavailable");
+        return true;
     }
 
-    int pick_x = static_cast<int>(x * cam_w / vp_w);
-    int pick_y = static_cast<int>(y * cam_h / vp_h);
-
-    // Call the pick API via SharedDataHub
-    std::uintptr_t picked_actor = 0;
-    if (auto cam = hub.camera_storage().try_acquire_read(camera_handle)) {
-        std::uintptr_t actor_pick_handle = cam->actor_pick_handle;
-        if (actor_pick_handle != 0) {
-            auto pick = hub.actor_pick_storage().try_acquire_write(actor_pick_handle);
-            if (pick) {
-                const auto ux = static_cast<std::uint32_t>(pick_x);
-                const auto uy = static_cast<std::uint32_t>(pick_y);
-                picked_actor = (pick->result_ready && pick->result_x == ux && pick->result_y == uy)
-                                   ? pick->actor_handle
-                                   : 0;
-                pick->x = ux;
-                pick->y = uy;
-                pick->pending = true;
-                pick->result_ready = false;
-            }
-        }
+    const double scaled_x = x * cam_w / vp_w;
+    const double scaled_y = y * cam_h / vp_h;
+    if (scaled_x < 0.0 || scaled_y < 0.0 ||
+        scaled_x >= cam_w || scaled_y >= cam_h) {
+        CFW_LOG_DEBUG("ViewportPick miss: camera={} request={} pos=({},{}) -> scaled=({},{})",
+                      camera_handle, request_id, x, y, scaled_x, scaled_y);
+        emit("miss", 0, 0, 0);
+        return true;
     }
 
-    // Result will be emitted to Vue via __coronaEmit by the actor pick system
-    // For now, the Python fallback path still handles the JS notification
-    (void)picked_actor;
-    CFW_LOG_DEBUG("ViewportPick: scene={} pos=({},{}) -> cam_px=({},{}) -> handle=0x{:x}",
-                  scene_handle, x, y, pick_x, pick_y, picked_actor);
+    const auto pick_x = static_cast<std::uint32_t>(scaled_x);
+    const auto pick_y = static_cast<std::uint32_t>(scaled_y);
+
+    auto pick = hub.actor_pick_storage().try_acquire_write(actor_pick_handle);
+    if (!pick) {
+        CFW_LOG_WARNING("ViewportPick: pick storage {} is unavailable", actor_pick_handle);
+        emit("error", 0, pick_x, pick_y, "actor pick storage unavailable");
+        return true;
+    }
+
+    if (pick->result_ready && pick->result_request_id == request_id &&
+        pick->result_x == pick_x && pick->result_y == pick_y) {
+        const auto picked_actor = pick->actor_handle;
+        emit(picked_actor != 0 ? "success" : "miss", picked_actor, pick_x, pick_y);
+        CFW_LOG_DEBUG("ViewportPick result: camera={} request={} cam_px=({},{}) -> handle=0x{:x}",
+                      camera_handle, request_id, pick_x, pick_y, picked_actor);
+        return true;
+    }
+
+    if (pick->request_id == request_id &&
+        pick->x == pick_x &&
+        pick->y == pick_y &&
+        !pick->result_ready) {
+        emit("pending", 0, pick_x, pick_y);
+        return true;
+    }
+
+    pick->request_id = request_id;
+    pick->x = pick_x;
+    pick->y = pick_y;
+    pick->pending = true;
+    pick->result_ready = false;
+    emit("pending", 0, pick_x, pick_y);
+    CFW_LOG_DEBUG("ViewportPick pending: camera={} scene='{}' request={} pos=({},{}) -> cam_px=({},{})",
+                  camera_handle, scene_id, request_id, x, y, pick_x, pick_y);
 
     return true;
 }
@@ -1440,7 +1495,7 @@ bool handle_realtime_process_message(CefRefPtr<CefBrowser> browser,
     }
 
     if (message->GetName() == "ViewportPick") {
-        return handle_viewport_pick(message);
+        return handle_viewport_pick(frame, message);
     }
 
     if (message->GetName() == "InputInject") {

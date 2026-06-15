@@ -1,5 +1,5 @@
 <template>
-  <div class="relative flex-1 min-h-0 w-full" tabindex="0">
+  <div class="relative flex flex-col flex-1 min-h-0 h-full w-full" tabindex="0">
     <!-- 顶部菜单栏 -->
     <div
       class="w-full bg-[#2d2d2d] text-gray-200 border-b border-gray-700 h-10 flex items-center px-4 space-x-6 text-sm shadow-md"
@@ -344,6 +344,15 @@
         <span class="text-white/80 text-xs w-8 text-right">{{ cameraSpeed.toFixed(2) }}</span>
       </div>
     </div>
+
+    <div
+      ref="viewportPickSurfaceRef"
+      class="relative flex-1 min-h-0 w-full"
+      data-viewport-pick-surface
+      aria-hidden="true"
+      @mousedown.left="handleViewportPick"
+    ></div>
+
     <!-- 自定义弹窗 -->
     <div
       v-if="showDialog"
@@ -474,6 +483,7 @@ import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { useDockStore } from '@/stores/dockStore.js';
 import { PLUGIN_MANIFEST } from '@/config/pluginManifest.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
+import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
 import AIHintBubble from '@/components/ui/AIHintBubble.vue';
 import { startStageHints, stopStageHints, setHintShowMs } from '@/services/aiHintGenerator.js';
 
@@ -505,6 +515,8 @@ const cameraBindingState = ref({
   cameraName: null,
   cameraHandle: null,
 });
+let actorPickIndex = new Map();
+const viewportPickSurfaceRef = ref(null);
 
 // 摄像头移动速度（可调节）
 const cameraSpeed = ref(0.2);
@@ -515,6 +527,25 @@ const mouseRotate = reactive({
   active: false,
   lastX: 0,
   lastY: 0,
+});
+
+const viewportPickController = createViewportPickController({
+  retryDelayMs: 60,
+  getBridge: () => window.coronaBridge,
+  getCameraBinding: () => cameraBindingState.value,
+  getViewportRect: () => viewportPickSurfaceRef.value?.getBoundingClientRect?.() ?? null,
+  getViewportSize: () => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }),
+  getActorIndex: () => actorPickIndex,
+  emitActorChange: (type, sceneId, actorName) => {
+    if (typeof window.__coronaEmit === 'function') {
+      window.__coronaEmit('actor-change', type, sceneId, actorName);
+    } else {
+      coronaEventBus.emit('actor-change', type, sceneId, actorName);
+    }
+  },
 });
 
 const hasActiveMovementKeys = () => Object.values(movementKeys).some((value) => value);
@@ -707,6 +738,7 @@ const applySceneSnapshot = (sceneId, payload) => {
   const normalizedSceneId =
     snapshot.scene_id ?? snapshot.sceneId ?? snapshot.id ?? sceneId ?? DEFAULT_SCENE_NAME;
   const cameras = Array.isArray(snapshot.cameras) ? snapshot.cameras : [];
+  actorPickIndex = indexActorsByHandle(Array.isArray(snapshot.actors) ? snapshot.actors : []);
   const activeCameraName =
     snapshot.active_camera_name ?? snapshot.activeCameraName ?? cameras[0]?.name ?? null;
   const activeCamera =
@@ -1085,55 +1117,8 @@ const handleMouseRotate = (dx, dy) => {
   cameraState.value.forward = vec3.normalize(newFwd);
 };
 
-// 鼠标左键拾取3D物体的两阶段重试
-let _pickRetryTimer = null;
-const PICK_RETRY_DELAY_MS = 60; // 等待引擎处理拾取请求（约一帧时间）
-
-const handleViewportPick = async (event) => {
-  const sceneId = tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
-  const vpW = window.innerWidth;
-  const vpH = window.innerHeight;
-  const clientX = event.clientX;
-  const clientY = event.clientY;
-
-  // ── 快速通道：coronaBridge.pickActor → CEF ProcessMessage → SharedDataHub ──
-  const bridge = window.coronaBridge;
-  if (bridge && typeof bridge.pickActor === 'function') {
-    try {
-      bridge.pickActor(0, clientX, clientY, vpW, vpH);  // scene_handle=0 means use current active scene
-      console.log('[PickFast] pickActor called (%d,%d) vp=(%d,%d)', clientX, clientY, vpW, vpH);
-      return;
-    } catch (e) {
-      console.warn('[PickFast] coronaBridge.pickActor failed, falling back to Python:', e);
-    }
-  }
-
-  // ── 慢通道：Python cefQuery 回退 ──
-  try {
-    console.log('[Pick] 请求拾取 scene=%s pos=(%d,%d) vp=(%d,%d)', sceneId, clientX, clientY, vpW, vpH);
-    const result = await sceneService.pickActor(
-      sceneId, clientX, clientY, vpW, vpH
-    );
-    const data = result?.data ?? result;
-    console.log('[Pick] 第一次响应:', JSON.stringify(data));
-    if (data?.status === 'pending') {
-      if (_pickRetryTimer) clearTimeout(_pickRetryTimer);
-      _pickRetryTimer = setTimeout(async () => {
-        _pickRetryTimer = null;
-        try {
-          const retryResult = await sceneService.pickActor(
-            sceneId, clientX, clientY, vpW, vpH
-          );
-          const retryData = retryResult?.data ?? retryResult;
-          if (retryData?.status === 'success') {
-            console.log('[Pick] 选中物体:', retryData.actor?.name);
-          }
-        } catch (e) { /* retry silently */ }
-      }, PICK_RETRY_DELAY_MS);
-    } else if (data?.status === 'success') {
-      console.log('[Pick] 命中缓存:', data.actor?.name);
-    }
-  } catch (e) { /* pick silently */ }
+const handleViewportPick = (event) => {
+  viewportPickController.pickAt(event);
 };
 
 const onMouseDown = (event) => {
@@ -1147,16 +1132,7 @@ const onMouseDown = (event) => {
     return;
   }
 
-  // 左键：在3D视口中拾取物体
-  if (event.button === 0) {
-    // 忽略UI交互元素上的点击（菜单栏、按钮、输入框、场景标签等）
-    const interactiveEl = event.target.closest(
-      'button, a, input, select, textarea, [role="button"], [role="menubar"]'
-    );
-    if (interactiveEl) return;
-
-    handleViewportPick(event);
-  }
+  // 左键拾取只由 viewportPickSurfaceRef 对应的视口层触发。
 };
 
 const onMouseMove = (event) => {
@@ -1192,6 +1168,10 @@ const onMouseUp = (event) => {
 const onContextMenu = (event) => {
   if (isGamePreviewInputLocked()) return;
   event.preventDefault();
+};
+
+const handleActorPickResult = (payload) => {
+  viewportPickController.handlePickResult(payload);
 };
 
 const sendCameraUpdateFast = () => {
@@ -1736,6 +1716,7 @@ onMounted(async () => {
     const panelId = payload?.panelId;
     if (panelId) dockStore.popIn(panelId);
   });
+  coronaEventBus.on('actor-pick-result', handleActorPickResult);
 
   // 启动阶段性包菜提示：每隔一段时间根据用户操作自动弹出 AI 提示气泡
   startStageHints(
@@ -1759,13 +1740,10 @@ onUnmounted(() => {
   coronaEventBus.off('scene-add');
   coronaEventBus.off('scene-rename');
   coronaEventBus.off('panel-closed');
+  coronaEventBus.off('actor-pick-result', handleActorPickResult);
   window.removeEventListener('storage', onStorageChange);
   stopMoveLoop();
-  // 清理拾取重试定时器
-  if (_pickRetryTimer) {
-    clearTimeout(_pickRetryTimer);
-    _pickRetryTimer = null;
-  }
+  viewportPickController.dispose();
   document.removeEventListener('keydown', handleKeyDown);
   document.removeEventListener('keyup', handleKeyUp);
   document.removeEventListener('click', handleClickOutside);

@@ -181,10 +181,10 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
 
             // ── pickActor: 视口拾取快速通道 ──
             if (name == "pickActor") {
-                // arguments: (sceneHandle: number, x: number, y: number, vpWidth: number, vpHeight: number)
-                // Returns result via __coronaEmit("actor-pick-result", ...) injected into the main frame
-                if (arguments.size() < 5) {
-                    exception = "pickActor(handle, x, y, vpW, vpH) requires 5 arguments";
+                // arguments: (cameraHandle: number, sceneId: string, requestId: string,
+                //             x: number, y: number, vpWidth: number, vpHeight: number)
+                if (arguments.size() < 7) {
+                    exception = "pickActor(cameraHandle, sceneId, requestId, x, y, vpW, vpH) requires 7 arguments";
                     retval = CefV8Value::CreateBool(false);
                     return true;
                 }
@@ -195,13 +195,34 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
                 }
                 CefRefPtr<CefProcessMessage> pick_msg = CefProcessMessage::Create("ViewportPick");
                 CefRefPtr<CefListValue> pick_args = pick_msg->GetArgumentList();
-                for (int i = 0; i < 5; ++i) {
-                    const auto& arg = arguments[i];
-                    if (!arg) { retval = CefV8Value::CreateBool(false); return true; }
-                    if (arg->IsInt()) pick_args->SetInt(i, arg->GetIntValue());
-                    else if (arg->IsDouble()) pick_args->SetDouble(i, arg->GetDoubleValue());
-                    else { retval = CefV8Value::CreateBool(false); return true; }
+
+                const auto set_numeric_arg = [&](int index) -> bool {
+                    const auto& arg = arguments[index];
+                    if (!arg) return false;
+                    if (arg->IsInt()) {
+                        pick_args->SetInt(index, arg->GetIntValue());
+                        return true;
+                    }
+                    if (arg->IsDouble()) {
+                        pick_args->SetDouble(index, arg->GetDoubleValue());
+                        return true;
+                    }
+                    return false;
+                };
+
+                if (!set_numeric_arg(0) ||
+                    !arguments[1] || !arguments[1]->IsString() ||
+                    !arguments[2] || !arguments[2]->IsString() ||
+                    !set_numeric_arg(3) ||
+                    !set_numeric_arg(4) ||
+                    !set_numeric_arg(5) ||
+                    !set_numeric_arg(6)) {
+                    exception = "pickActor: expected (number, string, string, number, number, number, number)";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
                 }
+                pick_args->SetString(1, arguments[1]->GetStringValue());
+                pick_args->SetString(2, arguments[2]->GetStringValue());
                 pick_ctx->GetFrame()->SendProcessMessage(PID_BROWSER, pick_msg);
                 retval = CefV8Value::CreateBool(true);
                 return true;

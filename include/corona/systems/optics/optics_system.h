@@ -123,6 +123,7 @@ class OpticsSystem : public Kernel::SystemBase {
 #endif  // CORONA_ENABLE_VISION
     struct ActorPickRequest {
         std::uintptr_t pick_handle{0};
+        std::string request_id;
         std::uint32_t x{0};
         std::uint32_t y{0};
     };

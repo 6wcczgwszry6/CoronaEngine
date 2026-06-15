@@ -1131,6 +1131,7 @@ std::optional<OpticsSystem::ActorPickRequest> OpticsSystem::take_pending_actor_p
 
     ActorPickRequest request;
     request.pick_handle = pick_handle;
+    request.request_id = pick->request_id;
     request.x = pick->x;
     request.y = pick->y;
     pick->pending = false;
@@ -1139,6 +1140,7 @@ std::optional<OpticsSystem::ActorPickRequest> OpticsSystem::take_pending_actor_p
         pick->actor_handle = 0;
         pick->result_x = request.x;
         pick->result_y = request.y;
+        pick->result_request_id = request.request_id;
         pick->result_ready = true;
         return std::nullopt;
     }
@@ -1163,9 +1165,13 @@ void OpticsSystem::complete_actor_pick(const ActorPickRequest& request,
     }
 
     if (auto pick = SharedDataHub::instance().actor_pick_storage().try_acquire_write(request.pick_handle)) {
+        if (pick->request_id != request.request_id) {
+            return;
+        }
         pick->actor_handle = actor_handle;
         pick->result_x = request.x;
         pick->result_y = request.y;
+        pick->result_request_id = request.request_id;
         pick->result_ready = true;
     }
 }
