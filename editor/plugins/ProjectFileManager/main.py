@@ -208,7 +208,11 @@ class FileManager(PluginBase):
                 if actor is None:
                     from CoronaCore.core.entities import Actor
                     actor = Actor(route=path, actor_type="actor")
-                CoronaEditor.js_call_func("actor-change", ['actor', "", actor.route])
+                # 优先使用 actor 名称（而非 route），并尝试获取所属场景名
+                scene_name = ""
+                if actor.parent:
+                    scene_name = getattr(actor.parent, 'route', '') or getattr(actor.parent, 'name', '')
+                CoronaEditor.js_call_func("actor-change", ['actor', scene_name, actor.name])
             else:
                 logger.error(f"No file type: {file_type}")
                 return False
