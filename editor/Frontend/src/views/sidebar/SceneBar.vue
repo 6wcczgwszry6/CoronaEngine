@@ -407,6 +407,7 @@
               <div
                 class="group flex items-center px-2 py-0.5 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#90caf9]"
                 :class="{ 'bg-[#264f78]/60': selectedItem === 'cam:' + cam.name }"
+                @mouseenter="RefreshCameraListOnHover"
                 @click="SelectCamera(cam)"
                 @dblclick="OpenCameraView(cam)"
               >
@@ -693,6 +694,7 @@ const recording = ref(false);
 const ACTOR_SINGLE_CLICK_DELAY_MS = 280;
 const FOCUS_POSE_TIMEOUT_MS = 1500;
 const CAMERA_FOCUS_WRITE_ATTEMPTS = 6;
+const CAMERA_LIST_HOVER_REFRESH_MS = 500;
 let actorSingleClickTimer = null;
 let actorFocusSeq = 0;
 let focusPoseRequestSeq = 0;
@@ -700,6 +702,8 @@ let previousFocusPoseResult = null;
 const pendingFocusPoseRequests = new Map();
 const pendingFocusCameraMoveFrames = new Set();
 let lastActorFocusPose = null;
+let cameraListRefreshInFlight = false;
+let lastCameraListHoverRefreshAt = 0;
 
 // ===========================================================================
 //  资源智能搜索(场景栏新增功能)
@@ -1797,27 +1801,7 @@ const OnInitObjTree = async () => {
       }
 
       if (Array.isArray(data.cameras)) {
-        sceneCameras.value = data.cameras.map((cam) => ({
-          id: cam.id || cam.camera_id || cam.name,
-          camera_id: cam.camera_id || cam.id || cam.name,
-          name: cam.name || 'Camera',
-          width: cam.width || 0,
-          height: cam.height || 0,
-          fov: cam.fov ?? null,
-          handle: normalizeHandle(cam.handle ?? cam.camera_handle),
-          render_backend: cam.render_backend || 'native',
-          output_mode: cam.output_mode || 'final_color',
-          deletable: cam.deletable !== false,
-          move_speed: cam.move_speed || 1,
-          view_open: !!cam.view_open,
-          view_x: cam.view_x || 120,
-          view_y: cam.view_y || 120,
-          view_width: cam.view_width || 960,
-          view_height: cam.view_height || 540,
-        }));
-        if (!sceneCameras.value.some((cam) => cam.name === selectedCameraName.value)) {
-          selectedCameraName.value = sceneCameras.value[0]?.name || null;
-        }
+        applyCameraList(data.cameras);
       }
     }
   } catch (e) {
@@ -1862,6 +1846,59 @@ const onSceneTreeChangedEvent = (sceneName) => {
   if (!sceneName || sceneName === currentSceneName.value) {
     OnInitObjTree();
   }
+};
+
+const normalizeCameraPayload = (cam) => ({
+  id: cam.id || cam.camera_id || cam.name,
+  camera_id: cam.camera_id || cam.id || cam.name,
+  name: cam.name || 'Camera',
+  width: cam.width || 0,
+  height: cam.height || 0,
+  fov: cam.fov ?? null,
+  handle: normalizeHandle(cam.handle ?? cam.camera_handle),
+  render_backend: cam.render_backend || 'native',
+  output_mode: cam.output_mode || 'final_color',
+  deletable: cam.deletable !== false,
+  move_speed: cam.move_speed || 1,
+  view_open: !!cam.view_open,
+  view_x: cam.view_x || 120,
+  view_y: cam.view_y || 120,
+  view_width: cam.view_width || 960,
+  view_height: cam.view_height || 540,
+});
+
+const applyCameraList = (cameras) => {
+  sceneCameras.value = cameras.map(normalizeCameraPayload);
+  if (!sceneCameras.value.some((cam) => cam.name === selectedCameraName.value)) {
+    selectedCameraName.value = sceneCameras.value[0]?.name || null;
+  }
+};
+
+const RefreshCameraListOnly = async () => {
+  if (!currentSceneName.value || cameraListRefreshInFlight) {
+    return;
+  }
+  cameraListRefreshInFlight = true;
+  try {
+    const result = await sceneService.listSceneTree(currentSceneName.value);
+    const data = result?.data ?? result;
+    if (Array.isArray(data?.cameras)) {
+      applyCameraList(data.cameras);
+    }
+  } catch (e) {
+    logError('Failed to refresh camera list', e);
+  } finally {
+    cameraListRefreshInFlight = false;
+  }
+};
+
+const RefreshCameraListOnHover = () => {
+  const now = Date.now();
+  if (now - lastCameraListHoverRefreshAt < CAMERA_LIST_HOVER_REFRESH_MS) {
+    return;
+  }
+  lastCameraListHoverRefreshAt = now;
+  RefreshCameraListOnly();
 };
 
 onUnmounted(() => {
