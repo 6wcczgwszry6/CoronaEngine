@@ -16,12 +16,23 @@ class FakeActorEngineObject:
     def __init__(self):
         self.active_profile = None
         self.follow_camera = False
+        self.profiles = []
 
     def add_profile(self, profile):
+        self.profiles.append(profile)
         return profile
+
+    def remove_profile(self, profile):
+        if profile in self.profiles:
+            self.profiles.remove(profile)
+        if self.active_profile is profile:
+            self.active_profile = self.profiles[0] if self.profiles else None
 
     def set_active_profile(self, profile):
         self.active_profile = profile
+
+    def get_active_profile(self):
+        return self.active_profile
 
     def get_handle(self):
         return 1234
@@ -63,15 +74,46 @@ class FakeGeometry:
 class FakeOptics:
     def __init__(self, geometry):
         self.engine_obj = object()
+        self.visible = True
+        self.metallic = 0.0
+        self.roughness = 0.5
 
     def get_visible(self):
-        return True
+        return self.visible
+
+    def set_visible(self, visible):
+        self.visible = bool(visible)
+
+    def get_metallic(self):
+        return self.metallic
+
+    def set_metallic(self, value):
+        self.metallic = value
+
+    def get_roughness(self):
+        return self.roughness
+
+    def set_roughness(self, value):
+        self.roughness = value
+
+    def to_dict(self):
+        return {
+            "visible": self.visible,
+            "metallic": self.metallic,
+            "roughness": self.roughness,
+        }
 
 
 class FakeComponent:
     def __init__(self, geometry):
         self.engine_obj = object()
         self.physics_enabled = True
+        self.collision_enabled = True
+        self.mass = 1.0
+        self.restitution = 0.8
+        self.damping = 0.99
+        self.linear_lock = [False, False, False]
+        self.angular_lock = [False, False, False]
 
     def set_collision_callback(self, callback):
         self.collision_callback = callback
@@ -84,6 +126,52 @@ class FakeComponent:
 
     def get_physics_enabled(self):
         return self.physics_enabled
+
+    def set_collision_enabled(self, enabled):
+        self.collision_enabled = enabled
+
+    def get_collision_enabled(self):
+        return self.collision_enabled
+
+    def set_mass(self, value):
+        self.mass = value
+
+    def get_mass(self):
+        return self.mass
+
+    def set_restitution(self, value):
+        self.restitution = value
+
+    def get_restitution(self):
+        return self.restitution
+
+    def set_damping(self, value):
+        self.damping = value
+
+    def get_damping(self):
+        return self.damping
+
+    def set_linear_lock(self, lock_x, lock_y, lock_z):
+        self.linear_lock = [lock_x, lock_y, lock_z]
+
+    def get_linear_lock(self):
+        return self.linear_lock
+
+    def set_angular_lock(self, lock_x, lock_y, lock_z):
+        self.angular_lock = [lock_x, lock_y, lock_z]
+
+    def get_angular_lock(self):
+        return self.angular_lock
+
+    def to_dict(self):
+        return {
+            "mass": self.mass,
+            "restitution": self.restitution,
+            "damping": self.damping,
+            "physics_enabled": self.physics_enabled,
+            "linear_lock": list(self.linear_lock),
+            "angular_lock": list(self.angular_lock),
+        }
 
 
 class ActorNetworkBroadcastTests(unittest.TestCase):
@@ -230,6 +318,58 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
         claims = [args[0] for name, args in events if name == "actor-ownership-claim"]
         self.assertTrue(claims)
         self.assertEqual(claims[-1]["actor_guid"], actor.actor_guid)
+
+    def test_set_model_replaces_profile_and_preserves_edit_state(self):
+        fake_editor = SimpleNamespace(
+            CoronaEngine=SimpleNamespace(
+                active_project_path="D:/project/test",
+                Actor=FakeActorEngineObject,
+                ActorProfile=SimpleNamespace,
+            ),
+            js_call_func=lambda name, args: None,
+        )
+        parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
+
+        with patch.object(actor_module, "CoronaEditor", fake_editor), \
+             patch.object(actor_module, "CoronaEngine", fake_editor.CoronaEngine), \
+             patch.object(actor_module, "Geometry", FakeGeometry), \
+             patch.object(actor_module, "Optics", FakeOptics), \
+             patch.object(actor_module, "Mechanics", FakeComponent), \
+             patch.object(actor_module, "Acoustics", FakeComponent):
+            actor = actor_module.Actor(route="Resource/cube.obj",
+                                       actor_type="model",
+                                       parent_scene=parent)
+            old_profile = actor._profile
+            old_geometry = actor._geometry
+
+            actor.set_position([1.0, 2.0, 3.0])
+            actor.set_rotation([10.0, 20.0, 30.0])
+            actor.set_scale([2.0, 3.0, 4.0])
+            actor.set_visible(False)
+            actor._optics.set_metallic(0.7)
+            actor._optics.set_roughness(0.2)
+            actor.set_mass(5.5)
+            actor.set_physics_enabled(False)
+            actor.set_collision_enabled("none")
+
+            actor.set_model("Resource/sphere.obj")
+
+        self.assertEqual(actor.model_path, "Resource/sphere.obj")
+        self.assertEqual(actor.final_model_path, "D:/project/test\\Resource/sphere.obj")
+        self.assertIsNot(actor._profile, old_profile)
+        self.assertIsNot(actor._geometry, old_geometry)
+        self.assertEqual(actor.engine_obj.active_profile, actor._profile)
+        self.assertEqual(actor.engine_obj.profiles, [actor._profile])
+        self.assertEqual(actor._geometry.model_path, "D:/project/test\\Resource/sphere.obj")
+        self.assertEqual(actor.get_position(), [1.0, 2.0, 3.0])
+        self.assertEqual(actor.get_rotation(), [10.0, 20.0, 30.0])
+        self.assertEqual(actor.get_scale(), [2.0, 3.0, 4.0])
+        self.assertFalse(actor.get_visible())
+        self.assertEqual(actor._optics.get_metallic(), 0.7)
+        self.assertEqual(actor._optics.get_roughness(), 0.2)
+        self.assertEqual(actor.get_mass(), 5.5)
+        self.assertFalse(actor.get_physics_enabled())
+        self.assertEqual(actor.get_collision_enabled(), "none")
 
     def test_follow_camera_round_trips_to_engine_and_to_dict(self):
         fake_editor = SimpleNamespace(
