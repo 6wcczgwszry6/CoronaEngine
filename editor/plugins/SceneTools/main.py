@@ -573,23 +573,45 @@ class SceneTools(PluginBase):
                 actor_data["actor_guid"]
                 for actor_data in vision_actor_imports["actors"]
             }
+            existing_by_guid = {
+                getattr(actor, "actor_guid", ""): actor
+                for actor in scene.get_actors()
+                if getattr(actor, "actor_guid", "")
+            }
+            source_guid_prefix = f"vision:{abs_path}#"
             for actor in scene.get_actors():
-                if getattr(actor, "actor_guid", "") in imported_guids:
+                actor_guid = getattr(actor, "actor_guid", "")
+                if actor_guid.startswith(source_guid_prefix) and actor_guid not in imported_guids:
                     scene.remove_actor(actor)
 
             for actor_data in vision_actor_imports["actors"]:
-                actor = Actor(actor_data["name"],
-                              actor_data["route"],
-                              actor_type=actor_data["actor_type"],
-                              parent_scene=scene,
-                              actor_data=actor_data)
+                actor = existing_by_guid.get(actor_data["actor_guid"])
+                if actor is None:
+                    actor = Actor(actor_data["name"],
+                                  actor_data["route"],
+                                  actor_type=actor_data["actor_type"],
+                                  parent_scene=scene,
+                                  actor_data=actor_data)
+                    scene.add_actor(actor)
+                else:
+                    actor.actor_type = actor_data["actor_type"]
+                    actor.actor_guid = actor_data["actor_guid"]
+                    if getattr(actor, "route", None) != actor_data["route"]:
+                        actor.route = actor_data["route"]
+                        actor.set_model(actor_data["route"])
+                    geometry_state = actor_data.get("geometry") or {}
+                    if "position" in geometry_state:
+                        actor.set_position(geometry_state["position"])
+                    if "rotation" in geometry_state:
+                        actor.set_rotation(geometry_state["rotation"])
+                    if "scale" in geometry_state:
+                        actor.set_scale(geometry_state["scale"])
                 optics_state = actor_data.get("optics") or {}
                 optics = getattr(actor, "_optics", None)
                 for key, value in optics_state.items():
                     setter = getattr(optics, f"set_{key}", None)
                     if setter is not None:
                         setter(value)
-                scene.add_actor(actor)
                 imported_actors.append(actor.to_dict())
 
             if "vision" not in scene.file_data:
@@ -600,7 +622,6 @@ class SceneTools(PluginBase):
             scene.file_data["vision"]["import_mode"] = "engine_built"
             scene.save_data()
 
-            CoronaEditor.CoronaEngine.load_vision_scene("")
             scene._notify_scene_tree_changed()
             logger.info("Vision scene imported into current scene %s: %s", scene_name, abs_path)
             return {

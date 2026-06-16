@@ -1794,6 +1794,13 @@ void OpticsSystem::apply_pending_vision_scene_load() {
         return;
     }
 
+    if (renderPipeline && vision_scene_source_ == VisionSceneSource::EngineBuilt) {
+        // Empty path is a state request: leave ExternalFile mode and use the
+        // engine-built scene. If that state is already active, the normal
+        // dynamic signature sync below will rebuild only when scene data changed.
+        return;
+    }
+
     try {
         auto pipeline = create_vision_pipeline();
         if (!pipeline) {

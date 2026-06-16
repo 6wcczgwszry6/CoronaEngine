@@ -103,6 +103,7 @@ class FakeAlignmentScene:
         self.route = "Scene/alignment.scene"
         self.file_data = {}
         self._actors = []
+        self.removed_actors = []
         self._main_camera = FakeCamera()
         self.engine_scene = SimpleNamespace(set_active_camera=lambda camera: None)
         self.saved_snapshots = []
@@ -136,6 +137,7 @@ class FakeAlignmentScene:
         self._actors.append(actor)
 
     def remove_actor(self, actor):
+        self.removed_actors.append(actor)
         self._actors.remove(actor)
 
     def save_data(self):
@@ -193,19 +195,23 @@ class VisionAlignmentWorkflowTests(unittest.TestCase):
                 scene.route,
                 str(VISION_SCENE),
             )
+            first_actor_ids = [id(actor) for actor in scene.get_actors()]
             second = scene_tools_main.SceneTools.import_vision_scene_into_current_scene(
                 scene.route,
                 str(VISION_SCENE),
             )
+            second_actor_ids = [id(actor) for actor in scene.get_actors()]
 
         self.assertEqual(first["status"], "success")
         self.assertEqual(second["status"], "success")
         self.assertEqual(second["import_mode"], "engine_built")
         self.assertEqual(second["imported_actor_count"], 2)
-        self.assertEqual(load_requests, ["", ""])
+        self.assertEqual(load_requests, [])
         self.assertEqual(scene.vision_import_mode, "engine_built")
         self.assertEqual([actor.name for actor in scene.get_actors()], ["AlignedModel", "AlignedModel_1"])
         self.assertEqual(len(scene.get_actors()), 2)
+        self.assertEqual(first_actor_ids, second_actor_ids)
+        self.assertEqual(scene.removed_actors, [])
         self.assertTrue(scene.notified)
 
         actor = scene.get_actors()[0]

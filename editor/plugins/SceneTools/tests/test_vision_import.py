@@ -239,7 +239,7 @@ class VisionImportTests(unittest.TestCase):
         self.assertEqual(result["import_mode"], "engine_built")
         self.assertEqual(result["imported_actor_count"], 1)
         self.assertEqual(result["unsupported_shapes"][0]["reason"], "unsupported_shape_type")
-        self.assertEqual(load_requests, [""])
+        self.assertEqual(load_requests, [])
         self.assertEqual(fake_scene.vision_import_mode, "engine_built")
         self.assertTrue(fake_scene.saved)
         self.assertTrue(fake_scene.notified)
