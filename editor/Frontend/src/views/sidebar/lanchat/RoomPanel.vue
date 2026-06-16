@@ -133,7 +133,7 @@
         <MemberList
           :members="s.members"
           :agents="s.agents"
-          :my-nickname="s.nickname"
+          :peer-id="s.peerId"
           @remove-agent="onRemoveAgent"
         />
         </div>
@@ -260,7 +260,13 @@ function onDraftInput() {
     mentionCandidates.value = [];
     return;
   }
-  const members = s.members.map((m) => ({ name: m, isAgent: false }));
+  const members = (s.memberDetails.length
+    ? s.memberDetails
+        .filter((member) => member.member_id !== s.peerId)
+        .map((member) => ({ name: member.nickname, isAgent: false }))
+    : s.members
+        .filter((name) => name !== s.nickname)
+        .map((name) => ({ name, isAgent: false })));
   const agents = s.agents.map((a) => ({ name: a.name, isAgent: true }));
   mentionCandidates.value = [...members, ...agents].filter((c) =>
     c.name.toLowerCase().startsWith(prefix.toLowerCase())

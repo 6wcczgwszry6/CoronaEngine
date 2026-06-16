@@ -1,3 +1,11 @@
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
 #include "browser_manager.h"
 #include "cef_client.h"
 
@@ -6,9 +14,11 @@
 #include <corona/systems/network/network_system.h>
 
 #include <cstdint>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <sstream>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -77,6 +87,123 @@ nlohmann::json build_network_session_info(
     payload["host_address"] = sys->host_address();
     payload["host_port"] = sys->host_port();
     return payload;
+}
+
+void emit_lanchat_event_json(const std::string& event_json) {
+    if (event_json.empty()) {
+        return;
+    }
+    std::string js = "if(window.__coronaEmit)window.__coronaEmit(" +
+                     nlohmann::json("lanchat-event").dump() + "," +
+                     event_json + ",{\"_fromCross\":1})";
+    for (auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+        if (tab && !tab->minimized && tab->client && tab->client->GetBrowser()) {
+            tab->client->GetBrowser()->GetMainFrame()->ExecuteJavaScript(js, "", 0);
+        }
+    }
+}
+
+nlohmann::json build_lanchat_members(
+    const std::vector<Corona::Network::LanChatMember>& members) {
+    nlohmann::json result = nlohmann::json::array();
+    for (const auto& member : members) {
+        result.push_back(member.nickname);
+    }
+    return result;
+}
+
+nlohmann::json build_lanchat_member_details(
+    const std::vector<Corona::Network::LanChatMember>& members) {
+    nlohmann::json result = nlohmann::json::array();
+    for (const auto& member : members) {
+        result.push_back({
+            {"member_id", member.member_id},
+            {"nickname", member.nickname},
+            {"status", member.status},
+        });
+    }
+    return result;
+}
+
+nlohmann::json build_lanchat_history(
+    const std::vector<Corona::Network::LanChatMessage>& history) {
+    nlohmann::json result = nlohmann::json::array();
+    for (const auto& message : history) {
+        result.push_back({
+            {"message_id", message.message_id},
+            {"sender_id", message.sender_id},
+            {"room_id", message.room_id},
+            {"seq", message.seq},
+            {"from", message.sender_name},
+            {"text", message.text},
+            {"ts", message.timestamp_ms / 1000},
+        });
+    }
+    return result;
+}
+
+nlohmann::json build_lanchat_agents(
+    const std::vector<Corona::Network::LanChatAgent>& agents) {
+    nlohmann::json result = nlohmann::json::array();
+    for (const auto& agent : agents) {
+        result.push_back({
+            {"agent_id", agent.agent_id},
+            {"name", agent.name},
+            {"owner", agent.owner_id},
+        });
+    }
+    return result;
+}
+
+std::string make_agent_id(const std::string& owner, const std::string& name) {
+    static uint64_t counter = 0;
+    std::ostringstream out;
+    out << "agent-" << std::hash<std::string>{}(owner + ":" + name) << "-" << ++counter;
+    return out.str();
+}
+
+std::string detect_local_ipv4() {
+#ifdef _WIN32
+    WSADATA wsa{};
+    const bool started = WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+#endif
+    char host_name[256] = {};
+    if (gethostname(host_name, sizeof(host_name)) != 0) {
+#ifdef _WIN32
+        if (started) WSACleanup();
+#endif
+        return "127.0.0.1";
+    }
+
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    addrinfo* result = nullptr;
+    if (getaddrinfo(host_name, nullptr, &hints, &result) != 0) {
+#ifdef _WIN32
+        if (started) WSACleanup();
+#endif
+        return "127.0.0.1";
+    }
+
+    std::string fallback = "127.0.0.1";
+    for (addrinfo* it = result; it; it = it->ai_next) {
+        auto* addr = reinterpret_cast<sockaddr_in*>(it->ai_addr);
+        char ip[INET_ADDRSTRLEN] = {};
+        if (!inet_ntop(AF_INET, &addr->sin_addr, ip, sizeof(ip))) {
+            continue;
+        }
+        std::string candidate(ip);
+        if (candidate.rfind("127.", 0) != 0 && candidate != "0.0.0.0") {
+            fallback = candidate;
+            break;
+        }
+    }
+    freeaddrinfo(result);
+#ifdef _WIN32
+    if (started) WSACleanup();
+#endif
+    return fallback;
 }
 }  // namespace
 
@@ -418,6 +545,140 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                 }
 
                 callback->Failure(1, "Unknown Network function: " + func);
+                return true;
+            }
+        } catch (const nlohmann::json::parse_error&) {
+            // 非合法 JSON，继续走后续路径
+        }
+    }
+
+    // ── LANChat 模块：C++ NetworkSystem 接管，不再进入 Python LANChat 插件 ──
+    if (req.find("\"LANChat\"") != std::string::npos) {
+        try {
+            auto j = nlohmann::json::parse(req);
+            if (j.value("module", "") == "LANChat") {
+                std::string func = j.value("function", "");
+                auto args = j.value("args", nlohmann::json::array());
+                const nlohmann::json payload_arg =
+                    (args.size() > 0 && args[0].is_object()) ? args[0] : nlohmann::json::object();
+
+                auto sys = get_network_system();
+                if (!sys) {
+                    callback->Failure(2, "NetworkSystem unavailable");
+                    return true;
+                }
+                sys->set_lanchat_event_callback(emit_lanchat_event_json);
+
+                if (func == "start_room") {
+                    const std::string room = payload_arg.value("room", "");
+                    const uint16_t port = payload_arg.value("port", 8770);
+                    bool ok = sys->lanchat_start_room(room, "房主", port);
+                    nlohmann::json data;
+                    data["ok"] = ok;
+                    data["ip"] = detect_local_ipv4();
+                    data["port"] = port;
+                    data["room"] = room;
+                    data["peer_id"] = sys->local_peer_id();
+                    data["members"] = build_lanchat_members(sys->lanchat_members());
+                    data["member_details"] = build_lanchat_member_details(sys->lanchat_members());
+                    data["agents"] = build_lanchat_agents(sys->lanchat_agents());
+                    callback->Success(create_success_json(func, data));
+                    return true;
+                }
+
+                if (func == "stop_room") {
+                    sys->lanchat_leave_room();
+                    sys->stop_session();
+                    nlohmann::json data;
+                    data["ok"] = true;
+                    callback->Success(create_success_json(func, data));
+                    return true;
+                }
+
+                if (func == "join_room") {
+                    const std::string ip = payload_arg.value("ip", "");
+                    const uint16_t port = payload_arg.value("port", 8770);
+                    const std::string room = payload_arg.value("room", "");
+                    const std::string nickname = payload_arg.value("nickname", "Guest");
+                    bool ok = sys->lanchat_join_room(ip, port, room, nickname);
+                    nlohmann::json data;
+                    data["ok"] = ok;
+                    data["you"] = nickname;
+                    data["peer_id"] = sys->local_peer_id();
+                    data["members"] = build_lanchat_members(sys->lanchat_members());
+                    data["member_details"] = build_lanchat_member_details(sys->lanchat_members());
+                    data["history"] = build_lanchat_history(sys->lanchat_history());
+                    data["agents"] = build_lanchat_agents(sys->lanchat_agents());
+                    if (!ok) data["error"] = "JOIN_FAILED";
+                    callback->Success(create_success_json(func, data));
+                    return true;
+                }
+
+                if (func == "leave_room") {
+                    sys->lanchat_leave_room();
+                    nlohmann::json data;
+                    data["ok"] = true;
+                    callback->Success(create_success_json(func, data));
+                    return true;
+                }
+
+                if (func == "send_message") {
+                    const std::string text = payload_arg.value("text", "");
+                    auto result = sys->lanchat_send_message(text);
+                    nlohmann::json data;
+                    data["ok"] = result.accepted;
+                    if (result.accepted) {
+                        data["message_id"] = result.message.message_id;
+                        data["seq"] = result.message.seq;
+                    } else {
+                        data["error"] = result.error.empty() ? "SEND_FAILED" : result.error;
+                    }
+                    callback->Success(create_success_json(func, data));
+                    return true;
+                }
+
+                if (func == "add_agent") {
+                    const std::string name = payload_arg.value("name", "Agent");
+                    const std::string persona = payload_arg.value("persona", "");
+                    const std::string agent_id = make_agent_id(sys->local_peer_id(), name);
+                    auto result = sys->lanchat_register_agent(agent_id, name, persona);
+                    nlohmann::json data;
+                    data["ok"] = result.ok;
+                    data["agent_id"] = agent_id;
+                    data["name"] = name;
+                    if (!result.ok) data["error"] = result.error;
+                    callback->Success(create_success_json(func, data));
+                    return true;
+                }
+
+                if (func == "remove_agent") {
+                    const std::string agent_id = payload_arg.value("agent_id", "");
+                    auto result = sys->lanchat_remove_agent(agent_id);
+                    nlohmann::json data;
+                    data["ok"] = result.ok;
+                    if (!result.ok) data["error"] = result.error;
+                    callback->Success(create_success_json(func, data));
+                    return true;
+                }
+
+                if (func == "list_agents") {
+                    nlohmann::json data;
+                    data["ok"] = true;
+                    data["agents"] = build_lanchat_agents(sys->lanchat_agents());
+                    callback->Success(create_success_json(func, data));
+                    return true;
+                }
+
+                if (func == "get_local_ip") {
+                    nlohmann::json data;
+                    data["ok"] = true;
+                    data["ip"] = detect_local_ipv4();
+                    data["port"] = 8770;
+                    callback->Success(create_success_json(func, data));
+                    return true;
+                }
+
+                callback->Failure(1, "Unknown LANChat function: " + func);
                 return true;
             }
         } catch (const nlohmann::json::parse_error&) {

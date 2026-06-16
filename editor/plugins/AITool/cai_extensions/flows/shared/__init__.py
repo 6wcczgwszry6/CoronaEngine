@@ -1,6 +1,6 @@
-"""Compatibility wrapper for shared asset metadata helpers."""
+"""Shared helpers for workflow packages."""
 
-from ..shared.asset_metadata import (
+from .asset_metadata import (
     build_asset_metadata,
     build_asset_metadata_batch,
     load_asset_metadata_cache,

@@ -15,19 +15,21 @@ import { lanChatService } from '../utils/bridge.js';
 // 连接状态机：idle（未进房）-> hosting/joined（在房）
 const ROLE = { NONE: 'none', HOST: 'host', GUEST: 'guest' };
 
-// 房主在房间内的显示昵称。必须与 Python 端 protocol.HOST_NICKNAME 保持一致——
-// 房主消息由服务器用该名盖章，前端据此判定 self（消息气泡右对齐）。
+// 房主在房间内的显示昵称。必须与 C++ LANChat 快速通道保持一致；
+// 房主消息由 NetworkSystem 用该名盖章，前端据此判定 self（消息气泡右对齐）。
 const HOST_NICKNAME = '房主';
 
 const state = reactive({
   role: ROLE.NONE, // none / host / guest
   inRoom: false,
-  connection: 'idle', // idle / connected / reconnecting
+  connection: 'idle', // idle / connecting / connected / reconnecting
   room: '', // 房间号
   ip: '', // 房主显示用：本机 IP；加入方：房主 IP
   port: 8770,
+  peerId: '',
   nickname: '',
   members: [], // string[]
+  memberDetails: [], // [{ member_id, nickname, status }]
   messages: [], // { from, text, ts, self }
   error: '', // 最近一次错误码/信息
   agents: [], // [{agent_id, name, owner}] 来自房主 agent_roster，不含 persona
@@ -40,8 +42,10 @@ function _resetRoom() {
   state.connection = 'idle';
   state.room = '';
   state.ip = '';
+  state.peerId = '';
   state.nickname = '';
   state.members = [];
+  state.memberDetails = [];
   state.messages = [];
   state.error = '';
   state.agents = [];
@@ -49,12 +53,42 @@ function _resetRoom() {
 }
 
 function _pushMessage(msg, self = false) {
+  if (msg.message_id && state.messages.some((m) => m.message_id === msg.message_id)) {
+    return;
+  }
   state.messages.push({
+    message_id: msg.message_id || '',
+    seq: msg.seq || 0,
     from: msg.from || '?',
     text: msg.text || '',
     ts: msg.ts || Math.floor(Date.now() / 1000),
     self,
   });
+}
+
+function normalizeMembers(payload = {}) {
+  const memberDetails = Array.isArray(payload.member_details)
+    ? payload.member_details
+        .map((m) => ({
+          member_id: m.member_id || m.id || '',
+          nickname: m.nickname || m.name || '',
+          status: m.status || 'online',
+        }))
+        .filter((m) => m.nickname)
+    : [];
+  const members = memberDetails.length
+    ? memberDetails.map((m) => m.nickname)
+    : (Array.isArray(payload.members) ? payload.members : [])
+        .map((m) => (typeof m === 'string' ? m : (m.nickname || m.name || '')))
+        .filter(Boolean);
+  return { members, memberDetails };
+}
+
+function applyMemberSnapshot(payload = {}) {
+  if (payload.peer_id) state.peerId = payload.peer_id;
+  const normalized = normalizeMembers(payload);
+  state.members = normalized.members;
+  state.memberDetails = normalized.memberDetails;
 }
 
 // ---- 动作 -----------------------------------------------------------------
@@ -70,9 +104,12 @@ async function openRoom({ room, password, port }) {
     state.room = room;
     state.ip = res.ip;
     state.port = res.port;
+    state.peerId = res.peer_id || '';
     state.nickname = HOST_NICKNAME;
-    state.members = [HOST_NICKNAME];
+    applyMemberSnapshot(res);
+    if (!state.members.length) state.members = [HOST_NICKNAME];
     state.messages = [];
+    state.agents = res.agents || [];
   } else {
     state.error = (res && res.error) || 'START_FAILED';
   }
@@ -92,19 +129,23 @@ async function joinRoom({ ip, port, room, password, nickname }) {
   if (res && res.ok) {
     state.role = ROLE.GUEST;
     state.inRoom = true;
-    state.connection = 'connected';
+    state.connection = 'connecting';
     state.room = room;
     state.ip = ip;
     state.port = port;
+    state.peerId = res.peer_id || '';
     // 服务器去重后的最终昵称（如 Alice -> Alice-2）
     state.nickname = res.you || nickname;
-    state.members = res.members || [];
+    applyMemberSnapshot(res);
     state.messages = (res.history || []).map((m) => ({
+      message_id: m.message_id || '',
+      seq: m.seq || 0,
       from: m.from,
       text: m.text,
       ts: m.ts,
       self: false,
     }));
+    state.agents = res.agents || [];
   } else {
     state.error = (res && res.code) || (res && res.error) || 'JOIN_FAILED';
   }
@@ -121,7 +162,15 @@ async function leaveRoom() {
 async function sendMessage(text) {
   const trimmed = (text || '').trim();
   if (!trimmed || !state.inRoom) return;
-  await lanChatService.sendMessage(trimmed);
+  const res = await lanChatService.sendMessage(trimmed);
+  if (res && res.ok === false) {
+    state.error = res.error || 'SEND_FAILED';
+    if (state.error === 'CONNECTING') {
+      state.connection = 'connecting';
+    }
+  } else {
+    state.error = '';
+  }
 }
 
 /** 添加 AI 助手。{ name, persona } */
@@ -158,7 +207,7 @@ async function removeAgent(agentId) {
 // ---- 事件分流（由 AITalkBar 调用）----------------------------------------
 
 /**
- * 处理来自 Python 的聊天室事件（channel === 'lanchat'）。
+ * 处理来自 C++ NetworkSystem 的聊天室事件（channel === 'lanchat'）。
  * @param {object} event - { channel, event, from, text, ts, members, history, code }
  */
 function handleEvent(event) {
@@ -168,15 +217,21 @@ function handleEvent(event) {
       _pushMessage(event, event.from === state.nickname);
       break;
     case 'member_update':
-      state.members = event.members || [];
+      applyMemberSnapshot(event);
+      if (state.role === ROLE.GUEST && state.connection === 'connecting') {
+        state.connection = 'connected';
+        state.error = '';
+      }
       break;
     case 'agent_roster':
       state.agents = event.agents || [];
       break;
     case 'joined':
-      state.members = event.members || [];
+      applyMemberSnapshot(event);
       if (Array.isArray(event.history)) {
         state.messages = event.history.map((m) => ({
+          message_id: m.message_id || '',
+          seq: m.seq || 0,
           from: m.from,
           text: m.text,
           ts: m.ts,
@@ -194,9 +249,15 @@ function handleEvent(event) {
       state.connection = 'connected';
       state.error = '';
       if (event.you) state.nickname = event.you;
-      state.members = event.members || state.members;
+      applyMemberSnapshot({
+        ...event,
+        members: event.members || state.members,
+        member_details: event.member_details || state.memberDetails,
+      });
       if (Array.isArray(event.history)) {
         state.messages = event.history.map((m) => ({
+          message_id: m.message_id || '',
+          seq: m.seq || 0,
           from: m.from,
           text: m.text,
           ts: m.ts,

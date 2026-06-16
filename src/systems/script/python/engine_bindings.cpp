@@ -1,5 +1,7 @@
 ﻿#include <corona/kernel/core/callback_sink.h>
 #include <corona/kernel/core/i_logger.h>
+#include <corona/kernel/core/kernel_context.h>
+#include <corona/systems/network/network_system.h>
 #include <corona/systems/script/camera_follow_controller.h>
 #include <corona/systems/script/corona_engine_api.h>
 #include <corona/systems/script/engine_scripts.h>
@@ -9,6 +11,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 
@@ -33,6 +36,24 @@ namespace nb = nanobind;
 using namespace Corona::API;
 
 namespace EngineScripts {
+
+namespace {
+
+std::shared_ptr<Corona::Systems::NetworkSystem> get_network_system() {
+    auto sys_mgr = Corona::Kernel::KernelContext::instance().system_manager();
+    if (!sys_mgr) {
+        return nullptr;
+    }
+    return std::dynamic_pointer_cast<Corona::Systems::NetworkSystem>(
+        sys_mgr->get_system("Network"));
+}
+
+uint64_t network_now_ms() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+}  // namespace
 
 void BindAll(nanobind::module_& m) {
     // ============================================================================
@@ -397,6 +418,115 @@ void BindAll(nanobind::module_& m) {
               } else {
                   PY_LOG_INFO("{}", message.c_str());  // Default to INFO
               } }, nb::arg("level"), nb::arg("message"), "Send a log message to the engine logger with specified level");
+
+    // ============================================================================
+    // Network collaboration bridge: Python may run AI locally; C++ owns state/network.
+    // ============================================================================
+    m.def("network_local_peer_id", []() -> std::string {
+        auto sys = get_network_system();
+        return sys ? sys->local_peer_id() : std::string{};
+    }, "Return the local NetworkSystem peer id.");
+
+    m.def("network_register_agent", [](const std::string& agent_id,
+                                        const std::string& name,
+                                        const std::string& persona) -> bool {
+        auto sys = get_network_system();
+        return sys && sys->lanchat_register_agent(agent_id, name, persona).ok;
+    }, nb::arg("agent_id"), nb::arg("name"), nb::arg("persona"),
+       "Register an AI agent in the C++ collaboration roster.");
+
+    m.def("network_remove_agent", [](const std::string& agent_id) -> bool {
+        auto sys = get_network_system();
+        return sys && sys->lanchat_remove_agent(agent_id).ok;
+    }, nb::arg("agent_id"), "Remove an AI agent from the C++ collaboration roster.");
+
+    m.def("network_send_agent_reply", [](const std::string& agent_id,
+                                          const std::string& agent_name,
+                                          const std::string& text) -> bool {
+        auto sys = get_network_system();
+        return sys && sys->lanchat_send_agent_reply(agent_id, agent_name, text).accepted;
+    }, nb::arg("agent_id"), nb::arg("agent_name"), nb::arg("text"),
+       "Send an AI agent reply through the C++ reliable collaboration channel.");
+
+    m.def("network_pop_lanchat_agent_trigger", []() -> nb::object {
+        auto sys = get_network_system();
+        if (!sys) {
+            return nb::none();
+        }
+        auto trigger = sys->lanchat_pop_agent_trigger();
+        if (!trigger.has_value()) {
+            return nb::none();
+        }
+
+        nb::dict result;
+        result["trigger_id"] = trigger->trigger_id;
+        result["message_id"] = trigger->message_id;
+        result["room_id"] = trigger->room_id;
+        result["sender_id"] = trigger->sender_id;
+        result["sender_name"] = trigger->sender_name;
+        result["agent_id"] = trigger->agent_id;
+        result["agent_name"] = trigger->agent_name;
+        result["persona"] = trigger->persona;
+        result["text"] = trigger->text;
+
+        nb::list history;
+        for (const auto& message : trigger->history) {
+            nb::dict item;
+            item["message_id"] = message.message_id;
+            item["sender_id"] = message.sender_id;
+            item["room_id"] = message.room_id;
+            item["seq"] = message.seq;
+            item["from"] = message.sender_name;
+            item["text"] = message.text;
+            item["ts"] = message.timestamp_ms / 1000;
+            history.append(item);
+        }
+        result["history"] = history;
+        return nb::object(result);
+    }, "Pop one pending LANChat AI agent trigger owned by this peer.");
+
+    m.def("network_lock_object", [](const std::string& object_id,
+                                     const std::string& user_id,
+                                     const std::string& operation) -> bool {
+        auto sys = get_network_system();
+        return sys && sys->lanchat_lock_object(
+            object_id, user_id, operation, network_now_ms()).ok;
+    }, nb::arg("object_id"), nb::arg("user_id"), nb::arg("operation") = "modify",
+       "Acquire an object collaboration lock through C++ state.");
+
+    m.def("network_unlock_object", [](const std::string& object_id,
+                                       const std::string& user_id) -> bool {
+        auto sys = get_network_system();
+        return sys && sys->lanchat_unlock_object(object_id, user_id).ok;
+    }, nb::arg("object_id"), nb::arg("user_id"),
+       "Release an object collaboration lock through C++ state.");
+
+    m.def("network_locked_by", [](const std::string& object_id) -> std::string {
+        auto sys = get_network_system();
+        return sys ? sys->lanchat_locked_by(object_id, network_now_ms()) : std::string{};
+    }, nb::arg("object_id"), "Return the owner of a C++ collaboration lock.");
+
+    m.def("network_broadcast_intent", [](const std::string& user_id,
+                                          const std::string& tooltip,
+                                          const std::array<float, 3>& position,
+                                          const std::string& status) {
+        auto sys = get_network_system();
+        if (sys) {
+            sys->lanchat_broadcast_intent(user_id, tooltip, position, status, network_now_ms());
+        }
+    }, nb::arg("user_id"), nb::arg("tooltip"), nb::arg("position"),
+       nb::arg("status") = "placing_object",
+       "Record a local operation preview intent in C++ collaboration state.");
+
+    m.def("network_check_preview_collision", [](const std::string& user_id,
+                                                 const std::array<float, 3>& position,
+                                                 float delta) -> std::string {
+        auto sys = get_network_system();
+        return sys ? sys->lanchat_check_preview_collision(
+                         user_id, position, delta, network_now_ms())
+                   : std::string{};
+    }, nb::arg("user_id"), nb::arg("position"), nb::arg("delta") = 0.5f,
+       "Return the conflicting user id for a preview placement, if any.");
 
     // ============================================================================
     // Render backend control (Native vs Vision)

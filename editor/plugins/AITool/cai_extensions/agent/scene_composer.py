@@ -1586,7 +1586,7 @@ class SceneComposer:
         # 读 AABB 算缩放（trimesh size = [width, height, depth]）
         asset_meta = {}
         try:
-            from ..flows.scene_composition_workflow_v2.asset_metadata import (
+            from ..flows.shared.asset_metadata import (
                 build_asset_metadata_batch,
             )
             paths = [m["model_path"] for m in shell_models if m.get("model_path")]
@@ -1747,7 +1747,7 @@ class SceneComposer:
 
         asset_meta = {}
         try:
-            from ..flows.scene_composition_workflow_v2.asset_metadata import (
+            from ..flows.shared.asset_metadata import (
                 build_asset_metadata_batch,
             )
             paths = [it["model_path"] for it in resolved if it.get("model_path")]
