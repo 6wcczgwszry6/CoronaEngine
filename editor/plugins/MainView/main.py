@@ -62,6 +62,20 @@ class MainView(PluginBase):
         return scene_file
 
     @staticmethod
+    def _apply_vision_source_for_scene(scene) -> None:
+        try:
+            if not CoronaEditor.CoronaEngine.is_vision_available():
+                return
+            source_path = getattr(scene, "vision_source_path", "") or ""
+            import_mode = getattr(scene, "vision_import_mode", "") or ""
+            if source_path and import_mode == "external":
+                CoronaEditor.CoronaEngine.load_vision_scene(source_path)
+            else:
+                CoronaEditor.CoronaEngine.load_vision_scene("")
+        except Exception:
+            logger.exception("Failed to apply Vision source for scene %s", getattr(scene, "route", ""))
+
+    @staticmethod
     def _save_project_field(key: str, value: str) -> None:
         MainView._sync_project_field(key, value)
         settings_manager.save_active_project_info()
@@ -119,6 +133,8 @@ class MainView(PluginBase):
             scene = scene_manager.get(route)
             if scene:
                 scene.set_enabled(route == active_scene)
+                if route == active_scene:
+                    MainView._apply_vision_source_for_scene(scene)
 
         if active_scene:
             MainView._save_project_field("active_scene", active_scene)
@@ -210,6 +226,7 @@ class MainView(PluginBase):
         # 激活目标场景（若首次访问则自动创建并加载 actors）
         scene = scene_manager.get_or_create(to_scene_path)
         scene.set_enabled(True)
+        MainView._apply_vision_source_for_scene(scene)
 
         CoronaEditor.js_call_func("actor-change", ['scene', scene.route, ""])
         MainView._save_project_field("active_scene", scene.route)

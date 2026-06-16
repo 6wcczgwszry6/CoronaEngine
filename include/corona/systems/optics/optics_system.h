@@ -94,8 +94,8 @@ class OpticsSystem : public Kernel::SystemBase {
     bool init_vision_lazy();  ///< 首次切换到 Vision 时的 lazy 初始化
     void run_vision_frame(float frame_count, uint64_t frame_index);
 
-    /// Vision 场景来源：引擎构建（默认，随 SharedDataHub 动态同步）或外部文件
-    /// （独立模式，导入期间禁用动态同步 / 相机对齐，使用场景自带 sensor）。
+    /// Vision 场景来源：引擎构建（默认，随 SharedDataHub 动态同步）或外部文件。
+    /// 外部文件模式禁用动态几何/灯光同步，但仍使用当前 Corona camera 驱动 viewport。
     enum class VisionSceneSource { EngineBuilt, ExternalFile };
     VisionSceneSource vision_scene_source_{VisionSceneSource::EngineBuilt};
 

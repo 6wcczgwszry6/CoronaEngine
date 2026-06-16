@@ -134,6 +134,8 @@ export const sceneService = {
   deleteCamera: (sceneName, cameraId) =>
     Bridge.callCEF('SceneTools', 'delete_camera', [sceneName, cameraId]),
   loadVisionScene: (path) => Bridge.callCEF('SceneTools', 'load_vision_scene', [path]),
+  importVisionSceneIntoCurrentScene: (sceneName, path) =>
+    Bridge.callCEF('SceneTools', 'import_vision_scene_into_current_scene', [sceneName, path]),
   selectVisionScenePath: () => Bridge.callCEF('SceneTools', 'select_vision_scene_path', []),
   listActorTree: (sceneName) => Bridge.callCEF('SceneTools', 'list_actor_tree', [sceneName]),
   listSceneTree: (sceneName) => Bridge.callCEF('SceneTools', 'list_scene_tree', [sceneName]),
