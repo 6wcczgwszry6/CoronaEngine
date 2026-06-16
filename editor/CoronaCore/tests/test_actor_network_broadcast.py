@@ -505,6 +505,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                     name="hud_quad",
                     actor_type="model",
                     route="Resource/hud.obj",
+                    actor_guid="vision:D:/scene.json#scene.shapes[0]",
                     _geometry=True,
                     get_position=lambda: [0.0, 0.0, 2.0],
                     get_rotation=lambda: [0.0, 0.0, 0.0],
@@ -518,12 +519,17 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
             saved = configparser.ConfigParser()
             saved.read(scene_path, encoding="utf-8")
             self.assertTrue(saved["actors"].getboolean("hud_quad.follow_camera"))
+            self.assertEqual(
+                saved["actors"]["hud_quad.actor_guid"],
+                "vision:D:/scene.json#scene.shapes[0]",
+            )
             self.assertEqual(saved["terrain"]["path"], "")
             self.assertEqual(saved["terrain"]["type"], "")
             self.assertNotIn("vision", saved)
 
             actor_data = scene._build_actor_json(saved["actors"], "hud_quad")
             self.assertTrue(actor_data["follow_camera"])
+            self.assertEqual(actor_data["actor_guid"], "vision:D:/scene.json#scene.shapes[0]")
 
 
 if __name__ == "__main__":

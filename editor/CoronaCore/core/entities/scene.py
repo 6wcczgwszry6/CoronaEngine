@@ -257,6 +257,7 @@ class Scene:
 
             self.file_data['actors'][f'{actor_key}.actor_type'] = getattr(actor, 'actor_type', 'actor')
             self.file_data['actors'][f'{actor_key}.route'] = getattr(actor, 'route', '')
+            self.file_data['actors'][f'{actor_key}.actor_guid'] = getattr(actor, 'actor_guid', '')
             if hasattr(actor, 'get_follow_camera'):
                 self.file_data['actors'][f'{actor_key}.follow_camera'] = (
                     'true' if actor.get_follow_camera() else 'false'
@@ -703,6 +704,7 @@ class Scene:
             "name": actor_name,
             "actor_type": actors_section.get(f'{actor_name}.actor_type', 'actor'),
             "route": actors_section.get(f'{actor_name}.route', ''),
+            "actor_guid": actors_section.get(f'{actor_name}.actor_guid', ''),
             "geometry": {}
         }
         follow_camera_key = f'{actor_name}.follow_camera'

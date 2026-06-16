@@ -9,6 +9,10 @@ from CoronaCore.core.entities import Actor
 from CoronaCore.core.entities.camera import Camera
 from CoronaCore.core.managers import scene_manager
 from CoronaCore.utils.file_handler import FileHandler
+try:
+    from .vision_import import extract_vision_actor_imports
+except ImportError:
+    from vision_import import extract_vision_actor_imports
 
 import logging
 
@@ -543,6 +547,7 @@ class SceneTools(PluginBase):
                 return {"status": "error", "message": f"Scene '{scene_name}' not found"}
 
             camera_pose = _extract_vision_camera_pose(document)
+            vision_actor_imports = extract_vision_actor_imports(document, abs_path)
             scene.ensure_default_camera()
             active_camera = scene.get_active_camera()
             camera_imported = False
@@ -563,21 +568,49 @@ class SceneTools(PluginBase):
                 if hasattr(scene.engine_scene, "set_active_camera"):
                     scene.engine_scene.set_active_camera(getattr(active_camera, "engine_obj", active_camera))
 
+            imported_actors = []
+            imported_guids = {
+                actor_data["actor_guid"]
+                for actor_data in vision_actor_imports["actors"]
+            }
+            for actor in scene.get_actors():
+                if getattr(actor, "actor_guid", "") in imported_guids:
+                    scene.remove_actor(actor)
+
+            for actor_data in vision_actor_imports["actors"]:
+                actor = Actor(actor_data["name"],
+                              actor_data["route"],
+                              actor_type=actor_data["actor_type"],
+                              parent_scene=scene,
+                              actor_data=actor_data)
+                optics_state = actor_data.get("optics") or {}
+                optics = getattr(actor, "_optics", None)
+                for key, value in optics_state.items():
+                    setter = getattr(optics, f"set_{key}", None)
+                    if setter is not None:
+                        setter(value)
+                scene.add_actor(actor)
+                imported_actors.append(actor.to_dict())
+
             if "vision" not in scene.file_data:
                 scene.file_data["vision"] = {}
             scene.vision_source_path = abs_path
-            scene.vision_import_mode = "external"
+            scene.vision_import_mode = "engine_built"
             scene.file_data["vision"]["source_path"] = abs_path
-            scene.file_data["vision"]["import_mode"] = "external"
+            scene.file_data["vision"]["import_mode"] = "engine_built"
             scene.save_data()
 
-            CoronaEditor.CoronaEngine.load_vision_scene(abs_path)
+            CoronaEditor.CoronaEngine.load_vision_scene("")
             scene._notify_scene_tree_changed()
             logger.info("Vision scene imported into current scene %s: %s", scene_name, abs_path)
             return {
                 "status": "success",
                 "scene": scene_name,
                 "path": abs_path,
+                "import_mode": "engine_built",
+                "imported_actor_count": len(imported_actors),
+                "imported_actors": imported_actors,
+                "unsupported_shapes": vision_actor_imports["unsupported_shapes"],
                 "camera_imported": camera_imported,
                 "camera": active_camera.to_dict() if active_camera is not None else None,
             }
