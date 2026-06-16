@@ -138,19 +138,36 @@ LanChatMessageResult LanChatState::apply_remote_message(const LanChatMessage& me
     if (message.message_id.empty()) {
         return {false, {}, "message_id is required"};
     }
-    if (has_message_id(message.message_id)) {
-        return {false, {}, "duplicate message_id"};
+    auto existing = std::find_if(history_.begin(), history_.end(), [&](const auto& item) {
+        return item.message_id == message.message_id;
+    });
+    if (existing != history_.end()) {
+        const bool same_payload =
+            existing->sender_id == message.sender_id &&
+            existing->sender_name == message.sender_name &&
+            existing->room_id == message.room_id &&
+            existing->text == message.text &&
+            existing->seq == message.seq &&
+            existing->timestamp_ms == message.timestamp_ms;
+        if (same_payload) {
+            return {false, *existing, "duplicate message_id"};
+        }
+        if (existing->seq != 0 && message.seq != 0 && message.seq < existing->seq) {
+            return {false, *existing, "stale message_id"};
+        }
+        *existing = message;
+        sort_history_and_advance_sequence();
+        return {true, *existing, {}};
     }
 
     history_.push_back(message);
-    std::sort(history_.begin(), history_.end(), [](const auto& lhs, const auto& rhs) {
-        if (lhs.seq != rhs.seq) {
-            return lhs.seq < rhs.seq;
-        }
-        return lhs.message_id < rhs.message_id;
-    });
-    next_seq_ = std::max(next_seq_, message.seq + 1);
+    sort_history_and_advance_sequence();
     return {true, message, {}};
+}
+
+void LanChatState::apply_history_snapshot(const std::vector<LanChatMessage>& history) {
+    history_ = history;
+    sort_history_and_advance_sequence();
 }
 
 LanChatResult LanChatState::register_agent(const std::string& agent_id,
@@ -328,6 +345,20 @@ bool LanChatState::has_message_id(const std::string& message_id) const {
     return std::any_of(history_.begin(), history_.end(), [&](const auto& message) {
         return message.message_id == message_id;
     });
+}
+
+void LanChatState::sort_history_and_advance_sequence() {
+    std::sort(history_.begin(), history_.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.seq != rhs.seq) {
+            return lhs.seq < rhs.seq;
+        }
+        return lhs.message_id < rhs.message_id;
+    });
+    uint64_t max_seq = 0;
+    for (const auto& message : history_) {
+        max_seq = std::max(max_seq, message.seq);
+    }
+    next_seq_ = std::max(next_seq_, max_seq + 1);
 }
 
 std::vector<LanChatMember>::iterator LanChatState::find_member(const std::string& member_id) {

@@ -22,7 +22,7 @@ const HOST_NICKNAME = '房主';
 const state = reactive({
   role: ROLE.NONE, // none / host / guest
   inRoom: false,
-  connection: 'idle', // idle / connecting / connected / reconnecting
+  connection: 'idle', // idle / connecting / syncing / connected / reconnecting
   room: '', // 房间号
   ip: '', // 房主显示用：本机 IP；加入方：房主 IP
   port: 8770,
@@ -30,7 +30,7 @@ const state = reactive({
   nickname: '',
   members: [], // string[]
   memberDetails: [], // [{ member_id, nickname, status }]
-  messages: [], // { from, text, ts, self }
+  messages: [], // { message_id, sender_id, room_id, seq, from, text, ts, self }
   error: '', // 最近一次错误码/信息
   agents: [], // [{agent_id, name, owner}] 来自房主 agent_roster，不含 persona
   myAgents: [], // 我添加的 agent 本地草稿 [{agent_id, name, persona}]，用于显示"我的"
@@ -52,18 +52,73 @@ function _resetRoom() {
   state.myAgents = [];
 }
 
-function _pushMessage(msg, self = false) {
-  if (msg.message_id && state.messages.some((m) => m.message_id === msg.message_id)) {
-    return;
+function resetAfterJoinFailure(code) {
+  _resetRoom();
+  state.error = code || 'JOIN_FAILED';
+}
+
+function isConnected() {
+  return state.inRoom && state.connection === 'connected';
+}
+
+function isJoining() {
+  return state.role === ROLE.GUEST && !state.inRoom && (
+    state.connection === 'connecting' || state.connection === 'syncing'
+  );
+}
+
+function messageSortKey(message) {
+  const seq = Number(message.seq || 0);
+  return seq > 0 ? seq : Number.MAX_SAFE_INTEGER;
+}
+
+function sortMessages() {
+  state.messages.sort((a, b) => {
+    const seqDiff = messageSortKey(a) - messageSortKey(b);
+    if (seqDiff !== 0) return seqDiff;
+    return String(a.message_id || '').localeCompare(String(b.message_id || ''));
+  });
+}
+
+function messageSelf(msg, fallback = false) {
+  if (msg.sender_id && state.peerId) {
+    return msg.sender_id === state.peerId;
   }
-  state.messages.push({
+  return fallback;
+}
+
+function normalizeMessage(msg, self = false) {
+  return {
     message_id: msg.message_id || '',
+    sender_id: msg.sender_id || '',
+    room_id: msg.room_id || state.room || '',
     seq: msg.seq || 0,
     from: msg.from || '?',
     text: msg.text || '',
     ts: msg.ts || Math.floor(Date.now() / 1000),
-    self,
-  });
+    self: messageSelf(msg, self),
+  };
+}
+
+function upsertMessage(msg, self = false) {
+  const normalized = normalizeMessage(msg, self);
+  const existing = normalized.message_id
+    ? state.messages.find((m) => m.message_id === normalized.message_id)
+    : null;
+  if (existing) {
+    Object.assign(existing, normalized);
+  } else {
+    state.messages.push(normalized);
+  }
+  sortMessages();
+}
+
+function applyHistorySnapshot(history = [], replace = false) {
+  if (!Array.isArray(history)) return;
+  if (replace) state.messages = [];
+  for (const message of history) {
+    upsertMessage(message, messageSelf(message, message.from === state.nickname));
+  }
 }
 
 function normalizeMembers(payload = {}) {
@@ -128,7 +183,7 @@ async function joinRoom({ ip, port, room, password, nickname }) {
   const res = await lanChatService.joinRoom({ ip, port, room, password, nickname });
   if (res && res.ok) {
     state.role = ROLE.GUEST;
-    state.inRoom = true;
+    state.inRoom = false;
     state.connection = 'connecting';
     state.room = room;
     state.ip = ip;
@@ -137,14 +192,7 @@ async function joinRoom({ ip, port, room, password, nickname }) {
     // 服务器去重后的最终昵称（如 Alice -> Alice-2）
     state.nickname = res.you || nickname;
     applyMemberSnapshot(res);
-    state.messages = (res.history || []).map((m) => ({
-      message_id: m.message_id || '',
-      seq: m.seq || 0,
-      from: m.from,
-      text: m.text,
-      ts: m.ts,
-      self: false,
-    }));
+    applyHistorySnapshot(res.history || [], true);
     state.agents = res.agents || [];
   } else {
     state.error = (res && res.code) || (res && res.error) || 'JOIN_FAILED';
@@ -162,6 +210,10 @@ async function leaveRoom() {
 async function sendMessage(text) {
   const trimmed = (text || '').trim();
   if (!trimmed || !state.inRoom) return;
+  if (!isConnected()) {
+    state.error = state.connection === 'syncing' ? 'SYNCING' : 'CONNECTING';
+    return { ok: false, error: state.error };
+  }
   const res = await lanChatService.sendMessage(trimmed);
   if (res && res.ok === false) {
     state.error = res.error || 'SEND_FAILED';
@@ -176,6 +228,10 @@ async function sendMessage(text) {
 /** 添加 AI 助手。{ name, persona } */
 async function addAgent({ name, persona }) {
   state.error = '';
+  if (!isConnected()) {
+    state.error = state.connection === 'syncing' ? 'SYNCING' : 'CONNECTING';
+    return { ok: false, error: state.error };
+  }
   let res;
   try {
     res = await lanChatService.addAgent({ name, persona });
@@ -194,6 +250,10 @@ async function addAgent({ name, persona }) {
 /** 移除 AI 助手。 */
 async function removeAgent(agentId) {
   state.error = '';
+  if (!isConnected()) {
+    state.error = state.connection === 'syncing' ? 'SYNCING' : 'CONNECTING';
+    return { ok: false };
+  }
   try {
     await lanChatService.removeAgent(agentId);
   } catch (e) {
@@ -214,11 +274,19 @@ function handleEvent(event) {
   if (!event || event.channel !== 'lanchat') return;
   switch (event.event) {
     case 'message':
-      _pushMessage(event, event.from === state.nickname);
+      upsertMessage(event, event.from === state.nickname);
       break;
     case 'member_update':
       applyMemberSnapshot(event);
       if (state.role === ROLE.GUEST && state.connection === 'connecting') {
+        state.connection = 'syncing';
+        state.error = '';
+      }
+      break;
+    case 'history_snapshot':
+      applyHistorySnapshot(event.history || [], true);
+      if (state.role === ROLE.GUEST && (state.connection === 'connecting' || state.connection === 'syncing')) {
+        state.inRoom = true;
         state.connection = 'connected';
         state.error = '';
       }
@@ -229,14 +297,7 @@ function handleEvent(event) {
     case 'joined':
       applyMemberSnapshot(event);
       if (Array.isArray(event.history)) {
-        state.messages = event.history.map((m) => ({
-          message_id: m.message_id || '',
-          seq: m.seq || 0,
-          from: m.from,
-          text: m.text,
-          ts: m.ts,
-          self: false,
-        }));
+        applyHistorySnapshot(event.history, true);
       }
       break;
     case 'reconnecting':
@@ -255,14 +316,7 @@ function handleEvent(event) {
         member_details: event.member_details || state.memberDetails,
       });
       if (Array.isArray(event.history)) {
-        state.messages = event.history.map((m) => ({
-          message_id: m.message_id || '',
-          seq: m.seq || 0,
-          from: m.from,
-          text: m.text,
-          ts: m.ts,
-          self: false,
-        }));
+        applyHistorySnapshot(event.history, true);
       }
       break;
     case 'room_closed':
@@ -271,6 +325,15 @@ function handleEvent(event) {
       break;
     case 'error':
       state.error = event.code || 'ERROR';
+      if (
+        event.code === 'ROOM_NOT_FOUND' ||
+        event.code === 'ROOM_MISMATCH' ||
+        event.code === 'JOIN_TIMEOUT' ||
+        event.code === 'HOST_UNREACHABLE'
+      ) {
+        resetAfterJoinFailure(event.code);
+        break;
+      }
       if (event.code === 'RECONNECT_FAILED' || event.code === 'RECONNECT_REJECTED') {
         state.connection = 'idle';
         state.inRoom = false;
@@ -292,6 +355,7 @@ export const lanchat = {
   addAgent,
   removeAgent,
   handleEvent,
+  isJoining,
 };
 
 export default lanchat;
