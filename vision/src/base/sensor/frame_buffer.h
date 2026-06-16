@@ -294,6 +294,10 @@ public:
         uint2 dim = raytracing_resolution();
         return dim.x * dim.y;
     }
+    [[nodiscard]] virtual uint2 presentation_resolution() const noexcept { return resolution(); }
+    [[nodiscard]] virtual BufferView<float4> presentation_buffer() const noexcept {
+        return enable_accumulation() ? accumulation_buffer_.view() : rt_buffer_.view();
+    }
     void register_(const SP<ScreenBuffer> &buffer) noexcept;
     void unregister(const SP<ScreenBuffer> &buffer) noexcept;
     void unregister(const string &name) noexcept;

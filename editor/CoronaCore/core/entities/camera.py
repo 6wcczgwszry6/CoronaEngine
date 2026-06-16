@@ -12,10 +12,15 @@ class Camera:
     包含图像效果、尺寸管理等功能。
     """
 
+    @staticmethod
+    def _normalize_vision_framebuffer(mode: str) -> str:
+        return 'lightfield' if str(mode).lower() == 'lightfield' else 'normal'
+
     def __init__(self, position: Optional[List[float]] = None, forward: Optional[List[float]] = None,
                  world_up: Optional[List[float]] = None, fov: Optional[float] = None, name: str = "Camera",
                  width: int = 1920, height: int = 1080, camera_id: Optional[str] = None,
                  render_backend: str = "native", output_mode: str = "final_color",
+                 vision_framebuffer: str = "normal",
                  move_speed: float = 1.0, view_open: bool = False,
                  view_x: int = 120, view_y: int = 120,
                  view_width: int = 960, view_height: int = 540,
@@ -46,6 +51,7 @@ class Camera:
         self.height = height
         self.render_backend = render_backend
         self.output_mode = output_mode
+        self.vision_framebuffer = self._normalize_vision_framebuffer(vision_framebuffer)
         self.move_speed = float(move_speed)
         self.view_open = bool(view_open)
         self.view_x = int(view_x)
@@ -56,6 +62,8 @@ class Camera:
         self.engine_obj.set_size(width, height)
         self.engine_obj.set_output_mode(output_mode)
         self.engine_obj.set_render_backend(render_backend)
+        if hasattr(self.engine_obj, 'set_vision_framebuffer'):
+            self.engine_obj.set_vision_framebuffer(self.vision_framebuffer)
         self._flush_view_state()
         # 持有强引用，避免 ImageEffects 被 GC 后底层句柄被释放
         self._image_effects_ref = None
@@ -128,6 +136,14 @@ class Camera:
 
     def get_render_backend(self) -> str:
         return self.render_backend
+
+    def set_vision_framebuffer(self, mode: str):
+        self.vision_framebuffer = self._normalize_vision_framebuffer(mode)
+        if hasattr(self.engine_obj, 'set_vision_framebuffer'):
+            self.engine_obj.set_vision_framebuffer(self.vision_framebuffer)
+
+    def get_vision_framebuffer(self) -> str:
+        return self.vision_framebuffer
 
     def _flush_view_state(self):
         self.engine_obj.set_view_state(
@@ -219,6 +235,7 @@ class Camera:
             'height': self.height,
             'output_mode': self.get_output_mode(),
             'render_backend': self.get_render_backend(),
+            'vision_framebuffer': self.get_vision_framebuffer(),
             'move_speed': self.move_speed,
             'view_open': self.view_open,
             'view_x': self.view_x,

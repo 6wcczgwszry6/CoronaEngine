@@ -198,6 +198,8 @@ class Scene:
             cam.set_size(width, height)
             cam.set_output_mode(data.get(f'{prefix}.output_mode', 'final_color'))
             cam.set_render_backend(data.get(f'{prefix}.render_backend', 'native'))
+            if hasattr(cam, 'set_vision_framebuffer'):
+                cam.set_vision_framebuffer(data.get(f'{prefix}.vision_framebuffer', 'normal'))
             cam.set_view_state(
                 data.get(f'{prefix}.view_open', 'false').lower() in ('1', 'true', 'yes', 'on'),
                 int(data.get(f'{prefix}.view_x', 120)),
@@ -315,6 +317,8 @@ class Scene:
                     self.file_data['camera'][f'{prefix}.height'] = str(cam.height)
                     self.file_data['camera'][f'{prefix}.output_mode'] = cam.get_output_mode()
                     self.file_data['camera'][f'{prefix}.render_backend'] = cam.get_render_backend()
+                    if hasattr(cam, 'get_vision_framebuffer'):
+                        self.file_data['camera'][f'{prefix}.vision_framebuffer'] = cam.get_vision_framebuffer()
                     self.file_data['camera'][f'{prefix}.move_speed'] = str(cam.move_speed)
                     self.file_data['camera'][f'{prefix}.view_open'] = str(cam.view_open).lower()
                     self.file_data['camera'][f'{prefix}.view_x'] = str(cam.view_x)

@@ -358,6 +358,43 @@ class SceneTools(PluginBase):
             return {"status": "error", "message": str(exc)}
 
     @staticmethod
+    def set_vision_framebuffer(mode: str = "normal", scene_name: str = None,
+                               camera_name: str = None) -> dict:
+        try:
+            normalized = "lightfield" if str(mode).lower() == "lightfield" else "normal"
+            if not scene_name:
+                return {"status": "error", "message": "scene_name is required"}
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                raise ValueError(f"Scene '{scene_name}' not found")
+            camera = scene.find_camera(camera_name)
+            if camera is None:
+                raise ValueError(f"Camera '{camera_name}' not found")
+            camera.set_vision_framebuffer(normalized)
+            scene.save_data()
+            return {
+                "status": "success",
+                "mode": camera.get_vision_framebuffer(),
+            }
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def get_vision_framebuffer(scene_name: str = None, camera_name: str = None) -> dict:
+        try:
+            if not scene_name:
+                return {"status": "error", "message": "scene_name is required"}
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                raise ValueError(f"Scene '{scene_name}' not found")
+            camera = scene.find_camera(camera_name)
+            if camera is None:
+                raise ValueError(f"Camera '{camera_name}' not found")
+            return {"status": "success", "mode": camera.get_vision_framebuffer()}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
     def create_camera_view(scene_name: str, name: str = None) -> dict:
         try:
             scene = scene_manager.get(scene_name)
@@ -386,6 +423,10 @@ class SceneTools(PluginBase):
                 height=source.height,
                 render_backend=source.get_render_backend(),
                 output_mode=source.get_output_mode(),
+                vision_framebuffer=(
+                    source.get_vision_framebuffer()
+                    if hasattr(source, "get_vision_framebuffer") else "normal"
+                ),
                 move_speed=source.move_speed,
                 view_open=True,
                 view_x=120 + index * 36,
@@ -487,6 +528,8 @@ class SceneTools(PluginBase):
                 camera.set_size(
                     int(state.get("width", camera.width)),
                     int(state.get("height", camera.height)))
+            if "vision_framebuffer" in state:
+                camera.set_vision_framebuffer(state.get("vision_framebuffer", "normal"))
             scene.save_data()
             return {"status": "success", "camera": SceneTools._camera_view_payload(scene, camera)}
         except Exception as exc:
