@@ -4,6 +4,10 @@
 #include <corona/systems/ui/vulkan_backend.h>
 #include <imgui_impl_sdl3.h>
 
+#ifdef _WIN32
+#include <Windows.h>
+#endif
+
 #include "cef/browser_manager.h"
 #include "cef/cef_client.h"
 
@@ -187,7 +191,50 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         return;
     }
 
-    auto result = event_handler_.process_events(context.window, url_input_active_tab_, [&](const SDL_Event& e) { input_handler_.process_sdl_key_event(e); }, [&](const SDL_Event& e) { input_handler_.process_sdl_text_event(e); }, [&](const SDL_Event& e) { input_handler_.process_sdl_ime_event(e); });
+    auto route_camera_window = [&](SDL_WindowID window_id) {
+        if (window_id == 0) {
+            return;
+        }
+        for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+            if (tab && tab->camera_view &&
+                tab->platform_window_id == window_id) {
+                *context.active_tab_id = tab_id;
+                url_input_active_tab_ = -1;
+                return;
+            }
+        }
+    };
+
+    auto result = event_handler_.process_events(
+        context.window, url_input_active_tab_,
+        [&](const SDL_Event& event) {
+            route_camera_window(event.key.windowID);
+            input_handler_.process_sdl_key_event(event);
+        },
+        [&](const SDL_Event& event) {
+            route_camera_window(event.text.windowID);
+            input_handler_.process_sdl_text_event(event);
+        },
+        [&](const SDL_Event& event) {
+            route_camera_window(event.edit.windowID);
+            input_handler_.process_sdl_ime_event(event);
+        });
+
+    if (SDL_Window* focused_window = SDL_GetKeyboardFocus()) {
+        route_camera_window(SDL_GetWindowID(focused_window));
+    }
+#ifdef _WIN32
+    if (HWND foreground = GetForegroundWindow()) {
+        for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+            if (tab && tab->camera_view &&
+                tab->platform_handle_raw == foreground) {
+                *context.active_tab_id = tab_id;
+                url_input_active_tab_ = -1;
+                break;
+            }
+        }
+    }
+#endif
 
     if (result.should_quit) {
         *context.running = false;
@@ -196,6 +243,20 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
     if (result.window_resized && context.window && context.window_size_changed) {
         *context.window_size_changed = true;
         context.vulkan_backend->request_rebuild();
+    }
+
+    // Forward text input before texture uploads and GPU presentation can block
+    // this main-thread UI frame.
+    if (*context.active_tab_id != -1 && url_input_active_tab_ == -1) {
+        auto* tab = BrowserManager::instance().get_tab(*context.active_tab_id);
+        if (tab && tab->client && tab->client->GetBrowser()) {
+            tab->client->GetBrowser()->GetHost()->SetFocus(true);
+            input_handler_.send_key_events_to_browser(tab->client->GetBrowser());
+        } else {
+            input_handler_.clear_pending_events();
+        }
+    } else {
+        input_handler_.clear_pending_events();
     }
 
     if (context.vulkan_backend->is_rebuild_needed()) {
@@ -221,17 +282,6 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
     std::vector<int> tabs_to_close = browser_renderer_.render_browser_tabs(dock_space_id, *context.active_tab_id, url_input_active_tab_, context.io);
 
     layout_manager_.end_dockspace();
-
-    if (*context.active_tab_id != -1 && url_input_active_tab_ == -1) {
-        auto* tab = BrowserManager::instance().get_tab(*context.active_tab_id);
-        if (tab && tab->client && tab->client->GetBrowser()) {
-            input_handler_.send_key_events_to_browser(tab->client->GetBrowser());
-        } else {
-            input_handler_.clear_pending_events();
-        }
-    } else {
-        input_handler_.clear_pending_events();
-    }
 
     for (auto tab_id : tabs_to_close) {
         BrowserManager::instance().remove_tab(tab_id);

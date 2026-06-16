@@ -31,6 +31,8 @@ if(WIN32 AND EXISTS "${_CORONA_OFFLINE_FETCH_BASE}")
     set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL "Require local FetchContent sources only" FORCE)
     message(STATUS "[FetchContent] Offline cache enabled: ${FETCHCONTENT_BASE_DIR}")
 endif()
+unset(_CORONA_LOCAL_HORIZON_SOURCE)
+unset(_CORONA_OFFLINE_FETCH_BASE)
 
 # ------------------------------------------------------------------------------
 # Modular Configuration Includes
@@ -38,6 +40,7 @@ endif()
 include(corona_options)             # Global build options (editor/examples/runtime switches)
 include(corona_python)              # Embedded Python discovery and dependency checks
 include(corona_third_party)         # FetchContent declarations for external dependencies
+include(corona_tbb)                 # Engine-owned TBB discovery and runtime copy helpers
 include(corona_compile_config)      # Compiler settings, standards, and shared definitions
 include(corona_add_system)          # Helper for adding system modules
 include(corona_runtime_deps)        # Runtime dependency collection and copy helpers
@@ -48,6 +51,9 @@ include(corona_cef)
 # Testing Support
 # ------------------------------------------------------------------------------
 include(CTest)
+if(BUILD_CORONA_TESTING AND NOT BUILD_TESTING)
+    enable_testing()
+endif()
 
 # ------------------------------------------------------------------------------
 # Subdirectories

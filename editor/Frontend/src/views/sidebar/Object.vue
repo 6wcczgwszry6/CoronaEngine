@@ -315,6 +315,33 @@
                   </div>
                 </div>
               </div>
+
+              <div
+                class="bg-[#3c3c3c]/50 p-2 rounded border-l-2"
+                :class="actorData.follow_camera ? 'border-cyan-500' : 'border-[#545454]'"
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <label class="text-[#e0e0e0] font-medium w-16">渲染空间</label>
+                  <div class="flex bg-[#1a1a1a] rounded p-0.5">
+                    <button
+                      type="button"
+                      class="px-2 py-1 rounded text-[10px] transition-colors"
+                      :class="!actorData.follow_camera ? 'bg-[#545454] text-[#ffffff]' : 'text-[#909090] hover:text-[#e0e0e0]'"
+                      @click="setActorRenderSpace(false)"
+                    >
+                      场景
+                    </button>
+                    <button
+                      type="button"
+                      class="px-2 py-1 rounded text-[10px] transition-colors"
+                      :class="actorData.follow_camera ? 'bg-cyan-600 text-[#ffffff]' : 'text-[#909090] hover:text-[#e0e0e0]'"
+                      @click="setActorRenderSpace(true)"
+                    >
+                      屏幕 UI
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <!-- 单位 - 模型 -->
@@ -412,8 +439,8 @@
                           :step="0.1"
                           :min="-100"
                           :max="100"
-                          @update:model-value="(value) => updateActorTransformFast('Move', 'x', value)"
-                          @change="() => updateActorTransform('Move')"
+                          @update:model-value="(value) => updateActorTransformFast('SetPosition', 'x', value)"
+                          @change="() => updateActorTransform('SetPosition')"
                         />
                       </div>
                       <div class="flex items-center gap-1">
@@ -423,8 +450,8 @@
                           :step="0.1"
                           :min="-100"
                           :max="100"
-                          @update:model-value="(value) => updateActorTransformFast('Move', 'y', value)"
-                          @change="() => updateActorTransform('Move')"
+                          @update:model-value="(value) => updateActorTransformFast('SetPosition', 'y', value)"
+                          @change="() => updateActorTransform('SetPosition')"
                         />
                       </div>
                       <div class="flex items-center gap-1">
@@ -434,8 +461,8 @@
                           :step="0.1"
                           :min="-100"
                           :max="100"
-                          @update:model-value="(value) => updateActorTransformFast('Move', 'z', value)"
-                          @change="() => updateActorTransform('Move')"
+                          @update:model-value="(value) => updateActorTransformFast('SetPosition', 'z', value)"
+                          @change="() => updateActorTransform('SetPosition')"
                         />
                       </div>
                     </div>
@@ -452,8 +479,8 @@
                           :step="0.1"
                           :min="-360"
                           :max="360"
-                          @update:model-value="(value) => updateActorTransformFast('Rotate', 'x', value)"
-                          @change="() => updateActorTransform('Rotate')"
+                          @update:model-value="(value) => updateActorTransformFast('SetRotation', 'x', value)"
+                          @change="() => updateActorTransform('SetRotation')"
                         />
                       </div>
 
@@ -464,8 +491,8 @@
                           :step="0.1"
                           :min="-360"
                           :max="360"
-                          @update:model-value="(value) => updateActorTransformFast('Rotate', 'y', value)"
-                          @change="() => updateActorTransform('Rotate')"
+                          @update:model-value="(value) => updateActorTransformFast('SetRotation', 'y', value)"
+                          @change="() => updateActorTransform('SetRotation')"
                         />
                       </div>
 
@@ -476,8 +503,8 @@
                           :step="0.1"
                           :min="-360"
                           :max="360"
-                          @update:model-value="(value) => updateActorTransformFast('Rotate', 'z', value)"
-                          @change="() => updateActorTransform('Rotate')"
+                          @update:model-value="(value) => updateActorTransformFast('SetRotation', 'z', value)"
+                          @change="() => updateActorTransform('SetRotation')"
                         />
                       </div>
                     </div>
@@ -494,8 +521,8 @@
                           :step="0.1"
                           :min="0.01"
                           :max="10"
-                          @update:model-value="(value) => updateActorTransformFast('Scale', 'x', value)"
-                          @change="() => updateActorTransform('Scale')"
+                          @update:model-value="(value) => updateActorTransformFast('SetScale', 'x', value)"
+                          @change="() => updateActorTransform('SetScale')"
                         />
                       </div>
 
@@ -506,8 +533,8 @@
                           :step="0.1"
                           :min="0.01"
                           :max="10"
-                          @update:model-value="(value) => updateActorTransformFast('Scale', 'y', value)"
-                          @change="() => updateActorTransform('Scale')"
+                          @update:model-value="(value) => updateActorTransformFast('SetScale', 'y', value)"
+                          @change="() => updateActorTransform('SetScale')"
                         />
                       </div>
 
@@ -518,8 +545,8 @@
                           :step="0.1"
                           :min="0.01"
                           :max="10"
-                          @update:model-value="(value) => updateActorTransformFast('Scale', 'z', value)"
-                          @change="() => updateActorTransform('Scale')"
+                          @update:model-value="(value) => updateActorTransformFast('SetScale', 'z', value)"
+                          @change="() => updateActorTransform('SetScale')"
                         />
                       </div>
                     </div>
@@ -584,11 +611,19 @@
                       <input
                         type="checkbox"
                         v-model="actorData.mechanics.physics_enabled"
-                        class="sr-only peer"
+                        class="sr-only"
                         @change="() => updateActorMechanics('SetPhysicsEnabled')"
                         @update:model-value="() => updateActorMechanicsFast(PROPERTY.PhysicsEnabled)"
                       />
-                      <div class="w-7 h-4 bg-[#1a1a1a] rounded-full peer-checked:bg-[#84a65b]/60 peer-checked:after:bg-[#84a65b] after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-[#555] after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-3"></div>
+                      <div
+                        class="relative w-7 h-4 rounded-full transition-colors"
+                        :class="actorData.mechanics.physics_enabled ? 'bg-[#84a65b]/60' : 'bg-[#1a1a1a]'"
+                      >
+                        <span
+                          class="absolute top-[2px] left-[2px] h-3 w-3 rounded-full transition-all"
+                          :class="actorData.mechanics.physics_enabled ? 'translate-x-3 bg-[#84a65b]' : 'translate-x-0 bg-[#555]'"
+                        ></span>
+                      </div>
                     </label>
                   </div>
                   <!-- 质量 -->
@@ -701,8 +736,24 @@
 
             <!-- 单位 - 积木 -->
             <div v-show="ActiveSubTab === 'Blockly'" class="flex flex-col" style="height: 400px;">
+              <!-- 积木工具栏：新建/打开/保存 -->
+              <div v-if="actorData.name" class="flex items-center gap-0.5 px-1 py-1 bg-[#2a2a2a] border-b border-[#444] shrink-0">
+                <button
+                  class="px-2 py-0.5 text-[11px] text-[#ccc] bg-transparent border border-transparent rounded hover:text-white hover:bg-[#3a3a3a] hover:border-[#555] transition-colors"
+                  @click="actorBlocklyRef?.handleNewCanvas()"
+                >新建</button>
+                <button
+                  class="px-2 py-0.5 text-[11px] text-[#ccc] bg-transparent border border-transparent rounded hover:text-white hover:bg-[#3a3a3a] hover:border-[#555] transition-colors"
+                  @click="actorBlocklyRef?.handleOpenWorkspace()"
+                >打开</button>
+                <button
+                  class="px-2 py-0.5 text-[11px] text-[#ccc] bg-transparent border border-transparent rounded hover:text-white hover:bg-[#3a3a3a] hover:border-[#555] transition-colors"
+                  @click="actorBlocklyRef?.handleSaveWorkspace()"
+                >保存</button>
+              </div>
               <BlocklyWorkspace
                 v-if="actorData.name"
+                ref="actorBlocklyRef"
                 :actorName="actorData.name"
                 :sceneName="actorData.parentScene || sceneData.name"
                 embedded
@@ -908,6 +959,33 @@
                   </div>
                 </div>
               </div>
+
+              <div
+                class="bg-[#3c3c3c]/50 p-2 rounded border-l-2"
+                :class="modelData.follow_camera ? 'border-cyan-500' : 'border-[#545454]'"
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <label class="text-[#e0e0e0] font-medium w-16">渲染空间</label>
+                  <div class="flex bg-[#1a1a1a] rounded p-0.5">
+                    <button
+                      type="button"
+                      class="px-2 py-1 rounded text-[10px] transition-colors"
+                      :class="!modelData.follow_camera ? 'bg-[#545454] text-[#ffffff]' : 'text-[#909090] hover:text-[#e0e0e0]'"
+                      @click="setModelRenderSpace(false)"
+                    >
+                      场景
+                    </button>
+                    <button
+                      type="button"
+                      class="px-2 py-1 rounded text-[10px] transition-colors"
+                      :class="modelData.follow_camera ? 'bg-cyan-600 text-[#ffffff]' : 'text-[#909090] hover:text-[#e0e0e0]'"
+                      @click="setModelRenderSpace(true)"
+                    >
+                      屏幕 UI
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <!-- 模型 - 模型设置 -->
@@ -938,8 +1016,8 @@
                         :step="0.1"
                         :min="-100"
                         :max="100"
-                        @update:model-value="(value) => updateModelTransformFast('Move', 'x', value)"
-                        @change="() => updateModelTransform('Move')"
+                        @update:model-value="(value) => updateModelTransformFast('SetPosition', 'x', value)"
+                        @change="() => updateModelTransform('SetPosition')"
                       />
                     </div>
 
@@ -950,8 +1028,8 @@
                         :step="0.1"
                         :min="-100"
                         :max="100"
-                        @update:model-value="(value) => updateModelTransformFast('Move', 'y', value)"
-                        @change="() => updateModelTransform('Move')"
+                        @update:model-value="(value) => updateModelTransformFast('SetPosition', 'y', value)"
+                        @change="() => updateModelTransform('SetPosition')"
                       />
                     </div>
 
@@ -962,8 +1040,8 @@
                         :step="0.1"
                         :min="-100"
                         :max="100"
-                        @update:model-value="(value) => updateModelTransformFast('Move', 'z', value)"
-                        @change="() => updateModelTransform('Move')"
+                        @update:model-value="(value) => updateModelTransformFast('SetPosition', 'z', value)"
+                        @change="() => updateModelTransform('SetPosition')"
                       />
                     </div>
                   </div>
@@ -980,8 +1058,8 @@
                         :step="0.1"
                         :min="-360"
                         :max="360"
-                        @update:model-value="(value) => updateModelTransformFast('Rotate', 'x', value)"
-                        @change="() => updateModelTransform('Rotate')"
+                        @update:model-value="(value) => updateModelTransformFast('SetRotation', 'x', value)"
+                        @change="() => updateModelTransform('SetRotation')"
                       />
                     </div>
 
@@ -992,8 +1070,8 @@
                         :step="0.1"
                         :min="-360"
                         :max="360"
-                        @update:model-value="(value) => updateModelTransformFast('Rotate', 'y', value)"
-                        @change="() => updateModelTransform('Rotate')"
+                        @update:model-value="(value) => updateModelTransformFast('SetRotation', 'y', value)"
+                        @change="() => updateModelTransform('SetRotation')"
                       />
                     </div>
 
@@ -1004,8 +1082,8 @@
                         :step="0.1"
                         :min="-360"
                         :max="360"
-                        @update:model-value="(value) => updateModelTransformFast('Rotate', 'z', value)"
-                        @change="() => updateModelTransform('Rotate')"
+                        @update:model-value="(value) => updateModelTransformFast('SetRotation', 'z', value)"
+                        @change="() => updateModelTransform('SetRotation')"
                       />
                     </div>
                   </div>
@@ -1022,8 +1100,8 @@
                         :step="0.1"
                         :min="0.01"
                         :max="10"
-                        @update:model-value="(value) => updateModelTransformFast('Scale', 'x', value)"
-                        @change="() => updateModelTransform('Scale')"
+                        @update:model-value="(value) => updateModelTransformFast('SetScale', 'x', value)"
+                        @change="() => updateModelTransform('SetScale')"
                       />
                     </div>
 
@@ -1034,8 +1112,8 @@
                         :step="0.1"
                         :min="0.01"
                         :max="10"
-                        @update:model-value="(value) => updateModelTransformFast('Scale', 'y', value)"
-                        @change="() => updateModelTransform('Scale')"
+                        @update:model-value="(value) => updateModelTransformFast('SetScale', 'y', value)"
+                        @change="() => updateModelTransform('SetScale')"
                       />
                     </div>
 
@@ -1046,8 +1124,8 @@
                         :step="0.1"
                         :min="0.01"
                         :max="10"
-                        @update:model-value="(value) => updateModelTransformFast('Scale', 'z', value)"
-                        @change="() => updateModelTransform('Scale')"
+                        @update:model-value="(value) => updateModelTransformFast('SetScale', 'z', value)"
+                        @change="() => updateModelTransform('SetScale')"
                       />
                     </div>
                   </div>
@@ -1106,11 +1184,19 @@
                     <input
                       type="checkbox"
                       v-model="modelData.mechanics.physics_enabled"
-                      class="sr-only peer"
+                      class="sr-only"
                       @change="() => updateModelMechanics('SetPhysicsEnabled')"
                       @update:model-value="() => updateModelMechanicsFast(PROPERTY.PhysicsEnabled)"
                     />
-                    <div class="w-7 h-4 bg-[#1a1a1a] rounded-full peer-checked:bg-[#84a65b]/60 peer-checked:after:bg-[#84a65b] after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-[#555] after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-3"></div>
+                    <div
+                      class="relative w-7 h-4 rounded-full transition-colors"
+                      :class="modelData.mechanics.physics_enabled ? 'bg-[#84a65b]/60' : 'bg-[#1a1a1a]'"
+                    >
+                      <span
+                        class="absolute top-[2px] left-[2px] h-3 w-3 rounded-full transition-all"
+                        :class="modelData.mechanics.physics_enabled ? 'translate-x-3 bg-[#84a65b]' : 'translate-x-0 bg-[#555]'"
+                      ></span>
+                    </div>
                   </label>
                 </div>
                 <!-- 质量 -->
@@ -1214,8 +1300,24 @@
 
             <!-- 模型 - 积木 -->
             <div v-show="ActiveSubTab === 'Blockly'" class="flex flex-col" style="height: 400px;">
+              <!-- 积木工具栏：新建/打开/保存 -->
+              <div v-if="modelData.name" class="flex items-center gap-0.5 px-1 py-1 bg-[#2a2a2a] border-b border-[#444] shrink-0">
+                <button
+                  class="px-2 py-0.5 text-[11px] text-[#ccc] bg-transparent border border-transparent rounded hover:text-white hover:bg-[#3a3a3a] hover:border-[#555] transition-colors"
+                  @click="modelBlocklyRef?.handleNewCanvas()"
+                >新建</button>
+                <button
+                  class="px-2 py-0.5 text-[11px] text-[#ccc] bg-transparent border border-transparent rounded hover:text-white hover:bg-[#3a3a3a] hover:border-[#555] transition-colors"
+                  @click="modelBlocklyRef?.handleOpenWorkspace()"
+                >打开</button>
+                <button
+                  class="px-2 py-0.5 text-[11px] text-[#ccc] bg-transparent border border-transparent rounded hover:text-white hover:bg-[#3a3a3a] hover:border-[#555] transition-colors"
+                  @click="modelBlocklyRef?.handleSaveWorkspace()"
+                >保存</button>
+              </div>
               <BlocklyWorkspace
                 v-if="modelData.name"
+                ref="modelBlocklyRef"
                 :actorName="modelData.name"
                 :sceneName="modelData.targetScene || sceneData.name"
                 embedded
@@ -1281,6 +1383,10 @@ const modelTabs = [
   { id: 'Model', label: '模型' },
   { id: 'Blockly', label: '积木' },
 ];
+
+// ========== Blockly 工作区引用 ==========
+const actorBlocklyRef = ref(null);
+const modelBlocklyRef = ref(null);
 
 // ========== 时间轴状态 ==========
 const timelineRulerRef = ref(null);
@@ -1578,6 +1684,8 @@ const actorData = ref({
   handle: 0,
   parentScene: '',
   file: '',
+  follow_camera: false,
+  render_space: 'scene',
   model: {
     path: '',
   },
@@ -1617,6 +1725,8 @@ const modelData = ref({
   handle: 0,
   targetScene: '',
   file: '',
+  follow_camera: false,
+  render_space: 'scene',
   defaultTransform: {
     position: { x: 0.0, y: 0.0, z: 0.0 },
     rotation: { x: 0.0, y: 0.0, z: 0.0 },
@@ -1655,6 +1765,13 @@ const switchMainTab = (tab) => {
   mainActiveTab.value = tab;
   ActiveSubTab.value = 'Basic'; // 重置子标签
 };
+
+const readFollowCameraState = (data) =>
+  data?.render_space === 'ui' ||
+  data?.follow_camera === true ||
+  data?.follow_camera === 1 ||
+  data?.follow_camera === 'true' ||
+  data?.follow_camera === '1';
 
 // 加载场景数据
 const loadSceneData = async (sceneId) => {
@@ -1717,6 +1834,9 @@ const loadActorData = async (sceneId, actorId) => {
       actorData.value.parentScene = sceneId || '';
       actorData.value.file = data.path;
       actorData.value.model.path = data.model || '';
+      const followCamera = readFollowCameraState(data);
+      actorData.value.follow_camera = followCamera;
+      actorData.value.render_space = followCamera ? 'ui' : 'scene';
 
       if (data.geometry) {
         actorData.value.hasGeometry = true;
@@ -1794,6 +1914,9 @@ const loadModelData = async (sceneId, modelId) => {
       modelData.value.handle = Number(data.handle || 0);
       modelData.value.targetScene = sceneId || '';
       modelData.value.file = data.path;
+      const followCamera = readFollowCameraState(data);
+      modelData.value.follow_camera = followCamera;
+      modelData.value.render_space = followCamera ? 'ui' : 'scene';
 
       if (data.geometry) {
         modelData.value.defaultTransform.position = {
@@ -1874,6 +1997,9 @@ const updateFloorGrid = async () => {
 };
 
 const ACTOR_TRANSFORM_OPERATION = {
+  SetPosition: 0,
+  SetRotation: 1,
+  SetScale: 2,
   Move: 0,
   Rotate: 1,
   Scale: 2,
@@ -1902,6 +2028,7 @@ const applyAxisOverride = (vector, axis, value) => {
 const getTransformVector = (transform, operationType, axis = null, value = null) => {
   if (!transform) return null;
   switch (operationType) {
+    case 'SetPosition':
     case 'Move':
       return applyAxisOverride(
         [
@@ -1912,6 +2039,7 @@ const getTransformVector = (transform, operationType, axis = null, value = null)
         axis,
         value
       );
+    case 'SetRotation':
     case 'Rotate':
       return applyAxisOverride(
         [
@@ -1922,6 +2050,7 @@ const getTransformVector = (transform, operationType, axis = null, value = null)
         axis,
         value
       );
+    case 'SetScale':
     case 'Scale':
       return applyAxisOverride(
         [
@@ -2179,6 +2308,36 @@ const updateActorCollision = () => {
   });
 };
 
+// 更新单位渲染空间：场景 Actor 或屏幕 UI Actor
+const setActorRenderSpace = async (followCamera) => {
+  if (!currentActorFile.value || !actorData.value.parentScene) return;
+
+  const enabled = Boolean(followCamera);
+  const previous = Boolean(actorData.value.follow_camera);
+  const previousPhysicsEnabled = Boolean(actorData.value.mechanics.physics_enabled);
+  if (previous === enabled) return;
+
+  actorData.value.follow_camera = enabled;
+  actorData.value.render_space = enabled ? 'ui' : 'scene';
+
+  try {
+    await sceneService.actorOperation(
+      actorData.value.parentScene,
+      currentActorFile.value,
+      'SetFollowCamera',
+      [enabled]
+    );
+    if (enabled) {
+      actorData.value.mechanics.physics_enabled = false;
+    }
+  } catch (e) {
+    actorData.value.follow_camera = previous;
+    actorData.value.render_space = previous ? 'ui' : 'scene';
+    actorData.value.mechanics.physics_enabled = previousPhysicsEnabled;
+    logError('更新单位渲染空间失败', e);
+  }
+};
+
 // 更新相机锁定
 const updateCameraLock = () => {
   if (!currentActorFile.value || !actorData.value.parentScene) return;
@@ -2250,6 +2409,36 @@ const updateModelTransform = (operationType) => {
       logError('更新模型变换失败', e);
     }
   });
+};
+
+// 更新模型渲染空间：场景 Actor 或屏幕 UI Actor
+const setModelRenderSpace = async (followCamera) => {
+  if (!currentModelFile.value || !modelData.value.targetScene) return;
+
+  const enabled = Boolean(followCamera);
+  const previous = Boolean(modelData.value.follow_camera);
+  const previousPhysicsEnabled = Boolean(modelData.value.mechanics.physics_enabled);
+  if (previous === enabled) return;
+
+  modelData.value.follow_camera = enabled;
+  modelData.value.render_space = enabled ? 'ui' : 'scene';
+
+  try {
+    await sceneService.actorOperation(
+      modelData.value.targetScene,
+      currentModelFile.value,
+      'SetFollowCamera',
+      [enabled]
+    );
+    if (enabled) {
+      modelData.value.mechanics.physics_enabled = false;
+    }
+  } catch (e) {
+    modelData.value.follow_camera = previous;
+    modelData.value.render_space = previous ? 'ui' : 'scene';
+    modelData.value.mechanics.physics_enabled = previousPhysicsEnabled;
+    logError('更新模型渲染空间失败', e);
+  }
 };
 
 // 更新模型物理属性

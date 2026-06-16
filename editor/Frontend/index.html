@@ -125,6 +125,9 @@
         });
 
         var following = false;
+        function isGamePreviewInputLocked() {
+            return !!window.__coronaGamePreviewInputLocked;
+        }
 
         function readOffsets() {
             return [
@@ -214,6 +217,7 @@
         // 键盘控制：ESC退出 / WASD移动物体（捕获阶段，先于Vue处理器）
         var wasdKeys = { w:1, a:1, s:1, d:1 };
         document.addEventListener('keydown', function(e) {
+            if (isGamePreviewInputLocked()) return;
             var k = e.key.toLowerCase();
             if (k === 'escape' && following) {
                 e.preventDefault();
@@ -234,6 +238,7 @@
             }
         }, true);
         document.addEventListener('keyup', function(e) {
+            if (isGamePreviewInputLocked()) return;
             var k = e.key.toLowerCase();
             if (wasdKeys[k] && following) {
                 e.preventDefault();

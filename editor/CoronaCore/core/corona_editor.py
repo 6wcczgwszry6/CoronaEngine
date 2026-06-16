@@ -108,6 +108,15 @@ class CoronaEditor:
     _camera_follow_scene = None
     _camera_follow_offset = [0.0, 0.0, 2.0]
     _held_keys = set()
+    _editor_camera_input_enabled = True
+
+    @classmethod
+    def set_editor_camera_input_enabled(cls, enabled):
+        cls._editor_camera_input_enabled = bool(enabled)
+        if not enabled:
+            cls._held_keys.clear()
+            cls._follow_rmb_down = False
+            cls._follow_prev_mouse = None
 
     @classmethod
     def camera_lock_set(cls, enabled, ox=0.0, oy=0.0, oz=2.0, rx=0.0, ry=0.0, rz=0.0):
@@ -186,11 +195,15 @@ class CoronaEditor:
 
     @classmethod
     def object_key_down(cls, key):
+        if not cls._editor_camera_input_enabled:
+            return {"ok": True}
         cls._held_keys.add(key.lower())
         return {"ok": True}
 
     @classmethod
     def object_key_up(cls, key):
+        if not cls._editor_camera_input_enabled:
+            return {"ok": True}
         cls._held_keys.discard(key.lower())
         return {"ok": True}
 
@@ -237,80 +250,85 @@ class CoronaEditor:
             if cam is None:
                 return
             obj_pos = actor.get_position()
+            input_enabled = cls._editor_camera_input_enabled
 
             w_down = a_down = s_down = d_down = 0
-            try:
-                import ctypes
-                w_down = ctypes.windll.user32.GetAsyncKeyState(0x57) & 0x8000
-                a_down = ctypes.windll.user32.GetAsyncKeyState(0x41) & 0x8000
-                s_down = ctypes.windll.user32.GetAsyncKeyState(0x53) & 0x8000
-                d_down = ctypes.windll.user32.GetAsyncKeyState(0x44) & 0x8000
-            except Exception:
-                pass
-            for k in list(cls._held_keys):
-                if k == 'w': w_down = 0x8000
-                elif k == 'a': a_down = 0x8000
-                elif k == 's': s_down = 0x8000
-                elif k == 'd': d_down = 0x8000
-
-            if w_down or a_down or s_down or d_down:
-                # 从 offset 推断相机朝向，确保 WASD 方向与观察方向一致
-                ox, oy, oz = cls._camera_follow_offset
-                look_dir = cls._normalize([-ox, -oy, -oz])
-                fwd_xz = cls._normalize([look_dir[0], 0.0, look_dir[2]])
-                right_xz = cls._normalize(cls._cross([0.0, 1.0, 0.0], fwd_xz))
-                move = [0.0, 0.0, 0.0]
-                step = 0.5
-                if w_down: move[0] += fwd_xz[0] * step; move[2] += fwd_xz[2] * step
-                if s_down: move[0] -= fwd_xz[0] * step; move[2] -= fwd_xz[2] * step
-                if a_down: move[0] -= right_xz[0] * step; move[2] -= right_xz[2] * step
-                if d_down: move[0] += right_xz[0] * step; move[2] += right_xz[2] * step
-                obj_pos = [obj_pos[0] + move[0], obj_pos[1] + move[1], obj_pos[2] + move[2]]
-                actor.set_position(obj_pos, if_init=True)
-                logger.debug("[CAMFOLLOW] WASD move to %s", obj_pos)
-
-            # 鼠标右键拖动物体
-            rmb_down = False
-            try:
-                rmb_down = ctypes.windll.user32.GetAsyncKeyState(0x02) & 0x8000
-            except Exception:
-                pass
-
-            if rmb_down:
-                cur_mouse = None
+            if input_enabled:
                 try:
-                    class POINT(ctypes.Structure):
-                        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-                    pt = POINT()
-                    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-                    cur_mouse = (pt.x, pt.y)
+                    import ctypes
+                    w_down = ctypes.windll.user32.GetAsyncKeyState(0x57) & 0x8000
+                    a_down = ctypes.windll.user32.GetAsyncKeyState(0x41) & 0x8000
+                    s_down = ctypes.windll.user32.GetAsyncKeyState(0x53) & 0x8000
+                    d_down = ctypes.windll.user32.GetAsyncKeyState(0x44) & 0x8000
+                except Exception:
+                    pass
+                for k in list(cls._held_keys):
+                    if k == 'w': w_down = 0x8000
+                    elif k == 'a': a_down = 0x8000
+                    elif k == 's': s_down = 0x8000
+                    elif k == 'd': d_down = 0x8000
+
+                if w_down or a_down or s_down or d_down:
+                    # 从 offset 推断相机朝向，确保 WASD 方向与观察方向一致
+                    ox, oy, oz = cls._camera_follow_offset
+                    look_dir = cls._normalize([-ox, -oy, -oz])
+                    fwd_xz = cls._normalize([look_dir[0], 0.0, look_dir[2]])
+                    right_xz = cls._normalize(cls._cross([0.0, 1.0, 0.0], fwd_xz))
+                    move = [0.0, 0.0, 0.0]
+                    step = 0.5
+                    if w_down: move[0] += fwd_xz[0] * step; move[2] += fwd_xz[2] * step
+                    if s_down: move[0] -= fwd_xz[0] * step; move[2] -= fwd_xz[2] * step
+                    if a_down: move[0] -= right_xz[0] * step; move[2] -= right_xz[2] * step
+                    if d_down: move[0] += right_xz[0] * step; move[2] += right_xz[2] * step
+                    obj_pos = [obj_pos[0] + move[0], obj_pos[1] + move[1], obj_pos[2] + move[2]]
+                    actor.set_position(obj_pos, if_init=True)
+                    logger.debug("[CAMFOLLOW] WASD move to %s", obj_pos)
+
+                # 鼠标右键拖动物体
+                rmb_down = False
+                try:
+                    rmb_down = ctypes.windll.user32.GetAsyncKeyState(0x02) & 0x8000
                 except Exception:
                     pass
 
-                if not cls._follow_rmb_down:
-                    cls._follow_rmb_down = True
-                    cls._follow_prev_mouse = cur_mouse
-                else:
-                    if cur_mouse and cls._follow_prev_mouse:
-                        dx = cur_mouse[0] - cls._follow_prev_mouse[0]
-                        dy = cur_mouse[1] - cls._follow_prev_mouse[1]
+                if rmb_down:
+                    cur_mouse = None
+                    try:
+                        class POINT(ctypes.Structure):
+                            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+                        pt = POINT()
+                        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                        cur_mouse = (pt.x, pt.y)
+                    except Exception:
+                        pass
+
+                    if not cls._follow_rmb_down:
+                        cls._follow_rmb_down = True
                         cls._follow_prev_mouse = cur_mouse
-                        if dx != 0 or dy != 0:
-                            ox, oy, oz = cls._camera_follow_offset
-                            look_dir = cls._normalize([-ox, -oy, -oz])
-                            fwd_xz = cls._normalize([look_dir[0], 0.0, look_dir[2]])
-                            right_xz = cls._normalize(cls._cross([0.0, 1.0, 0.0], fwd_xz))
-                            rmb_speed = 0.02
-                            move = [0.0, 0.0, 0.0]
-                            if dx != 0:
-                                move[0] += right_xz[0] * dx * rmb_speed
-                                move[2] += right_xz[2] * dx * rmb_speed
-                            if dy != 0:
-                                move[0] += fwd_xz[0] * (-dy) * rmb_speed
-                                move[2] += fwd_xz[2] * (-dy) * rmb_speed
-                            obj_pos = [obj_pos[0] + move[0], obj_pos[1] + move[1], obj_pos[2] + move[2]]
-                            actor.set_position(obj_pos, if_init=True)
-                            logger.debug("[CAMFOLLOW] RMB move to %s", obj_pos)
+                    else:
+                        if cur_mouse and cls._follow_prev_mouse:
+                            dx = cur_mouse[0] - cls._follow_prev_mouse[0]
+                            dy = cur_mouse[1] - cls._follow_prev_mouse[1]
+                            cls._follow_prev_mouse = cur_mouse
+                            if dx != 0 or dy != 0:
+                                ox, oy, oz = cls._camera_follow_offset
+                                look_dir = cls._normalize([-ox, -oy, -oz])
+                                fwd_xz = cls._normalize([look_dir[0], 0.0, look_dir[2]])
+                                right_xz = cls._normalize(cls._cross([0.0, 1.0, 0.0], fwd_xz))
+                                rmb_speed = 0.02
+                                move = [0.0, 0.0, 0.0]
+                                if dx != 0:
+                                    move[0] += right_xz[0] * dx * rmb_speed
+                                    move[2] += right_xz[2] * dx * rmb_speed
+                                if dy != 0:
+                                    move[0] += fwd_xz[0] * (-dy) * rmb_speed
+                                    move[2] += fwd_xz[2] * (-dy) * rmb_speed
+                                obj_pos = [obj_pos[0] + move[0], obj_pos[1] + move[1], obj_pos[2] + move[2]]
+                                actor.set_position(obj_pos, if_init=True)
+                                logger.debug("[CAMFOLLOW] RMB move to %s", obj_pos)
+                else:
+                    cls._follow_rmb_down = False
+                    cls._follow_prev_mouse = None
             else:
                 cls._follow_rmb_down = False
                 cls._follow_prev_mouse = None

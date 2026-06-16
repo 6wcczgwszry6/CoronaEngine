@@ -22,6 +22,27 @@
 
 namespace {
 std::atomic<void*> g_default_surface{nullptr};
+
+std::uintptr_t resolve_camera_handle(std::uintptr_t camera_handle) {
+    if (camera_handle != 0) {
+        return camera_handle;
+    }
+
+    std::uintptr_t fallback = 0;
+    for (const auto& scene : Corona::SharedDataHub::instance().scene_storage()) {
+        if (scene.active_camera_handle != 0) {
+            if (scene.enabled) {
+                return scene.active_camera_handle;
+            }
+            if (fallback == 0) {
+                fallback = scene.active_camera_handle;
+            }
+        } else if (!scene.camera_handles.empty() && fallback == 0) {
+            fallback = scene.camera_handles.front();
+        }
+    }
+    return fallback;
+}
 }
 
 // ########################
@@ -214,6 +235,9 @@ void Corona::API::Scene::add_camera(Camera* camera) {
 
     if (auto accessor = SharedDataHub::instance().scene_storage().acquire_write(handle_)) {
         accessor->camera_handles.push_back(camera_handle);
+        if (accessor->active_camera_handle == 0) {
+            accessor->active_camera_handle = camera_handle;
+        }
     } else {
         // Roll back local state to keep Scene cache and shared storage consistent.
         cameras_.pop_back();
@@ -251,6 +275,11 @@ void Corona::API::Scene::remove_camera(Camera* camera) {
 
     if (auto accessor = SharedDataHub::instance().scene_storage().acquire_write(handle_)) {
         std::erase(accessor->camera_handles, camera->get_handle());
+        if (accessor->active_camera_handle == camera->get_handle()) {
+            accessor->active_camera_handle = accessor->camera_handles.empty()
+                                                 ? 0
+                                                 : accessor->camera_handles.front();
+        }
     } else {
         if (existed_in_vector) {
             cameras_.insert(std::next(cameras_.begin(), static_cast<std::vector<Camera*>::difference_type>(camera_pos)), camera);
@@ -273,11 +302,41 @@ void Corona::API::Scene::clear_cameras() {
 
     if (auto accessor = SharedDataHub::instance().scene_storage().acquire_write(handle_)) {
         accessor->camera_handles.clear();
+        accessor->active_camera_handle = 0;
     } else {
         cameras_ = cameras_backup;
         cameras_index_ = cameras_index_backup;
         CFW_LOG_ERROR("[Scene::clear_cameras] Failed to acquire write access to scene storage, rolled back local camera clear");
     }
+}
+
+void Corona::API::Scene::set_active_camera(Camera* camera) {
+    if (handle_ == 0) return;
+
+    if (camera == nullptr || !has_camera(camera)) {
+        CFW_LOG_WARNING("[Scene::set_active_camera] Camera not found in scene");
+        return;
+    }
+
+    if (auto accessor = SharedDataHub::instance().scene_storage().acquire_write(handle_)) {
+        accessor->active_camera_handle = camera->get_handle();
+    } else {
+        CFW_LOG_ERROR("[Scene::set_active_camera] Failed to acquire write access to scene storage");
+    }
+}
+
+std::uintptr_t Corona::API::Scene::get_active_camera_handle() const {
+    if (handle_ == 0) return 0;
+
+    if (auto accessor = SharedDataHub::instance().scene_storage().try_acquire_read(handle_)) {
+        if (accessor->active_camera_handle != 0) {
+            return accessor->active_camera_handle;
+        }
+        return accessor->camera_handles.empty() ? 0 : accessor->camera_handles.front();
+    }
+
+    CFW_LOG_ERROR("[Scene::get_active_camera_handle] Failed to acquire read access to scene storage");
+    return 0;
 }
 
 std::size_t Corona::API::Scene::camera_count() const {
@@ -1357,6 +1416,13 @@ Corona::API::Actor::Actor()
 }
 
 Corona::API::Actor::~Actor() {
+    for (const auto& [_, storage_profile_handle] : profile_storage_handles_) {
+        if (storage_profile_handle != 0) {
+            SharedDataHub::instance().profile_storage().deallocate(storage_profile_handle);
+        }
+    }
+    profile_storage_handles_.clear();
+
     if (handle_ != 0) {
         SharedDataHub::instance().actor_storage().deallocate(handle_);
     }
@@ -1403,6 +1469,7 @@ Corona::API::Actor::Profile* Corona::API::Actor::add_profile(const Profile& prof
         SharedDataHub::instance().profile_storage().deallocate(storage_profile_handle);
         storage_profile_handle = 0;
     }
+    profile_storage_handles_[profile_handle] = storage_profile_handle;
 
     if (handle_ != 0) {
         if (auto accessor = SharedDataHub::instance().actor_storage().acquire_write(handle_)) {
@@ -1441,7 +1508,12 @@ void Corona::API::Actor::remove_profile(const Profile* profile) {
         return;
     }
 
+    const auto storage_profile_it = profile_storage_handles_.find(profile_handle);
+    const std::uintptr_t storage_profile_handle =
+        storage_profile_it != profile_storage_handles_.end() ? storage_profile_it->second : 0;
+
     profiles_.erase(it);
+    profile_storage_handles_.erase(profile_handle);
 
     if (active_profile_handle_ == profile_handle) {
         if (!profiles_.empty()) {
@@ -1452,7 +1524,13 @@ void Corona::API::Actor::remove_profile(const Profile* profile) {
     }
 
     if (auto accessor = SharedDataHub::instance().actor_storage().acquire_write(handle_)) {
-        std::erase(accessor->profile_handles, profile_handle);
+        if (storage_profile_handle != 0) {
+            std::erase(accessor->profile_handles, storage_profile_handle);
+        }
+    }
+
+    if (storage_profile_handle != 0) {
+        SharedDataHub::instance().profile_storage().deallocate(storage_profile_handle);
     }
 }
 
@@ -1480,6 +1558,33 @@ Corona::API::Actor::Profile* Corona::API::Actor::get_active_profile() {
 
 std::size_t Corona::API::Actor::profile_count() const {
     return profiles_.size();
+}
+
+void Corona::API::Actor::set_follow_camera(bool enabled) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Actor::set_follow_camera] Invalid actor handle");
+        return;
+    }
+
+    if (auto accessor = SharedDataHub::instance().actor_storage().acquire_write(handle_)) {
+        accessor->follow_camera = enabled;
+    } else {
+        CFW_LOG_ERROR("[Actor::set_follow_camera] Failed to acquire write access to actor storage");
+    }
+}
+
+bool Corona::API::Actor::get_follow_camera() const {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Actor::get_follow_camera] Invalid actor handle");
+        return false;
+    }
+
+    if (auto accessor = SharedDataHub::instance().actor_storage().try_acquire_read(handle_)) {
+        return accessor->follow_camera;
+    }
+
+    CFW_LOG_ERROR("[Actor::get_follow_camera] Failed to acquire read access to actor storage");
+    return false;
 }
 
 std::uintptr_t Corona::API::Actor::get_handle() const {
@@ -1567,12 +1672,14 @@ Corona::API::Camera::Camera(const std::array<float, 3>& position, const std::arr
 
 Corona::API::Camera::~Camera() {
     if (handle_) {
+        std::uintptr_t actor_pick_handle = 0;
         if (auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(handle_)) {
-            if (camera->actor_pick_handle != 0) {
-                SharedDataHub::instance().actor_pick_storage().deallocate(camera->actor_pick_handle);
-            }
+            actor_pick_handle = camera->actor_pick_handle;
         }
-        SharedDataHub::instance().camera_storage().deallocate(handle_);
+        SharedDataHub::instance().enqueue_camera_release({
+            .camera_handle = handle_,
+            .actor_pick_handle = actor_pick_handle,
+        });
         handle_ = 0;
     }
 }
@@ -1689,12 +1796,11 @@ void Corona::API::Camera::set_surface(void* surface) {
         return;
     }
 
-    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_write(handle_)) {
-        accessor->surface = surface;
-    } else {
-        CFW_LOG_ERROR("[Camera::set_surface] Failed to acquire write access to camera storage");
-        return;
-    }
+    CameraStateUpdateCommand command{};
+    command.camera_handle = handle_;
+    command.fields = CameraStateUpdateField::Surface;
+    command.surface = surface;
+    SharedDataHub::instance().enqueue_camera_state_update(command);
 
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
         event_bus->publish<Events::DisplaySurfaceChangedEvent>({surface});
@@ -1765,13 +1871,17 @@ void Corona::API::Camera::set_output_mode(const std::string& mode) {
         output_mode = CameraOutputMode::WorldPosition;
     } else if (mode == "object_id") {
         output_mode = CameraOutputMode::ObjectID;
+    } else if (mode == "visibility_buffer") {
+        output_mode = CameraOutputMode::VisibilityBuffer;
     } else if (mode != "final_color") {
         CFW_LOG_WARNING("[Camera::set_output_mode] Unknown mode '{}', defaulting to final_color", mode);
     }
 
-    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_write(handle_)) {
-        accessor->output_mode = output_mode;
-    }
+    CameraStateUpdateCommand command{};
+    command.camera_handle = handle_;
+    command.fields = CameraStateUpdateField::OutputMode;
+    command.output_mode = output_mode;
+    SharedDataHub::instance().enqueue_camera_state_update(command);
 }
 
 std::string Corona::API::Camera::get_output_mode() const {
@@ -1789,6 +1899,8 @@ std::string Corona::API::Camera::get_output_mode() const {
                 return "position";
             case CameraOutputMode::ObjectID:
                 return "object_id";
+            case CameraOutputMode::VisibilityBuffer:
+                return "visibility_buffer";
             case CameraOutputMode::FinalColor:
                 [[fallthrough]];
             default:
@@ -1796,6 +1908,50 @@ std::string Corona::API::Camera::get_output_mode() const {
         }
     }
     return "final_color";
+}
+
+void Corona::API::Camera::set_render_backend(const std::string& mode) {
+    Corona::API::set_render_backend(mode, handle_);
+}
+
+std::string Corona::API::Camera::get_render_backend() const {
+    return Corona::API::get_render_backend(handle_);
+}
+
+void Corona::API::Camera::set_view_state(bool open, int x, int y, int width, int height, float move_speed) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Camera::set_view_state] Invalid camera handle");
+        return;
+    }
+
+    CameraStateUpdateCommand command{};
+    command.camera_handle = handle_;
+    command.fields = CameraStateUpdateField::ViewState;
+    command.view_open = open;
+    command.view_x = x;
+    command.view_y = y;
+    command.view_width = std::max(width, 1);
+    command.view_height = std::max(height, 1);
+    command.move_speed = std::max(move_speed, 0.01f);
+    SharedDataHub::instance().enqueue_camera_state_update(command);
+}
+
+std::array<float, 6> Corona::API::Camera::get_view_state() const {
+    if (handle_ == 0) {
+        return {0.0f, 120.0f, 120.0f, 960.0f, 540.0f, 1.0f};
+    }
+
+    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_read(handle_)) {
+        return {
+            accessor->view_open ? 1.0f : 0.0f,
+            static_cast<float>(accessor->view_x),
+            static_cast<float>(accessor->view_y),
+            static_cast<float>(accessor->view_width),
+            static_cast<float>(accessor->view_height),
+            accessor->move_speed,
+        };
+    }
+    return {0.0f, 120.0f, 120.0f, 960.0f, 540.0f, 1.0f};
 }
 
 // ########################
@@ -1847,13 +2003,29 @@ void Corona::API::Camera::set_size(int width, int height) {
     width_ = width;
     height_ = height;
 
-    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_write(handle_)) {
-        accessor->width = static_cast<std::uint32_t>(width_);
-        accessor->height = static_cast<std::uint32_t>(height_);
-        accessor->aspect = static_cast<float>(width_) / static_cast<float>(height_);
-    } else {
-        CFW_LOG_ERROR("[Camera::set_size] Failed to acquire write access to camera storage");
+    CameraStateUpdateCommand command{};
+    command.camera_handle = handle_;
+    command.fields = CameraStateUpdateField::Size;
+    command.width = static_cast<std::uint32_t>(width_);
+    command.height = static_cast<std::uint32_t>(height_);
+    SharedDataHub::instance().enqueue_camera_state_update(command);
+}
+
+std::array<int, 2> Corona::API::Camera::get_size() const {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Camera::get_size] Invalid camera handle");
+        return {width_, height_};
     }
+
+    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_read(handle_)) {
+        return {
+            static_cast<int>(accessor->width),
+            static_cast<int>(accessor->height),
+        };
+    }
+
+    CFW_LOG_ERROR("[Camera::get_size] Failed to acquire read access to camera storage");
+    return {width_, height_};
 }
 
 void Corona::API::Camera::set_viewport_rect(int x, int y, int width, int height) {
@@ -1905,7 +2077,9 @@ void set_default_surface(void* surface) {
 
     // 句柄到达时，补写到已存在的相机，避免“先有 camera 后有 surface”的空窗。
     for (auto& camera : SharedDataHub::instance().camera_storage()) {
-        camera.surface = surface;
+        if (camera.follows_default_surface) {
+            camera.surface = surface;
+        }
     }
 }
 
@@ -1921,32 +2095,39 @@ bool is_vision_available() {
 #endif
 }
 
-namespace {
-// Tracks the last requested backend so get_render_backend() can report UI state
-// without reaching into the OpticsSystem render thread. 0 = Native, 1 = Vision.
-#ifdef CORONA_ENABLE_VISION
-std::atomic<int> g_requested_backend{1};
-#else
-std::atomic<int> g_requested_backend{0};
-#endif
-}  // namespace
-
-void set_render_backend(const std::string& mode) {
-    if (!is_vision_available()) {
-        CFW_LOG_WARNING("[set_render_backend] Vision not compiled in; request ignored");
+void set_render_backend(const std::string& mode, std::uintptr_t camera_handle) {
+    const auto resolved_handle = resolve_camera_handle(camera_handle);
+    if (resolved_handle == 0) {
+        CFW_LOG_WARNING("[set_render_backend] No camera is available");
         return;
     }
 
-    int backend = (mode == "vision") ? 1 : 0;
-    g_requested_backend.store(backend, std::memory_order_relaxed);
+    int backend = mode == "vision" ? 1 : 0;
+    if (backend == 1 && !is_vision_available()) {
+        CFW_LOG_WARNING("[set_render_backend] Vision not compiled in; falling back to Native");
+        backend = 0;
+    }
+
+    CameraStateUpdateCommand command{};
+    command.camera_handle = resolved_handle;
+    command.fields = CameraStateUpdateField::RenderBackend;
+    command.render_backend =
+        backend == 1 ? CameraRenderBackend::Vision : CameraRenderBackend::Native;
+    SharedDataHub::instance().enqueue_camera_state_update(command);
 
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
-        event_bus->publish<Events::RenderBackendSwitchEvent>({backend});
+        event_bus->publish<Events::RenderBackendSwitchEvent>({backend, resolved_handle});
     }
 }
 
-std::string get_render_backend() {
-    return g_requested_backend.load(std::memory_order_relaxed) == 1 ? "vision" : "native";
+std::string get_render_backend(std::uintptr_t camera_handle) {
+    const auto resolved_handle = resolve_camera_handle(camera_handle);
+    if (resolved_handle != 0) {
+        if (auto camera = SharedDataHub::instance().camera_storage().acquire_read(resolved_handle)) {
+            return camera->render_backend == CameraRenderBackend::Vision ? "vision" : "native";
+        }
+    }
+    return "native";
 }
 
 void load_vision_scene(const std::string& path) {

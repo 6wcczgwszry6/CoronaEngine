@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -20,102 +21,11 @@
 #include <corona/resource/resource.h>
 #include <corona/resource/resource_manager.h>
 
+#include "geometry_internal.h"
+
 namespace Corona::Systems {
 
-namespace {
-
-[[nodiscard]] ktm::fvec3 make_fvec3(float x, float y, float z) {
-    ktm::fvec3 value;
-    value[0] = x;
-    value[1] = y;
-    value[2] = z;
-    return value;
-}
-
-[[nodiscard]] ktm::fvec4 make_fvec4(float x, float y, float z, float w) {
-    ktm::fvec4 value;
-    value[0] = x;
-    value[1] = y;
-    value[2] = z;
-    value[3] = w;
-    return value;
-}
-
-[[nodiscard]] ktm::fvec3 transform_local_point_to_world(const Corona::ModelTransform& transform,
-                                                        const ktm::fvec3& local_point) {
-    const ktm::fmat4x4 matrix = transform.compute_matrix();
-    const ktm::fvec4 local_h = make_fvec4(local_point[0], local_point[1], local_point[2], 1.0f);
-    const ktm::fvec4 world_h = matrix * local_h;
-    return make_fvec3(world_h[0], world_h[1], world_h[2]);
-}
-
-void world_aabb_from_local_bounds(const Corona::ModelTransform& transform,
-                                  const ktm::fvec3& local_min,
-                                  const ktm::fvec3& local_max,
-                                  Spatial::AABB& out_world_aabb) {
-    const ktm::fvec3 corners[8] = {
-        make_fvec3(local_min[0], local_min[1], local_min[2]),
-        make_fvec3(local_max[0], local_min[1], local_min[2]),
-        make_fvec3(local_min[0], local_max[1], local_min[2]),
-        make_fvec3(local_max[0], local_max[1], local_min[2]),
-        make_fvec3(local_min[0], local_min[1], local_max[2]),
-        make_fvec3(local_max[0], local_min[1], local_max[2]),
-        make_fvec3(local_min[0], local_max[1], local_max[2]),
-        make_fvec3(local_max[0], local_max[1], local_max[2]),
-    };
-
-    const ktm::fvec3 first_corner = transform_local_point_to_world(transform, corners[0]);
-    out_world_aabb.min = first_corner;
-    out_world_aabb.max = first_corner;
-
-    for (int i = 1; i < 8; ++i) {
-        const ktm::fvec3 world_corner = transform_local_point_to_world(transform, corners[i]);
-        out_world_aabb.min[0] = std::min(out_world_aabb.min[0], world_corner[0]);
-        out_world_aabb.min[1] = std::min(out_world_aabb.min[1], world_corner[1]);
-        out_world_aabb.min[2] = std::min(out_world_aabb.min[2], world_corner[2]);
-        out_world_aabb.max[0] = std::max(out_world_aabb.max[0], world_corner[0]);
-        out_world_aabb.max[1] = std::max(out_world_aabb.max[1], world_corner[1]);
-        out_world_aabb.max[2] = std::max(out_world_aabb.max[2], world_corner[2]);
-    }
-}
-
-}  // namespace
-
-// ============================================================================
-// GeometrySystem::Impl —— 私有状态（原 SceneSystem 状态并入）
-//
-// 维护 per-scene 八叉树、Actor 加载状态机、可见性热度，并用读写锁保护查询路径。
-// ============================================================================
-
-struct GeometrySystem::Impl {
-    using Payload = std::uintptr_t;
-    using OctreeEntry = Spatial::Octree<Payload>::Entry;
-
-    struct SceneState {
-        Spatial::Octree<Payload>                            tree;
-        std::unordered_map<Payload,Spatial::AABB> actor_to_entry; //Actor到AABB映射
-        std::unordered_map<Payload, std::uint32_t>          invisible_frames;
-        SceneVisibilityConfig                               cfg;
-        SceneStats                                          stats;
-        mutable std::mutex                                  stats_mutex;
-        std::unordered_map<Payload,ActorLoadState>          actor_load_states;
-
-        std::unordered_map<Payload,std::future<std::uint64_t>> loading_tasks;
-        std::unordered_map<Payload,std::future<bool>>       unloading_tasks;
-        std::unordered_map<Payload,int>                     unload_retry_counts; //卸载重试次数
-    };
-
-    mutable std::shared_mutex                               mtx;
-    std::unordered_map<std::uintptr_t /*scene*/, SceneState> scenes;
-    std::unordered_map<Payload, bool>                       offline_actors;
-    std::vector<Kernel::EventId>                            event_subscriptions;
-    Kernel::ISystemContext*                                 ctx = nullptr;
-
-    SceneState& get_or_create(std::uintptr_t scene) {
-        auto [it, inserted] = scenes.try_emplace(scene);
-        return it->second;
-    }
-};
+using namespace GeometryInternal;
 
 // ============================================================================
 // 生命周期
@@ -600,176 +510,6 @@ void GeometrySystem::on_unload_completed(const Events::ActorUnloadCompletedEvent
 }
 
 // ============================================================================
-// 查询接口（线程安全）
-// ============================================================================
-
-std::vector<std::uintptr_t> GeometrySystem::query_aabb(
-    std::uintptr_t scene, const Spatial::AABB& box) const {
-    std::shared_lock lock(impl_->mtx);
-    std::vector<std::uintptr_t> out;
-
-    auto it = impl_->scenes.find(scene);
-    if (it == impl_->scenes.end() || it->second.tree.empty()) {
-        return out;
-    }
-
-    out.reserve(it->second.tree.size() / 2);
-    it->second.tree.query_aabb(box, out);
-
-    std::vector<std::uintptr_t> filtered;
-    filtered.reserve(out.size());
-    const auto& state_map = it->second.actor_load_states;
-    for (std::uintptr_t actor_handle : out) {
-        auto state_it = state_map.find(actor_handle);
-        if (state_it != state_map.end() && state_it->second == ActorLoadState::Loaded) {
-            filtered.push_back(actor_handle);
-        }
-    }
-    return filtered;
-}
-
-std::vector<std::uintptr_t> GeometrySystem::query_sphere(
-    std::uintptr_t scene, const ktm::fvec3& center, float radius) const {
-    std::shared_lock lock(impl_->mtx);
-    std::vector<std::uintptr_t> out;
-
-    auto it = impl_->scenes.find(scene);
-    if (it == impl_->scenes.end() || it->second.tree.empty()) {
-        return out;
-    }
-
-    out.reserve(it->second.tree.size() / 2);
-    it->second.tree.query_sphere(center, radius, out);
-
-    std::vector<std::uintptr_t> filtered;
-    filtered.reserve(out.size());
-    const auto& state_map = it->second.actor_load_states;
-    for (std::uintptr_t actor_handle : out) {
-        auto state_it = state_map.find(actor_handle);
-        if (state_it != state_map.end() && state_it->second == ActorLoadState::Loaded) {
-            filtered.push_back(actor_handle);
-        }
-    }
-    return filtered;
-}
-
-std::vector<std::uintptr_t> GeometrySystem::query_frustum(
-    std::uintptr_t scene, const Math::Frustum& frustum) const {
-    std::shared_lock lock(impl_->mtx);
-    std::vector<std::uintptr_t> out;
-
-    auto it = impl_->scenes.find(scene);
-    if (it == impl_->scenes.end() || it->second.tree.empty()) {
-       return out;
-    }
-
-    out.reserve(it->second.tree.size() / 2);
-    it->second.tree.query_if(
-        [&](const Spatial::AABB& b) { return frustum.intersects(b); }, out);
-
-    std::vector<std::uintptr_t> filtered;
-    filtered.reserve(out.size());
-    const auto& state_map = it->second.actor_load_states;
-    for (std::uintptr_t actor_handle : out) {
-        auto state_it = state_map.find(actor_handle);
-        if (state_it != state_map.end() && state_it->second == ActorLoadState::Loaded) {
-            filtered.push_back(actor_handle);
-        }
-    }
-    return filtered;
-}
-
-std::vector<std::pair<std::uintptr_t, std::uintptr_t>> GeometrySystem::query_pairs(
-    std::uintptr_t scene) const {
-    std::shared_lock lock(impl_->mtx);
-    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> out;
-
-    auto it = impl_->scenes.find(scene);
-    if (it == impl_->scenes.end() || it->second.tree.size() < 2) {
-        return out;
-    }
-
-    std::size_t n = it->second.tree.size();
-    out.reserve(n * (n - 1) / 4); // 保守估计，实际碰撞对通常远小于最大值
-    it->second.tree.collect_pairs(out);
-
-    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> filtered;
-    filtered.reserve(out.size());
-    const auto& state_map = it->second.actor_load_states;
-    for (const auto& pair : out) {
-        auto state_a = state_map.find(pair.first);
-        auto state_b = state_map.find(pair.second);
-        if (state_a != state_map.end() && state_a->second == ActorLoadState::Loaded
-            && state_b != state_map.end() && state_b->second == ActorLoadState::Loaded) {
-            filtered.push_back(pair);
-        }
-    }
-
-    return filtered;
-}
-
-std::vector<std::uintptr_t> GeometrySystem::query_visible_for_camera(
-    std::uintptr_t scene, std::uintptr_t camera) const {
-    auto& cam_storage = SharedDataHub::instance().camera_storage();
-    auto cam_handle = cam_storage.try_acquire_read_nowait(camera);
-    if (!cam_handle.valid()) {
-        return {};
-    }
-    const auto frustum = Math::Frustum::from_camera(*cam_handle);
-    return query_frustum(scene, frustum);
-}
-
-//加载状态查询
-ActorLoadState GeometrySystem::get_actor_load_state(std::uintptr_t actor,std::uintptr_t scene) const {
-    std::shared_lock lock(impl_->mtx);
-    auto scene_it = impl_->scenes.find(scene);
-    if (scene_it == impl_->scenes.end()) {
-        return ActorLoadState::Unloaded;
-    }
-    auto actor_it = scene_it->second.actor_load_states.find(actor);
-    return (actor_it != scene_it->second.actor_load_states.end()) ?
-            actor_it->second : ActorLoadState::Unloaded;
-}
-
-// ============================================================================
-// LRU 协作（占位）
-// ============================================================================
-
-bool GeometrySystem::is_actor_offline(std::uintptr_t actor) const {
-    std::shared_lock lock(impl_->mtx);
-    auto it = impl_->offline_actors.find(actor);
-    return it != impl_->offline_actors.end() && it->second;
-}
-
-void GeometrySystem::mark_actor_restored(std::uintptr_t actor) {
-    std::unique_lock lock(impl_->mtx);
-    impl_->offline_actors[actor] = false;
-    // LRU恢复时，将所有包含该actor的场景中的状态设为已加载
-    for (auto& [scene, state] : impl_->scenes) {
-        auto it = state.actor_load_states.find(actor);
-        if (it != state.actor_load_states.end()) {
-            it->second = ActorLoadState::Loaded;
-        }
-    }
-}
-
-// ============================================================================
-// 统计
-// ============================================================================
-
-SceneStats GeometrySystem::stats(std::uintptr_t scene) const {
-    std::shared_lock lock(impl_->mtx);
-    auto it = impl_->scenes.find(scene);
-    if (it == impl_->scenes.end()) {
-        return SceneStats{};
-    }
-    std::lock_guard stats_lock(it->second.stats_mutex);
-    SceneStats s = it->second.stats;
-    s.octree_entries = it->second.tree.size();
-    return s;
-}
-
-// ============================================================================
 // 异步资源任务处理
 // ============================================================================
 
@@ -1009,26 +749,6 @@ void GeometrySystem::on_unload_requested(const Events::ActorUnloadRequestedEvent
     scene_state.unloading_tasks[e.actor] = Resource::ResourceManager::get_instance().remove_cache_async(rid);
 }
 
-// ============================================================================
-// LOD 工具
-// ============================================================================
-
-float GeometrySystem::compute_screen_ratio(const ktm::fvec3& camera_pos,
-                                        float              camera_fov_deg,
-                                        const ktm::fvec3& world_center,
-                                        float              bounding_radius) {
-    float d = ktm::distance(camera_pos, world_center);
-    if (d < 1e-4f) d = 1e-4f;
-    return bounding_radius / (d * std::tan(ktm::radians(camera_fov_deg) * 0.5f));
-}
-
-int GeometrySystem::select_lod_level(float                     screen_ratio,
-                                   const std::vector<float>& thresholds) {
-    for (int i = static_cast<int>(thresholds.size()) - 1; i >= 0; --i) {
-        if (screen_ratio <= thresholds[i]) {
-            return i + 1;
-        }
-    }
-    return 0;
-}
 }  // namespace Corona::Systems
+
+

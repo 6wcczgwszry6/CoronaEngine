@@ -12,12 +12,49 @@
 
 namespace Corona::Systems::UI {
 
+namespace {
+
+bool is_main_editor_route(const std::string& url) {
+    const auto hash_pos = url.find('#');
+    if (hash_pos == std::string::npos) {
+        return false;
+    }
+
+    std::string route = url.substr(hash_pos + 1);
+    if (const auto query_pos = route.find('?'); query_pos != std::string::npos) {
+        route = route.substr(0, query_pos);
+    }
+
+    return route == "/" || route == "/MainPage";
+}
+
+bool should_preserve_alpha(BrowserTab* tab, CefRefPtr<CefBrowser> browser) {
+    if (!tab) {
+        return false;
+    }
+    if (tab->camera_view) {
+        return true;
+    }
+    if (tab->docking_pos != "main") {
+        return tab->transparent_overlay;
+    }
+
+    std::string url = tab->url;
+    if (browser && browser->GetMainFrame()) {
+        url = browser->GetMainFrame()->GetURL().ToString();
+    }
+    return is_main_editor_route(url);
+}
+
+}  // namespace
+
 // ============================================================================
 // OffscreenRenderHandler 实现
 // ============================================================================
 
 void OffscreenRenderHandler::GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) {
-    BrowserTab* t = tab;
+    std::lock_guard lock(tab_mutex_);
+    BrowserTab* t = tab_;
     if (t) {
         rect = CefRect(0, 0, t->width, t->height);
     } else {
@@ -28,9 +65,10 @@ void OffscreenRenderHandler::GetViewRect(CefRefPtr<CefBrowser> browser, CefRect&
 void OffscreenRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser, PaintElementType type,
                                      const RectList& dirty_rects, const void* buffer,
                                      int width, int height) {
-    // 捕获 tab 指针到局部变量，避免 remove_tab 在回调期间将其置空导致的竞争
-    BrowserTab* t = tab;
+    std::lock_guard tab_lock(tab_mutex_);
+    BrowserTab* t = tab_;
     if (t && type == PET_VIEW && buffer && width > 0 && height > 0) {
+        const bool preserve_alpha = should_preserve_alpha(t, browser);
         size_t bufferSize = static_cast<size_t>(width) * height * 4;
         std::lock_guard<std::mutex> lock(t->mutex);
         t->pixel_buffer.resize(bufferSize);
@@ -40,6 +78,9 @@ void OffscreenRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser, PaintElement
         auto* pixels = t->pixel_buffer.data();
         for (size_t i = 0; i < bufferSize; i += 4) {
             std::swap(pixels[i], pixels[i + 2]);
+            if (!preserve_alpha) {
+                pixels[i + 3] = 255;
+            }
         }
 
         t->buffer_dirty = true;
@@ -47,7 +88,8 @@ void OffscreenRenderHandler::OnPaint(CefRefPtr<CefBrowser> browser, PaintElement
 }
 
 bool OffscreenRenderHandler::GetScreenPoint(CefRefPtr<CefBrowser> browser, int viewX, int viewY, int& screenX, int& screenY) {
-    if (!tab) return false;
+    std::lock_guard lock(tab_mutex_);
+    if (!tab_) return false;
 
     // 将局部坐标转换成屏幕绝对坐标
     POINT mouse_pt;
@@ -55,6 +97,11 @@ bool OffscreenRenderHandler::GetScreenPoint(CefRefPtr<CefBrowser> browser, int v
     screenX = mouse_pt.x;
     screenY = mouse_pt.y;
     return true;
+}
+
+void OffscreenRenderHandler::SetTab(BrowserTab* tab) {
+    std::lock_guard lock(tab_mutex_);
+    tab_ = tab;
 }
 
 // ============================================================================
@@ -74,15 +121,20 @@ CefRefPtr<CefRenderHandler> OffscreenCefClient::GetRenderHandler() {
 
 void OffscreenCefClient::SetTab(BrowserTab* tab) {
     if (render_handler_) {
-        render_handler_->tab = tab;
+        render_handler_->SetTab(tab);
     }
 }
 
 void OffscreenCefClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     CEF_REQUIRE_UI_THREAD();
 
-    if (!browser_) {
-        browser_ = browser;
+    bool close_requested = false;
+    {
+        std::lock_guard lock(browser_mutex_);
+        if (!browser_) {
+            browser_ = browser;
+        }
+        close_requested = close_requested_;
     }
 
     if (!browser_side_router_) {
@@ -93,6 +145,10 @@ void OffscreenCefClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
 
         js_handler_ = new BrowserSideJSHandler();
         browser_side_router_->AddHandler(js_handler_, true);
+    }
+
+    if (close_requested) {
+        browser->GetHost()->CloseBrowser(true);
     }
 }
 
@@ -105,15 +161,52 @@ void OffscreenCefClient::OnLoadEnd(CefRefPtr<CefBrowser> browser,
 
 void OffscreenCefClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     CEF_REQUIRE_UI_THREAD();
-    browser_ = nullptr;
     if (browser_side_router_) {
         browser_side_router_->OnBeforeClose(browser);
     }
+    {
+        std::lock_guard lock(browser_mutex_);
+        browser_ = nullptr;
+        browser_closed_ = true;
+    }
+    browser_closed_cv_.notify_all();
+}
+
+CefRefPtr<CefBrowser> OffscreenCefClient::GetBrowser() {
+    std::lock_guard lock(browser_mutex_);
+    return browser_;
+}
+
+void OffscreenCefClient::RequestClose() {
+    CefRefPtr<CefBrowser> browser;
+    {
+        std::lock_guard lock(browser_mutex_);
+        close_requested_ = true;
+        browser = browser_;
+    }
+    if (browser) {
+        browser->GetHost()->CloseBrowser(true);
+    }
+}
+
+bool OffscreenCefClient::WaitForClose(std::chrono::milliseconds timeout) {
+    std::unique_lock lock(browser_mutex_);
+    return browser_closed_cv_.wait_for(lock, timeout, [this] {
+        return browser_closed_;
+    });
+}
+
+void OffscreenCefClient::MarkBrowserCreationFailed() {
+    {
+        std::lock_guard lock(browser_mutex_);
+        browser_closed_ = true;
+    }
+    browser_closed_cv_.notify_all();
 }
 
 void OffscreenCefClient::Resize(int width, int height) {
-    if (browser_) {
-        browser_->GetHost()->WasResized();
+    if (auto browser = GetBrowser()) {
+        browser->GetHost()->WasResized();
     }
 }
 
@@ -289,7 +382,7 @@ bool initialize_cef() {
     settings.windowless_rendering_enabled = true;
     settings.no_sandbox = true;
     settings.remote_debugging_port = 9222;
-    settings.log_severity = LOGSEVERITY_INFO;
+    settings.log_severity = LOGSEVERITY_FATAL;
     settings.uncaught_exception_stack_size = 10;
 
     CefString(&settings.locale).FromASCII("zh-CN");

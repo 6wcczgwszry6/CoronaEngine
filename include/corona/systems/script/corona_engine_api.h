@@ -203,6 +203,8 @@ class Actor {
     void set_active_profile(const Profile* profile);
     [[nodiscard]] Profile* get_active_profile();
     [[nodiscard]] std::size_t profile_count() const;
+    void set_follow_camera(bool enabled);
+    [[nodiscard]] bool get_follow_camera() const;
 
     [[nodiscard]] std::uintptr_t get_handle() const;
 
@@ -211,6 +213,7 @@ class Actor {
 
     std::uintptr_t handle_{};
     std::unordered_map<std::uintptr_t, Profile> profiles_;
+    std::unordered_map<std::uintptr_t, std::uintptr_t> profile_storage_handles_;
     std::uintptr_t active_profile_handle_{0};
     std::uintptr_t next_profile_handle_{1};
 };
@@ -247,6 +250,10 @@ class Camera {
 
     void set_output_mode(const std::string& mode);
     [[nodiscard]] std::string get_output_mode() const;
+    void set_render_backend(const std::string& mode);
+    [[nodiscard]] std::string get_render_backend() const;
+    void set_view_state(bool open, int x, int y, int width, int height, float move_speed);
+    [[nodiscard]] std::array<float, 6> get_view_state() const;
 
     [[nodiscard]] std::array<float, 3> get_position() const;
     [[nodiscard]] std::array<float, 3> get_forward() const;
@@ -260,6 +267,7 @@ class Camera {
     void remove_image_effects();
 
     void set_size(int width, int height);
+    [[nodiscard]] std::array<int, 2> get_size() const;
     void set_viewport_rect(int x, int y, int width, int height);
     [[nodiscard]] std::uintptr_t pick_actor_at_pixel(int x, int y) const;
 
@@ -328,6 +336,8 @@ class Scene {
     void add_camera(Camera* camera);
     void remove_camera(Camera* camera);
     void clear_cameras();
+    void set_active_camera(Camera* camera);
+    [[nodiscard]] std::uintptr_t get_active_camera_handle() const;
 
     [[nodiscard]] std::size_t camera_count() const;
     [[nodiscard]] bool has_camera(const Camera* camera) const;
@@ -369,10 +379,10 @@ void write_scene(Scene* scene, const std::filesystem::path& scene_path);
 
 /// 请求切换光学渲染后端。mode: "native" 或 "vision"。
 /// 仅当 is_vision_available() 为 true 时生效，否则被忽略。
-void set_render_backend(const std::string& mode);
+void set_render_backend(const std::string& mode, std::uintptr_t camera_handle = 0);
 
 /// 获取当前请求的渲染后端，返回 "native" 或 "vision"。
-[[nodiscard]] std::string get_render_backend();
+[[nodiscard]] std::string get_render_backend(std::uintptr_t camera_handle = 0);
 
 /// 请求加载一个外部 Vision 场景文件（.json）。仅当 Vision 后端可用且处于激活
 /// 状态时生效；实际导入在光学系统渲染线程执行。

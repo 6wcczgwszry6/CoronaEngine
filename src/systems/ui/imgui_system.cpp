@@ -1,9 +1,13 @@
 ﻿#include <corona/kernel/core/i_logger.h>
+#include <corona/shared_data_hub.h>
 #include <corona/systems/script/script_system.h>
+#include <corona/systems/ui/camera_viewport_manager.h>
 #include <corona/systems/ui/imgui_system.h>
 
+#include <algorithm>
 #include <chrono>
 #include <thread>
+#include <vector>
 
 #include "cef/browser_manager.h"
 #include "cef/cef_client.h"
@@ -59,6 +63,29 @@ void ImguiSystem::start() {
 void ImguiSystem::stop() {
     // 主线程系统不需要停止线程
     CFW_LOG_INFO("ImguiSystem: Stop called (main thread mode)");
+    auto& browser_manager = UI::BrowserManager::instance();
+    std::vector<std::uintptr_t> camera_handles;
+    for (const auto& [tab_id, tab] : browser_manager.get_tabs()) {
+        if (tab->camera_view) {
+            if (auto record = UI::CameraViewportManager::instance().find_by_tab(tab_id)) {
+                camera_handles.push_back(record->camera_handle);
+            }
+        }
+    }
+    browser_manager.close_all_tabs();
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!camera_handles.empty() && std::chrono::steady_clock::now() < deadline) {
+        std::erase_if(camera_handles, [](const std::uintptr_t camera_handle) {
+            auto camera =
+                SharedDataHub::instance().camera_storage().try_acquire_read(camera_handle);
+            return !camera || camera->surface == nullptr;
+        });
+        if (!camera_handles.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    ImGui::DestroyPlatformWindows();
     running_ = false;
     state_ = Kernel::SystemState::stopped;
 }
@@ -87,11 +114,6 @@ void ImguiSystem::shutdown() {
     // 关闭所有浏览器标签页
     CFW_LOG_INFO("ImGuiSystem: Closing all browser tabs...");
     UI::BrowserManager::instance().close_all_tabs();
-
-    // 给 CEF 消息循环一些时间来处理浏览器关闭事件
-    // 在 multi_threaded_message_loop 模式下，CEF 在后台线程处理消息
-    CFW_LOG_INFO("ImGuiSystem: Waiting for CEF to process close events...");
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     // 清理 SDL 和 ImGui (必须在主线程)
     if (sdl_initialized_) {

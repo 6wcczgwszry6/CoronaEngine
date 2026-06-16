@@ -181,10 +181,10 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
 
             // ── pickActor: 视口拾取快速通道 ──
             if (name == "pickActor") {
-                // arguments: (sceneHandle: number, x: number, y: number, vpWidth: number, vpHeight: number)
-                // Returns result via __coronaEmit("actor-pick-result", ...) injected into the main frame
-                if (arguments.size() < 5) {
-                    exception = "pickActor(handle, x, y, vpW, vpH) requires 5 arguments";
+                // arguments: (cameraHandle: number, sceneId: string, requestId: string,
+                //             x: number, y: number, vpWidth: number, vpHeight: number)
+                if (arguments.size() < 7) {
+                    exception = "pickActor(cameraHandle, sceneId, requestId, x, y, vpW, vpH) requires 7 arguments";
                     retval = CefV8Value::CreateBool(false);
                     return true;
                 }
@@ -195,14 +195,135 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
                 }
                 CefRefPtr<CefProcessMessage> pick_msg = CefProcessMessage::Create("ViewportPick");
                 CefRefPtr<CefListValue> pick_args = pick_msg->GetArgumentList();
-                for (int i = 0; i < 5; ++i) {
-                    const auto& arg = arguments[i];
-                    if (!arg) { retval = CefV8Value::CreateBool(false); return true; }
-                    if (arg->IsInt()) pick_args->SetInt(i, arg->GetIntValue());
-                    else if (arg->IsDouble()) pick_args->SetDouble(i, arg->GetDoubleValue());
-                    else { retval = CefV8Value::CreateBool(false); return true; }
+
+                const auto set_numeric_arg = [&](int index) -> bool {
+                    const auto& arg = arguments[index];
+                    if (!arg) return false;
+                    if (arg->IsInt()) {
+                        pick_args->SetInt(index, arg->GetIntValue());
+                        return true;
+                    }
+                    if (arg->IsDouble()) {
+                        pick_args->SetDouble(index, arg->GetDoubleValue());
+                        return true;
+                    }
+                    return false;
+                };
+
+                if (!set_numeric_arg(0) ||
+                    !arguments[1] || !arguments[1]->IsString() ||
+                    !arguments[2] || !arguments[2]->IsString() ||
+                    !set_numeric_arg(3) ||
+                    !set_numeric_arg(4) ||
+                    !set_numeric_arg(5) ||
+                    !set_numeric_arg(6)) {
+                    exception = "pickActor: expected (number, string, string, number, number, number, number)";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
                 }
+                pick_args->SetString(1, arguments[1]->GetStringValue());
+                pick_args->SetString(2, arguments[2]->GetStringValue());
                 pick_ctx->GetFrame()->SendProcessMessage(PID_BROWSER, pick_msg);
+                retval = CefV8Value::CreateBool(true);
+                return true;
+            }
+
+            if (name == "getActorGizmoState") {
+                if (arguments.size() < 6) {
+                    exception = "getActorGizmoState(cameraHandle, sceneId, actorHandle, requestId, vpW, vpH) requires 6 arguments";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                auto gizmo_ctx = CefV8Context::GetCurrentContext();
+                if (!gizmo_ctx || !gizmo_ctx->GetBrowser()) {
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+
+                CefRefPtr<CefProcessMessage> gizmo_msg = CefProcessMessage::Create("ActorGizmoState");
+                CefRefPtr<CefListValue> gizmo_args = gizmo_msg->GetArgumentList();
+                const auto set_numeric_arg = [&](int src, int dst) -> bool {
+                    const auto& arg = arguments[src];
+                    if (!arg) return false;
+                    if (arg->IsInt()) {
+                        gizmo_args->SetInt(dst, arg->GetIntValue());
+                        return true;
+                    }
+                    if (arg->IsDouble()) {
+                        gizmo_args->SetDouble(dst, arg->GetDoubleValue());
+                        return true;
+                    }
+                    return false;
+                };
+
+                if (!set_numeric_arg(0, 0) ||
+                    !arguments[1] || !arguments[1]->IsString() ||
+                    !set_numeric_arg(2, 2) ||
+                    !arguments[3] || !arguments[3]->IsString() ||
+                    !set_numeric_arg(4, 4) ||
+                    !set_numeric_arg(5, 5)) {
+                    exception = "getActorGizmoState: expected (number, string, number, string, number, number)";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                gizmo_args->SetString(1, arguments[1]->GetStringValue());
+                gizmo_args->SetString(3, arguments[3]->GetStringValue());
+                gizmo_ctx->GetFrame()->SendProcessMessage(PID_BROWSER, gizmo_msg);
+                retval = CefV8Value::CreateBool(true);
+                return true;
+            }
+
+            if (name == "actorGizmoDrag") {
+                if (arguments.size() < 12) {
+                    exception = "actorGizmoDrag(cameraHandle, sceneId, actorHandle, requestId, dragId, phase, mode, axis, x, y, vpW, vpH) requires 12 arguments";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                auto drag_ctx = CefV8Context::GetCurrentContext();
+                if (!drag_ctx || !drag_ctx->GetBrowser()) {
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+
+                CefRefPtr<CefProcessMessage> drag_msg = CefProcessMessage::Create("ActorGizmoDrag");
+                CefRefPtr<CefListValue> drag_args = drag_msg->GetArgumentList();
+                const auto set_numeric_arg = [&](int index) -> bool {
+                    const auto& arg = arguments[index];
+                    if (!arg) return false;
+                    if (arg->IsInt()) {
+                        drag_args->SetInt(index, arg->GetIntValue());
+                        return true;
+                    }
+                    if (arg->IsDouble()) {
+                        drag_args->SetDouble(index, arg->GetDoubleValue());
+                        return true;
+                    }
+                    return false;
+                };
+                const auto set_string_arg = [&](int index) -> bool {
+                    const auto& arg = arguments[index];
+                    if (!arg || !arg->IsString()) return false;
+                    drag_args->SetString(index, arg->GetStringValue());
+                    return true;
+                };
+
+                if (!set_numeric_arg(0) ||
+                    !set_string_arg(1) ||
+                    !set_numeric_arg(2) ||
+                    !set_string_arg(3) ||
+                    !set_string_arg(4) ||
+                    !set_string_arg(5) ||
+                    !set_string_arg(6) ||
+                    !set_string_arg(7) ||
+                    !set_numeric_arg(8) ||
+                    !set_numeric_arg(9) ||
+                    !set_numeric_arg(10) ||
+                    !set_numeric_arg(11)) {
+                    exception = "actorGizmoDrag: expected (number, string, number, string, string, string, string, string, number, number, number, number)";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                drag_ctx->GetFrame()->SendProcessMessage(PID_BROWSER, drag_msg);
                 retval = CefV8Value::CreateBool(true);
                 return true;
             }
@@ -223,6 +344,42 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
                 CefRefPtr<CefProcessMessage> dock_msg = CefProcessMessage::Create("DockCommand");
                 dock_msg->GetArgumentList()->SetString(0, arguments[0]->GetStringValue());
                 dock_ctx->GetFrame()->SendProcessMessage(PID_BROWSER, dock_msg);
+                retval = CefV8Value::CreateBool(true);
+                return true;
+            }
+
+            if (name == "computeActorFocusPose") {
+                if (arguments.size() < 2) {
+                    exception = "computeActorFocusPose(actorHandle, requestId) requires 2 arguments";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+
+                const auto actor_handle = arguments[0];
+                if (!actor_handle || (!actor_handle->IsInt() && !actor_handle->IsDouble())) {
+                    exception = "computeActorFocusPose: actorHandle must be a number";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+
+                if (!arguments[1] || !arguments[1]->IsString()) {
+                    exception = "computeActorFocusPose: requestId must be a string";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+
+                auto focus_ctx = CefV8Context::GetCurrentContext();
+                if (!focus_ctx || !focus_ctx->GetBrowser()) {
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+
+                CefRefPtr<CefProcessMessage> focus_msg =
+                    CefProcessMessage::Create("ComputeActorFocusPoseFast");
+                CefRefPtr<CefListValue> focus_args = focus_msg->GetArgumentList();
+                focus_args->SetDouble(0, actor_handle->GetDoubleValue());
+                focus_args->SetString(1, arguments[1]->GetStringValue());
+                focus_ctx->GetFrame()->SendProcessMessage(PID_BROWSER, focus_msg);
                 retval = CefV8Value::CreateBool(true);
                 return true;
             }
@@ -330,14 +487,22 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
         CefRefPtr<CefV8Value> actor_transform = CefV8Value::CreateFunction("actorTransform", handler);
         CefRefPtr<CefV8Value> set_property = CefV8Value::CreateFunction("setProperty", handler);
         CefRefPtr<CefV8Value> pick_actor = CefV8Value::CreateFunction("pickActor", handler);
+        CefRefPtr<CefV8Value> get_actor_gizmo_state =
+            CefV8Value::CreateFunction("getActorGizmoState", handler);
+        CefRefPtr<CefV8Value> actor_gizmo_drag = CefV8Value::CreateFunction("actorGizmoDrag", handler);
         CefRefPtr<CefV8Value> inject_input = CefV8Value::CreateFunction("injectInput", handler);
         CefRefPtr<CefV8Value> dock_command = CefV8Value::CreateFunction("dockCommand", handler);
+        CefRefPtr<CefV8Value> compute_actor_focus_pose =
+            CefV8Value::CreateFunction("computeActorFocusPose", handler);
         bridge->SetValue("cameraMove", camera_move, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("actorTransform", actor_transform, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("setProperty", set_property, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("pickActor", pick_actor, V8_PROPERTY_ATTRIBUTE_NONE);
+        bridge->SetValue("getActorGizmoState", get_actor_gizmo_state, V8_PROPERTY_ATTRIBUTE_NONE);
+        bridge->SetValue("actorGizmoDrag", actor_gizmo_drag, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("injectInput", inject_input, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("dockCommand", dock_command, V8_PROPERTY_ATTRIBUTE_NONE);
+        bridge->SetValue("computeActorFocusPose", compute_actor_focus_pose, V8_PROPERTY_ATTRIBUTE_NONE);
         global->SetValue("coronaBridge", bridge, V8_PROPERTY_ATTRIBUTE_NONE);
 
         std::cout << "[Renderer] V8 context created, cefQuery injected" << std::endl;

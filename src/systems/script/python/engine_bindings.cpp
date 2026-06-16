@@ -258,6 +258,10 @@ void BindAll(nanobind::module_& m) {
              nb::rv_policy::reference_internal)
         .def("profile_count", &Actor::profile_count,
              "Get number of profiles in this actor")
+        .def("set_follow_camera", &Actor::set_follow_camera, nb::arg("enabled"),
+             "Render this actor in camera-local orthographic pass 2")
+        .def("get_follow_camera", &Actor::get_follow_camera,
+             "Return whether this actor renders in camera-local orthographic pass 2")
         .def("get_handle", &Actor::get_handle, "Get the underlying handle of this actor");
 
     // ============================================================================
@@ -281,6 +285,11 @@ void BindAll(nanobind::module_& m) {
              "Set camera output mode. mode: 'final_color', 'base_color', 'normal', 'position', 'object_id'")
         .def("get_output_mode", &Camera::get_output_mode,
              "Get current camera output mode as string")
+        .def("set_render_backend", &Camera::set_render_backend, nb::arg("mode"))
+        .def("get_render_backend", &Camera::get_render_backend)
+        .def("set_view_state", &Camera::set_view_state, nb::arg("open"), nb::arg("x"),
+             nb::arg("y"), nb::arg("width"), nb::arg("height"), nb::arg("move_speed"))
+        .def("get_view_state", &Camera::get_view_state)
         .def("set_surface", [](Camera& self, std::uintptr_t surface) { self.set_surface(reinterpret_cast<void*>(surface)); }, nb::arg("surface"), "Set render surface (pass window ID as integer)")
         .def("get_surface", [](const Camera& self) -> std::uintptr_t { return reinterpret_cast<std::uintptr_t>(self.get_surface()); }, "Get render surface handle as integer (0 if none)")
         .def("get_position", &Camera::get_position, "Get camera position [x, y, z]")
@@ -292,6 +301,7 @@ void BindAll(nanobind::module_& m) {
         .def("has_image_effects", &Camera::has_image_effects, "Check if camera has image effects")
         .def("remove_image_effects", &Camera::remove_image_effects, "Remove image effects from this camera")
         .def("set_size", &Camera::set_size, nb::arg("width"), nb::arg("height"), "Set camera render dimensions")
+        .def("get_size", &Camera::get_size, "Get camera render dimensions [width, height]")
         .def("set_viewport_rect", &Camera::set_viewport_rect, nb::arg("x"), nb::arg("y"), nb::arg("width"), nb::arg("height"), "Set viewport rectangle")
         .def("pick_actor_at_pixel", &Camera::pick_actor_at_pixel, nb::arg("x"), nb::arg("y"), "Pick actor at pixel coordinates");
 
@@ -364,6 +374,10 @@ void BindAll(nanobind::module_& m) {
              "Remove a camera from the scene")
         .def("clear_cameras", &Scene::clear_cameras,
              "Remove all cameras from the scene")
+        .def("set_active_camera", &Scene::set_active_camera, nb::arg("camera"),
+             "Set the active camera for this scene")
+        .def("get_active_camera_handle", &Scene::get_active_camera_handle,
+             "Get the active camera handle")
         .def("camera_count", &Scene::camera_count,
              "Get number of cameras in the scene")
         .def("has_camera", &Scene::has_camera, nb::arg("camera"),
@@ -585,8 +599,9 @@ void BindAll(nanobind::module_& m) {
     m.def("is_vision_available", &is_vision_available,
           "Return True if the engine was compiled with Vision (CORONA_ENABLE_VISION) support");
     m.def("set_render_backend", &set_render_backend, nb::arg("mode"),
+          nb::arg("camera_handle") = 0,
           "Request a render backend switch. mode: 'native' or 'vision'. Only effective when Vision is available.");
-    m.def("get_render_backend", &get_render_backend,
+    m.def("get_render_backend", &get_render_backend, nb::arg("camera_handle") = 0,
           "Get the currently requested render backend as 'native' or 'vision'");
     m.def("load_vision_scene", &load_vision_scene, nb::arg("path"),
           "Load an external Vision scene file (.json). Pass an empty string to "
@@ -641,6 +656,11 @@ void BindAll(nanobind::module_& m) {
     m.def("camera_follow_clear", []() {
         Corona::Systems::CameraFollowController::instance().clear_target();
     }, "Clear the camera follow target");
+
+    m.def("camera_follow_set_input_enabled", [](bool enabled) {
+        Corona::Systems::CameraFollowController::instance().set_input_enabled(enabled);
+    }, nb::arg("enabled"),
+       "Enable or disable editor camera-follow keyboard/mouse input");
 
     m.def("camera_follow_inject_rmb", [](bool down, int x, int y) {
         Corona::Systems::CameraFollowController::instance().inject_rmb(down, x, y);

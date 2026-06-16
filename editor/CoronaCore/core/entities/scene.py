@@ -14,6 +14,16 @@ CoronaEngine = CoronaEditor.CoronaEngine
 logger = logging.getLogger(__name__)
 
 
+def _active_project_path():
+    try:
+        from ...utils.settings import settings_manager
+        if settings_manager.active_project_path:
+            return settings_manager.active_project_path
+    except Exception:
+        pass
+    return getattr(CoronaEngine, "active_project_path", None)
+
+
 class Scene:
     """
     场景包装类：仅管理对象引用，生命周期由外部管理。
@@ -52,6 +62,8 @@ class Scene:
         self.terrain_type = ''
         self.terrain_path = ''
         self.script_path = ''
+        self.vision_source_path = ''
+        self.vision_import_mode = ''
 
         self.read_data()
         # 场景创建后补齐默认相机（幂等）
@@ -74,7 +86,7 @@ class Scene:
         if os.path.isabs(self.route):
             data_path = self.route
         else:
-            data_path = os.path.join(CoronaEngine.active_project_path, self.route)
+            data_path = os.path.join(_active_project_path() or '', self.route)
 
         if os.path.exists(data_path):
             self.file_data.read(data_path, encoding='utf-8')
@@ -124,31 +136,87 @@ class Scene:
                 self.terrain_type = self.file_data['terrain'].get('type', '')
 
             # 读取相机数据（延迟到 ensure_default_camera 之后应用）
+            if 'vision' in self.file_data:
+                self.vision_source_path = self.file_data['vision'].get('source_path', '')
+                self.vision_import_mode = self.file_data['vision'].get('import_mode', '')
+
             self._pending_camera_data = {}
             if 'camera' in self.file_data:
                 self._pending_camera_data = dict(self.file_data['camera'])
 
     def _apply_pending_camera_data(self):
-        """将从文件读取的相机数据应用到相机上"""
+        """加载新 camera 列表格式，并兼容旧的单 camera0.* 格式。"""
         data = getattr(self, '_pending_camera_data', {})
         if not data:
             return
-        for i, cam in enumerate(self._cameras):
+
+        try:
+            camera_count = int(data.get('count', 0))
+        except (TypeError, ValueError):
+            camera_count = 0
+        if camera_count <= 0:
+            indices = []
+            for key in data:
+                if key.startswith('camera') and '.' in key:
+                    index_text = key[6:key.index('.')]
+                    if index_text.isdigit():
+                        indices.append(int(index_text))
+            camera_count = max(indices, default=0) + 1
+
+        while len(self._cameras) < camera_count:
+            camera_index = len(self._cameras)
+            camera = Camera(
+                name=f"{self.name}_Camera{camera_index}",
+                deletable=camera_index != 0)
+            camera.set_surface(0)
+            self._cameras.append(camera)
+            self.engine_scene.add_camera(camera.engine_obj)
+
+        for i, cam in enumerate(self._cameras[:camera_count]):
             prefix = f'camera{i}'
-            pos_str = data.get(f'{prefix}.position')
-            fwd_str = data.get(f'{prefix}.forward')
-            up_str = data.get(f'{prefix}.world_up')
-            fov_str = data.get(f'{prefix}.fov')
-            if pos_str and fwd_str and up_str and fov_str:
-                try:
+            cam.camera_id = data.get(f'{prefix}.id', cam.camera_id)
+            cam.name = data.get(f'{prefix}.name', cam.name)
+            cam.deletable = data.get(
+                f'{prefix}.deletable',
+                'false' if i == 0 else 'true').lower() in ('1', 'true', 'yes', 'on')
+            try:
+                pos_str = data.get(f'{prefix}.position')
+                fwd_str = data.get(f'{prefix}.forward')
+                up_str = data.get(f'{prefix}.world_up')
+                fov_str = data.get(f'{prefix}.fov')
+                if pos_str and fwd_str and up_str and fov_str:
                     pos = [float(x.strip()) for x in pos_str.split(',')]
                     fwd = [float(x.strip()) for x in fwd_str.split(',')]
                     up = [float(x.strip()) for x in up_str.split(',')]
                     fov = float(fov_str.strip())
-                    if hasattr(cam, 'set'):
-                        cam.set(pos, fwd, up, fov)
-                except Exception:
-                    pass
+                    cam.set(pos, fwd, up, fov)
+            except (TypeError, ValueError):
+                logger.warning("Scene '%s': invalid pose for %s", self.name, prefix)
+
+            width = int(data.get(f'{prefix}.width', cam.width))
+            height = int(data.get(f'{prefix}.height', cam.height))
+            cam.set_size(width, height)
+            cam.set_output_mode(data.get(f'{prefix}.output_mode', 'final_color'))
+            cam.set_render_backend(data.get(f'{prefix}.render_backend', 'native'))
+            cam.set_view_state(
+                data.get(f'{prefix}.view_open', 'false').lower() in ('1', 'true', 'yes', 'on'),
+                int(data.get(f'{prefix}.view_x', 120)),
+                int(data.get(f'{prefix}.view_y', 120)),
+                int(data.get(f'{prefix}.view_width', 960)),
+                int(data.get(f'{prefix}.view_height', 540)),
+                float(data.get(f'{prefix}.move_speed', 1.0)),
+            )
+            if i > 0:
+                cam.set_surface(0)
+
+        active_id = data.get('active_id')
+        active = next(
+            (camera for camera in self._cameras
+             if camera.camera_id == active_id or camera.name == active_id),
+            self._cameras[0] if self._cameras else None)
+        if active is not None:
+            self._main_camera = active
+            self.engine_scene.set_active_camera(active.engine_obj)
         self._pending_camera_data = {}
 
     def save_data(self):
@@ -156,7 +224,7 @@ class Scene:
         if os.path.isabs(self.route):
             data_path = self.route
         else:
-            data_path = os.path.join(CoronaEngine.active_project_path, self.route)
+            data_path = os.path.join(_active_project_path() or '', self.route)
 
         # 确保必要的 section 存在
         for section in ('base', 'sun', 'actors', 'scripts', 'terrain'):
@@ -189,6 +257,11 @@ class Scene:
 
             self.file_data['actors'][f'{actor_key}.actor_type'] = getattr(actor, 'actor_type', 'actor')
             self.file_data['actors'][f'{actor_key}.route'] = getattr(actor, 'route', '')
+            self.file_data['actors'][f'{actor_key}.actor_guid'] = getattr(actor, 'actor_guid', '')
+            if hasattr(actor, 'get_follow_camera'):
+                self.file_data['actors'][f'{actor_key}.follow_camera'] = (
+                    'true' if actor.get_follow_camera() else 'false'
+                )
 
             # 获取几何体属性
             if hasattr(actor, '_geometry'):
@@ -216,28 +289,56 @@ class Scene:
                         pass
 
         # 脚本数据
-        self.file_data['scripts']["path"] = self.script_path
+        self.file_data['scripts']["path"] = getattr(self, 'script_path', '')
 
         # 地形数据
-        self.file_data['terrain']["path"] = self.terrain_path
+        self.file_data['terrain']["path"] = getattr(self, 'terrain_path', '')
+        self.file_data['terrain']["type"] = getattr(self, 'terrain_type', '')
+
+        vision_source_path = getattr(self, 'vision_source_path', '')
+        vision_import_mode = getattr(self, 'vision_import_mode', '')
+        if vision_source_path or vision_import_mode:
+            if 'vision' not in self.file_data:
+                self.file_data['vision'] = {}
+            self.file_data['vision']['source_path'] = vision_source_path
+            self.file_data['vision']['import_mode'] = vision_import_mode or 'external'
 
         # 相机数据
-        if 'camera' not in self.file_data:
-            self.file_data['camera'] = {}
+        self.file_data['camera'] = {}
+        active_camera = self.get_active_camera()
+        self.file_data['camera']['count'] = str(len(self._cameras))
+        self.file_data['camera']['active_id'] = (
+            active_camera.camera_id if active_camera is not None else '')
         for i, cam in enumerate(self._cameras):
             if cam is not None:
                 try:
+                    cam.refresh_view_state()
+                    cam.refresh_size()
                     pos = cam.get_position()
                     fwd = cam.get_forward()
                     up = cam.get_world_up()
                     fov = cam.get_fov()
                     prefix = f'camera{i}'
+                    self.file_data['camera'][f'{prefix}.id'] = cam.camera_id
+                    self.file_data['camera'][f'{prefix}.name'] = cam.name
+                    self.file_data['camera'][f'{prefix}.deletable'] = str(cam.deletable).lower()
                     self.file_data['camera'][f'{prefix}.position'] = f"{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}"
                     self.file_data['camera'][f'{prefix}.forward'] = f"{fwd[0]:.4f}, {fwd[1]:.4f}, {fwd[2]:.4f}"
                     self.file_data['camera'][f'{prefix}.world_up'] = f"{up[0]:.4f}, {up[1]:.4f}, {up[2]:.4f}"
                     self.file_data['camera'][f'{prefix}.fov'] = f"{fov:.2f}"
-                except Exception:
-                    pass
+                    self.file_data['camera'][f'{prefix}.width'] = str(cam.width)
+                    self.file_data['camera'][f'{prefix}.height'] = str(cam.height)
+                    self.file_data['camera'][f'{prefix}.output_mode'] = cam.get_output_mode()
+                    self.file_data['camera'][f'{prefix}.render_backend'] = cam.get_render_backend()
+                    self.file_data['camera'][f'{prefix}.move_speed'] = str(cam.move_speed)
+                    self.file_data['camera'][f'{prefix}.view_open'] = str(cam.view_open).lower()
+                    self.file_data['camera'][f'{prefix}.view_x'] = str(cam.view_x)
+                    self.file_data['camera'][f'{prefix}.view_y'] = str(cam.view_y)
+                    self.file_data['camera'][f'{prefix}.view_width'] = str(cam.view_width)
+                    self.file_data['camera'][f'{prefix}.view_height'] = str(cam.view_height)
+                except Exception as exc:
+                    logger.warning("Scene '%s': failed to save camera '%s': %s",
+                                   self.name, getattr(cam, 'name', i), exc)
 
         with open(data_path, 'w', encoding='utf-8') as f:
             self.file_data.write(f)
@@ -319,6 +420,11 @@ class Scene:
             return False
         self._cameras.append(camera)
         self.engine_scene.add_camera(getattr(camera, 'engine_obj', camera))
+        if self._main_camera is None:
+            camera.deletable = False
+            self._main_camera = camera
+            if hasattr(self.engine_scene, 'set_active_camera'):
+                self.engine_scene.set_active_camera(getattr(camera, 'engine_obj', camera))
         return True
 
     @auto_save
@@ -327,12 +433,17 @@ class Scene:
             return False
         self._cameras.remove(camera)
         self.engine_scene.remove_camera(getattr(camera, 'engine_obj', camera))
+        if self._main_camera is camera:
+            self._main_camera = self._cameras[0] if self._cameras else None
+            if self._main_camera is not None and hasattr(self.engine_scene, 'set_active_camera'):
+                self.engine_scene.set_active_camera(getattr(self._main_camera, 'engine_obj', self._main_camera))
         return True
 
     @auto_save
     def clear_cameras(self) -> bool:
         for cam in self._cameras.copy():
             self.remove_camera_from_scene(cam)
+        self._main_camera = None
         return True
 
     def get_cameras(self) -> List[Camera]:
@@ -450,14 +561,19 @@ class Scene:
         created = False
 
         if not self._cameras:
-            camera = Camera(name=f"{self.name}_MainCamera")
+            camera = Camera(name=f"{self.name}_MainCamera", deletable=False)
             self._cameras.append(camera)
             self.engine_scene.add_camera(getattr(camera, 'engine_obj', camera))
             self._main_camera = camera
+            if hasattr(self.engine_scene, 'set_active_camera'):
+                self.engine_scene.set_active_camera(getattr(camera, 'engine_obj', camera))
             created = True
 
         if self._main_camera is None:
             self._main_camera = self._cameras[0]
+            self._main_camera.deletable = False
+            if hasattr(self.engine_scene, 'set_active_camera'):
+                self.engine_scene.set_active_camera(getattr(self._main_camera, 'engine_obj', self._main_camera))
 
         return created
 
@@ -474,12 +590,13 @@ class Scene:
             return self.get_active_camera()
 
         for camera in self._cameras:
-            if getattr(camera, 'name', None) == camera_name:
+            if (getattr(camera, 'name', None) == camera_name or
+                    getattr(camera, 'camera_id', None) == camera_name):
                 return camera
 
-        logger.warning("Scene.find_camera: camera '%s' not found in scene '%s', fallback to active camera",
+        logger.warning("Scene.find_camera: camera '%s' not found in scene '%s'",
                        camera_name, self.name)
-        return self.get_active_camera()
+        return None
 
     # Camera 设置（兼容旧接口）
     @auto_save
@@ -491,6 +608,8 @@ class Scene:
 
         if camera is not None:
             self._main_camera = camera if isinstance(camera, Camera) else self._main_camera
+            if hasattr(self.engine_scene, 'set_active_camera'):
+                self.engine_scene.set_active_camera(getattr(camera, 'engine_obj', camera))
 
             logger.info("Scene.set_camera scene=%s camera=%s camera_type=%s",
                         self.name,
@@ -530,7 +649,7 @@ class Scene:
             "id": self.route,
             "scene_id": self.route,
             "name": self.name,
-            "active_camera_id": getattr(active_camera, 'name', None),
+            "active_camera_id": getattr(active_camera, 'camera_id', None),
             "active_camera_name": getattr(active_camera, 'name', None),
             "camera": active_camera.to_dict() if hasattr(active_camera, 'to_dict') else None,
             "cameras": camera_payloads,
@@ -544,6 +663,10 @@ class Scene:
             "terrain": {
                 "path": self.terrain_path,
                 "type": self.terrain_type
+            },
+            "vision": {
+                "source_path": self.vision_source_path,
+                "import_mode": self.vision_import_mode,
             },
             "script": self.script_path,
             "actors": [actor.to_dict() for actor in self.get_actors()]
@@ -593,8 +716,12 @@ class Scene:
             "name": actor_name,
             "actor_type": actors_section.get(f'{actor_name}.actor_type', 'actor'),
             "route": actors_section.get(f'{actor_name}.route', ''),
+            "actor_guid": actors_section.get(f'{actor_name}.actor_guid', ''),
             "geometry": {}
         }
+        follow_camera_key = f'{actor_name}.follow_camera'
+        if follow_camera_key in actors_section:
+            actor_data["follow_camera"] = actors_section.getboolean(follow_camera_key)
 
         # 解析几何体属性
         pos_str = actors_section.get(f'{actor_name}.geometry.position', '0.0, 0.0, 0.0')

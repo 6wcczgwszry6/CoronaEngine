@@ -4,7 +4,10 @@
 
 #include <array>
 #include <cstdint>
+#include <mutex>
+#include <unordered_map>
 #include <memory>
+#include <string>
 #include <vector>
 #include <filesystem>
 
@@ -138,6 +141,7 @@ struct ProfileDevice {
 struct ActorDevice {
     std::vector<std::uintptr_t> profile_handles;
     std::filesystem::path model_path;  //Actor文件路径，同时作为Actor的唯一标识
+    bool follow_camera{false};         // true: render in Optics pass 2 using camera-local orthographic space
 };
 
 enum class CameraOutputMode : uint8_t {
@@ -149,8 +153,14 @@ enum class CameraOutputMode : uint8_t {
     VisibilityBuffer,
 };
 
+enum class CameraRenderBackend : uint8_t {
+    Native,
+    Vision,
+};
+
 struct CameraDevice {
     void* surface{};
+    bool follows_default_surface{true};
 
     ktm::fvec3 position;
     ktm::fvec3 forward;
@@ -162,6 +172,13 @@ struct CameraDevice {
     std::uint32_t width{1920};
     std::uint32_t height{1080};
     CameraOutputMode output_mode{CameraOutputMode::FinalColor};
+    CameraRenderBackend render_backend{CameraRenderBackend::Native};
+    bool view_open{false};
+    int view_x{120};
+    int view_y{120};
+    int view_width{960};
+    int view_height{540};
+    float move_speed{1.0f};
     std::uintptr_t actor_pick_handle{};
 
     CameraDevice() {
@@ -196,6 +213,8 @@ struct CameraDevice {
 };
 
 struct ActorPickDevice {
+    std::string request_id;
+    std::string result_request_id;
     std::uint32_t x{0};
     std::uint32_t y{0};
     std::uint32_t result_x{0};
@@ -203,6 +222,71 @@ struct ActorPickDevice {
     std::uintptr_t actor_handle{0};
     bool pending{false};
     bool result_ready{false};
+};
+
+struct CameraMoveCommand {
+    std::uintptr_t camera_handle{};
+    ktm::fvec3 position{};
+    ktm::fvec3 forward{};
+    ktm::fvec3 world_up{};
+    float fov{45.0f};
+    std::uint64_t sequence{};
+};
+
+struct CameraViewportUpdateCommand {
+    std::uintptr_t camera_handle{};
+    void* surface{};
+    bool view_open{false};
+    int x{120};
+    int y{120};
+    int width{960};
+    int height{540};
+    int render_width{960};
+    int render_height{540};
+    std::uint64_t sequence{};
+};
+
+enum class CameraStateUpdateField : std::uint32_t {
+    None = 0,
+    Surface = 1u << 0,
+    Size = 1u << 1,
+    OutputMode = 1u << 2,
+    RenderBackend = 1u << 3,
+    ViewState = 1u << 4,
+};
+
+constexpr CameraStateUpdateField operator|(CameraStateUpdateField lhs,
+                                           CameraStateUpdateField rhs) {
+    return static_cast<CameraStateUpdateField>(
+        static_cast<std::uint32_t>(lhs) | static_cast<std::uint32_t>(rhs));
+}
+
+constexpr bool has_camera_state_field(CameraStateUpdateField fields,
+                                      CameraStateUpdateField field) {
+    return (static_cast<std::uint32_t>(fields) &
+            static_cast<std::uint32_t>(field)) != 0;
+}
+
+struct CameraStateUpdateCommand {
+    std::uintptr_t camera_handle{};
+    CameraStateUpdateField fields{CameraStateUpdateField::None};
+    void* surface{};
+    std::uint32_t width{1};
+    std::uint32_t height{1};
+    CameraOutputMode output_mode{CameraOutputMode::FinalColor};
+    CameraRenderBackend render_backend{CameraRenderBackend::Native};
+    bool view_open{false};
+    int view_x{120};
+    int view_y{120};
+    int view_width{960};
+    int view_height{540};
+    float move_speed{1.0f};
+    std::uint64_t sequence{};
+};
+
+struct CameraReleaseCommand {
+    std::uintptr_t camera_handle{};
+    std::uintptr_t actor_pick_handle{};
 };
 
 struct EnvironmentDevice {
@@ -228,6 +312,7 @@ struct SceneDevice {
     std::uintptr_t environment{};
     std::vector<std::uintptr_t> actor_handles;
     std::vector<std::uintptr_t> camera_handles;
+    std::uintptr_t active_camera_handle{};
     ktm::fvec3 min_world;
     ktm::fvec3 max_world;
     ktm::fvec3 center_world;
@@ -311,6 +396,15 @@ class SharedDataHub {
     ImageStorage& image_storage();
     const ImageStorage& image_storage() const;
 
+    void enqueue_camera_move(CameraMoveCommand command);
+    std::vector<CameraMoveCommand> drain_camera_moves();
+    void enqueue_camera_viewport_update(CameraViewportUpdateCommand command);
+    std::vector<CameraViewportUpdateCommand> drain_camera_viewport_updates();
+    void enqueue_camera_state_update(CameraStateUpdateCommand command);
+    std::vector<CameraStateUpdateCommand> drain_camera_state_updates();
+    void enqueue_camera_release(CameraReleaseCommand command);
+    std::vector<CameraReleaseCommand> drain_camera_releases();
+
    private:
     ModelResourceStorage model_resource_storage_;
     GeometryStorage geometry_storage_;
@@ -325,6 +419,19 @@ class SharedDataHub {
     ActorPickStorage actor_pick_storage_;
     SceneStorage scene_storage_;
     ImageStorage image_storage_;
+    std::mutex camera_move_mutex_;
+    std::unordered_map<std::uintptr_t, CameraMoveCommand> pending_camera_moves_;
+    std::uint64_t camera_move_sequence_{0};
+    std::mutex camera_viewport_update_mutex_;
+    std::unordered_map<std::uintptr_t, CameraViewportUpdateCommand>
+        pending_camera_viewport_updates_;
+    std::uint64_t camera_viewport_update_sequence_{0};
+    std::mutex camera_state_update_mutex_;
+    std::unordered_map<std::uintptr_t, CameraStateUpdateCommand>
+        pending_camera_state_updates_;
+    std::uint64_t camera_state_update_sequence_{0};
+    std::mutex camera_release_mutex_;
+    std::vector<CameraReleaseCommand> pending_camera_releases_;
 };
 
 }  // namespace Corona

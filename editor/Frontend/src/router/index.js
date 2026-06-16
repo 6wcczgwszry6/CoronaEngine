@@ -30,9 +30,9 @@ const routes = [
     component: () => import('../views/layout/ProjectLauncher.vue'),
   },
   {
-    path: '/StoryMode',
-    name: 'StoryMode',
-    component: () => import('../views/layout/StoryMode.vue'),
+    path: '/NewGame',
+    name: 'NewGame',
+    component: () => import('../views/layout/NewGame.vue'),
   },
   {
     path: '/CreateGame',
@@ -93,6 +93,11 @@ const routes = [
     path: '/ScratchTool',
     name: 'ScratchTool',
     component: BlocklyWorkspace,
+  },
+  {
+    path: '/CameraView',
+    name: 'CameraView',
+    component: () => import('../views/tools/CameraView.vue'),
   },
 ];
 

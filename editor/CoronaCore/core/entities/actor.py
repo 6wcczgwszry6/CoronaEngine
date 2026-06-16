@@ -21,6 +21,16 @@ CoronaEngine = CoronaEditor.CoronaEngine
 _handle_to_actor = weakref.WeakValueDictionary()
 
 
+def _active_project_path():
+    try:
+        from ...utils.settings import settings_manager
+        if settings_manager.active_project_path:
+            return settings_manager.active_project_path
+    except Exception:
+        pass
+    return getattr(CoronaEngine, "active_project_path", None)
+
+
 class Actor:
     """
     OOP API 包装：基于 CoronaEngine.Actor。
@@ -44,6 +54,7 @@ class Actor:
         self.model_dependencies = []
         self.script_path = ""
         self.actor_guid = ""
+        self._follow_camera = False
         self._suppress_network_broadcast = bool(
             actor_data and actor_data.get("_suppress_network_broadcast")
         )
@@ -81,6 +92,7 @@ class Actor:
             self.actor_guid = f"actor-{uuid.uuid4().hex}"
 
         self.handle = self.engine_obj.get_handle()
+        self._sync_follow_camera_to_engine()
         _handle_to_actor[self.handle] = self
 
         self._enable_collision_callback = True  # 控制是否启用碰撞回调（Python 层回调开关）
@@ -104,7 +116,7 @@ class Actor:
         if os.path.isabs(self.route):
             return self.route
         else:
-            return os.path.join(CoronaEngine.active_project_path, self.route)
+            return os.path.join(_active_project_path() or '', self.route)
 
     def _load_from_config(self, data_path: str):
         """从配置文件加载actor数据"""
@@ -113,10 +125,11 @@ class Actor:
         # 读取模型路径
         self.model_path = self.file_data['base']['path']
         self.actor_guid = self.file_data['base'].get('actor_guid', '')
+        self._follow_camera = self.file_data['base'].getboolean('follow_camera', fallback=False)
         if not self.actor_guid:
             self.actor_guid = f"actor-{uuid.uuid4().hex}"
         if self.model_path:
-            self.final_model_path = os.path.join(CoronaEngine.active_project_path, self.model_path)
+            self.final_model_path = os.path.join(_active_project_path() or '', self.model_path)
             if self.parent:
                 self._create_components_from_config()
 
@@ -124,6 +137,7 @@ class Actor:
 
     def _load_from_actor_data(self, actor_data: dict, data_path: str):
         """从actor_data字典加载actor数据"""
+        file_follow_camera = False
         if self.actor_type == "actor":
             self.file_data.read(data_path, encoding='utf-8')
             self.model_path = self.file_data['base']['path']
@@ -131,12 +145,18 @@ class Actor:
                 'actor_guid',
                 self.file_data['base'].get('actor_guid', '')
             )
+            file_follow_camera = self.file_data['base'].getboolean('follow_camera', fallback=False)
             self.script_path = self.file_data['scripts']["path"]
-            self.final_model_path = os.path.join(CoronaEngine.active_project_path,
+            self.final_model_path = os.path.join(_active_project_path() or '',
                                                  self.model_path) if self.model_path else ""
         else:
             self.final_model_path = data_path
             self.actor_guid = actor_data.get('actor_guid', '')
+
+        self._follow_camera = self._coerce_bool(
+            actor_data.get('follow_camera',
+                           actor_data.get('render_space', 'ui' if file_follow_camera else 'scene') == 'ui')
+        )
 
         if not self.actor_guid:
             self.actor_guid = f"actor-{uuid.uuid4().hex}"
@@ -194,29 +214,139 @@ class Actor:
                 except Exception:
                     pass
 
-    def _create_and_add_profile(self):
-        """创建组件、配置集合并添加到actor"""
+    def _create_profile_for_geometry(self, geometry):
+        """Create an engine profile for a geometry and return its Python wrappers."""
         ActorProfile = getattr(CoronaEngine, 'ActorProfile', None)
         if ActorProfile is None:
             raise RuntimeError("CoronaEngine 未提供 ActorProfile 类型")
 
         # 创建各个组件
-        self._optics = Optics(self._geometry)
-        self._mechanics = Mechanics(self._geometry)
-        self._acoustics = Acoustics(self._geometry)
+        optics = Optics(geometry)
+        mechanics = Mechanics(geometry)
+        acoustics = Acoustics(geometry)
 
         # 创建并配置profile
         prof = ActorProfile()
-        prof.geometry = self._geometry.engine_obj
-        prof.optics = self._optics.engine_obj
-        prof.mechanics = self._mechanics.engine_obj
-        prof.acoustics = self._acoustics.engine_obj
+        prof.geometry = geometry.engine_obj
+        prof.optics = optics.engine_obj
+        prof.mechanics = mechanics.engine_obj
+        prof.acoustics = acoustics.engine_obj
 
         # 添加到actor并激活
         stored = self.engine_obj.add_profile(prof)
         if stored is None:
             raise RuntimeError("无法向 Actor 添加默认 Profile（几何/组件不一致）")
         self.engine_obj.set_active_profile(stored)
+        return stored, optics, mechanics, acoustics
+
+    def _create_and_add_profile(self):
+        """创建组件、配置集合并添加到actor"""
+        stored, optics, mechanics, acoustics = self._create_profile_for_geometry(self._geometry)
+        self._profile = stored
+        self._optics = optics
+        self._mechanics = mechanics
+        self._acoustics = acoustics
+
+    def _resolve_model_path(self, route: str) -> str:
+        if not route:
+            return ""
+        if os.path.isabs(route):
+            return route
+        return os.path.join(_active_project_path() or '', route)
+
+    @staticmethod
+    def _safe_call(obj, method_name, default=None):
+        if obj is None or not hasattr(obj, method_name):
+            return default
+        try:
+            return getattr(obj, method_name)()
+        except Exception as exc:
+            logging.warning("Failed to read %s from %s: %s", method_name, obj, exc)
+            return default
+
+    @staticmethod
+    def _safe_set(obj, method_name, value):
+        if obj is None or value is None or not hasattr(obj, method_name):
+            return
+        try:
+            getattr(obj, method_name)(value)
+        except Exception as exc:
+            logging.warning("Failed to restore %s on %s: %s", method_name, obj, exc)
+
+    @staticmethod
+    def _safe_set_many(obj, method_name, values):
+        if obj is None or values is None or not hasattr(obj, method_name):
+            return
+        try:
+            getattr(obj, method_name)(*values)
+        except Exception as exc:
+            logging.warning("Failed to restore %s on %s: %s", method_name, obj, exc)
+
+    def _capture_model_state(self) -> Dict[str, Any]:
+        return {
+            'position': self._safe_call(getattr(self, '_geometry', None), 'get_position'),
+            'rotation': self._safe_call(getattr(self, '_geometry', None), 'get_rotation'),
+            'scale': self._safe_call(getattr(self, '_geometry', None), 'get_scale'),
+            'optics': (self._safe_call(getattr(self, '_optics', None), 'to_dict', {}) or {}),
+            'mechanics': (self._safe_call(getattr(self, '_mechanics', None), 'to_dict', {}) or {}),
+            'collision_type': getattr(self, '_collision_type', 'box'),
+        }
+
+    def _restore_model_state(self, state: Dict[str, Any]):
+        if state.get('position') is not None:
+            self._geometry.set_position(state['position'])
+        if state.get('rotation') is not None:
+            self._geometry.set_rotation(state['rotation'])
+        if state.get('scale') is not None:
+            self._geometry.set_scale(state['scale'])
+
+        optics_state = state.get('optics') or {}
+        optics_setters = {
+            'metallic': 'set_metallic',
+            'roughness': 'set_roughness',
+            'subsurface': 'set_subsurface',
+            'specular': 'set_specular',
+            'specular_tint': 'set_specular_tint',
+            'anisotropic': 'set_anisotropic',
+            'sheen': 'set_sheen',
+            'sheen_tint': 'set_sheen_tint',
+            'clearcoat': 'set_clearcoat',
+            'clearcoat_gloss': 'set_clearcoat_gloss',
+            'visible': 'set_visible',
+            'ambient': 'set_ambient',
+            'diffuse': 'set_diffuse',
+            'specular_color': 'set_specular_color',
+            'shininess': 'set_shininess',
+        }
+        for key, setter in optics_setters.items():
+            self._safe_set(getattr(self, '_optics', None), setter, optics_state.get(key))
+
+        mechanics_state = state.get('mechanics') or {}
+        self._safe_set(getattr(self, '_mechanics', None), 'set_mass', mechanics_state.get('mass'))
+        self._safe_set(getattr(self, '_mechanics', None), 'set_restitution', mechanics_state.get('restitution'))
+        self._safe_set(getattr(self, '_mechanics', None), 'set_damping', mechanics_state.get('damping'))
+        self._safe_set(getattr(self, '_mechanics', None), 'set_physics_enabled',
+                       mechanics_state.get('physics_enabled'))
+        self._safe_set_many(getattr(self, '_mechanics', None), 'set_linear_lock',
+                            mechanics_state.get('linear_lock'))
+        self._safe_set_many(getattr(self, '_mechanics', None), 'set_angular_lock',
+                            mechanics_state.get('angular_lock'))
+
+        self.set_collision_enabled(state.get('collision_type', 'box'))
+
+    @staticmethod
+    def _coerce_bool(value) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on", "ui")
+        return bool(value)
+
+    def _sync_follow_camera_to_engine(self):
+        if hasattr(self.engine_obj, 'set_follow_camera'):
+            try:
+                self.engine_obj.set_follow_camera(self._follow_camera)
+            except Exception as exc:
+                logging.warning("Failed to sync follow_camera for actor %s: %s",
+                                self.name or self.route, exc)
 
     def _broadcast_actor_created(self):
         """通过 NetworkSystem 广播 Actor 创建事件到已连接的 peer。"""
@@ -247,7 +377,7 @@ class Actor:
         if self.actor_type == "actor" or not self.route:
             return
 
-        project_root_raw = getattr(CoronaEngine, "active_project_path", None)
+        project_root_raw = _active_project_path()
         if not project_root_raw:
             return
 
@@ -365,6 +495,7 @@ class Actor:
             self.file_data['base']['name'] = self.name
             self.file_data['base']['path'] = self.model_path
             self.file_data['base']['actor_guid'] = self.actor_guid
+            self.file_data['base']['follow_camera'] = 'true' if self._follow_camera else 'false'
             if self.model_path:
                 position = self.get_position()
                 rotation = self.get_rotation()
@@ -392,15 +523,40 @@ class Actor:
     @auto_save
     def set_model(self, route):
         self.model_path = route
-        if not hasattr(self, '_geometry'):
-            old_collision_type = getattr(self, '_collision_type', 'box')
-            self._geometry = Geometry(self.model_path)
-            self._create_and_add_profile()
-            # 恢复碰撞状态，避免切换模型后开关重置
-            self.set_collision_enabled(old_collision_type)
-            # 重新设置碰撞回调（新的 mechanics 需要重新注册回调）
-            self._setup_collision_callback()
-            self._setup_on_move_callback()
+        self.final_model_path = self._resolve_model_path(route)
+
+        if not self.final_model_path:
+            return True
+
+        old_profile = getattr(self, '_profile', None)
+        if old_profile is None and hasattr(self.engine_obj, 'get_active_profile'):
+            try:
+                old_profile = self.engine_obj.get_active_profile()
+            except Exception as exc:
+                logging.warning("Failed to read active profile before model replace: %s", exc)
+
+        state = self._capture_model_state()
+
+        new_geometry = Geometry(self.final_model_path)
+        stored, optics, mechanics, acoustics = self._create_profile_for_geometry(new_geometry)
+
+        self._geometry = new_geometry
+        self._profile = stored
+        self._optics = optics
+        self._mechanics = mechanics
+        self._acoustics = acoustics
+
+        self._restore_model_state(state)
+
+        if old_profile is not None and old_profile is not stored and hasattr(self.engine_obj, 'remove_profile'):
+            try:
+                self.engine_obj.remove_profile(old_profile)
+            except Exception as exc:
+                logging.warning("Failed to remove old profile after model replace: %s", exc)
+
+        # 重新设置回调（新的 mechanics 需要重新注册回调）
+        self._setup_collision_callback()
+        self._setup_on_move_callback()
         return True
 
     @auto_save
@@ -408,30 +564,48 @@ class Actor:
         self.script_path = route
         return True
 
-    # 兼容编辑器的变换操作：直接作用于几何体
+    # 兼容编辑器的变换操作：直接作用于几何体。
+    # Contract:
+    # - set_position/set_rotation/set_scale are absolute setters.
+    # - translate/rotate_delta/scale_delta are relative operations.
     @auto_save
-    def scale(self, v: List[float]):
-        if not hasattr(self, '_geometry'):
-            raise False
-        self._geometry.set_scale(v)
-        return True
-
-    @auto_save
-    def move(self, v: List[float]):
+    def translate(self, delta: List[float]):
         if not hasattr(self, '_geometry'):
             return False
         pos = self._geometry.get_position()
-        new_pos = [pos[0] + v[0], pos[1] + v[1], pos[2] + v[2]]
-        self._geometry.set_position(new_pos)
+        self._geometry.set_position([pos[0] + delta[0], pos[1] + delta[1], pos[2] + delta[2]])
         return True
 
     @auto_save
-    def rotate(self, euler: List[float]):
+    def rotate_delta(self, delta: List[float]):
         if not hasattr(self, '_geometry'):
             return False
         rot = self._geometry.get_rotation()
-        self._geometry.set_rotation([rot[0] + euler[0], rot[1] + euler[1], rot[2] + euler[2]])
+        self._geometry.set_rotation([rot[0] + delta[0], rot[1] + delta[1], rot[2] + delta[2]])
         return True
+
+    @auto_save
+    def scale_delta(self, factor):
+        if not hasattr(self, '_geometry'):
+            return False
+        if isinstance(factor, (int, float)):
+            factor = [factor, factor, factor]
+        current = self._geometry.get_scale()
+        self._geometry.set_scale([
+            current[0] * factor[0],
+            current[1] * factor[1],
+            current[2] * factor[2],
+        ])
+        return True
+
+    def move(self, v: List[float]):
+        return self.translate(v)
+
+    def rotate(self, euler: List[float]):
+        return self.rotate_delta(euler)
+
+    def scale(self, v: List[float]):
+        return self.set_scale(v)
 
     @auto_save
     def set_position(self, position: List[float], if_init=False):
@@ -484,6 +658,25 @@ class Actor:
         if not hasattr(self, '_optics'):
             return True
         return self._optics.get_visible()
+
+    @auto_save
+    def set_follow_camera(self, enabled: bool, if_init=False):
+        self._follow_camera = self._coerce_bool(enabled)
+        self._sync_follow_camera_to_engine()
+        if if_init:
+            return False
+        if self._follow_camera and hasattr(self, '_mechanics') and self._mechanics is not None:
+            self._mechanics.set_physics_enabled(False)
+        return True
+
+    def get_follow_camera(self) -> bool:
+        if hasattr(self.engine_obj, 'get_follow_camera'):
+            try:
+                self._follow_camera = bool(self.engine_obj.get_follow_camera())
+            except Exception as exc:
+                logging.warning("Failed to read follow_camera for actor %s: %s",
+                                self.name or self.route, exc)
+        return self._follow_camera
 
     def set_mass(self, mass: float):
         if not hasattr(self, '_mechanics'):
@@ -677,6 +870,7 @@ class Actor:
 
     def to_dict(self) -> Dict[str, Any]:
         _, ext = os.path.splitext(self.route)
+        follow_camera = self.get_follow_camera()
 
         result_dict = {
             "name": self.name,
@@ -690,7 +884,9 @@ class Actor:
             "actor_type": self.actor_type,
             "collision": self.get_collision_enabled(),
             "visible": self.get_visible(),
-            "script": self.script_path
+            "script": self.script_path,
+            "follow_camera": follow_camera,
+            "render_space": "ui" if follow_camera else "scene",
         }
 
         if hasattr(self, '_geometry'):
