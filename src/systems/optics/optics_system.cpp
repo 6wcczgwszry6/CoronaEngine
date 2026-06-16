@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <functional>
 #include <system_error>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -34,6 +35,7 @@
 #include "base/mgr/pipeline.h"
 #include "base/mgr/scene.h"
 #include "base/sensor/frame_buffer.h"
+#include "base/sensor/light_field_types.h"
 #include "base/sensor/sensor.h"
 #include "rhi/context.h"
 #include "vision/vision_geometry_adapter.h"
@@ -307,6 +309,56 @@ std::unordered_set<std::uintptr_t> retainedVisionContexts;
         return scene.active_camera_handle;
     }
     return scene.camera_handles.empty() ? 0 : scene.camera_handles.front();
+}
+
+void log_vision_pipeline_diagnostics(vision::Pipeline& pipeline,
+                                     const std::string& label) {
+    auto* fb = pipeline.frame_buffer();
+    if (fb == nullptr) {
+        CFW_LOG_WARNING("OpticsSystem: Vision pipeline {} has no framebuffer", label);
+        return;
+    }
+
+    const auto pixel_res = fb->resolution();
+    const auto raytracing_res = fb->raytracing_resolution();
+    const bool lightfield =
+        dynamic_cast<const vision::ILightFieldFrameBuffer*>(fb) != nullptr;
+    const bool output_denoise = pipeline.output_desc().denoise;
+
+    std::string denoiser_type = "none";
+    bool denoiser_enabled = false;
+    bool denoiser_supports_lightfield = false;
+    if (auto* integrator = pipeline.renderer().integrator().get()) {
+        if (auto* illum = dynamic_cast<vision::IlluminationIntegrator*>(integrator)) {
+            if (auto* denoiser = illum->denoiser()) {
+                denoiser_type = std::string(denoiser->impl_type());
+                denoiser_enabled = denoiser->enabled();
+                denoiser_supports_lightfield = denoiser->supports_lightfield();
+            }
+        }
+    }
+
+    const bool ssat_active = lightfield &&
+                             denoiser_type == "SSAT" &&
+                             denoiser_enabled &&
+                             output_denoise &&
+                             denoiser_supports_lightfield;
+
+    CFW_LOG_INFO(
+        "OpticsSystem: Vision pipeline {} framebuffer={}, pixel_res=({}, {}), "
+        "raytracing_res=({}, {}), lightfield={}, denoiser={}, "
+        "denoiser_enabled={}, output_denoise={}, SSAT active={}",
+        label,
+        std::string(fb->impl_type()),
+        pixel_res.x,
+        pixel_res.y,
+        raytracing_res.x,
+        raytracing_res.y,
+        lightfield,
+        denoiser_type,
+        denoiser_enabled,
+        output_denoise,
+        ssat_active);
 }
 
 // Loads a Vision scene from disk and brings it to a renderable state, mirroring
@@ -1735,7 +1787,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 renderPipeline->display(1.0 / 60.0);
 
                 auto* fb = renderPipeline->frame_buffer();
-                const auto res = fb->raytracing_resolution();
+                const auto res = fb->resolution();
                 const uint32_t w = res.x;
                 const uint32_t h = res.y;
 
@@ -1930,6 +1982,7 @@ bool OpticsSystem::load_external_vision_scene(const std::string& scene_path) {
             CFW_LOG_ERROR("OpticsSystem: External Vision scene import failed: {}", scene_path);
             return false;
         }
+        log_vision_pipeline_diagnostics(*pipeline, "external import");
         // Replace only after a successful import so a bad path leaves the current
         // scene intact.
         if (renderPipeline) {
