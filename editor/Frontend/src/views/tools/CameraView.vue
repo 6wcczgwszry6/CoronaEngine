@@ -22,14 +22,6 @@
           <button :disabled="!visionAvailable" @click="selectBackend('vision')">Vision</button>
         </div>
       </div>
-      <label v-if="backend === 'vision'" class="lightfield-toggle no-drag" title="Use Vision light-field framebuffer">
-        <input
-          type="checkbox"
-          :checked="visionFramebuffer === 'lightfield'"
-          @change="toggleLightField"
-        />
-        Light Field
-      </label>
       <div class="dropdown no-drag">
         <button
           class="control dropdown-trigger"
@@ -79,7 +71,6 @@ const cameraId = String(route.query.camera || '');
 const camera = ref(null);
 const cameraName = ref('Camera');
 const backend = ref('native');
-const visionFramebuffer = ref('normal');
 const outputMode = ref('final_color');
 const moveSpeed = ref(1);
 const renderWidth = ref(960);
@@ -116,9 +107,6 @@ const loadCamera = async () => {
   visionAvailable.value = !!unwrap(visionResult)?.available;
   cameraName.value = camera.value.name;
   backend.value = camera.value.render_backend || 'native';
-  visionFramebuffer.value = camera.value.vision_framebuffer === 'lightfield'
-    ? 'lightfield'
-    : 'normal';
   outputMode.value = backend.value === 'vision'
     ? 'final_color'
     : camera.value.output_mode || 'final_color';
@@ -148,21 +136,6 @@ const changeBackend = async () => {
       await sceneService.setOutputMode(sceneId, cameraId, 'final_color');
     }
   } catch (error) {
-    errorText.value = error.message;
-  }
-};
-
-const toggleLightField = async (event) => {
-  const mode = event.target.checked ? 'lightfield' : 'normal';
-  visionFramebuffer.value = mode;
-  try {
-    const result = unwrap(await sceneService.setVisionFramebuffer(mode, sceneId, cameraId));
-    visionFramebuffer.value = result?.mode === 'lightfield' ? 'lightfield' : 'normal';
-    if (camera.value) {
-      camera.value.vision_framebuffer = visionFramebuffer.value;
-    }
-  } catch (error) {
-    visionFramebuffer.value = visionFramebuffer.value === 'lightfield' ? 'normal' : 'lightfield';
     errorText.value = error.message;
   }
 };
@@ -565,17 +538,9 @@ onBeforeUnmount(() => {
 .dropdown-menu button:hover { background: rgba(255, 255, 255, 0.12); }
 .dropdown-menu button:disabled { color: #777; cursor: default; }
 .output-menu { min-width: 92px; }
-.speed, .resolution, .lightfield-toggle { display: flex; align-items: center; gap: 3px; font-size: 10px; }
+.speed, .resolution { display: flex; align-items: center; gap: 3px; font-size: 10px; }
 .speed input { width: 54px; padding: 0 4px; }
 .resolution input { width: 58px; padding: 0 4px; }
-.lightfield-toggle {
-  height: 24px;
-  padding: 0 5px;
-  border: 1px solid #555;
-  border-radius: 4px;
-  background: rgba(35, 35, 35, 0.9);
-}
-.lightfield-toggle input { margin: 0; }
 .button { padding: 0 8px; cursor: pointer; }
 .window-action { width: 24px; cursor: pointer; }
 .maximize { margin-left: auto; }

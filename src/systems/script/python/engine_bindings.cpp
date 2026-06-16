@@ -265,8 +265,6 @@ void BindAll(nanobind::module_& m) {
              "Get current camera output mode as string")
         .def("set_render_backend", &Camera::set_render_backend, nb::arg("mode"))
         .def("get_render_backend", &Camera::get_render_backend)
-        .def("set_vision_framebuffer", &Camera::set_vision_framebuffer, nb::arg("mode"))
-        .def("get_vision_framebuffer", &Camera::get_vision_framebuffer)
         .def("set_view_state", &Camera::set_view_state, nb::arg("open"), nb::arg("x"),
              nb::arg("y"), nb::arg("width"), nb::arg("height"), nb::arg("move_speed"))
         .def("get_view_state", &Camera::get_view_state)

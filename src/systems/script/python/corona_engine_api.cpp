@@ -1918,32 +1918,6 @@ std::string Corona::API::Camera::get_render_backend() const {
     return Corona::API::get_render_backend(handle_);
 }
 
-void Corona::API::Camera::set_vision_framebuffer(const std::string& mode) {
-    if (handle_ == 0) {
-        CFW_LOG_WARNING("[Camera::set_vision_framebuffer] Invalid camera handle");
-        return;
-    }
-
-    CameraStateUpdateCommand command{};
-    command.camera_handle = handle_;
-    command.fields = CameraStateUpdateField::VisionFrameBuffer;
-    command.vision_framebuffer =
-        mode == "lightfield" ? CameraVisionFrameBuffer::LightField
-                             : CameraVisionFrameBuffer::Normal;
-    SharedDataHub::instance().enqueue_camera_state_update(command);
-}
-
-std::string Corona::API::Camera::get_vision_framebuffer() const {
-    if (handle_ != 0) {
-        if (auto camera = SharedDataHub::instance().camera_storage().acquire_read(handle_)) {
-            return camera->vision_framebuffer == CameraVisionFrameBuffer::LightField
-                       ? "lightfield"
-                       : "normal";
-        }
-    }
-    return "normal";
-}
-
 void Corona::API::Camera::set_view_state(bool open, int x, int y, int width, int height, float move_speed) {
     if (handle_ == 0) {
         CFW_LOG_WARNING("[Camera::set_view_state] Invalid camera handle");

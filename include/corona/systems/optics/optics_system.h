@@ -5,7 +5,6 @@
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/kernel/system/system_base.h>
-#include <corona/shared_data_hub.h>
 
 #include <cstdint>
 #include <memory>
@@ -179,8 +178,6 @@ class OpticsSystem : public Kernel::SystemBase {
     // has been removed.
     std::unordered_map<std::uintptr_t, std::unique_ptr<Vision::VisionZeroCopyBridge>>
         vision_zero_copy_bridges_;
-    std::unordered_map<std::uintptr_t, Corona::CameraVisionFrameBuffer>
-        vision_camera_framebuffer_modes_;
 #endif
     bool vision_initialized_{false};
 
