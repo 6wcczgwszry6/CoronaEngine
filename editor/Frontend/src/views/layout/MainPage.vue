@@ -492,7 +492,6 @@ import { PLUGIN_MANIFEST } from '@/config/pluginManifest.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
 import { createViewportGizmoController } from '@/utils/viewportGizmo.js';
-import { createViewport3DCursorController } from '@/utils/viewport3DCursor.js';
 import AIHintBubble from '@/components/ui/AIHintBubble.vue';
 import ViewportGizmoOverlay from '@/components/viewport/ViewportGizmoOverlay.vue';
 import { startStageHints, stopStageHints, setHintShowMs } from '@/services/aiHintGenerator.js';
@@ -530,7 +529,6 @@ const viewportPickSurfaceRef = ref(null);
 const selectedGizmoActor = ref(null);
 const gizmoState = ref(null);
 const gizmoMode = ref('move');
-const cursor3DEnabled = ref(false);
 let gizmoRefreshRafId = null;
 const viewportLayoutVersion = ref(0);
 
@@ -544,43 +542,15 @@ const mouseRotate = reactive({
   lastX: 0,
   lastY: 0,
 });
-let lastViewportCursorPoint = null;
 
 const getViewportHitRect = () => viewportPickSurfaceRef.value?.getBoundingClientRect?.() ?? null;
 
 const getViewportRenderRect = () => ({
-  x: 0,
-  y: 0,
   left: 0,
   top: 0,
   width: Math.max(Number(window.innerWidth || 0), 0),
   height: Math.max(Number(window.innerHeight || 0), 0),
 });
-
-const getViewportSize = () => {
-  const rect = getViewportRenderRect();
-  return { width: rect.width, height: rect.height };
-};
-
-const rememberViewportCursorPoint = (event) => {
-  const hitRect = getViewportHitRect();
-  const renderRect = getViewportRenderRect();
-  if (!hitRect || renderRect.width <= 0 || renderRect.height <= 0) {
-    return;
-  }
-  if (
-    event.clientX < hitRect.left ||
-    event.clientX > hitRect.right ||
-    event.clientY < hitRect.top ||
-    event.clientY > hitRect.bottom
-  ) {
-    return;
-  }
-  lastViewportCursorPoint = {
-    x: Math.max(0, Math.min(renderRect.width, event.clientX - renderRect.left)),
-    y: Math.max(0, Math.min(renderRect.height, event.clientY - renderRect.top)),
-  };
-};
 
 const gizmoScreenOffset = computed(() => {
   viewportLayoutVersion.value;
@@ -640,34 +610,6 @@ const viewportGizmoController = createViewportGizmoController({
   emitTransformUpdate: emitTransformUpdateFast,
 });
 
-const unwrapResponse = (result) => result?.data ?? result;
-
-const viewport3DCursorController = createViewport3DCursorController({
-  getBridge: () => window.coronaBridge,
-  getCameraBinding: () => cameraBindingState.value,
-  getViewportRect: getViewportRenderRect,
-  getViewportSize,
-  getInitialCursorPoint: () => lastViewportCursorPoint,
-  isInputSuppressed: () => (
-    isGamePreviewInputLocked() ||
-    showDialog.value ||
-    Boolean(activeMenu.value) ||
-    isBlocklyHotkeyCaptured(document.activeElement)
-  ),
-  ensureCursorActor: async (sceneId) => {
-    const result = await sceneService.ensure3DCursorActor(sceneId);
-    const payload = unwrapResponse(result);
-    return payload?.cursor ?? payload;
-  },
-  onModeChange: (enabled) => {
-    cursor3DEnabled.value = enabled;
-    if (enabled) {
-      resetRealtimeCameraInput();
-      clearGizmoSelection();
-    }
-  },
-});
-
 const clearGizmoSelection = () => {
   selectedGizmoActor.value = null;
   gizmoState.value = null;
@@ -697,9 +639,6 @@ const scheduleGizmoStateRefresh = () => {
 const handleViewportLayoutChange = () => {
   viewportLayoutVersion.value += 1;
   scheduleGizmoStateRefresh();
-  if (cursor3DEnabled.value) {
-    void viewport3DCursorController.enable();
-  }
 };
 
 const hasActiveMovementKeys = () => Object.values(movementKeys).some((value) => value);
@@ -981,63 +920,7 @@ const handleWheel = (event) => {
   handleCameraMove(direction);
 };
 
-const isEditableHotkeyTarget = (target) => {
-  const tag = String(target?.tagName || '').toUpperCase();
-  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable;
-};
-
-const isBlocklyHotkeyCaptured = (target) => {
-  const selector = [
-    '.blocklyWidgetDiv',
-    '.blocklyDropDownDiv',
-    '.blocklyMenu',
-    '.blocklyTooltipDiv',
-    '.blocklySvg',
-    '.blocklyHtmlInput',
-    '.injectionDiv',
-    '[id*="blockly"]',
-    '[class*="blockly"]',
-  ].join(',');
-  return Boolean(target?.closest?.(selector));
-};
-
-const is3DCursorToggleKey = (event) =>
-  event.code === 'KeyC' || String(event.key || '').toLowerCase() === 'c';
-
-const isEscapeKey = (event) =>
-  event.code === 'Escape' || event.key === 'Escape' || event.keyCode === 27 || event.which === 27;
-
-const stop3DCursorHotkey = (event) => {
-  event.preventDefault();
-  event.stopPropagation();
-  event.stopImmediatePropagation?.();
-};
-
-const handle3DCursorKeyDownCapture = (event) => {
-  if (isEscapeKey(event) && cursor3DEnabled.value) {
-    stop3DCursorHotkey(event);
-    void viewport3DCursorController.handleKeyDown(event);
-    return;
-  }
-
-  if (
-    is3DCursorToggleKey(event) &&
-    !event.repeat &&
-    !isEditableHotkeyTarget(event.target) &&
-    !isGamePreviewInputLocked() &&
-    !showDialog.value &&
-    !activeMenu.value &&
-    !isBlocklyHotkeyCaptured(event.target)
-  ) {
-    stop3DCursorHotkey(event);
-    void viewport3DCursorController.handleKeyDown(event);
-  }
-};
-
 const handleKeyDown = (event) => {
-  if (event.defaultPrevented) {
-    return;
-  }
   // 检查输入框是否聚焦
   const inputElement = document.getElementById('new-tab-name');
   if (inputElement && inputElement === document.activeElement) {
@@ -1345,8 +1228,6 @@ const handleViewportPick = (event) => {
 };
 
 const onMouseDown = (event) => {
-  rememberViewportCursorPoint(event);
-
   // 右键拖拽旋转（原有逻辑不变）
   if (event.button === 2) {
     if (isGamePreviewInputLocked()) return;
@@ -1361,8 +1242,6 @@ const onMouseDown = (event) => {
 };
 
 const onMouseMove = (event) => {
-  rememberViewportCursorPoint(event);
-
   if (isGamePreviewInputLocked()) {
     mouseRotate.active = false;
     return;
@@ -1590,7 +1469,6 @@ const closeTab = async (index) => {
     tabs.value.splice(index, 1);
 
     if (wasActive) {
-      await viewport3DCursorController.release();
       await appService.suspendCameraViews(removedId).catch(() => {});
       activeTab.value = nextActiveIndex;
       await projectService.sceneSwitch(removedId, tabs.value[nextActiveIndex]?.id);
@@ -1615,7 +1493,6 @@ const switchTab = async (index, if_new) => {
   if (activeTab.value === index) {
     return;
   }
-  await viewport3DCursorController.release();
   const current_name = tabs.value[activeTab.value]?.id;
   const to_name = tabs.value[index]?.id;
   await appService.suspendCameraViews(current_name).catch(() => {});
@@ -1979,7 +1856,6 @@ onMounted(async () => {
   await syncSceneCameraBinding(tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME);
   await restoreCameraViews(initialSceneId);
 
-  window.addEventListener('keydown', handle3DCursorKeyDownCapture, true);
   document.addEventListener('keydown', handleKeyDown);
   document.addEventListener('keyup', handleKeyUp);
   document.addEventListener('click', handleClickOutside);
@@ -2024,7 +1900,6 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  void viewport3DCursorController.release();
   clearPreviewPoll();
   setGamePreviewInputLocked(false);
   stopStageHints();
@@ -2042,7 +1917,6 @@ onUnmounted(() => {
   }
   viewportPickController.dispose();
   viewportGizmoController.dispose();
-  window.removeEventListener('keydown', handle3DCursorKeyDownCapture, true);
   document.removeEventListener('keydown', handleKeyDown);
   document.removeEventListener('keyup', handleKeyUp);
   document.removeEventListener('click', handleClickOutside);
