@@ -74,6 +74,7 @@ export const createViewportGizmoController = ({
   getSelectedActor,
   onStateChange,
   emitTransformUpdate,
+  onTransformCommit,
   makeRequestId,
   makeDragId,
 } = {}) => {
@@ -262,6 +263,7 @@ export const createViewportGizmoController = ({
         startY: point.y,
         width: point.width,
         height: point.height,
+        commitRequested: false,
       };
       if (!latestRequestId) {
         latestRequestId = activeDrag.requestId;
@@ -279,7 +281,11 @@ export const createViewportGizmoController = ({
     },
 
     endDrag(event) {
-      return callDrag('end', event);
+      const ended = callDrag('end', event);
+      if (ended && activeDrag) {
+        activeDrag.commitRequested = true;
+      }
+      return ended;
     },
 
     handleTransform(payload) {
@@ -311,6 +317,15 @@ export const createViewportGizmoController = ({
         transform.scale,
         context.actor.type || 'actor'
       );
+      if (activeDrag.commitRequested && payload.phase === 'end') {
+        onTransformCommit?.(
+          payload.sceneId || context.sceneId,
+          context.actor.name,
+          context.actor.type || 'actor',
+          transform
+        );
+        activeDrag = null;
+      }
       return true;
     },
   };

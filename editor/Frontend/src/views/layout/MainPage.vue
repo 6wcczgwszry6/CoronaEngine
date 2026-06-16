@@ -600,6 +600,15 @@ const emitTransformUpdateFast = (sceneId, actorName, position, rotation, scale, 
   }
 };
 
+const commitGizmoTransform = async (sceneId, actorName) => {
+  if (!sceneId || !actorName) return;
+  try {
+    await sceneService.saveActor(sceneId, actorName);
+  } catch (error) {
+    logError('Actor gizmo transform save failed', error);
+  }
+};
+
 const viewportGizmoController = createViewportGizmoController({
   getBridge: () => window.coronaBridge,
   getCameraBinding: () => cameraBindingState.value,
@@ -608,6 +617,7 @@ const viewportGizmoController = createViewportGizmoController({
   getSelectedActor: () => selectedGizmoActor.value,
   onStateChange: mergeGizmoState,
   emitTransformUpdate: emitTransformUpdateFast,
+  onTransformCommit: commitGizmoTransform,
 });
 
 const clearGizmoSelection = () => {

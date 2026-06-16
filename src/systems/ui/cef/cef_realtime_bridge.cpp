@@ -1277,6 +1277,7 @@ bool handle_actor_gizmo_drag(const CefRefPtr<CefFrame>& frame,
         payload["actorHandle"] = static_cast<std::uint64_t>(actor_handle);
         payload["requestId"] = request_id;
         payload["dragId"] = drag_id;
+        payload["phase"] = phase;
         payload["mode"] = mode;
         payload["axis"] = axis;
         if (message_text) payload["message"] = message_text;

@@ -66,6 +66,7 @@ const controller = createViewportGizmoController({
     sceneId: 'scene-a',
     actorHandle: 22,
     dragId: 'drag-1',
+    phase: 'move',
     mode: 'move',
     axis: 'x',
     transform: {
@@ -75,6 +76,7 @@ const controller = createViewportGizmoController({
     },
   };
   let emitted = null;
+  let committed = null;
   const transformController = createViewportGizmoController({
     getBridge: () => bridge,
     getCameraBinding: () => ({ cameraHandle: 11, sceneId: 'scene-a' }),
@@ -85,6 +87,9 @@ const controller = createViewportGizmoController({
     makeDragId: () => 'drag-1',
     emitTransformUpdate: (...args) => {
       emitted = args;
+    },
+    onTransformCommit: (...args) => {
+      committed = args;
     },
   });
   transformController.requestState();
@@ -102,6 +107,31 @@ const controller = createViewportGizmoController({
   calls.shift();
   assert.equal(transformController.handleTransform(payload), true);
   assert.deepEqual(emitted, ['scene-a', 'cube', [1, 2, 3], [0, 0, 0], [1, 1, 1], 'model']);
+  assert.equal(committed, null);
+
+  assert.equal(transformController.endDrag({
+    clientX: 50,
+    clientY: 80,
+    stopPropagation() {},
+    preventDefault() {},
+  }), true);
+  assert.deepEqual(calls.shift(), [
+    'drag',
+    [11, 'scene-a', 22, 'request-1', 'drag-1', 'end', 'move', 'x', 50, 80, 1280, 720],
+  ]);
+  assert.equal(transformController.handleTransform(payload), true);
+  assert.equal(committed, null);
+  assert.equal(transformController.handleTransform({ ...payload, phase: 'end' }), true);
+  assert.deepEqual(committed, [
+    'scene-a',
+    'cube',
+    'model',
+    {
+      position: [1, 2, 3],
+      rotation: [0, 0, 0],
+      scale: [1, 1, 1],
+    },
+  ]);
 }
 
 console.log('viewport gizmo tests passed');
