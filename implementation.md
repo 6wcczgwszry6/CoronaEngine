@@ -152,6 +152,33 @@ D:\Documents\GitHub\CoronaExample\test_vision\render_scene\cbox\vision_scene.jso
 - `Optics.to_dict()` 已暴露的 optics 参数会尽量恢复，但 mesh-level `materialColor` 不在当前 Python `Optics` wrapper 状态中，后续 material adapter 任务需要继续处理。
 - 如果 engine `remove_profile()` 失败，当前实现会记录 warning，但 Python wrapper 已指向新 profile；真实运行时应在 E2E 中确认旧 profile 没有残留渲染。
 
+### 2026-06-16 补充验证与流程纠偏
+
+用户指出：每个 task 提交前都必须做足量测试，本任务在代码提交前只做了局部单测和语法检查，验证强度不足。该判断成立。本节记录的是提交后的补救验证，不应被视为满足“提交前足量测试”的流程要求。
+
+补救验证时先将第 2 条任务的未提交 WIP 临时 stash，确保测试对象是已经提交的 task 1 代码。
+
+补充执行：
+
+- `python -m py_compile editor\CoronaCore\core\entities\actor.py editor\CoronaCore\core\entities\scene.py editor\plugins\SceneDatas\main.py editor\CoronaCore\tests\test_actor_network_broadcast.py`
+  - 结果：通过。
+- `python -m unittest editor.CoronaCore.tests.test_actor_network_broadcast.ActorNetworkBroadcastTests.test_set_model_replaces_profile_and_preserves_edit_state`
+  - 结果：通过。
+- `python -m unittest discover -s editor\CoronaCore\tests -p "test*.py"`
+  - 结果：失败于既有 `Scene.terrain_type` 缺失问题；新增 task 1 用例通过。
+- `cmake --build D:/Documents/GitHub/CoronaEngine/build --config RelWithDebInfo --target corona_engine -- --quiet`，通过 VS DevCmd wrapper 执行。
+  - 结果：通过。完整日志：`build\agent-build.log`。
+
+仍缺失的足量验证：
+
+- 真实 Editor E2E：从 UI 对已有 actor 选择新模型，确认 native viewport 新 mesh 出现、旧 mesh 消失、保存/切场景后仍一致。
+- 内置 Vision E2E：同一 actor 替换模型后，确认 EngineBuilt Vision signature 触发 rebuild，Vision viewport 与 native 结果一致。
+
+后续纪律修正：
+
+- task 2 起不允许在只完成局部单测/语法检查时提交代码。
+- 对跨模块或用户可见链路，必须先执行或明确记录单元、集成、E2E/手动 E2E 三层验证，再提交。
+
 # 模型编辑操作与 Vision 同步对齐调查
 
 ## 调查目标
