@@ -226,8 +226,8 @@ export const aiClient = {
     ]),
 };
 
-// 局域网聊天室：所有跨机传输在 Python 侧完成，前端只通过 cefQuery 调用本机插件。
-// Python 侧通过 js_call_func('lanchat-event', [event]) 把房间消息推回前端
+// 局域网聊天室：所有跨机传输在 C++ NetworkSystem 完成，前端只通过 cefQuery 调用。
+// C++ 侧通过 __coronaEmit('lanchat-event', event) 把房间消息推回前端
 // （coronaEventBus.on('lanchat-event')），事件信封带 channel: 'lanchat'。
 //
 // 注意：deal_func_from_js 用 create_success_response 把返回值包成

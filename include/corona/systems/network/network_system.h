@@ -6,11 +6,14 @@
 #include <corona/kernel/system/system_base.h>
 
 #include <corona/systems/network/protocol.h>
+#include <corona/systems/network/lanchat_state.h>
 #include <corona/systems/network/network_identity.h>
 #include <corona/systems/network/peer_manager.h>
 #include <corona/systems/network/sync_engine.h>
 
+#include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -99,10 +102,57 @@ public:
     /// 已连接的 peer 数量。
     [[nodiscard]] size_t peer_count() const;
 
+    /// 本机稳定 peer id，用于 LANChat 消息 sender_id/去重。
+    [[nodiscard]] std::string local_peer_id() const;
+
     /// 手动连接到指定 IP 的房主或 peer。
     /// 要求会话已启动。force=true 跳过 ID 排序，由主动方发起连接。
     bool connect_to_peer(const std::string& ip, uint16_t port,
                          const std::string& peer_name);
+
+    /// LANChat 事件回调。参数是可直接传给 window.__coronaEmit 的 JSON 对象字符串。
+    void set_lanchat_event_callback(std::function<void(const std::string&)> callback);
+
+    bool lanchat_start_room(const std::string& room_id,
+                            const std::string& nickname,
+                            uint16_t port);
+    bool lanchat_join_room(const std::string& ip,
+                           uint16_t port,
+                           const std::string& room_id,
+                           const std::string& nickname);
+    void lanchat_leave_room();
+    Network::LanChatMessageResult lanchat_send_message(const std::string& text);
+    Network::LanChatMessageResult lanchat_send_agent_reply(const std::string& agent_id,
+                                                           const std::string& agent_name,
+                                                           const std::string& text);
+    Network::LanChatResult lanchat_register_agent(const std::string& agent_id,
+                                                  const std::string& name,
+                                                  const std::string& persona,
+                                                  const std::string& owner_id = {});
+    Network::LanChatResult lanchat_remove_agent(const std::string& agent_id);
+    [[nodiscard]] const std::vector<Network::LanChatMember>& lanchat_members() const;
+    [[nodiscard]] const std::vector<Network::LanChatMessage>& lanchat_history() const;
+    [[nodiscard]] const std::vector<Network::LanChatAgent>& lanchat_agents() const;
+    [[nodiscard]] std::optional<Network::LanChatAgentTrigger> lanchat_pop_agent_trigger();
+
+    Network::LanChatResult lanchat_lock_object(const std::string& object_id,
+                                               const std::string& user_id,
+                                               const std::string& operation,
+                                               uint64_t now_ms);
+    Network::LanChatResult lanchat_unlock_object(const std::string& object_id,
+                                                 const std::string& user_id);
+    [[nodiscard]] std::string lanchat_locked_by(const std::string& object_id,
+                                                uint64_t now_ms);
+    void lanchat_broadcast_intent(const std::string& user_id,
+                                  const std::string& tooltip,
+                                  const std::array<float, 3>& position,
+                                  const std::string& status,
+                                  uint64_t now_ms);
+    [[nodiscard]] std::string lanchat_check_preview_collision(
+        const std::string& user_id,
+        const std::array<float, 3>& position,
+        float delta,
+        uint64_t now_ms);
 
     /**
      * @brief 向所有已连接的 peer 广播 Actor 创建事件。

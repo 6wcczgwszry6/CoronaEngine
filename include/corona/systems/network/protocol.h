@@ -57,6 +57,14 @@ enum class MessageType : uint8_t {
     FILE_REQUEST  = 0x11,  // Request model file from peer
     FILE_CHUNK    = 0x12,  // File chunk transfer
     OWNERSHIP_CLAIM = 0x13, // Actor ownership handoff claim
+    CHAT_JOIN     = 0x20,  // LANChat room join/member snapshot
+    CHAT_LEAVE    = 0x21,  // LANChat room leave
+    CHAT_MESSAGE  = 0x22,  // LANChat user/agent message
+    CHAT_MEMBER_UPDATE = 0x23, // LANChat member status update
+    CHAT_AGENT_REGISTER = 0x24, // LANChat agent roster add/update
+    CHAT_AGENT_REMOVE = 0x25, // LANChat agent roster remove
+    CHAT_AGENT_TRIGGER = 0x26, // LANChat agent invocation request
+    CHAT_AGENT_REPLY = 0x27, // LANChat agent invocation reply
 };
 
 // ============================================================================
@@ -367,6 +375,96 @@ inline std::vector<uint8_t> build_ownership_claim(const std::string& actor_guid)
     buf.reserve(1 + 2 + actor_guid.size());
     write_u8(buf, static_cast<uint8_t>(MessageType::OWNERSHIP_CLAIM));
     write_string(buf, actor_guid);
+    return buf;
+}
+
+// ============================================================================
+// LANChat message builders
+// ============================================================================
+// CHAT_MESSAGE wire format:
+//   [1B type] [2B message_id_len] [message_id]
+//   [2B sender_id_len] [sender_id] [2B room_id_len] [room_id]
+//   [8B seq] [2B sender_name_len] [sender_name]
+//   [2B text_len] [text] [8B timestamp_ms]
+// ============================================================================
+inline std::vector<uint8_t> build_chat_message(
+    const std::string& message_id,
+    const std::string& sender_id,
+    const std::string& room_id,
+    uint64_t seq,
+    const std::string& sender_name,
+    const std::string& text,
+    uint64_t timestamp_ms)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 2 + message_id.size() + 2 + sender_id.size() +
+                2 + room_id.size() + 8 + 2 + sender_name.size() +
+                2 + text.size() + 8);
+    write_u8(buf, static_cast<uint8_t>(MessageType::CHAT_MESSAGE));
+    write_string(buf, message_id);
+    write_string(buf, sender_id);
+    write_string(buf, room_id);
+    write_u64(buf, seq);
+    write_string(buf, sender_name);
+    write_string(buf, text);
+    write_u64(buf, timestamp_ms);
+    return buf;
+}
+
+inline std::vector<uint8_t> build_chat_join(
+    const std::string& room_id,
+    const std::string& member_id,
+    const std::string& nickname)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 2 + room_id.size() + 2 + member_id.size() + 2 + nickname.size());
+    write_u8(buf, static_cast<uint8_t>(MessageType::CHAT_JOIN));
+    write_string(buf, room_id);
+    write_string(buf, member_id);
+    write_string(buf, nickname);
+    return buf;
+}
+
+inline std::vector<uint8_t> build_chat_leave(
+    const std::string& room_id,
+    const std::string& member_id)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 2 + room_id.size() + 2 + member_id.size());
+    write_u8(buf, static_cast<uint8_t>(MessageType::CHAT_LEAVE));
+    write_string(buf, room_id);
+    write_string(buf, member_id);
+    return buf;
+}
+
+inline std::vector<uint8_t> build_chat_agent_register(
+    const std::string& room_id,
+    const std::string& agent_id,
+    const std::string& name,
+    const std::string& persona,
+    const std::string& owner_id)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 2 + room_id.size() + 2 + agent_id.size() + 2 + name.size() +
+                2 + persona.size() + 2 + owner_id.size());
+    write_u8(buf, static_cast<uint8_t>(MessageType::CHAT_AGENT_REGISTER));
+    write_string(buf, room_id);
+    write_string(buf, agent_id);
+    write_string(buf, name);
+    write_string(buf, persona);
+    write_string(buf, owner_id);
+    return buf;
+}
+
+inline std::vector<uint8_t> build_chat_agent_remove(
+    const std::string& room_id,
+    const std::string& agent_id)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 2 + room_id.size() + 2 + agent_id.size());
+    write_u8(buf, static_cast<uint8_t>(MessageType::CHAT_AGENT_REMOVE));
+    write_string(buf, room_id);
+    write_string(buf, agent_id);
     return buf;
 }
 

@@ -15,8 +15,8 @@ import { lanChatService } from '../utils/bridge.js';
 // 连接状态机：idle（未进房）-> hosting/joined（在房）
 const ROLE = { NONE: 'none', HOST: 'host', GUEST: 'guest' };
 
-// 房主在房间内的显示昵称。必须与 Python 端 protocol.HOST_NICKNAME 保持一致——
-// 房主消息由服务器用该名盖章，前端据此判定 self（消息气泡右对齐）。
+// 房主在房间内的显示昵称。必须与 C++ LANChat 快速通道保持一致；
+// 房主消息由 NetworkSystem 用该名盖章，前端据此判定 self（消息气泡右对齐）。
 const HOST_NICKNAME = '房主';
 
 const state = reactive({
@@ -49,7 +49,12 @@ function _resetRoom() {
 }
 
 function _pushMessage(msg, self = false) {
+  if (msg.message_id && state.messages.some((m) => m.message_id === msg.message_id)) {
+    return;
+  }
   state.messages.push({
+    message_id: msg.message_id || '',
+    seq: msg.seq || 0,
     from: msg.from || '?',
     text: msg.text || '',
     ts: msg.ts || Math.floor(Date.now() / 1000),
@@ -100,6 +105,8 @@ async function joinRoom({ ip, port, room, password, nickname }) {
     state.nickname = res.you || nickname;
     state.members = res.members || [];
     state.messages = (res.history || []).map((m) => ({
+      message_id: m.message_id || '',
+      seq: m.seq || 0,
       from: m.from,
       text: m.text,
       ts: m.ts,
@@ -158,7 +165,7 @@ async function removeAgent(agentId) {
 // ---- 事件分流（由 AITalkBar 调用）----------------------------------------
 
 /**
- * 处理来自 Python 的聊天室事件（channel === 'lanchat'）。
+ * 处理来自 C++ NetworkSystem 的聊天室事件（channel === 'lanchat'）。
  * @param {object} event - { channel, event, from, text, ts, members, history, code }
  */
 function handleEvent(event) {
@@ -177,6 +184,8 @@ function handleEvent(event) {
       state.members = event.members || [];
       if (Array.isArray(event.history)) {
         state.messages = event.history.map((m) => ({
+          message_id: m.message_id || '',
+          seq: m.seq || 0,
           from: m.from,
           text: m.text,
           ts: m.ts,
@@ -197,6 +206,8 @@ function handleEvent(event) {
       state.members = event.members || state.members;
       if (Array.isArray(event.history)) {
         state.messages = event.history.map((m) => ({
+          message_id: m.message_id || '',
+          seq: m.seq || 0,
           from: m.from,
           text: m.text,
           ts: m.ts,

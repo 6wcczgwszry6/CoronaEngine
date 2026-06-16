@@ -31,6 +31,12 @@ from .services.media_ingress import MediaIngress
 from .services.request_service import AIRequestService
 from .services.stream_dispatcher import StreamDispatcher
 from .services.ai_hint_service import get_hint_service
+from .services.lanchat_agent_worker import LANChatAgentWorker
+
+try:
+    import CoronaEngine as _CoronaEngine
+except Exception:
+    _CoronaEngine = None
 
 
 @PluginBase.register_web("AITool")
@@ -52,6 +58,7 @@ class AITool(PluginBase):
         _event_loop_runner,
         build_error_response,
     )
+    _lanchat_agent_worker = LANChatAgentWorker(corona_engine=_CoronaEngine)
     _request_states = _request_service.states
     _hint_service = get_hint_service()
 
@@ -101,6 +108,7 @@ class AITool(PluginBase):
     @classmethod
     def cleanup(cls):
         """清理资源"""
+        cls._lanchat_agent_worker.stop()
         cls._controller.cleanup(cls._executor)
 
     @staticmethod
@@ -109,6 +117,7 @@ class AITool(PluginBase):
 
 
 AITool._init_hint_service()
+AITool._lanchat_agent_worker.start()
 
 # ---------------------------------------------------------------------------
 # P0: 引擎多场景并发测试（设置环境变量 CORONA_P0_CONCURRENCY_TEST=1 启用）

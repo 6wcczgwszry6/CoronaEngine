@@ -1,4 +1,5 @@
 #include <corona/systems/network/file_transfer.h>
+#include <corona/systems/network/lanchat_state.h>
 #include <corona/systems/network/network_identity.h>
 #include <corona/systems/network/network_system.h>
 #include <corona/systems/network/protocol.h>
@@ -160,6 +161,134 @@ void test_ownership_claim_carries_actor_guid() {
                 "ownership claim message type");
     expect_true(reader.read_string(reader.read_u16()) == "actor-owner",
                 "ownership claim actor guid payload");
+}
+
+void test_lanchat_message_carries_identity_and_sequence() {
+    auto packet = Corona::Network::build_chat_message(
+        "msg-1", "peer-a", "room-a", 42, "Alice", "hello", 12345);
+
+    Corona::Network::BufferReader reader(packet.data(), packet.size());
+    expect_true(static_cast<Corona::Network::MessageType>(reader.read_u8()) ==
+                    Corona::Network::MessageType::CHAT_MESSAGE,
+                "chat message type");
+    expect_true(reader.read_string(reader.read_u16()) == "msg-1",
+                "chat message id payload");
+    expect_true(reader.read_string(reader.read_u16()) == "peer-a",
+                "chat message sender id payload");
+    expect_true(reader.read_string(reader.read_u16()) == "room-a",
+                "chat message room id payload");
+    expect_true(reader.read_u64() == 42, "chat message sequence payload");
+    expect_true(reader.read_string(reader.read_u16()) == "Alice",
+                "chat message sender name payload");
+    expect_true(reader.read_string(reader.read_u16()) == "hello",
+                "chat message text payload");
+    expect_true(reader.read_u64() == 12345, "chat message timestamp payload");
+}
+
+void test_lanchat_state_deduplicates_messages_and_tracks_agents() {
+    Corona::Network::LanChatState state;
+    expect_true(state.open_room("room-a", "host-peer", "房主"),
+                "lanchat state opens room");
+    expect_true(state.join_member("peer-b", "Alice").ok,
+                "lanchat state joins member");
+
+    auto first = state.record_message("msg-1", "peer-b", "Alice", "hello", 10);
+    auto duplicate = state.record_message("msg-1", "peer-b", "Alice", "hello again", 11);
+    expect_true(first.accepted, "lanchat state accepts first message");
+    expect_true(!duplicate.accepted, "lanchat state rejects duplicate message id");
+    expect_true(state.history().size() == 1, "lanchat state keeps one message");
+    expect_true(state.history().front().seq == 1, "lanchat state assigns sequence");
+    expect_true(state.history().front().text == "hello", "lanchat state preserves first text");
+
+    expect_true(state.register_agent("agent-1", "Designer", "persona", "peer-b").ok,
+                "lanchat state registers agent");
+    expect_true(state.agents().size() == 1, "lanchat state tracks agent roster");
+    expect_true(state.remove_agent("agent-1").ok, "lanchat state removes agent");
+    expect_true(state.agents().empty(), "lanchat state agent roster is empty");
+}
+
+void test_lanchat_state_enqueues_local_agent_trigger_from_mention() {
+    Corona::Network::LanChatState state;
+    state.open_room("room-a", "local-peer", "Host");
+    expect_true(state.register_agent("agent-1", "SceneBot", "scene helper", "local-peer").ok,
+                "lanchat state registers local agent");
+    expect_true(state.register_agent("agent-2", "RemoteBot", "remote helper", "remote-peer").ok,
+                "lanchat state registers remote agent");
+
+    auto message = state.record_message(
+        "msg-mention", "user-peer", "Alice", "@SceneBot 111 @RemoteBot", 1000);
+    expect_true(message.accepted, "lanchat state accepts mentioned message");
+
+    state.enqueue_agent_triggers_for_message(message.message, "local-peer");
+    auto trigger = state.pop_agent_trigger();
+    expect_true(trigger.has_value(), "lanchat state enqueues local owned agent trigger");
+    expect_true(trigger->message_id == "msg-mention", "lanchat trigger carries message id");
+    expect_true(trigger->agent_id == "agent-1", "lanchat trigger carries local agent id");
+    expect_true(trigger->agent_name == "SceneBot", "lanchat trigger carries agent name");
+    expect_true(trigger->persona == "scene helper", "lanchat trigger carries persona");
+    expect_true(trigger->text == "@SceneBot 111 @RemoteBot", "lanchat trigger carries source text");
+    expect_true(trigger->history.size() == 1, "lanchat trigger carries recent history");
+    expect_true(!state.pop_agent_trigger().has_value(),
+                "lanchat state does not trigger remote owned agent");
+}
+
+void test_lanchat_state_deduplicates_agent_triggers() {
+    Corona::Network::LanChatState state;
+    state.open_room("room-a", "local-peer", "Host");
+    state.register_agent("agent-1", "SceneBot", "scene helper", "local-peer");
+
+    auto message = state.record_message("msg-1", "user-peer", "Alice", "@SceneBot 111", 1000);
+    state.enqueue_agent_triggers_for_message(message.message, "local-peer");
+    state.enqueue_agent_triggers_for_message(message.message, "local-peer");
+
+    expect_true(state.pop_agent_trigger().has_value(),
+                "lanchat state returns first agent trigger");
+    expect_true(!state.pop_agent_trigger().has_value(),
+                "lanchat state suppresses duplicate agent trigger");
+}
+
+void test_lanchat_state_does_not_trigger_agent_reply_or_duplicate_names() {
+    Corona::Network::LanChatState state;
+    state.open_room("room-a", "local-peer", "Host");
+    expect_true(state.register_agent("agent-1", "SceneBot", "scene helper", "local-peer").ok,
+                "lanchat state registers first agent name");
+    expect_true(!state.register_agent("agent-2", "SceneBot", "other helper", "local-peer").ok,
+                "lanchat state rejects duplicate agent name");
+
+    Corona::Network::LanChatMessage reply;
+    reply.message_id = "reply-1";
+    reply.sender_id = "agent-1";
+    reply.sender_name = "SceneBot";
+    reply.room_id = "room-a";
+    reply.text = "@SceneBot done";
+    reply.seq = 1;
+    reply.timestamp_ms = 1000;
+
+    state.enqueue_agent_triggers_for_message(reply, "local-peer", true);
+    expect_true(!state.pop_agent_trigger().has_value(),
+                "lanchat state does not enqueue triggers for agent replies");
+}
+
+void test_lanchat_state_tracks_locks_and_preview_conflicts() {
+    Corona::Network::LanChatState state;
+    state.open_room("room-a", "host-peer", "房主");
+
+    expect_true(state.lock_object("chair", "alice", "move", 1000).ok,
+                "lanchat state locks object");
+    expect_true(!state.lock_object("chair", "bob", "move", 1001).ok,
+                "lanchat state rejects conflicting lock");
+    expect_true(state.locked_by("chair", 1002) == "alice",
+                "lanchat state reports lock owner");
+    expect_true(state.unlock_object("chair", "alice").ok,
+                "lanchat state unlocks object");
+    expect_true(state.locked_by("chair", 1003).empty(),
+                "lanchat state clears lock owner");
+
+    state.broadcast_intent("alice", "move chair", {1.0f, 0.0f, 1.0f}, "moving", 2000);
+    auto conflict = state.check_preview_collision("bob", {1.2f, 0.0f, 1.1f}, 0.5f, 2001);
+    expect_true(conflict == "alice", "lanchat state detects preview conflict");
+    auto no_conflict = state.check_preview_collision("alice", {1.2f, 0.0f, 1.1f}, 0.5f, 2001);
+    expect_true(no_conflict.empty(), "lanchat state ignores same user preview");
 }
 
 void test_project_relative_path_validation() {
@@ -675,6 +804,12 @@ int main() {
     test_file_request_carries_transfer_id();
     test_file_chunk_carries_transfer_id_and_offset();
     test_ownership_claim_carries_actor_guid();
+    test_lanchat_message_carries_identity_and_sequence();
+    test_lanchat_state_deduplicates_messages_and_tracks_agents();
+    test_lanchat_state_enqueues_local_agent_trigger_from_mention();
+    test_lanchat_state_deduplicates_agent_triggers();
+    test_lanchat_state_does_not_trigger_agent_reply_or_duplicate_names();
+    test_lanchat_state_tracks_locks_and_preview_conflicts();
     test_project_relative_path_validation();
     test_network_system_session_role_defaults_to_none();
     test_network_identity_registry_resolves_actor_components();
