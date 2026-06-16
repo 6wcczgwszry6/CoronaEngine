@@ -144,6 +144,9 @@ void SharedDataHub::enqueue_camera_state_update(CameraStateUpdateCommand command
     if (has_camera_state_field(command.fields, CameraStateUpdateField::RenderBackend)) {
         pending.render_backend = command.render_backend;
     }
+    if (has_camera_state_field(command.fields, CameraStateUpdateField::VisionFrameBuffer)) {
+        pending.vision_framebuffer = command.vision_framebuffer;
+    }
     if (has_camera_state_field(command.fields, CameraStateUpdateField::ViewState)) {
         pending.view_open = command.view_open;
         pending.view_x = command.view_x;

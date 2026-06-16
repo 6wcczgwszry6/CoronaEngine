@@ -15,6 +15,7 @@
 #include <exception>
 #include <filesystem>
 #include <functional>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -132,6 +133,10 @@ void apply_pending_camera_state_updates() {
                 camera->render_backend = update.render_backend;
             }
             if (Corona::has_camera_state_field(
+                    update.fields, Corona::CameraStateUpdateField::VisionFrameBuffer)) {
+                camera->vision_framebuffer = update.vision_framebuffer;
+            }
+            if (Corona::has_camera_state_field(
                     update.fields, Corona::CameraStateUpdateField::ViewState)) {
                 camera->view_open = update.view_open;
                 camera->view_x = update.view_x;
@@ -212,8 +217,16 @@ void apply_pending_camera_releases() {
 ocarina::SP<vision::Pipeline> renderPipeline;
 vision::Device* visionDevicePtr = nullptr;
 std::unordered_set<std::uintptr_t> retainedVisionContexts;
+std::unordered_map<Corona::CameraVisionFrameBuffer, ocarina::SP<vision::Pipeline>>
+    engineBuiltVisionPipelines;
 
-[[nodiscard]] auto make_default_vision_project_desc() -> vision::ProjectDesc {
+[[nodiscard]] const char* vision_framebuffer_name(Corona::CameraVisionFrameBuffer mode) noexcept {
+    return mode == Corona::CameraVisionFrameBuffer::LightField ? "lightfield" : "normal";
+}
+
+[[nodiscard]] auto make_default_vision_project_desc(
+    Corona::CameraVisionFrameBuffer framebuffer = Corona::CameraVisionFrameBuffer::Normal)
+    -> vision::ProjectDesc {
     // Each *Desc has in-class default initializers; the overridden
     // init(const ParameterSet&) is only used for JSON-driven configuration.
     // The ParameterSet MUST wrap an empty JSON *object* (not a default-
@@ -233,11 +246,17 @@ std::unordered_set<std::uintptr_t> retainedVisionContexts;
     project_desc.renderer_desc.render_setting.init(empty_ps);
     project_desc.scene_desc.sensor_desc.init(empty_ps);
     project_desc.output_desc.init(empty_ps);
+    project_desc.pipeline_desc.frame_buffer_desc.sub_type = vision_framebuffer_name(framebuffer);
+    if (framebuffer == Corona::CameraVisionFrameBuffer::LightField) {
+        project_desc.renderer_desc.integrator_desc.denoiser_desc.sub_type = "SSAT";
+    }
     return project_desc;
 }
 
-[[nodiscard]] auto create_vision_pipeline() -> ocarina::SP<vision::Pipeline> {
-    auto project_desc = make_default_vision_project_desc();
+[[nodiscard]] auto create_vision_pipeline(
+    Corona::CameraVisionFrameBuffer framebuffer = Corona::CameraVisionFrameBuffer::Normal)
+    -> ocarina::SP<vision::Pipeline> {
+    auto project_desc = make_default_vision_project_desc(framebuffer);
     auto pipeline = vision::Node::create_shared<vision::Pipeline>(project_desc.pipeline_desc);
     if (!pipeline) {
         return {};
@@ -245,6 +264,57 @@ std::unordered_set<std::uintptr_t> retainedVisionContexts;
     pipeline->init_project(project_desc);
     pipeline->init_postprocessor(project_desc.renderer_desc.denoiser_desc);
     pipeline->init();
+    return pipeline;
+}
+
+[[nodiscard]] auto select_scene_camera_handle(const Corona::SceneDevice& scene) -> std::uintptr_t;
+
+bool prepare_engine_built_vision_pipeline(ocarina::SP<vision::Pipeline>& pipeline) {
+    if (!pipeline) return false;
+
+    auto& scene = pipeline->scene();
+    Corona::Systems::Vision::build_vision_geometry(scene);
+
+    Corona::EnvironmentDevice env{};
+    for (auto sd_it = Corona::SharedDataHub::instance().scene_storage().cbegin();
+         sd_it != Corona::SharedDataHub::instance().scene_storage().cend(); ++sd_it) {
+        const auto& sd = *sd_it;
+        if (!sd.enabled) continue;
+        if (sd.environment != 0) {
+            if (auto e = Corona::SharedDataHub::instance().environment_storage().try_acquire_read(sd.environment)) {
+                env = *e;
+                break;
+            }
+        }
+    }
+    Corona::Systems::Vision::setup_vision_lights(scene, env);
+
+    pipeline->prepare();
+    pipeline->frame_buffer()->prepare_view_texture();
+
+    for (auto sd_it = Corona::SharedDataHub::instance().scene_storage().cbegin();
+         sd_it != Corona::SharedDataHub::instance().scene_storage().cend(); ++sd_it) {
+        const auto& sd = *sd_it;
+        if (!sd.enabled) continue;
+        const auto camera_handle = select_scene_camera_handle(sd);
+        if (camera_handle == 0) continue;
+        auto camera = Corona::SharedDataHub::instance().camera_storage().try_acquire_read(camera_handle);
+        if (!camera) continue;
+        Corona::Systems::Vision::sync_vision_camera(*pipeline, *camera);
+        break;
+    }
+    return true;
+}
+
+[[nodiscard]] ocarina::SP<vision::Pipeline> engine_built_pipeline_for(
+    Corona::CameraVisionFrameBuffer framebuffer) {
+    auto& pipeline = engineBuiltVisionPipelines[framebuffer];
+    if (!pipeline) {
+        pipeline = create_vision_pipeline(framebuffer);
+        if (!prepare_engine_built_vision_pipeline(pipeline)) {
+            pipeline = nullptr;
+        }
+    }
     return pipeline;
 }
 
@@ -1485,7 +1555,22 @@ void OpticsSystem::sync_vision_dynamic_scene() {
     }
     vision_stable_frames_ = 0;
 
-    const Vision::VisionBuildResult result = rebuild_vision_scene();
+    Vision::VisionBuildResult result;
+    if (vision_scene_source_ == VisionSceneSource::EngineBuilt &&
+        !engineBuiltVisionPipelines.empty()) {
+        auto previous_pipeline = renderPipeline;
+        for (auto& [_, pipeline] : engineBuiltVisionPipelines) {
+            if (!pipeline) continue;
+            renderPipeline = pipeline;
+            const auto rebuild_result = rebuild_vision_scene();
+            result.instance_count += rebuild_result.instance_count;
+            result.candidate_count += rebuild_result.candidate_count;
+            result.skipped_no_data += rebuild_result.skipped_no_data;
+        }
+        renderPipeline = previous_pipeline;
+    } else {
+        result = rebuild_vision_scene();
+    }
 
     if (result.instance_count > 0 || result.candidate_count == 0) {
         // 重建成功，或场景本就为空（candidate_count==0 是合法的 0）：接受签名，
@@ -1531,60 +1616,10 @@ bool OpticsSystem::init_vision_lazy() {
         vision_scene_source_ = VisionSceneSource::ExternalFile;
         return true;
 #else
-        renderPipeline = create_vision_pipeline();
+        renderPipeline = engine_built_pipeline_for(CameraVisionFrameBuffer::Normal);
         if (!renderPipeline) {
             CFW_LOG_ERROR("OpticsSystem: Failed to create Vision pipeline without external scene import");
             return false;
-        }
-
-        // Populate Vision scene directly from CoronaEngine scene data.
-        auto& scene = renderPipeline->scene();
-        Vision::build_vision_geometry(scene);
-
-        // Always inject lights. Vision's UniformLightSampler divides by light_num()
-        // and indexes the light buffer; an empty light set (no environment in the
-        // Corona scene) causes a 1/0 PMF and an out-of-bounds GPU read -> device crash.
-        // When no environment is found we fall back to a default EnvironmentDevice so
-        // the scene still receives a directional sun + sky light.
-        Corona::EnvironmentDevice env{};
-        for (auto sd_it = SharedDataHub::instance().scene_storage().cbegin();
-             sd_it != SharedDataHub::instance().scene_storage().cend(); ++sd_it) {
-            const auto& sd = *sd_it;
-            if (!sd.enabled) continue;
-            if (sd.environment != 0) {
-                if (auto e = SharedDataHub::instance().environment_storage().try_acquire_read(sd.environment)) {
-                    env = *e;
-                    break;
-                }
-            }
-        }
-        Vision::setup_vision_lights(scene, env);
-
-        renderPipeline->prepare();
-
-        // Pipeline::prepare() allocates the internal per-pixel device buffers but
-        // does NOT create FrameBuffer::view_texture_ (only prepare_view_texture()
-        // does). The render path tone-maps into view_texture_ and we later read it
-        // via fill_window_buffer(view_texture()). Without this the first frame uses
-        // an uninitialized texture. The official vision-gui/vision-eval apps also
-        // call prepare_view_texture() right after prepare().
-        renderPipeline->frame_buffer()->prepare_view_texture();
-
-        // sync_vision_camera uploads to GPU device buffers. Those device buffers are
-        // only allocated during Pipeline::prepare() (Scene::prepare -> Sensor::prepare
-        // -> EncodedObject::prepare_data -> reset_device_buffer). Running it
-        // before prepare() uploads into unallocated device memory and crashes the
-        // CUDA device deterministically.
-        for (auto sd_it = SharedDataHub::instance().scene_storage().cbegin();
-             sd_it != SharedDataHub::instance().scene_storage().cend(); ++sd_it) {
-            const auto& sd = *sd_it;
-            if (!sd.enabled) continue;
-            const auto camera_handle = select_scene_camera_handle(sd);
-            if (camera_handle == 0) continue;
-            auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(camera_handle);
-            if (!camera) continue;
-            Vision::sync_vision_camera(*renderPipeline, *camera);
-            break;
         }
 
         vision_initialized_ = true;
@@ -1612,6 +1647,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
 
 #ifndef CORONA_VISION_IMPORT_DEMO
     bool has_visible_vision_camera = false;
+    CameraVisionFrameBuffer first_visible_framebuffer = CameraVisionFrameBuffer::Normal;
     for (const auto& scene : SharedDataHub::instance().scene_storage()) {
         if (!scene.enabled) continue;
         for (const auto camera_handle : scene.camera_handles) {
@@ -1620,12 +1656,16 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
             if (camera && camera->render_backend == CameraRenderBackend::Vision &&
                 camera->surface != nullptr) {
                 has_visible_vision_camera = true;
+                first_visible_framebuffer = camera->vision_framebuffer;
                 break;
             }
         }
         if (has_visible_vision_camera) break;
     }
     if (has_visible_vision_camera && vision_scene_source_ == VisionSceneSource::EngineBuilt) {
+        if (auto pipeline = engine_built_pipeline_for(first_visible_framebuffer)) {
+            renderPipeline = pipeline;
+        }
         sync_vision_dynamic_scene();
     }
 #endif
@@ -1646,26 +1686,42 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
             active_contexts.insert(cam_handle);
             retainedVisionContexts.erase(cam_handle);
             try {
+                auto* active_pipeline = renderPipeline.get();
+                if (vision_scene_source_ == VisionSceneSource::EngineBuilt) {
+                    auto pipeline = engine_built_pipeline_for(camera->vision_framebuffer);
+                    if (!pipeline) {
+                        CFW_LOG_ERROR("OpticsSystem: no Vision pipeline for framebuffer {}",
+                                      vision_framebuffer_name(camera->vision_framebuffer));
+                        continue;
+                    }
+                    renderPipeline = pipeline;
+                    active_pipeline = pipeline.get();
+                    vision_camera_framebuffer_modes_[cam_handle] = camera->vision_framebuffer;
+                }
+                if (active_pipeline == nullptr) {
+                    continue;
+                }
+
                 const auto resolution =
                     ocarina::make_uint2(std::max(camera->width, 1u),
                                        std::max(camera->height, 1u));
-                if (!renderPipeline->has_view_context(cam_handle) &&
-                    !renderPipeline->create_view_context(cam_handle, resolution)) {
+                if (!active_pipeline->has_view_context(cam_handle) &&
+                    !active_pipeline->create_view_context(cam_handle, resolution)) {
                     CFW_LOG_ERROR(
                         "OpticsSystem: unable to allocate Vision view context for camera {}",
                         cam_handle);
                     continue;
                 }
-                if (!renderPipeline->activate_view_context(cam_handle)) {
+                if (!active_pipeline->activate_view_context(cam_handle)) {
                     continue;
                 }
 
-                Vision::sync_vision_camera(*renderPipeline, *camera);
-                renderPipeline->upload_data();
-                renderPipeline->display(1.0 / 60.0);
+                Vision::sync_vision_camera(*active_pipeline, *camera);
+                active_pipeline->upload_data();
+                active_pipeline->display(1.0 / 60.0);
 
-                auto* fb = renderPipeline->frame_buffer();
-                const auto res = fb->raytracing_resolution();
+                auto* fb = active_pipeline->frame_buffer();
+                const auto res = fb->presentation_resolution();
                 const uint32_t w = res.x;
                 const uint32_t h = res.y;
 
@@ -1673,8 +1729,8 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 if (!bridge) {
                     bridge = std::make_unique<Vision::VisionZeroCopyBridge>();
                 }
-                if (!bridge->ensure(*renderPipeline, w, h) ||
-                    !bridge->copy_from_framebuffer(*renderPipeline)) {
+                if (!bridge->ensure(*active_pipeline, w, h) ||
+                    !bridge->copy_from_framebuffer(*active_pipeline)) {
                     CFW_LOG_WARNING(
                         "OpticsSystem: Vision bridge unavailable for camera {} ({}x{})",
                         cam_handle, w, h);
@@ -1732,6 +1788,22 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
         const auto camera_handle = it->first;
         bool camera_exists = false;
         bool retain_bridge = false;
+        auto* context_pipeline = renderPipeline.get();
+        if (vision_scene_source_ == VisionSceneSource::EngineBuilt) {
+            auto mode_it = vision_camera_framebuffer_modes_.find(camera_handle);
+            const auto mode = mode_it == vision_camera_framebuffer_modes_.end()
+                                  ? CameraVisionFrameBuffer::Normal
+                                  : mode_it->second;
+            auto pipeline_it = engineBuiltVisionPipelines.find(mode);
+            context_pipeline = pipeline_it == engineBuiltVisionPipelines.end()
+                                   ? nullptr
+                                   : pipeline_it->second.get();
+        }
+        if (context_pipeline == nullptr) {
+            it = vision_zero_copy_bridges_.erase(it);
+            vision_camera_framebuffer_modes_.erase(camera_handle);
+            continue;
+        }
         if (auto camera =
                 SharedDataHub::instance().camera_storage().try_acquire_read(camera_handle)) {
             camera_exists = true;
@@ -1744,21 +1816,22 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
         // or suspending the view clears the surface and still releases the bridge.
         if (retain_bridge) {
             if (!retainedVisionContexts.contains(camera_handle)) {
-                renderPipeline->commit_command();
-                renderPipeline->invalidate_view_context(camera_handle);
+                context_pipeline->commit_command();
+                context_pipeline->invalidate_view_context(camera_handle);
                 retainedVisionContexts.insert(camera_handle);
             }
             ++it;
             continue;
         }
 
-        renderPipeline->commit_command();
+        context_pipeline->commit_command();
         it = vision_zero_copy_bridges_.erase(it);
         if (camera_exists) {
-            renderPipeline->invalidate_view_context(camera_handle);
+            context_pipeline->invalidate_view_context(camera_handle);
             retainedVisionContexts.insert(camera_handle);
         } else {
-            renderPipeline->remove_view_context(camera_handle);
+            context_pipeline->remove_view_context(camera_handle);
+            vision_camera_framebuffer_modes_.erase(camera_handle);
         }
     }
     for (auto it = retainedVisionContexts.begin();
@@ -1767,10 +1840,26 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
             ++it;
             continue;
         }
-        renderPipeline->remove_view_context(*it);
+        auto* context_pipeline = renderPipeline.get();
+        if (vision_scene_source_ == VisionSceneSource::EngineBuilt) {
+            auto mode_it = vision_camera_framebuffer_modes_.find(*it);
+            const auto mode = mode_it == vision_camera_framebuffer_modes_.end()
+                                  ? CameraVisionFrameBuffer::Normal
+                                  : mode_it->second;
+            auto pipeline_it = engineBuiltVisionPipelines.find(mode);
+            context_pipeline = pipeline_it == engineBuiltVisionPipelines.end()
+                                   ? nullptr
+                                   : pipeline_it->second.get();
+        }
+        if (context_pipeline != nullptr) {
+            context_pipeline->remove_view_context(*it);
+        }
+        vision_camera_framebuffer_modes_.erase(*it);
         it = retainedVisionContexts.erase(it);
     }
-    renderPipeline->activate_view_context(0u);
+    if (renderPipeline) {
+        renderPipeline->activate_view_context(0u);
+    }
 }
 
 void OpticsSystem::apply_pending_vision_scene_load() {
@@ -1802,40 +1891,17 @@ void OpticsSystem::apply_pending_vision_scene_load() {
     }
 
     try {
-        auto pipeline = create_vision_pipeline();
+        for (auto& [_, pipeline] : engineBuiltVisionPipelines) {
+            if (pipeline) {
+                pipeline->commit_command();
+                pipeline->clear_view_contexts();
+            }
+        }
+        engineBuiltVisionPipelines.clear();
+        auto pipeline = engine_built_pipeline_for(CameraVisionFrameBuffer::Normal);
         if (!pipeline) {
             CFW_LOG_ERROR("OpticsSystem: failed to recreate engine-built Vision pipeline");
             return;
-        }
-        auto& scene = pipeline->scene();
-        Vision::build_vision_geometry(scene);
-
-        Corona::EnvironmentDevice env{};
-        for (auto sd_it = SharedDataHub::instance().scene_storage().cbegin();
-             sd_it != SharedDataHub::instance().scene_storage().cend(); ++sd_it) {
-            const auto& sd = *sd_it;
-            if (!sd.enabled) continue;
-            if (sd.environment != 0) {
-                if (auto e = SharedDataHub::instance().environment_storage().try_acquire_read(sd.environment)) {
-                    env = *e;
-                    break;
-                }
-            }
-        }
-        Vision::setup_vision_lights(scene, env);
-        pipeline->prepare();
-        pipeline->frame_buffer()->prepare_view_texture();
-
-        for (auto sd_it = SharedDataHub::instance().scene_storage().cbegin();
-             sd_it != SharedDataHub::instance().scene_storage().cend(); ++sd_it) {
-            const auto& sd = *sd_it;
-            if (!sd.enabled) continue;
-            const auto camera_handle = select_scene_camera_handle(sd);
-            if (camera_handle == 0) continue;
-            auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(camera_handle);
-            if (!camera) continue;
-            Vision::sync_vision_camera(*pipeline, *camera);
-            break;
         }
 
         if (renderPipeline) {
@@ -1844,7 +1910,8 @@ void OpticsSystem::apply_pending_vision_scene_load() {
         }
         vision_zero_copy_bridges_.clear();
         retainedVisionContexts.clear();
-        renderPipeline = std::move(pipeline);
+        vision_camera_framebuffer_modes_.clear();
+        renderPipeline = pipeline;
         vision_scene_source_ = VisionSceneSource::EngineBuilt;
         vision_applied_signature_ = compute_vision_scene_signature();
         vision_pending_signature_ = vision_applied_signature_;
@@ -1871,6 +1938,7 @@ bool OpticsSystem::load_external_vision_scene(const std::string& scene_path) {
         }
         vision_zero_copy_bridges_.clear();
         retainedVisionContexts.clear();
+        vision_camera_framebuffer_modes_.clear();
         renderPipeline = std::move(pipeline);
         return true;
     } catch (const std::exception& e) {

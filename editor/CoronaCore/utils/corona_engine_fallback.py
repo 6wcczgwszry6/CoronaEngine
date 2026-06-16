@@ -280,6 +280,7 @@ class Camera:
         self._handle = Camera._next_handle
         Camera._next_handle += 1
         self._render_backend = 'native'
+        self._vision_framebuffer = 'normal'
         self._view_state = [0.0, 120.0, 120.0, 960.0, 540.0, 1.0]
 
     def set(self, position, forward, world_up, fov):
@@ -332,6 +333,12 @@ class Camera:
 
     def get_render_backend(self) -> str:
         return self._render_backend
+
+    def set_vision_framebuffer(self, mode: str):
+        self._vision_framebuffer = 'lightfield' if mode == 'lightfield' else 'normal'
+
+    def get_vision_framebuffer(self) -> str:
+        return self._vision_framebuffer
 
     def set_view_state(self, open_, x, y, width, height, move_speed):
         self._view_state = [

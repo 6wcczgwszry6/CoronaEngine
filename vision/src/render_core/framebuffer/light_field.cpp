@@ -725,6 +725,14 @@ public:
         return make_uint2(lenticular_.res_w, lenticular_.res_h);
     }
 
+    [[nodiscard]] uint2 presentation_resolution() const noexcept override {
+        return pixel_dispatch_dim();
+    }
+
+    [[nodiscard]] BufferView<float4> presentation_buffer() const noexcept override {
+        return enable_accumulation() ? encoded_accum_buffer_.view() : encoded_buffer_.view();
+    }
+
     // ========== UI ==========
     void render_sub_UI(Widgets *widgets) noexcept override {
         FrameBuffer::render_sub_UI(widgets);
