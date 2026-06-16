@@ -278,6 +278,41 @@
 - 如果保留 external pipeline，会同时维护 Corona scene、Vision pipeline、Vision JSON 三份状态，必须先证明收益大于复杂度。
 - 不要在没有 object identity 的情况下做名称猜测式同步。
 
+执行状态：已实施第一步，起点提交 `30b5cd37 chore: mark start of external alignment route task`，代码提交 `9bee50d6 fix: import vision models into engine built scene`。
+
+实施摘要：
+
+- 选择“Vision JSON -> Corona actors -> EngineBuilt”作为 native 编辑完全对齐的主路线。
+- 新增 Vision JSON actor import helper，将可支持的 `model` shape 转换为 Corona actor data。
+- `SceneTools.import_vision_scene_into_current_scene()` 导入可支持 model shape 后，保存 `import_mode=engine_built`，并调用 `load_vision_scene("")` 卸载 external pipeline。
+- stable identity 使用 `vision:<abs_scene_path>#scene.shapes[index]` 写入 `actor_guid`。
+- `Scene.save_data()` / `_build_actor_json()` 补 `actor_guid` 持久化，避免重启后失去 Vision shape identity。
+- Vision material 做保守降级：base color、roughness、metallic、subsurface、anisotropic、sheen、coat 等可表达字段写入 Optics。
+- `quad/cube` 等当前 Corona `Geometry(path)` 无法表达的 primitive 不再静默忽略，而是通过 `unsupported_shapes` 返回。
+
+宏观检查结果：
+
+- 没有走 external pipeline 增量镜像的局部补丁路线；当前修改减少 source-of-truth 数量，把后续编辑统一回 Corona scene/SharedDataHub。
+- 没有用 shape name 做唯一匹配；重复导入和后续映射以 JSON path/index identity 为基础。
+- 对 primitive 和复杂 matrix rotation 没有伪装成完全适配，后续必须通过明确 geometry/transform 能力补齐。
+
+验证摘要：
+
+- 通过：SceneTools Vision import 单测 4 个，覆盖 model 导入、material 降级、matrix/TRS transform、unsupported primitive/missing model、SceneTools 入口切 EngineBuilt。
+- 通过：CoronaCore `actor_guid` 持久化目标单测。
+- 通过：SceneTools tests discover、CoronaCore 全量 discover、py_compile。
+- 通过：C++ `corona_engine` 增量 build。
+- 通过：全量 CTest，`NetworkProtocolTests` 与 `VisionMaterialAdapterTests` 均通过。
+- 通过：前端 lint，0 errors，既有 66 warnings。
+- 通过：前端 build，仅既有 Vite chunk warnings。
+- 通过：`git diff --check`。
+- 真实 CEF 文件选择 + viewport E2E 尚无自动 harness，手动复核步骤和剩余风险已写入 `implementation.md`。
+
+下一条任务前的宏观提醒：
+
+- 第 6 条测试 scene 与验证流程必须补 external Vision import 后的完整用户链路验证，不能只停留在 parser/unit tests。
+- 对 Task 5 暴露出的 `quad/cube` primitive 和 matrix rotation 缺口，应决定是先补测试 scene 揭示差异，还是先补 primitive-to-mesh/transform 分解；不能在后续验证里把 unsupported case 当成成功。
+
 ### 6. 建测试 scene 与验证流程
 
 目标：把同步对齐变成可重复验证的行为，而不是只靠肉眼检查。

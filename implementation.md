@@ -949,3 +949,75 @@ external Vision：
 
 ---
 
+## Task 5 实施记录：选择并落地 external Vision 对齐路线第一步
+
+起点提交：`30b5cd37 chore: mark start of external alignment route task`
+
+代码提交：`9bee50d6 fix: import vision models into engine built scene`
+
+### 宏观检查
+
+本任务没有选择在 external Vision pipeline 上按名称猜测同步 transform，也没有让 Corona scene、Vision runtime scene、Vision JSON 三份状态并行双写。最终选择并开始实施“Vision JSON -> Corona actors -> EngineBuilt”：外部 Vision JSON 导入时先解析可编辑对象，生成 Corona actor；导入后卸载 external pipeline，后续 native 与内置 Vision 都继续以 Corona `SharedDataHub` 为统一 source-of-truth。
+
+当前实现只导入 Vision `model` shape，`quad` / `cube` 等过程几何会在返回值 `unsupported_shapes` 中明确列出原因。这样不是跳过问题，而是避免把当前 `Geometry(path)` 不支持的 primitive 静默伪装成已适配。后续应补 primitive-to-mesh bake 或 Corona primitive geometry，再把这些 unsupported case 变成可导入对象。
+
+### 实施过程
+
+- 新增 `editor/plugins/SceneTools/vision_import.py`，负责把 Vision JSON shapes/materials/transform 转换为 Corona actor data。
+- `model` shape 的 `param.fn` 解析为相对 Vision JSON 所在目录的绝对模型路径，支持常见模型扩展名。
+- stable identity 使用 `vision:<abs_scene_path>#scene.shapes[index]` 写入 `actor_guid`。
+- shape name 使用 Vision `name` / `names`，缺失时生成 `vision_shape_<index>`，并规避 `.` 影响 `.scene` actor key。
+- transform 支持：
+  - `matrix4x4`：做 Vision(-Z) 与 Corona(+Z) 的 Z flip，提取 position 与 column scale；rotation 暂不强行分解。
+  - `trs`：导入 position/scale，并做 Z flip。
+  - `Euler`：导入 position 与 pitch/yaw/roll 的保守映射。
+- material 支持：
+  - `color` 降级到 Corona Optics `diffuse/ambient`。
+  - `roughness/metallic/subsurface_weight/anisotropic/sheen_weight/coat_weight/coat_roughness` 映射到 Optics 可表达字段。
+- `SceneTools.import_vision_scene_into_current_scene()` 改为：
+  - 继续解析并同步 Vision camera。
+  - 删除同一 `actor_guid` 的旧导入 actor，避免重复导入同一 JSON 时堆叠对象。
+  - 创建可支持的 Corona actor 并应用 Optics 降级字段。
+  - 保存 `[vision] source_path`，但 `import_mode` 写为 `engine_built`。
+  - 调用 `CoronaEngine.load_vision_scene("")` 卸载 external Vision pipeline，切回 EngineBuilt。
+  - 返回 `imported_actor_count/imported_actors/unsupported_shapes`，让 UI 或日志能看到导入覆盖范围。
+- `Scene.save_data()` / `_build_actor_json()` 补 `actor_guid` 持久化，保证 stable identity 重启后不丢。
+
+### 遇到的问题与处理
+
+- PowerShell 当前版本不支持 `&&` 作为命令连接符，提交命令第一次失败；已改为分两步 `git add` 与 `git commit`，没有影响代码。
+- Vision primitive shapes 不能直接塞给当前 Corona `Geometry(model_path)`。本次用显式 `unsupported_shapes` 暴露，后续任务应正面实现 primitive-to-mesh/primitive geometry，而不是在导入时忽略。
+- 任意 `matrix4x4` 的旋转分解容易因为坐标系、列主序和非均匀缩放出错。本次只提取 position/scale 并记录 approximation，避免错误旋转进入 native source-of-truth。
+
+### 验证记录
+
+提交 `9bee50d6` 前已执行：
+
+- `python -m py_compile editor\plugins\SceneTools\vision_import.py editor\plugins\SceneTools\main.py editor\CoronaCore\core\entities\scene.py editor\plugins\SceneTools\tests\test_vision_import.py editor\CoronaCore\tests\test_actor_network_broadcast.py`：通过。
+- `python -m unittest editor.plugins.SceneTools.tests.test_vision_import`：通过，4 tests OK。覆盖 model shape 导入、material 降级、matrix/TRS transform、unsupported primitive/missing model、SceneTools 入口切换 EngineBuilt。
+- `python -m unittest editor.CoronaCore.tests.test_actor_network_broadcast.ActorNetworkBroadcastTests.test_scene_actor_follow_camera_persists_in_scene_actor_section`：通过，覆盖 `actor_guid` 与 `terrain_type` 等 scene save 边界。
+- `python -m unittest discover -s editor\plugins\SceneTools\tests -p "test*.py"`：通过，4 tests OK。
+- `python -m unittest discover -s editor\CoronaCore\tests -p "test*.py"`：通过，9 tests OK。
+- `cmake --build D:/Documents/GitHub/CoronaEngine/build --config RelWithDebInfo --target corona_engine -- --quiet`，通过 VS DevCmd wrapper 执行：通过。日志 `build\agent-build.log`。
+- `ctest --test-dir D:/Documents/GitHub/CoronaEngine/build -C RelWithDebInfo --output-on-failure`：通过，`NetworkProtocolTests` 与 `VisionMaterialAdapterTests` 均通过。
+- `$env:PATH = "<repo>\third_party\node-v22.19.0-win-x64;$env:PATH"; npm --prefix editor\Frontend run lint`：通过，0 errors，保留既有 66 warnings。
+- `$env:PATH = "<repo>\third_party\node-v22.19.0-win-x64;$env:PATH"; npm --prefix editor\Frontend run build`：通过，仅保留既有 Vite dynamic/static import chunk warnings。
+- `git diff --check`：通过，仅有仓库行尾 CRLF 提示。
+
+### E2E / 手动验证记录
+
+当前仍没有可自动驱动 CEF 文件选择器和真实 viewport backend 切换的 E2E harness。需要在 Editor 中手动复核：
+
+1. 打开一个普通 Corona scene。
+2. 点击 SceneBar 的 Vision 导入按钮，选择包含 `model` shape 的 Vision `scene.json`。
+3. 预期 scene tree 新增对应 model actor；返回 payload 中 `import_mode=engine_built`，`imported_actor_count` 与可支持 model shape 数一致。
+4. 若 JSON 中包含 `quad/cube`，预期返回 `unsupported_shapes` 中列出这些 primitive，而不是静默成功。
+5. 切换到 Vision backend 后，预期渲染来自 EngineBuilt 的 Corona actors；执行移动/旋转/缩放/删除/替换模型后，native 与内置 Vision 按前几项任务的同步机制保持一致。
+6. 保存、重启或重新打开 scene 后，预期 actor 的 `actor_guid` 仍为 `vision:<path>#scene.shapes[index]`，不会重复导入同一 shape。
+
+剩余风险：
+
+- `quad/cube` 等过程几何尚未导入为 Corona actor，需要后续补 primitive-to-mesh 或 Corona primitive geometry。
+- 任意 matrix transform 的 rotation 尚未可靠分解；当前只保守导入 position/scale。
+- 尚未做真实 CEF 导入后的截图或像素对比，Task 6 需要补可重复测试 scene 与 E2E/半自动验证流程。
+
