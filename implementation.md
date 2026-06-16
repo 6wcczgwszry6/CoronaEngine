@@ -1080,3 +1080,16 @@ external Vision：
 - `quad/cube` primitive 仍是显式 unsupported；下一步需要实现 primitive-to-mesh 或 Corona primitive geometry，或者在验证报告中继续标为不可对齐项。
 - `matrix4x4` rotation 分解仍未实现；当前 workflow 测试只锁定 position/scale 的保守导入。
 
+## Task 6 补充实施记录：真实 UI E2E 暴露的 Vision 导入运行时问题
+
+代码提交：`e15ebcc5 fix: keep vision imports stable during live rendering`
+
+本次真实 UI E2E 发现两个运行时问题：已处于 EngineBuilt Vision 时重复消费空路径恢复请求会造成不必要的 pipeline 重建；重复导入同一 Vision JSON 时删除再新建同 guid actor 会在 Optics 活跃渲染中打断 actor/profile/geometry 生命周期，旧进程日志出现 `EXCEPTION_ACCESS_VIOLATION`。
+
+修复策略没有引入 external pipeline 双写，而是继续坚持 `Vision JSON -> Corona actors -> EngineBuilt` 的单一 source-of-truth：`SceneTools.import_vision_scene_into_current_scene()` 不再强制调用 `CoronaEngine.load_vision_scene("")`；`OpticsSystem::apply_pending_vision_scene_load()` 对已经处于 EngineBuilt 的空路径请求做幂等消费；重复导入时按 `actor_guid` 复用既有 actor，只更新模型 route 变化、transform 和 optics 字段，保留 `AlignedModel_1` 这类去重后名称，只删除同一 `vision:<abs_path>#` source 下本次 JSON 已不存在的 actor。
+
+验证：`py_compile`、目标 SceneTools 测试、SceneTools discover、CoronaCore discover、CTest、`corona_engine` C++ build、前端 lint/build、`git diff --check` 均通过。前端 lint 仍为既有 66 warnings；前端 build 仍为既有 Vite dynamic/static import chunk warnings；`git diff --check` 仅有 CRLF 提示。
+
+真实 UI E2E：通过 VSCode CMake Tools 的 `play, 在终端窗口中启动所选目标: [corona_engine]` 按钮启动程序；点击“继续游戏/最近项目”并双击 `Vision Alignment E2E 20260616`；进入编辑器后确认 scene tree 包含 `AlignmentCamera`、`alignedmodel`、`alignedmodel_1`，视口显示导入模型，日志出现 `External CUDA buffer imported`；点击 SceneBar 的 Vision 场景文件按钮，在原生文件对话框中选择运行目录下的 `vision_scene.json`；重复导入后对话框关闭，进程 20 秒后仍存活。最新日志 `2026-06-16_20-29-16_corona.log` 出现 `Vision scene imported into current scene Scene/场景1.scene: ...\vision_scene.json`，未出现 `EXCEPTION_ACCESS_VIOLATION`、`SIGABRT` 或 `Received signal`。`.scene` 仍只包含 `alignedmodel` 和 `alignedmodel_1` 两个 actor，guid 分别指向 `#scene.shapes[0]` 和 `#scene.shapes[1]`，`camera0.render_backend = vision`，`[vision].import_mode = engine_built`。
+
+剩余风险：`quad/cube` primitive 仍是显式 unsupported；`matrix4x4` rotation 仍只做保守导入；当前 UI E2E 仍是人工点击加日志/scene 文件交叉验证，尚未沉淀为自动化 CEF/viewport harness。

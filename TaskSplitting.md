@@ -379,3 +379,30 @@
 - 如果继续推进“完全对齐”，不要把 Task 6 的 unsupported primitive 当成测试通过后的可忽略项；应优先补 primitive-to-mesh/Corona primitive geometry，或明确把 primitive 排除在当前对齐承诺外。
 - 还需要真实 CEF/viewport E2E 或半自动截图对比，覆盖 SceneBar 文件选择、payload 可见性、native viewport 与 Vision viewport 的视觉一致性。
 
+## Task 6 补充状态：真实 UI E2E 后的运行时修复
+
+代码提交：`e15ebcc5 fix: keep vision imports stable during live rendering`
+
+宏观检查结果：真实 UI 复测说明“重复导入时删除再新建同 guid actor”是局部最优。它能让数据层去重通过，但会破坏正在渲染的 actor/profile/geometry 生命周期。正确方向是让 `actor_guid` 成为真正稳定的 object identity：同一 Vision shape 复用同一 Corona actor，本次 JSON 新增才创建，不存在才删除。
+
+实施摘要：
+- `SceneTools.import_vision_scene_into_current_scene()` 导入 EngineBuilt actor 后不再强制调用 `load_vision_scene("")`。
+- `OpticsSystem::apply_pending_vision_scene_load()` 对已处于 EngineBuilt 的空路径请求做幂等消费。
+- 重复导入同一 Vision JSON 时复用既有 actor，更新 route/transform/optics，保留已去重名称，避免活跃渲染中删除再新建同一对象。
+- workflow 测试新增断言：第二次导入同一 JSON 后 actor 对象 id 不变、未调用 `remove_actor`、`AlignedModel_1` 后缀保留。
+
+验证摘要：
+- 通过：`py_compile`。
+- 通过：`python -m unittest editor.plugins.SceneTools.tests.test_vision_import editor.plugins.SceneTools.tests.test_vision_alignment_workflow`，6 tests OK。
+- 通过：`python -m unittest discover -s editor\plugins\SceneTools\tests -p "test*.py"`，6 tests OK。
+- 通过：`python -m unittest discover -s editor\CoronaCore\tests -p "test*.py"`，9 tests OK。
+- 通过：CTest，`NetworkProtocolTests` 和 `VisionMaterialAdapterTests`。
+- 通过：C++ `corona_engine` 增量 build。
+- 通过：前端 lint，0 errors，保留既有 66 warnings。
+- 通过：前端 build，保留既有 Vite chunk warnings。
+- 通过：`git diff --check`，仅 CRLF 提示。
+- 通过真实 UI E2E：使用 VSCode CMake Tools 运行按钮启动；打开 `Vision Alignment E2E 20260616`；点击 SceneBar Vision 文件按钮；选择 `vision_scene.json`；重复导入后进程继续存活，日志无 `EXCEPTION_ACCESS_VIOLATION` / `SIGABRT` / `Received signal`，`.scene` 仍只有两个导入 actor 且 guid 稳定。
+
+下一步宏观提醒：
+- 继续推进完全对齐时，不要把当前 unsupported primitive 当成已完成能力；需要实现 primitive-to-mesh/Corona primitive geometry，或在对齐承诺中明确排除。
+- UI E2E 已人工复测通过，但仍应沉淀为可重复的自动化或半自动化 viewport/CEF harness。
