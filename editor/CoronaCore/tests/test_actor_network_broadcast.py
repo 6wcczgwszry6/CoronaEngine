@@ -371,6 +371,48 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
         self.assertFalse(actor.get_physics_enabled())
         self.assertEqual(actor.get_collision_enabled(), "none")
 
+    def test_transform_contract_separates_absolute_and_delta_operations(self):
+        fake_editor = SimpleNamespace(
+            CoronaEngine=SimpleNamespace(
+                active_project_path="D:/project/test",
+                Actor=FakeActorEngineObject,
+                ActorProfile=SimpleNamespace,
+            ),
+            js_call_func=lambda name, args: None,
+        )
+        parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
+
+        with patch.object(actor_module, "CoronaEditor", fake_editor), \
+             patch.object(actor_module, "CoronaEngine", fake_editor.CoronaEngine), \
+             patch.object(actor_module, "Geometry", FakeGeometry), \
+             patch.object(actor_module, "Optics", FakeOptics), \
+             patch.object(actor_module, "Mechanics", FakeComponent), \
+             patch.object(actor_module, "Acoustics", FakeComponent):
+            actor = actor_module.Actor(route="Resource/cube.obj",
+                                       actor_type="model",
+                                       parent_scene=parent)
+
+            actor.set_position([1.0, 2.0, 3.0])
+            actor.set_rotation([10.0, 20.0, 30.0])
+            actor.set_scale([2.0, 3.0, 4.0])
+            self.assertEqual(actor.get_position(), [1.0, 2.0, 3.0])
+            self.assertEqual(actor.get_rotation(), [10.0, 20.0, 30.0])
+            self.assertEqual(actor.get_scale(), [2.0, 3.0, 4.0])
+
+            actor.translate([0.5, -1.0, 2.0])
+            actor.rotate_delta([5.0, 0.0, -10.0])
+            actor.scale_delta([2.0, 0.5, 1.0])
+            self.assertEqual(actor.get_position(), [1.5, 1.0, 5.0])
+            self.assertEqual(actor.get_rotation(), [15.0, 20.0, 20.0])
+            self.assertEqual(actor.get_scale(), [4.0, 1.5, 4.0])
+
+            actor.move([1.0, 1.0, 1.0])
+            actor.rotate([1.0, 2.0, 3.0])
+            actor.scale([9.0, 8.0, 7.0])
+            self.assertEqual(actor.get_position(), [2.5, 2.0, 6.0])
+            self.assertEqual(actor.get_rotation(), [16.0, 22.0, 23.0])
+            self.assertEqual(actor.get_scale(), [9.0, 8.0, 7.0])
+
     def test_follow_camera_round_trips_to_engine_and_to_dict(self):
         fake_editor = SimpleNamespace(
             CoronaEngine=SimpleNamespace(

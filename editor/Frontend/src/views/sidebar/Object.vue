@@ -439,8 +439,8 @@
                           :step="0.1"
                           :min="-100"
                           :max="100"
-                          @update:model-value="(value) => updateActorTransformFast('Move', 'x', value)"
-                          @change="() => updateActorTransform('Move')"
+                          @update:model-value="(value) => updateActorTransformFast('SetPosition', 'x', value)"
+                          @change="() => updateActorTransform('SetPosition')"
                         />
                       </div>
                       <div class="flex items-center gap-1">
@@ -450,8 +450,8 @@
                           :step="0.1"
                           :min="-100"
                           :max="100"
-                          @update:model-value="(value) => updateActorTransformFast('Move', 'y', value)"
-                          @change="() => updateActorTransform('Move')"
+                          @update:model-value="(value) => updateActorTransformFast('SetPosition', 'y', value)"
+                          @change="() => updateActorTransform('SetPosition')"
                         />
                       </div>
                       <div class="flex items-center gap-1">
@@ -461,8 +461,8 @@
                           :step="0.1"
                           :min="-100"
                           :max="100"
-                          @update:model-value="(value) => updateActorTransformFast('Move', 'z', value)"
-                          @change="() => updateActorTransform('Move')"
+                          @update:model-value="(value) => updateActorTransformFast('SetPosition', 'z', value)"
+                          @change="() => updateActorTransform('SetPosition')"
                         />
                       </div>
                     </div>
@@ -479,8 +479,8 @@
                           :step="0.1"
                           :min="-360"
                           :max="360"
-                          @update:model-value="(value) => updateActorTransformFast('Rotate', 'x', value)"
-                          @change="() => updateActorTransform('Rotate')"
+                          @update:model-value="(value) => updateActorTransformFast('SetRotation', 'x', value)"
+                          @change="() => updateActorTransform('SetRotation')"
                         />
                       </div>
 
@@ -491,8 +491,8 @@
                           :step="0.1"
                           :min="-360"
                           :max="360"
-                          @update:model-value="(value) => updateActorTransformFast('Rotate', 'y', value)"
-                          @change="() => updateActorTransform('Rotate')"
+                          @update:model-value="(value) => updateActorTransformFast('SetRotation', 'y', value)"
+                          @change="() => updateActorTransform('SetRotation')"
                         />
                       </div>
 
@@ -503,8 +503,8 @@
                           :step="0.1"
                           :min="-360"
                           :max="360"
-                          @update:model-value="(value) => updateActorTransformFast('Rotate', 'z', value)"
-                          @change="() => updateActorTransform('Rotate')"
+                          @update:model-value="(value) => updateActorTransformFast('SetRotation', 'z', value)"
+                          @change="() => updateActorTransform('SetRotation')"
                         />
                       </div>
                     </div>
@@ -521,8 +521,8 @@
                           :step="0.1"
                           :min="0.01"
                           :max="10"
-                          @update:model-value="(value) => updateActorTransformFast('Scale', 'x', value)"
-                          @change="() => updateActorTransform('Scale')"
+                          @update:model-value="(value) => updateActorTransformFast('SetScale', 'x', value)"
+                          @change="() => updateActorTransform('SetScale')"
                         />
                       </div>
 
@@ -533,8 +533,8 @@
                           :step="0.1"
                           :min="0.01"
                           :max="10"
-                          @update:model-value="(value) => updateActorTransformFast('Scale', 'y', value)"
-                          @change="() => updateActorTransform('Scale')"
+                          @update:model-value="(value) => updateActorTransformFast('SetScale', 'y', value)"
+                          @change="() => updateActorTransform('SetScale')"
                         />
                       </div>
 
@@ -545,8 +545,8 @@
                           :step="0.1"
                           :min="0.01"
                           :max="10"
-                          @update:model-value="(value) => updateActorTransformFast('Scale', 'z', value)"
-                          @change="() => updateActorTransform('Scale')"
+                          @update:model-value="(value) => updateActorTransformFast('SetScale', 'z', value)"
+                          @change="() => updateActorTransform('SetScale')"
                         />
                       </div>
                     </div>
@@ -1016,8 +1016,8 @@
                         :step="0.1"
                         :min="-100"
                         :max="100"
-                        @update:model-value="(value) => updateModelTransformFast('Move', 'x', value)"
-                        @change="() => updateModelTransform('Move')"
+                        @update:model-value="(value) => updateModelTransformFast('SetPosition', 'x', value)"
+                        @change="() => updateModelTransform('SetPosition')"
                       />
                     </div>
 
@@ -1028,8 +1028,8 @@
                         :step="0.1"
                         :min="-100"
                         :max="100"
-                        @update:model-value="(value) => updateModelTransformFast('Move', 'y', value)"
-                        @change="() => updateModelTransform('Move')"
+                        @update:model-value="(value) => updateModelTransformFast('SetPosition', 'y', value)"
+                        @change="() => updateModelTransform('SetPosition')"
                       />
                     </div>
 
@@ -1040,8 +1040,8 @@
                         :step="0.1"
                         :min="-100"
                         :max="100"
-                        @update:model-value="(value) => updateModelTransformFast('Move', 'z', value)"
-                        @change="() => updateModelTransform('Move')"
+                        @update:model-value="(value) => updateModelTransformFast('SetPosition', 'z', value)"
+                        @change="() => updateModelTransform('SetPosition')"
                       />
                     </div>
                   </div>
@@ -1058,8 +1058,8 @@
                         :step="0.1"
                         :min="-360"
                         :max="360"
-                        @update:model-value="(value) => updateModelTransformFast('Rotate', 'x', value)"
-                        @change="() => updateModelTransform('Rotate')"
+                        @update:model-value="(value) => updateModelTransformFast('SetRotation', 'x', value)"
+                        @change="() => updateModelTransform('SetRotation')"
                       />
                     </div>
 
@@ -1070,8 +1070,8 @@
                         :step="0.1"
                         :min="-360"
                         :max="360"
-                        @update:model-value="(value) => updateModelTransformFast('Rotate', 'y', value)"
-                        @change="() => updateModelTransform('Rotate')"
+                        @update:model-value="(value) => updateModelTransformFast('SetRotation', 'y', value)"
+                        @change="() => updateModelTransform('SetRotation')"
                       />
                     </div>
 
@@ -1082,8 +1082,8 @@
                         :step="0.1"
                         :min="-360"
                         :max="360"
-                        @update:model-value="(value) => updateModelTransformFast('Rotate', 'z', value)"
-                        @change="() => updateModelTransform('Rotate')"
+                        @update:model-value="(value) => updateModelTransformFast('SetRotation', 'z', value)"
+                        @change="() => updateModelTransform('SetRotation')"
                       />
                     </div>
                   </div>
@@ -1100,8 +1100,8 @@
                         :step="0.1"
                         :min="0.01"
                         :max="10"
-                        @update:model-value="(value) => updateModelTransformFast('Scale', 'x', value)"
-                        @change="() => updateModelTransform('Scale')"
+                        @update:model-value="(value) => updateModelTransformFast('SetScale', 'x', value)"
+                        @change="() => updateModelTransform('SetScale')"
                       />
                     </div>
 
@@ -1112,8 +1112,8 @@
                         :step="0.1"
                         :min="0.01"
                         :max="10"
-                        @update:model-value="(value) => updateModelTransformFast('Scale', 'y', value)"
-                        @change="() => updateModelTransform('Scale')"
+                        @update:model-value="(value) => updateModelTransformFast('SetScale', 'y', value)"
+                        @change="() => updateModelTransform('SetScale')"
                       />
                     </div>
 
@@ -1124,8 +1124,8 @@
                         :step="0.1"
                         :min="0.01"
                         :max="10"
-                        @update:model-value="(value) => updateModelTransformFast('Scale', 'z', value)"
-                        @change="() => updateModelTransform('Scale')"
+                        @update:model-value="(value) => updateModelTransformFast('SetScale', 'z', value)"
+                        @change="() => updateModelTransform('SetScale')"
                       />
                     </div>
                   </div>
@@ -1997,6 +1997,9 @@ const updateFloorGrid = async () => {
 };
 
 const ACTOR_TRANSFORM_OPERATION = {
+  SetPosition: 0,
+  SetRotation: 1,
+  SetScale: 2,
   Move: 0,
   Rotate: 1,
   Scale: 2,
@@ -2025,6 +2028,7 @@ const applyAxisOverride = (vector, axis, value) => {
 const getTransformVector = (transform, operationType, axis = null, value = null) => {
   if (!transform) return null;
   switch (operationType) {
+    case 'SetPosition':
     case 'Move':
       return applyAxisOverride(
         [
@@ -2035,6 +2039,7 @@ const getTransformVector = (transform, operationType, axis = null, value = null)
         axis,
         value
       );
+    case 'SetRotation':
     case 'Rotate':
       return applyAxisOverride(
         [
@@ -2045,6 +2050,7 @@ const getTransformVector = (transform, operationType, axis = null, value = null)
         axis,
         value
       );
+    case 'SetScale':
     case 'Scale':
       return applyAxisOverride(
         [

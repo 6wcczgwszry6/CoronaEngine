@@ -547,30 +547,48 @@ class Actor:
         self.script_path = route
         return True
 
-    # 兼容编辑器的变换操作：直接作用于几何体
+    # 兼容编辑器的变换操作：直接作用于几何体。
+    # Contract:
+    # - set_position/set_rotation/set_scale are absolute setters.
+    # - translate/rotate_delta/scale_delta are relative operations.
     @auto_save
-    def scale(self, v: List[float]):
-        if not hasattr(self, '_geometry'):
-            raise False
-        self._geometry.set_scale(v)
-        return True
-
-    @auto_save
-    def move(self, v: List[float]):
+    def translate(self, delta: List[float]):
         if not hasattr(self, '_geometry'):
             return False
         pos = self._geometry.get_position()
-        new_pos = [pos[0] + v[0], pos[1] + v[1], pos[2] + v[2]]
-        self._geometry.set_position(new_pos)
+        self._geometry.set_position([pos[0] + delta[0], pos[1] + delta[1], pos[2] + delta[2]])
         return True
 
     @auto_save
-    def rotate(self, euler: List[float]):
+    def rotate_delta(self, delta: List[float]):
         if not hasattr(self, '_geometry'):
             return False
         rot = self._geometry.get_rotation()
-        self._geometry.set_rotation([rot[0] + euler[0], rot[1] + euler[1], rot[2] + euler[2]])
+        self._geometry.set_rotation([rot[0] + delta[0], rot[1] + delta[1], rot[2] + delta[2]])
         return True
+
+    @auto_save
+    def scale_delta(self, factor):
+        if not hasattr(self, '_geometry'):
+            return False
+        if isinstance(factor, (int, float)):
+            factor = [factor, factor, factor]
+        current = self._geometry.get_scale()
+        self._geometry.set_scale([
+            current[0] * factor[0],
+            current[1] * factor[1],
+            current[2] * factor[2],
+        ])
+        return True
+
+    def move(self, v: List[float]):
+        return self.translate(v)
+
+    def rotate(self, euler: List[float]):
+        return self.rotate_delta(euler)
+
+    def scale(self, v: List[float]):
+        return self.set_scale(v)
 
     @auto_save
     def set_position(self, position: List[float], if_init=False):
