@@ -892,6 +892,14 @@ class MasterAgent:
         imported = result.get("imported", [])
         failed = result.get("failed", [])
         truncated = result.get("truncated", 0)
+        progress_events = result.get("progress_events") or []
+        progress_timeline = result.get("progress_timeline") or []
+        final_report_text = result.get("final_report_text") or ""
+        vlm_review_text = result.get("vlm_review_text") or ""
+        vlm_skipped = result.get("vlm_review_skipped") or []
+        vlm_timed_out = result.get("vlm_review_timed_out") or []
+        operation_count = int(result.get("operation_count") or 0)
+        snapshot_path = result.get("zone_decompose_snapshot")
 
         lines = [f"{tag} 🏗️ 场景组合完成"]
         lines.append(f"  • 识别物体：{extracted} 个")
@@ -899,6 +907,19 @@ class MasterAgent:
             lines.append(f"  • ⚠️ 单次生成上限 {self._scene_max_items} 个，本次先做前 {self._scene_max_items} 个（剩 {truncated} 个可稍后继续）")
         lines.append(f"  • 获取模型：{model_count} 个")
         lines.append(f"  • 导入引擎：{len(imported)} 个")
+        if result.get("progressive"):
+            phases = result.get("phases_run") or []
+            lines.append(f"  • 渐进阶段：{(' / '.join(phases)) if phases else '已启用'}")
+        if progress_timeline:
+            last_progress = progress_timeline[-1]
+            lines.append(
+                f"  • 阶段披露：{last_progress.get('percent', 100)}% "
+                f"{last_progress.get('phase', '')} {last_progress.get('status', '')}"
+            )
+        if progress_events:
+            lines.append(f"  • 最近进度：{progress_events[-1]}")
+        if operation_count:
+            lines.append(f"  • 捕获用户介入：{operation_count} 条")
         # 15a：shell 外壳建筑独立汇报（它不走家具路径，否则成败不可见）
         shell_placed = result.get("shell_placed", [])
         shell_failed = result.get("shell_failed", [])
@@ -913,6 +934,16 @@ class MasterAgent:
             lines.append(f"⚠️ 未完成：{('、'.join(failed[:8]))}")
         if shell_failed:
             lines.append(f"⚠️ 外壳未完成：{('、'.join(shell_failed[:5]))}")
+        if final_report_text:
+            lines.append(f"\n🧭 最终检查：{final_report_text}")
+        if vlm_review_text:
+            lines.append(f"👁️ VLM 外审：{vlm_review_text}")
+        if vlm_skipped or vlm_timed_out:
+            lines.append(
+                f"👁️ VLM 跳过：{len(vlm_skipped)} 个，超时：{len(vlm_timed_out)} 个"
+            )
+        if snapshot_path:
+            lines.append(f"🧪 F5 分解快照：{snapshot_path}")
         return "\n".join(lines)
 
     def _gather_compose_text(self, user_text: str, messages: List[str]) -> str:

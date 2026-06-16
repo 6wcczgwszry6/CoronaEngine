@@ -13,6 +13,49 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
 
+PHASE_ORDER = ["GROUND", "SHELL", "INTERIOR", "BOUNDARY", "OBJECTS", "DECORATION"]
+
+CAPABILITY_MANIFEST = {
+    "ground_profile": "flat / rolling / dunes / noise 等地形起伏",
+    "ground_cover": "grass / sand / snow / stone 等地表覆盖",
+    "boundary": "fence / wall / hedge 等边界物",
+    "interior_surface": "floor / wall / ceiling / openings 内皮",
+    "entrance": "door / curtain / archway 入口",
+    "shell_dressing": "建筑外壳和附属外观件",
+}
+
+GENERATOR_MANIFEST = {
+    "ground_profile": {
+        "phase": "GROUND",
+        "effective_params": [
+            "type", "amplitude", "frequency", "seed",
+            "material", "extent_factor",
+        ],
+    },
+    "shell_dressing": {
+        "phase": "SHELL",
+        "effective_params": ["asset_id", "style"],
+    },
+    "entrance": {
+        "phase": "SHELL",
+        "effective_params": ["style", "hint"],
+    },
+    "interior_surface": {
+        "phase": "INTERIOR",
+        "depends_on": ["shell_dressing"],
+        "effective_params": ["floor_material", "floor_shape"],
+    },
+    "boundary": {
+        "phase": "BOUNDARY",
+        "effective_params": ["kind", "material", "height", "style", "radius", "margin"],
+    },
+    "ground_cover": {
+        "phase": "DECORATION",
+        "effective_params": ["kind", "density", "scatter"],
+    },
+}
+
+
 @dataclass
 class Volume:
     """参数化空间体积（唯一事实源，我们自己造、可控、能留门洞）"""
@@ -47,6 +90,13 @@ class Connector:
 
 
 @dataclass
+class ZoneAspect:
+    """半开放能力切面：capability 受 manifest 约束，params 开放。"""
+    capability: str
+    params: Dict = field(default_factory=dict)
+
+
+@dataclass
 class TerrainProfile:
     """参数化地形高度场：outdoor zone 的"外皮"，与 InteriorSkin 对称（M2 步骤 15c-ii）。
 
@@ -57,6 +107,9 @@ class TerrainProfile:
     amplitude: float = 0.0           # 起伏高度（米）
     frequency: float = 1.0           # 起伏密度
     seed: int = 0                    # 随机种子（确定性，派生相位用）
+    material: str = "neutral"        # "neutral" | "grass" | "dirt" | "sand" | "snow" | "stone"
+    scatter: str = "none"            # "grass" | "flowers" | "shrubs" | "rocks" | "snow_patches" | "none"
+    style_tags: List[str] = field(default_factory=list)
 
 
 
@@ -96,6 +149,8 @@ class Zone:
 
     # 元数据（M2 预留）
     metadata: Dict = field(default_factory=dict)
+    aspects: List[ZoneAspect] = field(default_factory=list)
+    style_context: Dict = field(default_factory=dict)
 
 
 class ZoneTree:

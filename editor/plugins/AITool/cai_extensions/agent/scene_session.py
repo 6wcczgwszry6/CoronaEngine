@@ -135,7 +135,7 @@ class SceneSession:
         """注册进度回调（突击方案 E2，复用 phase 边界）。"""
         self._progress_sink = sink
 
-    def _emit_progress(self, phase: str, extra: str = "") -> None:
+    def _emit_progress(self, phase: str, extra: str = "") -> str:
         msg = PHASE_PROGRESS.get(phase, f"正在处理 {phase}…")
         if extra:
             msg = msg.rstrip("…") + f"（{extra}）…"
@@ -145,6 +145,7 @@ class SceneSession:
             except Exception:  # noqa: BLE001
                 pass
         logger.info("[SceneSession][进度] %s", msg)
+        return msg
 
     def _append_operation(
         self,
@@ -274,13 +275,27 @@ class SceneSession:
         round_id = self.current_round
         imported_all: List[str] = []
         phases_run: List[str] = []
+        progress_timeline: List[Dict[str, Any]] = []
+        active_phases = [phase for phase in PHASE_ORDER if phase_generators.get(phase)]
+        total_phases = max(1, len(active_phases))
 
         for phase in PHASE_ORDER:
             gen = phase_generators.get(phase)
             if gen is None:
                 continue
             phases_run.append(phase)
+            phase_index = len(phases_run)
             batch_id = f"r{round_id}_{phase}"
+            start_percent = int(((phase_index - 1) / total_phases) * 100)
+            start_msg = self._emit_progress(phase, extra=f"开始 {phase_index}/{total_phases}")
+            progress_timeline.append({
+                "phase": phase,
+                "status": "start",
+                "percent": start_percent,
+                "message": start_msg,
+                "asset_count": 0,
+                "imported_count": 0,
+            })
 
             # 1. 生成本 phase 的资产（纯 API/几何，不碰引擎）
             try:
@@ -311,7 +326,16 @@ class SceneSession:
                         logger.debug("[SceneSession] 导入后 diff 基线更新跳过: %s", exc)
 
             # 3. 进度反馈（复用 phase 边界，突击方案 E2）
-            self._emit_progress(phase, extra=f"{len(assets)}件" if assets else "")
+            done_percent = int((phase_index / total_phases) * 100)
+            done_msg = self._emit_progress(phase, extra=f"{len(assets)}件" if assets else "")
+            progress_timeline.append({
+                "phase": phase,
+                "status": "done",
+                "percent": done_percent,
+                "message": done_msg,
+                "asset_count": len(assets),
+                "imported_count": len(imported_this_phase),
+            })
 
             # 4. 采集视口介入（路 A）+ drain（AI 工具介入已随时入队）
             if viewport_sampler is not None:
@@ -341,6 +365,7 @@ class SceneSession:
             "imported": imported_all,
             "round": round_id,
             "final_report": report,
+            "progress_timeline": progress_timeline,
         }
 
     # ── FinalReview（突击方案 §2.5：只修 AGENT，不静默覆盖用户）────

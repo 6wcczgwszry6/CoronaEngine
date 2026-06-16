@@ -122,6 +122,40 @@ def test_phase_loop_runs_provided_only():
     print("[OK] progressive_compose 按 PHASE_ORDER 跑、跳过未提供的 phase")
 
 
+def test_progress_sink_and_report_text_are_observable():
+    layout = FakeLayout()
+    session = SceneSession(layout)
+    progress_events: List[str] = []
+    session.set_progress_sink(progress_events.append)
+
+    def gen_objects(s, phase):
+        return [{"name": "table", "path": "/m/tb.glb"}]
+
+    def importer(assets, batch_id):
+        for a in assets:
+            layout.add(FakeInst(a["name"], provenance="AGENT", batch_id=batch_id))
+        return {"imported": [a["name"] for a in assets]}
+
+    result = session.progressive_compose(
+        {"OBJECTS": gen_objects},
+        importer=importer,
+        reasonable_provider=lambda: {"table": True},
+        skip_final_review=True,
+    )
+    report = session.final_review({"table": True}, protection_fn=_fake_protection)
+    assert progress_events, "渐进进度必须能被上层收集，而不是只写日志"
+    assert any("1件" in msg for msg in progress_events), progress_events
+    assert result["phases_run"] == ["OBJECTS"]
+    timeline = result["progress_timeline"]
+    assert timeline[0]["status"] == "start"
+    assert timeline[0]["percent"] == 0
+    assert timeline[-1]["status"] == "done"
+    assert timeline[-1]["percent"] == 100
+    assert timeline[-1]["asset_count"] == 1
+    assert "场景已就绪" in report.to_user_text()
+    print("[OK] 进度 sink + progress_timeline + FinalReview 文案可被上层观测")
+
+
 def test_intervention_drain_marks_user():
     layout = FakeLayout()
     layout.add(FakeInst("sofa", provenance="AGENT", batch_id="r1_GROUND"))
@@ -199,6 +233,7 @@ def test_final_review_three_buckets():
 
 if __name__ == "__main__":
     test_phase_loop_runs_provided_only()
+    test_progress_sink_and_report_text_are_observable()
     test_intervention_drain_marks_user()
     test_delete_marks_stale_not_physical()
     test_settle_skips_recent_user()

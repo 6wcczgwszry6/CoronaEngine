@@ -132,6 +132,25 @@ def _build_disc_obj(segments: int = 48, mtl_lib: str = "carpet.mtl",
     return "\n".join(lines) + "\n"
 
 
+def _select_interior_floor_shape(width: float, depth: float,
+                                 surface_params: Dict[str, Any] = None) -> str:
+    """Choose shell interior floor mesh shape without scene-name inference."""
+    params = dict(surface_params or {})
+    explicit = str(params.get("floor_shape") or params.get("shape") or "").strip().lower()
+    if explicit in ("disc", "round", "circle", "circular"):
+        return "disc"
+    if explicit in ("quad", "rect", "rectangle", "square"):
+        return "quad"
+    try:
+        w = abs(float(width))
+        d = abs(float(depth))
+    except Exception:
+        return "disc"
+    if min(w, d) > 1e-6 and max(w, d) / min(w, d) >= 1.2:
+        return "quad"
+    return "disc"
+
+
 def _terrain_height(x: float, z: float, profile, platform_radius: float) -> float:
     """通用高度场 h(x,z)：terrain zone 的参数化外皮（M2 步骤 15c-ii）。
 
@@ -282,25 +301,93 @@ def _build_grass_obj(width: float, depth: float, profile, platform_radius: float
     return "\n".join(lines) + "\n"
 
 
+def _terrain_mtl_text(material: str) -> str:
+    """terrain material -> MTL text. 颜色保守，优先保证 demo 可读。"""
+    palette = {
+        "neutral": ("terrain", "0.24 0.24 0.22", "0.48 0.47 0.42"),
+        "grass": ("terrain", "0.20 0.32 0.12", "0.36 0.55 0.22"),
+        "dirt": ("terrain", "0.22 0.16 0.10", "0.45 0.34 0.22"),
+        "sand": ("terrain", "0.36 0.31 0.20", "0.78 0.67 0.42"),
+        "snow": ("terrain", "0.62 0.66 0.70", "0.86 0.90 0.92"),
+        "stone": ("terrain", "0.20 0.20 0.19", "0.42 0.42 0.39"),
+    }
+    name, ka, kd = palette.get(material, palette["neutral"])
+    return f"newmtl {name}\nKa {ka}\nKd {kd}\nKs 0.02 0.02 0.02\nNs 4.0\nd 1.0\n"
+
+
+def _scatter_mtl_text(scatter: str, material: str) -> str:
+    """scatter style -> billboard material. OBJ 仍用 blade/flower 两材质名以复用几何。"""
+    if scatter == "rocks":
+        blade_ka, blade_kd = "0.16 0.15 0.14", "0.36 0.35 0.32"
+        flower_ka, flower_kd = "0.22 0.20 0.18", "0.48 0.45 0.40"
+    elif scatter == "shrubs":
+        blade_ka, blade_kd = "0.10 0.18 0.07", "0.24 0.38 0.16"
+        flower_ka, flower_kd = "0.18 0.12 0.08", "0.42 0.30 0.18"
+    elif scatter == "snow_patches":
+        blade_ka, blade_kd = "0.62 0.66 0.70", "0.86 0.90 0.92"
+        flower_ka, flower_kd = "0.50 0.54 0.58", "0.72 0.78 0.82"
+    elif material == "sand":
+        blade_ka, blade_kd = "0.24 0.22 0.14", "0.58 0.50 0.30"
+        flower_ka, flower_kd = "0.18 0.20 0.10", "0.35 0.42 0.18"
+    else:
+        blade_ka, blade_kd = "0.10 0.22 0.06", "0.30 0.52 0.16"
+        flower_ka, flower_kd = "0.30 0.10 0.20", "0.85 0.35 0.55"
+    return (
+        f"newmtl blade\nKa {blade_ka}\nKd {blade_kd}\n"
+        "Ks 0.0 0.0 0.0\nNs 1.0\nd 1.0\n"
+        f"newmtl flower\nKa {flower_ka}\nKd {flower_kd}\n"
+        "Ks 0.0 0.0 0.0\nNs 1.0\nd 1.0\n"
+    )
+
+
+def _surface_mtl_text(material: str) -> str:
+    """interior surface material -> MTL text. 缺省保持中性，不写死地毯。"""
+    palette = {
+        "neutral": ("0.28 0.27 0.24", "0.58 0.56 0.50"),
+        "stone": ("0.22 0.22 0.21", "0.50 0.50 0.46"),
+        "wood": ("0.22 0.13 0.06", "0.50 0.32 0.16"),
+        "carpet": ("0.20 0.10 0.08", "0.55 0.28 0.20"),
+    }
+    ka, kd = palette.get(material, palette["neutral"])
+    return f"newmtl {material}\nKa {ka}\nKd {kd}\nKs 0.02 0.02 0.02\nNs 6.0\nd 1.0\n"
+
+
+def _boundary_mtl_text(kind: str, material: str) -> str:
+    """boundary material -> MTL text. kind/material 都来自 boundary aspect。"""
+    key = (material or "").strip() or (kind or "").strip() or "neutral"
+    palette = {
+        "wood": ("0.18 0.10 0.05", "0.45 0.28 0.14"),
+        "stone": ("0.20 0.20 0.19", "0.45 0.45 0.40"),
+        "greenery": ("0.08 0.18 0.06", "0.22 0.42 0.16"),
+        "hedge": ("0.08 0.18 0.06", "0.22 0.42 0.16"),
+        "wall": ("0.20 0.20 0.19", "0.45 0.45 0.40"),
+        "fence": ("0.18 0.10 0.05", "0.45 0.28 0.14"),
+        "neutral": ("0.24 0.23 0.20", "0.46 0.44 0.38"),
+    }
+    ka, kd = palette.get(key, palette["neutral"])
+    return f"newmtl boundary\nKa {ka}\nKd {kd}\nKs 0.02 0.02 0.02\nNs 4.0\nd 1.0\n"
+
+
 def _build_fence_obj(platform_radius: float, gap_center_angle: float = 1.5708,
-                     gap_half_angle: float = 0.5, mtl_lib: str = "fence.mtl") -> str:
-    """环形木栏 dressing（任务D：草原营地边界）。
+                     gap_half_angle: float = 0.5, mtl_lib: str = "fence.mtl",
+                     kind: str = "fence", height: float = 1.1) -> str:
+    """环形 boundary dressing。
 
     纯函数、世界坐标、确定性——跟 terrain/草簇同源，Actor scale=[1,1,1]。
-    平台边缘外一圈木桩 + 两道横档，朝 gap_center_angle（默认 +Z=门那侧）留一段口子
-    （配合 camera 走进蒙古包）。通用：换 dressing 几何即可复用环形散布（拴马桩/经幡等）。
+    kind/material/height 来自 boundary aspect；没有 boundary aspect 时调用方不应调用它。
     """
     import math
     R = max(2.0, platform_radius + 1.2)   # 栏在平台外一圈
     N = 28                                # 木桩总数（含 gap 内被跳过的）
-    POST_H = 1.1                          # 桩高
+    boundary_kind = (kind or "fence").strip().lower()
+    POST_H = max(0.25, float(height or 1.1))
     POST_T = 0.06                         # 桩半宽（细方柱）
     RAIL_T = 0.05                         # 横档半厚
-    RAIL_YS = [0.4, 0.85]                 # 两道横档高度
+    RAIL_YS = [POST_H * 0.36, POST_H * 0.77]
     step = 2.0 * math.pi / N
 
-    lines = [f"mtllib {mtl_lib}", "usemtl wood",
-             f"# fence ring R={R:.2f} gap_at={gap_center_angle:.2f} half={gap_half_angle:.2f}"]
+    lines = [f"mtllib {mtl_lib}", "usemtl boundary",
+             f"# boundary kind={boundary_kind} R={R:.2f} gap_at={gap_center_angle:.2f} half={gap_half_angle:.2f} height={POST_H:.2f}"]
     verts, faces = [], []
 
     def add_box(cx, cy, cz, hx, hy, hz, dirx=1.0, dirz=0.0):
@@ -334,9 +421,10 @@ def _build_fence_obj(platform_radius: float, gap_center_angle: float = 1.5708,
             kept.append(None)
             continue
         kept.append((cx, cz))
-        add_box(cx, POST_H / 2.0, cz, POST_T, POST_H / 2.0, POST_T)  # 竖桩
+        if boundary_kind == "fence":
+            add_box(cx, POST_H / 2.0, cz, POST_T, POST_H / 2.0, POST_T)
 
-    # 横档：相邻保留桩之间各加两道（跨 gap 的不连 → 自然留口）
+    # 相邻保留点之间加几何段；跨 gap 的不连 → 自然留口。
     for i in range(N):
         a = kept[i]
         nb = kept[(i + 1) % N]
@@ -350,8 +438,13 @@ def _build_fence_obj(platform_radius: float, gap_center_angle: float = 1.5708,
         if seg < 1e-6:
             continue
         ux, uz = dx / seg, dz / seg
-        for ry in RAIL_YS:
-            add_box(mx, ry, mz, seg / 2.0, RAIL_T, RAIL_T, dirx=ux, dirz=uz)
+        if boundary_kind == "wall":
+            add_box(mx, POST_H / 2.0, mz, seg / 2.0, POST_H / 2.0, 0.08, dirx=ux, dirz=uz)
+        elif boundary_kind == "hedge":
+            add_box(mx, POST_H / 2.0, mz, seg / 2.0, POST_H / 2.0, 0.14, dirx=ux, dirz=uz)
+        else:
+            for ry in RAIL_YS:
+                add_box(mx, ry, mz, seg / 2.0, RAIL_T, RAIL_T, dirx=ux, dirz=uz)
 
     for vx, vy, vz in verts:
         lines.append(f"v {vx:.3f} {vy:.3f} {vz:.3f}")
@@ -371,16 +464,32 @@ _ZONE_DECOMPOSE_SYSTEM_PROMPT = """你是空间场景分解器。把用户的场
   "zones": [
     {
       "id": "z0",
-      "name": "区域名(中文)",
-      "role": "outdoor" | "indoor",
-      "enclosure": "terrain" | "box" | "shell",
-      "shell_asset": null | "建筑模型名(中文)",
-      "size": [宽, 深, 高],
-      "parent": null | "父zone的id",
-      "has_door": true | false
-    }
-  ]
-}
+	      "name": "区域名(中文)",
+		      "role": "outdoor" | "indoor",
+		      "enclosure": "terrain" | "box" | "shell",
+		      "shell_asset": null | "建筑模型名(中文)",
+		      "style_context": {
+		        "main_building": "主建筑/核心对象",
+		        "terrain_mood": "地形与环境气质",
+		        "material_palette": ["wood", "grass", "stone"],
+		        "functional_intent": "camp|courtyard|defense|ritual|research 等用途"
+		      },
+		      "aspects": [
+		        {"capability": "ground_profile", "params": {"type": "flat|rolling|dunes|noise", "amplitude": 0.0, "frequency": 1.0, "material": "neutral", "extent_factor": 6.0}},
+		        {"capability": "ground_cover", "params": {"kind": "grass|snow|sand|stone|none", "density": 0.0}},
+		        {"capability": "boundary", "params": {"kind": "fence|wall|hedge", "material": "wood|stone|greenery|neutral", "height": 1.1, "style": "边界外观提示", "radius": null, "margin": 1.0}},
+	        {"capability": "interior_surface", "params": {"floor_material": "neutral|stone|wood|carpet", "floor_shape": "disc|quad"}},
+	        {"capability": "entrance", "params": {"style": "door|curtain|archway", "hint": "入口生成提示"}},
+	        {"capability": "shell_dressing", "params": {"asset_id": "建筑模型名", "style": "外观提示"}},
+	        {"capability": "unsupported", "params": {"requested": "water_moat", "reason": "场景强烈需要但 manifest 未覆盖"}}
+	      ],
+	      "terrain_profile": null,
+	      "size": [宽, 深, 高],
+	      "parent": null | "父zone的id",
+	      "has_door": true | false
+	    }
+	  ]
+	}
 
 字段说明：
 - enclosure:
@@ -388,6 +497,19 @@ _ZONE_DECOMPOSE_SYSTEM_PROMPT = """你是空间场景分解器。把用户的场
   * box = 合成的中性盒子(客厅/卧室/教堂内部这种"房间"，没有特定外观的建筑模型，由墙地顶围合)
   * shell = 由一个生成的建筑模型包裹(蒙古包/帐篷/小木屋这种有标志性外观的建筑，模型本身就是外壳)
 - shell_asset: 仅当 enclosure=shell 时填，是那个建筑模型的名字(如"蒙古包")；其它情况填 null
+- style_context: 规划层上下文，用于解释为什么选择某些 aspect params。代码不会按 main_building/terrain_mood 写 if；它只保存上下文供 GM/VLM/后续 prompt 使用。
+  * main_building: 当前 zone 关联的主建筑或核心对象
+  * terrain_mood: 地形/环境气质，如 open grassland、stone courtyard、volcanic observation site
+  * material_palette: 推荐材质调性数组，如 wood/felt/grass、stone/slate、metal/concrete
+  * functional_intent: 功能意图，如 camp、courtyard、defense、research、market
+- aspects: 半开放能力切面。优先使用 manifest 中已有 capability：
+  * ground_profile: 地形起伏/材质/范围，params 可含 type/amplitude/frequency/material/extent_factor
+  * ground_cover: 地表覆盖，params 可含 kind/density/scatter
+  * boundary: 边界物，params 可含 kind/material/height/style/radius/margin；没有 boundary aspect 时不要生成任何围栏/墙/绿篱
+  * interior_surface: 内皮地面/墙面，params 可含 floor_material/floor_shape
+  * entrance: 入口，params 可含 style/hint
+  * shell_dressing: 建筑外壳，params 可含 asset_id/style
+  * unsupported: 场景强烈需要但 manifest 未覆盖时使用，params 写 requested/reason；unsupported 不会执行
 - size: 单位米 [宽, 深, 高]; terrain 的高填 0
 - parent: 顶层 zone 填 null; 嵌套在某区域内填父 zone 的 id
 - has_door: box 是否朝父区域开门洞(仅 box 有意义; shell 用模型自带入口, terrain 无, 都填 false)
@@ -399,7 +521,266 @@ _ZONE_DECOMPOSE_SYSTEM_PROMPT = """你是空间场景分解器。把用户的场
 - 室内外混合但内层只是【普通房间】（院子里的一间客厅）→ 外层 terrain + 内层 box(has_door=true)。
 - 纯室外（一片草原 / 广场，无可进入建筑）→ 1 个 terrain，role=outdoor，parent=null。
 - 最多 2 层。内层(box/shell)是"人活动空间"(宽深 4~6 米、高 2.5~3 米)；外层 terrain 一大片(15~25 米)。
+- 动态参数选择规则：根据用户需求、主建筑、地形气质、时代/文化/功能意图填写 aspects.params。
+  * 需要边界时才输出 boundary；不需要边界时不要输出 boundary。
+  * boundary 的 kind/material/height/style/radius/margin 必须与 style_context 和 zone size 一致，例如营地可低矮木栏，庭院可石墙；纯室外如需要控制围栏范围可给 radius，或用 margin 表示距 zone 边缘的内缩距离；研究/工业设施可 unsupported metal_railing。
+  * ground_cover 的 kind/density/scatter 必须与 ground_profile.material 和 terrain_mood 一致；没有覆盖物需求时不要输出 ground_cover。
+  * entrance 的 style/hint 必须来自主建筑风格；不要把毡帘、拱门、木门当成全局默认。
+  * interior_surface 的 floor_material/floor_shape 必须来自主建筑/功能意图；圆形/帐篷类可用 disc，矩形/教堂/房间类可用 quad；缺少明确风格时 material 用 neutral、shape 可省略。
+- 草原蒙古包可输出 rolling/grass/fence/curtain/carpet/disc 等 aspects；欧式教堂不要输出 grass/fence/curtain，室内地面可用 stone/quad。
+- 火山口观测站如需要 lava_flow 且 manifest 不支持，应输出 unsupported，不要编造新 capability。
 只输出 JSON，不要解释。"""
+
+
+def _terrain_profile_from_spec(spec: Dict[str, Any], context_specs: List[Dict[str, Any]]):
+    """兼容 legacy terrain_profile；缺失时只返回中性默认，不做场景关键词推断。"""
+    from ..data_model.zone_tree import TerrainProfile
+
+    raw = spec.get("terrain_profile") if isinstance(spec, dict) else None
+    raw = raw if isinstance(raw, dict) else {}
+    typ = str(raw.get("type") or "flat")
+    material = str(raw.get("material") or "neutral")
+    scatter = str(raw.get("scatter") or "none")
+    style_tags = raw.get("style_tags") or []
+    if not isinstance(style_tags, list):
+        style_tags = [str(style_tags)]
+
+    return TerrainProfile(
+        type=typ,
+        amplitude=float(raw.get("amplitude", 0.0)),
+        frequency=float(raw.get("frequency", 1.0)),
+        seed=int(raw.get("seed", 0)),
+        material=material,
+        scatter=scatter,
+        style_tags=[str(t) for t in style_tags if str(t).strip()],
+    )
+
+
+def _normalize_aspect_dict(raw: Any):
+    from ..data_model.zone_tree import CAPABILITY_MANIFEST, ZoneAspect
+
+    if not isinstance(raw, dict):
+        return None
+    capability = str(raw.get("capability") or "").strip()
+    params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
+    if not capability:
+        return None
+    if capability == "unsupported":
+        return ZoneAspect(capability="unsupported", params=dict(params))
+    if capability not in CAPABILITY_MANIFEST:
+        return ZoneAspect(
+            capability="unsupported",
+            params={
+                "requested": capability,
+                "reason": "capability not in manifest",
+                "params": dict(params),
+            },
+        )
+    return ZoneAspect(capability=capability, params=dict(params))
+
+
+def _add_legacy_aspect(zone, capability: str, params: Dict[str, Any]) -> None:
+    from ..data_model.zone_tree import ZoneAspect
+
+    if any(a.capability == capability for a in getattr(zone, "aspects", [])):
+        return
+    zone.aspects.append(ZoneAspect(capability=capability, params=dict(params)))
+
+
+def normalize_zone_aspects(zone) -> None:
+    """Normalize LLM aspects + legacy fields into zone.aspects.
+
+    Explicit aspects win. This is the only place that reads legacy terrain_profile,
+    interior_skin, primary_shell_asset_id, dressing_assets, and connector hints.
+    """
+    raw_aspects = list(getattr(zone, "metadata", {}).get("raw_aspects") or [])
+    normalized = []
+    for raw in raw_aspects:
+        aspect = _normalize_aspect_dict(raw)
+        if aspect is not None:
+            normalized.append(aspect)
+    zone.aspects = normalized
+
+    if getattr(zone, "primary_shell_asset_id", None):
+        _add_legacy_aspect(
+            zone,
+            "shell_dressing",
+            {"asset_id": zone.primary_shell_asset_id, "style": zone.name},
+        )
+
+    terrain_profile = getattr(zone, "terrain_profile", None)
+    if terrain_profile is not None:
+        _add_legacy_aspect(
+            zone,
+            "ground_profile",
+            {
+                "type": terrain_profile.type,
+                "amplitude": terrain_profile.amplitude,
+                "frequency": terrain_profile.frequency,
+                "seed": terrain_profile.seed,
+                "material": terrain_profile.material,
+                "extent_factor": getattr(terrain_profile, "extent_factor", 6.0),
+            },
+        )
+        if getattr(terrain_profile, "scatter", "none") != "none":
+            _add_legacy_aspect(
+                zone,
+                "ground_cover",
+                {
+                    "kind": terrain_profile.scatter,
+                    "scatter": terrain_profile.scatter,
+                    "density": 1.0,
+                },
+            )
+
+    skin = getattr(zone, "interior_skin", None)
+    if skin is not None:
+        _add_legacy_aspect(
+            zone,
+            "interior_surface",
+            {"floor_material": getattr(skin, "floor_material", "neutral")},
+        )
+
+    if any(getattr(c, "type", "") == "door" for c in getattr(zone, "connectors", []) or []):
+        _add_legacy_aspect(zone, "entrance", {"style": "door"})
+
+
+def _aspect(zone, capability: str):
+    for aspect in getattr(zone, "aspects", []) or []:
+        if aspect.capability == capability:
+            return aspect
+    return None
+
+
+def _aspect_params(zone, capability: str) -> Dict[str, Any]:
+    aspect = _aspect(zone, capability)
+    return dict(getattr(aspect, "params", {}) or {}) if aspect else {}
+
+
+def _has_aspect(zone, capability: str) -> bool:
+    return _aspect(zone, capability) is not None
+
+
+def resolve_zone_anchor(composer, zone=None, capability: str = "boundary",
+                        params: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Resolve the geometric anchor used by open-scene generators.
+
+    Priority is measured shell footprint, generated terrain platform, then the
+    abstract zone volume. The function is deliberately scene-name agnostic so
+    pure outdoor zones can generate boundaries without a shell AABB.
+    """
+    params = dict(params or {})
+    zone_id = getattr(zone, "zone_id", None)
+    center = [0.0, 0.0, 0.0]
+    volume = getattr(zone, "volume", None)
+    if volume is not None:
+        raw_center = getattr(volume, "center", None) or center
+        if len(raw_center) >= 3:
+            center = [float(raw_center[0]), float(raw_center[1]), float(raw_center[2])]
+
+    shell_aabbs = getattr(composer, "_shell_aabb", {}) or {}
+    shell_aabb = shell_aabbs.get(zone_id) if zone_id else None
+    if shell_aabb is None and shell_aabbs:
+        shell_aabb = max(
+            shell_aabbs.values(),
+            key=lambda a: max(
+                float(a.get("half_x", 0.0) or 0.0),
+                float(a.get("half_z", 0.0) or 0.0),
+            ),
+        )
+    if shell_aabb is not None:
+        shell_r = max(
+            float(shell_aabb.get("half_x", 0.0) or 0.0),
+            float(shell_aabb.get("half_z", 0.0) or 0.0),
+        )
+        if shell_r > 1e-6:
+            return {
+                "anchor_type": "shell",
+                "capability": capability,
+                "zone_id": zone_id,
+                "center": [
+                    float(shell_aabb.get("center_x", shell_aabb.get("x", 0.0)) or 0.0),
+                    float(shell_aabb.get("center_y", shell_aabb.get("y", 0.0)) or 0.0),
+                    float(shell_aabb.get("center_z", shell_aabb.get("z", 0.0)) or 0.0),
+                ],
+                "ring_radius": shell_r * 1.15 + 0.5,
+                "half_x": float(shell_aabb.get("half_x", shell_r) or shell_r),
+                "half_z": float(shell_aabb.get("half_z", shell_r) or shell_r),
+            }
+
+    platform_radius = float(getattr(composer, "_platform_radius", 0.0) or 0.0)
+    if platform_radius > 1e-6:
+        return {
+            "anchor_type": "platform",
+            "capability": capability,
+            "zone_id": zone_id,
+            "center": center,
+            "ring_radius": platform_radius * 1.05 + 0.5,
+            "half_x": platform_radius,
+            "half_z": platform_radius,
+        }
+
+    size = getattr(volume, "size", None) if volume is not None else None
+    if size and len(size) >= 2:
+        width = float(size[0] or 0.0)
+        depth = float(size[1] or 0.0)
+        if width > 1e-6 and depth > 1e-6:
+            try:
+                explicit_radius = float(params.get("radius", 0.0) or 0.0)
+            except Exception:
+                explicit_radius = 0.0
+            if explicit_radius > 1e-6:
+                ring_r = explicit_radius
+            else:
+                try:
+                    margin = float(params.get("margin", 1.0) or 1.0)
+                except Exception:
+                    margin = 1.0
+                ring_r = max(2.0, min(width, depth) / 2.0 - max(0.0, margin))
+            return {
+                "anchor_type": "zone_volume",
+                "capability": capability,
+                "zone_id": zone_id,
+                "center": center,
+                "ring_radius": ring_r,
+                "half_x": width / 2.0,
+                "half_z": depth / 2.0,
+            }
+
+    return {
+        "anchor_type": "none",
+        "capability": capability,
+        "zone_id": zone_id,
+        "center": center,
+        "ring_radius": 0.0,
+        "half_x": 0.0,
+        "half_z": 0.0,
+    }
+
+
+def _shell_generation_hint(zone) -> str:
+    """Build shell prompt hint from aspects; no entrance aspect means no door/curtain bias."""
+    hints = ["完整建筑外观，入口与建筑风格一体，不要生成剖面或露出内部"]
+    shell_params = _aspect_params(zone, "shell_dressing")
+    entrance_params = _aspect_params(zone, "entrance")
+    style_context = getattr(zone, "style_context", {}) or {}
+    style = str(shell_params.get("style") or "").strip()
+    if style:
+        hints.append(style)
+    palette = style_context.get("material_palette")
+    if isinstance(palette, list) and palette:
+        hints.append("材质调性: " + ", ".join(str(p) for p in palette[:4] if str(p).strip()))
+    terrain_mood = str(style_context.get("terrain_mood") or "").strip()
+    if terrain_mood:
+        hints.append("环境气质: " + terrain_mood)
+    if entrance_params:
+        entrance_hint = str(entrance_params.get("hint") or "").strip()
+        entrance_style = str(entrance_params.get("style") or "").strip()
+        if entrance_hint:
+            hints.append(entrance_hint)
+        elif entrance_style:
+            hints.append(f"入口形式: {entrance_style}")
+    return "，".join(hints)
 
 
 
@@ -482,6 +863,8 @@ class SceneComposer:
         # M2 步骤 14a：ZoneTree（可选）。为 None 时退化成单 Zone + enclosure=box，
         # 几何与旧 room_size 逻辑完全一致，零功能损失。
         self.zone_tree = zone_tree
+        self._last_zone_decompose_snapshot = None
+        self._last_zone_decompose_spec = None
 
     def _get_room_zone(self):
         """返回用于"物体布局"的 Zone（物体摆进它的体积里）。
@@ -520,6 +903,7 @@ class SceneComposer:
         zones_spec = self._llm_decompose(text)
         if not zones_spec:
             return None
+        self._last_zone_decompose_spec = zones_spec
         try:
             tree = self._build_zone_tree(zones_spec)
         except Exception as e:
@@ -533,7 +917,52 @@ class SceneComposer:
             return None
         logger.info("[SceneComposer] 场景分解为 %d 个 Zone: %s",
                     len(zones), [f"{z.name}({z.enclosure})" for z in zones])
+        self._save_zone_decompose_snapshot(text, zones_spec, tree)
         return tree
+
+    def _save_zone_decompose_snapshot(self, text: str, zones_spec: List[Dict[str, Any]], tree) -> None:
+        """Persist the latest decompose JSON for F5 review without touching repo files."""
+        import tempfile as _tf, time as _time
+
+        try:
+            zones = []
+            if tree is not None:
+                for z in tree.list_all_zones():
+                    zones.append({
+                        "zone_id": z.zone_id,
+                        "name": z.name,
+                        "role": z.role,
+                        "enclosure": z.enclosure,
+                        "volume": {
+                            "center": list(getattr(z.volume, "center", []) or []),
+                            "size": list(getattr(z.volume, "size", []) or []),
+                        },
+                        "primary_shell_asset_id": z.primary_shell_asset_id,
+                        "style_context": dict(getattr(z, "style_context", {}) or {}),
+                        "aspects": [
+                            {
+                                "capability": a.capability,
+                                "params": dict(getattr(a, "params", {}) or {}),
+                            }
+                            for a in (getattr(z, "aspects", []) or [])
+                        ],
+                        "parent": z.metadata.get("parent"),
+                    })
+            payload = {
+                "prompt": text,
+                "raw_zones": zones_spec,
+                "normalized_zones": zones,
+            }
+            out_dir = os.path.join(_tf.gettempdir(), "corona_m2_f5_decompose")
+            os.makedirs(out_dir, exist_ok=True)
+            safe_scene = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.scene_name or "scene")[:48]
+            out_path = os.path.join(out_dir, f"{safe_scene}_{int(_time.time())}.json")
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            self._last_zone_decompose_snapshot = out_path
+            logger.info("[SceneComposer] Zone decompose snapshot saved: %s", out_path)
+        except Exception as e:
+            logger.warning("[SceneComposer] Zone decompose snapshot 保存失败（忽略）: %s", e)
 
     def _llm_decompose(self, text: str) -> List[Dict[str, Any]]:
         """调 LLM 把场景拆成 zones 列表。失败返回 []。"""
@@ -610,8 +1039,12 @@ class SceneComposer:
             if enclosure == "shell":
                 shell_name = (spec.get("shell_asset") or spec.get("name") or "").strip()
                 zone.primary_shell_asset_id = shell_name or None
+            if enclosure == "terrain":
+                zone.terrain_profile = _terrain_profile_from_spec(spec, zones_spec)
             zone.metadata["has_door"] = bool(spec.get("has_door"))
             zone.metadata["parent"] = spec.get("parent")
+            zone.metadata["raw_aspects"] = spec.get("aspects") if isinstance(spec.get("aspects"), list) else []
+            zone.style_context = spec.get("style_context") if isinstance(spec.get("style_context"), dict) else {}
             nodes[zid] = zone
             order.append(zid)
 
@@ -636,6 +1069,8 @@ class SceneComposer:
                     root = z
         if root is None:
             root = nodes[order[0]]
+        for zone in nodes.values():
+            normalize_zone_aspects(zone)
         return ZoneTree(root=root)
 
     def _collect_shell_assets(self) -> set:
@@ -956,22 +1391,23 @@ class SceneComposer:
 
         # 15a：shell 建筑（如蒙古包）当围合体不是家具。确保它在生成清单里（缺则补）。
         shell_names = self._collect_shell_assets()
-        # shell 入口引导（通用，不写 if 场景）：让入口与建筑风格一体（毡布门帘/布帘/拱门等
-        # 按建筑类型选），避免生成突兀的独立木门。对蒙古包→门帘、教堂→拱门，由 LLM 按类型判断。
-        # 注：模型生成不可控，prompt 只能引导、不保证每次都听话。
-        _SHELL_ENTRANCE_HINT = ("完整建筑外观，入口与建筑风格一体（蒙古包/帐篷类用毡布门帘或布帘，"
-                                "拱顶建筑用拱门），不要突兀的独立木门")
+        shell_hint_by_name = {}
+        if self.zone_tree is not None and self.zone_tree.root is not None:
+            for z in self.zone_tree.list_all_zones():
+                if (getattr(z, "enclosure", "") or "") == "shell" and z.primary_shell_asset_id:
+                    shell_hint_by_name[z.primary_shell_asset_id.strip()] = _shell_generation_hint(z)
         for sname in shell_names:
             matched = [it for it in items if (it.get("name") or "").strip() == sname]
+            shell_hint = shell_hint_by_name.get(sname) or "完整建筑外观，入口与建筑风格一体，不要生成剖面或露出内部"
             if matched:
-                # 已在清单（用户说了"蒙古包"）→ 追加入口引导到现有关键词
+                # 已在清单 → 追加 shell/aspect 引导；入口样式只由 entrance aspect 提供。
                 for it in matched:
                     kw = (it.get("keywords") or "").strip()
-                    it["keywords"] = (kw + ", " if kw else "") + _SHELL_ENTRANCE_HINT
+                    it["keywords"] = (kw + ", " if kw else "") + shell_hint
             else:
                 # 不在清单 → 补进来
                 items.insert(0, {"name": sname, "quantity": 1,
-                                 "keywords": f"{sname}, building exterior, {_SHELL_ENTRANCE_HINT}"})
+                                 "keywords": f"{sname}, building exterior, {shell_hint}"})
 
         extracted_total = len(items)
         truncated = 0
@@ -1048,6 +1484,7 @@ class SceneComposer:
                                      for n in shell_failed_gen])
         result["shell_expected"] = sorted(shell_names)
         result["shell_degraded"] = degraded
+        result["zone_decompose_snapshot"] = getattr(self, "_last_zone_decompose_snapshot", None)
         return result
 
     def _review_models(self, resolved: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1232,11 +1669,18 @@ class SceneComposer:
         width = size[0] if len(size) > 0 else 20.0
         depth = size[1] if len(size) > 1 else 20.0
 
-        # profile：zone 声明优先，未声明给默认 rolling（demo 草原够用；LLM 输出 type 留 15c-iii）
-        profile = getattr(zone, "terrain_profile", None)
-        if profile is None:
-            from ..data_model.zone_tree import TerrainProfile
-            profile = TerrainProfile(type="rolling", amplitude=0.8, frequency=0.35, seed=7)
+        from ..data_model.zone_tree import TerrainProfile
+        profile_params = _aspect_params(zone, "ground_profile")
+        cover_params = _aspect_params(zone, "ground_cover")
+        profile = TerrainProfile(
+            type=str(profile_params.get("type") or "flat"),
+            amplitude=float(profile_params.get("amplitude", 0.0) or 0.0),
+            frequency=float(profile_params.get("frequency", 1.0) or 1.0),
+            seed=int(profile_params.get("seed", 0) or 0),
+            material=str(profile_params.get("material") or "neutral"),
+            scatter=str(cover_params.get("scatter") or cover_params.get("kind") or "none"),
+            style_tags=[],
+        )
 
         # 平台半径：内嵌 shell/box 子 zone 的 footprint × 2.2（B 方案：宁大勿小，给足余量，
         # 保证 shell 真实脚印一定装得下；放 shell 时再夹回这个平台）。无子 zone → 无平台。
@@ -1249,29 +1693,33 @@ class SceneComposer:
         # 锚定链-2：存平台半径，供 _place_shells 夹回 + _generate_interior_floor 派生用。
         self._platform_radius = platform_radius
 
-        # 问题1（草原太小/看不到）：草原要足够开阔 + 随主建筑放大。
-        # 不依赖 platform_radius（可能为 0 导致不放大）——直接从子 zone 足迹估建筑尺寸。
-        # 绝对下限 40m 保证总是看得到大片草原；建筑越大草原越开阔（×6），通用不写死场景。
+        # 地形范围随主建筑放大；extent_factor 来自 ground_profile.params。
         building_extent = 0.0
         for sub in getattr(zone, "sub_zones", []) or []:
             if (getattr(sub, "enclosure", "") or "") in ("shell", "box"):
                 sw = sub.volume.size[0] if sub.volume.size else 4.0
                 sd = sub.volume.size[1] if len(sub.volume.size) > 1 else 4.0
                 building_extent = max(building_extent, max(sw, sd))
-        min_extent = max(40.0, building_extent * 6.0)
+        extent_factor = float(profile_params.get("extent_factor", 6.0) or 6.0)
+        min_extent = max(40.0, building_extent * extent_factor)
         width = max(width, min_extent)
         depth = max(depth, min_extent)
 
         tmp_dir = _os.path.join(_tf.gettempdir(), "corona_room_box")
         _os.makedirs(tmp_dir, exist_ok=True)
-        grass_mtl_path = _os.path.join(tmp_dir, "grass.mtl")
+        terrain_mtl_name = "terrain_style.mtl"
+        grass_mtl_path = _os.path.join(tmp_dir, terrain_mtl_name)
         terrain_path = _os.path.join(tmp_dir, "terrain.obj")
-        # 15c：草地绿材质（不透明）。Kd 偏黄绿，Ka 略暗——比中性灰更像草原。
+        material = str(getattr(profile, "material", "neutral") or "neutral")
+        scatter = str(getattr(profile, "scatter", "none") or "none")
+        # 15c：材质/散布来自 aspect params；无 aspect 时中性、不猜场景身份。
         with open(grass_mtl_path, "w", encoding="ascii") as f:
-            f.write("newmtl grass\nKa 0.20 0.32 0.12\nKd 0.36 0.55 0.22\n"
-                    "Ks 0.02 0.02 0.02\nNs 4.0\nd 1.0\n")
+            f.write(_terrain_mtl_text(material))
         with open(terrain_path, "w", encoding="ascii") as f:
-            f.write(_build_terrain_mesh_obj(width, depth, profile, platform_radius, grid=32))
+            f.write(_build_terrain_mesh_obj(
+                width, depth, profile, platform_radius, grid=32,
+                mtl_lib=terrain_mtl_name, mtl_name="terrain",
+            ))
 
         try:
             from CoronaCore.core.managers import scene_manager as _sm
@@ -1316,24 +1764,21 @@ class SceneComposer:
                     pass
             scene.add_actor(actor)
             _t.sleep(0.3)
-            logger.info("[SceneComposer] 地形(terrain)已创建: %.1f×%.1f m, type=%s, scale=%.1f, 抬高=%.2f",
-                        width, depth, getattr(profile, "type", "?"), s, -min_y)
+            logger.info("[SceneComposer] 地形(terrain)已创建: %.1f×%.1f m, type=%s, material=%s, scatter=%s, scale=%.1f, 抬高=%.2f",
+                        width, depth, getattr(profile, "type", "?"), material, scatter, s, -min_y)
         except Exception as e:
             logger.warning("[SceneComposer] 地形创建失败: %s", e)
 
-        # 15e：草/花散布层（terrain 之上叠加 billboard 草簇）。flat 地形不长草。
+        # 15e：地表覆盖散布层。只有 ground_cover aspect 显式声明时才生成；
+        # flat 地形也可有覆盖物，是否覆盖由 aspect 决定，不由场景关键词兜底。
         # actor 名用 __terrain_ 前缀（非 __room_，否则 _generate_room_box 的 __room_ 守卫
         # 会在 terrain+box 混合场景误挡盒子）。
-        if getattr(profile, "type", "flat") != "flat" and "__terrain_grass" not in existing:
+        if _has_aspect(zone, "ground_cover") and scatter != "none" and "__terrain_grass" not in existing:
             try:
                 grass_mtl_path = _os.path.join(tmp_dir, "grass_blade.mtl")
                 grass_obj_path = _os.path.join(tmp_dir, "grass_blade.obj")
                 with open(grass_mtl_path, "w", encoding="ascii") as f:
-                    # blade 草绿、flower 暖花色，双面不剔除
-                    f.write("newmtl blade\nKa 0.10 0.22 0.06\nKd 0.30 0.52 0.16\n"
-                            "Ks 0.0 0.0 0.0\nNs 1.0\nd 1.0\n"
-                            "newmtl flower\nKa 0.30 0.10 0.20\nKd 0.85 0.35 0.55\n"
-                            "Ks 0.0 0.0 0.0\nNs 1.0\nd 1.0\n")
+                    f.write(_scatter_mtl_text(scatter, material))
                 with open(grass_obj_path, "w", encoding="ascii") as f:
                     f.write(_build_grass_obj(width, depth, profile, platform_radius, count=160))
                 gactor = Actor(name="__terrain_grass", route=grass_obj_path,
@@ -1359,30 +1804,38 @@ class SceneComposer:
                         pass
                 scene.add_actor(gactor)
                 _t.sleep(0.2)
-                logger.info("[SceneComposer] 草/花散布层已铺设: 160 簇（平台外）")
+                logger.info("[SceneComposer] 地形散布层已铺设: %s, 160 簇（平台外）", scatter)
             except Exception as e:
                 logger.warning("[SceneComposer] 草/花散布失败（忽略）: %s", e)
 
 
-    def _generate_fence(self) -> None:
-        """木栏 dressing（任务D）：围绕 shell 真实脚印一圈（稍大），门那侧（+Z）留口。
+    def _generate_fence(self, boundary_params: Dict[str, Any] = None,
+                        anchor: Dict[str, Any] = None) -> None:
+        """boundary dressing：围绕 resolved anchor 一圈，门那侧（+Z）留口。
 
-        必须在 _place_shells 之后调——ring 半径从 self._shell_aabb 真实世界足迹派生
-        （锚定链：栏跟随主建筑实测脚印，不再靠平台半径估，才能"比蒙古包稍大一圈"）。
+        shell 场景优先跟随 self._shell_aabb 真实世界足迹；纯室外场景回退到
+        terrain platform / zone volume，避免 boundary 被 shell-only 路径卡死。
         引擎归一化 mesh 成单位盒 → 世界大小只认 scale；scale=2*ring_r 还原环径 + 抬地。
         __terrain_ 前缀 → 已在 AI 编辑排除列表（选项 B，背景环境不可手调）。
         """
         import os as _os, tempfile as _tf, time as _t, math as _math
 
-        aabbs = getattr(self, "_shell_aabb", {}) or {}
-        if not aabbs:
+        boundary_params = dict(boundary_params or {})
+        kind = str(boundary_params.get("kind") or "fence").strip().lower()
+        if kind not in ("fence", "wall", "hedge"):
+            kind = "fence"
+        material = str(boundary_params.get("material") or "").strip().lower()
+        if not material:
+            material = {"wall": "stone", "hedge": "greenery"}.get(kind, "wood")
+        try:
+            height = float(boundary_params.get("height", 1.1) or 1.1)
+        except Exception:
+            height = 1.1
+
+        anchor = dict(anchor or resolve_zone_anchor(self, None, "boundary"))
+        ring_r = float(anchor.get("ring_radius", 0.0) or 0.0)
+        if ring_r < 1e-6:
             return
-        shell_r = max(
-            max(a.get("half_x", 0.0), a.get("half_z", 0.0)) for a in aabbs.values()
-        )
-        if shell_r < 1e-6:
-            return
-        ring_r = shell_r * 1.15 + 0.5  # 比蒙古包真实脚印稍大一圈
 
         try:
             from CoronaCore.core.managers import scene_manager as _sm
@@ -1396,24 +1849,25 @@ class SceneComposer:
         if scene is None:
             return
         existing = {a.name for a in scene.get_actors()}
-        if "__terrain_fence" in existing:
+        if "__terrain_boundary" in existing or "__terrain_fence" in existing:
             return
 
         tmp_dir = _os.path.join(_tf.gettempdir(), "corona_room_box")
         _os.makedirs(tmp_dir, exist_ok=True)
-        fence_mtl_path = _os.path.join(tmp_dir, "fence.mtl")
-        fence_obj_path = _os.path.join(tmp_dir, "fence.obj")
+        fence_mtl_path = _os.path.join(tmp_dir, "boundary.mtl")
+        fence_obj_path = _os.path.join(tmp_dir, "boundary.obj")
         try:
             with open(fence_mtl_path, "w", encoding="ascii") as f:
-                # 木色（暖棕），不透明
-                f.write("newmtl wood\nKa 0.18 0.10 0.05\nKd 0.45 0.28 0.14\n"
-                        "Ks 0.02 0.02 0.02\nNs 4.0\nd 1.0\n")
+                f.write(_boundary_mtl_text(kind, material))
             with open(fence_obj_path, "w", encoding="ascii") as f:
                 # gap 朝 +Z（门洞默认朝向）= 角度 pi/2
                 f.write(_build_fence_obj(ring_r,
                                          gap_center_angle=_math.pi / 2.0,
-                                         gap_half_angle=0.5))
-            factor = Actor(name="__terrain_fence", route=fence_obj_path,
+                                         gap_half_angle=0.5,
+                                         mtl_lib="boundary.mtl",
+                                         kind=kind,
+                                         height=height))
+            factor = Actor(name="__terrain_boundary", route=fence_obj_path,
                            actor_type="mesh", parent_scene=scene)
             # 归一化后环径=单位盒 max 边=1 → scale=2*ring_r 让世界环半径=ring_r。
             s = 2.0 * ring_r
@@ -1427,7 +1881,8 @@ class SceneComposer:
                     fmin_y = float(faabb[1]) * s
             except Exception:
                 pass
-            factor.set_position([0.0, -fmin_y, 0.0], True)
+            center = anchor.get("center") or [0.0, 0.0, 0.0]
+            factor.set_position([float(center[0]), -fmin_y, float(center[2])], True)
             fmech = getattr(factor, "_mechanics", None)
             if fmech is not None:
                 try:
@@ -1436,16 +1891,16 @@ class SceneComposer:
                     pass
             scene.add_actor(factor)
             _t.sleep(0.2)
-            logger.info("[SceneComposer] 木栏已铺设: 围 shell 脚印 ring_r=%.2f, scale=%.1f, 门那侧留口",
-                        ring_r, s)
+            logger.info("[SceneComposer] 边界已铺设: kind=%s material=%s height=%.2f ring_r=%.2f scale=%.1f anchor=%s",
+                        kind, material, height, ring_r, s, anchor.get("anchor_type", "?"))
         except Exception as e:
-            logger.warning("[SceneComposer] 木栏铺设失败（忽略）: %s", e)
+            logger.warning("[SceneComposer] 边界铺设失败（忽略）: %s", e)
 
 
     def _generate_interior_floor(self, zone) -> None:
-        """M2 步骤 15b / 锚定链-3：为 shell zone 铺内皮地面（interior_skin 的 floor）。
+        """M2 步骤 15b / 锚定链-3：为 shell zone 铺内皮地面（interior_surface 的 floor）。
 
-        shell 建筑模型（蒙古包）是实心外观团块，没有可用内表面——进去后地面是黑的、
+        shell 建筑模型是实心外观团块，没有可用内表面——进去后地面是黑的、
         物体悬空（F5 截图2）。这里程序生成一块地面（地毯），不靠外壳内表面。
         锚定链：地毯尺寸**从 shell 真实世界足迹派生**（self._shell_aabb，_place_shells 量得），
         而非抽象 volume——这是修"地毯与蒙古包不贴合、露天空缝"穿模的关键。
@@ -1467,24 +1922,22 @@ class SceneComposer:
             depth = size[1] if len(size) > 1 else 4.0
             logger.info("[SceneComposer] 内皮地面回退抽象 volume（无真实足迹）: %.2f×%.2f m", width, depth)
 
-        # interior_skin 参数化材质（默认地毯暖色；zone.interior_skin 可覆盖）
-        floor_mat = "carpet"
-        skin = getattr(zone, "interior_skin", None)
-        if skin is not None and getattr(skin, "floor_material", None):
-            floor_mat = str(skin.floor_material)
+        # interior_surface 参数化材质；缺失时中性地面，不写死 carpet。
+        surface_params = _aspect_params(zone, "interior_surface")
+        floor_mat = str(surface_params.get("floor_material") or "neutral")
+        floor_shape = _select_interior_floor_shape(width, depth, surface_params)
 
         tmp_dir = _os.path.join(_tf.gettempdir(), "corona_room_box")
         _os.makedirs(tmp_dir, exist_ok=True)
         carpet_mtl_path = _os.path.join(tmp_dir, "carpet.mtl")
         carpet_obj_path = _os.path.join(tmp_dir, "carpet.obj")
-        # 地毯暖色（红棕），不透明
         with open(carpet_mtl_path, "w", encoding="ascii") as f:
-            f.write(f"newmtl {floor_mat}\nKa 0.20 0.10 0.08\nKd 0.55 0.28 0.20\n"
-                    "Ks 0.02 0.02 0.02\nNs 6.0\nd 1.0\n")
+            f.write(_surface_mtl_text(floor_mat))
         with open(carpet_obj_path, "w", encoding="ascii") as f:
-            # 圆盘地板：shell 主建筑（蒙古包）底是圆形，方地板四角露在外/不贴合 →
-            # 用圆盘跟圆底一致（footprint 方形时 scale[w,1,d] 退化成椭圆，通用）。
-            f.write(_build_disc_obj(mtl_lib="carpet.mtl", mtl_name=floor_mat))
+            if floor_shape == "quad":
+                f.write(_build_floor_obj(mtl_lib="carpet.mtl", mtl_name=floor_mat))
+            else:
+                f.write(_build_disc_obj(mtl_lib="carpet.mtl", mtl_name=floor_mat))
 
         try:
             from CoronaCore.core.managers import scene_manager as _sm
@@ -1517,8 +1970,8 @@ class SceneComposer:
                     pass
             scene.add_actor(actor)
             _t.sleep(0.3)
-            logger.info("[SceneComposer] 内皮地面已铺设: %.1f×%.1f m (材质=%s)",
-                        width * INSCRIBE, depth * INSCRIBE, floor_mat)
+            logger.info("[SceneComposer] 内皮地面已铺设: %.1f×%.1f m (材质=%s shape=%s)",
+                        width * INSCRIBE, depth * INSCRIBE, floor_mat, floor_shape)
         except Exception as e:
             logger.warning("[SceneComposer] 内皮地面铺设失败: %s", e)
 
@@ -1737,9 +2190,22 @@ class SceneComposer:
             for z in self.zone_tree.list_all_zones():
                 if (getattr(z, "enclosure", "") or "") == "shell":
                     self._generate_interior_floor(z)
-        # 锚定链-5：shell 放完、_shell_aabb 已填 → 围 shell 真实脚印一圈铺木栏
-        # （比平台估更准，"比蒙古包稍大一圈"）。归一化-感知 scale 修过。
-        self._generate_fence()
+        # 锚定链-5：boundary 是 opt-in aspect；没有声明 boundary 就不生成围栏/边界物。
+        # gate 放在调用边界，_generate_fence 只保留几何生成能力。
+        if self.zone_tree is not None and self.zone_tree.root is not None:
+            boundary_zone = next(
+                (z for z in self.zone_tree.list_all_zones() if _has_aspect(z, "boundary")),
+                None,
+            )
+            if boundary_zone is not None:
+                boundary_params = _aspect_params(boundary_zone, "boundary")
+                boundary_anchor = resolve_zone_anchor(
+                    self, boundary_zone, "boundary", params=boundary_params,
+                )
+                self._generate_fence(
+                    boundary_params,
+                    anchor=boundary_anchor,
+                )
 
         extracted = len(all_items)
         model_count = len(resolved)

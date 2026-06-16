@@ -1,7 +1,9 @@
-"""GM 仲裁器（突击方案 COMMIT 7 / §3.2）。
+"""GM 仲裁器历史兼容模块。
 
-定位：桌游隐喻 —— GM = 地下城主，负责编排、裁定、推进；房主 = 桌主，拥有拍板权。
-GM 不负责解决 race（单写者队列已解决），只负责**语义冲突仲裁**。
+LANChat transport/state has moved to C++ NetworkSystem. New GM orchestration
+lives in plugins.AITool.services.lanchat_agent_orchestrator and consumes C++
+agent triggers. This module keeps the old data classes available for legacy
+imports, but it must not own chat state or integrate with a Python chat server.
 
 权限模型（写死，不做动态仲裁）：GM > 房主 > 玩家。
 
@@ -150,20 +152,15 @@ class GMArbiter:
 
 
 def integrate_gm_into_chat_server(chat_server: Any) -> None:
-    """把 GM 仲裁器集成进 LANChat server（突击方案接入点）。
+    """Deprecated no-op.
 
-    在 `_dispatch_mentions` 前插入冲突检测 + GM 提案环节：
-    1. 用户消息入 GM 队列（而非立即派发）
-    2. 每轮消息后检测冲突
-    3. 有冲突 → GM 提案 → 房主确认 → 按顺序派发
-    4. 无冲突 → 直接派发
-
-    当前简化版：在 chat_server 里加 `gm_arbiter` 属性，修改 `_dispatch_mentions` 逻辑。
-    完整版需改 `_on_message` 入口。
+    The Python chat_server was removed by the C++ NetworkSystem migration.
+    Use AITool.services.lanchat_agent_orchestrator instead.
     """
-    from .gm_arbiter import GMArbiter
-    chat_server.gm_arbiter = GMArbiter()
-    logger.info("[GMArbiter] 已集成进 LANChat server（房主侧）")
+    logger.warning(
+        "[GMArbiter] integrate_gm_into_chat_server is deprecated; "
+        "LANChat is owned by C++ NetworkSystem"
+    )
 
 
 __all__ = [

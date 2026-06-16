@@ -4,6 +4,8 @@ import logging
 import threading
 from typing import Any, Callable
 
+from .lanchat_agent_orchestrator import LanChatAgentOrchestrator
+
 
 class LANChatAgentWorker:
     """Poll C++ LANChat agent triggers and return replies through C++."""
@@ -19,7 +21,7 @@ class LANChatAgentWorker:
         self._sleep_seconds = sleep_seconds
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
-        self._agent: Any = None
+        self._orchestrator: LanChatAgentOrchestrator | None = None
         self._logger = logging.getLogger(__name__)
 
     def start(self) -> None:
@@ -54,15 +56,20 @@ class LANChatAgentWorker:
         if not trigger:
             return False
 
-        agent_id = str(trigger.get("agent_id") or "")
-        agent_name = str(trigger.get("agent_name") or "Agent")
         try:
-            reply = self._run_agent(trigger)
+            result = self._run_agent(trigger)
         except Exception as exc:
             self._logger.debug("LANChat AI agent failed: %s", exc)
+            agent_id = str(trigger.get("agent_id") or "agent")
+            agent_name = str(trigger.get("agent_name") or "Agent")
             reply = f"AI agent failed: {exc}"
+        else:
+            agent_id = result.sender_id
+            agent_name = result.sender_name
+            reply = result.text
 
         try:
+            self._broadcast_confirmed_action(getattr(result, "action_payload", None))
             return bool(
                 self._corona_engine.network_send_agent_reply(
                     agent_id,
@@ -87,17 +94,32 @@ class LANChatAgentWorker:
             and hasattr(self._corona_engine, "network_send_agent_reply")
         )
 
-    def _get_agent(self) -> Any:
-        if self._agent is None:
-            factory = self._agent_factory or self._default_agent_factory
-            self._agent = factory()
-        return self._agent
+    def _get_orchestrator(self) -> LanChatAgentOrchestrator:
+        if self._orchestrator is None:
+            self._orchestrator = LanChatAgentOrchestrator(
+                agent_factory=self._agent_factory or self._default_agent_factory,
+            )
+        return self._orchestrator
 
-    def _run_agent(self, trigger: dict[str, Any]) -> str:
-        agent = self._get_agent()
-        persona = str(trigger.get("persona") or "")
-        messages = self._messages_from_trigger(trigger)
-        return str(agent(persona, messages))
+    def _run_agent(self, trigger: dict[str, Any]):
+        return self._get_orchestrator().handle_trigger(trigger)
+
+    def _broadcast_confirmed_action(self, payload: dict[str, Any] | None) -> None:
+        if not payload or payload.get("status") != "confirmed":
+            return
+        if not hasattr(self._corona_engine, "network_broadcast_intent"):
+            return
+        source_user_id = str(payload.get("source_user_id") or "unknown")
+        tooltip = str(payload.get("intent_text") or payload.get("proposal_id") or "")
+        try:
+            self._corona_engine.network_broadcast_intent(
+                source_user_id,
+                tooltip,
+                [0.0, 0.0, 0.0],
+                "confirmed_gm_action",
+            )
+        except Exception as exc:
+            self._logger.debug("Failed to broadcast confirmed GM action: %s", exc)
 
     @staticmethod
     def _messages_from_trigger(trigger: dict[str, Any]) -> list[str]:

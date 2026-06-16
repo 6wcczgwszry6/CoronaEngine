@@ -11,6 +11,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -448,10 +449,10 @@ void BindAll(nanobind::module_& m) {
     }, nb::arg("agent_id"), nb::arg("agent_name"), nb::arg("text"),
        "Send an AI agent reply through the C++ reliable collaboration channel.");
 
-    m.def("network_pop_lanchat_agent_trigger", []() -> nb::object {
-        auto sys = get_network_system();
-        if (!sys) {
-            return nb::none();
+	    m.def("network_pop_lanchat_agent_trigger", []() -> nb::object {
+	        auto sys = get_network_system();
+	        if (!sys) {
+	            return nb::none();
         }
         auto trigger = sys->lanchat_pop_agent_trigger();
         if (!trigger.has_value()) {
@@ -481,12 +482,62 @@ void BindAll(nanobind::module_& m) {
             item["ts"] = message.timestamp_ms / 1000;
             history.append(item);
         }
-        result["history"] = history;
-        return nb::object(result);
-    }, "Pop one pending LANChat AI agent trigger owned by this peer.");
+	        result["history"] = history;
+	        return nb::object(result);
+	    }, "Pop one pending LANChat AI agent trigger owned by this peer.");
 
-    m.def("network_lock_object", [](const std::string& object_id,
-                                     const std::string& user_id,
+	    m.def("network_lanchat_history_snapshot", [](int limit) -> nb::list {
+	        nb::list history;
+	        auto sys = get_network_system();
+	        if (!sys) {
+	            return history;
+	        }
+	        const auto& messages = sys->lanchat_history();
+	        const size_t total = messages.size();
+	        const size_t keep = limit > 0 ? std::min<size_t>(static_cast<size_t>(limit), total) : total;
+	        const size_t start = total > keep ? total - keep : 0;
+	        for (size_t i = start; i < total; ++i) {
+	            const auto& message = messages[i];
+	            nb::dict item;
+	            item["message_id"] = message.message_id;
+	            item["sender_id"] = message.sender_id;
+	            item["room_id"] = message.room_id;
+	            item["seq"] = message.seq;
+	            item["from"] = message.sender_name;
+	            item["text"] = message.text;
+	            item["ts"] = message.timestamp_ms / 1000;
+	            history.append(item);
+	        }
+	        return history;
+	    }, nb::arg("limit") = 20, "Return a recent LANChat history snapshot for Python AI/GM logic.");
+
+	    m.def("network_lanchat_agents_snapshot", []() -> nb::list {
+	        nb::list agents;
+	        auto sys = get_network_system();
+	        if (!sys) {
+	            return agents;
+	        }
+	        for (const auto& agent : sys->lanchat_agents()) {
+	            nb::dict item;
+	            item["agent_id"] = agent.agent_id;
+	            item["name"] = agent.name;
+	            item["persona"] = agent.persona;
+	            item["owner"] = agent.owner_id;
+	            agents.append(item);
+	        }
+	        return agents;
+	    }, "Return the C++ LANChat agent roster for Python AI/GM logic.");
+
+	    m.def("network_send_system_message", [](const std::string& sender_id,
+	                                             const std::string& sender_name,
+	                                             const std::string& text) -> bool {
+	        auto sys = get_network_system();
+	        return sys && sys->lanchat_send_agent_reply(sender_id, sender_name, text).accepted;
+	    }, nb::arg("sender_id"), nb::arg("sender_name"), nb::arg("text"),
+	       "Send a GM/system message through the C++ reliable LANChat channel.");
+
+	    m.def("network_lock_object", [](const std::string& object_id,
+	                                     const std::string& user_id,
                                      const std::string& operation) -> bool {
         auto sys = get_network_system();
         return sys && sys->lanchat_lock_object(

@@ -71,6 +71,8 @@ def run_progressive_workflow(
         engine_gate=engine_gate,
         scene_name=composer.scene_name or "progressive_scene",
     )
+    progress_events: List[str] = []
+    session.set_progress_sink(progress_events.append)
 
     # 设置基线快照（框架已生成，作为初始状态）
     initial_snapshot = _capture_viewport_snapshot(composer)
@@ -140,6 +142,18 @@ def run_progressive_workflow(
     # 8. 返回（格式与 _run_original_workflow 一致）
     imported = prog_result.get("imported", [])
     failed = [it["name"] for it in resolved if it["name"] not in imported]
+    final_report = prog_result.get("final_report")
+    final_report_text = (
+        final_report.to_user_text()
+        if hasattr(final_report, "to_user_text")
+        else None
+    )
+    vlm_report = _run_vlm_advisory_review(imported, engine_gate)
+    vlm_review_text = (
+        vlm_report.to_user_text()
+        if hasattr(vlm_report, "to_user_text")
+        else None
+    )
     return {
         "items": resolved,
         "imported": imported,
@@ -149,9 +163,66 @@ def run_progressive_workflow(
         "scene_path": None,  # 渐进式不用 scene.json
         "error": None,
         "progressive": True,
-        "final_report": prog_result.get("final_report"),
+        "final_report": final_report,
+        "final_report_text": final_report_text,
         "phases_run": prog_result.get("phases_run", []),
+        "progress_events": progress_events,
+        "progress_timeline": prog_result.get("progress_timeline", []),
+        "operation_log": _serialize_operation_log(getattr(session, "operation_log", [])),
+        "operation_count": len(getattr(session, "operation_log", [])),
+        "round": prog_result.get("round"),
+        "vlm_review": vlm_report,
+        "vlm_review_text": vlm_review_text,
+        "vlm_review_skipped": list(getattr(vlm_report, "skipped", []) or []),
+        "vlm_review_timed_out": list(getattr(vlm_report, "timed_out", []) or []),
     }
+
+
+def _run_vlm_advisory_review(imported: List[str], engine_gate: Any) -> Any:
+    """Run the optional VLM outer loop; failures are advisory-only."""
+    try:
+        from .model_reviewer import _capture_single_model, _vlm_review_model
+        from .vlm_review_loop import review_models_async
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[ProgressiveWorkflow] VLM 外回路不可用，跳过: %s", exc)
+        return None
+
+    max_targets = int(os.getenv("PROGRESSIVE_VLM_MAX_TARGETS", "4") or "4")
+    targets = [
+        {"actor_id": actor_id, "model_name": actor_id, "model_type": actor_id}
+        for actor_id in imported[:max(0, max_targets)]
+    ]
+    if not targets:
+        return None
+    try:
+        return review_models_async(
+            targets,
+            capture_fn=_capture_single_model,
+            review_fn=_vlm_review_model,
+            engine_gate=engine_gate,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ProgressiveWorkflow] VLM 外回路异常，已跳过: %s", exc)
+        return None
+
+
+def _serialize_operation_log(entries: List[Any]) -> List[Dict[str, Any]]:
+    """把 OperationLogEntry 转成 compose() 可直接返回的普通 dict。"""
+    out: List[Dict[str, Any]] = []
+    for entry in entries:
+        out.append({
+            "op_id": getattr(entry, "op_id", None),
+            "round_id": getattr(entry, "round_id", None),
+            "timestamp": getattr(entry, "timestamp", None),
+            "source": getattr(entry, "source", None),
+            "op_type": getattr(entry, "op_type", None),
+            "actor_id": getattr(entry, "actor_id", None),
+            "user_id": getattr(entry, "user_id", None),
+            "before": getattr(entry, "before", None),
+            "after": getattr(entry, "after", None),
+            "intent_text": getattr(entry, "intent_text", None),
+        })
+    return out
 
 
 def _capture_viewport_snapshot(composer: Any) -> Dict[str, Any]:

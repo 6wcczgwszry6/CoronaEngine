@@ -152,15 +152,29 @@
         class="absolute inset-0 bg-black/50 flex items-center justify-center z-10"
         @click.self="showAddAgent = false"
       >
-        <div class="bg-[#2a2a2a] p-4 rounded w-72 space-y-3">
-          <div class="text-sm text-gray-200">添加 AI 助手</div>
-          <input v-model="agentForm.name" placeholder="助手名字（如 小策）" :class="inputCls" />
-          <textarea
-            v-model="agentForm.persona"
-            placeholder="人设提示词（可选，如：你是资深关卡策划）"
-            rows="3"
-            :class="inputCls"
-          ></textarea>
+	        <div class="bg-[#2a2a2a] p-4 rounded w-72 space-y-3">
+	          <div class="text-sm text-gray-200">添加 AI 助手</div>
+	          <div class="space-y-2">
+	            <div class="text-[11px] text-gray-400">快速模板</div>
+	            <div class="grid grid-cols-3 gap-1.5">
+	              <button
+	                v-for="role in roleTemplates"
+	                :key="role.key"
+	                class="px-2 py-1 rounded bg-[#3a3a3a] text-xs text-gray-200 hover:bg-[#84A65B]/70"
+	                :title="role.hint"
+	                @click="selectRoleTemplate(role)"
+	              >
+	                {{ role.name }}
+	              </button>
+	            </div>
+	          </div>
+	          <input v-model="agentForm.name" placeholder="助手名字（如 小策）" :class="inputCls" />
+	          <textarea
+	            v-model="agentForm.persona"
+	            placeholder="人设提示词（可选，也可直接写自定义角色）"
+	            rows="3"
+	            :class="inputCls"
+	          ></textarea>
           <div class="flex gap-2">
             <button class="flex-1 py-1.5 rounded bg-[#3a3a3a] text-gray-200 text-sm" @click="showAddAgent = false">取消</button>
             <button class="flex-1 py-1.5 rounded bg-[#84A65B] text-white text-sm" @click="onAddAgent">添加</button>
@@ -183,6 +197,39 @@ const showAddAgent = ref(false);
 const agentForm = reactive({ name: '', persona: '' });
 const mentionCandidates = ref([]);
 const msgRef = ref(null);
+
+const roleTemplates = [
+  {
+    key: 'elder',
+    name: '长者',
+    persona: '长者',
+    hint: '沉稳、传统、实用、安全、秩序感',
+  },
+  {
+    key: 'little_girl',
+    name: '小女孩',
+    persona: '小女孩',
+    hint: '明亮、可爱、装饰性强、童趣、柔和颜色',
+  },
+  {
+    key: 'bandit',
+    name: '山贼',
+    persona: '山贼',
+    hint: '粗犷、木质、营地感、防御性、战利品',
+  },
+  {
+    key: 'scholar',
+    name: '学者',
+    persona: '学者',
+    hint: '书籍、秩序、研究工具、安静区域',
+  },
+  {
+    key: 'merchant',
+    name: '商人',
+    persona: '商人',
+    hint: '摊位、货物、展示、交易动线',
+  },
+];
 
 const form = reactive({
   room: '',
@@ -254,6 +301,11 @@ async function onAddAgent() {
   agentForm.name = '';
   agentForm.persona = '';
   showAddAgent.value = false;
+}
+
+function selectRoleTemplate(role) {
+  agentForm.name = role.name;
+  agentForm.persona = role.persona;
 }
 
 async function onRemoveAgent(agentId) {
