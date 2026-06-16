@@ -161,6 +161,52 @@ D:\Documents\GitHub\CoronaExample\test_vision\render_scene\cbox\vision_scene.jso
 
 剩余风险：尚未通过真实 CEF UI 自动化验证 Object 面板输入到 native viewport 的完整链路；后续 task 6 应补可重复 E2E scene/harness。
 
+## Task 3 实施记录：gizmo drag end 持久化
+
+起点提交：`c5ea6967 chore: mark start of gizmo persistence task`
+
+代码提交：`23a02411 fix: persist gizmo transforms on drag end`
+
+### 宏观检查
+
+本任务没有把保存逻辑散落到 Object 面板、MainPage pointerup 或每帧 move 回调里，也没有让 gizmo move 帧高频写盘。最终方案是在 gizmo 控制器里形成统一的 transform commit 边界：C++ drag end 成功回包确认后，前端只触发一次持久化；实时 viewport 更新仍继续由 SharedDataHub 快速通道负责。
+
+实施中发现一个局部最优风险：如果只在 JS 端记录“end 命令已发出”，那么乱序到达的旧 move 回包可能提前触发保存。为避免这个问题，C++ `actor-gizmo-transform` 回包补充 `phase` 字段，JS 只在 `commitRequested && payload.phase === "end"` 时 commit。
+
+### 实施过程
+
+- `src/systems/ui/cef/cef_realtime_bridge.cpp` 的 gizmo transform payload 新增 `phase`，让前端能区分 start/move/end 回包。
+- `createViewportGizmoController()` 新增 `onTransformCommit` 回调。
+- `beginDrag()` 初始化 `commitRequested=false`。
+- `endDrag()` 只在成功发送 end 命令后标记 `commitRequested=true`，不会直接写盘。
+- `handleTransform()` 仍先更新 gizmo state 和 Object 面板 transform；只有收到同一 drag 的成功 end 回包时，才调用 `onTransformCommit(sceneId, actorName, actorType, transform)`，随后清空 `activeDrag`。
+- `MainPage.vue` 接入 `onTransformCommit`，调用已有 `sceneService.saveActor(sceneId, actorName)`，失败时记录 `Actor gizmo transform save failed`，不阻断实时 transform。
+- `viewportGizmo.test.mjs` 增加持久化时序测试：move 回包不保存；end 命令发出后，即使先收到旧 move 回包也不保存；只有 end 回包会保存一次。
+
+### 验证记录
+
+提交 `23a02411` 前已执行：
+
+- `.\third_party\node-v22.19.0-win-x64\node.exe editor\Frontend\src\utils\viewportGizmo.test.mjs`：通过，覆盖 gizmo commit 时序和乱序 move 回包不保存。
+- `python -m unittest discover -s editor\CoronaCore\tests -p "test*.py"`：通过，9 tests OK。
+- `$env:PATH = "<repo>\third_party\node-v22.19.0-win-x64;$env:PATH"; npm --prefix editor\Frontend run lint`：通过，0 errors，保留既有 66 warnings。
+- `$env:PATH = "<repo>\third_party\node-v22.19.0-win-x64;$env:PATH"; npm --prefix editor\Frontend run build`：通过；仅保留既有 Vite dynamic/static import chunk warnings。
+- `cmake --build D:/Documents/GitHub/CoronaEngine/build --config RelWithDebInfo --target corona_engine -- --quiet`，通过 VS DevCmd wrapper 执行：通过。完整日志：`build\agent-build.log`。
+- `git diff --check`：通过。
+
+### E2E / 手动验证记录
+
+当前 CLI 仍没有可自动驱动 CEF viewport gizmo 的 E2E harness，因此真实 UI 拖拽未自动执行。需要在 Editor 中手动复核：
+
+1. 打开含有 actor/model 的 scene。
+2. 选中 actor/model，使用 viewport gizmo 分别执行 move、rotate、scale 拖拽。
+3. 拖拽过程中预期 native viewport 实时更新，且不会频繁写盘。
+4. 松开鼠标后预期 C++ `actor-gizmo-transform` end 回包触发一次 `saveActor(sceneId, actorName)`。
+5. 切换 scene 或重启 Editor 后，预期该 actor/model 的 position、rotation、scale 与松手后的最终 transform 一致。
+6. 对 scale gizmo 复核 bounds center compensation：缩放后保存的 position/scale 应与 viewport 最终结果一致。
+
+剩余风险：尚未通过真实 CEF UI 自动化验证 pointerup -> C++ end 回包 -> `saveActor` -> `.scene` 持久化的完整链路；后续 task 6 应补可重复 E2E scene/harness。
+
 ## Task 1 实施记录：已有 actor 的 set_model() 真正替换 geometry/profile
 
 代码提交：`61a90a46 fix: replace actor model profiles`

@@ -156,6 +156,37 @@
 - 不要在每帧拖拽时写盘。
 - 最好让 Object 面板数值输入和 gizmo 共用同一个 commit 语义。
 
+执行状态：已实施，起点提交 `c5ea6967 chore: mark start of gizmo persistence task`，代码提交 `23a02411 fix: persist gizmo transforms on drag end`。
+
+实施摘要：
+
+- C++ `actor-gizmo-transform` payload 新增 `phase`，前端可以可靠区分 start/move/end 回包。
+- `createViewportGizmoController()` 新增 `onTransformCommit` 回调；drag move 继续只做实时同步，drag end 成功发送后只标记等待 commit。
+- 前端只在同一 drag 的成功 end 回包到达时触发 `onTransformCommit`，避免旧 move 回包乱序到达时误保存。
+- `MainPage.vue` 接入统一 commit，调用已有 `sceneService.saveActor(sceneId, actorName)` 写盘，失败时记录错误。
+- 新增/扩展 `viewportGizmo.test.mjs`，验证 move 不保存、end 后旧 move 回包仍不保存、end 回包才保存一次。
+
+宏观检查结果：
+
+- 本次没有引入每帧保存，也没有把保存分散到多个 UI 组件；保存边界集中在 gizmo controller 的 end 回包确认处。
+- 补 C++ `phase` 字段后，跨语言协议比单纯 JS 标记更稳，避免为了当前测试通过而接受乱序回包风险。
+- 仍然以 Corona actor/SharedDataHub 为实时源，持久化只在用户完成一次 gizmo 编辑后提交，没有扩大 native、内置 Vision、external Vision 的多源状态。
+
+验证摘要：
+
+- 通过：`node editor\Frontend\src\utils\viewportGizmo.test.mjs`，覆盖 commit 时序和乱序 move 回包。
+- 通过：CoronaCore 全量 discover，9 tests OK。
+- 通过：前端 lint，0 errors，既有 66 warnings。
+- 通过：前端 build，仅既有 Vite chunk warnings。
+- 通过：C++ `corona_engine` 增量 build，日志 `build\agent-build.log`。
+- 通过：`git diff --check`。
+- 真实 CEF viewport gizmo E2E 尚无自动 harness，手动验证步骤与剩余风险已写入 `implementation.md`。
+
+下一条任务前的宏观提醒：
+
+- 第 4 条 material adapter/signature 不能只加 signature 触发 rebuild，否则会出现“重建了但材质没变”的假同步。
+- 开始第 4 条前必须重新阅读 `implementation.md`、`TaskSplitting.md`、`AGENTS.md`，确认文档和代码提交均已完成，并先做起点提交。
+
 ### 4. 扩展内置 Vision material adapter 和 signature
 
 目标：让 native 已暴露的材质编辑在内置 Vision 中有明确同步能力或明确降级规则。
