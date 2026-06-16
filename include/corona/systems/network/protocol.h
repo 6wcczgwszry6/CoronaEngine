@@ -66,6 +66,8 @@ enum class MessageType : uint8_t {
     CHAT_AGENT_REMOVE = 0x25, // LANChat agent roster remove
     CHAT_AGENT_TRIGGER = 0x26, // LANChat agent invocation request
     CHAT_AGENT_REPLY = 0x27, // LANChat agent invocation reply
+    CHAT_HISTORY_SNAPSHOT = 0x28, // LANChat full message history snapshot
+    CHAT_JOIN_REJECT = 0x29, // LANChat join rejected by host
 };
 
 // ============================================================================
@@ -461,6 +463,52 @@ inline std::vector<uint8_t> build_chat_member_update(
         write_string(buf, member.status);
         write_u64(buf, member.last_seen_ms);
     }
+    return buf;
+}
+
+inline std::vector<uint8_t> build_chat_history_snapshot(
+    const std::string& room_id,
+    const std::vector<LanChatMessage>& history)
+{
+    size_t payload_size = 1 + 2 + room_id.size() + 2;
+    for (const auto& message : history) {
+        payload_size += 2 + message.message_id.size();
+        payload_size += 2 + message.sender_id.size();
+        payload_size += 2 + message.room_id.size();
+        payload_size += 8;
+        payload_size += 2 + message.sender_name.size();
+        payload_size += 2 + message.text.size();
+        payload_size += 8;
+    }
+
+    std::vector<uint8_t> buf;
+    buf.reserve(payload_size);
+    write_u8(buf, static_cast<uint8_t>(MessageType::CHAT_HISTORY_SNAPSHOT));
+    write_string(buf, room_id);
+    write_u16(buf, static_cast<uint16_t>(history.size()));
+    for (const auto& message : history) {
+        write_string(buf, message.message_id);
+        write_string(buf, message.sender_id);
+        write_string(buf, message.room_id);
+        write_u64(buf, message.seq);
+        write_string(buf, message.sender_name);
+        write_string(buf, message.text);
+        write_u64(buf, message.timestamp_ms);
+    }
+    return buf;
+}
+
+inline std::vector<uint8_t> build_chat_join_reject(
+    const std::string& room_id,
+    const std::string& code,
+    const std::string& reason)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 2 + room_id.size() + 2 + code.size() + 2 + reason.size());
+    write_u8(buf, static_cast<uint8_t>(MessageType::CHAT_JOIN_REJECT));
+    write_string(buf, room_id);
+    write_string(buf, code);
+    write_string(buf, reason);
     return buf;
 }
 

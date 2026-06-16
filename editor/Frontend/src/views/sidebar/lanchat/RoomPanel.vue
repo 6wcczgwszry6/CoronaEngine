@@ -31,14 +31,19 @@
 
       <!-- 加入房间 -->
       <div v-else class="space-y-3">
-        <input v-model="form.ip" placeholder="房主 IP（如 192.168.1.5）" :class="inputCls" />
-        <input v-model.number="form.port" placeholder="端口（默认 8770）" :class="inputCls" />
-        <input v-model="form.room" placeholder="房间号" :class="inputCls" />
-        <input v-model="form.password" placeholder="密码（可选）" :class="inputCls" />
-        <input v-model="form.nickname" placeholder="你的昵称" :class="inputCls" />
-        <button class="w-full py-2 rounded bg-[#84A65B] text-white text-sm" @click="onJoin">
-          加入
+        <input v-model="form.ip" placeholder="房主 IP（如 192.168.1.5）" :class="inputCls" :disabled="isJoining" />
+        <input v-model.number="form.port" placeholder="端口（默认 8770）" :class="inputCls" :disabled="isJoining" />
+        <input v-model="form.room" placeholder="房间号" :class="inputCls" :disabled="isJoining" />
+        <input v-model="form.password" placeholder="密码（可选）" :class="inputCls" :disabled="isJoining" />
+        <input v-model="form.nickname" placeholder="你的昵称" :class="inputCls" :disabled="isJoining" />
+        <button
+          class="w-full py-2 rounded bg-[#84A65B] text-white text-sm disabled:opacity-50"
+          :disabled="isJoining"
+          @click="onJoin"
+        >
+          {{ isJoining ? joinStatusText : '加入' }}
         </button>
+        <div v-if="isJoining" class="text-[#B8D58D] text-xs">{{ joinStatusText }}</div>
       </div>
 
       <div v-if="s.error" class="text-red-400 text-xs">{{ errorText }}</div>
@@ -198,8 +203,15 @@ const ERROR_TEXT = {
   ROOM_CLOSED: '房间已关闭',
   START_FAILED: '开房失败',
   JOIN_FAILED: '加入失败',
+  HOST_UNREACHABLE: '无法连接到房主',
+  ROOM_MISMATCH: '房间号不匹配',
+  JOIN_TIMEOUT: '加入超时',
+  CONNECTING: '连接尚未完成',
+  SYNCING: '正在同步房间',
 };
 const errorText = computed(() => ERROR_TEXT[s.error] || s.error || '');
+const isJoining = computed(() => lanchat.isJoining());
+const joinStatusText = computed(() => (s.connection === 'syncing' ? '正在同步房间…' : '正在连接房主…'));
 
 async function onCreate() {
   if (!form.room.trim()) return;

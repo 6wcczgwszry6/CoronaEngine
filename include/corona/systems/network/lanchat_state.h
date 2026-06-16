@@ -92,6 +92,7 @@ public:
                                         const std::string& text,
                                         uint64_t timestamp_ms);
     LanChatMessageResult apply_remote_message(const LanChatMessage& message);
+    void apply_history_snapshot(const std::vector<LanChatMessage>& history);
     [[nodiscard]] const std::vector<LanChatMessage>& history() const { return history_; }
 
     LanChatResult register_agent(const std::string& agent_id,
@@ -138,6 +139,7 @@ private:
     static constexpr uint64_t kIntentTtlMs = 60000;
 
     [[nodiscard]] bool has_message_id(const std::string& message_id) const;
+    void sort_history_and_advance_sequence();
     [[nodiscard]] std::vector<LanChatMember>::iterator find_member(const std::string& member_id);
     [[nodiscard]] std::vector<LanChatAgent>::iterator find_agent(const std::string& agent_id);
     [[nodiscard]] std::vector<ObjectLock>::iterator find_lock(const std::string& object_id);

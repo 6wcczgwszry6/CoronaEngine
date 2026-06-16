@@ -215,6 +215,52 @@ void test_lanchat_member_update_carries_full_snapshot() {
     expect_true(reader.read_u64() == 200, "chat member update guest last seen payload");
 }
 
+void test_lanchat_history_snapshot_carries_full_history() {
+    const std::vector<Corona::Network::LanChatMessage> history{
+        {"msg-1", "host-peer", "房主", "room-a", "hello", 1, 1000},
+        {"msg-2", "guest-peer", "Alice", "room-a", "hi", 2, 2000},
+    };
+    auto packet = Corona::Network::build_chat_history_snapshot("room-a", history);
+
+    Corona::Network::BufferReader reader(packet.data(), packet.size());
+    expect_true(static_cast<Corona::Network::MessageType>(reader.read_u8()) ==
+                    Corona::Network::MessageType::CHAT_HISTORY_SNAPSHOT,
+                "chat history snapshot message type");
+    expect_true(reader.read_string(reader.read_u16()) == "room-a",
+                "chat history snapshot room id payload");
+    expect_true(reader.read_u16() == 2, "chat history snapshot count payload");
+    expect_true(reader.read_string(reader.read_u16()) == "msg-1",
+                "chat history first message id payload");
+    expect_true(reader.read_string(reader.read_u16()) == "host-peer",
+                "chat history first sender id payload");
+    expect_true(reader.read_string(reader.read_u16()) == "room-a",
+                "chat history first room id payload");
+    expect_true(reader.read_u64() == 1, "chat history first sequence payload");
+    expect_true(reader.read_string(reader.read_u16()) == "房主",
+                "chat history first sender name payload");
+    expect_true(reader.read_string(reader.read_u16()) == "hello",
+                "chat history first text payload");
+    expect_true(reader.read_u64() == 1000, "chat history first timestamp payload");
+    expect_true(reader.read_string(reader.read_u16()) == "msg-2",
+                "chat history second message id payload");
+}
+
+void test_lanchat_join_reject_carries_error_code() {
+    auto packet = Corona::Network::build_chat_join_reject(
+        "room-a", "ROOM_NOT_FOUND", "room is not open");
+
+    Corona::Network::BufferReader reader(packet.data(), packet.size());
+    expect_true(static_cast<Corona::Network::MessageType>(reader.read_u8()) ==
+                    Corona::Network::MessageType::CHAT_JOIN_REJECT,
+                "chat join reject message type");
+    expect_true(reader.read_string(reader.read_u16()) == "room-a",
+                "chat join reject room id payload");
+    expect_true(reader.read_string(reader.read_u16()) == "ROOM_NOT_FOUND",
+                "chat join reject code payload");
+    expect_true(reader.read_string(reader.read_u16()) == "room is not open",
+                "chat join reject reason payload");
+}
+
 void test_lanchat_state_deduplicates_messages_and_tracks_agents() {
     Corona::Network::LanChatState state;
     expect_true(state.open_room("room-a", "host-peer", "房主"),
@@ -235,6 +281,42 @@ void test_lanchat_state_deduplicates_messages_and_tracks_agents() {
     expect_true(state.agents().size() == 1, "lanchat state tracks agent roster");
     expect_true(state.remove_agent("agent-1").ok, "lanchat state removes agent");
     expect_true(state.agents().empty(), "lanchat state agent roster is empty");
+}
+
+void test_lanchat_state_updates_authoritative_message_and_history_snapshot() {
+    Corona::Network::LanChatState state;
+    state.open_room("room-a", "guest-peer", "Alice");
+
+    Corona::Network::LanChatMessage provisional;
+    provisional.message_id = "msg-1";
+    provisional.sender_id = "guest-peer";
+    provisional.sender_name = "Alice";
+    provisional.room_id = "room-a";
+    provisional.text = "hello";
+    provisional.seq = 0;
+    provisional.timestamp_ms = 1000;
+    auto first = state.apply_remote_message(provisional);
+    expect_true(first.accepted, "lanchat state accepts provisional message");
+
+    Corona::Network::LanChatMessage authoritative = provisional;
+    authoritative.seq = 7;
+    authoritative.timestamp_ms = 1001;
+    auto updated = state.apply_remote_message(authoritative);
+    expect_true(updated.accepted, "lanchat state updates duplicate authoritative message");
+    expect_true(state.history().size() == 1, "lanchat state keeps one authoritative message");
+    expect_true(state.history().front().seq == 7, "lanchat state updates authoritative sequence");
+
+    const std::vector<Corona::Network::LanChatMessage> snapshot{
+        {"msg-2", "host-peer", "房主", "room-a", "before", 1, 900},
+        authoritative,
+    };
+    state.apply_history_snapshot(snapshot);
+    expect_true(state.history().size() == 2, "lanchat state applies full history snapshot");
+    expect_true(state.history()[0].message_id == "msg-2",
+                "lanchat state sorts history snapshot by sequence");
+    expect_true(state.history()[1].message_id == "msg-1",
+                "lanchat state keeps authoritative snapshot message");
+    expect_true(state.next_seq() == 8, "lanchat state advances next sequence from snapshot");
 }
 
 void test_lanchat_state_applies_authoritative_member_snapshot() {
@@ -855,7 +937,10 @@ int main() {
     test_ownership_claim_carries_actor_guid();
     test_lanchat_message_carries_identity_and_sequence();
     test_lanchat_member_update_carries_full_snapshot();
+    test_lanchat_history_snapshot_carries_full_history();
+    test_lanchat_join_reject_carries_error_code();
     test_lanchat_state_deduplicates_messages_and_tracks_agents();
+    test_lanchat_state_updates_authoritative_message_and_history_snapshot();
     test_lanchat_state_applies_authoritative_member_snapshot();
     test_lanchat_state_enqueues_local_agent_trigger_from_mention();
     test_lanchat_state_deduplicates_agent_triggers();
