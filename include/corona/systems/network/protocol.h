@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <corona/systems/network/lanchat_state.h>
 #include <string>
 #include <vector>
 
@@ -434,6 +435,32 @@ inline std::vector<uint8_t> build_chat_leave(
     write_u8(buf, static_cast<uint8_t>(MessageType::CHAT_LEAVE));
     write_string(buf, room_id);
     write_string(buf, member_id);
+    return buf;
+}
+
+inline std::vector<uint8_t> build_chat_member_update(
+    const std::string& room_id,
+    const std::vector<LanChatMember>& members)
+{
+    size_t payload_size = 1 + 2 + room_id.size() + 2;
+    for (const auto& member : members) {
+        payload_size += 2 + member.member_id.size();
+        payload_size += 2 + member.nickname.size();
+        payload_size += 2 + member.status.size();
+        payload_size += 8;
+    }
+
+    std::vector<uint8_t> buf;
+    buf.reserve(payload_size);
+    write_u8(buf, static_cast<uint8_t>(MessageType::CHAT_MEMBER_UPDATE));
+    write_string(buf, room_id);
+    write_u16(buf, static_cast<uint16_t>(members.size()));
+    for (const auto& member : members) {
+        write_string(buf, member.member_id);
+        write_string(buf, member.nickname);
+        write_string(buf, member.status);
+        write_u64(buf, member.last_seen_ms);
+    }
     return buf;
 }
 

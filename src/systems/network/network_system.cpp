@@ -31,6 +31,7 @@ struct NetworkSystem::Impl {
     std::function<void(const std::string&)> lanchat_event_callback;
     std::string lanchat_nickname;
     uint64_t next_lanchat_message_id = 1;
+    std::unordered_map<std::string, std::string> lanchat_member_by_peer;
 
     // State
     SessionState session_state{SessionState::Idle};
@@ -151,6 +152,32 @@ std::string member_names_json(const std::vector<Network::LanChatMember>& members
         out << json_string(members[i].nickname);
     }
     out << "]";
+    return out.str();
+}
+
+std::string member_details_json(const std::vector<Network::LanChatMember>& members) {
+    std::ostringstream out;
+    out << "[";
+    for (size_t i = 0; i < members.size(); ++i) {
+        const auto& member = members[i];
+        if (i > 0) out << ",";
+        out << "{\"member_id\":" << json_string(member.member_id)
+            << ",\"nickname\":" << json_string(member.nickname)
+            << ",\"status\":" << json_string(member.status)
+            << "}";
+    }
+    out << "]";
+    return out.str();
+}
+
+std::string member_update_event_json(const std::vector<Network::LanChatMember>& members,
+                                     const std::string& local_peer_id) {
+    std::ostringstream out;
+    out << "{\"channel\":\"lanchat\",\"event\":\"member_update\""
+        << ",\"peer_id\":" << json_string(local_peer_id)
+        << ",\"members\":" << member_names_json(members)
+        << ",\"member_details\":" << member_details_json(members)
+        << "}";
     return out.str();
 }
 
@@ -487,6 +514,7 @@ bool NetworkSystem::lanchat_start_room(const std::string& room_id,
         }
     }
     impl_->lanchat_nickname = display_name;
+    impl_->lanchat_member_by_peer.clear();
     const std::string peer_id = local_peer_id();
     return impl_->lanchat.open_room(room_id, peer_id, display_name);
 }
@@ -502,12 +530,11 @@ bool NetworkSystem::lanchat_join_room(const std::string& ip,
         }
     }
     impl_->lanchat_nickname = display_name;
+    impl_->lanchat_member_by_peer.clear();
     impl_->lanchat.open_room(room_id, local_peer_id(), display_name);
     if (!connect_to_peer(ip, port, display_name)) {
         return false;
     }
-    auto packet = Network::build_chat_join(room_id, local_peer_id(), display_name);
-    impl_->peer_manager.broadcast(Network::kChannelReliable, packet.data(), packet.size(), true);
     return true;
 }
 
@@ -520,6 +547,10 @@ void NetworkSystem::lanchat_leave_room() {
 }
 
 Network::LanChatMessageResult NetworkSystem::lanchat_send_message(const std::string& text) {
+    if (impl_->session_role == SessionRole::Client && impl_->peer_manager.peer_count() == 0) {
+        return {false, {}, "CONNECTING"};
+    }
+
     const uint64_t timestamp = now_ms();
     const std::string sender_id = local_peer_id();
     const std::string message_id =
@@ -751,6 +782,19 @@ void NetworkSystem::set_project_root(const std::string& project_root) {
 void NetworkSystem::on_peer_connected(const Network::PeerManager::PeerInfo& info) {
     CFW_LOG_INFO("NetworkSystem: Peer connected — {} ({})", info.id, info.name);
 
+    if (impl_->session_role == SessionRole::Client && !impl_->lanchat.room_id().empty()) {
+        auto packet = Network::build_chat_join(
+            impl_->lanchat.room_id(), local_peer_id(), impl_->lanchat_nickname);
+        const auto* peer_info = impl_->peer_manager.find_peer(info.id);
+        if (peer_info && peer_info->peer) {
+            impl_->peer_manager.send_to(
+                peer_info->peer, Network::kChannelReliable, packet.data(), packet.size(), true);
+        } else {
+            impl_->peer_manager.broadcast(
+                Network::kChannelReliable, packet.data(), packet.size(), true);
+        }
+    }
+
     if (impl_->ctx && impl_->ctx->event_bus()) {
         Events::PeerConnectedEvent ev{info.id, info.name};
         impl_->ctx->event_bus()->publish(ev);
@@ -759,6 +803,22 @@ void NetworkSystem::on_peer_connected(const Network::PeerManager::PeerInfo& info
 
 void NetworkSystem::on_peer_disconnected(const Network::PeerManager::PeerInfo& info) {
     CFW_LOG_INFO("NetworkSystem: Peer disconnected — {} ({})", info.id, info.name);
+
+    if (impl_->session_role == SessionRole::Host && !impl_->lanchat.room_id().empty()) {
+        auto it = impl_->lanchat_member_by_peer.find(info.id);
+        if (it != impl_->lanchat_member_by_peer.end()) {
+            impl_->lanchat.leave_member(it->second);
+            impl_->lanchat_member_by_peer.erase(it);
+            auto packet = Network::build_chat_member_update(
+                impl_->lanchat.room_id(), impl_->lanchat.members());
+            impl_->peer_manager.broadcast(
+                Network::kChannelReliable, packet.data(), packet.size(), true);
+            if (impl_->lanchat_event_callback) {
+                impl_->lanchat_event_callback(
+                    member_update_event_json(impl_->lanchat.members(), local_peer_id()));
+            }
+        }
+    }
 
     if (impl_->ctx && impl_->ctx->event_bus()) {
         Events::PeerDisconnectedEvent ev{info.id};
@@ -912,26 +972,42 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
         }
         if (impl_->lanchat.room_id() != room_id) return;
         impl_->lanchat.join_member(member_id, nickname, now_ms());
+        impl_->lanchat_member_by_peer[sender_peer_id] = member_id;
         if (impl_->lanchat_event_callback) {
             impl_->lanchat_event_callback(
-                "{\"channel\":\"lanchat\",\"event\":\"member_update\",\"members\":" +
-                member_names_json(impl_->lanchat.members()) + "}");
+                member_update_event_json(impl_->lanchat.members(), local_peer_id()));
         }
         if (impl_->session_role == SessionRole::Host) {
-            impl_->peer_manager.broadcast(Network::kChannelReliable, data, len, true);
+            auto members_packet = Network::build_chat_member_update(
+                impl_->lanchat.room_id(), impl_->lanchat.members());
+            impl_->peer_manager.broadcast(
+                Network::kChannelReliable, members_packet.data(), members_packet.size(), true);
+            const auto* peer_info = impl_->peer_manager.find_peer(sender_peer_id);
             for (const auto& message : impl_->lanchat.history()) {
                 auto packet = Network::build_chat_message(
                     message.message_id, message.sender_id, message.room_id, message.seq,
                     message.sender_name, message.text, message.timestamp_ms);
-                impl_->peer_manager.broadcast(
-                    Network::kChannelReliable, packet.data(), packet.size(), true);
+                if (peer_info && peer_info->peer) {
+                    impl_->peer_manager.send_to(
+                        peer_info->peer, Network::kChannelReliable,
+                        packet.data(), packet.size(), true);
+                } else {
+                    impl_->peer_manager.broadcast(
+                        Network::kChannelReliable, packet.data(), packet.size(), true);
+                }
             }
             for (const auto& agent : impl_->lanchat.agents()) {
                 auto packet = Network::build_chat_agent_register(
                     impl_->lanchat.room_id(), agent.agent_id, agent.name,
                     agent.persona, agent.owner_id);
-                impl_->peer_manager.broadcast(
-                    Network::kChannelReliable, packet.data(), packet.size(), true);
+                if (peer_info && peer_info->peer) {
+                    impl_->peer_manager.send_to(
+                        peer_info->peer, Network::kChannelReliable,
+                        packet.data(), packet.size(), true);
+                } else {
+                    impl_->peer_manager.broadcast(
+                        Network::kChannelReliable, packet.data(), packet.size(), true);
+                }
             }
         }
     } else if (mt == MessageType::CHAT_LEAVE) {
@@ -945,13 +1021,53 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
         std::string member_id = r.read_string(member_len);
         if (impl_->lanchat.room_id() != room_id) return;
         impl_->lanchat.leave_member(member_id);
+        for (auto it = impl_->lanchat_member_by_peer.begin();
+             it != impl_->lanchat_member_by_peer.end(); ) {
+            if (it->first == sender_peer_id || it->second == member_id) {
+                it = impl_->lanchat_member_by_peer.erase(it);
+            } else {
+                ++it;
+            }
+        }
         if (impl_->lanchat_event_callback) {
             impl_->lanchat_event_callback(
-                "{\"channel\":\"lanchat\",\"event\":\"member_update\",\"members\":" +
-                member_names_json(impl_->lanchat.members()) + "}");
+                member_update_event_json(impl_->lanchat.members(), local_peer_id()));
         }
         if (impl_->session_role == SessionRole::Host) {
-            impl_->peer_manager.broadcast(Network::kChannelReliable, data, len, true);
+            auto packet = Network::build_chat_member_update(
+                impl_->lanchat.room_id(), impl_->lanchat.members());
+            impl_->peer_manager.broadcast(
+                Network::kChannelReliable, packet.data(), packet.size(), true);
+        }
+    } else if (mt == MessageType::CHAT_MEMBER_UPDATE) {
+        Network::BufferReader r(data + 1, len - 1);
+        if (!r.has_remaining(2)) return;
+        uint16_t room_len = r.read_u16();
+        if (!r.has_remaining(room_len + 2)) return;
+        std::string room_id = r.read_string(room_len);
+        uint16_t member_count = r.read_u16();
+        std::vector<Network::LanChatMember> members;
+        members.reserve(member_count);
+        for (uint16_t i = 0; i < member_count; ++i) {
+            if (!r.has_remaining(2)) return;
+            uint16_t member_id_len = r.read_u16();
+            if (!r.has_remaining(member_id_len + 2)) return;
+            Network::LanChatMember member;
+            member.member_id = r.read_string(member_id_len);
+            uint16_t nickname_len = r.read_u16();
+            if (!r.has_remaining(nickname_len + 2)) return;
+            member.nickname = r.read_string(nickname_len);
+            uint16_t status_len = r.read_u16();
+            if (!r.has_remaining(status_len + 8)) return;
+            member.status = r.read_string(status_len);
+            member.last_seen_ms = r.read_u64();
+            members.push_back(std::move(member));
+        }
+        if (impl_->lanchat.room_id() != room_id) return;
+        impl_->lanchat.apply_member_snapshot(members);
+        if (impl_->lanchat_event_callback) {
+            impl_->lanchat_event_callback(
+                member_update_event_json(impl_->lanchat.members(), local_peer_id()));
         }
     } else if (mt == MessageType::CHAT_MESSAGE || mt == MessageType::CHAT_AGENT_REPLY) {
         Network::BufferReader r(data + 1, len - 1);

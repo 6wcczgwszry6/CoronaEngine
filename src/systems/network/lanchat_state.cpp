@@ -105,6 +105,10 @@ LanChatResult LanChatState::leave_member(const std::string& member_id) {
     return {true, {}};
 }
 
+void LanChatState::apply_member_snapshot(const std::vector<LanChatMember>& members) {
+    members_ = members;
+}
+
 LanChatMessageResult LanChatState::record_message(const std::string& message_id,
                                                   const std::string& sender_id,
                                                   const std::string& sender_name,

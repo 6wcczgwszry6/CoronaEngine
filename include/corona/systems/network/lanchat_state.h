@@ -83,6 +83,7 @@ public:
                               const std::string& nickname,
                               uint64_t now_ms = 0);
     LanChatResult leave_member(const std::string& member_id);
+    void apply_member_snapshot(const std::vector<LanChatMember>& members);
     [[nodiscard]] const std::vector<LanChatMember>& members() const { return members_; }
 
     LanChatMessageResult record_message(const std::string& message_id,

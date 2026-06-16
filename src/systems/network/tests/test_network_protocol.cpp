@@ -185,6 +185,36 @@ void test_lanchat_message_carries_identity_and_sequence() {
     expect_true(reader.read_u64() == 12345, "chat message timestamp payload");
 }
 
+void test_lanchat_member_update_carries_full_snapshot() {
+    const std::vector<Corona::Network::LanChatMember> members{
+        {"host-peer", "房主", "online", 100},
+        {"guest-peer", "Alice", "online", 200},
+    };
+    auto packet = Corona::Network::build_chat_member_update("room-a", members);
+
+    Corona::Network::BufferReader reader(packet.data(), packet.size());
+    expect_true(static_cast<Corona::Network::MessageType>(reader.read_u8()) ==
+                    Corona::Network::MessageType::CHAT_MEMBER_UPDATE,
+                "chat member update message type");
+    expect_true(reader.read_string(reader.read_u16()) == "room-a",
+                "chat member update room id payload");
+    expect_true(reader.read_u16() == 2, "chat member update count payload");
+    expect_true(reader.read_string(reader.read_u16()) == "host-peer",
+                "chat member update host id payload");
+    expect_true(reader.read_string(reader.read_u16()) == "房主",
+                "chat member update host nickname payload");
+    expect_true(reader.read_string(reader.read_u16()) == "online",
+                "chat member update host status payload");
+    expect_true(reader.read_u64() == 100, "chat member update host last seen payload");
+    expect_true(reader.read_string(reader.read_u16()) == "guest-peer",
+                "chat member update guest id payload");
+    expect_true(reader.read_string(reader.read_u16()) == "Alice",
+                "chat member update guest nickname payload");
+    expect_true(reader.read_string(reader.read_u16()) == "online",
+                "chat member update guest status payload");
+    expect_true(reader.read_u64() == 200, "chat member update guest last seen payload");
+}
+
 void test_lanchat_state_deduplicates_messages_and_tracks_agents() {
     Corona::Network::LanChatState state;
     expect_true(state.open_room("room-a", "host-peer", "房主"),
@@ -205,6 +235,25 @@ void test_lanchat_state_deduplicates_messages_and_tracks_agents() {
     expect_true(state.agents().size() == 1, "lanchat state tracks agent roster");
     expect_true(state.remove_agent("agent-1").ok, "lanchat state removes agent");
     expect_true(state.agents().empty(), "lanchat state agent roster is empty");
+}
+
+void test_lanchat_state_applies_authoritative_member_snapshot() {
+    Corona::Network::LanChatState state;
+    state.open_room("room-a", "guest-peer", "Alice");
+    state.join_member("stale-peer", "Stale");
+
+    const std::vector<Corona::Network::LanChatMember> members{
+        {"host-peer", "房主", "online", 100},
+        {"guest-peer", "Alice", "online", 200},
+    };
+    state.apply_member_snapshot(members);
+
+    expect_true(state.members().size() == 2,
+                "lanchat state replaces stale members with snapshot");
+    expect_true(state.members()[0].member_id == "host-peer",
+                "lanchat state snapshot keeps host member");
+    expect_true(state.members()[1].member_id == "guest-peer",
+                "lanchat state snapshot keeps guest member");
 }
 
 void test_lanchat_state_enqueues_local_agent_trigger_from_mention() {
@@ -805,7 +854,9 @@ int main() {
     test_file_chunk_carries_transfer_id_and_offset();
     test_ownership_claim_carries_actor_guid();
     test_lanchat_message_carries_identity_and_sequence();
+    test_lanchat_member_update_carries_full_snapshot();
     test_lanchat_state_deduplicates_messages_and_tracks_agents();
+    test_lanchat_state_applies_authoritative_member_snapshot();
     test_lanchat_state_enqueues_local_agent_trigger_from_mention();
     test_lanchat_state_deduplicates_agent_triggers();
     test_lanchat_state_does_not_trigger_agent_reply_or_duplicate_names();

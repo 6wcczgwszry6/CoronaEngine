@@ -112,6 +112,19 @@ nlohmann::json build_lanchat_members(
     return result;
 }
 
+nlohmann::json build_lanchat_member_details(
+    const std::vector<Corona::Network::LanChatMember>& members) {
+    nlohmann::json result = nlohmann::json::array();
+    for (const auto& member : members) {
+        result.push_back({
+            {"member_id", member.member_id},
+            {"nickname", member.nickname},
+            {"status", member.status},
+        });
+    }
+    return result;
+}
+
 nlohmann::json build_lanchat_history(
     const std::vector<Corona::Network::LanChatMessage>& history) {
     nlohmann::json result = nlohmann::json::array();
@@ -565,7 +578,10 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     data["ip"] = detect_local_ipv4();
                     data["port"] = port;
                     data["room"] = room;
+                    data["peer_id"] = sys->local_peer_id();
                     data["members"] = build_lanchat_members(sys->lanchat_members());
+                    data["member_details"] = build_lanchat_member_details(sys->lanchat_members());
+                    data["agents"] = build_lanchat_agents(sys->lanchat_agents());
                     callback->Success(create_success_json(func, data));
                     return true;
                 }
@@ -588,7 +604,9 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     nlohmann::json data;
                     data["ok"] = ok;
                     data["you"] = nickname;
+                    data["peer_id"] = sys->local_peer_id();
                     data["members"] = build_lanchat_members(sys->lanchat_members());
+                    data["member_details"] = build_lanchat_member_details(sys->lanchat_members());
                     data["history"] = build_lanchat_history(sys->lanchat_history());
                     data["agents"] = build_lanchat_agents(sys->lanchat_agents());
                     if (!ok) data["error"] = "JOIN_FAILED";

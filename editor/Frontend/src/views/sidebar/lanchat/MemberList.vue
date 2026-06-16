@@ -21,7 +21,7 @@
     >
       <span class="truncate">🤖 {{ a.name }}</span>
       <button
-        v-if="a.owner === myNickname"
+        v-if="a.owner === peerId"
         class="ml-1 text-red-400 hover:text-red-300"
         title="移除"
         @click="$emit('remove-agent', a.agent_id)"
@@ -36,7 +36,7 @@
 defineProps({
   members: { type: Array, default: () => [] },
   agents: { type: Array, default: () => [] },
-  myNickname: { type: String, default: '' },
+  peerId: { type: String, default: '' },
 });
 defineEmits(['remove-agent']);
 </script>
