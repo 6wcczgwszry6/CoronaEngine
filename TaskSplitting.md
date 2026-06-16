@@ -27,9 +27,12 @@
 2. 统一 transform 操作契约：区分 `SetPosition/SetRotation/SetScale` 和 `Translate/RotateDelta/ScaleDelta`。
 3. 给 gizmo drag end 补持久化：`saveActor(sceneId, actorName)` 或统一 transform commit 事件。
 4. 扩展内置 Vision material adapter 和 signature，至少让 native 已暴露的材质参数有明确支持或明确降级。
-5. 选择 external 对齐路线：
-   - 若以 native 编辑为核心，优先做“Vision JSON -> Corona actors -> EngineBuilt”。
-   - 若必须保留 external Vision pipeline，先做 object identity/mapping，再做 transform-only 增量同步，最后做增删和材质同步。
+5. 已选择 external_live 对齐路线：
+   - 导入外部 Vision scene 时创建/复用 Corona proxy actors。
+   - Vision viewport 保持外部 Vision pipeline，不切回 `EngineBuilt`。
+   - 先做 `actor_guid -> Vision ShapeInstance/group/instance` 稳定映射。
+   - transform-only 走 `set_o2w() -> update_geometry() -> invalidate`，不 reload JSON，不替换 pipeline。
+   - 增删替换走 runtime topology add/remove/reorganize，并用 overlay 记录重启恢复/撤销/导出意图。
 6. 建测试 scene：
    - 单模型：position/rotation/scale/gizmo scale compensation。
    - 多模型：增删顺序、同名对象。
@@ -119,34 +122,71 @@
 - 不要承诺 Vision 无法表达的材质完全一致。
 - 优先建立“支持/降级/不支持”的明确矩阵。
 
-### 5. 选择 external Vision 对齐路线
+### 5. 实现 external_live 外部 Vision 对齐路线
 
-目标：决定外部 Vision 与 native 编辑完全对齐时的 source-of-truth，避免在两套 scene graph 之间做脆弱双写。
+目标：保留外部 Vision pipeline，同时让 native proxy actor 的编辑实时投递到 external Vision runtime scene。当前路线已经确定为 `external_live`，不再把导入后的 Vision viewport 切回 `EngineBuilt`。
 
-推荐路线概括：Vision JSON -> Corona actors -> EngineBuilt。
+实现原则：
 
-- external Vision 导入时解析 JSON shapes/materials/camera/lights。
-- 为每个 Vision shape 生成 Corona actor/profile/geometry/optics。
-- 建立 stable identity：shape name、JSON path，或生成 `vision_shape_<index>`。
-- 将 Vision transform 转为 Corona transform，复杂矩阵保留 metadata。
-- 将 Vision material graph 降级到 Corona Optics，并记录无法表达的原始 metadata。
-- 导入后切到 `EngineBuilt`，让后续 native 编辑和内置 Vision 使用同一 `SharedDataHub`。
-- 如需要保留 Vision 文件工作流，补 Corona scene -> Vision scene.json export。
+- 外部 Vision pipeline 是实时渲染对象，不因 transform 编辑 reload JSON 或 replace pipeline。
+- Corona proxy actors 是 native 编辑、选择、UI、保存入口。
+- overlay 只用于保存 native 编辑意图、重启恢复、撤销/重做、导出，不驱动当前帧实时渲染。
+- mapping 必须基于 `actor_guid -> shape_guid/json_path/instance refs`，不能靠 name 猜测。
+- topology/material 变化使用安全 runtime refresh 边界，不调用 initialized pipeline 上的完整 `renderPipeline->prepare()`。
 
-备选路线概括：保留 external pipeline 并新增增量镜像。
+分任务：
 
-- 新增 `ExternalVisionSceneAdapter`。
-- 建立 Corona actor handle 与 Vision shape/group/instance/material 映射。
-- 补 Vision runtime edit API：transform、visibility、material、topology。
-- transform-only 可尝试增量更新 `ShapeInstance::set_o2w()` 和 TLAS。
-- topology/material 先复用保守 rebuild。
-- 维护 JSON 或 overlay 写回。
+1. `external_live` 模式和事件载荷：
+   - 保留旧 `external` / `ExternalFile` 语义。
+   - 新增 `ExternalLive` source 或等价模式。
+   - 将 `VisionSceneLoadEvent` 或 C++ load API 扩展为可携带 `import_mode`、overlay path、overlay guid、bindings。
+   - `apply_pending_vision_scene_load()` 按 mode 分支初始化 external pipeline 和 adapter。
+
+2. Python import 与 overlay：
+   - `SceneTools.import_vision_scene_into_current_scene()` 解析 Vision JSON model shapes。
+   - 为每个支持的 model shape 创建或复用 Corona proxy actor。
+   - 确保每个 proxy actor 有 `actor_guid`。
+   - 生成 overlay：`overlay_guid`、`source_path`、`bindings`、`ops`。
+   - `.scene [vision]` 写入 `import_mode=external_live`、`overlay_path`、`overlay_guid`。
+   - phase 1 明确只支持 model shape；primitive shape 必须标记 unsupported 或生成 proxy mesh，不能静默丢失。
+
+3. `ExternalVisionSceneAdapter` skeleton：
+   - 新增 `src/systems/optics/vision/external_vision_scene_adapter.h/.cpp`。
+   - 保存 `actor_guid -> actor_handle -> shape_guid/json_path` bindings。
+   - 扫描 `renderPipeline->scene()` 建立 `actor_guid -> ShapeInstance/group/instance` 映射。
+   - 初始化失败时给出可诊断日志，不回退到 name matching。
+
+4. transform-only 同步：
+   - `run_vision_frame()` 在 `ExternalLive` 下调用 adapter。
+   - adapter 从 `SharedDataHub` 读取 proxy actor geometry transform。
+   - 复用 built-in Vision 的 Corona->Vision matrix 转换。
+   - 对 mapped `ShapeInstance(s)` 调用 `set_o2w()`。
+   - 调用 `renderPipeline->update_geometry()` 和 `invalidate_all_view_contexts()`。
+   - 不 clear/rebuild，不 reload JSON，不替换整个 pipeline。
+
+5. runtime topology add/delete/replace：
+   - 新增模型：Corona mesh/material -> Vision Mesh/ShapeInstance/ShapeGroup -> scene add path -> safe topology refresh -> overlay added record。
+   - 删除模型：通过正式 Scene API 移除 group/instances，维护 flattened instances 和 geometry handles -> safe topology refresh -> overlay deleted record。
+   - 替换模型：删除旧 shape + 新增新 shape，保留同一 `actor_guid` -> overlay replaced record。
+   - 优先补 Vision Scene-level add/remove API，避免在业务代码里直接改私有容器。
+
+6. material/emission first stage：
+   - 复用 built-in Vision 的 `create_vision_material()`。
+   - 复用 `setup_vision_lights()` 和既有 Area light 安全边界。
+   - 第一阶段只承诺 baseColor、roughness、metallic 和现有 light setup。
+   - 复杂 Vision material graph 先保留 metadata 或标记降级，不做复杂支持矩阵。
+
+7. overlay 恢复、撤销/重做、导出：
+   - overlay 不参与当前帧渲染。
+   - 重启恢复时用 overlay 重建 proxy actors 和 bindings。
+   - 导出时把 added/deleted/replaced 意图应用回 Vision scene 或生成新 JSON。
 
 宏观检查：
 
-- 如果目标是 native 编辑完全对齐，优先统一到 Corona source-of-truth。
-- 如果保留 external pipeline，会同时维护 Corona scene、Vision pipeline、Vision JSON 三份状态，必须先证明收益大于复杂度。
-- 不要在没有 object identity 的情况下做名称猜测式同步。
+- 每个阶段都要先确认 object identity 是否仍然清晰。
+- 如果某个实现开始依赖 shape name、导入顺序猜测或多处散落双写，应停止并回到 adapter/overlay 边界。
+- transform-only 路径必须证明没有 JSON reload、没有 pipeline replacement。
+- topology/material 路径必须证明没有调用 full `renderPipeline->prepare()`。
 
 ### 6. 建测试 scene 与验证流程
 
