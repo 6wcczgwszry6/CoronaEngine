@@ -40,6 +40,61 @@
    - 替换模型资源。
    - external Vision JSON import 后执行同样编辑，验证 native viewport 与 Vision viewport 是否一致。
 
+## external_live 开工前审计后的调整顺序
+
+本节是沿现有代码管线调查后的执行顺序修正。原清单的大方向成立，但不应把所有 native/EngineBuilt 缺口都挡在 external_live transform-only 之前；应先完成 stable identity、持久化和导入恢复，否则后续 adapter 没有可靠锚点。
+
+调整后的第一阶段顺序：
+
+1. 稳定身份前置：
+   - `Scene.save_data()` 必须把 scene-level actor 的 `actor_guid` 写入 `[actors]`。
+   - `_build_actor_json()` 必须读回 `actor_guid`。
+   - C++ `ActorDevice` 建议增加 `actor_guid`，并通过 Python `Actor` 初始化同步到 engine actor；否则 OpticsSystem 只能依赖一次性 event binding，后续新增/重载 actor 难以恢复。
+   - 验证：scene 保存/读取后 `actor_guid` 不变，同名 actor 不混淆。
+
+2. external_live 场景元数据前置：
+   - `Scene` 增加并持久化 `vision_overlay_path`、`vision_overlay_guid`。
+   - `MainView._apply_vision_source_for_scene()` 必须识别 `import_mode == "external_live"`，不能只认旧的 `"external"`。
+   - 旧 `"external"` / `ExternalFile` 行为保留。
+   - 验证：切场景/重启恢复 external_live 时不会退回 `EngineBuilt` 或 unload external pipeline。
+
+3. Python import + overlay：
+   - `import_vision_scene_into_current_scene()` 解析 Vision JSON `scene.shapes`。
+   - phase 1 只支持 `type == "model"`；`quad/cube/sphere` 等 primitive 必须记录 unsupported 或后续生成 proxy mesh，不能静默丢失。
+   - 为 model shape 创建/复用 Corona proxy actor，写 `actor_guid -> shape_guid/json_path/shape_index` binding。
+   - overlay 不驱动当前帧渲染，只用于 binding、恢复、撤销/导出。
+
+4. C++ load request 与 source mode：
+   - pybind 目前只有 `load_vision_scene(path)`，建议新增 external_live 专用 API，或扩展 API 但保持旧调用默认 `ExternalFile`。
+   - `VisionSceneLoadEvent` / pending request 从 path 扩展为 mode + overlay path/guid。
+   - `OpticsSystem::apply_pending_vision_scene_load()` 新增 `ExternalLive` 分支。
+
+5. `ExternalVisionSceneAdapter` skeleton：
+   - 初始化时读取 overlay bindings。
+   - 通过 `actor_guid` 找 Corona actor handle，通过 `shape_index/json_path` 找 Vision group/instances；不使用 shape name 匹配。
+   - Vision runtime 当前没有 shape guid metadata，phase 1 可用 JSON shape index / group import order 作为 binding 输入，但必须在 overlay 中显式记录并测试同名对象。
+
+6. transform-only 同步：
+   - factor 出 built-in Vision 已使用的 Corona->Vision matrix helper。
+   - 每帧 diff proxy actor transform，更新 mapped `ShapeInstance::set_o2w()`。
+   - 调用 `renderPipeline->update_geometry()` 和 `invalidate_all_view_contexts()`。
+   - 验证没有 JSON reload、没有 pipeline replacement、没有 clear/rebuild。
+
+7. 再处理 native 与 topology 前置：
+   - `Actor.set_model()` 修复应在 external_live 替换模型阶段之前完成；它不阻塞 transform-only。
+   - gizmo drag end 持久化应在 overlay 重启恢复/撤销之前完成；它不阻塞当前帧 transform sync。
+   - 内置 Vision material adapter 扩展可后移；external_live first stage 只复用现有 `create_vision_material()` / `setup_vision_lights()`。
+
+8. runtime topology 与 material：
+   - 新增/删除/替换必须走 Vision Scene-level add/remove/reorganize API，不能散落直接改 `groups()` / `instances()`。
+   - topology/material refresh 复用 runtime safe sequence，不调用 initialized pipeline 上的 full `renderPipeline->prepare()`。
+
+审计结论：
+
+- external_live transform-only 的真正阻塞项是 stable identity 和 import/recovery plumbing，不是 `set_model()`、gizmo 持久化或完整 material matrix。
+- 替换模型、删除残留、material/emission 属于第二阶段，必须在 adapter skeleton 和 transform-only 路径可验证后再做。
+- 如果实现中开始依赖 name matching、重载 JSON 或重新创建整个 pipeline 来响应 transform，说明方向偏离，应停止并回到本顺序。
+
 ## 分任务实现方法概括
 
 ### 1. 修复已有 actor 的模型资源替换
