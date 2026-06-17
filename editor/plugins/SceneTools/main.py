@@ -165,11 +165,47 @@ def _vision_shape_name(shape: dict, model_path: str, shape_index: int) -> str:
 
 
 def _vision_shape_guid(shape: dict, json_path: str) -> str:
+    declared_guid = _vision_shape_declared_guid(shape)
+    if declared_guid:
+        return declared_guid
+    return f"vision-shape-{uuid.uuid5(uuid.NAMESPACE_URL, json_path).hex}"
+
+
+def _vision_shape_declared_guid(shape: dict) -> str:
     for key in ("shape_guid", "guid", "id"):
         value = shape.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    return f"vision-shape-{uuid.uuid5(uuid.NAMESPACE_URL, json_path).hex}"
+    return ""
+
+
+def _json_identity(value) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        return str(value)
+
+
+def _vision_shape_identity_key(scene_path: str, shape: dict, json_path: str) -> str:
+    declared_guid = _vision_shape_declared_guid(shape)
+    if declared_guid:
+        return f"guid:{declared_guid}"
+
+    shape_type = _vision_shape_type(shape)
+    if shape_type == "model":
+        model_path = _resolve_vision_model_path(scene_path, shape)
+        if model_path:
+            return f"model:{os.path.normcase(os.path.abspath(model_path))}"
+
+    params = dict(_vision_shape_params(shape))
+    params.pop("transform", None)
+    payload = {
+        "type": shape_type,
+        "params": params,
+        "fn": shape.get("fn"),
+        "path": shape.get("path"),
+    }
+    return f"shape:{_json_identity(payload)}"
 
 
 def _resolve_vision_model_path(scene_path: str, shape: dict) -> str:
@@ -488,11 +524,92 @@ def _find_actor_by_guid(scene, actor_guid: str):
     return None
 
 
-def _binding_by_json_path(bindings, json_path: str):
-    for binding in bindings or []:
-        if binding.get("json_path") == json_path:
-            return binding
+def _binding_is_compatible(binding: dict, shape_type: str, model_path: str,
+                           identity_key: str) -> bool:
+    if binding.get("shape_type") and binding.get("shape_type") != shape_type:
+        return False
+    if model_path and binding.get("model_path") and (
+            os.path.normcase(os.path.abspath(binding.get("model_path"))) !=
+            os.path.normcase(os.path.abspath(model_path))):
+        return False
+    if binding.get("shape_identity_key"):
+        return binding.get("shape_identity_key") == identity_key
+    return True
+
+
+def _find_previous_binding(bindings, used_binding_indices: set, shape: dict, shape_type: str,
+                           json_path: str, scene_path: str, model_path: str):
+    current_guid = _vision_shape_guid(shape, json_path)
+    current_identity_key = _vision_shape_identity_key(scene_path, shape, json_path)
+    declared_guid = _vision_shape_declared_guid(shape)
+
+    if declared_guid:
+        for index, binding in enumerate(bindings or []):
+            if index in used_binding_indices:
+                continue
+            if binding.get("shape_guid") == current_guid:
+                used_binding_indices.add(index)
+                return binding
+
+    identity_matches = []
+    for index, binding in enumerate(bindings or []):
+        if index in used_binding_indices:
+            continue
+        if binding.get("shape_identity_key") == current_identity_key:
+            identity_matches.append((index, binding))
+    if len(identity_matches) == 1:
+        index, binding = identity_matches[0]
+        used_binding_indices.add(index)
+        return binding
+
+    for index, binding in enumerate(bindings or []):
+        if index in used_binding_indices:
+            continue
+        if binding.get("json_path") != json_path:
+            continue
+        if not _binding_is_compatible(binding, shape_type, model_path, current_identity_key):
+            continue
+        used_binding_indices.add(index)
+        return binding
     return None
+
+
+def _vision_import_summary(import_mode: str, source_path: str, bindings, unsupported_shapes) -> dict:
+    unsupported_by_reason = {}
+    unsupported_by_type = {}
+    for shape in unsupported_shapes or []:
+        reason = shape.get("reason") or "unknown"
+        shape_type = shape.get("type") or "unknown"
+        unsupported_by_reason[reason] = unsupported_by_reason.get(reason, 0) + 1
+        unsupported_by_type[shape_type] = unsupported_by_type.get(shape_type, 0) + 1
+    return {
+        "import_mode": import_mode,
+        "source_path": source_path,
+        "binding_count": len(bindings or []),
+        "unsupported_count": len(unsupported_shapes or []),
+        "unsupported_by_reason": unsupported_by_reason,
+        "unsupported_by_type": unsupported_by_type,
+        "unsupported_shapes": list(unsupported_shapes or []),
+    }
+
+
+def _remove_stale_vision_proxy_actors(scene, previous_bindings, active_actor_guids) -> int:
+    removed = 0
+    for binding in previous_bindings or []:
+        actor_guid = binding.get("actor_guid", "")
+        if not actor_guid or actor_guid in active_actor_guids:
+            continue
+        actor = _find_actor_by_guid(scene, actor_guid)
+        if actor is None:
+            continue
+        try:
+            if hasattr(scene, "remove_actor"):
+                scene.remove_actor(actor)
+                removed += 1
+        except Exception as exc:
+            logger.warning("Failed to remove stale Vision proxy actor %s: %s",
+                           getattr(actor, "name", actor_guid), exc)
+    return removed
 
 
 @PluginBase.register_web("SceneTools")
@@ -954,6 +1071,7 @@ class SceneTools(PluginBase):
             unsupported_shapes = []
             created_proxy_count = 0
             reused_proxy_count = 0
+            used_binding_indices = set()
 
             for shape_index, json_path, shape in _iter_vision_shapes(document):
                 shape_type = _vision_shape_type(shape)
@@ -991,7 +1109,15 @@ class SceneTools(PluginBase):
                     })
                     continue
 
-                previous_binding = _binding_by_json_path(previous_bindings, json_path)
+                previous_binding = _find_previous_binding(
+                    previous_bindings,
+                    used_binding_indices,
+                    shape,
+                    shape_type,
+                    json_path,
+                    abs_path,
+                    model_path,
+                )
                 actor = _find_actor_by_guid(
                     scene, previous_binding.get("actor_guid", "") if previous_binding else "")
                 transform = (
@@ -1047,10 +1173,14 @@ class SceneTools(PluginBase):
                     "shape_index": shape_index,
                     "json_path": json_path,
                     "shape_type": shape_type,
+                    "shape_identity_key": _vision_shape_identity_key(abs_path, shape, json_path),
                     "model_path": model_path,
                     "source_path": abs_path,
                 })
 
+            active_actor_guids = {binding.get("actor_guid", "") for binding in new_bindings}
+            removed_proxy_count = _remove_stale_vision_proxy_actors(
+                scene, previous_bindings, active_actor_guids)
             scene.vision_bindings = new_bindings
             scene.vision_unsupported_shapes = unsupported_shapes
             scene.save_data()
@@ -1063,8 +1193,11 @@ class SceneTools(PluginBase):
                 scene.save_data()
             scene._notify_scene_tree_changed()
             logger.info(
-                "Vision scene imported into current scene %s: %s (created proxies=%d, reused=%d, unsupported=%d)",
-                scene_name, abs_path, created_proxy_count, reused_proxy_count, len(unsupported_shapes))
+                "Vision scene imported into current scene %s: %s (created proxies=%d, reused=%d, removed=%d, unsupported=%d)",
+                scene_name, abs_path, created_proxy_count, reused_proxy_count,
+                removed_proxy_count, len(unsupported_shapes))
+            vision_summary = _vision_import_summary(
+                "external_live", abs_path, new_bindings, unsupported_shapes)
             return {
                 "status": "success",
                 "scene": scene_name,
@@ -1074,8 +1207,10 @@ class SceneTools(PluginBase):
                 "camera": active_camera.to_dict() if active_camera is not None else None,
                 "proxy_actors_created": created_proxy_count,
                 "proxy_actors_reused": reused_proxy_count,
+                "proxy_actors_removed": removed_proxy_count,
                 "bindings": new_bindings,
                 "unsupported_shapes": unsupported_shapes,
+                "vision": vision_summary,
             }
         except json.JSONDecodeError as exc:
             return {"status": "error", "message": f"Invalid Vision JSON: {exc}"}
@@ -1139,15 +1274,28 @@ class SceneTools(PluginBase):
         if scene is None:
             raise ValueError(f"Scene '{scene_name}' not found")
 
+        bindings = list(getattr(scene, "vision_bindings", []))
+        unsupported_shapes = list(getattr(scene, "vision_unsupported_shapes", []))
+        binding_by_actor_guid = {
+            binding.get("actor_guid"): binding
+            for binding in bindings
+            if binding.get("actor_guid")
+        }
         actors = []
         for actor in scene.get_actors():
-            actors.append({
+            actor_guid = getattr(actor, "actor_guid", "")
+            actor_info = {
                 "name": actor.name,
                 "path": actor.route,
                 "type": actor.actor_type,
                 "visible": actor.get_visible(),
                 "handle": int(getattr(actor, "handle", 0) or 0),
-            })
+                "actor_guid": actor_guid,
+                "vision_proxy": actor_guid in binding_by_actor_guid,
+            }
+            if actor_guid in binding_by_actor_guid:
+                actor_info["vision_binding"] = binding_by_actor_guid[actor_guid]
+            actors.append(actor_info)
 
         cameras = []
         for cam in scene.get_cameras():
@@ -1158,7 +1306,16 @@ class SceneTools(PluginBase):
                 camera_info = {"name": getattr(cam, 'name', 'Unknown')}
             cameras.append(camera_info)
 
-        return {"actors": actors, "cameras": cameras}
+        return {
+            "actors": actors,
+            "cameras": cameras,
+            "vision": _vision_import_summary(
+                getattr(scene, "vision_import_mode", ""),
+                getattr(scene, "vision_source_path", ""),
+                bindings,
+                unsupported_shapes,
+            ),
+        }
 
     @staticmethod
     def focus_actor(scene_name: str, actor_name: str, camera_name: str = None) -> dict:

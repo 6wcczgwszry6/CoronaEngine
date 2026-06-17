@@ -13,6 +13,22 @@
       <div class="flex items-center gap-2 p-2 bg-[#1a1a1a]/50 border-b border-[#333]">
         <div class="text-[10px] text-gray-400 truncate flex-1">
           <span class="text-[#84a65b] font-bold">{{ currentSceneName }}</span>
+          <span
+            v-if="visionModeLabel"
+            class="ml-2 px-1.5 py-0.5 rounded bg-[#264f78]/70 text-[#9cdcfe] border border-[#3c6f99]/60"
+            :title="visionStatusTitle"
+            data-testid="scene-vision-status"
+          >
+            {{ visionModeLabel }}
+          </span>
+          <span
+            v-if="sceneVision.unsupported_count"
+            class="ml-1 px-1.5 py-0.5 rounded bg-[#5a3a1f]/70 text-[#f0c674] border border-[#8a5a2b]/60"
+            :title="visionUnsupportedTitle"
+            data-testid="scene-vision-unsupported"
+          >
+            unsupported {{ sceneVision.unsupported_count }}
+          </span>
         </div>
       </div>
 
@@ -511,6 +527,14 @@
               <span class="text-xs text-[#e0e0e0] truncate flex-1" :title="scene.name">
                 {{ scene.name }}
               </span>
+              <span
+                v-if="scene.vision_proxy"
+                class="text-[10px] text-[#9cdcfe] mr-1 hidden group-hover:inline"
+                :title="scene.vision_binding?.shape_guid || 'Vision proxy actor'"
+                data-testid="actor-vision-proxy"
+              >
+                Vision
+              </span>
               <!-- 类型标签 -->
               <span class="text-[10px] text-[#666] mr-2 hidden group-hover:inline">
                 {{ getTypeShort(scene.type) }}
@@ -683,6 +707,7 @@ const camerasExpanded = ref(true);
 const actorsExpanded = ref(true);
 
 const sceneImages = ref([]);
+const sceneVision = ref({});
 const playingStates = reactive({});  // { name: true/false } — 音频播放状态
 const route = useRoute();
 const currentSceneName = ref('');
@@ -726,6 +751,26 @@ let searchIndexRetry = null;
 const searchActive = computed(() => {
   return searchLoading.value || searchIndexing.value || searchResults.value.length > 0
     || !!searchError.value || !!searchLastQuery.value;
+});
+
+const visionModeLabel = computed(() => {
+  const mode = sceneVision.value?.import_mode || '';
+  if (mode === 'external_live') return 'Vision Live';
+  if (mode === 'external') return 'Vision External';
+  return '';
+});
+
+const visionStatusTitle = computed(() => {
+  const mode = sceneVision.value?.import_mode || 'none';
+  const source = sceneVision.value?.source_path || '';
+  const count = sceneVision.value?.binding_count ?? 0;
+  return `mode=${mode}; bindings=${count}${source ? `; source=${source}` : ''}`;
+});
+
+const visionUnsupportedTitle = computed(() => {
+  const byType = sceneVision.value?.unsupported_by_type || {};
+  const details = Object.entries(byType).map(([type, count]) => `${type}: ${count}`);
+  return details.length ? details.join(', ') : 'Unsupported Vision shapes';
 });
 
 const typeIcon = (type) => ({
@@ -1784,9 +1829,11 @@ const OnInitObjTree = async () => {
     const result = await sceneService.listSceneTree(currentSceneName.value);
     sceneImages.value = [];
     sceneCameras.value = [];
+    sceneVision.value = {};
 
     if (result.success && result.data) {
       const data = result.data;
+      sceneVision.value = data.vision || {};
 
       if (Array.isArray(data.actors)) {
         data.actors.forEach((item) => {
@@ -1796,6 +1843,8 @@ const OnInitObjTree = async () => {
             type: item.type || 'obj',
             visible: item.visible !== false,
             handle: normalizeHandle(item.handle),
+            vision_proxy: item.vision_proxy === true,
+            vision_binding: item.vision_binding || null,
           });
         });
       }

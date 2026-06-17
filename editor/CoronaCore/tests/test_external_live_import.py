@@ -69,6 +69,9 @@ class FakeScene:
     def get_active_camera(self):
         return self._camera
 
+    def get_cameras(self):
+        return [self._camera]
+
     def get_actors(self):
         return self._actors
 
@@ -90,6 +93,12 @@ class FakeScene:
 
     def _notify_scene_tree_changed(self):
         self.tree_notified = True
+
+    def remove_actor(self, actor):
+        if actor in self._actors:
+            self._actors.remove(actor)
+            return True
+        return False
 
 
 class FakeActor:
@@ -117,6 +126,9 @@ class FakeActor:
 
     def set_physics_enabled(self, enabled):
         self.physics_enabled = bool(enabled)
+
+    def get_visible(self):
+        return True
 
 
 class ExternalLiveImportTests(unittest.TestCase):
@@ -268,6 +280,7 @@ class ExternalLiveImportTests(unittest.TestCase):
             self.assertAlmostEqual(scene._camera.fov, 57.29577951308232)
             self.assertEqual(result["proxy_actors_created"], 3)
             self.assertEqual(result["proxy_actors_reused"], 0)
+            self.assertEqual(result["proxy_actors_removed"], 0)
             self.assertEqual(len(scene.get_actors()), 3)
             self.assertEqual(scene.get_actors()[0].name, "Chair")
             self.assertFalse(scene.get_actors()[0].physics_enabled)
@@ -299,11 +312,154 @@ class ExternalLiveImportTests(unittest.TestCase):
             self.assertEqual(scene.vision_unsupported_shapes[0]["type"], "cylinder")
             self.assertEqual(scene.vision_unsupported_shapes[0]["reason"],
                              "unsupported_shape_type")
+            self.assertEqual(result["vision"]["binding_count"], 3)
+            self.assertEqual(result["vision"]["unsupported_count"], 1)
+            self.assertEqual(result["vision"]["unsupported_by_type"], {"cylinder": 1})
             self.assertEqual(loaded_paths, [str(vision_scene.resolve())])
             self.assertLess(call_order.index("load_vision_scene"),
                             call_order.index("set_render_backend:vision"))
             self.assertTrue(scene.saved)
             self.assertTrue(scene.tree_notified)
+
+    def test_reimport_same_vision_scene_reuses_proxies_without_duplicates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "chair.obj").write_text("mesh", encoding="utf-8")
+            vision_scene = root / "scene.json"
+            vision_scene.write_text(json.dumps({
+                "scene": {
+                    "shapes": [{
+                        "type": "model",
+                        "name": "Chair",
+                        "guid": "shape-chair",
+                        "param": {"fn": "chair.obj"},
+                    }],
+                },
+            }), encoding="utf-8")
+
+            scene = FakeScene()
+            fake_editor = SimpleNamespace(
+                CoronaEngine=SimpleNamespace(
+                    active_project_path=str(root),
+                    is_vision_available=lambda: True,
+                    load_vision_scene=lambda path: None,
+                )
+            )
+            fake_scene_manager = SimpleNamespace(get=lambda scene_name: scene)
+
+            with patch.object(scene_tools_module, "CoronaEditor", fake_editor), \
+                 patch.object(scene_tools_module, "scene_manager", fake_scene_manager), \
+                 patch.object(scene_tools_module, "Actor", FakeActor):
+                first = scene_tools_module.SceneTools.import_vision_scene_into_current_scene(
+                    scene.route, str(vision_scene))
+                first_guid = scene.get_actors()[0].actor_guid
+                second = scene_tools_module.SceneTools.import_vision_scene_into_current_scene(
+                    scene.route, str(vision_scene))
+
+            self.assertEqual(first["proxy_actors_created"], 1)
+            self.assertEqual(second["proxy_actors_created"], 0)
+            self.assertEqual(second["proxy_actors_reused"], 1)
+            self.assertEqual(second["proxy_actors_removed"], 0)
+            self.assertEqual(len(scene.get_actors()), 1)
+            self.assertEqual(scene.get_actors()[0].actor_guid, first_guid)
+
+    def test_reimport_matches_by_shape_guid_when_order_changes_and_removes_stale_proxy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.obj").write_text("mesh-a", encoding="utf-8")
+            (root / "b.obj").write_text("mesh-b", encoding="utf-8")
+            vision_scene = root / "scene.json"
+            vision_scene.write_text(json.dumps({
+                "scene": {
+                    "shapes": [
+                        {
+                            "type": "model",
+                            "name": "Part",
+                            "guid": "shape-a",
+                            "param": {"fn": "a.obj"},
+                        },
+                        {
+                            "type": "model",
+                            "name": "Part",
+                            "guid": "shape-b",
+                            "param": {"fn": "b.obj"},
+                        },
+                    ],
+                },
+            }), encoding="utf-8")
+
+            scene = FakeScene()
+            fake_editor = SimpleNamespace(
+                CoronaEngine=SimpleNamespace(
+                    active_project_path=str(root),
+                    is_vision_available=lambda: True,
+                    load_vision_scene=lambda path: None,
+                )
+            )
+            fake_scene_manager = SimpleNamespace(get=lambda scene_name: scene)
+
+            with patch.object(scene_tools_module, "CoronaEditor", fake_editor), \
+                 patch.object(scene_tools_module, "scene_manager", fake_scene_manager), \
+                 patch.object(scene_tools_module, "Actor", FakeActor):
+                scene_tools_module.SceneTools.import_vision_scene_into_current_scene(
+                    scene.route, str(vision_scene))
+                guid_by_shape = {
+                    binding["shape_guid"]: binding["actor_guid"]
+                    for binding in scene.vision_bindings
+                }
+
+                vision_scene.write_text(json.dumps({
+                    "scene": {
+                        "shapes": [{
+                            "type": "model",
+                            "name": "Part",
+                            "guid": "shape-b",
+                            "param": {"fn": "b.obj"},
+                        }],
+                    },
+                }), encoding="utf-8")
+                result = scene_tools_module.SceneTools.import_vision_scene_into_current_scene(
+                    scene.route, str(vision_scene))
+
+            self.assertEqual(result["proxy_actors_created"], 0)
+            self.assertEqual(result["proxy_actors_reused"], 1)
+            self.assertEqual(result["proxy_actors_removed"], 1)
+            self.assertEqual(len(scene.get_actors()), 1)
+            self.assertEqual(scene.vision_bindings[0]["shape_guid"], "shape-b")
+            self.assertEqual(scene.vision_bindings[0]["json_path"], "/scene/shapes/0")
+            self.assertEqual(scene.vision_bindings[0]["actor_guid"], guid_by_shape["shape-b"])
+
+    def test_list_scene_tree_exposes_external_live_status_and_proxy_metadata(self):
+        scene = FakeScene()
+        scene.vision_source_path = "D:/vision/scene.json"
+        scene.vision_import_mode = "external_live"
+        actor = FakeActor(name="Chair", route="D:/vision/chair.obj", actor_type="model",
+                          actor_data={"actor_guid": "actor-chair"})
+        scene._actors.append(actor)
+        scene.vision_bindings = [{
+            "actor_guid": "actor-chair",
+            "shape_guid": "shape-chair",
+            "json_path": "/scene/shapes/0",
+            "shape_type": "model",
+            "shape_identity_key": "guid:shape-chair",
+        }]
+        scene.vision_unsupported_shapes = [{
+            "shape_index": 1,
+            "json_path": "/scene/shapes/1",
+            "type": "cylinder",
+            "reason": "unsupported_shape_type",
+        }]
+        fake_scene_manager = SimpleNamespace(get=lambda scene_name: scene)
+
+        with patch.object(scene_tools_module, "scene_manager", fake_scene_manager):
+            result = scene_tools_module.SceneTools.list_scene_tree(scene.route)
+
+        self.assertEqual(result["vision"]["import_mode"], "external_live")
+        self.assertEqual(result["vision"]["binding_count"], 1)
+        self.assertEqual(result["vision"]["unsupported_count"], 1)
+        self.assertEqual(result["vision"]["unsupported_by_reason"], {"unsupported_shape_type": 1})
+        self.assertTrue(result["actors"][0]["vision_proxy"])
+        self.assertEqual(result["actors"][0]["vision_binding"]["shape_guid"], "shape-chair")
 
 
 if __name__ == "__main__":
