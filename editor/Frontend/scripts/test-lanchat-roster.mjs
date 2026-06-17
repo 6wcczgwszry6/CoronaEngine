@@ -14,6 +14,8 @@ const assertIncludes = (source, needle, message) => {
 const store = read('src/stores/lanchat.js');
 const roomPanel = read('src/views/sidebar/lanchat/RoomPanel.vue');
 const memberList = read('src/views/sidebar/lanchat/MemberList.vue');
+const cefBridge = read('../../src/systems/ui/cef/cef_query_bridge.cpp');
+const networkHeader = read('../../include/corona/systems/network/network_system.h');
 const networkSystem = read('../../src/systems/network/network_system.cpp');
 
 assertIncludes(store, 'peerId:', 'lanchat store must track local peerId');
@@ -52,20 +54,32 @@ assertIncludes(roomPanel, "s.role === 'host'", 'RoomPanel must only show GM conf
 assertIncludes(roomPanel, 'function sendGmDecision', 'RoomPanel must send structured GM decisions');
 assertIncludes(roomPanel, "message_kind: 'confirmation'", 'GM confirmation buttons must send structured confirmation');
 assertIncludes(roomPanel, 'correlation_id: proposalId', 'GM confirmation must preserve proposal correlation_id');
+assertIncludes(roomPanel, '房主端口', 'RoomPanel must not imply LANChat always uses default 8770');
 
 assertIncludes(memberList, 'peerId', 'MemberList must accept peerId prop');
 assertIncludes(memberList, 'a.owner === peerId', 'agent remove visibility must compare owner to peerId');
 
+assertIncludes(networkHeader, 'session_port() const', 'NetworkSystem must expose the active ENet listen port');
 assertIncludes(networkSystem, 'if (impl_->session_role != SessionRole::Host) return;', 'clients must not process LANChat join packets');
 assertIncludes(networkSystem, 'MessageType::CHAT_HISTORY_SNAPSHOT', 'NetworkSystem must handle LANChat history snapshots');
 assertIncludes(networkSystem, 'MessageType::CHAT_JOIN_REJECT', 'NetworkSystem must handle LANChat join rejection');
 assertIncludes(networkSystem, 'lanchat_join_pending', 'NetworkSystem must track pending LANChat joins');
 assertIncludes(networkSystem, 'JOIN_TIMEOUT', 'NetworkSystem must emit LANChat join timeout errors');
 assertIncludes(networkSystem, 'ROOM_NOT_FOUND', 'NetworkSystem must reject joins when no LANChat room is open');
+assertIncludes(networkSystem, 'uint16_t NetworkSystem::session_port() const', 'NetworkSystem must return the active ENet listen port');
+assertIncludes(networkSystem, 'effective_port', 'LANChat join must prefer the already-connected collaboration host port');
+assertIncludes(networkSystem, 'send_lanchat_join_to_ready_peer', 'LANChat join must send CHAT_JOIN on existing ready peers');
+assertIncludes(networkSystem, 'complete_lanchat_join_if_ready', 'LANChat join completion must be shared by member and history snapshots');
 assertIncludes(networkSystem, 'send_to_first_peer(impl_->peer_manager, packet)', 'clients must send LANChat packets to host instead of broadcasting loops');
 assertIncludes(networkSystem, 'result = impl_->lanchat.record_message', 'host must assign authoritative LANChat message sequence');
 assertIncludes(networkSystem, 'result = impl_->lanchat.apply_remote_message', 'clients must only apply authoritative LANChat messages');
 assertIncludes(networkSystem, 'skipped history snapshot', 'missing join peer must not fall back to broadcasting history');
+assertIncludes(cefBridge, 'payload["listen_port"] = sys->session_port()', 'Network bridge must expose the local ENet listen port');
+assertIncludes(cefBridge, 'const uint16_t actual_port = sys->session_port() != 0 ? sys->session_port() : port', 'LANChat start_room must return the actual session port');
+assertIncludes(cefBridge, 'sys->session_port() != 0 ? sys->session_port() : 8770', 'LANChat get_local_ip must return the active session port when available');
+if (cefBridge.includes('data["port"] = 8770;')) {
+  fail('LANChat bridge must not hard-code get_local_ip port to 8770');
+}
 const chatJoinBranch = networkSystem.slice(
   networkSystem.indexOf('} else if (mt == MessageType::CHAT_JOIN) {'),
   networkSystem.indexOf('} else if (mt == MessageType::CHAT_JOIN_REJECT) {'),
@@ -73,6 +87,16 @@ const chatJoinBranch = networkSystem.slice(
 if (chatJoinBranch.includes('impl_->lanchat.open_room(')) {
   fail('CHAT_JOIN handling must not implicitly create a LANChat room');
 }
+const memberUpdateBranch = networkSystem.slice(
+  networkSystem.indexOf('} else if (mt == MessageType::CHAT_MEMBER_UPDATE) {'),
+  networkSystem.indexOf('} else if (mt == MessageType::CHAT_HISTORY_SNAPSHOT ||'),
+);
+assertIncludes(memberUpdateBranch, 'complete_lanchat_join_if_ready', 'member snapshots must complete pending joins when history arrived first');
+const historySnapshotBranchCpp = networkSystem.slice(
+  networkSystem.indexOf('} else if (mt == MessageType::CHAT_HISTORY_SNAPSHOT ||'),
+  networkSystem.indexOf('} else if (mt == MessageType::CHAT_MESSAGE ||'),
+);
+assertIncludes(historySnapshotBranchCpp, 'complete_lanchat_join_if_ready', 'history snapshots must complete pending joins when members arrived first');
 const joinRoomStart = store.indexOf('async function joinRoom');
 const sendMessageStart = store.indexOf('async function sendMessage');
 const joinRoomBody = store.slice(joinRoomStart, sendMessageStart);

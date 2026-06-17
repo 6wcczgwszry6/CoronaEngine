@@ -99,6 +99,9 @@ public:
     /// 客户端记录的房主端口；房主或未连接时为 0。
     [[nodiscard]] uint16_t host_port() const;
 
+    /// 当前 ENet 会话监听端口；未启动时为 0。
+    [[nodiscard]] uint16_t session_port() const;
+
     /// 已连接的 peer 数量。
     [[nodiscard]] size_t peer_count() const;
 

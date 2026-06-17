@@ -355,6 +355,41 @@ bool send_to_first_peer(Network::PeerManager& peer_manager,
     return false;
 }
 
+bool endpoint_matches(const std::string& peer_id,
+                      const std::string& ip,
+                      uint16_t port) {
+    if (peer_id.empty() || ip.empty() || port == 0) return false;
+    const std::string endpoint = ip + ":" + std::to_string(port);
+    if (peer_id == endpoint) return true;
+    if (peer_id.size() < endpoint.size()) return false;
+    return peer_id.compare(peer_id.size() - endpoint.size(),
+                           endpoint.size(), endpoint) == 0;
+}
+
+bool peer_matches_endpoint(const Network::PeerManager::PeerInfo& peer,
+                           const std::string& ip,
+                           uint16_t port) {
+    return endpoint_matches(peer.id, ip, port) ||
+           endpoint_matches(peer.stable_id, ip, port);
+}
+
+bool send_lanchat_join_to_ready_peer(Network::PeerManager& peer_manager,
+                                     const std::string& ip,
+                                     uint16_t port,
+                                     const std::vector<uint8_t>& packet) {
+    if (packet.empty()) return false;
+    const auto peers = peer_manager.peers();
+    for (const auto& peer : peers) {
+        if (peer.peer && peer.connected && peer.hello_done &&
+            peer_matches_endpoint(peer, ip, port)) {
+            peer_manager.send_to(peer.peer, Network::kChannelReliable,
+                                 packet.data(), packet.size(), true);
+            return true;
+        }
+    }
+    return false;
+}
+
 bool send_to_peer_id(Network::PeerManager& peer_manager,
                      const std::string& peer_id,
                      const std::vector<uint8_t>& packet) {
@@ -365,6 +400,14 @@ bool send_to_peer_id(Network::PeerManager& peer_manager,
         peer_info->peer, Network::kChannelReliable,
         packet.data(), packet.size(), true);
     return true;
+}
+
+void complete_lanchat_join_if_ready(bool& pending,
+                                    bool member_snapshot_received,
+                                    bool history_snapshot_received) {
+    if (pending && member_snapshot_received && history_snapshot_received) {
+        pending = false;
+    }
 }
 
 std::string_view session_role_label(NetworkSystem::SessionRole role) {
@@ -634,6 +677,10 @@ uint16_t NetworkSystem::host_port() const {
     return impl_->host_port;
 }
 
+uint16_t NetworkSystem::session_port() const {
+    return impl_->port;
+}
+
 size_t NetworkSystem::peer_count() const {
     return impl_->peer_manager.peer_count();
 }
@@ -686,6 +733,13 @@ bool NetworkSystem::lanchat_join_room(const std::string& ip,
                                       const std::string& room_id,
                                       const std::string& nickname) {
     const std::string display_name = nickname.empty() ? "Guest" : nickname;
+    const bool was_active_client =
+        impl_->session_state == SessionState::Active &&
+        impl_->session_role == SessionRole::Client;
+    const uint16_t effective_port =
+        was_active_client && impl_->host_address == ip && impl_->host_port != 0
+            ? impl_->host_port
+            : port;
     if (impl_->session_state != SessionState::Active) {
         if (!start_session(display_name, 0, 0, SessionRole::Client)) {
             return false;
@@ -694,14 +748,19 @@ bool NetworkSystem::lanchat_join_room(const std::string& ip,
     impl_->lanchat_nickname = display_name;
     impl_->lanchat_member_by_peer.clear();
     impl_->lanchat.open_room(room_id, local_peer_id(), display_name);
-    if (!connect_to_peer(ip, port, display_name)) {
-        impl_->lanchat.close_room();
-        return false;
-    }
     impl_->lanchat_join_pending = true;
     impl_->lanchat_join_member_snapshot_received = false;
     impl_->lanchat_join_history_snapshot_received = false;
     impl_->lanchat_join_started = Impl::Clock::now();
+    auto join_packet = Network::build_chat_join(
+        impl_->lanchat.room_id(), local_peer_id(), impl_->lanchat_nickname);
+    if (!send_lanchat_join_to_ready_peer(
+            impl_->peer_manager, ip, effective_port, join_packet) &&
+        !connect_to_peer(ip, effective_port, display_name)) {
+        impl_->lanchat.close_room();
+        impl_->lanchat_join_pending = false;
+        return false;
+    }
     return true;
 }
 
@@ -1036,13 +1095,8 @@ void NetworkSystem::on_peer_connected(const Network::PeerManager::PeerInfo& info
     if (impl_->session_role == SessionRole::Client && !impl_->lanchat.room_id().empty()) {
         auto packet = Network::build_chat_join(
             impl_->lanchat.room_id(), local_peer_id(), impl_->lanchat_nickname);
-        const auto* peer_info = impl_->peer_manager.find_peer(info.id);
-        if (peer_info && peer_info->peer) {
-            impl_->peer_manager.send_to(
-                peer_info->peer, Network::kChannelReliable, packet.data(), packet.size(), true);
-        } else {
-            send_to_first_peer(impl_->peer_manager, packet);
-        }
+        send_lanchat_join_to_ready_peer(
+            impl_->peer_manager, impl_->host_address, impl_->host_port, packet);
     }
 
     if (impl_->ctx && impl_->ctx->event_bus()) {
@@ -1357,6 +1411,10 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
         impl_->lanchat.apply_member_snapshot(members);
         if (impl_->session_role == SessionRole::Client && impl_->lanchat_join_pending) {
             impl_->lanchat_join_member_snapshot_received = true;
+            complete_lanchat_join_if_ready(
+                impl_->lanchat_join_pending,
+                impl_->lanchat_join_member_snapshot_received,
+                impl_->lanchat_join_history_snapshot_received);
         }
         if (impl_->lanchat_event_callback) {
             impl_->lanchat_event_callback(
@@ -1383,9 +1441,10 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
         impl_->lanchat.apply_history_snapshot(history);
         if (impl_->session_role == SessionRole::Client && impl_->lanchat_join_pending) {
             impl_->lanchat_join_history_snapshot_received = true;
-            if (impl_->lanchat_join_member_snapshot_received) {
-                impl_->lanchat_join_pending = false;
-            }
+            complete_lanchat_join_if_ready(
+                impl_->lanchat_join_pending,
+                impl_->lanchat_join_member_snapshot_received,
+                impl_->lanchat_join_history_snapshot_received);
         }
         if (impl_->lanchat_event_callback) {
             impl_->lanchat_event_callback(

@@ -32,7 +32,7 @@
       <!-- 加入房间 -->
       <div v-else class="space-y-3">
         <input v-model="form.ip" placeholder="房主 IP（如 192.168.1.5）" :class="inputCls" :disabled="isJoining" />
-        <input v-model.number="form.port" placeholder="端口（默认 8770）" :class="inputCls" :disabled="isJoining" />
+        <input v-model.number="form.port" placeholder="房主端口" :class="inputCls" :disabled="isJoining" />
         <input v-model="form.room" placeholder="房间号" :class="inputCls" :disabled="isJoining" />
         <input v-model="form.password" placeholder="密码（可选）" :class="inputCls" :disabled="isJoining" />
         <input v-model="form.nickname" placeholder="你的昵称" :class="inputCls" :disabled="isJoining" />

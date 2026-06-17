@@ -86,6 +86,7 @@ nlohmann::json build_network_session_info(
     payload["peer_count"] = static_cast<int>(sys->peer_count());
     payload["host_address"] = sys->host_address();
     payload["host_port"] = sys->host_port();
+    payload["listen_port"] = sys->session_port();
     return payload;
 }
 
@@ -579,10 +580,11 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     const std::string room = payload_arg.value("room", "");
                     const uint16_t port = payload_arg.value("port", 8770);
                     bool ok = sys->lanchat_start_room(room, "房主", port);
+                    const uint16_t actual_port = sys->session_port() != 0 ? sys->session_port() : port;
                     nlohmann::json data;
                     data["ok"] = ok;
                     data["ip"] = detect_local_ipv4();
-                    data["port"] = port;
+                    data["port"] = actual_port;
                     data["room"] = room;
                     data["peer_id"] = sys->local_peer_id();
                     data["members"] = build_lanchat_members(sys->lanchat_members());
@@ -691,7 +693,7 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     nlohmann::json data;
                     data["ok"] = true;
                     data["ip"] = detect_local_ipv4();
-                    data["port"] = 8770;
+                    data["port"] = sys->session_port() != 0 ? sys->session_port() : 8770;
                     callback->Success(create_success_json(func, data));
                     return true;
                 }
