@@ -219,6 +219,33 @@ def test_role_agent_not_hijacked_by_prior_agent_or_gm_messages():
     print("[OK] prior agent/GM messages do not hijack a normal @agent reply")
 
 
+def test_role_agent_theme_discussion_not_hijacked_by_gm():
+    orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
+    trigger = _trigger("@商人 围绕暗黑集市主题讨论一下吧，其他人都可以提出想法", "商人")
+    trigger["agent_id"] = "merchant"
+    trigger["sender_id"] = "host-a"
+    trigger["sender_name"] = "房主"
+    trigger["history"] = [
+        {"message_id": "m0", "from": "房主", "sender_id": "host-a", "text": "@长者 介绍一下各位"},
+        {"message_id": "m1", "from": "用户", "sender_id": "user-b", "text": "@房主 用商人"},
+        {"message_id": "m2", "from": "房主", "sender_id": "host-a", "text": trigger["text"]},
+    ]
+    result = orch.handle_trigger(trigger)
+    assert result.proposal is False
+    assert result.sender_id == "merchant"
+    assert result.sender_name == "商人"
+    assert "GM 提案" not in result.text
+    print("[OK] @Agent theme discussion stays on role agent path")
+
+
+def test_role_agent_advice_request_not_hijacked_by_gm():
+    orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
+    result = orch.handle_trigger(_trigger("@商人 你有什么建议呢", "商人"))
+    assert result.proposal is False
+    assert result.sender_name == "商人"
+    print("[OK] @Agent advice request does not create GM proposal")
+
+
 def test_gm_pause_and_discussion_controls_do_not_reject_pending_proposal():
     runtime = get_lanchat_scene_runtime()
     runtime.end_compose()
@@ -303,6 +330,29 @@ def test_host_confirmation_replay_does_not_requeue_action():
     print("[OK] repeated proposal confirmation does not requeue confirmed action")
 
 
+def test_duplicate_trigger_reuses_existing_proposal_id():
+    orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
+    trigger = _trigger("@GM 用户A和用户B对桌子位置有冲突", "GM")
+    first = orch.handle_trigger(trigger)
+    second = orch.handle_trigger(dict(trigger))
+    assert first.proposal is True and second.proposal is True
+    assert first.action_payload["proposal_id"] == second.action_payload["proposal_id"]
+    print("[OK] duplicate trigger reuses existing proposal instead of creating a second one")
+
+
+def test_rejected_proposal_cannot_be_confirmed_later():
+    orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
+    proposal = orch.handle_trigger(_trigger("@GM 删除桌子", "GM"))
+    proposal_id = proposal.action_payload["proposal_id"]
+    rejected = orch.handle_trigger(_trigger(f"@GM 拒绝 {proposal_id}", "GM"))
+    assert "已取消" in rejected.text
+    assert rejected.action_payload["status"] == "rejected"
+    replay = orch.handle_trigger(_trigger(f"@GM 确认 {proposal_id}", "GM"))
+    assert "已处理" in replay.text
+    assert replay.action_payload is None
+    print("[OK] rejected proposal cannot be confirmed later")
+
+
 def test_host_confirmation_rejects_explicit_non_host_role():
     orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
     proposal = orch.handle_trigger(_trigger("@GM 删除桌子", "GM"))
@@ -338,6 +388,22 @@ def test_structured_confirmation_uses_correlation_id_and_metadata():
     assert confirmed.action_payload["confirmation_mode"] == "structured_confirmation"
     assert confirmed.action_payload["proposal_id"] == proposal_id
     print("[OK] structured confirmation consumes proposal by correlation_id")
+
+
+def test_role_agent_api_error_is_sanitized():
+    def broken_agent_factory():
+        def _agent(persona, messages):
+            raise RuntimeError("Error code: 401 - {'message': 'Invalid Token (request id: abc)'}")
+
+        return _agent
+
+    orch = LanChatAgentOrchestrator(agent_factory=broken_agent_factory)
+    result = orch.handle_trigger(_trigger("@商人 你有什么建议", "商人"))
+    assert result.proposal is False
+    assert "当前模型服务不可用" in result.text
+    assert "Invalid Token" not in result.text
+    assert "request id" not in result.text
+    print("[OK] role agent provider errors are sanitized before chat reply")
 
 
 def test_worker_uses_orchestrator_and_sends_reply():
@@ -571,6 +637,27 @@ def test_worker_broadcasts_confirmed_gm_action():
     print("[OK] worker broadcasts confirmed GM action payload and queues host execution")
 
 
+def test_worker_does_not_execute_discussion_only_confirmed_payload():
+    executor = FakeHostActionExecutor()
+    engine = FakeEngine([])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        host_action_executor=executor,
+        async_agent_execution=False,
+    )
+    worker._broadcast_confirmed_action({  # noqa: SLF001 - direct unit coverage for dispatch gate
+        "proposal_id": "gm-discuss",
+        "status": "confirmed",
+        "action_type": "discussion_only",
+        "source_user_id": "user-a",
+        "intent_text": "围绕暗黑集市主题讨论",
+    })
+    assert not executor.payloads
+    assert not engine.intents
+    print("[OK] discussion-only confirmed payload does not enter host executor")
+
+
 def test_host_action_executor_runs_under_gate_and_reports_result():
     engine = FakeEngine([])
     gate = FakeGate()
@@ -600,7 +687,7 @@ def test_host_action_executor_runs_under_gate_and_reports_result():
     assert result is not None and result.ok is True
     assert result.event_type == "SceneDelta"
     assert result.payload["source_user_id"] == "user-a"
-    assert "peer actor sync" in result.message
+    assert "peer actor sync" not in result.message
     assert [item[3] for item in engine.intents] == [
         "queued_host_action",
         "executing_host_action",
@@ -608,6 +695,9 @@ def test_host_action_executor_runs_under_gate_and_reports_result():
     ]
     assert engine.system_messages
     assert "scene delta applied" in engine.system_messages[-1][2]
+    assert "host_single_writer" not in engine.system_messages[-1][2]
+    assert "EngineWriteGate" not in engine.system_messages[-1][2]
+    assert "peer actor sync" not in engine.system_messages[-1][2]
     assert engine.system_messages[-1][3] == "action_status"
     print("[OK] host action executor runs under EngineWriteGate and reports SceneDelta")
 
@@ -673,9 +763,38 @@ def test_host_action_executor_reports_accepted_no_delta_when_no_executor_agent()
     })
     assert result is not None and result.ok is True
     assert result.event_type == "AcceptedNoDelta"
-    assert "未产生 typed actor delta" in result.message
+    assert "未修改场景" in result.message
+    assert "typed actor delta" not in result.message
     assert [item[3] for item in engine.intents][-1] == "accepted_no_delta"
     print("[OK] host action executor separates accepted_no_delta from complete actor execution")
+
+
+def test_host_action_executor_sanitizes_agent_api_error():
+    engine = FakeEngine([])
+
+    def broken_agent_factory():
+        def _agent(persona, messages):
+            raise RuntimeError("Error code: 401 - {'message': 'Invalid Token (request id: abc)'}")
+
+        return _agent
+
+    executor = LanChatHostActionExecutor(
+        corona_engine=engine,
+        agent_factory=broken_agent_factory,
+        engine_gate=None,
+    )
+    result = executor.enqueue_and_process({
+        "proposal_id": "gm-token",
+        "status": "confirmed",
+        "source_user_id": "user-a",
+        "intent_text": "添加篝火",
+    })
+    assert result is not None and result.ok is False
+    assert "Invalid Token" not in result.message
+    assert "request id" not in result.message
+    assert "当前模型服务不可用" in engine.system_messages[-1][2]
+    assert "Invalid Token" not in engine.system_messages[-1][2]
+    print("[OK] host executor provider errors are sanitized before chat status")
 
 
 def test_host_action_executor_serializes_parallel_confirmed_actions():
@@ -738,13 +857,18 @@ if __name__ == "__main__":
     test_gm_proposal_for_conflict()
     test_gm_summary_does_not_create_proposal()
     test_role_agent_not_hijacked_by_prior_agent_or_gm_messages()
+    test_role_agent_theme_discussion_not_hijacked_by_gm()
+    test_role_agent_advice_request_not_hijacked_by_gm()
     test_gm_pause_and_discussion_controls_do_not_reject_pending_proposal()
     test_single_user_major_action_stays_on_role_agent_path()
     test_host_confirmation_consumes_pending_proposal()
     test_host_confirmation_rejects_wrong_proposal_id()
     test_host_confirmation_replay_does_not_requeue_action()
+    test_duplicate_trigger_reuses_existing_proposal_id()
+    test_rejected_proposal_cannot_be_confirmed_later()
     test_host_confirmation_rejects_explicit_non_host_role()
     test_structured_confirmation_uses_correlation_id_and_metadata()
+    test_role_agent_api_error_is_sanitized()
     test_worker_uses_orchestrator_and_sends_reply()
     test_worker_streams_sanitized_progress_reply_before_final()
     test_worker_async_agent_execution_returns_before_slow_agent_reply()
@@ -754,8 +878,10 @@ if __name__ == "__main__":
     test_planning_confirmation_gate_roundtrip()
     test_worker_async_agent_calls_are_serialized_per_worker()
     test_worker_broadcasts_confirmed_gm_action()
+    test_worker_does_not_execute_discussion_only_confirmed_payload()
     test_host_action_executor_runs_under_gate_and_reports_result()
     test_host_action_executor_does_not_report_executed_for_empty_or_failed_result()
     test_host_action_executor_reports_accepted_no_delta_when_no_executor_agent()
+    test_host_action_executor_sanitizes_agent_api_error()
     test_host_action_executor_serializes_parallel_confirmed_actions()
     print("\n=== LANChat agent orchestrator ALL PASS ===")

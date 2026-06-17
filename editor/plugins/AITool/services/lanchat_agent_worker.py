@@ -158,7 +158,10 @@ class LANChatAgentWorker:
         trigger: dict[str, Any],
         action_payload: dict[str, Any] | None = None,
     ) -> bool:
-        if action_payload and action_payload.get("status") == "pending_host_confirmation":
+        if action_payload and (
+            action_payload.get("status") in {"pending_host_confirmation", "pending"}
+            or action_payload.get("requires_host_confirm")
+        ):
             proposal_id = str(action_payload.get("proposal_id") or self._correlation_id(trigger))
             metadata = dict(action_payload)
             metadata.setdefault("requires_host_confirm", True)
@@ -202,6 +205,8 @@ class LANChatAgentWorker:
 
     def _broadcast_confirmed_action(self, payload: dict[str, Any] | None) -> None:
         if not payload or payload.get("status") != "confirmed":
+            return
+        if str(payload.get("action_type") or "") == "discussion_only":
             return
         if hasattr(self._corona_engine, "network_broadcast_intent"):
             source_user_id = str(payload.get("source_user_id") or "unknown")

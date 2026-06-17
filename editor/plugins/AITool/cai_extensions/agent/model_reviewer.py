@@ -48,14 +48,117 @@ def _get_current_scene() -> Optional[Any]:
         return None
 
 
+def _mark_vlm_camera_internal(camera: Any) -> None:
+    """Mark the review camera as internal/transient for Python-side filters."""
+    for key, value in (
+        ("internal", True),
+        ("transient", True),
+        ("syncable", False),
+        ("show_in_ui", False),
+    ):
+        try:
+            setattr(camera, key, value)
+        except Exception:
+            pass
+
+
+def _force_review_camera_offscreen(camera: Any) -> bool:
+    """Keep VLM screenshots away from the default/main viewport surface."""
+    try:
+        set_view_state = getattr(camera, "set_view_state", None)
+        if callable(set_view_state):
+            set_view_state(False, 0, 0, 1, 1, 1.0)
+    except Exception as exc:
+        logger.warning("[ModelReviewer] VLM 相机关闭 viewport 失败: %s", exc)
+        return False
+
+    set_surface = getattr(camera, "set_surface", None)
+    get_surface = getattr(camera, "get_surface", None)
+    if not callable(set_surface) or not callable(get_surface):
+        logger.warning("[ModelReviewer] VLM 相机缺少离屏 surface 接口, 跳过截图")
+        return False
+
+    try:
+        set_surface(0)
+        surface = get_surface()
+    except Exception as exc:
+        logger.warning("[ModelReviewer] VLM 相机设置离屏 surface 失败: %s", exc)
+        return False
+    if int(surface or 0) != 0:
+        logger.warning("[ModelReviewer] VLM 相机未进入离屏 surface(surface=%s), 跳过截图", surface)
+        return False
+    return True
+
+
+def _snapshot_camera_state(camera: Any) -> Optional[Dict[str, Any]]:
+    if camera is None:
+        return None
+    try:
+        get_output_mode = getattr(camera, "get_output_mode", None)
+        get_surface = getattr(camera, "get_surface", None)
+        return {
+            "handle": camera.get_handle() if hasattr(camera, "get_handle") else None,
+            "position": list(camera.get_position()),
+            "forward": list(camera.get_forward()),
+            "up": list(camera.get_world_up()),
+            "fov": float(camera.get_fov()),
+            "output_mode": get_output_mode() if callable(get_output_mode) else getattr(camera, "output_mode", None),
+            "surface": get_surface() if callable(get_surface) else None,
+        }
+    except Exception as exc:
+        logger.warning("[ModelReviewer] 主相机状态快照失败: %s", exc)
+        return None
+
+
+def _restore_camera_state(camera: Any, state: Optional[Dict[str, Any]]) -> bool:
+    if camera is None or not state:
+        return False
+    restored = False
+    try:
+        camera.set(state["position"], state["forward"], state["up"], state["fov"])
+        restored = True
+    except Exception as exc:
+        logger.warning("[ModelReviewer] 主相机 pose 恢复失败: %s", exc)
+    try:
+        if state.get("output_mode") and hasattr(camera, "set_output_mode"):
+            camera.set_output_mode(state["output_mode"])
+            restored = True
+    except Exception as exc:
+        logger.warning("[ModelReviewer] 主相机 output_mode 恢复失败: %s", exc)
+    try:
+        if state.get("surface") is not None and hasattr(camera, "set_surface"):
+            camera.set_surface(state["surface"])
+            restored = True
+    except Exception as exc:
+        logger.warning("[ModelReviewer] 主相机 surface 恢复失败: %s", exc)
+    return restored
+
+
+def _camera_state_changed(camera: Any, state: Optional[Dict[str, Any]]) -> bool:
+    current = _snapshot_camera_state(camera)
+    if not current or not state:
+        return False
+    for key in ("handle", "position", "forward", "up", "fov", "output_mode", "surface"):
+        if current.get(key) != state.get(key):
+            return True
+    return False
+
+
 def get_or_create_vlm_review_camera(scene: Any, camera_factory: Optional[Any] = None) -> Optional[Any]:
     """Return a hidden VLM review camera without switching the active viewport camera."""
     if scene is None:
         return None
     try:
+        ensure_default = getattr(scene, "ensure_default_camera", None)
+        if callable(ensure_default):
+            ensure_default()
+    except Exception:
+        pass
+    try:
         existing = scene.find_camera(VLM_REVIEW_CAMERA_NAME)
         if existing is not None:
-            return existing
+            _mark_vlm_camera_internal(existing)
+            return existing if _force_review_camera_offscreen(existing) else None
     except Exception:
         pass
 
@@ -72,7 +175,11 @@ def get_or_create_vlm_review_camera(scene: Any, camera_factory: Optional[Any] = 
             render_backend="native",
             output_mode="base_color",
         )
+        _mark_vlm_camera_internal(camera)
         scene.add_camera_to_scene(camera)
+        if not _force_review_camera_offscreen(camera):
+            logger.warning("[ModelReviewer] VLM 独立截图摄像头无法隔离, 跳过截图")
+            return None
         logger.info("[ModelReviewer] 已创建 VLM 独立截图摄像头: %s", VLM_REVIEW_CAMERA_NAME)
         return camera
     except Exception as exc:
@@ -135,6 +242,19 @@ def _capture_with_review_camera(
     calc_camera_pose: Any,
 ) -> Optional[str]:
     os.makedirs(output_dir, exist_ok=True)
+    main_camera = None
+    main_state = None
+    try:
+        get_active = getattr(scene, "get_active_camera", None)
+        main_camera = get_active() if callable(get_active) else scene.find_camera(None)
+        if main_camera is review_camera:
+            logger.warning("[ModelReviewer] VLM review camera 是当前主相机, 跳过截图")
+            return None
+        main_state = _snapshot_camera_state(main_camera)
+    except Exception:
+        main_camera = None
+        main_state = None
+
     distance = 3.0
     center = [0.0, 0.5, 0.0]
     angles = [0, 90, 180, 270]
@@ -168,6 +288,10 @@ def _capture_with_review_camera(
                 review_camera.set_output_mode(old_mode)
             except Exception:
                 pass
+        if _camera_state_changed(main_camera, main_state):
+            _restore_camera_state(main_camera, main_state)
+            logger.warning("VLM camera leaked into main camera; restored main camera and skipped review")
+            return None
 
     logger.info("[ModelReviewer] %s 独立摄像头截图 %d/%d", model_name, len(saved), len(angles))
     return output_dir if saved else None
@@ -252,15 +376,13 @@ def _capture_single_model(output_dir: str, model_name: str, tier: int = 99) -> O
     if review_camera is not None:
         return _capture_with_review_camera(scene, review_camera, output_dir, model_name, _calc_camera_pose)
 
-    allow_main = os.environ.get("CORONA_VLM_ALLOW_MAIN_CAMERA_CAPTURE", "0").strip() == "1"
-    if not allow_main:
+    if os.environ.get("CORONA_VLM_ALLOW_MAIN_CAMERA_CAPTURE", "0").strip() == "1":
         logger.warning(
-            "[ModelReviewer] VLM 独立截图摄像头不可用, 跳过截图; "
-            "如需旧主相机调试, 设置 CORONA_VLM_ALLOW_MAIN_CAMERA_CAPTURE=1"
+            "[ModelReviewer] CORONA_VLM_ALLOW_MAIN_CAMERA_CAPTURE 已被忽略; "
+            "为保护主视口稳定, VLM 不再使用主相机 fallback"
         )
-        return None
-    logger.warning("[ModelReviewer] 使用旧主相机截图 fallback, 可能扰动主视口")
-    return _capture_single_model_main_camera_fallback(output_dir, model_name)
+    logger.warning("[ModelReviewer] VLM 独立截图摄像头不可用, 跳过截图")
+    return None
 
 
 def _vlm_review_model(screenshot_dir: str, model_name: str, model_type: str) -> Dict[str, Any]:

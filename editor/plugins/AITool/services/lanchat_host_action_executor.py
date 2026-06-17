@@ -69,11 +69,11 @@ class LanChatHostActionExecutor:
                 else:
                     result_text = self._execute_payload(payload)
             except Exception as exc:
-                self._logger.debug("Host GM action execution failed: %s", exc)
+                self._logger.warning("Host GM action execution failed", exc_info=True)
                 result = HostActionExecutionResult(
                     ok=False,
                     event_type="CommandRejected",
-                    message=f"host action failed: {exc}",
+                    message="执行失败，请稍后重试或换一个助手。",
                     payload=self._result_payload(payload, "CommandRejected", False, str(exc)),
                 )
                 self._broadcast_status(payload, "host_action_failed")
@@ -94,7 +94,7 @@ class LanChatHostActionExecutor:
                 return result
 
             if self._looks_no_delta_result(result_text):
-                message = f"{result_text}（未产生 typed actor delta；peer 同步以底层 SceneDelta 为准。）"
+                message = "已接收该请求；这是讨论或状态类内容，未修改场景。"
                 result = HostActionExecutionResult(
                     ok=True,
                     event_type="AcceptedNoDelta",
@@ -105,7 +105,7 @@ class LanChatHostActionExecutor:
                 self._send_system_message(result.message, payload, "accepted_no_delta")
                 return result
 
-            message = f"{result_text}（语义执行完成；peer actor sync 以底层 SceneDelta 为准。）"
+            message = result_text
             result = HostActionExecutionResult(
                 ok=True,
                 event_type="SceneDelta",
@@ -142,7 +142,11 @@ class LanChatHostActionExecutor:
             f"conflicts={conflicts}",
             f"用户确认意图：{intent_text}",
         ]
-        return str(agent(persona, messages))
+        try:
+            return str(agent(persona, messages))
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning("Host executor agent failed", exc_info=True)
+            return self._safe_agent_error_text(exc)
 
     @staticmethod
     def _looks_failed_result(text: str) -> bool:
@@ -161,6 +165,8 @@ class LanChatHostActionExecutor:
             "不能",
             "无法",
             "未能",
+            "不可用",
+            "已跳过",
         )
         return any(marker in lower for marker in failure_markers)
 
@@ -186,12 +192,13 @@ class LanChatHostActionExecutor:
             return
         source_user_id = str(payload.get("source_user_id") or "unknown")
         tooltip = str(payload.get("intent_text") or payload.get("proposal_id") or status)
+        visible_status = self._visible_status_text(status)
         if hasattr(self._corona_engine, "network_send_system_message_ex"):
             try:
                 self._corona_engine.network_send_system_message_ex(
                     self._system_sender_id,
                     self._system_sender_name,
-                    f"[Host status] {status}: {tooltip}",
+                    f"【执行状态】{visible_status}: {tooltip}",
                     "action_status",
                     str(payload.get("proposal_id") or ""),
                     json.dumps(self._action_status_metadata(payload, status), ensure_ascii=False),
@@ -224,7 +231,7 @@ class LanChatHostActionExecutor:
                 self._corona_engine.network_send_system_message_ex(
                     self._system_sender_id,
                     self._system_sender_name,
-                    f"【Host 执行结果】{message}",
+                    f"【执行结果】{message}",
                     "action_status",
                     str(payload.get("proposal_id") or ""),
                     json.dumps({
@@ -236,7 +243,7 @@ class LanChatHostActionExecutor:
                 self._corona_engine.network_send_system_message(
                     self._system_sender_id,
                     self._system_sender_name,
-                    f"【Host 执行结果】{message}",
+                    f"【执行结果】{message}",
                 )
         except Exception as exc:
             self._logger.debug("Failed to send host action system message: %s", exc)
@@ -268,6 +275,25 @@ class LanChatHostActionExecutor:
             "message": message,
             "timestamp": time.time(),
         }
+
+    @staticmethod
+    def _visible_status_text(status: str) -> str:
+        return {
+            "queued_host_action": "已排队",
+            "executing_host_action": "执行中",
+            "host_action_executed": "已完成",
+            "host_action_failed": "执行失败",
+            "accepted_no_delta": "未修改场景",
+            "failed": "执行失败",
+            "executed": "已完成",
+        }.get(status, status)
+
+    @staticmethod
+    def _safe_agent_error_text(exc: Exception) -> str:
+        text = str(exc)
+        if any(marker in text for marker in ("Invalid Token", "request id", "rix_api_error", "stack trace")):
+            return "当前模型服务不可用，已跳过该助手回复。"
+        return "该助手暂时无法响应，请稍后重试或换一个助手。"
 
     @staticmethod
     def _default_engine_gate() -> Any:

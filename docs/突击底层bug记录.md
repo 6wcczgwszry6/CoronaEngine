@@ -588,3 +588,24 @@
   - Run protocol tests for `ACTOR_TRANSFORM_UPDATE`.
   - Confirm CEF `broadcast_actor_transform` and `poll_pending_actor_transform` compile.
   - F5 verify Host actor transform changes apply on Guest.
+
+## 2026-06-17: VLM review camera / main viewport isolation hardening
+
+- Latest F5 symptom:
+  - Main viewport can flicker heavily when VLM review camera is created or used.
+  - Extra user-opened CameraView is expected behavior and should remain allowed; the issue is main camera vs `vlm_review_camera` isolation.
+- Python-side mitigation implemented:
+  - `vlm_review_camera` is now forced to `view_open=False`.
+  - `vlm_review_camera` is forced to surface `0`; if the engine cannot confirm surface `0`, VLM capture is skipped.
+  - Main-camera fallback is ignored even if `CORONA_VLM_ALLOW_MAIN_CAMERA_CAPTURE=1`.
+  - VLM capture snapshots the active main camera state before screenshots and restores it if any leak is detected.
+  - VLM camera is marked `internal/transient/syncable=False/show_in_ui=False` on the Python object.
+- Bottom-layer verification still required:
+  - Confirm `Camera.set_surface(0)` is a valid offscreen/no-presented-surface path in C++.
+  - Confirm camera state changes for `vlm_review_camera` do not enqueue camera sync / dirty viewport updates.
+  - Confirm camera roster / CameraView UI respects internal/transient flags or filters `vlm_review_camera` by name.
+  - Confirm GPU screenshot readback from the VLM camera does not use the main presented render target.
+- Not done in this pass:
+  - No C++/Ninja/CMake build.
+  - No C++ offscreen render-target implementation.
+  - No CameraView UI roster filtering beyond Python-side object flags.

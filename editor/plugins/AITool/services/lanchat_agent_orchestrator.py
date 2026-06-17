@@ -34,7 +34,12 @@ class LanChatAgentOrchestrator:
     _CONFLICT_WORDS = ("冲突", "同时", "覆盖", "不同意", "反对", "抢", "都要")
     _CONFIRM_WORDS = ("确认", "同意", "按方案", "执行", "可以")
     _REJECT_WORDS = ("拒绝", "取消", "不要")
-    _MAJOR_ACTION_WORDS = ("删除", "重置", "清空", "整体", "主题", "大件", "核心家具")
+    _MAJOR_ACTION_WORDS = ("删除", "重置", "清空", "整体", "大件", "核心家具", "覆盖")
+    _EXECUTION_WORDS = ("开始执行", "开始生成", "按方案", "执行", "生成", "应用方案")
+    _DISCUSSION_WORDS = (
+        "讨论", "介绍", "建议", "idea", "想法", "你是谁", "你会干什么",
+        "其他人都可以提出", "大家都可以提出",
+    )
     _PROPOSAL_ID_PATTERN = re.compile(r"\bgm-\d+\b", re.I)
 
     def __init__(
@@ -50,6 +55,8 @@ class LanChatAgentOrchestrator:
         self._system_sender_name = system_sender_name
         self._agent: Any = None
         self._pending_proposal: dict[str, Any] | None = None
+        self._proposals: dict[str, dict[str, Any]] = {}
+        self._trigger_to_proposal: dict[str, str] = {}
         self._last_confirmed_action: dict[str, Any] | None = None
         self._processed_proposals: dict[str, str] = {}
         self._session_mode = "DISCUSSING"
@@ -118,12 +125,14 @@ class LanChatAgentOrchestrator:
 
     def _needs_gm_proposal(self, trigger: dict[str, Any], state: DiscussionState) -> bool:
         text = str(trigger.get("text") or "")
+        if not self._is_gm_trigger(trigger) and self._is_discussion_intent(text):
+            return False
         if self._is_gm_trigger(trigger):
             return (
                 state.conflicts
                 or any(word in text for word in self._CONFLICT_WORDS)
                 or any(word in text for word in self._MAJOR_ACTION_WORDS)
-                or any(word in text for word in ("开始执行", "开始生成", "按方案", "执行", "生成"))
+                or any(word in text for word in self._EXECUTION_WORDS)
             )
         if state.conflicts:
             return True
@@ -133,7 +142,12 @@ class LanChatAgentOrchestrator:
         # GM 只发 proposal 但没有执行队列时吞掉用户操作。多人重大操作仍需 GM。
         if any(word in text for word in self._MAJOR_ACTION_WORDS) and self._is_multi_user(trigger):
             return True
+        if any(word in text for word in self._EXECUTION_WORDS) and self._is_multi_user(trigger):
+            return True
         return False
+
+    def _is_discussion_intent(self, text: str) -> bool:
+        return any(word in str(text or "") for word in self._DISCUSSION_WORDS)
 
     def _gm_control_response(self, trigger: dict[str, Any], state: DiscussionState) -> str | None:
         text = str(trigger.get("text") or "").strip()
@@ -185,16 +199,25 @@ class LanChatAgentOrchestrator:
     def _build_gm_proposal(self, trigger: dict[str, Any], state: DiscussionState) -> str:
         requester = str(trigger.get("sender_name") or trigger.get("sender_id") or "用户")
         text = str(trigger.get("text") or "").strip()
+        dedupe_key = self._proposal_dedupe_key(trigger)
+        existing_id = self._trigger_to_proposal.get(dedupe_key)
+        if existing_id and existing_id in self._proposals:
+            existing = self._proposals[existing_id]
+            self._pending_proposal = existing if existing.get("status") == "pending" else self._pending_proposal
+            return self._format_gm_proposal(existing)
+
         proposal_id = f"gm-{int(time.time() * 1000)}"
         pending = state.pending_intents or [f"{requester}: {text}"]
         conflicts = state.conflicts or self._infer_pair_conflicts(self._history_from_trigger(trigger))
         if not conflicts:
             conflicts = ["暂无明确对象冲突，但该操作可能影响多人共识或核心布局。"]
 
+        action_type = self._infer_action_type(trigger, state)
         self._pending_proposal = {
             "proposal_id": proposal_id,
             "correlation_id": proposal_id,
-            "status": "pending_host_confirmation",
+            "status": "pending",
+            "action_type": action_type,
             "source_user_id": str(trigger.get("sender_id") or ""),
             "target_agent_id": str(trigger.get("agent_id") or ""),
             "requester": requester,
@@ -204,7 +227,17 @@ class LanChatAgentOrchestrator:
             "requires_host_confirm": True,
             "execution": "host_single_writer",
         }
+        self._proposals[proposal_id.lower()] = self._pending_proposal
+        self._trigger_to_proposal[dedupe_key] = proposal_id.lower()
 
+        return self._format_gm_proposal(self._pending_proposal)
+
+    def _format_gm_proposal(self, proposal: dict[str, Any]) -> str:
+        proposal_id = str(proposal.get("proposal_id") or "")
+        requester = str(proposal.get("requester") or "用户")
+        text = str(proposal.get("intent_text") or "")
+        pending = proposal.get("pending") or []
+        conflicts = proposal.get("conflicts") or []
         return (
             f"【GM 提案 {proposal_id}】\n"
             f"我理解当前请求来自 {requester}：{text}\n"
@@ -213,6 +246,26 @@ class LanChatAgentOrchestrator:
             "建议：先保留最近用户明确操作，Agent 物体让位；涉及删除、重置或覆盖多人意见时由房主确认。\n"
             f"房主可回复：@GM 确认 {proposal_id} / @GM 拒绝 {proposal_id}。"
         )
+
+    def _proposal_dedupe_key(self, trigger: dict[str, Any]) -> str:
+        message_id = str(trigger.get("message_id") or trigger.get("correlation_id") or "")
+        sender_id = str(trigger.get("sender_id") or trigger.get("sender_name") or "")
+        text = str(trigger.get("text") or "").strip()
+        return f"{sender_id}|{message_id}|{text}"
+
+    def _infer_action_type(self, trigger: dict[str, Any], state: DiscussionState) -> str:
+        text = str(trigger.get("text") or "")
+        if any(word in text for word in self._CONFLICT_WORDS) or state.conflicts:
+            return "conflict_resolution"
+        if any(word in text for word in ("删除", "移除", "清空")):
+            return "actor_delete"
+        if any(word in text for word in ("移动", "旋转", "缩放", "放大", "缩小", "调整")):
+            return "actor_transform"
+        if any(word in text for word in ("添加", "新增", "放入")):
+            return "actor_add"
+        if any(word in text for word in ("开始生成", "生成", "开始执行", "执行", "应用方案")):
+            return "start_generation"
+        return "discussion_only"
 
     def _consume_confirmation(self, text: str, trigger: dict[str, Any] | None = None) -> str | None:
         self._last_confirmed_action = None
@@ -237,26 +290,34 @@ class LanChatAgentOrchestrator:
         correlation_id = str(trigger.get("correlation_id") or metadata.get("proposal_id") or "").strip().lower()
         if correlation_id:
             mentioned_ids.add(correlation_id)
-        processed_matches = [
-            item for item in sorted(mentioned_ids)
-            if item in self._processed_proposals
-        ]
+        processed_matches = [item for item in sorted(mentioned_ids) if item in self._processed_proposals]
         if processed_matches:
             replay_id = processed_matches[0]
             status = self._processed_proposals[replay_id]
             return f"【GM】提案 {replay_id} 已处理（{status}），不会重复入队。"
-        if self._pending_proposal is None:
+        proposal_status_matches = [
+            (item, self._proposals[item].get("status"))
+            for item in sorted(mentioned_ids)
+            if item in self._proposals and self._proposals[item].get("status") != "pending"
+        ]
+        if proposal_status_matches:
+            replay_id, status = proposal_status_matches[0]
+            self._processed_proposals[replay_id] = str(status or "processed")
+            return f"【GM】提案 {replay_id} 已处理（{status}），不会重复入队。"
+        proposal = self._find_confirmation_proposal(mentioned_ids)
+        if proposal is None:
             return None
-        pid = str(self._pending_proposal.get("proposal_id") or "")
+        pid = str(proposal.get("proposal_id") or "")
         if mentioned_ids and pid.lower() not in mentioned_ids:
             for item in mentioned_ids:
                 self._processed_proposals.setdefault(item, "mismatched")
-            return f"【GM】确认编号不匹配，当前待确认提案是 {pid}。请回复：@GM 确认 {pid} 或 @GM 拒绝 {pid}。"
+            current = self._current_pending_proposal_id() or pid
+            return f"【GM】确认编号不匹配，当前待确认提案是 {current}。请回复：@GM 确认 {current} 或 @GM 拒绝 {current}。"
         host_check = self._trusted_host_confirmation(trigger)
         if host_check is False:
             return f"【GM】只有房主可以确认 {pid}；该请求没有进入 host 执行队列。"
         if is_confirm:
-            self._last_confirmed_action = dict(self._pending_proposal)
+            self._last_confirmed_action = dict(proposal)
             self._last_confirmed_action["status"] = "confirmed"
             if not mentioned_ids:
                 self._last_confirmed_action["confirmation_mode"] = "bare_text_fallback"
@@ -267,16 +328,39 @@ class LanChatAgentOrchestrator:
             else:
                 self._last_confirmed_action["confirmation_mode"] = "verified_host"
             self._last_confirmed_action["requires_host_confirm"] = False
-            self._pending_proposal = None
+            proposal["status"] = "confirmed"
+            if self._pending_proposal is proposal:
+                self._pending_proposal = self._latest_pending_proposal()
             self._processed_proposals[pid.lower()] = "confirmed"
-            return f"【GM】已确认 {pid}，后续由 host 单写者执行；执行时保留真实 source_user_id。"
+            return f"【GM】已确认 {pid}。"
         if is_reject:
-            self._last_confirmed_action = dict(self._pending_proposal)
+            self._last_confirmed_action = dict(proposal)
             self._last_confirmed_action["status"] = "rejected"
-            self._pending_proposal = None
+            proposal["status"] = "rejected"
+            if self._pending_proposal is proposal:
+                self._pending_proposal = self._latest_pending_proposal()
             self._processed_proposals[pid.lower()] = "rejected"
             return f"【GM】已取消 {pid}，不会执行该提案。"
         return None
+
+    def _find_confirmation_proposal(self, mentioned_ids: set[str]) -> dict[str, Any] | None:
+        if mentioned_ids:
+            for item in mentioned_ids:
+                proposal = self._proposals.get(item.lower())
+                if proposal is not None:
+                    return proposal
+            return self._pending_proposal
+        return self._pending_proposal
+
+    def _latest_pending_proposal(self) -> dict[str, Any] | None:
+        for proposal in reversed(list(self._proposals.values())):
+            if proposal.get("status") == "pending":
+                return proposal
+        return None
+
+    def _current_pending_proposal_id(self) -> str:
+        proposal = self._pending_proposal or self._latest_pending_proposal()
+        return str((proposal or {}).get("proposal_id") or "")
 
     @staticmethod
     def _metadata_from_trigger(trigger: dict[str, Any]) -> dict[str, Any]:
@@ -295,21 +379,32 @@ class LanChatAgentOrchestrator:
         return parsed if isinstance(parsed, dict) else {}
 
     def _run_role_agent(self, trigger: dict[str, Any], state: DiscussionState) -> str:
-        agent = self._get_agent()
-        persona = str(trigger.get("persona") or "")
-        messages = self._messages_from_trigger(trigger)
-        agent_name = str(trigger.get("agent_name") or "Agent")
-        latest = str(trigger.get("text") or "")
-        messages = [
-            "【当前点名上下文】\n"
-            f"本轮明确被 @ 的 AI 助手是：{agent_name}。\n"
-            f"最新用户消息是发给你的：{latest}\n"
-            "请以该助手身份回应，不要因为历史中出现其他 @对象 而拒绝执行或越位判断。"
-        ] + messages
-        context = state.to_prompt_context()
-        if context:
-            messages = [f"【静默监听摘要】\n{context}"] + messages
-        return str(agent(persona, messages))
+        try:
+            agent = self._get_agent()
+            persona = str(trigger.get("persona") or "")
+            messages = self._messages_from_trigger(trigger)
+            agent_name = str(trigger.get("agent_name") or "Agent")
+            latest = str(trigger.get("text") or "")
+            messages = [
+                "【当前点名上下文】\n"
+                f"本轮明确被 @ 的 AI 助手是：{agent_name}。\n"
+                f"最新用户消息是发给你的：{latest}\n"
+                "请以该助手身份回应，不要因为历史中出现其他 @对象 而拒绝执行或越位判断。"
+            ] + messages
+            context = state.to_prompt_context()
+            if context:
+                messages = [f"【静默监听摘要】\n{context}"] + messages
+            return str(agent(persona, messages))
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning("LANChat role agent failed", exc_info=True)
+            return self._safe_agent_error_text(exc)
+
+    @staticmethod
+    def _safe_agent_error_text(exc: Exception) -> str:
+        text = str(exc)
+        if any(marker in text for marker in ("Invalid Token", "request id", "rix_api_error", "stack trace")):
+            return "当前模型服务不可用，已跳过该助手回复。"
+        return "该助手暂时无法响应，请稍后重试或换一个助手。"
 
     def _get_agent(self) -> Any:
         if self._agent is None:

@@ -126,6 +126,15 @@ class FakeCamera:
         self.up = [0, 1, 0]
         self.fov = 45.0
         self.output_mode = kwargs.get("output_mode", "beauty")
+        self.surface = 123
+        self.view_state = {
+            "open": kwargs.get("view_open", False),
+            "x": 120,
+            "y": 120,
+            "width": 960,
+            "height": 540,
+            "move_speed": 1.0,
+        }
         self.set_calls = 0
 
     def set(self, position, forward, world_up, fov):
@@ -140,6 +149,37 @@ class FakeCamera:
 
     def set_output_mode(self, mode):
         self.output_mode = mode
+
+    def get_position(self):
+        return list(self.position)
+
+    def get_forward(self):
+        return list(self.forward)
+
+    def get_world_up(self):
+        return list(self.up)
+
+    def get_fov(self):
+        return self.fov
+
+    def get_handle(self):
+        return id(self)
+
+    def set_surface(self, surface):
+        self.surface = surface
+
+    def get_surface(self):
+        return self.surface
+
+    def set_view_state(self, open_, x, y, width, height, move_speed=None):
+        self.view_state = {
+            "open": bool(open_),
+            "x": int(x),
+            "y": int(y),
+            "width": int(width),
+            "height": int(height),
+            "move_speed": 1.0 if move_speed is None else float(move_speed),
+        }
 
     def save_screenshot_sync(self, path):
         with open(path, "wb") as f:
@@ -195,6 +235,11 @@ def test_vlm_review_camera_created_without_switching_active():
     assert scene.get_active_camera() is active_before
     assert camera.kwargs.get("view_open") is False
     assert camera.kwargs.get("deletable") is False
+    assert camera.get_surface() == 0
+    assert camera.view_state["open"] is False
+    assert camera.internal is True
+    assert camera.syncable is False
+    assert camera.show_in_ui is False
     print("[OK] VLM review camera created without switching active camera")
 
 
@@ -216,6 +261,74 @@ def test_vlm_capture_uses_review_camera_not_main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("[OK] VLM capture uses review camera and leaves main camera untouched")
+
+
+def test_vlm_capture_restores_and_skips_when_main_camera_leaks():
+    scene = FakeScene()
+    review_camera = FakeCamera(model_reviewer.VLM_REVIEW_CAMERA_NAME)
+    main_before = model_reviewer._snapshot_camera_state(scene.active)
+
+    def pose(center, distance, az, elevation):
+        return {"position": [az / 90.0, 2.0, 3.0], "forward": [0, 0, -1], "up": [0, 1, 0]}
+
+    original_save = review_camera.save_screenshot_sync
+
+    def leaking_save(path):
+        scene.active.set([9, 9, 9], [1, 0, 0], [0, 1, 0], 60.0)
+        scene.active.set_output_mode("base_color")
+        return original_save(path)
+
+    review_camera.save_screenshot_sync = leaking_save
+    tmp = _test_tmp_dir("main_leak")
+    try:
+        result = model_reviewer._capture_with_review_camera(scene, review_camera, tmp, "leak", pose)
+        assert result is None
+        assert model_reviewer._snapshot_camera_state(scene.active) == main_before
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("[OK] VLM main-camera leak is restored and skipped")
+
+
+def test_vlm_review_camera_without_offscreen_surface_is_skipped():
+    class NoSurfaceCamera(FakeCamera):
+        def set_surface(self, surface):
+            self.surface = 123
+
+    scene = FakeScene()
+    camera = model_reviewer.get_or_create_vlm_review_camera(scene, camera_factory=NoSurfaceCamera)
+    assert camera is None
+    print("[OK] VLM review skips when offscreen surface cannot be isolated")
+
+
+def test_main_camera_fallback_env_is_ignored(monkeypatch=None):
+    old = os.environ.get("CORONA_VLM_ALLOW_MAIN_CAMERA_CAPTURE")
+    os.environ["CORONA_VLM_ALLOW_MAIN_CAMERA_CAPTURE"] = "1"
+    original_scene = model_reviewer._get_current_scene
+    original_fallback = model_reviewer._capture_single_model_main_camera_fallback
+    called = {"fallback": False}
+
+    def no_scene():
+        return None
+
+    def fallback(*args, **kwargs):
+        called["fallback"] = True
+        return "/should-not-happen"
+
+    model_reviewer._get_current_scene = no_scene
+    model_reviewer._capture_single_model_main_camera_fallback = fallback
+    tmp = _test_tmp_dir("no_main_fallback")
+    try:
+        assert model_reviewer._capture_single_model(tmp, "sample") is None
+        assert called["fallback"] is False
+    finally:
+        model_reviewer._get_current_scene = original_scene
+        model_reviewer._capture_single_model_main_camera_fallback = original_fallback
+        shutil.rmtree(tmp, ignore_errors=True)
+        if old is None:
+            os.environ.pop("CORONA_VLM_ALLOW_MAIN_CAMERA_CAPTURE", None)
+        else:
+            os.environ["CORONA_VLM_ALLOW_MAIN_CAMERA_CAPTURE"] = old
+    print("[OK] main camera fallback env is ignored for viewport safety")
 
 
 def test_screenshot_waits_for_late_png_write():
@@ -248,5 +361,8 @@ if __name__ == "__main__":
     test_vlm_review_camera_reuses_existing()
     test_vlm_review_camera_created_without_switching_active()
     test_vlm_capture_uses_review_camera_not_main()
+    test_vlm_capture_restores_and_skips_when_main_camera_leaks()
+    test_vlm_review_camera_without_offscreen_surface_is_skipped()
+    test_main_camera_fallback_env_is_ignored()
     test_screenshot_waits_for_late_png_write()
     print("\n=== COMMIT 5 VLM 外回路 ALL PASS ===")
