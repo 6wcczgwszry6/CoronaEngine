@@ -138,6 +138,44 @@ class SceneTools(PluginBase):
                                              notify_frontend=False)
 
     @staticmethod
+    def apply_actor_transform_internal(scene_name: str, actor_guid: str, actor_data=None) -> dict:
+        """Apply a remote actor transform without re-broadcasting it."""
+        try:
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                return {"status": "error",
+                        "message": f"Scene '{scene_name}' not found",
+                        "code": "scene_not_found"}
+
+            actor = None
+            for candidate in scene.get_actors():
+                if getattr(candidate, "actor_guid", "") == actor_guid:
+                    actor = candidate
+                    break
+            if actor is None:
+                actor = scene.find_actor(actor_guid)
+            if actor is None:
+                return {"status": "error",
+                        "message": f"Actor guid '{actor_guid}' not found",
+                        "code": "actor_not_found"}
+
+            geometry = (actor_data or {}).get("geometry") or {}
+            if "position" in geometry:
+                actor.set_position(geometry["position"], if_init=True)
+            if "rotation" in geometry:
+                actor.set_rotation(geometry["rotation"], if_init=True)
+            if "scale" in geometry:
+                actor.set_scale(geometry["scale"], if_init=True)
+            try:
+                scene.save_data()
+            except Exception:
+                logger.debug("apply_actor_transform_internal: save_data failed", exc_info=True)
+            return {"status": "success", "scene": scene_name, "actor": actor.to_dict()}
+        except Exception as exc:
+            logger.exception("apply_actor_transform_internal failed")
+            return {"status": "error", "message": str(exc), "code": "internal_error"}
+
+    @staticmethod
     def _create_actor_impl(scene_name: str, asset_path: str, actor_type: str = 'model',
                            actor_data=None, notify_frontend: bool = True) -> dict:
         scene = scene_manager.get(scene_name)

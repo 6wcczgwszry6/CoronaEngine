@@ -92,16 +92,34 @@ def run_progressive_workflow(
     # 3. Phase generators（按 PHASE_ORDER 生成资产）
     # 简化版：这里先把 resolved 按名字分配到各 phase（真实逻辑可按 placement_type 等分类）
     phase_assets = _distribute_assets_to_phases(resolved, all_items, composer)
+    phase_sequence, phase_metadata, micro_phase_assets = _build_micro_batch_phase_plan(phase_assets)
 
     def make_phase_gen(phase: str):
         def gen(sess: SceneSession, ph: str) -> List[Dict[str, Any]]:
-            assets = phase_assets.get(phase, [])
+            assets = list(micro_phase_assets.get(phase, []) or [])
+            notes = _consume_runtime_scene_notes()
+            if notes:
+                assets = _apply_pending_notes_to_batch(assets, notes, sess)
             logger.info("[ProgressiveWorkflow] phase %s: %d assets", phase, len(assets))
             return assets
         return gen
 
-    phase_generators = {ph: make_phase_gen(ph) for ph in PHASE_ORDER
-                        if phase_assets.get(ph)}
+    phase_generators = {ph: make_phase_gen(ph) for ph in phase_sequence
+                        if micro_phase_assets.get(ph)}
+
+    def runtime_mode_provider() -> str:
+        try:
+            from plugins.AITool.services.lanchat_scene_runtime import get_lanchat_scene_runtime
+        except Exception:  # noqa: BLE001
+            try:
+                from services.lanchat_scene_runtime import get_lanchat_scene_runtime  # type: ignore
+            except Exception:
+                return ""
+        try:
+            return get_lanchat_scene_runtime().mode()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[ProgressiveWorkflow] runtime mode unavailable: %s", exc)
+            return ""
 
     # 4. Importer（调 incremental_import）
     from ..flows.scene_composition_workflow.helpers import get_tool, parse_import_result
@@ -153,7 +171,11 @@ def run_progressive_workflow(
             engine_gate,
             zone_aabbs=_collect_zone_aabbs(getattr(composer, "zone_tree", None)),
             door_aabbs=_collect_door_clearance_aabbs(getattr(composer, "zone_tree", None)),
+            issue_sink=session.pending_tasks,
         ),
+        phase_sequence=phase_sequence,
+        phase_metadata=phase_metadata,
+        runtime_mode_provider=runtime_mode_provider,
     )
 
     # 8. 返回（格式与 _run_original_workflow 一致）
@@ -187,12 +209,217 @@ def run_progressive_workflow(
         "progress_timeline": prog_result.get("progress_timeline", []),
         "operation_log": _serialize_operation_log(getattr(session, "operation_log", [])),
         "operation_count": len(getattr(session, "operation_log", [])),
+        "pending_tasks": list(getattr(session, "pending_tasks", []) or []),
         "round": prog_result.get("round"),
+        "paused": bool(prog_result.get("paused")),
+        "paused_mode": prog_result.get("paused_mode"),
+        "paused_before_phase": prog_result.get("paused_before_phase"),
         "vlm_review": vlm_report,
         "vlm_review_text": vlm_review_text,
         "vlm_review_skipped": list(getattr(vlm_report, "skipped", []) or []),
         "vlm_review_timed_out": list(getattr(vlm_report, "timed_out", []) or []),
     }
+
+
+def _build_micro_batch_phase_plan(
+    phase_assets: Dict[str, List[Dict[str, Any]]],
+) -> Tuple[List[str], Dict[str, Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
+    """Split content phases into real micro-batches.
+
+    Framework phases remain as-is. INTERIOR/OBJECTS/DECORATION are user-visible
+    placement phases, so they become 2-3 item batches to create intervention
+    windows between imports.
+    """
+    from .scene_session import PHASE_ORDER
+
+    batch_size = max(1, int(os.getenv("CORONA_PROGRESSIVE_BATCH_SIZE", "3") or "3"))
+    split_phases = {"INTERIOR", "OBJECTS", "DECORATION"}
+    sequence: List[str] = []
+    metadata: Dict[str, Dict[str, Any]] = {}
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    total_assets = sum(len(items or []) for items in phase_assets.values())
+
+    for phase in PHASE_ORDER:
+        assets = list(phase_assets.get(phase) or [])
+        if not assets:
+            continue
+        if phase not in split_phases or len(assets) <= batch_size:
+            sequence.append(phase)
+            out[phase] = assets
+            metadata[phase] = {
+                "batch_index": 1,
+                "batch_total": 1,
+                "asset_count": len(assets),
+                "total_assets": total_assets,
+            }
+            continue
+
+        ordered = sorted(assets, key=_micro_batch_sort_key)
+        batches = [ordered[i:i + batch_size] for i in range(0, len(ordered), batch_size)]
+        for idx, batch in enumerate(batches, 1):
+            key = f"{phase}#{idx}"
+            sequence.append(key)
+            out[key] = batch
+            metadata[key] = {
+                "batch_index": idx,
+                "batch_total": len(batches),
+                "asset_count": len(batch),
+                "total_assets": total_assets,
+            }
+    return sequence, metadata, out
+
+
+def _micro_batch_sort_key(asset: Dict[str, Any]) -> Tuple[int, str]:
+    role = str(asset.get("layout_role") or "").lower()
+    name = str(asset.get("name") or "")
+    priority = {
+        "main": 0,
+        "landmark": 0,
+        "foreground_object": 1,
+        "furniture": 1,
+        "support": 1,
+        "surface": 2,
+        "decoration": 3,
+        "ground_cover": 3,
+    }.get(role, 2)
+    return priority, name
+
+
+def _consume_runtime_scene_notes() -> List[Any]:
+    try:
+        from plugins.AITool.services.lanchat_scene_runtime import get_lanchat_scene_runtime
+    except Exception:  # noqa: BLE001
+        try:
+            from services.lanchat_scene_runtime import get_lanchat_scene_runtime  # type: ignore
+        except Exception:  # noqa: BLE001
+            return []
+    try:
+        return list(get_lanchat_scene_runtime().consume_notes())
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _apply_pending_notes_to_batch(
+    assets: List[Dict[str, Any]],
+    notes: List[Any],
+    session: SceneSession,
+) -> List[Dict[str, Any]]:
+    """Apply safe pending notes to the next batch.
+
+    v1 intentionally does not spawn new model-generation jobs mid-compose. It
+    can remove forbidden future assets, nudge next-batch placement constraints,
+    and records additions that need a follow-up generation round.
+    """
+    remaining = list(assets)
+    for note in notes:
+        text = str(getattr(note, "text", "") or "")
+        kind = str(getattr(note, "kind", "") or "")
+        source = str(getattr(note, "source_agent", "") or "")
+        task = {
+            "kind": kind,
+            "text": text,
+            "source": source,
+            "status": "recorded",
+        }
+        if kind == "layout_constraint":
+            affected: List[str] = []
+            for asset in remaining:
+                constraints = asset.setdefault("runtime_layout_constraints", [])
+                if text and text not in constraints:
+                    constraints.append(text)
+                if _apply_runtime_layout_constraint(asset, text):
+                    affected.append(str(asset.get("name") or ""))
+            task["status"] = "applied_to_next_batch_layout" if affected else "recorded_layout_constraint"
+            if affected:
+                task["affected_assets"] = [name for name in affected if name][:6]
+        negative = any(word in text.lower() for word in ("不要", "别再", "移除后续", "do not", "don't", "remove", "no more"))
+        if kind == "layout_constraint":
+            pass
+        elif kind == "generation_delta" and not negative:
+            matched_existing = False
+            for asset in remaining:
+                context = asset.setdefault("runtime_generation_context", [])
+                if text and text not in context:
+                    context.append(text)
+                name = str(asset.get("name") or "")
+                if name and name in text:
+                    matched_existing = True
+            task["status"] = "already_in_remaining_plan" if matched_existing else "pending_next_generation"
+        elif kind == "generation_delta" and negative:
+            filtered: List[Dict[str, Any]] = []
+            removed: List[str] = []
+            for asset in remaining:
+                name = str(asset.get("name") or "")
+                if name and name in text:
+                    logger.info("[ProgressiveWorkflow] pending note removed future asset: %s", name)
+                    removed.append(name)
+                    continue
+                filtered.append(asset)
+            remaining = filtered
+            task["status"] = "applied_removed_from_remaining" if removed else "recorded_no_matching_asset"
+            if removed:
+                task["affected_assets"] = removed[:6]
+        elif kind == "edit_existing":
+            task["status"] = "queued_edit_or_waiting_for_actor"
+        session.pending_tasks.append(task)
+    return remaining
+
+
+def _apply_runtime_layout_constraint(asset: Dict[str, Any], text: str) -> bool:
+    """Apply cheap user-visible layout constraints to a not-yet-imported asset."""
+    if not text:
+        return False
+    pos = asset.get("pos")
+    if not isinstance(pos, list) or len(pos) < 3:
+        return False
+    try:
+        x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
+    except Exception:
+        return False
+
+    before = (round(x, 4), round(y, 4), round(z, 4))
+    name = str(asset.get("name") or "")
+
+    lower = text.lower()
+
+    if any(k in lower for k in ("中央活动区", "中间活动区", "中央留空", "中间留空", "不要挡住中间", "别挡中间", "central", "center clear", "middle clear")):
+        radius = max((x * x + z * z) ** 0.5, 2.4)
+        if abs(x) + abs(z) < 0.6:
+            seed = sum(ord(ch) for ch in name) or 1
+            # Four deterministic quadrants, no scene-specific branching.
+            quadrant = seed % 4
+            signs = ((1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0))[quadrant]
+            x = signs[0] * radius
+            z = signs[1] * radius
+        else:
+            scale = radius / max(0.001, (x * x + z * z) ** 0.5)
+            x *= scale
+            z *= scale
+
+    if any(k in lower for k in ("靠墙", "贴墙", "沿墙", "侧墙", "against wall", "near wall", "by wall")):
+        wall_offset = 2.2
+        if abs(x) >= abs(z):
+            x = (1.0 if x >= 0.0 else -1.0) * max(abs(x), wall_offset)
+        else:
+            z = (1.0 if z >= 0.0 else -1.0) * max(abs(z), wall_offset)
+        if abs(x) + abs(z) < 0.6:
+            x = wall_offset
+
+    if any(k in lower for k in ("不要挡入口", "别挡入口", "不要挡门", "别挡门", "门口留空", "入口留空", "entrance clear", "do not block entrance", "do not block door")):
+        if abs(x) < 1.2 and z > -0.5:
+            x = 1.8 if (sum(ord(ch) for ch in name) % 2 == 0) else -1.8
+            z = min(z, -0.8)
+
+    if ("喷泉" in name or "fountain" in name.lower()) and any(k in lower for k in ("轴线", "外广场", "教堂外", "广场前", "前场", "axis", "outside", "forecourt")):
+        x = 0.0
+        direction = 1.0 if z >= 0.0 else -1.0
+        z = direction * max(abs(z), 4.0)
+
+    after = (round(x, 4), round(y, 4), round(z, 4))
+    if after == before:
+        return False
+    asset["pos"] = [round(x, 4), round(y, 4), round(z, 4)]
+    return True
 
 
 def _generate_post_shell_framework(composer: Any) -> None:
@@ -240,7 +467,7 @@ def _run_vlm_advisory_review(imported: List[str], engine_gate: Any) -> Any:
         logger.debug("[ProgressiveWorkflow] VLM 外回路不可用，跳过: %s", exc)
         return None
 
-    max_targets = int(os.getenv("PROGRESSIVE_VLM_MAX_TARGETS", "4") or "4")
+    max_targets = _vlm_max_targets()
     targets = [
         {"actor_id": actor_id, "model_name": actor_id, "model_type": actor_id}
         for actor_id in imported[:max(0, max_targets)]
@@ -257,6 +484,19 @@ def _run_vlm_advisory_review(imported: List[str], engine_gate: Any) -> Any:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ProgressiveWorkflow] VLM 外回路异常，已跳过: %s", exc)
         return None
+
+
+def _vlm_max_targets() -> int:
+    """Return configured VLM advisory target count.
+
+    F5 demo mode defaults to 0 so the main interaction demo is not slowed by
+    screenshot/VLM work. Explicit PROGRESSIVE_VLM_MAX_TARGETS always wins.
+    """
+    default_targets = "0" if os.getenv("CORONA_F5_DEMO_MODE") and "PROGRESSIVE_VLM_MAX_TARGETS" not in os.environ else "4"
+    try:
+        return max(0, int(os.getenv("PROGRESSIVE_VLM_MAX_TARGETS", default_targets) or default_targets))
+    except Exception:
+        return int(default_targets)
 
 
 def _serialize_operation_log(entries: List[Any]) -> List[Dict[str, Any]]:
@@ -360,6 +600,7 @@ def _repair_recent_imports(
     *,
     zone_aabbs: Dict[str, List[float]],
     door_aabbs: Dict[str, List[float]],
+    issue_sink: Optional[List[Dict[str, Any]]] = None,
 ) -> int:
     """AABB hard loop after each imported batch: snap bottom and resolve overlaps."""
 
@@ -435,6 +676,16 @@ def _repair_recent_imports(
                     overlap.get("reason") or "overlap",
                     overlap.get("remaining_overlap") or [],
                 )
+                if issue_sink is not None:
+                    issue_sink.append({
+                        "kind": "aabb_repair",
+                        "text": f"{actor_id} 仍有重叠或摆放冲突",
+                        "source": "AABB",
+                        "status": "needs_confirm",
+                        "actor_id": actor_id,
+                        "reason": overlap.get("reason") or "overlap",
+                        "remaining_overlap": list(overlap.get("remaining_overlap") or []),
+                    })
         except Exception as exc:  # noqa: BLE001
             logger.debug("[ProgressiveWorkflow] AABB repair skipped for %s: %s", actor_id, exc)
     return repaired

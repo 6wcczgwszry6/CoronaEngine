@@ -1528,9 +1528,136 @@ class SceneComposer:
             seen.add(name)
             filtered.append(it)
 
+        filtered = self._ensure_minimum_scene_inventory(text, filtered)
         logger.info("[SceneComposer] 提取到 %d 个物体（过滤前 %d）: %s",
                     len(filtered), len(items), [it.get("name") for it in filtered])
         return filtered
+
+    def _ensure_minimum_scene_inventory(
+        self,
+        text: str,
+        items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Expand underspecified open-scene inventories to a useful demo size.
+
+        The expansion is prompt-driven, not scene-keyword-driven. Fallback items
+        are generic functional placeholders so unknown scenes do not silently
+        become grassland/yurt/church-specific.
+        """
+        if os.getenv("CORONA_DISABLE_INVENTORY_EXPANSION", "0") == "1":
+            return items
+        if any(word in str(text or "") for word in ("极简", "只要", "只放", "不要太多")):
+            return items
+        target_min = min(max(1, self.max_items), int(os.getenv("CORONA_MIN_SCENE_ITEMS", "6") or "6"))
+        if len(items) >= target_min:
+            return items
+        try:
+            expanded = self._llm_expand_inventory(text, items, target_min)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[SceneComposer] 清单补全 LLM 跳过: %s", exc)
+            expanded = []
+        if not expanded:
+            expanded = self._fallback_expand_inventory(items, target_min)
+
+        out: List[Dict[str, Any]] = []
+        seen = set()
+        for item in list(items) + list(expanded):
+            name = str(item.get("name") or "").strip()
+            if not name or _is_blacklisted(name) or name in seen:
+                continue
+            seen.add(name)
+            out.append({
+                "name": name,
+                "quantity": int(item.get("quantity", 1) or 1),
+                "keywords": str(item.get("keywords") or name).strip(),
+                "layout_role": str(item.get("layout_role") or "").strip() or None,
+            })
+            if len(out) >= self.max_items:
+                break
+        if len(out) > len(items):
+            logger.info("[SceneComposer] 开放场景清单补全: %d → %d", len(items), len(out))
+        return out
+
+    def _llm_expand_inventory(
+        self,
+        text: str,
+        items: List[Dict[str, Any]],
+        target_min: int,
+    ) -> List[Dict[str, Any]]:
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FTimeout
+        from Quasar.ai_models.base_pool.registry import get_chat_model
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        existing = [str(it.get("name") or "").strip() for it in items if it.get("name")]
+        system = (
+            "你是开放场景物体清单补全器。根据用户目标和已有清单，补足到 6-10 个可生成的 3D 物体。"
+            "不要写死某类场景模板；只从用户文本、风格、功能和空间关系推导。"
+            "不要重复主体建筑，不要输出地形/天空/光照本身。"
+            "输出 JSON 数组，每项包含 name, keywords, layout_role。"
+            "layout_role 只能是 main, support, landmark, furniture, decoration, surface, boundary。"
+        )
+        prompt = {
+            "user_text": str(text or "")[:1800],
+            "existing_items": existing,
+            "target_min": target_min,
+            "max_items": self.max_items,
+        }
+
+        def _call():
+            llm = get_chat_model(temperature=0, request_timeout=35.0)
+            return llm.invoke([
+                SystemMessage(content=system),
+                HumanMessage(content=json.dumps(prompt, ensure_ascii=False)),
+            ])
+
+        ex = ThreadPoolExecutor(max_workers=1)
+        fut = ex.submit(_call)
+        try:
+            resp = fut.result(timeout=40.0)
+        except FTimeout:
+            ex.shutdown(wait=False, cancel_futures=True)
+            return []
+        finally:
+            ex.shutdown(wait=False)
+        raw = (resp.content if hasattr(resp, "content") else str(resp)).strip()
+        if "```" in raw:
+            s = raw.find("["); e = raw.rfind("]")
+            if s != -1 and e != -1:
+                raw = raw[s:e + 1]
+        data = json.loads(raw)
+        if not isinstance(data, list):
+            return []
+        out: List[Dict[str, Any]] = []
+        for item in data[: max(target_min, self.max_items)]:
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            out.append({
+                "name": str(item.get("name") or "").strip(),
+                "quantity": int(item.get("quantity", 1) or 1),
+                "keywords": str(item.get("keywords") or item.get("name") or "").strip(),
+                "layout_role": str(item.get("layout_role") or "").strip(),
+            })
+        return out
+
+    @staticmethod
+    def _fallback_expand_inventory(items: List[Dict[str, Any]], target_min: int) -> List[Dict[str, Any]]:
+        generic = [
+            ("功能支撑物件", "scene support object", "support"),
+            ("导视牌", "wayfinding sign prop", "support"),
+            ("灯光装饰", "decorative light prop", "decoration"),
+            ("储物道具", "storage crate prop", "decoration"),
+            ("活动区装饰", "activity area decoration prop", "decoration"),
+            ("小型展示物", "small display prop", "decoration"),
+        ]
+        existing = {str(it.get("name") or "").strip() for it in items}
+        out: List[Dict[str, Any]] = []
+        for name, keywords, role in generic:
+            if len(items) + len(out) >= target_min:
+                break
+            if name in existing:
+                continue
+            out.append({"name": name, "quantity": 1, "keywords": keywords, "layout_role": role})
+        return out
 
     def _llm_extract(self, text: str) -> List[Dict[str, Any]]:
         # extract 是推理任务（自然语言→结构化清单），与布局同级，超时不应比布局短。

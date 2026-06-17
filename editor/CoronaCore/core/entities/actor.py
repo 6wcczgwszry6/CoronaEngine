@@ -363,6 +363,31 @@ class Actor:
             logging.warning("Actor network create broadcast failed for %s: %s",
                             self.name or self.route, exc)
 
+    def _broadcast_actor_transform_updated(self):
+        """Broadcast a demo-grade transform delta for an already-synced Actor."""
+        try:
+            if self.network_remote or self._suppress_network_broadcast:
+                return
+            if not network_sync_policy.actor_is_syncable(self):
+                return
+            payload = {
+                "actor_guid": self.actor_guid,
+                "scene": self.parent.route if self.parent else "",
+                "name": self.name,
+                "actor_type": self.actor_type,
+                "geometry": {
+                    "position": list(self.get_position()),
+                    "rotation": list(self.get_rotation()),
+                    "scale": list(self.get_scale()),
+                },
+                "source_user_id": "",
+                "correlation_id": "",
+            }
+            CoronaEditor.js_call_func("actor-transform-sync-broadcast", [payload])
+        except Exception as exc:
+            logging.warning("Actor network transform broadcast failed for %s: %s",
+                            self.name or self.route, exc)
+
     def _disable_local_physics_for_remote_actor(self):
         if not hasattr(self, '_mechanics') or self._mechanics is None:
             return
@@ -574,6 +599,7 @@ class Actor:
             return False
         pos = self._geometry.get_position()
         self._geometry.set_position([pos[0] + delta[0], pos[1] + delta[1], pos[2] + delta[2]])
+        self._broadcast_actor_transform_updated()
         return True
 
     @auto_save
@@ -582,6 +608,7 @@ class Actor:
             return False
         rot = self._geometry.get_rotation()
         self._geometry.set_rotation([rot[0] + delta[0], rot[1] + delta[1], rot[2] + delta[2]])
+        self._broadcast_actor_transform_updated()
         return True
 
     @auto_save
@@ -596,6 +623,7 @@ class Actor:
             current[1] * factor[1],
             current[2] * factor[2],
         ])
+        self._broadcast_actor_transform_updated()
         return True
 
     def move(self, v: List[float]):
@@ -614,6 +642,7 @@ class Actor:
         self._geometry.set_position(position)
         if if_init:
             return False
+        self._broadcast_actor_transform_updated()
         return True
 
     def get_position(self) -> List[float]:
@@ -628,6 +657,7 @@ class Actor:
         self._geometry.set_rotation(euler)
         if if_init:
             return False
+        self._broadcast_actor_transform_updated()
         return True
 
     def get_rotation(self) -> List[float]:
@@ -642,6 +672,7 @@ class Actor:
         self._geometry.set_scale(scale)
         if if_init:
             return False
+        self._broadcast_actor_transform_updated()
         return True
 
     def get_scale(self) -> List[float]:
@@ -809,6 +840,7 @@ class Actor:
         if self.actor_guid:
             CoronaEditor.js_call_func("actor-ownership-claim",
                                       [{"actor_guid": self.actor_guid}])
+            self._broadcast_actor_transform_updated()
         self.save_data()
 
 

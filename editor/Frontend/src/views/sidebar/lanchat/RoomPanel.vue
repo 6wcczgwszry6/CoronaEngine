@@ -138,7 +138,7 @@
                   @mousedown.prevent
                   @click="pickMention(c)"
                 >
-                  {{ c.isAgent ? '🤖 ' : '' }}{{ c.name }}
+                  {{ c.isGM ? '🎲 ' : (c.isAgent ? '🤖 ' : '') }}{{ c.name }}<span v-if="c.hint" class="text-[10px] text-gray-400 ml-1">{{ c.hint }}</span>
                 </div>
               </div>
             </div>
@@ -314,7 +314,7 @@ function onSend() {
   draft.value = '';
   mentionCandidates.value = [];
   mentionActiveIndex.value = 0;
-  lanchat.sendMessage(text).catch((error) => {
+  lanchat.sendMessage(text, messageOptionsForText(text)).catch((error) => {
     console.warn('[LANChat] send message failed', error);
   });
 }
@@ -334,6 +334,7 @@ async function sendGmDecision(proposalId, decision) {
   const verb = decision === 'reject' ? '拒绝' : '确认';
   await lanchat.sendMessage(`@GM ${verb} ${proposalId}`, {
     message_kind: 'confirmation',
+    target_agent_id: 'gm',
     correlation_id: proposalId,
     metadata: { decision, proposal_id: proposalId },
   });
@@ -377,8 +378,11 @@ function onDraftInput() {
     : s.members
         .filter((name) => name !== s.nickname)
         .map((name) => ({ name, isAgent: false })));
-  const agents = s.agents.map((a) => ({ name: a.name, isAgent: true }));
-  mentionCandidates.value = [...members, ...agents].filter((c) =>
+  const gm = [{ name: 'GM', isAgent: true, isGM: true, hint: '主持 / 仲裁' }];
+  const agents = s.agents
+    .filter((a) => String(a.name || '').toLowerCase() !== 'gm')
+    .map((a) => ({ name: a.name, isAgent: true }));
+  mentionCandidates.value = [...gm, ...members, ...agents].filter((c) =>
     c.name.toLowerCase().startsWith(prefix.toLowerCase())
   );
   if (mentionCandidates.value.length) {
@@ -394,6 +398,14 @@ function pickMention(c) {
   draft.value = text.slice(0, at) + '@' + c.name + ' ';
   mentionCandidates.value = [];
   mentionActiveIndex.value = 0;
+}
+
+function messageOptionsForText(text) {
+  const trimmed = String(text || '').trim();
+  if (/^@GM(?:\s|$)/i.test(trimmed)) {
+    return { message_kind: 'chat', target_agent_id: 'gm' };
+  }
+  return {};
 }
 
 function onDraftKeydown(e) {

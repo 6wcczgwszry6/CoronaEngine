@@ -508,6 +508,22 @@
   - No C++/Ninja/CMake build or protocol test.
   - No offscreen render target implementation.
 
+## 2026-06-17: VLM independent camera mitigation status
+
+- Python-side fix implemented:
+  - VLM review now uses a dedicated scene camera named `vlm_review_camera`.
+  - The review camera is hidden (`view_open=False`) and is added without switching the active/main viewport camera.
+  - Main-camera fallback is disabled by default.
+  - Legacy main-camera capture is only allowed when `CORONA_VLM_ALLOW_MAIN_CAMERA_CAPTURE=1`.
+  - Python now waits for the screenshot PNG to exist and stabilize before treating capture as successful.
+- Expected F5 improvement:
+  - VLM review should no longer visibly jump the user viewport camera or leave the main camera inside a wall.
+  - If capture setup fails, VLM should report skipped/warn instead of disturbing the viewport.
+- Still bottom-layer:
+  - The screenshot path still calls camera screenshot APIs that can share GPU readback/render scheduling.
+  - A true no-stall solution needs C++/Optics support for an independent offscreen render target and a completion signal that fires only after the PNG is fully written.
+- No C++/Ninja work was run in this pass.
+
 ## 2026-06-17: F5 generation-time input lag after async worker
 
 - Latest F5 symptom:
@@ -530,3 +546,45 @@
   - If typing is responsive but AI replies are slow -> Python agent serialization / missing edit fast path.
   - If typing itself freezes -> CEF/UI/render main-thread blocking.
   - If lag spikes align with ResourceSearch logs -> run F5 with `CORONA_RESOURCESEARCH_DISABLE_AUTO_REBUILD=1`.
+
+## 2026-06-17: A-level intervention v1 lower-layer boundary
+
+- Python-side mitigation implemented:
+  - `LANChatAgentWorker` can reply to busy-scene messages before entering `_agent_call_lock`.
+  - Other agents can record pending scene notes while the active agent is composing.
+  - Progress is now micro-batch based for `INTERIOR/OBJECTS/DECORATION`.
+  - `@GM 暂停/继续/先讨论` now writes Python runtime mode, and `SceneSession` can stop at the next micro-batch boundary.
+  - Pending generation/layout/edit notes are now visible to the next-batch Python context.
+- Still lower-layer if reproduced:
+  - If the user cannot type or the input box does not regain focus during generation, inspect CEF/UI/render main-thread scheduling.
+  - If a sent message does not enter LANChat history until compose ends, inspect C++ LANChat send/history broadcast path.
+  - If progress/agent replies are emitted by Python but appear late in the UI, inspect C++/CEF dispatch and frontend store rendering.
+  - If host reports `host_action_executed` but guest actors do not change, inspect typed SceneDelta / actor sync, not GM intelligence.
+  - If two users edit the same actor and the final actor state is ambiguous, inspect actor version / lock / owner metadata.
+- Not done in this pass:
+  - No C++/Ninja/CMake build.
+  - No C++ protocol tests.
+  - No offscreen VLM render target.
+  - No dynamic mid-compose Hunyuan generation for newly added items.
+  - No typed SceneDelta, actor version, or peer actor delta apply implementation.
+
+## 2026-06-17: Codex execution constraint for C++/Ninja/CMake
+
+- User instruction:
+  - Do not run C++/Ninja/CMake build or compile commands in this Codex thread.
+  - Record required build/protocol verification here instead.
+- Immediate context:
+  - `cmake --build build --target corona_network_protocol_tests --config Debug` was started for the multiplayer actor sync protocol check.
+  - The user intentionally interrupted the turn and instructed not to run build/compile here.
+  - Do not infer pass/fail from the aborted build.
+- Allowed in this thread unless separately blocked:
+  - CodeGraph inspection.
+  - Python unit tests.
+  - Node/frontend lightweight scripts.
+  - AST/static checks.
+  - Source edits and project documentation updates.
+- Bottom-layer verification now deferred to a designated build environment:
+  - Build `corona_network_protocol_tests`.
+  - Run protocol tests for `ACTOR_TRANSFORM_UPDATE`.
+  - Confirm CEF `broadcast_actor_transform` and `poll_pending_actor_transform` compile.
+  - F5 verify Host actor transform changes apply on Guest.

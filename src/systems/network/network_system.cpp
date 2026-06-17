@@ -93,6 +93,15 @@ struct NetworkSystem::Impl {
     };
     std::vector<PendingAction> pending_actor_creates;
 
+    struct PendingTransformUpdate {
+        std::string actor_guid;
+        std::string scene_name;
+        float transform[9] = {0,0,0, 0,0,0, 1,1,1};
+        std::string source_user_id;
+        std::string correlation_id;
+    };
+    std::vector<PendingTransformUpdate> pending_actor_transform_updates;
+
     // Pending file transfers: model_path → actor data from the original
     // ACTOR_CREATE that triggered the transfer.  When the file arrives,
     // we reconstruct the PendingAction without requiring a re-send.
@@ -1057,6 +1066,24 @@ void NetworkSystem::broadcast_actor_create(const std::string& actor_guid,
                  actor_guid, scene_name, model_path, dependency_paths.size());
 }
 
+void NetworkSystem::broadcast_actor_transform_update(const std::string& actor_guid,
+                                                     const std::string& scene_name,
+                                                     const float* transform,
+                                                     const std::string& source_user_id,
+                                                     const std::string& correlation_id) {
+    if (impl_->session_state != SessionState::Active) return;
+    if (actor_guid.empty() || transform == nullptr) return;
+    if (impl_->peer_manager.peer_count() == 0) {
+        CFW_LOG_DEBUG("NetworkSystem: No peers — skipping actor transform broadcast");
+        return;
+    }
+    auto pkt = Network::build_actor_transform_update(
+        actor_guid, scene_name, transform, source_user_id, correlation_id);
+    impl_->peer_manager.broadcast(Network::kChannelReliable, pkt.data(), pkt.size(), true);
+    CFW_LOG_INFO("NetworkSystem: Broadcast actor transform — actor='{}' scene='{}' corr='{}'",
+                 actor_guid, scene_name, correlation_id);
+}
+
 bool NetworkSystem::has_pending_transfers() const {
     return !impl_->pending_actor_creates.empty();
 }
@@ -1078,6 +1105,26 @@ bool NetworkSystem::pop_pending_actor_create(std::string& actor_guid,
         std::memcpy(actor_packed_out, &pa.actor_packed, packed_size);
     }
     impl_->pending_actor_creates.erase(impl_->pending_actor_creates.begin());
+    return true;
+}
+
+bool NetworkSystem::pop_pending_actor_transform_update(std::string& actor_guid,
+                                                       std::string& scene_name,
+                                                       float* transform_out,
+                                                       size_t transform_count,
+                                                       std::string& source_user_id,
+                                                       std::string& correlation_id) {
+    if (impl_->pending_actor_transform_updates.empty()) return false;
+    auto& update = impl_->pending_actor_transform_updates.front();
+    actor_guid = update.actor_guid;
+    scene_name = update.scene_name;
+    source_user_id = update.source_user_id;
+    correlation_id = update.correlation_id;
+    if (transform_out && transform_count >= 9) {
+        std::memcpy(transform_out, update.transform, sizeof(update.transform));
+    }
+    impl_->pending_actor_transform_updates.erase(
+        impl_->pending_actor_transform_updates.begin());
     return true;
 }
 
@@ -1283,6 +1330,36 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
                 }
             }
         }
+    } else if (mt == MessageType::ACTOR_TRANSFORM_UPDATE) {
+        Network::BufferReader r(data + 1, len - 1);
+        if (!r.has_remaining(2)) return;
+        uint16_t guid_len = r.read_u16();
+        if (!r.has_remaining(guid_len + 2)) return;
+        std::string actor_guid = r.read_string(guid_len);
+        uint16_t scene_len = r.read_u16();
+        if (!r.has_remaining(scene_len + 36)) return;
+        std::string scene_name = r.read_string(scene_len);
+
+        Impl::PendingTransformUpdate update;
+        update.actor_guid = actor_guid;
+        update.scene_name = scene_name;
+        std::memcpy(update.transform, r.data + r.pos, sizeof(update.transform));
+        r.pos += sizeof(update.transform);
+        if (r.has_remaining(2)) {
+            uint16_t source_len = r.read_u16();
+            if (r.has_remaining(source_len)) {
+                update.source_user_id = r.read_string(source_len);
+            }
+        }
+        if (r.has_remaining(2)) {
+            uint16_t corr_len = r.read_u16();
+            if (r.has_remaining(corr_len)) {
+                update.correlation_id = r.read_string(corr_len);
+            }
+        }
+        impl_->pending_actor_transform_updates.push_back(update);
+        CFW_LOG_INFO("NetworkSystem: Received ACTOR_TRANSFORM_UPDATE from {} — actor='{}' scene='{}' corr='{}'",
+                     sender_peer_id, actor_guid, scene_name, update.correlation_id);
     } else if (mt == MessageType::FILE_REQUEST) {
         handle_file_request(sender_peer_id, data, len);
     } else if (mt == MessageType::FILE_CHUNK) {

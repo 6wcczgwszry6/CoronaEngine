@@ -504,6 +504,70 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
         self.assertTrue(claims)
         self.assertEqual(claims[-1]["actor_guid"], actor.actor_guid)
 
+    def test_local_transform_setters_emit_actor_transform_sync(self):
+        events = []
+        fake_editor = SimpleNamespace(
+            CoronaEngine=SimpleNamespace(
+                active_project_path="D:/project/test",
+                Actor=FakeActorEngineObject,
+                ActorProfile=SimpleNamespace,
+            ),
+            js_call_func=lambda name, args: events.append((name, args)),
+        )
+        parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
+
+        with patch.object(actor_module, "CoronaEditor", fake_editor), \
+             patch.object(actor_module, "CoronaEngine", fake_editor.CoronaEngine), \
+             patch.object(actor_module, "Geometry", FakeGeometry), \
+             patch.object(actor_module, "Optics", FakeOptics), \
+             patch.object(actor_module, "Mechanics", FakeComponent), \
+             patch.object(actor_module, "Acoustics", FakeComponent):
+            actor = actor_module.Actor(route="Resource/cube.obj",
+                                       actor_type="model",
+                                       parent_scene=parent)
+            events.clear()
+            actor.set_position([1.0, 2.0, 3.0])
+            actor.set_rotation([0.0, 1.5708, 0.0])
+            actor.set_scale([2.0, 2.0, 2.0])
+
+        updates = [args[0] for name, args in events
+                   if name == "actor-transform-sync-broadcast"]
+        self.assertEqual(len(updates), 3)
+        self.assertEqual(updates[-1]["actor_guid"], actor.actor_guid)
+        self.assertEqual(updates[-1]["scene"], "Scene/main.scene")
+        self.assertEqual(updates[-1]["geometry"]["position"], [1.0, 2.0, 3.0])
+        self.assertEqual(updates[-1]["geometry"]["rotation"], [0.0, 1.5708, 0.0])
+        self.assertEqual(updates[-1]["geometry"]["scale"], [2.0, 2.0, 2.0])
+
+    def test_remote_transform_apply_does_not_rebroadcast(self):
+        events = []
+        fake_editor = SimpleNamespace(
+            CoronaEngine=SimpleNamespace(
+                active_project_path="D:/project/test",
+                Actor=FakeActorEngineObject,
+                ActorProfile=SimpleNamespace,
+            ),
+            js_call_func=lambda name, args: events.append((name, args)),
+        )
+        parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
+
+        with patch.object(actor_module, "CoronaEditor", fake_editor), \
+             patch.object(actor_module, "CoronaEngine", fake_editor.CoronaEngine), \
+             patch.object(actor_module, "Geometry", FakeGeometry), \
+             patch.object(actor_module, "Optics", FakeOptics), \
+             patch.object(actor_module, "Mechanics", FakeComponent), \
+             patch.object(actor_module, "Acoustics", FakeComponent):
+            actor = actor_module.Actor(route="Resource/cube.obj",
+                                       actor_type="model",
+                                       parent_scene=parent)
+            events.clear()
+            actor.set_position([4.0, 5.0, 6.0], if_init=True)
+            actor.set_rotation([0.0, 0.5, 0.0], if_init=True)
+            actor.set_scale([1.5, 1.5, 1.5], if_init=True)
+
+        updates = [event for event in events if event[0] == "actor-transform-sync-broadcast"]
+        self.assertEqual(updates, [])
+
     def test_set_model_replaces_profile_and_preserves_edit_state(self):
         fake_editor = SimpleNamespace(
             CoronaEngine=SimpleNamespace(

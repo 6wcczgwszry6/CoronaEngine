@@ -159,6 +159,46 @@ def test_progress_sink_and_report_text_are_observable():
     print("[OK] 进度 sink + progress_timeline + FinalReview 文案可被上层观测")
 
 
+def test_progressive_compose_pauses_at_micro_batch_boundary():
+    layout = FakeLayout()
+    session = SceneSession(layout)
+    progress_events: List[str] = []
+    session.set_progress_sink(progress_events.append)
+    calls = {"mode": 0}
+
+    def gen_objects(s, phase):
+        return [{"name": phase, "path": f"/m/{phase}.glb"}]
+
+    def importer(assets, batch_id):
+        for a in assets:
+            layout.add(FakeInst(a["name"], provenance="AGENT", batch_id=batch_id))
+        return {"imported": [a["name"] for a in assets]}
+
+    def runtime_mode():
+        calls["mode"] += 1
+        return "EXECUTING" if calls["mode"] == 1 else "PAUSED"
+
+    result = session.progressive_compose(
+        {"OBJECTS#1": gen_objects, "OBJECTS#2": gen_objects},
+        importer=importer,
+        phase_sequence=["OBJECTS#1", "OBJECTS#2"],
+        phase_metadata={
+            "OBJECTS#1": {"batch_index": 1, "batch_total": 2, "asset_count": 1, "total_assets": 2},
+            "OBJECTS#2": {"batch_index": 2, "batch_total": 2, "asset_count": 1, "total_assets": 2},
+        },
+        runtime_mode_provider=runtime_mode,
+        skip_final_review=False,
+    )
+    assert result["phases_run"] == ["OBJECTS#1"]
+    assert result["imported"] == ["OBJECTS#1"]
+    assert result["paused"] is True
+    assert result["paused_mode"] == "PAUSED"
+    assert result["paused_before_phase"] == "OBJECTS#2"
+    assert result["final_report"] is None, "暂停时不应跑最终审查假装完成"
+    assert any("等待 @GM 继续" in msg for msg in progress_events), progress_events
+    print("[OK] progressive_compose 在 micro-batch 边界响应 PAUSED 并返回可恢复状态")
+
+
 def test_intervention_drain_marks_user():
     layout = FakeLayout()
     layout.add(FakeInst("sofa", provenance="AGENT", batch_id="r1_GROUND"))
@@ -263,6 +303,7 @@ def test_final_review_three_buckets():
 if __name__ == "__main__":
     test_phase_loop_runs_provided_only()
     test_progress_sink_and_report_text_are_observable()
+    test_progressive_compose_pauses_at_micro_batch_boundary()
     test_intervention_drain_marks_user()
     test_post_import_hook_runs_before_final_review()
     test_delete_marks_stale_not_physical()

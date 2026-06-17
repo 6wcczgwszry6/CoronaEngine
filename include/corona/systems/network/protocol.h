@@ -58,6 +58,7 @@ enum class MessageType : uint8_t {
     FILE_REQUEST  = 0x11,  // Request model file from peer
     FILE_CHUNK    = 0x12,  // File chunk transfer
     OWNERSHIP_CLAIM = 0x13, // Actor ownership handoff claim
+    ACTOR_TRANSFORM_UPDATE = 0x14, // Actor transform delta (demo-grade SceneDelta)
     CHAT_JOIN     = 0x20,  // LANChat room join/member snapshot
     CHAT_LEAVE    = 0x21,  // LANChat room leave
     CHAT_MESSAGE  = 0x22,  // LANChat user/agent message
@@ -352,6 +353,34 @@ inline std::vector<uint8_t> build_actor_create(
         write_string(buf, dep);
     }
 
+    return buf;
+}
+
+// ============================================================================
+// ACTOR_TRANSFORM_UPDATE message builder
+// ============================================================================
+// Wire format:
+//   [1B type] [2B actor_guid_len] [actor_guid]
+//   [2B scene_name_len] [scene_name] [36B transform (9 floats)]
+//   [2B source_user_id_len] [source_user_id]
+//   [2B correlation_id_len] [correlation_id]
+// ============================================================================
+inline std::vector<uint8_t> build_actor_transform_update(
+    const std::string& actor_guid,
+    const std::string& scene_name,
+    const float* transform,  // 9 floats
+    const std::string& source_user_id = {},
+    const std::string& correlation_id = {})
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 2 + actor_guid.size() + 2 + scene_name.size() + 36 +
+                2 + source_user_id.size() + 2 + correlation_id.size());
+    write_u8(buf, static_cast<uint8_t>(MessageType::ACTOR_TRANSFORM_UPDATE));
+    write_string(buf, actor_guid);
+    write_string(buf, scene_name);
+    write_bytes(buf, transform, 36);
+    write_string(buf, source_user_id);
+    write_string(buf, correlation_id);
     return buf;
 }
 

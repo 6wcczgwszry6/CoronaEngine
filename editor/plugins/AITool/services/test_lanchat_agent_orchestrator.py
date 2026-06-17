@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from plugins.AITool.services.lanchat_agent_orchestrator import LanChatAgentOrchestrator  # noqa: E402
 from plugins.AITool.services.lanchat_host_action_executor import LanChatHostActionExecutor  # noqa: E402
 from plugins.AITool.services.lanchat_agent_worker import LANChatAgentWorker  # noqa: E402
+from plugins.AITool.services.lanchat_scene_runtime import get_lanchat_scene_runtime  # noqa: E402
 
 
 def _agent_factory():
@@ -171,6 +172,84 @@ def test_gm_proposal_for_conflict():
     print("[OK] conflict or GM mention produces GM proposal")
 
 
+def test_gm_summary_does_not_create_proposal():
+    orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
+    trigger = _trigger("@GM 整理一下大家的想法", "GM")
+    trigger["agent_id"] = "gm"
+    result = orch.handle_trigger(trigger)
+    assert result.sender_id == "gm-system"
+    assert result.sender_name == "GM"
+    assert result.proposal is False
+    assert "GM 总结" in result.text
+    assert "GM 提案" not in result.text
+    print("[OK] @GM summary stays on GM control path without proposal")
+
+
+def test_role_agent_not_hijacked_by_prior_agent_or_gm_messages():
+    orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
+    trigger = _trigger("@学者 给我介绍一下agent", "学者")
+    trigger["agent_id"] = "agent-scholar"
+    trigger["history"] = [
+        {
+            "message_id": "m0",
+            "from": "山贼",
+            "sender_type": "agent",
+            "message_kind": "agent_reply",
+            "text": "能看懂，直接生成也行。",
+        },
+        {
+            "message_id": "m1",
+            "from": "GM",
+            "sender_type": "gm",
+            "message_kind": "gm_proposal",
+            "text": "【GM 提案 gm-1】待处理意图：内部摘要",
+        },
+        {
+            "message_id": "m2",
+            "from": "用户A",
+            "sender_type": "user",
+            "message_kind": "chat",
+            "text": "@学者 给我介绍一下agent",
+        },
+    ]
+    result = orch.handle_trigger(trigger)
+    assert result.proposal is False
+    assert result.sender_id == "agent-scholar"
+    assert result.sender_name == "学者"
+    print("[OK] prior agent/GM messages do not hijack a normal @agent reply")
+
+
+def test_gm_pause_and_discussion_controls_do_not_reject_pending_proposal():
+    runtime = get_lanchat_scene_runtime()
+    runtime.end_compose()
+    runtime.consume_notes()
+    runtime.set_mode("DISCUSSING")
+    orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
+    proposal = orch.handle_trigger(_trigger("@GM 删除桌子", "GM"))
+    assert proposal.proposal is True
+    proposal_id = proposal.action_payload["proposal_id"]
+
+    paused = orch.handle_trigger(_trigger("@GM 暂停", "GM"))
+    assert paused.proposal is False
+    assert "暂停状态" in paused.text
+    assert paused.action_payload is None
+    assert runtime.mode() == "PAUSED"
+
+    discussing = orch.handle_trigger(_trigger("@GM 先讨论，不要生成", "GM"))
+    assert "讨论模式" in discussing.text
+    assert discussing.action_payload is None
+    assert runtime.mode() == "DISCUSSING"
+
+    resumed = orch.handle_trigger(_trigger("@GM 继续", "GM"))
+    assert "恢复" in resumed.text
+    assert runtime.mode() == "EXECUTING"
+
+    confirmed = orch.handle_trigger(_trigger(f"@GM 确认 {proposal_id}", "GM"))
+    assert confirmed.action_payload["status"] == "confirmed"
+    runtime.end_compose()
+    print("[OK] GM control commands do not accidentally reject pending proposals")
+
+
 def test_single_user_major_action_stays_on_role_agent_path():
     orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
     result = orch.handle_trigger(_trigger("删除桌子", "小B"))
@@ -245,7 +324,7 @@ def test_host_confirmation_rejects_explicit_non_host_role():
 
 def test_structured_confirmation_uses_correlation_id_and_metadata():
     orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
-    proposal = orch.handle_trigger(_trigger("@GM conflict on table", "GM"))
+    proposal = orch.handle_trigger(_trigger("@GM 用户A和用户B对桌子位置有冲突", "GM"))
     assert proposal.proposal is True
     proposal_id = proposal.action_payload["proposal_id"]
 
@@ -356,6 +435,77 @@ def test_worker_async_sends_fast_ack_before_agent_lock_finishes():
         time.sleep(0.01)
     assert "slow compose done" in engine.replies[-1][2]
     print("[OK] async worker sends fast ack before long compose finishes")
+
+
+def test_worker_records_busy_scene_message_without_agent_lock():
+    runtime = get_lanchat_scene_runtime()
+    runtime.end_compose()
+    runtime.consume_notes()
+    runtime.start_compose("长者", "森林奇幻集市")
+    try:
+        engine = FakeEngine([_trigger("@小女孩 后面再加两个摊位和灯串", "小女孩")])
+        worker = LANChatAgentWorker(
+            corona_engine=engine,
+            agent_factory=_agent_factory,
+            async_agent_execution=False,
+        )
+        assert worker.process_once() is True
+        assert len(engine.replies) == 1
+        assert engine.replies[0][1] == "小女孩"
+        assert "已记录" in engine.replies[0][2]
+        notes = runtime.consume_notes()
+        assert notes and notes[0].kind == "generation_delta"
+        assert "灯串" in notes[0].text
+    finally:
+        runtime.end_compose()
+        runtime.consume_notes()
+    print("[OK] busy scene messages are recorded and replied without entering agent lock")
+
+
+def test_worker_records_busy_layout_and_edit_notes():
+    runtime = get_lanchat_scene_runtime()
+    runtime.end_compose()
+    runtime.consume_notes()
+    runtime.start_compose("长者", "森林奇幻集市")
+    try:
+        engine = FakeEngine([
+            _trigger("@学者 后续不要挡中央活动区", "学者"),
+            _trigger("@小女孩 放大摊位", "小女孩"),
+        ])
+        worker = LANChatAgentWorker(
+            corona_engine=engine,
+            agent_factory=_agent_factory,
+            async_agent_execution=False,
+        )
+        assert worker.process_once() is True
+        assert worker.process_once() is True
+        assert len(engine.replies) == 2
+        notes = runtime.consume_notes()
+        assert [note.kind for note in notes] == ["layout_constraint", "edit_existing"]
+        assert "中央活动区" in notes[0].text
+        assert "放大" in notes[1].text
+    finally:
+        runtime.end_compose()
+        runtime.consume_notes()
+    print("[OK] busy path records layout constraints and edit requests for next-batch handling")
+
+
+def test_planning_confirmation_gate_roundtrip():
+    runtime = get_lanchat_scene_runtime()
+    runtime.end_compose()
+    runtime.consume_notes()
+    action, reply = runtime.handle_planning_gate("长者", "我有一个计划，建立一个森林奇幻集市")
+    assert action == "reply"
+    assert "确认开始" in str(reply)
+    assert "建议先做" in str(reply)
+    action, reply = runtime.handle_planning_gate("长者", "补充：要有灯串和木牌")
+    assert action == "reply"
+    assert "我已更新方案" in str(reply)
+    action, compose_text = runtime.handle_planning_gate("长者", "确认开始，先生成前三个")
+    assert action == "compose"
+    assert "森林奇幻集市" in str(compose_text)
+    assert "灯串" in str(compose_text) or "木牌" in str(compose_text)
+    print("[OK] planning confirmation gate returns proposal then compose text")
 
 
 def test_worker_async_agent_calls_are_serialized_per_worker():
@@ -586,6 +736,9 @@ if __name__ == "__main__":
     test_regular_role_agent_reply()
     test_current_mentioned_agent_identity_overrides_history_mentions()
     test_gm_proposal_for_conflict()
+    test_gm_summary_does_not_create_proposal()
+    test_role_agent_not_hijacked_by_prior_agent_or_gm_messages()
+    test_gm_pause_and_discussion_controls_do_not_reject_pending_proposal()
     test_single_user_major_action_stays_on_role_agent_path()
     test_host_confirmation_consumes_pending_proposal()
     test_host_confirmation_rejects_wrong_proposal_id()
@@ -596,6 +749,9 @@ if __name__ == "__main__":
     test_worker_streams_sanitized_progress_reply_before_final()
     test_worker_async_agent_execution_returns_before_slow_agent_reply()
     test_worker_async_sends_fast_ack_before_agent_lock_finishes()
+    test_worker_records_busy_scene_message_without_agent_lock()
+    test_worker_records_busy_layout_and_edit_notes()
+    test_planning_confirmation_gate_roundtrip()
     test_worker_async_agent_calls_are_serialized_per_worker()
     test_worker_broadcasts_confirmed_gm_action()
     test_host_action_executor_runs_under_gate_and_reports_result()

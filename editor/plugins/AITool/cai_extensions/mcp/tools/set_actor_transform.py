@@ -95,7 +95,7 @@ class SetActorTransformInput(BaseModel):
     )
     rotation: Optional[Tuple[float, float, float]] = Field(
         default=None,
-        description="绝对旋转 [rx, ry, rz] (欧拉角，度)，不传则不修改",
+        description="绝对旋转 [rx, ry, rz] (欧拉角，弧度)，不传则不修改；用户说角度时需先转换为弧度",
     )
     scale: Optional[Tuple[float, float, float]] = Field(
         default=None,
@@ -213,7 +213,7 @@ def _build_set_actor_transform_tool(scene_manager) -> StructuredTool:
             "绝对设置引擎场景中物体的位置/旋转/缩放。"
             "与 transform_model（相对偏移）不同，本工具直接设置绝对坐标。"
             "传入 None 的字段保持不变。"
-            "坐标: X+右, Y+上, Z+屏幕内侧。旋转单位为度(欧拉角)。"
+            "坐标: X+右, Y+上, Z+屏幕内侧。旋转单位为弧度(欧拉角)，例如 90度=1.5708。"
         ),
         args_schema=SetActorTransformInput,
         func=_set_actor_transform,

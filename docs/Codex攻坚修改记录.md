@@ -1247,3 +1247,252 @@ AI 执行铁律：
 - Remaining:
   - Need to extend the edit fast path from scale/grounding to common wall/side placement commands.
   - If input still freezes after the frontend change and ResourceSearch disable flag, classify as CEF/render/main-thread lower-layer blocking.
+
+## 2026-06-17 add: A-level intervention v1 - confirmation, micro-batch, pending plan
+
+- Scope:
+  - Python-side implementation only.
+  - No C++/Ninja/CMake build or protocol tests were run in this pass.
+- Planning confirmation:
+  - Added `services/lanchat_scene_runtime.py` as a lightweight runtime side-channel.
+  - Plan-like messages such as "I have a plan / build a ..." now return a short confirmation proposal instead of directly starting compose.
+  - Explicit commands such as "confirm start / direct generate / start generating" bypass the gate and enter compose.
+  - Supplements before confirmation are merged into the compose text, so they can affect item extraction/model preparation.
+- Inventory expansion:
+  - `SceneComposer.extract_items()` now calls `_ensure_minimum_scene_inventory()`.
+  - If an open scene extracts fewer than the configured minimum items, the system asks an LLM to expand to a 6-10 item inventory.
+  - Fallback expansion is generic functional props only; no code-side "forest=..." or "church=..." scene identity mapping was added.
+- Real micro-batch:
+  - `scene_composer_progressive.py` now splits `INTERIOR`, `OBJECTS`, and `DECORATION` into 2-3 item micro-batches.
+  - `SceneSession.progressive_compose()` now accepts `phase_sequence` and `phase_metadata`, so progress can report batch index and cumulative imported count.
+  - Progress text now says "next batch" instead of only "phase boundary".
+- Generation-time pending notes:
+  - `LANChatAgentWorker` checks `LanChatSceneRuntime` before entering `_agent_call_lock`.
+  - If a scene compose is active, other agents can send a lightweight reply and record pending generation/layout/edit notes without waiting for the long agent call.
+  - Pending "do not generate X" notes can filter a future batch.
+  - Pending additions are recorded and reported, but v1 does not spawn new text-to-image/Hunyuan jobs mid-compose; use the pre-generation confirmation/supplement path for additions that must affect the current run.
+- Edit fast path:
+  - Extended deterministic fast edit path from scale/grounding to simple delete/hide and relative position commands:
+    - center, move farther/nearer, left/right/front/back.
+  - Fast edits still run ground snap and overlap repair after position/scale changes.
+- Verification:
+  - PASS: Python AST parse for edited files.
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_scene_session.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+  - PASS: `python -B editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+- Remaining for true A-level:
+  - Mid-compose additions are recorded but not yet dynamically model-generated inside the same run.
+  - If frontend typing itself still freezes, classify as CEF/UI/render main-thread blocking, not Python worker lock.
+
+## 2026-06-17 add: Multiplayer GM first-class mention entry
+
+- Goal:
+  - Make `@GM` a visible and routable first-class collaboration entry.
+  - Stop ordinary `@Agent` questions from being hijacked by GM proposals.
+  - Let structured host confirmations reach GM without reopening progress/action_status trigger loops.
+- Frontend:
+  - `RoomPanel` injects a virtual `GM` candidate at the top of the `@` mention list.
+  - Sending `@GM ...` now includes `target_agent_id=gm`.
+  - GM proposal buttons send `message_kind=confirmation`, `target_agent_id=gm`, `correlation_id=<proposal_id>`, and structured decision metadata.
+- C++ LANChat:
+  - Added a narrow virtual GM trigger path in `LanChatState::enqueue_agent_triggers_for_message()`.
+  - `@GM` / `target_agent_id=gm` creates a virtual trigger with `agent_id=gm`, `agent_name=GM`.
+  - `message_kind=confirmation` is allowed only through the GM target path; `progress`, `gm_proposal`, `action_status`, and normal agent replies remain non-triggering.
+- Python orchestrator:
+  - `LANChatSummaryService` now only monitors user chat messages, filtering out agent replies, progress, GM proposals, confirmations, and action status messages.
+  - `@GM 整理/总结` returns a sanitized GM summary instead of a proposal.
+  - `@GM 暂停/继续/先讨论` enters a control path and does not accidentally reject pending proposals.
+  - Normal `@学者/@山贼/...` messages stay on the role-agent path even when recent history contains old GM/agent messages.
+- Verification:
+  - PASS: `python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - PASS: Python AST parse for modified LANChat Python services.
+  - PASS: `node editor/Frontend/scripts/test-lanchat-roster.mjs`
+  - PASS: `git diff --check` on this change set.
+- Not run:
+  - C++/Ninja build and `test_network_protocol` binary were not run in this pass.
+  - A C++ protocol test was added for virtual GM trigger / structured confirmation, but it still needs the normal C++ build/test lane.
+
+## 2026-06-17 add: Multiplayer A-level intervention runtime mode + pending plan closure
+
+- Scope:
+  - Python-side multiplayer / multi-agent intervention loop only.
+  - No C++/Ninja/CMake build, typed SceneDelta, actor version, or peer actor apply work in this pass.
+- Runtime mode:
+  - `LanChatSceneRuntime` now tracks room-level mode: `DISCUSSING`, `PLANNING`, `EXECUTING`, `PAUSED`.
+  - Planning confirmation moves the runtime to `PLANNING`; confirmed compose/start moves it to `EXECUTING`; compose end returns to `DISCUSSING`.
+  - `@GM 暂停`, `@GM 继续`, and `@GM 先讨论/不要生成` now write this runtime mode instead of only returning text.
+- Micro-batch boundary control:
+  - `SceneSession.progressive_compose()` accepts a `runtime_mode_provider`.
+  - Before each phase/micro-batch, `PAUSED` or `DISCUSSING` stops further import and returns `paused`, `paused_mode`, and `paused_before_phase`.
+  - Paused runs do not execute FinalReview, avoiding a false "finished" state.
+  - Progress messages now expose a user-visible paused state such as waiting for `@GM 继续`.
+- Pending plan application:
+  - Generation-time messages from non-executing agents still use the fast busy path and do not enter the heavy agent lock.
+  - `generation_delta` notes are recorded as `pending_for_planner` and attached to the next batch metadata as `runtime_generation_context`.
+  - `layout_constraint` notes are recorded as `applied_to_batch_context` and attached to batch assets as `runtime_layout_constraints`.
+  - `edit_existing` notes are recorded as `queued_edit_or_waiting_for_actor`.
+  - "Do not generate X" generation notes can remove matching future assets from the current remaining batch.
+- Verification:
+  - PASS: `python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - PASS: `python editor/plugins/AITool/cai_extensions/agent/test_scene_session.py`
+  - PASS: `python editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+- Remaining:
+  - Positive mid-compose additions are visible to planner/context but still do not spawn new model-generation jobs inside the same running compose.
+  - True multiplayer visual sync after host execution still depends on typed SceneDelta / actor sync bottom-layer work.
+
+## 2026-06-17 add: Single-user multi-agent A-level intervention closure pass
+
+- Scope:
+  - Continue the single-user + multi-role-agent line to A-level demo behavior.
+  - No C++/Ninja/CMake work in this pass.
+- Pending plan now affects the next batch instead of only being recorded:
+  - `layout_constraint` notes can mutate not-yet-imported batch positions for central-clear, entrance-clear, wall-aligned, and fountain-axis style constraints.
+  - `generation_delta` notes now distinguish:
+    - `applied_removed_from_remaining`
+    - `already_in_remaining_plan`
+    - `pending_next_generation`
+  - `edit_existing` notes remain queued until the actor exists or the user repeats the command after import.
+- AABB repair visibility:
+  - Post-import AABB repair now appends unresolved overlaps/conflicts into `pending_tasks` with `status=needs_confirm`.
+  - This avoids reporting a clean success when overlap resolution could not finish.
+- Fast edit path:
+  - Added deterministic fast rotation and basic color edit attempts.
+  - Clear fast-edit requests with no actor match now return candidate actor names instead of falling into the slow integrated stream.
+  - Position/scale edits still run bottom snap + overlap repair.
+- Final user report:
+  - Compose summary now groups absorbed interventions into visible buckets:
+    - applied
+    - recorded for follow-up
+    - needs confirmation
+- Verification:
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_scene_session.py`
+  - PASS: `python -B editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_cai_text_extraction.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_role_registry.py`
+- Remaining:
+  - Positive brand-new mid-compose additions are still follow-up-generation tasks unless already present in the pre-generated asset list.
+  - Frontend input freeze during heavy engine/render work remains a C++/CEF/UI-thread issue if it reproduces with Python async enabled.
+
+## 2026-06-17 add: Rotation unit closure for single-user multi-agent F5
+
+- Problem:
+  - Engine `set_rotation/get_rotation` directly reads/writes Euler values.
+  - The runtime expects radians, but the AI edit prompt, layout prompt, and tool schema still described rotation as degrees.
+- Fix:
+  - Fast edit path now parses user-facing degree text and converts it with `math.radians()` before writing actor yaw.
+  - Fast edit reply explicitly marks the written rotation as radians.
+  - Agentic edit prompt now tells the executor to convert user degrees to radians before calling `set_actor_transform`.
+  - `set_actor_transform` schema/tool description now documents radians.
+  - `compose_scene` layout prompt now asks for radian rotations, with 90/180 degree examples.
+  - `model_reviewer` VLM correction schema now reports rotation corrections in radians.
+- Verification:
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_role_registry.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_scene_session.py`
+  - PASS: `python -B editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_vlm_review_loop.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_cai_text_extraction.py`
+  - PASS: AST parse for modified Python files.
+  - PASS: `git diff --check` (line-ending warnings only).
+
+## 2026-06-17 add: Single-user multi-agent F5 handoff guardrails
+
+- Goal:
+  - Turn the remaining single-user + multi-agent plan into a repeatable F5 handoff.
+  - Keep the first F5 pass focused on interaction smoothness and AABB geometry, not VLM screenshot cost.
+- VLM F5 guardrail:
+  - `scene_composer_progressive._vlm_max_targets()` now defaults to 0 when `CORONA_F5_DEMO_MODE=1` and `PROGRESSIVE_VLM_MAX_TARGETS` is not explicitly set.
+  - Normal non-demo behavior keeps the previous default of 4 targets.
+  - Explicit `PROGRESSIVE_VLM_MAX_TARGETS=1` still enables the second-pass VLM paper-point check.
+- F5 handoff doc:
+  - Added `docs/单人多Agent_F5验收手册.md`.
+  - The doc contains the three fixed demo scripts:
+    - forest fantasy market
+    - children bedroom
+    - European church plaza
+  - It also records environment variables, pass criteria, failure attribution, and the VLM second-pass rule.
+- Verification:
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_scene_session.py`
+  - PASS: `python -B editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_vlm_review_loop.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_cai_text_extraction.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_role_registry.py`
+  - PASS: AST parse for modified progressive files.
+  - PASS: `git diff --check` (line-ending warnings only).
+
+## 2026-06-17 add: VLM independent review camera
+
+- Problem:
+  - F5 logs showed VLM review moving the main viewport camera 16 times (4 models x 4 angles).
+  - The viewport could turn black/freeze during review, then recover after VLM stopped.
+  - Logs also showed a PNG timing race: Python checked for the file before C++ finished writing it.
+- Fix:
+  - Added `vlm_review_camera` in `model_reviewer.py`.
+  - VLM capture now reuses or creates this hidden camera with `view_open=False`, `deletable=False`, `render_backend="native"`, and `512x512` resolution.
+  - The new camera is added through `scene.add_camera_to_scene(camera)` and does not call `scene.set_camera()`.
+  - `_capture_single_model()` now defaults to the independent review camera path.
+  - Main-camera capture is disabled by default; the legacy path only runs when `CORONA_VLM_ALLOW_MAIN_CAMERA_CAPTURE=1`.
+  - Screenshot success now waits for the PNG file to exist and settle briefly, avoiding the "future returned before file is on disk" false skip.
+- Verification:
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_vlm_review_loop.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_scene_session.py`
+  - PASS: `python -B editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_role_registry.py`
+  - PASS: `python -B editor/plugins/AITool/cai_extensions/agent/test_cai_text_extraction.py`
+  - PASS: AST parse for modified Python files.
+- Remaining:
+  - This pass stops main viewport camera movement.
+  - It does not yet provide a fully independent offscreen render target, so GPU readback contention can still require a C++/Optics follow-up.
+
+## 2026-06-17 add: Multiplayer demo-grade ActorTransformUpdated sync
+
+- Goal:
+  - Push the LANChat + multi-agent line past L3 semantic execution status.
+  - Add the minimum L4 actor transform sync needed for tonight's demo:
+    Host moves/scales/rotates an already-synced actor, Guest applies the same transform by `actor_guid`.
+- Existing ActorAdded path kept:
+  - Reused Python `actor-sync-broadcast` -> frontend `Network.vue` -> CEF `broadcast_actor_create` -> C++ `ACTOR_CREATE` -> peer pending create.
+  - No duplicate ActorAdded protocol was introduced.
+- New demo-grade transform path:
+  - Added `ACTOR_TRANSFORM_UPDATE` protocol packet with:
+    - `actor_guid`
+    - `scene_name`
+    - transform `[position(3), rotation(3 radians), scale(3)]`
+    - `source_user_id`
+    - `correlation_id`
+  - Added `NetworkSystem::broadcast_actor_transform_update()`.
+  - Added peer-side pending transform queue and `pop_pending_actor_transform_update()`.
+  - Added CEF fast-path functions:
+    - `broadcast_actor_transform`
+    - `poll_pending_actor_transform`
+  - Added frontend bridge methods:
+    - `networkService.broadcastActorTransform()`
+    - `networkService.pollPendingActorTransform()`
+  - Added frontend `Network.vue` handling:
+    - local `actor-transform-sync-broadcast` -> C++ transform broadcast
+    - pending remote transform -> `SceneTools.apply_actor_transform_internal()`
+  - Added `SceneTools.apply_actor_transform_internal()`:
+    - finds actor by `actor_guid`
+    - applies position/rotation/scale with `if_init=True`
+    - avoids re-broadcast loops
+  - Added Actor-side transform event:
+    - local `set_position/set_rotation/set_scale`
+    - local `translate/rotate_delta/scale_delta`
+    - `on_move()`
+    - remote/init writes do not rebroadcast.
+- Tests / checks run in this thread:
+  - PASS: `python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - PASS: `python -m unittest editor.CoronaCore.tests.test_actor_network_broadcast.ActorNetworkBroadcastTests.test_local_transform_setters_emit_actor_transform_sync editor.CoronaCore.tests.test_actor_network_broadcast.ActorNetworkBroadcastTests.test_remote_transform_apply_does_not_rebroadcast editor.CoronaCore.tests.test_actor_network_broadcast.ActorNetworkBroadcastTests.test_actor_move_emits_ownership_claim`
+  - PASS: `node editor/Frontend/scripts/test-lanchat-roster.mjs`
+  - PASS: AST parse for modified Python files.
+  - PASS: `git diff --check` on transform sync files (line-ending warnings only).
+- Not run by instruction:
+  - No C++/Ninja/CMake build in this Codex thread.
+  - `corona_network_protocol_tests` build/run is deferred to the designated bottom-layer environment.
+- F5 gate:
+  - Host creates/imports actor -> Guest sees actor via existing ActorAdded path.
+  - Host moves/scales/rotates the same actor -> Guest updates same `actor_guid`, without duplicate actor creation.
+  - If this fails after C++ build passes, inspect CEF event dispatch and frontend pending transform polling first.

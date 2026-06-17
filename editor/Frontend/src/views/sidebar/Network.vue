@@ -325,6 +325,28 @@ async function pollPeers() {
         }
       }
     } catch (_) { /* best effort — actor creation polling is secondary */ }
+
+    try {
+      const pendingTransform = await networkService.pollPendingActorTransform();
+      if (pendingTransform && pendingTransform.has_pending) {
+        const actorData = {
+          actor_guid: pendingTransform.actor_guid || '',
+          geometry: pendingTransform.geometry || {},
+          source_user_id: pendingTransform.source_user_id || '',
+          correlation_id: pendingTransform.correlation_id || '',
+        };
+        const updated = await Bridge.callCEF('SceneTools', 'apply_actor_transform_internal', [
+          pendingTransform.scene_name || 'Scene/default.scene',
+          pendingTransform.actor_guid || '',
+          actorData,
+        ]);
+        const updatedData = unwrapCefResult(updated);
+        if (updatedData?.status !== 'error') {
+          remoteActorLog.value = `远程 Actor 已更新: ${pendingTransform.actor_guid || 'unknown'}`;
+          setTimeout(() => { remoteActorLog.value = ''; }, 3000);
+        }
+      }
+    } catch (_) { /* best effort — transform sync is demo-grade */ }
   } catch (e) {
     // ignore polling errors
   }
@@ -439,6 +461,14 @@ onMounted(() => {
     networkService.broadcastActorCreate(actorGuid, sceneName, modelPath, actorData).catch(() => {});
   });
 
+  coronaEventBus.on('actor-transform-sync-broadcast', (actorData) => {
+    if (!sessionActive.value || !actorData) return;
+    const actorGuid = actorData.actor_guid || '';
+    if (!actorGuid) return;
+    const sceneName = actorData.scene || 'Scene/default.scene';
+    networkService.broadcastActorTransform(actorGuid, sceneName, actorData).catch(() => {});
+  });
+
   coronaEventBus.on('network-sync-pause-request', ({ paused } = {}) => {
     networkService.setSyncPaused(Boolean(paused)).catch(() => {});
   });
@@ -480,6 +510,7 @@ onUnmounted(() => {
   ownershipClaimTimes.clear();
   // Clean up event listeners
   coronaEventBus.off('actor-sync-broadcast');
+  coronaEventBus.off('actor-transform-sync-broadcast');
   coronaEventBus.off('network-sync-pause-request');
   coronaEventBus.off('actor-ownership-claim');
   coronaEventBus.off('file-sync-status');

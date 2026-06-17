@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import math
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
@@ -12,6 +13,26 @@ from cai_extensions.agent.role_registry import (  # noqa: E402
     resolve_role_template,
 )
 from cai_extensions.agent.agent_adapter import MasterAgent  # noqa: E402
+
+
+class FakeRotActor:
+    def __init__(self):
+        self.name = "chair"
+        self._rotation = [0.0, 0.0, 0.0]
+        self._position = [0.0, 0.0, 0.0]
+        self._scale = [1.0, 1.0, 1.0]
+
+    def get_rotation(self):
+        return list(self._rotation)
+
+    def set_rotation(self, value):
+        self._rotation = list(value)
+
+    def get_position(self):
+        return list(self._position)
+
+    def get_scale(self):
+        return list(self._scale)
 
 
 def test_builtin_role_has_structured_biases():
@@ -51,9 +72,22 @@ def test_master_agent_can_build_role_compose_context():
     assert "SceneState, AABB, VLM and user intent have priority" in ctx
 
 
+def test_fast_rotation_converts_degrees_to_radians():
+    agent = MasterAgent()
+    actor = FakeRotActor()
+    reply = agent._try_fast_transform_edit("旋转chair90度", [actor])
+    assert reply and "弧度" in reply
+    assert math.isclose(actor.get_rotation()[1], math.pi / 2, abs_tol=0.0015)
+
+    reply = agent._try_fast_transform_edit("逆时针旋转chair45度", [actor])
+    assert reply and "弧度" in reply
+    assert math.isclose(actor.get_rotation()[1], math.pi / 4, abs_tol=0.0015)
+
+
 if __name__ == "__main__":
     test_builtin_role_has_structured_biases()
     test_role_voice_injection_keeps_persona_visible()
     test_custom_role_is_supported_without_overwriting_builtin()
     test_master_agent_can_build_role_compose_context()
+    test_fast_rotation_converts_degrees_to_radians()
     print("\n=== Role registry ALL PASS ===")

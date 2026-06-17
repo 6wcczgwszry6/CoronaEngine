@@ -11,9 +11,13 @@
 """
 import sys
 import os
+import threading
+import time
+import shutil
 
 sys.path.insert(0, os.path.dirname(__file__))
 from vlm_review_loop import review_models_async, VlmReviewReport  # noqa: E402
+import model_reviewer  # noqa: E402
 
 
 class FakeGate:
@@ -113,10 +117,136 @@ def test_empty_targets():
     print("[OK] 空目标安全返回")
 
 
+class FakeCamera:
+    def __init__(self, name="main", **kwargs):
+        self.name = name
+        self.kwargs = kwargs
+        self.position = [0, 0, 0]
+        self.forward = [0, 0, 1]
+        self.up = [0, 1, 0]
+        self.fov = 45.0
+        self.output_mode = kwargs.get("output_mode", "beauty")
+        self.set_calls = 0
+
+    def set(self, position, forward, world_up, fov):
+        self.position = list(position)
+        self.forward = list(forward)
+        self.up = list(world_up)
+        self.fov = fov
+        self.set_calls += 1
+
+    def get_output_mode(self):
+        return self.output_mode
+
+    def set_output_mode(self, mode):
+        self.output_mode = mode
+
+    def save_screenshot_sync(self, path):
+        with open(path, "wb") as f:
+            f.write(b"fake-png")
+        return True
+
+
+class FakeScene:
+    def __init__(self, cameras=None):
+        self.cameras = list(cameras or [])
+        self.active = FakeCamera("main_camera")
+        self.added = []
+
+    def find_camera(self, name):
+        if name is None:
+            return self.active
+        for camera in self.cameras:
+            if getattr(camera, "name", None) == name:
+                return camera
+        return None
+
+    def add_camera_to_scene(self, camera):
+        self.cameras.append(camera)
+        self.added.append(camera)
+
+    def get_active_camera(self):
+        return self.active
+
+
+def _test_tmp_dir(name):
+    root = os.path.abspath(os.path.join(os.getcwd(), "temp", "vlm_review_test"))
+    path = os.path.join(root, name)
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def test_vlm_review_camera_reuses_existing():
+    existing = FakeCamera(model_reviewer.VLM_REVIEW_CAMERA_NAME)
+    scene = FakeScene([existing])
+    camera = model_reviewer.get_or_create_vlm_review_camera(scene, camera_factory=FakeCamera)
+    assert camera is existing
+    assert not scene.added
+    print("[OK] VLM review camera reuses existing camera")
+
+
+def test_vlm_review_camera_created_without_switching_active():
+    scene = FakeScene()
+    active_before = scene.get_active_camera()
+    camera = model_reviewer.get_or_create_vlm_review_camera(scene, camera_factory=FakeCamera)
+    assert camera is scene.added[0]
+    assert camera.name == model_reviewer.VLM_REVIEW_CAMERA_NAME
+    assert scene.get_active_camera() is active_before
+    assert camera.kwargs.get("view_open") is False
+    assert camera.kwargs.get("deletable") is False
+    print("[OK] VLM review camera created without switching active camera")
+
+
+def test_vlm_capture_uses_review_camera_not_main():
+    scene = FakeScene()
+    review_camera = FakeCamera(model_reviewer.VLM_REVIEW_CAMERA_NAME)
+    main_before = list(scene.active.position)
+
+    def pose(center, distance, az, elevation):
+        return {"position": [az / 90.0, 2.0, 3.0], "forward": [0, 0, -1], "up": [0, 1, 0]}
+
+    tmp = _test_tmp_dir("capture")
+    try:
+        result = model_reviewer._capture_with_review_camera(scene, review_camera, tmp, "sample", pose)
+        assert result == tmp
+        assert review_camera.set_calls == 4
+        assert scene.active.position == main_before
+        assert os.path.exists(os.path.join(tmp, "sample_az000.png"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("[OK] VLM capture uses review camera and leaves main camera untouched")
+
+
+def test_screenshot_waits_for_late_png_write():
+    camera = FakeCamera(model_reviewer.VLM_REVIEW_CAMERA_NAME)
+
+    def delayed_save(path):
+        def writer():
+            time.sleep(0.25)
+            with open(path, "wb") as f:
+                f.write(b"late-png")
+        threading.Thread(target=writer, daemon=True).start()
+        return True
+
+    camera.save_screenshot_sync = delayed_save
+    tmp = _test_tmp_dir("late")
+    try:
+        path = os.path.join(tmp, "late.png")
+        assert model_reviewer._save_camera_screenshot_with_timeout(camera, path, timeout=1.0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("[OK] VLM screenshot waits until late PNG is actually on disk")
+
+
 if __name__ == "__main__":
     test_advisory_with_corrections()
     test_screenshot_timeout_tolerated()
     test_review_exception_skipped()
     test_no_screenshot_skipped()
     test_empty_targets()
+    test_vlm_review_camera_reuses_existing()
+    test_vlm_review_camera_created_without_switching_active()
+    test_vlm_capture_uses_review_camera_not_main()
+    test_screenshot_waits_for_late_png_write()
     print("\n=== COMMIT 5 VLM 外回路 ALL PASS ===")

@@ -89,7 +89,16 @@ class LANChatSummaryService:
 
     @staticmethod
     def _normalize_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [item for item in history if isinstance(item, dict)]
+        normalized: list[dict[str, Any]] = []
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("message_kind") or "chat").strip().lower()
+            sender_type = str(item.get("sender_type") or "user").strip().lower()
+            if kind != "chat" or sender_type != "user":
+                continue
+            normalized.append(item)
+        return normalized
 
     @staticmethod
     def _compact_intent(speaker: str, text: str, limit: int = 48) -> str:

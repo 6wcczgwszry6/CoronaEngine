@@ -449,6 +449,35 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     return true;
                 }
 
+                if (func == "poll_pending_actor_transform") {
+                    nlohmann::json payload;
+                    std::string actor_guid, scene_name, source_user_id, correlation_id;
+                    float transform[9] = {0,0,0, 0,0,0, 1,1,1};
+                    if (sys->pop_pending_actor_transform_update(
+                            actor_guid, scene_name, transform, 9,
+                            source_user_id, correlation_id)) {
+                        payload["has_pending"] = true;
+                        payload["actor_guid"] = actor_guid;
+                        payload["scene_name"] = scene_name;
+                        payload["source_user_id"] = source_user_id;
+                        payload["correlation_id"] = correlation_id;
+                        payload["geometry"]["position"] = {
+                            transform[0], transform[1], transform[2]
+                        };
+                        payload["geometry"]["rotation"] = {
+                            transform[3], transform[4], transform[5]
+                        };
+                        payload["geometry"]["scale"] = {
+                            transform[6], transform[7], transform[8]
+                        };
+                    } else {
+                        payload["has_pending"] = false;
+                    }
+                    payload["ok"] = true;
+                    callback->Success(create_success_json("poll_pending_actor_transform", payload));
+                    return true;
+                }
+
                 if (func == "set_sync_paused") {
                     bool paused = args.size() > 0 ? args[0].get<bool>() : false;
                     sys->set_sync_paused(paused);
@@ -478,6 +507,43 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     nlohmann::json payload;
                     payload["ok"] = ok;
                     callback->Success(create_success_json("claim_actor_ownership", payload));
+                    return true;
+                }
+
+                if (func == "broadcast_actor_transform") {
+                    std::string actor_guid = args.size() > 0 ? args[0].get<std::string>() : "";
+                    std::string scene_name = args.size() > 1 ? args[1].get<std::string>() : "";
+                    float transform[9] = {0,0,0, 0,0,0, 1,1,1};
+                    std::string source_user_id;
+                    std::string correlation_id;
+                    if (args.size() > 2 && args[2].is_object()) {
+                        auto& ad = args[2];
+                        if (ad.contains("geometry")) {
+                            auto& geo = ad["geometry"];
+                            if (geo.contains("position") && geo["position"].is_array() && geo["position"].size() >= 3) {
+                                transform[0] = geo["position"][0].get<float>();
+                                transform[1] = geo["position"][1].get<float>();
+                                transform[2] = geo["position"][2].get<float>();
+                            }
+                            if (geo.contains("rotation") && geo["rotation"].is_array() && geo["rotation"].size() >= 3) {
+                                transform[3] = geo["rotation"][0].get<float>();
+                                transform[4] = geo["rotation"][1].get<float>();
+                                transform[5] = geo["rotation"][2].get<float>();
+                            }
+                            if (geo.contains("scale") && geo["scale"].is_array() && geo["scale"].size() >= 3) {
+                                transform[6] = geo["scale"][0].get<float>();
+                                transform[7] = geo["scale"][1].get<float>();
+                                transform[8] = geo["scale"][2].get<float>();
+                            }
+                        }
+                        source_user_id = ad.value("source_user_id", "");
+                        correlation_id = ad.value("correlation_id", "");
+                    }
+                    sys->broadcast_actor_transform_update(
+                        actor_guid, scene_name, transform, source_user_id, correlation_id);
+                    nlohmann::json payload;
+                    payload["ok"] = true;
+                    callback->Success(create_success_json("broadcast_actor_transform", payload));
                     return true;
                 }
 

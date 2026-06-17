@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from typing import Any, Callable, Dict, List, Optional
 
@@ -35,11 +36,13 @@ try:
         agent_progress_sink,
         get_current_progress_sink,
     )
+    from plugins.AITool.services.lanchat_scene_runtime import get_lanchat_scene_runtime
 except Exception:  # noqa: BLE001
     from services.agent_progress_context import (  # type: ignore
         agent_progress_sink,
         get_current_progress_sink,
     )
+    from services.lanchat_scene_runtime import get_lanchat_scene_runtime  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -764,6 +767,16 @@ class MasterAgent:
             if cmd == "patrol":
                 return self._handle_patrol(system)
 
+            # 1.5 生成前轻量确认：只拦计划型请求；明确“确认/直接生成”会继续进入 compose。
+            agent_name = self._extract_current_agent_name(messages) or self._router.route(system).name
+            gate_action, gate_payload = get_lanchat_scene_runtime().handle_planning_gate(agent_name, trigger)
+            if gate_action == "reply":
+                logger.info("[MasterAgent] routing → planning confirmation gate")
+                return str(gate_payload or "")
+            if gate_action == "compose":
+                logger.info("[MasterAgent] routing → compose (confirmed plan)")
+                return self._handle_scene(str(gate_payload or trigger), system, messages, force_compose=True)
+
             # 2. 意图三分类（compose / edit / chat）——语义分类取代关键词路由。
             #    关键词路由两类都翻车：真编辑漏判掉聊天（"把矮桌变小""蒙古包调大"），
             #    抱怨误判进编辑（"蒙古包没有调整好"命中"调整"）。改用 LLM 语义分类。
@@ -908,10 +921,10 @@ class MasterAgent:
 
 执行规则：
 - 用户说的物体名可能是简称：用户说"蒙古包"，实际 actor 名是 "__shell_蒙古包"——调工具时用真实名字。
-- 相对量要基于物体【当前 transform】（上面列出了）计算出绝对目标值再调工具：
-  * "放大3倍"=当前 scale 各分量 ×3；"缩小一半"=×0.5；"变大"≈×1.5；"变小"≈×0.7
-  * "y轴向上移动2"=当前 pos 的 y +2；"往左1米"=x -1（坐标系 X+右/Y+上/Z+屏幕内）
-  * "旋转90度"=当前 rot 的 y +90（度）
+        - 相对量要基于物体【当前 transform】（上面列出了）计算出绝对目标值再调工具：
+          * "放大3倍"=当前 scale 各分量 ×3；"缩小一半"=×0.5；"变大"≈×1.5；"变小"≈×0.7
+          * "y轴向上移动2"=当前 pos 的 y +2；"往左1米"=x -1（坐标系 X+右/Y+上/Z+屏幕内）
+          * 项目底层 rotation 使用【弧度】。用户说"旋转90度"时，先把 90 度转换为 1.5708 弧度，再做当前 rot 的 y +1.5708。
 - 设置绝对变换用 set_actor_transform（传 actor 真实名 + position/rotation/scale）；删除用对应删除工具。
 - 完成后用一句中文确认你做了什么（含物体名和新数值）。"""
 
@@ -952,6 +965,108 @@ class MasterAgent:
             return 0.75
         return None
 
+    def _parse_fast_position_delta(self, user_text: str, actor: Any) -> List[float] | None:
+        text = user_text.strip()
+        try:
+            pos = [float(v) for v in actor.get_position()]
+        except Exception:
+            pos = [0.0, 0.0, 0.0]
+        step = 2.0 if any(k in text for k in ("远一点", "移远", "调远")) else 1.0
+        if "放中间" in text or "居中" in text or "到中间" in text:
+            return [-pos[0], 0.0, -pos[2]]
+        if "靠左" in text or "往左" in text or "左墙" in text:
+            return [-step, 0.0, 0.0]
+        if "靠右" in text or "往右" in text or "右墙" in text:
+            return [step, 0.0, 0.0]
+        if "往前" in text or "靠前" in text:
+            return [0.0, 0.0, step]
+        if "往后" in text or "靠后" in text:
+            return [0.0, 0.0, -step]
+        if "移远" in text or "远一点" in text or "调远" in text:
+            direction = 1.0 if pos[2] >= 0.0 else -1.0
+            if abs(pos[2]) < 0.2:
+                direction = -1.0
+            return [0.0, 0.0, direction * step]
+        if "近一点" in text or "靠近" in text:
+            direction = -1.0 if pos[2] >= 0.0 else 1.0
+            return [0.0, 0.0, direction * step]
+        return None
+
+    def _parse_fast_rotation_delta(self, user_text: str) -> float | None:
+        text = user_text.strip()
+        if not any(k in text for k in ("旋转", "转一下", "转动", "转到", "朝向", "方向")):
+            return None
+        numeric = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*度", text)
+        angle = float(numeric.group(1)) if numeric else 90.0
+        if any(k in text for k in ("逆时针", "往左转", "左转")):
+            angle = -angle
+        return math.radians(angle)
+
+    def _parse_fast_color(self, user_text: str) -> tuple[str, List[float]] | None:
+        colors = {
+            "红": ("红色", [1.0, 0.08, 0.06]),
+            "蓝": ("蓝色", [0.08, 0.28, 1.0]),
+            "绿": ("绿色", [0.08, 0.65, 0.18]),
+            "黄": ("黄色", [1.0, 0.82, 0.08]),
+            "白": ("白色", [0.92, 0.92, 0.88]),
+            "黑": ("黑色", [0.03, 0.03, 0.03]),
+            "灰": ("灰色", [0.45, 0.45, 0.45]),
+            "金": ("金色", [1.0, 0.68, 0.16]),
+            "银": ("银色", [0.75, 0.76, 0.78]),
+            "粉": ("粉色", [1.0, 0.45, 0.72]),
+            "紫": ("紫色", [0.55, 0.18, 0.85]),
+            "棕": ("棕色", [0.42, 0.22, 0.10]),
+        }
+        if not any(k in user_text for k in ("改色", "换色", "变成", "颜色", "涂成")):
+            return None
+        for key, value in colors.items():
+            if key in user_text:
+                return value
+        return None
+
+    def _try_apply_actor_color(self, actor: Any, rgb: List[float]) -> bool:
+        candidates = [
+            getattr(actor, "set_color", None),
+            getattr(actor, "set_diffuse", None),
+        ]
+        optics = getattr(actor, "_optics", None)
+        if optics is not None:
+            candidates.extend([
+                getattr(optics, "set_color", None),
+                getattr(optics, "set_diffuse", None),
+                getattr(optics, "set_base_color", None),
+            ])
+        for setter in candidates:
+            if not callable(setter):
+                continue
+            try:
+                setter(rgb)
+                return True
+            except TypeError:
+                try:
+                    setter(float(rgb[0]), float(rgb[1]), float(rgb[2]))
+                    return True
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        return False
+
+    def _looks_like_fast_edit_request(self, user_text: str) -> bool:
+        return any(k in user_text for k in (
+            "放大", "缩小", "变大", "变小", "贴地", "穿模", "底座",
+            "移远", "靠墙", "靠左", "靠右", "往前", "往后", "居中",
+            "删除", "删掉", "移除", "不要这个", "旋转", "转一下",
+            "改色", "换色", "颜色", "涂成",
+        ))
+
+    def _candidate_actor_reply(self, actors: List[Any]) -> str:
+        names = [self._actor_display_name(str(getattr(a, "name", "") or "")) for a in actors[:8]]
+        names = [n for n in names if n]
+        if not names:
+            return "我没找到可编辑的物体。"
+        return "我没找到你说的那个物体。你可以点名这些物体之一：" + "、".join(names)
+
     def _try_fast_transform_edit(self, user_text: str, actors: List[Any]) -> str | None:
         actor = self._pick_edit_actor(user_text, actors)
         if actor is None:
@@ -962,17 +1077,56 @@ class MasterAgent:
         changed_parts: list[str] = []
         scale_factor = self._parse_fast_scale_factor(user_text)
         try:
+            if any(k in user_text for k in ("删除", "删掉", "移除", "不要这个")):
+                setter = getattr(actor, "set_visible", None)
+                if callable(setter):
+                    setter(False)
+                    return f"已快速隐藏 **{display}**。如果需要彻底删除，我可以在后续执行队列中继续清理。"
+                return None
+
             if scale_factor is not None:
                 current = [float(v) for v in actor.get_scale()]
                 new_scale = [round(max(0.02, v * scale_factor), 4) for v in current[:3]]
                 actor.set_scale(new_scale)
                 changed_parts.append(f"缩放调整为 {new_scale}")
 
+            rotation_delta = self._parse_fast_rotation_delta(user_text)
+            if rotation_delta is not None:
+                current_rot = [float(v) for v in actor.get_rotation()]
+                while len(current_rot) < 3:
+                    current_rot.append(0.0)
+                current_rot[1] = round(current_rot[1] + rotation_delta, 3)
+                actor.set_rotation(current_rot[:3])
+                changed_parts.append(f"旋转调整为 {current_rot[:3]}（弧度）")
+
+            color = self._parse_fast_color(user_text)
+            if color is not None:
+                label, rgb = color
+                if self._try_apply_actor_color(actor, rgb):
+                    changed_parts.append(f"颜色调整为{label}")
+
+            delta = self._parse_fast_position_delta(user_text, actor)
+            if delta is not None:
+                current_pos = [float(v) for v in actor.get_position()]
+                new_pos = [
+                    round(current_pos[0] + float(delta[0]), 4),
+                    round(current_pos[1] + float(delta[1]), 4),
+                    round(current_pos[2] + float(delta[2]), 4),
+                ]
+                actor.set_position(new_pos)
+                changed_parts.append(f"位置调整为 {new_pos}")
+
             needs_grounding = scale_factor is not None or any(
-                k in user_text for k in ("穿模", "贴地", "落地", "抬高", "底座")
+                k in user_text for k in ("穿模", "贴地", "落地", "抬高", "底座", "重叠", "太挤", "碰撞")
             )
+            if delta is not None:
+                needs_grounding = True
             if not needs_grounding:
-                return None
+                if not changed_parts:
+                    return None
+                pos = [round(float(v), 3) for v in actor.get_position()]
+                scale = [round(float(v), 3) for v in actor.get_scale()]
+                return f"已快速调整 **{display}**：{'；'.join(changed_parts)}。当前位置 {pos}，缩放 {scale}。"
 
             try:
                 from plugins.AITool.cai_extensions.mcp.tools.transform_grounding import (
@@ -1049,6 +1203,9 @@ class MasterAgent:
         if not actors_lines:
             return "⚠️ 场景里没有可编辑的物体。"
 
+        if self._looks_like_fast_edit_request(user_text) and self._pick_edit_actor(user_text, editable_actors) is None:
+            return self._candidate_actor_reply(editable_actors)
+
         fast_reply = self._try_fast_transform_edit(user_text, editable_actors)
         if fast_reply:
             logger.info("[MasterAgent] edit → fast transform path")
@@ -1106,18 +1263,27 @@ class MasterAgent:
         # 优先从最近对话中找完整清单文本（用户可能只说"按清单生成"）
         compose_text = self._gather_compose_text(user_text, messages)
         role_context = self._role_compose_context(persona)
+        runtime = get_lanchat_scene_runtime()
+        pending_context = runtime.consume_notes_for_prompt()
+        if pending_context:
+            compose_text = f"{compose_text}\n\n{pending_context}"
         if role_context:
             compose_text = f"{compose_text}\n\n## RoleAgent 软偏好\n{role_context}"
         image_url = self._extract_image_url(messages)
 
         composer = SceneComposer(room_size=[5.0, 3.0, 3.0], scene_name="lanchat_scene",
                                  max_items=self._scene_max_items)
-        result = composer.compose(
-            compose_text,
-            image_url=image_url,
-            do_import=True,
-            progress_sink=get_current_progress_sink(),
-        )
+        agent_name = self._extract_current_agent_name(messages) or specialist.name
+        runtime.start_compose(agent_name, compose_text)
+        try:
+            result = composer.compose(
+                compose_text,
+                image_url=image_url,
+                do_import=True,
+                progress_sink=get_current_progress_sink(),
+            )
+        finally:
+            runtime.end_compose(agent_name)
 
         # 记录到 GroupAgent
         for _ in result.get("items", []):
@@ -1139,6 +1305,7 @@ class MasterAgent:
         vlm_skipped = result.get("vlm_review_skipped") or []
         vlm_timed_out = result.get("vlm_review_timed_out") or []
         operation_count = int(result.get("operation_count") or 0)
+        pending_tasks = result.get("pending_tasks") or []
         snapshot_path = result.get("zone_decompose_snapshot")
 
         lines = [f"{tag} 🏗️ 场景组合完成"]
@@ -1164,6 +1331,9 @@ class MasterAgent:
             lines.append(f"  • 最近进度：{progress_events[-1]}")
         if operation_count:
             lines.append(f"  • 捕获用户介入：{operation_count} 条")
+        if pending_tasks:
+            lines.append(f"  • 生成中吸收：{len(pending_tasks)} 条后续要求")
+            lines.extend(self._format_pending_tasks_summary(pending_tasks))
         # 15a：shell 外壳建筑独立汇报（它不走家具路径，否则成败不可见）
         shell_placed = result.get("shell_placed", [])
         shell_failed = result.get("shell_failed", [])
@@ -1189,6 +1359,31 @@ class MasterAgent:
         if snapshot_path:
             lines.append(f"🧪 F5 分解快照：{snapshot_path}")
         return "\n".join(lines)
+
+    def _format_pending_tasks_summary(self, pending_tasks: List[Dict[str, Any]]) -> List[str]:
+        applied: List[str] = []
+        waiting: List[str] = []
+        attention: List[str] = []
+        for task in pending_tasks[:12]:
+            text = str(task.get("text") or "").strip()
+            if not text:
+                continue
+            status = str(task.get("status") or "")
+            short = text.replace("\n", " ")[:36]
+            if status.startswith("applied") or status in {"already_in_remaining_plan", "recorded_layout_constraint"}:
+                applied.append(short)
+            elif status in {"pending_next_generation", "queued_edit_or_waiting_for_actor", "pending_for_planner"}:
+                waiting.append(short)
+            elif "confirm" in status or status in {"recorded_no_matching_asset"}:
+                attention.append(short)
+        lines: List[str] = []
+        if applied:
+            lines.append(f"    - 已应用：{'；'.join(applied[:3])}")
+        if waiting:
+            lines.append(f"    - 已记录待补：{'；'.join(waiting[:3])}")
+        if attention:
+            lines.append(f"    - 需确认：{'；'.join(attention[:3])}")
+        return lines
 
     def _role_compose_context(self, persona: str) -> str:
         """Resolve role persona into advisory compose context."""
@@ -1465,6 +1660,14 @@ class MasterAgent:
             text = re.sub(r'@\w+\s*', '', text).strip()
             return text
         return messages[-1] if messages else ""
+
+    def _extract_current_agent_name(self, messages: List[str]) -> str:
+        """Read the explicitly injected current @agent context from orchestrator."""
+        for msg in messages:
+            m = re.search(r"本轮明确被 @ 的 AI 助手是：([^。\n]+)", str(msg or ""))
+            if m:
+                return m.group(1).strip()
+        return ""
 
     def _extract_sender(self, messages: List[str]) -> str:
         """从最近一条非摘要消息中提取发言人名字（用于协同锁/意图预览）。"""

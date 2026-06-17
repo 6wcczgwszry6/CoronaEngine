@@ -8,17 +8,21 @@
 import os
 import sys
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import List
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from cai_extensions.agent.scene_composer_progressive import (  # noqa: E402
+    _apply_pending_notes_to_batch,
+    _build_micro_batch_phase_plan,
     _collect_door_clearance_aabbs,
     _collect_zone_aabbs,
     _distribute_assets_to_phases,
     _filter_aabbs_by_zone,
     _generate_post_shell_framework,
     _infer_primary_zone_ids,
+    _vlm_max_targets,
 )
 from cai_extensions.data_model.zone_tree import Connector, Volume, Zone, ZoneAspect, ZoneTree  # noqa: E402
 
@@ -187,6 +191,77 @@ def test_filter_aabbs_by_zone():
     print("[OK] AABB zone checks are scoped by LayoutInstance.zone_id")
 
 
+def test_micro_batch_plan_splits_content_phases():
+    phase_assets = {
+        "GROUND": [],
+        "SHELL": [],
+        "INTERIOR": [{"name": f"家具{i}", "layout_role": "furniture"} for i in range(7)],
+        "BOUNDARY": [{"name": "围栏"}],
+        "OBJECTS": [{"name": f"室外物{i}", "layout_role": "support"} for i in range(5)],
+        "DECORATION": [{"name": f"装饰{i}", "layout_role": "decoration"} for i in range(4)],
+    }
+    sequence, metadata, batches = _build_micro_batch_phase_plan(phase_assets)
+    assert sequence == [
+        "INTERIOR#1", "INTERIOR#2", "INTERIOR#3",
+        "BOUNDARY",
+        "OBJECTS#1", "OBJECTS#2",
+        "DECORATION#1", "DECORATION#2",
+    ]
+    assert metadata["INTERIOR#1"]["batch_index"] == 1
+    assert metadata["INTERIOR#3"]["batch_total"] == 3
+    assert len(batches["OBJECTS#1"]) == 3
+    assert len(batches["DECORATION#2"]) == 1
+    print("[OK] content phases split into real micro-batches")
+
+
+def _legacy_test_pending_notes_apply_to_next_batch_context():
+    session = SimpleNamespace(pending_tasks=[])
+    assets = [
+        {"name": "摊位", "layout_role": "foreground_object"},
+        {"name": "玩具柜", "layout_role": "decoration"},
+    ]
+    notes = [
+        SimpleNamespace(kind="generation_delta", text="后面再加灯串和发光蘑菇", source_agent="小女孩"),
+        SimpleNamespace(kind="layout_constraint", text="后续不要挡中央活动区", source_agent="学者"),
+        SimpleNamespace(kind="edit_existing", text="放大摊位", source_agent="小女孩"),
+        SimpleNamespace(kind="generation_delta", text="不要再生成玩具柜", source_agent="长者"),
+    ]
+    out = _apply_pending_notes_to_batch(assets, notes, session)
+    assert [item["name"] for item in out] == ["摊位"]
+    assert session.pending_tasks
+    statuses = {item["kind"]: item["status"] for item in session.pending_tasks}
+    assert statuses["layout_constraint"] == "applied_to_batch_context"
+    assert statuses["edit_existing"] == "queued_edit_or_waiting_for_actor"
+    assert out[0]["runtime_generation_context"] == ["后面再加灯串和发光蘑菇"]
+    assert out[0]["runtime_layout_constraints"] == ["后续不要挡中央活动区"]
+    print("[OK] pending scene notes enter next-batch context and can remove forbidden future assets")
+
+
+def test_pending_notes_apply_to_next_batch_context():
+    session = SimpleNamespace(pending_tasks=[])
+    assets = [
+        {"name": "market stall", "layout_role": "foreground_object", "pos": [0.0, 0.0, 0.0]},
+        {"name": "toy cabinet", "layout_role": "decoration", "pos": [1.0, 0.0, 0.0]},
+    ]
+    notes = [
+        SimpleNamespace(kind="generation_delta", text="add lantern strings and glowing mushrooms later", source_agent="girl"),
+        SimpleNamespace(kind="layout_constraint", text="keep central activity area clear", source_agent="scholar"),
+        SimpleNamespace(kind="edit_existing", text="scale up stall", source_agent="girl"),
+        SimpleNamespace(kind="generation_delta", text="do not generate toy cabinet", source_agent="elder"),
+    ]
+    out = _apply_pending_notes_to_batch(assets, notes, session)
+    assert [item["name"] for item in out] == ["market stall"]
+    statuses = [item["status"] for item in session.pending_tasks]
+    assert "applied_to_next_batch_layout" in statuses
+    assert "queued_edit_or_waiting_for_actor" in statuses
+    assert "pending_next_generation" in statuses
+    assert "applied_removed_from_remaining" in statuses
+    assert out[0]["pos"] != [0.0, 0.0, 0.0]
+    assert out[0]["runtime_generation_context"] == ["add lantern strings and glowing mushrooms later"]
+    assert out[0]["runtime_layout_constraints"] == ["keep central activity area clear"]
+    print("[OK] pending scene notes can mutate next batch positions and remove forbidden assets")
+
+
 def test_progressive_post_shell_framework_generates_floor_and_boundary():
     composer = FakeComposer()
     _generate_post_shell_framework(composer)
@@ -197,10 +272,34 @@ def test_progressive_post_shell_framework_generates_floor_and_boundary():
     print("[OK] progressive post-shell framework keeps interior floor and boundary chain")
 
 
+def test_f5_demo_mode_disables_vlm_by_default():
+    old_demo = os.environ.get("CORONA_F5_DEMO_MODE")
+    old_targets = os.environ.get("PROGRESSIVE_VLM_MAX_TARGETS")
+    try:
+        os.environ["CORONA_F5_DEMO_MODE"] = "1"
+        os.environ.pop("PROGRESSIVE_VLM_MAX_TARGETS", None)
+        assert _vlm_max_targets() == 0
+        os.environ["PROGRESSIVE_VLM_MAX_TARGETS"] = "1"
+        assert _vlm_max_targets() == 1
+    finally:
+        if old_demo is None:
+            os.environ.pop("CORONA_F5_DEMO_MODE", None)
+        else:
+            os.environ["CORONA_F5_DEMO_MODE"] = old_demo
+        if old_targets is None:
+            os.environ.pop("PROGRESSIVE_VLM_MAX_TARGETS", None)
+        else:
+            os.environ["PROGRESSIVE_VLM_MAX_TARGETS"] = old_targets
+    print("[OK] F5 demo mode disables VLM by default but explicit target count wins")
+
+
 if __name__ == "__main__":
     test_zone_and_asset_routing()
     test_zone_and_door_aabb_helpers()
     test_indoor_room_slot_planner_uses_asset_semantics()
     test_filter_aabbs_by_zone()
+    test_micro_batch_plan_splits_content_phases()
+    test_pending_notes_apply_to_next_batch_context()
     test_progressive_post_shell_framework_generates_floor_and_boundary()
+    test_f5_demo_mode_disables_vlm_by_default()
     print("\n=== progressive mixed geometry ALL PASS ===")

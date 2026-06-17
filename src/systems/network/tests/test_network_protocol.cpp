@@ -125,6 +125,31 @@ void test_actor_create_carries_dependency_paths() {
                 "actor create second dependency path");
 }
 
+void test_actor_transform_update_carries_transform_and_correlation() {
+    float transform[9] = {1, 2, 3, 0.1f, 0.2f, 0.3f, 2, 2, 2};
+    auto packet = Corona::Network::build_actor_transform_update(
+        "actor-xform", "Scene/main.scene", transform, "user-a", "gm-1");
+
+    Corona::Network::BufferReader reader(packet.data(), packet.size());
+    expect_true(static_cast<Corona::Network::MessageType>(reader.read_u8()) ==
+                    Corona::Network::MessageType::ACTOR_TRANSFORM_UPDATE,
+                "actor transform update message type");
+    expect_true(reader.read_string(reader.read_u16()) == "actor-xform",
+                "actor transform actor guid payload");
+    expect_true(reader.read_string(reader.read_u16()) == "Scene/main.scene",
+                "actor transform scene payload");
+    const float* wire_transform = reinterpret_cast<const float*>(reader.data + reader.pos);
+    for (int i = 0; i < 9; ++i) {
+        expect_true(wire_transform[i] == transform[i],
+                    "actor transform preserves transform values");
+    }
+    reader.pos += 36;
+    expect_true(reader.read_string(reader.read_u16()) == "user-a",
+                "actor transform source user payload");
+    expect_true(reader.read_string(reader.read_u16()) == "gm-1",
+                "actor transform correlation payload");
+}
+
 void test_file_chunk_carries_transfer_id_and_offset() {
     constexpr uint64_t transfer_id = 0x8877665544332211ull;
     constexpr uint32_t total_size = 4096;
@@ -514,6 +539,38 @@ void test_lanchat_state_does_not_trigger_structured_progress_messages() {
     state.enqueue_agent_triggers_for_message(progress.message, "local-peer");
     expect_true(!state.pop_agent_trigger().has_value(),
                 "structured progress does not trigger agents");
+}
+
+void test_lanchat_state_enqueues_virtual_gm_from_mention_and_target() {
+    Corona::Network::LanChatState state;
+    state.open_room("room-a", "local-peer", "Host");
+    state.register_agent("agent-1", "SceneBot", "scene helper", "local-peer");
+
+    auto gm_chat = state.record_message_ex(
+        "gm-chat-1", "user-peer", "Alice", "@GM 整理一下大家的想法", 1000,
+        "user", "chat", "gm", "user-peer", "", "{}");
+    expect_true(gm_chat.accepted, "lanchat accepts @GM chat message");
+
+    state.enqueue_agent_triggers_for_message(gm_chat.message, "local-peer");
+    auto trigger = state.pop_agent_trigger();
+    expect_true(trigger.has_value(), "virtual GM receives @GM chat trigger");
+    expect_true(trigger->agent_id == "gm", "virtual GM trigger has gm id");
+    expect_true(trigger->agent_name == "GM", "virtual GM trigger has GM name");
+    expect_true(trigger->target_agent_id == "gm", "virtual GM trigger carries target_agent_id");
+    expect_true(!state.pop_agent_trigger().has_value(),
+                "@GM does not also trigger ordinary local agents");
+
+    auto confirmation = state.record_message_ex(
+        "gm-confirm-1", "user-peer", "Alice", "@GM 确认 gm-1", 1001,
+        "user", "confirmation", "gm", "user-peer", "gm-1", "{\"decision\":\"confirm\"}");
+    expect_true(confirmation.accepted, "lanchat accepts structured GM confirmation");
+    state.enqueue_agent_triggers_for_message(confirmation.message, "local-peer");
+    auto confirm_trigger = state.pop_agent_trigger();
+    expect_true(confirm_trigger.has_value(), "structured confirmation can reach virtual GM");
+    expect_true(confirm_trigger->message_kind == "confirmation",
+                "virtual GM confirmation trigger preserves message kind");
+    expect_true(confirm_trigger->correlation_id == "gm-1",
+                "virtual GM confirmation trigger preserves correlation id");
 }
 
 void test_lanchat_state_tracks_locks_and_preview_conflicts() {
@@ -1069,6 +1126,7 @@ int main() {
     test_actor_create_carries_actor_guid();
     test_actor_create_unpack_preserves_wire_transform();
     test_actor_create_carries_dependency_paths();
+    test_actor_transform_update_carries_transform_and_correlation();
     test_file_request_carries_transfer_id();
     test_file_chunk_carries_transfer_id_and_offset();
     test_ownership_claim_carries_actor_guid();
@@ -1086,6 +1144,7 @@ int main() {
     test_lanchat_state_deduplicates_agent_triggers();
     test_lanchat_state_does_not_trigger_agent_reply_or_duplicate_names();
     test_lanchat_state_does_not_trigger_structured_progress_messages();
+    test_lanchat_state_enqueues_virtual_gm_from_mention_and_target();
     test_lanchat_state_tracks_locks_and_preview_conflicts();
     test_project_relative_path_validation();
     test_network_system_session_role_defaults_to_none();

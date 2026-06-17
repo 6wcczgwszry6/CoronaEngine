@@ -190,6 +190,14 @@ public:
                                 const float* transform,
                                 const void* optics_packed, size_t optics_size);
 
+    /// Broadcast a demo-grade Actor transform delta. Transform is 9 floats:
+    /// position(3) + rotation(3, radians) + scale(3).
+    void broadcast_actor_transform_update(const std::string& actor_guid,
+                                          const std::string& scene_name,
+                                          const float* transform,
+                                          const std::string& source_user_id = {},
+                                          const std::string& correlation_id = {});
+
     /// 检查是否有待完成的文件传输（需要在 update 中处理）
     [[nodiscard]] bool has_pending_transfers() const;
 
@@ -200,6 +208,13 @@ public:
     bool pop_pending_actor_create(std::string& actor_guid,
                                   std::string& scene_name, std::string& model_path,
                                   void* actor_packed_out, size_t packed_size);
+
+    bool pop_pending_actor_transform_update(std::string& actor_guid,
+                                            std::string& scene_name,
+                                            float* transform_out,
+                                            size_t transform_count,
+                                            std::string& source_user_id,
+                                            std::string& correlation_id);
 
     /**
      * @brief 注册稳定 Actor 网络 ID 到本地 SharedDataHub handle 映射。

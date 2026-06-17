@@ -9,14 +9,18 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 # 全局互斥锁: 同一时刻只允许一个审查会话, 防止截图竞态死锁
 _review_lock = threading.Lock()
+
+VLM_REVIEW_CAMERA_NAME = "vlm_review_camera"
 
 # 审查 VLM prompt
 _REVIEW_SYSTEM_PROMPT = """你是 3D 模型质量检查员。检查单个模型的:
@@ -27,16 +31,150 @@ _REVIEW_SYSTEM_PROMPT = """你是 3D 模型质量检查员。检查单个模型�
 输出 JSON:
 {
   "overall": "PASS" | "FAIL",
-  "rotation_correction": [rx, ry, rz],   // 需要的旋转修正(度), 不需要则为 [0,0,0]
+  "rotation_correction": [rx, ry, rz],   // 需要的旋转修正(弧度), 不需要则为 [0,0,0]；例如 90度=1.5708
   "scale_correction": [sx, sy, sz],       // 需要的比例修正, 不需要则为 [1,1,1]
   "issues": ["问题描述"],
   "fix_suggestion": "修正建议 (给后续 LLM 布局用, 如: 旋转 90° 使其朝前)"
 }"""
 
 
-def _capture_single_model(output_dir: str, model_name: str, tier: int = 99) -> Optional[str]:
-    """对场景中单个模型拍摄 4 角度截图。复用 v2 的 _capture_for_review 逻辑。"""
-    import math
+def _get_current_scene() -> Optional[Any]:
+    try:
+        from CoronaCore.core.managers import scene_manager
+        routes = scene_manager.list_all()
+        return scene_manager.get(routes[0]) if routes else None
+    except Exception as exc:
+        logger.warning("[ModelReviewer] 无法获取当前场景: %s", exc)
+        return None
+
+
+def get_or_create_vlm_review_camera(scene: Any, camera_factory: Optional[Any] = None) -> Optional[Any]:
+    """Return a hidden VLM review camera without switching the active viewport camera."""
+    if scene is None:
+        return None
+    try:
+        existing = scene.find_camera(VLM_REVIEW_CAMERA_NAME)
+        if existing is not None:
+            return existing
+    except Exception:
+        pass
+
+    try:
+        if camera_factory is None:
+            from CoronaCore.core.entities.camera import Camera
+            camera_factory = Camera
+        camera = camera_factory(
+            name=VLM_REVIEW_CAMERA_NAME,
+            width=512,
+            height=512,
+            view_open=False,
+            deletable=False,
+            render_backend="native",
+            output_mode="base_color",
+        )
+        scene.add_camera_to_scene(camera)
+        logger.info("[ModelReviewer] 已创建 VLM 独立截图摄像头: %s", VLM_REVIEW_CAMERA_NAME)
+        return camera
+    except Exception as exc:
+        logger.warning("[ModelReviewer] 创建 VLM 独立截图摄像头失败: %s", exc)
+        return None
+
+
+def _wait_for_file_ready(filepath: str, timeout: float = 1.5, interval: float = 0.05) -> bool:
+    """Wait until the screenshot file exists and its size has settled briefly."""
+    deadline = time.time() + timeout
+    last_size = -1
+    stable_count = 0
+    while time.time() < deadline:
+        try:
+            size = os.path.getsize(filepath)
+        except OSError:
+            size = 0
+        if size > 0 and size == last_size:
+            stable_count += 1
+            if stable_count >= 2:
+                return True
+        else:
+            stable_count = 0
+            last_size = size
+        time.sleep(interval)
+    return False
+
+
+def _save_camera_screenshot_with_timeout(camera: Any, filepath: str, timeout: float = 5.0) -> bool:
+    def _save() -> Any:
+        save_sync = getattr(camera, "save_screenshot_sync", None)
+        if callable(save_sync):
+            return save_sync(filepath)
+        return camera.save_screenshot(filepath)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(_save)
+    try:
+        result = future.result(timeout=timeout)
+        if result is False:
+            return False
+        return _wait_for_file_ready(filepath)
+    except FuturesTimeoutError:
+        logger.warning("[ModelReviewer] VLM 独立摄像头截图超时: %s", filepath)
+        executor.shutdown(wait=False, cancel_futures=True)
+        return False
+    except Exception as exc:
+        logger.warning("[ModelReviewer] VLM 独立摄像头截图异常: %s", exc)
+        return False
+    finally:
+        if future.done():
+            executor.shutdown(wait=False)
+
+
+def _capture_with_review_camera(
+    scene: Any,
+    review_camera: Any,
+    output_dir: str,
+    model_name: str,
+    calc_camera_pose: Any,
+) -> Optional[str]:
+    os.makedirs(output_dir, exist_ok=True)
+    distance = 3.0
+    center = [0.0, 0.5, 0.0]
+    angles = [0, 90, 180, 270]
+    saved: List[str] = []
+    old_mode = None
+    try:
+        old_mode_fn = getattr(review_camera, "get_output_mode", None)
+        old_mode = old_mode_fn() if callable(old_mode_fn) else getattr(review_camera, "output_mode", None)
+    except Exception:
+        old_mode = None
+
+    try:
+        set_mode = getattr(review_camera, "set_output_mode", None)
+        if callable(set_mode):
+            set_mode("base_color")
+        for az in angles:
+            pose = calc_camera_pose(center, distance, az, 25.0)
+            filepath = os.path.join(output_dir, f"{model_name}_az{az:03d}.png")
+            try:
+                review_camera.set(pose["position"], pose["forward"], pose["up"], 45.0)
+                time.sleep(0.1)
+                if _save_camera_screenshot_with_timeout(review_camera, filepath):
+                    saved.append(filepath)
+                else:
+                    logger.warning("[ModelReviewer] %s az=%d VLM 截图失败/为空", model_name, az)
+            except Exception as exc:
+                logger.warning("[ModelReviewer] %s az=%d VLM 独立截图异常: %s", model_name, az, exc)
+    finally:
+        if old_mode:
+            try:
+                review_camera.set_output_mode(old_mode)
+            except Exception:
+                pass
+
+    logger.info("[ModelReviewer] %s 独立摄像头截图 %d/%d", model_name, len(saved), len(angles))
+    return output_dir if saved else None
+
+
+def _capture_single_model_main_camera_fallback(output_dir: str, model_name: str) -> Optional[str]:
+    """Legacy debug path. This moves the main camera; keep it opt-in only."""
     import os
 
     try:
@@ -97,6 +235,32 @@ def _capture_single_model(output_dir: str, model_name: str, tier: int = 99) -> O
 
     logger.info("[ModelReviewer] %s 截图 %d/%d", model_name, len(saved), len(angles))
     return output_dir if saved else None
+
+
+def _capture_single_model(output_dir: str, model_name: str, tier: int = 99) -> Optional[str]:
+    """对场景中单个模型拍摄 4 角度截图。默认使用独立 VLM 摄像头, 不扰动主视口。"""
+    try:
+        from ..flows.scene_composition_workflow_v2.nodes_tier_review import (
+            _calc_camera_pose,
+        )
+    except ImportError:
+        logger.warning("[ModelReviewer] 无法导入截图姿态工具")
+        return None
+
+    scene = _get_current_scene()
+    review_camera = get_or_create_vlm_review_camera(scene)
+    if review_camera is not None:
+        return _capture_with_review_camera(scene, review_camera, output_dir, model_name, _calc_camera_pose)
+
+    allow_main = os.environ.get("CORONA_VLM_ALLOW_MAIN_CAMERA_CAPTURE", "0").strip() == "1"
+    if not allow_main:
+        logger.warning(
+            "[ModelReviewer] VLM 独立截图摄像头不可用, 跳过截图; "
+            "如需旧主相机调试, 设置 CORONA_VLM_ALLOW_MAIN_CAMERA_CAPTURE=1"
+        )
+        return None
+    logger.warning("[ModelReviewer] 使用旧主相机截图 fallback, 可能扰动主视口")
+    return _capture_single_model_main_camera_fallback(output_dir, model_name)
 
 
 def _vlm_review_model(screenshot_dir: str, model_name: str, model_type: str) -> Dict[str, Any]:

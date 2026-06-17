@@ -52,6 +52,48 @@ bool mentions_agent(const std::string& text, const std::string& agent_name) {
     return false;
 }
 
+bool is_gm_target(const LanChatMessage& message) {
+    return message.target_agent_id == "gm" ||
+           message.target_agent_id == "GM" ||
+           mentions_agent(message.text, "GM");
+}
+
+void enqueue_virtual_gm_trigger(LanChatState& state,
+                                const LanChatMessage& message,
+                                std::deque<LanChatAgentTrigger>& pending,
+                                std::unordered_set<std::string>& triggered_keys,
+                                std::mutex& mutex) {
+    LanChatAgentTrigger trigger;
+    trigger.trigger_id = message.message_id + ":gm";
+    trigger.message_id = message.message_id;
+    trigger.room_id = message.room_id;
+    trigger.sender_id = message.sender_id;
+    trigger.sender_name = message.sender_name;
+    trigger.sender_type = message.sender_type;
+    trigger.message_kind = message.message_kind;
+    trigger.target_agent_id = message.target_agent_id.empty() ? "gm" : message.target_agent_id;
+    trigger.source_user_id = message.source_user_id;
+    trigger.correlation_id = message.correlation_id;
+    trigger.metadata_json = message.metadata_json;
+    trigger.agent_id = "gm";
+    trigger.agent_name = "GM";
+    trigger.persona = "GM";
+    trigger.text = message.text;
+
+    const auto& history = state.history();
+    const size_t start = history.size() > kAgentTriggerHistoryLimit
+        ? history.size() - kAgentTriggerHistoryLimit
+        : 0;
+    trigger.history.assign(history.begin() + static_cast<std::ptrdiff_t>(start),
+                           history.end());
+
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!triggered_keys.insert(trigger.trigger_id).second) {
+        return;
+    }
+    pending.push_back(std::move(trigger));
+}
+
 }  // namespace
 
 bool LanChatState::open_room(const std::string& room_id,
@@ -230,10 +272,17 @@ void LanChatState::enqueue_agent_triggers_for_message(const LanChatMessage& mess
     if (is_agent_reply || message.message_id.empty() || local_peer_id.empty()) {
         return;
     }
-    if (!message.message_kind.empty() && message.message_kind != "chat") {
+    const bool is_confirmation = message.message_kind == "confirmation";
+    if (!message.message_kind.empty() && message.message_kind != "chat" && !is_confirmation) {
         return;
     }
     if (!message.sender_type.empty() && message.sender_type != "user") {
+        return;
+    }
+
+    if (is_gm_target(message)) {
+        enqueue_virtual_gm_trigger(*this, message, pending_agent_triggers_,
+                                   triggered_agent_keys_, agent_trigger_mutex_);
         return;
     }
 

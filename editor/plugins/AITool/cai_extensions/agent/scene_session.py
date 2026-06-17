@@ -171,24 +171,40 @@ class SceneSession:
         """
         percent = max(0, min(100, int(event.get("percent", 0) or 0)))
         phase = str(event.get("phase") or "")
+        base_phase = phase.split("#", 1)[0]
         status = str(event.get("status") or "")
-        label = PHASE_PROGRESS.get(phase, "处理场景")
-        detail = _PHASE_DETAILS.get(phase, "正在推进当前场景。")
+        label = PHASE_PROGRESS.get(base_phase, "处理场景")
+        detail = _PHASE_DETAILS.get(base_phase, "正在推进当前场景。")
         blocks = max(0, min(10, round(percent / 10)))
         bar = "█" * blocks + "░" * (10 - blocks)
         if status == "start":
             verb = "开始"
         elif status == "done":
             verb = "完成"
+        elif status == "paused":
+            verb = "暂停"
         else:
             verb = "进行中"
         suffix = ""
         imported = int(event.get("imported_count", 0) or 0)
         assets = int(event.get("asset_count", 0) or 0)
+        cumulative = int(event.get("cumulative_imported", 0) or 0)
+        total_assets = int(event.get("total_assets", 0) or 0)
+        batch_index = int(event.get("batch_index", 0) or 0)
+        batch_total = int(event.get("batch_total", 0) or 0)
+        batch_prefix = f"第 {batch_index}/{batch_total} 批，" if batch_index and batch_total else ""
         if status == "done" and assets:
-            suffix = f" 本阶段已处理 {imported}/{assets} 个物件。"
+            suffix = f" {batch_prefix}本批已处理 {imported}/{assets} 个物件。"
+            if total_assets:
+                suffix += f"累计已放入 {cumulative}/{total_assets} 个。"
         elif status == "start":
-            suffix = " 你可以继续提出调整，我会在阶段边界吸收。"
+            suffix = f" {batch_prefix}你可以继续提出调整，我会在下一批前吸收。"
+        elif status == "paused":
+            mode = str(event.get("mode") or "")
+            if mode == "DISCUSSING":
+                suffix = " 已切到讨论模式，后续批次暂不写入场景。"
+            else:
+                suffix = " 已在批次边界暂停，等待 @GM 继续。"
         return f"生成进度 {percent:>3}% [{bar}] {verb}：{label}。{detail}{suffix}"
 
     def _append_operation(
@@ -306,6 +322,9 @@ class SceneSession:
         settle_fn: Optional[Callable[[List[Any]], None]] = None,
         post_import_hook: Optional[Callable[[List[str], str], None]] = None,
         skip_final_review: bool = False,
+        phase_sequence: Optional[Sequence[str]] = None,
+        phase_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+        runtime_mode_provider: Optional[Callable[[], str]] = None,
     ) -> Dict[str, Any]:
         """渐进式主循环。每个 phase：生成→导入→进度→采集视口→drain介入→settle。
 
@@ -321,18 +340,56 @@ class SceneSession:
         imported_all: List[str] = []
         phases_run: List[str] = []
         progress_timeline: List[Dict[str, Any]] = []
-        active_phases = [phase for phase in PHASE_ORDER if phase_generators.get(phase)]
+        ordered_phases = list(phase_sequence) if phase_sequence else list(PHASE_ORDER)
+        active_phases = [phase for phase in ordered_phases if phase_generators.get(phase)]
         total_phases = max(1, len(active_phases))
+        total_assets = sum(int((phase_metadata or {}).get(phase, {}).get("asset_count", 0) or 0)
+                           for phase in active_phases)
+        cumulative_imported = 0
+        paused = False
+        paused_mode = ""
+        paused_before_phase = ""
 
-        for phase in PHASE_ORDER:
+        for phase in ordered_phases:
             gen = phase_generators.get(phase)
             if gen is None:
                 continue
-            phases_run.append(phase)
-            phase_index = len(phases_run)
-            batch_id = f"r{round_id}_{phase}"
+            base_phase = phase.split("#", 1)[0]
+            meta = dict((phase_metadata or {}).get(phase, {}) or {})
+            phase_index = len(phases_run) + 1
+            batch_id = f"r{round_id}_{phase.replace('#', '_b')}"
             start_percent = int(((phase_index - 1) / total_phases) * 100)
-            start_msg = self._emit_progress(phase, extra=f"开始 {phase_index}/{total_phases}")
+
+            mode = ""
+            if runtime_mode_provider is not None:
+                try:
+                    mode = str(runtime_mode_provider() or "").strip().upper()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("[SceneSession] runtime mode provider skipped: %s", exc)
+                    mode = ""
+            if mode in {"PAUSED", "DISCUSSING"}:
+                paused = True
+                paused_mode = mode
+                paused_before_phase = phase
+                pause_msg = self._emit_progress(base_phase, extra=f"暂停 {phase_index}/{total_phases}")
+                progress_timeline.append({
+                    "phase": phase,
+                    "status": "paused",
+                    "mode": mode,
+                    "percent": start_percent,
+                    "message": pause_msg,
+                    "asset_count": int(meta.get("asset_count", 0) or 0),
+                    "imported_count": 0,
+                    "cumulative_imported": cumulative_imported,
+                    "total_assets": total_assets,
+                    **meta,
+                })
+                self._publish_progress_event(progress_timeline[-1])
+                logger.info("[SceneSession] runtime mode %s pauses before phase %s", mode, phase)
+                break
+
+            phases_run.append(phase)
+            start_msg = self._emit_progress(base_phase, extra=f"开始 {phase_index}/{total_phases}")
             progress_timeline.append({
                 "phase": phase,
                 "status": "start",
@@ -340,6 +397,9 @@ class SceneSession:
                 "message": start_msg,
                 "asset_count": 0,
                 "imported_count": 0,
+                "cumulative_imported": cumulative_imported,
+                "total_assets": total_assets,
+                **meta,
             })
             self._publish_progress_event(progress_timeline[-1])
 
@@ -378,15 +438,19 @@ class SceneSession:
                         logger.debug("[SceneSession] 导入后 diff 基线更新跳过: %s", exc)
 
             # 3. 进度反馈（复用 phase 边界，突击方案 E2）
+            cumulative_imported += len(imported_this_phase)
             done_percent = int((phase_index / total_phases) * 100)
-            done_msg = self._emit_progress(phase, extra=f"{len(assets)}件" if assets else "")
+            done_msg = self._emit_progress(base_phase, extra=f"{len(assets)}件" if assets else "")
             progress_timeline.append({
                 "phase": phase,
                 "status": "done",
                 "percent": done_percent,
                 "message": done_msg,
+                **meta,
                 "asset_count": len(assets),
                 "imported_count": len(imported_this_phase),
+                "cumulative_imported": cumulative_imported,
+                "total_assets": total_assets,
             })
             self._publish_progress_event(progress_timeline[-1])
 
@@ -410,7 +474,7 @@ class SceneSession:
 
         # 7. FinalReview 只修 AGENT（测试可跳过，因为有专门的独立测试覆盖）
         report = None
-        if not skip_final_review:
+        if not skip_final_review and not paused:
             report = self.final_review(
                 reasonable_provider() if reasonable_provider else None)
         return {
@@ -419,6 +483,9 @@ class SceneSession:
             "round": round_id,
             "final_report": report,
             "progress_timeline": progress_timeline,
+            "paused": paused,
+            "paused_mode": paused_mode,
+            "paused_before_phase": paused_before_phase,
         }
 
     # ── FinalReview（突击方案 §2.5：只修 AGENT，不静默覆盖用户）────

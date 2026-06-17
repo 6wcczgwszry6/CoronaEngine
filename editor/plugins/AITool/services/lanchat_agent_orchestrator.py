@@ -33,7 +33,7 @@ class LanChatAgentOrchestrator:
     _GM_NAMES = {"gm", "主持人", "裁判", "gm agent", "game master"}
     _CONFLICT_WORDS = ("冲突", "同时", "覆盖", "不同意", "反对", "抢", "都要")
     _CONFIRM_WORDS = ("确认", "同意", "按方案", "执行", "可以")
-    _REJECT_WORDS = ("拒绝", "取消", "不要", "暂停")
+    _REJECT_WORDS = ("拒绝", "取消", "不要")
     _MAJOR_ACTION_WORDS = ("删除", "重置", "清空", "整体", "主题", "大件", "核心家具")
     _PROPOSAL_ID_PATTERN = re.compile(r"\bgm-\d+\b", re.I)
 
@@ -52,6 +52,7 @@ class LanChatAgentOrchestrator:
         self._pending_proposal: dict[str, Any] | None = None
         self._last_confirmed_action: dict[str, Any] | None = None
         self._processed_proposals: dict[str, str] = {}
+        self._session_mode = "DISCUSSING"
         self._logger = logging.getLogger(__name__)
 
     @property
@@ -63,6 +64,17 @@ class LanChatAgentOrchestrator:
         state = self._summary_service.monitor(history)
         text = str(trigger.get("text") or "")
 
+        if self._is_gm_trigger(trigger) and self._is_control_without_proposal_id(text):
+            control = self._gm_control_response(trigger, state)
+            if control is not None:
+                return AgentOrchestrationResult(
+                    text=control,
+                    sender_id=self._system_sender_id,
+                    sender_name=self._system_sender_name,
+                    discussion_state=state,
+                    proposal=False,
+                )
+
         confirmation = self._consume_confirmation(text, trigger)
         if confirmation is not None:
             return AgentOrchestrationResult(
@@ -73,6 +85,17 @@ class LanChatAgentOrchestrator:
                 proposal=False,
                 action_payload=self._last_confirmed_action,
             )
+
+        if self._is_gm_trigger(trigger):
+            control = self._gm_control_response(trigger, state)
+            if control is not None:
+                return AgentOrchestrationResult(
+                    text=control,
+                    sender_id=self._system_sender_id,
+                    sender_name=self._system_sender_name,
+                    discussion_state=state,
+                    proposal=False,
+                )
 
         if self._needs_gm_proposal(trigger, state):
             proposal_text = self._build_gm_proposal(trigger, state)
@@ -94,10 +117,14 @@ class LanChatAgentOrchestrator:
         )
 
     def _needs_gm_proposal(self, trigger: dict[str, Any], state: DiscussionState) -> bool:
-        agent_name = str(trigger.get("agent_name") or "").strip().lower()
         text = str(trigger.get("text") or "")
-        if agent_name in self._GM_NAMES:
-            return True
+        if self._is_gm_trigger(trigger):
+            return (
+                state.conflicts
+                or any(word in text for word in self._CONFLICT_WORDS)
+                or any(word in text for word in self._MAJOR_ACTION_WORDS)
+                or any(word in text for word in ("开始执行", "开始生成", "按方案", "执行", "生成"))
+            )
         if state.conflicts:
             return True
         if any(word in text for word in self._CONFLICT_WORDS):
@@ -107,6 +134,53 @@ class LanChatAgentOrchestrator:
         if any(word in text for word in self._MAJOR_ACTION_WORDS) and self._is_multi_user(trigger):
             return True
         return False
+
+    def _gm_control_response(self, trigger: dict[str, Any], state: DiscussionState) -> str | None:
+        text = str(trigger.get("text") or "").strip()
+        if any(word in text for word in ("暂停", "先停", "等一下")):
+            self._session_mode = "PAUSED"
+            self._set_runtime_mode("PAUSED")
+            return "【GM】已进入暂停状态。我会在当前批次边界停止继续推进；你们可以继续补充调整。"
+        if any(word in text for word in ("继续", "恢复")):
+            self._session_mode = "PLANNING"
+            self._set_runtime_mode("EXECUTING")
+            return "【GM】已恢复到规划状态。需要执行时请由房主确认具体方案。"
+        if any(word in text for word in ("先讨论", "不要生成", "别生成", "先规划")):
+            self._session_mode = "DISCUSSING"
+            self._set_runtime_mode("DISCUSSING")
+            return "【GM】已切到讨论模式。当前只整理方案和约束，不会写入场景。"
+        if any(word in text for word in ("整理", "总结", "大家的想法", "当前想法")):
+            return self._build_gm_summary(state)
+        return None
+
+    def _set_runtime_mode(self, mode: str) -> None:
+        try:
+            from .lanchat_scene_runtime import get_lanchat_scene_runtime
+            get_lanchat_scene_runtime().set_mode(mode)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("LANChat scene runtime mode update skipped: %s", exc)
+
+    def _is_control_without_proposal_id(self, text: str) -> bool:
+        if self._PROPOSAL_ID_PATTERN.search(str(text or "")):
+            return False
+        return any(word in text for word in (
+            "暂停", "先停", "等一下", "继续", "恢复",
+            "先讨论", "不要生成", "别生成", "先规划",
+            "整理", "总结", "大家的想法", "当前想法",
+        ))
+
+    def _build_gm_summary(self, state: DiscussionState) -> str:
+        lines = ["【GM 总结】"]
+        if state.summary:
+            lines.append(f"当前讨论：{state.summary}")
+        if state.pending_intents:
+            lines.append(f"待整理意图：{self._join_lines(state.pending_intents)}")
+        if state.conflicts:
+            lines.append(f"潜在冲突：{self._join_lines(state.conflicts)}")
+        if not state.summary and not state.pending_intents and not state.conflicts:
+            lines.append("目前还没有足够明确的多人共识。可以继续讨论，或由房主指定一个方向。")
+        lines.append("如需执行，请让房主明确确认方案。")
+        return "\n".join(lines)
 
     def _build_gm_proposal(self, trigger: dict[str, Any], state: DiscussionState) -> str:
         requester = str(trigger.get("sender_name") or trigger.get("sender_id") or "用户")
@@ -265,7 +339,7 @@ class LanChatAgentOrchestrator:
     def _infer_pair_conflicts(history: list[dict[str, Any]]) -> list[str]:
         object_mentions: dict[str, list[str]] = {}
         pattern = re.compile(r"(桌子|椅子|门|墙|蒙古包|篝火|灯|床|沙发|table|chair|door|wall|fire)", re.I)
-        for item in history[-8:]:
+        for item in LanChatAgentOrchestrator._user_chat_history(history)[-8:]:
             sender = str(item.get("from") or item.get("sender_name") or item.get("sender_id") or "")
             text = str(item.get("text") or "")
             for match in pattern.findall(text):
@@ -277,6 +351,22 @@ class LanChatAgentOrchestrator:
             if len(unique) >= 2:
                 conflicts.append(f"{key}: " + " / ".join(unique[:3]))
         return conflicts
+
+    @staticmethod
+    def _user_chat_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for item in history:
+            kind = str(item.get("message_kind") or "chat").strip().lower()
+            sender_type = str(item.get("sender_type") or "user").strip().lower()
+            if kind == "chat" and sender_type == "user":
+                out.append(item)
+        return out
+
+    def _is_gm_trigger(self, trigger: dict[str, Any]) -> bool:
+        agent_name = str(trigger.get("agent_name") or "").strip().lower()
+        agent_id = str(trigger.get("agent_id") or "").strip().lower()
+        target_agent_id = str(trigger.get("target_agent_id") or "").strip().lower()
+        return agent_name in self._GM_NAMES or agent_id == "gm" or target_agent_id == "gm"
 
     @staticmethod
     def _is_multi_user(trigger: dict[str, Any]) -> bool:
