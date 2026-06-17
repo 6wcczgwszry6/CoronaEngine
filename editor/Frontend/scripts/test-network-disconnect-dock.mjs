@@ -22,6 +22,7 @@ const networkFileTransfer = read('../../include/corona/systems/network/file_tran
 const networkProtocolTests = read('../../src/systems/network/tests/test_network_protocol.cpp');
 const legacyLanChat = read('../../editor/plugins/LANChat/main.py');
 const actorCore = read('../../editor/CoronaCore/core/entities/actor.py');
+const sceneCore = read('../../editor/CoronaCore/core/entities/scene.py');
 const actorBroadcastTests = read('../../editor/CoronaCore/tests/test_actor_network_broadcast.py');
 
 assertIncludes(
@@ -151,6 +152,31 @@ assertIncludes(
   'Actor network broadcast must copy project models assets to a stable Resource subdir'
 );
 assertIncludes(
+  actorCore,
+  '_collect_gltf_dependencies',
+  'Actor network broadcast must collect GLTF external buffer/image dependencies'
+);
+assertIncludes(
+  actorCore,
+  '_collect_common_material_dependencies',
+  'Actor network broadcast must collect conservative same-directory material assets for non-OBJ formats'
+);
+assertIncludes(
+  actorCore,
+  'map_Kd',
+  'Actor network broadcast must parse OBJ MTL texture dependencies'
+);
+assertIncludes(
+  sceneCore,
+  'actor-delete-sync-broadcast',
+  'Scene actor removal must emit a network delete broadcast'
+);
+assertIncludes(
+  sceneCore,
+  '_suppress_network_broadcast',
+  'Remote actor removal must suppress delete rebroadcast loops'
+);
+assertIncludes(
   actorBroadcastTests,
   'test_local_model_library_path_is_copied_to_stable_resource_before_broadcast',
   'Actor network broadcast tests must cover local model library path stabilization'
@@ -169,6 +195,21 @@ assertIncludes(
   actorBroadcastTests,
   'Resource/models/矮桌/base.obj',
   'Actor network broadcast test must assert the stable Resource path for project models'
+);
+assertIncludes(
+  actorBroadcastTests,
+  'test_gltf_external_dependencies_are_copied_before_broadcast',
+  'Actor network broadcast tests must cover GLTF external resource dependencies'
+);
+assertIncludes(
+  actorBroadcastTests,
+  'test_fbx_copies_common_same_directory_material_assets',
+  'Actor network broadcast tests must cover non-OBJ conservative material dependencies'
+);
+assertIncludes(
+  actorBroadcastTests,
+  'test_scene_remove_actor_emits_delete_sync_broadcast',
+  'Actor network broadcast tests must cover local actor delete broadcasts'
 );
 
 assertIncludes(
@@ -241,6 +282,41 @@ assertIncludes(
   networkSystem,
   'impl_->stop_session_after_peer_disconnect = true',
   'Host disconnect and host leave paths must request deferred session stop'
+);
+assertIncludes(
+  networkSystem,
+  'MessageType::ACTOR_DELETE',
+  'NetworkSystem must handle actor delete packets'
+);
+assertIncludes(
+  networkSystem,
+  'broadcast_actor_delete',
+  'NetworkSystem must expose actor delete broadcasts'
+);
+assertIncludes(
+  networkSystem,
+  'pending_actor_deletes',
+  'NetworkSystem must queue remote actor deletes for frontend polling'
+);
+assertIncludes(
+  networkPanel,
+  'pollPendingActorDelete',
+  'Network panel must poll and apply remote actor deletes'
+);
+assertIncludes(
+  networkPanel,
+  'actor-delete-sync-broadcast',
+  'Network panel must forward local actor delete broadcasts to NetworkSystem'
+);
+assertIncludes(
+  networkPanel,
+  'remove_actor_internal',
+  'Network panel must apply remote actor deletes through an internal no-rebroadcast path'
+);
+assertIncludes(
+  networkProtocolTests,
+  'test_actor_delete_carries_scene_guid_and_name',
+  'Network protocol tests must cover actor delete packets'
 );
 
 const updateStart = networkSystem.indexOf('void NetworkSystem::update()');

@@ -347,6 +347,22 @@ async function pollPeers() {
         }
       }
     } catch (_) { /* best effort — transform sync is demo-grade */ }
+
+    try {
+      const pendingDelete = await networkService.pollPendingActorDelete();
+      if (pendingDelete && pendingDelete.has_pending) {
+        const deleted = await Bridge.callCEF('SceneTools', 'remove_actor_internal', [
+          pendingDelete.scene_name || 'Scene/default.scene',
+          pendingDelete.actor_guid || '',
+          pendingDelete.actor_name || '',
+        ]);
+        const deletedData = unwrapCefResult(deleted);
+        if (deletedData?.status !== 'error') {
+          remoteActorLog.value = `远程 Actor 已删除: ${pendingDelete.actor_name || pendingDelete.actor_guid || 'unknown'}`;
+          setTimeout(() => { remoteActorLog.value = ''; }, 3000);
+        }
+      }
+    } catch (_) { /* best effort — actor delete polling is secondary */ }
   } catch (e) {
     // ignore polling errors
   }
@@ -469,6 +485,15 @@ onMounted(() => {
     networkService.broadcastActorTransform(actorGuid, sceneName, actorData).catch(() => {});
   });
 
+  coronaEventBus.on('actor-delete-sync-broadcast', (actorData) => {
+    if (!sessionActive.value || !actorData) return;
+    const actorGuid = actorData.actor_guid || '';
+    const actorName = actorData.actor_name || actorData.name || '';
+    if (!actorGuid && !actorName) return;
+    const sceneName = actorData.scene || 'Scene/default.scene';
+    networkService.broadcastActorDelete(actorGuid, sceneName, actorName).catch(() => {});
+  });
+
   coronaEventBus.on('network-sync-pause-request', ({ paused } = {}) => {
     networkService.setSyncPaused(Boolean(paused)).catch(() => {});
   });
@@ -511,6 +536,7 @@ onUnmounted(() => {
   // Clean up event listeners
   coronaEventBus.off('actor-sync-broadcast');
   coronaEventBus.off('actor-transform-sync-broadcast');
+  coronaEventBus.off('actor-delete-sync-broadcast');
   coronaEventBus.off('network-sync-pause-request');
   coronaEventBus.off('actor-ownership-claim');
   coronaEventBus.off('file-sync-status');

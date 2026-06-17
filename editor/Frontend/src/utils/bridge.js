@@ -471,12 +471,16 @@ export const networkService = {
     Bridge.callCEF('Network', 'broadcast_actor_create', [actorGuid, sceneName, modelPath, actorData]).then(_unwrap),
   broadcastActorTransform: (actorGuid, sceneName, actorData) =>
     Bridge.callCEF('Network', 'broadcast_actor_transform', [actorGuid, sceneName, actorData]).then(_unwrap),
+  broadcastActorDelete: (actorGuid, sceneName, actorName) =>
+    Bridge.callCEF('Network', 'broadcast_actor_delete', [actorGuid, sceneName, actorName]).then(_unwrap),
   /** 轮询待创建的远程 Actor（文件传输完成后触发创建） */
   pollPendingActorCreate: () =>
     Bridge.callCEF('Network', 'poll_pending_actor_create', []).then(_unwrap),
   /** 轮询远程 Actor transform delta */
   pollPendingActorTransform: () =>
     Bridge.callCEF('Network', 'poll_pending_actor_transform', []).then(_unwrap),
+  pollPendingActorDelete: () =>
+    Bridge.callCEF('Network', 'poll_pending_actor_delete', []).then(_unwrap),
   /** 暂停/恢复同步（Actor 创建期间避免 seq_id 碰撞） */
   setSyncPaused: (paused) =>
     Bridge.callCEF('Network', 'set_sync_paused', [paused]).then(_unwrap),

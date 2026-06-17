@@ -151,6 +151,22 @@ void test_actor_transform_update_carries_transform_and_correlation() {
                 "actor transform correlation payload");
 }
 
+void test_actor_delete_carries_scene_guid_and_name() {
+    auto packet = Corona::Network::build_actor_delete(
+        "actor-delete", "Scene/main.scene", "chair");
+
+    Corona::Network::BufferReader reader(packet.data(), packet.size());
+    expect_true(static_cast<Corona::Network::MessageType>(reader.read_u8()) ==
+                    Corona::Network::MessageType::ACTOR_DELETE,
+                "actor delete message type");
+    expect_true(reader.read_string(reader.read_u16()) == "actor-delete",
+                "actor delete actor guid payload");
+    expect_true(reader.read_string(reader.read_u16()) == "Scene/main.scene",
+                "actor delete scene payload");
+    expect_true(reader.read_string(reader.read_u16()) == "chair",
+                "actor delete actor name payload");
+}
+
 void test_file_chunk_carries_transfer_id_and_offset() {
     constexpr uint64_t transfer_id = 0x8877665544332211ull;
     constexpr uint32_t total_size = 4096;
@@ -1149,6 +1165,7 @@ int main() {
     test_actor_create_unpack_preserves_wire_transform();
     test_actor_create_carries_dependency_paths();
     test_actor_transform_update_carries_transform_and_correlation();
+    test_actor_delete_carries_scene_guid_and_name();
     test_file_request_carries_transfer_id();
     test_file_chunk_carries_transfer_id_and_offset();
     test_ownership_claim_carries_actor_guid();

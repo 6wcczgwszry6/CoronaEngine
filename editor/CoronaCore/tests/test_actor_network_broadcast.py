@@ -382,6 +382,137 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
             self.assertTrue((project_root / "Resource" / "models" / "矮桌" / "base.mtl").exists())
             self.assertTrue((project_root / "Resource" / "models" / "矮桌" / "textures" / "diffuse.png").exists())
 
+    def test_gltf_external_dependencies_are_copied_before_broadcast(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            model_dir = project_root / "models" / "plant"
+            model_dir.mkdir(parents=True)
+            (model_dir / "scene.gltf").write_text(
+                '{"buffers":[{"uri":"scene.bin"}],"images":[{"uri":"textures/diffuse.png"},{"uri":"data:image/png;base64,AAAA"}]}',
+                encoding="utf-8",
+            )
+            (model_dir / "scene.bin").write_bytes(b"bin-data")
+            (model_dir / "textures").mkdir()
+            (model_dir / "textures" / "diffuse.png").write_bytes(b"png-data")
+
+            actor, events = self._create_actor_with_events(
+                route="models/plant/scene.gltf",
+                project_path=str(project_root),
+            )
+
+            actor_data = events[0][1][0]
+            self.assertEqual(actor_data["path"], "Resource/models/plant/scene.gltf")
+            self.assertEqual(actor_data["model_dependencies"], [
+                "Resource/models/plant/scene.bin",
+                "Resource/models/plant/textures/diffuse.png",
+            ])
+            self.assertTrue((project_root / "Resource" / "models" / "plant" / "scene.bin").exists())
+            self.assertTrue((project_root / "Resource" / "models" / "plant" / "textures" / "diffuse.png").exists())
+
+    def test_existing_resource_gltf_dependencies_are_advertised_without_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            model_dir = project_root / "Resource" / "models" / "plant"
+            model_dir.mkdir(parents=True)
+            (model_dir / "scene.gltf").write_text(
+                '{"buffers":[{"uri":"scene.bin"}],"images":[{"uri":"textures/diffuse.png"}]}',
+                encoding="utf-8",
+            )
+            (model_dir / "scene.bin").write_bytes(b"bin-data")
+            (model_dir / "textures").mkdir()
+            (model_dir / "textures" / "diffuse.png").write_bytes(b"png-data")
+
+            _, events = self._create_actor_with_events(
+                route="Resource/models/plant/scene.gltf",
+                project_path=str(project_root),
+            )
+
+            actor_data = events[0][1][0]
+            self.assertEqual(actor_data["path"], "Resource/models/plant/scene.gltf")
+            self.assertEqual(actor_data["model_dependencies"], [
+                "Resource/models/plant/scene.bin",
+                "Resource/models/plant/textures/diffuse.png",
+            ])
+
+    def test_fbx_copies_common_same_directory_material_assets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            model_dir = project_root / "models" / "table"
+            model_dir.mkdir(parents=True)
+            (model_dir / "table.fbx").write_bytes(b"fbx-data")
+            (model_dir / "table.png").write_bytes(b"png-data")
+            (model_dir / "table.mtl").write_text("material", encoding="utf-8")
+            (model_dir / "notes.txt").write_text("ignore", encoding="utf-8")
+
+            _, events = self._create_actor_with_events(
+                route="models/table/table.fbx",
+                project_path=str(project_root),
+            )
+
+            actor_data = events[0][1][0]
+            self.assertEqual(actor_data["path"], "Resource/models/table/table.fbx")
+            self.assertEqual(actor_data["model_dependencies"], [
+                "Resource/models/table/table.mtl",
+                "Resource/models/table/table.png",
+            ])
+            self.assertTrue((project_root / "Resource" / "models" / "table" / "table.mtl").exists())
+            self.assertTrue((project_root / "Resource" / "models" / "table" / "table.png").exists())
+            self.assertFalse((project_root / "Resource" / "models" / "table" / "notes.txt").exists())
+
+    def test_scene_remove_actor_emits_delete_sync_broadcast(self):
+        events = []
+        fake_editor = SimpleNamespace(
+            js_call_func=lambda name, args: events.append((name, args)),
+        )
+        scene = scene_module.Scene.__new__(scene_module.Scene)
+        scene.route = "Scene/main.scene"
+        scene._notify_scene_tree_changed = lambda: None
+        scene.engine_scene = SimpleNamespace(remove_actor=lambda engine_obj: None)
+        actor = SimpleNamespace(
+            name="chair",
+            actor_guid="actor-chair",
+            engine_obj=object(),
+            network_remote=False,
+            _suppress_network_broadcast=False,
+        )
+        actor._optics = object()
+        scene._actors = [actor]
+
+        with patch.object(scene_module, "CoronaEditor", fake_editor):
+            self.assertTrue(scene.remove_actor(actor))
+
+        self.assertEqual(events, [
+            ("actor-delete-sync-broadcast", [{
+                "scene": "Scene/main.scene",
+                "actor_guid": "actor-chair",
+                "actor_name": "chair",
+            }])
+        ])
+
+    def test_scene_remove_remote_actor_does_not_rebroadcast_delete(self):
+        events = []
+        fake_editor = SimpleNamespace(
+            js_call_func=lambda name, args: events.append((name, args)),
+        )
+        scene = scene_module.Scene.__new__(scene_module.Scene)
+        scene.route = "Scene/main.scene"
+        scene._notify_scene_tree_changed = lambda: None
+        scene.engine_scene = SimpleNamespace(remove_actor=lambda engine_obj: None)
+        actor = SimpleNamespace(
+            name="chair",
+            actor_guid="actor-chair",
+            engine_obj=object(),
+            network_remote=True,
+            _suppress_network_broadcast=True,
+        )
+        actor._optics = object()
+        scene._actors = [actor]
+
+        with patch.object(scene_module, "CoronaEditor", fake_editor):
+            self.assertTrue(scene.remove_actor(actor))
+
+        self.assertEqual(events, [])
+
     def test_remote_actor_disables_local_physics(self):
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp)

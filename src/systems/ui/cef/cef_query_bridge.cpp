@@ -478,6 +478,22 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     return true;
                 }
 
+                if (func == "poll_pending_actor_delete") {
+                    nlohmann::json payload;
+                    std::string actor_guid, scene_name, actor_name;
+                    if (sys->pop_pending_actor_delete(actor_guid, scene_name, actor_name)) {
+                        payload["has_pending"] = true;
+                        payload["actor_guid"] = actor_guid;
+                        payload["scene_name"] = scene_name;
+                        payload["actor_name"] = actor_name;
+                    } else {
+                        payload["has_pending"] = false;
+                    }
+                    payload["ok"] = true;
+                    callback->Success(create_success_json("poll_pending_actor_delete", payload));
+                    return true;
+                }
+
                 if (func == "set_sync_paused") {
                     bool paused = args.size() > 0 ? args[0].get<bool>() : false;
                     sys->set_sync_paused(paused);
@@ -544,6 +560,17 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     nlohmann::json payload;
                     payload["ok"] = true;
                     callback->Success(create_success_json("broadcast_actor_transform", payload));
+                    return true;
+                }
+
+                if (func == "broadcast_actor_delete") {
+                    std::string actor_guid = args.size() > 0 ? args[0].get<std::string>() : "";
+                    std::string scene_name = args.size() > 1 ? args[1].get<std::string>() : "";
+                    std::string actor_name = args.size() > 2 ? args[2].get<std::string>() : "";
+                    sys->broadcast_actor_delete(actor_guid, scene_name, actor_name);
+                    nlohmann::json payload;
+                    payload["ok"] = true;
+                    callback->Success(create_success_json("broadcast_actor_delete", payload));
                     return true;
                 }
 

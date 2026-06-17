@@ -250,6 +250,46 @@ class SceneTools(PluginBase):
             return {"status": "error", "message": str(exc), "code": "internal_error"}
 
     @staticmethod
+    def remove_actor_internal(scene_name: str, actor_guid: str = "", actor_name: str = "") -> dict:
+        """Apply a remote actor deletion without re-broadcasting it."""
+        try:
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                return {"status": "error",
+                        "message": f"Scene '{scene_name}' not found",
+                        "code": "scene_not_found"}
+
+            actor = None
+            if actor_guid:
+                for candidate in scene.get_actors():
+                    if getattr(candidate, "actor_guid", "") == actor_guid:
+                        actor = candidate
+                        break
+            if actor is None and actor_name:
+                actor = scene.find_actor(actor_name)
+            if actor is None and actor_guid:
+                actor = scene.find_actor(actor_guid)
+            if actor is None:
+                return {"status": "warning",
+                        "message": f"Actor '{actor_guid or actor_name}' not found",
+                        "code": "actor_not_found",
+                        "actor_guid": actor_guid,
+                        "actor": actor_name}
+
+            actor.network_remote = True
+            actor._suppress_network_broadcast = True
+            scene.remove_actor(actor)
+            logger.info("Remote actor %s/%s removed from %s",
+                        actor_guid, actor_name, scene_name)
+            return {"status": "success",
+                    "scene": scene_name,
+                    "actor_guid": actor_guid,
+                    "actor": actor_name or getattr(actor, "name", "")}
+        except Exception as exc:
+            logger.exception("remove_actor_internal failed")
+            return {"status": "error", "message": str(exc), "code": "internal_error"}
+
+    @staticmethod
     def sun_direction(scene_name: str, if_enable: bool, direction: list[float]) -> dict:
         try:
             scene = scene_manager.get(scene_name)

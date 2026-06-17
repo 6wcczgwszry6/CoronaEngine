@@ -399,12 +399,28 @@ class Scene:
     def remove_actor(self, actor: Actor, rescene: bool = False) -> bool:
         if actor not in self._actors:
             return False
+        should_broadcast_delete = not (
+            getattr(actor, "network_remote", False) or
+            getattr(actor, "_suppress_network_broadcast", False) or
+            rescene
+        )
+        delete_payload = {
+            "scene": self.route,
+            "actor_guid": getattr(actor, "actor_guid", ""),
+            "actor_name": getattr(actor, "name", ""),
+        }
         del actor._optics
         if not rescene:
             self._actors.remove(actor)
         if hasattr(self.engine_scene, 'remove_actor'):
             self.engine_scene.remove_actor(actor.engine_obj)
         self._notify_scene_tree_changed()
+        if should_broadcast_delete and (delete_payload["actor_guid"] or delete_payload["actor_name"]):
+            try:
+                CoronaEditor.js_call_func("actor-delete-sync-broadcast", [delete_payload])
+            except Exception as exc:
+                logger.warning("Actor delete network broadcast failed for %s: %s",
+                               delete_payload["actor_guid"] or delete_payload["actor_name"], exc)
         return True  # 返回True触发auto_save
 
     @auto_save

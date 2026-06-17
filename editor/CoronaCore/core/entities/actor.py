@@ -1,4 +1,5 @@
 import configparser
+import json
 import logging
 import shutil
 import time
@@ -453,6 +454,9 @@ class Actor:
             self.route = rel_path
             self.model_path = rel_path
             self.final_model_path = str(source_path)
+            if source_path.is_file():
+                self.model_dependencies = self._project_relative_dependency_paths(
+                    source_path, project_root)
             return
         except ValueError:
             pass
@@ -513,24 +517,69 @@ class Actor:
 
         copied_model_path = copy_relative(source_path)
 
-        if source_path.suffix.lower() == ".obj":
+        suffix = source_path.suffix.lower()
+        if suffix == ".obj":
             source_dir = source_path.parent
             for mtl_path in self._read_obj_material_libraries(source_path):
                 mtl_source = (source_dir / mtl_path).resolve()
                 if not mtl_source.is_file():
                     logging.warning("OBJ material library missing: %s", mtl_source)
                     continue
-                copied_mtl_path = copy_relative(mtl_source)
+                copy_relative(mtl_source, source_dir)
                 for texture_path in self._read_mtl_texture_paths(mtl_source):
                     texture_source = (mtl_source.parent / texture_path).resolve()
                     if not texture_source.is_file():
                         logging.warning("MTL texture missing: %s", texture_source)
                         continue
                     copy_relative(texture_source, source_dir)
+        elif suffix == ".gltf":
+            for dep_path in self._collect_gltf_dependencies(source_path):
+                copy_relative(dep_path, source_path.parent)
+        elif suffix in {".fbx", ".dae", ".usd"}:
+            for dep_path in self._collect_common_material_dependencies(source_path):
+                copy_relative(dep_path, source_path.parent)
 
         if copied and copied[0] != copied_model_path.relative_to(project_root).as_posix():
             copied.insert(0, copied_model_path.relative_to(project_root).as_posix())
         return copied
+
+    def _project_relative_dependency_paths(self, source_path: Path,
+                                           project_root: Path) -> List[str]:
+        dependencies = []
+        for dep_path in self._collect_model_dependency_sources(source_path):
+            try:
+                rel_path = dep_path.resolve().relative_to(project_root).as_posix()
+            except ValueError:
+                logging.warning("Skipping dependency outside project: %s", dep_path)
+                continue
+            if rel_path not in dependencies:
+                dependencies.append(rel_path)
+        return dependencies
+
+    def _collect_model_dependency_sources(self, source_path: Path) -> List[Path]:
+        suffix = source_path.suffix.lower()
+        dependencies = []
+        if suffix == ".obj":
+            source_dir = source_path.parent
+            for mtl_path in self._read_obj_material_libraries(source_path):
+                mtl_source = (source_dir / mtl_path).resolve()
+                if not mtl_source.is_file():
+                    logging.warning("OBJ material library missing: %s", mtl_source)
+                    continue
+                if mtl_source not in dependencies:
+                    dependencies.append(mtl_source)
+                for texture_path in self._read_mtl_texture_paths(mtl_source):
+                    texture_source = (mtl_source.parent / texture_path).resolve()
+                    if not texture_source.is_file():
+                        logging.warning("MTL texture missing: %s", texture_source)
+                        continue
+                    if texture_source not in dependencies:
+                        dependencies.append(texture_source)
+        elif suffix == ".gltf":
+            dependencies.extend(self._collect_gltf_dependencies(source_path))
+        elif suffix in {".fbx", ".dae", ".usd"}:
+            dependencies.extend(self._collect_common_material_dependencies(source_path))
+        return dependencies
 
     @staticmethod
     def _read_obj_material_libraries(obj_path: Path) -> List[Path]:
@@ -569,6 +618,52 @@ class Actor:
         except Exception as exc:
             logging.warning("Failed to parse MTL dependencies for %s: %s", mtl_path, exc)
         return textures
+
+    @staticmethod
+    def _collect_gltf_dependencies(gltf_path: Path) -> List[Path]:
+        dependencies = []
+        try:
+            data = json.loads(gltf_path.read_text(encoding="utf-8"))
+            base_dir = gltf_path.parent
+            uris = []
+            for buffer in data.get("buffers", []) or []:
+                uri = buffer.get("uri") if isinstance(buffer, dict) else None
+                if uri:
+                    uris.append(uri)
+            for image in data.get("images", []) or []:
+                uri = image.get("uri") if isinstance(image, dict) else None
+                if uri:
+                    uris.append(uri)
+            for uri in uris:
+                normalized = str(uri).strip()
+                if not normalized or normalized.startswith("data:"):
+                    continue
+                dep_path = (base_dir / normalized).resolve()
+                if dep_path.is_file() and dep_path not in dependencies:
+                    dependencies.append(dep_path)
+                elif not dep_path.is_file():
+                    logging.warning("GLTF dependency missing: %s", dep_path)
+        except Exception as exc:
+            logging.warning("Failed to parse GLTF dependencies for %s: %s", gltf_path, exc)
+        return dependencies
+
+    @staticmethod
+    def _collect_common_material_dependencies(model_path: Path) -> List[Path]:
+        material_suffixes = {
+            ".mtl", ".png", ".jpg", ".jpeg", ".tga", ".bmp", ".exr", ".hdr",
+        }
+        dependencies = []
+        try:
+            for candidate in sorted(model_path.parent.iterdir(),
+                                    key=lambda path: path.name.lower()):
+                if candidate == model_path or not candidate.is_file():
+                    continue
+                if candidate.suffix.lower() in material_suffixes:
+                    dependencies.append(candidate.resolve())
+        except Exception as exc:
+            logging.warning("Failed to collect material dependencies for %s: %s",
+                            model_path, exc)
+        return dependencies
 
     def save_data(self):
         if self.parent:

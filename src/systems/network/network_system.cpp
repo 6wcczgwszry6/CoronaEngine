@@ -8,6 +8,7 @@
 #include <corona/shared_data_hub.h>
 
 #include <chrono>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -101,6 +102,13 @@ struct NetworkSystem::Impl {
         std::string correlation_id;
     };
     std::vector<PendingTransformUpdate> pending_actor_transform_updates;
+
+    struct PendingActorDelete {
+        std::string actor_guid;
+        std::string scene_name;
+        std::string actor_name;
+    };
+    std::vector<PendingActorDelete> pending_actor_deletes;
 
     // Pending file transfers: model_path → actor data from the original
     // ACTOR_CREATE that triggered the transfer.  When the file arrives,
@@ -1084,6 +1092,21 @@ void NetworkSystem::broadcast_actor_transform_update(const std::string& actor_gu
                  actor_guid, scene_name, correlation_id);
 }
 
+void NetworkSystem::broadcast_actor_delete(const std::string& actor_guid,
+                                           const std::string& scene_name,
+                                           const std::string& actor_name) {
+    if (impl_->session_state != SessionState::Active) return;
+    if (actor_guid.empty() && actor_name.empty()) return;
+    if (impl_->peer_manager.peer_count() == 0) {
+        CFW_LOG_DEBUG("NetworkSystem: No peers — skipping actor delete broadcast");
+        return;
+    }
+    auto pkt = Network::build_actor_delete(actor_guid, scene_name, actor_name);
+    impl_->peer_manager.broadcast(Network::kChannelReliable, pkt.data(), pkt.size(), true);
+    CFW_LOG_INFO("NetworkSystem: Broadcast actor delete — actor='{}' name='{}' scene='{}'",
+                 actor_guid, actor_name, scene_name);
+}
+
 bool NetworkSystem::has_pending_transfers() const {
     return !impl_->pending_actor_creates.empty();
 }
@@ -1125,6 +1148,18 @@ bool NetworkSystem::pop_pending_actor_transform_update(std::string& actor_guid,
     }
     impl_->pending_actor_transform_updates.erase(
         impl_->pending_actor_transform_updates.begin());
+    return true;
+}
+
+bool NetworkSystem::pop_pending_actor_delete(std::string& actor_guid,
+                                             std::string& scene_name,
+                                             std::string& actor_name) {
+    if (impl_->pending_actor_deletes.empty()) return false;
+    auto& pending = impl_->pending_actor_deletes.front();
+    actor_guid = pending.actor_guid;
+    scene_name = pending.scene_name;
+    actor_name = pending.actor_name;
+    impl_->pending_actor_deletes.erase(impl_->pending_actor_deletes.begin());
     return true;
 }
 
@@ -1360,6 +1395,44 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
         impl_->pending_actor_transform_updates.push_back(update);
         CFW_LOG_INFO("NetworkSystem: Received ACTOR_TRANSFORM_UPDATE from {} — actor='{}' scene='{}' corr='{}'",
                      sender_peer_id, actor_guid, scene_name, update.correlation_id);
+    } else if (mt == MessageType::ACTOR_DELETE) {
+        Network::BufferReader r(data + 1, len - 1);
+        if (!r.has_remaining(2)) return;
+        uint16_t guid_len = r.read_u16();
+        if (!r.has_remaining(guid_len + 2)) return;
+        Impl::PendingActorDelete pending;
+        pending.actor_guid = r.read_string(guid_len);
+        uint16_t scene_len = r.read_u16();
+        if (!r.has_remaining(scene_len + 2)) return;
+        pending.scene_name = r.read_string(scene_len);
+        uint16_t name_len = r.read_u16();
+        if (!r.has_remaining(name_len)) return;
+        pending.actor_name = r.read_string(name_len);
+        if (!pending.actor_guid.empty()) {
+            std::erase_if(impl_->pending_actor_creates,
+                          [&](const Impl::PendingAction& action) {
+                              return action.actor_guid == pending.actor_guid;
+                          });
+            std::erase_if(impl_->pending_actor_transform_updates,
+                          [&](const Impl::PendingTransformUpdate& update) {
+                              return update.actor_guid == pending.actor_guid;
+                          });
+            for (auto it = impl_->pending_file_transfer_groups.begin();
+                 it != impl_->pending_file_transfer_groups.end(); ) {
+                if (it->second.actor_guid == pending.actor_guid) {
+                    for (uint64_t transfer_id : it->second.transfer_ids) {
+                        impl_->transfer_to_group.erase(transfer_id);
+                    }
+                    it = impl_->pending_file_transfer_groups.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        impl_->pending_actor_deletes.push_back(pending);
+        CFW_LOG_INFO(
+            "NetworkSystem: Received ACTOR_DELETE from {} — actor='{}' name='{}' scene='{}'",
+            sender_peer_id, pending.actor_guid, pending.actor_name, pending.scene_name);
     } else if (mt == MessageType::FILE_REQUEST) {
         handle_file_request(sender_peer_id, data, len);
     } else if (mt == MessageType::FILE_CHUNK) {

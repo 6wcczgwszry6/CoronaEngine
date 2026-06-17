@@ -198,6 +198,11 @@ public:
                                           const std::string& source_user_id = {},
                                           const std::string& correlation_id = {});
 
+    /// Broadcast an Actor deletion by stable network identity.
+    void broadcast_actor_delete(const std::string& actor_guid,
+                                const std::string& scene_name,
+                                const std::string& actor_name);
+
     /// 检查是否有待完成的文件传输（需要在 update 中处理）
     [[nodiscard]] bool has_pending_transfers() const;
 
@@ -215,6 +220,10 @@ public:
                                             size_t transform_count,
                                             std::string& source_user_id,
                                             std::string& correlation_id);
+
+    bool pop_pending_actor_delete(std::string& actor_guid,
+                                  std::string& scene_name,
+                                  std::string& actor_name);
 
     /**
      * @brief 注册稳定 Actor 网络 ID 到本地 SharedDataHub handle 映射。
