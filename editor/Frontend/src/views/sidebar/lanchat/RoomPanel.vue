@@ -75,7 +75,7 @@
         class="px-3 py-1 bg-yellow-500/20 text-yellow-300 text-xs flex items-center gap-2"
       >
         <span class="inline-block w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></span>
-        连接已断开，正在重连…
+        连接已断开
       </div>
 
       <div class="flex flex-1 min-h-0">
@@ -122,7 +122,7 @@
                 v-model="draft"
                 :class="inputCls"
                 :disabled="s.connection === 'reconnecting'"
-                :placeholder="s.connection === 'reconnecting' ? '重连中…' : '输入消息，回车发送'"
+                :placeholder="s.connection === 'reconnecting' ? '连接已断开' : '输入消息，回车发送'"
                 @input="onDraftInput"
                 @keydown="onDraftKeydown"
               />

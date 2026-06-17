@@ -228,7 +228,7 @@ async function joinRoom({ ip, port, room, password, nickname }) {
     state.connection = 'connecting';
     state.room = room;
     state.ip = ip;
-    state.port = port;
+    state.port = res.port || port;
     state.peerId = res.peer_id || '';
     // 服务器去重后的最终昵称（如 Alice -> Alice-2）
     state.nickname = res.you || nickname;

@@ -70,7 +70,7 @@ assertIncludes(networkSystem, 'uint16_t NetworkSystem::session_port() const', 'N
 assertIncludes(networkSystem, 'effective_port', 'LANChat join must prefer the already-connected collaboration host port');
 assertIncludes(networkSystem, 'send_lanchat_join_to_ready_peer', 'LANChat join must send CHAT_JOIN on existing ready peers');
 assertIncludes(networkSystem, 'complete_lanchat_join_if_ready', 'LANChat join completion must be shared by member and history snapshots');
-assertIncludes(networkSystem, 'send_to_first_peer(impl_->peer_manager, packet)', 'clients must send LANChat packets to host instead of broadcasting loops');
+assertIncludes(networkSystem, 'send_to_connected_host_peer(packet)', 'clients must send LANChat packets to the connected host instead of broadcasting loops');
 assertIncludes(networkSystem, 'result = impl_->lanchat.record_message', 'host must assign authoritative LANChat message sequence');
 assertIncludes(networkSystem, 'result = impl_->lanchat.apply_remote_message', 'clients must only apply authoritative LANChat messages');
 assertIncludes(networkSystem, 'skipped history snapshot', 'missing join peer must not fall back to broadcasting history');

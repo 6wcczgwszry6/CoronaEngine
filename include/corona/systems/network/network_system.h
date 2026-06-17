@@ -248,6 +248,11 @@ private:
     void on_peer_disconnected(const Network::PeerManager::PeerInfo& info);
     void on_data_received(const std::string& peer_id, const uint8_t* data, size_t len);
     void on_custom_message(const std::string& sender_peer_id, const uint8_t* data, size_t len);
+    bool is_connected_host_peer(const Network::PeerManager::PeerInfo& info) const;
+    bool is_message_from_connected_host(const std::string& sender_peer_id) const;
+    bool send_to_connected_host_peer(const std::vector<uint8_t>& packet);
+    void notify_lanchat_room_closed();
+    void clear_lanchat_room_state();
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

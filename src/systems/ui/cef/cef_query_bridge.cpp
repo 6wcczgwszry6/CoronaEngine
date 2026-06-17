@@ -613,6 +613,7 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     data["ok"] = ok;
                     data["you"] = nickname;
                     data["peer_id"] = sys->local_peer_id();
+                    data["port"] = sys->host_port() != 0 ? sys->host_port() : port;
                     data["members"] = build_lanchat_members(sys->lanchat_members());
                     data["member_details"] = build_lanchat_member_details(sys->lanchat_members());
                     data["history"] = build_lanchat_history(sys->lanchat_history());

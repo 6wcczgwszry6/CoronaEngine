@@ -3,7 +3,7 @@
     <DockTitleBar
       v-if="!isDocked"
       title="网络协作"
-      extraClass="bg-[#4a9eff]"
+      extraClass="bg-[#84A65B]"
       routePath="/Network"
       @close="closeFloat"
     />
@@ -100,15 +100,15 @@
         >
           加入房间
         </button>
-        <div v-if="connectStatus === 'connecting'" class="text-yellow-400 text-xs">正在连接...</div>
-        <div v-else-if="connectStatus === 'success'" class="text-green-400 text-xs">连接请求已发送</div>
+        <div v-if="connectStatus === 'connecting'" class="text-yellow-400 text-xs">连接请求已发送，等待握手...</div>
+        <div v-else-if="connectStatus === 'connected'" class="text-green-400 text-xs">已连接</div>
         <div v-else-if="connectStatus" class="text-red-400 text-xs">{{ connectStatus }}</div>
       </div>
 
       <!-- ═══ Peer 列表 ═══ -->
       <div class="border-t border-gray-700 pt-4">
         <div class="flex items-center justify-between mb-2">
-          <span class="text-gray-400">在线用户</span>
+          <span class="text-gray-400">已连接用户数</span>
           <span class="text-gray-500 tabular-nums">{{ peers.length }}</span>
         </div>
 
@@ -164,11 +164,10 @@
 import { computed, ref, onMounted, onUnmounted } from 'vue';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import { Bridge, networkService } from '@/utils/bridge';
-import { useDockStore } from '@/stores/dockStore';
+import { useDockPanel } from '@/composables/useDockPanel.js';
 import { coronaEventBus } from '@/utils/eventBus';
 
-const dock = useDockStore();
-const isDocked = ref(true);
+const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 const instanceName = ref('');
 const port = ref(27960);
 const sessionActive = ref(false);
@@ -181,11 +180,13 @@ const peers = ref([]);
 const remoteIp = ref('');
 const remotePort = ref(27960);
 const remotePeerName = ref('');
-const connectStatus = ref(''); // '' | 'connecting' | 'success' | error
+const connectStatus = ref(''); // '' | 'connecting' | 'connected' | error
 const fileStatus = ref(null); // null | { type: 'transferring'|'success'|'error', path, progress? }
 const remoteActorLog = ref(''); // latest remote actor creation log
 
 let pollTimer = null;
+const CONNECT_TIMEOUT_MS = 5000;
+const connectionAttemptStartedAt = ref(0);
 const ownershipClaimTimes = new Map();
 
 const roleLabel = computed(() => {
@@ -196,10 +197,29 @@ const roleLabel = computed(() => {
 
 function applySessionInfo(info) {
   if (!info) return;
-  sessionActive.value = Boolean(info.active ?? sessionActive.value);
+  const active = Boolean(info.active ?? sessionActive.value);
+  if (!active) {
+    resetSessionInfo();
+    return;
+  }
+  sessionActive.value = true;
   sessionRole.value = info.role || sessionRole.value || 'none';
   hostAddress.value = info.host_address || '';
   hostPort.value = info.host_port || 0;
+  const listenPort = Number(info.listen_port || 0);
+  if (listenPort > 0) {
+    port.value = listenPort;
+  }
+}
+
+function resetSessionInfo() {
+  sessionActive.value = false;
+  sessionRole.value = 'none';
+  hostAddress.value = '';
+  hostPort.value = 0;
+  peers.value = [];
+  connectStatus.value = '';
+  connectionAttemptStartedAt.value = 0;
 }
 
 async function ensureProjectRoot() {
@@ -243,11 +263,7 @@ async function stopSession() {
   errorMsg.value = '';
   try {
     await networkService.stopSession();
-    sessionActive.value = false;
-    sessionRole.value = 'none';
-    hostAddress.value = '';
-    hostPort.value = 0;
-    peers.value = [];
+    resetSessionInfo();
     stopPolling();
   } catch (e) {
     errorMsg.value = e.message;
@@ -258,17 +274,33 @@ async function pollPeers() {
   try {
     const res = await networkService.getPeerCount();
     applySessionInfo(res);
+    if (res && res.active === false) {
+      stopPolling();
+      return;
+    }
     if (res && res.peer_count !== undefined) {
-      const count = res.peer_count;
+      const count = Number(res.peer_count || 0);
       if (peers.value.length < count) {
         while (peers.value.length < count) {
           peers.value.push({
-            name: `Peer ${peers.value.length + 1}`,
-            id: '...',
+            name: `已连接用户 ${peers.value.length + 1}`,
+            id: 'handshake confirmed',
           });
         }
       } else while (peers.value.length > count) {
         peers.value.pop();
+      }
+      if (connectStatus.value === 'connecting') {
+        if (count > 0) {
+          connectStatus.value = 'connected';
+          connectionAttemptStartedAt.value = 0;
+        } else if (
+          connectionAttemptStartedAt.value > 0 &&
+          Date.now() - connectionAttemptStartedAt.value >= CONNECT_TIMEOUT_MS
+        ) {
+          connectStatus.value = '无法连接到房主';
+          connectionAttemptStartedAt.value = 0;
+        }
       }
     }
 
@@ -312,11 +344,13 @@ function stopPolling() {
 
 async function doConnectToPeer() {
   connectStatus.value = 'connecting';
+  connectionAttemptStartedAt.value = Date.now();
   try {
     if (!sessionActive.value) {
       const started = await startSessionAsRole('client');
       if (!started) {
         connectStatus.value = errorMsg.value || '本地会话启动失败';
+        connectionAttemptStartedAt.value = 0;
         return;
       }
     }
@@ -324,13 +358,15 @@ async function doConnectToPeer() {
     const res = await networkService.connectToPeer(remoteIp.value, remotePort.value, peerName);
     if (res && res.ok) {
       applySessionInfo(res);
-      connectStatus.value = 'success';
-      setTimeout(() => { connectStatus.value = ''; }, 3000);
+      startPolling();
+      await pollPeers();
     } else {
       connectStatus.value = (res && res.error) || '连接失败';
+      connectionAttemptStartedAt.value = 0;
     }
   } catch (e) {
     connectStatus.value = e.message;
+    connectionAttemptStartedAt.value = 0;
   }
 }
 
@@ -362,7 +398,7 @@ function isActorSyncable(actorData) {
 }
 
 function closeFloat() {
-  // handled by DockLayout
+  closeDockPanel();
 }
 
 function unwrapCefResult(res) {

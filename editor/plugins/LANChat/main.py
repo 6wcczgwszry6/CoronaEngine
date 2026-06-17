@@ -3,6 +3,7 @@
 CEF now intercepts the LANChat module and routes it to C++ NetworkSystem.
 This file remains only for any legacy Python-side imports; it must not start
 WebSocket clients/servers or own collaboration state.
+It is not a source of truth for current UI port display; C++/CEF owns that.
 """
 from __future__ import annotations
 
