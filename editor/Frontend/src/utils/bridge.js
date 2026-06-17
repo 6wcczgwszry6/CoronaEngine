@@ -423,28 +423,55 @@ export const logService = {
 // 当前模块的"调用方"标识(必须出现在后端 ALLOWED_CALLERS 白名单内)
 // 任何后端接口调用都会自动附带此标识,供权限控制
 const CURRENT_CALLER = 'SceneBar';
+const RESOURCE_SEARCH_ENABLED = false;
+const resourceSearchDisabled = () => Promise.resolve({
+  success: true,
+  data: {
+    status: 'disabled',
+    code: 'resource_search_disabled',
+    message: 'ResourceSearch is disabled',
+    items: [],
+    total: 0,
+  },
+});
 
 export const resourceService = {
   prepareIndex: () =>
-    Bridge.callCEF('ResourceSearch', 'prepare_index', [CURRENT_CALLER]),
+    RESOURCE_SEARCH_ENABLED
+      ? Bridge.callCEF('ResourceSearch', 'prepare_index', [CURRENT_CALLER])
+      : resourceSearchDisabled(),
   fuzzySearch: (query, topK = 20, typeFilter = null) =>
-    Bridge.callCEF('ResourceSearch', 'fuzzy_search',
-      [query, topK, typeFilter, CURRENT_CALLER]),
+    RESOURCE_SEARCH_ENABLED
+      ? Bridge.callCEF('ResourceSearch', 'fuzzy_search',
+        [query, topK, typeFilter, CURRENT_CALLER])
+      : resourceSearchDisabled(),
   imageSearch: (imageB64, topK = 20, threshold = 10) =>
-    Bridge.callCEF('ResourceSearch', 'image_search',
-      [imageB64, topK, threshold, CURRENT_CALLER]),
+    RESOURCE_SEARCH_ENABLED
+      ? Bridge.callCEF('ResourceSearch', 'image_search',
+        [imageB64, topK, threshold, CURRENT_CALLER])
+      : resourceSearchDisabled(),
   listTypes: () =>
-    Bridge.callCEF('ResourceSearch', 'list_types', [CURRENT_CALLER]),
+    RESOURCE_SEARCH_ENABLED
+      ? Bridge.callCEF('ResourceSearch', 'list_types', [CURRENT_CALLER])
+      : resourceSearchDisabled(),
   rebuildIndex: () =>
-    Bridge.callCEF('ResourceSearch', 'rebuild_index', [CURRENT_CALLER]),
+    RESOURCE_SEARCH_ENABLED
+      ? Bridge.callCEF('ResourceSearch', 'rebuild_index', [CURRENT_CALLER])
+      : resourceSearchDisabled(),
   getStats: () =>
-    Bridge.callCEF('ResourceSearch', 'get_stats', [CURRENT_CALLER]),
+    RESOURCE_SEARCH_ENABLED
+      ? Bridge.callCEF('ResourceSearch', 'get_stats', [CURRENT_CALLER])
+      : resourceSearchDisabled(),
   markIndexDirty: (reason = 'frontend') =>
-    Bridge.callCEF('ResourceSearch', 'mark_index_dirty',
-      [reason, CURRENT_CALLER]),
+    RESOURCE_SEARCH_ENABLED
+      ? Bridge.callCEF('ResourceSearch', 'mark_index_dirty',
+        [reason, CURRENT_CALLER])
+      : resourceSearchDisabled(),
   focusActor: (sceneName, actorName) =>
-    Bridge.callCEF('ResourceSearch', 'focus_actor',
-      [sceneName, actorName, CURRENT_CALLER]),
+    RESOURCE_SEARCH_ENABLED
+      ? Bridge.callCEF('ResourceSearch', 'focus_actor',
+        [sceneName, actorName, CURRENT_CALLER])
+      : resourceSearchDisabled(),
 };
 
 export const projectSettingsService = {
