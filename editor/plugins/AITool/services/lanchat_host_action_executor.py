@@ -126,7 +126,9 @@ class LanChatHostActionExecutor:
             return "GM action accepted by host queue; no executor agent is registered yet."
 
         source_user_id = str(payload.get("source_user_id") or "unknown")
-        intent_text = str(payload.get("intent_text") or payload.get("proposal_id") or "")
+        raw_intent_text = str(payload.get("intent_text") or payload.get("proposal_id") or "")
+        resolved_intent_text = str(payload.get("resolved_intent_text") or "").strip()
+        intent_text = resolved_intent_text or raw_intent_text
         conflicts = payload.get("conflicts") or []
         pending = payload.get("pending") or []
         persona = (
@@ -138,6 +140,8 @@ class LanChatHostActionExecutor:
             "请在 host 机器上按确认意图执行；无法安全执行时说明原因，不要静默覆盖用户对象。",
             f"source_user_id={source_user_id}",
             f"proposal_id={payload.get('proposal_id', '')}",
+            f"source_agent_name={payload.get('source_agent_name', '')}",
+            f"resolved_from_plan_id={payload.get('resolved_from_plan_id', '')}",
             f"pending={pending}",
             f"conflicts={conflicts}",
             f"用户确认意图：{intent_text}",

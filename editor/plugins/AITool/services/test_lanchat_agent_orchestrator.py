@@ -6,11 +6,16 @@ import threading
 import time
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from plugins.AITool.services.lanchat_agent_orchestrator import LanChatAgentOrchestrator  # noqa: E402
 from plugins.AITool.services.lanchat_host_action_executor import LanChatHostActionExecutor  # noqa: E402
 from plugins.AITool.services.lanchat_agent_worker import LANChatAgentWorker  # noqa: E402
 from plugins.AITool.services.lanchat_scene_runtime import get_lanchat_scene_runtime  # noqa: E402
+from plugins.AITool.cai_extensions.agent.scene_composer import (  # noqa: E402
+    _has_resolved_plan_context,
+    _looks_generic_inventory,
+)
 
 
 def _agent_factory():
@@ -283,8 +288,73 @@ def test_agent_plan_reference_resolves_before_gm_proposal():
     assert result.action_payload["source_agent_id"] == "merchant"
     assert "暗黑集市方案" in result.action_payload["resolved_intent_text"]
     assert "暗黑集市方案" in result.text
-    assert "就按照你的方案来执行吧" not in result.action_payload["resolved_intent_text"]
+    assert "原始用户请求" in result.action_payload["resolved_intent_text"]
+    assert "入口留出动线" in result.action_payload["resolved_intent_text"]
     print("[OK] @Agent plan reference is resolved before GM proposal")
+
+
+def test_agent_plan_reference_resolves_real_runtime_phrase():
+    orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
+    trigger = _trigger("@商人 按照你说的这个方案进行场景建筑生成把", "商人")
+    trigger["agent_id"] = "merchant"
+    trigger["history"] = [
+        {
+            "message_id": "m1",
+            "from": "商人",
+            "sender_id": "merchant",
+            "sender_type": "agent",
+            "message_kind": "agent_reply",
+            "text": (
+                "暗黑集市布局方案：入口区设置黑木拱门，两侧放石灯、残碑；"
+                "主通道铺暗色石板路，两侧摆摊位、货箱、展示架；"
+                "深处设置主柜台、旧木桌、钱箱、账本、封印柜；灯光用暗红、幽紫和烛火。"
+            ),
+        },
+        {
+            "message_id": "m2",
+            "from": "房主",
+            "sender_id": "host-a",
+            "sender_type": "user",
+            "message_kind": "chat",
+            "text": trigger["text"],
+        },
+    ]
+    result = orch.handle_trigger(trigger)
+    assert result.proposal is True
+    assert result.action_payload["action_type"] == "start_generation"
+    assert result.action_payload["source_agent_id"] == "merchant"
+    resolved = result.action_payload["resolved_intent_text"]
+    assert "原始用户请求" in resolved
+    assert "黑木拱门" in resolved
+    assert "暗色石板路" in resolved
+    assert "主柜台" in resolved
+    assert "现代主体建筑" not in resolved
+    assert "黑木拱门" in result.text
+    print("[OK] real runtime plan-reference phrase resolves to latest agent plan")
+
+
+def test_agent_plan_reference_resolves_legacy_history_without_v2_fields():
+    orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
+    trigger = _trigger("@商人 按照你说的方案开始生成", "商人")
+    trigger["agent_id"] = "merchant"
+    trigger["history"] = [
+        {
+            "message_id": "m1",
+            "from": "商人",
+            "text": "暗黑集市方案：黑木拱门、石灯残碑、两侧摊位、深处主柜台、幽紫烛火。",
+        },
+        {
+            "message_id": "m2",
+            "from": "房主",
+            "text": trigger["text"],
+        },
+    ]
+    result = orch.handle_trigger(trigger)
+    assert result.proposal is True
+    assert result.action_payload["action_type"] == "start_generation"
+    assert "黑木拱门" in result.action_payload["resolved_intent_text"]
+    assert "主柜台" in result.action_payload["resolved_intent_text"]
+    print("[OK] plan reference resolves from legacy history without v2 message fields")
 
 
 def test_agent_plan_reference_does_not_cross_agents():
@@ -314,6 +384,29 @@ def test_agent_plan_reference_does_not_cross_agents():
     assert "没有找到长者刚才的可执行方案" in result.text
     assert result.action_payload is None
     print("[OK] plan reference only resolves against the currently mentioned agent")
+
+
+def test_resolved_plan_generic_inventory_guard():
+    text = (
+        "原始用户请求：@商人 按照这个方案进行场景建筑生成把\n"
+        "用户确认执行 @商人 最近方案。请严格围绕下列方案生成开放场景：黑木拱门、暗色石板路、摊位、主柜台。"
+    )
+    generic_items = [
+        {"name": "现代主体建筑"},
+        {"name": "入口门厅"},
+        {"name": "铺装广场"},
+        {"name": "指示牌"},
+    ]
+    specific_items = [
+        {"name": "黑木拱门"},
+        {"name": "暗色石板路"},
+        {"name": "集市摊位"},
+        {"name": "主柜台"},
+    ]
+    assert _has_resolved_plan_context(text) is True
+    assert _looks_generic_inventory(generic_items) is True
+    assert _looks_generic_inventory(specific_items) is False
+    print("[OK] resolved-plan generic inventory guard detects fallback pollution")
 
 
 def test_agent_plan_reference_after_stale_marker_is_rejected():
@@ -800,6 +893,43 @@ def test_host_action_executor_runs_under_gate_and_reports_result():
     print("[OK] host action executor runs under EngineWriteGate and reports SceneDelta")
 
 
+def test_host_action_executor_prefers_resolved_intent_text():
+    captured = {}
+
+    def agent_factory():
+        def _agent(persona, messages):
+            captured["messages"] = list(messages)
+            assert "黑木拱门" in messages[-1]
+            assert "暗色石板路" in messages[-1]
+            assert "主柜台" in messages[-1]
+            assert messages[-1].count("用户确认意图：") == 1
+            return "scene delta applied"
+
+        return _agent
+
+    executor = LanChatHostActionExecutor(
+        corona_engine=FakeEngine([]),
+        agent_factory=agent_factory,
+        engine_gate=FakeGate(),
+    )
+    result = executor.enqueue_and_process({
+        "proposal_id": "gm-plan",
+        "status": "confirmed",
+        "source_user_id": "host-a",
+        "source_agent_name": "商人",
+        "resolved_from_plan_id": "plan-merchant-1",
+        "intent_text": "@商人 按照这个方案进行场景建筑生成把",
+        "resolved_intent_text": (
+            "原始用户请求：@商人 按照这个方案进行场景建筑生成把\n"
+            "用户确认执行 @商人 最近方案。请严格围绕下列方案生成开放场景：\n"
+            "入口黑木拱门、石灯残碑、暗色石板路、两侧摊位、深处主柜台、暗红幽紫灯光。"
+        ),
+    })
+    assert result is not None and result.ok is True
+    assert captured["messages"][-1].startswith("用户确认意图：原始用户请求")
+    print("[OK] host action executor prefers resolved plan intent over vague source text")
+
+
 def test_host_action_executor_does_not_report_executed_for_empty_or_failed_result():
     engine = FakeEngine([])
 
@@ -958,7 +1088,10 @@ if __name__ == "__main__":
     test_role_agent_theme_discussion_not_hijacked_by_gm()
     test_role_agent_advice_request_not_hijacked_by_gm()
     test_agent_plan_reference_resolves_before_gm_proposal()
+    test_agent_plan_reference_resolves_real_runtime_phrase()
+    test_agent_plan_reference_resolves_legacy_history_without_v2_fields()
     test_agent_plan_reference_does_not_cross_agents()
+    test_resolved_plan_generic_inventory_guard()
     test_agent_plan_reference_after_stale_marker_is_rejected()
     test_gm_pause_and_discussion_controls_do_not_reject_pending_proposal()
     test_single_user_major_action_stays_on_role_agent_path()
@@ -981,6 +1114,7 @@ if __name__ == "__main__":
     test_worker_broadcasts_confirmed_gm_action()
     test_worker_does_not_execute_discussion_only_confirmed_payload()
     test_host_action_executor_runs_under_gate_and_reports_result()
+    test_host_action_executor_prefers_resolved_intent_text()
     test_host_action_executor_does_not_report_executed_for_empty_or_failed_result()
     test_host_action_executor_reports_accepted_no_delta_when_no_executor_agent()
     test_host_action_executor_sanitizes_agent_api_error()

@@ -25,6 +25,20 @@ def _image_retry_max_workers(count: int) -> int:
     return max(1, min(max(1, count), configured))
 
 
+def _is_image_retry_fatal_error(exc: Exception) -> bool:
+    text = str(exc)
+    fatal_markers = (
+        "未配置账号池",
+        "旧客户端配置不完整",
+        "无效的 URL",
+        "Invalid Token",
+        "request id",
+        "api_key",
+        "API Key",
+    )
+    return any(marker in text for marker in fatal_markers)
+
+
 def _retry_failed_images(
     failed_elements: List[Dict[str, str]],
     session_id: str,
@@ -60,16 +74,53 @@ def _retry_failed_images(
             reset_current_session(token)
         return name, ""
 
+    def _probe_one(elem: Dict[str, str]) -> tuple[bool, tuple[str, str]]:
+        name = elem.get("item_name", "")
+        prompt = elem.get("image_prompt", "")
+        if not prompt:
+            return False, (name, "")
+        token = set_current_session(session_id)
+        try:
+            raw_result = image_tool.invoke({"prompt": prompt})
+            image_url = extract_image_url(raw_result)
+            if image_url:
+                logger.info("[Workflow][dispatch] %s 补偿图片探针成功", name)
+                return False, (name, image_url)
+            logger.warning("[Workflow][dispatch] %s 补偿图片探针结果为空", name)
+        except Exception as e:
+            if _is_image_retry_fatal_error(e):
+                logger.warning(
+                    "[Workflow][dispatch] 图片生成配置不可用，跳过本轮补偿重试并转文字直生 3D: %s",
+                    e,
+                )
+                return True, (name, "")
+            logger.warning("[Workflow][dispatch] %s 补偿图片探针失败: %s", name, e)
+        finally:
+            reset_current_session(token)
+        return False, (name, "")
+
     recovered: Dict[str, str] = {}
+    fatal, first_result = _probe_one(failed_elements[0])
+    if fatal:
+        return {}
+    first_name, first_url = first_result
+    if first_name and first_url:
+        recovered[first_name] = first_url
+    remaining = [
+        elem for elem in failed_elements
+        if elem.get("item_name", "") != first_name
+    ]
+    if not remaining:
+        return recovered
     workers = _image_retry_max_workers(len(failed_elements))
     started_at = time.perf_counter()
     logger.info(
         "[Workflow][dispatch] 并发补偿图片: items=%s workers=%s",
-        len(failed_elements),
+        len(remaining),
         workers,
     )
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_retry_one, elem) for elem in failed_elements]
+        futures = [pool.submit(_retry_one, elem) for elem in remaining]
         for future in concurrent.futures.as_completed(futures):
             name, image_url = future.result()
             if name and image_url:

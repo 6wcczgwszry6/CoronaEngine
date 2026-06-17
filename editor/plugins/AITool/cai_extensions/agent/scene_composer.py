@@ -1221,6 +1221,43 @@ def is_compose_request(text: str) -> bool:
     return False
 
 
+_RESOLVED_PLAN_MARKERS = (
+    "用户确认执行 @",
+    "最近方案",
+    "严格围绕下列方案",
+    "resolved_intent_text",
+)
+
+_GENERIC_INVENTORY_NAMES = {
+    "现代主体建筑",
+    "入口门厅",
+    "铺装广场",
+    "指示牌",
+    "休息长椅",
+    "景观花池",
+    "低矮围栏",
+    "入口台阶",
+    "功能支撑物件",
+    "导视牌",
+    "灯光装饰",
+    "储物道具",
+    "活动区装饰",
+    "小型展示物",
+}
+
+
+def _has_resolved_plan_context(text: str) -> bool:
+    return any(marker in str(text or "") for marker in _RESOLVED_PLAN_MARKERS)
+
+
+def _looks_generic_inventory(items: List[Dict[str, Any]]) -> bool:
+    names = [str(item.get("name") or "").strip() for item in items]
+    if not names:
+        return False
+    generic_hits = sum(1 for name in names if name in _GENERIC_INVENTORY_NAMES)
+    return generic_hits >= 3 or generic_hits >= max(1, len(names) - 1)
+
+
 class SceneComposer:
     """场景组合器。"""
 
@@ -1893,6 +1930,27 @@ class SceneComposer:
             return {"items": [], "imported": [], "failed": [],
                     "extracted_count": 0, "model_count": 0,
                     "error": "未能从描述中提取出物体清单"}
+        if _has_resolved_plan_context(text) and _looks_generic_inventory(items):
+            names = [str(item.get("name") or "") for item in items]
+            logger.warning(
+                "[SceneComposer] resolved plan inventory looked generic; paused before model generation: %s",
+                names,
+            )
+            message = "方案解析不足，已暂停生成，请确认是否继续。"
+            if progress_sink:
+                try:
+                    progress_sink(message)
+                except Exception:  # noqa: BLE001
+                    pass
+            return {
+                "items": items,
+                "imported": [],
+                "failed": names,
+                "extracted_count": len(items),
+                "model_count": 0,
+                "error": message,
+                "inventory_warning": "generic_inventory_from_resolved_plan",
+            }
 
         # ── Phase 0: 场景空间分解（开放性在这一步，LLM 读结构）──
         # 纯室内单房间 → None（走旧单盒路径）；真·室内外混合 → ZoneTree。

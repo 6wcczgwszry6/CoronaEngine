@@ -45,6 +45,9 @@ class LanChatAgentOrchestrator:
         "按你的方案", "按照你的方案", "按你说的", "按刚才那个方案",
         "按上面的方案", "就这样生成", "执行你的方案", "开始执行你的方案",
         "就按照你的方案", "照你的方案", "按这个方案",
+        "按照你说的这个方案", "按照你说的方案", "就按照你说的",
+        "按照刚才的方案", "按刚才商人的方案", "按这个方案生成",
+        "按照这个方案进行场景建筑生成", "按照这个方案进行场景生成",
     )
     _STALE_PLAN_WORDS = ("换方案", "不要刚才", "不要这个方案", "重新讨论", "重来", "作废")
     _PROPOSAL_ID_PATTERN = re.compile(r"\bgm-\d+\b", re.I)
@@ -76,7 +79,7 @@ class LanChatAgentOrchestrator:
 
     def handle_trigger(self, trigger: dict[str, Any]) -> AgentOrchestrationResult:
         history = self._history_from_trigger(trigger)
-        self._remember_plans_from_history(history)
+        self._remember_plans_from_history(history, trigger)
         state = self._summary_service.monitor(history)
         text = str(trigger.get("text") or "")
 
@@ -456,19 +459,34 @@ class LanChatAgentOrchestrator:
             self._logger.warning("LANChat role agent failed", exc_info=True)
             return self._safe_agent_error_text(exc)
 
-    def _remember_plans_from_history(self, history: list[dict[str, Any]]) -> None:
+    def _remember_plans_from_history(
+        self,
+        history: list[dict[str, Any]],
+        trigger: dict[str, Any] | None = None,
+    ) -> None:
+        trigger = trigger or {}
+        current_agent_id = str(trigger.get("agent_id") or "").strip().lower()
+        current_agent_name = str(trigger.get("agent_name") or "").strip().lower()
         for item in history[-24:]:
             kind = str(item.get("message_kind") or "").strip().lower()
             sender_type = str(item.get("sender_type") or "").strip().lower()
             text = str(item.get("text") or "").strip()
-            if kind != "agent_reply" and sender_type != "agent":
+            sender_id = str(item.get("sender_id") or item.get("agent_id") or "").strip()
+            agent_name = str(item.get("from") or item.get("sender_name") or sender_id or "Agent").strip()
+            sender_id_key = sender_id.lower()
+            agent_name_key = agent_name.lower()
+            looks_like_current_agent = bool(
+                current_agent_id
+                and sender_id_key == current_agent_id
+                or current_agent_name
+                and agent_name_key == current_agent_name
+            )
+            if kind != "agent_reply" and sender_type != "agent" and not looks_like_current_agent:
                 continue
             if not self._looks_like_plan(text):
                 continue
-            agent_id = str(item.get("sender_id") or item.get("agent_id") or "").strip()
-            agent_name = str(item.get("from") or item.get("sender_name") or agent_id or "Agent").strip()
             self._record_agent_plan(
-                agent_id=agent_id,
+                agent_id=sender_id,
                 agent_name=agent_name,
                 raw_text=text,
                 source_message_id=str(item.get("message_id") or ""),
@@ -525,7 +543,8 @@ class LanChatAgentOrchestrator:
             return False
         resolved = dict(plan)
         resolved["resolved_intent_text"] = (
-            f"用户确认执行 @{agent_name or agent_id} 最近方案：\n"
+            f"原始用户请求：{text}\n"
+            f"用户确认执行 @{agent_name or agent_id} 最近方案。请严格围绕下列方案生成开放场景，不要退化成通用现代建筑：\n"
             f"{plan.get('raw_text') or plan.get('compact_summary') or ''}"
         )
         return resolved
@@ -534,7 +553,10 @@ class LanChatAgentOrchestrator:
         updated = dict(trigger)
         agent_name = str(updated.get("agent_name") or plan.get("agent_name") or "该助手")
         summary = str(plan.get("compact_summary") or plan.get("raw_text") or "")
-        updated["text"] = f"@GM 开始执行 {agent_name} 刚才的方案：\n{summary}"
+        updated["text"] = (
+            f"@GM 开始执行 {agent_name} 刚才的方案：\n{summary}\n"
+            "执行时必须使用完整 resolved_intent_text。"
+        )
         updated["_resolved_plan"] = plan
         return updated
 
