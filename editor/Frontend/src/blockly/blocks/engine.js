@@ -242,4 +242,54 @@ export const defineEngineBlocks = () => {
       this.setTooltip('该角色的 Z 坐标');
     },
   };
+
+  // ── 物理扩展：速度与冲量 ──
+
+  Blockly.Blocks['engine_set_velocity'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('设置速度 X')
+        .appendField(new Blockly.FieldNumber(0), 'VX')
+        .appendField('Y')
+        .appendField(new Blockly.FieldNumber(0), 'VY')
+        .appendField('Z')
+        .appendField(new Blockly.FieldNumber(0), 'VZ');
+      this.setInputsInline(true);
+      this.setPreviousStatement(true, null);
+      this.setNextStatement(true, null);
+      this.setStyle('engine_blocks');
+      this.setTooltip('设置物体当前线速度（单位/秒），用于移动靶运动控制');
+    },
+  };
+
+  Blockly.Blocks['engine_apply_impulse'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('施加冲量 X')
+        .appendField(new Blockly.FieldNumber(0), 'IX')
+        .appendField('Y')
+        .appendField(new Blockly.FieldNumber(0), 'IY')
+        .appendField('Z')
+        .appendField(new Blockly.FieldNumber(0), 'IZ');
+      this.setInputsInline(true);
+      this.setPreviousStatement(true, null);
+      this.setNextStatement(true, null);
+      this.setStyle('engine_blocks');
+      this.setTooltip('施加瞬时冲量（N·s），用于子弹命中反馈/爆炸推开效果');
+    },
+  };
+
+  Blockly.Blocks['engine_get_velocity'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('当前速度')
+        .appendField(
+          new Blockly.FieldDropdown([['X', 'X'], ['Y', 'Y'], ['Z', 'Z']]),
+          'AXIS'
+        );
+      this.setOutput(true, 'Number');
+      this.setStyle('engine_blocks');
+      this.setTooltip('获取物体当前速度分量');
+    },
+  };
 };

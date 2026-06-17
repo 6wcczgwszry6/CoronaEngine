@@ -696,6 +696,8 @@ const initBlocklyAndGenerators = async () => {
 
   if (!blocksRegistered) {
     const [
+      { defineAudioBlocks },
+      { defineCameraBlocks },
       { defineEngineBlocks },
       { defineAppearanceBlocks },
       { defineEventBlocks },
@@ -705,6 +707,8 @@ const initBlocklyAndGenerators = async () => {
       { defineVariableBlocks },
       { defineListBlocks },
     ] = await Promise.all([
+      import('@/blockly/blocks/audio.js'),
+      import('@/blockly/blocks/camera.js'),
       import('@/blockly/blocks/engine.js'),
       import('@/blockly/blocks/appearance.js'),
       import('@/blockly/blocks/event.js'),
@@ -716,6 +720,8 @@ const initBlocklyAndGenerators = async () => {
     ]);
 
     try {
+      defineAudioBlocks();
+      defineCameraBlocks();
       defineEngineBlocks();
       defineAppearanceBlocks();
       defineEventBlocks(broadcastList, createNewBroadcast);

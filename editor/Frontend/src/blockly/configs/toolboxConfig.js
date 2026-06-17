@@ -28,11 +28,30 @@ export const TOOLBOX_CONFIG = {
         { kind: 'block', type: 'engine_X' },
         { kind: 'block', type: 'engine_Y' },
         { kind: 'block', type: 'engine_Z' },
+        { kind: 'block', type: 'engine_set_velocity' },
+        { kind: 'block', type: 'engine_apply_impulse' },
+        { kind: 'block', type: 'engine_get_velocity' },
       ],
     },
 
     // ===================================================================
-    // 2. 外观 —— CoronaEngine 自定义动画/尺寸/显隐积木
+    // 2. 摄像机 —— FPS 视角控制积木（新增）
+    // ===================================================================
+    {
+      kind: 'category',
+      name: '摄像机',
+      categorystyle: 'camera_category',
+      contents: [
+        { kind: 'block', type: 'camera_lock_mouse' },
+        { kind: 'block', type: 'camera_unlock_mouse' },
+        { kind: 'block', type: 'camera_mouse_dx' },
+        { kind: 'block', type: 'camera_mouse_dy' },
+        { kind: 'block', type: 'camera_set_fov' },
+      ],
+    },
+
+    // ===================================================================
+    // 3. 外观 —— CoronaEngine 自定义动画/尺寸/显隐积木
     // ===================================================================
     {
       kind: 'category',
@@ -50,6 +69,8 @@ export const TOOLBOX_CONFIG = {
         { kind: 'block', type: 'appearance_hide' },
         { kind: 'block', type: 'appearance_cartoon' },
         { kind: 'block', type: 'appearance_size' },
+        { kind: 'block', type: 'appearance_set_color' },
+        { kind: 'block', type: 'appearance_set_alpha' },
       ],
     },
 
@@ -131,11 +152,15 @@ export const TOOLBOX_CONFIG = {
         { kind: 'block', type: 'detect_mouse1' },
         { kind: 'block', type: 'detect_mouse0' },
         { kind: 'block', type: 'detect_attribute' },
+        { kind: 'block', type: 'detect_raycast' },
+        { kind: 'block', type: 'detect_raycast_distance' },
+        { kind: 'block', type: 'detect_raycast_object' },
+        { kind: 'block', type: 'detect_raycast_point' },
       ],
     },
 
     // ===================================================================
-    // 6. 运算 —— 自定义运算 + 标准数学
+    // 7. 运算 —— 自定义运算 + 标准数学
     // ===================================================================
     {
       kind: 'category',
@@ -248,7 +273,22 @@ export const TOOLBOX_CONFIG = {
     },
 
     // ===================================================================
-    // 10. 函数 —— 标准 Blockly 函数/过程积木（新增分类）
+    // 11. 音效 —— CoronaEngine 音效控制积木（新增分类）
+    // ===================================================================
+    {
+      kind: 'category',
+      name: '音效',
+      categorystyle: 'audio_category',
+      contents: [
+        { kind: 'block', type: 'audio_play' },
+        { kind: 'block', type: 'audio_loop' },
+        { kind: 'block', type: 'audio_stop' },
+        { kind: 'block', type: 'audio_stop_all' },
+      ],
+    },
+
+    // ===================================================================
+    // 12. 函数 —— 标准 Blockly 函数/过程积木
     // ===================================================================
     {
       kind: 'category',

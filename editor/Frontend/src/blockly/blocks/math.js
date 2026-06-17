@@ -1,6 +1,17 @@
 import * as Blockly from 'blockly/core';
 
 export const defineMathBlocks = () => {
+  // ── 修复 math_change（"给…加…"）积木样式 ──
+  // 标准 Blockly 中 math_change 使用 variable_blocks 样式（橙色），
+  // 但它在运算分类中，应与其他数学积木一致使用 math_blocks 样式（绿色）。
+  if (Blockly.Blocks['math_change']) {
+    const _init = Blockly.Blocks['math_change'].init;
+    Blockly.Blocks['math_change'].init = function () {
+      _init.call(this);
+      this.setStyle('math_blocks');
+    };
+  }
+
   Blockly.Blocks['math_add'] = {
     init: function () {
       this.setStyle('math_blocks');

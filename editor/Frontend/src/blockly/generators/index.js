@@ -4,6 +4,8 @@ import { resetPrelude, renderPreludeAt } from './prelude';
 import { PYTHON_IMPORTS } from './constants';
 
 import { defineAppearanceGenerators } from './appearance';
+import { defineAudioGenerators } from './audio';
+import { defineCameraGenerators } from './camera';
 import { defineControlGenerators } from './control';
 import { defineDetectGenerators } from './detect';
 import { defineEngineGenerators } from './engine';
@@ -14,6 +16,8 @@ import { defineVariableGenerators } from './variable';
 
 // 注册所有分类的生成器（幂等）
 try { defineAppearanceGenerators?.(); } catch {}
+try { defineAudioGenerators?.(); } catch {}
+try { defineCameraGenerators?.(); } catch {}
 try { defineControlGenerators?.(); } catch {}
 try { defineDetectGenerators?.(); } catch {}
 try { defineEngineGenerators?.(); } catch {}

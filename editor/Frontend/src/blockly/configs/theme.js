@@ -12,6 +12,7 @@ function darker(hex, pct) {
 // ── 统一定义：每种分类色同时用于 blockStyle 和 categoryStyle ──
 const COLOURS = {
   engine:     '#5631E4',
+  camera:     '#4A90D9',
   appearance: '#C501F6',
   event:      '#FFDE59',
   control:    '#FFAB19',
@@ -21,6 +22,7 @@ const COLOURS = {
   list:       '#FF661A',
   text:       '#3EB07A',
   function:   '#C040C0',
+  audio:      '#D94A8C',
 };
 
 // 生成标准格式的 blockStyle
@@ -62,6 +64,7 @@ export const CoronaTheme = Blockly.Theme.defineTheme('CoronaTheme', {
   blockStyles: {
     // ── CoronaEngine 自定义分类 ──
     engine_blocks:     bs(COLOURS.engine),
+    camera_blocks:     bs(COLOURS.camera),
     appearance_blocks: bs(COLOURS.appearance),
     event_blocks:      bs(COLOURS.event),
     control_blocks:    bs(COLOURS.control),
@@ -71,6 +74,7 @@ export const CoronaTheme = Blockly.Theme.defineTheme('CoronaTheme', {
     list_blocks:       bs(COLOURS.list),
     text_blocks:       bs(COLOURS.text),
     procedure_blocks:  bs(COLOURS.function),
+    audio_blocks:      bs(COLOURS.audio),
 
     // ── 覆盖标准样式 → 归入对应分类颜色 ──
     logic_blocks:             bs(COLOURS.control),
@@ -83,6 +87,7 @@ export const CoronaTheme = Blockly.Theme.defineTheme('CoronaTheme', {
   // ── 工具箱分类样式（categoryStyles）──
   categoryStyles: {
     engine_category:     { colour: COLOURS.engine },
+    camera_category:     { colour: COLOURS.camera },
     appearance_category: { colour: COLOURS.appearance },
     event_category:      { colour: COLOURS.event },
     control_category:    { colour: COLOURS.control },
@@ -92,6 +97,7 @@ export const CoronaTheme = Blockly.Theme.defineTheme('CoronaTheme', {
     list_category:       { colour: COLOURS.list },
     text_category:       { colour: COLOURS.text },
     function_category:   { colour: COLOURS.function },
+    audio_category:      { colour: COLOURS.audio },
   },
 
   fontStyle: {

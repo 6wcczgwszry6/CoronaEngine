@@ -93,8 +93,32 @@ export const defineAppearanceBlocks = () => {
     init: function () {
       this.setStyle('appearance_blocks');
       this.appendDummyInput().appendField('大小');
-      this.setOutput(true, 'Number'); // 关键：输出数值类型
+      this.setOutput(true, 'Number');
       this.setTooltip('该角色的大小');
+    },
+  };
+
+  // ── 外观扩展：颜色与透明度 ──
+
+  Blockly.Blocks['appearance_set_color'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('设置颜色 R')
+        .appendField(new Blockly.FieldNumber(1, 0, 1), 'R')
+        .appendField('G')
+        .appendField(new Blockly.FieldNumber(0, 0, 1), 'G')
+        .appendField('B')
+        .appendField(new Blockly.FieldNumber(0, 0, 1), 'B');
+      setCommonProperties(this, 'appearance_blocks', '设置物体漫反射颜色（R/G/B 范围 0~1）');
+    },
+  };
+
+  Blockly.Blocks['appearance_set_alpha'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('透明度设为')
+        .appendField(new Blockly.FieldNumber(1, 0, 1), 'ALPHA');
+      setCommonProperties(this, 'appearance_blocks', '设置物体透明度（1=不透明，0=全透明）');
     },
   };
 };

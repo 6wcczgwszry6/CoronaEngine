@@ -19,6 +19,17 @@ export const BLOCK_CATEGORY_MAP = {
   engine_X: '引擎',
   engine_Y: '引擎',
   engine_Z: '引擎',
+  // 物理扩展
+  engine_set_velocity: '引擎',
+  engine_apply_impulse: '引擎',
+  engine_get_velocity: '引擎',
+
+  // ── 摄像机 (5) ──
+  camera_lock_mouse: '摄像机',
+  camera_unlock_mouse: '摄像机',
+  camera_mouse_dx: '摄像机',
+  camera_mouse_dy: '摄像机',
+  camera_set_fov: '摄像机',
 
   // ── 外观 (11) ──
   appearance_cartoonSet: '外观',
@@ -32,6 +43,9 @@ export const BLOCK_CATEGORY_MAP = {
   appearance_hide: '外观',
   appearance_cartoon: '外观',
   appearance_size: '外观',
+  // 外观扩展
+  appearance_set_color: '外观',
+  appearance_set_alpha: '外观',
 
   // ── 事件 (10) ──
   event_gameStart: '事件',
@@ -85,6 +99,11 @@ export const BLOCK_CATEGORY_MAP = {
   detect_mouse1: '侦测',
   detect_mouse0: '侦测',
   detect_attribute: '侦测',
+  // 射线检测
+  detect_raycast: '侦测',
+  detect_raycast_distance: '侦测',
+  detect_raycast_object: '侦测',
+  detect_raycast_point: '侦测',
 
   // ── 运算 (12 自定义 + 14 标准数学 = 26) ──
   math_add: '运算',
@@ -166,4 +185,10 @@ export const BLOCK_CATEGORY_MAP = {
   procedures_callnoreturn: '函数',
   procedures_callreturn: '函数',
   procedures_ifreturn: '函数',
+
+  // ── 音效 (4) ──
+  audio_play: '音效',
+  audio_loop: '音效',
+  audio_stop: '音效',
+  audio_stop_all: '音效',
 };
