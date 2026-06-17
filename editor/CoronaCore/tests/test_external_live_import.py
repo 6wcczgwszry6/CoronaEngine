@@ -1,4 +1,5 @@
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -138,6 +139,30 @@ class ExternalLiveImportTests(unittest.TestCase):
         self.assertEqual(len(faces), 24)
         self.assertEqual(vertices[0], [0.0, 2.0, 0.0])
         self.assertEqual(vertices[-1], [0.0, -2.0, 0.0])
+
+    def test_vision_euler_primitive_transform_matches_corona_rotation_order(self):
+        shape = {
+            "param": {
+                "transform": {
+                    "type": "euler",
+                    "param": {
+                        "position": [10, 20, 30],
+                        "pitch": math.pi * 0.5,
+                        "yaw": math.pi * 0.5,
+                        "roll": math.pi * 0.5,
+                    },
+                },
+            },
+        }
+
+        transform = scene_tools_module._extract_vision_shape_transform(shape)
+        self.assertEqual(transform["position"], [10.0, 20.0, -30.0])
+        self.assertEqual(transform["rotation"], [math.pi * 0.5, -math.pi * 0.5, -math.pi * 0.5])
+
+        [vertex] = scene_tools_module._vision_primitive_world_vertices(shape, [[1, 2, 3]])
+        self.assertAlmostEqual(vertex[0], 13.0)
+        self.assertAlmostEqual(vertex[1], 22.0)
+        self.assertAlmostEqual(vertex[2], -29.0)
 
     def test_import_creates_proxy_actors_and_persists_bindings(self):
         with tempfile.TemporaryDirectory() as tmp:
