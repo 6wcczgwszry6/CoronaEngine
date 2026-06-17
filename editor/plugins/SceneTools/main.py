@@ -498,7 +498,7 @@ def _ensure_vision_primitive_proxy(scene, shape: dict, shape_type: str, json_pat
 
     lines = [f"# Corona external_live proxy for {shape_type} {json_path}"]
     for x, y, z in vertices:
-        lines.append(f"v {x:.9g} {y:.9g} {z:.9g}")
+        lines.append(f"v {x:.17g} {y:.17g} {z:.17g}")
     for face in faces:
         lines.append("f " + " ".join(str(index) for index in face))
     with open(abs_path, "w", encoding="utf-8") as file:

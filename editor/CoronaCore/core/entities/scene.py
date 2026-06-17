@@ -24,6 +24,14 @@ def _active_project_path():
     return getattr(CoronaEngine, "active_project_path", None)
 
 
+def _format_float(value) -> str:
+    return format(float(value), ".17g")
+
+
+def _format_float3(values) -> str:
+    return ", ".join(_format_float(values[index]) for index in range(3))
+
+
 class Scene:
     """
     场景包装类：仅管理对象引用，生命周期由外部管理。
@@ -284,11 +292,11 @@ class Scene:
                 scale = actor.get_scale()
 
                 self.file_data['actors'][
-                    f'{actor_key}.geometry.position'] = f"{position[0]: .2f}, {position[1]: .2f}, {position[2]: .2f}"
+                    f'{actor_key}.geometry.position'] = _format_float3(position)
                 self.file_data['actors'][
-                    f'{actor_key}.geometry.rotation'] = f"{rotation[0]: .2f}, {rotation[1]: .2f}, {rotation[2]: .2f}"
+                    f'{actor_key}.geometry.rotation'] = _format_float3(rotation)
                 self.file_data['actors'][
-                    f'{actor_key}.geometry.scale'] = f"{scale[0]: .2f}, {scale[1]: .2f}, {scale[2]: .2f}"
+                    f'{actor_key}.geometry.scale'] = _format_float3(scale)
 
         # 脚本数据
         self.file_data['scripts']["path"] = self.script_path

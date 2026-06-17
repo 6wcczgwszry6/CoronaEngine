@@ -30,6 +30,14 @@ def _active_project_path():
     return getattr(CoronaEngine, "active_project_path", None)
 
 
+def _format_float(value) -> str:
+    return format(float(value), ".17g")
+
+
+def _format_float3(values) -> str:
+    return ", ".join(_format_float(values[index]) for index in range(3))
+
+
 class Actor:
     """
     OOP API 包装：基于 CoronaEngine.Actor。
@@ -454,11 +462,11 @@ class Actor:
                 rotation = self.get_rotation()
                 scale = self.get_scale()
                 self.file_data['geometry'][
-                    f'position'] = f"{position[0]: .2f}, {position[1]: .2f}, {position[2]: .2f}"
+                    f'position'] = _format_float3(position)
                 self.file_data['geometry'][
-                    f'rotation'] = f"{rotation[0]: .2f}, {rotation[1]: .2f}, {rotation[2]: .2f}"
+                    f'rotation'] = _format_float3(rotation)
                 self.file_data['geometry'][
-                    f'scale'] = f"{scale[0]: .2f}, {scale[1]: .2f}, {scale[2]: .2f}"
+                    f'scale'] = _format_float3(scale)
 
             self.file_data['scripts']['path'] = self.script_path
 

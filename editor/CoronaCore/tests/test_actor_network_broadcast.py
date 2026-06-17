@@ -325,9 +325,21 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                     actor_type="model",
                     route="Resource/hud.obj",
                     _geometry=True,
-                    get_position=lambda: [0.0, 0.0, 2.0],
-                    get_rotation=lambda: [0.0, 0.0, 0.0],
-                    get_scale=lambda: [1.0, 1.0, 1.0],
+                    get_position=lambda: [
+                        0.12345678912345678,
+                        -0.9876543219876543,
+                        2.000000000000001,
+                    ],
+                    get_rotation=lambda: [
+                        0.000000123456789,
+                        -0.000000987654321,
+                        1.234567891234567,
+                    ],
+                    get_scale=lambda: [
+                        1.000000000000001,
+                        0.999999999999999,
+                        1.234567891234567,
+                    ],
                     get_follow_camera=lambda: True,
                     get_physics_enabled=lambda: False,
                 )
@@ -345,6 +357,18 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
             self.assertTrue(actor_data["follow_camera"])
             self.assertFalse(actor_data["mechanics"]["physics_enabled"])
             self.assertEqual(actor_data["actor_guid"], "actor-hud")
+            self.assertEqual(
+                actor_data["geometry"]["position"],
+                [0.12345678912345678, -0.9876543219876543, 2.000000000000001],
+            )
+            self.assertEqual(
+                actor_data["geometry"]["rotation"],
+                [0.000000123456789, -0.000000987654321, 1.234567891234567],
+            )
+            self.assertEqual(
+                actor_data["geometry"]["scale"],
+                [1.000000000000001, 0.999999999999999, 1.234567891234567],
+            )
 
     def test_actor_data_restores_physics_enabled_to_mechanics(self):
         with tempfile.TemporaryDirectory() as tmp:
