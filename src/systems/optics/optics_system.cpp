@@ -9,12 +9,14 @@
 #include <corona/systems/optics/optics_system.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <exception>
 #include <filesystem>
 #include <functional>
+#include <system_error>
 #include <unordered_set>
 #include <vector>
 
@@ -53,6 +55,55 @@ struct RenderInstanceBatch {
         actorHandles.clear();
     }
 };
+
+[[nodiscard]] std::string normalize_scene_path_key(const std::string& raw_path) {
+    if (raw_path.empty()) {
+        return {};
+    }
+
+    std::error_code ec;
+    std::filesystem::path path = std::filesystem::u8path(raw_path);
+    auto normalized = std::filesystem::weakly_canonical(path, ec);
+    if (ec) {
+        ec.clear();
+        normalized = path.is_absolute() ? path : std::filesystem::absolute(path, ec);
+        if (ec) {
+            normalized = path;
+        }
+    }
+    auto key = normalized.lexically_normal().generic_string();
+#ifdef _WIN32
+    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+#endif
+    return key;
+}
+
+[[nodiscard]] bool has_external_live_bindings_for_scene(const std::string& scene_path) {
+    const auto target_key = normalize_scene_path_key(scene_path);
+    if (target_key.empty()) {
+        return false;
+    }
+
+    auto& hub = Corona::SharedDataHub::instance();
+    for (auto scene_it = hub.scene_storage().cbegin(); scene_it != hub.scene_storage().cend(); ++scene_it) {
+        const auto& scene_dev = *scene_it;
+        if (!scene_dev.enabled) {
+            continue;
+        }
+        for (auto actor_handle : scene_dev.actor_handles) {
+            const auto binding = hub.external_vision_binding(actor_handle);
+            if (!binding) {
+                continue;
+            }
+            if (normalize_scene_path_key(binding->source_path) == target_key) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 void apply_pending_camera_moves() {
     auto& hub = Corona::SharedDataHub::instance();
@@ -1539,12 +1590,15 @@ bool OpticsSystem::init_vision_lazy() {
                 return false;
             }
             vision_initialized_ = true;
-            vision_scene_source_ = VisionSceneSource::ExternalFile;
+            const bool external_live = has_external_live_bindings_for_scene(*pending_external_scene);
+            vision_scene_source_ =
+                external_live ? VisionSceneSource::ExternalLive : VisionSceneSource::ExternalFile;
             vision_applied_signature_ = 0;
             vision_pending_signature_ = 0;
             vision_stable_frames_ = 0;
             vision_rebuild_retries_ = 0;
-            CFW_LOG_INFO("OpticsSystem: initialized Vision from external scene: {}",
+            CFW_LOG_INFO("OpticsSystem: initialized Vision from {} scene: {}",
+                         external_live ? "external_live" : "external",
                          *pending_external_scene);
             return true;
         }
@@ -1800,12 +1854,16 @@ void OpticsSystem::apply_pending_vision_scene_load() {
     const std::string& path = *request;
     if (!path.empty()) {
         if (load_external_vision_scene(path)) {
-            vision_scene_source_ = VisionSceneSource::ExternalFile;
+            const bool external_live = has_external_live_bindings_for_scene(path);
+            vision_scene_source_ =
+                external_live ? VisionSceneSource::ExternalLive : VisionSceneSource::ExternalFile;
             vision_applied_signature_ = 0;
             vision_pending_signature_ = 0;
             vision_stable_frames_ = 0;
             vision_rebuild_retries_ = 0;
-            CFW_LOG_INFO("OpticsSystem: external Vision scene loaded: {}", path);
+            CFW_LOG_INFO("OpticsSystem: {} Vision scene loaded: {}",
+                         external_live ? "external_live" : "external",
+                         path);
         }
         return;
     }

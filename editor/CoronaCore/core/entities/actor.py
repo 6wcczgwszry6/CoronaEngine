@@ -91,6 +91,7 @@ class Actor:
             self.actor_guid = f"actor-{uuid.uuid4().hex}"
 
         self.handle = self.engine_obj.get_handle()
+        self._sync_actor_guid_to_engine()
         self._sync_follow_camera_to_engine()
         _handle_to_actor[self.handle] = self
 
@@ -238,6 +239,49 @@ class Actor:
             except Exception as exc:
                 logging.warning("Failed to sync follow_camera for actor %s: %s",
                                 self.name or self.route, exc)
+
+    def _sync_actor_guid_to_engine(self):
+        if hasattr(self.engine_obj, 'set_actor_guid'):
+            try:
+                self.engine_obj.set_actor_guid(self.actor_guid)
+            except Exception as exc:
+                logging.warning("Failed to sync actor_guid for actor %s: %s",
+                                self.name or self.route, exc)
+
+    def set_external_vision_binding(self, binding: Dict[str, Any]):
+        self._external_vision_binding = dict(binding or {})
+        setter = getattr(self.engine_obj, 'set_external_vision_binding', None)
+        if not callable(setter):
+            return
+        try:
+            shape_index = self._external_vision_binding.get("shape_index", -1)
+            try:
+                shape_index = int(shape_index)
+            except (TypeError, ValueError):
+                shape_index = -1
+            setter(
+                self._external_vision_binding.get("source_path", "") or "",
+                self._external_vision_binding.get("shape_guid", "") or "",
+                shape_index,
+                self._external_vision_binding.get("json_path", "") or "",
+                self._external_vision_binding.get("shape_type", "") or "",
+                self._external_vision_binding.get("shape_identity_key", "") or "",
+                self._external_vision_binding.get("model_path", "") or "",
+            )
+        except Exception as exc:
+            logging.warning("Failed to sync external Vision binding for actor %s: %s",
+                            self.name or self.route, exc)
+
+    def clear_external_vision_binding(self):
+        self._external_vision_binding = {}
+        clearer = getattr(self.engine_obj, 'clear_external_vision_binding', None)
+        if not callable(clearer):
+            return
+        try:
+            clearer()
+        except Exception as exc:
+            logging.warning("Failed to clear external Vision binding for actor %s: %s",
+                            self.name or self.route, exc)
 
     def _broadcast_actor_created(self):
         """通过 NetworkSystem 广播 Actor 创建事件到已连接的 peer。"""

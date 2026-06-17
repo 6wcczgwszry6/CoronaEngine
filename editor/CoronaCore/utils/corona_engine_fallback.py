@@ -213,6 +213,8 @@ class Actor:
         self._profiles: List[ActorProfile] = []
         self._active: Optional[ActorProfile] = None
         self._follow_camera = False
+        self._actor_guid = ""
+        self._external_vision_binding = {}
 
     def add_profile(self, profile: ActorProfile) -> Optional[ActorProfile]:
         _log(f"[Fallback][Actor.add_profile] profile={profile}")
@@ -259,6 +261,36 @@ class Actor:
     def get_follow_camera(self) -> bool:
         _log("[Fallback][Actor.get_follow_camera]")
         return self._follow_camera
+
+    def set_actor_guid(self, actor_guid: str):
+        _log(f"[Fallback][Actor.set_actor_guid] actor_guid={actor_guid}")
+        self._actor_guid = actor_guid or ""
+
+    def get_actor_guid(self) -> str:
+        _log("[Fallback][Actor.get_actor_guid]")
+        return self._actor_guid
+
+    def set_external_vision_binding(self, source_path: str, shape_guid: str, shape_index: int,
+                                    json_path: str, shape_type: str, shape_identity_key: str,
+                                    model_path: str):
+        _log(f"[Fallback][Actor.set_external_vision_binding] source_path={source_path}, shape_guid={shape_guid}")
+        self._external_vision_binding = {
+            "source_path": source_path or "",
+            "shape_guid": shape_guid or "",
+            "shape_index": int(shape_index),
+            "json_path": json_path or "",
+            "shape_type": shape_type or "",
+            "shape_identity_key": shape_identity_key or "",
+            "model_path": model_path or "",
+        }
+
+    def clear_external_vision_binding(self):
+        _log("[Fallback][Actor.clear_external_vision_binding]")
+        self._external_vision_binding = {}
+
+    def has_external_vision_binding(self) -> bool:
+        _log("[Fallback][Actor.has_external_vision_binding]")
+        return bool(self._external_vision_binding)
 
 
 # ================================
@@ -551,6 +583,10 @@ class CoronaEngine:
     @staticmethod
     def is_vision_available():
         return False
+
+    @staticmethod
+    def load_vision_scene(path):
+        _log(f"[Fallback][load_vision_scene] path={path}")
 
     @staticmethod
     def import_media(path):

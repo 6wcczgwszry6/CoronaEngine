@@ -68,7 +68,9 @@ class MainView(PluginBase):
                 return
             source_path = getattr(scene, "vision_source_path", "") or ""
             import_mode = getattr(scene, "vision_import_mode", "") or ""
-            if source_path and import_mode in ("external", "external_live"):
+            if source_path and import_mode == "external_live":
+                CoronaEditor.CoronaEngine.load_vision_scene(source_path)
+            elif source_path and import_mode == "external":
                 CoronaEditor.CoronaEngine.load_vision_scene(source_path)
             else:
                 CoronaEditor.CoronaEngine.load_vision_scene("")

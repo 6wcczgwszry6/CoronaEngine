@@ -143,6 +143,7 @@ class Scene:
                 self.vision_import_mode = self.file_data['vision'].get('import_mode', '')
             self.vision_bindings = self._read_indexed_section('vision_bindings')
             self.vision_unsupported_shapes = self._read_indexed_section('vision_unsupported_shapes')
+            self._sync_external_vision_bindings_to_actors()
 
             self._pending_camera_data = {}
             if 'camera' in self.file_data:
@@ -766,3 +767,18 @@ class Scene:
                     self.file_data[section_name][f'{prefix}.{key}'] = serialized
         elif section_name in self.file_data:
             self.file_data.remove_section(section_name)
+
+    def _sync_external_vision_bindings_to_actors(self) -> None:
+        bindings_by_actor = {
+            record.get('actor_guid', ''): record
+            for record in getattr(self, 'vision_bindings', [])
+            if record.get('actor_guid', '')
+        }
+        external_live = getattr(self, 'vision_import_mode', '') == 'external_live'
+        for actor in getattr(self, '_actors', []):
+            actor_guid = getattr(actor, 'actor_guid', '')
+            binding = bindings_by_actor.get(actor_guid)
+            if external_live and binding and hasattr(actor, 'set_external_vision_binding'):
+                actor.set_external_vision_binding(binding)
+            elif hasattr(actor, 'clear_external_vision_binding'):
+                actor.clear_external_vision_binding()

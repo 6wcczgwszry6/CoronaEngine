@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <iterator>
+#include <utility>
 
 #include "corona/resource/types/audio.h"
 #include "corona/resource/types/image.h"
@@ -1424,6 +1425,7 @@ Corona::API::Actor::~Actor() {
     profile_storage_handles_.clear();
 
     if (handle_ != 0) {
+        SharedDataHub::instance().clear_actor_metadata(handle_);
         SharedDataHub::instance().actor_storage().deallocate(handle_);
     }
 }
@@ -1585,6 +1587,66 @@ bool Corona::API::Actor::get_follow_camera() const {
 
     CFW_LOG_ERROR("[Actor::get_follow_camera] Failed to acquire read access to actor storage");
     return false;
+}
+
+void Corona::API::Actor::set_actor_guid(const std::string& actor_guid) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Actor::set_actor_guid] Invalid actor handle");
+        return;
+    }
+
+    SharedDataHub::instance().set_actor_guid(handle_, actor_guid);
+}
+
+std::string Corona::API::Actor::get_actor_guid() const {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Actor::get_actor_guid] Invalid actor handle");
+        return {};
+    }
+
+    return SharedDataHub::instance().actor_guid(handle_);
+}
+
+void Corona::API::Actor::set_external_vision_binding(const std::string& source_path,
+                                                     const std::string& shape_guid,
+                                                     int shape_index,
+                                                     const std::string& json_path,
+                                                     const std::string& shape_type,
+                                                     const std::string& shape_identity_key,
+                                                     const std::string& model_path) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Actor::set_external_vision_binding] Invalid actor handle");
+        return;
+    }
+
+    ExternalVisionBindingDevice binding{};
+    binding.enabled = true;
+    binding.source_path = source_path;
+    binding.shape_guid = shape_guid;
+    binding.shape_index = shape_index;
+    binding.json_path = json_path;
+    binding.shape_type = shape_type;
+    binding.shape_identity_key = shape_identity_key;
+    binding.model_path = model_path;
+    SharedDataHub::instance().set_external_vision_binding(handle_, std::move(binding));
+}
+
+void Corona::API::Actor::clear_external_vision_binding() {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Actor::clear_external_vision_binding] Invalid actor handle");
+        return;
+    }
+
+    SharedDataHub::instance().clear_external_vision_binding(handle_);
+}
+
+bool Corona::API::Actor::has_external_vision_binding() const {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Actor::has_external_vision_binding] Invalid actor handle");
+        return false;
+    }
+
+    return SharedDataHub::instance().has_external_vision_binding(handle_);
 }
 
 std::uintptr_t Corona::API::Actor::get_handle() const {

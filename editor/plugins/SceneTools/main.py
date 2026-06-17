@@ -603,6 +603,8 @@ def _remove_stale_vision_proxy_actors(scene, previous_bindings, active_actor_gui
         if actor is None:
             continue
         try:
+            if hasattr(actor, "clear_external_vision_binding"):
+                actor.clear_external_vision_binding()
             if hasattr(scene, "remove_actor"):
                 scene.remove_actor(actor)
                 removed += 1
@@ -1166,7 +1168,7 @@ class SceneTools(PluginBase):
                                            getattr(actor, "name", ""), exc)
                     reused_proxy_count += 1
 
-                new_bindings.append({
+                binding = {
                     "actor_guid": getattr(actor, "actor_guid", ""),
                     "actor_name": getattr(actor, "name", ""),
                     "shape_guid": _vision_shape_guid(shape, json_path),
@@ -1176,7 +1178,10 @@ class SceneTools(PluginBase):
                     "shape_identity_key": _vision_shape_identity_key(abs_path, shape, json_path),
                     "model_path": model_path,
                     "source_path": abs_path,
-                })
+                }
+                if hasattr(actor, "set_external_vision_binding"):
+                    actor.set_external_vision_binding(binding)
+                new_bindings.append(binding)
 
             active_actor_guids = {binding.get("actor_guid", "") for binding in new_bindings}
             removed_proxy_count = _remove_stale_vision_proxy_actors(

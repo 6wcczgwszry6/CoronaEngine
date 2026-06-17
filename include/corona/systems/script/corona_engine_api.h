@@ -205,6 +205,17 @@ class Actor {
     [[nodiscard]] std::size_t profile_count() const;
     void set_follow_camera(bool enabled);
     [[nodiscard]] bool get_follow_camera() const;
+    void set_actor_guid(const std::string& actor_guid);
+    [[nodiscard]] std::string get_actor_guid() const;
+    void set_external_vision_binding(const std::string& source_path,
+                                     const std::string& shape_guid,
+                                     int shape_index,
+                                     const std::string& json_path,
+                                     const std::string& shape_type,
+                                     const std::string& shape_identity_key,
+                                     const std::string& model_path);
+    void clear_external_vision_binding();
+    [[nodiscard]] bool has_external_vision_binding() const;
 
     [[nodiscard]] std::uintptr_t get_handle() const;
 

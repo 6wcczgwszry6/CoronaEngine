@@ -7,6 +7,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <filesystem>
@@ -136,6 +137,17 @@ struct ProfileDevice {
     std::uintptr_t acoustics_handle{};
     std::uintptr_t mechanics_handle{};
     std::uintptr_t geometry_handle{};
+};
+
+struct ExternalVisionBindingDevice {
+    bool enabled{false};
+    std::string source_path;
+    std::string shape_guid;
+    int shape_index{-1};
+    std::string json_path;
+    std::string shape_type;
+    std::string shape_identity_key;
+    std::string model_path;
 };
 
 struct ActorDevice {
@@ -381,6 +393,18 @@ class SharedDataHub {
     ActorStorage& actor_storage();
     const ActorStorage& actor_storage() const;
 
+    // Runtime-only editor metadata keyed by native actor handle. Persisted state
+    // remains in .scene; this cache only bridges Python proxy actors to native
+    // systems such as OpticsSystem/ExternalVisionSceneAdapter.
+    void set_actor_guid(std::uintptr_t actor_handle, std::string actor_guid);
+    [[nodiscard]] std::string actor_guid(std::uintptr_t actor_handle) const;
+    void set_external_vision_binding(std::uintptr_t actor_handle, ExternalVisionBindingDevice binding);
+    void clear_external_vision_binding(std::uintptr_t actor_handle);
+    [[nodiscard]] std::optional<ExternalVisionBindingDevice> external_vision_binding(
+        std::uintptr_t actor_handle) const;
+    [[nodiscard]] bool has_external_vision_binding(std::uintptr_t actor_handle) const;
+    void clear_actor_metadata(std::uintptr_t actor_handle);
+
     CameraStorage& camera_storage();
     const CameraStorage& camera_storage() const;
 
@@ -414,6 +438,9 @@ class SharedDataHub {
     AcousticsStorage acoustics_storage_;
     ProfileStorage profile_storage_;
     ActorStorage actor_storage_;
+    mutable std::mutex actor_metadata_mutex_;
+    std::unordered_map<std::uintptr_t, std::string> actor_guids_;
+    std::unordered_map<std::uintptr_t, ExternalVisionBindingDevice> external_vision_bindings_;
     EnvironmentStorage environment_storage_;
     CameraStorage camera_storage_;
     ActorPickStorage actor_pick_storage_;

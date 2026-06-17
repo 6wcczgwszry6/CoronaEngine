@@ -95,8 +95,8 @@ class OpticsSystem : public Kernel::SystemBase {
     void run_vision_frame(float frame_count, uint64_t frame_index);
 
     /// Vision 场景来源：引擎构建（默认，随 SharedDataHub 动态同步）或外部文件。
-    /// 外部文件模式禁用动态几何/灯光同步，但仍使用当前 Corona camera 驱动 viewport。
-    enum class VisionSceneSource { EngineBuilt, ExternalFile };
+    /// ExternalLive 使用外部 Vision pipeline，但有 proxy actor binding 作为后续增量同步入口。
+    enum class VisionSceneSource { EngineBuilt, ExternalFile, ExternalLive };
     VisionSceneSource vision_scene_source_{VisionSceneSource::EngineBuilt};
 
     /// 渲染线程起始处消费：若存在 pending 加载请求则切换 Vision 场景。

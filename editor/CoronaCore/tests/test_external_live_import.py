@@ -10,6 +10,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from plugins.SceneTools import main as scene_tools_module
+from plugins.MainView import main as main_view_module
+from CoronaCore.core.entities.scene import Scene
 
 
 class FakeCamera:
@@ -101,6 +103,35 @@ class FakeScene:
         return False
 
 
+class FakeEngineActor:
+    def __init__(self, handle=4242):
+        self.actor_guid = ""
+        self.external_vision_binding = {}
+        self.handle = handle
+
+    def set_actor_guid(self, actor_guid):
+        self.actor_guid = actor_guid
+
+    def get_handle(self):
+        return self.handle
+
+    def set_external_vision_binding(self, source_path, shape_guid, shape_index,
+                                    json_path, shape_type, shape_identity_key,
+                                    model_path):
+        self.external_vision_binding = {
+            "source_path": source_path,
+            "shape_guid": shape_guid,
+            "shape_index": int(shape_index),
+            "json_path": json_path,
+            "shape_type": shape_type,
+            "shape_identity_key": shape_identity_key,
+            "model_path": model_path,
+        }
+
+    def clear_external_vision_binding(self):
+        self.external_vision_binding = {}
+
+
 class FakeActor:
     def __init__(self, name="", route=None, source_index=0, actor_type="actor",
                  parent_scene=None, actor_data=None):
@@ -114,6 +145,9 @@ class FakeActor:
         self.rotation = geometry.get("rotation", [0.0, 0.0, 0.0])
         self.scale = geometry.get("scale", [1.0, 1.0, 1.0])
         self.physics_enabled = True
+        self.handle = actor_data.get("handle", 4242) if actor_data else 4242
+        self.engine_obj = FakeEngineActor(self.handle)
+        self.engine_obj.set_actor_guid(self.actor_guid)
 
     def set_position(self, position, if_init=False):
         self.position = position
@@ -129,6 +163,22 @@ class FakeActor:
 
     def get_visible(self):
         return True
+
+    def set_external_vision_binding(self, binding):
+        self.external_vision_binding = dict(binding)
+        self.engine_obj.set_external_vision_binding(
+            binding.get("source_path", ""),
+            binding.get("shape_guid", ""),
+            binding.get("shape_index", -1),
+            binding.get("json_path", ""),
+            binding.get("shape_type", ""),
+            binding.get("shape_identity_key", ""),
+            binding.get("model_path", ""),
+        )
+
+    def clear_external_vision_binding(self):
+        self.external_vision_binding = {}
+        self.engine_obj.clear_external_vision_binding()
 
 
 class ExternalLiveImportTests(unittest.TestCase):
@@ -309,6 +359,14 @@ class ExternalLiveImportTests(unittest.TestCase):
             self.assertEqual(scene.vision_bindings[0]["json_path"], "/scene/shapes/0")
             self.assertEqual(scene.vision_bindings[1]["shape_type"], "quad")
             self.assertEqual(scene.vision_bindings[2]["shape_type"], "sphere")
+            self.assertEqual(scene.get_actors()[0].engine_obj.actor_guid,
+                             scene.get_actors()[0].actor_guid)
+            self.assertEqual(scene.get_actors()[0].engine_obj.external_vision_binding["source_path"],
+                             str(vision_scene.resolve()))
+            self.assertEqual(scene.get_actors()[0].engine_obj.external_vision_binding["shape_guid"],
+                             "shape-chair")
+            self.assertEqual(scene.get_actors()[1].engine_obj.external_vision_binding["shape_type"],
+                             "quad")
             self.assertEqual(scene.vision_unsupported_shapes[0]["type"], "cylinder")
             self.assertEqual(scene.vision_unsupported_shapes[0]["reason"],
                              "unsupported_shape_type")
@@ -407,6 +465,10 @@ class ExternalLiveImportTests(unittest.TestCase):
                     binding["shape_guid"]: binding["actor_guid"]
                     for binding in scene.vision_bindings
                 }
+                actors_by_guid = {
+                    actor.actor_guid: actor
+                    for actor in scene.get_actors()
+                }
 
                 vision_scene.write_text(json.dumps({
                     "scene": {
@@ -428,13 +490,15 @@ class ExternalLiveImportTests(unittest.TestCase):
             self.assertEqual(scene.vision_bindings[0]["shape_guid"], "shape-b")
             self.assertEqual(scene.vision_bindings[0]["json_path"], "/scene/shapes/0")
             self.assertEqual(scene.vision_bindings[0]["actor_guid"], guid_by_shape["shape-b"])
+            stale_actor = actors_by_guid[guid_by_shape["shape-a"]]
+            self.assertEqual(stale_actor.engine_obj.external_vision_binding, {})
 
     def test_list_scene_tree_exposes_external_live_status_and_proxy_metadata(self):
         scene = FakeScene()
         scene.vision_source_path = "D:/vision/scene.json"
         scene.vision_import_mode = "external_live"
         actor = FakeActor(name="Chair", route="D:/vision/chair.obj", actor_type="model",
-                          actor_data={"actor_guid": "actor-chair"})
+                          actor_data={"actor_guid": "actor-chair", "handle": 98765})
         scene._actors.append(actor)
         scene.vision_bindings = [{
             "actor_guid": "actor-chair",
@@ -458,8 +522,82 @@ class ExternalLiveImportTests(unittest.TestCase):
         self.assertEqual(result["vision"]["binding_count"], 1)
         self.assertEqual(result["vision"]["unsupported_count"], 1)
         self.assertEqual(result["vision"]["unsupported_by_reason"], {"unsupported_shape_type": 1})
+        self.assertEqual(result["actors"][0]["handle"], 98765)
         self.assertTrue(result["actors"][0]["vision_proxy"])
         self.assertEqual(result["actors"][0]["vision_binding"]["shape_guid"], "shape-chair")
+
+    def test_scene_binding_sync_rehydrates_actor_engine_binding_by_guid(self):
+        scene = SimpleNamespace(
+            _actors=[
+                FakeActor(name="Chair", route="chair.obj", actor_type="model",
+                          actor_data={"actor_guid": "actor-chair"}),
+                FakeActor(name="Table", route="table.obj", actor_type="model",
+                          actor_data={"actor_guid": "actor-table"}),
+            ],
+            vision_import_mode="external_live",
+            vision_bindings=[{
+                "actor_guid": "actor-chair",
+                "source_path": "D:/vision/scene.json",
+                "shape_guid": "shape-chair",
+                "shape_index": "3",
+                "json_path": "/scene/shapes/3",
+                "shape_type": "model",
+                "shape_identity_key": "guid:shape-chair",
+                "model_path": "D:/vision/chair.obj",
+            }],
+        )
+
+        Scene._sync_external_vision_bindings_to_actors(scene)
+
+        chair_binding = scene._actors[0].engine_obj.external_vision_binding
+        self.assertEqual(chair_binding["source_path"], "D:/vision/scene.json")
+        self.assertEqual(chair_binding["shape_guid"], "shape-chair")
+        self.assertEqual(chair_binding["shape_index"], 3)
+        self.assertEqual(scene._actors[1].engine_obj.external_vision_binding, {})
+
+    def test_main_view_restores_external_live_with_standard_vision_loader(self):
+        scene = SimpleNamespace(
+            route="Scene/main.scene",
+            vision_source_path="D:/vision/scene.json",
+            vision_import_mode="external_live",
+            vision_bindings=[{
+                "actor_guid": "actor-chair",
+                "shape_guid": "shape-chair",
+                "json_path": "/scene/shapes/0",
+            }],
+        )
+        legacy_loads = []
+        fake_editor = SimpleNamespace(
+            CoronaEngine=SimpleNamespace(
+                is_vision_available=lambda: True,
+                load_vision_scene=lambda path: legacy_loads.append(path),
+            )
+        )
+
+        with patch.object(main_view_module, "CoronaEditor", fake_editor):
+            main_view_module.MainView._apply_vision_source_for_scene(scene)
+
+        self.assertEqual(legacy_loads, ["D:/vision/scene.json"])
+
+    def test_main_view_keeps_legacy_external_path_only(self):
+        scene = SimpleNamespace(
+            route="Scene/main.scene",
+            vision_source_path="D:/vision/scene.json",
+            vision_import_mode="external",
+            vision_bindings=[{"actor_guid": "actor-chair"}],
+        )
+        legacy_loads = []
+        fake_editor = SimpleNamespace(
+            CoronaEngine=SimpleNamespace(
+                is_vision_available=lambda: True,
+                load_vision_scene=lambda path: legacy_loads.append(path),
+            )
+        )
+
+        with patch.object(main_view_module, "CoronaEditor", fake_editor):
+            main_view_module.MainView._apply_vision_source_for_scene(scene)
+
+        self.assertEqual(legacy_loads, ["D:/vision/scene.json"])
 
 
 if __name__ == "__main__":

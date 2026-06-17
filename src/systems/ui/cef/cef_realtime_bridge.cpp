@@ -894,13 +894,28 @@ bool handle_compute_actor_focus_pose_fast(const CefRefPtr<CefFrame>& frame,
         return fail("actor handle is empty");
     }
 
+    auto& hub = Corona::SharedDataHub::instance();
+    bool actor_found = false;
+    std::size_t profile_count = 0;
+    if (auto actor = hub.actor_storage().try_acquire_read_nowait(actor_handle)) {
+        actor_found = true;
+        profile_count = actor->profile_handles.size();
+    }
+    const bool has_external_vision_binding = hub.has_external_vision_binding(actor_handle);
+
     FocusBounds bounds;
-    for (const auto& source : resolve_actor_focus_geometry_sources(actor_handle)) {
+    const auto focus_sources = resolve_actor_focus_geometry_sources(actor_handle);
+    for (const auto& source : focus_sources) {
         append_geometry_focus_bounds(source, bounds);
     }
 
     if (!bounds.valid) {
-        return fail("actor bounds are unavailable");
+        return fail(
+            "actor bounds are unavailable (handle=" + std::to_string(actor_handle) +
+            ", actor_found=" + (actor_found ? "true" : "false") +
+            ", profiles=" + std::to_string(profile_count) +
+            ", geometry_sources=" + std::to_string(focus_sources.size()) +
+            ", external_vision_binding=" + (has_external_vision_binding ? "true" : "false") + ")");
     }
 
     const ktm::fvec3 center = make_fvec3(
