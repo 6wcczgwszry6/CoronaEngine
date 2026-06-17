@@ -382,6 +382,142 @@ void apply_pending_camera_releases() {
     return out;
 }
 
+bool collect_actor_instances_for_visibility(
+    const Corona::SceneDevice& scene,
+    RasterizerPipeline<visibility_vert_glsl, visibility_frag_glsl>& target_visibility,
+    uint32_t target_vp_descriptor,
+    bool follow_camera_pass,
+    const ktm::fmat4x4* camera_basis,
+    RenderInstanceBatch& batch) {
+    batch.clear();
+
+    auto& hub = Corona::SharedDataHub::instance();
+    auto& actor_storage = hub.actor_storage();
+    auto& profile_storage = hub.profile_storage();
+    auto& optics_storage = hub.optics_storage();
+    auto& geom_storage = hub.geometry_storage();
+    auto& transform_storage = hub.model_transform_storage();
+
+    bool has_instances = false;
+    uint32_t object_id = 1;
+    for (auto actor_handle : scene.actor_handles) {
+        auto actor = actor_storage.try_acquire_read(actor_handle);
+        if (!actor) {
+            ++object_id;
+            continue;
+        }
+
+        if (actor->follow_camera != follow_camera_pass) {
+            ++object_id;
+            continue;
+        }
+
+        for (auto profile_handle : actor->profile_handles) {
+            auto profile = profile_storage.try_acquire_read(profile_handle);
+            if (!profile || profile->optics_handle == 0) continue;
+
+            auto optics_acc = optics_storage.try_acquire_read(profile->optics_handle);
+            if (!optics_acc) continue;
+            const auto& optics = *optics_acc;
+
+            if (!optics.visible) {
+                ++object_id;
+                continue;
+            }
+            // Mesh texture descriptors are non-const, so the geometry storage must be
+            // write-acquired here. Skipping on transient lock contention causes flicker.
+            if (auto geom = geom_storage.try_acquire_write(optics.geometry_handle)) {
+                ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
+                if (auto transform = transform_storage.try_acquire_read(geom->transform_handle)) {
+                    model_matrix = transform->compute_matrix();
+                    if (camera_basis != nullptr) {
+                        model_matrix = multiply_ktm_mat4(*camera_basis, model_matrix);
+                    }
+                }
+
+                for (auto& m : geom->mesh_handles) {
+                    auto material_id = static_cast<uint32_t>(batch.materials.size());
+                    {
+                        Hardware::MaterialInfo mat_info{};
+
+                        const float lighting_enabled = optics.bEnableLighting ? 1.0f : 0.0f;
+                        mat_info.textureDescriptor = m.textureBuffer ? m.textureBuffer.storeDescriptor() : 0;
+
+                        if (optics.bEnableLighting) {
+                            mat_info.metallic = optics.metallic;
+                            mat_info.roughness = optics.roughness;
+                            mat_info.subsurface = optics.subsurface;
+                            mat_info.specular = optics.specular;
+                            mat_info.specularTint = optics.specularTint;
+                            mat_info.anisotropic = optics.anisotropic;
+                            mat_info.sheen = optics.sheen;
+                            mat_info.sheenTint = optics.sheenTint;
+                            mat_info.clearcoat = optics.clearcoat;
+                            mat_info.clearcoatGloss = optics.clearcoatGloss;
+                        } else {
+                            mat_info.metallic = 0.0f;
+                            mat_info.roughness = 1.0f;
+                            mat_info.subsurface = 0.0f;
+                            mat_info.specular = 0.0f;
+                            mat_info.specularTint = 0.0f;
+                            mat_info.anisotropic = 0.0f;
+                            mat_info.sheen = 0.0f;
+                            mat_info.sheenTint = 0.0f;
+                            mat_info.clearcoat = 0.0f;
+                            mat_info.clearcoatGloss = 0.0f;
+                        }
+
+                        mat_info.lightingEnabled = lighting_enabled;
+                        mat_info.materialColor = ktm::fvec4{
+                            m.materialColor[0], m.materialColor[1],
+                            m.materialColor[2], m.materialColor[3]};
+                        batch.materials.push_back(mat_info);
+                    }
+
+                    auto instance_id = static_cast<uint32_t>(batch.instances.size());
+                    {
+                        Hardware::InstanceInfo inst{};
+                        inst.modelMatrix = model_matrix;
+                        inst.vertexBufferIndex =
+                            m.vertexStorageBuffer ? m.vertexStorageBuffer.storeDescriptor() : 0;
+                        inst.indexBufferIndex =
+                            m.indexStorageBuffer ? m.indexStorageBuffer.storeDescriptor() : 0;
+                        inst.materialID = material_id;
+                        inst.objectID = object_id;
+                        batch.instances.push_back(inst);
+                        batch.actorHandles.push_back(actor_handle);
+                        has_instances = true;
+                    }
+
+                    target_visibility.pushConsts.modelMatrix = model_matrix;
+                    target_visibility.pushConsts.uniformBufferIndex = target_vp_descriptor;
+                    target_visibility.pushConsts.instanceID = instance_id + 1;
+                    target_visibility[visibility_frag_glsl::pushConsts::textureIndex] =
+                        m.textureBuffer ? m.textureBuffer.storeDescriptor() : static_cast<uint32_t>(0);
+                    target_visibility.record(m.indexBuffer, m.vertexBuffer);
+                }
+            }
+            ++object_id;
+        }
+    }
+    return has_instances;
+}
+
+void upload_instance_tables(const RenderInstanceBatch& batch,
+                            HardwareBuffer& instance_buffer,
+                            HardwareBuffer& material_buffer) {
+    if (!batch.instances.empty()) {
+        instance_buffer.copyFromData(
+            batch.instances.data(),
+            batch.instances.size() * sizeof(Hardware::InstanceInfo));
+    }
+    if (!batch.materials.empty()) {
+        material_buffer.copyFromData(
+            batch.materials.data(),
+            batch.materials.size() * sizeof(Hardware::MaterialInfo));
+    }
+}
+
 #ifdef CORONA_ENABLE_VISION
 ocarina::SP<vision::Pipeline> renderPipeline;
 vision::Device* visionDevicePtr = nullptr;
@@ -1400,6 +1536,49 @@ void OpticsSystem::complete_actor_pick(const ActorPickRequest& request,
     }
 }
 
+#ifdef CORONA_ENABLE_VISION
+void OpticsSystem::process_vision_actor_pick(std::uintptr_t camera_handle,
+                                             const CameraDevice& camera,
+                                             const SceneDevice& scene,
+                                             uint64_t frame_index) {
+    const auto actor_pick_request = take_pending_actor_pick(camera_handle);
+    if (!actor_pick_request) {
+        return;
+    }
+
+    bind_native_view_resources(camera_handle, camera.width, camera.height, frame_index);
+    auto& visibility = *native_view_resources_.at(camera_handle)->visibility_pipeline;
+
+    hardware_->vpUniformBufferObjects.viewProjMatrix = camera.compute_view_proj_matrix();
+    hardware_->vpUniformBuffer.copyFromData(&hardware_->vpUniformBufferObjects,
+                                            sizeof(hardware_->vpUniformBufferObjects));
+    const uint32_t scene_vp_descriptor = hardware_->vpUniformBuffer.storeDescriptor();
+
+    RenderInstanceBatch scene_batch;
+    collect_actor_instances_for_visibility(scene,
+                                           visibility,
+                                           scene_vp_descriptor,
+                                           false,
+                                           nullptr,
+                                           scene_batch);
+    upload_instance_tables(scene_batch,
+                           hardware_->instanceInfoBuffer,
+                           hardware_->materialTableBuffer);
+
+    auto& actor_pick = *hardware_->actorPickPipeline;
+    actor_pick.pushConsts.pixel = ktm::uvec2{actor_pick_request->x, actor_pick_request->y};
+    actor_pick.pushConsts.visibilityImageIndex = hardware_->visibilityImage.storeDescriptor();
+    actor_pick.pushConsts.outputBufferIndex = hardware_->actorPickBuffer.storeDescriptor();
+
+    hardware_->executor << visibility(hardware_->gbufferSize.x, hardware_->gbufferSize.y)
+                        << actor_pick(1, 1, 1)
+                        << hardware_->executor.commit();
+    hardware_->executor.waitForDeferredResources();
+
+    complete_actor_pick(*actor_pick_request, scene_batch.actorHandles);
+}
+#endif
+
 void OpticsSystem::process_pending_screenshots(std::uintptr_t camera_handle, HardwareImage& render_target) {
     std::vector<PendingScreenshot> matched;
     {
@@ -1986,6 +2165,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
 
             active_contexts.insert(cam_handle);
             retainedVisionContexts.erase(cam_handle);
+            process_vision_actor_pick(cam_handle, *camera, scene, frame_index);
             try {
                 const auto resolution =
                     ocarina::make_uint2(std::max(camera->width, 1u),

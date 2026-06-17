@@ -1103,12 +1103,6 @@ bool handle_viewport_pick(const CefRefPtr<CefFrame>& frame,
         return true;
     }
 
-    if (actor_pick_handle == 0) {
-        CFW_LOG_WARNING("ViewportPick: camera {} has no actor pick storage", camera_handle);
-        emit("error", 0, 0, 0, "actor pick unavailable");
-        return true;
-    }
-
     const double scaled_x = x * cam_w / vp_w;
     const double scaled_y = y * cam_h / vp_h;
     if (scaled_x < 0.0 || scaled_y < 0.0 ||
@@ -1121,6 +1115,12 @@ bool handle_viewport_pick(const CefRefPtr<CefFrame>& frame,
 
     const auto pick_x = static_cast<std::uint32_t>(scaled_x);
     const auto pick_y = static_cast<std::uint32_t>(scaled_y);
+
+    if (actor_pick_handle == 0) {
+        CFW_LOG_WARNING("ViewportPick: camera {} has no actor pick storage", camera_handle);
+        emit("error", 0, pick_x, pick_y, "actor pick unavailable");
+        return true;
+    }
 
     auto pick = hub.actor_pick_storage().try_acquire_write(actor_pick_handle);
     if (!pick) {

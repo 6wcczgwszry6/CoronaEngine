@@ -93,6 +93,10 @@ class OpticsSystem : public Kernel::SystemBase {
     // Vision 相关私有方法（在 CORONA_ENABLE_VISION 宏保护下实现）
     bool init_vision_lazy();  ///< 首次切换到 Vision 时的 lazy 初始化
     void run_vision_frame(float frame_count, uint64_t frame_index);
+    void process_vision_actor_pick(std::uintptr_t camera_handle,
+                                   const CameraDevice& camera,
+                                   const SceneDevice& scene,
+                                   uint64_t frame_index);
 
     /// Vision 场景来源：引擎构建（默认，随 SharedDataHub 动态同步）或外部文件。
     /// ExternalLive 使用外部 Vision pipeline，但有 proxy actor binding 作为后续增量同步入口。
