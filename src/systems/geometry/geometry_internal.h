@@ -99,6 +99,23 @@ struct GeometrySystem::Impl {
     std::vector<Kernel::EventId>                            event_subscriptions;
     Kernel::ISystemContext*                                 ctx = nullptr;
 
+    // ========================================
+    // 动态减面（LOD）相关状态
+    // ========================================
+    struct LODCacheEntry {
+        std::vector<LODMeshBuffers> levels;
+        std::uintptr_t model_resource_handle = 0;  // 用于检测模型变更（slot 复用）
+    };
+
+    MeshSimplificationConfig           simplification_cfg;
+    mutable std::shared_mutex          lod_cache_mutex;
+    std::unordered_map<uint64_t, LODCacheEntry> lod_cache;
+
+    [[nodiscard]] static uint64_t make_lod_key(std::uintptr_t geometry_handle,
+                                               uint32_t       mesh_index) {
+        return (static_cast<uint64_t>(geometry_handle) << 32) | mesh_index;
+    }
+
     SceneState& get_or_create(std::uintptr_t scene) {
         auto [it, inserted] = scenes.try_emplace(scene);
         return it->second;

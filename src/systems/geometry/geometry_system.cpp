@@ -20,6 +20,7 @@
 
 #include <corona/resource/resource.h>
 #include <corona/resource/resource_manager.h>
+#include <corona/resource/types/scene.h>
 
 #include "geometry_internal.h"
 
@@ -80,6 +81,11 @@ void GeometrySystem::update() {
     }
 
     process_async_tasks();
+
+    // ---- 动态减面管线 ----
+    if (impl_->simplification_cfg.enabled) {
+        upload_lod_from_scene_data();
+    }
 
     for (std::uintptr_t scene_handle : scene_handles) {
         const auto scene_begin = std::chrono::steady_clock::now();
@@ -747,6 +753,191 @@ void GeometrySystem::on_unload_requested(const Events::ActorUnloadRequestedEvent
                   e.actor, Utils::path_to_utf8(actor_read->model_path));
     scene_state.unload_retry_counts[e.actor] = 0;
     scene_state.unloading_tasks[e.actor] = Resource::ResourceManager::get_instance().remove_cache_async(rid);
+}
+
+// ============================================================================
+// 动态减面 (Mesh Simplification) 公共 API
+// ============================================================================
+
+void GeometrySystem::set_simplification_config(const MeshSimplificationConfig& cfg) {
+    impl_->simplification_cfg = cfg;
+}
+
+const MeshSimplificationConfig& GeometrySystem::get_simplification_config() const {
+    return impl_->simplification_cfg;
+}
+
+const LODMeshBuffers* GeometrySystem::get_lod_buffers(
+    std::uintptr_t geometry_handle,
+    uint32_t       mesh_index,
+    int            lod_level) const {
+
+    std::shared_lock lock(impl_->lod_cache_mutex);
+    auto key = Impl::make_lod_key(geometry_handle, mesh_index);
+    auto it = impl_->lod_cache.find(key);
+    if (it == impl_->lod_cache.end()) return nullptr;
+    if (lod_level < 0 || static_cast<size_t>(lod_level) >= it->second.levels.size())
+        return nullptr;
+    auto& level = it->second.levels[lod_level];
+    // 降级：如果目标级别未就绪，回退到 LOD 0
+    if (!level.ready && lod_level > 0) {
+        auto& lod0 = it->second.levels[0];
+        return lod0.ready ? &lod0 : nullptr;
+    }
+    return level.ready ? &level : nullptr;
+}
+
+int GeometrySystem::get_lod_count(std::uintptr_t geometry_handle,
+                                  uint32_t       mesh_index) const {
+    std::shared_lock lock(impl_->lod_cache_mutex);
+    auto key = Impl::make_lod_key(geometry_handle, mesh_index);
+    auto it = impl_->lod_cache.find(key);
+    if (it == impl_->lod_cache.end()) return 0;
+    return static_cast<int>(it->second.levels.size());
+}
+
+int GeometrySystem::resolve_lod_level(std::uintptr_t geometry_handle,
+                                      uint32_t       mesh_index,
+                                      float          screen_ratio) const {
+
+    std::shared_lock lock(impl_->lod_cache_mutex);
+    auto key = Impl::make_lod_key(geometry_handle, mesh_index);
+    auto it = impl_->lod_cache.find(key);
+    if (it == impl_->lod_cache.end()) return 0;
+
+    std::vector<float> thresholds;
+    for (size_t i = 1; i < it->second.levels.size(); ++i) {
+        thresholds.push_back(it->second.levels[i].screen_threshold);
+    }
+
+    int selected = select_lod_level(screen_ratio, thresholds);
+
+    // 降级到最近的已就绪级别
+    while (selected > 0) {
+        if (static_cast<size_t>(selected) < it->second.levels.size()
+            && it->second.levels[selected].ready)
+            break;
+        selected--;
+    }
+    return selected;
+}
+
+const LODMeshBuffers* GeometrySystem::resolve_lod_buffers(
+    std::uintptr_t geometry_handle,
+    uint32_t       mesh_index,
+    float          screen_ratio) const {
+
+    std::shared_lock lock(impl_->lod_cache_mutex);
+    auto key = Impl::make_lod_key(geometry_handle, mesh_index);
+    auto it = impl_->lod_cache.find(key);
+    if (it == impl_->lod_cache.end()) return nullptr;
+
+    // 构建阈值列表（LOD 1..N 的 screen_threshold）
+    std::vector<float> thresholds;
+    for (size_t i = 1; i < it->second.levels.size(); ++i) {
+        thresholds.push_back(it->second.levels[i].screen_threshold);
+    }
+
+    int selected = select_lod_level(screen_ratio, thresholds);
+
+    // 降级到最近的已就绪级别
+    while (selected > 0) {
+        if (static_cast<size_t>(selected) < it->second.levels.size()
+            && it->second.levels[selected].ready)
+            break;
+        selected--;
+    }
+
+    // 返回缓冲（与 get_lod_buffers 相同的降级策略）
+    if (selected < 0 || static_cast<size_t>(selected) >= it->second.levels.size())
+        return nullptr;
+
+    auto& level = it->second.levels[selected];
+    if (!level.ready && selected > 0) {
+        auto& lod0 = it->second.levels[0];
+        return lod0.ready ? &lod0 : nullptr;
+    }
+    return level.ready ? &level : nullptr;
+}
+
+// ============================================================================
+// 动态减面内部管线
+// ============================================================================
+
+void GeometrySystem::upload_lod_from_scene_data() {
+    if (!impl_->simplification_cfg.auto_on_load) return;
+
+    auto& resource_manager = Resource::ResourceManager::get_instance();
+    auto& geom_storage = SharedDataHub::instance().geometry_storage();
+
+    for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
+        const GeometryDevice& geom_dev = *it;
+        auto geom_handle = reinterpret_cast<std::uintptr_t>(&geom_dev);
+        if (!geom_dev.model_resource_handle) continue;
+
+        for (uint32_t mesh_idx = 0; mesh_idx < static_cast<uint32_t>(geom_dev.mesh_handles.size()); ++mesh_idx) {
+            uint64_t lod_key = Impl::make_lod_key(geom_handle, mesh_idx);
+
+            // 已有缓存且模型未变更则跳过（model_resource_handle 比较防止 slot 复用）
+            {
+                std::shared_lock lock(impl_->lod_cache_mutex);
+                auto cache_it = impl_->lod_cache.find(lod_key);
+                if (cache_it != impl_->lod_cache.end()
+                    && cache_it->second.model_resource_handle == geom_dev.model_resource_handle)
+                    continue;
+            }
+
+            // 从 ResourceManager 读取 Scene 数据
+            auto scene_read = resource_manager.acquire_read<Resource::Scene>(geom_dev.model_resource_handle);
+            if (!scene_read.valid()) continue;
+
+            auto& scene = *scene_read;
+            if (mesh_idx >= scene.data.meshes.size()) continue;
+
+            auto& mesh = scene.data.meshes[mesh_idx];
+            if (mesh.lod_levels.empty()) continue;
+
+            // 创建缓存条目
+            Impl::LODCacheEntry entry;
+            entry.model_resource_handle = geom_dev.model_resource_handle;
+            auto& mesh_dev = geom_dev.mesh_handles[mesh_idx];
+
+            // LOD 0：复用现有的 GPU 缓冲
+            LODMeshBuffers lod0;
+            lod0.vertex_buffer    = mesh_dev.vertexBuffer;
+            lod0.index_buffer     = mesh_dev.indexBuffer;
+            lod0.vertex_storage   = mesh_dev.vertexStorageBuffer;
+            lod0.index_storage    = mesh_dev.indexStorageBuffer;
+            lod0.error            = 0.0f;
+            lod0.screen_threshold = 1.0f;
+            lod0.ready            = true;
+            entry.levels.push_back(std::move(lod0));
+
+            // LOD 1..N：从导入时 meshoptimizer 生成的数据创建 GPU 缓冲
+            for (size_t lod_idx = 0; lod_idx < mesh.lod_levels.size() && lod_idx < static_cast<size_t>(impl_->simplification_cfg.max_lod_levels - 1); ++lod_idx) {
+                auto& lod_data = mesh.lod_levels[lod_idx];
+                if (lod_data.vertices.empty() || lod_data.indices.empty()) continue;
+
+                LODMeshBuffers lod_buf;
+                // 转换为 uint32 索引（meshopt 输出 uint16，GPU 需要 uint32）
+                std::vector<uint32_t> indices32;
+                indices32.reserve(lod_data.indices.size());
+                for (auto idx : lod_data.indices) indices32.push_back(static_cast<uint32_t>(idx));
+
+                lod_buf.vertex_buffer    = HardwareBuffer(lod_data.vertices, BufferUsage::VertexBuffer);
+                lod_buf.index_buffer     = HardwareBuffer(indices32,        BufferUsage::IndexBuffer);
+                lod_buf.vertex_storage   = HardwareBuffer(lod_data.vertices, BufferUsage::StorageBuffer);
+                lod_buf.index_storage    = HardwareBuffer(indices32,        BufferUsage::StorageBuffer);
+                lod_buf.error            = lod_data.error;
+                lod_buf.screen_threshold = lod_data.screen_threshold;
+                lod_buf.ready            = true;
+                entry.levels.push_back(std::move(lod_buf));
+            }
+
+            std::unique_lock lock(impl_->lod_cache_mutex);
+            impl_->lod_cache.insert_or_assign(lod_key, std::move(entry));
+        }
+    }
 }
 
 }  // namespace Corona::Systems
