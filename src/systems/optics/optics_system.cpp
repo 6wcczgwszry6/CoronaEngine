@@ -18,6 +18,7 @@
 #include <functional>
 #include <system_error>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -106,6 +107,126 @@ struct RenderInstanceBatch {
     }
     return false;
 }
+
+#ifdef CORONA_ENABLE_VISION
+[[nodiscard]] ::vision::float4x4 corona_transform_to_vision_o2w(
+    const Corona::ModelTransform& transform) {
+    const ktm::fmat4x4 corona_mat = transform.compute_matrix();
+    ::vision::float4x4 o2w = ::vision::make_float4x4(1.f);
+    // Corona/Native uses +Z-forward left-handed coordinates. Vision uses
+    // -Z-forward coordinates, so convert object transforms by F * M * F where
+    // F = diag(1, 1, -1, 1), matching the built-in Vision geometry adapter.
+    for (int col = 0; col < 4; ++col) {
+        for (int row = 0; row < 4; ++row) {
+            float value = corona_mat[col][row];
+            if (row == 2) value = -value;
+            if (col == 2) value = -value;
+            o2w[col][row] = value;
+        }
+    }
+    return o2w;
+}
+
+void mix_hash(std::size_t& sig, std::size_t value) {
+    sig ^= value + 0x9e3779b97f4a7c15ULL + (sig << 6) + (sig >> 2);
+}
+
+void mix_hash_float(std::size_t& sig, float value) {
+    std::uint32_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value), "float must be 32-bit");
+    std::memcpy(&bits, &value, sizeof(bits));
+    mix_hash(sig, static_cast<std::size_t>(bits));
+}
+
+[[nodiscard]] std::size_t external_live_transform_signature(
+    const Corona::ModelTransform& transform,
+    int shape_index) {
+    std::size_t sig = 0;
+    mix_hash(sig, static_cast<std::size_t>(shape_index));
+    mix_hash_float(sig, transform.position.x);
+    mix_hash_float(sig, transform.position.y);
+    mix_hash_float(sig, transform.position.z);
+    mix_hash_float(sig, transform.euler_rotation.x);
+    mix_hash_float(sig, transform.euler_rotation.y);
+    mix_hash_float(sig, transform.euler_rotation.z);
+    mix_hash_float(sig, transform.scale.x);
+    mix_hash_float(sig, transform.scale.y);
+    mix_hash_float(sig, transform.scale.z);
+    return sig;
+}
+
+[[nodiscard]] int external_live_shape_index(const Corona::ExternalVisionBindingDevice& binding) {
+    if (binding.shape_index >= 0) {
+        return binding.shape_index;
+    }
+
+    constexpr std::string_view prefix = "/scene/shapes/";
+    if (binding.json_path.rfind(prefix, 0) != 0) {
+        return -1;
+    }
+    try {
+        return std::stoi(binding.json_path.substr(prefix.size()));
+    } catch (...) {
+        return -1;
+    }
+}
+
+struct ExternalLiveResolvedTransform {
+    int shape_index{-1};
+    std::size_t signature{0};
+    ::vision::float4x4 o2w{};
+};
+
+[[nodiscard]] std::optional<ExternalLiveResolvedTransform> resolve_external_live_transform(
+    std::uintptr_t actor_handle,
+    const Corona::ExternalVisionBindingDevice& binding) {
+    const int shape_index = external_live_shape_index(binding);
+    if (actor_handle == 0 || shape_index < 0) {
+        return std::nullopt;
+    }
+
+    auto& hub = Corona::SharedDataHub::instance();
+    auto actor = hub.actor_storage().try_acquire_read(actor_handle);
+    if (!actor) {
+        return std::nullopt;
+    }
+
+    for (auto profile_handle : actor->profile_handles) {
+        auto profile = hub.profile_storage().try_acquire_read(profile_handle);
+        if (!profile) {
+            continue;
+        }
+
+        std::uintptr_t geometry_handle = profile->geometry_handle;
+        if (geometry_handle == 0 && profile->optics_handle != 0) {
+            if (auto optics = hub.optics_storage().try_acquire_read(profile->optics_handle)) {
+                geometry_handle = optics->geometry_handle;
+            }
+        }
+        if (geometry_handle == 0) {
+            continue;
+        }
+
+        auto geometry = hub.geometry_storage().try_acquire_read(geometry_handle);
+        if (!geometry || geometry->transform_handle == 0) {
+            continue;
+        }
+
+        auto transform = hub.model_transform_storage().try_acquire_read(geometry->transform_handle);
+        if (!transform) {
+            continue;
+        }
+
+        ExternalLiveResolvedTransform result;
+        result.shape_index = shape_index;
+        result.signature = external_live_transform_signature(*transform, shape_index);
+        result.o2w = corona_transform_to_vision_o2w(*transform);
+        return result;
+    }
+
+    return std::nullopt;
+}
+#endif
 
 void apply_pending_camera_moves() {
     auto& hub = Corona::SharedDataHub::instance();
@@ -1604,6 +1725,97 @@ void OpticsSystem::sync_vision_dynamic_scene() {
     }
 }
 
+void OpticsSystem::sync_external_live_vision_transforms() {
+    if (!vision_initialized_ || !renderPipeline || current_vision_scene_path_.empty()) {
+        return;
+    }
+
+    const auto current_scene_key = normalize_scene_path_key(current_vision_scene_path_);
+    if (current_scene_key.empty()) {
+        return;
+    }
+
+    auto& hub = SharedDataHub::instance();
+    auto& vision_scene = renderPipeline->scene();
+    auto& groups = vision_scene.groups();
+
+    bool changed = false;
+    std::size_t updated_actors = 0;
+    std::unordered_set<std::uintptr_t> active_bound_actors;
+
+    for (auto scene_it = hub.scene_storage().cbegin(); scene_it != hub.scene_storage().cend(); ++scene_it) {
+        const auto& scene_dev = *scene_it;
+        if (!scene_dev.enabled) {
+            continue;
+        }
+
+        for (auto actor_handle : scene_dev.actor_handles) {
+            const auto binding = hub.external_vision_binding(actor_handle);
+            if (!binding) {
+                continue;
+            }
+            if (normalize_scene_path_key(binding->source_path) != current_scene_key) {
+                continue;
+            }
+
+            const auto resolved = resolve_external_live_transform(actor_handle, *binding);
+            if (!resolved) {
+                continue;
+            }
+
+            active_bound_actors.insert(actor_handle);
+            const auto cached = external_live_transform_signatures_.find(actor_handle);
+            if (cached != external_live_transform_signatures_.end() &&
+                cached->second == resolved->signature) {
+                continue;
+            }
+
+            const auto group_index = static_cast<std::size_t>(resolved->shape_index);
+            if (group_index >= groups.size() || !groups[group_index]) {
+                continue;
+            }
+
+            auto& group = groups[group_index];
+            group->aabb = ::vision::Box3f{};
+            group->for_each([&](::vision::SP<::vision::ShapeInstance> instance, uint) {
+                if (!instance) {
+                    return;
+                }
+                instance->set_o2w(resolved->o2w);
+                instance->init_aabb();
+                group->aabb.extend(instance->aabb);
+            });
+
+            external_live_transform_signatures_[actor_handle] = resolved->signature;
+            changed = true;
+            ++updated_actors;
+        }
+    }
+
+    for (auto it = external_live_transform_signatures_.begin();
+         it != external_live_transform_signatures_.end();) {
+        if (active_bound_actors.contains(it->first)) {
+            ++it;
+        } else {
+            it = external_live_transform_signatures_.erase(it);
+        }
+    }
+
+    if (!changed) {
+        return;
+    }
+
+    try {
+        renderPipeline->activate_view_context(0u);
+        renderPipeline->update_geometry();
+        renderPipeline->invalidate_all_view_contexts();
+        CFW_LOG_DEBUG("OpticsSystem: external_live updated {} proxy actor transform(s)",
+                      updated_actors);
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("OpticsSystem: external_live transform sync failed: {}", e.what());
+    }
+}
+
 bool OpticsSystem::init_vision_lazy() {
     if (vision_initialized_) return true;
     try {
@@ -1626,6 +1838,8 @@ bool OpticsSystem::init_vision_lazy() {
         }
         vision_initialized_ = true;
         vision_scene_source_ = VisionSceneSource::ExternalFile;
+        current_vision_scene_path_ = kVisionDemoScenePath;
+        external_live_transform_signatures_.clear();
         return true;
 #else
         std::optional<std::string> pending_external_scene;
@@ -1712,6 +1926,8 @@ bool OpticsSystem::init_vision_lazy() {
         }
 
         vision_initialized_ = true;
+        current_vision_scene_path_.clear();
+        external_live_transform_signatures_.clear();
 
         // Establish the dynamic-scene signature baseline so subsequent edits are
         // detected as changes against the initially-built scene.
@@ -1749,6 +1965,9 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
     }
     if (has_visible_vision_camera && vision_scene_source_ == VisionSceneSource::EngineBuilt) {
         sync_vision_dynamic_scene();
+    } else if (has_visible_vision_camera &&
+               vision_scene_source_ == VisionSceneSource::ExternalLive) {
+        sync_external_live_vision_transforms();
     }
 #endif
 
@@ -1965,6 +2184,8 @@ void OpticsSystem::apply_pending_vision_scene_load() {
         retainedVisionContexts.clear();
         renderPipeline = std::move(pipeline);
         vision_scene_source_ = VisionSceneSource::EngineBuilt;
+        current_vision_scene_path_.clear();
+        external_live_transform_signatures_.clear();
         vision_applied_signature_ = compute_vision_scene_signature();
         vision_pending_signature_ = vision_applied_signature_;
         vision_stable_frames_ = 0;
@@ -1992,6 +2213,8 @@ bool OpticsSystem::load_external_vision_scene(const std::string& scene_path) {
         vision_zero_copy_bridges_.clear();
         retainedVisionContexts.clear();
         renderPipeline = std::move(pipeline);
+        current_vision_scene_path_ = scene_path;
+        external_live_transform_signatures_.clear();
         return true;
     } catch (const std::exception& e) {
         CFW_LOG_ERROR("OpticsSystem: External Vision scene import threw: {}", e.what());
