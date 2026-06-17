@@ -156,6 +156,7 @@ def test_adapter():
         MasterAgent, SummaryAgent, PersonaRouter, Specialist,
         create_master_agent, create_summary_agent,
         is_scene_command, is_builtin_command, SPECIALISTS, _GENERALIST,
+        _extract_cai_text_chunk,
     )
     _assert(is_scene_command("加个台灯"), "detect add"); _assert(is_scene_command("把沙发删掉"), "detect delete")
     _assert(is_scene_command("把台灯往右移"), "detect move"); _assert(not is_scene_command("你好"), "skip hello")
@@ -169,6 +170,11 @@ def test_adapter():
     spec = SPECIALISTS["cyberpunk"]
     prompt = spec.inject_prompt("test"); _assert("赛博朋克" in prompt and "neon glass" in prompt, "inject")
     _assert(len(_GENERALIST.capabilities) >= 5, "generalist caps")
+    cai_chunk = (
+        '{"session_id":"s","error_code":0,"status_info":"ok",'
+        '"llm_content":[{"part":[{"content_type":"text","content_text":"真实回复"}]}]}'
+    )
+    _assert(_extract_cai_text_chunk(cai_chunk) == "真实回复", "extract CAI envelope text")
     m = MasterAgent(fallback_chat=lambda s, m: "fake")
     _assert("场景设计大师" in m._handle_help(""), "help gen")
     _assert("灯光师" in m._handle_help("灯光专家"), "help spec")

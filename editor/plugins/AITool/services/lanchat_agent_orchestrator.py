@@ -34,6 +34,7 @@ class LanChatAgentOrchestrator:
     _CONFIRM_WORDS = ("确认", "同意", "按方案", "执行", "可以")
     _REJECT_WORDS = ("拒绝", "取消", "不要", "暂停")
     _MAJOR_ACTION_WORDS = ("删除", "重置", "清空", "整体", "主题", "大件", "核心家具")
+    _PROPOSAL_ID_PATTERN = re.compile(r"\bgm-\d+\b", re.I)
 
     def __init__(
         self,
@@ -49,6 +50,7 @@ class LanChatAgentOrchestrator:
         self._agent: Any = None
         self._pending_proposal: dict[str, Any] | None = None
         self._last_confirmed_action: dict[str, Any] | None = None
+        self._processed_proposals: dict[str, str] = {}
         self._logger = logging.getLogger(__name__)
 
     @property
@@ -60,7 +62,7 @@ class LanChatAgentOrchestrator:
         state = self._summary_service.monitor(history)
         text = str(trigger.get("text") or "")
 
-        confirmation = self._consume_confirmation(text)
+        confirmation = self._consume_confirmation(text, trigger)
         if confirmation is not None:
             return AgentOrchestrationResult(
                 text=confirmation,
@@ -99,7 +101,9 @@ class LanChatAgentOrchestrator:
             return True
         if any(word in text for word in self._CONFLICT_WORDS):
             return True
-        if any(word in text for word in self._MAJOR_ACTION_WORDS):
+        # 单人/无冲突的明确增删改移应回到普通 agentic 工具通道，避免
+        # GM 只发 proposal 但没有执行队列时吞掉用户操作。多人重大操作仍需 GM。
+        if any(word in text for word in self._MAJOR_ACTION_WORDS) and self._is_multi_user(trigger):
             return True
         return False
 
@@ -131,24 +135,52 @@ class LanChatAgentOrchestrator:
             f"待处理意图：{self._join_lines(pending)}\n"
             f"潜在冲突：{self._join_lines(conflicts)}\n"
             "建议：先保留最近用户明确操作，Agent 物体让位；涉及删除、重置或覆盖多人意见时由房主确认。\n"
-            "房主可回复：确认 / 拒绝 / 按方案A。"
+            f"房主可回复：@GM 确认 {proposal_id} / @GM 拒绝 {proposal_id}。"
         )
 
-    def _consume_confirmation(self, text: str) -> str | None:
+    def _consume_confirmation(self, text: str, trigger: dict[str, Any] | None = None) -> str | None:
+        self._last_confirmed_action = None
+        is_confirm = any(word in text for word in self._CONFIRM_WORDS)
+        is_reject = any(word in text for word in self._REJECT_WORDS)
+        if not is_confirm and not is_reject:
+            return None
+        mentioned_ids = {match.group(0).lower() for match in self._PROPOSAL_ID_PATTERN.finditer(text)}
+        processed_matches = [
+            item for item in sorted(mentioned_ids)
+            if item in self._processed_proposals
+        ]
+        if processed_matches:
+            replay_id = processed_matches[0]
+            status = self._processed_proposals[replay_id]
+            return f"【GM】提案 {replay_id} 已处理（{status}），不会重复入队。"
         if self._pending_proposal is None:
             return None
-        if any(word in text for word in self._CONFIRM_WORDS):
-            pid = self._pending_proposal.get("proposal_id", "")
+        pid = str(self._pending_proposal.get("proposal_id") or "")
+        if mentioned_ids and pid.lower() not in mentioned_ids:
+            for item in mentioned_ids:
+                self._processed_proposals.setdefault(item, "mismatched")
+            return f"【GM】确认编号不匹配，当前待确认提案是 {pid}。请回复：@GM 确认 {pid} 或 @GM 拒绝 {pid}。"
+        host_check = self._trusted_host_confirmation(trigger or {})
+        if host_check is False:
+            return f"【GM】只有房主可以确认 {pid}；该请求没有进入 host 执行队列。"
+        if is_confirm:
             self._last_confirmed_action = dict(self._pending_proposal)
             self._last_confirmed_action["status"] = "confirmed"
+            if not mentioned_ids:
+                self._last_confirmed_action["confirmation_mode"] = "bare_text_fallback"
+            elif host_check is None:
+                self._last_confirmed_action["confirmation_mode"] = "proposal_id_without_verified_host"
+            else:
+                self._last_confirmed_action["confirmation_mode"] = "verified_host"
             self._last_confirmed_action["requires_host_confirm"] = False
             self._pending_proposal = None
+            self._processed_proposals[pid.lower()] = "confirmed"
             return f"【GM】已确认 {pid}，后续由 host 单写者执行；执行时保留真实 source_user_id。"
-        if any(word in text for word in self._REJECT_WORDS):
-            pid = self._pending_proposal.get("proposal_id", "")
+        if is_reject:
             self._last_confirmed_action = dict(self._pending_proposal)
             self._last_confirmed_action["status"] = "rejected"
             self._pending_proposal = None
+            self._processed_proposals[pid.lower()] = "rejected"
             return f"【GM】已取消 {pid}，不会执行该提案。"
         return None
 
@@ -156,6 +188,14 @@ class LanChatAgentOrchestrator:
         agent = self._get_agent()
         persona = str(trigger.get("persona") or "")
         messages = self._messages_from_trigger(trigger)
+        agent_name = str(trigger.get("agent_name") or "Agent")
+        latest = str(trigger.get("text") or "")
+        messages = [
+            "【当前点名上下文】\n"
+            f"本轮明确被 @ 的 AI 助手是：{agent_name}。\n"
+            f"最新用户消息是发给你的：{latest}\n"
+            "请以该助手身份回应，不要因为历史中出现其他 @对象 而拒绝执行或越位判断。"
+        ] + messages
         context = state.to_prompt_context()
         if context:
             messages = [f"【静默监听摘要】\n{context}"] + messages
@@ -201,6 +241,40 @@ class LanChatAgentOrchestrator:
             if len(unique) >= 2:
                 conflicts.append(f"{key}: " + " / ".join(unique[:3]))
         return conflicts
+
+    @staticmethod
+    def _is_multi_user(trigger: dict[str, Any]) -> bool:
+        speakers: set[str] = set()
+        sender = str(trigger.get("sender_id") or trigger.get("sender_name") or "")
+        sender_name = str(trigger.get("sender_name") or "")
+        if sender:
+            speakers.add(sender)
+        for item in LanChatAgentOrchestrator._history_from_trigger(trigger):
+            speaker = str(
+                item.get("sender_id")
+                or item.get("from")
+                or item.get("sender_name")
+                or ""
+            )
+            if speaker and sender_name and speaker == sender_name and sender:
+                speaker = sender
+            if speaker:
+                speakers.add(speaker)
+        return len(speakers) >= 2
+
+    @staticmethod
+    def _trusted_host_confirmation(trigger: dict[str, Any]) -> bool | None:
+        """Return True/False only when trigger carries an explicit room role."""
+        for key in ("sender_role", "room_role", "role"):
+            if key not in trigger:
+                continue
+            role = str(trigger.get(key) or "").strip().lower()
+            if role:
+                return role in {"host", "owner", "room_host", "房主"}
+        for key in ("is_host", "is_room_host", "sender_is_host"):
+            if key in trigger:
+                return bool(trigger.get(key))
+        return None
 
     @staticmethod
     def _join_lines(items: list[str]) -> str:

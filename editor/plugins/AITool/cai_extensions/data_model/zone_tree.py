@@ -17,9 +17,10 @@ PHASE_ORDER = ["GROUND", "SHELL", "INTERIOR", "BOUNDARY", "OBJECTS", "DECORATION
 
 CAPABILITY_MANIFEST = {
     "ground_profile": "flat / rolling / dunes / noise 等地形起伏",
-    "ground_cover": "grass / sand / snow / stone 等地表覆盖",
+    "ground_cover": "grass / flowers / rocks / shrubs / debris / paving_marks 等地表散布",
     "boundary": "fence / wall / hedge 等边界物",
     "interior_surface": "floor / wall / ceiling / openings 内皮",
+    "foundation_surface": "主建筑外部基座 / 铺装垫层",
     "entrance": "door / curtain / archway 入口",
     "shell_dressing": "建筑外壳和附属外观件",
 }
@@ -29,7 +30,9 @@ GENERATOR_MANIFEST = {
         "phase": "GROUND",
         "effective_params": [
             "type", "amplitude", "frequency", "seed",
-            "material", "extent_factor",
+            "material", "secondary_material", "extent_factor",
+            "min_extent", "max_extent", "padding", "openness",
+            "detail_pattern", "detail_strength",
         ],
     },
     "shell_dressing": {
@@ -43,7 +46,18 @@ GENERATOR_MANIFEST = {
     "interior_surface": {
         "phase": "INTERIOR",
         "depends_on": ["shell_dressing"],
-        "effective_params": ["floor_material", "floor_shape"],
+        "effective_params": [
+            "floor_material", "floor_shape", "wall_material",
+            "ceiling_material", "accent_material", "detail_pattern",
+        ],
+    },
+    "foundation_surface": {
+        "phase": "INTERIOR",
+        "depends_on": ["shell_dressing"],
+        "effective_params": [
+            "material", "shape", "padding", "height_offset",
+            "follow_shell_footprint",
+        ],
     },
     "boundary": {
         "phase": "BOUNDARY",

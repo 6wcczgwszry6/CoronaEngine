@@ -14,14 +14,22 @@ from cai_extensions.agent.scene_composer import (  # noqa: E402
     _build_fence_obj,
     _build_floor_obj,
     _build_disc_obj,
+    _build_grass_obj,
+    _build_room_box_obj,
     _build_terrain_mesh_obj,
+    _derive_room_skin_materials,
+    _room_box_mtl_text,
     _has_aspect,
     _normalize_aspect_dict,
     _shell_generation_hint,
     _select_interior_floor_shape,
+    _resolve_terrain_extent,
+    _scatter_mtl_text,
     _surface_mtl_text,
     _terrain_mtl_text,
     _terrain_profile_from_spec,
+    _looks_same_scene_asset,
+    _ZONE_DECOMPOSE_SYSTEM_PROMPT,
     normalize_zone_aspects,
     resolve_zone_anchor,
 )
@@ -55,6 +63,7 @@ def test_manifest_shape_and_phase_order():
         "ground_cover",
         "boundary",
         "interior_surface",
+        "foundation_surface",
         "entrance",
         "shell_dressing",
     }
@@ -63,10 +72,26 @@ def test_manifest_shape_and_phase_order():
     assert "radius" in GENERATOR_MANIFEST["boundary"]["effective_params"]
     assert "margin" in GENERATOR_MANIFEST["boundary"]["effective_params"]
     assert "floor_shape" in GENERATOR_MANIFEST["interior_surface"]["effective_params"]
+    assert "wall_material" in GENERATOR_MANIFEST["interior_surface"]["effective_params"]
+    assert "ceiling_material" in GENERATOR_MANIFEST["interior_surface"]["effective_params"]
+    assert "extent_factor" in GENERATOR_MANIFEST["ground_profile"]["effective_params"]
+    assert "foundation_surface" in GENERATOR_MANIFEST
+    assert "padding" in GENERATOR_MANIFEST["foundation_surface"]["effective_params"]
     assert "unsupported" not in CAPABILITY_MANIFEST
     assert SESSION_PHASE_ORDER == ["GROUND", "SHELL", "INTERIOR", "BOUNDARY", "OBJECTS", "DECORATION"]
     assert ZONE_PHASE_ORDER == SESSION_PHASE_ORDER
     print("[OK] manifest shape and PHASE_ORDER remain correct")
+
+
+def test_decompose_prompt_keeps_role_bias_soft_and_cover_semantics_clear():
+    assert '"kind": "none|grass|flowers|rocks|shrubs|debris|paving_marks"' in _ZONE_DECOMPOSE_SYSTEM_PROMPT
+    assert '"capability": "foundation_surface"' in _ZONE_DECOMPOSE_SYSTEM_PROMPT
+    assert "detail_pattern/detail_strength" in _ZONE_DECOMPOSE_SYSTEM_PROMPT
+    assert '"kind": "grass|snow|sand|stone|none"' not in _ZONE_DECOMPOSE_SYSTEM_PROMPT
+    assert "RoleAgent 软偏好" in _ZONE_DECOMPOSE_SYSTEM_PROMPT
+    assert "不是用户新增物体清单" in _ZONE_DECOMPOSE_SYSTEM_PROMPT
+    assert "stone/marble/slate/pavement/tile/concrete" in _ZONE_DECOMPOSE_SYSTEM_PROMPT
+    print("[OK] decompose prompt keeps role bias soft and ground_cover semantics clear")
 
 
 def test_unknown_capability_is_unsupported():
@@ -126,6 +151,7 @@ def test_ground_cover_and_boundary_are_opt_in():
     z.terrain_profile = TerrainProfile()
     normalize_zone_aspects(z)
     assert _has_aspect(z, "ground_profile")
+    assert _aspect_params(z, "ground_profile")["extent_factor"] == 3.0
     assert not _has_aspect(z, "ground_cover")
     assert not _has_aspect(z, "boundary")
 
@@ -133,6 +159,32 @@ def test_ground_cover_and_boundary_are_opt_in():
     normalize_zone_aspects(with_cover)
     assert _has_aspect(with_cover, "ground_cover")
     print("[OK] ground_cover/boundary only generate when declared")
+
+
+def test_surface_material_ground_cover_is_sanitized():
+    z = _zone(raw_aspects=[
+        {"capability": "ground_cover", "params": {"kind": "stone", "density": 1.0}},
+    ])
+    z.terrain_profile = TerrainProfile(type="flat", material="neutral", scatter="none")
+    normalize_zone_aspects(z)
+    profile = _aspect_params(z, "ground_profile")
+    assert profile["material"] == "stone"
+    assert not _has_aspect(z, "ground_cover")
+
+    flower_zone = _zone(raw_aspects=[
+        {"capability": "ground_cover", "params": {"kind": "flowers", "density": 1.0}},
+    ])
+    normalize_zone_aspects(flower_zone)
+    assert _has_aspect(flower_zone, "ground_cover")
+    print("[OK] paved surface materials are not treated as scatter ground_cover")
+
+
+def test_shell_asset_name_dedupe_matcher_is_conservative():
+    assert _looks_same_scene_asset("欧式教堂", "教堂")
+    assert _looks_same_scene_asset("yurt shell", "yurt")
+    assert not _looks_same_scene_asset("喷泉", "欧式教堂")
+    assert not _looks_same_scene_asset("灯", "教堂")
+    print("[OK] shell duplicate matcher catches main building aliases only")
 
 
 def test_boundary_params_drive_kind_material_and_height():
@@ -339,12 +391,154 @@ def test_material_is_written_into_terrain_obj():
     print("[OK] terrain OBJ/MTL uses explicit profile material")
 
 
+def test_terrain_extent_is_param_driven_without_grassland_default():
+    width, depth, meta = _resolve_terrain_extent(
+        18.0, 16.0, 6.0,
+        {"extent_factor": 3.0, "padding": 2.0, "min_extent": 24.0, "max_extent": 32.0},
+    )
+    assert width == 24.0
+    assert depth == 24.0
+    assert meta["extent_factor"] == 3.0
+
+    width2, depth2, _ = _resolve_terrain_extent(
+        30.0, 28.0, 8.0,
+        {"extent_factor": 6.0, "padding": 0.0, "max_extent": 36.0},
+    )
+    assert width2 == 36.0
+    assert depth2 == 36.0
+    print("[OK] terrain extent follows params and does not force 40m grassland default")
+
+
+def test_terrain_detail_and_scatter_are_param_driven():
+    p = TerrainProfile(type="flat", material="marble", scatter="paving_marks")
+    setattr(p, "secondary_material", "slate")
+    setattr(p, "detail_pattern", "paving_grid")
+    setattr(p, "detail_strength", 1.0)
+    obj = _build_terrain_mesh_obj(10.0, 10.0, p, 0.0, grid=4,
+                                  mtl_lib="terrain_style.mtl", mtl_name="terrain")
+    mtl = _terrain_mtl_text("marble", "slate")
+    scatter = _build_grass_obj(10.0, 10.0, p, 0.0, count=8, scatter="paving_marks")
+    assert "usemtl terrain_detail" in obj
+    assert "newmtl terrain_detail" in mtl
+    assert "Kd 0.34 0.36 0.38" in mtl
+    assert "# ground scatter kind=paving_marks" in scatter
+    assert "Kd 0.62 0.60 0.54" in _scatter_mtl_text("paving_marks", "marble")
+    print("[OK] terrain detail pattern and non-grass scatter are param driven")
+
+
+def test_room_box_open_face_modes():
+    default_box = _build_room_box_obj(5.0, 3.0, 4.0)
+    assert "# 5 faces: open front" in default_box
+    assert default_box.count("\nf ") == 5
+    assert "usemtl floor" in default_box
+    assert "usemtl wall" in default_box
+    assert "usemtl ceiling" in default_box
+    assert "front wall as frame around door hole" not in default_box
+    assert "f 5//1 8//1 7//1 6//1" not in default_box
+
+    closed_box = _build_room_box_obj(5.0, 3.0, 4.0, open_face="none")
+    assert "# 6 faces" in closed_box
+    assert closed_box.count("\nf ") == 6
+    assert "f 5//1 8//1 7//1 6//1" in closed_box
+
+    door_box = _build_room_box_obj(5.0, 3.0, 4.0, door={"width": 1.0, "height": 2.0},
+                                   open_face="none")
+    assert "front wall as frame around door hole" in door_box
+    assert door_box.count("\nf ") == 8
+
+    display_box = _build_room_box_obj(5.0, 3.0, 4.0, open_face="front_and_ceiling")
+    assert "# 4 faces: open front" in display_box
+    assert display_box.count("\nf ") == 4
+    assert "f 4//6 3//6 7//6 8//6" not in display_box
+    print("[OK] room box open-face modes support 5-face default and 6-face fallback")
+
+
+def test_room_box_skin_materials_are_param_driven():
+    mtl = _room_box_mtl_text(
+        floor_material="wood",
+        wall_material="wallpaper",
+        ceiling_material="plaster",
+        accent_material="stone",
+    )
+    assert "newmtl floor" in mtl
+    assert "Kd 0.50 0.32 0.16" in mtl
+    assert "newmtl wall" in mtl
+    assert "Kd 0.68 0.60 0.52" in mtl
+    assert "newmtl ceiling" in mtl
+    assert "Kd 0.76 0.72 0.64" in mtl
+    assert "newmtl accent" in mtl
+    assert "Kd 0.50 0.50 0.46" in mtl
+    print("[OK] room box floor/wall/ceiling skin materials are aspect-param driven")
+
+
+def test_room_box_skin_is_derived_from_open_material_context():
+    skin = _derive_room_skin_materials(
+        {},
+        {"material_palette": ["warm wood", "fabric panels"]},
+    )
+    assert skin["floor_material"] == "wood"
+    assert skin["wall_material"] == "fabric"
+    assert skin["ceiling_material"] == "fabric"
+
+    floor_only = _derive_room_skin_materials({"floor_material": "marble"}, {})
+    assert floor_only["floor_material"] == "marble"
+    assert floor_only["wall_material"] == "plaster"
+    assert floor_only["ceiling_material"] == "plaster"
+
+    explicit = _derive_room_skin_materials(
+        {"floor_material": "wood", "wall_material": "wallpaper"},
+        {"material_palette": ["stone"]},
+    )
+    assert explicit["floor_material"] == "wood"
+    assert explicit["wall_material"] == "wallpaper"
+    assert explicit["ceiling_material"] == "plaster"
+    print("[OK] room box skin derives missing surfaces from material context")
+
+
+def test_single_box_decompose_preserves_interior_surface_for_room_skin():
+    from cai_extensions.agent.scene_composer import SceneComposer  # noqa: E402
+
+    specs = [{
+        "id": "room",
+        "name": "商人卧室",
+        "role": "indoor",
+        "enclosure": "box",
+        "size": [5.0, 4.0, 3.0],
+        "parent": None,
+        "has_door": False,
+        "aspects": [{
+            "capability": "interior_surface",
+            "params": {
+                "floor_material": "wood",
+                "wall_material": "wallpaper",
+                "ceiling_material": "plaster",
+            },
+        }],
+    }]
+    composer = SceneComposer(scene_name="skin_fallback")
+    tree = composer._build_zone_tree(specs)
+    assert tree is not None
+    # Mirror decompose_zone_tree's single-box fallback behavior without an LLM.
+    zones = tree.list_all_zones()
+    composer._fallback_room_aspects = list(zones[0].metadata.get("raw_aspects") or [])
+    composer._fallback_room_style_context = dict(getattr(zones[0], "style_context", {}) or {})
+    zone = composer._get_room_zone()
+    params = _aspect_params(zone, "interior_surface")
+    assert params["floor_material"] == "wood"
+    assert params["wall_material"] == "wallpaper"
+    assert params["ceiling_material"] == "plaster"
+    print("[OK] single-box fallback preserves interior_surface for room skin")
+
+
 if __name__ == "__main__":
     test_manifest_shape_and_phase_order()
+    test_decompose_prompt_keeps_role_bias_soft_and_cover_semantics_clear()
     test_unknown_capability_is_unsupported()
     test_explicit_aspects_win_over_legacy_profile()
     test_fire_observatory_has_neutral_default_without_keyword_inference()
     test_ground_cover_and_boundary_are_opt_in()
+    test_surface_material_ground_cover_is_sanitized()
+    test_shell_asset_name_dedupe_matcher_is_conservative()
     test_boundary_params_drive_kind_material_and_height()
     test_resolve_zone_anchor_preserves_shell_path()
     test_resolve_zone_anchor_supports_platform_and_pure_outdoor_volume()
@@ -353,4 +547,10 @@ if __name__ == "__main__":
     test_entrance_and_interior_surface_are_aspect_driven()
     test_interior_floor_shape_is_aspect_driven_with_geometry_fallback()
     test_material_is_written_into_terrain_obj()
+    test_terrain_extent_is_param_driven_without_grassland_default()
+    test_terrain_detail_and_scatter_are_param_driven()
+    test_room_box_open_face_modes()
+    test_room_box_skin_materials_are_param_driven()
+    test_room_box_skin_is_derived_from_open_material_context()
+    test_single_box_decompose_preserves_interior_surface_for_room_skin()
     print("\n=== zone aspect / terrain profile ALL PASS ===")

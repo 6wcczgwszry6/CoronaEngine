@@ -203,11 +203,29 @@ void LanChatState::enqueue_agent_triggers_for_message(const LanChatMessage& mess
         return;
     }
 
+    std::vector<const LanChatAgent*> local_agents;
+    local_agents.reserve(agents_.size());
     for (const auto& agent : agents_) {
         if (agent.owner_id != local_peer_id || agent.agent_id == message.sender_id) {
             continue;
         }
-        if (!mentions_agent(message.text, agent.name)) {
+        local_agents.push_back(&agent);
+    }
+
+    bool mentioned_any_local_agent = false;
+    for (const auto* agent : local_agents) {
+        if (mentions_agent(message.text, agent->name)) {
+            mentioned_any_local_agent = true;
+            break;
+        }
+    }
+
+    for (const auto* agent_ptr : local_agents) {
+        const auto& agent = *agent_ptr;
+        const bool mentioned = mentions_agent(message.text, agent.name);
+        const bool implicit_single_agent =
+            !mentioned_any_local_agent && local_agents.size() == 1;
+        if (!mentioned && !implicit_single_agent) {
             continue;
         }
 

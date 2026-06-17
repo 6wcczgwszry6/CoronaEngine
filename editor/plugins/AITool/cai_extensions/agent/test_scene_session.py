@@ -144,7 +144,9 @@ def test_progress_sink_and_report_text_are_observable():
     )
     report = session.final_review({"table": True}, protection_fn=_fake_protection)
     assert progress_events, "渐进进度必须能被上层收集，而不是只写日志"
-    assert any("1件" in msg for msg in progress_events), progress_events
+    assert any("生成进度" in msg and "[" in msg and "]" in msg for msg in progress_events), progress_events
+    assert any("1/1 个物件" in msg for msg in progress_events), progress_events
+    assert not any("OBJECTS" in msg or "batch" in msg or "prompt" in msg for msg in progress_events), progress_events
     assert result["phases_run"] == ["OBJECTS"]
     timeline = result["progress_timeline"]
     assert timeline[0]["status"] == "start"
@@ -152,6 +154,7 @@ def test_progress_sink_and_report_text_are_observable():
     assert timeline[-1]["status"] == "done"
     assert timeline[-1]["percent"] == 100
     assert timeline[-1]["asset_count"] == 1
+    assert "user_message" in timeline[-1]
     assert "场景已就绪" in report.to_user_text()
     print("[OK] 进度 sink + progress_timeline + FinalReview 文案可被上层观测")
 
@@ -170,6 +173,32 @@ def test_intervention_drain_marks_user():
     assert inst.touched_by_user is True
     assert inst.intervention_round == 3, "应记当前轮次（近因加权）"
     print("[OK] 介入入队 + phase 边界 drain 落账（打 USER + 轮次）")
+
+
+def test_post_import_hook_runs_before_final_review():
+    layout = FakeLayout()
+    session = SceneSession(layout)
+    repaired: List[tuple] = []
+
+    def gen_objects(s, phase):
+        return [{"name": "chair", "path": "/m/chair.glb"}]
+
+    def importer(assets, batch_id):
+        for a in assets:
+            layout.add(FakeInst(a["name"], provenance="AGENT", batch_id=batch_id))
+        return {"imported": [a["name"] for a in assets]}
+
+    def post_import_hook(imported_ids, batch_id):
+        repaired.append((tuple(imported_ids), batch_id))
+
+    session.progressive_compose(
+        {"OBJECTS": gen_objects},
+        importer=importer,
+        post_import_hook=post_import_hook,
+        skip_final_review=True,
+    )
+    assert repaired == [(("chair",), "r1_OBJECTS")]
+    print("[OK] phase 导入后会触发 post_import_hook（AABB repair 接线点）")
 
 
 def test_delete_marks_stale_not_physical():
@@ -235,6 +264,7 @@ if __name__ == "__main__":
     test_phase_loop_runs_provided_only()
     test_progress_sink_and_report_text_are_observable()
     test_intervention_drain_marks_user()
+    test_post_import_hook_runs_before_final_review()
     test_delete_marks_stale_not_physical()
     test_settle_skips_recent_user()
     test_final_review_three_buckets()

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Any, Callable
 
 from .lanchat_agent_orchestrator import LanChatAgentOrchestrator
+from .lanchat_host_action_executor import LanChatHostActionExecutor
 
 
 class LANChatAgentWorker:
@@ -14,14 +16,23 @@ class LANChatAgentWorker:
         self,
         corona_engine: Any = None,
         agent_factory: Callable[[], Any] | None = None,
+        host_action_executor: Any = None,
         sleep_seconds: float = 0.1,
+        async_agent_execution: bool | None = None,
     ) -> None:
         self._corona_engine = corona_engine
         self._agent_factory = agent_factory
+        self._host_action_executor = host_action_executor
         self._sleep_seconds = sleep_seconds
+        self._async_agent_execution = (
+            os.getenv("LANCHAT_AGENT_ASYNC", "0") == "1"
+            if async_agent_execution is None
+            else bool(async_agent_execution)
+        )
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._orchestrator: LanChatAgentOrchestrator | None = None
+        self._agent_call_lock = threading.RLock()
         self._logger = logging.getLogger(__name__)
 
     def start(self) -> None:
@@ -56,20 +67,52 @@ class LANChatAgentWorker:
         if not trigger:
             return False
 
+        if self._async_agent_execution:
+            threading.Thread(
+                target=self._process_trigger,
+                args=(trigger,),
+                name="LANChatAgentTask",
+                daemon=True,
+            ).start()
+            return True
+
+        return self._process_trigger(trigger)
+
+    def _process_trigger(self, trigger: dict[str, Any]) -> bool:
+        agent_id = str(trigger.get("agent_id") or "agent")
+        agent_name = str(trigger.get("agent_name") or "Agent")
+        action_payload = None
+
+        def _send_progress(message: str) -> None:
+            text = str(message or "").strip()
+            if not text:
+                return
+            try:
+                self._corona_engine.network_send_agent_reply(
+                    agent_id,
+                    agent_name,
+                    text,
+                )
+            except Exception as exc:
+                self._logger.debug("Failed to send LANChat progress reply: %s", exc)
+
         try:
-            result = self._run_agent(trigger)
+            from .agent_progress_context import agent_progress_sink
+
+            with agent_progress_sink(_send_progress):
+                with self._agent_call_lock:
+                    result = self._run_agent(trigger)
         except Exception as exc:
             self._logger.debug("LANChat AI agent failed: %s", exc)
-            agent_id = str(trigger.get("agent_id") or "agent")
-            agent_name = str(trigger.get("agent_name") or "Agent")
             reply = f"AI agent failed: {exc}"
         else:
             agent_id = result.sender_id
             agent_name = result.sender_name
             reply = result.text
+            action_payload = getattr(result, "action_payload", None)
 
         try:
-            self._broadcast_confirmed_action(getattr(result, "action_payload", None))
+            self._broadcast_confirmed_action(action_payload)
             return bool(
                 self._corona_engine.network_send_agent_reply(
                     agent_id,
@@ -107,19 +150,37 @@ class LANChatAgentWorker:
     def _broadcast_confirmed_action(self, payload: dict[str, Any] | None) -> None:
         if not payload or payload.get("status") != "confirmed":
             return
-        if not hasattr(self._corona_engine, "network_broadcast_intent"):
+        if hasattr(self._corona_engine, "network_broadcast_intent"):
+            source_user_id = str(payload.get("source_user_id") or "unknown")
+            tooltip = str(payload.get("intent_text") or payload.get("proposal_id") or "")
+            try:
+                self._corona_engine.network_broadcast_intent(
+                    source_user_id,
+                    tooltip,
+                    [0.0, 0.0, 0.0],
+                    "confirmed_gm_action",
+                )
+            except Exception as exc:
+                self._logger.debug("Failed to broadcast confirmed GM action: %s", exc)
+
+        self._execute_confirmed_action(payload)
+
+    def _execute_confirmed_action(self, payload: dict[str, Any]) -> None:
+        executor = self._get_host_action_executor()
+        if executor is None or not hasattr(executor, "enqueue_and_process"):
             return
-        source_user_id = str(payload.get("source_user_id") or "unknown")
-        tooltip = str(payload.get("intent_text") or payload.get("proposal_id") or "")
         try:
-            self._corona_engine.network_broadcast_intent(
-                source_user_id,
-                tooltip,
-                [0.0, 0.0, 0.0],
-                "confirmed_gm_action",
-            )
+            executor.enqueue_and_process(payload)
         except Exception as exc:
-            self._logger.debug("Failed to broadcast confirmed GM action: %s", exc)
+            self._logger.debug("Failed to execute confirmed GM action: %s", exc)
+
+    def _get_host_action_executor(self) -> Any:
+        if self._host_action_executor is None:
+            self._host_action_executor = LanChatHostActionExecutor(
+                corona_engine=self._corona_engine,
+                agent_factory=self._agent_factory or self._default_agent_factory,
+            )
+        return self._host_action_executor
 
     @staticmethod
     def _messages_from_trigger(trigger: dict[str, Any]) -> list[str]:

@@ -146,6 +146,28 @@ function applyMemberSnapshot(payload = {}) {
   state.memberDetails = normalized.memberDetails;
 }
 
+function upsertAgent(agent = {}) {
+  const agentId = agent.agent_id || agent.id || '';
+  const name = agent.name || agent.agent_name || '';
+  if (!agentId || !name) return;
+  const normalized = {
+    agent_id: agentId,
+    name,
+    owner: agent.owner || agent.owner_id || state.peerId || '',
+    persona: agent.persona || '',
+  };
+  const existing = state.agents.find((item) => item.agent_id === agentId);
+  if (existing) {
+    Object.assign(existing, normalized);
+  } else {
+    state.agents.push(normalized);
+  }
+}
+
+function removeAgentFromRoster(agentId) {
+  state.agents = state.agents.filter((a) => a.agent_id !== agentId);
+}
+
 // ---- 动作 -----------------------------------------------------------------
 
 /** 房主开房。返回 { ok, ip, port } 或 { ok:false, error }。 */
@@ -240,7 +262,9 @@ async function addAgent({ name, persona }) {
     return { ok: false, error: 'ADD_AGENT_FAILED' };
   }
   if (res && res.ok) {
-    state.myAgents.push({ agent_id: res.agent_id, name: res.name || name, persona });
+    const added = { agent_id: res.agent_id, name: res.name || name, persona, owner: state.peerId };
+    state.myAgents.push(added);
+    upsertAgent(added);
   } else {
     state.error = (res && res.error) || 'ADD_AGENT_FAILED';
   }
@@ -261,6 +285,7 @@ async function removeAgent(agentId) {
     return { ok: false };
   }
   state.myAgents = state.myAgents.filter((a) => a.agent_id !== agentId);
+  removeAgentFromRoster(agentId);
   return { ok: true };
 }
 

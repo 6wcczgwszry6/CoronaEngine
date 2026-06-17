@@ -16,6 +16,7 @@ from Quasar.ai_tools.response_adapter import (
     build_success_result,
     build_error_result,
 )
+from .transform_grounding import resolve_actor_overlaps, snap_actor_to_ground
 DEFAULT_SCENE_NAME = ""
 
 
@@ -64,6 +65,12 @@ class TransformModelInput(BaseModel):
         default=None,
         description=SCENE_TRANSFORM_PROMPTS.fields["axis"],
     )
+    snap_to_ground: bool = Field(
+        default=True,
+        description="移动/缩放后是否按模型 AABB 自动贴地，默认开启以减少底座穿模",
+    )
+    ground_y: float = Field(default=0.0, description="贴地目标高度")
+    ground_clearance: float = Field(default=0.02, description="贴地安全余量")
 
 
 class SceneActorsInput(BaseModel):
@@ -154,6 +161,9 @@ def _build_transform_tool(scene_manager) -> StructuredTool:
         ] = "scale",
         scale_factor: float | None = None,
         vector: Tuple[float, float, float] | None = None,
+        snap_to_ground: bool = True,
+        ground_y: float = 0.0,
+        ground_clearance: float = 0.02,
     ) -> str:
         try:
             data = TransformModelInput(
@@ -162,6 +172,9 @@ def _build_transform_tool(scene_manager) -> StructuredTool:
                 operation=operation,
                 scale_factor=scale_factor,
                 vector=vector,
+                snap_to_ground=snap_to_ground,
+                ground_y=ground_y,
+                ground_clearance=ground_clearance,
             )
             scene = _resolve_scene(scene_manager, data.scene_name)
             if scene is None:
@@ -197,12 +210,30 @@ def _build_transform_tool(scene_manager) -> StructuredTool:
                     error_message=f"Unsupported operation '{data.operation}'"
                 ).to_envelope(interface_type="scene")
 
+            snap_position = None
+            overlap_result = None
+            if data.snap_to_ground and op in {"scale", "move"}:
+                snap_position = snap_actor_to_ground(
+                    actor,
+                    ground_y=data.ground_y,
+                    clearance=data.ground_clearance,
+                )
+                try:
+                    overlap_result = resolve_actor_overlaps(
+                        actor,
+                        [a for a in scene.get_actors() if a is not actor],
+                    )
+                except Exception:
+                    overlap_result = None
+
             payload = {
                 "actor": actor.name,
                 "operation": op,
                 "position": list(actor.get_position()),
                 "rotation": list(actor.get_rotation()),
                 "scale": list(actor.get_scale()),
+                "ground_snapped": snap_position is not None,
+                "overlap_resolved": bool(overlap_result and overlap_result.get("changed")),
             }
             part = build_part(
                 content_type="text",

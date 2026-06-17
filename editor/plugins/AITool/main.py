@@ -58,7 +58,10 @@ class AITool(PluginBase):
         _event_loop_runner,
         build_error_response,
     )
-    _lanchat_agent_worker = LANChatAgentWorker(corona_engine=_CoronaEngine)
+    _lanchat_agent_worker = LANChatAgentWorker(
+        corona_engine=_CoronaEngine,
+        async_agent_execution=True,
+    )
     _request_states = _request_service.states
     _hint_service = get_hint_service()
 

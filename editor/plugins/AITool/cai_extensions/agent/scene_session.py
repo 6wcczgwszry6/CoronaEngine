@@ -31,12 +31,21 @@ PHASE_ORDER = ["GROUND", "SHELL", "INTERIOR", "BOUNDARY", "OBJECTS", "DECORATION
 
 # phase → 用户可读进度文案（中性模板，不写场景身份；具体对象名由调用方填充）。
 PHASE_PROGRESS = {
-    "GROUND": "正在生成地形…",
-    "SHELL": "正在放置主体建筑…",
-    "INTERIOR": "正在生成内部…",
-    "BOUNDARY": "正在铺设边界…",
-    "DECORATION": "正在点缀装饰…",
-    "OBJECTS": "正在摆放物体…",
+    "GROUND": "准备场地",
+    "SHELL": "放置主体",
+    "INTERIOR": "整理内部",
+    "BOUNDARY": "处理边界",
+    "OBJECTS": "摆放物件",
+    "DECORATION": "补充装饰",
+}
+
+_PHASE_DETAILS = {
+    "GROUND": "先把地面和空间范围搭好。",
+    "SHELL": "主体会先落位，后面的物件会围绕它调整。",
+    "INTERIOR": "正在处理内部地面和可进入空间。",
+    "BOUNDARY": "正在确认边界和通行空间。",
+    "OBJECTS": "开始把主要物件放进场景。",
+    "DECORATION": "补充装饰，但不会覆盖你刚刚改过的内容。",
 }
 
 # 介入操作类型（突击方案 §B3）
@@ -136,16 +145,51 @@ class SceneSession:
         self._progress_sink = sink
 
     def _emit_progress(self, phase: str, extra: str = "") -> str:
-        msg = PHASE_PROGRESS.get(phase, f"正在处理 {phase}…")
+        msg = PHASE_PROGRESS.get(phase, "处理场景")
         if extra:
-            msg = msg.rstrip("…") + f"（{extra}）…"
-        if self._progress_sink:
-            try:
-                self._progress_sink(msg)
-            except Exception:  # noqa: BLE001
-                pass
+            msg = f"{msg}（{extra}）"
         logger.info("[SceneSession][进度] %s", msg)
         return msg
+
+    def _publish_progress_event(self, event: Dict[str, Any]) -> None:
+        """Publish a sanitized progress message to the outer UI/chat layer."""
+        user_message = self.format_progress_message(event)
+        event["user_message"] = user_message
+        if self._progress_sink:
+            try:
+                self._progress_sink(user_message)
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def format_progress_message(event: Dict[str, Any]) -> str:
+        """Format a safe, user-facing progress line.
+
+        Do not include prompts, batch ids, tool names, model provider names, or
+        raw phase internals. This text is safe to stream into LANChat while the
+        generation is still running.
+        """
+        percent = max(0, min(100, int(event.get("percent", 0) or 0)))
+        phase = str(event.get("phase") or "")
+        status = str(event.get("status") or "")
+        label = PHASE_PROGRESS.get(phase, "处理场景")
+        detail = _PHASE_DETAILS.get(phase, "正在推进当前场景。")
+        blocks = max(0, min(10, round(percent / 10)))
+        bar = "█" * blocks + "░" * (10 - blocks)
+        if status == "start":
+            verb = "开始"
+        elif status == "done":
+            verb = "完成"
+        else:
+            verb = "进行中"
+        suffix = ""
+        imported = int(event.get("imported_count", 0) or 0)
+        assets = int(event.get("asset_count", 0) or 0)
+        if status == "done" and assets:
+            suffix = f" 本阶段已处理 {imported}/{assets} 个物件。"
+        elif status == "start":
+            suffix = " 你可以继续提出调整，我会在阶段边界吸收。"
+        return f"生成进度 {percent:>3}% [{bar}] {verb}：{label}。{detail}{suffix}"
 
     def _append_operation(
         self,
@@ -260,6 +304,7 @@ class SceneSession:
         viewport_sampler: Optional[Callable[[], Any]] = None,
         reasonable_provider: Optional[Callable[[], Dict[str, bool]]] = None,
         settle_fn: Optional[Callable[[List[Any]], None]] = None,
+        post_import_hook: Optional[Callable[[List[str], str], None]] = None,
         skip_final_review: bool = False,
     ) -> Dict[str, Any]:
         """渐进式主循环。每个 phase：生成→导入→进度→采集视口→drain介入→settle。
@@ -296,6 +341,7 @@ class SceneSession:
                 "asset_count": 0,
                 "imported_count": 0,
             })
+            self._publish_progress_event(progress_timeline[-1])
 
             # 1. 生成本 phase 的资产（纯 API/几何，不碰引擎）
             try:
@@ -314,6 +360,12 @@ class SceneSession:
                     imported_all.extend(imported_this_phase)
                 except Exception as exc:  # noqa: BLE001
                     logger.error("[SceneSession] phase %s 导入失败（跳过）: %s", phase, exc)
+
+            if imported_this_phase and post_import_hook is not None:
+                try:
+                    post_import_hook(imported_this_phase, batch_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("[SceneSession] phase %s post-import repair skipped: %s", phase, exc)
 
             # Agent 刚导入的 actor 必须纳入 diff 基线，否则下一次 poll 会误判成用户新增。
             if imported_this_phase and viewport_sampler is not None and self.diff_tracker is not None:
@@ -336,6 +388,7 @@ class SceneSession:
                 "asset_count": len(assets),
                 "imported_count": len(imported_this_phase),
             })
+            self._publish_progress_event(progress_timeline[-1])
 
             # 4. 采集视口介入（路 A）+ drain（AI 工具介入已随时入队）
             if viewport_sampler is not None:

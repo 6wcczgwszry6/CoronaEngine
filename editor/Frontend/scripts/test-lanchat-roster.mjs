@@ -30,6 +30,9 @@ assertIncludes(store, "case 'history_snapshot':", 'history snapshot must be the 
 assertIncludes(store, 'msg.sender_id === state.peerId', 'lanchat store must prefer peerId for self messages');
 assertIncludes(store, 'state.agents = res.agents || []', 'joinRoom must initialize agent roster');
 assertIncludes(store, 'event.member_details', 'member_update must consume member_details');
+assertIncludes(store, 'function upsertAgent', 'lanchat store must support local agent roster upsert');
+assertIncludes(store, 'upsertAgent(added)', 'addAgent must make new agents immediately mentionable');
+assertIncludes(store, 'removeAgentFromRoster(agentId)', 'removeAgent must clear local mention roster optimistically');
 
 assertIncludes(roomPanel, 'member.member_id !== s.peerId', 'mention candidates must filter local member_id');
 assertIncludes(roomPanel, 'a.name, isAgent: true', 'mention candidates must include agents');
@@ -38,6 +41,11 @@ assertIncludes(roomPanel, 'isJoining', 'RoomPanel must render pending join state
 assertIncludes(roomPanel, ':disabled="isJoining"', 'RoomPanel must disable join controls while pending');
 assertIncludes(roomPanel, 'JOIN_TIMEOUT', 'RoomPanel must display join timeout errors');
 assertIncludes(roomPanel, 'HOST_UNREACHABLE', 'RoomPanel must display unreachable host errors');
+assertIncludes(roomPanel, 'function gmProposalId', 'RoomPanel must detect GM proposal ids');
+assertIncludes(roomPanel, "text.includes('GM 提案')", 'RoomPanel must restrict confirmation controls to GM proposals');
+assertIncludes(roomPanel, "s.role === 'host'", 'RoomPanel must only show GM confirmation controls to host');
+assertIncludes(roomPanel, 'function sendGmDecision', 'RoomPanel must send structured GM decisions');
+assertIncludes(roomPanel, '`@GM ${verb} ${proposalId}`', 'GM confirmation buttons must include proposal_id');
 
 assertIncludes(memberList, 'peerId', 'MemberList must accept peerId prop');
 assertIncludes(memberList, 'a.owner === peerId', 'agent remove visibility must compare owner to peerId');

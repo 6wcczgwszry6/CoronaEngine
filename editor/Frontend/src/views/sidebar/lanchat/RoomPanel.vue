@@ -95,6 +95,23 @@
               >
                 {{ m.text }}
               </div>
+              <div
+                v-if="gmProposalId(m) && s.role === 'host'"
+                class="mt-1 flex gap-1"
+              >
+                <button
+                  class="px-2 py-0.5 rounded bg-[#84A65B] text-white text-[11px]"
+                  @click="sendGmDecision(gmProposalId(m), 'confirm')"
+                >
+                  确认
+                </button>
+                <button
+                  class="px-2 py-0.5 rounded bg-[#3a3a3a] text-gray-100 text-[11px]"
+                  @click="sendGmDecision(gmProposalId(m), 'reject')"
+                >
+                  拒绝
+                </button>
+              </div>
             </div>
           </div>
 
@@ -107,7 +124,7 @@
                 :disabled="s.connection === 'reconnecting'"
                 :placeholder="s.connection === 'reconnecting' ? '重连中…' : '输入消息，回车发送'"
                 @input="onDraftInput"
-                @keyup.enter="onSend"
+                @keydown="onDraftKeydown"
               />
               <div
                 v-if="mentionCandidates.length"
@@ -116,7 +133,9 @@
                 <div
                   v-for="(c, i) in mentionCandidates"
                   :key="i"
-                  class="px-2 py-1 text-sm text-gray-200 hover:bg-[#84A65B]/40 cursor-pointer"
+                  class="px-2 py-1 text-sm text-gray-200 cursor-pointer"
+                  :class="i === mentionActiveIndex ? 'bg-[#84A65B]/60 text-white' : 'hover:bg-[#84A65B]/40'"
+                  @mousedown.prevent
                   @click="pickMention(c)"
                 >
                   {{ c.isAgent ? '🤖 ' : '' }}{{ c.name }}
@@ -196,6 +215,7 @@ const draft = ref('');
 const showAddAgent = ref(false);
 const agentForm = reactive({ name: '', persona: '' });
 const mentionCandidates = ref([]);
+const mentionActiveIndex = ref(0);
 const msgRef = ref(null);
 
 const roleTemplates = [
@@ -290,9 +310,24 @@ async function onLeave() {
 
 async function onSend() {
   const text = draft.value;
+  if (!text.trim()) return;
   draft.value = '';
   mentionCandidates.value = [];
+  mentionActiveIndex.value = 0;
   await lanchat.sendMessage(text);
+}
+
+function gmProposalId(message) {
+  const text = String(message?.text || '');
+  if (!text.includes('GM 提案')) return '';
+  const match = text.match(/\bgm-\d+\b/i);
+  return match ? match[0] : '';
+}
+
+async function sendGmDecision(proposalId, decision) {
+  if (!proposalId) return;
+  const verb = decision === 'reject' ? '拒绝' : '确认';
+  await lanchat.sendMessage(`@GM ${verb} ${proposalId}`);
 }
 
 async function onAddAgent() {
@@ -317,11 +352,13 @@ function onDraftInput() {
   const at = text.lastIndexOf('@');
   if (at === -1) {
     mentionCandidates.value = [];
+    mentionActiveIndex.value = 0;
     return;
   }
   const prefix = text.slice(at + 1);
   if (prefix.includes(' ')) {
     mentionCandidates.value = [];
+    mentionActiveIndex.value = 0;
     return;
   }
   const members = (s.memberDetails.length
@@ -335,6 +372,11 @@ function onDraftInput() {
   mentionCandidates.value = [...members, ...agents].filter((c) =>
     c.name.toLowerCase().startsWith(prefix.toLowerCase())
   );
+  if (mentionCandidates.value.length) {
+    mentionActiveIndex.value = Math.min(mentionActiveIndex.value, mentionCandidates.value.length - 1);
+  } else {
+    mentionActiveIndex.value = 0;
+  }
 }
 
 function pickMention(c) {
@@ -342,6 +384,38 @@ function pickMention(c) {
   const at = text.lastIndexOf('@');
   draft.value = text.slice(0, at) + '@' + c.name + ' ';
   mentionCandidates.value = [];
+  mentionActiveIndex.value = 0;
+}
+
+function onDraftKeydown(e) {
+  if (mentionCandidates.value.length) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      mentionActiveIndex.value = (mentionActiveIndex.value + 1) % mentionCandidates.value.length;
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      mentionActiveIndex.value =
+        (mentionActiveIndex.value - 1 + mentionCandidates.value.length) % mentionCandidates.value.length;
+      return;
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      pickMention(mentionCandidates.value[mentionActiveIndex.value] || mentionCandidates.value[0]);
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      mentionCandidates.value = [];
+      mentionActiveIndex.value = 0;
+      return;
+    }
+  }
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    onSend();
+  }
 }
 
 // 新消息自动滚到底

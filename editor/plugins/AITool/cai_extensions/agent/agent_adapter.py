@@ -30,6 +30,17 @@ import logging
 import re
 from typing import Any, Callable, Dict, List, Optional
 
+try:
+    from plugins.AITool.services.agent_progress_context import (
+        agent_progress_sink,
+        get_current_progress_sink,
+    )
+except Exception:  # noqa: BLE001
+    from services.agent_progress_context import (  # type: ignore
+        agent_progress_sink,
+        get_current_progress_sink,
+    )
+
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -152,12 +163,13 @@ def _llm_is_compose_intent(text: str, timeout: float = 20.0) -> Optional[bool]:
 
 # 内部链路 chunk 判据：菜包 agentic stream 会把工具中间结果（如 remove_model 返回的
 # raw JSON）也当文本 chunk 吐出。这些含内部 actor 名（__room_/__shell_/__terrain_/
-# __interior_）或工具状态键（remaining_actors/removed_actor/status_info/imported），
-# 不能给用户看——只留最终自然语言反馈。
+# __interior_）或工具状态键（remaining_actors/removed_actor/imported），不能给用户看。
+# 注意：session_id/error_code/status_info 是 CAI 成功响应信封的固定字段，不是内部工具特征。
 _INTERNAL_CHUNK_MARKERS = (
     "__room_", "__shell_", "__terrain_", "__interior_",
     "remaining_actors", "removed_actor", "imported_actor",
-    '"status":', '"status_info"', "session_id", "error_code",
+    '"status":', '"actor":', '"position":', '"rotation":', '"scale":',
+    "scene_json_updated",
 )
 
 
@@ -166,6 +178,140 @@ def _is_internal_tool_chunk(chunk) -> bool:
     if not isinstance(chunk, str):
         return False
     return any(m in chunk for m in _INTERNAL_CHUNK_MARKERS)
+
+
+def _looks_like_tool_json(obj: Any) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    keys = set(obj.keys())
+    return bool(
+        {"actor", "position"} <= keys
+        or {"actor", "scale"} <= keys
+        or {"removed_actor", "remaining_actors"} & keys
+        or {"imported_actor", "scene_json_updated"} & keys
+    )
+
+
+def _strip_visible_tool_json(text: str) -> str:
+    """Remove raw tool JSON objects from otherwise natural-language text."""
+    if not text:
+        return ""
+
+    out: List[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "{":
+            out.append(text[i])
+            i += 1
+            continue
+        depth = 0
+        in_str = False
+        escaped = False
+        end = -1
+        for j in range(i, n):
+            ch = text[j]
+            if in_str:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j + 1
+                    break
+        if end == -1:
+            out.append(text[i])
+            i += 1
+            continue
+        candidate = text[i:end]
+        try:
+            data = json.loads(candidate)
+        except Exception:  # noqa: BLE001
+            out.append(text[i])
+            i += 1
+            continue
+        if _looks_like_tool_json(data):
+            i = end
+            continue
+        out.append(candidate)
+        i = end
+
+    cleaned = "".join(out)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _extract_cai_text_chunk(chunk) -> str:
+    """从 CAI JSON 信封 chunk 中提取用户可见文本；非 JSON 则按纯文本处理。
+
+    运行时可能返回 build_success_response 的 JSON 字符串，也可能由上层
+    stream adapter 先转成 dict，或包一层 data/event。这里做宽松解析，但只
+    抽取明确的自然语言字段，避免把 session_id/status_info 再暴露给用户。
+    """
+    if isinstance(chunk, dict):
+        data = chunk
+    elif isinstance(chunk, str):
+        try:
+            data = json.loads(chunk)
+        except (json.JSONDecodeError, TypeError):
+            return "" if _is_internal_tool_chunk(chunk) else chunk
+    else:
+        return ""
+
+    def _collect_text(obj) -> List[str]:
+        if isinstance(obj, str):
+            if _is_internal_tool_chunk(obj):
+                stripped = _strip_visible_tool_json(obj)
+                return [stripped] if stripped else []
+            return [_strip_visible_tool_json(obj)]
+        if isinstance(obj, list):
+            out: List[str] = []
+            for item in obj:
+                out.extend(_collect_text(item))
+            return out
+        if not isinstance(obj, dict):
+            return []
+
+        out: List[str] = []
+        for content in obj.get("llm_content", []) or []:
+            if not isinstance(content, dict):
+                continue
+            for part in content.get("part", []) or []:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("content_type") == "text":
+                    text = str(part.get("content_text", "") or "")
+                    if text:
+                        stripped = _strip_visible_tool_json(text)
+                        if stripped and not _is_internal_tool_chunk(stripped):
+                            out.append(stripped)
+
+        # 兼容 stream/event 包装层：只认常见自然语言字段，不递归扫所有键，
+        # 避免 session_id/error_code/status_info 被误拼进回复。
+        for key in ("content_text", "text", "content", "delta"):
+            val = obj.get(key)
+            if isinstance(val, str) and val:
+                stripped = _strip_visible_tool_json(val)
+                if stripped and not _is_internal_tool_chunk(stripped):
+                    out.append(stripped)
+        for key in ("data", "message", "payload", "response"):
+            val = obj.get(key)
+            if isinstance(val, (dict, list)):
+                out.extend(_collect_text(val))
+        return out
+
+    if not isinstance(data, dict):
+        return ""
+    return "".join(_collect_text(data))
 
 
 def is_compose_intent(text: str) -> bool:
@@ -574,7 +720,6 @@ class MasterAgent:
 
     def _group_ai_chat(self, system: str, messages: list) -> str:
         """GroupAgent 的 ai_chat 回调 — 调用 CAIApp。"""
-        import json as _json
         try:
             from plugins.AITool.main import AITool
             from Quasar.cai.protocol.request import ChatRequest
@@ -582,18 +727,7 @@ class MasterAgent:
             text = f"{system}\n\n{convo}"
             req = ChatRequest.from_text(text=text, metadata={"skip_conversation_store": True})
             chunks = AITool._cai_app.chat(req)
-            # 解析流式JSON响应
-            result_text = []
-            for chunk in chunks:
-                try:
-                    data = _json.loads(chunk)
-                    for content in data.get("llm_content", []):
-                        for part in content.get("part", []):
-                            if part.get("content_type") == "text":
-                                result_text.append(part.get("content_text", ""))
-                except (_json.JSONDecodeError, KeyError, TypeError):
-                    continue
-            return "".join(result_text).strip() or "{}"
+            return "".join(_extract_cai_text_chunk(c) for c in chunks).strip() or "{}"
         except Exception as e:
             logger.warning("[MasterAgent] group_ai_chat failed: %s, using fallback", e)
             if self._fallback_chat:
@@ -856,7 +990,7 @@ class MasterAgent:
         compose_text = self._gather_compose_text(user_text, messages)
         if force_compose or is_compose_request(user_text) or is_compose_request(compose_text):
             logger.info("[MasterAgent] scene → compose (整体场景组合)")
-            return self._handle_scene_compose(user_text, messages, specialist)
+            return self._handle_scene_compose(user_text, messages, specialist, persona)
 
         # 复杂需求 → Multi-Step Planning 分解；简单指令 → 单步 Coordinator
         from .multi_step_planner import MultiStepPlanner
@@ -867,17 +1001,25 @@ class MasterAgent:
         return self._handle_scene_single(user_text, scene_state, style_bible, specialist, messages)
 
     def _handle_scene_compose(self, user_text: str, messages: List[str],
-                              specialist: "Specialist") -> str:
+                              specialist: "Specialist", persona: str = "") -> str:
         """整体场景组合：从清单/方案批量生成模型、布局、导入引擎。"""
         from .scene_composer import SceneComposer
 
         # 优先从最近对话中找完整清单文本（用户可能只说"按清单生成"）
         compose_text = self._gather_compose_text(user_text, messages)
+        role_context = self._role_compose_context(persona)
+        if role_context:
+            compose_text = f"{compose_text}\n\n## RoleAgent 软偏好\n{role_context}"
         image_url = self._extract_image_url(messages)
 
         composer = SceneComposer(room_size=[5.0, 3.0, 3.0], scene_name="lanchat_scene",
                                  max_items=self._scene_max_items)
-        result = composer.compose(compose_text, image_url=image_url, do_import=True)
+        result = composer.compose(
+            compose_text,
+            image_url=image_url,
+            do_import=True,
+            progress_sink=get_current_progress_sink(),
+        )
 
         # 记录到 GroupAgent
         for _ in result.get("items", []):
@@ -902,6 +1044,9 @@ class MasterAgent:
         snapshot_path = result.get("zone_decompose_snapshot")
 
         lines = [f"{tag} 🏗️ 场景组合完成"]
+        if role_context:
+            role_name = role_context.splitlines()[0].replace("RoleAgent: ", "")
+            lines.append(f"  • RoleAgent：{role_name}（软偏好已注入）")
         lines.append(f"  • 识别物体：{extracted} 个")
         if truncated > 0:
             lines.append(f"  • ⚠️ 单次生成上限 {self._scene_max_items} 个，本次先做前 {self._scene_max_items} 个（剩 {truncated} 个可稍后继续）")
@@ -912,10 +1057,11 @@ class MasterAgent:
             lines.append(f"  • 渐进阶段：{(' / '.join(phases)) if phases else '已启用'}")
         if progress_timeline:
             last_progress = progress_timeline[-1]
-            lines.append(
-                f"  • 阶段披露：{last_progress.get('percent', 100)}% "
-                f"{last_progress.get('phase', '')} {last_progress.get('status', '')}"
-            )
+            user_progress = last_progress.get("user_message")
+            if user_progress:
+                lines.append(f"  • 阶段披露：{user_progress}")
+            else:
+                lines.append(f"  • 阶段披露：{last_progress.get('percent', 100)}%")
         if progress_events:
             lines.append(f"  • 最近进度：{progress_events[-1]}")
         if operation_count:
@@ -945,6 +1091,16 @@ class MasterAgent:
         if snapshot_path:
             lines.append(f"🧪 F5 分解快照：{snapshot_path}")
         return "\n".join(lines)
+
+    def _role_compose_context(self, persona: str) -> str:
+        """Resolve role persona into advisory compose context."""
+        try:
+            from .role_registry import resolve_role_template
+            tpl = resolve_role_template(persona)
+            return tpl.to_compose_context() if tpl is not None else ""
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[MasterAgent] role compose context skipped: %s", e)
+            return ""
 
     def _gather_compose_text(self, user_text: str, messages: List[str]) -> str:
         """收集用于组合的文本：清单 + 布局/风格描述 + 当前指令。
@@ -1141,10 +1297,9 @@ class MasterAgent:
             text = f"{system}\n\n以下是群聊上下文：\n{convo}\n\n请以你的身份回复最新消息。"
             req = ChatRequest.from_text(text=text, metadata={"skip_conversation_store": True})
             chunks = AITool._cai_app.chat(req)
-            # 只给用户结果反馈，不暴露内部链路：菜包 stream 会把【工具中间结果】也当文本
-            # chunk 吐出来（如 remove_model 返回的 raw JSON，含 __room_/__shell_ 内部 actor 名 +
-            # remaining_actors 内部状态）。过滤掉这些，只留最终自然语言反馈。
-            clean = [c for c in chunks if not _is_internal_tool_chunk(c)]
+            # CAIApp.chat 返回的是 build_success_response JSON 信封；必须先抽
+            # llm_content[].part[].content_text，再做内部工具噪声过滤。
+            clean = [_extract_cai_text_chunk(c) for c in chunks]
             reply = "".join(clean).strip()
             if reply:
                 return reply

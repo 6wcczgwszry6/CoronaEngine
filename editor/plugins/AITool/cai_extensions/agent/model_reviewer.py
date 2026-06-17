@@ -47,7 +47,7 @@ def _capture_single_model(output_dir: str, model_name: str, tier: int = 99) -> O
         logger.warning("[ModelReviewer] 无法导入截图工具")
         return None
 
-    from ..scene_composition_workflow.helpers import get_tool
+    from ..flows.scene_composition_workflow.helpers import get_tool
 
     move_tool = get_tool("camera_move")
     shot_tool = get_tool("camera_screenshot")
@@ -96,7 +96,7 @@ def _capture_single_model(output_dir: str, model_name: str, tier: int = 99) -> O
 
 def _vlm_review_model(screenshot_dir: str, model_name: str, model_type: str) -> Dict[str, Any]:
     """对模型截图进行 VLM 审查, 返回结构化评审结果。"""
-    from ..scene_composition_workflow.helpers import get_tool, parse_review_result
+    from ..flows.scene_composition_workflow.helpers import get_tool, parse_review_result
 
     review_tool = get_tool("scene_rationality_review")
     if review_tool is None:

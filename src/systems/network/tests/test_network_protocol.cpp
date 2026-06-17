@@ -363,6 +363,27 @@ void test_lanchat_state_enqueues_local_agent_trigger_from_mention() {
                 "lanchat state does not trigger remote owned agent");
 }
 
+void test_lanchat_state_implicit_trigger_only_for_single_local_agent() {
+    Corona::Network::LanChatState state;
+    state.open_room("room-a", "local-peer", "Host");
+    expect_true(state.register_agent("agent-1", "SceneBot", "scene helper", "local-peer").ok,
+                "lanchat state registers single local agent");
+
+    auto direct = state.record_message("msg-direct", "user-peer", "Alice", "生成一个广场", 1000);
+    state.enqueue_agent_triggers_for_message(direct.message, "local-peer");
+    auto trigger = state.pop_agent_trigger();
+    expect_true(trigger.has_value(), "single local agent receives direct non-mention message");
+    expect_true(trigger->agent_id == "agent-1", "implicit trigger targets the only local agent");
+    expect_true(trigger->text == "生成一个广场", "implicit trigger carries source text");
+
+    expect_true(state.register_agent("agent-2", "HelperBot", "helper", "local-peer").ok,
+                "lanchat state registers second local agent");
+    auto ambiguous = state.record_message("msg-ambiguous", "user-peer", "Alice", "再加一个喷泉", 1001);
+    state.enqueue_agent_triggers_for_message(ambiguous.message, "local-peer");
+    expect_true(!state.pop_agent_trigger().has_value(),
+                "multiple local agents require explicit mention");
+}
+
 void test_lanchat_state_deduplicates_agent_triggers() {
     Corona::Network::LanChatState state;
     state.open_room("room-a", "local-peer", "Host");
@@ -964,6 +985,7 @@ int main() {
     test_lanchat_state_updates_authoritative_message_and_history_snapshot();
     test_lanchat_state_applies_authoritative_member_snapshot();
     test_lanchat_state_enqueues_local_agent_trigger_from_mention();
+    test_lanchat_state_implicit_trigger_only_for_single_local_agent();
     test_lanchat_state_deduplicates_agent_triggers();
     test_lanchat_state_does_not_trigger_agent_reply_or_duplicate_names();
     test_lanchat_state_tracks_locks_and_preview_conflicts();

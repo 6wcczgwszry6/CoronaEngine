@@ -35,6 +35,9 @@ class RoleTemplate:
     name: str
     persona: str
     scene_hint: str = ""
+    object_bias: List[str] = field(default_factory=list)
+    layout_bias: str = ""
+    forbidden_bias: List[str] = field(default_factory=list)
     builtin: bool = True
 
     def inject(self, base_system: str) -> str:
@@ -45,8 +48,36 @@ class RoleTemplate:
             parts.append(f"\n【说话风格】{self.persona}")
         if self.scene_hint:
             parts.append(f"\n【场景倾向】{self.scene_hint}（仅作风格参考，不强制）")
+        if self.object_bias:
+            parts.append(f"\n【偏好物件】{', '.join(self.object_bias[:8])}")
+        if self.layout_bias:
+            parts.append(f"\n【布局偏好】{self.layout_bias}")
+        if self.forbidden_bias:
+            parts.append(f"\n【避免倾向】{', '.join(self.forbidden_bias[:8])}")
         parts.append("\n始终以该角色的口吻回复，保持人设一致。")
         return "".join(parts)
+
+    def to_compose_context(self) -> str:
+        """Return a soft role context for scene compose prompts.
+
+        This is deliberately advisory text, not a new capability or code-side
+        scene classifier, so M2 open-scene generation remains manifest-driven.
+        """
+        lines = [f"RoleAgent: {self.name}"]
+        if self.scene_hint:
+            lines.append(f"style_bias: {self.scene_hint}")
+        if self.object_bias:
+            lines.append(
+                "object_bias_reference_only: "
+                + ", ".join(self.object_bias[:8])
+                + " (do not add these as new objects unless the user requested them)"
+            )
+        if self.layout_bias:
+            lines.append(f"layout_bias: {self.layout_bias}")
+        if self.forbidden_bias:
+            lines.append("avoid: " + ", ".join(self.forbidden_bias[:8]))
+        lines.append("note: soft preference only; SceneState, AABB, VLM and user intent have priority.")
+        return "\n".join(lines)
 
 
 # ── 内置模板（N 个，demo 可选）────────────────────────────────
@@ -58,30 +89,45 @@ _BUILTIN: Dict[str, RoleTemplate] = {
             persona="沉稳、睿智、慢条斯理，常引经据典，用词文雅，喜欢用比喻讲道理，"
                     "语气温和而有威严，偶尔感慨世事。",
             scene_hint="偏好庄重、对称、有历史感的布置",
+            object_bias=["木桌", "石灯", "书卷", "茶具", "传统屏风"],
+            layout_bias="强调秩序、通行安全和稳定重心，核心物件对称或沿主轴排列",
+            forbidden_bias=["过度杂乱", "刺眼霓虹", "幼稚装饰"],
         ),
         RoleTemplate(
             key="little_girl", name="小女孩",
             persona="天真烂漫、活泼好奇，爱用感叹号和叠词，常问'为什么呀'，"
                     "情绪外放，看到喜欢的东西会很兴奋。",
             scene_hint="偏好明亮、可爱、色彩丰富的布置",
+            object_bias=["小花", "玩偶", "彩色灯", "软垫", "小摆件"],
+            layout_bias="保留开阔活动区，把可爱装饰放在视线显眼但不挡路的位置",
+            forbidden_bias=["阴暗压抑", "尖锐危险物", "过重武器感"],
         ),
         RoleTemplate(
             key="bandit", name="山贼",
             persona="粗犷豪迈、口无遮拦，自称'老子'，说话带江湖气，喜欢拍胸脯打包票，"
                     "嫌弃斯文，讲究实用和气派。",
             scene_hint="偏好粗犷、实用、有营寨/篝火气息的布置",
+            object_bias=["篝火", "木栅栏", "酒坛", "战利品", "武器架"],
+            layout_bias="强调防御边界、中心火堆和可聚集的营地动线",
+            forbidden_bias=["过度精致", "宫廷感", "柔弱粉色装饰"],
         ),
         RoleTemplate(
             key="scholar", name="学者",
             persona="严谨、条理分明，喜欢分点阐述，用词精确，常补充背景知识，"
                     "克制而专业，不轻易下结论。",
             scene_hint="偏好整洁、功能分区清晰、有书卷气的布置",
+            object_bias=["书架", "书桌", "卷轴", "仪器", "台灯"],
+            layout_bias="按研究、阅读、展示分区，留出安静且可扫描的工作动线",
+            forbidden_bias=["随意堆放", "喧闹装饰", "无功能摆设过多"],
         ),
         RoleTemplate(
             key="merchant", name="商人",
             persona="精明热情、能说会道，满嘴生意经，爱算性价比，常用'划算''包您满意'，"
                     "察言观色，善于推销。",
             scene_hint="偏好琳琅满目、有陈列感、热闹的布置",
+            object_bias=["摊位", "货箱", "招牌", "展示架", "钱箱"],
+            layout_bias="强调迎客入口、货物陈列和交易动线，贵重物靠内侧",
+            forbidden_bias=["空旷无货", "遮挡入口", "无展示重点"],
         ),
     ]
 }
@@ -174,7 +220,12 @@ def inject_persona_voice(base_system: str, persona: str) -> str:
     return tpl.inject(base_system)
 
 
+def resolve_role_template(persona: str) -> Optional[RoleTemplate]:
+    """Resolve persona text to a template for non-chat paths."""
+    return get_role_registry().resolve(persona)
+
+
 __all__ = [
     "RoleTemplate", "RoleRegistry", "get_role_registry",
-    "inject_persona_voice", "DEFAULT_KEY",
+    "inject_persona_voice", "resolve_role_template", "DEFAULT_KEY",
 ]

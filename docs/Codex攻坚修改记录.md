@@ -1,5 +1,13 @@
 # Codex 攻坚修改记录
 
+## 2026-06-17 追加：室内 skin 自动派生兜底
+
+- 回应 F5 反馈“房间不是应该自动派生皮肤吗”：上一轮只把 `floor/wall/ceiling` 三套材质槽位接通，但缺字段时仍回落到 `neutral`，视觉上仍可能单一。
+- 新增 `_derive_room_skin_materials(surface_params, style_context)`：优先尊重 `interior_surface.floor_material/wall_material/ceiling_material/accent_material`，缺失时从开放式 `style_context.material_palette/materials/surface_palette` 和材质词派生，不按“教堂/书房/卧室”等场景身份写死分支。
+- `_generate_room_box()` 改为使用派生结果写入 `box.mtl`，因此纯室内 5 面盒子在 LLM 只给材质调性或只给地板材质时，也会自动形成基础地面/墙面/顶面组合。
+- 新增 `test_room_box_skin_is_derived_from_open_material_context`，覆盖 `wood+fabric` 自动派生和 `floor_material=marble` 自动补墙/顶的兜底。
+- 验证：`python editor/plugins/AITool/cai_extensions/agent/test_terrain_style_profile.py` 通过；相关 AST 检查通过。
+
 > 维护规则：每次关键接线、语义修正、测试结果都记录到本文档，便于后续 AI 接手时快速判断当前状态。
 
 ## 执行计划（置顶）
@@ -582,3 +590,580 @@ AI 执行铁律：
 - 验证：
   - 轻量静态检查确认 `roleTemplates/selectRoleTemplate` 已存在；
   - `npm` 被 PowerShell 执行策略拦截，改用 `npm.cmd` 后发现当前前端依赖环境缺少可执行 `eslint`，因此未跑完整 lint。
+
+### 2026-06-17 追加：修复 CAIApp JSON 信封被误过滤导致聊天空回复
+
+- 问题：
+  - `_call_caiapp()` 直接把 `AITool._cai_app.chat(req)` 返回的 chunk 当纯文本拼接。
+  - CAI stream chunk 实际是 `build_success_response()` 生成的 JSON 信封，顶层固定包含 `session_id/error_code/status_info`。
+  - 旧 `_INTERNAL_CHUNK_MARKERS` 包含这些信封字段，导致每个正常 chunk 都被误判为内部工具结果并过滤，最终落到“✅ 已完成你的调整。”兜底。
+- 修复：
+  - 新增 `_extract_cai_text_chunk()`，逐 chunk `json.loads()` 后提取 `llm_content[].part[].content_text`。
+  - `_call_caiapp()` 改为使用该 helper 拼接用户可见文本。
+  - 从 `_INTERNAL_CHUNK_MARKERS` 移除 `session_id/error_code/status_info`，保留 `__room_/__shell_/__terrain_/remaining_actors/removed_actor/imported_actor` 等真实内部工具噪声特征。
+- 验证：
+  - 新增 `test_agent.py` 断言：包含 `session_id/error_code/status_info` 的正常 CAI 信封可提取“真实回复”。
+  - 定向 helper 检查通过。
+  - 完整 `test_agent.py` 在 Windows 下仍失败于既有 `/tmp/_test_agent_mem.json` 写入权限，不是本次改动引入。
+### 2026-06-17 追加：F5 急救修复包（chat / AABB / VLM / general 语义 / 单人操作路由）
+
+- Chat 回复读取：
+  - `_extract_cai_text_chunk()` 扩展为同时支持 JSON 字符串、dict、`data/message/payload/response` 包装层。
+  - 只抽取 `llm_content[].part[].content_text`、`content_text/text/content/delta` 等自然语言字段，不再把 `session_id/status_info` 当内部工具噪声误过滤。
+  - 新增 `test_cai_text_extraction.py` 覆盖标准 CAI 信封、嵌套 stream event、空 status envelope。
+- 用户介入 / AABB / FinalReview：
+  - `scene_composer_progressive.py` 不再调用不存在的 `scene_manager.get_active_scene()`。
+  - 新增 `_get_current_scene()`，按现有公开 API `scene_manager.get("") -> list_all()/get(route)` 获取场景。
+  - 快照采集从 `actor.name/get_name()` 兼容读取；AABB 采集从 `actor.get_bounding_box()` 或 `actor._geometry.get_aabb()` 兼容读取。
+  - `_collect_aabbs()` 改用 `scene.get_actor()`，避免旧的 `get_actor_by_name()` 断点。
+- VLM 外回路：
+  - `model_reviewer.py` 修正 helper import 路径为 `..flows.scene_composition_workflow.helpers`。
+  - 解决运行时 `No module named 'plugins.AITool.cai_extensions.scene_composition_workflow'` 导致 VLM 全跳过的问题。
+- 开放场景 general 语义防线：
+  - `normalize_zone_aspects()` 增加 ground_cover 清洗：`stone/marble/slate/pavement/tile/concrete` 等基础铺装材质不再作为散布层生成。
+  - 被误放入 `ground_cover` 的基础材质会转入 legacy `ground_profile.material` 兜底；真正的 flowers/grass/snow/debris 等覆盖物不受影响。
+  - 新增 `_looks_same_scene_asset()`，用于保守识别 `欧式教堂` vs `教堂`、`yurt shell` vs `yurt` 这类 shell 主建筑重复普通物体。
+  - `SceneComposer.compose()` 在 shell 资产补齐后剔除主建筑重复 object，避免“外壳教堂 + 室内普通教堂”重复导入。
+- 单人 @AI 增删改路由：
+  - `LanChatAgentOrchestrator._needs_gm_proposal()` 调整为：单人/无冲突重大操作不再自动进入 GM proposal，而是回到普通 role agent / MasterAgent 工具通道。
+  - 多人冲突、显式 @GM、多人重大操作仍保留 GM 仲裁。
+  - `_is_multi_user()` 对 `sender_id` 与 history 中 `sender_name/from` 做归一化，避免同一用户被误判为两人。
+- 验证：
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_cai_text_extraction.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_terrain_style_profile.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_vlm_review_loop.py`
+  - 通过：`python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - 通过：`ast.parse` 只读语法检查关键 5 个 Python 文件。
+  - 未通过：`python -m py_compile ...` 因 Windows `__pycache__` 目标文件拒绝访问，属于 pyc 写入权限/锁问题；已用只读语法检查替代。
+- F5 复测重点：
+  - “你好 / 我有一个大计划”这类 chat 必须有自然语言回复。
+  - 生成后拖动物体，`operation_count` 应该能增加，FinalReview 不应再因 AABB 空采集而虚假全 0。
+  - 教堂广场 snapshot 不应再有 `ground_cover.kind=stone`；引擎不应铺设 stone/grass/flower 散布簇。
+  - `欧式教堂` 作为 shell 后，不应再把 `教堂` 当普通 object 放进室内。
+  - 单人 @普通 AI 助手执行删除/移动/添加时，不应只出现 GM proposal 空转。
+
+### 2026-06-17 追加：多人 GM/Host Single-writer 执行队列 v1
+- 问题：
+  - 之前多人 GM 链路已经能生成 `action_payload`，房主文字确认后也能广播 `confirmed_gm_action`。
+  - 但确认后的 action 仍停在“网络可见意图”，没有进入 host 侧执行队列，也没有经过 `EngineWriteGate`。
+- 本轮推进：
+  - 新增 `LanChatHostActionExecutor`：
+    - 维护 host 侧 confirmed action 队列；
+    - `enqueue()` 广播 `queued_host_action`；
+    - `process_next()` 广播 `executing_host_action`，并在 `EngineWriteGate.run()` 内执行已确认 action；
+    - 成功后生成 `HostActionExecutionResult(event_type="SceneDelta")`，广播 `host_action_executed`，并通过 `network_send_system_message()` 发出 host 执行结果；
+    - 失败时返回 `CommandRejected`，广播 `host_action_failed`，不吞异常。
+  - `LANChatAgentWorker` 接入 host executor：
+    - 保留原有 `confirmed_gm_action` 广播；
+    - 广播失败不再阻塞执行队列；
+    - 只有 `payload.status=="confirmed"` 才会入队执行；
+    - 保留真实 `source_user_id`，不把 guest 请求伪装成房主。
+  - 默认执行策略：
+    - 不在 executor 内把自由文本硬解析成删除/移动等危险低层命令；
+    - 将已确认 intent 交给 host 侧 agent callback，并把 callback 包在 `EngineWriteGate.run()` 内，保证 host single-writer；
+    - 后续可以把 callback 替换成更明确的 SceneDelta/ActorAdded/ActorMoved/ActorDeleted 执行器。
+- 边界：
+  - 当前 `SceneDelta` 是 Python 执行结果 payload + LANChat intent/system message 可见性，不是新的 C++ typed SceneDelta 协议。
+  - C++ binding 已有 `network_broadcast_intent()` / `network_send_system_message()` 可复用；真正的 ActorMoved/ActorDeleted typed 广播仍需后续补 C++/前端协议。
+- 验证：
+  - 通过：`python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - 通过：`ast.parse` 检查 `lanchat_agent_worker.py / lanchat_host_action_executor.py / test_lanchat_agent_orchestrator.py`
+
+### 2026-06-17 追加：多人/多 Agent 与开放场景链路校验
+- 校验范围：
+  - 用户 @AI 助手 / 不 @ 直接发消息；
+  - 单人普通 role agent vs 多人 GM 仲裁；
+  - 多 Agent role 模板与软偏好注入；
+  - 场景意图分类：`compose / edit / chat`；
+  - M2 `ZoneTree + ZoneAspect` 分解；
+  - terrain / shell / interior floor / boundary 的锚定链；
+  - ground_cover / boundary opt-in；
+  - AABB 内回路、VLM advisory 外回路；
+  - 渐进阶段披露与进度消息。
+- Python 层结果：
+  - `LanChatAgentOrchestrator`：单人重大增删改移不再被 GM proposal 吞掉；多人冲突、显式 @GM、多用户重大操作仍进入 GM。
+  - `LANChatAgentWorker`：agent 调用期间可通过 `agent_progress_sink()` 发送阶段进度，最终仍发送 summary reply。
+  - `LanChatHostActionExecutor`：房主确认后的 payload 进入 host queue，并在 `EngineWriteGate.run()` 内执行，执行状态通过 LANChat intent/system message 可见。
+  - `RoleRegistry`：内置长者/小女孩/山贼/学者/商人模板可解析；自定义 persona 可作为 adhoc role 注入；compose path 中 role 只作为软偏好，不作为代码侧场景分类。
+  - `SceneComposer`：开放式生成继续走 LLM `decompose_zone_tree()` + manifest/adapter，代码侧没有恢复“按场景关键词推地形参数”的分支。
+  - decompose prompt 收紧：
+    - `ground_cover.kind` 示例不再包含 `stone`，避免把基础铺装误诱导成散布层；
+    - 明确 `stone/marble/slate/pavement/tile/concrete` 属于基础地面材质，不属于 ground_cover；
+    - 明确 `RoleAgent 软偏好` 不是用户新增物体清单，`object_bias` 不应自动加入 aspects/items。
+  - `scene_composer_progressive`：progressive path 已补 post-shell framework hook，shell 放置后仍生成 interior floor 与 opt-in boundary，避免渐进路径漏掉锚定链。
+- 已通过的 Python/离线测试：
+  - `python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - `python editor/plugins/AITool/cai_extensions/agent/test_role_registry.py`
+  - `python editor/plugins/AITool/cai_extensions/agent/test_cai_text_extraction.py`
+  - `python editor/plugins/AITool/cai_extensions/agent/test_terrain_style_profile.py`
+  - `python editor/plugins/AITool/cai_extensions/agent/test_scene_session.py`
+  - `python editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+  - `python editor/plugins/AITool/cai_extensions/agent/test_vlm_review_loop.py`
+  - `python editor/plugins/AITool/cai_extensions/flows/scene_composition_workflow/test_incremental_import.py`
+  - `ast.parse` 检查关键 Python 文件通过。
+- 底层边界：
+  - `LANChatState` 现在有“单个本地 agent 时，无 @ 消息隐式触发；多个 agent 时必须显式 @”的 C++ 代码尝试与 C++ test 变更。
+  - 但按当前推进策略，不运行 C++/Ninja 构建验证；该能力必须在 F5/底层专项中确认，不作为 Python 层已闭环能力。
+- F5 仍需确认：
+  - 草原蒙古包：围栏中心套住主建筑，地形起伏/草地/入口/地板贴合合理；
+  - 欧式教堂：无 grass/boundary，`interior_surface.floor_shape=quad`，非毡帘；
+  - 火山口观测站：无 grass fallback，unsupported 正确记录；
+  - 纯室外集市/营地：无 shell 时 boundary 可落地，围栏不切穿主体物；
+  - 多 agent 房间：单 agent 可测试不 @ 触发；多个 agent 必须 @ 指定，否则不应误触发所有 agent；
+  - 多人 GM：confirmed action 应显示 `confirmed_gm_action -> queued_host_action -> executing_host_action -> host_action_executed` 状态链。
+
+### 2026-06-17 追加：RoleAgent 模板增强与可见注入
+
+- Role 模板从“说话风格 + 一句轻偏好”扩展为结构化字段：
+  - `object_bias`
+  - `layout_bias`
+  - `forbidden_bias`
+- 内置模板补强：
+  - 长者：木桌、石灯、书卷、茶具、传统屏风；强调秩序、安全、主轴/对称。
+  - 小女孩：小花、玩偶、彩色灯、软垫、小摆件；强调明亮、可爱、开阔活动区。
+  - 山贼：篝火、木栅栏、酒坛、战利品、武器架；强调防御边界、营地动线。
+  - 学者：书架、书桌、卷轴、仪器、台灯；强调研究/阅读/展示分区。
+  - 商人：摊位、货箱、招牌、展示架、钱箱；强调迎客入口、展示和交易动线。
+- Chat 注入：
+  - `RoleTemplate.inject()` 会把偏好物件、布局偏好、避免倾向写入 system prompt，增强“遵守模板”的可观测性。
+- Compose 注入：
+  - 新增 `RoleTemplate.to_compose_context()` 和 `resolve_role_template()`。
+  - `MasterAgent._handle_scene_compose()` 将 role context 作为“RoleAgent 软偏好”追加到 compose 文本，并在完成回复中显示 `RoleAgent：xxx（软偏好已注入）`。
+  - 为避免污染开放场景物体抽取，`object_bias` 在 compose context 中标记为 `object_bias_reference_only`，并明确 “do not add these as new objects unless the user requested them”。
+- GroupAgent 收口：
+  - `_group_ai_chat()` 复用 `_extract_cai_text_chunk()`，避免总结/巡检路径再次出现 CAI JSON 信封空回复问题。
+- 多人测试适配：
+  - 当前 worker 已接入 `LanChatHostActionExecutor`，确认后会广播 `confirmed_gm_action -> queued_host_action -> executing_host_action -> host_action_executed`。
+  - `test_lanchat_agent_orchestrator.py` 改为检查状态链中包含 `confirmed_gm_action` 和 `host_action_executed`，不再错误假设最后一条就是 confirmed。
+- 验证：
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_role_registry.py`
+  - 通过：`python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_cai_text_extraction.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_terrain_style_profile.py`
+  - 通过：`ast.parse` 只读语法检查 `agent_adapter.py / role_registry.py / test_lanchat_agent_orchestrator.py`。
+- F5 复测重点：
+  - 添加“小女孩/山贼/长者”等模板后，聊天回复和场景完成回执里应能看到 role 注入。
+  - Role 偏好只能作为软偏好，不应凭空增加用户未请求的玩偶、武器架等物体。
+  - 复杂多人确认后，日志/广播中应能看到 host action 状态推进；但强类型 SceneDelta 命令队列仍是后续深水项。
+
+### 2026-06-17 追加：生成中阶段披露 / 进度条式聊天提示
+
+- 问题：
+  - 之前 `progress_timeline/progress_events` 主要在最终结果里展示，用户在长时间生成中仍然像黑箱等待。
+  - `_handle_scene_compose()` 还会显示 `GROUND/SHELL/...` 等内部 phase 枚举，不适合作为面向用户的中途提示。
+- 修复：
+  - `SceneSession.format_progress_message()` 统一生成脱敏用户文案，包含百分比、10 格进度条、阶段中文名和简短说明。
+  - `SceneSession.progressive_compose()` 在每个真实执行 phase 的 start/done 边界发布 `user_message`。
+  - `run_progressive_workflow()` 新增 `progress_sink` 入参，向上层实时冒泡阶段消息。
+  - `SceneComposer.compose()` 新增可选 `progress_sink`，默认不影响旧调用。
+  - 新增轻量模块 `services/agent_progress_context.py`，用 thread-local 在一次 agent 调用内传递进度回调，避免 worker 导入重型 `agent_adapter` 触发 `Quasar` 依赖。
+  - `LANChatAgentWorker.process_once()` 在调用 agent 时包住 `agent_progress_sink()`，收到阶段消息后立即通过 `network_send_agent_reply()` 发到聊天室；最终总结仍正常发送。
+  - `_handle_scene_compose()` 最终汇报里的“阶段披露”改为复用脱敏 `user_message`，不再显示内部 phase/status。
+- 隐私/安全边界：
+  - 中途消息不包含 prompt、batch_id、tool 名称、模型供应商、raw phase id。
+  - 只披露用户可理解的状态，例如“生成进度 50% [█████░░░░░] 完成：摆放物件...”。
+  - start 消息提示“你可以继续提出调整，我会在阶段边界吸收”，强化渐进生成 + 用户介入的交互预期。
+- 验证：
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_scene_session.py`
+  - 通过：`python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_role_registry.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+  - 通过：`ast.parse` 检查 `scene_session.py / scene_composer_progressive.py / scene_composer.py / agent_adapter.py / lanchat_agent_worker.py / agent_progress_context.py / test_lanchat_agent_orchestrator.py`
+- F5 复测重点：
+  - 长生成过程中，聊天室应逐条出现阶段提示，而不是只在最终结果里出现。
+  - 阶段提示应为中文用户文案和进度条，不应出现 `GROUND/SHELL/OBJECTS`、`batch`、`prompt`、工具名等内部信息。
+  - 最终完成消息仍包含完整导入/FinalReview/VLM/snapshot 信息。
+
+### 2026-06-17 追加：单人 + 多 Agent 链路横切排查修复
+
+- 排查范围：
+  - 用户 @AI 助手 / 不 @ 直接发消息；
+  - 多 Agent role 模板、persona 注入、GM proposal 分流；
+  - 场景意图分类、compose 入口、ZoneTree / aspects；
+  - 地形与主建筑、边界、内部地面、室外附属物的组合；
+  - AABB / VLM / FinalReview 可观测性。
+- 结论与修复：
+  - `LANChatState` 当前 C++ 事实源仍以 `@agentName` 触发 Python worker；“单 agent 不 @ 自动触发”的底层规则已做代码尝试，但 C++/Ninja 验证按用户要求暂停，移入 `docs/突击底层bug记录.md`。
+  - Python 单人/多 Agent 主路径确认：单人重大增删改移不再被 GM proposal 吞掉；只有 @GM、多人冲突或多人重大操作进入 GM。
+  - Role 模板确认：长者/小女孩/山贼/学者/商人模板可解析；chat 走 `inject_persona_voice()`，compose 走 `_role_compose_context()` 软偏好，不直接覆盖 SceneState。
+  - 修复渐进链路漏框架问题：`run_progressive_workflow()` 在 `_place_shells()` 后新增 post-shell framework hook，补回 shell interior floor 和 opt-in boundary，保持与旧 workflow 的 anchor chain 一致。
+  - 修复混合场景室外物件分流：喷泉、雕像、天使、长椅、路灯、树、摊位等默认归 outdoor zone；mixed outdoor + shell 场景下未知主体物优先 outdoor，避免被塞进主建筑内部。
+  - 修复渐进导入原点堆叠风险：`_distribute_assets_to_phases()` 后新增保守确定性初始布局。室内物件走室内小网格；室外物件绕主建筑外圈或广场区域摆放，避免全部 `[0,0,0]` 导入导致挤压穿模。
+- 验证：
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_terrain_style_profile.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_scene_session.py`
+  - 通过：`python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_cai_text_extraction.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_role_registry.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_vlm_review_loop.py`
+  - 通过：`ast.parse` 检查相关 Python 文件。
+- F5 复测重点：
+  - 默认按 `@AI助手 ...` 测主路径；不 @ 自动触发属于底层待验项，暂不作为 Python 单人闭环阻塞。
+  - “欧式教堂广场 + 喷泉 + 天使雕像”中，喷泉/雕像应在 outdoor/plaza，不应进教堂内部。
+  - 渐进路径中，shell 放置后应能看到 interior floor / opt-in boundary，不应因 progressive 默认路径漏掉。
+  - 新导入物体不应全部堆在原点；若仍挤压，下一步看真实 actor AABB 采集和 nudge/relayout，而不是再怀疑 zone 分流。
+
+### 2026-06-17 追加：F5 对话日志二次诊断（JSON 泄漏 / 当前 Agent 身份 / 介入卡顿）
+
+- 本次日志结论：
+  - `@学者 你好`、`@小D 你好`、`@学者 生成...` 已能触发对应 Python worker，说明显式 `@agent` 主路径可用。
+  - `/help` 和不带 `@` 的普通房主消息仍依赖 C++ LANChat trigger 规则；Python 层不再把它作为当前单人闭环阻塞项，底层记录见 `docs/突击底层bug记录.md`。
+  - 生成链路能跑通并落地 snapshot，但首批只披露 `OBJECTS`，且用户反映生成时 UI 卡住，说明“阶段消息可见”不等于“输入框可用”。真正随时介入仍需要前端/CEF/host 线程把长任务与输入解耦。
+- 已修复：工具 JSON 泄漏到聊天文本。
+  - 症状：`{"actor":"喷泉","position":...,"scene_json_updated":false}已将...` 直接显示给用户。
+  - 根因：CAI/tool stream 中的可见文本前缀包含工具结果 JSON，旧抽取逻辑只过滤完整内部 chunk，没有清洗“JSON + 自然语言”混合文本。
+  - 修复：`agent_adapter._strip_visible_tool_json()` 会扫描并移除 actor/position/scale 等工具结果 JSON，只保留用户可读自然语言。
+  - 覆盖：`test_cai_text_extraction.py::test_strip_tool_json_from_visible_text`。
+- 已修复：多 Agent 历史导致当前被点名助手身份漂移。
+  - 症状：用户 `@小D` 时，小D 回复“这是给 @小D 的，我不越位”，实际像继承了 `@学者` 的历史判断。
+  - 根因：history 中其他 `@agent` 的消息权重过高，role agent 没有明确收到“本轮被点名对象就是你”的上下文。
+  - 修复：`LanChatAgentOrchestrator._run_role_agent()` 在消息最前注入“当前点名上下文”，明确当前 `agent_name` 和最新用户消息。
+  - 覆盖：`test_lanchat_agent_orchestrator.py::test_current_mentioned_agent_identity_overrides_history_mentions`。
+- 仍需专项：编辑后的 AABB 落地复核。
+  - 症状：雕像/喷泉缩放后需要用户反复说“底座穿模”，Agent 只是猜测 y 值上移。
+  - 当前判断：agentic 增删改移路径已经可执行，但 scale/move 后没有统一读取缩放后的 actor AABB，并按地面/平台/terrain 高度做 bottom snap。
+  - 下一步建议：对 `scale/move` 工具结果增加 `EngineWriteGate + get_actor_aabb + ground_y resolver + y = y + (ground_y - aabb_min_y) + epsilon` 的后处理；用户 HARD 最近操作仍只修 Agent/目标物体，不整体重排。
+- 验证：
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_cai_text_extraction.py`
+  - 通过：`python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_scene_session.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_role_registry.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_vlm_review_loop.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_terrain_style_profile.py`
+
+### 2026-06-17 追加：编辑 AABB 自动贴地 + 语义阶段进度 + 非阻塞输入 v1
+
+- 编辑后 AABB 自动贴地：
+  - 新增 `mcp/tools/transform_grounding.py`。
+  - 核心策略：读取 actor `_geometry.get_aabb()` 的 local AABB、当前 `get_position()` 和 `get_scale()`，只修正 Y：
+    - `bottom_y = position_y + local_min_y * scale_y`
+    - `target_bottom = ground_y + clearance`
+    - `new_y = position_y + (target_bottom - bottom_y)`
+  - 接入 `set_actor_transform`：
+    - 新增 `snap_to_ground=True`
+    - 新增 `ground_y=0.0`
+    - 新增 `ground_clearance=0.02`
+    - 当设置 `position` 或 `scale` 后，默认做一次 bottom snap。
+  - 接入旧 `transform_model`：
+    - `scale/move` 后默认做一次 bottom snap。
+  - 目的：
+    - 解决本轮 F5 中“喷泉/雕像放大后底座穿模，需要用户反复要求上移”的问题。
+    - 不改变 X/Z，避免覆盖用户“调远一点”的空间意图。
+  - 边界：
+    - 悬挂物、桌面物、墙面物后续应由工具显式传 `snap_to_ground=False` 或传入对应 `ground_y`。
+    - 当前 v1 默认地面高度为 0；复杂地形/平台高度后续需要接 `zone/platform/terrain ground resolver`。
+- 语义阶段进度：
+  - `SceneComposer.compose()` 在 SceneSession 之前补充高层语义进度：
+    - `开始理解场景需求`
+    - `完成空间拆分/完成空间判断`
+    - `准备所需模型`
+    - `检查候选模型`
+    - `开始组装场景`
+    - `完成自动检查`
+  - 目的：
+    - 覆盖模型检索/生成这段最长等待时间，不再只在 `OBJECTS` 导入阶段才提示。
+    - 不暴露 prompt、工具名、provider、raw phase id。
+- 生成任务非阻塞输入 v1：
+  - `LANChatAgentWorker` 新增可选异步执行模式：
+    - 构造参数 `async_agent_execution=True`
+    - 或环境变量 `LANCHAT_AGENT_ASYNC=1`
+  - 行为：
+    - `process_once()` pop 到 trigger 后立即开后台 `LANChatAgentTask` 执行 agent/compose，并立刻返回。
+    - 后台任务仍按原路径发送进度消息和最终回复。
+  - 目的：
+    - 降低 UI/调用方被 Python agent 长任务阻塞的概率。
+  - 边界：
+    - 若 CEF/前端输入框或引擎写入本身被底层主线程阻塞，该开关不能单独解决，需要底层专项。
+- VLM 位置判断：
+  - 保留 VLM，但只作为外回路 advisory：
+    - 看风格一致性、语义摆放、朝向、整体“像不像”。
+    - 不负责硬防穿模。
+  - 穿模/悬空/挡门必须由 AABB 内回路和编辑工具贴地实时解决。
+  - VLM 不阻塞主链路，不直接改场景，不覆盖用户最近操作。
+- 验证：
+  - 通过：`python editor/plugins/AITool/cai_extensions/mcp/tools/test_transform_grounding.py`
+  - 通过：`python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_cai_text_extraction.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_scene_session.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+
+### 2026-06-17 追加：LANChat @AI 助手候选支持键盘选中
+
+- 问题：
+  - 用户输入 `@AI助手` 时，候选列表只能鼠标点击。
+  - 上下键 + Enter 不能直接选中候选，需要再次用鼠标点击，打断高频多 Agent 对话节奏。
+- 修复：
+  - `RoomPanel.vue` 新增 `mentionActiveIndex`。
+  - 输入框从 `@keyup.enter="onSend"` 改为统一 `@keydown="onDraftKeydown"`。
+  - 候选列表打开时：
+    - `ArrowDown`：下移高亮候选；
+    - `ArrowUp`：上移高亮候选；
+    - `Enter` / `Tab`：选中当前高亮候选并补全 `@名字 `；
+    - `Escape`：关闭候选列表。
+  - 候选列表关闭时：
+    - `Enter` 仍发送消息。
+  - 鼠标路径保留，并增加 `@mousedown.prevent`，避免输入框失焦影响候选点击。
+- 用户体验预期：
+  - 用户输入 `@` 后可用键盘完成 `@学者` / `@小D` 选择，再继续输入指令，不需要鼠标。
+- 验证：
+  - CodeGraph/只读核对确认 `@keydown`、`mentionActiveIndex`、候选高亮和 pickMention 接线存在。
+  - 尝试运行 `npm.cmd run lint -- src/views/sidebar/lanchat/RoomPanel.vue`，当前前端环境缺少可执行 `eslint`，未完成 lint；这与此前前端依赖状态一致，不是本次改动引入。
+
+### 2026-06-17 追加：多人 / 多 Agent Python 链路专项收口
+
+- 范围边界：
+  - 本轮只推进多人 / 多 Agent 链路。
+  - 单人链路只做影响校验：progressive 输出、EngineWriteGate、RoleAgent 软偏好是否可被多人复用；不接管单人 F5。
+- 当前链路确认：
+  - `LANChatAgentWorker` 已支持：
+    - `LANCHAT_AGENT_ASYNC=1` 或构造参数 `async_agent_execution=True` 的异步 agent 执行；
+    - `agent_progress_sink()` 阶段披露消息；
+    - agent 异常兜底回复，不杀 worker。
+  - `LanChatAgentOrchestrator` 已支持：
+    - 当前 `@agent` 身份注入，避免历史中其他 `@` 污染本轮目标；
+    - GM proposal；
+    - 房主文字确认；
+    - `source_user_id` / `target_agent_id` / `execution=host_single_writer` 保留。
+  - `LanChatHostActionExecutor` 已支持：
+    - `confirmed_gm_action -> queued_host_action -> executing_host_action -> host_action_executed/host_action_failed` 状态链；
+    - confirmed payload 进入 host queue；
+    - 执行时包在 `EngineWriteGate.run()` 内；
+    - 执行结果通过 `network_broadcast_intent()` 和 `network_send_system_message()` 可见。
+- 本轮加固：
+  - `LanChatHostActionExecutor` 新增 executor 级 `_process_lock`。
+  - 目的：即使 async worker 同时收到多个 confirmed GM action，Python host executor 层也只允许一个 action 处于 executing / semantic execution 中。
+  - 这不是替代 `EngineWriteGate`，而是补齐 host single-writer 在“状态链 + 语义执行”层面的串行语义；`EngineWriteGate` 继续负责实际引擎写入锁。
+  - 新增测试 `test_host_action_executor_serializes_parallel_confirmed_actions()`，在没有 EngineWriteGate 兜底时验证两个并发 confirmed action 不会并行执行。
+- C++/底层接口静态核对：
+  - 已只读核对 `engine_bindings.cpp` 存在：
+    - `network_send_agent_reply()`
+    - `network_pop_lanchat_agent_trigger()`
+    - `network_lanchat_history_snapshot()`
+    - `network_lanchat_agents_snapshot()`
+    - `network_send_system_message()`
+    - `network_lock_object()`
+    - `network_broadcast_intent()`
+  - 已只读核对 `LANChatState` 中 `@agent` 触发规则：
+    - 显式 mention 只触发目标 local agent；
+    - 单个 local agent 且无 mention 时允许隐式触发；
+    - 多个 local agent 且无 mention 时不触发全部。
+  - 按当前要求未运行 C++/Ninja 编译验证。
+- 验证：
+  - 通过：`python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_role_registry.py`
+  - 通过：`python -B -c "import ast, pathlib; ..."` 对多人关键 Python 文件做只读 AST 校验。
+  - `python -m py_compile ...` 曾因 Windows `__pycache__` 写入权限失败；改用 `python -B` + AST 校验规避 pyc 写入，不判定为语法失败。
+- 明天多人联机 F5 必查：
+  - 单 agent 房间：不 `@` 消息应触发唯一 agent。
+  - 多 agent 房间：不 `@` 消息不应触发全部 agent。
+  - 显式 `@小B`：只触发小B，不能被历史中其他 `@agent` 污染。
+  - GM 冲突：产生 proposal，房主文字确认后应看到 `confirmed_gm_action -> queued_host_action -> executing_host_action -> host_action_executed`。
+  - 若执行状态可见但 peer 端 actor 不同步，归入 typed SceneDelta / actor sync 底层缺口。
+
+### 2026-06-17 追加：多人 LANChat worker 默认异步与 orchestrator 串行保护
+
+- 问题：
+  - `LANChatAgentWorker` 虽支持 `async_agent_execution=True` / `LANCHAT_AGENT_ASYNC=1`，但运行态 `AITool.main` 未传参时仍可能同步执行。
+  - 同步执行会让长场景生成/agent 调用拖住 LANChat worker 调用链，削弱多人“生成中继续发消息/介入”的体验。
+  - 直接默认异步又会带来新风险：多个 trigger 并发进入同一个 `LanChatAgentOrchestrator`，可能污染 GM pending proposal / confirmation 状态。
+- 修复：
+  - `AITool.main` 启动 `_lanchat_agent_worker` 时显式传 `async_agent_execution=True`，F5 不再依赖手动设置环境变量。
+  - `LANChatAgentWorker` 新增 `_agent_call_lock`，异步模式下同一个 worker 内的 agent/orchestrator 调用仍串行进入。
+  - host action executor 已有 `_process_lock`，因此 confirmed action 的语义执行与状态链也保持串行。
+- 边界：
+  - 这能降低 Python agent 长任务阻塞 LANChat worker 的概率。
+  - 如果 CEF/前端输入框或引擎主线程本身被阻塞，仍属于底层调度问题，需要明天联机 F5 记录到 `docs/突击底层bug记录.md`。
+- 验证：
+  - 通过：`python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - 新增覆盖：`test_worker_async_agent_calls_are_serialized_per_worker()`，验证两个异步 trigger 不会并发进入 agent/orchestrator。
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_role_registry.py`
+  - 通过：`python -B -c "import ast, pathlib; ..."` 对 `main.py / lanchat_agent_worker.py / lanchat_host_action_executor.py / test_lanchat_agent_orchestrator.py` 等做只读 AST 校验。
+
+### 2026-06-17 追加：LANChat 添加 Agent 后立即可 @
+
+- 问题：
+  - `RoomPanel.vue` 的 `@` 候选列表读取 `state.agents`。
+  - `lanchat.addAgent()` 成功后只写入 `state.myAgents`，若 C++ `agent_roster` 事件没有立刻回到前端，用户刚添加的 AI 助手不会马上出现在 `@` 候选里。
+- 修复：
+  - `lanchat.js` 新增 `upsertAgent()` 和 `removeAgentFromRoster()`。
+  - `addAgent()` 成功后同时写入 `myAgents` 和 `agents`，让本机立即可 `@` 新 agent。
+  - `removeAgent()` 成功后同步移除本地 roster。
+  - 后续 `agent_roster` 事件仍作为 C++ 权威快照覆盖 `state.agents`，本地更新只用于消除交互延迟。
+- 验证：
+  - 通过：`node editor/Frontend/scripts/test-lanchat-roster.mjs`
+  - 通过：`python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+
+### 2026-06-17 追加：多人 GM proposal_id 级确认 v1.5
+
+- 问题：
+  - 旧 GM proposal 只提示房主回复“确认 / 拒绝 / 按方案A”。
+  - Orchestrator 只要看到确认词就消费唯一 pending proposal，无法确认“确认的是哪个 proposal”。
+  - 多 proposal、重复冲突或误输确认时，容易误伤当前 pending proposal。
+- 修复：
+  - `LanChatAgentOrchestrator` 的 GM proposal 文案改为明确携带 `proposal_id`：
+    - `@GM 确认 gm-xxx`
+    - `@GM 拒绝 gm-xxx`
+  - `_consume_confirmation()` 新增 `gm-xxx` 编号校验：
+    - 文本中带了错误 proposal id 时，不消费 pending proposal，并提示当前待确认编号；
+    - 文本中带了正确 id 时，才确认 / 拒绝；
+    - 裸“确认 / 拒绝”仍保留为 F5 应急兼容路径。
+  - `RoomPanel.vue` 在 Host 端 GM proposal 消息下方显示“确认 / 拒绝”按钮。
+  - 按钮复用 LANChat message 路径，发送 `@GM 确认 gm-xxx` / `@GM 拒绝 gm-xxx`。
+- 边界：
+  - 当前只做前端 host 视角按钮显示和 Python proposal_id 校验。
+  - 还没有 C++/Python 结构化 host 身份校验；非房主手打确认文本的风险已记录到 `docs/突击底层bug记录.md`。
+- 验证：
+  - 新增 `test_host_confirmation_rejects_wrong_proposal_id()`。
+  - `test_host_confirmation_consumes_pending_proposal()` 改为使用显式 proposal_id。
+  - `test-lanchat-roster.mjs` 增加 GM proposal 按钮静态约束。
+
+### 2026-06-17 追加：多人 / 多 Agent @ 规则文档统一
+
+- 问题：
+  - `docs/LANChat_AI_使用说明.md` 仍写“大部分场景指令不需要 @”。
+  - 这与 C++ `LANChatState` 的多 Agent 规则冲突：多个 local agent 时，不 `@` 不应触发全部 agent。
+- 修复：
+  - 文档改为：多人 / 多 Agent 房间默认显式 `@助手名`。
+  - 单 Agent 房间可尝试不 `@`，作为增强体验，不作为主链路依赖。
+  - 多 Agent 不确定目标时使用 `@GM`，由 GM 整理冲突、排序、确认项。
+- F5：
+  - 单 agent 不 `@` 触发作为底层待验项。
+  - 多 agent 不 `@` 不群发作为主链路验收项。
+  - 添加“学者/山贼”后无需刷新即可出现在 `@` 候选。
+### 2026-06-17 追加：地形 / 主建筑基座 / 全场景比例关系 v1
+
+- 目标：
+  - 地形范围不再统一套草原式超大默认，而由 `ground_profile.params` 的 `extent_factor/min_extent/max_extent/padding/openness` 驱动。
+  - 地形材质与细节由 `material/secondary_material/detail_pattern/detail_strength` 驱动，避免欧式教堂广场误长草簇。
+  - `ground_cover` 只表示 opt-in 的散布覆盖：`grass/flowers/rocks/shrubs/debris/paving_marks`，不再承载 stone/marble/concrete 这类基础铺装材质。
+  - 新增 `foundation_surface` 能力，用于 shell 放置并测得真实 footprint 后，在 objects 导入前生成外部基座/铺装垫层。
+  - progressive objects 根据 `layout_role`、主建筑 AABB、terrain extent、foundation extent 给出保守初始位置和 scale，喷泉/雕像默认进入 outdoor activity zone。
+- 实现：
+  - `zone_tree.py`
+    - `CAPABILITY_MANIFEST` 新增 `foundation_surface`。
+    - `GENERATOR_MANIFEST.ground_profile.effective_params` 扩展 terrain extent/detail 参数。
+    - `ground_cover` 描述收敛为散布覆盖，不再写 sand/stone 这类基础材质。
+  - `scene_composer.py`
+    - 新增 `_resolve_terrain_extent()`，公式为 aspect 参数驱动的 `max(zone.size, building_extent * extent_factor) + padding`，再受 `min_extent/max_extent` clamp。
+    - legacy `TerrainProfile` 兜底的 `extent_factor` 从草原式 6.0 收敛为中性 3.0；草原宽大必须由 decompose 显式给 `extent_factor/min_extent`。
+    - `_generate_terrain()` 接入 `secondary_material/detail_pattern/detail_strength`，写出 `terrain_detail` 材质和程序化地表细节。
+    - `_build_grass_obj()` 扩展为通用 ground scatter，支持 `rocks/shrubs/debris/paving_marks`。
+    - 新增 `_generate_foundation_surface()`，按 shell 真实 footprint + padding 生成 `disc/quad` 外部基座，记录 `_foundation_extent`。
+    - 原始 workflow 在 shell 后依次生成 interior floor + foundation surface，再进入 boundary/objects。
+  - `scene_composer_progressive.py`
+    - post-shell framework 同步生成 foundation surface，保证 F5 progressive 路径不漏基座。
+    - `_distribute_assets_to_phases()` 为资产写入 `layout_role`。
+    - 新增 `_scene_scale_context()` / `_outdoor_default_scale()`，用主建筑和地形尺度给 fountain/statue/foreground/decorations 保守 scale。
+    - `_outdoor_default_pos()` 改为考虑 foundation extent，室外物件围绕主建筑外部活动区，不默认堆原点或进 shell。
+- 边界：
+  - 仍不在生成代码里写死“教堂/蒙古包/火山”等场景身份分支；场景差异必须来自 decompose aspects。
+  - 当前 scale 是基于 actor 导入倍率的保守 v1，并不等于真实目标米制尺寸；F5 若发现具体模型资产本身尺度异常，下一步要接入导入后真实 actor AABB normalization。
+  - foundation_surface 只解决主建筑与地形/广场的承接，不替代 interior_surface。
+- 验证：
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_terrain_style_profile.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+- F5 必查：
+  - 欧式教堂广场：ground_profile 应为 stone/marble/concrete/pavement 一类铺装材质，ground_cover 不应是 grass/flowers；应有 foundation_surface；喷泉和天使雕像在 outdoor/plaza，比例不明显失真。
+  - 草原蒙古包：若要宽大草原，decompose 必须显式给 `min_extent/extent_factor`；围栏/草簇/基座仍需围绕 shell。
+  - 纯室外营地/广场：无 shell 时继续依赖 zone volume/platform 作为尺度基准，boundary 与物体相对位置仍需截图确认。
+### 2026-06-17 追加：室内 5 面盒子默认展示 + 单人/多 Agent 链路审查
+
+- 室内盒子：
+  - `_build_room_box_obj()` 新增 `open_face` 参数。
+  - 默认 `open_face="front"`，生成前墙开放的 5 面盒子：地面、左墙、右墙、后墙、顶面。
+  - `open_face="none"` 保留旧 6 面封闭盒子；带 `door` 时继续生成门洞三块前墙。
+  - `open_face="front_and_ceiling"` 生成 4 面展示盒：地面、左墙、右墙、后墙。
+  - `_generate_room_box()` 读取 `CORONA_ROOM_BOX_OPEN_FACE`，默认 `front`；非法值回退 `front`。
+- 设计边界：
+  - 5 面盒子只是展示/可观察性策略，不把 open_face 交给 LLM 决定。
+  - 去掉前墙 mesh 不等于取消空间约束；后续越界仍由 Zone AABB / door clearance / consistency check 管。
+  - 若 F5 需要旧封闭视觉，可设置 `CORONA_ROOM_BOX_OPEN_FACE=none`。
+- 单人/多 Agent 链路审查：
+  - `LanChatAgentOrchestrator` 当前规则符合单人优先：单人明确增删改移不被 GM proposal 吞掉；GM 主要处理 @GM、语义冲突、多人重大操作。
+  - Role 模板仍是 chat voice + compose soft context；`object_bias_reference_only` 明确不自动新增物体，不直接写引擎。
+  - 当前 @agent 身份注入在 history 前，避免历史中其他 @对象 污染本轮目标 agent。
+  - `run_progressive_workflow()` 有 progress sink、post-shell framework、VLM advisory 外回路；AABB/FinalReview 仍走 SceneSession。
+  - 编辑 scale/move 的贴地链路在工具层已有 v1；本轮未改底层 C++/CEF/ninja。
+- 验证：
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_terrain_style_profile.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_scene_session.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_cai_text_extraction.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_role_registry.py`
+  - 通过：`python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - 通过：`python -B` AST 检查改动 Python 文件。
+- F5 必查：
+  - 室内书房/卧室默认应能从前方直接看到内部家具，顶面仍保留房间感。
+  - 设置 `CORONA_ROOM_BOX_OPEN_FACE=none` 后应回退 6 面封闭盒子。
+  - 多 Agent 场景中 `@学者` / `@小D` 不能串身份；单人编辑操作不应被 GM 提案阻断。
+  - 如果生成中输入框仍卡住，优先记录为 CEF/主线程/底层调度问题，而不是继续改 Python worker。
+
+### 2026-06-17 追加：多人 / 多 Agent P0 非底层收口
+
+- 本轮约束：
+  - 不修改 C++。
+  - 不运行 Ninja。
+  - 不实现 typed SceneDelta / actor version / peer actor apply。
+  - 只推进 Python / Frontend / 文档记录中能落地的部分。
+- Orchestrator 加固：
+  - `_consume_confirmation()` 改为接收 trigger。
+  - 继续校验 `proposal_id`。
+  - 新增 `_processed_proposals`，重复确认已 confirmed/rejected/mismatched 的 proposal id 时返回“已处理”，不再产生 `action_payload`，避免重复入队。
+  - 若 trigger 显式携带 `sender_role/room_role/role/is_host/is_room_host/sender_is_host`，非 host 确认会被拒绝。
+  - 若 trigger 没有可信 host 字段，不用 sender name 猜房主；剩余风险记录到底层身份字段缺口。
+  - 裸“确认/拒绝”仍保留为 fallback，并在 confirmed payload 中写入 `confirmation_mode=bare_text_fallback`。
+- Host executor 加固：
+  - 空结果或明显失败结果不再广播 `host_action_executed`，改为 `host_action_failed` + `CommandRejected`。
+  - 无 executor agent / 未产生 typed actor delta 的结果改为 `accepted_no_delta`，不伪装成完整 actor 同步。
+  - 成功结果文案明确标注：“语义执行完成；peer actor sync 以底层 SceneDelta 为准。”
+- F5 文档：
+  - `docs/F5测试轮次_项目链路使用说明书.md` 新增多人 P0 判定性实验：
+    - 基础连通与 agent roster；
+    - 多 agent 不 @ 不误群发；
+    - GM proposal + Host 按钮确认状态链；
+    - Host executed 后 Guest 场景是否同步；
+    - 非房主手打确认绕过；
+    - proposal_id 过期 / 乱序 / 重放；
+    - 生成中继续输入；
+    - 同 actor 双人冲突。
+  - 每个实验都标注失败指向层和第一检查文件。
+- 底层记录：
+  - `docs/突击底层bug记录.md` 新增“多人 P0 暂不处理底层项”。
+  - 明确 typed SceneDelta、actor version/lock/owner、host identity 可信字段、peer delta apply、C++/Ninja protocol tests 全部留给底层专项。
+- 验证：
+  - 通过：`python editor/plugins/AITool/services/test_lanchat_agent_orchestrator.py`
+  - 通过：`node editor/Frontend/scripts/test-lanchat-roster.mjs`
+### 2026-06-17 追加：Bug-first AABB hard loop + VLM 审查定位
+
+- 目标：
+  - 先修 F5 暴露的穿模、堆叠、缩放后底座埋地、GM 内部提示泄漏。
+  - 保留 VLM，但定位为组装合理性/风格一致性/最后 1-2 轮审查，不作为硬几何 solver。
+- AABB 几何闭环：
+  - `transform_grounding.py` 新增 `actor_world_aabb()`，修正 local geometry AABB 被误当 world AABB 的风险。
+  - 新增 `resolve_actor_overlaps()`，对当前 actor 做 XZ nudge，跳过地毯/地板 surface 和 `__room_ / __interior_ / __terrain_ / __foundation_` 基础设施。
+  - `transform_model` 和 `set_actor_transform` 在默认 `snap_to_ground=True` 后继续尝试 overlap resolve，并返回 `overlap_resolved`。
+  - `SceneSession.progressive_compose()` 新增 `post_import_hook`，`run_progressive_workflow()` 在每个 phase 导入后立刻执行贴地 + 解叠，再更新 diff baseline。
+- GM 降噪：
+  - `LanChatHostActionExecutor` 不再把 host executor 内部指令作为最后一条消息送入 MasterAgent；最后一条改为 `用户确认意图：...`，避免内部协议被当成普通 chat trigger。
+- 边界：
+  - 本轮只做 Python 层 hardening，不改 C++/CEF/ninja。
+  - AABB 是防穿模主路径；VLM 只做 advisory/review，截图失败或超时不得阻塞主链路。
+
+### 2026-06-17 追加：室内 5 面盒子基础 skin
+
+- 目标：
+  - 在 AABB/介入 bug 修复后，补室内视觉基础层，让 5 面盒子不再只有单一灰墙。
+  - 墙/地/顶风格来自 `interior_surface` aspect params，不在代码里写死“商人/学者/卧室”等场景身份。
+- 实现：
+  - `_build_room_box_obj()` 增加 floor/wall/ceiling material slots，OBJ 内按面写 `usemtl floor/wall/ceiling`。
+  - 新增 `_room_box_mtl_text()`，根据 `floor_material/wall_material/ceiling_material/accent_material` 输出基础 MTL。
+  - `_generate_room_box()` 读取当前 room zone 的 `interior_surface`，缺失时使用 neutral fallback。
+  - 纯室内单 box 退化路径保留 LLM decompose 的 raw aspects，避免返回 None 后丢失 room skin 参数。
+  - `GENERATOR_MANIFEST["interior_surface"].effective_params` 扩展 wall/ceiling/accent/detail 参数。
+- 验证：
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_terrain_style_profile.py`
+  - 通过：`python editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py`
+  - 通过：`python -B` AST 检查相关 Python 文件。

@@ -23,6 +23,7 @@ def run_progressive_workflow(
     all_items: List[Dict[str, Any]],
     do_import: bool,
     reviews: Optional[List[Dict[str, Any]]] = None,
+    progress_sink: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """渐进式场景组合工作流（突击方案完整接入）。
 
@@ -41,6 +42,7 @@ def run_progressive_workflow(
     shell_models = getattr(composer, "_shell_models", None)
     if shell_models:
         composer._shell_report = composer._place_shells(shell_models)
+    _generate_post_shell_framework(composer)
 
     # 2. 渐进式主循环（新路径）
     from .scene_session import SceneSession, PHASE_ORDER
@@ -72,7 +74,15 @@ def run_progressive_workflow(
         scene_name=composer.scene_name or "progressive_scene",
     )
     progress_events: List[str] = []
-    session.set_progress_sink(progress_events.append)
+    def _progress_sink(message: str) -> None:
+        progress_events.append(message)
+        if callable(progress_sink):
+            try:
+                progress_sink(message)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[ProgressiveWorkflow] progress sink skipped: %s", exc)
+
+    session.set_progress_sink(_progress_sink)
 
     # 设置基线快照（框架已生成，作为初始状态）
     initial_snapshot = _capture_viewport_snapshot(composer)
@@ -137,6 +147,13 @@ def run_progressive_workflow(
         importer=importer,
         viewport_sampler=viewport_sampler,
         reasonable_provider=reasonable_provider,
+        post_import_hook=lambda imported_ids, _batch_id: _repair_recent_imports(
+            imported_ids,
+            scene_layout,
+            engine_gate,
+            zone_aabbs=_collect_zone_aabbs(getattr(composer, "zone_tree", None)),
+            door_aabbs=_collect_door_clearance_aabbs(getattr(composer, "zone_tree", None)),
+        ),
     )
 
     # 8. 返回（格式与 _run_original_workflow 一致）
@@ -176,6 +193,42 @@ def run_progressive_workflow(
         "vlm_review_skipped": list(getattr(vlm_report, "skipped", []) or []),
         "vlm_review_timed_out": list(getattr(vlm_report, "timed_out", []) or []),
     }
+
+
+def _generate_post_shell_framework(composer: Any) -> None:
+    """Generate framework pieces that depend on measured shell placement.
+
+    The original workflow runs these after _place_shells(). Progressive compose
+    must keep the same anchor chain, otherwise shell interiors and opt-in
+    boundary aspects disappear from the default F5 path.
+    """
+    zone_tree = getattr(composer, "zone_tree", None)
+    if zone_tree is None or getattr(zone_tree, "root", None) is None:
+        return
+    try:
+        from .scene_composer import _aspect_params, _has_aspect, resolve_zone_anchor
+
+        for zone in zone_tree.list_all_zones():
+            if (getattr(zone, "enclosure", "") or "") == "shell":
+                composer._generate_interior_floor(zone)
+                composer._generate_foundation_surface(zone)
+
+        boundary_zone = next(
+            (zone for zone in zone_tree.list_all_zones() if _has_aspect(zone, "boundary")),
+            None,
+        )
+        if boundary_zone is None:
+            return
+        boundary_params = _aspect_params(boundary_zone, "boundary")
+        boundary_anchor = resolve_zone_anchor(
+            composer,
+            boundary_zone,
+            "boundary",
+            params=boundary_params,
+        )
+        composer._generate_fence(boundary_params, anchor=boundary_anchor)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ProgressiveWorkflow] post-shell framework skipped: %s", exc)
 
 
 def _run_vlm_advisory_review(imported: List[str], engine_gate: Any) -> Any:
@@ -228,14 +281,15 @@ def _serialize_operation_log(entries: List[Any]) -> List[Dict[str, Any]]:
 def _capture_viewport_snapshot(composer: Any) -> Dict[str, Any]:
     """采集当前视口的 transform 快照（喂给 SceneDiffTracker）。"""
     try:
-        from CoronaCore.core.managers import scene_manager
         from .scene_diff import make_transform
-        scene = scene_manager.get_active_scene()
+        scene = _get_current_scene()
         if scene is None:
             return {}
         snapshot = {}
         for actor in scene.get_actors():
-            aid = actor.get_name()
+            aid = _actor_name(actor)
+            if not aid:
+                continue
             pos = actor.get_position()
             rot = actor.get_rotation()
             scale = actor.get_scale()
@@ -244,6 +298,137 @@ def _capture_viewport_snapshot(composer: Any) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ProgressiveWorkflow] 采集快照失败: %s", exc)
         return {}
+
+
+def _get_current_scene() -> Any:
+    """Return the active/default Corona scene using the public scene_manager API."""
+    from CoronaCore.core.managers import scene_manager
+
+    scene = scene_manager.get("")
+    if scene is not None:
+        return scene
+    routes = scene_manager.list_all()
+    return scene_manager.get(routes[0]) if routes else None
+
+
+def _actor_name(actor: Any) -> str:
+    getter = getattr(actor, "get_name", None)
+    if callable(getter):
+        try:
+            return str(getter() or "")
+        except Exception:
+            pass
+    return str(getattr(actor, "name", "") or "")
+
+
+def _actor_aabb(actor: Any) -> Optional[List[float]]:
+    getter = getattr(actor, "get_bounding_box", None)
+    if callable(getter):
+        bb = getter()
+        return list(bb) if bb and len(bb) >= 6 else None
+    try:
+        from ..mcp.tools.transform_grounding import actor_world_aabb
+        bb = actor_world_aabb(actor)
+        return list(bb) if bb and len(bb) >= 6 else None
+    except Exception:
+        pass
+    return None
+
+
+def _scene_actor(scene: Any, actor_id: str) -> Any:
+    getter = getattr(scene, "get_actor", None)
+    if callable(getter):
+        try:
+            actor = getter(actor_id)
+            if actor is not None:
+                return actor
+        except Exception:
+            pass
+    finder = getattr(scene, "find_actor", None)
+    if callable(finder):
+        try:
+            return finder(actor_id)
+        except Exception:
+            return None
+    return None
+
+
+def _repair_recent_imports(
+    imported_ids: List[str],
+    scene_layout: Any,
+    engine_gate: Any,
+    *,
+    zone_aabbs: Dict[str, List[float]],
+    door_aabbs: Dict[str, List[float]],
+) -> int:
+    """AABB hard loop after each imported batch: snap bottom and resolve overlaps."""
+
+    if not imported_ids:
+        return 0
+    try:
+        from ..mcp.tools.transform_grounding import resolve_actor_overlaps, snap_actor_to_ground
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[ProgressiveWorkflow] AABB repair unavailable: %s", exc)
+        return 0
+    scene = _get_current_scene()
+    if scene is None:
+        return 0
+
+    try:
+        active_ids = {str(getattr(inst, "instance_id", "") or "") for inst in scene_layout.list_active()}
+    except Exception:
+        active_ids = set()
+
+    repaired = 0
+    for actor_id in imported_ids:
+        actor = _scene_actor(scene, actor_id)
+        if actor is None:
+            continue
+        try:
+            inst = scene_layout.get(actor_id)
+        except Exception:
+            inst = None
+        zone_id = str(getattr(inst, "zone_id", "") or "")
+        zone_aabb = zone_aabbs.get(zone_id)
+
+        def _apply() -> Dict[str, Any]:
+            before = list(actor.get_position())
+            snapped = snap_actor_to_ground(actor, ground_y=0.0, clearance=0.02)
+            obstacles = []
+            for other_id in active_ids:
+                if other_id == actor_id:
+                    continue
+                other = _scene_actor(scene, other_id)
+                if other is not None:
+                    obstacles.append(other)
+            overlap = resolve_actor_overlaps(
+                actor,
+                obstacles,
+                extra_obstacle_aabbs=door_aabbs.values(),
+                zone_aabb=zone_aabb,
+            )
+            after = list(actor.get_position())
+            return {
+                "changed": before != after,
+                "snapped": snapped is not None,
+                "overlap": overlap,
+                "position": after,
+            }
+
+        try:
+            result = engine_gate.run(_apply) if engine_gate is not None else _apply()
+            if result.get("changed"):
+                repaired += 1
+                if inst is not None:
+                    transform = getattr(inst, "transform", None)
+                    if not isinstance(transform, dict):
+                        transform = {}
+                        inst.transform = transform
+                    transform["pos"] = list(result.get("position") or actor.get_position())
+                logger.info("[ProgressiveWorkflow] AABB repair %s -> %s", actor_id, result.get("position"))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[ProgressiveWorkflow] AABB repair skipped for %s: %s", actor_id, exc)
+    return repaired
 
 
 def _distribute_assets_to_phases(
@@ -263,33 +448,228 @@ def _distribute_assets_to_phases(
     for asset in resolved:
         asset = dict(asset)
         name = (asset.get("name") or "").lower()
+        role = _infer_layout_role(asset)
+        asset.setdefault("layout_role", role)
         # 简单分类（可扩展为查 placement_type）
         if any(kw in name for kw in ["地毯", "rug", "floor", "桌", "table", "椅", "chair", "床", "bed"]):
+            asset.setdefault("layout_role", "furniture")
             if indoor_zone_id:
                 asset.setdefault("zone_id", indoor_zone_id)
             if shell_zone_id:
                 asset.setdefault("anchor_ref", shell_zone_id)
             phase_map["INTERIOR"].append(asset)
         elif any(kw in name for kw in ["栅栏", "fence", "boundary", "围栏"]):
+            asset.setdefault("layout_role", "boundary")
             if outdoor_zone_id:
                 asset.setdefault("zone_id", outdoor_zone_id)
             phase_map["BOUNDARY"].append(asset)
-        elif any(kw in name for kw in ["篝火", "火堆", "campfire", "bonfire", "木柴", "log", "horse", "马"]):
+        elif any(kw in name for kw in [
+            "篝火", "火堆", "campfire", "bonfire", "木柴", "log", "horse", "马",
+            "喷泉", "fountain", "雕像", "statue", "天使", "angel", "长椅", "bench",
+            "广场", "plaza", "路灯", "streetlight", "树", "tree", "摊", "stall",
+        ]):
             if outdoor_zone_id:
                 asset.setdefault("zone_id", outdoor_zone_id)
             phase_map["OBJECTS"].append(asset)
         elif any(kw in name for kw in ["灯", "lamp", "light", "装饰", "deco"]):
+            asset.setdefault("layout_role", "decoration")
             if indoor_zone_id:
                 asset.setdefault("zone_id", indoor_zone_id)
             if shell_zone_id:
                 asset.setdefault("anchor_ref", shell_zone_id)
             phase_map["DECORATION"].append(asset)
         else:
-            if indoor_zone_id:
+            # Mixed outdoor + shell scenes should not silently push unknown
+            # plaza/camp props into the building. Known furniture above still
+            # goes indoors; otherwise prefer the outdoor parent when present.
+            if outdoor_zone_id and shell_zone_id:
+                asset.setdefault("zone_id", outdoor_zone_id)
+            elif indoor_zone_id:
                 asset.setdefault("zone_id", indoor_zone_id)
             phase_map["OBJECTS"].append(asset)
 
+    _assign_default_progressive_positions(phase_map, composer)
     return phase_map
+
+
+def _assign_default_progressive_positions(phase_map: Dict[str, List[Dict[str, Any]]],
+                                          composer: Any) -> None:
+    """Assign conservative non-overlapping positions when no layout pos exists.
+
+    Progressive import intentionally bypasses the old clear-scene compose/import
+    path, so assets can arrive without LLM layout geometry. A small deterministic
+    first-pass layout is better than importing everything at the origin; AABB/VLM
+    can then review from a sane initial state.
+    """
+    zones = _zone_lookup(composer)
+    counters: Dict[str, int] = {}
+    for phase, assets in phase_map.items():
+        for asset in assets:
+            if asset.get("pos") is not None:
+                continue
+            zone_id = str(asset.get("zone_id") or "")
+            idx = counters.get(zone_id or phase, 0)
+            counters[zone_id or phase] = idx + 1
+            zone = zones.get(zone_id)
+            if _is_outdoor_zone(zone):
+                asset["pos"] = _outdoor_default_pos(asset, idx, zone, composer)
+                asset.setdefault("scale", _outdoor_default_scale(asset, zone, composer))
+            else:
+                asset["pos"] = _indoor_default_pos(idx, zone)
+
+
+def _zone_lookup(composer: Any) -> Dict[str, Any]:
+    tree = getattr(composer, "zone_tree", None)
+    if tree is None or getattr(tree, "root", None) is None:
+        return {}
+    return {str(getattr(zone, "zone_id", "")): zone for zone in tree.list_all_zones()}
+
+
+def _is_outdoor_zone(zone: Any) -> bool:
+    if zone is None:
+        return False
+    return (
+        (str(getattr(zone, "role", "") or "").lower() == "outdoor")
+        or (str(getattr(zone, "enclosure", "") or "").lower() == "terrain")
+    )
+
+
+def _indoor_default_pos(index: int, zone: Any) -> List[float]:
+    size = list(getattr(getattr(zone, "volume", None), "size", []) or [5.0, 5.0, 3.0])
+    width = float(size[0] if len(size) > 0 else 5.0)
+    depth = float(size[1] if len(size) > 1 else 5.0)
+    margin_x = max(0.4, min(width / 2.0 - 0.4, 1.0))
+    margin_z = max(0.4, min(depth / 2.0 - 0.4, 1.0))
+    pattern = [
+        [0.0, 0.0, 0.0],
+        [-margin_x, 0.0, margin_z],
+        [margin_x, 0.0, margin_z],
+        [-margin_x, 0.0, -margin_z],
+        [margin_x, 0.0, -margin_z],
+        [0.0, 0.0, margin_z * 1.4],
+        [0.0, 0.0, -margin_z * 1.4],
+    ]
+    if index < len(pattern):
+        return pattern[index]
+    row = index - len(pattern)
+    x = ((row % 3) - 1) * margin_x
+    z = (1.8 + row // 3) * margin_z
+    return [x, 0.0, min(depth / 2.0 - 0.5, z)]
+
+
+def _infer_layout_role(asset: Dict[str, Any]) -> str:
+    explicit = str(asset.get("layout_role") or "").strip().lower()
+    if explicit:
+        return explicit
+    name = str(asset.get("name") or "").lower()
+    if any(kw in name for kw in ("fountain", "喷泉", "statue", "雕像", "angel", "天使")):
+        return "landmark"
+    if any(kw in name for kw in ("bench", "长椅", "streetlight", "路灯", "stall", "摊")):
+        return "foreground_object"
+    if any(kw in name for kw in ("fence", "boundary", "围栏", "栅栏")):
+        return "boundary"
+    if any(kw in name for kw in ("grass", "flower", "rocks", "shrub", "草", "花", "岩石", "灌木")):
+        return "ground_cover"
+    if any(kw in name for kw in ("table", "chair", "bed", "desk", "桌", "椅", "床")):
+        return "furniture"
+    return "decoration"
+
+
+def _scene_scale_context(composer: Any, zone: Any) -> Dict[str, float]:
+    shell_r = _measured_shell_radius(composer)
+    aabbs = getattr(composer, "_shell_aabb", {}) or {}
+    building_width = shell_r * 2.0 if shell_r > 0.0 else 0.0
+    building_depth = building_width
+    building_height = 0.0
+    for item in aabbs.values():
+        if isinstance(item, dict):
+            building_width = max(building_width, float(item.get("half_x", 0.0) or 0.0) * 2.0)
+            building_depth = max(building_depth, float(item.get("half_z", 0.0) or 0.0) * 2.0)
+            building_height = max(building_height, float(item.get("height", 0.0) or 0.0))
+    if building_height <= 0.0 and building_width > 0.0:
+        building_height = building_width * 0.75
+
+    size = list(getattr(getattr(zone, "volume", None), "size", []) or [20.0, 20.0, 0.0])
+    terrain_extent = max(
+        float(size[0] if len(size) > 0 else 20.0),
+        float(size[1] if len(size) > 1 else 20.0),
+        float((getattr(composer, "_terrain_extent", {}) or {}).get("extent", 0.0) or 0.0),
+    )
+    foundation = getattr(composer, "_foundation_extent", {}) or {}
+    foundation_extent = max(
+        float(foundation.get("width", 0.0) or 0.0),
+        float(foundation.get("depth", 0.0) or 0.0),
+        building_width,
+        building_depth,
+    )
+    return {
+        "building_width": building_width,
+        "building_depth": building_depth,
+        "building_height": building_height,
+        "building_radius": max(building_width, building_depth) / 2.0,
+        "terrain_extent": terrain_extent,
+        "foundation_extent": foundation_extent,
+    }
+
+
+def _scale_triplet(value: float) -> List[float]:
+    v = round(max(0.2, float(value or 1.0)), 3)
+    return [v, v, v]
+
+
+def _outdoor_default_scale(asset: Dict[str, Any], zone: Any, composer: Any) -> List[float]:
+    if asset.get("scale") is not None:
+        scale = asset.get("scale")
+        return list(scale) if isinstance(scale, (list, tuple)) else _scale_triplet(float(scale))
+    ctx = _scene_scale_context(composer, zone)
+    name = str(asset.get("name") or "").lower()
+    role = str(asset.get("layout_role") or "").lower()
+    width = max(1.0, ctx.get("building_width", 0.0) or ctx.get("terrain_extent", 20.0) * 0.25)
+    height = max(width * 0.75, ctx.get("building_height", 0.0) or 0.0)
+    if "fountain" in name or "喷泉" in name:
+        return _scale_triplet(max(1.15, min(1.9, width / 5.0)))
+    if "statue" in name or "雕像" in name or "angel" in name or "天使" in name:
+        return _scale_triplet(max(1.25, min(2.0, height / 3.8)))
+    if role == "foreground_object":
+        return _scale_triplet(max(0.85, min(1.25, height / 8.0)))
+    if role == "decoration":
+        return _scale_triplet(max(0.65, min(1.05, height / 10.0)))
+    return _scale_triplet(1.0)
+
+
+def _outdoor_default_pos(asset: Dict[str, Any], index: int, zone: Any, composer: Any) -> List[float]:
+    size = list(getattr(getattr(zone, "volume", None), "size", []) or [20.0, 20.0, 0.0])
+    width = float(size[0] if len(size) > 0 else 20.0)
+    depth = float(size[1] if len(size) > 1 else 20.0)
+    half_limit = max(2.0, min(width, depth) / 2.0 - 1.5)
+    ctx = _scene_scale_context(composer, zone)
+    shell_r = float(ctx.get("building_radius", 0.0) or _measured_shell_radius(composer))
+    foundation_r = float(ctx.get("foundation_extent", 0.0) or 0.0) / 2.0
+    activity_r = max(shell_r + 2.0, foundation_r + 1.2, min(width, depth) * 0.22, 3.5)
+    radius = min(half_limit, activity_r)
+    name = str(asset.get("name") or "").lower()
+    if "fountain" in name or "喷泉" in name:
+        return [0.0, 0.0, radius]
+    if "statue" in name or "雕像" in name or "angel" in name or "天使" in name:
+        return [-radius * 0.65, 0.0, radius * 0.45]
+    angles = [0.0, 0.75, -0.75, 1.6, -1.6, 2.35, -2.35, 3.14]
+    angle = angles[index % len(angles)]
+    import math
+    return [
+        round(math.sin(angle) * radius, 3),
+        0.0,
+        round(math.cos(angle) * radius, 3),
+    ]
+
+
+def _measured_shell_radius(composer: Any) -> float:
+    aabbs = getattr(composer, "_shell_aabb", {}) or {}
+    radii = []
+    for item in aabbs.values():
+        if isinstance(item, dict):
+            radii.append(max(float(item.get("half_x", 0.0) or 0.0),
+                            float(item.get("half_z", 0.0) or 0.0)))
+    return max(radii) if radii else 0.0
 
 
 def _infer_primary_zone_ids(composer: Any) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -412,16 +792,15 @@ def _filter_aabbs_by_zone(scene_layout: Any, aabbs: Dict[str, List[float]], zone
 def _collect_aabbs(scene_layout: Any) -> Dict[str, List[float]]:
     """从 scene_layout 采集各 actor 的 AABB（喂给 consistency_check）。"""
     try:
-        from CoronaCore.core.managers import scene_manager
-        scene = scene_manager.get_active_scene()
+        scene = _get_current_scene()
         if scene is None:
             return {}
         aabbs = {}
         for inst in scene_layout.list_active():
-            actor = scene.get_actor_by_name(inst.instance_id)
+            actor = scene.get_actor(inst.instance_id)
             if actor is None:
                 continue
-            bb = actor.get_bounding_box()
+            bb = _actor_aabb(actor)
             if bb and len(bb) >= 6:
                 aabbs[inst.instance_id] = list(bb)
         return aabbs

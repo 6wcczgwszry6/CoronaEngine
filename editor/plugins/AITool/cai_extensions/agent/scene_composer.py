@@ -17,26 +17,35 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
 def _build_room_box_obj(width: float, height: float, depth: float,
-                        door: Optional[Dict[str, float]] = None) -> str:
+                        door: Optional[Dict[str, float]] = None,
+                        open_face: str = "front",
+                        floor_mtl: str = "floor",
+                        wall_mtl: str = "wall",
+                        ceiling_mtl: str = "ceiling") -> str:
     """构建房间盒子 OBJ 字符串（单位立方体，缩放由 Actor 完成）。
 
     M2 步骤 14b-i：纯函数，可离线几何验证（共面 + 法向内向）。
-    - door=None  → 闭合六面盒子（与旧 _generate_room_box 几何完全一致，零损失）
-    - door={width, height} → 前墙(z=+0.5)拆成左柱+右柱+门楣，包住一个落地门洞，
+    - open_face="front" → 默认 5 面展示盒：前墙开放，便于 F5/VLM/用户观察室内。
+    - open_face="none" + door=None → 闭合六面盒子（旧几何回退）。
+    - open_face="none" + door={width, height} → 前墙(z=+0.5)拆成左柱+右柱+门楣，包住一个落地门洞，
       camera 可从门洞走进去。门洞横向居中、底边贴地。
+    - open_face="front_and_ceiling" → 去前墙和顶面，作为 demo/debug 展示模式。
 
     单位立方体边长 1（中心原点），door 尺寸以"米"给出，按 width/height 归一化到
     单位坐标。所有面法向指向盒内（背面剔除后摄像机能看进内部）。
     """
     # 8 基础顶点 + 6 法向（与旧表一致）
+    floor_mtl = (floor_mtl or "floor").strip() or "floor"
+    wall_mtl = (wall_mtl or "wall").strip() or "wall"
+    ceiling_mtl = (ceiling_mtl or "ceiling").strip() or "ceiling"
     head = (
-        "mtllib box.mtl\nusemtl wall\n"
+        "mtllib box.mtl\n"
         "# 8 vertices of a 1x1x1 cube centered at origin\n"
         "v -0.5 -0.5 -0.5\nv  0.5 -0.5 -0.5\nv  0.5  0.5 -0.5\nv -0.5  0.5 -0.5\n"
         "v -0.5 -0.5  0.5\nv  0.5 -0.5  0.5\nv  0.5  0.5  0.5\nv -0.5  0.5  0.5\n"
@@ -44,17 +53,33 @@ def _build_room_box_obj(width: float, height: float, depth: float,
         "vn  0.0  1.0  0.0\nvn  0.0 -1.0  0.0\n"
     )
     # 背/左/右/底/顶 5 面（门洞只改前墙，这 5 面恒定，法向内向）
-    common_faces = (
+    open_face = (open_face or "front").strip().lower()
+    if open_face not in ("front", "none", "front_and_ceiling"):
+        open_face = "front"
+
+    side_faces = (
+        f"usemtl {wall_mtl}\n"
         "f 1//3 2//3 3//3 4//3\n"   # back   z=-0.5 inward +Z
         "f 1//2 4//2 8//2 5//2\n"   # left   x=-0.5 inward +X
         "f 2//4 6//4 7//4 3//4\n"   # right  x=+0.5 inward -X
+        f"usemtl {floor_mtl}\n"
         "f 1//5 5//5 6//5 2//5\n"   # bottom y=-0.5 inward +Y
-        "f 4//6 3//6 7//6 8//6\n"   # top    y=+0.5 inward -Y
     )
+    top_face = f"usemtl {ceiling_mtl}\nf 4//6 3//6 7//6 8//6\n"   # top y=+0.5 inward -Y
+    common_faces = side_faces + ("" if open_face == "front_and_ceiling" else top_face)
+
+    if open_face in ("front", "front_and_ceiling"):
+        label = "5 faces" if open_face == "front" else "4 faces"
+        return head + (
+            f"# {label}: open front for editor/VLM visibility.\n"
+            "# room boundary is still enforced by Zone/AABB checks.\n"
+        ) + common_faces
+
+    common_faces = side_faces + top_face
 
     if not door:
-        # 闭合：前墙整面一块（与旧表完全一致）
-        front = "f 5//1 8//1 7//1 6//1\n"   # front z=+0.5 inward -Z
+        # 闭合：前墙整面一块（旧 6 面回退）
+        front = f"usemtl {wall_mtl}\nf 5//1 8//1 7//1 6//1\n"   # front z=+0.5 inward -Z
         return head + (
             "# 6 faces (quads): each is a planar quad, normals inward.\n"
             "# verified by cross-product: 4 coplanar verts + inward normal.\n"
@@ -79,6 +104,7 @@ def _build_room_box_obj(width: float, height: float, depth: float,
     # 前墙拆 3 块（全在 z=+0.5，法向 -Z 内向，缠绕 bl->tl->tr->br）
     front_frame = (
         "# front wall as frame around door hole (normal -Z inward)\n"
+        f"usemtl {wall_mtl}\n"
         "f 5//1 8//1 13//1 9//1\n"     # left strip   x in [-0.5, dl]
         "f 10//1 14//1 7//1 6//1\n"    # right strip  x in [dr, 0.5]
         "f 12//1 13//1 14//1 11//1\n"  # top lintel   y in [dt, 0.5]
@@ -151,6 +177,54 @@ def _select_interior_floor_shape(width: float, depth: float,
     return "disc"
 
 
+def _float_param(params: Dict[str, Any], key: str, default: float) -> float:
+    try:
+        value = params.get(key, default)
+        if value is None:
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _optional_float_param(params: Dict[str, Any], key: str):
+    try:
+        value = params.get(key)
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _resolve_terrain_extent(width: float, depth: float, building_extent: float,
+                            profile_params: Dict[str, Any]) -> Tuple[float, float, Dict[str, float]]:
+    """Resolve terrain size from aspect params without scene-name inference."""
+    params = dict(profile_params or {})
+    extent_factor = _float_param(params, "extent_factor", 3.0)
+    padding = _float_param(params, "padding", 0.0)
+    min_extent = _optional_float_param(params, "min_extent")
+    max_extent = _optional_float_param(params, "max_extent")
+
+    base_extent = max(float(width or 0.0), float(depth or 0.0))
+    if building_extent > 1e-6:
+        base_extent = max(base_extent, float(building_extent) * max(0.0, extent_factor))
+    extent = max(1.0, base_extent + padding)
+    if min_extent is not None:
+        extent = max(extent, min_extent)
+    if max_extent is not None:
+        extent = min(extent, max_extent)
+    extent = max(1.0, extent)
+    return extent, extent, {
+        "extent_factor": float(extent_factor),
+        "padding": float(padding),
+        "min_extent": float(min_extent) if min_extent is not None else 0.0,
+        "max_extent": float(max_extent) if max_extent is not None else 0.0,
+        "building_extent": float(building_extent or 0.0),
+        "extent": float(extent),
+    }
+
+
 def _terrain_height(x: float, z: float, profile, platform_radius: float) -> float:
     """通用高度场 h(x,z)：terrain zone 的参数化外皮（M2 步骤 15c-ii）。
 
@@ -197,6 +271,27 @@ def _terrain_height(x: float, z: float, profile, platform_radius: float) -> floa
     return max(0.0, h * ramp)
 
 
+def _terrain_detail_material(x: float, z: float, i: int, j: int, profile) -> str:
+    """Choose terrain/detail material procedurally from params, not scene names."""
+    import math
+    pattern = str(getattr(profile, "detail_pattern", "none") or "none").strip().lower()
+    strength = float(getattr(profile, "detail_strength", 0.0) or 0.0)
+    if pattern == "none" or strength <= 0.0:
+        return "terrain"
+    if pattern == "paving_grid":
+        return "terrain_detail" if (i % 3 == 0 or j % 3 == 0) else "terrain"
+    if pattern == "radial_plaza":
+        r = math.hypot(x, z)
+        angle_band = int((math.atan2(z, x) + math.pi) / (math.pi / 8.0))
+        return "terrain_detail" if (angle_band % 2 == 0 or int(r) % 4 == 0) else "terrain"
+    if pattern == "cracked_stone":
+        return "terrain_detail" if ((i * 7 + j * 11) % 13 in (0, 1)) else "terrain"
+    if pattern == "noise_patches":
+        v = _hash01(i * 101 + j * 37 + 17)
+        return "terrain_detail" if v < min(0.55, max(0.05, strength)) else "terrain"
+    return "terrain"
+
+
 def _build_terrain_mesh_obj(width: float, depth: float, profile,
                             platform_radius: float, grid: int = 32,
                             mtl_lib: str = "grass.mtl", mtl_name: str = "grass") -> str:
@@ -225,8 +320,15 @@ def _build_terrain_mesh_obj(width: float, depth: float, profile,
         return j * (N + 1) + i + 1   # 1-based
 
     # 每格两三角，缠绕保证 +Y 朝上（与 _build_floor_obj 同向）
+    cur_mtl = mtl_name
     for j in range(N):
         for i in range(N):
+            cx = -hw + width * (i + 0.5) / N
+            cz = -hd + depth * (j + 0.5) / N
+            mat = _terrain_detail_material(cx, cz, i, j, profile)
+            if mat != cur_mtl:
+                lines.append(f"usemtl {mat}")
+                cur_mtl = mat
             a, b = vid(i, j), vid(i + 1, j)
             c, d = vid(i + 1, j + 1), vid(i, j + 1)
             lines.append(f"f {a}//1 {d}//1 {c}//1")
@@ -242,8 +344,9 @@ def _hash01(n: int) -> float:
 
 
 def _build_grass_obj(width: float, depth: float, profile, platform_radius: float,
-                     count: int = 160, mtl_lib: str = "grass_blade.mtl") -> str:
-    """散布草簇/花 billboard（M2 步骤 15e：草原的"草和花"材质层）。
+                     count: int = 160, mtl_lib: str = "grass_blade.mtl",
+                     scatter: str = "grass") -> str:
+    """散布地表覆盖物（草/花/岩石/灌木/碎屑/铺装标记）。
 
     纯函数，确定性散布（hash 自 index，不用 random）。每簇 = 交叉双竖直 quad（billboard），
     落在平台外（草不长在建筑下）、底部贴 _terrain_height（随坡起伏）。少量(~1/6)用花色。
@@ -251,13 +354,21 @@ def _build_grass_obj(width: float, depth: float, profile, platform_radius: float
     """
     import math
     hw, hd = width / 2.0, depth / 2.0
+    scatter = (scatter or "grass").strip().lower()
     lines = [f"mtllib {mtl_lib}",
-             f"# grass scatter count={count} platform_r={platform_radius:.2f}"]
+             f"# ground scatter kind={scatter} count={count} platform_r={platform_radius:.2f}"]
     vbase = 0          # 已写顶点数（face 索引用）
     faces = []
     placed = 0
-    BLADE_H = 0.35     # 草高
-    BLADE_W = 0.18     # 草宽（半宽）
+    if scatter in ("rocks", "debris", "paving_marks"):
+        BLADE_H = 0.08
+        BLADE_W = 0.22
+    elif scatter == "shrubs":
+        BLADE_H = 0.55
+        BLADE_W = 0.28
+    else:
+        BLADE_H = 0.35
+        BLADE_W = 0.18
     attempts = 0
     idx = 0
     while placed < count and attempts < count * 4:
@@ -270,7 +381,8 @@ def _build_grass_obj(width: float, depth: float, profile, platform_radius: float
         if math.hypot(x, z) <= platform_radius + 0.3:
             continue
         y = _terrain_height(x, z, profile, platform_radius)
-        is_flower = (_hash01(idx * 7 + 3) < 0.16)   # ~16% 是花
+        flower_ratio = 0.55 if scatter == "flowers" else 0.16
+        is_flower = (_hash01(idx * 7 + 3) < flower_ratio)
         mat = "flower" if is_flower else "blade"
         # 交叉双 quad（billboard）：两片竖直面互相垂直，从任意角度都看得见
         # quad1 沿 X，quad2 沿 Z
@@ -301,7 +413,7 @@ def _build_grass_obj(width: float, depth: float, profile, platform_radius: float
     return "\n".join(lines) + "\n"
 
 
-def _terrain_mtl_text(material: str) -> str:
+def _terrain_mtl_text(material: str, secondary_material: str = "") -> str:
     """terrain material -> MTL text. 颜色保守，优先保证 demo 可读。"""
     palette = {
         "neutral": ("terrain", "0.24 0.24 0.22", "0.48 0.47 0.42"),
@@ -310,9 +422,17 @@ def _terrain_mtl_text(material: str) -> str:
         "sand": ("terrain", "0.36 0.31 0.20", "0.78 0.67 0.42"),
         "snow": ("terrain", "0.62 0.66 0.70", "0.86 0.90 0.92"),
         "stone": ("terrain", "0.20 0.20 0.19", "0.42 0.42 0.39"),
+        "marble": ("terrain", "0.48 0.48 0.46", "0.78 0.76 0.70"),
+        "concrete": ("terrain", "0.26 0.26 0.24", "0.52 0.51 0.47"),
+        "pavement": ("terrain", "0.22 0.22 0.21", "0.46 0.45 0.42"),
+        "slate": ("terrain", "0.16 0.17 0.18", "0.34 0.36 0.38"),
     }
     name, ka, kd = palette.get(material, palette["neutral"])
-    return f"newmtl {name}\nKa {ka}\nKd {kd}\nKs 0.02 0.02 0.02\nNs 4.0\nd 1.0\n"
+    _, ska, skd = palette.get(secondary_material or "", palette.get(material, palette["neutral"]))
+    return (
+        f"newmtl {name}\nKa {ka}\nKd {kd}\nKs 0.02 0.02 0.02\nNs 4.0\nd 1.0\n"
+        f"newmtl terrain_detail\nKa {ska}\nKd {skd}\nKs 0.02 0.02 0.02\nNs 4.0\nd 1.0\n"
+    )
 
 
 def _scatter_mtl_text(scatter: str, material: str) -> str:
@@ -320,6 +440,12 @@ def _scatter_mtl_text(scatter: str, material: str) -> str:
     if scatter == "rocks":
         blade_ka, blade_kd = "0.16 0.15 0.14", "0.36 0.35 0.32"
         flower_ka, flower_kd = "0.22 0.20 0.18", "0.48 0.45 0.40"
+    elif scatter == "debris":
+        blade_ka, blade_kd = "0.18 0.16 0.13", "0.42 0.36 0.28"
+        flower_ka, flower_kd = "0.12 0.11 0.10", "0.30 0.28 0.24"
+    elif scatter == "paving_marks":
+        blade_ka, blade_kd = "0.18 0.18 0.17", "0.62 0.60 0.54"
+        flower_ka, flower_kd = "0.10 0.10 0.10", "0.36 0.35 0.33"
     elif scatter == "shrubs":
         blade_ka, blade_kd = "0.10 0.18 0.07", "0.24 0.38 0.16"
         flower_ka, flower_kd = "0.18 0.12 0.08", "0.42 0.30 0.18"
@@ -345,11 +471,202 @@ def _surface_mtl_text(material: str) -> str:
     palette = {
         "neutral": ("0.28 0.27 0.24", "0.58 0.56 0.50"),
         "stone": ("0.22 0.22 0.21", "0.50 0.50 0.46"),
+        "marble": ("0.48 0.48 0.46", "0.78 0.76 0.70"),
+        "concrete": ("0.26 0.26 0.24", "0.52 0.51 0.47"),
+        "pavement": ("0.22 0.22 0.21", "0.46 0.45 0.42"),
+        "dirt": ("0.20 0.15 0.10", "0.44 0.32 0.20"),
         "wood": ("0.22 0.13 0.06", "0.50 0.32 0.16"),
         "carpet": ("0.20 0.10 0.08", "0.55 0.28 0.20"),
     }
     ka, kd = palette.get(material, palette["neutral"])
     return f"newmtl {material}\nKa {ka}\nKd {kd}\nKs 0.02 0.02 0.02\nNs 6.0\nd 1.0\n"
+
+
+def _surface_palette(material: str) -> Tuple[str, str]:
+    palette = {
+        "neutral": ("0.28 0.27 0.24", "0.58 0.56 0.50"),
+        "stone": ("0.22 0.22 0.21", "0.50 0.50 0.46"),
+        "marble": ("0.48 0.48 0.46", "0.78 0.76 0.70"),
+        "concrete": ("0.26 0.26 0.24", "0.52 0.51 0.47"),
+        "pavement": ("0.22 0.22 0.21", "0.46 0.45 0.42"),
+        "dirt": ("0.20 0.15 0.10", "0.44 0.32 0.20"),
+        "wood": ("0.22 0.13 0.06", "0.50 0.32 0.16"),
+        "carpet": ("0.20 0.10 0.08", "0.55 0.28 0.20"),
+        "wallpaper": ("0.34 0.30 0.26", "0.68 0.60 0.52"),
+        "plaster": ("0.42 0.40 0.36", "0.76 0.72 0.64"),
+        "fabric": ("0.26 0.18 0.16", "0.56 0.38 0.34"),
+    }
+    return palette.get(str(material or "neutral"), palette["neutral"])
+
+
+_SURFACE_MATERIAL_ALIASES = {
+    "wood": "wood",
+    "wooden": "wood",
+    "timber": "wood",
+    "木": "wood",
+    "木质": "wood",
+    "木地板": "wood",
+    "stone": "stone",
+    "rock": "stone",
+    "slate": "stone",
+    "石": "stone",
+    "石材": "stone",
+    "石板": "stone",
+    "marble": "marble",
+    "大理石": "marble",
+    "concrete": "concrete",
+    "cement": "concrete",
+    "混凝土": "concrete",
+    "pavement": "pavement",
+    "paving": "pavement",
+    "tile": "pavement",
+    "tiles": "pavement",
+    "砖": "pavement",
+    "地砖": "pavement",
+    "carpet": "carpet",
+    "rug": "carpet",
+    "地毯": "carpet",
+    "dirt": "dirt",
+    "earth": "dirt",
+    "土": "dirt",
+    "wallpaper": "wallpaper",
+    "壁纸": "wallpaper",
+    "plaster": "plaster",
+    "灰泥": "plaster",
+    "抹灰": "plaster",
+    "fabric": "fabric",
+    "布艺": "fabric",
+}
+
+
+def _canonical_surface_material(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if text in _SURFACE_MATERIAL_ALIASES:
+        return _SURFACE_MATERIAL_ALIASES[text]
+    for key, material in _SURFACE_MATERIAL_ALIASES.items():
+        if key and key in text:
+            return material
+    return text if text in {"neutral", "stone", "marble", "concrete", "pavement", "dirt", "wood", "carpet", "wallpaper", "plaster", "fabric"} else ""
+
+
+def _style_material_tokens(style_context: Dict[str, Any]) -> List[str]:
+    tokens: List[str] = []
+    if not isinstance(style_context, dict):
+        return tokens
+    for key in ("material_palette", "materials", "surface_palette"):
+        values = style_context.get(key)
+        if isinstance(values, list):
+            tokens.extend(str(v) for v in values)
+        elif isinstance(values, str):
+            tokens.append(values)
+    for key in ("terrain_mood", "interior_mood", "style", "detail_pattern"):
+        value = style_context.get(key)
+        if isinstance(value, str):
+            tokens.append(value)
+    return tokens
+
+
+def _derive_room_skin_materials(
+    surface_params: Dict[str, Any],
+    style_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, str]:
+    """Derive floor/wall/ceiling skin from open material params, not scene names."""
+
+    params = dict(surface_params or {})
+    style_context = style_context or {}
+    candidates: List[str] = []
+    for key in ("floor_material", "wall_material", "ceiling_material", "accent_material", "material"):
+        value = params.get(key)
+        if value:
+            candidates.append(str(value))
+    candidates.extend(_style_material_tokens(style_context))
+    materials: List[str] = []
+    for value in candidates:
+        material = _canonical_surface_material(value)
+        if material and material not in materials:
+            materials.append(material)
+
+    def explicit(key: str) -> str:
+        return _canonical_surface_material(params.get(key))
+
+    floor = explicit("floor_material")
+    if not floor:
+        for material in materials:
+            if material in {"wood", "marble", "stone", "concrete", "pavement", "carpet", "dirt"}:
+                floor = material
+                break
+    floor = floor or "neutral"
+
+    wall = explicit("wall_material")
+    if not wall:
+        for material in materials:
+            if material in {"wallpaper", "plaster", "fabric"}:
+                wall = material
+                break
+    if not wall:
+        for material in materials:
+            if material in {"wood", "stone"}:
+                wall = material
+                break
+    if not wall:
+        if floor in {"marble", "stone", "concrete", "pavement"}:
+            wall = "plaster"
+        elif floor in {"wood", "carpet"}:
+            wall = "wallpaper"
+        elif floor == "dirt":
+            wall = "wood"
+        else:
+            wall = "plaster"
+
+    ceiling = explicit("ceiling_material")
+    if not ceiling:
+        for material in materials:
+            if material in {"plaster", "fabric"}:
+                ceiling = material
+                break
+    if not ceiling:
+        ceiling = "plaster" if wall in {"wallpaper", "plaster", "fabric", "stone"} else ""
+    if not ceiling:
+        ceiling = "wood" if "wood" in materials else ""
+    if not ceiling:
+        ceiling = "plaster" if wall in {"wallpaper", "plaster", "fabric", "stone"} else "neutral"
+
+    accent = explicit("accent_material")
+    if not accent:
+        for material in materials:
+            if material not in {floor, wall, ceiling, "neutral"}:
+                accent = material
+                break
+
+    return {
+        "floor_material": floor,
+        "wall_material": wall,
+        "ceiling_material": ceiling,
+        "accent_material": accent or wall,
+    }
+
+
+def _room_box_mtl_text(
+    *,
+    floor_material: str = "neutral",
+    wall_material: str = "neutral",
+    ceiling_material: str = "neutral",
+    accent_material: str = "",
+) -> str:
+    """MTL for room skin: floor/walls/ceiling have separate material slots."""
+
+    fka, fkd = _surface_palette(floor_material)
+    wka, wkd = _surface_palette(wall_material)
+    cka, ckd = _surface_palette(ceiling_material)
+    aka, akd = _surface_palette(accent_material or wall_material or "neutral")
+    return (
+        f"newmtl floor\nKa {fka}\nKd {fkd}\nKs 0.02 0.02 0.02\nNs 6.0\nd 1.0\n"
+        f"newmtl wall\nKa {wka}\nKd {wkd}\nKs 0.02 0.02 0.02\nNs 5.0\nd 1.0\n"
+        f"newmtl ceiling\nKa {cka}\nKd {ckd}\nKs 0.01 0.01 0.01\nNs 3.0\nd 1.0\n"
+        f"newmtl accent\nKa {aka}\nKd {akd}\nKs 0.02 0.02 0.02\nNs 5.0\nd 1.0\n"
+    )
 
 
 def _boundary_mtl_text(kind: str, material: str) -> str:
@@ -475,10 +792,11 @@ _ZONE_DECOMPOSE_SYSTEM_PROMPT = """你是空间场景分解器。把用户的场
 		        "functional_intent": "camp|courtyard|defense|ritual|research 等用途"
 		      },
 		      "aspects": [
-		        {"capability": "ground_profile", "params": {"type": "flat|rolling|dunes|noise", "amplitude": 0.0, "frequency": 1.0, "material": "neutral", "extent_factor": 6.0}},
-		        {"capability": "ground_cover", "params": {"kind": "grass|snow|sand|stone|none", "density": 0.0}},
+		        {"capability": "ground_profile", "params": {"type": "flat|rolling|dunes|noise", "amplitude": 0.0, "frequency": 1.0, "material": "neutral", "secondary_material": "neutral", "extent_factor": 3.0, "min_extent": null, "max_extent": null, "padding": 0.0, "openness": 0.5, "detail_pattern": "none|paving_grid|radial_plaza|cracked_stone|noise_patches", "detail_strength": 0.0}},
+		        {"capability": "ground_cover", "params": {"kind": "none|grass|flowers|rocks|shrubs|debris|paving_marks", "scatter": "none|grass|flowers|rocks|shrubs|debris|paving_marks", "density": 0.0}},
 		        {"capability": "boundary", "params": {"kind": "fence|wall|hedge", "material": "wood|stone|greenery|neutral", "height": 1.1, "style": "边界外观提示", "radius": null, "margin": 1.0}},
-	        {"capability": "interior_surface", "params": {"floor_material": "neutral|stone|wood|carpet", "floor_shape": "disc|quad"}},
+	        {"capability": "interior_surface", "params": {"floor_material": "neutral|stone|wood|carpet", "floor_shape": "disc|quad", "wall_material": "neutral|stone|wood|wallpaper|plaster|fabric", "ceiling_material": "neutral|wood|plaster|concrete", "accent_material": "neutral|wood|stone|fabric", "detail_pattern": "none|paneling|trim|subtle_grid"}},
+	        {"capability": "foundation_surface", "params": {"material": "neutral|stone|wood|carpet|dirt|marble", "shape": "auto|disc|quad", "padding": 0.6, "height_offset": 0.02, "follow_shell_footprint": true}},
 	        {"capability": "entrance", "params": {"style": "door|curtain|archway", "hint": "入口生成提示"}},
 	        {"capability": "shell_dressing", "params": {"asset_id": "建筑模型名", "style": "外观提示"}},
 	        {"capability": "unsupported", "params": {"requested": "water_moat", "reason": "场景强烈需要但 manifest 未覆盖"}}
@@ -503,10 +821,11 @@ _ZONE_DECOMPOSE_SYSTEM_PROMPT = """你是空间场景分解器。把用户的场
   * material_palette: 推荐材质调性数组，如 wood/felt/grass、stone/slate、metal/concrete
   * functional_intent: 功能意图，如 camp、courtyard、defense、research、market
 - aspects: 半开放能力切面。优先使用 manifest 中已有 capability：
-  * ground_profile: 地形起伏/材质/范围，params 可含 type/amplitude/frequency/material/extent_factor
-  * ground_cover: 地表覆盖，params 可含 kind/density/scatter
+  * ground_profile: 地形起伏/材质/范围，params 可含 type/amplitude/frequency/material/secondary_material/extent_factor/min_extent/max_extent/padding/openness/detail_pattern/detail_strength
+  * ground_cover: 地表覆盖，params 可含 kind/density/scatter；只用于草、花、岩石、灌木、碎屑、铺装标记等覆盖/散布物，不用于 stone/marble/slate/pavement/tile/concrete 这类基础铺装材质
   * boundary: 边界物，params 可含 kind/material/height/style/radius/margin；没有 boundary aspect 时不要生成任何围栏/墙/绿篱
   * interior_surface: 内皮地面/墙面，params 可含 floor_material/floor_shape
+  * foundation_surface: 主建筑外部基座/铺装垫层，params 可含 material/shape/padding/height_offset/follow_shell_footprint；它用于建筑底部与地形/广场衔接，不替代 interior_surface
   * entrance: 入口，params 可含 style/hint
   * shell_dressing: 建筑外壳，params 可含 asset_id/style
   * unsupported: 场景强烈需要但 manifest 未覆盖时使用，params 写 requested/reason；unsupported 不会执行
@@ -521,13 +840,18 @@ _ZONE_DECOMPOSE_SYSTEM_PROMPT = """你是空间场景分解器。把用户的场
 - 室内外混合但内层只是【普通房间】（院子里的一间客厅）→ 外层 terrain + 内层 box(has_door=true)。
 - 纯室外（一片草原 / 广场，无可进入建筑）→ 1 个 terrain，role=outdoor，parent=null。
 - 最多 2 层。内层(box/shell)是"人活动空间"(宽深 4~6 米、高 2.5~3 米)；外层 terrain 一大片(15~25 米)。
+- 如果用户消息里包含 "RoleAgent 软偏好" 段落，它只表示角色风格倾向，不是用户新增物体清单；object_bias 里的物件不要自动加入 aspects 或 items，除非用户正文明确要求。
 - 动态参数选择规则：根据用户需求、主建筑、地形气质、时代/文化/功能意图填写 aspects.params。
   * 需要边界时才输出 boundary；不需要边界时不要输出 boundary。
   * boundary 的 kind/material/height/style/radius/margin 必须与 style_context 和 zone size 一致，例如营地可低矮木栏，庭院可石墙；纯室外如需要控制围栏范围可给 radius，或用 margin 表示距 zone 边缘的内缩距离；研究/工业设施可 unsupported metal_railing。
-  * ground_cover 的 kind/density/scatter 必须与 ground_profile.material 和 terrain_mood 一致；没有覆盖物需求时不要输出 ground_cover。
+  * ground_profile 的 extent_factor/min_extent/max_extent/padding/openness 控制地形大小；开放自然环境可更大，庭院/广场/建筑前场应更克制。不要让所有 terrain 都默认超大草原。
+  * ground_profile 的 detail_pattern/detail_strength 用于程序化地表细节：石板网格、放射广场纹理、裂纹、岩石斑块、草色变化等。
+  * ground_cover 的 kind/density/scatter 必须与 ground_profile.material 和 terrain_mood 一致；没有覆盖物需求时不要输出 ground_cover。铺装广场不要输出 grass/flowers。
   * entrance 的 style/hint 必须来自主建筑风格；不要把毡帘、拱门、木门当成全局默认。
   * interior_surface 的 floor_material/floor_shape 必须来自主建筑/功能意图；圆形/帐篷类可用 disc，矩形/教堂/房间类可用 quad；缺少明确风格时 material 用 neutral、shape 可省略。
-- 草原蒙古包可输出 rolling/grass/fence/curtain/carpet/disc 等 aspects；欧式教堂不要输出 grass/fence/curtain，室内地面可用 stone/quad。
+- foundation_surface 用于主建筑外部基座。圆底/帐篷类可用 disc，矩形/教堂/房屋类可用 quad；材质应与地形/主建筑底部协调。
+- 对重要普通物体可在 item/metadata 中标注 layout_role 或 scale_relation；喷泉/雕像/广场装饰应属于室外活动区，不要放进主建筑内部，除非用户明确要求。
+- 草原蒙古包可输出 rolling/grass/fence/curtain/carpet/disc/foundation_surface 等 aspects；欧式教堂不要输出 grass/fence/curtain，室内地面可用 stone/quad，外部 foundation_surface 可用 stone 或 marble/quad。
 - 火山口观测站如需要 lava_flow 且 manifest 不支持，应输出 unsupported，不要编造新 capability。
 只输出 JSON，不要解释。"""
 
@@ -579,6 +903,37 @@ def _normalize_aspect_dict(raw: Any):
     return ZoneAspect(capability=capability, params=dict(params))
 
 
+_GROUND_SURFACE_MATERIALS = {
+    "stone", "marble", "slate", "pavement", "paved", "tile", "tiles",
+    "concrete", "brick", "cobblestone", "asphalt", "neutral",
+    "石材", "石板", "大理石", "板岩", "铺装", "瓷砖", "地砖", "混凝土", "砖",
+}
+
+
+def _is_surface_material_cover(params: Dict[str, Any]) -> bool:
+    """Return True when ground_cover is actually a base surface material."""
+    kind = str(params.get("kind") or params.get("scatter") or "").strip().lower()
+    if not kind:
+        return False
+    return kind in _GROUND_SURFACE_MATERIALS
+
+
+def _looks_same_scene_asset(a: str, b: str) -> bool:
+    """Conservative name match for shell asset de-duplication.
+
+    Exact shell names are already handled. This catches cases like "欧式教堂"
+    vs "教堂" without treating unrelated short props as duplicates.
+    """
+    left = re.sub(r"[\s_\-·,，。:：]+", "", str(a or "")).lower()
+    right = re.sub(r"[\s_\-·,，。:：]+", "", str(b or "")).lower()
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    min_len = min(len(left), len(right))
+    return min_len >= 2 and (left in right or right in left)
+
+
 def _add_legacy_aspect(zone, capability: str, params: Dict[str, Any]) -> None:
     from ..data_model.zone_tree import ZoneAspect
 
@@ -599,6 +954,21 @@ def normalize_zone_aspects(zone) -> None:
         aspect = _normalize_aspect_dict(raw)
         if aspect is not None:
             normalized.append(aspect)
+    # LLM 有时会把石板/大理石/铺装这类“基础地面材质”误放进
+    # ground_cover，导致广场生成散布簇。这里把它收口到 ground_profile
+    # 的 material，ground_cover 本身移除；草/花/雪/碎石等真正覆盖物不受影响。
+    surface_cover_material = None
+    cleaned = []
+    for aspect in normalized:
+        if aspect.capability == "ground_cover" and _is_surface_material_cover(aspect.params):
+            surface_cover_material = str(
+                aspect.params.get("kind") or aspect.params.get("scatter") or ""
+            ).strip()
+            logger.info("[SceneComposer] ground_cover=%s 识别为基础地面材质，转入 ground_profile.material",
+                        surface_cover_material)
+            continue
+        cleaned.append(aspect)
+    normalized = cleaned
     zone.aspects = normalized
 
     if getattr(zone, "primary_shell_asset_id", None):
@@ -610,6 +980,9 @@ def normalize_zone_aspects(zone) -> None:
 
     terrain_profile = getattr(zone, "terrain_profile", None)
     if terrain_profile is not None:
+        terrain_material = terrain_profile.material
+        if surface_cover_material and (not terrain_material or terrain_material == "neutral"):
+            terrain_material = surface_cover_material
         _add_legacy_aspect(
             zone,
             "ground_profile",
@@ -618,8 +991,8 @@ def normalize_zone_aspects(zone) -> None:
                 "amplitude": terrain_profile.amplitude,
                 "frequency": terrain_profile.frequency,
                 "seed": terrain_profile.seed,
-                "material": terrain_profile.material,
-                "extent_factor": getattr(terrain_profile, "extent_factor", 6.0),
+                "material": terrain_material,
+                "extent_factor": getattr(terrain_profile, "extent_factor", 3.0),
             },
         )
         if getattr(terrain_profile, "scatter", "none") != "none":
@@ -865,6 +1238,8 @@ class SceneComposer:
         self.zone_tree = zone_tree
         self._last_zone_decompose_snapshot = None
         self._last_zone_decompose_spec = None
+        self._fallback_room_aspects = []
+        self._fallback_room_style_context = {}
 
     def _get_room_zone(self):
         """返回用于"物体布局"的 Zone（物体摆进它的体积里）。
@@ -882,13 +1257,17 @@ class SceneComposer:
         # 退化：构造默认单 Zone（center/size 与旧 _generate_room_box 完全一致）
         from ..data_model.zone_tree import Zone, Volume
         w, d, h = self.room_size[0], self.room_size[1], self.room_size[2]
-        return Zone(
+        zone = Zone(
             zone_id="zone_root",
             name=self.scene_name,
             role="indoor",
             volume=Volume(center=[0.0, h / 2.0, 0.0], size=[w, d, h]),
             enclosure="box",
         )
+        zone.metadata["raw_aspects"] = list(getattr(self, "_fallback_room_aspects", []) or [])
+        zone.style_context = dict(getattr(self, "_fallback_room_style_context", {}) or {})
+        normalize_zone_aspects(zone)
+        return zone
 
     def decompose_zone_tree(self, text: str):
         """M2 步骤 14b-ii：把场景描述分解成 ZoneTree。开放性在这一步（LLM 读结构）。
@@ -914,6 +1293,9 @@ class SceneComposer:
         # 纯单室内盒（1 个 box、无 terrain、无门洞）→ 等价旧路径，返回 None 省一层
         zones = tree.list_all_zones()
         if len(zones) == 1 and zones[0].enclosure == "box" and not zones[0].connectors:
+            self._fallback_room_aspects = list(getattr(zones[0], "metadata", {}).get("raw_aspects") or [])
+            self._fallback_room_style_context = dict(getattr(zones[0], "style_context", {}) or {})
+            self._save_zone_decompose_snapshot(text, zones_spec, tree)
             return None
         logger.info("[SceneComposer] 场景分解为 %d 个 Zone: %s",
                     len(zones), [f"{z.name}({z.enclosure})" for z in zones])
@@ -1356,7 +1738,8 @@ class SceneComposer:
 
     def compose(self, text: str, image_url: str = "",
                 do_import: bool = True,
-                do_review: bool = False) -> Dict[str, Any]:
+                do_review: bool = False,
+                progress_sink: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
         """完整场景组合: 提取清单 → 获取模型 → 审查 → 布局+导入。
 
         三阶段:
@@ -1365,6 +1748,19 @@ class SceneComposer:
           3. compose       — LLM 布局 (注入审查结果) → 批量导入 → 物理沉降
         """
         logger.info("[SceneComposer] ====== 开始场景组合 (三阶段) ======")
+
+        def emit_stage(percent: int, label: str, detail: str) -> None:
+            if not progress_sink:
+                return
+            pct = max(0, min(100, int(percent)))
+            blocks = max(0, min(10, round(pct / 10)))
+            bar = "█" * blocks + "░" * (10 - blocks)
+            try:
+                progress_sink(f"生成进度 {pct:>3}% [{bar}] {label}。{detail}")
+            except Exception:  # noqa: BLE001
+                pass
+
+        emit_stage(5, "开始理解场景需求", "我会先识别空间、主体建筑和关键物件。你可以继续补充要求。")
         items = self.extract_items(text)
         if not items:
             return {"items": [], "imported": [], "failed": [],
@@ -1380,6 +1776,10 @@ class SceneComposer:
             except Exception as e:
                 logger.warning("[SceneComposer] 场景分解异常，退化单盒: %s", e)
                 self.zone_tree = None
+        if self.zone_tree is not None:
+            emit_stage(18, "完成空间拆分", "已确定场地、主体和室内外关系，后续会按这些边界摆放。")
+        else:
+            emit_stage(18, "完成空间判断", "将按当前空间范围继续生成和摆放。")
         # 关键：建树后把 room_size 同步成 indoor box/shell 的真实体积。下游布局 prompt 与
         # 导入后钳制都读 self.room_size——同步后它们自动按真实体积工作，无需改布局代码。
         if self.zone_tree is not None:
@@ -1409,7 +1809,30 @@ class SceneComposer:
                 items.insert(0, {"name": sname, "quantity": 1,
                                  "keywords": f"{sname}, building exterior, {shell_hint}"})
 
-        extracted_total = len(items)
+        if shell_names:
+            before = len(items)
+            filtered_items: List[Dict[str, Any]] = []
+            removed_shell_dupes: List[str] = []
+            for it in items:
+                name = (it.get("name") or "").strip()
+                if name in shell_names:
+                    filtered_items.append(it)
+                    continue
+                if any(_looks_same_scene_asset(name, shell_name) for shell_name in shell_names):
+                    removed_shell_dupes.append(name)
+                    continue
+                filtered_items.append(it)
+            if removed_shell_dupes:
+                logger.info("[SceneComposer] 剔除 shell 主建筑重复普通物体: %s",
+                            removed_shell_dupes)
+                items = filtered_items
+                # 主建筑重复不应计入用户真实需求数量。
+                extracted_total = max(0, before - len(removed_shell_dupes))
+            else:
+                extracted_total = len(items)
+        else:
+            extracted_total = len(items)
+
         truncated = 0
         if extracted_total > self.max_items:
             # 截断保护 shell 名：先留 shell，再用家具填满剩余额度
@@ -1422,6 +1845,7 @@ class SceneComposer:
                         extracted_total, self.max_items, len(items), len(shells_kept), truncated)
 
         # ── Phase 1: generate_all (并行, 纯 API) ──
+        emit_stage(32, "准备所需模型", "正在获取主体和物件资源，界面可能需要等待一会儿。")
         resolved = self._run_model_retrieval(items)
         if not resolved:
             reasons = getattr(self, "_last_fail_reasons", [])
@@ -1436,6 +1860,7 @@ class SceneComposer:
         # ── Phase 2: review_queue (串行, 全局锁保护) ──
         reviews: List[Dict[str, Any]] = []
         if do_review:
+            emit_stage(48, "检查候选模型", "正在筛掉明显不合适的模型，避免后续组装返工。")
             reviews = self._review_models(resolved)
             logger.info("[SceneComposer] 审查完成: %d/%d", len(reviews), len(resolved))
 
@@ -1464,10 +1889,12 @@ class SceneComposer:
         # 突击方案接入：渐进式工作流默认开启；如需回退旧清场式路径，
         # 显式设置 USE_PROGRESSIVE_COMPOSE=0。
         use_progressive = os.getenv("USE_PROGRESSIVE_COMPOSE", "1") != "0"
+        emit_stage(62, "开始组装场景", "会先放主体和场地，再把物件摆到合理位置。")
         if use_progressive:
             from .scene_composer_progressive import run_progressive_workflow
             result = run_progressive_workflow(self, text, furniture, items, do_import,
-                                              reviews=reviews)
+                                              reviews=reviews,
+                                              progress_sink=progress_sink)
         else:
             result = self._run_original_workflow(text, furniture, items, do_import,
                                                   reviews=reviews)
@@ -1485,6 +1912,7 @@ class SceneComposer:
         result["shell_expected"] = sorted(shell_names)
         result["shell_degraded"] = degraded
         result["zone_decompose_snapshot"] = getattr(self, "_last_zone_decompose_snapshot", None)
+        emit_stage(96, "完成自动检查", "已汇总摆放结果、用户介入信息和可选外观审查。")
         return result
 
     def _review_models(self, resolved: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1602,9 +2030,22 @@ class SceneComposer:
         _os.makedirs(tmp_dir, exist_ok=True)
         mtl_path = _os.path.join(tmp_dir, "box.mtl")
         obj_path = _os.path.join(tmp_dir, "box.obj")
+        surface_params = _aspect_params(zone, "interior_surface")
+        skin = _derive_room_skin_materials(
+            surface_params,
+            getattr(zone, "style_context", {}) or {},
+        )
+        floor_mat = skin["floor_material"]
+        wall_mat = skin["wall_material"]
+        ceiling_mat = skin["ceiling_material"]
+        accent_mat = skin["accent_material"]
         with open(mtl_path, "w", encoding="ascii") as f:
-            f.write("newmtl wall\nKa 0.85 0.85 0.85\nKd 0.92 0.92 0.92\n"
-                    "Ks 0.0 0.0 0.0\nNs 0.0\nd 1.0\n")
+            f.write(_room_box_mtl_text(
+                floor_material=floor_mat,
+                wall_material=wall_mat,
+                ceiling_material=ceiling_mat,
+                accent_material=accent_mat,
+            ))
         # M2 步骤 14b-i：OBJ 由纯函数生成（支持门洞）。门洞从根 Zone 的首个
         # connector 读；当前无 Zone 声明门洞 → door=None → 闭合盒子（与现状一致）。
         door = None
@@ -1613,7 +2054,19 @@ class SceneComposer:
             sz = getattr(c, "size", None)
             if sz and len(sz) >= 2:
                 door = {"width": sz[0], "height": sz[1]}
-        obj_text = _build_room_box_obj(width, height, depth, door=door)
+        open_face = (_os.getenv("CORONA_ROOM_BOX_OPEN_FACE", "front") or "front").strip().lower()
+        if open_face not in ("front", "none", "front_and_ceiling"):
+            open_face = "front"
+        obj_text = _build_room_box_obj(
+            width,
+            height,
+            depth,
+            door=door,
+            open_face=open_face,
+            floor_mtl="floor",
+            wall_mtl="wall",
+            ceiling_mtl="ceiling",
+        )
         with open(obj_path, "w", encoding="ascii") as f:
             f.write(obj_text)
 
@@ -1651,8 +2104,8 @@ class SceneComposer:
                     pass
             scene.add_actor(actor)
             _t.sleep(0.3)
-            logger.info("[SceneComposer] 整体房间盒子已创建: %.1f×%.1f×%.1f m",
-                        width, depth, height)
+            logger.info("[SceneComposer] 整体房间盒子已创建: %.1f×%.1f×%.1f m (floor=%s wall=%s ceiling=%s)",
+                        width, depth, height, floor_mat, wall_mat, ceiling_mat)
         except Exception as e:
             logger.warning("[SceneComposer] 房间盒子创建失败: %s", e)
 
@@ -1681,6 +2134,9 @@ class SceneComposer:
             scatter=str(cover_params.get("scatter") or cover_params.get("kind") or "none"),
             style_tags=[],
         )
+        setattr(profile, "secondary_material", str(profile_params.get("secondary_material") or ""))
+        setattr(profile, "detail_pattern", str(profile_params.get("detail_pattern") or "none"))
+        setattr(profile, "detail_strength", _float_param(profile_params, "detail_strength", 0.0))
 
         # 平台半径：内嵌 shell/box 子 zone 的 footprint × 2.2（B 方案：宁大勿小，给足余量，
         # 保证 shell 真实脚印一定装得下；放 shell 时再夹回这个平台）。无子 zone → 无平台。
@@ -1700,10 +2156,15 @@ class SceneComposer:
                 sw = sub.volume.size[0] if sub.volume.size else 4.0
                 sd = sub.volume.size[1] if len(sub.volume.size) > 1 else 4.0
                 building_extent = max(building_extent, max(sw, sd))
-        extent_factor = float(profile_params.get("extent_factor", 6.0) or 6.0)
-        min_extent = max(40.0, building_extent * extent_factor)
-        width = max(width, min_extent)
-        depth = max(depth, min_extent)
+        width, depth, extent_meta = _resolve_terrain_extent(
+            width, depth, building_extent, profile_params,
+        )
+        self._terrain_extent = dict(extent_meta)
+        self._terrain_extent.update({
+            "width": width,
+            "depth": depth,
+            "openness": _float_param(profile_params, "openness", 0.5),
+        })
 
         tmp_dir = _os.path.join(_tf.gettempdir(), "corona_room_box")
         _os.makedirs(tmp_dir, exist_ok=True)
@@ -1711,10 +2172,11 @@ class SceneComposer:
         grass_mtl_path = _os.path.join(tmp_dir, terrain_mtl_name)
         terrain_path = _os.path.join(tmp_dir, "terrain.obj")
         material = str(getattr(profile, "material", "neutral") or "neutral")
+        secondary_material = str(getattr(profile, "secondary_material", "") or "")
         scatter = str(getattr(profile, "scatter", "none") or "none")
         # 15c：材质/散布来自 aspect params；无 aspect 时中性、不猜场景身份。
         with open(grass_mtl_path, "w", encoding="ascii") as f:
-            f.write(_terrain_mtl_text(material))
+            f.write(_terrain_mtl_text(material, secondary_material))
         with open(terrain_path, "w", encoding="ascii") as f:
             f.write(_build_terrain_mesh_obj(
                 width, depth, profile, platform_radius, grid=32,
@@ -1780,7 +2242,12 @@ class SceneComposer:
                 with open(grass_mtl_path, "w", encoding="ascii") as f:
                     f.write(_scatter_mtl_text(scatter, material))
                 with open(grass_obj_path, "w", encoding="ascii") as f:
-                    f.write(_build_grass_obj(width, depth, profile, platform_radius, count=160))
+                    density = max(0.1, min(2.0, _float_param(cover_params, "density", 1.0)))
+                    scatter_count = max(20, min(300, int(160 * density)))
+                    f.write(_build_grass_obj(
+                        width, depth, profile, platform_radius,
+                        count=scatter_count, scatter=scatter,
+                    ))
                 gactor = Actor(name="__terrain_grass", route=grass_obj_path,
                                actor_type="mesh", parent_scene=scene)
                 # 同 terrain：引擎归一化 mesh 成单位盒 → 世界大小只认 scale。
@@ -1804,7 +2271,8 @@ class SceneComposer:
                         pass
                 scene.add_actor(gactor)
                 _t.sleep(0.2)
-                logger.info("[SceneComposer] 地形散布层已铺设: %s, 160 簇（平台外）", scatter)
+                logger.info("[SceneComposer] terrain scatter layer created: %s, %d clusters",
+                            scatter, scatter_count)
             except Exception as e:
                 logger.warning("[SceneComposer] 草/花散布失败（忽略）: %s", e)
 
@@ -1974,6 +2442,92 @@ class SceneComposer:
                         width * INSCRIBE, depth * INSCRIBE, floor_mat, floor_shape)
         except Exception as e:
             logger.warning("[SceneComposer] 内皮地面铺设失败: %s", e)
+
+    def _generate_foundation_surface(self, zone) -> None:
+        """Generate an exterior foundation/paving pad from foundation_surface."""
+        import os as _os, tempfile as _tf, time as _t
+
+        if not _has_aspect(zone, "foundation_surface"):
+            return
+        params = _aspect_params(zone, "foundation_surface")
+        aabb = getattr(self, "_shell_aabb", {}).get(getattr(zone, "zone_id", ""), None)
+        if aabb and aabb.get("half_x", 0) > 1e-6:
+            width = float(aabb.get("half_x", 0.0) or 0.0) * 2.0
+            depth = float(aabb.get("half_z", 0.0) or 0.0) * 2.0
+            center_x = float(aabb.get("center_x", 0.0) or 0.0)
+            center_z = float(aabb.get("center_z", 0.0) or 0.0)
+        else:
+            size = list(getattr(getattr(zone, "volume", None), "size", []) or [])
+            center = list(getattr(getattr(zone, "volume", None), "center", []) or [])
+            width = float(size[0] if len(size) > 0 else 4.0)
+            depth = float(size[1] if len(size) > 1 else 4.0)
+            center_x = float(center[0] if len(center) > 0 else 0.0)
+            center_z = float(center[2] if len(center) > 2 else 0.0)
+
+        padding = max(0.0, _float_param(params, "padding", 0.6))
+        height_offset = _float_param(params, "height_offset", 0.02)
+        material = str(params.get("material") or params.get("floor_material") or "neutral")
+        shape = str(params.get("shape") or "auto").strip().lower()
+        if shape not in ("disc", "quad"):
+            shape = _select_interior_floor_shape(width, depth, params)
+
+        foundation_w = max(0.5, width + padding * 2.0)
+        foundation_d = max(0.5, depth + padding * 2.0)
+
+        tmp_dir = _os.path.join(_tf.gettempdir(), "corona_room_box")
+        _os.makedirs(tmp_dir, exist_ok=True)
+        mtl_path = _os.path.join(tmp_dir, "foundation_surface.mtl")
+        obj_path = _os.path.join(tmp_dir, "foundation_surface.obj")
+        with open(mtl_path, "w", encoding="ascii") as f:
+            f.write(_surface_mtl_text(material))
+        with open(obj_path, "w", encoding="ascii") as f:
+            if shape == "quad":
+                f.write(_build_floor_obj(mtl_lib="foundation_surface.mtl", mtl_name=material))
+            else:
+                f.write(_build_disc_obj(mtl_lib="foundation_surface.mtl", mtl_name=material))
+
+        try:
+            from CoronaCore.core.managers import scene_manager as _sm
+            from CoronaCore.core.entities.actor import Actor
+        except ImportError:
+            return
+
+        scene = _sm.get("")
+        if scene is None:
+            routes = _sm.list_all()
+            scene = _sm.get(routes[0]) if routes else None
+        if scene is None:
+            return
+
+        existing = {a.name for a in scene.get_actors()}
+        actor_name = "__foundation_surface"
+        if actor_name in existing:
+            return
+
+        try:
+            actor = Actor(name=actor_name, route=obj_path, actor_type="mesh",
+                          parent_scene=scene)
+            actor.set_position([center_x, height_offset, center_z], True)
+            actor.set_scale([foundation_w, 1.0, foundation_d], True)
+            mech = getattr(actor, "_mechanics", None)
+            if mech is not None:
+                try:
+                    mech.set_physics_enabled(False)
+                except Exception:
+                    pass
+            scene.add_actor(actor)
+            _t.sleep(0.2)
+            self._foundation_extent = {
+                "width": foundation_w,
+                "depth": foundation_d,
+                "shape": shape,
+                "material": material,
+                "center": [center_x, height_offset, center_z],
+            }
+            logger.info("[SceneComposer] foundation surface created: %.1fx%.1f material=%s shape=%s",
+                        foundation_w, foundation_d, material, shape)
+        except Exception as e:
+            logger.warning("[SceneComposer] foundation surface skipped: %s", e)
 
     def _generate_scene_framework(self, prompt: str) -> None:
         """M2 步骤 14b-ii/15a：按 ZoneTree 生成场景框架。
@@ -2190,6 +2744,7 @@ class SceneComposer:
             for z in self.zone_tree.list_all_zones():
                 if (getattr(z, "enclosure", "") or "") == "shell":
                     self._generate_interior_floor(z)
+                    self._generate_foundation_surface(z)
         # 锚定链-5：boundary 是 opt-in aspect；没有声明 boundary 就不生成围栏/边界物。
         # gate 放在调用边界，_generate_fence 只保留几何生成能力。
         if self.zone_tree is not None and self.zone_tree.root is not None:
