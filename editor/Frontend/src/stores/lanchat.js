@@ -39,6 +39,10 @@ const state = reactive({
   messages: [], // { message_id, sender_id, room_id, seq, from, text, ts, self }
   disclosures: [], // safe stage/progress cards derived from metadata
   processedProposalIds: [], // proposal ids already confirmed/rejected locally or by GM reply
+  generationOptions: {
+    vlmEnabled: false,
+    vlmMaxTargets: 0,
+  },
   error: '', // 最近一次错误码/信息
   agents: [], // [{agent_id, name, owner}] 来自房主 agent_roster，不含 persona
   myAgents: [], // 我添加的 agent 本地草稿 [{agent_id, name, persona}]，用于显示"我的"
@@ -58,6 +62,8 @@ function _resetRoom() {
   state.messages = [];
   state.disclosures = [];
   state.processedProposalIds = [];
+  state.generationOptions.vlmEnabled = false;
+  state.generationOptions.vlmMaxTargets = 0;
   state.error = '';
   state.agents = [];
   state.myAgents = [];
@@ -411,6 +417,24 @@ async function sendMessage(text, options = {}) {
   }
 }
 
+function setGenerationOptions(options = {}) {
+  const vlmEnabled = Boolean(options.vlmEnabled);
+  const vlmMaxTargets = Number(options.vlmMaxTargets);
+  state.generationOptions.vlmEnabled = vlmEnabled;
+  state.generationOptions.vlmMaxTargets = vlmEnabled
+    ? Math.max(1, Math.min(4, Number.isFinite(vlmMaxTargets) ? Math.floor(vlmMaxTargets) : 1))
+    : 0;
+}
+
+function generationOptionsMetadata() {
+  return {
+    generation_options: {
+      vlm_enabled: Boolean(state.generationOptions.vlmEnabled),
+      vlm_max_targets: Number(state.generationOptions.vlmMaxTargets || 0),
+    },
+  };
+}
+
 /** 添加 AI 助手。{ name, persona } */
 async function addAgent({ name, persona }) {
   state.error = '';
@@ -542,6 +566,8 @@ export const lanchat = {
   joinRoom,
   leaveRoom,
   sendMessage,
+  setGenerationOptions,
+  generationOptionsMetadata,
   addAgent,
   removeAgent,
   handleEvent,

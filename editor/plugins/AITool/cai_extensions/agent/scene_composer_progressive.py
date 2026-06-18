@@ -1203,12 +1203,12 @@ def _run_vlm_advisory_review(imported: List[str], engine_gate: Any, composer: An
         else:
             targets = [
                 {"actor_id": actor_id, "model_name": actor_id, "model_type": actor_id}
-                for actor_id in imported[:max(0, max_targets)]
+                for actor_id in _prioritize_vlm_targets(imported, max_targets)
             ]
     else:
         targets = [
             {"actor_id": actor_id, "model_name": actor_id, "model_type": actor_id}
-            for actor_id in imported[:max(0, max_targets)]
+            for actor_id in _prioritize_vlm_targets(imported, max_targets)
         ]
     if not targets:
         logger.info("[ProgressiveWorkflow] VLM 外回路未执行: no imported targets")
@@ -1229,6 +1229,47 @@ def _run_vlm_advisory_review(imported: List[str], engine_gate: Any, composer: An
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ProgressiveWorkflow] VLM 外回路异常，已跳过: %s", exc)
         return VlmReviewReport(status="unavailable", reason=f"VLM 外回路异常：{exc}")
+
+
+_VLM_TARGET_PRIORITY_RULES: tuple[tuple[int, tuple[str, ...]], ...] = (
+    (0, ("__terrain_boundary", "_terrain_boundary", "terrain_boundary", "地形边界", "边界", "围栏", "栅栏")),
+    (1, ("入口", "拱门", "门楼", "主街", "通道", "path", "entrance", "gate", "arch")),
+    (2, ("主摊", "摊位", "焦点", "地标", "招牌", "market", "stall", "landmark", "sign")),
+    (3, ("雕像", "天使", "大型", "巨型", "动物", "小狗", "狗", "statue", "angel", "animal", "dog")),
+    (4, ("灯笼", "灯光", "火盆", "休息区", "长椅", "lantern", "light", "bench", "rest")),
+)
+
+
+def _prioritize_vlm_targets(imported: List[Any], max_targets: int) -> List[str]:
+    """Pick semantically important scene anchors for optional VLM review.
+
+    VLM is expensive, so reviewing the first imported objects often wastes the
+    budget on small furniture. Prefer targets that affect scene readability,
+    style continuity, scale, or user-visible high-risk additions.
+    """
+    if max_targets <= 0:
+        return []
+    seen: set[str] = set()
+    names: List[str] = []
+    for item in imported or []:
+        if isinstance(item, dict):
+            raw = item.get("actor_id") or item.get("name") or item.get("model_name") or ""
+        else:
+            raw = item
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+
+    def _rank(name: str) -> tuple[int, int]:
+        lower = name.lower()
+        for rank, keywords in _VLM_TARGET_PRIORITY_RULES:
+            if any(keyword.lower() in lower for keyword in keywords):
+                return rank, names.index(name)
+        return 99, names.index(name)
+
+    return sorted(names, key=_rank)[:max_targets]
 
 
 def _vlm_max_targets() -> int:

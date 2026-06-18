@@ -176,6 +176,7 @@ class LANChatAgentWorker:
         """
         if not isinstance(message, dict):
             return False
+        self._apply_generation_options_from_message(message)
         message_kind = str(message.get("message_kind") or "chat").lower()
         sender_type = str(message.get("sender_type") or "user").lower()
         dedupe_key = self._coordinator_sync_dedupe_key(message, source=source)
@@ -298,6 +299,7 @@ class LANChatAgentWorker:
         return processed
 
     def _process_trigger(self, trigger: dict[str, Any]) -> bool:
+        self._apply_generation_options_from_message(trigger)
         agent_id = str(trigger.get("agent_id") or "agent")
         agent_name = str(trigger.get("agent_name") or "Agent")
         action_payload = None
@@ -912,6 +914,34 @@ class LANChatAgentWorker:
             if value:
                 metadata[key] = str(value)
         return metadata
+
+    def _apply_generation_options_from_message(self, message: dict[str, Any]) -> None:
+        metadata = self._metadata_from_trigger(message)
+        options = metadata.get("generation_options") if isinstance(metadata, dict) else None
+        if not isinstance(options, dict):
+            return
+        is_host = bool(
+            message.get("is_host")
+            or str(message.get("sender_type") or "").lower() == "host"
+            or metadata.get("is_host")
+            or str(metadata.get("sender_role") or "").lower() == "host"
+        )
+        if not is_host:
+            return
+        enabled = bool(options.get("vlm_enabled"))
+        raw_targets = options.get("vlm_max_targets", 1 if enabled else 0)
+        try:
+            targets = int(raw_targets)
+        except Exception:
+            targets = 1 if enabled else 0
+        targets = max(0, min(4, targets))
+        if enabled and targets <= 0:
+            targets = 1
+        os.environ["PROGRESSIVE_VLM_MAX_TARGETS"] = str(targets if enabled else 0)
+        self._logger.info(
+            "LANChat generation option updated: PROGRESSIVE_VLM_MAX_TARGETS=%s",
+            os.environ["PROGRESSIVE_VLM_MAX_TARGETS"],
+        )
 
     @staticmethod
     def _coordinator_sync_dedupe_key(message: dict[str, Any], *, source: str) -> str:

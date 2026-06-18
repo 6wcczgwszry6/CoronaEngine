@@ -146,6 +146,23 @@ def test_lanchat_room_panel_exposes_validation_agent_bundle() -> None:
     )
 
 
+def test_lanchat_room_panel_exposes_host_vlm_toggle() -> None:
+    _assert_contains(
+        "editor/Frontend/src/views/sidebar/lanchat/RoomPanel.vue",
+        "VLM 外观检查",
+        "onVlmToggle",
+        "generationOptionsMetadata",
+        "vlmMaxTargets",
+    )
+    _assert_contains(
+        "editor/Frontend/src/stores/lanchat.js",
+        "generationOptions",
+        "setGenerationOptions",
+        "generationOptionsMetadata",
+        "vlm_max_targets",
+    )
+
+
 if __name__ == "__main__":
     test_lanchat_room_event_bridge_is_pollable_from_python_worker()
     test_lanchat_plain_chat_coordinator_bridge_contract_is_intact()
@@ -154,4 +171,5 @@ if __name__ == "__main__":
     test_lanchat_worker_is_started_with_scene_composer_factory()
     test_network_host_periodic_snapshot_does_not_rebroadcast_actor_creates()
     test_lanchat_room_panel_exposes_validation_agent_bundle()
+    test_lanchat_room_panel_exposes_host_vlm_toggle()
     print("[OK] LANChat native bridge static contracts")

@@ -1144,6 +1144,56 @@ def test_worker_does_not_crash_when_coordinator_blocks_start_generation():
     print("[OK] blocked Coordinator confirmation no longer crashes Worker start payload preparation")
 
 
+def test_worker_applies_host_vlm_generation_option_from_metadata():
+    old_targets = os.environ.get("PROGRESSIVE_VLM_MAX_TARGETS")
+    try:
+        os.environ["PROGRESSIVE_VLM_MAX_TARGETS"] = "0"
+        worker = LANChatAgentWorker(
+            corona_engine=FakeEngine([]),
+            agent_factory=_agent_factory,
+            async_agent_execution=False,
+        )
+
+        worker._apply_generation_options_from_message({  # noqa: SLF001 - direct coverage for metadata bridge
+            "sender_type": "host",
+            "metadata_json": json.dumps({
+                "generation_options": {
+                    "vlm_enabled": True,
+                    "vlm_max_targets": 1,
+                },
+            }, ensure_ascii=False),
+        })
+        assert os.environ.get("PROGRESSIVE_VLM_MAX_TARGETS") == "1"
+
+        worker._apply_generation_options_from_message({  # noqa: SLF001
+            "sender_type": "user",
+            "metadata_json": json.dumps({
+                "generation_options": {
+                    "vlm_enabled": False,
+                    "vlm_max_targets": 0,
+                },
+            }, ensure_ascii=False),
+        })
+        assert os.environ.get("PROGRESSIVE_VLM_MAX_TARGETS") == "1"
+
+        worker._apply_generation_options_from_message({  # noqa: SLF001
+            "sender_type": "host",
+            "metadata_json": json.dumps({
+                "generation_options": {
+                    "vlm_enabled": False,
+                    "vlm_max_targets": 0,
+                },
+            }, ensure_ascii=False),
+        })
+        assert os.environ.get("PROGRESSIVE_VLM_MAX_TARGETS") == "0"
+    finally:
+        if old_targets is None:
+            os.environ.pop("PROGRESSIVE_VLM_MAX_TARGETS", None)
+        else:
+            os.environ["PROGRESSIVE_VLM_MAX_TARGETS"] = old_targets
+    print("[OK] worker applies host-only VLM generation option from LANChat metadata")
+
+
 def test_worker_routes_completed_layout_adjustment_to_coordinator_without_model_agent():
     executor = FakeHostActionExecutor()
     coordinator = InteractionCoordinator()
@@ -3159,6 +3209,7 @@ if __name__ == "__main__":
     test_worker_acknowledges_final_adjustment_confirmation_without_host_execution()
     test_worker_routes_agent_status_query_to_coordinator_without_model_agent()
     test_worker_does_not_crash_when_coordinator_blocks_start_generation()
+    test_worker_applies_host_vlm_generation_option_from_metadata()
     test_worker_routes_completed_layout_adjustment_to_coordinator_without_model_agent()
     test_worker_executes_completed_boundary_adjustment_without_model_agent()
     test_worker_acknowledges_conflict_resolution_rejection_without_host_execution()

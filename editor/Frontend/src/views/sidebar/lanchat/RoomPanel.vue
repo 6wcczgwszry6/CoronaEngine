@@ -153,6 +153,22 @@
         </div>
       </div>
 
+      <div
+        v-if="s.role === 'host'"
+        class="px-3 py-1.5 border-b border-gray-700 bg-[#202020] text-xs flex items-center justify-between gap-2"
+      >
+        <label class="flex items-center gap-2 text-gray-300 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            class="accent-[#84A65B]"
+            :checked="s.generationOptions.vlmEnabled"
+            @change="onVlmToggle"
+          />
+          <span>VLM 外观检查</span>
+        </label>
+        <span class="text-gray-500">{{ s.generationOptions.vlmEnabled ? '审查 1 个关键目标' : '关闭' }}</span>
+      </div>
+	
       <div class="flex flex-1 min-h-0">
         <!-- 消息区 -->
         <div class="flex-1 flex flex-col min-h-0">
@@ -560,10 +576,27 @@ function pickMention(c) {
 
 function messageOptionsForText(text) {
   const trimmed = String(text || '').trim();
+  const generationMetadata = s.role === 'host' ? lanchat.generationOptionsMetadata() : {};
   if (/^@GM(?:\s|$)/i.test(trimmed)) {
-    return buildManualGmMessageOptions(s.role);
+    if (!Object.keys(generationMetadata).length) return buildManualGmMessageOptions(s.role);
+    const options = buildManualGmMessageOptions(s.role);
+    options.metadata = {
+      ...(options.metadata || {}),
+      ...generationMetadata,
+    };
+    return options;
   }
-  return {};
+  return Object.keys(generationMetadata).length
+    ? { metadata: generationMetadata }
+    : {};
+}
+
+function onVlmToggle(event) {
+  const enabled = Boolean(event?.target?.checked);
+  lanchat.setGenerationOptions({
+    vlmEnabled: enabled,
+    vlmMaxTargets: enabled ? 1 : 0,
+  });
 }
 
 function disclosureActionLabel(action) {

@@ -27,6 +27,7 @@ from cai_extensions.agent.scene_composer_progressive import (  # noqa: E402
     _generate_post_shell_framework,
     _infer_primary_zone_ids,
     _merge_final_and_vlm_review_text,
+    _prioritize_vlm_targets,
     _run_vlm_advisory_review,
     _resolve_pending_resource_requests_for_batch,
     _vlm_max_targets,
@@ -600,6 +601,18 @@ def test_vlm_review_uses_composer_hooks_under_engine_gate():
     print("[OK] VLM review uses composer target/capture/review hooks under EngineWriteGate")
 
 
+def test_vlm_target_priority_prefers_scene_anchors_and_high_risk_additions():
+    targets = _prioritize_vlm_targets(
+        ["展示桌", "长椅", "灯笼", "入口拱门", "入一个天使雕像", "小狗", "__terrain_boundary"],
+        4,
+    )
+    assert targets == ["__terrain_boundary", "入口拱门", "入一个天使雕像", "小狗"]
+
+    one_target = _prioritize_vlm_targets(["展示桌", "长椅", "入一个天使雕像"], 1)
+    assert one_target == ["入一个天使雕像"]
+    print("[OK] VLM target priority prefers scene anchors and high-risk additions")
+
+
 def test_final_report_text_includes_vlm_status_without_duplicate():
     merged = _merge_final_and_vlm_review_text(
         "风格收口：warm、fantasy。",
@@ -1065,6 +1078,7 @@ if __name__ == "__main__":
     test_aabb_review_issues_flow_to_coordinator_review_result()
     test_vlm_actionable_advice_flows_to_coordinator_review_result()
     test_vlm_review_uses_composer_hooks_under_engine_gate()
+    test_vlm_target_priority_prefers_scene_anchors_and_high_risk_additions()
     test_final_report_text_includes_vlm_status_without_duplicate()
     test_scene_composer_injects_shared_scoped_memory_only()
     test_scene_composer_can_focus_scoped_memory_on_target_actor()
