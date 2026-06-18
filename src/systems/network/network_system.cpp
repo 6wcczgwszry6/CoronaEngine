@@ -110,6 +110,24 @@ struct NetworkSystem::Impl {
     };
     std::vector<PendingActorDelete> pending_actor_deletes;
 
+    struct PendingActorSceneSnapshotRequest {
+        std::string scene_name;
+    };
+    std::vector<PendingActorSceneSnapshotRequest> pending_actor_scene_snapshot_requests;
+
+    struct PendingActorSceneSnapshot {
+        std::string scene_name;
+        std::string snapshot_json;
+    };
+    std::vector<PendingActorSceneSnapshot> pending_actor_scene_snapshots;
+
+    struct PendingActorStateUpdate {
+        std::string actor_guid;
+        std::string scene_name;
+        std::string actor_json;
+    };
+    std::vector<PendingActorStateUpdate> pending_actor_state_updates;
+
     // Pending file transfers: model_path → actor data from the original
     // ACTOR_CREATE that triggered the transfer.  When the file arrives,
     // we reconstruct the PendingAction without requiring a re-send.
@@ -642,6 +660,11 @@ void NetworkSystem::stop_session() {
     impl_->incoming_transfers.clear();
     impl_->outgoing_cache.clear();
     impl_->pending_actor_creates.clear();
+    impl_->pending_actor_transform_updates.clear();
+    impl_->pending_actor_deletes.clear();
+    impl_->pending_actor_scene_snapshot_requests.clear();
+    impl_->pending_actor_scene_snapshots.clear();
+    impl_->pending_actor_state_updates.clear();
     impl_->pending_file_transfer_groups.clear();
     impl_->transfer_to_group.clear();
     clear_lanchat_room_state();
@@ -1107,6 +1130,47 @@ void NetworkSystem::broadcast_actor_delete(const std::string& actor_guid,
                  actor_guid, actor_name, scene_name);
 }
 
+void NetworkSystem::request_actor_scene_snapshot(const std::string& scene_name) {
+    if (impl_->session_state != SessionState::Active) return;
+    if (scene_name.empty()) return;
+    if (impl_->peer_manager.peer_count() == 0) {
+        CFW_LOG_DEBUG("NetworkSystem: No peers — skipping actor scene snapshot request");
+        return;
+    }
+    auto pkt = Network::build_actor_scene_snapshot_request(scene_name);
+    impl_->peer_manager.broadcast(Network::kChannelReliable, pkt.data(), pkt.size(), true);
+    CFW_LOG_INFO("NetworkSystem: Requested actor scene snapshot — scene='{}'", scene_name);
+}
+
+void NetworkSystem::broadcast_actor_scene_snapshot(const std::string& scene_name,
+                                                   const std::string& snapshot_json) {
+    if (impl_->session_state != SessionState::Active) return;
+    if (scene_name.empty()) return;
+    if (impl_->peer_manager.peer_count() == 0) {
+        CFW_LOG_DEBUG("NetworkSystem: No peers — skipping actor scene snapshot broadcast");
+        return;
+    }
+    auto pkt = Network::build_actor_scene_snapshot(scene_name, snapshot_json);
+    impl_->peer_manager.broadcast(Network::kChannelReliable, pkt.data(), pkt.size(), true);
+    CFW_LOG_INFO("NetworkSystem: Broadcast actor scene snapshot — scene='{}' bytes={}",
+                 scene_name, snapshot_json.size());
+}
+
+void NetworkSystem::broadcast_actor_state_update(const std::string& actor_guid,
+                                                 const std::string& scene_name,
+                                                 const std::string& actor_json) {
+    if (impl_->session_state != SessionState::Active) return;
+    if (actor_guid.empty() || scene_name.empty()) return;
+    if (impl_->peer_manager.peer_count() == 0) {
+        CFW_LOG_DEBUG("NetworkSystem: No peers — skipping actor state update broadcast");
+        return;
+    }
+    auto pkt = Network::build_actor_state_update(actor_guid, scene_name, actor_json);
+    impl_->peer_manager.broadcast(Network::kChannelReliable, pkt.data(), pkt.size(), true);
+    CFW_LOG_INFO("NetworkSystem: Broadcast actor state update — actor='{}' scene='{}' bytes={}",
+                 actor_guid, scene_name, actor_json.size());
+}
+
 bool NetworkSystem::has_pending_transfers() const {
     return !impl_->pending_actor_creates.empty();
 }
@@ -1160,6 +1224,38 @@ bool NetworkSystem::pop_pending_actor_delete(std::string& actor_guid,
     scene_name = pending.scene_name;
     actor_name = pending.actor_name;
     impl_->pending_actor_deletes.erase(impl_->pending_actor_deletes.begin());
+    return true;
+}
+
+bool NetworkSystem::pop_pending_actor_scene_snapshot_request(std::string& scene_name) {
+    if (impl_->pending_actor_scene_snapshot_requests.empty()) return false;
+    auto& pending = impl_->pending_actor_scene_snapshot_requests.front();
+    scene_name = pending.scene_name;
+    impl_->pending_actor_scene_snapshot_requests.erase(
+        impl_->pending_actor_scene_snapshot_requests.begin());
+    return true;
+}
+
+bool NetworkSystem::pop_pending_actor_scene_snapshot(std::string& scene_name,
+                                                     std::string& snapshot_json) {
+    if (impl_->pending_actor_scene_snapshots.empty()) return false;
+    auto& pending = impl_->pending_actor_scene_snapshots.front();
+    scene_name = pending.scene_name;
+    snapshot_json = pending.snapshot_json;
+    impl_->pending_actor_scene_snapshots.erase(
+        impl_->pending_actor_scene_snapshots.begin());
+    return true;
+}
+
+bool NetworkSystem::pop_pending_actor_state_update(std::string& actor_guid,
+                                                   std::string& scene_name,
+                                                   std::string& actor_json) {
+    if (impl_->pending_actor_state_updates.empty()) return false;
+    auto& pending = impl_->pending_actor_state_updates.front();
+    actor_guid = pending.actor_guid;
+    scene_name = pending.scene_name;
+    actor_json = pending.actor_json;
+    impl_->pending_actor_state_updates.erase(impl_->pending_actor_state_updates.begin());
     return true;
 }
 
@@ -1433,6 +1529,49 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
         CFW_LOG_INFO(
             "NetworkSystem: Received ACTOR_DELETE from {} — actor='{}' name='{}' scene='{}'",
             sender_peer_id, pending.actor_guid, pending.actor_name, pending.scene_name);
+    } else if (mt == MessageType::ACTOR_SCENE_SNAPSHOT_REQUEST) {
+        if (impl_->session_role != SessionRole::Host) return;
+        Network::BufferReader r(data + 1, len - 1);
+        if (!r.has_remaining(2)) return;
+        uint16_t scene_len = r.read_u16();
+        if (!r.has_remaining(scene_len)) return;
+        Impl::PendingActorSceneSnapshotRequest pending;
+        pending.scene_name = r.read_string(scene_len);
+        impl_->pending_actor_scene_snapshot_requests.push_back(pending);
+        CFW_LOG_INFO(
+            "NetworkSystem: Received ACTOR_SCENE_SNAPSHOT_REQUEST from {} — scene='{}'",
+            sender_peer_id, pending.scene_name);
+    } else if (mt == MessageType::ACTOR_SCENE_SNAPSHOT) {
+        Network::BufferReader r(data + 1, len - 1);
+        if (!r.has_remaining(2)) return;
+        uint16_t scene_len = r.read_u16();
+        if (!r.has_remaining(scene_len + 4)) return;
+        Impl::PendingActorSceneSnapshot pending;
+        pending.scene_name = r.read_string(scene_len);
+        uint32_t json_len = r.read_u32();
+        if (!r.has_remaining(json_len)) return;
+        pending.snapshot_json = r.read_string(json_len);
+        impl_->pending_actor_scene_snapshots.push_back(pending);
+        CFW_LOG_INFO(
+            "NetworkSystem: Received ACTOR_SCENE_SNAPSHOT from {} — scene='{}' bytes={}",
+            sender_peer_id, pending.scene_name, pending.snapshot_json.size());
+    } else if (mt == MessageType::ACTOR_STATE_UPDATE) {
+        Network::BufferReader r(data + 1, len - 1);
+        if (!r.has_remaining(2)) return;
+        uint16_t guid_len = r.read_u16();
+        if (!r.has_remaining(guid_len + 2)) return;
+        Impl::PendingActorStateUpdate pending;
+        pending.actor_guid = r.read_string(guid_len);
+        uint16_t scene_len = r.read_u16();
+        if (!r.has_remaining(scene_len + 4)) return;
+        pending.scene_name = r.read_string(scene_len);
+        uint32_t json_len = r.read_u32();
+        if (!r.has_remaining(json_len)) return;
+        pending.actor_json = r.read_string(json_len);
+        impl_->pending_actor_state_updates.push_back(pending);
+        CFW_LOG_INFO(
+            "NetworkSystem: Received ACTOR_STATE_UPDATE from {} — actor='{}' scene='{}' bytes={}",
+            sender_peer_id, pending.actor_guid, pending.scene_name, pending.actor_json.size());
     } else if (mt == MessageType::FILE_REQUEST) {
         handle_file_request(sender_peer_id, data, len);
     } else if (mt == MessageType::FILE_CHUNK) {

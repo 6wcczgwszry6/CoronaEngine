@@ -167,6 +167,48 @@ void test_actor_delete_carries_scene_guid_and_name() {
                 "actor delete actor name payload");
 }
 
+void test_actor_scene_snapshot_request_carries_scene() {
+    auto packet = Corona::Network::build_actor_scene_snapshot_request("Scene/main.scene");
+
+    Corona::Network::BufferReader reader(packet.data(), packet.size());
+    expect_true(static_cast<Corona::Network::MessageType>(reader.read_u8()) ==
+                    Corona::Network::MessageType::ACTOR_SCENE_SNAPSHOT_REQUEST,
+                "actor scene snapshot request message type");
+    expect_true(reader.read_string(reader.read_u16()) == "Scene/main.scene",
+                "actor scene snapshot request scene payload");
+}
+
+void test_actor_scene_snapshot_carries_json_payload() {
+    const std::string json = "{\"actors\":[{\"actor_guid\":\"actor-chair\"}]}";
+    auto packet = Corona::Network::build_actor_scene_snapshot("Scene/main.scene", json);
+
+    Corona::Network::BufferReader reader(packet.data(), packet.size());
+    expect_true(static_cast<Corona::Network::MessageType>(reader.read_u8()) ==
+                    Corona::Network::MessageType::ACTOR_SCENE_SNAPSHOT,
+                "actor scene snapshot message type");
+    expect_true(reader.read_string(reader.read_u16()) == "Scene/main.scene",
+                "actor scene snapshot scene payload");
+    expect_true(reader.read_string(reader.read_u32()) == json,
+                "actor scene snapshot json payload");
+}
+
+void test_actor_state_update_carries_guid_scene_and_json() {
+    const std::string json = "{\"name\":\"Display Chair\"}";
+    auto packet = Corona::Network::build_actor_state_update(
+        "actor-chair", "Scene/main.scene", json);
+
+    Corona::Network::BufferReader reader(packet.data(), packet.size());
+    expect_true(static_cast<Corona::Network::MessageType>(reader.read_u8()) ==
+                    Corona::Network::MessageType::ACTOR_STATE_UPDATE,
+                "actor state update message type");
+    expect_true(reader.read_string(reader.read_u16()) == "actor-chair",
+                "actor state update actor guid payload");
+    expect_true(reader.read_string(reader.read_u16()) == "Scene/main.scene",
+                "actor state update scene payload");
+    expect_true(reader.read_string(reader.read_u32()) == json,
+                "actor state update json payload");
+}
+
 void test_file_chunk_carries_transfer_id_and_offset() {
     constexpr uint64_t transfer_id = 0x8877665544332211ull;
     constexpr uint32_t total_size = 4096;
@@ -1166,6 +1208,9 @@ int main() {
     test_actor_create_carries_dependency_paths();
     test_actor_transform_update_carries_transform_and_correlation();
     test_actor_delete_carries_scene_guid_and_name();
+    test_actor_scene_snapshot_request_carries_scene();
+    test_actor_scene_snapshot_carries_json_payload();
+    test_actor_state_update_carries_guid_scene_and_json();
     test_file_request_carries_transfer_id();
     test_file_chunk_carries_transfer_id_and_offset();
     test_ownership_claim_carries_actor_guid();

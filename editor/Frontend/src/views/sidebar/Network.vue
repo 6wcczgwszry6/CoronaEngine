@@ -188,6 +188,8 @@ let pollTimer = null;
 const CONNECT_TIMEOUT_MS = 5000;
 const connectionAttemptStartedAt = ref(0);
 const ownershipClaimTimes = new Map();
+const currentSceneName = ref('Scene/default.scene');
+const snapshotRequestedScenes = new Set();
 
 const roleLabel = computed(() => {
   if (sessionRole.value === 'host') return '房主';
@@ -220,6 +222,7 @@ function resetSessionInfo() {
   peers.value = [];
   connectStatus.value = '';
   connectionAttemptStartedAt.value = 0;
+  snapshotRequestedScenes.clear();
 }
 
 async function ensureProjectRoot() {
@@ -302,7 +305,55 @@ async function pollPeers() {
           connectionAttemptStartedAt.value = 0;
         }
       }
+      if (count > 0 && sessionRole.value === 'client') {
+        await requestSceneSnapshotOnce(currentSceneName.value);
+      }
+      if (count > 0 && sessionRole.value === 'host') {
+        await broadcastCurrentSceneSnapshot(currentSceneName.value, false);
+      }
     }
+
+    try {
+      const pendingRequest = await networkService.pollPendingSceneSnapshotRequest();
+      if (pendingRequest && pendingRequest.has_pending && sessionRole.value === 'host') {
+        const sceneName = pendingRequest.scene_name || currentSceneName.value;
+        await broadcastCurrentSceneSnapshot(sceneName, true);
+      }
+    } catch (_) { /* best effort — snapshot request polling is secondary */ }
+
+    try {
+      const pendingSnapshot = await networkService.pollPendingSceneSnapshot();
+      if (pendingSnapshot && pendingSnapshot.has_pending) {
+        await applyRemoteSceneSnapshot(
+          pendingSnapshot.scene_name || currentSceneName.value,
+          pendingSnapshot.snapshot_json,
+        );
+      }
+    } catch (_) { /* best effort — snapshot polling is secondary */ }
+
+    try {
+      const pendingState = await networkService.pollPendingActorStateUpdate();
+      if (pendingState && pendingState.has_pending) {
+        let actorData = {};
+        try {
+          actorData = JSON.parse(pendingState.actor_json || '{}');
+        } catch (_) {
+          actorData = {};
+        }
+        actorData.actor_guid = actorData.actor_guid || pendingState.actor_guid || '';
+        actorData._suppress_network_broadcast = true;
+        const updated = await Bridge.callCEF('SceneTools', 'apply_actor_state_internal', [
+          pendingState.scene_name || currentSceneName.value,
+          pendingState.actor_guid || actorData.actor_guid || '',
+          actorData,
+        ]);
+        const updatedData = unwrapCefResult(updated);
+        if (updatedData?.status !== 'error') {
+          remoteActorLog.value = `远程 Actor 状态已更新: ${actorData.name || actorData.actor_guid || 'unknown'}`;
+          setTimeout(() => { remoteActorLog.value = ''; }, 3000);
+        }
+      }
+    } catch (_) { /* best effort — state sync is secondary */ }
 
     // Poll for pending remote actor creation (file transfer completed)
     try {
@@ -398,6 +449,7 @@ async function doConnectToPeer() {
       applySessionInfo(res);
       startPolling();
       await pollPeers();
+      await requestSceneSnapshotOnce(currentSceneName.value);
     } else {
       connectStatus.value = (res && res.error) || '连接失败';
       connectionAttemptStartedAt.value = 0;
@@ -435,12 +487,93 @@ function isActorSyncable(actorData) {
   return Boolean(actorData.path || actorData.model);
 }
 
+function rememberSceneName(sceneName) {
+  const value = String(sceneName || '').trim();
+  if (value) currentSceneName.value = value;
+  return currentSceneName.value || 'Scene/default.scene';
+}
+
 function closeFloat() {
   closeDockPanel();
 }
 
 function unwrapCefResult(res) {
   return res && res.data !== undefined ? res.data : res;
+}
+
+async function getActorSnapshot(sceneName) {
+  const raw = await Bridge.callCEF('SceneTools', 'get_actor_sync_snapshot', [sceneName]);
+  return unwrapCefResult(raw);
+}
+
+async function broadcastCurrentSceneSnapshot(sceneName, includeActorCreates) {
+  const targetScene = rememberSceneName(sceneName);
+  const snapshot = await getActorSnapshot(targetScene);
+  if (!snapshot || snapshot.status === 'error') return;
+  const actors = Array.isArray(snapshot.actors) ? snapshot.actors : [];
+  if (includeActorCreates) {
+    for (const actor of actors) {
+      if (!isActorSyncable(actor)) continue;
+      const actorGuid = actor.actor_guid || '';
+      const modelPath = actor.path || actor.model || '';
+      if (!actorGuid || !modelPath) continue;
+      await networkService.broadcastActorCreate(
+        actorGuid,
+        targetScene,
+        modelPath,
+        { ...actor, scene: targetScene },
+      ).catch(() => {});
+    }
+  }
+  await networkService.broadcastSceneSnapshot(targetScene, snapshot).catch(() => {});
+}
+
+async function requestSceneSnapshotOnce(sceneName) {
+  if (!sessionActive.value || sessionRole.value !== 'client') return;
+  const targetScene = rememberSceneName(sceneName);
+  if (snapshotRequestedScenes.has(targetScene)) return;
+  snapshotRequestedScenes.add(targetScene);
+  await networkService.requestSceneSnapshot(targetScene).catch(() => {
+    snapshotRequestedScenes.delete(targetScene);
+  });
+}
+
+async function applyRemoteSceneSnapshot(sceneName, snapshotPayload) {
+  const targetScene = rememberSceneName(sceneName);
+  let snapshot = snapshotPayload || {};
+  if (typeof snapshotPayload === 'string') {
+    try {
+      snapshot = JSON.parse(snapshotPayload);
+    } catch (_) {
+      snapshot = {};
+    }
+  }
+  if (!snapshot || !Array.isArray(snapshot.actors)) return;
+  snapshot.actors = snapshot.actors.map((actor) => ({
+    ...(actor || {}),
+    _suppress_network_broadcast: true,
+  }));
+  await networkService.setSyncPaused(true);
+  try {
+    const applied = await Bridge.callCEF('SceneTools', 'apply_actor_sync_snapshot_internal', [
+      targetScene,
+      snapshot,
+    ]);
+    const appliedData = unwrapCefResult(applied);
+    const changedActors = [
+      ...(appliedData?.created || []),
+      ...(appliedData?.updated || []),
+    ];
+    for (const actorData of changedActors) {
+      await registerActorIdentityFromData(actorData, false);
+    }
+    if (changedActors.length > 0) {
+      remoteActorLog.value = `远程场景快照已同步: ${changedActors.length} 个 Actor`;
+      setTimeout(() => { remoteActorLog.value = ''; }, 3000);
+    }
+  } finally {
+    await networkService.setSyncPaused(false);
+  }
 }
 
 async function registerActorIdentityFromData(actorData, locallyOwned = true) {
@@ -469,7 +602,7 @@ onMounted(() => {
     const modelPath = actorData.path || actorData.model || '';
     if (!modelPath) return;
     // Get scene name from the actor's parent scene if available
-    const sceneName = actorData.scene || 'Scene/default.scene';
+    const sceneName = rememberSceneName(actorData.scene || 'Scene/default.scene');
     const actorGuid = actorData.actor_guid ||
       `actor-${hashString(`${sceneName}|${modelPath}|${actorData.name || ''}`)}`;
     actorData.actor_guid = actorGuid;
@@ -481,8 +614,17 @@ onMounted(() => {
     if (!sessionActive.value || !actorData) return;
     const actorGuid = actorData.actor_guid || '';
     if (!actorGuid) return;
-    const sceneName = actorData.scene || 'Scene/default.scene';
+    const sceneName = rememberSceneName(actorData.scene || 'Scene/default.scene');
     networkService.broadcastActorTransform(actorGuid, sceneName, actorData).catch(() => {});
+  });
+
+  coronaEventBus.on('actor-state-sync-broadcast', (actorData) => {
+    if (!sessionActive.value || !actorData) return;
+    if (actorData._suppress_network_broadcast) return;
+    const actorGuid = actorData.actor_guid || '';
+    if (!actorGuid) return;
+    const sceneName = rememberSceneName(actorData.scene || 'Scene/default.scene');
+    networkService.broadcastActorStateUpdate(actorGuid, sceneName, actorData).catch(() => {});
   });
 
   coronaEventBus.on('actor-delete-sync-broadcast', (actorData) => {
@@ -490,8 +632,12 @@ onMounted(() => {
     const actorGuid = actorData.actor_guid || '';
     const actorName = actorData.actor_name || actorData.name || '';
     if (!actorGuid && !actorName) return;
-    const sceneName = actorData.scene || 'Scene/default.scene';
+    const sceneName = rememberSceneName(actorData.scene || 'Scene/default.scene');
     networkService.broadcastActorDelete(actorGuid, sceneName, actorName).catch(() => {});
+  });
+
+  coronaEventBus.on('scene-tree-changed', (sceneName) => {
+    rememberSceneName(sceneName);
   });
 
   coronaEventBus.on('network-sync-pause-request', ({ paused } = {}) => {
@@ -536,7 +682,9 @@ onUnmounted(() => {
   // Clean up event listeners
   coronaEventBus.off('actor-sync-broadcast');
   coronaEventBus.off('actor-transform-sync-broadcast');
+  coronaEventBus.off('actor-state-sync-broadcast');
   coronaEventBus.off('actor-delete-sync-broadcast');
+  coronaEventBus.off('scene-tree-changed');
   coronaEventBus.off('network-sync-pause-request');
   coronaEventBus.off('actor-ownership-claim');
   coronaEventBus.off('file-sync-status');

@@ -203,6 +203,15 @@ public:
                                 const std::string& scene_name,
                                 const std::string& actor_name);
 
+    void request_actor_scene_snapshot(const std::string& scene_name);
+
+    void broadcast_actor_scene_snapshot(const std::string& scene_name,
+                                        const std::string& snapshot_json);
+
+    void broadcast_actor_state_update(const std::string& actor_guid,
+                                      const std::string& scene_name,
+                                      const std::string& actor_json);
+
     /// 检查是否有待完成的文件传输（需要在 update 中处理）
     [[nodiscard]] bool has_pending_transfers() const;
 
@@ -224,6 +233,15 @@ public:
     bool pop_pending_actor_delete(std::string& actor_guid,
                                   std::string& scene_name,
                                   std::string& actor_name);
+
+    bool pop_pending_actor_scene_snapshot_request(std::string& scene_name);
+
+    bool pop_pending_actor_scene_snapshot(std::string& scene_name,
+                                          std::string& snapshot_json);
+
+    bool pop_pending_actor_state_update(std::string& actor_guid,
+                                        std::string& scene_name,
+                                        std::string& actor_json);
 
     /**
      * @brief 注册稳定 Actor 网络 ID 到本地 SharedDataHub handle 映射。

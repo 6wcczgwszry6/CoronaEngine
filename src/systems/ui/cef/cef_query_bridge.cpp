@@ -494,6 +494,54 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     return true;
                 }
 
+                if (func == "poll_pending_actor_scene_snapshot_request") {
+                    nlohmann::json payload;
+                    std::string scene_name;
+                    if (sys->pop_pending_actor_scene_snapshot_request(scene_name)) {
+                        payload["has_pending"] = true;
+                        payload["scene_name"] = scene_name;
+                    } else {
+                        payload["has_pending"] = false;
+                    }
+                    payload["ok"] = true;
+                    callback->Success(create_success_json(
+                        "poll_pending_actor_scene_snapshot_request", payload));
+                    return true;
+                }
+
+                if (func == "poll_pending_actor_scene_snapshot") {
+                    nlohmann::json payload;
+                    std::string scene_name, snapshot_json;
+                    if (sys->pop_pending_actor_scene_snapshot(scene_name, snapshot_json)) {
+                        payload["has_pending"] = true;
+                        payload["scene_name"] = scene_name;
+                        payload["snapshot_json"] = snapshot_json;
+                    } else {
+                        payload["has_pending"] = false;
+                    }
+                    payload["ok"] = true;
+                    callback->Success(create_success_json(
+                        "poll_pending_actor_scene_snapshot", payload));
+                    return true;
+                }
+
+                if (func == "poll_pending_actor_state_update") {
+                    nlohmann::json payload;
+                    std::string actor_guid, scene_name, actor_json;
+                    if (sys->pop_pending_actor_state_update(actor_guid, scene_name, actor_json)) {
+                        payload["has_pending"] = true;
+                        payload["actor_guid"] = actor_guid;
+                        payload["scene_name"] = scene_name;
+                        payload["actor_json"] = actor_json;
+                    } else {
+                        payload["has_pending"] = false;
+                    }
+                    payload["ok"] = true;
+                    callback->Success(create_success_json(
+                        "poll_pending_actor_state_update", payload));
+                    return true;
+                }
+
                 if (func == "set_sync_paused") {
                     bool paused = args.size() > 0 ? args[0].get<bool>() : false;
                     sys->set_sync_paused(paused);
@@ -571,6 +619,53 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     nlohmann::json payload;
                     payload["ok"] = true;
                     callback->Success(create_success_json("broadcast_actor_delete", payload));
+                    return true;
+                }
+
+                if (func == "request_actor_scene_snapshot") {
+                    std::string scene_name = args.size() > 0 ? args[0].get<std::string>() : "";
+                    sys->request_actor_scene_snapshot(scene_name);
+                    nlohmann::json payload;
+                    payload["ok"] = true;
+                    callback->Success(create_success_json(
+                        "request_actor_scene_snapshot", payload));
+                    return true;
+                }
+
+                if (func == "broadcast_actor_scene_snapshot") {
+                    std::string scene_name = args.size() > 0 ? args[0].get<std::string>() : "";
+                    std::string snapshot_json;
+                    if (args.size() > 1) {
+                        if (args[1].is_string()) {
+                            snapshot_json = args[1].get<std::string>();
+                        } else {
+                            snapshot_json = args[1].dump();
+                        }
+                    }
+                    sys->broadcast_actor_scene_snapshot(scene_name, snapshot_json);
+                    nlohmann::json payload;
+                    payload["ok"] = true;
+                    callback->Success(create_success_json(
+                        "broadcast_actor_scene_snapshot", payload));
+                    return true;
+                }
+
+                if (func == "broadcast_actor_state_update") {
+                    std::string actor_guid = args.size() > 0 ? args[0].get<std::string>() : "";
+                    std::string scene_name = args.size() > 1 ? args[1].get<std::string>() : "";
+                    std::string actor_json;
+                    if (args.size() > 2) {
+                        if (args[2].is_string()) {
+                            actor_json = args[2].get<std::string>();
+                        } else {
+                            actor_json = args[2].dump();
+                        }
+                    }
+                    sys->broadcast_actor_state_update(actor_guid, scene_name, actor_json);
+                    nlohmann::json payload;
+                    payload["ok"] = true;
+                    callback->Success(create_success_json(
+                        "broadcast_actor_state_update", payload));
                     return true;
                 }
 

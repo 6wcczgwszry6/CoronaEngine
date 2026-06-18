@@ -60,6 +60,9 @@ enum class MessageType : uint8_t {
     OWNERSHIP_CLAIM = 0x13, // Actor ownership handoff claim
     ACTOR_TRANSFORM_UPDATE = 0x14, // Actor transform delta (demo-grade SceneDelta)
     ACTOR_DELETE = 0x15, // Actor deletion event (actor_guid + scene_name + actor_name)
+    ACTOR_SCENE_SNAPSHOT_REQUEST = 0x16, // Request host actor scene snapshot
+    ACTOR_SCENE_SNAPSHOT = 0x17, // Actor scene snapshot JSON payload
+    ACTOR_STATE_UPDATE = 0x18, // Lightweight actor metadata/state JSON payload
     CHAT_JOIN     = 0x20,  // LANChat room join/member snapshot
     CHAT_LEAVE    = 0x21,  // LANChat room leave
     CHAT_MESSAGE  = 0x22,  // LANChat user/agent message
@@ -165,6 +168,10 @@ inline void write_string(std::vector<uint8_t>& buf, const std::string& s) {
     write_u16(buf, static_cast<uint16_t>(s.size()));
     write_bytes(buf, s.data(), s.size());
 }
+inline void write_string_u32(std::vector<uint8_t>& buf, const std::string& s) {
+    write_u32(buf, static_cast<uint32_t>(s.size()));
+    write_bytes(buf, s.data(), s.size());
+}
 
 struct BufferReader {
     const uint8_t* data;
@@ -196,7 +203,7 @@ struct BufferReader {
         pos += 8;
         return v;
     }
-    std::string read_string(uint16_t len) {
+    std::string read_string(size_t len) {
         std::string s(reinterpret_cast<const char*>(data + pos), len);
         pos += len;
         return s;
@@ -404,6 +411,62 @@ inline std::vector<uint8_t> build_actor_delete(
     write_string(buf, actor_guid);
     write_string(buf, scene_name);
     write_string(buf, actor_name);
+    return buf;
+}
+
+// ============================================================================
+// ACTOR_SCENE_SNAPSHOT_REQUEST message builder
+// ============================================================================
+// Wire format:
+//   [1B type] [2B scene_name_len] [scene_name]
+// ============================================================================
+inline std::vector<uint8_t> build_actor_scene_snapshot_request(
+    const std::string& scene_name)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 2 + scene_name.size());
+    write_u8(buf, static_cast<uint8_t>(MessageType::ACTOR_SCENE_SNAPSHOT_REQUEST));
+    write_string(buf, scene_name);
+    return buf;
+}
+
+// ============================================================================
+// ACTOR_SCENE_SNAPSHOT message builder
+// ============================================================================
+// Wire format:
+//   [1B type] [2B scene_name_len] [scene_name] [4B json_len] [json]
+// ============================================================================
+inline std::vector<uint8_t> build_actor_scene_snapshot(
+    const std::string& scene_name,
+    const std::string& snapshot_json)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 2 + scene_name.size() + 4 + snapshot_json.size());
+    write_u8(buf, static_cast<uint8_t>(MessageType::ACTOR_SCENE_SNAPSHOT));
+    write_string(buf, scene_name);
+    write_string_u32(buf, snapshot_json);
+    return buf;
+}
+
+// ============================================================================
+// ACTOR_STATE_UPDATE message builder
+// ============================================================================
+// Wire format:
+//   [1B type] [2B actor_guid_len] [actor_guid]
+//   [2B scene_name_len] [scene_name] [4B json_len] [json]
+// ============================================================================
+inline std::vector<uint8_t> build_actor_state_update(
+    const std::string& actor_guid,
+    const std::string& scene_name,
+    const std::string& actor_json)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 2 + actor_guid.size() + 2 + scene_name.size() +
+                4 + actor_json.size());
+    write_u8(buf, static_cast<uint8_t>(MessageType::ACTOR_STATE_UPDATE));
+    write_string(buf, actor_guid);
+    write_string(buf, scene_name);
+    write_string_u32(buf, actor_json);
     return buf;
 }
 
