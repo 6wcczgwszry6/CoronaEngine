@@ -9,10 +9,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <future>
 #include <limits>
 #include <memory>
+#include <span>
 #include <type_traits>
 #include <vector>
 
@@ -22,6 +24,34 @@ struct ImGuiGpuVertex {
     float uv[2]{};
     float color[4]{};
 };
+
+struct FVec2Upload {
+    float x;
+    float y;
+};
+
+struct FVec4Upload {
+    float x;
+    float y;
+    float z;
+    float w;
+};
+
+[[nodiscard]] FVec2Upload upload_value(const ktm::fvec2& value) {
+    return {value.x, value.y};
+}
+
+[[nodiscard]] FVec4Upload upload_value(const ktm::fvec4& value) {
+    return {value.x, value.y, value.z, value.w};
+}
+
+[[nodiscard]] Corona::Horizon::RasterizerPipelineDesc make_imgui_pipeline_desc() {
+    Corona::Horizon::RasterizerPipelineDesc desc;
+    desc.depth_stencil.depth_test_enabled = false;
+    desc.depth_stencil.depth_write_enabled = false;
+    desc.depth_stencil.stencil_test_enabled = false;
+    return desc;
+}
 
 inline ktm::fvec4 unpack_imgui_color(const ImU32 color) {
     constexpr float kInv255 = 1.0f / 255.0f;
@@ -34,10 +64,19 @@ inline ktm::fvec4 unpack_imgui_color(const ImU32 color) {
 
 inline uint32_t texture_id_to_descriptor(ImTextureID tex_id) {
     const ImU64 raw = static_cast<ImU64>(tex_id);
-    if (raw > static_cast<ImU64>(std::numeric_limits<uint32_t>::max())) {
+    if (raw == 0) {
+        CFW_LOG_ERROR("VulkanBackend: ImTextureID is null");
+        return 0;
+    }
+    const ImU64 descriptor = raw - 1u;
+    if (descriptor > static_cast<ImU64>(std::numeric_limits<uint32_t>::max())) {
         CFW_LOG_ERROR("VulkanBackend: ImTextureID out of uint32 range: {}", raw);
     }
-    return static_cast<uint32_t>(raw);
+    return static_cast<uint32_t>(descriptor);
+}
+
+inline ImTextureID descriptor_to_texture_id(uint32_t descriptor) {
+    return static_cast<ImTextureID>(static_cast<ImU64>(descriptor) + 1u);
 }
 }  // namespace
 
@@ -51,7 +90,7 @@ namespace Corona::Systems {
 // publish it as a UIFrameReadyEvent keyed by this window's native handle (surface).
 struct ViewportData {
     ViewportRenderResources resources;                              // per-window render target + geometry buffers
-    RasterizerPipeline<imgui_vert_glsl, imgui_frag_glsl> pipeline;  // independent pipeline instance
+    std::optional<Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>> pipeline;  // independent pipeline instance
     bool pipeline_ready = false;
     bool pending_show = false;          // deferred show: wait until first frame is published
     void* surface = nullptr;            // native window handle (HWND/NSWindow*); the DisplaySystem surface key
@@ -186,20 +225,18 @@ void VulkanBackend::shutdown() {
         ImGui::DestroyPlatformWindows();
     }
 
-    main_resources_.executor.waitForDeferredResources();
-
     main_resources_.frame_ready = false;
     imgui_pipeline_ready_ = false;
     font_ready_ = false;
+    font_upload_receipt_ = Horizon::SubmitReceipt();
     rebuild_needed_ = false;
 
-    main_resources_.render_target = HardwareImage();
-    main_resources_.executor = HardwareExecutor();
-    font_atlas_image_ = HardwareImage();
-    imgui_pipeline_ = RasterizerPipeline<imgui_vert_glsl, imgui_frag_glsl>();
+    main_resources_.render_target = Horizon::HardwareImage();
+    font_atlas_image_ = Horizon::HardwareImage();
+    imgui_pipeline_.reset();
 
-    main_resources_.vertex_buffer = HardwareBuffer();
-    main_resources_.index_buffer = HardwareBuffer();
+    main_resources_.vertex_buffer = Horizon::HardwareBuffer();
+    main_resources_.index_buffer = Horizon::HardwareBuffer();
     main_resources_.vertex_buffer_capacity = 0;
     main_resources_.index_buffer_capacity = 0;
 
@@ -228,11 +265,9 @@ void VulkanBackend::new_frame() {
     // before we clear and render new UI content into it.
     if (image_handle_ != 0) {
         if (auto image_device = SharedDataHub::instance().image_storage().acquire_write(image_handle_)) {
-            main_resources_.executor.wait(image_device->consumed_executor);
+            main_resources_.executor.wait(image_device->consumed_receipt);
         }
     }
-
-    main_resources_.executor.cleanupDeferredResources();
 }
 
 void VulkanBackend::render_frame(ImDrawData* draw_data) {
@@ -244,7 +279,8 @@ void VulkanBackend::render_frame(ImDrawData* draw_data) {
         return;
     }
 
-    if (render_draw_data(draw_data, main_resources_, imgui_pipeline_, font_atlas_image_)) {
+    main_resources_.executor.wait(font_upload_receipt_);
+    if (render_draw_data(draw_data, main_resources_, *imgui_pipeline_, font_atlas_image_)) {
         main_resources_.frame_ready = true;
     }
 }
@@ -256,9 +292,9 @@ void VulkanBackend::render_frame(ImDrawData* draw_data) {
 bool VulkanBackend::render_draw_data(
     ImDrawData* draw_data,
     ViewportRenderResources& res,
-    RasterizerPipeline<imgui_vert_glsl, imgui_frag_glsl>& pipeline,
-    const HardwareImage& font_atlas,
-    ImageUsage render_target_usage) {
+    Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>& pipeline,
+    const Horizon::HardwareImage& font_atlas,
+    Horizon::ImageUsageFlags render_target_usage) {
     if (draw_data == nullptr) {
         return false;
     }
@@ -326,27 +362,39 @@ bool VulkanBackend::render_draw_data(
     const size_t idx_bytes = merged_indices.size() * sizeof(ImDrawIdx);
 
     if (!res.vertex_buffer || res.vertex_buffer_capacity < vtx_bytes) {
-        const size_t new_capacity = vtx_bytes + 5000 * sizeof(ImGuiGpuVertex);
-        res.vertex_buffer = HardwareBuffer(new_capacity, BufferUsage::VertexBuffer);
-        res.vertex_buffer_capacity = new_capacity;
+        const size_t new_count = merged_vertices.size() + 5000;
+        Horizon::HardwareBufferDesc desc;
+        desc.element_count = new_count;
+        desc.element_size = static_cast<uint32_t>(sizeof(ImGuiGpuVertex));
+        desc.usage = Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Vertex;
+        desc.debug_name = "imgui.vertex";
+        res.vertex_buffer = Horizon::HardwareBuffer(desc);
+        res.vertex_buffer_capacity = desc.byte_size();
         if (!res.vertex_buffer) {
-            CFW_LOG_ERROR("VulkanBackend: failed to allocate vertex buffer ({} bytes)", new_capacity);
+            CFW_LOG_ERROR("VulkanBackend: failed to allocate vertex buffer ({} bytes)", res.vertex_buffer_capacity);
             return false;
         }
     }
 
     if (!res.index_buffer || res.index_buffer_capacity < idx_bytes) {
-        const size_t new_capacity = idx_bytes + 10000 * sizeof(ImDrawIdx);
-        res.index_buffer = HardwareBuffer(new_capacity, BufferUsage::IndexBuffer);
-        res.index_buffer_capacity = new_capacity;
+        const size_t new_count = merged_indices.size() + 10000;
+        Horizon::HardwareBufferDesc desc;
+        desc.element_count = new_count;
+        desc.element_size = static_cast<uint32_t>(sizeof(ImDrawIdx));
+        desc.usage = Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Index;
+        desc.debug_name = "imgui.index";
+        res.index_buffer = Horizon::HardwareBuffer(desc);
+        res.index_buffer_capacity = desc.byte_size();
         if (!res.index_buffer) {
-            CFW_LOG_ERROR("VulkanBackend: failed to allocate index buffer ({} bytes)", new_capacity);
+            CFW_LOG_ERROR("VulkanBackend: failed to allocate index buffer ({} bytes)", res.index_buffer_capacity);
             return false;
         }
     }
 
-    res.vertex_buffer.copyFromData(merged_vertices.data(), vtx_bytes);
-    res.index_buffer.copyFromData(merged_indices.data(), idx_bytes);
+    (void)res.vertex_buffer.write_bytes(
+        std::as_bytes(std::span<const ImGuiGpuVertex>(merged_vertices.data(), merged_vertices.size())));
+    (void)res.index_buffer.write_bytes(
+        std::as_bytes(std::span<const ImDrawIdx>(merged_indices.data(), merged_indices.size())));
 
     // --- Record draw commands with global offsets ---
     const float sx = 2.0f / draw_data->DisplaySize.x;
@@ -393,14 +441,14 @@ bool VulkanBackend::render_draw_data(
 
             uint32_t texture_index = texture_id_to_descriptor(pcmd.GetTexID());
             if (texture_index == 0 && font_atlas) {
-                texture_index = const_cast<HardwareImage&>(font_atlas).storeDescriptor();
+                texture_index = font_atlas.storeDescriptor();
             }
 
-            pipeline.pushConsts.scale = scale;
-            pipeline.pushConsts.translate = translate;
-            pipeline[imgui_frag_glsl::pushConsts::clip_rect] = ktm::fvec4(
-                clip_min.x, clip_min.y, clip_max.x, clip_max.y);
-            pipeline[imgui_frag_glsl::pushConsts::texture_index] = texture_index;
+            pipeline[imgui_vert_glsl_t::pushConsts::scale] = upload_value(scale);
+            pipeline[imgui_vert_glsl_t::pushConsts::translate] = upload_value(translate);
+            pipeline[imgui_frag_glsl_t::pushConsts::clip_rect] = upload_value(
+                ktm::fvec4(clip_min.x, clip_min.y, clip_max.x, clip_max.y));
+            pipeline[imgui_frag_glsl_t::pushConsts::texture_index] = texture_index;
 
             const int32_t scissor_x = static_cast<int32_t>(std::floor(clip_min.x));
             const int32_t scissor_y = static_cast<int32_t>(std::floor(clip_min.y));
@@ -410,13 +458,13 @@ bool VulkanBackend::render_draw_data(
                 continue;
             }
 
-            DrawIndexedParams draw_params;
-            draw_params.indexCount = static_cast<uint32_t>(pcmd.ElemCount);
-            draw_params.firstIndex = static_cast<uint32_t>(pcmd.IdxOffset + global_idx_offset);
-            draw_params.vertexOffset = static_cast<int32_t>(pcmd.VtxOffset + global_vtx_offset);
-            draw_params.indexType = sizeof(ImDrawIdx) == sizeof(uint16_t) ? IndexType::UInt16 : IndexType::UInt32;
-            draw_params.enableScissor = true;
-            draw_params.scissor = ScissorRect{
+            Horizon::DrawIndexedParams draw_params;
+            draw_params.index_count = static_cast<uint32_t>(pcmd.ElemCount);
+            draw_params.first_index = static_cast<uint32_t>(pcmd.IdxOffset + global_idx_offset);
+            draw_params.vertex_offset = static_cast<int32_t>(pcmd.VtxOffset + global_vtx_offset);
+            draw_params.index_type = sizeof(ImDrawIdx) == sizeof(uint16_t) ? Horizon::IndexType::UInt16 : Horizon::IndexType::UInt32;
+            draw_params.enable_scissor = true;
+            draw_params.scissor = Horizon::ScissorRect{
                 scissor_x,
                 scissor_y,
                 static_cast<uint32_t>(scissor_w),
@@ -435,8 +483,9 @@ bool VulkanBackend::render_draw_data(
     }
 
     // --- Submit ---
-    res.executor << pipeline(static_cast<uint16_t>(fb_width), static_cast<uint16_t>(fb_height))
-                 << res.executor.commit();
+    (void)(res.executor.stream()
+           << pipeline(static_cast<uint16_t>(fb_width), static_cast<uint16_t>(fb_height))
+           << Horizon::commit());
 
     return true;
 }
@@ -448,7 +497,7 @@ void VulkanBackend::present_frame() {
 
     if (auto image_device = SharedDataHub::instance().image_storage().acquire_write(image_handle_)) {
         image_device->image = main_resources_.render_target;
-        image_device->executor = main_resources_.executor;
+        image_device->submit_receipt = main_resources_.executor.last_receipt();
     } else {
         return;
     }
@@ -483,7 +532,7 @@ void VulkanBackend::rebuild(int width, int height) {
 }
 
 bool VulkanBackend::ensure_render_target(ViewportRenderResources& resources, uint32_t width, uint32_t height,
-                                         ImageUsage usage) {
+                                         Horizon::ImageUsageFlags usage) {
     if (width == 0 || height == 0) {
         return false;
     }
@@ -492,18 +541,24 @@ bool VulkanBackend::ensure_render_target(ViewportRenderResources& resources, uin
         return true;
     }
 
-    // RGBA8_SRGB does not support VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT on many GPUs.
+    // SRGBA8_UNORM does not support VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT on many GPUs.
     // When the render target is used as a storage image (secondary viewports), use a
     // storage-capable format (RGBA16_FLOAT) to avoid VK_ERROR_FORMAT_NOT_SUPPORTED.
-    const ImageFormat target_format =
-        (usage == ImageUsage::StorageImage) ? ImageFormat::RGBA16_FLOAT : ImageFormat::RGBA8_SRGB;
+    const Horizon::ImageUsageFlags target_usage = usage | Horizon::ImageUsageFlags::ColorAttachment;
+    const Horizon::Format target_format =
+        Horizon::has_flag(target_usage, Horizon::ImageUsageFlags::Storage) ? Horizon::Format::RGBA16_FLOAT : Horizon::Format::SRGBA8_UNORM;
 
-    HardwareImage new_target(width, height, target_format, usage);
+    Horizon::HardwareImage new_target(Horizon::HardwareImageDesc::texture_2d(
+        width,
+        height,
+        target_format,
+        target_usage,
+        "imgui.render_target"));
     if (!new_target) {
         CFW_LOG_ERROR("VulkanBackend: create render target failed ({}x{})", width, height);
         return false;
     }
-    new_target.setClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    new_target.set_clear_color(0.0f, 0.0f, 0.0f, 0.0f);
     resources.render_target = std::move(new_target);
     resources.width = width;
     resources.height = height;
@@ -517,12 +572,12 @@ bool VulkanBackend::ensure_imgui_pipeline() {
         return true;
     }
 
-    imgui_pipeline_.setDepthEnabled(false);
-    imgui_pipeline_ready_ = (imgui_pipeline_.getRasterizerPipelineID() != 0);
+    imgui_pipeline_.emplace(imgui_vert_glsl, imgui_frag_glsl, make_imgui_pipeline_desc());
+    imgui_pipeline_ready_ = imgui_pipeline_->getRasterizerPipelineID() != 0;
 
     if (imgui_pipeline_ready_) {
         CFW_LOG_INFO("VulkanBackend: typed imgui pipeline created, pipeline_id={}",
-                     imgui_pipeline_.getRasterizerPipelineID());
+                     imgui_pipeline_->getRasterizerPipelineID());
     } else {
         CFW_LOG_ERROR("VulkanBackend: typed imgui pipeline creation returned invalid pipeline id");
     }
@@ -554,26 +609,28 @@ bool VulkanBackend::ensure_font_texture() {
         return false;
     }
 
-    font_atlas_image_ = HardwareImage(
+    font_atlas_image_ = Horizon::HardwareImage(Horizon::HardwareImageDesc::texture_2d(
         static_cast<uint32_t>(width),
         static_cast<uint32_t>(height),
-        ImageFormat::RGBA8_SRGB,
-        ImageUsage::SampledImage);
+        Horizon::Format::SRGBA8_UNORM,
+        Horizon::ImageUsageFlags::Sampled | Horizon::ImageUsageFlags::TransferDst,
+        "imgui.font_atlas"));
 
     if (!font_atlas_image_) {
         CFW_LOG_ERROR("VulkanBackend: create font atlas image failed");
         return false;
     }
 
-    main_resources_.executor << font_atlas_image_.copyFrom(pixels) << main_resources_.executor.commit();
+    const auto font_pixels = std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(pixels),
+        static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+    font_upload_receipt_ =
+        font_upload_executor_.stream()
+        << font_atlas_image_.upload(font_pixels)
+        << Horizon::submit;
 
     const uint32_t descriptor = font_atlas_image_.storeDescriptor();
-    if (descriptor == 0) {
-        CFW_LOG_ERROR("VulkanBackend: font atlas descriptor is 0 (invalid)");
-        return false;
-    }
-
-    io.Fonts->SetTexID(static_cast<ImTextureID>(descriptor));
+    io.Fonts->SetTexID(descriptor_to_texture_id(descriptor));
 
     font_ready_ = true;
     CFW_LOG_INFO("VulkanBackend: font atlas uploaded ({}x{}), descriptor={}", width, height, descriptor);
@@ -595,8 +652,8 @@ void VulkanBackend::renderer_create_window(ImGuiViewport* vp) {
 
     // Initialize per-viewport pipeline (shares compiled VkPipeline via global ID,
     // but has independent renderTargets/geomMeshesRecord state).
-    vd->pipeline.setDepthEnabled(false);
-    vd->pipeline_ready = (vd->pipeline.getRasterizerPipelineID() != 0);
+    vd->pipeline.emplace(imgui_vert_glsl, imgui_frag_glsl, make_imgui_pipeline_desc());
+    vd->pipeline_ready = vd->pipeline->getRasterizerPipelineID() != 0;
     if (!vd->pipeline_ready) {
         CFW_LOG_ERROR("VulkanBackend: failed to create pipeline for viewport {}", vp->ID);
         IM_DELETE(vd);
@@ -618,7 +675,7 @@ void VulkanBackend::renderer_create_window(ImGuiViewport* vp) {
     }
 
     CFW_LOG_INFO("VulkanBackend: secondary viewport {} created (pipeline_id={}, ui_handle={})",
-                 vp->ID, vd->pipeline.getRasterizerPipelineID(), vd->image_handle);
+                 vp->ID, vd->pipeline->getRasterizerPipelineID(), vd->image_handle);
 }
 
 void VulkanBackend::renderer_destroy_window(ImGuiViewport* vp) {
@@ -629,8 +686,6 @@ void VulkanBackend::renderer_destroy_window(ImGuiViewport* vp) {
     }
 
     // Finish any GPU work referencing this viewport's UI render target before teardown.
-    vd->resources.executor.waitForDeferredResources();
-
     // 改造2: DisplaySystem owns the swapchain for this surface. It must destroy that
     // swapchain + VkSurfaceKHR BEFORE we let ImGui/SDL destroy the OS window, or the
     // Display thread could present to a dead window. EventBus dispatch is synchronous and
@@ -669,7 +724,7 @@ void VulkanBackend::renderer_set_window_size(ImGuiViewport* vp, ImVec2 size) {
     if (w > 0 && h > 0) {
         // SampledImage: the UI layer is consumed as the composite shader's fg (sampled),
         // matching the main window. DisplaySystem owns/recreates the swapchain on resize.
-        ensure_render_target(vd->resources, w, h, ImageUsage::SampledImage);
+        ensure_render_target(vd->resources, w, h, Horizon::ImageUsageFlags::Sampled);
     }
 }
 
@@ -690,19 +745,23 @@ void VulkanBackend::renderer_render_window(ImGuiViewport* vp, void* /*render_arg
         return;
     }
 
+    if (!s_instance_->ensure_font_texture()) {
+        return;
+    }
+    vd->resources.executor.wait(s_instance_->font_upload_receipt_);
+
     // Back-pressure: wait for DisplaySystem to finish consuming the previous frame's image
     // before overwriting it (mirrors VulkanBackend::new_frame() for the main window).
     if (vd->image_handle != 0) {
         if (auto image_device =
                 SharedDataHub::instance().image_storage().acquire_write(vd->image_handle)) {
-            vd->resources.executor.wait(image_device->consumed_executor);
+            vd->resources.executor.wait(image_device->consumed_receipt);
         }
     }
 
-    vd->resources.executor.cleanupDeferredResources();
-
-    if (!render_draw_data(draw_data, vd->resources, vd->pipeline, s_instance_->font_atlas_image_,
-                          ImageUsage::SampledImage)) {
+    if (!vd->pipeline ||
+        !render_draw_data(draw_data, vd->resources, *vd->pipeline, s_instance_->font_atlas_image_,
+                          Horizon::ImageUsageFlags::Sampled)) {
         return;
     }
 
@@ -712,7 +771,7 @@ void VulkanBackend::renderer_render_window(ImGuiViewport* vp, void* /*render_arg
         if (auto image_device =
                 SharedDataHub::instance().image_storage().acquire_write(vd->image_handle)) {
             image_device->image = vd->resources.render_target;
-            image_device->executor = vd->resources.executor;
+            image_device->submit_receipt = vd->resources.executor.last_receipt();
         } else {
             return;
         }

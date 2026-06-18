@@ -1,6 +1,6 @@
 ﻿#pragma once
 
-#include <Horizon.h>
+#include "horizon.h"
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <include/internal/cef_types.h>
@@ -109,7 +109,7 @@ class BrowserManager {
     void destroy_tab_texture(BrowserTab* tab);
 
     struct OwnedImage {
-        HardwareImage image;
+        Horizon::HardwareImage image;
         uint32_t width = 0;
         uint32_t height = 0;
     };
@@ -119,7 +119,6 @@ class BrowserManager {
     std::unordered_map<ImTextureID, OwnedImage> owned_images_;
     int tab_counter_ = 0;
 
-    HardwareExecutor texture_executor_;
 };
 
 }  // namespace Corona::Systems::UI

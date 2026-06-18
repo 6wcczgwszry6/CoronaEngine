@@ -10,7 +10,7 @@
 #include <vector>
 #include <filesystem>
 
-#include "Horizon.h"
+#include "horizon.h"
 
 // Forward declarations
 
@@ -19,16 +19,16 @@ namespace Corona {
 class Model;
 
 struct MeshDevice {
-    HardwareBuffer indexBuffer;
-    HardwareBuffer vertexBuffer;
+    Horizon::HardwareBuffer indexBuffer;
+    Horizon::HardwareBuffer vertexBuffer;
 
     // StorageBuffer mirrors for compute shader (VBuffer resolve) access.
     // Horizon BufferUsage is non-combinable, so we keep separate copies.
-    HardwareBuffer indexStorageBuffer;
-    HardwareBuffer vertexStorageBuffer;
+    Horizon::HardwareBuffer indexStorageBuffer;
+    Horizon::HardwareBuffer vertexStorageBuffer;
 
     uint32_t materialIndex;
-    HardwareImage textureBuffer;
+    Horizon::HardwareImage textureBuffer;
 
     // 材质颜色 (RGBA)
     std::array<float, 4> materialColor{1.0f, 1.0f, 1.0f, 1.0f};
@@ -247,12 +247,12 @@ struct SceneDevice {
 };
 
 struct ImageDevice {
-    HardwareImage image;
-    HardwareExecutor executor;
+    Horizon::HardwareImage image;
+    Horizon::SubmitReceipt submit_receipt;
 
     /// Written by DisplaySystem after compositing finishes reading the image.
     /// Producers wait on this before overwriting with new content to prevent GPU read/write races.
-    HardwareExecutor consumed_executor;
+    Horizon::SubmitReceipt consumed_receipt;
 };
 
 class SharedDataHub {

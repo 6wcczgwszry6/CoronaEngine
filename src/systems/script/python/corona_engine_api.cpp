@@ -1,4 +1,4 @@
-#include <Horizon.h>
+#include "horizon.h"
 #include <corona/events/acoustics_system_events.h>
 #include <corona/events/display_system_events.h>
 #include <corona/events/optics_system_events.h>
@@ -14,14 +14,44 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <iterator>
+#include <span>
+#include <string>
+#include <vector>
 
 #include "corona/resource/types/audio.h"
 #include "corona/resource/types/image.h"
 #include "corona/resource/types/video.h"
 
 namespace {
+namespace H = Corona::Horizon;
+
 std::atomic<void*> g_default_surface{nullptr};
+
+template <typename T>
+H::HardwareBuffer make_horizon_buffer(const std::vector<T>& data,
+                                      H::BufferUsageFlags usage,
+                                      std::string name = {}) {
+    H::HardwareBufferDesc desc;
+    desc.element_count = data.size();
+    desc.element_size = static_cast<uint32_t>(sizeof(T));
+    desc.usage = usage;
+    desc.debug_name = std::move(name);
+    return H::HardwareBuffer(desc, std::as_bytes(std::span<const T>(data.data(), data.size())));
+}
+
+H::HardwareImageDesc make_sampled_texture_desc(uint32_t width,
+                                               uint32_t height,
+                                               H::Format format,
+                                               std::string name = {}) {
+    return H::HardwareImageDesc::texture_2d(
+        width,
+        height,
+        format,
+        H::ImageUsageFlags::Sampled | H::ImageUsageFlags::TransferDst,
+        std::move(name));
+}
 }
 
 // ########################
@@ -569,7 +599,7 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
     // 用于批量纹理上传的数据结构
     struct PendingTextureUpload {
         std::uint32_t mesh_idx;
-        HardwareImage* texture;
+        H::HardwareImage* texture;
         std::vector<unsigned char> rgba_data;  // 保持数据存活直到上传完成
         unsigned char* data_ptr;
     };
@@ -577,19 +607,10 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
     pending_uploads.reserve(scene->data.meshes.size());
 
     // 获取或创建共享的占位纹理（只创建一次）
-    static HardwareImage shared_placeholder_texture = []() {
-        HardwareImageCreateInfo placeholder_info{};
-        placeholder_info.width = 1;
-        placeholder_info.height = 1;
-        placeholder_info.format = ImageFormat::RGBA8_SRGB;
-        placeholder_info.usage = ImageUsage::SampledImage;
-        placeholder_info.arrayLayers = 1;
-        placeholder_info.mipLevels = 1;
-
+    static H::HardwareImage shared_placeholder_texture = []() {
         static const unsigned char white_pixel[4] = {255, 255, 255, 255};
-        HardwareImage texture(placeholder_info);
-        HardwareExecutor temp_executor;
-        temp_executor << texture.copyFrom(white_pixel) << temp_executor.commit();
+        H::HardwareImage texture(make_sampled_texture_desc(1, 1, H::Format::SRGBA8_UNORM, "script.placeholder_texture"));
+        (void)texture.write_bytes(std::as_bytes(std::span<const unsigned char>(white_pixel, 4)));
         return texture;
     }();
 
@@ -598,12 +619,24 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
         const auto& mesh = scene->data.meshes[mesh_idx];
         MeshDevice dev{};
 
-        dev.vertexBuffer = HardwareBuffer(scene->get_mesh_vertices(mesh_idx), BufferUsage::VertexBuffer);
-        dev.indexBuffer = HardwareBuffer(scene->get_mesh_indices(mesh_idx), BufferUsage::IndexBuffer);
+        dev.vertexBuffer = make_horizon_buffer(
+            scene->get_mesh_vertices(mesh_idx),
+            H::BufferUsageFlags::TransferDst | H::BufferUsageFlags::Vertex,
+            "script.mesh.vertex");
+        dev.indexBuffer = make_horizon_buffer(
+            scene->get_mesh_indices(mesh_idx),
+            H::BufferUsageFlags::TransferDst | H::BufferUsageFlags::Index,
+            "script.mesh.index");
 
         // StorageBuffer mirrors for VBuffer material resolve compute shader access
-        dev.vertexStorageBuffer = HardwareBuffer(scene->get_mesh_vertices(mesh_idx), BufferUsage::StorageBuffer);
-        dev.indexStorageBuffer = HardwareBuffer(scene->get_mesh_indices(mesh_idx), BufferUsage::StorageBuffer);
+        dev.vertexStorageBuffer = make_horizon_buffer(
+            scene->get_mesh_vertices(mesh_idx),
+            H::BufferUsageFlags::TransferSrc | H::BufferUsageFlags::TransferDst | H::BufferUsageFlags::Storage,
+            "script.mesh.vertex_storage");
+        dev.indexStorageBuffer = make_horizon_buffer(
+            scene->get_mesh_indices(mesh_idx),
+            H::BufferUsageFlags::TransferSrc | H::BufferUsageFlags::TransferDst | H::BufferUsageFlags::Storage,
+            "script.mesh.index_storage");
 
         dev.materialIndex = (mesh.material_index != Resource::InvalidIndex)
                                 ? mesh.material_index
@@ -617,7 +650,7 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
         }
 
         bool texture_created = false;
-        HardwareImageCreateInfo create_info{};
+        H::HardwareImageDesc create_info{};
 
         if (mesh.material_index != Resource::InvalidIndex &&
             mesh.material_index < scene->data.materials.size()) {
@@ -648,41 +681,44 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
                             const auto& compressed = texture_data->get_compressed_data();
 
                             // 根据实际压缩格式选择正确的 ImageFormat
-                            create_info.width = tex_width;
-                            create_info.height = tex_height;
-                            create_info.usage = ImageUsage::SampledImage;
-                            create_info.arrayLayers = 1;
-                            create_info.mipLevels = 1;
+                            create_info = make_sampled_texture_desc(
+                                static_cast<uint32_t>(tex_width),
+                                static_cast<uint32_t>(tex_height),
+                                H::Format::SRGBA8_UNORM,
+                                "script.mesh.texture_compressed");
 
                             // 根据压缩格式类型选择对应的 GPU 格式
                             if (compressed.format == Resource::CompressedData::Format::BC1) {
-                                create_info.format = ImageFormat::BC1_RGB_SRGB;
+                                create_info.format = H::Format::BC1_UNORM_SRGB;
                             } else if (compressed.format == Resource::CompressedData::Format::BC3) {
-                                create_info.format = ImageFormat::BC3_RGBA_SRGB;
+                                create_info.format = H::Format::BC3_UNORM_SRGB;
                             } else if (compressed.format == Resource::CompressedData::Format::ASTC_4x4) {
-                                create_info.format = ImageFormat::ASTC_4x4_SRGB;
+                                CFW_LOG_WARNING("[Geometry::Geometry] ASTC_4x4 texture is not supported by current Horizon main format enum; using placeholder texture");
+                                create_info.format = H::Format::UNKNOWN;
                             } else {
-                                CFW_LOG_WARNING("[Geometry::Geometry] Unsupported compressed format, falling back to RGBA8");
+                                CFW_LOG_WARNING("[Geometry::Geometry] Unsupported compressed format; using placeholder texture");
+                                create_info.format = H::Format::UNKNOWN;
                                 // 如果遇到未知格式，应该使用非压缩路径而非猜测
                             }
 
                             // 复制压缩数据以避免悬空指针（texture_data 可能在上传前失效）
-                            PendingTextureUpload upload{mesh_idx, nullptr, {}, nullptr};
+                            if (create_info.format != H::Format::UNKNOWN) {
+                                PendingTextureUpload upload{mesh_idx, nullptr, {}, nullptr};
                             upload.rgba_data.assign(compressed.data.begin(), compressed.data.end());
                             upload.data_ptr = upload.rgba_data.data();
 
-                            dev.textureBuffer = HardwareImage(create_info);
+                            dev.textureBuffer = H::HardwareImage(create_info);
                             upload.texture = &dev.textureBuffer;
                             pending_uploads.push_back(std::move(upload));
-                            texture_created = true;
+                                texture_created = true;
+                            }
                         } else {
                             // 使用非压缩 RGBA8 格式，需要确保数据通道匹配
-                            create_info.width = tex_width;
-                            create_info.height = tex_height;
-                            create_info.format = ImageFormat::RGBA8_SRGB;
-                            create_info.usage = ImageUsage::SampledImage;
-                            create_info.arrayLayers = 1;
-                            create_info.mipLevels = 1;
+                            create_info = make_sampled_texture_desc(
+                                static_cast<uint32_t>(tex_width),
+                                static_cast<uint32_t>(tex_height),
+                                H::Format::SRGBA8_UNORM,
+                                "script.mesh.texture");
 
                             unsigned char* src_data = texture_data->get_data();
                             PendingTextureUpload upload{mesh_idx, nullptr, {}, nullptr};
@@ -716,7 +752,7 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
                             }
 
                             if (upload.data_ptr != nullptr) {
-                                dev.textureBuffer = HardwareImage(create_info);
+                                dev.textureBuffer = H::HardwareImage(create_info);
                                 upload.texture = &dev.textureBuffer;
                                 pending_uploads.push_back(std::move(upload));
                                 texture_created = true;
@@ -753,17 +789,16 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
         for (size_t batch_start = 0; batch_start < pending_uploads.size(); batch_start += kBatchSize) {
             size_t batch_end = std::min(batch_start + kBatchSize, pending_uploads.size());
 
-            HardwareExecutor batch_executor;
             for (size_t i = batch_start; i < batch_end; ++i) {
                 auto& upload = pending_uploads[i];
                 // 更新texture指针（因为mesh_devices可能已经移动）
-                HardwareImage& tex = mesh_devices[upload.mesh_idx].textureBuffer;
-                batch_executor << tex.copyFrom(upload.data_ptr);
+                H::HardwareImage& tex = mesh_devices[upload.mesh_idx].textureBuffer;
+                (void)tex.write_bytes(std::as_bytes(std::span<const unsigned char>(
+                    upload.data_ptr,
+                    upload.rgba_data.size())));
             }
-            batch_executor << batch_executor.commit();
 
             // 强制等待每一批上传完成，防止短时间内提交过多 CommandBuffer 导致 Device Lost (TDR) 或内存问题
-            batch_executor.waitForDeferredResources();
         }
     }
 

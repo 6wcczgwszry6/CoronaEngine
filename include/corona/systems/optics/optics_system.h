@@ -1,6 +1,6 @@
 ﻿#pragma once
 
-#include <Horizon.h>
+#include "horizon.h"
 #include <corona/events/optics_system_events.h>
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
@@ -85,7 +85,7 @@ class OpticsSystem : public Kernel::SystemBase {
 
     void ensure_camera_render_resources(uint32_t width, uint32_t height);
     void optics_pipeline(float frame_count, uint64_t frame_index);
-    void process_pending_screenshots(std::uintptr_t camera_handle, HardwareImage& render_target);
+    void process_pending_screenshots(std::uintptr_t camera_handle, Horizon::HardwareImage& render_target);
 #ifdef CORONA_ENABLE_VISION
     // Vision 相关私有方法（在 CORONA_ENABLE_VISION 宏保护下实现）
     bool init_vision_lazy();  ///< 首次切换到 Vision 时的 lazy 初始化
@@ -134,9 +134,9 @@ class OpticsSystem : public Kernel::SystemBase {
     // 这样逐相机遍历时不再互相覆盖；DisplaySystem 也已按 surface 独立合成。
     // Pass 1 scene 与 Pass 2 UI 使用各自的 visibility/depth 中间产物。
     struct SurfaceRenderTarget {
-        HardwareImage final_output;        ///< 该 surface 专属的 RGBA16F 最终输出
-        HardwareImage ui_overlay;          ///< Pass 2 camera-follow actor overlay
-        HardwareImage composite_output;    ///< Optics-internal scene+overlay result
+        Horizon::HardwareImage final_output;        ///< 该 surface 专属的 RGBA16F 最终输出
+        Horizon::HardwareImage ui_overlay;          ///< Pass 2 camera-follow actor overlay
+        Horizon::HardwareImage composite_output;    ///< Optics-internal scene+overlay result
         std::uintptr_t image_handle = 0;   ///< 该 surface 专属的 image_storage 句柄
         uint32_t width = 0;                ///< 该输出图当前分辨率
         uint32_t height = 0;
@@ -158,7 +158,7 @@ class OpticsSystem : public Kernel::SystemBase {
 
     // 无 surface 的离屏相机（仅截图，不显示）继续共用一张离屏图：截图在渲染后
     // 同步处理，逐相机串行，无需 per-surface。
-    HardwareImage offscreen_image_;
+    Horizon::HardwareImage offscreen_image_;
     uint32_t offscreen_w_{0}, offscreen_h_{0};
 
     std::unique_ptr<Hardware> hardware_;

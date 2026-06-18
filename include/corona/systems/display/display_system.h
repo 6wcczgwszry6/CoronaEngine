@@ -1,18 +1,19 @@
 ﻿#pragma once
 
-#include <Horizon.h>
+#include "horizon.h"
 #include <corona/events/display_system_events.h>
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/kernel/system/system_base.h>
 #include <corona/shader_include.h>
 // clang-format off
-#include GLSL(../../../../assets/shaders/composite.comp.glsl)
+#include GLSL(../../../assets/shaders/composite.comp.glsl)
 // clang-format on
 
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -61,12 +62,12 @@ class DisplaySystem : public Kernel::SystemBase {
         PendingLayer ui;
     };
 
-    void compose_and_present(HardwareDisplayer& displayer,
+    void compose_and_present(Horizon::HardwareDisplayer& displayer,
                              SurfaceState& state,
-                             HardwareImage& optics_image,
-                             HardwareExecutor* optics_executor,
-                             HardwareImage& ui_image,
-                             HardwareExecutor* ui_executor);
+                             Horizon::HardwareImage& optics_image,
+                             const Horizon::SubmitReceipt* optics_receipt,
+                             Horizon::HardwareImage& ui_image,
+                             const Horizon::SubmitReceipt* ui_receipt);
     bool ensure_composite_resources(uint32_t width, uint32_t height);
 
     Kernel::EventId surface_changed_sub_id_ = 0;
@@ -78,7 +79,7 @@ class DisplaySystem : public Kernel::SystemBase {
     // from EventBus handlers (Optics thread, main thread) and update() (Display thread)
     std::mutex frame_mutex_;
 
-    std::unordered_map<uint64_t, HardwareDisplayer> displayers_;
+    std::unordered_map<uint64_t, Horizon::HardwareDisplayer> displayers_;
     std::unordered_map<uint64_t, SurfaceState> surface_states_;
     std::vector<void*> pending_surfaces_;  ///< Surfaces awaiting displayer creation (deferred to update thread)
 
@@ -94,11 +95,11 @@ class DisplaySystem : public Kernel::SystemBase {
     std::vector<PendingRemoval> pending_removals_;
 
     // Compositing resources
-    ComputePipeline<composite_comp_glsl> composite_pipeline_;
-    HardwareExecutor compositor_executor_;
-    HardwareImage composite_output_;
-    HardwareImage transparent_storage_;  ///< 1x1 transparent StorageImage fallback (missing Optics bg)
-    HardwareImage transparent_sampled_;  ///< 1x1 transparent SampledImage fallback (missing UI fg)
+    std::optional<Horizon::ComputePipeline<composite_comp_glsl_t>> composite_pipeline_;
+    std::optional<Horizon::HardwareExecutor> compositor_executor_;
+    Horizon::HardwareImage composite_output_;
+    Horizon::HardwareImage transparent_storage_;  ///< 1x1 transparent StorageImage fallback (missing Optics bg)
+    Horizon::HardwareImage transparent_sampled_;  ///< 1x1 transparent SampledImage fallback (missing UI fg)
     uint32_t composite_width_ = 0;
     uint32_t composite_height_ = 0;
     bool composite_pipeline_ready_ = false;

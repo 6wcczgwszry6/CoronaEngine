@@ -1,12 +1,20 @@
 #include <corona/systems/ui/vulkan_backend.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <mutex>
+#include <span>
 
 #include "cef/browser_manager.h"
 #include "cef/cef_client.h"
 
 namespace Corona::Systems::UI {
+namespace {
+ImTextureID descriptor_to_texture_id(uint32_t descriptor) {
+    return static_cast<ImTextureID>(static_cast<ImU64>(descriptor) + 1u);
+}
+}  // namespace
+
 void BrowserManager::destroy_tab_texture(BrowserTab* tab) {
     if (!tab || !is_valid_texture_id(tab->texture_id)) {
         return;
@@ -25,7 +33,12 @@ ImTextureID BrowserManager::create_browser_texture(int width, int height) {
     const uint32_t safe_height = static_cast<uint32_t>(std::max(height, 1));
 
     OwnedImage owned{};
-    owned.image = HardwareImage(safe_width, safe_height, ImageFormat::RGBA8_SRGB, ImageUsage::SampledImage);
+    owned.image = Horizon::HardwareImage(Horizon::HardwareImageDesc::texture_2d(
+        safe_width,
+        safe_height,
+        Horizon::Format::SRGBA8_UNORM,
+        Horizon::ImageUsageFlags::Sampled | Horizon::ImageUsageFlags::TransferDst,
+        "cef.browser_texture"));
     if (!owned.image) {
         return k_invalid_texture_id;
     }
@@ -34,10 +47,7 @@ ImTextureID BrowserManager::create_browser_texture(int width, int height) {
     owned.height = safe_height;
 
     const uint32_t descriptor = owned.image.storeDescriptor();
-    if (descriptor == 0) {
-        return k_invalid_texture_id;
-    }
-    const ImTextureID texture_id = static_cast<ImTextureID>(descriptor);
+    const ImTextureID texture_id = descriptor_to_texture_id(descriptor);
 
     owned_images_[texture_id] = std::move(owned);
     return texture_id;
@@ -77,8 +87,8 @@ void BrowserManager::update_texture(int tab_id) {
         kRgbaBytesPerPixel;
 
     if (pixels.size() >= expected_size) {
-        texture_executor_ << image_it->second.image.copyFrom(pixels.data())
-                          << texture_executor_.commit();
+        image_it->second.image.write_bytes(
+            std::as_bytes(std::span<const uint8_t>(pixels.data(), expected_size)));
     }
 }
 

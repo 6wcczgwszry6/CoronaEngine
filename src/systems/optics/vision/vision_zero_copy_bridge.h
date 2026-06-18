@@ -19,7 +19,7 @@
 
 #ifdef CORONA_ENABLE_VISION
 
-#include <Horizon.h>
+#include <horizon.h>
 
 #include <cstdint>
 
@@ -52,7 +52,7 @@ public:
 
     // The Vulkan-side view of the shared memory. Bind its storeDescriptor() as
     // the resolve pass's source SSBO. Valid only after a successful ensure().
-    [[nodiscard]] HardwareBuffer& imported() noexcept { return imported_; }
+    [[nodiscard]] Corona::Horizon::HardwareBuffer& imported() noexcept { return imported_; }
     [[nodiscard]] bool valid() const noexcept { return valid_; }
     [[nodiscard]] uint32_t width() const noexcept { return width_; }
     [[nodiscard]] uint32_t height() const noexcept { return height_; }
@@ -66,7 +66,7 @@ private:
 
     struct Shared;       // owns the exported ocarina Buffer<float4>
     Shared* shared_ = nullptr;
-    HardwareBuffer imported_;
+    Corona::Horizon::HardwareBuffer imported_;
     uint32_t width_ = 0;
     uint32_t height_ = 0;
     bool valid_ = false;

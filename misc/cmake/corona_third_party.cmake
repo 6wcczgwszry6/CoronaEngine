@@ -51,7 +51,7 @@ endfunction()
 # ------------------------------------------------------------------------------
 FetchContent_Declare(Horizon
     GIT_REPOSITORY https://github.com/CoronaEngine/Horizon.git
-    GIT_TAG d947b716cc5e4fe6539f4d1881150b9b6edfc263
+    GIT_TAG main
     EXCLUDE_FROM_ALL
 )
 
@@ -140,11 +140,20 @@ FetchContent_Declare(
         EXCLUDE_FROM_ALL
 )
 
+FetchContent_Declare(
+        oneTBB
+        GIT_REPOSITORY https://github.com/uxlfoundation/oneTBB.git
+        GIT_TAG v2022.3.0
+        GIT_SHALLOW TRUE
+        EXCLUDE_FROM_ALL
+)
+
 # ------------------------------------------------------------------------------
 # Fetch and enable dependencies
 # ------------------------------------------------------------------------------
 
 set(BUILD_TESTING OFF CACHE BOOL "Disable building tests for 3rd party dependencies" FORCE)
+set(ASSIMP_BUILD_USD_IMPORTER OFF CACHE BOOL "" FORCE)
 
 # When Vision is enabled, assimp must build with all importers + zlib to satisfy
 # Vision's mesh import paths. Only override these knobs in that case so default
@@ -168,60 +177,31 @@ message(STATUS "[3rdparty] stb module enabled")
 FetchContent_MakeAvailable(nanobind)
 message(STATUS "[3rdparty] nanobind module enabled")
 
-if(WIN32)
-    FetchContent_GetProperties(Horizon SOURCE_DIR _corona_horizon_source_dir)
-    if(NOT _corona_horizon_source_dir)
-        if(FETCHCONTENT_BASE_DIR)
-            set(_corona_horizon_source_dir "${FETCHCONTENT_BASE_DIR}/horizon-src")
-        else()
-            set(_corona_horizon_source_dir "${CMAKE_BINARY_DIR}/_deps/horizon-src")
-        endif()
-    endif()
-
-    get_filename_component(
-        _corona_horizon_tbb_dir
-        "${_corona_horizon_source_dir}/modules/corona/third_party/win/oneapi-tbb-2022.3.0/lib/cmake/tbb"
-        ABSOLUTE
-    )
-
-    if(DEFINED TBB_DIR AND NOT TBB_DIR STREQUAL "")
-        corona_tbb_package_has_runtime("${TBB_DIR}" _corona_existing_tbb_ok)
-    else()
-        set(_corona_existing_tbb_ok FALSE)
-    endif()
-
-    if(NOT _corona_existing_tbb_ok)
-        set(TBB_DIR "${_corona_horizon_tbb_dir}" CACHE PATH
-            "Path to TBB cmake configuration directory" FORCE)
-        message(STATUS "[3rdparty] Using Horizon vendored TBB: ${TBB_DIR}")
-    endif()
-
-    unset(_corona_existing_tbb_ok)
-    unset(_corona_horizon_tbb_dir)
-    unset(_corona_horizon_source_dir)
-endif()
+set(TBB_TEST OFF CACHE BOOL "" FORCE)
+set(TBB_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(TBB_STRICT OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(oneTBB)
+message(STATUS "[3rdparty] oneTBB module enabled")
 
 if(CORONA_BUILD_VISION)
     set(HORIZON_BUILD_OCARINA ON CACHE BOOL "" FORCE)
-    set(HORIZON_BUILD_VISION_HOTFIX ON CACHE BOOL "" FORCE)
+else()
+    set(HORIZON_BUILD_OCARINA OFF CACHE BOOL "" FORCE)
 endif()
+set(HORIZON_BUILD_TOOLS ON CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(Horizon)
-# Horizon's Helicon / corona_pal targets publish /source-charset:utf-8 and
+# Horizon's Helicon / corona kernel targets publish /source-charset:utf-8 and
 # /execution-charset:utf-8 via PUBLIC compile options. Strip the INTERFACE
 # side so downstream consumers (which already get /utf-8 globally) do not
 # trigger MSVC D8016 from mixing the long and short UTF-8 charset flags.
 corona_strip_msvc_charset_interface(Helicon)
+corona_strip_msvc_charset_interface(corona_kernel)
 corona_strip_msvc_charset_interface(corona_pal)
 
 if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
     if(TARGET ShaderCompileScripts)
         target_compile_options(ShaderCompileScripts PRIVATE
-            $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>)
-    endif()
-
-    if(TARGET corona_kernel)
-        target_compile_options(corona_kernel PRIVATE
             $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>)
     endif()
 
@@ -325,7 +305,7 @@ if(CORONA_BUILD_VISION)
 endif()
 
 # ==============================================================================
-# UTF-8 flag normalization for Horizon's Helicon target
+# UTF-8 flag normalization for Horizon targets
 #
 # Problem:
 #   Horizon's root CMakeLists adds:
@@ -342,11 +322,10 @@ endif()
 #   which MSVC rejects with `command-line error D8016`.
 #
 # Fix:
-#   Strip ONLY INTERFACE_COMPILE_OPTIONS on Helicon (and defensively on
-#   Horizon). This leaves Helicon's own compilation untouched (no behavioural
-#   change for Helicon's source files, which may contain non-ASCII literals),
-#   while preventing the conflicting pair from leaking into our targets. Our
-#   own targets get /utf-8 from corona_compile_config.cmake via
+#   Strip ONLY INTERFACE_COMPILE_OPTIONS on Horizon-provided targets that
+#   publish the long-form charset flags. This leaves their own compilation
+#   untouched while preventing the conflicting pair from leaking into our
+#   targets. Our own targets get /utf-8 from corona_compile_config.cmake via
 #   add_compile_options().
 #
 # Failure handling:
@@ -363,7 +342,7 @@ if(MSVC)
     # previously only handled the bare-token form.
     set(_CORONA_LEGACY_CHARSET_REGEX "/(source|execution)-charset:utf-8")
 
-    foreach(_corona_charset_target Helicon Horizon)
+    foreach(_corona_charset_target Helicon Horizon corona_kernel corona_pal)
         if(TARGET ${_corona_charset_target})
             get_target_property(_corona_iopts
                 ${_corona_charset_target} INTERFACE_COMPILE_OPTIONS)
@@ -388,24 +367,27 @@ if(MSVC)
         endif()
     endforeach()
 
-    # Post-check: ensure no Helicon consumer can hit D8016. Walk each option
+    # Post-check: ensure no Horizon-provided consumer can hit D8016. Walk each option
     # individually with the same regex used above, so this guard and the
     # stripping logic stay in lock-step (avoids the previous failure mode
     # where REMOVE_ITEM silently no-op'd but string(FIND) still tripped).
-    if(TARGET Helicon)
-        get_target_property(_corona_iopts Helicon INTERFACE_COMPILE_OPTIONS)
-        if(_corona_iopts)
-            foreach(_opt IN LISTS _corona_iopts)
-                if(_opt MATCHES "${_CORONA_LEGACY_CHARSET_REGEX}")
-                    message(FATAL_ERROR
-                        "[3rdparty] Helicon still exposes long-form charset flag "
-                        "via INTERFACE_COMPILE_OPTIONS after stripping: '${_opt}'. "
-                        "The regex in misc/cmake/corona_third_party.cmake must be "
-                        "updated to match the new upstream flag form.")
-                endif()
-            endforeach()
+    foreach(_corona_charset_target Helicon Horizon corona_kernel corona_pal)
+        if(TARGET ${_corona_charset_target})
+            get_target_property(_corona_iopts
+                ${_corona_charset_target} INTERFACE_COMPILE_OPTIONS)
+            if(_corona_iopts)
+                foreach(_opt IN LISTS _corona_iopts)
+                    if(_opt MATCHES "${_CORONA_LEGACY_CHARSET_REGEX}")
+                        message(FATAL_ERROR
+                            "[3rdparty] ${_corona_charset_target} still exposes long-form charset flag "
+                            "via INTERFACE_COMPILE_OPTIONS after stripping: '${_opt}'. "
+                            "The regex in misc/cmake/corona_third_party.cmake must be "
+                            "updated to match the new upstream flag form.")
+                    endif()
+                endforeach()
+            endif()
         endif()
-    endif()
+    endforeach()
 
     unset(_CORONA_LEGACY_CHARSET_REGEX)
 endif()

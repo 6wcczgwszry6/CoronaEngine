@@ -10,11 +10,6 @@ layout(push_constant) uniform PushConsts
     mat4 modelMatrix;
 } pushConsts;
 
-layout(set = 1, binding = 0) readonly buffer UniformBufferObject
-{
-    mat4 viewProjMatrix;
-} uniformBufferObjects[];
-
 layout (set = 0, binding = 0) uniform sampler2D textures[];
 
 layout(location = 0) in vec2 fragTexCoord;

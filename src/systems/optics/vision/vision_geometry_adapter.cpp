@@ -7,7 +7,9 @@
 #include <corona/resource/types/scene.h>
 #include <corona/shared_data_hub.h>
 
+#include <cstddef>
 #include <cstring>
+#include <span>
 #include <vector>
 
 #include "base/mgr/geometry.h"
@@ -71,7 +73,7 @@ struct CpuMeshData {
     }
 
     out_mesh.vertices.resize(static_cast<std::size_t>(vertex_bytes / vertex_stride));
-    if (!vertex_buffer->copyToData(out_mesh.vertices.data(), vertex_bytes)) {
+    if (!vertex_buffer->read_bytes(std::as_writable_bytes(std::span(out_mesh.vertices)))) {
         out_mesh.vertices.clear();
         return false;
     }
@@ -93,7 +95,7 @@ struct CpuMeshData {
     }
 
     std::vector<uint8_t> index_data(index_bytes);
-    if (!index_buffer->copyToData(index_data.data(), index_bytes)) {
+    if (!index_buffer->read_bytes(std::as_writable_bytes(std::span(index_data)))) {
         out_mesh.vertices.clear();
         return false;
     }
