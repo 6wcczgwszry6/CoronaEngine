@@ -734,6 +734,7 @@ bool OpticsSystem::initialize_render_pipelines() {
         hardware_->debugResolvePipeline.emplace();
         hardware_->actorPickPipeline.emplace();
         hardware_->opticsOverlayPipeline.emplace();
+        hardware_->opticsUiWarpPipeline.emplace();
         hardware_->opticsCompositePipeline.emplace();
 #ifdef CORONA_ENABLE_VISION
         hardware_->visionResolvePipeline.emplace();
@@ -820,7 +821,8 @@ OpticsSystem::SurfaceRenderTarget& OpticsSystem::acquire_surface_target(void* su
     }
 
     // 分辨率变化或首次：创建/重建该 surface 的 Optics 输出图。
-    if (!target.final_output || !target.ui_overlay || !target.composite_output ||
+    if (!target.final_output || !target.ui_overlay || !target.ui_warped_overlay ||
+        !target.composite_output ||
         target.width != width || target.height != height) {
         if (target.image_handle != 0) {
             if (auto image_device =
@@ -832,6 +834,8 @@ OpticsSystem::SurfaceRenderTarget& OpticsSystem::acquire_surface_target(void* su
         target.final_output =
             HardwareImage(width, height, ImageFormat::RGBA16_FLOAT, ImageUsage::StorageImage);
         target.ui_overlay =
+            HardwareImage(width, height, ImageFormat::RGBA16_FLOAT, ImageUsage::StorageImage);
+        target.ui_warped_overlay =
             HardwareImage(width, height, ImageFormat::RGBA16_FLOAT, ImageUsage::StorageImage);
         target.composite_output =
             HardwareImage(width, height, ImageFormat::RGBA16_FLOAT, ImageUsage::StorageImage);
@@ -960,7 +964,8 @@ void OpticsSystem::update() {
 
     if (!hardware_->shaderHasInit || !hardware_->lightingPipeline ||
         !hardware_->skyPipeline || !hardware_->tonemapPipeline ||
-        !hardware_->debugResolvePipeline) {
+        !hardware_->debugResolvePipeline || !hardware_->opticsOverlayPipeline ||
+        !hardware_->opticsUiWarpPipeline || !hardware_->opticsCompositePipeline) {
         return;
     }
 
@@ -979,6 +984,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
     auto& sky = *hardware_->skyPipeline;
     auto& tonemap = *hardware_->tonemapPipeline;
     auto& opticsOverlay = *hardware_->opticsOverlayPipeline;
+    auto& opticsUiWarp = *hardware_->opticsUiWarpPipeline;
     auto& opticsComposite = *hardware_->opticsCompositePipeline;
     auto& uiVisibility = *hardware_->uiVisibilityPipeline;
 
@@ -1401,8 +1407,37 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                             uiVpDescriptor;
                         opticsOverlay.pushConsts.outputImage = overlayDescriptor;
 
+                        const auto viewport_ui_state =
+                            SharedDataHub::instance().viewport_ui_state(cam_handle);
+                        const bool stereo_ui =
+                            viewport_ui_state.mode == ViewportUiMode::Stereo3D;
+                        uint32_t compositeOverlayDescriptor = overlayDescriptor;
+                        if (stereo_ui) {
+                            const auto& calibration = viewport_ui_state.calibration;
+                            opticsUiWarp.pushConsts.inputImage = overlayDescriptor;
+                            opticsUiWarp.pushConsts.outputImage =
+                                target.ui_warped_overlay.storeDescriptor();
+                            opticsUiWarp.pushConsts.outputWidth = hardware_->gbufferSize.x;
+                            opticsUiWarp.pushConsts.outputHeight = hardware_->gbufferSize.y;
+                            opticsUiWarp.pushConsts.lenticularPitch =
+                                calibration.lenticular_pitch;
+                            opticsUiWarp.pushConsts.slant =
+                                std::tan(calibration.slant_angle_radians);
+                            opticsUiWarp.pushConsts.phaseOffset =
+                                calibration.phase_offset;
+                            opticsUiWarp.pushConsts.parallaxScale =
+                                calibration.parallax_scale;
+                            opticsUiWarp.pushConsts.rgbSubpixelOffsets = {
+                                calibration.rgb_subpixel_offsets[0],
+                                calibration.rgb_subpixel_offsets[1],
+                                calibration.rgb_subpixel_offsets[2],
+                                0.0f};
+                            compositeOverlayDescriptor =
+                                target.ui_warped_overlay.storeDescriptor();
+                        }
+
                         opticsComposite.pushConsts.bgImage = render_target.storeDescriptor();
-                        opticsComposite.pushConsts.fgImage = overlayDescriptor;
+                        opticsComposite.pushConsts.fgImage = compositeOverlayDescriptor;
                         opticsComposite.pushConsts.outputImage =
                             target.composite_output.storeDescriptor();
                         opticsComposite.pushConsts.outputWidth = hardware_->gbufferSize.x;
@@ -1410,8 +1445,11 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
 
                         hardware_->executor << uiVisibility(hardware_->gbufferSize.x,
                                                             hardware_->gbufferSize.y)
-                                            << opticsOverlay(dispatchX, dispatchY, 1)
-                                            << opticsComposite(dispatchX, dispatchY, 1)
+                                            << opticsOverlay(dispatchX, dispatchY, 1);
+                        if (stereo_ui) {
+                            hardware_->executor << opticsUiWarp(dispatchX, dispatchY, 1);
+                        }
+                        hardware_->executor << opticsComposite(dispatchX, dispatchY, 1)
                                             << hardware_->executor.commit();
 
                         presented_target = &target.composite_output;

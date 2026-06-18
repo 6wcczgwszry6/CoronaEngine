@@ -154,6 +154,7 @@ class OpticsSystem : public Kernel::SystemBase {
     struct SurfaceRenderTarget {
         HardwareImage final_output;        ///< 该 surface 专属的 RGBA16F 最终输出
         HardwareImage ui_overlay;          ///< Pass 2 camera-follow actor overlay
+        HardwareImage ui_warped_overlay;   ///< LFD-warped UI overlay for Stereo3D mode
         HardwareImage composite_output;    ///< Optics-internal scene+overlay result
         std::uintptr_t image_handle = 0;   ///< 该 surface 专属的 image_storage 句柄
         uint32_t width = 0;                ///< 该输出图当前分辨率
