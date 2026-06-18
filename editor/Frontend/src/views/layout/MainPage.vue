@@ -1286,8 +1286,16 @@ const onContextMenu = (event) => {
   event.preventDefault();
 };
 
-const handleActorPickResult = (payload) => {
-  const result = viewportPickController.handlePickResult(payload);
+const refreshActorPickIndex = async (sceneId) => {
+  if (!sceneId) return false;
+  const result = await sceneService.listSceneTree(sceneId);
+  const snapshot = result?.data ?? result;
+  const actors = Array.isArray(snapshot?.actors) ? snapshot.actors : [];
+  actorPickIndex = indexActorsByHandle(actors);
+  return actorPickIndex.size > 0;
+};
+
+const applyActorPickResult = (result) => {
   if (result.status === 'pending' || result.status === 'stale') return;
 
   if (result.status !== 'selected') {
@@ -1303,6 +1311,23 @@ const handleActorPickResult = (payload) => {
     sceneId: result.payload.sceneId,
   };
   requestGizmoState();
+};
+
+const handleActorPickResult = (payload) => {
+  const result = viewportPickController.handlePickResult(payload);
+  if (result.status !== 'unknown' || !payload?.sceneId) {
+    applyActorPickResult(result);
+    return;
+  }
+
+  refreshActorPickIndex(payload.sceneId)
+    .then(() => {
+      applyActorPickResult(viewportPickController.handlePickResult(payload));
+    })
+    .catch((error) => {
+      logError('Actor pick index refresh failed', error);
+      clearGizmoSelection();
+    });
 };
 
 const handleGizmoStateResult = (payload) => {

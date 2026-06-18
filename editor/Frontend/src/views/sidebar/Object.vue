@@ -298,6 +298,33 @@
           <template v-else-if="mainActiveTab === 'actor'">
             <!-- 单位 - 基础信息 -->
             <div v-show="ActiveSubTab === 'Basic'" class="space-y-2 text-xs">
+              <div class="bg-[#3c3c3c]/50 p-2 rounded border-l-2 border-[#84a65b]">
+                <div class="flex items-center space-x-2">
+                  <label class="text-[#e0e0e0] font-medium w-16">别名</label>
+                  <input
+                    v-model="actorAliasDraft"
+                    type="text"
+                    class="flex-1 min-w-0 p-1 bg-[#1a1a1a] text-[#e0e0e0] rounded border border-[#3c3c3c] text-[10px] focus:border-[#84a65b] focus:outline-none"
+                    placeholder="Actor 别名"
+                    :disabled="actorAliasSaving"
+                    @keydown.enter.prevent="commitActorAlias"
+                    @keydown.esc.prevent="resetActorAliasDraft"
+                  />
+                  <button
+                    type="button"
+                    class="px-2 py-1 rounded whitespace-nowrap text-[10px] transition-colors"
+                    :class="actorAliasDirty && !actorAliasSaving ? 'bg-[#84a65b] text-[#101510] hover:bg-[#95b96a]' : 'bg-[#545454] text-[#909090] cursor-not-allowed'"
+                    :disabled="!actorAliasDirty || actorAliasSaving"
+                    @click="commitActorAlias"
+                  >
+                    {{ actorAliasSaving ? '保存中' : '保存' }}
+                  </button>
+                </div>
+                <div v-if="actorAliasError" class="mt-1 text-[10px] text-red-300">
+                  {{ actorAliasError }}
+                </div>
+              </div>
+
               <div class="bg-[#3c3c3c]/50 p-2 rounded">
                 <div class="flex items-center space-x-2">
                   <label class="text-[#e0e0e0] font-medium w-16">场景</label>
@@ -942,6 +969,33 @@
           <template v-else-if="mainActiveTab === 'model'">
             <!-- 模型 - 基础信息 -->
             <div v-show="ActiveSubTab === 'Basic'" class="space-y-2 text-xs">
+              <div class="bg-[#3c3c3c]/50 p-2 rounded border-l-2 border-[#84a65b]">
+                <div class="flex items-center space-x-2">
+                  <label class="text-[#e0e0e0] font-medium w-16">别名</label>
+                  <input
+                    v-model="modelAliasDraft"
+                    type="text"
+                    class="flex-1 min-w-0 p-1 bg-[#1a1a1a] text-[#e0e0e0] rounded border border-[#3c3c3c] text-[10px] focus:border-[#84a65b] focus:outline-none"
+                    placeholder="模型别名"
+                    :disabled="modelAliasSaving"
+                    @keydown.enter.prevent="commitModelAlias"
+                    @keydown.esc.prevent="resetModelAliasDraft"
+                  />
+                  <button
+                    type="button"
+                    class="px-2 py-1 rounded whitespace-nowrap text-[10px] transition-colors"
+                    :class="modelAliasDirty && !modelAliasSaving ? 'bg-[#84a65b] text-[#101510] hover:bg-[#95b96a]' : 'bg-[#545454] text-[#909090] cursor-not-allowed'"
+                    :disabled="!modelAliasDirty || modelAliasSaving"
+                    @click="commitModelAlias"
+                  >
+                    {{ modelAliasSaving ? '保存中' : '保存' }}
+                  </button>
+                </div>
+                <div v-if="modelAliasError" class="mt-1 text-[10px] text-red-300">
+                  {{ modelAliasError }}
+                </div>
+              </div>
+
               <div class="bg-[#3c3c3c]/50 p-2 rounded">
                 <div class="flex items-center space-x-2">
                   <label class="text-[#e0e0e0] font-medium w-16">场景</label>
@@ -1654,6 +1708,12 @@ function keyframeColorClass(type) {
 // ========== 当前打开的文件 ==========
 const currentActorFile = ref('');
 const currentModelFile = ref('');
+const actorAliasDraft = ref('');
+const actorAliasSaving = ref(false);
+const actorAliasError = ref('');
+const modelAliasDraft = ref('');
+const modelAliasSaving = ref(false);
+const modelAliasError = ref('');
 
 // ========== 场景数据 ==========
 const sceneData = ref({
@@ -1746,6 +1806,13 @@ const modelData = ref({
 });
 
 // ========== 计算属性 ==========
+const actorAliasDirty = computed(() =>
+  actorAliasDraft.value.trim() !== (actorData.value.name || '')
+);
+const modelAliasDirty = computed(() =>
+  modelAliasDraft.value.trim() !== (modelData.value.name || '')
+);
+
 const currentFileInfo = computed(() => {
   if (mainActiveTab.value === 'scene') {
     return `🎬 场景: ${sceneData.value.name}`;
@@ -1772,6 +1839,96 @@ const readFollowCameraState = (data) =>
   data?.follow_camera === 1 ||
   data?.follow_camera === 'true' ||
   data?.follow_camera === '1';
+
+const unwrapBridgeResult = (result) => result?.data ?? result;
+
+const resetActorAliasDraft = () => {
+  actorAliasDraft.value = actorData.value.name || '';
+  actorAliasError.value = '';
+};
+
+const commitActorAlias = async () => {
+  const sceneName = actorData.value.parentScene;
+  const actorName = currentActorFile.value || actorData.value.name;
+  const nextName = actorAliasDraft.value.trim();
+
+  if (!sceneName || !actorName || actorAliasSaving.value) return;
+  if (!nextName) {
+    actorAliasError.value = '别名不能为空';
+    return;
+  }
+  if (nextName === actorData.value.name) {
+    resetActorAliasDraft();
+    return;
+  }
+
+  actorAliasSaving.value = true;
+  actorAliasError.value = '';
+  try {
+    const result = unwrapBridgeResult(
+      await sceneService.renameActor(sceneName, actorName, nextName)
+    );
+    if (result?.status === 'error') {
+      throw new Error(result.message || '修改别名失败');
+    }
+
+    const savedName = result?.actor?.name || result?.new_name || nextName;
+    currentActorFile.value = savedName;
+    actorData.value.name = savedName;
+    actorAliasDraft.value = savedName;
+    setActorContext(sceneName, savedName);
+  } catch (e) {
+    actorAliasError.value = e?.message || '修改别名失败';
+    actorAliasDraft.value = actorData.value.name || actorName;
+    logError('修改单位别名失败', e);
+  } finally {
+    actorAliasSaving.value = false;
+  }
+};
+
+const resetModelAliasDraft = () => {
+  modelAliasDraft.value = modelData.value.name || '';
+  modelAliasError.value = '';
+};
+
+const commitModelAlias = async () => {
+  const sceneName = modelData.value.targetScene;
+  const actorName = currentModelFile.value || modelData.value.name;
+  const nextName = modelAliasDraft.value.trim();
+
+  if (!sceneName || !actorName || modelAliasSaving.value) return;
+  if (!nextName) {
+    modelAliasError.value = '别名不能为空';
+    return;
+  }
+  if (nextName === modelData.value.name) {
+    resetModelAliasDraft();
+    return;
+  }
+
+  modelAliasSaving.value = true;
+  modelAliasError.value = '';
+  try {
+    const result = unwrapBridgeResult(
+      await sceneService.renameActor(sceneName, actorName, nextName)
+    );
+    if (result?.status === 'error') {
+      throw new Error(result.message || '修改别名失败');
+    }
+
+    const savedName = result?.actor?.name || result?.new_name || nextName;
+    currentModelFile.value = savedName;
+    modelData.value.name = savedName;
+    modelAliasDraft.value = savedName;
+    setActorContext(sceneName, savedName);
+  } catch (e) {
+    modelAliasError.value = e?.message || '修改别名失败';
+    modelAliasDraft.value = modelData.value.name || actorName;
+    logError('修改模型别名失败', e);
+  } finally {
+    modelAliasSaving.value = false;
+  }
+};
 
 // 加载场景数据
 const loadSceneData = async (sceneId) => {
@@ -1829,7 +1986,10 @@ const loadActorData = async (sceneId, actorId) => {
     const result = await sceneService.getActor(sceneId, actorId);
     if (result) {
       const data = result.data;
-      actorData.value.name = actorId;
+      const displayName = data.name || actorId;
+      actorData.value.name = displayName;
+      actorAliasDraft.value = displayName;
+      actorAliasError.value = '';
       actorData.value.handle = Number(data.handle || 0);
       actorData.value.parentScene = sceneId || '';
       actorData.value.file = data.path;
@@ -1910,7 +2070,10 @@ const loadModelData = async (sceneId, modelId) => {
     const result = await sceneService.getActor(sceneId, modelId);
     if (result) {
       const data = result.data;
-      modelData.value.name = modelId;
+      const displayName = data.name || modelId;
+      modelData.value.name = displayName;
+      modelAliasDraft.value = displayName;
+      modelAliasError.value = '';
       modelData.value.handle = Number(data.handle || 0);
       modelData.value.targetScene = sceneId || '';
       modelData.value.file = data.path;

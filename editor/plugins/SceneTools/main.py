@@ -250,6 +250,36 @@ class SceneTools(PluginBase):
             return {"status": "error", "message": str(exc), "code": "internal_error"}
 
     @staticmethod
+    def rename_actor(scene_name: str, actor_name: str, new_name: str) -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                raise ValueError(f"Scene '{scene_name}' not found")
+            actor = scene.find_actor(actor_name)
+            if actor is None:
+                raise ValueError(f"Actor '{actor_name}' not found")
+            normalized_name = str(new_name or "").strip()
+            if not normalized_name:
+                raise ValueError("Actor name cannot be empty")
+            if any(other is not actor and other.name == normalized_name
+                   for other in scene.get_actors()):
+                raise ValueError(f"Actor name '{normalized_name}' already exists")
+
+            old_name = actor.name
+            actor.name = normalized_name
+            scene.save_data()
+            scene._notify_scene_tree_changed()
+            return {
+                "status": "success",
+                "scene": scene_name,
+                "actor": actor.to_dict(),
+                "old_name": old_name,
+                "new_name": normalized_name,
+            }
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
     def remove_actor_internal(scene_name: str, actor_guid: str = "", actor_name: str = "") -> dict:
         """Apply a remote actor deletion without re-broadcasting it."""
         try:

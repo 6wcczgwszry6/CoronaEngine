@@ -989,6 +989,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
 
             saved = configparser.ConfigParser()
             saved.read(scene_path, encoding="utf-8")
+            self.assertEqual(saved["actors"]["hud_quad.name"], "hud_quad")
             self.assertTrue(saved["actors"].getboolean("hud_quad.follow_camera"))
             self.assertEqual(
                 saved["actors"]["hud_quad.actor_guid"],
@@ -999,8 +1000,136 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
             self.assertNotIn("vision", saved)
 
             actor_data = scene._build_actor_json(saved["actors"], "hud_quad")
+            self.assertEqual(actor_data["name"], "hud_quad")
             self.assertTrue(actor_data["follow_camera"])
             self.assertEqual(actor_data["actor_guid"], "vision:D:/scene.json#scene.shapes[0]")
+
+    def test_scene_actor_alias_is_separate_from_unique_ini_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scene_path = Path(tmp) / "main.scene"
+            scene = scene_module.Scene.__new__(scene_module.Scene)
+            scene.route = str(scene_path)
+            scene.name = "main"
+            scene.file_data = configparser.ConfigParser()
+            scene._environment = None
+            scene._cameras = []
+            scene._main_camera = None
+            scene.engine_scene = SimpleNamespace(
+                add_camera=lambda camera: None,
+                set_active_camera=lambda camera: None,
+            )
+            scene.script_path = ""
+            scene.terrain_path = ""
+
+            def make_actor(guid):
+                return SimpleNamespace(
+                    name="chair",
+                    actor_type="model",
+                    route="Resource/chair.obj",
+                    actor_guid=guid,
+                    _geometry=True,
+                    get_position=lambda: [0.0, 0.0, 0.0],
+                    get_rotation=lambda: [0.0, 0.0, 0.0],
+                    get_scale=lambda: [1.0, 1.0, 1.0],
+                    get_follow_camera=lambda: False,
+                )
+
+            scene._actors = [make_actor("actor-chair-a"), make_actor("actor-chair-b")]
+
+            scene.save_data()
+
+            saved = configparser.ConfigParser()
+            saved.read(scene_path, encoding="utf-8")
+            self.assertEqual(saved["actors"]["chair.name"], "chair")
+            self.assertEqual(saved["actors"]["chair_1.name"], "chair")
+            self.assertEqual(scene._build_actor_json(saved["actors"], "chair")["name"], "chair")
+            self.assertEqual(scene._build_actor_json(saved["actors"], "chair_1")["name"], "chair")
+
+    def test_actor_config_loads_display_alias_from_base_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actor_path = Path(tmp) / "resource_name.actor"
+            config = configparser.ConfigParser()
+            config["base"] = {
+                "name": "Display Chair",
+                "path": "",
+                "actor_guid": "actor-display-chair",
+            }
+            config["scripts"] = {"path": ""}
+            with actor_path.open("w", encoding="utf-8") as handle:
+                config.write(handle)
+
+            fake_editor = SimpleNamespace(
+                CoronaEngine=SimpleNamespace(
+                    active_project_path=str(Path(tmp)),
+                    Actor=FakeActorEngineObject,
+                    ActorProfile=SimpleNamespace,
+                ),
+                js_call_func=lambda name, args: None,
+            )
+
+            with patch.object(actor_module, "CoronaEditor", fake_editor), \
+                 patch.object(actor_module, "CoronaEngine", fake_editor.CoronaEngine):
+                actor = actor_module.Actor(route=str(actor_path), actor_type="actor")
+
+            self.assertEqual(actor.name, "Display Chair")
+            self.assertEqual(actor.actor_guid, "actor-display-chair")
+
+    def test_legacy_scene_actor_without_explicit_alias_falls_back_to_ini_key(self):
+        scene = scene_module.Scene.__new__(scene_module.Scene)
+        actors = configparser.ConfigParser()
+        actors["actors"] = {
+            "legacy_chair.actor_type": "model",
+            "legacy_chair.route": "Resource/chair.obj",
+            "legacy_chair.geometry.position": "0.0, 0.0, 0.0",
+            "legacy_chair.geometry.rotation": "0.0, 0.0, 0.0",
+            "legacy_chair.geometry.scale": "1.0, 1.0, 1.0",
+        }
+
+        actor_data = scene._build_actor_json(actors["actors"], "legacy_chair")
+
+        self.assertEqual(actor_data["name"], "legacy_chair")
+
+    def test_actor_data_alias_overrides_model_filename_when_loading_scene_actor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            model_path = project_root / "Resource" / "chair_mesh.obj"
+            model_path.parent.mkdir()
+            model_path.write_text("mesh", encoding="utf-8")
+            fake_editor = SimpleNamespace(
+                CoronaEngine=SimpleNamespace(
+                    active_project_path=str(project_root),
+                    Actor=FakeActorEngineObject,
+                    ActorProfile=SimpleNamespace,
+                ),
+                js_call_func=lambda name, args: None,
+            )
+            parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
+            actor_data = {
+                "name": "Display Chair",
+                "actor_guid": "actor-display-chair",
+                "_suppress_network_broadcast": True,
+                "geometry": {
+                    "position": [0.0, 0.0, 0.0],
+                    "rotation": [0.0, 0.0, 0.0],
+                    "scale": [1.0, 1.0, 1.0],
+                },
+            }
+
+            with patch.object(actor_module, "CoronaEditor", fake_editor), \
+                 patch.object(actor_module, "CoronaEngine", fake_editor.CoronaEngine), \
+                 patch.object(actor_module, "Geometry", FakeGeometry), \
+                 patch.object(actor_module, "Optics", FakeOptics), \
+                 patch.object(actor_module, "Mechanics", FakeComponent), \
+                 patch.object(actor_module, "Acoustics", FakeComponent):
+                actor = actor_module.Actor(
+                    route="Resource/chair_mesh.obj",
+                    actor_type="model",
+                    parent_scene=parent,
+                    actor_data=actor_data,
+                )
+
+            self.assertEqual(actor.name, "Display Chair")
+            self.assertEqual(actor.actor_guid, "actor-display-chair")
 
 
 if __name__ == "__main__":

@@ -124,6 +124,9 @@ class Actor:
         self.file_data.read(data_path, encoding='utf-8')
 
         # 读取模型路径
+        saved_name = self.file_data['base'].get('name', '')
+        if saved_name:
+            self.name = saved_name
         self.model_path = self.file_data['base']['path']
         self.actor_guid = self.file_data['base'].get('actor_guid', '')
         self._follow_camera = self.file_data['base'].getboolean('follow_camera', fallback=False)
@@ -138,6 +141,9 @@ class Actor:
 
     def _load_from_actor_data(self, actor_data: dict, data_path: str):
         """从actor_data字典加载actor数据"""
+        saved_name = actor_data.get('name', '')
+        if saved_name:
+            self.name = str(saved_name)
         file_follow_camera = False
         if self.actor_type == "actor":
             self.file_data.read(data_path, encoding='utf-8')

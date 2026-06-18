@@ -256,6 +256,7 @@ class Scene:
                 actor_key = actor_name
 
             self.file_data['actors'][f'{actor_key}.actor_type'] = getattr(actor, 'actor_type', 'actor')
+            self.file_data['actors'][f'{actor_key}.name'] = actor_name
             self.file_data['actors'][f'{actor_key}.route'] = getattr(actor, 'route', '')
             self.file_data['actors'][f'{actor_key}.actor_guid'] = getattr(actor, 'actor_guid', '')
             if hasattr(actor, 'get_follow_camera'):
@@ -729,7 +730,7 @@ class Scene:
             包含actor完整信息的字典
         """
         actor_data = {
-            "name": actor_name,
+            "name": actors_section.get(f'{actor_name}.name', actor_name),
             "actor_type": actors_section.get(f'{actor_name}.actor_type', 'actor'),
             "route": actors_section.get(f'{actor_name}.route', ''),
             "actor_guid": actors_section.get(f'{actor_name}.actor_guid', ''),

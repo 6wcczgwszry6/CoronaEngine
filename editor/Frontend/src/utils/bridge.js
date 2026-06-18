@@ -91,6 +91,8 @@ export const sceneService = {
     Bridge.callCEF('SceneTools', 'create_actor', [sceneName, objPath]),
   removeActor: (sceneName, actorName) =>
     Bridge.callCEF('SceneTools', 'remove_actor', [sceneName, actorName]),
+  renameActor: (sceneName, actorName, name) =>
+    Bridge.callCEF('SceneTools', 'rename_actor', [sceneName, actorName, name]),
   createScene: (sceneName) => Bridge.callCEF('SceneTools', 'create_scene', [sceneName]),
 
   sunDirection: (sceneName, enable, direction) =>
