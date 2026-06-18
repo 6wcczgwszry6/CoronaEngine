@@ -48,7 +48,6 @@ corona_add_system(imgui
         winmm
         Python::Python
         nanobind-static
-        ktm
         corona::resource::manager
         nlohmann_json::nlohmann_json
     INCLUDE_DIRS

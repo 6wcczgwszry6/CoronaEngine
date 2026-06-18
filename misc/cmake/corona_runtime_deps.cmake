@@ -22,6 +22,43 @@
 include_guard(GLOBAL)
 
 # ------------------------------------------------------------------------------
+# Function: copy one dependency target's runtime file next to an executable
+# ------------------------------------------------------------------------------
+function(corona_copy_runtime_files source_target target_name)
+    if(NOT WIN32)
+        return()
+    endif()
+
+    if(NOT TARGET ${target_name})
+        message(FATAL_ERROR "corona_copy_runtime_files: target '${target_name}' does not exist")
+    endif()
+
+    if(NOT TARGET ${source_target})
+        message(WARNING "corona_copy_runtime_files: dependency target '${source_target}' does not exist; skipping")
+        return()
+    endif()
+
+    get_target_property(_corona_runtime_target_type ${source_target} TYPE)
+
+    if(_corona_runtime_target_type STREQUAL "STATIC_LIBRARY"
+       OR _corona_runtime_target_type STREQUAL "INTERFACE_LIBRARY"
+       OR _corona_runtime_target_type STREQUAL "OBJECT_LIBRARY"
+       OR _corona_runtime_target_type STREQUAL "UTILITY")
+        return()
+    endif()
+
+    add_custom_command(
+        TARGET ${target_name}
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:${source_target}>"
+            "$<TARGET_FILE_DIR:${target_name}>"
+        COMMENT "[Corona:RuntimeDeps] Copy runtime target ${source_target} -> ${target_name}"
+        VERBATIM
+    )
+endfunction()
+
+# ------------------------------------------------------------------------------
 # Function: install runtime dependencies to a target directory
 # ------------------------------------------------------------------------------
 function(corona_install_runtime_deps target_name)

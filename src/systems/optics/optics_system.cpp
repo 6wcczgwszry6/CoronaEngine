@@ -876,14 +876,14 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     is_offscreen ? offscreen_image_
                                  : surface_targets_[surface].final_output;
                 Horizon::HardwareImage* presented_target = &render_target;
-                const uint32_t finalOutputDescriptor = render_target.storeDescriptor();
+                const uint32_t finalOutputDescriptor = render_target.storeStorageDescriptor();
 
                 // ================================================================
                 // 5. Lighting pass: VBuffer decode + PBR direct illumination
                 // ================================================================
                 lighting.pushConsts.gbufferSize = upload_value(hardware_->gbufferSize);
                 lighting.pushConsts.visibilityImageIndex =
-                    hardware_->visibilityImage.storeDescriptor();
+                    hardware_->visibilityImage.storeStorageDescriptor();
                 lighting.pushConsts.depthImageIndex = depthDescriptor;
                 lighting.pushConsts.instanceInfoBufferIndex =
                     hardware_->instanceInfoBuffer.storeDescriptor();
@@ -893,6 +893,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     hardware_->vpUniformBuffer.storeDescriptor();
                 lighting.pushConsts.finalOutputImage = finalOutputDescriptor;
                 lighting.pushConsts.uniformBufferIndex = uboDescriptor;
+                lighting.bind_storage_image(0, hardware_->visibilityImage);
+                lighting.bind_storage_image(1, render_target);
                 lighting.pushConsts.sun_dir = upload_value(sun_dir);
                 {
                     ktm::fvec3 lightColor;
@@ -914,6 +916,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 sky.pushConsts.floor_grid_enabled = floor_grid_enabled;
                 sky.pushConsts.cameraFov = camera->fov;
                 sky.pushConsts.sky_intensity = sky_intensity;
+                sky.bind_storage_image(0, render_target);
 
                 // ================================================================
                 // 7. Tonemap pass: ACES filmic HDR → LDR
@@ -922,13 +925,14 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 tonemap.pushConsts.inputImage = finalOutputDescriptor;
                 tonemap.pushConsts.outputImage = finalOutputDescriptor;
                 tonemap.pushConsts.exposure = exposure;
+                tonemap.bind_storage_image(0, render_target);
 
                 // ================================================================
                 // 8. GPU sync & dispatch
                 // ================================================================
                 const bool is_debug_mode = camera->output_mode != CameraOutputMode::FinalColor;
-                const uint32_t dispatchX = (hardware_->gbufferSize.x + 7u) / 8u;
-                const uint32_t dispatchY = (hardware_->gbufferSize.y + 7u) / 8u;
+                const uint32_t dispatchX = hardware_->gbufferSize.x;
+                const uint32_t dispatchY = hardware_->gbufferSize.y;
                 const auto actor_pick_request = take_pending_actor_pick(cam_handle);
 
                 if (actor_pick_request) {
@@ -936,9 +940,10 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     actorPick.pushConsts.pixel =
                         upload_value(ktm::uvec2{actor_pick_request->x, actor_pick_request->y});
                     actorPick.pushConsts.visibilityImageIndex =
-                        hardware_->visibilityImage.storeDescriptor();
+                        hardware_->visibilityImage.storeStorageDescriptor();
                     actorPick.pushConsts.outputBufferIndex =
                         hardware_->actorPickBuffer.storeDescriptor();
+                    actorPick.bind_storage_image(0, hardware_->visibilityImage);
                 }
 
                 Horizon::SubmitReceipt latest_submit_receipt;
@@ -980,6 +985,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                 hardware_->visibilityImage.storeSampledDescriptor();
                             visibilityDebugResolve.pushConsts.outputImageIndex =
                                 render_target.storeStorageDescriptor();
+                            visibilityDebugResolve.bind_storage_image(0, render_target);
                             stream << visibilityDebugResolve(dispatchX, dispatchY, 1);
                         } else {
                             auto& debugResolve = *hardware_->debugResolvePipeline;
@@ -996,6 +1002,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                 hardware_->vpUniformBuffer.storeDescriptor();
                             debugResolve.pushConsts.outputImageIndex = finalOutputDescriptor;
                             debugResolve.pushConsts.debugMode = debugMode;
+                            debugResolve.bind_storage_image(0, render_target);
 
                             stream << debugResolve(dispatchX, dispatchY, 1);
                         }
@@ -1055,10 +1062,10 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                                hardware_->uiInstanceInfoBuffer,
                                                hardware_->uiMaterialTableBuffer);
 
-                        const uint32_t overlayDescriptor = target.ui_overlay.storeDescriptor();
+                        const uint32_t overlayDescriptor = target.ui_overlay.storeStorageDescriptor();
                         opticsOverlay.pushConsts.gbufferSize = upload_value(hardware_->gbufferSize);
                         opticsOverlay.pushConsts.visibilityImageIndex =
-                            hardware_->uiVisibilityImage.storeDescriptor();
+                            hardware_->uiVisibilityImage.storeStorageDescriptor();
                         opticsOverlay.pushConsts.instanceInfoBufferIndex =
                             hardware_->uiInstanceInfoBuffer.storeDescriptor();
                         opticsOverlay.pushConsts.materialTableBufferIndex =
@@ -1066,13 +1073,18 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                         opticsOverlay.pushConsts.vpBufferIndex =
                             uiVpDescriptor;
                         opticsOverlay.pushConsts.outputImage = overlayDescriptor;
+                        opticsOverlay.bind_storage_image(0, hardware_->uiVisibilityImage);
+                        opticsOverlay.bind_storage_image(1, target.ui_overlay);
 
-                        opticsComposite.pushConsts.bgImage = render_target.storeDescriptor();
+                        opticsComposite.pushConsts.bgImage = render_target.storeStorageDescriptor();
                         opticsComposite.pushConsts.fgImage = overlayDescriptor;
                         opticsComposite.pushConsts.outputImage =
-                            target.composite_output.storeDescriptor();
+                            target.composite_output.storeStorageDescriptor();
                         opticsComposite.pushConsts.outputWidth = hardware_->gbufferSize.x;
                         opticsComposite.pushConsts.outputHeight = hardware_->gbufferSize.y;
+                        opticsComposite.bind_storage_image(0, render_target);
+                        opticsComposite.bind_storage_image(1, target.ui_overlay);
+                        opticsComposite.bind_storage_image(2, target.composite_output);
 
                         latest_submit_receipt =
                             hardware_->executor.stream()
@@ -1431,7 +1443,7 @@ std::size_t OpticsSystem::compute_vision_scene_signature() const {
                     const auto& vbuf = mesh_dev.vertexBuffer
                                            ? mesh_dev.vertexBuffer
                                            : mesh_dev.vertexStorageBuffer;
-                    mix(static_cast<std::size_t>(vbuf.getElementCount()));
+                    mix(static_cast<std::size_t>(vbuf.get_element_count()));
                 }
 
                 // Object-to-world transform (position / rotation / scale).
@@ -1776,11 +1788,12 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                     visionResolve.pushConsts.srcBufferIndex =
                         vision_zero_copy_bridge_->imported().storeDescriptor();
                     visionResolve.pushConsts.outputImage =
-                        resolve_target->storeDescriptor();
+                        resolve_target->storeStorageDescriptor();
                     visionResolve.pushConsts.exposure = 1.0f;  // Vision FrameBuffer default
+                    visionResolve.bind_storage_image(0, *resolve_target);
 
-                    const uint32_t dispatchX = (w + 7u) / 8u;
-                    const uint32_t dispatchY = (h + 7u) / 8u;
+                    const uint32_t dispatchX = w;
+                    const uint32_t dispatchY = h;
                     vision_submit_receipt =
                         hardware_->executor.stream()
                             << visionResolve(dispatchX, dispatchY, 1)

@@ -9,9 +9,9 @@
 #include <algorithm>
 #include <array>
 #include <ranges>
+#include <span>
 
 namespace Corona::Systems {
-
 bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
     auto* event_bus = ctx->event_bus();
     if (event_bus == nullptr) {
@@ -88,8 +88,6 @@ bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
 
     // Create 1x1 transparent fallback images for single-layer compositing.
     // Porter-Duff Source Over with a transparent layer is an identity operation.
-    // Two images needed because Optics outputs StorageImage and UI outputs SampledImage,
-    // which live in different descriptor sets.
     auto transparent_storage_desc = Horizon::HardwareImageDesc::texture_2d(
         1,
         1,
@@ -99,19 +97,9 @@ bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
     transparent_storage_desc.cpu_access = Horizon::CpuAccessMode::Write;
     transparent_storage_ = Horizon::HardwareImage(transparent_storage_desc);
 
-    auto transparent_sampled_desc = Horizon::HardwareImageDesc::texture_2d(
-        1,
-        1,
-        Horizon::Format::SRGBA8_UNORM,
-        Horizon::ImageUsageFlags::Sampled | Horizon::ImageUsageFlags::TransferDst,
-        "display.transparent_sampled");
-    transparent_sampled_desc.cpu_access = Horizon::CpuAccessMode::Write;
-    transparent_sampled_ = Horizon::HardwareImage(transparent_sampled_desc);
-    if (transparent_storage_ && transparent_sampled_) {
+    if (transparent_storage_) {
         const std::array<std::uint16_t, 4> zero_rgba16f = {0, 0, 0, 0};
-        const std::array<std::uint8_t, 4> zero_rgba8 = {0, 0, 0, 0};
         (void)transparent_storage_.write(std::span<const std::uint16_t>(zero_rgba16f));
-        (void)transparent_sampled_.write(std::span<const std::uint8_t>(zero_rgba8));
     }
 
     return true;
@@ -211,7 +199,7 @@ void DisplaySystem::update() {
         }
 
         Horizon::HardwareImage& bg_image = (optics_img_ptr && *optics_img_ptr) ? *optics_img_ptr : transparent_storage_;
-        Horizon::HardwareImage& fg_image = (ui_img_ptr && *ui_img_ptr) ? *ui_img_ptr : transparent_sampled_;
+        Horizon::HardwareImage& fg_image = (ui_img_ptr && *ui_img_ptr) ? *ui_img_ptr : transparent_storage_;
 
         if (!bg_image || !fg_image) {
             continue;
@@ -284,18 +272,22 @@ void DisplaySystem::compose_and_present(Horizon::HardwareDisplayer& displayer,
         return;
     }
 
-    // bgImage & outputImage are StorageImage (set 2); fgImage is SampledImage (set 0).
     auto& composite_pipeline = *composite_pipeline_;
-    composite_pipeline.pushConsts.bgImage = optics_image.storeDescriptor();
-    composite_pipeline.pushConsts.fgImage = ui_image.storeDescriptor();
-    composite_pipeline.pushConsts.outputImage = composite_output_.storeDescriptor();
+    composite_pipeline.pushConsts.bgImage = optics_image.storeStorageDescriptor();
+    composite_pipeline.pushConsts.fgImage = ui_image.storeStorageDescriptor();
+    composite_pipeline.pushConsts.outputImage = composite_output_.storeStorageDescriptor();
     composite_pipeline.pushConsts.outputWidth = output_width;
     composite_pipeline.pushConsts.outputHeight = output_height;
     composite_pipeline.pushConsts.bgWidth = std::max(state.optics.width, 1u);
     composite_pipeline.pushConsts.bgHeight = std::max(state.optics.height, 1u);
+    composite_pipeline.pushConsts.fgWidth = std::max(state.ui.width, 1u);
+    composite_pipeline.pushConsts.fgHeight = std::max(state.ui.height, 1u);
+    composite_pipeline.bind_storage_image(0, optics_image);
+    composite_pipeline.bind_storage_image(1, ui_image);
+    composite_pipeline.bind_storage_image(2, composite_output_);
 
-    const uint32_t dispatch_x = (output_width + 7u) / 8u;
-    const uint32_t dispatch_y = (output_height + 7u) / 8u;
+    const uint32_t dispatch_x = output_width;
+    const uint32_t dispatch_y = output_height;
 
     if (!compositor_executor_) {
         compositor_executor_.emplace();
@@ -310,8 +302,13 @@ void DisplaySystem::compose_and_present(Horizon::HardwareDisplayer& displayer,
         compositor_executor.wait(*ui_receipt);
     }
 
+    const Horizon::SubmitReceipt composite_receipt =
+        compositor_executor.stream()
+        << composite_pipeline(dispatch_x, dispatch_y, 1)
+        << Horizon::commit();
+
+    compositor_executor.wait(composite_receipt);
     (void)(compositor_executor.stream()
-           << composite_pipeline(dispatch_x, dispatch_y, 1)
            << Horizon::present(displayer, composite_output_)
            << Horizon::commit());
 }

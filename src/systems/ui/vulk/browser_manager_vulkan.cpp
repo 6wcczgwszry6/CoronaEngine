@@ -1,9 +1,11 @@
 #include <corona/systems/ui/vulkan_backend.h>
+#include <corona/kernel/core/i_logger.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <mutex>
 #include <span>
+#include <vector>
 
 #include "cef/browser_manager.h"
 #include "cef/cef_client.h"
@@ -22,6 +24,7 @@ void BrowserManager::destroy_tab_texture(BrowserTab* tab) {
 
     auto it = owned_images_.find(tab->texture_id);
     if (it != owned_images_.end()) {
+        browser_upload_executor_.wait(it->second.upload_receipt);
         owned_images_.erase(it);
     }
 
@@ -37,7 +40,7 @@ ImTextureID BrowserManager::create_browser_texture(int width, int height) {
         safe_width,
         safe_height,
         Horizon::Format::SRGBA8_UNORM,
-        Horizon::ImageUsageFlags::Sampled | Horizon::ImageUsageFlags::TransferDst,
+        Horizon::ImageUsageFlags::Sampled | Horizon::ImageUsageFlags::TransferDst | Horizon::ImageUsageFlags::TransferSrc,
         "cef.browser_texture"));
     if (!owned.image) {
         return k_invalid_texture_id;
@@ -46,7 +49,16 @@ ImTextureID BrowserManager::create_browser_texture(int width, int height) {
     owned.width = safe_width;
     owned.height = safe_height;
 
-    const uint32_t descriptor = owned.image.storeDescriptor();
+    const std::vector<uint8_t> transparent_pixels(
+        static_cast<size_t>(safe_width) * static_cast<size_t>(safe_height) * 4u,
+        0u);
+    owned.upload_receipt =
+        browser_upload_executor_.stream()
+        << owned.image.upload(std::as_bytes(std::span<const uint8_t>(transparent_pixels.data(),
+                                                                     transparent_pixels.size())))
+        << Horizon::commit();
+
+    const uint32_t descriptor = owned.image.storeSampledDescriptor();
     const ImTextureID texture_id = descriptor_to_texture_id(descriptor);
 
     owned_images_[texture_id] = std::move(owned);
@@ -87,9 +99,29 @@ void BrowserManager::update_texture(int tab_id) {
         kRgbaBytesPerPixel;
 
     if (pixels.size() >= expected_size) {
-        image_it->second.image.write_bytes(
-            std::as_bytes(std::span<const uint8_t>(pixels.data(), expected_size)));
+        auto& owned = image_it->second;
+        browser_upload_executor_.wait(owned.upload_receipt);
+        owned.upload_receipt =
+            browser_upload_executor_.stream()
+            << owned.image.upload(std::as_bytes(std::span<const uint8_t>(pixels.data(), expected_size)))
+            << Horizon::commit();
     }
+}
+
+const Horizon::HardwareImage* BrowserManager::get_texture_image(ImTextureID texture_id) const {
+    auto image_it = owned_images_.find(texture_id);
+    if (image_it == owned_images_.end()) {
+        return nullptr;
+    }
+    return &image_it->second.image;
+}
+
+void BrowserManager::wait_for_texture_upload(ImTextureID texture_id) {
+    auto image_it = owned_images_.find(texture_id);
+    if (image_it == owned_images_.end()) {
+        return;
+    }
+    browser_upload_executor_.wait_idle(image_it->second.upload_receipt);
 }
 
 void BrowserManager::resize_tab(int tab_id, int width, int height) {

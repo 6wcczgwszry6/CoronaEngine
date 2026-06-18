@@ -169,6 +169,9 @@ if(CORONA_BUILD_VISION)
 endif()
 
 FetchContent_MakeAvailable(assimp)
+if(MSVC AND TARGET assimp)
+    target_compile_options(assimp PRIVATE /EHsc)
+endif()
 message(STATUS "[3rdparty] assimp module enabled")
 
 FetchContent_MakeAvailable(stb)
@@ -183,10 +186,42 @@ set(TBB_STRICT OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(oneTBB)
 message(STATUS "[3rdparty] oneTBB module enabled")
 
+if(WIN32 AND NOT TARGET TBB::tbb)
+    FetchContent_GetProperties(Horizon SOURCE_DIR _corona_horizon_source_dir)
+    if(NOT _corona_horizon_source_dir)
+        if(FETCHCONTENT_BASE_DIR)
+            set(_corona_horizon_source_dir "${FETCHCONTENT_BASE_DIR}/horizon-src")
+        else()
+            set(_corona_horizon_source_dir "${CMAKE_BINARY_DIR}/_deps/horizon-src")
+        endif()
+    endif()
+
+    get_filename_component(
+        _corona_horizon_tbb_dir
+        "${_corona_horizon_source_dir}/modules/corona/third_party/win/oneapi-tbb-2022.3.0/lib/cmake/tbb"
+        ABSOLUTE
+    )
+
+    if(DEFINED TBB_DIR AND NOT TBB_DIR STREQUAL "")
+        corona_tbb_package_has_runtime("${TBB_DIR}" _corona_existing_tbb_ok)
+    else()
+        set(_corona_existing_tbb_ok FALSE)
+    endif()
+
+    if(NOT _corona_existing_tbb_ok)
+        set(TBB_DIR "${_corona_horizon_tbb_dir}" CACHE PATH
+            "Path to TBB cmake configuration directory" FORCE)
+        message(STATUS "[3rdparty] Using Horizon vendored TBB: ${TBB_DIR}")
+    endif()
+
+    unset(_corona_existing_tbb_ok)
+    unset(_corona_horizon_tbb_dir)
+    unset(_corona_horizon_source_dir)
+endif()
+
 if(CORONA_BUILD_VISION)
     set(HORIZON_BUILD_OCARINA ON CACHE BOOL "" FORCE)
-else()
-    set(HORIZON_BUILD_OCARINA OFF CACHE BOOL "" FORCE)
+    set(HORIZON_BUILD_VISION_HOTFIX ON CACHE BOOL "" FORCE)
 endif()
 set(HORIZON_BUILD_TOOLS ON CACHE BOOL "" FORCE)
 

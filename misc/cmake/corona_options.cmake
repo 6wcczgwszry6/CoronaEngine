@@ -23,22 +23,25 @@ option(BUILD_CORONA_EDITOR "Build Corona editor" ON)
 option(BUILD_CORONA_RUNTIME "Build Corona runtime" ON)
 option(BUILD_CORONA_TESTING "Build Corona test suite" ${PROJECT_IS_TOP_LEVEL})
 option(BUILD_CORONA_EXAMPLES "Build example programs" ${PROJECT_IS_TOP_LEVEL})
-option(BUILD_CORONA_RENDER_SMOKE "Build the minimal Vulkan/UI/Optics runtime smoke executable" ${PROJECT_IS_TOP_LEVEL})
 option(CORONA_BUILD_HARDWARE "Build Corona Hardware features" ON)
 
 # ------------------------------------------------------------------------------
 # Vision feature gate
 #
-# Vision is opt-in while CoronaEngine tracks Horizon main. CUDA is still
-# detected and reported for diagnostics, but it no longer enables Vision by
-# default. Users may force the option via `-DCORONA_BUILD_VISION=ON/OFF`.
+# Vision requires the CUDA SDK. Mirror Horizon's behaviour (cmake/HorizonOcarina.cmake)
+# and auto-detect a usable CUDA toolkit:
+#   1. Respect the `CUDA_PATH` environment variable when present.
+#   2. Otherwise fall back to `find_package(CUDAToolkit QUIET)`.
+# Users may still force the option via `-DCORONA_BUILD_VISION=ON/OFF`.
 # ------------------------------------------------------------------------------
 set(_corona_vision_default OFF)
 if(DEFINED ENV{CUDA_PATH} AND EXISTS "$ENV{CUDA_PATH}")
+    set(_corona_vision_default ON)
     message(STATUS "[Options] CUDA SDK detected via CUDA_PATH=$ENV{CUDA_PATH}")
 else()
     find_package(CUDAToolkit QUIET)
     if(CUDAToolkit_FOUND)
+        set(_corona_vision_default ON)
         message(STATUS "[Options] CUDA SDK detected via find_package(CUDAToolkit) (${CUDAToolkit_VERSION})")
     endif()
 endif()
@@ -73,7 +76,6 @@ message(STATUS "[Options] BUILD_CORONA_EDITOR                     = ${BUILD_CORO
 message(STATUS "[Options] BUILD_CORONA_RUNTIME                    = ${BUILD_CORONA_RUNTIME}")
 message(STATUS "[Options] BUILD_CORONA_TESTING                    = ${BUILD_CORONA_TESTING}")
 message(STATUS "[Options] BUILD_CORONA_EXAMPLES                   = ${BUILD_CORONA_EXAMPLES}")
-message(STATUS "[Options] BUILD_CORONA_RENDER_SMOKE               = ${BUILD_CORONA_RENDER_SMOKE}")
 message(STATUS "[Options] CORONA_BUILD_HARDWARE                   = ${CORONA_BUILD_HARDWARE}")
 message(STATUS "[Options] CORONA_BUILD_VISION                     = ${CORONA_BUILD_VISION}")
 message(STATUS "[Options] VISION_BUILD_APPS                       = ${VISION_BUILD_APPS}")

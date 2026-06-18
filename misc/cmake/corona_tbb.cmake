@@ -17,6 +17,17 @@ if(TARGET TBB::tbb)
 else()
     set(_corona_candidate_tbb_dirs "${_corona_default_tbb_dir}")
 
+    if(WIN32)
+        if(FETCHCONTENT_BASE_DIR)
+            list(APPEND _corona_candidate_tbb_dirs
+                "${FETCHCONTENT_BASE_DIR}/horizon-src/modules/corona/third_party/win/oneapi-tbb-2022.3.0/lib/cmake/tbb")
+        endif()
+
+        list(APPEND _corona_candidate_tbb_dirs
+            "${CMAKE_BINARY_DIR}/_deps/horizon-src/modules/corona/third_party/win/oneapi-tbb-2022.3.0/lib/cmake/tbb"
+            "${CMAKE_SOURCE_DIR}/cmake-build-relwithdebinfo/_deps/horizon-src/modules/corona/third_party/win/oneapi-tbb-2022.3.0/lib/cmake/tbb")
+    endif()
+
     if(DEFINED TBB_DIR AND NOT TBB_DIR STREQUAL "")
         corona_tbb_package_has_runtime("${TBB_DIR}" _corona_tbb_dir_ok)
     else()
@@ -68,10 +79,6 @@ endfunction()
 
 function(_corona_collect_tbb_redist_artifacts)
     if(NOT TBB_FOUND)
-        return()
-    endif()
-
-    if(NOT DEFINED TBB_DIR OR TBB_DIR STREQUAL "")
         return()
     endif()
 

@@ -83,6 +83,8 @@ class BrowserManager {
     void remove_tab(int tab_id);
     void update_texture(int tab_id);
     void resize_tab(int tab_id, int width, int height);
+    [[nodiscard]] const Horizon::HardwareImage* get_texture_image(ImTextureID texture_id) const;
+    void wait_for_texture_upload(ImTextureID texture_id);
 
     // 隐藏标签页（最小化）
     bool hide_tab(int tab_id, bool if_close = false);
@@ -110,6 +112,7 @@ class BrowserManager {
 
     struct OwnedImage {
         Horizon::HardwareImage image;
+        Horizon::SubmitReceipt upload_receipt;
         uint32_t width = 0;
         uint32_t height = 0;
     };
@@ -117,6 +120,7 @@ class BrowserManager {
     std::unordered_map<int, std::unique_ptr<BrowserTab>> tabs_;
     std::vector<int> tabs_to_close_;
     std::unordered_map<ImTextureID, OwnedImage> owned_images_;
+    Horizon::HardwareExecutor browser_upload_executor_;
     int tab_counter_ = 0;
 
 };

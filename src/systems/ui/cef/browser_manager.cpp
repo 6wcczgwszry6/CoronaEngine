@@ -151,6 +151,7 @@ int BrowserManager::create_tab(const std::string& url, const std::string& path,
 
     CefBrowserSettings browser_settings;
     browser_settings.windowless_frame_rate = 60;
+    browser_settings.background_color = CefColorSetARGB(0, 0, 0, 0);
     browser_settings.javascript = STATE_ENABLED;
     browser_settings.local_storage = STATE_ENABLED;
     browser_settings.webgl = STATE_ENABLED;

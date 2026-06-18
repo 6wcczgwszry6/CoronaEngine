@@ -338,6 +338,9 @@ void BrowserRenderer::render_single_tab(int tab_id,
 
     bool is_main_tab = (tab->docking_pos == "main");
     if (is_main_tab) {
+        browser_window_flags |= ImGuiWindowFlags_NoBackground;
+    }
+    if (is_main_tab) {
         browser_window_flags |= ImGuiWindowFlags_NoMove;  // 主窗口始终禁止移动
     }
 

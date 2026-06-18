@@ -98,8 +98,7 @@ class DisplaySystem : public Kernel::SystemBase {
     std::optional<Horizon::ComputePipeline<composite_comp_glsl_t>> composite_pipeline_;
     std::optional<Horizon::HardwareExecutor> compositor_executor_;
     Horizon::HardwareImage composite_output_;
-    Horizon::HardwareImage transparent_storage_;  ///< 1x1 transparent StorageImage fallback (missing Optics bg)
-    Horizon::HardwareImage transparent_sampled_;  ///< 1x1 transparent SampledImage fallback (missing UI fg)
+    Horizon::HardwareImage transparent_storage_;  ///< 1x1 transparent StorageImage fallback for missing layers
     uint32_t composite_width_ = 0;
     uint32_t composite_height_ = 0;
     bool composite_pipeline_ready_ = false;

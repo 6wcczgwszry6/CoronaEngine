@@ -6,6 +6,8 @@
 #include <corona/systems/script/corona_engine_api.h>
 #include <corona/systems/ui/vulkan_backend.h>
 
+#include "cef/browser_manager.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -47,6 +49,8 @@ struct FVec4Upload {
 
 [[nodiscard]] Corona::Horizon::RasterizerPipelineDesc make_imgui_pipeline_desc() {
     Corona::Horizon::RasterizerPipelineDesc desc;
+    desc.debug_name = "corona.imgui";
+    desc.rasterizer.cull_mode = Corona::Horizon::CullMode::None;
     desc.depth_stencil.depth_test_enabled = false;
     desc.depth_stencil.depth_write_enabled = false;
     desc.depth_stencil.stencil_test_enabled = false;
@@ -78,6 +82,9 @@ inline uint32_t texture_id_to_descriptor(ImTextureID tex_id) {
 inline ImTextureID descriptor_to_texture_id(uint32_t descriptor) {
     return static_cast<ImTextureID>(static_cast<ImU64>(descriptor) + 1u);
 }
+
+constexpr auto kUiRenderTargetUsage =
+    Corona::Horizon::ImageUsageFlags::Sampled | Corona::Horizon::ImageUsageFlags::Storage;
 }  // namespace
 
 namespace Corona::Systems {
@@ -155,7 +162,8 @@ bool VulkanBackend::initialize() {
     SDL_GetWindowSize(window_, &w, &h);
 
     if (w > 0 && h > 0) {
-        if (!ensure_render_target(main_resources_, static_cast<uint32_t>(w), static_cast<uint32_t>(h))) {
+        if (!ensure_render_target(main_resources_, static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+                                  kUiRenderTargetUsage)) {
             CFW_LOG_ERROR("VulkanBackend: failed to create initial render target");
             return false;
         }
@@ -280,7 +288,7 @@ void VulkanBackend::render_frame(ImDrawData* draw_data) {
     }
 
     main_resources_.executor.wait(font_upload_receipt_);
-    if (render_draw_data(draw_data, main_resources_, *imgui_pipeline_, font_atlas_image_)) {
+    if (render_draw_data(draw_data, main_resources_, *imgui_pipeline_, font_atlas_image_, kUiRenderTargetUsage)) {
         main_resources_.frame_ready = true;
     }
 }
@@ -319,6 +327,8 @@ bool VulkanBackend::render_draw_data(
 
     // --- Set pipeline output ---
     pipeline.out_color = res.render_target;
+    pipeline.bind_render_target(0, res.render_target);
+    pipeline.clear_records();
 
     // --- Merge all draw lists into single vertex/index arrays ---
     const auto total_vtx = static_cast<size_t>(draw_data->TotalVtxCount);
@@ -391,10 +401,18 @@ bool VulkanBackend::render_draw_data(
         }
     }
 
-    (void)res.vertex_buffer.write_bytes(
+    const bool vertex_write_ok = res.vertex_buffer.write_bytes(
         std::as_bytes(std::span<const ImGuiGpuVertex>(merged_vertices.data(), merged_vertices.size())));
-    (void)res.index_buffer.write_bytes(
+    const bool index_write_ok = res.index_buffer.write_bytes(
         std::as_bytes(std::span<const ImDrawIdx>(merged_indices.data(), merged_indices.size())));
+    if (!vertex_write_ok || !index_write_ok) {
+        CFW_LOG_ERROR("VulkanBackend: ImGui geometry upload failed vertex_ok={} index_ok={} vtx_bytes={} idx_bytes={}",
+                      vertex_write_ok,
+                      index_write_ok,
+                      vtx_bytes,
+                      idx_bytes);
+        return false;
+    }
 
     // --- Record draw commands with global offsets ---
     const float sx = 2.0f / draw_data->DisplaySize.x;
@@ -419,6 +437,7 @@ bool VulkanBackend::render_draw_data(
             if (pcmd.UserCallback != nullptr) {
                 if (pcmd.UserCallback == ImDrawCallback_ResetRenderState) {
                     pipeline.out_color = res.render_target;
+                    pipeline.bind_render_target(0, res.render_target);
                     continue;
                 }
                 pcmd.UserCallback(cmd_list, &pcmd);
@@ -439,9 +458,18 @@ bool VulkanBackend::render_draw_data(
                 continue;
             }
 
-            uint32_t texture_index = texture_id_to_descriptor(pcmd.GetTexID());
-            if (texture_index == 0 && font_atlas) {
-                texture_index = font_atlas.storeDescriptor();
+            const ImTextureID tex_id = pcmd.GetTexID();
+            uint32_t texture_index = texture_id_to_descriptor(tex_id);
+            if (const auto* browser_texture = UI::BrowserManager::instance().get_texture_image(pcmd.GetTexID())) {
+                UI::BrowserManager::instance().wait_for_texture_upload(pcmd.GetTexID());
+                texture_index = browser_texture->storeSampledDescriptor();
+                pipeline[imgui_frag_glsl_t::textures] = *browser_texture;
+            } else if (font_atlas) {
+                const uint32_t font_descriptor = font_atlas.storeSampledDescriptor();
+                if (texture_index == 0 || texture_index == font_descriptor) {
+                    texture_index = font_descriptor;
+                    pipeline[imgui_frag_glsl_t::textures] = font_atlas;
+                }
             }
 
             pipeline[imgui_vert_glsl_t::pushConsts::scale] = upload_value(scale);
@@ -523,7 +551,8 @@ void VulkanBackend::rebuild(int width, int height) {
         return;
     }
 
-    if (!ensure_render_target(main_resources_, static_cast<uint32_t>(width), static_cast<uint32_t>(height))) {
+    if (!ensure_render_target(main_resources_, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+                              kUiRenderTargetUsage)) {
         rebuild_needed_ = true;
         return;
     }
@@ -629,7 +658,7 @@ bool VulkanBackend::ensure_font_texture() {
         << font_atlas_image_.upload(font_pixels)
         << Horizon::submit;
 
-    const uint32_t descriptor = font_atlas_image_.storeDescriptor();
+    const uint32_t descriptor = font_atlas_image_.storeSampledDescriptor();
     io.Fonts->SetTexID(descriptor_to_texture_id(descriptor));
 
     font_ready_ = true;
@@ -722,9 +751,7 @@ void VulkanBackend::renderer_set_window_size(ImGuiViewport* vp, ImVec2 size) {
     const auto w = static_cast<uint32_t>(size.x);
     const auto h = static_cast<uint32_t>(size.y);
     if (w > 0 && h > 0) {
-        // SampledImage: the UI layer is consumed as the composite shader's fg (sampled),
-        // matching the main window. DisplaySystem owns/recreates the swapchain on resize.
-        ensure_render_target(vd->resources, w, h, Horizon::ImageUsageFlags::Sampled);
+        ensure_render_target(vd->resources, w, h, kUiRenderTargetUsage);
     }
 }
 
@@ -761,7 +788,7 @@ void VulkanBackend::renderer_render_window(ImGuiViewport* vp, void* /*render_arg
 
     if (!vd->pipeline ||
         !render_draw_data(draw_data, vd->resources, *vd->pipeline, s_instance_->font_atlas_image_,
-                          Horizon::ImageUsageFlags::Sampled)) {
+                          kUiRenderTargetUsage)) {
         return;
     }
 
