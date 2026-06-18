@@ -1390,6 +1390,35 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                                          true,
                                                          &camera_basis,
                                                          uiBatch);
+                    const auto viewport_ui_state =
+                        SharedDataHub::instance().viewport_ui_state(cam_handle);
+                    const bool stereo_ui =
+                        viewport_ui_state.mode == ViewportUiMode::Stereo3D;
+                    const auto ui_instance_count =
+                        static_cast<std::uint32_t>(uiBatch.instances.size());
+                    auto& ui_log_state = ui_pass_log_states_[cam_handle];
+                    if (!ui_log_state.has_state ||
+                        ui_log_state.has_follow_camera_instances != has_follow_camera_instances ||
+                        ui_log_state.stereo_ui != stereo_ui ||
+                        ui_log_state.instance_count != ui_instance_count ||
+                        ui_log_state.width != hardware_->gbufferSize.x ||
+                        ui_log_state.height != hardware_->gbufferSize.y) {
+                        ui_log_state = UiPassLogState{
+                            .has_state = true,
+                            .has_follow_camera_instances = has_follow_camera_instances,
+                            .stereo_ui = stereo_ui,
+                            .instance_count = ui_instance_count,
+                            .width = hardware_->gbufferSize.x,
+                            .height = hardware_->gbufferSize.y,
+                        };
+                        CFW_LOG_INFO("Optics UI pass: camera={} mode={} follow_camera_instances={} output={}x{} warp={}",
+                                     cam_handle,
+                                     stereo_ui ? "stereo3d" : "flat2d",
+                                     ui_instance_count,
+                                     hardware_->gbufferSize.x,
+                                     hardware_->gbufferSize.y,
+                                     (stereo_ui && has_follow_camera_instances) ? "submitted" : "skipped");
+                    }
                     if (has_follow_camera_instances) {
                         upload_instance_tables(uiBatch,
                                                hardware_->uiInstanceInfoBuffer,
@@ -1407,10 +1436,6 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                             uiVpDescriptor;
                         opticsOverlay.pushConsts.outputImage = overlayDescriptor;
 
-                        const auto viewport_ui_state =
-                            SharedDataHub::instance().viewport_ui_state(cam_handle);
-                        const bool stereo_ui =
-                            viewport_ui_state.mode == ViewportUiMode::Stereo3D;
                         uint32_t compositeOverlayDescriptor = overlayDescriptor;
                         if (stereo_ui) {
                             const auto& calibration = viewport_ui_state.calibration;

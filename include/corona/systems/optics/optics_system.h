@@ -175,6 +175,16 @@ class OpticsSystem : public Kernel::SystemBase {
     /// 空闲多少帧后回收一个 surface 目标（约 2s @120fps）。
     static constexpr uint64_t kSurfaceTargetIdleEvictFrames = 240;
 
+    struct UiPassLogState {
+        bool has_state = false;
+        bool has_follow_camera_instances = false;
+        bool stereo_ui = false;
+        std::uint32_t instance_count = 0;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+    };
+    std::unordered_map<std::uintptr_t, UiPassLogState> ui_pass_log_states_;
+
     struct NativeViewResources;
     std::unordered_map<std::uintptr_t, std::unique_ptr<NativeViewResources>>
         native_view_resources_;

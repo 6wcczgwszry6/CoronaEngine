@@ -730,8 +730,12 @@ bool handle_viewport_ui_mode(const CefRefPtr<CefProcessMessage>& message) {
     }
 
     const auto camera_handle = static_cast<std::uintptr_t>(camera_value);
-    const auto mode = parse_viewport_ui_mode(args->GetString(1).ToString());
+    const std::string mode_name = args->GetString(1).ToString();
+    const auto mode = parse_viewport_ui_mode(mode_name);
     Corona::SharedDataHub::instance().set_viewport_ui_mode(camera_handle, mode);
+    CFW_LOG_INFO("ViewportUiMode set: camera={} mode={}",
+                 camera_handle,
+                 mode == Corona::ViewportUiMode::Stereo3D ? "stereo3d" : "flat2d");
     return true;
 }
 
