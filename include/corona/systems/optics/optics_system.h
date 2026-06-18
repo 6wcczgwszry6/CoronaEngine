@@ -8,6 +8,7 @@
 #include <corona/shared_data_hub.h>
 #ifdef CORONA_ENABLE_VISION
 #include <corona/systems/optics/vision_pipeline_key.h>
+#include <corona/systems/optics/vision_scene_resource.h>
 #endif
 
 #include <cstdint>
@@ -105,6 +106,9 @@ class OpticsSystem : public Kernel::SystemBase {
     using VisionPipelineSource = Vision::VisionPipelineSource;
     using VisionPipelineKey = Vision::VisionPipelineKey;
     using VisionPipelineKeyHash = Vision::VisionPipelineKeyHash;
+    using VisionSceneResource = Vision::VisionSceneResource;
+    using VisionSceneResourceKey = Vision::VisionSceneResourceKey;
+    using VisionSceneResourceKeyHash = Vision::VisionSceneResourceKeyHash;
     struct VisionPipelineRuntime;
 
     VisionPipelineRuntime& get_or_create_runtime(const VisionPipelineKey& key);
@@ -112,6 +116,13 @@ class OpticsSystem : public Kernel::SystemBase {
     VisionPipelineKey make_vision_pipeline_key(std::string scene_path,
                                                Corona::CameraVisionRenderMode mode,
                                                VisionPipelineSource source) const;
+    VisionSceneResourceKey make_vision_scene_resource_key(
+        std::string scene_path,
+        VisionPipelineSource source) const;
+    std::shared_ptr<VisionSceneResource> get_or_create_vision_scene_resource(
+        const VisionSceneResourceKey& key,
+        std::string display_source_path);
+    void release_unused_vision_scene_resources();
     void activate_single_vision_runtime_key(const VisionPipelineKey& key);
     void clear_vision_runtimes();
 
@@ -154,6 +165,10 @@ class OpticsSystem : public Kernel::SystemBase {
                        std::unique_ptr<VisionPipelineRuntime>,
                        VisionPipelineKeyHash>
         vision_runtimes_;
+    std::unordered_map<VisionSceneResourceKey,
+                       std::shared_ptr<VisionSceneResource>,
+                       VisionSceneResourceKeyHash>
+        vision_scene_resources_;
 #endif  // CORONA_ENABLE_VISION
     struct ActorPickRequest {
         std::uintptr_t pick_handle{0};

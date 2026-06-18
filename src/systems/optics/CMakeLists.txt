@@ -17,6 +17,7 @@ corona_add_system(optics
         $<$<BOOL:${CORONA_BUILD_VISION}>:vision/vision_render_mode_config.cpp>
         $<$<BOOL:${CORONA_BUILD_VISION}>:vision/vision_render_mode_config.h>
         $<$<BOOL:${CORONA_BUILD_VISION}>:${PROJECT_SOURCE_DIR}/include/corona/systems/optics/vision_pipeline_key.h>
+        $<$<BOOL:${CORONA_BUILD_VISION}>:${PROJECT_SOURCE_DIR}/include/corona/systems/optics/vision_scene_resource.h>
         $<$<BOOL:${CORONA_BUILD_VISION}>:vision/vision_zero_copy_bridge.cpp>
         $<$<BOOL:${CORONA_BUILD_VISION}>:vision/vision_zero_copy_bridge.h>
     DEPENDENCIES
@@ -72,6 +73,22 @@ if((BUILD_CORONA_TESTING OR BUILD_TESTING) AND CORONA_BUILD_VISION)
     add_test(NAME VisionPipelineKeyTests
              COMMAND corona_vision_pipeline_key_tests)
     set_tests_properties(VisionPipelineKeyTests PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
+
+    add_executable(corona_vision_scene_resource_tests
+        tests/test_vision_scene_resource.cpp
+    )
+    target_include_directories(corona_vision_scene_resource_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+    )
+    target_link_libraries(corona_vision_scene_resource_tests
+        PRIVATE
+            corona::system::optics
+    )
+    add_test(NAME VisionSceneResourceTests
+             COMMAND corona_vision_scene_resource_tests)
+    set_tests_properties(VisionSceneResourceTests PROPERTIES
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
 endif()
 

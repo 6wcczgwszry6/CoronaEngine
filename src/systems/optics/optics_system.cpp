@@ -688,6 +688,15 @@ std::string describe_vision_pipeline_key(
     return result;
 }
 
+std::string describe_vision_scene_resource_key(
+    const Corona::Systems::Vision::VisionSceneResourceKey& key) {
+    std::string result = "source=";
+    result.append(std::string(Corona::Systems::Vision::vision_pipeline_source_name(key.source)));
+    result.append(", path=");
+    result.append(key.source_path_key.empty() ? "<engine-built>" : key.source_path_key);
+    return result;
+}
+
 // Loads a Vision scene from disk and brings it to a renderable state, mirroring
 // the reference snippet (import_scene -> init -> prepare -> prepare_view_texture).
 // Resolves relative texture/mesh references against the scene's own folder.
@@ -759,6 +768,7 @@ struct OpticsSystem::NativeViewResources {
 #ifdef CORONA_ENABLE_VISION
 struct OpticsSystem::VisionPipelineRuntime {
     ocarina::SP<vision::Pipeline> pipeline;
+    std::shared_ptr<VisionSceneResource> scene_resource;
     VisionPipelineSource source{VisionPipelineSource::EngineBuilt};
     std::string scene_path;
     Corona::CameraVisionRenderMode mode{Corona::CameraVisionRenderMode::PathTracing};
@@ -767,7 +777,6 @@ struct OpticsSystem::VisionPipelineRuntime {
     // and resolves it via the vision_resolve compute pass.
     std::unordered_map<std::uintptr_t, std::unique_ptr<Vision::VisionZeroCopyBridge>> bridges;
     std::unordered_set<std::uintptr_t> retained_contexts;
-    std::unordered_map<std::uintptr_t, std::size_t> external_live_transform_signatures;
 
     void commit_and_clear_contexts() noexcept {
         if (pipeline) {
@@ -782,7 +791,6 @@ struct OpticsSystem::VisionPipelineRuntime {
     void clear_camera_runtime_state() noexcept {
         bridges.clear();
         retained_contexts.clear();
-        external_live_transform_signatures.clear();
     }
 
     void reset_pipeline(ocarina::SP<vision::Pipeline> next_pipeline,
@@ -809,16 +817,64 @@ OpticsSystem::VisionPipelineKey OpticsSystem::make_vision_pipeline_key(
     return VisionPipelineKey{std::move(scene_path), mode, source};
 }
 
+OpticsSystem::VisionSceneResourceKey OpticsSystem::make_vision_scene_resource_key(
+    std::string scene_path,
+    VisionPipelineSource source) const {
+    if (source == VisionPipelineSource::EngineBuilt) {
+        scene_path.clear();
+    } else {
+        scene_path = normalize_scene_path_key(scene_path);
+    }
+    return VisionSceneResourceKey{std::move(scene_path), source};
+}
+
+std::shared_ptr<OpticsSystem::VisionSceneResource>
+OpticsSystem::get_or_create_vision_scene_resource(
+    const VisionSceneResourceKey& key,
+    std::string display_source_path) {
+    auto [it, inserted] = vision_scene_resources_.try_emplace(key);
+    if (inserted || !it->second) {
+        auto resource = std::make_shared<VisionSceneResource>();
+        resource->key = key;
+        resource->display_source_path = std::move(display_source_path);
+        it->second = std::move(resource);
+        CFW_LOG_INFO("OpticsSystem: created shared Vision scene resource ({})",
+                     describe_vision_scene_resource_key(key));
+    } else if (!display_source_path.empty() && it->second->display_source_path.empty()) {
+        it->second->display_source_path = std::move(display_source_path);
+    }
+    return it->second;
+}
+
+void OpticsSystem::release_unused_vision_scene_resources() {
+    for (auto it = vision_scene_resources_.begin(); it != vision_scene_resources_.end();) {
+        if (it->second && it->second.use_count() == 1) {
+            CFW_LOG_INFO("OpticsSystem: releasing unused shared Vision scene resource ({})",
+                         describe_vision_scene_resource_key(it->first));
+            it = vision_scene_resources_.erase(it);
+            continue;
+        }
+        ++it;
+    }
+}
+
 OpticsSystem::VisionPipelineRuntime& OpticsSystem::get_or_create_runtime(
     const VisionPipelineKey& key) {
     auto [it, inserted] = vision_runtimes_.try_emplace(key);
     if (inserted || !it->second) {
         it->second = std::make_unique<VisionPipelineRuntime>();
+        it->second->scene_resource = get_or_create_vision_scene_resource(
+            make_vision_scene_resource_key(key.scene_path, key.source),
+            key.scene_path);
         it->second->source = key.source;
         it->second->scene_path = key.scene_path;
         it->second->mode = key.mode;
         CFW_LOG_INFO("OpticsSystem: created Vision runtime ({})",
                      describe_vision_pipeline_key(key));
+    } else if (!it->second->scene_resource) {
+        it->second->scene_resource = get_or_create_vision_scene_resource(
+            make_vision_scene_resource_key(key.scene_path, key.source),
+            key.scene_path);
     }
     return *it->second;
 }
@@ -841,6 +897,7 @@ void OpticsSystem::activate_single_vision_runtime_key(const VisionPipelineKey& k
         }
         it = vision_runtimes_.erase(it);
     }
+    release_unused_vision_scene_resources();
     active_vision_runtime_key_ = key;
     (void)get_or_create_runtime(key);
     CFW_LOG_INFO("OpticsSystem: active Vision runtime key ({})",
@@ -870,6 +927,7 @@ void OpticsSystem::clear_vision_runtimes() {
         }
     }
     vision_runtimes_.clear();
+    vision_scene_resources_.clear();
     active_vision_runtime_key_.reset();
 }
 #endif
@@ -2103,11 +2161,14 @@ void OpticsSystem::sync_vision_dynamic_scene(VisionPipelineRuntime& runtime) {
 
 void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& runtime) {
     auto& pipeline = runtime.pipeline;
-    if (!vision_initialized_ || !pipeline || runtime.scene_path.empty()) {
+    auto scene_resource = runtime.scene_resource;
+    if (!vision_initialized_ || !pipeline || !scene_resource || runtime.scene_path.empty()) {
         return;
     }
 
-    const auto current_scene_key = normalize_scene_path_key(runtime.scene_path);
+    const auto current_scene_key = scene_resource->key.source_path_key.empty()
+                                       ? normalize_scene_path_key(runtime.scene_path)
+                                       : scene_resource->key.source_path_key;
     if (current_scene_key.empty()) {
         return;
     }
@@ -2141,8 +2202,9 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
             }
 
             active_bound_actors.insert(actor_handle);
-            const auto cached = runtime.external_live_transform_signatures.find(actor_handle);
-            if (cached != runtime.external_live_transform_signatures.end() &&
+            const auto cached =
+                scene_resource->external_live_transform_signatures.find(actor_handle);
+            if (cached != scene_resource->external_live_transform_signatures.end() &&
                 cached->second == resolved->signature) {
                 continue;
             }
@@ -2163,18 +2225,19 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
                 group->aabb.extend(instance->aabb);
             });
 
-            runtime.external_live_transform_signatures[actor_handle] = resolved->signature;
+            scene_resource->external_live_transform_signatures[actor_handle] =
+                resolved->signature;
             changed = true;
             ++updated_actors;
         }
     }
 
-    for (auto it = runtime.external_live_transform_signatures.begin();
-         it != runtime.external_live_transform_signatures.end();) {
+    for (auto it = scene_resource->external_live_transform_signatures.begin();
+         it != scene_resource->external_live_transform_signatures.end();) {
         if (active_bound_actors.contains(it->first)) {
             ++it;
         } else {
-            it = runtime.external_live_transform_signatures.erase(it);
+            it = scene_resource->external_live_transform_signatures.erase(it);
         }
     }
 
@@ -2186,6 +2249,7 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
         pipeline->activate_view_context(0u);
         pipeline->update_geometry();
         pipeline->invalidate_all_view_contexts();
+        scene_resource->mark_transforms_changed();
         CFW_LOG_DEBUG("OpticsSystem: external_live updated {} proxy actor transform(s)",
                       updated_actors);
     } catch (const std::exception& e) {
