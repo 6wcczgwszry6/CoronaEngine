@@ -1903,7 +1903,12 @@ class SceneComposer:
     def compose(self, text: str, image_url: str = "",
                 do_import: bool = True,
                 do_review: bool = False,
-                progress_sink: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+                progress_sink: Optional[Callable[[str], None]] = None,
+                interaction_coordinator: Optional[Any] = None,
+                room_id: str = "",
+                plan_id: str = "",
+                session_id: str = "",
+                actor_id: str = "") -> Dict[str, Any]:
         """完整场景组合: 提取清单 → 获取模型 → 审查 → 布局+导入。
 
         三阶段:
@@ -1912,6 +1917,14 @@ class SceneComposer:
           3. compose       — LLM 布局 (注入审查结果) → 批量导入 → 物理沉降
         """
         logger.info("[SceneComposer] ====== 开始场景组合 (三阶段) ======")
+        generation_text, memory_context = self._compose_generation_text(
+            text,
+            interaction_coordinator=interaction_coordinator,
+            room_id=room_id,
+            plan_id=plan_id,
+            session_id=session_id,
+            actor_id=actor_id,
+        )
 
         def emit_stage(percent: int, label: str, detail: str) -> None:
             if not progress_sink:
@@ -1925,12 +1938,12 @@ class SceneComposer:
                 pass
 
         emit_stage(5, "开始理解场景需求", "我会先识别空间、主体建筑和关键物件。你可以继续补充要求。")
-        items = self.extract_items(text)
+        items = self.extract_items(generation_text)
         if not items:
             return {"items": [], "imported": [], "failed": [],
                     "extracted_count": 0, "model_count": 0,
                     "error": "未能从描述中提取出物体清单"}
-        if _has_resolved_plan_context(text) and _looks_generic_inventory(items):
+        if _has_resolved_plan_context(generation_text) and _looks_generic_inventory(items):
             names = [str(item.get("name") or "") for item in items]
             logger.warning(
                 "[SceneComposer] resolved plan inventory looked generic; paused before model generation: %s",
@@ -1957,7 +1970,7 @@ class SceneComposer:
         # 放在截断前：shell 建筑要从家具清单分离 + 保护不被截断（它是场景主体）。
         if self.zone_tree is None:
             try:
-                self.zone_tree = self.decompose_zone_tree(text)
+                self.zone_tree = self.decompose_zone_tree(generation_text)
             except Exception as e:
                 logger.warning("[SceneComposer] 场景分解异常，退化单盒: %s", e)
                 self.zone_tree = None
@@ -2077,11 +2090,15 @@ class SceneComposer:
         emit_stage(62, "开始组装场景", "会先放主体和场地，再把物件摆到合理位置。")
         if use_progressive:
             from .scene_composer_progressive import run_progressive_workflow
-            result = run_progressive_workflow(self, text, furniture, items, do_import,
+            result = run_progressive_workflow(self, generation_text, furniture, items, do_import,
                                               reviews=reviews,
-                                              progress_sink=progress_sink)
+                                              progress_sink=progress_sink,
+                                              interaction_coordinator=interaction_coordinator,
+                                              room_id=room_id,
+                                              plan_id=plan_id,
+                                              session_id=session_id)
         else:
-            result = self._run_original_workflow(text, furniture, items, do_import,
+            result = self._run_original_workflow(generation_text, furniture, items, do_import,
                                                   reviews=reviews)
 
         result["extracted_count"] = extracted_total
@@ -2097,8 +2114,66 @@ class SceneComposer:
         result["shell_expected"] = sorted(shell_names)
         result["shell_degraded"] = degraded
         result["zone_decompose_snapshot"] = getattr(self, "_last_zone_decompose_snapshot", None)
+        result["memory_context_used"] = bool(memory_context)
+        result["memory_context_entry_count"] = int(memory_context.get("entry_count") or 0) if memory_context else 0
         emit_stage(96, "完成自动检查", "已汇总摆放结果、用户介入信息和可选外观审查。")
         return result
+
+    def _compose_generation_text(
+        self,
+        text: str,
+        *,
+        interaction_coordinator: Optional[Any] = None,
+        room_id: str = "",
+        plan_id: str = "",
+        session_id: str = "",
+        actor_id: str = "",
+    ) -> tuple[str, Dict[str, Any]]:
+        """Append safe shared scoped-memory summary without exposing private agent memory."""
+        if interaction_coordinator is None or not room_id:
+            return text, {}
+        summary_fn = getattr(interaction_coordinator, "memory_summary", None)
+        if not callable(summary_fn):
+            return text, {}
+        try:
+            summary = summary_fn(
+                room_id=room_id,
+                plan_id=plan_id,
+                actor_id=actor_id,
+                visibility="shared",
+                limit=8,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[SceneComposer] scoped memory summary skipped: %s", exc)
+            return text, {}
+        summary_text = str((summary or {}).get("summary_text") or "").strip()
+        entries = (summary or {}).get("entries") or []
+        if not summary_text:
+            return text, {}
+        safe_summary = summary_text[:1200]
+        enhanced = (
+            f"{text}\n\n"
+            "[跨批次已确认上下文]\n"
+            f"{safe_summary}\n"
+            "[使用规则]\n"
+            "以上上下文只用于保持用户意图、风格、空间约束和最近介入的一致性；"
+            "不得把它当作新的额外物体清单，也不得覆盖当前明确指令。"
+        )
+        context = {
+            "room_id": room_id,
+            "plan_id": plan_id,
+            "session_id": session_id,
+            "actor_id": actor_id,
+            "entry_count": len(entries),
+        }
+        logger.info(
+            "[SceneComposer] 注入 scoped memory summary: room=%s plan=%s actor=%s entries=%s",
+            room_id,
+            plan_id,
+            actor_id,
+            len(entries),
+        )
+        return enhanced, context
 
     def _review_models(self, resolved: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Phase 2: 串行审查队列 — 逐个导入 → 截图 → VLM → 修正 → 卸载。

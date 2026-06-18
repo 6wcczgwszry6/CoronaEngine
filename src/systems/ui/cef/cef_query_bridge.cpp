@@ -767,10 +767,13 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                 if (func == "start_room") {
                     const std::string room = payload_arg.value("room", "");
                     const uint16_t port = payload_arg.value("port", 8770);
-                    bool ok = sys->lanchat_start_room(room, "房主", port);
+                    const std::string nickname = payload_arg.value("nickname", "房主");
+                    const std::string host_nickname = nickname.empty() ? "房主" : nickname;
+                    bool ok = sys->lanchat_start_room(room, host_nickname, port);
                     const uint16_t actual_port = sys->session_port() != 0 ? sys->session_port() : port;
                     nlohmann::json data;
                     data["ok"] = ok;
+                    data["you"] = host_nickname;
                     data["ip"] = detect_local_ipv4();
                     data["port"] = actual_port;
                     data["room"] = room;

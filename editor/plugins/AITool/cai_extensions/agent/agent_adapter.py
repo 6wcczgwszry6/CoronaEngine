@@ -1235,6 +1235,9 @@ class MasterAgent:
             "metadata": {"room_size": [5, 3, 3], "scene_name": "lanchat_scene", "style_bible": style_bible},
             "intermediate": {"style_bible": style_bible},
         }
+        lanchat_context = self._extract_lanchat_context(messages)
+        if lanchat_context:
+            scene_state["metadata"].update(lanchat_context)
 
         # 场景组合（物品清单/整体布置）→ SceneComposer 批量建模+布局+导入
         # 判断同时看当前指令 + 历史消息：用户可能只说"生成3d模型/按清单生成"，
@@ -1511,8 +1514,7 @@ class MasterAgent:
 
         # 记录本轮对话到记忆单例（供后续记忆增强 / 上下文回忆）
         try:
-            from .memory import get_memory_manager
-            get_memory_manager().record_conversation(user_text, reply)
+            self.coordinator._memory_for_scene(scene_state).record_conversation(user_text, reply)
         except Exception as e:
             logger.warning("[MasterAgent] record_conversation failed: %s", e)
 
@@ -1668,6 +1670,28 @@ class MasterAgent:
             if m:
                 return m.group(1).strip()
         return ""
+
+    def _extract_lanchat_context(self, messages: List[str]) -> Dict[str, str]:
+        """Extract internal LANChat routing scope injected by the orchestrator."""
+        context: Dict[str, str] = {}
+        aliases = {
+            "room_id": "room_id",
+            "lanchat_room_id": "room_id",
+            "plan_id": "plan_id",
+            "seed_plan_id": "plan_id",
+            "batch_id": "batch_id",
+            "agent_id": "agent_id",
+            "agent_name": "agent_name",
+        }
+        for msg in messages or []:
+            text = str(msg or "")
+            if "链路上下文" not in text:
+                continue
+            for key, value in re.findall(r"([a-zA-Z_][\w]*)=([^\s,，;；]+)", text):
+                mapped = aliases.get(key)
+                if mapped and value:
+                    context[mapped] = value.strip()
+        return context
 
     def _extract_sender(self, messages: List[str]) -> str:
         """从最近一条非摘要消息中提取发言人名字（用于协同锁/意图预览）。"""

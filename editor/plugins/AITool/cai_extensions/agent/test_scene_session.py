@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, os.path.dirname(__file__))
 from scene_session import (  # noqa: E402
     SceneSession,
+    FinalReviewReport,
     InterventionOp,
     PHASE_ORDER,
     OP_MOVE,
@@ -35,6 +36,7 @@ class FakeInst:
     touched_by_user: bool = False
     lock_level: str = "NONE"
     layout_status: str = "active"
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 class FakeLayout:
@@ -126,7 +128,9 @@ def test_progress_sink_and_report_text_are_observable():
     layout = FakeLayout()
     session = SceneSession(layout)
     progress_events: List[str] = []
+    progress_structured: List[Dict[str, Any]] = []
     session.set_progress_sink(progress_events.append)
+    session.set_progress_event_sink(progress_structured.append)
 
     def gen_objects(s, phase):
         return [{"name": "table", "path": "/m/tb.glb"}]
@@ -139,6 +143,19 @@ def test_progress_sink_and_report_text_are_observable():
     result = session.progressive_compose(
         {"OBJECTS": gen_objects},
         importer=importer,
+        phase_metadata={
+            "OBJECTS": {
+                "batch_index": 1,
+                "batch_total": 1,
+                "prompt": "PRIVATE_PROGRESS_PROMPT_SHOULD_NOT_LEAK",
+                "provider": "progress-provider-secret",
+                "job_id": "progress-job-secret",
+                "session_id": "progress-session-secret",
+                "runtime_context": {"token": "progress-token-secret"},
+                "scheduler_updates": [{"prompt": "nested-progress-secret"}],
+                "hidden_debug_ref": "progress-debug-secret",
+            }
+        },
         reasonable_provider=lambda: {"table": True},
         skip_final_review=True,
     )
@@ -155,8 +172,21 @@ def test_progress_sink_and_report_text_are_observable():
     assert timeline[-1]["percent"] == 100
     assert timeline[-1]["asset_count"] == 1
     assert "user_message" in timeline[-1]
+    assert progress_structured, "结构化进度事件必须能被 Coordinator 收集"
+    assert progress_structured[-1]["status"] == "done"
+    assert progress_structured[-1]["phase"] == "OBJECTS"
+    assert progress_structured[-1]["percent"] == 100
+    assert progress_structured[-1]["user_message"] == timeline[-1]["user_message"]
+    exposed_structured = repr(progress_structured) + repr(timeline)
+    assert "PRIVATE_PROGRESS_PROMPT_SHOULD_NOT_LEAK" not in exposed_structured
+    assert "progress-provider-secret" not in exposed_structured
+    assert "progress-job-secret" not in exposed_structured
+    assert "progress-session-secret" not in exposed_structured
+    assert "progress-token-secret" not in exposed_structured
+    assert "nested-progress-secret" not in exposed_structured
+    assert "progress-debug-secret" not in exposed_structured
     assert "场景已就绪" in report.to_user_text()
-    print("[OK] 进度 sink + progress_timeline + FinalReview 文案可被上层观测")
+    print("[OK] 字符串进度 + 结构化进度 + progress_timeline + FinalReview 文案可被上层观测")
 
 
 def test_progressive_compose_pauses_at_micro_batch_boundary():
@@ -300,6 +330,338 @@ def test_final_review_three_buckets():
     print("[OK] FinalReview 三分桶 + 报告文案")
 
 
+def test_final_adjustment_plan_is_consumed_by_final_review():
+    layout = FakeLayout()
+    session = SceneSession(layout)
+    layout.add(FakeInst("agent_ok", provenance="AGENT"))
+    statue = FakeInst("actor-statue", provenance="AGENT")
+    statue.transform = {
+        "pos": [1.0, -0.25, 2.0],
+        "rot": [0.0, 0.0, 0.0],
+        "scale": [2.0, 2.0, 2.0],
+    }
+    layout.add(statue)
+    lamp = FakeInst("actor-lamp", provenance="AGENT")
+    lamp.transform = {
+        "pos": [2.0, 0.0, 3.0],
+        "rot": [0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0],
+    }
+    layout.add(lamp)
+    conflicted = FakeInst("actor-conflict", provenance="AGENT")
+    conflicted.transform = {
+        "pos": [0.0, 0.0, 0.0],
+        "rot": [0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0],
+    }
+    layout.add(conflicted)
+
+    adjustment = {
+        "selected": [
+            {
+                "intervention_id": "iv-late",
+                "content": "最后收尾时把中心雕塑缩小并贴地",
+                "actor_id": "actor-statue",
+                "apply_policy": "final_adjustment",
+                "score": 120,
+            },
+            {
+                "intervention_id": "iv-conflict",
+                "content": "删除这个冲突物体",
+                "actor_id": "actor-conflict",
+                "apply_policy": "final_adjustment",
+                "score": 115,
+            },
+            {
+                "intervention_id": "iv-vlm",
+                "content": "朝向不符合用户意图，请缩小一点",
+                "actor_id": "actor-lamp",
+                "apply_policy": "final_adjustment",
+                "score": 110,
+                "finding_details": [{
+                    "action": "apply_vlm_advice",
+                    "position_correction": [2.5, 0.0, 3.5],
+                    "rotation_correction": [0.0, 90.0, 0.0],
+                    "scale_correction": [0.8, 0.8, 0.8],
+                    "fix_suggestion": "移到不穿模位置，旋转 90 度并缩小",
+                }],
+            }
+        ],
+        "deferred": [
+            {
+                "intervention_id": "iv-early",
+                "content": "第一批旁边加一个很小的摊位",
+                "defer_reason": "early_low_priority_request_superseded_by_later_batches",
+            }
+        ],
+        "conflicts": [
+            {
+                "actor_id": "actor-conflict",
+                "reason": "same_actor_has_remove_and_keep_modify_requests",
+            },
+            {
+                "actor_id": "",
+                "target_hint": "入口摊位",
+                "reason": "same_target_has_remove_and_keep_modify_requests",
+            }
+        ],
+    }
+
+    result = session.progressive_compose(
+        {},
+        reasonable_provider=lambda: {"agent_ok": True},
+        final_adjustment_provider=lambda: adjustment,
+        final_review_protection_fn=_fake_protection,
+    )
+    report = result["final_report"]
+
+    assert result["final_adjustment_plan"] == adjustment
+    assert report.final_adjustments[0]["intervention_id"] == "iv-late"
+    assert report.deferred_interventions[0]["intervention_id"] == "iv-early"
+    assert report.conflicts[0]["actor_id"] == "actor-conflict"
+    assert statue.transform["pos"][1] == 0.0
+    assert statue.transform["scale"] == [1.7, 1.7, 1.7]
+    assert lamp.transform["pos"] == [2.5, 0.0, 3.5]
+    assert lamp.transform["rot"] == [0.0, 90.0, 0.0]
+    assert lamp.transform["scale"] == [0.8, 0.8, 0.8]
+    assert conflicted.layout_status == "active", "冲突 actor 不应被静默删除"
+    assert report.applied_final_adjustments[0]["actor_id"] == "actor-statue"
+    assert report.applied_final_adjustments[0]["actions"] == ["scale_down", "ground_fit"]
+    assert any(
+        item["actor_id"] == "actor-lamp"
+        and item["actions"] == [
+            "apply_position_correction",
+            "apply_rotation_correction",
+            "apply_scale_correction",
+        ]
+        for item in report.applied_final_adjustments
+    )
+    assert any(entry.op_type == "FINAL_ADJUST" and entry.actor_id == "actor-statue"
+               for entry in session.operation_log)
+    text = report.to_user_text()
+    assert "最终收尾会优先处理" in text
+    assert "中心雕塑缩小" in text
+    assert "已完成收尾调整" in text
+    assert "GM/房主确认" in text
+    assert "入口摊位" in text
+    assert "同一目标同时存在删除与保留/修改要求" in text
+    print("[OK] FinalReview consumes Coordinator final adjustment plan")
+
+
+def test_resolved_final_adjustment_conflicts_are_consumed_by_final_review():
+    layout = FakeLayout()
+    session = SceneSession(layout)
+    layout.add(FakeInst("actor-confirmed", provenance="AGENT"))
+    layout.add(FakeInst("actor-rejected", provenance="AGENT"))
+
+    adjustment = {
+        "selected": [
+            {
+                "intervention_id": "iv-confirmed",
+                "content": "房主确认后删除这个冲突物体",
+                "actor_id": "actor-confirmed",
+                "apply_policy": "final_adjustment",
+                "score": 120,
+            }
+        ],
+        "deferred": [
+            {
+                "intervention_id": "iv-rejected",
+                "content": "房主拒绝删除这个冲突物体",
+                "actor_id": "actor-rejected",
+                "apply_policy": "final_adjustment",
+                "defer_reason": "final_adjustment_conflict_rejected_by_host",
+            }
+        ],
+        "conflicts": [],
+        "resolved_conflicts": [
+            {
+                "actor_id": "actor-confirmed",
+                "reason": "same_actor_has_remove_and_keep_modify_requests",
+                "status": "confirmed",
+            },
+            {
+                "actor_id": "actor-rejected",
+                "reason": "same_actor_has_remove_and_keep_modify_requests",
+                "status": "rejected",
+            },
+        ],
+    }
+
+    result = session.progressive_compose(
+        {},
+        reasonable_provider=lambda: {"actor-confirmed": True, "actor-rejected": True},
+        final_adjustment_provider=lambda: adjustment,
+        final_review_protection_fn=_fake_protection,
+    )
+    report = result["final_report"]
+
+    assert layout.get("actor-confirmed").layout_status == "stale"
+    assert layout.get("actor-rejected").layout_status == "active"
+    assert report.conflicts == []
+    assert report.resolved_conflicts[0]["status"] == "confirmed"
+    assert report.resolved_conflicts[1]["status"] == "rejected"
+    text = report.to_user_text()
+    assert "GM/房主确认" not in text
+    assert "已按房主决定跳过收尾冲突项" in text
+    print("[OK] FinalReview consumes resolved final adjustment conflicts without re-blocking confirmed items")
+
+
+def test_unresolved_target_hint_conflict_blocks_matching_final_adjustment():
+    layout = FakeLayout()
+    session = SceneSession(layout)
+    stall = FakeInst("actor-stall-generated", provenance="AGENT")
+    stall.transform = {
+        "pos": [0.0, 0.0, 0.0],
+        "rot": [0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0],
+    }
+    layout.add(stall)
+
+    adjustment = {
+        "selected": [
+            {
+                "intervention_id": "iv-target-hint",
+                "content": "删除入口摊位",
+                "actor_id": "actor-stall-generated",
+                "target_hint": "入口摊位",
+                "apply_policy": "final_adjustment",
+                "score": 120,
+            }
+        ],
+        "deferred": [],
+        "conflicts": [
+            {
+                "actor_id": "",
+                "target_hint": "入口摊位",
+                "reason": "same_target_has_remove_and_keep_modify_requests",
+            }
+        ],
+        "resolved_conflicts": [],
+    }
+
+    result = session.progressive_compose(
+        {},
+        reasonable_provider=lambda: {"actor-stall-generated": True},
+        final_adjustment_provider=lambda: adjustment,
+        final_review_protection_fn=_fake_protection,
+    )
+    report = result["final_report"]
+
+    assert stall.layout_status == "active", "target_hint 未决冲突不应被 actor_id 绕过"
+    assert report.applied_final_adjustments == []
+    text = report.to_user_text()
+    assert "GM/房主确认" in text
+    assert "入口摊位" in text
+    print("[OK] target_hint conflicts block matching final adjustments")
+
+
+def test_final_adjustment_skips_stale_actor_version():
+    layout = FakeLayout()
+    session = SceneSession(layout)
+    stall = FakeInst("actor-stall", provenance="AGENT", metadata={"actor_version": 5})
+    stall.transform = {
+        "pos": [0.0, 0.0, 0.0],
+        "rot": [0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0],
+    }
+    layout.add(stall)
+
+    adjustment = {
+        "selected": [
+            {
+                "intervention_id": "iv-stale-version",
+                "content": "把入口摊位缩小一点",
+                "actor_id": "actor-stall",
+                "actor_version": 3,
+                "target_hint": "入口摊位",
+                "apply_policy": "final_adjustment",
+                "score": 120,
+            }
+        ],
+        "deferred": [],
+        "conflicts": [],
+        "resolved_conflicts": [],
+    }
+
+    result = session.progressive_compose(
+        {},
+        reasonable_provider=lambda: {"actor-stall": True},
+        final_adjustment_provider=lambda: adjustment,
+        final_review_protection_fn=_fake_protection,
+    )
+    report = result["final_report"]
+
+    assert stall.transform["scale"] == [1.0, 1.0, 1.0]
+    assert report.applied_final_adjustments[0]["actions"] == ["skipped_actor_version_mismatch"]
+    assert report.applied_final_adjustments[0]["expected_actor_version"] == 3
+    assert report.applied_final_adjustments[0]["actual_actor_version"] == 5
+    assert not any(entry.op_type == "FINAL_ADJUST" for entry in session.operation_log)
+    text = report.to_user_text()
+    assert "已跳过过期介入" in text
+    assert "已完成收尾调整" not in text
+    assert "后续批次或用户更新" in text
+    print("[OK] FinalReview skips stale actor-version final adjustments")
+
+
+def test_final_review_user_text_sanitizes_internal_fields():
+    report = FinalReviewReport(
+        preserved=["入口摊位 prompt=PRIVATE_FINAL_PROMPT_SHOULD_NOT_LEAK"],
+        adjusted=["天使雕塑 provider=final-provider-secret"],
+        needs_confirm=[
+            {
+                "detail": "重新安排灯光 session_id=final-session-secret token=final-token-secret",
+                "actor_id": "light-1",
+            }
+        ],
+        final_adjustments=[
+            {
+                "content": "把入口摊位缩小一点 raw_prompt=PRIVATE_RAW_PROMPT_SHOULD_NOT_LEAK",
+            }
+        ],
+        conflicts=[
+            {
+                "target_hint": "中央喷泉 vlm_raw=PRIVATE_VLM_RAW_SHOULD_NOT_LEAK",
+                "reason": "debug=final-debug-secret",
+            }
+        ],
+        resolved_conflicts=[
+            {
+                "target_hint": "入口摊位 api_key=final-api-key-secret",
+                "reason": "same_target_has_remove_and_keep_modify_requests",
+                "status": "rejected",
+            }
+        ],
+        applied_final_adjustments=[
+            {
+                "action": "贴地修正 scheduler_updates=PRIVATE_SCHEDULER_UPDATE_SHOULD_NOT_LEAK",
+            },
+            {
+                "content": "过期入口摊位 job_id=final-job-secret",
+                "actions": ["skipped_actor_version_mismatch"],
+            },
+        ],
+    )
+
+    text = report.to_user_text()
+    assert "入口摊位" in text
+    assert "缩小一点" in text
+    assert "贴地修正" in text
+    assert "重新安排灯光" in text
+    assert "中央喷泉" in text
+    assert "PRIVATE_FINAL_PROMPT_SHOULD_NOT_LEAK" not in text
+    assert "final-provider-secret" not in text
+    assert "final-session-secret" not in text
+    assert "final-token-secret" not in text
+    assert "PRIVATE_RAW_PROMPT_SHOULD_NOT_LEAK" not in text
+    assert "PRIVATE_VLM_RAW_SHOULD_NOT_LEAK" not in text
+    assert "final-debug-secret" not in text
+    assert "final-api-key-secret" not in text
+    assert "PRIVATE_SCHEDULER_UPDATE_SHOULD_NOT_LEAK" not in text
+    assert "final-job-secret" not in text
+    print("[OK] FinalReview user text sanitizes internal fields")
+
+
 if __name__ == "__main__":
     test_phase_loop_runs_provided_only()
     test_progress_sink_and_report_text_are_observable()
@@ -309,4 +671,9 @@ if __name__ == "__main__":
     test_delete_marks_stale_not_physical()
     test_settle_skips_recent_user()
     test_final_review_three_buckets()
+    test_final_adjustment_plan_is_consumed_by_final_review()
+    test_resolved_final_adjustment_conflicts_are_consumed_by_final_review()
+    test_unresolved_target_hint_conflict_blocks_matching_final_adjustment()
+    test_final_adjustment_skips_stale_actor_version()
+    test_final_review_user_text_sanitizes_internal_fields()
     print("\n=== COMMIT 4 SceneSession ALL PASS ===")

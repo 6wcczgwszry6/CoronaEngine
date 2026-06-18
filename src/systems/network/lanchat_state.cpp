@@ -116,6 +116,11 @@ void LanChatState::close_room() {
         pending_agent_triggers_.clear();
         triggered_agent_keys_.clear();
     }
+    {
+        std::lock_guard<std::mutex> lock(coordinator_sync_mutex_);
+        pending_coordinator_sync_messages_.clear();
+        coordinator_sync_message_ids_.clear();
+    }
     locks_.clear();
     intents_.clear();
 }
@@ -195,6 +200,7 @@ LanChatMessageResult LanChatState::record_message_ex(const std::string& message_
     message.metadata_json = metadata_json;
 
     history_.push_back(message);
+    enqueue_coordinator_sync_message(message);
     return {true, message, {}};
 }
 
@@ -227,11 +233,13 @@ LanChatMessageResult LanChatState::apply_remote_message(const LanChatMessage& me
         }
         *existing = message;
         sort_history_and_advance_sequence();
+        enqueue_coordinator_sync_message(*existing);
         return {true, *existing, {}};
     }
 
     history_.push_back(message);
     sort_history_and_advance_sequence();
+    enqueue_coordinator_sync_message(message);
     return {true, message, {}};
 }
 
@@ -276,7 +284,9 @@ void LanChatState::enqueue_agent_triggers_for_message(const LanChatMessage& mess
     if (!message.message_kind.empty() && message.message_kind != "chat" && !is_confirmation) {
         return;
     }
-    if (!message.sender_type.empty() && message.sender_type != "user") {
+    if (!message.sender_type.empty() &&
+        message.sender_type != "user" &&
+        message.sender_type != "host") {
         return;
     }
 
@@ -351,6 +361,36 @@ std::optional<LanChatAgentTrigger> LanChatState::pop_agent_trigger() {
     auto trigger = std::move(pending_agent_triggers_.front());
     pending_agent_triggers_.pop_front();
     return trigger;
+}
+
+std::optional<LanChatMessage> LanChatState::pop_coordinator_sync_message() {
+    std::lock_guard<std::mutex> lock(coordinator_sync_mutex_);
+    if (pending_coordinator_sync_messages_.empty()) {
+        return std::nullopt;
+    }
+    auto message = std::move(pending_coordinator_sync_messages_.front());
+    pending_coordinator_sync_messages_.pop_front();
+    return message;
+}
+
+void LanChatState::enqueue_coordinator_sync_message(const LanChatMessage& message) {
+    if (message.message_id.empty()) {
+        return;
+    }
+    const std::string message_kind = message.message_kind.empty() ? "chat" : message.message_kind;
+    const std::string sender_type = message.sender_type.empty() ? "user" : message.sender_type;
+    if (message_kind != "chat") {
+        return;
+    }
+    if (sender_type != "user" && sender_type != "host") {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(coordinator_sync_mutex_);
+    if (!coordinator_sync_message_ids_.insert(message.message_id).second) {
+        return;
+    }
+    pending_coordinator_sync_messages_.push_back(message);
 }
 
 LanChatResult LanChatState::remove_agent(const std::string& agent_id) {

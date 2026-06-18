@@ -3,11 +3,39 @@ from __future__ import annotations
 import logging
 import json
 import os
+import re
 import threading
+import time
+from collections import deque
 from typing import Any, Callable
 
+from .interaction_coordinator import ChatMessage, InteractionCoordinator
 from .lanchat_agent_orchestrator import LanChatAgentOrchestrator
 from .lanchat_host_action_executor import LanChatHostActionExecutor
+from .generation_scheduler import GenerationScheduler
+from .generation_composer_adapter import SceneComposerJobRunner
+
+
+MAX_COORDINATOR_SYNC_MESSAGES_PER_TICK = 4
+MAX_ROOM_EVENTS_PER_TICK = 4
+MAX_COORDINATOR_SEEN_MESSAGE_IDS = 2048
+MAX_ACTIVE_ROOM_IDS = 256
+_SENSITIVE_WORKER_PAYLOAD_KEYS = {
+    "prompt",
+    "raw_prompt",
+    "provider",
+    "model_provider",
+    "runtime_context",
+    "scheduler_updates",
+    "vlm_raw",
+    "hidden_debug_ref",
+    "debug",
+    "job_id",
+    "session_id",
+    "token",
+    "api_key",
+}
+_SENSITIVE_WORKER_TEXT_MARKERS = tuple(sorted(_SENSITIVE_WORKER_PAYLOAD_KEYS))
 
 
 class LANChatAgentWorker:
@@ -18,12 +46,19 @@ class LANChatAgentWorker:
         corona_engine: Any = None,
         agent_factory: Callable[[], Any] | None = None,
         host_action_executor: Any = None,
+        interaction_coordinator: InteractionCoordinator | None = None,
+        generation_scheduler: Any = None,
+        composer_factory: Callable[[], Any] | None = None,
         sleep_seconds: float = 0.1,
         async_agent_execution: bool | None = None,
     ) -> None:
         self._corona_engine = corona_engine
         self._agent_factory = agent_factory
         self._host_action_executor = host_action_executor
+        self._interaction_coordinator = interaction_coordinator
+        self._generation_scheduler = generation_scheduler
+        self._composer_factory = composer_factory
+        self._owns_generation_scheduler = generation_scheduler is None and interaction_coordinator is None
         self._sleep_seconds = sleep_seconds
         self._async_agent_execution = (
             os.getenv("LANCHAT_AGENT_ASYNC", "1") == "1"
@@ -34,7 +69,13 @@ class LANChatAgentWorker:
         self._thread: threading.Thread | None = None
         self._orchestrator: LanChatAgentOrchestrator | None = None
         self._agent_call_lock = threading.RLock()
+        self._coordinator_seen_message_ids: set[str] = set()
+        self._coordinator_seen_message_order: deque[str] = deque()
+        self._active_room_ids: set[str] = set()
+        self._active_room_order: deque[str] = deque()
         self._logger = logging.getLogger(__name__)
+        if self._generation_scheduler is not None:
+            self._install_generation_scheduler_hooks(self._generation_scheduler)
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -54,19 +95,144 @@ class LANChatAgentWorker:
         self._stop_event.set()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=timeout)
+        if self._generation_scheduler is not None:
+            self._clear_generation_scheduler_hooks(self._generation_scheduler)
+        if self._owns_generation_scheduler and self._generation_scheduler is not None:
+            shutdown = getattr(self._generation_scheduler, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+
+    def generation_scheduler_snapshot(self) -> dict[str, Any]:
+        scheduler = self._generation_scheduler
+        if scheduler is None:
+            return {"available": False, "reason": "generation scheduler has not been initialized"}
+        snapshot = getattr(scheduler, "public_snapshot", None)
+        if not callable(snapshot):
+            snapshot = getattr(scheduler, "snapshot", None)
+        if not callable(snapshot):
+            return {"available": False, "reason": "generation scheduler does not expose snapshot"}
+        data = snapshot()
+        if isinstance(data, dict):
+            return {"available": True, **data}
+        return {"available": False, "reason": "generation scheduler snapshot returned non-dict"}
+
+    def generation_scheduler_session_snapshot(self, session_id: str) -> dict[str, Any]:
+        scheduler = self._generation_scheduler
+        if scheduler is None:
+            return {"available": False, "reason": "generation scheduler has not been initialized"}
+        session_snapshot = getattr(scheduler, "public_session_snapshot", None)
+        if not callable(session_snapshot):
+            session_snapshot = getattr(scheduler, "session_snapshot", None)
+        if not callable(session_snapshot):
+            return {"available": False, "reason": "generation scheduler does not expose session_snapshot"}
+        data = session_snapshot(session_id)
+        if isinstance(data, dict):
+            return {"available": True, **data}
+        return {"available": False, "reason": "generation scheduler session_snapshot returned non-dict"}
+
+    def cancel_generation_session(self, session_id: str, *, abandon_remote: bool = False) -> dict[str, Any]:
+        scheduler = self._generation_scheduler
+        if scheduler is None:
+            return {"available": False, "reason": "generation scheduler has not been initialized"}
+        cancel_session = getattr(scheduler, "cancel_session", None)
+        if not callable(cancel_session):
+            return {"available": False, "reason": "generation scheduler does not expose cancel_session"}
+        result = cancel_session(session_id, abandon_remote=abandon_remote)
+        if isinstance(result, dict):
+            return {"available": True, **result}
+        return {"available": False, "reason": "generation scheduler cancel_session returned non-dict"}
+
+    def handle_lanchat_room_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(event, dict):
+            return {"handled": False, "reason": "event is not a dict"}
+        event_type = str(event.get("event") or event.get("type") or "").strip().lower()
+        room_id = str(event.get("room_id") or event.get("room") or "").strip()
+        if room_id:
+            self._remember_room_id(room_id)
+        if event_type not in {"room_closed", "leave_room", "left", "stop_room", "stopped", "closed"}:
+            return {"handled": False, "reason": "event does not close a room"}
+        target_rooms = [room_id] if room_id else sorted(self._active_room_ids)
+        if not target_rooms:
+            return {"handled": True, "cancelled": [], "reason": "no active room id known"}
+        cancelled = []
+        for target_room in target_rooms:
+            cancelled.append(self.cancel_generation_session(target_room, abandon_remote=True))
+            self._forget_room_id(target_room)
+        return {"handled": True, "cancelled": cancelled}
+
+    def sync_chat_message_to_coordinator(
+        self,
+        message: dict[str, Any],
+        *,
+        source: str = "lanchat_direct",
+        emit_disclosure: bool = True,
+    ) -> bool:
+        """Sync one ordinary LANChat user/host message into InteractionCoordinator.
+
+        This is the Python bridge point for non-@Agent chat messages. It does
+        not run role agents or execute generation; Coordinator decides whether
+        the message updates a SeedPlan draft or becomes a batch intervention.
+        """
+        if not isinstance(message, dict):
+            return False
+        message_kind = str(message.get("message_kind") or "chat").lower()
+        sender_type = str(message.get("sender_type") or "user").lower()
+        dedupe_key = self._coordinator_sync_dedupe_key(message, source=source)
+        if not dedupe_key:
+            return False
+        if dedupe_key in self._coordinator_seen_message_ids:
+            return False
+        if message_kind != "chat" or sender_type not in {"user", "host"}:
+            self._remember_coordinator_seen_message_id(dedupe_key)
+            return False
+        text = str(message.get("text") or "").strip()
+        if not text:
+            self._remember_coordinator_seen_message_id(dedupe_key)
+            return False
+        try:
+            coordinator = self._get_interaction_coordinator()
+            disclosure_start = len(coordinator.disclosure_events)
+            room_id = str(message.get("room_id") or "default")
+            self._remember_room_id(room_id)
+            metadata = self._coordinator_sync_metadata(message, source=source)
+            coordinator.ingest_message(ChatMessage(
+                room_id=room_id,
+                sender_id=str(message.get("sender_id") or message.get("from") or ""),
+                sender_name=str(message.get("sender_name") or message.get("from") or ""),
+                text=text,
+                is_host=bool(message.get("is_host") or sender_type == "host"),
+                metadata=metadata,
+            ))
+            if emit_disclosure:
+                self._emit_new_disclosure_events(coordinator, disclosure_start)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to sync LANChat chat message to Coordinator: %s", exc)
+            return False
+        finally:
+            self._remember_coordinator_seen_message_id(dedupe_key)
 
     def process_once(self) -> bool:
         if not self._has_engine_api():
             return False
 
+        processed_room_event = self._process_room_events(
+            max_events=MAX_ROOM_EVENTS_PER_TICK,
+        )
+        processed_coordinator_sync = self._process_coordinator_sync_messages(
+            max_messages=MAX_COORDINATOR_SYNC_MESSAGES_PER_TICK,
+        )
+
         try:
             trigger = self._corona_engine.network_pop_lanchat_agent_trigger()
         except Exception as exc:
             self._logger.debug("Failed to poll LANChat agent trigger: %s", exc)
-            return False
+            return processed_room_event or processed_coordinator_sync
 
         if not trigger:
-            return False
+            return processed_room_event or processed_coordinator_sync
+
+        self._sync_trigger_history_to_coordinator(trigger)
 
         if self._async_agent_execution:
             threading.Thread(
@@ -78,6 +244,47 @@ class LANChatAgentWorker:
             return True
 
         return self._process_trigger(trigger)
+
+    def _process_room_events(self, *, max_events: int) -> bool:
+        if not hasattr(self._corona_engine, "network_pop_lanchat_room_event"):
+            return False
+        processed = False
+        limit = max(1, int(max_events or 1))
+        for _ in range(limit):
+            try:
+                event = self._corona_engine.network_pop_lanchat_room_event()
+            except Exception as exc:
+                self._logger.debug("Failed to poll LANChat room event: %s", exc)
+                break
+            if not event:
+                break
+            processed = True
+            try:
+                self.handle_lanchat_room_event(dict(event))
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("Failed to handle LANChat room event: %s", exc)
+        return processed
+
+    def _process_coordinator_sync_messages(self, *, max_messages: int) -> bool:
+        if not hasattr(self._corona_engine, "network_pop_lanchat_coordinator_sync_message"):
+            return False
+        processed = False
+        limit = max(1, int(max_messages or 1))
+        for _ in range(limit):
+            try:
+                message = self._corona_engine.network_pop_lanchat_coordinator_sync_message()
+            except Exception as exc:
+                self._logger.debug("Failed to poll LANChat Coordinator sync message: %s", exc)
+                break
+            if not message:
+                break
+            processed = True
+            self.sync_chat_message_to_coordinator(
+                dict(message),
+                source="lanchat_native_queue",
+                emit_disclosure=True,
+            )
+        return processed
 
     def _process_trigger(self, trigger: dict[str, Any]) -> bool:
         agent_id = str(trigger.get("agent_id") or "agent")
@@ -108,6 +315,13 @@ class LANChatAgentWorker:
             except Exception as exc:
                 self._logger.debug("Failed to send LANChat progress reply: %s", exc)
 
+        control_reply = self._handle_coordinator_gm_control(trigger)
+        if control_reply is not None:
+            return bool(self._send_final_reply("gm-system", "GM", control_reply, trigger))
+        clarification_reply = self._handle_coordinator_gm_clarification(trigger)
+        if clarification_reply is not None:
+            return bool(self._send_final_reply("gm-system", "GM", clarification_reply, trigger))
+
         try:
             from .agent_progress_context import agent_progress_sink
             from .lanchat_scene_runtime import get_lanchat_scene_runtime
@@ -134,6 +348,7 @@ class LANChatAgentWorker:
             agent_name = result.sender_name
             reply = result.text
             action_payload = getattr(result, "action_payload", None)
+            action_payload = self._prepare_confirmed_action_payload(action_payload, trigger)
 
         try:
             self._broadcast_confirmed_action(action_payload)
@@ -163,13 +378,13 @@ class LANChatAgentWorker:
             or action_payload.get("requires_host_confirm")
         ):
             proposal_id = str(action_payload.get("proposal_id") or self._correlation_id(trigger))
-            metadata = dict(action_payload)
+            metadata = self._sanitize_control_payload(action_payload)
             metadata.setdefault("requires_host_confirm", True)
             if hasattr(self._corona_engine, "network_send_system_message_ex"):
                 return bool(self._corona_engine.network_send_system_message_ex(
                     agent_id,
                     agent_name,
-                    text,
+                    self._safe_control_text(text),
                     "gm_proposal",
                     proposal_id,
                     json.dumps(metadata, ensure_ascii=False),
@@ -185,6 +400,41 @@ class LANChatAgentWorker:
                 json.dumps({"reply_to": str(trigger.get("message_id") or "")}, ensure_ascii=False),
             ))
         return bool(self._corona_engine.network_send_agent_reply(agent_id, agent_name, text))
+
+    def _remember_room_id(self, room_id: str) -> None:
+        room = str(room_id or "").strip()
+        if not room:
+            return
+        if room in self._active_room_ids:
+            try:
+                self._active_room_order.remove(room)
+            except ValueError:
+                pass
+        self._active_room_ids.add(room)
+        self._active_room_order.append(room)
+        while len(self._active_room_order) > MAX_ACTIVE_ROOM_IDS:
+            oldest = self._active_room_order.popleft()
+            self._active_room_ids.discard(oldest)
+
+    def _forget_room_id(self, room_id: str) -> None:
+        room = str(room_id or "").strip()
+        if not room:
+            return
+        self._active_room_ids.discard(room)
+        try:
+            self._active_room_order.remove(room)
+        except ValueError:
+            pass
+
+    def _remember_coordinator_seen_message_id(self, key: str) -> None:
+        normalized = str(key or "").strip()
+        if not normalized or normalized in self._coordinator_seen_message_ids:
+            return
+        self._coordinator_seen_message_ids.add(normalized)
+        self._coordinator_seen_message_order.append(normalized)
+        while len(self._coordinator_seen_message_order) > MAX_COORDINATOR_SEEN_MESSAGE_IDS:
+            oldest = self._coordinator_seen_message_order.popleft()
+            self._coordinator_seen_message_ids.discard(oldest)
 
     def _has_engine_api(self) -> bool:
         return (
@@ -203,14 +453,208 @@ class LANChatAgentWorker:
     def _run_agent(self, trigger: dict[str, Any]):
         return self._get_orchestrator().handle_trigger(trigger)
 
+    def _handle_coordinator_gm_control(self, trigger: dict[str, Any]) -> str | None:
+        action = self._gm_pace_action_from_trigger(trigger)
+        if not action:
+            return None
+        if self._trusted_host_control(trigger) is False:
+            return "【GM】只有房主可以控制生成节奏；该请求没有进入 Coordinator。"
+        room_id = str(trigger.get("room_id") or "default")
+        self._remember_room_id(room_id)
+        try:
+            coordinator = self._get_interaction_coordinator()
+            disclosure_start = len(coordinator.disclosure_events)
+            event = coordinator.control_pace(
+                room_id,
+                action,
+                actor_id=str(trigger.get("sender_id") or trigger.get("agent_id") or "gm"),
+                note=str(trigger.get("text") or ""),
+            )
+            emitted = self._emit_new_disclosure_events(coordinator, disclosure_start)
+            self._start_coordinator_disclosure_watch(coordinator, disclosure_start + emitted)
+            self._set_runtime_mode_for_pace(action)
+            self._emit_generation_scheduler_disclosure()
+            return f"【GM】{event.message}"
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Coordinator GM pace control skipped: %s", exc)
+            return None
+
+    def _handle_coordinator_gm_clarification(self, trigger: dict[str, Any]) -> str | None:
+        question = self._gm_clarification_question_from_trigger(trigger)
+        if not question:
+            return None
+        if self._trusted_host_control(trigger) is False:
+            return "【GM】只有房主可以发起强制澄清；该请求没有进入 Coordinator。"
+        room_id = str(trigger.get("room_id") or "default")
+        self._remember_room_id(room_id)
+        try:
+            coordinator = self._get_interaction_coordinator()
+            disclosure_start = len(coordinator.disclosure_events)
+            event = coordinator.request_clarification(
+                room_id,
+                question,
+                requested_by=str(trigger.get("sender_id") or trigger.get("agent_id") or "gm"),
+            )
+            emitted = self._emit_new_disclosure_events(coordinator, disclosure_start)
+            self._start_coordinator_disclosure_watch(coordinator, disclosure_start + emitted)
+            return f"【GM】{event.message} {question}"
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Coordinator GM clarification skipped: %s", exc)
+            return None
+
+    @staticmethod
+    def _gm_pace_action_from_trigger(trigger: dict[str, Any]) -> str:
+        agent_id = str(trigger.get("agent_id") or trigger.get("target_agent_id") or "").lower()
+        agent_name = str(trigger.get("agent_name") or "").lower()
+        text = str(trigger.get("text") or "").strip()
+        if not (agent_id == "gm" or agent_name in {"gm", "主持人", "裁判", "game master"} or text.startswith("@GM")):
+            return ""
+        if re.search(r"\b(?:gm-\d+|fa-[\w.-]+|cr-[\w.-]+)\b", text, flags=re.I):
+            return ""
+        if any(word in text for word in ("暂停", "先停", "等一下")):
+            return "pause"
+        if any(word in text for word in ("继续", "恢复")):
+            return "resume"
+        if any(word in text for word in ("先讨论", "不要生成", "别生成", "先规划")):
+            return "discuss"
+        return ""
+
+    @staticmethod
+    def _gm_clarification_question_from_trigger(trigger: dict[str, Any]) -> str:
+        agent_id = str(trigger.get("agent_id") or trigger.get("target_agent_id") or "").lower()
+        agent_name = str(trigger.get("agent_name") or "").lower()
+        text = str(trigger.get("text") or "").strip()
+        if not (agent_id == "gm" or agent_name in {"gm", "主持人", "裁判", "game master"} or text.startswith("@GM")):
+            return ""
+        if re.search(r"\b(?:gm-\d+|fa-[\w.-]+|cr-[\w.-]+)\b", text, flags=re.I):
+            return ""
+        if not any(word in text for word in ("澄清", "问清楚", "问一下", "不明确", "需要补充", "补充需求")):
+            return ""
+        question = re.sub(r"^@GM\s*", "", text, flags=re.I).strip()
+        return question or "请补充关键需求。"
+
+    @classmethod
+    def _trusted_host_control(cls, trigger: dict[str, Any]) -> bool | None:
+        metadata = cls._metadata_from_trigger(trigger)
+        view = {**metadata, **(trigger or {})}
+        for key in ("sender_role", "room_role", "role"):
+            if key not in view:
+                continue
+            role = str(view.get(key) or "").strip().lower()
+            if role:
+                return role in {"host", "owner", "room_host", "房主"}
+        for key in ("is_host", "is_room_host", "sender_is_host"):
+            if key in view:
+                return bool(view.get(key))
+        return None
+
+    @staticmethod
+    def _metadata_from_trigger(trigger: dict[str, Any]) -> dict[str, Any]:
+        metadata = (trigger or {}).get("metadata")
+        if isinstance(metadata, dict):
+            return metadata
+        raw = (trigger or {}).get("metadata_json")
+        if not raw:
+            return {}
+        if isinstance(raw, dict):
+            return raw
+        try:
+            parsed = json.loads(str(raw))
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _coordinator_sync_metadata(self, message: dict[str, Any], *, source: str) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "message_id": str(message.get("message_id") or ""),
+            "source": source,
+        }
+        raw_metadata = self._metadata_from_trigger(message)
+        for key in (
+            "actor_id",
+            "target_actor_id",
+            "object_id",
+            "target_object_id",
+            "actor_version",
+            "target_hint",
+        ):
+            value = raw_metadata.get(key)
+            if value is not None and value != "":
+                metadata[key] = value
+        for key in ("source_user_id", "correlation_id"):
+            value = message.get(key)
+            if value:
+                metadata[key] = str(value)
+        return metadata
+
+    @staticmethod
+    def _coordinator_sync_dedupe_key(message: dict[str, Any], *, source: str) -> str:
+        message_id = str(message.get("message_id") or "").strip()
+        if message_id:
+            return f"id:{message_id}"
+        text = str(message.get("text") or "").strip()
+        if not text:
+            return ""
+        parts = (
+            "fallback",
+            str(source or "lanchat_direct").strip(),
+            str(message.get("room_id") or "default").strip(),
+            str(message.get("sender_id") or message.get("from") or "").strip(),
+            str(message.get("sender_type") or "user").strip().lower(),
+            str(message.get("message_kind") or "chat").strip().lower(),
+            text,
+        )
+        return "|".join(parts)
+
+    def _set_runtime_mode_for_pace(self, action: str) -> None:
+        mode = {"pause": "PAUSED", "resume": "EXECUTING", "discuss": "DISCUSSING"}.get(action)
+        if not mode:
+            return
+        try:
+            from .lanchat_scene_runtime import get_lanchat_scene_runtime
+            get_lanchat_scene_runtime().set_mode(mode)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("LANChat scene runtime pace update skipped: %s", exc)
+
+    def _sync_trigger_history_to_coordinator(self, trigger: dict[str, Any]) -> None:
+        history = trigger.get("history") or []
+        if not isinstance(history, list):
+            return
+        room_id = str(trigger.get("room_id") or "default")
+        self._remember_room_id(room_id)
+        current_message_id = str(trigger.get("message_id") or "")
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            message_id = str(item.get("message_id") or "")
+            if not message_id or message_id == current_message_id:
+                continue
+            if message_id in self._coordinator_seen_message_ids:
+                continue
+            payload = dict(item)
+            payload["room_id"] = str(payload.get("room_id") or room_id)
+            self.sync_chat_message_to_coordinator(
+                payload,
+                source="lanchat_history_snapshot",
+                emit_disclosure=False,
+            )
+
     def _broadcast_confirmed_action(self, payload: dict[str, Any] | None) -> None:
-        if not payload or payload.get("status") != "confirmed":
+        if not payload:
+            return
+        if str(payload.get("action_type") or "") == "final_adjustment_confirmation":
+            self._record_final_adjustment_confirmation(payload)
+            return
+        if str(payload.get("action_type") or "") == "conflict_resolution_confirmation":
+            self._record_conflict_resolution_confirmation(payload)
+            return
+        if payload.get("status") != "confirmed":
             return
         if str(payload.get("action_type") or "") == "discussion_only":
             return
         if hasattr(self._corona_engine, "network_broadcast_intent"):
             source_user_id = str(payload.get("source_user_id") or "unknown")
-            tooltip = str(payload.get("intent_text") or payload.get("proposal_id") or "")
+            tooltip = self._safe_control_text(payload.get("intent_text") or payload.get("proposal_id") or "")
             try:
                 self._corona_engine.network_broadcast_intent(
                     source_user_id,
@@ -223,22 +667,458 @@ class LANChatAgentWorker:
 
         self._execute_confirmed_action(payload)
 
+    @classmethod
+    def _sanitize_control_payload(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            sanitized: dict[str, Any] = {}
+            for key, item in value.items():
+                normalized = str(key or "").lower()
+                if any(marker in normalized for marker in _SENSITIVE_WORKER_PAYLOAD_KEYS):
+                    continue
+                sanitized[key] = cls._sanitize_control_payload(item)
+            return sanitized
+        if isinstance(value, list):
+            return [cls._sanitize_control_payload(item) for item in value]
+        if isinstance(value, tuple):
+            return [cls._sanitize_control_payload(item) for item in value]
+        if isinstance(value, str):
+            return cls._safe_control_text(value)
+        return value
+
+    @staticmethod
+    def _safe_control_text(value: Any) -> str:
+        text = str(value or "")
+        lower = text.lower()
+        cut_points = [
+            lower.find(marker)
+            for marker in _SENSITIVE_WORKER_TEXT_MARKERS
+            if lower.find(marker) >= 0
+        ]
+        if not cut_points:
+            return text
+        first = min(cut_points)
+        keep = text[:first].strip(" \t\r\n,;；。")
+        return keep or "已收到控制动作，内部执行细节已隐藏。"
+
+    def _record_final_adjustment_confirmation(self, payload: dict[str, Any]) -> None:
+        coordinator = self._interaction_coordinator
+        if coordinator is None:
+            return
+        proposal_id = str(payload.get("proposal_id") or "").strip()
+        decision = str(payload.get("decision") or "confirm").strip().lower()
+        host_id = str(payload.get("source_user_id") or payload.get("confirmed_by") or "").strip()
+        disclosure_start = len(coordinator.disclosure_events)
+        confirm = getattr(coordinator, "confirm_final_adjustment_conflict", None)
+        if not callable(confirm):
+            return
+        try:
+            confirm(proposal_id, host_id, decision=decision)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to record final adjustment confirmation: %s", exc)
+            return
+        emitted = self._emit_new_disclosure_events(coordinator, disclosure_start)
+        self._start_coordinator_disclosure_watch(coordinator, disclosure_start + emitted)
+
+    def _record_conflict_resolution_confirmation(self, payload: dict[str, Any]) -> None:
+        coordinator = self._interaction_coordinator
+        if coordinator is None:
+            return
+        proposal_id = str(payload.get("proposal_id") or "").strip()
+        decision = str(payload.get("decision") or "confirm").strip().lower()
+        host_id = str(payload.get("source_user_id") or payload.get("confirmed_by") or "").strip()
+        disclosure_start = len(coordinator.disclosure_events)
+        handler_name = "reject_conflict_resolution" if decision in {"reject", "rejected", "no", "cancel"} else "confirm_conflict_resolution"
+        handler = getattr(coordinator, handler_name, None)
+        if not callable(handler):
+            return
+        try:
+            handler(proposal_id, host_id)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to record conflict resolution confirmation: %s", exc)
+            return
+        emitted = self._emit_new_disclosure_events(coordinator, disclosure_start)
+        self._start_coordinator_disclosure_watch(coordinator, disclosure_start + emitted)
+
     def _execute_confirmed_action(self, payload: dict[str, Any]) -> None:
         executor = self._get_host_action_executor()
         if executor is None or not hasattr(executor, "enqueue_and_process"):
             return
+        coordinator = self._interaction_coordinator
+        disclosure_start = len(coordinator.disclosure_events) if coordinator is not None else 0
         try:
             executor.enqueue_and_process(payload)
         except Exception as exc:
             self._logger.debug("Failed to execute confirmed GM action: %s", exc)
+        finally:
+            if coordinator is not None:
+                emitted = self._emit_new_disclosure_events(coordinator, disclosure_start)
+                self._start_coordinator_disclosure_watch(coordinator, disclosure_start + emitted)
+            self._emit_generation_scheduler_disclosure()
+
+    def _emit_new_disclosure_events(self, coordinator: InteractionCoordinator, start_index: int) -> int:
+        if self._corona_engine is None:
+            return 0
+        if hasattr(coordinator, "disclosure_events_since"):
+            events, cursor_advance = coordinator.disclosure_events_since(start_index)
+        else:
+            events = coordinator.disclosure_events[start_index:]
+            cursor_advance = len(events)
+        if not events:
+            return cursor_advance
+        for event in events:
+            if getattr(event, "audience", "") not in {"participant", "host"}:
+                continue
+            payload = event.as_dict()
+            text = self._broadcast_text_for_disclosure(payload)
+            if not text:
+                continue
+            if self._try_send_targeted_host_disclosure(payload, text):
+                continue
+            metadata_payload = payload
+            if str(payload.get("audience") or "") == "host":
+                metadata_payload = self._host_disclosure_broadcast_payload(payload, text)
+            metadata = json.dumps({"disclosure": metadata_payload}, ensure_ascii=False)
+            try:
+                if hasattr(self._corona_engine, "network_send_system_message_ex"):
+                    self._corona_engine.network_send_system_message_ex(
+                        "system",
+                        "系统",
+                        text,
+                        "action_status",
+                        str(payload.get("event_id") or ""),
+                        metadata,
+                    )
+                elif hasattr(self._corona_engine, "network_send_system_message"):
+                    self._corona_engine.network_send_system_message("system", "系统", text)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("Failed to emit LANChat disclosure event: %s", exc)
+        return cursor_advance
+
+    def _try_send_targeted_host_disclosure(self, payload: dict[str, Any], text: str) -> bool:
+        if str(payload.get("audience") or "") != "host":
+            return False
+        target_sender_id = str(
+            payload.get("target_user_id")
+            or (payload.get("metadata") or {}).get("target_user_id")
+            or "host"
+        )
+        metadata = json.dumps({"disclosure": payload}, ensure_ascii=False)
+        for method_name in (
+            "network_send_system_message_to_host_ex",
+            "network_send_system_message_to_user_ex",
+        ):
+            sender = getattr(self._corona_engine, method_name, None)
+            if not callable(sender):
+                continue
+            try:
+                if method_name.endswith("_to_user_ex"):
+                    sender(
+                        target_sender_id,
+                        "system",
+                        "系统",
+                        text,
+                        "action_status",
+                        str(payload.get("event_id") or ""),
+                        metadata,
+                    )
+                else:
+                    sender(
+                        "system",
+                        "系统",
+                        text,
+                        "action_status",
+                        str(payload.get("event_id") or ""),
+                        metadata,
+                    )
+                return True
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("Failed to emit targeted host disclosure via %s: %s", method_name, exc)
+        return False
+
+    @staticmethod
+    def _host_disclosure_broadcast_payload(payload: dict[str, Any], text: str) -> dict[str, Any]:
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        safe_metadata = {
+            key: metadata.get(key)
+            for key in ("proposal_id", "requires_conflict_resolution", "requires_confirmation")
+            if key in metadata
+        }
+        return {
+            "event_id": payload.get("event_id"),
+            "room_id": payload.get("room_id"),
+            "audience": "participant",
+            "stage": payload.get("stage"),
+            "progress": payload.get("progress"),
+            "public_message": text,
+            "available_actions": [],
+            "requires_confirmation": False,
+            "metadata": safe_metadata,
+        }
+
+    def _start_coordinator_disclosure_watch(
+        self,
+        coordinator: InteractionCoordinator,
+        start_index: int,
+        *,
+        duration_seconds: float = 30.0,
+        interval_seconds: float = 0.05,
+    ) -> None:
+        if self._corona_engine is None:
+            return
+
+        def _watch() -> None:
+            cursor = int(start_index)
+            deadline = time.time() + max(0.1, float(duration_seconds))
+            while not self._stop_event.is_set() and time.time() < deadline:
+                emitted = self._emit_new_disclosure_events(coordinator, cursor)
+                if emitted:
+                    cursor += emitted
+                time.sleep(max(0.01, float(interval_seconds)))
+
+        threading.Thread(
+            target=_watch,
+            name="LANChatDisclosureWatch",
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _broadcast_text_for_disclosure(payload: dict[str, Any]) -> str:
+        """Return text safe for a room-wide system message."""
+        audience = str(payload.get("audience") or "")
+        if audience == "host":
+            if payload.get("requires_confirmation"):
+                return "有一项需要房主确认的事项。"
+            return "有一项仅房主可见的进度更新。"
+        return str(payload.get("public_message") or "")
+
+    def _emit_generation_scheduler_disclosure(self) -> None:
+        if self._corona_engine is None:
+            return
+        room_ids = sorted(self._active_room_ids)
+        snapshots: list[tuple[str, dict[str, Any]]] = []
+        if room_ids:
+            for room_id in room_ids:
+                snapshot = self.generation_scheduler_session_snapshot(room_id)
+                if snapshot.get("available"):
+                    snapshots.append((room_id, snapshot))
+        else:
+            snapshot = self.generation_scheduler_snapshot()
+            if snapshot.get("available"):
+                snapshots.append(("", snapshot))
+        for room_id, snapshot in snapshots:
+            self._emit_generation_scheduler_snapshot_disclosure(room_id, snapshot)
+
+    def _emit_generation_scheduler_snapshot_disclosure(self, room_id: str, snapshot: dict[str, Any]) -> None:
+        queued_count = int(snapshot.get("queued_count") or 0)
+        total_jobs = int(snapshot.get("total_jobs") or 0)
+        active_count = int(snapshot.get("active_count") or len(snapshot.get("active_jobs") or []))
+        paused_sessions = list(snapshot.get("paused_sessions") or [])
+        paused_session_count = int(snapshot.get("paused_session_count") or len(paused_sessions))
+        queue_pressure = float(snapshot.get("queue_pressure") or 0.0)
+        diagnosis = snapshot.get("diagnosis") if isinstance(snapshot.get("diagnosis"), dict) else {}
+        if queued_count <= 0 and active_count <= 0 and paused_session_count <= 0:
+            return
+        progress = max(0, min(100, int(round(queue_pressure * 100))))
+        if paused_session_count > 0:
+            public_message = "后续生成已暂停，等待房主或 GM 确认后继续。"
+            available_actions = ["continue_generation", "add_note"]
+        elif queue_pressure >= 1.0:
+            public_message = "生成队列已满，新的生成请求会先等待当前批次释放资源。"
+            available_actions = ["pause_after_batch", "add_note"]
+        elif queued_count > 0:
+            public_message = "生成任务已进入队列，系统会按批次和优先级继续处理。"
+            available_actions = ["add_note", "pause_after_batch"]
+        else:
+            public_message = "生成任务正在执行，当前阶段会持续更新。"
+            available_actions = ["add_note"]
+        metadata = {
+            "disclosure": {
+                "event_id": f"scheduler-{room_id or 'global'}-{int(time.time() * 1000)}",
+                "room_id": room_id,
+                "audience": "participant",
+                "stage": "资源调度",
+                "progress": progress,
+                "public_message": public_message,
+                "available_actions": available_actions,
+                "requires_confirmation": False,
+                "metadata": {
+                    "queue_pressure": queue_pressure,
+                    "queued_count": queued_count,
+                    "active_count": active_count,
+                    "paused_session_count": paused_session_count,
+                    "total_jobs": total_jobs,
+                    "diagnosis": {
+                        "state": str(diagnosis.get("state") or ""),
+                        "reasons": [
+                            str(item) for item in list(diagnosis.get("reasons") or [])[:6]
+                            if str(item)
+                        ],
+                        "recommended_actions": [
+                            str(item) for item in list(diagnosis.get("recommended_actions") or [])[:6]
+                            if str(item)
+                        ],
+                    },
+                    "recent_event_types": [
+                        str(event.get("event_type") or "")
+                        for event in (snapshot.get("recent_events") or [])[-5:]
+                        if isinstance(event, dict)
+                    ],
+                },
+            },
+        }
+        text = public_message
+        try:
+            if hasattr(self._corona_engine, "network_send_system_message_ex"):
+                self._corona_engine.network_send_system_message_ex(
+                    "system",
+                    "系统",
+                    text,
+                    "action_status",
+                    metadata["disclosure"]["event_id"],
+                    json.dumps(metadata, ensure_ascii=False),
+                )
+            elif hasattr(self._corona_engine, "network_send_system_message"):
+                self._corona_engine.network_send_system_message("system", "系统", text)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to emit generation scheduler disclosure: %s", exc)
 
     def _get_host_action_executor(self) -> Any:
         if self._host_action_executor is None:
             self._host_action_executor = LanChatHostActionExecutor(
                 corona_engine=self._corona_engine,
                 agent_factory=self._agent_factory or self._default_agent_factory,
+                structured_action_handler=self._get_interaction_coordinator().execute_action_payload,
             )
         return self._host_action_executor
+
+    def _get_interaction_coordinator(self) -> InteractionCoordinator:
+        if self._interaction_coordinator is None:
+            self._interaction_coordinator = InteractionCoordinator(
+                scheduler=self._get_generation_scheduler(),
+            )
+        return self._interaction_coordinator
+
+    def _get_generation_scheduler(self) -> Any:
+        if self._generation_scheduler is None:
+            if self._composer_factory is not None:
+                runner = SceneComposerJobRunner(self._composer_factory)
+                self._generation_scheduler = GenerationScheduler(
+                    stage_handlers=runner.stage_handlers(),
+                    stage_order=("compose",),
+                )
+            else:
+                self._generation_scheduler = GenerationScheduler()
+            self._install_generation_scheduler_hooks(self._generation_scheduler)
+        return self._generation_scheduler
+
+    def _install_generation_scheduler_hooks(self, scheduler: Any) -> None:
+        self._install_deferred_download_scheduler(scheduler)
+        self._install_media_task_scheduler(scheduler)
+
+    def _clear_generation_scheduler_hooks(self, scheduler: Any) -> None:
+        self._clear_deferred_download_scheduler(scheduler)
+        self._clear_media_task_scheduler(scheduler)
+
+    def _install_deferred_download_scheduler(self, scheduler: Any) -> None:
+        try:
+            from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import model_tools
+        except Exception:
+            return
+        setter = getattr(model_tools, "set_deferred_download_scheduler", None)
+        if callable(setter):
+            try:
+                setter(scheduler)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("Failed to install deferred download scheduler: %s", exc)
+
+    def _clear_deferred_download_scheduler(self, scheduler: Any) -> None:
+        try:
+            from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import model_tools
+        except Exception:
+            return
+        getter = getattr(model_tools, "get_deferred_download_scheduler", None)
+        setter = getattr(model_tools, "set_deferred_download_scheduler", None)
+        if not callable(getter) or not callable(setter):
+            return
+        try:
+            if getter() is scheduler:
+                setter(None)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to clear deferred download scheduler: %s", exc)
+
+    def _install_media_task_scheduler(self, scheduler: Any) -> None:
+        try:
+            from plugins.AITool.Quasar.ai_media_resource import registry
+        except Exception:
+            return
+        setter = getattr(registry, "set_media_task_scheduler", None)
+        if callable(setter):
+            try:
+                setter(scheduler)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("Failed to install media task scheduler: %s", exc)
+
+    def _clear_media_task_scheduler(self, scheduler: Any) -> None:
+        try:
+            from plugins.AITool.Quasar.ai_media_resource import registry
+        except Exception:
+            return
+        getter = getattr(registry, "get_media_task_scheduler", None)
+        setter = getattr(registry, "set_media_task_scheduler", None)
+        if not callable(getter) or not callable(setter):
+            return
+        try:
+            if getter() is scheduler:
+                setter(None)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to clear media task scheduler: %s", exc)
+
+    def _prepare_confirmed_action_payload(
+        self,
+        payload: dict[str, Any] | None,
+        trigger: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not payload or payload.get("status") != "confirmed":
+            return payload
+        if str(payload.get("action_type") or "") != "start_generation":
+            return payload
+        if payload.get("seed_plan") and payload.get("plan_id"):
+            return payload
+
+        coordinator = self._get_interaction_coordinator()
+        room_id = str(trigger.get("room_id") or payload.get("room_id") or "default")
+        host_id = str(trigger.get("sender_id") or payload.get("source_user_id") or "host")
+        intent_text = str(
+            payload.get("resolved_intent_text")
+            or payload.get("intent_text")
+            or trigger.get("text")
+            or ""
+        )
+        plan = coordinator.create_or_update_seed_plan(ChatMessage(
+            room_id=room_id,
+            sender_id=host_id,
+            sender_name=str(trigger.get("sender_name") or ""),
+            text=intent_text,
+            is_host=True,
+            agent_id=str(trigger.get("agent_id") or ""),
+            agent_name=str(trigger.get("agent_name") or ""),
+        ))
+        if plan.status.value == "draft":
+            plan.propose()
+        confirmed = coordinator.confirm_seed_plan(plan.plan_id, host_id)
+        structured = dict(payload)
+        structured.update({
+            "action_type": "start_generation",
+            "execution": "coordinator_structured",
+            "plan_id": confirmed.payload["plan_id"],
+            "plan_version": confirmed.payload["plan_version"],
+            "room_id": room_id,
+            "seed_plan": confirmed.payload["seed_plan"],
+            "requires_host_confirm": False,
+            "status": "confirmed",
+        })
+        structured.setdefault("intent_text", intent_text)
+        return structured
 
     @staticmethod
     def _correlation_id(trigger: dict[str, Any]) -> str:

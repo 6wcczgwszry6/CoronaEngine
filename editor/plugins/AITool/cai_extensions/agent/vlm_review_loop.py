@@ -28,21 +28,35 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _coerce_confidence(value: Any) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return max(0.0, min(1.0, confidence))
+
+
 @dataclass
 class VlmAdvice:
     """VLM 对单个模型的审查建议（advisory，不强制）。"""
     actor_id: str
     overall: str = "PASS"                       # "PASS" | "WARN" | "FAIL" | "SKIPPED"
+    position_correction: List[float] = field(default_factory=list)
     rotation_correction: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     scale_correction: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
     issues: List[str] = field(default_factory=list)
     fix_suggestion: str = ""
+    confidence: float = 0.0
 
     def has_correction(self) -> bool:
-        """是否给出了非平凡的修正建议（旋转非零或缩放非 1）。"""
+        """是否给出了非平凡的修正建议（位置、旋转或缩放）。"""
+        pos_nontrivial = len(self.position_correction) >= 3
         rot_nontrivial = any(abs(r) > 1e-3 for r in self.rotation_correction)
         scale_nontrivial = any(abs(s - 1.0) > 1e-3 for s in self.scale_correction)
-        return rot_nontrivial or scale_nontrivial
+        return pos_nontrivial or rot_nontrivial or scale_nontrivial
+
+    def is_confident(self, threshold: float = 0.55) -> bool:
+        return _coerce_confidence(self.confidence) >= threshold
 
 
 @dataclass
@@ -51,10 +65,14 @@ class VlmReviewReport:
     advices: List[VlmAdvice] = field(default_factory=list)
     skipped: List[str] = field(default_factory=list)       # 截图/审查失败被跳过的
     timed_out: List[str] = field(default_factory=list)      # 截图超时（卡死源兜底命中）
+    confidence_threshold: float = 0.55
 
     def actionable(self) -> List[VlmAdvice]:
         """返回有可执行修正建议的条目（供 FinalReview 选择性采纳）。"""
-        return [a for a in self.advices if a.has_correction() or a.overall == "FAIL"]
+        return [
+            a for a in self.advices
+            if a.is_confident(self.confidence_threshold) and (a.has_correction() or a.overall == "FAIL")
+        ]
 
     def to_user_text(self) -> str:
         act = self.actionable()
@@ -63,6 +81,17 @@ class VlmReviewReport:
                 skipped = len(self.skipped)
                 timed_out = len(self.timed_out)
                 return f"VLM 外审未完成：截图失败/跳过 {skipped} 个，超时 {timed_out} 个；本轮以 AABB 几何检查为准。"
+            low_confidence_count = sum(
+                1
+                for advice in self.advices
+                if not advice.is_confident(self.confidence_threshold)
+                and (advice.has_correction() or advice.overall == "FAIL")
+            )
+            if low_confidence_count:
+                return (
+                    f"VLM 审查发现 {low_confidence_count} 条低置信建议；"
+                    "本轮不自动执行，等待后续批次或人工确认。"
+                )
             return "VLM 审查未发现明显语义问题。"
         lines = ["VLM 审查发现可优化项（建议，非强制）："]
         for a in act[:5]:
@@ -132,10 +161,12 @@ def review_models_async(
         advice = VlmAdvice(
             actor_id=actor_id,
             overall=str(raw.get("overall", "PASS")),
+            position_correction=list(raw.get("position_correction", []) or []),
             rotation_correction=list(raw.get("rotation_correction", [0.0, 0.0, 0.0])),
             scale_correction=list(raw.get("scale_correction", [1.0, 1.0, 1.0])),
             issues=list(raw.get("issues", []) or []),
             fix_suggestion=str(raw.get("fix_suggestion", "") or ""),
+            confidence=_coerce_confidence(raw.get("confidence")),
         )
         report.advices.append(advice)
 

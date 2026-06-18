@@ -129,6 +129,7 @@ public:
                                             const std::string& local_peer_id,
                                             bool is_agent_reply = false);
     [[nodiscard]] std::optional<LanChatAgentTrigger> pop_agent_trigger();
+    [[nodiscard]] std::optional<LanChatMessage> pop_coordinator_sync_message();
 
     LanChatResult lock_object(const std::string& object_id,
                               const std::string& user_id,
@@ -167,6 +168,7 @@ private:
     [[nodiscard]] std::vector<LanChatAgent>::iterator find_agent(const std::string& agent_id);
     [[nodiscard]] std::vector<ObjectLock>::iterator find_lock(const std::string& object_id);
     [[nodiscard]] std::vector<LanChatIntent>::iterator find_intent(const std::string& user_id);
+    void enqueue_coordinator_sync_message(const LanChatMessage& message);
 
     std::string room_id_;
     uint64_t next_seq_ = 1;
@@ -176,6 +178,9 @@ private:
     mutable std::mutex agent_trigger_mutex_;
     std::deque<LanChatAgentTrigger> pending_agent_triggers_;
     std::unordered_set<std::string> triggered_agent_keys_;
+    mutable std::mutex coordinator_sync_mutex_;
+    std::deque<LanChatMessage> pending_coordinator_sync_messages_;
+    std::unordered_set<std::string> coordinator_sync_message_ids_;
     std::vector<ObjectLock> locks_;
     std::vector<LanChatIntent> intents_;
 };

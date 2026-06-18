@@ -50,7 +50,7 @@ class LanChatAgentOrchestrator:
         "按照这个方案进行场景建筑生成", "按照这个方案进行场景生成",
     )
     _STALE_PLAN_WORDS = ("换方案", "不要刚才", "不要这个方案", "重新讨论", "重来", "作废")
-    _PROPOSAL_ID_PATTERN = re.compile(r"\bgm-\d+\b", re.I)
+    _PROPOSAL_ID_PATTERN = re.compile(r"\b(?:gm-\d+|fa-[\w.-]+|cr-[\w.-]+)\b", re.I)
 
     def __init__(
         self,
@@ -350,6 +350,15 @@ class LanChatAgentOrchestrator:
         correlation_id = str(trigger.get("correlation_id") or metadata.get("proposal_id") or "").strip().lower()
         if correlation_id:
             mentioned_ids.add(correlation_id)
+        external_confirmation = self._consume_external_confirmation(
+            mentioned_ids,
+            is_confirm=is_confirm,
+            is_reject=is_reject,
+            is_structured_confirmation=is_structured_confirmation,
+            trigger=trigger,
+        )
+        if external_confirmation is not None:
+            return external_confirmation
         processed_matches = [item for item in sorted(mentioned_ids) if item in self._processed_proposals]
         if processed_matches:
             replay_id = processed_matches[0]
@@ -373,7 +382,7 @@ class LanChatAgentOrchestrator:
                 self._processed_proposals.setdefault(item, "mismatched")
             current = self._current_pending_proposal_id() or pid
             return f"【GM】确认编号不匹配，当前待确认提案是 {current}。请回复：@GM 确认 {current} 或 @GM 拒绝 {current}。"
-        host_check = self._trusted_host_confirmation(trigger)
+        host_check = self._trusted_host_confirmation({**metadata, **trigger})
         if host_check is False:
             return f"【GM】只有房主可以确认 {pid}；该请求没有进入 host 执行队列。"
         if is_confirm:
@@ -401,6 +410,80 @@ class LanChatAgentOrchestrator:
                 self._pending_proposal = self._latest_pending_proposal()
             self._processed_proposals[pid.lower()] = "rejected"
             return f"【GM】已取消 {pid}，不会执行该提案。"
+        return None
+
+    def _consume_external_confirmation(
+        self,
+        mentioned_ids: set[str],
+        *,
+        is_confirm: bool,
+        is_reject: bool,
+        is_structured_confirmation: bool,
+        trigger: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Acknowledge Coordinator-owned proposal ids without host-executing them."""
+        if not is_structured_confirmation:
+            return None
+        external_ids = [
+            item for item in sorted(mentioned_ids)
+            if item.startswith("fa-") or item.startswith("cr-")
+        ]
+        if not external_ids:
+            return None
+        proposal_id = external_ids[0]
+        is_conflict_resolution = proposal_id.startswith("cr-")
+        label = "冲突决议候选" if is_conflict_resolution else "最终调整提案"
+        action_type = (
+            "conflict_resolution_confirmation"
+            if is_conflict_resolution
+            else "final_adjustment_confirmation"
+        )
+        trigger = trigger or {}
+        metadata = self._metadata_from_trigger(trigger)
+        source_user_id = str(
+            trigger.get("source_user_id")
+            or trigger.get("sender_id")
+            or metadata.get("source_user_id")
+            or metadata.get("sender_id")
+            or metadata.get("confirmed_by")
+            or ""
+        ).strip()
+        host_check = self._trusted_host_confirmation({**metadata, **trigger})
+        if host_check is False:
+            return f"【GM】只有房主可以处理{label} {proposal_id}；该请求没有进入确认流程。"
+        if not source_user_id:
+            return f"【GM】缺少房主确认身份，不能处理{label} {proposal_id}。"
+        if proposal_id in self._processed_proposals:
+            status = self._processed_proposals[proposal_id]
+            return f"【GM】{label} {proposal_id} 已处理（{status}），不会重复确认。"
+        if is_confirm:
+            self._processed_proposals[proposal_id] = "confirmed"
+            self._last_confirmed_action = {
+                "action_type": action_type,
+                "execution": "coordinator_only",
+                "proposal_id": proposal_id,
+                "decision": "confirm",
+                "status": "confirmed",
+                "requires_host_confirm": False,
+                "source_user_id": source_user_id,
+            }
+            if is_conflict_resolution:
+                return f"【GM】已确认冲突决议候选 {proposal_id}，将交由方案确认流程处理。"
+            return f"【GM】已确认最终调整提案 {proposal_id}，将交由最终调整流程处理。"
+        if is_reject:
+            self._processed_proposals[proposal_id] = "rejected"
+            self._last_confirmed_action = {
+                "action_type": action_type,
+                "execution": "coordinator_only",
+                "proposal_id": proposal_id,
+                "decision": "reject",
+                "status": "rejected",
+                "requires_host_confirm": False,
+                "source_user_id": source_user_id,
+            }
+            if is_conflict_resolution:
+                return f"【GM】已拒绝冲突决议候选 {proposal_id}，方案仍需继续讨论或重新提案。"
+            return f"【GM】已拒绝最终调整提案 {proposal_id}，不会自动应用该冲突调整。"
         return None
 
     def _find_confirmation_proposal(self, mentioned_ids: set[str]) -> dict[str, Any] | None:
@@ -447,6 +530,10 @@ class LanChatAgentOrchestrator:
             latest = str(trigger.get("text") or "")
             messages = [
                 "【当前点名上下文】\n"
+                "【链路上下文】"
+                f"room_id={trigger.get('room_id') or ''} "
+                f"agent_id={trigger.get('agent_id') or ''} "
+                f"agent_name={trigger.get('agent_name') or ''}\n"
                 f"本轮明确被 @ 的 AI 助手是：{agent_name}。\n"
                 f"最新用户消息是发给你的：{latest}\n"
                 "请以该助手身份回应，不要因为历史中出现其他 @对象 而拒绝执行或越位判断。"

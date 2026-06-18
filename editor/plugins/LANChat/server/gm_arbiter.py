@@ -21,6 +21,39 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+_SENSITIVE_GM_TEXT_MARKERS = (
+    "prompt",
+    "raw_prompt",
+    "provider",
+    "model_provider",
+    "runtime_context",
+    "scheduler_updates",
+    "hidden_debug_ref",
+    "debug",
+    "job_id",
+    "session_id",
+    "token",
+    "api_key",
+    "vlm_raw",
+)
+
+
+def _safe_user_text(value: Any, *, fallback: str = "") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    lower = text.lower()
+    cut_points = [
+        lower.find(marker)
+        for marker in _SENSITIVE_GM_TEXT_MARKERS
+        if lower.find(marker) >= 0
+    ]
+    if cut_points:
+        keep = text[:min(cut_points)].strip(" \t\r\n,;；。")
+        return keep or fallback or "内部细节已隐藏"
+    return text
+
+
 @dataclass
 class UserRequest:
     """一条用户请求（通过 @agent 发出）。"""
@@ -94,7 +127,11 @@ class GMArbiter:
                         kind="同物体冲突",
                         req_a=req_a,
                         req_b=req_b,
-                        detail=f"{req_a.user_id} 和 {req_b.user_id} 同时要操作 {req_a.target_actor}",
+                        detail=(
+                            f"{_safe_user_text(req_a.user_id, fallback='用户')} 和 "
+                            f"{_safe_user_text(req_b.user_id, fallback='用户')} 同时要操作 "
+                            f"{_safe_user_text(req_a.target_actor, fallback='同一目标')}"
+                        ),
                     ))
         return conflicts
 
@@ -111,16 +148,22 @@ class GMArbiter:
         else:
             first, second = conflict.req_b, conflict.req_a
 
+        first_user = _safe_user_text(first.user_id, fallback="先到用户")
+        second_user = _safe_user_text(second.user_id, fallback="后到用户")
+        target_actor = _safe_user_text(conflict.req_a.target_actor, fallback="同一目标")
+        first_text = _safe_user_text(first.text, fallback="请求")
+        second_text = _safe_user_text(second.text, fallback="请求")
+
         return GMArbiterProposal(
             conflict=conflict,
             resolution="按时间先后",
             explanation=(
-                f"{first.user_id} 和 {second.user_id} 同时想操作 {conflict.req_a.target_actor}。\n"
-                f"建议按谁先说谁先执行：先 {first.user_id}，再 {second.user_id}。"
+                f"{first_user} 和 {second_user} 同时想操作 {target_actor}。\n"
+                f"建议按谁先说谁先执行：先 {first_user}，再 {second_user}。"
             ),
             action_plan=[
-                f"执行 {first.user_id} 的请求（{first.text[:20]}...）",
-                f"执行 {second.user_id} 的请求（{second.text[:20]}...）",
+                f"执行 {first_user} 的请求（{first_text[:20]}...）",
+                f"执行 {second_user} 的请求（{second_text[:20]}...）",
             ],
         )
 
@@ -132,17 +175,50 @@ class GMArbiter:
         """等待房主确认 GM 提案。
 
         返回：
+        - "pending_host_confirmation" — 已挂起，等待房主显式确认/拒绝
         - "confirmed" — 房主确认，按 action_plan 执行
-        - "modified" — 房主修改了顺序（TODO: 实现修改接口）
+        - "rejected" — 房主拒绝，丢弃提案
+        - "modified" — 房主修改了顺序或执行计划
         - "timeout" — 超时，默认按提案执行
 
-        当前简化版：立即返回 "confirmed"（假设房主默认同意）。
-        完整版需前端 UI：弹窗显示 proposal.explanation + action_plan，房主点确认/改。
+        Legacy 模块不再默认自动确认。新版控制面由
+        AITool.services.interaction_coordinator 收口；这里仅保留一个显式
+        pending 状态，避免旧入口绕过房主确认。
         """
         logger.info("[GMArbiter] 等待房主确认提案: %s", proposal.explanation)
-        # TODO: 发消息给房主前端 → 等回复
-        # 简化版：直接确认
+        self._pending_proposal = proposal
+        return "pending_host_confirmation"
+
+    def confirm_pending_proposal(self) -> str:
+        """Confirm the currently pending legacy GM proposal."""
+        if self._pending_proposal is None:
+            return "no_pending_proposal"
+        self._pending_proposal = None
         return "confirmed"
+
+    def reject_pending_proposal(self) -> str:
+        """Reject the currently pending legacy GM proposal."""
+        if self._pending_proposal is None:
+            return "no_pending_proposal"
+        self._pending_proposal = None
+        return "rejected"
+
+    def modify_pending_proposal(self, action_plan: List[str]) -> str:
+        """Replace the pending proposal action plan with an explicit host edit."""
+        if self._pending_proposal is None:
+            return "no_pending_proposal"
+        safe_plan = [
+            _safe_user_text(item, fallback="内部细节已隐藏")
+            for item in action_plan
+            if str(item or "").strip()
+        ]
+        if not safe_plan:
+            return "invalid_action_plan"
+        self._pending_proposal.action_plan = safe_plan
+        self._pending_proposal.resolution = "房主修改"
+        self._pending_proposal.explanation = "房主已修改 GM 仲裁执行计划。"
+        self._pending_proposal = None
+        return "modified"
 
     def drain_queue(self) -> List[UserRequest]:
         """清空队列（执行完一批后调用）。返回已处理的请求列表。"""

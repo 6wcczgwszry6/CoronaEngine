@@ -54,6 +54,25 @@ uint64_t network_now_ms() {
         std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
+nb::dict lanchat_message_to_dict(const Corona::Network::LanChatMessage& message) {
+    nb::dict item;
+    item["message_id"] = message.message_id;
+    item["sender_id"] = message.sender_id;
+    item["sender_name"] = message.sender_name;
+    item["room_id"] = message.room_id;
+    item["seq"] = message.seq;
+    item["from"] = message.sender_name;
+    item["text"] = message.text;
+    item["ts"] = message.timestamp_ms / 1000;
+    item["sender_type"] = message.sender_type;
+    item["message_kind"] = message.message_kind;
+    item["target_agent_id"] = message.target_agent_id;
+    item["source_user_id"] = message.source_user_id;
+    item["correlation_id"] = message.correlation_id;
+    item["metadata_json"] = message.metadata_json;
+    return item;
+}
+
 }  // namespace
 
 void BindAll(nanobind::module_& m) {
@@ -480,6 +499,41 @@ void BindAll(nanobind::module_& m) {
        nb::arg("correlation_id") = "", nb::arg("metadata_json") = "",
        "Send a structured AI agent reply through the C++ LANChat channel.");
 
+    m.def("network_send_system_message_to_host_ex",
+          [](const std::string& sender_id,
+             const std::string& sender_name,
+             const std::string& text,
+             const std::string& message_kind,
+             const std::string& correlation_id,
+             const std::string& metadata_json) -> bool {
+              auto sys = get_network_system();
+              return sys && sys->lanchat_send_system_message_to_host_ex(
+                  sender_id, sender_name, text, message_kind, correlation_id,
+                  metadata_json).accepted;
+          },
+          nb::arg("sender_id"), nb::arg("sender_name"), nb::arg("text"),
+          nb::arg("message_kind") = "action_status",
+          nb::arg("correlation_id") = "", nb::arg("metadata_json") = "",
+          "Send a host-only LANChat system message to the local host UI.");
+
+    m.def("network_send_system_message_to_user_ex",
+          [](const std::string& target_user_id,
+             const std::string& sender_id,
+             const std::string& sender_name,
+             const std::string& text,
+             const std::string& message_kind,
+             const std::string& correlation_id,
+             const std::string& metadata_json) -> bool {
+              auto sys = get_network_system();
+              return sys && sys->lanchat_send_system_message_to_user_ex(
+                  target_user_id, sender_id, sender_name, text, message_kind,
+                  correlation_id, metadata_json).accepted;
+          },
+          nb::arg("target_user_id"), nb::arg("sender_id"), nb::arg("sender_name"),
+          nb::arg("text"), nb::arg("message_kind") = "action_status",
+          nb::arg("correlation_id") = "", nb::arg("metadata_json") = "",
+          "Send a local-user LANChat system message without room broadcast.");
+
 	    m.def("network_pop_lanchat_agent_trigger", []() -> nb::object {
 	        auto sys = get_network_system();
 	        if (!sys) {
@@ -527,9 +581,37 @@ void BindAll(nanobind::module_& m) {
         }
 	        result["history"] = history;
 	        return nb::object(result);
-	    }, "Pop one pending LANChat AI agent trigger owned by this peer.");
+		    }, "Pop one pending LANChat AI agent trigger owned by this peer.");
 
-	    m.def("network_lanchat_history_snapshot", [](int limit) -> nb::list {
+        m.def("network_pop_lanchat_coordinator_sync_message", []() -> nb::object {
+            auto sys = get_network_system();
+            if (!sys) {
+                return nb::none();
+            }
+            auto message = sys->lanchat_pop_coordinator_sync_message();
+            if (!message.has_value()) {
+                return nb::none();
+            }
+            return nb::object(lanchat_message_to_dict(*message));
+        }, "Pop one ordinary LANChat message that should be synced into InteractionCoordinator.");
+
+        m.def("network_pop_lanchat_room_event", []() -> nb::object {
+            auto sys = get_network_system();
+            if (!sys) {
+                return nb::none();
+            }
+            auto event = sys->lanchat_pop_room_event();
+            if (!event.has_value()) {
+                return nb::none();
+            }
+            nb::dict item;
+            item["channel"] = "lanchat";
+            item["event"] = event->event;
+            item["room_id"] = event->room_id;
+            return nb::object(item);
+        }, "Pop one LANChat room lifecycle event for Python scheduler/Coordinator cleanup.");
+	
+		    m.def("network_lanchat_history_snapshot", [](int limit) -> nb::list {
 	        nb::list history;
 	        auto sys = get_network_system();
 	        if (!sys) {

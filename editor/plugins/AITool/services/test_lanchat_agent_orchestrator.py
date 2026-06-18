@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 import threading
 import time
 
@@ -10,12 +11,25 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from plugins.AITool.services.lanchat_agent_orchestrator import LanChatAgentOrchestrator  # noqa: E402
 from plugins.AITool.services.lanchat_host_action_executor import LanChatHostActionExecutor  # noqa: E402
-from plugins.AITool.services.lanchat_agent_worker import LANChatAgentWorker  # noqa: E402
+from plugins.AITool.services.lanchat_agent_worker import (  # noqa: E402
+    LANChatAgentWorker,
+    MAX_ACTIVE_ROOM_IDS,
+    MAX_COORDINATOR_SEEN_MESSAGE_IDS,
+)
 from plugins.AITool.services.lanchat_scene_runtime import get_lanchat_scene_runtime  # noqa: E402
+from plugins.AITool.services.generation_scheduler import GenerationScheduler  # noqa: E402
+from plugins.AITool.services.interaction_coordinator import (  # noqa: E402
+    ChatMessage,
+    InteractionCoordinator,
+)
+from plugins.AITool.services.seed_plan import SeedPlanStatus  # noqa: E402
+from plugins.AITool.services.disclosure_policy import DisclosureEvent  # noqa: E402
 from plugins.AITool.cai_extensions.agent.scene_composer import (  # noqa: E402
     _has_resolved_plan_context,
     _looks_generic_inventory,
 )
+from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import model_tools  # noqa: E402
+from plugins.AITool.Quasar.ai_media_resource import registry as media_registry  # noqa: E402
 
 
 def _agent_factory():
@@ -45,11 +59,19 @@ def _trigger(text="@小B 添加一个篝火", agent_name="小B"):
 
 
 class FakeEngine:
-    def __init__(self, triggers):
+    def __init__(self, triggers, coordinator_messages=None, room_events=None):
         self.triggers = list(triggers)
+        self.coordinator_messages = list(coordinator_messages or [])
+        self.room_events = list(room_events or [])
         self.replies = []
         self.intents = []
         self.system_messages = []
+
+    def network_pop_lanchat_room_event(self):
+        return self.room_events.pop(0) if self.room_events else None
+
+    def network_pop_lanchat_coordinator_sync_message(self):
+        return self.coordinator_messages.pop(0) if self.coordinator_messages else None
 
     def network_pop_lanchat_agent_trigger(self):
         return self.triggers.pop(0) if self.triggers else None
@@ -116,6 +138,31 @@ class FakeGate:
         return fn(*args, **kwargs)
 
 
+class TargetedHostFakeEngine(FakeEngine):
+    def __init__(self, triggers):
+        super().__init__(triggers)
+        self.targeted_host_messages = []
+
+    def network_send_system_message_to_host_ex(
+        self,
+        sender_id,
+        sender_name,
+        text,
+        message_kind="agent_reply",
+        correlation_id="",
+        metadata_json="",
+    ):
+        self.targeted_host_messages.append((
+            sender_id,
+            sender_name,
+            text,
+            message_kind,
+            correlation_id,
+            metadata_json,
+        ))
+        return True
+
+
 class FakeHostActionExecutor:
     def __init__(self):
         self.payloads = []
@@ -123,6 +170,34 @@ class FakeHostActionExecutor:
     def enqueue_and_process(self, payload):
         self.payloads.append(dict(payload))
         return None
+
+
+class FakeScheduler:
+    def __init__(self):
+        self.submitted = []
+        self.statuses = {}
+        self.paused_sessions = []
+        self.resumed_sessions = []
+
+    def submit(self, payload):
+        self.submitted.append(dict(payload))
+        job_id = str(payload.get("job_id") or "job-worker-1")
+        self.statuses[job_id] = {"job_id": job_id, "status": "queued", "result": {}}
+        return {"job_id": job_id, "status": "queued", **payload}
+
+    def status(self, job_id):
+        return self.statuses.get(job_id, {"job_id": job_id, "status": "not_found"})
+
+    def wait(self, job_id, timeout=5.0):
+        return self.status(job_id)
+
+    def pause_session(self, session_id):
+        self.paused_sessions.append(str(session_id))
+        return {"session_id": str(session_id), "status": "paused", "success": True}
+
+    def resume_session(self, session_id):
+        self.resumed_sessions.append(str(session_id))
+        return {"session_id": str(session_id), "status": "running", "success": True}
 
 
 def test_regular_role_agent_reply():
@@ -828,6 +903,1575 @@ def test_worker_broadcasts_confirmed_gm_action():
     print("[OK] worker broadcasts confirmed GM action payload and queues host execution")
 
 
+def test_worker_acknowledges_final_adjustment_confirmation_without_host_execution():
+    executor = FakeHostActionExecutor()
+    coordinator = InteractionCoordinator()
+    coordinator.ingest_message(ChatMessage(room_id="room-a", sender_id="host-a", is_host=True, text="室外暗黑集市"))
+    plan = coordinator.propose_seed_plan("room-a")
+    coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    coordinator.execute_confirmed_plan(plan.plan_id)
+    coordinator.ingest_intervention({
+        "room_id": "room-a",
+        "plan_id": plan.plan_id,
+        "actor_id": "actor-stall",
+        "source_user_id": "u1",
+        "intent_type": "remove",
+        "content": "删除入口摊位",
+        "priority": 2,
+        "apply_policy": "final_adjustment",
+    })
+    coordinator.ingest_intervention({
+        "room_id": "room-a",
+        "plan_id": plan.plan_id,
+        "actor_id": "actor-stall",
+        "source_user_id": "u2",
+        "intent_type": "modify",
+        "content": "保留入口摊位并调暗",
+        "priority": 2,
+        "apply_policy": "final_adjustment",
+    })
+    proposal_id = coordinator.final_adjustment_plan(plan.plan_id)["conflicts"][0]["proposal_id"]
+    event_start = len(coordinator.events)
+    engine = FakeEngine([
+        {
+            **_trigger(f"@GM 确认 {proposal_id}", "GM"),
+            "message_kind": "confirmation",
+            "correlation_id": proposal_id,
+            "metadata": {
+                "decision": "confirm",
+                "proposal_id": proposal_id,
+            },
+        },
+    ])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        host_action_executor=executor,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+    assert worker.process_once() is True
+
+    assert not executor.payloads
+    assert not engine.intents
+    assert engine.replies and f"已确认最终调整提案 {proposal_id}" in engine.replies[-1][2]
+    new_events = coordinator.events[event_start:]
+    assert any(item.event_type == "final_adjustment_conflict_confirmed" for item in new_events)
+    assert any(
+        json.loads(item[5]).get("disclosure", {}).get("metadata", {}).get("intervention", {}).get("proposal_id") == proposal_id
+        for item in engine.system_messages
+        if len(item) > 5 and item[3] == "action_status"
+    )
+    print("[OK] worker acknowledges final adjustment confirmation without host execution")
+
+
+def test_worker_acknowledges_conflict_resolution_rejection_without_host_execution():
+    executor = FakeHostActionExecutor()
+    coordinator = InteractionCoordinator()
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="u1",
+        sender_name="用户A",
+        text="我想要红墙集市",
+    ))
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="u2",
+        sender_name="用户B",
+        text="这里有冲突：我想要蓝墙集市",
+    ))
+    plan = coordinator.propose_seed_plan("room-a")
+    plan.conflicts.append("用户A要红墙，用户B要蓝墙")
+    proposal = coordinator.propose_conflict_resolution(
+        plan.plan_id,
+        proposed_by="gm",
+        recommendation="建议折中为红蓝灯光分区。",
+    )
+    proposal_id = proposal.proposal_id
+    event_start = len(coordinator.events)
+    engine = FakeEngine([
+        {
+            **_trigger(f"@GM 拒绝 {proposal_id}", "GM"),
+            "message_kind": "confirmation",
+            "correlation_id": proposal_id,
+            "metadata": {
+                "decision": "reject",
+                "proposal_id": proposal_id,
+            },
+        },
+    ])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        host_action_executor=executor,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+    assert worker.process_once() is True
+
+    blocked_plan_confirm = coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    assert not executor.payloads
+    assert not engine.intents
+    assert engine.replies and f"已拒绝冲突决议候选 {proposal_id}" in engine.replies[-1][2]
+    assert proposal.status == "rejected"
+    assert blocked_plan_confirm.ok is False
+    assert blocked_plan_confirm.payload["requires_conflict_resolution"] is True
+    new_events = coordinator.events[event_start:]
+    assert any(item.event_type == "conflict_resolution_rejected" for item in new_events)
+    print("[OK] worker acknowledges conflict resolution rejection without host execution")
+
+
+def test_worker_rejects_coordinator_confirmation_without_sender_identity():
+    executor = FakeHostActionExecutor()
+    coordinator = InteractionCoordinator()
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="u1",
+        sender_name="用户A",
+        text="我想要红墙集市",
+    ))
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="u2",
+        sender_name="用户B",
+        text="这里有冲突：我想要蓝墙集市",
+    ))
+    plan = coordinator.propose_seed_plan("room-a")
+    plan.conflicts.append("用户A要红墙，用户B要蓝墙")
+    proposal = coordinator.propose_conflict_resolution(
+        plan.plan_id,
+        proposed_by="gm",
+        recommendation="建议折中为红蓝灯光分区。",
+    )
+    proposal_id = proposal.proposal_id
+    trigger = {
+        **_trigger(f"@GM 确认 {proposal_id}", "GM"),
+        "message_kind": "confirmation",
+        "correlation_id": proposal_id,
+        "metadata": {
+            "decision": "confirm",
+            "proposal_id": proposal_id,
+        },
+    }
+    trigger.pop("sender_id", None)
+    trigger.pop("source_user_id", None)
+    event_start = len(coordinator.events)
+    engine = FakeEngine([trigger])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        host_action_executor=executor,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+
+    assert not executor.payloads
+    assert not engine.intents
+    assert engine.replies and "缺少房主确认身份" in engine.replies[-1][2]
+    assert proposal.status == "proposed"
+    assert proposal.confirmed_by == ""
+    assert not any(item.event_type == "conflict_resolution_confirmed" for item in coordinator.events[event_start:])
+    assert plan.review_policy.get("conflict_resolutions") in (None, [])
+    print("[OK] worker rejects coordinator confirmation without sender identity")
+
+
+def test_worker_rejects_coordinator_confirmation_from_non_host_role():
+    executor = FakeHostActionExecutor()
+    coordinator = InteractionCoordinator()
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="u1",
+        sender_name="用户A",
+        text="我想要红墙集市",
+    ))
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="u2",
+        sender_name="用户B",
+        text="这里有冲突：我想要蓝墙集市",
+    ))
+    plan = coordinator.propose_seed_plan("room-a")
+    plan.conflicts.append("用户A要红墙，用户B要蓝墙")
+    proposal = coordinator.propose_conflict_resolution(
+        plan.plan_id,
+        proposed_by="gm",
+        recommendation="建议折中为红蓝灯光分区。",
+    )
+    proposal_id = proposal.proposal_id
+    event_start = len(coordinator.events)
+    engine = FakeEngine([
+        {
+            **_trigger(f"@GM 确认 {proposal_id}", "GM"),
+            "sender_id": "u2",
+            "sender_name": "用户B",
+            "sender_role": "participant",
+            "message_kind": "confirmation",
+            "correlation_id": proposal_id,
+            "metadata": {
+                "decision": "confirm",
+                "proposal_id": proposal_id,
+            },
+        },
+    ])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        host_action_executor=executor,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+
+    assert not executor.payloads
+    assert not engine.intents
+    assert engine.replies and "只有房主可以处理" in engine.replies[-1][2]
+    assert proposal.status == "proposed"
+    assert proposal.confirmed_by == ""
+    assert not any(item.event_type == "conflict_resolution_confirmed" for item in coordinator.events[event_start:])
+    assert plan.review_policy.get("conflict_resolutions") in (None, [])
+    print("[OK] worker rejects coordinator confirmation from non-host role")
+
+
+def test_worker_rejects_coordinator_confirmation_from_metadata_non_host_role():
+    executor = FakeHostActionExecutor()
+    coordinator = InteractionCoordinator()
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="u1",
+        sender_name="用户A",
+        text="我想要红墙集市",
+    ))
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="u2",
+        sender_name="用户B",
+        text="这里有冲突：我想要蓝墙集市",
+    ))
+    plan = coordinator.propose_seed_plan("room-a")
+    plan.conflicts.append("用户A要红墙，用户B要蓝墙")
+    proposal = coordinator.propose_conflict_resolution(
+        plan.plan_id,
+        proposed_by="gm",
+        recommendation="建议折中为红蓝灯光分区。",
+    )
+    proposal_id = proposal.proposal_id
+    event_start = len(coordinator.events)
+    engine = FakeEngine([
+        {
+            **_trigger(f"@GM 确认 {proposal_id}", "GM"),
+            "message_kind": "confirmation",
+            "correlation_id": proposal_id,
+            "metadata": {
+                "decision": "confirm",
+                "proposal_id": proposal_id,
+                "sender_role": "participant",
+                "is_host": False,
+            },
+        },
+    ])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        host_action_executor=executor,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+
+    assert not executor.payloads
+    assert not engine.intents
+    assert engine.replies and "只有房主可以处理" in engine.replies[-1][2]
+    assert proposal.status == "proposed"
+    assert proposal.confirmed_by == ""
+    assert not any(item.event_type == "conflict_resolution_confirmed" for item in coordinator.events[event_start:])
+    assert plan.review_policy.get("conflict_resolutions") in (None, [])
+    print("[OK] worker rejects coordinator confirmation from metadata non-host role")
+
+
+def test_worker_wraps_confirmed_generation_as_seed_plan_payload():
+    executor = FakeHostActionExecutor()
+    coordinator = InteractionCoordinator()
+    engine = FakeEngine([
+        _trigger("@GM 开始生成暗黑集市场景", "GM"),
+        _trigger("确认", "GM"),
+    ])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        host_action_executor=executor,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+    assert worker.process_once() is True
+    assert worker.process_once() is True
+
+    assert executor.payloads, "confirmed generation should enter host queue"
+    payload = executor.payloads[-1]
+    assert payload["action_type"] == "start_generation"
+    assert payload["execution"] == "coordinator_structured"
+    assert payload["plan_id"]
+    assert payload["seed_plan"]["plan_id"] == payload["plan_id"]
+    assert payload["seed_plan"]["status"] == "confirmed"
+    assert coordinator.get_plan(payload["plan_id"]) is not None
+    print("[OK] worker wraps confirmed generation as structured SeedPlan payload")
+
+
+def test_worker_default_host_executor_uses_coordinator_handler_for_seed_plan():
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    engine = FakeEngine([])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=None,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="形成方案：室外暗黑集市，准备分批生成",
+    ))
+    plan = coordinator.propose_seed_plan("room-a")
+    confirmed = coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+
+    worker._execute_confirmed_action(confirmed.payload)  # noqa: SLF001 - direct unit coverage for default executor wiring
+
+    assert scheduler.submitted
+    assert scheduler.submitted[-1]["plan_id"] == plan.plan_id
+    assert engine.system_messages
+    assert any("SeedPlan" in item[2] for item in engine.system_messages)
+    disclosure_messages = [
+        item for item in engine.system_messages
+        if len(item) >= 6 and item[3] == "action_status"
+    ]
+    assert disclosure_messages
+    metadata = json.loads(disclosure_messages[-1][5])
+    disclosure = metadata["disclosure"]
+    assert disclosure["audience"] == "participant"
+    assert disclosure["stage"] == "生成中"
+    assert "prompt" not in json.dumps(disclosure, ensure_ascii=False)
+    print("[OK] default worker host executor uses Coordinator structured handler")
+
+
+def test_worker_host_confirmation_disclosure_broadcast_is_sanitized_without_targeted_api():
+    coordinator = InteractionCoordinator(scheduler=FakeScheduler())
+    coordinator._disclosure_events.append(  # noqa: SLF001 - direct worker emission boundary coverage
+        DisclosureEvent(
+            event_id="disc-host-confirm-1",
+            room_id="room-a",
+            audience="host",
+            stage="冲突仲裁",
+            progress=20,
+            public_message="GM 建议采用折中方案，等待房主确认。",
+            available_actions=["confirm_conflict_resolution", "request_clarification"],
+            requires_confirmation=True,
+            metadata={
+                "apply_policy": "host_confirmation",
+                "proposal_id": "conflict-proposal-1",
+                "requires_conflict_resolution": True,
+            },
+        )
+    )
+    engine = FakeEngine([])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=None,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    worker._emit_new_disclosure_events(coordinator, 0)  # noqa: SLF001 - direct unit coverage
+
+    assert engine.system_messages
+    message = engine.system_messages[-1]
+    assert message[3] == "action_status"
+    assert message[2] == "有一项需要房主确认的事项。"
+    assert "GM 建议采用折中方案" not in message[2]
+    metadata = json.loads(message[5])
+    disclosure = metadata["disclosure"]
+    assert disclosure["audience"] == "participant"
+    assert disclosure["requires_confirmation"] is False
+    assert disclosure["public_message"] == "有一项需要房主确认的事项。"
+    assert disclosure["metadata"]["proposal_id"] == "conflict-proposal-1"
+    assert "GM 建议采用折中方案" not in json.dumps(disclosure, ensure_ascii=False)
+    assert "hidden_debug_ref" not in disclosure
+    assert "prompt" not in json.dumps(disclosure, ensure_ascii=False)
+    print("[OK] worker host confirmation disclosure broadcast is sanitized without targeted API")
+
+
+def test_worker_disclosure_emit_survives_coordinator_history_prune():
+    coordinator = InteractionCoordinator(scheduler=FakeScheduler())
+    for index in range(2051):
+        coordinator._record_disclosures(  # noqa: SLF001 - direct watcher cursor coverage
+            room_id="room-a",
+            stage="batch",
+            progress=index % 100,
+            plan={"plan_id": "plan-a", "room_id": "room-a"},
+            intervention={"intent_type": "batch_boundary", "status_message": f"batch-{index}"},
+        )
+    engine = FakeEngine([])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=None,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    emitted = worker._emit_new_disclosure_events(coordinator, 0)  # noqa: SLF001 - direct unit coverage
+
+    assert emitted >= 2051
+    assert engine.system_messages
+    emitted_disclosures = [
+        json.loads(item[5])["disclosure"]
+        for item in engine.system_messages
+        if len(item) >= 6 and item[3] == "action_status"
+    ]
+    assert any(
+        item.get("metadata", {}).get("intervention", {}).get("status_message") == "batch-2050"
+        for item in emitted_disclosures
+    )
+    print("[OK] worker disclosure emission survives Coordinator history pruning")
+
+
+def test_worker_host_confirmation_disclosure_uses_targeted_api_when_available():
+    coordinator = InteractionCoordinator(scheduler=FakeScheduler())
+    coordinator._disclosure_events.append(  # noqa: SLF001 - direct worker emission boundary coverage
+        DisclosureEvent(
+            event_id="disc-host-confirm-2",
+            room_id="room-a",
+            audience="host",
+            stage="冲突仲裁",
+            progress=20,
+            public_message="GM 建议采用折中方案，等待房主确认。",
+            available_actions=["confirm_conflict_resolution", "request_clarification"],
+            requires_confirmation=True,
+            metadata={
+                "apply_policy": "host_confirmation",
+                "proposal_id": "conflict-proposal-2",
+                "requires_conflict_resolution": True,
+            },
+        )
+    )
+    engine = TargetedHostFakeEngine([])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=None,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    worker._emit_new_disclosure_events(coordinator, 0)  # noqa: SLF001 - direct unit coverage
+
+    assert not engine.system_messages
+    assert engine.targeted_host_messages
+    message = engine.targeted_host_messages[-1]
+    assert message[3] == "action_status"
+    assert message[2] == "有一项需要房主确认的事项。"
+    metadata = json.loads(message[5])
+    disclosure = metadata["disclosure"]
+    assert disclosure["audience"] == "host"
+    assert disclosure["requires_confirmation"] is True
+    assert disclosure["public_message"] == "GM 建议采用折中方案，等待房主确认。"
+    assert disclosure["metadata"]["proposal_id"] == "conflict-proposal-2"
+    print("[OK] worker host confirmation disclosure uses targeted API when available")
+
+
+def test_worker_default_coordinator_submits_confirmed_generation_to_scheduler():
+    scheduler = FakeScheduler()
+    engine = FakeEngine([
+        _trigger("@GM 开始生成暗黑集市场景", "GM"),
+        _trigger("确认", "GM"),
+    ])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+    assert worker.process_once() is True
+    assert worker.process_once() is True
+
+    assert scheduler.submitted
+    submitted = scheduler.submitted[-1]
+    assert submitted["job_type"] == "scene_generation"
+    assert submitted["plan_id"]
+    assert submitted["seed_plan"]["status"] == "executing"
+    assert any("SeedPlan" in str(item[2]) for item in engine.system_messages)
+    print("[OK] worker default Coordinator submits confirmed generation to scheduler")
+
+
+def test_worker_exposes_generation_scheduler_snapshot_without_payload_leak():
+    scheduler = GenerationScheduler(queue_limit=2)
+    worker_without_scheduler = LANChatAgentWorker(
+        corona_engine=FakeEngine([]),
+        agent_factory=None,
+        async_agent_execution=False,
+    )
+    try:
+        unavailable = worker_without_scheduler.generation_scheduler_snapshot()
+        submitted = scheduler.submit({
+            "plan_id": "seed-observe",
+            "session_id": "room-a",
+            "prompt": "private prompt should not appear in worker diagnostics",
+        })
+        other = scheduler.submit({
+            "plan_id": "seed-other",
+            "session_id": "room-b",
+            "batch_id": "other-batch",
+            "prompt": "other room private prompt",
+        })
+        final = scheduler.wait(submitted["job_id"], timeout=2.0)
+        other_final = scheduler.wait(other["job_id"], timeout=2.0)
+        worker = LANChatAgentWorker(
+            corona_engine=FakeEngine([]),
+            agent_factory=None,
+            generation_scheduler=scheduler,
+            async_agent_execution=False,
+        )
+        snapshot = worker.generation_scheduler_snapshot()
+        session_snapshot = worker.generation_scheduler_session_snapshot("room-a")
+    finally:
+        worker_without_scheduler.stop()
+        scheduler.shutdown()
+
+    assert unavailable["available"] is False
+    assert final["status"] == "done"
+    assert other_final["status"] == "done"
+    assert snapshot["available"] is True
+    assert snapshot["total_jobs"] >= 1
+    assert session_snapshot["available"] is True
+    assert session_snapshot["total_jobs"] == 1
+    assert "session_id" not in session_snapshot
+    assert "job_id" not in str(session_snapshot)
+    assert "seed-observe" not in str(session_snapshot)
+    assert "other-batch" not in str(session_snapshot)
+    assert "private prompt" not in str(snapshot)
+    assert "private prompt" not in str(session_snapshot)
+    assert "other room private prompt" not in str(session_snapshot)
+    print("[OK] worker exposes generation scheduler snapshot without payload leak")
+
+
+def test_worker_cancels_generation_session_without_touching_other_rooms():
+    started = threading.Event()
+    release = threading.Event()
+
+    def submit(job):
+        if job.session_id == "room-b":
+            started.set()
+            assert release.wait(timeout=1.0)
+
+    scheduler = GenerationScheduler(stage_handlers={"submit": submit}, stage_order=("submit",))
+    worker_without_scheduler = LANChatAgentWorker(
+        corona_engine=FakeEngine([]),
+        agent_factory=None,
+        async_agent_execution=False,
+    )
+    try:
+        unavailable = worker_without_scheduler.cancel_generation_session("room-a")
+        worker = LANChatAgentWorker(
+            corona_engine=FakeEngine([]),
+            agent_factory=None,
+            generation_scheduler=scheduler,
+            async_agent_execution=False,
+        )
+        other = scheduler.submit({"plan_id": "seed-other", "session_id": "room-b"})
+        assert started.wait(timeout=1.0)
+        queued = scheduler.submit({"plan_id": "seed-room-a", "session_id": "room-a"})
+        cancelled = worker.cancel_generation_session("room-a")
+        final_cancelled = scheduler.wait(queued["job_id"], timeout=1.0)
+        other_mid = scheduler.status(other["job_id"])
+        release.set()
+        other_final = scheduler.wait(other["job_id"], timeout=2.0)
+    finally:
+        release.set()
+        worker_without_scheduler.stop()
+        scheduler.shutdown()
+
+    assert unavailable["available"] is False
+    assert cancelled["available"] is True
+    assert cancelled["success"] is True
+    assert cancelled["job_ids"] == [queued["job_id"]]
+    assert final_cancelled["status"] == "cancelled"
+    assert other_mid["status"] == "submitting"
+    assert other_final["status"] == "done"
+    print("[OK] worker cancels generation session without touching other rooms")
+
+
+def test_worker_room_closed_event_cancels_known_generation_session():
+    scheduler = GenerationScheduler(auto_start=True)
+    worker = LANChatAgentWorker(
+        corona_engine=FakeEngine([]),
+        agent_factory=None,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+    try:
+        scheduler.pause_session("room-a")
+        submitted = scheduler.submit({"plan_id": "seed-room-close", "session_id": "room-a"})
+        time.sleep(0.05)
+        worker.sync_chat_message_to_coordinator({
+            "message_id": "room-a-msg-1",
+            "room_id": "room-a",
+            "sender_id": "user-a",
+            "sender_name": "Alice",
+            "sender_type": "user",
+            "message_kind": "chat",
+            "text": "先生成一个室外集市",
+        }, emit_disclosure=False)
+        handled = worker.handle_lanchat_room_event({"event": "room_closed"})
+        final = scheduler.wait(submitted["job_id"], timeout=1.0)
+        snapshot = scheduler.snapshot()
+    finally:
+        scheduler.shutdown()
+
+    assert handled["handled"] is True
+    assert handled["cancelled"][0]["available"] is True
+    assert handled["cancelled"][0]["job_ids"] == [submitted["job_id"]]
+    assert final["status"] == "abandoned"
+    assert "room-a" not in snapshot["paused_sessions"]
+    print("[OK] worker room_closed event cancels known generation session")
+
+
+def test_worker_active_room_registry_is_bounded_for_close_fallback():
+    scheduler = GenerationScheduler(auto_start=True)
+    worker = LANChatAgentWorker(
+        corona_engine=FakeEngine([]),
+        agent_factory=None,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+    try:
+        for index in range(MAX_ACTIVE_ROOM_IDS + 5):
+            worker._remember_room_id(f"room-{index}")
+        assert len(worker._active_room_ids) == MAX_ACTIVE_ROOM_IDS
+        assert "room-0" not in worker._active_room_ids
+        assert f"room-{MAX_ACTIVE_ROOM_IDS + 4}" in worker._active_room_ids
+
+        latest_room = f"room-{MAX_ACTIVE_ROOM_IDS + 4}"
+        scheduler.pause_session(latest_room)
+        submitted = scheduler.submit({
+            "plan_id": "seed-latest-room-close",
+            "session_id": latest_room,
+        })
+        time.sleep(0.05)
+        handled = worker.handle_lanchat_room_event({"event": "room_closed"})
+        final = scheduler.wait(submitted["job_id"], timeout=1.0)
+    finally:
+        scheduler.shutdown()
+
+    assert handled["handled"] is True
+    assert any(
+        result.get("available") is True and submitted["job_id"] in result.get("job_ids", [])
+        for result in handled["cancelled"]
+    )
+    assert final["status"] == "abandoned"
+    assert not worker._active_room_ids
+    assert not worker._active_room_order
+    print("[OK] worker active room registry is bounded for close fallback")
+
+
+def test_worker_polls_native_room_closed_event_for_generation_cancel():
+    scheduler = GenerationScheduler(auto_start=True)
+    engine = FakeEngine(
+        [],
+        room_events=[{"event": "room_closed", "room_id": "room-a"}],
+    )
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=None,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+    try:
+        scheduler.pause_session("room-a")
+        submitted = scheduler.submit({"plan_id": "seed-native-room-close", "session_id": "room-a"})
+        time.sleep(0.05)
+        processed = worker.process_once()
+        final = scheduler.wait(submitted["job_id"], timeout=1.0)
+    finally:
+        scheduler.shutdown()
+
+    assert processed is True
+    assert final["status"] == "abandoned"
+    assert not engine.room_events
+    print("[OK] worker polls native room_closed event and cancels generation session")
+
+
+def test_worker_ignores_non_closing_lanchat_events_for_generation_cancel():
+    scheduler = GenerationScheduler(auto_start=True)
+    worker = LANChatAgentWorker(
+        corona_engine=FakeEngine([]),
+        agent_factory=None,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+    try:
+        scheduler.pause_session("room-a")
+        submitted = scheduler.submit({"plan_id": "seed-member-update", "session_id": "room-a"})
+        time.sleep(0.05)
+        handled = worker.handle_lanchat_room_event({"event": "member_update", "room_id": "room-a"})
+        status = scheduler.status(submitted["job_id"])
+    finally:
+        scheduler.shutdown()
+
+    assert handled["handled"] is False
+    assert status["status"] == "paused"
+    print("[OK] worker ignores non-closing LANChat events for generation cancel")
+
+
+def test_worker_emits_safe_generation_scheduler_disclosure():
+    scheduler = GenerationScheduler(queue_limit=2)
+    engine = FakeEngine([])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=None,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+    try:
+        scheduler.pause_session("room-a")
+        scheduler.pause_session("room-b")
+        scheduler.submit({
+            "plan_id": "seed-resource",
+            "room_id": "room-a",
+            "session_id": "exec-seed-resource-1",
+            "batch_id": "batch-resource",
+            "prompt": "private scheduler disclosure prompt",
+        })
+        scheduler.submit({
+            "plan_id": "seed-other-resource",
+            "room_id": "room-b",
+            "session_id": "exec-seed-other-resource-1",
+            "batch_id": "batch-other-resource",
+            "prompt": "other room private scheduler prompt",
+        })
+        time.sleep(0.05)
+        worker.handle_lanchat_room_event({"event": "member_update", "room_id": "room-a"})
+        worker._emit_generation_scheduler_disclosure()  # noqa: SLF001 - direct safe-disclosure boundary coverage
+    finally:
+        worker.stop()
+        scheduler.shutdown()
+
+    assert engine.system_messages
+    message = engine.system_messages[-1]
+    assert message[3] == "action_status"
+    metadata = json.loads(message[5])
+    disclosure = metadata["disclosure"]
+    disclosure_text = json.dumps(disclosure, ensure_ascii=False)
+    assert disclosure["stage"] == "资源调度"
+    assert disclosure["room_id"] == "room-a"
+    assert disclosure["audience"] == "participant"
+    assert disclosure["metadata"]["queued_count"] == 1
+    assert disclosure["metadata"]["paused_session_count"] == 1
+    assert disclosure["metadata"]["total_jobs"] == 1
+    assert disclosure["metadata"]["diagnosis"]["state"] == "paused"
+    assert "paused_sessions" in disclosure["metadata"]["diagnosis"]["reasons"]
+    assert "resume_or_cancel_paused_sessions" in disclosure["metadata"]["diagnosis"]["recommended_actions"]
+    assert "pause_session" in disclosure["metadata"]["recent_event_types"]
+    assert "exec-seed-resource-1" not in disclosure_text
+    assert "exec-seed-other-resource-1" not in disclosure_text
+    assert "batch-other-resource" not in disclosure_text
+    assert "private scheduler disclosure prompt" not in disclosure_text
+    assert "other room private scheduler prompt" not in disclosure_text
+    assert "job_id" not in disclosure_text
+    print("[OK] worker emits safe generation scheduler disclosure")
+
+
+def test_worker_routes_gm_pace_control_through_coordinator():
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="形成方案：室外暗黑集市，分批生成",
+    ))
+    plan = coordinator.propose_seed_plan("room-a")
+    coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    coordinator.execute_confirmed_plan(plan.plan_id)
+
+    def _should_not_run_agent():
+        raise AssertionError("GM pace control should be handled by Coordinator before model agent")
+
+    trigger = {
+        **_trigger("@GM 暂停一下，先等用户补充", "GM"),
+        "room_id": "room-a",
+        "agent_id": "gm",
+        "agent_name": "GM",
+        "sender_id": "host-a",
+        "sender_name": "房主",
+    }
+    engine = FakeEngine([trigger])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_should_not_run_agent,
+        interaction_coordinator=coordinator,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+
+    assert scheduler.paused_sessions == ["room-a"]
+    assert coordinator.get_plan(plan.plan_id).status == SeedPlanStatus.PAUSED
+    assert engine.replies
+    assert "已暂停后续生成" in engine.replies[-1][2]
+    disclosure_messages = [
+        item for item in engine.system_messages
+        if len(item) >= 6
+        and item[3] == "action_status"
+        and json.loads(item[5]).get("disclosure", {}).get("metadata", {}).get("intervention", {}).get("intent_type") == "pace_control"
+    ]
+    assert disclosure_messages
+    disclosure = json.loads(disclosure_messages[-1][5])["disclosure"]
+    assert disclosure["stage"] == "已暂停"
+    assert disclosure["metadata"]["intervention"]["intent_type"] == "pace_control"
+    assert "prompt" not in json.dumps(disclosure, ensure_ascii=False)
+    print("[OK] worker routes GM pace control through Coordinator without model agent")
+
+
+def test_worker_rejects_gm_pace_control_from_non_host_role():
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="形成方案：室外暗黑集市，分批生成",
+    ))
+    plan = coordinator.propose_seed_plan("room-a")
+    coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    coordinator.execute_confirmed_plan(plan.plan_id)
+
+    def _should_not_run_agent():
+        raise AssertionError("unauthorized GM pace control should be rejected before model agent")
+
+    trigger = {
+        **_trigger("@GM 暂停一下", "GM"),
+        "room_id": "room-a",
+        "agent_id": "gm",
+        "agent_name": "GM",
+        "sender_id": "u2",
+        "sender_name": "用户B",
+        "metadata": {
+            "sender_role": "participant",
+            "is_host": False,
+        },
+    }
+    engine = FakeEngine([trigger])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_should_not_run_agent,
+        interaction_coordinator=coordinator,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+
+    assert scheduler.paused_sessions == []
+    assert coordinator.get_plan(plan.plan_id).status == SeedPlanStatus.EXECUTING
+    assert engine.replies and "只有房主可以控制生成节奏" in engine.replies[-1][2]
+    assert not any(
+        item.event_type == "gm_pace_control"
+        for item in coordinator.events
+    )
+    print("[OK] worker rejects GM pace control from non-host role")
+
+
+def test_worker_routes_gm_clarification_through_coordinator():
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="user-a",
+        sender_name="用户A",
+        text="我们想做一个场景，但室内室外还不清楚。",
+    ))
+    plan = coordinator.active_plan_for_room("room-a")
+    assert plan is not None
+
+    def _should_not_run_agent():
+        raise AssertionError("GM clarification should be handled by Coordinator before model agent")
+
+    trigger = {
+        **_trigger("@GM 澄清一下：请确认室内、室外还是混合场景", "GM"),
+        "room_id": "room-a",
+        "agent_id": "gm",
+        "agent_name": "GM",
+        "sender_id": "host-a",
+        "sender_name": "房主",
+    }
+    engine = FakeEngine([trigger])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_should_not_run_agent,
+        interaction_coordinator=coordinator,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+
+    assert coordinator.get_plan(plan.plan_id).status == SeedPlanStatus.CLARIFYING
+    assert coordinator.get_plan(plan.plan_id).review_policy["clarification_requests"][0]["status"] == "pending"
+    assert engine.replies
+    assert "GM 已请求补充澄清" in engine.replies[-1][2]
+    disclosure_messages = [
+        item for item in engine.system_messages
+        if len(item) >= 6
+        and item[3] == "action_status"
+        and json.loads(item[5]).get("disclosure", {}).get("metadata", {}).get("intervention", {}).get("intent_type") == "clarification"
+    ]
+    assert disclosure_messages
+    disclosure = json.loads(disclosure_messages[-1][5])["disclosure"]
+    assert disclosure["stage"] == "方案整理中"
+    assert "室内、室外还是混合" in disclosure["public_message"]
+    assert "prompt" not in json.dumps(disclosure, ensure_ascii=False)
+    print("[OK] worker routes GM clarification through Coordinator without model agent")
+
+
+def test_worker_rejects_gm_clarification_from_non_host_role():
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="user-a",
+        sender_name="用户A",
+        text="我们想做一个场景，但室内室外还不清楚。",
+    ))
+    plan = coordinator.active_plan_for_room("room-a")
+    assert plan is not None
+
+    def _should_not_run_agent():
+        raise AssertionError("unauthorized GM clarification should be rejected before model agent")
+
+    trigger = {
+        **_trigger("@GM 澄清一下：请确认室内、室外还是混合场景", "GM"),
+        "room_id": "room-a",
+        "agent_id": "gm",
+        "agent_name": "GM",
+        "sender_id": "u2",
+        "sender_name": "用户B",
+        "sender_role": "participant",
+    }
+    engine = FakeEngine([trigger])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_should_not_run_agent,
+        interaction_coordinator=coordinator,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+
+    assert coordinator.get_plan(plan.plan_id).status != SeedPlanStatus.CLARIFYING
+    assert coordinator.get_plan(plan.plan_id).review_policy.get("clarification_requests") in (None, [])
+    assert engine.replies and "只有房主可以发起强制澄清" in engine.replies[-1][2]
+    assert not any(
+        item.event_type == "clarification_requested"
+        for item in coordinator.events
+    )
+    print("[OK] worker rejects GM clarification from non-host role")
+
+
+def test_worker_syncs_plain_chat_history_to_coordinator_without_generation():
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    trigger = _trigger("@小B 你觉得这些想法怎么整理？", "小B")
+    trigger["history"] = [
+        {
+            "message_id": "plain-1",
+            "room_id": "r1",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "text": "我们想做一个室外暗黑集市，摊位不要太密。",
+        },
+        {
+            "message_id": "plain-2",
+            "room_id": "r1",
+            "sender_id": "user-b",
+            "sender_name": "用户B",
+            "sender_type": "user",
+            "message_kind": "chat",
+            "text": "入口处要留出路，后面可以加一座雕像。",
+        },
+        {
+            "message_id": "agent-old",
+            "room_id": "r1",
+            "sender_id": "agent-b",
+            "sender_name": "小B",
+            "sender_type": "agent",
+            "message_kind": "agent_reply",
+            "text": "我来整理。",
+        },
+        {
+            "message_id": trigger["message_id"],
+            "room_id": "r1",
+            "sender_id": "user-a",
+            "sender_name": "用户A",
+            "sender_type": "user",
+            "message_kind": "chat",
+            "text": trigger["text"],
+        },
+    ]
+    engine = FakeEngine([trigger])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+
+    plan = coordinator.active_plan_for_room("r1")
+    assert plan is not None
+    summary = coordinator.memory_summary(room_id="r1", plan_id=plan.plan_id)
+    assert "暗黑集市" in summary["summary_text"]
+    assert "雕像" in summary["summary_text"]
+    assert "@小B 你觉得" not in summary["summary_text"]
+    assert not scheduler.submitted
+    assert engine.replies
+    assert not any(item[3] == "action_status" for item in engine.system_messages)
+    print("[OK] worker syncs plain chat history into Coordinator without triggering generation")
+
+
+def test_worker_syncs_direct_plain_chat_as_runtime_intervention():
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    coordinator.ingest_message(ChatMessage(
+        room_id="r-direct",
+        sender_id="host-a",
+        sender_name="房主",
+        text="我们要做一个室外暗黑集市，入口留出主路。",
+        is_host=True,
+    ))
+    plan = coordinator.propose_seed_plan("r-direct")
+    confirm = coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    assert confirm.ok
+    coordinator.execute_confirmed_plan(plan.plan_id)
+
+    worker = LANChatAgentWorker(
+        corona_engine=FakeEngine([]),
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+
+    message = {
+        "message_id": "direct-plain-1",
+        "room_id": "r-direct",
+        "sender_id": "user-b",
+        "sender_name": "用户B",
+        "sender_type": "user",
+        "message_kind": "chat",
+        "text": "第一批后帮我补一座天使雕塑，放在入口附近。",
+    }
+    assert worker.sync_chat_message_to_coordinator(message) is True
+    assert worker.sync_chat_message_to_coordinator(message) is False
+    assert worker.sync_chat_message_to_coordinator({
+        "message_id": "agent-ignore",
+        "room_id": "r-direct",
+        "sender_id": "agent-b",
+        "sender_type": "agent",
+        "message_kind": "agent_reply",
+        "text": "我来整理。",
+    }) is False
+
+    pending = coordinator.pending_interventions(plan.plan_id)
+    assert len(pending) == 1
+    assert pending[0].source_user_id == "user-b"
+    assert pending[0].intent_type == "add"
+    assert pending[0].apply_policy in {"next_batch", "final_adjustment"}
+    assert "天使雕塑" in pending[0].target_hint
+    summary = coordinator.memory_summary(room_id="r-direct", plan_id=plan.plan_id)
+    assert "天使雕塑" in summary["summary_text"]
+    disclosure_messages = [
+        item for item in worker._corona_engine.system_messages  # noqa: SLF001 - direct bridge disclosure coverage
+        if len(item) >= 6 and item[3] == "action_status"
+    ]
+    assert disclosure_messages
+    metadata = json.loads(disclosure_messages[-1][5])
+    disclosure = metadata["disclosure"]
+    assert disclosure["audience"] == "participant"
+    assert disclosure["stage"] == "可介入窗口"
+    assert "天使雕塑" in disclosure["public_message"]
+    assert "天使雕塑" in disclosure["metadata"]["intervention"]["target_hint"]
+    assert "prompt" not in json.dumps(disclosure, ensure_ascii=False)
+    print("[OK] worker syncs direct plain chat into runtime intervention without agent trigger")
+
+
+def test_worker_syncs_plain_chat_without_message_id_once():
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    coordinator.ingest_message(ChatMessage(
+        room_id="r-direct-no-id",
+        sender_id="host-a",
+        sender_name="房主",
+        text="我们要做一个室外暗黑集市，入口留出主路。",
+        is_host=True,
+    ))
+    plan = coordinator.propose_seed_plan("r-direct-no-id")
+    assert coordinator.confirm_seed_plan(plan.plan_id, "host-a").ok
+    coordinator.execute_confirmed_plan(plan.plan_id)
+
+    worker = LANChatAgentWorker(
+        corona_engine=FakeEngine([]),
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+    message = {
+        "room_id": "r-direct-no-id",
+        "sender_id": "user-b",
+        "sender_name": "用户B",
+        "sender_type": "user",
+        "message_kind": "chat",
+        "text": "第一批后帮我补一座天使雕塑，放在入口附近。",
+    }
+
+    assert worker.sync_chat_message_to_coordinator(message) is True
+    disclosure_count_after_first_sync = len(worker._corona_engine.system_messages)  # noqa: SLF001
+    assert worker.sync_chat_message_to_coordinator(dict(message)) is False
+    assert len(worker._corona_engine.system_messages) == disclosure_count_after_first_sync  # noqa: SLF001
+
+    pending = coordinator.pending_interventions(plan.plan_id)
+    assert len(pending) == 1
+    assert pending[0].source_user_id == "user-b"
+    assert pending[0].intent_type == "add"
+    assert "天使雕塑" in pending[0].target_hint
+    disclosure_messages = [
+        item for item in worker._corona_engine.system_messages  # noqa: SLF001 - direct bridge disclosure coverage
+        if len(item) >= 6 and item[3] == "action_status"
+    ]
+    assert disclosure_messages
+    intervention_disclosures = [
+        json.loads(item[5])["disclosure"]
+        for item in disclosure_messages
+        if "intervention" in json.loads(item[5])["disclosure"].get("metadata", {})
+    ]
+    assert intervention_disclosures
+    assert "天使雕塑" in intervention_disclosures[-1]["metadata"]["intervention"]["target_hint"]
+    print("[OK] worker syncs no-message-id plain chat once with fallback dedupe")
+
+
+def test_worker_plain_chat_dedupe_cache_is_bounded():
+    worker = LANChatAgentWorker(
+        corona_engine=FakeEngine([]),
+        agent_factory=_agent_factory,
+        interaction_coordinator=InteractionCoordinator(scheduler=FakeScheduler()),
+        generation_scheduler=FakeScheduler(),
+        async_agent_execution=False,
+    )
+
+    for index in range(MAX_COORDINATOR_SEEN_MESSAGE_IDS + 3):
+        worker._remember_coordinator_seen_message_id(f"msg-{index}")  # noqa: SLF001
+
+    assert len(worker._coordinator_seen_message_ids) == MAX_COORDINATOR_SEEN_MESSAGE_IDS  # noqa: SLF001
+    assert len(worker._coordinator_seen_message_order) == MAX_COORDINATOR_SEEN_MESSAGE_IDS  # noqa: SLF001
+    assert "msg-0" not in worker._coordinator_seen_message_ids  # noqa: SLF001
+    assert f"msg-{MAX_COORDINATOR_SEEN_MESSAGE_IDS + 2}" in worker._coordinator_seen_message_ids  # noqa: SLF001
+    worker._remember_coordinator_seen_message_id(f"msg-{MAX_COORDINATOR_SEEN_MESSAGE_IDS + 2}")  # noqa: SLF001
+    assert len(worker._coordinator_seen_message_ids) == MAX_COORDINATOR_SEEN_MESSAGE_IDS  # noqa: SLF001
+    print("[OK] worker plain chat Coordinator dedupe cache is bounded")
+
+
+def test_worker_syncs_plain_chat_metadata_actor_target_to_coordinator():
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    coordinator.ingest_message(ChatMessage(
+        room_id="r-actor-meta",
+        sender_id="host-a",
+        sender_name="房主",
+        text="我们先做室外集市入口，后续允许用户调整已生成物体。",
+        is_host=True,
+    ))
+    plan = coordinator.propose_seed_plan("r-actor-meta")
+    assert coordinator.confirm_seed_plan(plan.plan_id, "host-a").ok
+    coordinator.execute_confirmed_plan(plan.plan_id)
+
+    worker = LANChatAgentWorker(
+        corona_engine=FakeEngine([]),
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+
+    message = {
+        "message_id": "direct-actor-meta-1",
+        "room_id": "r-actor-meta",
+        "sender_id": "user-b",
+        "sender_name": "用户B",
+        "sender_type": "user",
+        "message_kind": "chat",
+        "text": "把这个摊位往右挪一点，别挡住入口。",
+        "metadata_json": json.dumps({
+            "actor_id": "stall-actor-7",
+            "actor_version": 4,
+            "target_hint": "入口右侧摊位",
+            "prompt": "hidden prompt must not be forwarded",
+            "provider": "hidden provider",
+        }, ensure_ascii=False),
+    }
+
+    assert worker.sync_chat_message_to_coordinator(message) is True
+    pending = coordinator.pending_interventions(plan.plan_id)
+    assert len(pending) == 1
+    assert pending[0].actor_id == "stall-actor-7"
+    assert pending[0].actor_version == 4
+    assert pending[0].target_hint == "入口右侧摊位"
+    assert pending[0].source_user_id == "user-b"
+    assert "hidden" not in json.dumps(pending[0].as_dict(), ensure_ascii=False)
+    print("[OK] worker preserves safe actor metadata for direct Coordinator interventions")
+
+
+def test_worker_polls_native_plain_chat_queue_into_coordinator():
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    coordinator.ingest_message(ChatMessage(
+        room_id="r-native",
+        sender_id="host-a",
+        sender_name="房主",
+        text="我们要做一个混合室内外展区，先生成入口和主路。",
+        is_host=True,
+    ))
+    plan = coordinator.propose_seed_plan("r-native")
+    assert coordinator.confirm_seed_plan(plan.plan_id, "host-a").ok
+    coordinator.execute_confirmed_plan(plan.plan_id)
+    submitted_before = len(scheduler.submitted)
+
+    native_message = {
+        "message_id": "native-plain-1",
+        "room_id": "r-native",
+        "sender_id": "user-c",
+        "sender_name": "用户C",
+        "sender_type": "user",
+        "message_kind": "chat",
+        "text": "第一批之后把入口右侧的摊位删掉，换成矮墙。",
+    }
+    engine = FakeEngine([], coordinator_messages=[native_message])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+    assert not engine.replies
+    assert len(scheduler.submitted) == submitted_before
+    pending = coordinator.pending_interventions(plan.plan_id)
+    assert len(pending) == 1
+    assert pending[0].source_user_id == "user-c"
+    assert pending[0].intent_type in {"delete", "modify"}
+    assert "入口右侧的摊位" in pending[0].content
+    assert engine.system_messages
+    print("[OK] worker polls native plain chat queue into Coordinator without agent trigger")
+
+
+def test_worker_polls_native_host_chat_as_host_message():
+    coordinator = InteractionCoordinator(scheduler=FakeScheduler())
+    native_message = {
+        "message_id": "native-host-1",
+        "room_id": "r-native-host",
+        "sender_id": "host-a",
+        "sender_name": "房主",
+        "sender_type": "host",
+        "message_kind": "chat",
+        "text": "房主确认：先做室外暗黑集市入口，暂时不要生成室内部分。",
+    }
+    engine = FakeEngine([], coordinator_messages=[native_message])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+    plan = coordinator.active_plan_for_room("r-native-host")
+    assert plan is not None
+    assert plan.host_id == "host-a"
+    assert "暗黑集市" in plan.intent_summary
+    assert not engine.replies
+    print("[OK] worker polls native host chat as host message into Coordinator")
+
+
+def test_worker_does_not_starve_agent_trigger_behind_native_chat_queue():
+    coordinator = InteractionCoordinator(scheduler=FakeScheduler())
+    native_messages = [
+        {
+            "message_id": f"native-burst-{index}",
+            "room_id": "r-burst",
+            "sender_id": f"user-{index}",
+            "sender_name": f"用户{index}",
+            "sender_type": "user",
+            "message_kind": "chat",
+            "text": f"第 {index} 条补充意见，先记录下来。",
+        }
+        for index in range(6)
+    ]
+    trigger = _trigger("@小B 请综合刚才的讨论给一句建议")
+    trigger["room_id"] = "r-burst"
+    engine = FakeEngine([trigger], coordinator_messages=native_messages)
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+    assert engine.replies
+    assert len(engine.coordinator_messages) == 2
+    plan = coordinator.active_plan_for_room("r-burst")
+    assert plan is not None
+    assert "补充意见" in coordinator.memory_summary(
+        room_id="r-burst",
+        plan_id=plan.plan_id,
+    )["summary_text"]
+    print("[OK] worker does not starve agent trigger behind native chat queue")
+
+
+def test_worker_installs_deferred_download_scheduler_hook():
+    model_tools.set_deferred_download_scheduler(None)
+    media_registry.set_media_task_scheduler(None)
+    scheduler = FakeScheduler()
+    worker = LANChatAgentWorker(
+        corona_engine=FakeEngine([]),
+        agent_factory=_agent_factory,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+    try:
+        assert model_tools.get_deferred_download_scheduler() is scheduler
+        assert media_registry.get_media_task_scheduler() is scheduler
+    finally:
+        worker.stop()
+    assert model_tools.get_deferred_download_scheduler() is None
+    assert media_registry.get_media_task_scheduler() is None
+    print("[OK] worker installs and clears generation scheduler hooks")
+
+
+def test_deferred_provider_download_does_not_bypass_rejecting_scheduler():
+    class RejectingScheduler:
+        def submit(self, payload):
+            raise AssertionError("control test should not call submit")
+
+    rejected = model_tools._deferred_download_control(
+        scheduler=RejectingScheduler(),
+        scheduled={"job_id": "", "status": "waiting_user", "error": "generation queue is full"},
+    )
+    legacy = model_tools._deferred_download_control(scheduler=None, scheduled=None)
+    scheduled = model_tools._deferred_download_control(
+        scheduler=RejectingScheduler(),
+        scheduled={"job_id": "gen-1", "status": "queued"},
+    )
+
+    assert rejected["mode"] == "rejected"
+    assert rejected["start_legacy_thread"] is False
+    assert rejected["status"] == "waiting_user"
+    assert "queue is full" in rejected["error"]
+    assert legacy["mode"] == "legacy_thread"
+    assert legacy["start_legacy_thread"] is True
+    assert scheduled["mode"] == "scheduled"
+    assert scheduled["start_legacy_thread"] is False
+    assert scheduled["job_id"] == "gen-1"
+    print("[OK] deferred provider download respects scheduler backpressure instead of starting legacy thread")
+
+
+def test_media_registry_submit_uses_generation_scheduler_hook():
+    media_registry.reset_media_registry()
+    media_registry.set_media_task_scheduler(None)
+
+    class ImmediateScheduler:
+        def __init__(self):
+            self.submitted = []
+            self.statuses = {}
+
+        def submit(self, payload):
+            self.submitted.append(dict(payload))
+            job_id = str(payload["job_id"])
+            handler = payload["_runtime_context"]["stage_handlers"]["submit"]
+            result = handler(type("Job", (), {"payload": payload})())
+            self.statuses[job_id] = {
+                "job_id": job_id,
+                "status": "done",
+                "result": result,
+            }
+            return self.statuses[job_id]
+
+        def wait(self, job_id, timeout=5.0):
+            return self.statuses[job_id]
+
+        def status(self, job_id):
+            return self.statuses[job_id]
+
+    scheduler = ImmediateScheduler()
+    media_registry.set_media_task_scheduler(scheduler)
+    try:
+        registry = media_registry.get_media_registry()
+        file_id = registry.submit(
+            lambda: "https://example.invalid/generated.png",
+            resource_type="image",
+            session_id="room-a",
+            content_text="dark market reference",
+        )
+
+        assert scheduler.submitted
+        submitted = scheduler.submitted[-1]
+        assert submitted["job_type"] == "media_resource_task"
+        assert submitted["resource_type"] == "image"
+        assert submitted["_runtime_context"]["stage_order"] == ("submit",)
+        assert registry.resolve(file_id) == "https://example.invalid/generated.png"
+        assert registry.get_status(file_id).value == "done"
+    finally:
+        media_registry.set_media_task_scheduler(None)
+        media_registry.reset_media_registry()
+    print("[OK] media registry submits async media task through GenerationScheduler hook")
+
+
+def test_media_registry_does_not_bypass_rejecting_scheduler():
+    media_registry.reset_media_registry()
+    media_registry.set_media_task_scheduler(None)
+
+    class RejectingScheduler:
+        def __init__(self):
+            self.submitted = []
+
+        def submit(self, payload):
+            self.submitted.append(dict(payload))
+            return {
+                "job_id": "",
+                "status": "waiting_user",
+                "error": "generation queue is full",
+            }
+
+    calls = {"task": 0}
+    scheduler = RejectingScheduler()
+    media_registry.set_media_task_scheduler(scheduler)
+    try:
+        registry = media_registry.get_media_registry()
+        file_id = registry.submit(
+            lambda: calls.__setitem__("task", calls["task"] + 1) or "https://example.invalid/generated.png",
+            resource_type="image",
+            session_id="room-a",
+            content_text="overflow image",
+        )
+
+        assert scheduler.submitted
+        assert calls["task"] == 0, "scheduler 背压拒绝后不能 fallback 到 TaskExecutor 执行任务"
+        assert registry.get_status(file_id).value == "error"
+        record = registry.get_by_file_id(file_id)
+        assert record is not None
+        assert "rejected" in record.error or "queue" in record.error
+        try:
+            registry.resolve(file_id, timeout=0.01)
+        except RuntimeError as exc:
+            assert "任务" in str(exc) and ("queue" in str(exc) or "rejected" in str(exc))
+        else:
+            raise AssertionError("rejected media task must not resolve successfully")
+    finally:
+        media_registry.set_media_task_scheduler(None)
+        media_registry.reset_media_registry()
+    print("[OK] media registry respects scheduler backpressure instead of falling back to TaskExecutor")
+
+
+def test_worker_configured_composer_scheduler_runs_confirmed_seed_plan_context():
+    compose_calls = []
+
+    class FakeComposer:
+        def compose(self, text, **kwargs):
+            compose_calls.append((text, kwargs))
+            coordinator = kwargs["interaction_coordinator"]
+            coordinator.bind_scene_session_progress(
+                FakeProgressSession(),
+                room_id=kwargs["room_id"],
+                plan_id=kwargs["plan_id"],
+                session_id=kwargs["session_id"],
+            )
+            return {"imported": ["market-stall"], "progressive": True}
+
+    class FakeProgressSession:
+        def set_progress_event_sink(self, sink):
+            sink({
+                "phase": "OBJECTS#1",
+                "status": "done",
+                "percent": 100,
+                "batch_id": "r1_OBJECTS_b1",
+                "user_message": "第一批已完成，可继续介入。",
+            })
+
+    engine = FakeEngine([
+        _trigger("@GM 开始生成暗黑集市场景", "GM"),
+        _trigger("确认", "GM"),
+    ])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        composer_factory=lambda: FakeComposer(),
+        async_agent_execution=False,
+    )
+    try:
+        assert worker.process_once() is True
+        assert worker.process_once() is True
+        deadline = time.time() + 2.0
+        while not compose_calls and time.time() < deadline:
+            time.sleep(0.01)
+        disclosure_deadline = time.time() + 2.0
+        while time.time() < disclosure_deadline:
+            if any(
+                len(item) >= 6
+                and item[3] == "action_status"
+                and "第一批已完成" in item[2]
+                for item in engine.system_messages
+            ):
+                break
+            time.sleep(0.01)
+    finally:
+        worker.stop()
+
+    assert compose_calls
+    prompt, kwargs = compose_calls[-1]
+    assert "暗黑集市" in prompt
+    assert kwargs["room_id"]
+    assert kwargs["plan_id"]
+    assert kwargs["session_id"].startswith(f"exec-{kwargs['plan_id']}-")
+    assert kwargs["session_id"] != kwargs["room_id"]
+    coordinator = kwargs["interaction_coordinator"]
+    assert coordinator.events[-1].event_type == "batch_intervention_window_open"
+    assert "第一批已完成" in coordinator.memory_summary(room_id=kwargs["room_id"], plan_id=kwargs["plan_id"])["summary_text"]
+    progress_disclosures = [
+        item for item in engine.system_messages
+        if len(item) >= 6 and item[3] == "action_status" and "第一批已完成" in item[2]
+    ]
+    assert progress_disclosures
+    metadata = json.loads(progress_disclosures[-1][5])
+    disclosure = metadata["disclosure"]
+    assert disclosure["stage"] == "可介入窗口"
+    assert disclosure["audience"] == "participant"
+    assert disclosure["metadata"]["intervention"]["status_message"] == "第一批已完成，可继续介入。"
+    assert "prompt" not in json.dumps(disclosure, ensure_ascii=False)
+    print("[OK] configured worker scheduler runs composer with SeedPlan/Coordinator context")
+
+
 def test_worker_does_not_execute_discussion_only_confirmed_payload():
     executor = FakeHostActionExecutor()
     engine = FakeEngine([])
@@ -1025,6 +2669,108 @@ def test_host_action_executor_sanitizes_agent_api_error():
     print("[OK] host executor provider errors are sanitized before chat status")
 
 
+def test_host_action_executor_sanitizes_payload_text_in_status_and_result():
+    engine = FakeEngine([])
+
+    def agent_factory():
+        def _agent(persona, messages):
+            return "scene delta applied"
+
+        return _agent
+
+    executor = LanChatHostActionExecutor(
+        corona_engine=engine,
+        agent_factory=agent_factory,
+        engine_gate=None,
+    )
+    result = executor.enqueue_and_process({
+        "proposal_id": "gm-dirty",
+        "status": "confirmed",
+        "source_user_id": "user-a",
+        "intent_text": (
+            "添加篝火 prompt=PRIVATE_HOST_PROMPT_SHOULD_NOT_LEAK "
+            "provider=host-provider-secret runtime_context token=host-token-secret "
+            "scheduler_updates session_id=host-session-secret hidden_debug_ref=host-debug-secret "
+            "api_key=host-api-key-secret vlm_raw=host-vlm-raw-secret"
+        ),
+    })
+    exposed_text = repr(result.payload) + repr(engine.intents) + repr(engine.system_messages)
+
+    assert result is not None and result.ok is True
+    assert "添加篝火" in result.payload["intent_text"]
+    assert "PRIVATE_HOST_PROMPT_SHOULD_NOT_LEAK" not in exposed_text
+    assert "host-provider-secret" not in exposed_text
+    assert "host-token-secret" not in exposed_text
+    assert "host-session-secret" not in exposed_text
+    assert "host-debug-secret" not in exposed_text
+    assert "host-api-key-secret" not in exposed_text
+    assert "host-vlm-raw-secret" not in exposed_text
+    print("[OK] host action executor sanitizes payload text in status and result")
+
+
+def test_worker_sanitizes_pending_gm_proposal_payload_metadata():
+    dirty_payload = {
+        "proposal_id": "gm-dirty",
+        "status": "pending_host_confirmation",
+        "requires_host_confirm": True,
+        "source_user_id": "user-a",
+        "intent_text": (
+            "添加篝火 prompt=PRIVATE_WORKER_PROMPT_SHOULD_NOT_LEAK "
+            "provider=worker-provider-secret runtime_context token=worker-token-secret "
+            "scheduler_updates session_id=worker-session-secret hidden_debug_ref=worker-debug-secret"
+        ),
+        "seed_plan": {
+            "title": "营地方案",
+            "raw_prompt": "PRIVATE_SEED_PROMPT_SHOULD_NOT_LEAK",
+            "provider": "seed-provider-secret",
+        },
+        "finding_details": {
+            "actor_id": "campfire-1",
+            "fix_suggestion": "缩小一点",
+            "vlm_raw": "PRIVATE_VLM_RAW_SHOULD_NOT_LEAK",
+            "job_id": "worker-job-secret",
+        },
+    }
+
+    engine = FakeEngine([])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        async_agent_execution=False,
+    )
+
+    assert worker._send_final_reply(  # noqa: SLF001
+        "gm-system",
+        "GM",
+        dirty_payload["intent_text"],
+        _trigger(),
+        dirty_payload,
+    ) is True
+    assert engine.system_messages
+    message = engine.system_messages[-1]
+    assert message[3] == "gm_proposal"
+    metadata = json.loads(message[5])
+    exposed_text = repr(engine.system_messages) + repr(engine.replies) + repr(engine.intents)
+
+    assert metadata["proposal_id"] == "gm-dirty"
+    assert metadata["requires_host_confirm"] is True
+    assert metadata["intent_text"] == "添加篝火"
+    assert metadata["seed_plan"]["title"] == "营地方案"
+    assert metadata["finding_details"]["actor_id"] == "campfire-1"
+    assert metadata["finding_details"]["fix_suggestion"] == "缩小一点"
+    assert "raw_prompt" not in metadata["seed_plan"]
+    assert "provider" not in metadata["seed_plan"]
+    assert "vlm_raw" not in metadata["finding_details"]
+    assert "job_id" not in metadata["finding_details"]
+    assert "PRIVATE_WORKER_PROMPT_SHOULD_NOT_LEAK" not in exposed_text
+    assert "worker-provider-secret" not in exposed_text
+    assert "worker-token-secret" not in exposed_text
+    assert "worker-session-secret" not in exposed_text
+    assert "worker-debug-secret" not in exposed_text
+    assert "PRIVATE_SEED_PROMPT_SHOULD_NOT_LEAK" not in exposed_text
+    assert "PRIVATE_VLM_RAW_SHOULD_NOT_LEAK" not in exposed_text
+    print("[OK] worker sanitizes pending GM proposal payload metadata")
+
+
 def test_host_action_executor_serializes_parallel_confirmed_actions():
     engine = FakeEngine([])
     active = 0
@@ -1112,11 +2858,48 @@ if __name__ == "__main__":
     test_planning_confirmation_gate_roundtrip()
     test_worker_async_agent_calls_are_serialized_per_worker()
     test_worker_broadcasts_confirmed_gm_action()
+    test_worker_acknowledges_final_adjustment_confirmation_without_host_execution()
+    test_worker_acknowledges_conflict_resolution_rejection_without_host_execution()
+    test_worker_rejects_coordinator_confirmation_without_sender_identity()
+    test_worker_rejects_coordinator_confirmation_from_non_host_role()
+    test_worker_rejects_coordinator_confirmation_from_metadata_non_host_role()
+    test_worker_wraps_confirmed_generation_as_seed_plan_payload()
+    test_worker_default_host_executor_uses_coordinator_handler_for_seed_plan()
+    test_worker_host_confirmation_disclosure_broadcast_is_sanitized_without_targeted_api()
+    test_worker_disclosure_emit_survives_coordinator_history_prune()
+    test_worker_host_confirmation_disclosure_uses_targeted_api_when_available()
+    test_worker_default_coordinator_submits_confirmed_generation_to_scheduler()
+    test_worker_exposes_generation_scheduler_snapshot_without_payload_leak()
+    test_worker_cancels_generation_session_without_touching_other_rooms()
+    test_worker_room_closed_event_cancels_known_generation_session()
+    test_worker_active_room_registry_is_bounded_for_close_fallback()
+    test_worker_polls_native_room_closed_event_for_generation_cancel()
+    test_worker_ignores_non_closing_lanchat_events_for_generation_cancel()
+    test_worker_emits_safe_generation_scheduler_disclosure()
+    test_worker_routes_gm_pace_control_through_coordinator()
+    test_worker_rejects_gm_pace_control_from_non_host_role()
+    test_worker_routes_gm_clarification_through_coordinator()
+    test_worker_rejects_gm_clarification_from_non_host_role()
+    test_worker_syncs_plain_chat_history_to_coordinator_without_generation()
+    test_worker_syncs_direct_plain_chat_as_runtime_intervention()
+    test_worker_syncs_plain_chat_without_message_id_once()
+    test_worker_plain_chat_dedupe_cache_is_bounded()
+    test_worker_syncs_plain_chat_metadata_actor_target_to_coordinator()
+    test_worker_polls_native_plain_chat_queue_into_coordinator()
+    test_worker_polls_native_host_chat_as_host_message()
+    test_worker_does_not_starve_agent_trigger_behind_native_chat_queue()
+    test_worker_installs_deferred_download_scheduler_hook()
+    test_deferred_provider_download_does_not_bypass_rejecting_scheduler()
+    test_media_registry_submit_uses_generation_scheduler_hook()
+    test_media_registry_does_not_bypass_rejecting_scheduler()
+    test_worker_configured_composer_scheduler_runs_confirmed_seed_plan_context()
     test_worker_does_not_execute_discussion_only_confirmed_payload()
     test_host_action_executor_runs_under_gate_and_reports_result()
     test_host_action_executor_prefers_resolved_intent_text()
     test_host_action_executor_does_not_report_executed_for_empty_or_failed_result()
     test_host_action_executor_reports_accepted_no_delta_when_no_executor_agent()
     test_host_action_executor_sanitizes_agent_api_error()
+    test_host_action_executor_sanitizes_payload_text_in_status_and_result()
+    test_worker_sanitizes_pending_gm_proposal_payload_metadata()
     test_host_action_executor_serializes_parallel_confirmed_actions()
     print("\n=== LANChat agent orchestrator ALL PASS ===")

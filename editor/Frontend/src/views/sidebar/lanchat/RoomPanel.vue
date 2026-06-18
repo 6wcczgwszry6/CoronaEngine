@@ -78,6 +78,65 @@
         连接已断开
       </div>
 
+      <div
+        v-if="currentDisclosure"
+        class="px-3 py-2 border-b border-gray-700 bg-[#242424] text-xs"
+      >
+        <div class="flex items-center justify-between gap-2">
+          <div class="min-w-0">
+            <div class="text-[#B8D58D] font-medium truncate">{{ currentDisclosure.stage || '协作状态' }}</div>
+            <div class="text-gray-300 leading-snug mt-0.5">{{ currentDisclosure.public_message }}</div>
+            <div v-if="resourceDiagnosisText" class="text-gray-400 leading-snug mt-1">
+              {{ resourceDiagnosisText }}
+            </div>
+          </div>
+          <div class="shrink-0 text-gray-300 tabular-nums">{{ currentDisclosure.progress }}%</div>
+        </div>
+        <div class="mt-2 h-1.5 rounded bg-[#3a3a3a] overflow-hidden">
+          <div
+            class="h-full bg-[#84A65B]"
+            :style="{ width: `${currentDisclosure.progress}%` }"
+          ></div>
+        </div>
+        <div v-if="currentDisclosure.available_actions.length" class="mt-2 flex flex-wrap gap-1">
+          <template
+            v-for="action in currentDisclosure.available_actions"
+            :key="action"
+          >
+            <button
+              v-if="isDisclosureActionSendable(action)"
+              class="px-2 py-0.5 rounded bg-[#3a3a3a] text-gray-200 hover:bg-[#84A65B]/70"
+              @click="sendDisclosureAction(action)"
+            >
+              {{ disclosureActionLabel(action) }}
+            </button>
+            <span
+              v-else
+              class="px-2 py-0.5 rounded bg-[#3a3a3a] text-gray-200"
+            >
+              {{ disclosureActionLabel(action) }}
+            </span>
+          </template>
+        </div>
+        <div
+          v-if="currentDisclosure.requires_confirmation && currentDisclosure.proposal_id && s.role === 'host'"
+          class="mt-2 flex gap-1"
+        >
+          <button
+            class="px-2 py-0.5 rounded bg-[#84A65B] text-white text-[11px]"
+            @click="sendGmDecision(currentDisclosure.proposal_id, 'confirm')"
+          >
+            确认
+          </button>
+          <button
+            class="px-2 py-0.5 rounded bg-[#3a3a3a] text-gray-100 text-[11px]"
+            @click="sendGmDecision(currentDisclosure.proposal_id, 'reject')"
+          >
+            拒绝
+          </button>
+        </div>
+      </div>
+
       <div class="flex flex-1 min-h-0">
         <!-- 消息区 -->
         <div class="flex-1 flex flex-col min-h-0">
@@ -119,6 +178,7 @@
           <div class="p-2 border-t border-gray-600 flex gap-2">
             <div class="relative flex-1">
               <input
+                ref="draftInput"
                 v-model="draft"
                 :class="inputCls"
                 :disabled="s.connection === 'reconnecting'"
@@ -207,6 +267,12 @@
 <script setup>
 import { reactive, ref, computed, nextTick, watch } from 'vue';
 import lanchat from '../../../stores/lanchat.js';
+import {
+  buildGmDecisionMessage,
+  buildGmDisclosureActionMessage,
+  buildManualGmMessageOptions,
+  buildParticipantDisclosureDraft,
+} from '../../../stores/lanchatDisclosure.js';
 import MemberList from './MemberList.vue';
 
 const s = lanchat.state;
@@ -217,6 +283,7 @@ const agentForm = reactive({ name: '', persona: '' });
 const mentionCandidates = ref([]);
 const mentionActiveIndex = ref(0);
 const msgRef = ref(null);
+const draftInput = ref(null);
 
 const roleTemplates = [
   {
@@ -279,6 +346,19 @@ const ERROR_TEXT = {
 const errorText = computed(() => ERROR_TEXT[s.error] || s.error || '');
 const isJoining = computed(() => lanchat.isJoining());
 const joinStatusText = computed(() => (s.connection === 'syncing' ? '正在同步房间…' : '正在连接房主…'));
+const currentDisclosure = computed(() => {
+  const items = s.disclosures || [];
+  if (!items.length) return null;
+  if (s.role === 'host') {
+    const pending = [...items].reverse().find((item) => item.requires_confirmation && item.proposal_id);
+    if (pending) return pending;
+  }
+  return items[items.length - 1];
+});
+const resourceDiagnosisText = computed(() => {
+  if (!currentDisclosure.value || currentDisclosure.value.stage !== '资源调度') return '';
+  return resourceDiagnosisLabel(currentDisclosure.value.metadata?.diagnosis);
+});
 
 async function onCreate() {
   if (!form.room.trim()) return;
@@ -330,14 +410,32 @@ function gmProposalId(message) {
 }
 
 async function sendGmDecision(proposalId, decision) {
-  if (!proposalId) return;
-  const verb = decision === 'reject' ? '拒绝' : '确认';
-  await lanchat.sendMessage(`@GM ${verb} ${proposalId}`, {
-    message_kind: 'confirmation',
-    target_agent_id: 'gm',
-    correlation_id: proposalId,
-    metadata: { decision, proposal_id: proposalId },
-  });
+  const message = buildGmDecisionMessage(proposalId, decision);
+  if (!message) return;
+  await lanchat.sendMessage(message.text, message.options);
+  lanchat.dismissDisclosureByProposal(proposalId);
+}
+
+function isDisclosureActionSendable(action) {
+  return Boolean(
+    buildGmDisclosureActionMessage(action) ||
+    buildParticipantDisclosureDraft(action, currentDisclosure.value)
+  );
+}
+
+async function sendDisclosureAction(action) {
+  const message = buildGmDisclosureActionMessage(action);
+  if (message) {
+    await lanchat.sendMessage(message.text, message.options);
+    return;
+  }
+  const draftText = buildParticipantDisclosureDraft(action, currentDisclosure.value);
+  if (!draftText) return;
+  draft.value = draftText;
+  mentionCandidates.value = [];
+  mentionActiveIndex.value = 0;
+  await nextTick();
+  draftInput.value?.focus?.();
 }
 
 async function onAddAgent() {
@@ -403,9 +501,58 @@ function pickMention(c) {
 function messageOptionsForText(text) {
   const trimmed = String(text || '').trim();
   if (/^@GM(?:\s|$)/i.test(trimmed)) {
-    return { message_kind: 'chat', target_agent_id: 'gm' };
+    return buildManualGmMessageOptions(s.role);
   }
   return {};
+}
+
+function disclosureActionLabel(action) {
+  return {
+    confirm_plan: '确认方案',
+    request_clarification: '继续澄清',
+    pause_discussion: '暂停讨论',
+    pause_after_batch: '批次后暂停',
+    add_intervention: '补充介入',
+    request_review: '请求审查',
+    approve_final: '确认结果',
+    request_repair: '要求修复',
+    continue_generation: '继续生成',
+    add_note: '补充想法',
+    request_add: '请求新增',
+    request_modify: '请求调整',
+    report_issue: '报告问题',
+    propose_seed_plan: '整理方案',
+    resolve_conflict: '仲裁冲突',
+    control_pace: '控制节奏',
+    execute_constraints: '执行约束',
+    report_blocker: '报告阻塞',
+    confirm_conflict_resolution: '确认仲裁',
+    reject_conflict_resolution: '拒绝仲裁',
+  }[action] || '查看状态';
+}
+
+function resourceDiagnosisLabel(diagnosis) {
+  if (!diagnosis || typeof diagnosis !== 'object') return '';
+  const state = String(diagnosis.state || '');
+  const reasons = Array.isArray(diagnosis.reasons)
+    ? diagnosis.reasons.map((item) => String(item))
+    : [];
+  if (state === 'stopped' || reasons.includes('scheduler_stopped')) {
+    return '资源状态：生成已停止，需要重新开始后续生成。';
+  }
+  if (state === 'paused' || reasons.includes('paused_sessions')) {
+    return '资源状态：已暂停，等待房主继续或取消。';
+  }
+  if (state === 'saturated' || reasons.includes('queue_at_capacity') || reasons.includes('recent_queue_full')) {
+    return '资源状态：队列拥堵，系统会先处理已排队任务。';
+  }
+  if (state === 'strained' || reasons.includes('queue_near_capacity') || reasons.includes('import_stage_busy')) {
+    return '资源状态：负载较高，建议先等待当前批次完成。';
+  }
+  if (state === 'active') {
+    return '资源状态：正在处理生成任务。';
+  }
+  return '';
 }
 
 function onDraftKeydown(e) {

@@ -9,6 +9,23 @@ from dataclasses import dataclass
 from typing import Any, Callable, Deque
 
 
+_SENSITIVE_TEXT_MARKERS = (
+    "prompt",
+    "raw_prompt",
+    "provider",
+    "model_provider",
+    "runtime_context",
+    "scheduler_updates",
+    "vlm_raw",
+    "hidden_debug_ref",
+    "debug",
+    "job_id",
+    "session_id",
+    "token",
+    "api_key",
+)
+
+
 @dataclass
 class HostActionExecutionResult:
     ok: bool
@@ -32,12 +49,14 @@ class LanChatHostActionExecutor:
         corona_engine: Any = None,
         agent_factory: Callable[[], Any] | None = None,
         engine_gate: Any = None,
+        structured_action_handler: Callable[[dict[str, Any]], str] | None = None,
         system_sender_id: str = "gm-system",
         system_sender_name: str = "GM",
     ) -> None:
         self._corona_engine = corona_engine
         self._agent_factory = agent_factory
         self._engine_gate = engine_gate or self._default_engine_gate()
+        self._structured_action_handler = structured_action_handler
         self._system_sender_id = system_sender_id
         self._system_sender_name = system_sender_name
         self._queue: Deque[dict[str, Any]] = deque()
@@ -121,6 +140,9 @@ class LanChatHostActionExecutor:
         return self.process_next()
 
     def _execute_payload(self, payload: dict[str, Any]) -> str:
+        if self._structured_action_handler is not None and self._is_structured_seed_plan_action(payload):
+            return str(self._structured_action_handler(dict(payload)))
+
         agent = self._get_agent()
         if agent is None:
             return "GM action accepted by host queue; no executor agent is registered yet."
@@ -151,6 +173,14 @@ class LanChatHostActionExecutor:
         except Exception as exc:  # noqa: BLE001
             self._logger.warning("Host executor agent failed", exc_info=True)
             return self._safe_agent_error_text(exc)
+
+    @staticmethod
+    def _is_structured_seed_plan_action(payload: dict[str, Any]) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("seed_plan") or payload.get("plan_id"):
+            return str(payload.get("action_type") or "") in {"start_generation", "execute_seed_plan"}
+        return False
 
     @staticmethod
     def _looks_failed_result(text: str) -> bool:
@@ -195,7 +225,7 @@ class LanChatHostActionExecutor:
         if not self._corona_engine:
             return
         source_user_id = str(payload.get("source_user_id") or "unknown")
-        tooltip = str(payload.get("intent_text") or payload.get("proposal_id") or status)
+        tooltip = self._safe_text(payload.get("intent_text") or payload.get("proposal_id") or status)
         visible_status = self._visible_status_text(status)
         if hasattr(self._corona_engine, "network_send_system_message_ex"):
             try:
@@ -230,53 +260,56 @@ class LanChatHostActionExecutor:
         if not self._corona_engine:
             return
         payload = payload or {}
+        safe_message = self._safe_text(message)
         try:
             if hasattr(self._corona_engine, "network_send_system_message_ex"):
                 self._corona_engine.network_send_system_message_ex(
                     self._system_sender_id,
                     self._system_sender_name,
-                    f"【执行结果】{message}",
+                    f"【执行结果】{safe_message}",
                     "action_status",
                     str(payload.get("proposal_id") or ""),
                     json.dumps({
                         **self._action_status_metadata(payload, status or "executed"),
-                        "message": message,
+                        "message": safe_message,
                     }, ensure_ascii=False),
                 )
             else:
                 self._corona_engine.network_send_system_message(
                     self._system_sender_id,
                     self._system_sender_name,
-                    f"【执行结果】{message}",
+                    f"【执行结果】{safe_message}",
                 )
         except Exception as exc:
             self._logger.debug("Failed to send host action system message: %s", exc)
 
-    @staticmethod
-    def _action_status_metadata(payload: dict[str, Any], status: str) -> dict[str, Any]:
+    @classmethod
+    def _action_status_metadata(cls, payload: dict[str, Any], status: str) -> dict[str, Any]:
         return {
             "status": status,
             "proposal_id": str(payload.get("proposal_id") or ""),
             "source_user_id": str(payload.get("source_user_id") or ""),
             "target_agent_id": str(payload.get("target_agent_id") or ""),
-            "intent_text": str(payload.get("intent_text") or ""),
+            "intent_text": cls._safe_text(payload.get("intent_text") or ""),
             "execution": "host_single_writer",
         }
 
-    @staticmethod
+    @classmethod
     def _result_payload(
+        cls,
         payload: dict[str, Any],
         event_type: str,
         ok: bool,
         message: str,
     ) -> dict[str, Any]:
+        safe_message = cls._safe_text(message)
         return {
             "event_type": event_type,
             "ok": ok,
             "source_user_id": str(payload.get("source_user_id") or ""),
             "proposal_id": str(payload.get("proposal_id") or ""),
-            "intent_text": str(payload.get("intent_text") or ""),
-            "message": message,
+            "intent_text": cls._safe_text(payload.get("intent_text") or ""),
+            "message": safe_message,
             "timestamp": time.time(),
         }
 
@@ -298,6 +331,23 @@ class LanChatHostActionExecutor:
         if any(marker in text for marker in ("Invalid Token", "request id", "rix_api_error", "stack trace")):
             return "当前模型服务不可用，已跳过该助手回复。"
         return "该助手暂时无法响应，请稍后重试或换一个助手。"
+
+    @staticmethod
+    def _safe_text(value: Any) -> str:
+        text = str(value or "")
+        if not text:
+            return ""
+        lower = text.lower()
+        if any(marker in lower for marker in _SENSITIVE_TEXT_MARKERS):
+            cut_points = [
+                lower.find(marker)
+                for marker in _SENSITIVE_TEXT_MARKERS
+                if lower.find(marker) >= 0
+            ]
+            first = min(cut_points) if cut_points else 0
+            keep = text[:first].strip(" \t\r\n,;；。")
+            return keep or "已收到确认动作，内部执行细节已隐藏。"
+        return text
 
     @staticmethod
     def _default_engine_gate() -> Any:

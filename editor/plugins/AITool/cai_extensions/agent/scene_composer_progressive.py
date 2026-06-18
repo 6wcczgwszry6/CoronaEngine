@@ -24,6 +24,10 @@ def run_progressive_workflow(
     do_import: bool,
     reviews: Optional[List[Dict[str, Any]]] = None,
     progress_sink: Optional[Any] = None,
+    interaction_coordinator: Optional[Any] = None,
+    room_id: str = "",
+    plan_id: str = "",
+    session_id: str = "",
 ) -> Dict[str, Any]:
     """渐进式场景组合工作流（突击方案完整接入）。
 
@@ -83,6 +87,19 @@ def run_progressive_workflow(
                 logger.debug("[ProgressiveWorkflow] progress sink skipped: %s", exc)
 
     session.set_progress_sink(_progress_sink)
+    coordinator_room_id = room_id or "default"
+    if interaction_coordinator is not None and plan_id:
+        bind_progress = getattr(interaction_coordinator, "bind_scene_session_progress", None)
+        if callable(bind_progress):
+            try:
+                bind_progress(
+                    session,
+                    room_id=coordinator_room_id,
+                    plan_id=plan_id,
+                    session_id=session_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[ProgressiveWorkflow] coordinator progress binding skipped: %s", exc)
 
     # 设置基线快照（框架已生成，作为初始状态）
     initial_snapshot = _capture_viewport_snapshot(composer)
@@ -133,6 +150,18 @@ def run_progressive_workflow(
             logger.debug("[ProgressiveWorkflow] runtime mode unavailable: %s", exc)
             return ""
 
+    def final_adjustment_provider() -> Optional[Dict[str, Any]]:
+        if interaction_coordinator is None or not plan_id:
+            return None
+        provider = getattr(interaction_coordinator, "final_adjustment_plan", None)
+        if not callable(provider):
+            return None
+        try:
+            return provider(plan_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[ProgressiveWorkflow] final adjustment plan skipped: %s", exc)
+            return None
+
     # 4. Importer（调 incremental_import）
     from ..flows.scene_composition_workflow.helpers import get_tool, parse_import_result
     import_tool = get_tool("import_model")
@@ -177,17 +206,23 @@ def run_progressive_workflow(
         importer=importer,
         viewport_sampler=viewport_sampler,
         reasonable_provider=reasonable_provider,
-        post_import_hook=lambda imported_ids, _batch_id: _repair_recent_imports(
+        post_import_hook=lambda imported_ids, _batch_id: _post_import_repair_and_review(
             imported_ids,
+            _batch_id,
             scene_layout,
             engine_gate,
             zone_aabbs=_collect_zone_aabbs(getattr(composer, "zone_tree", None)),
             door_aabbs=_collect_door_clearance_aabbs(getattr(composer, "zone_tree", None)),
             issue_sink=session.pending_tasks,
+            interaction_coordinator=interaction_coordinator,
+            room_id=coordinator_room_id,
+            plan_id=plan_id,
+            session_id=session_id,
         ),
         phase_sequence=phase_sequence,
         phase_metadata=phase_metadata,
         runtime_mode_provider=runtime_mode_provider,
+        final_adjustment_provider=final_adjustment_provider,
     )
 
     # 8. 返回（格式与 _run_original_workflow 一致）
@@ -199,7 +234,14 @@ def run_progressive_workflow(
         if hasattr(final_report, "to_user_text")
         else None
     )
-    vlm_report = _run_vlm_advisory_review(imported, engine_gate)
+    vlm_report = _run_vlm_advisory_review(imported, engine_gate, composer=composer)
+    _emit_vlm_review_results(
+        vlm_report,
+        interaction_coordinator=interaction_coordinator,
+        room_id=coordinator_room_id,
+        plan_id=plan_id,
+        session_id=session_id,
+    )
     vlm_review_text = (
         vlm_report.to_user_text()
         if hasattr(vlm_report, "to_user_text")
@@ -216,6 +258,7 @@ def run_progressive_workflow(
         "progressive": True,
         "final_report": final_report,
         "final_report_text": final_report_text,
+        "final_adjustment_plan": prog_result.get("final_adjustment_plan"),
         "phases_run": prog_result.get("phases_run", []),
         "progress_events": progress_events,
         "progress_timeline": prog_result.get("progress_timeline", []),
@@ -608,7 +651,7 @@ def _generate_post_shell_framework(composer: Any) -> None:
         logger.warning("[ProgressiveWorkflow] post-shell framework skipped: %s", exc)
 
 
-def _run_vlm_advisory_review(imported: List[str], engine_gate: Any) -> Any:
+def _run_vlm_advisory_review(imported: List[str], engine_gate: Any, composer: Any = None) -> Any:
     """Run the optional VLM outer loop; failures are advisory-only."""
     try:
         from .model_reviewer import _capture_single_model, _vlm_review_model
@@ -618,17 +661,40 @@ def _run_vlm_advisory_review(imported: List[str], engine_gate: Any) -> Any:
         return None
 
     max_targets = _vlm_max_targets()
-    targets = [
-        {"actor_id": actor_id, "model_name": actor_id, "model_type": actor_id}
-        for actor_id in imported[:max(0, max_targets)]
-    ]
+    target_provider = getattr(composer, "vlm_target_provider", None) if composer is not None else None
+    if callable(target_provider):
+        try:
+            provided = target_provider(imported, max_targets=max_targets)
+        except TypeError:
+            provided = target_provider(imported)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ProgressiveWorkflow] VLM target provider failed, using imported actors: %s", exc)
+            provided = None
+        if provided is not None:
+            targets = [dict(item) for item in list(provided or [])[:max(0, max_targets)] if isinstance(item, dict)]
+        else:
+            targets = [
+                {"actor_id": actor_id, "model_name": actor_id, "model_type": actor_id}
+                for actor_id in imported[:max(0, max_targets)]
+            ]
+    else:
+        targets = [
+            {"actor_id": actor_id, "model_name": actor_id, "model_type": actor_id}
+            for actor_id in imported[:max(0, max_targets)]
+        ]
     if not targets:
         return None
+    capture_fn = getattr(composer, "vlm_capture_fn", None) if composer is not None else None
+    review_fn = getattr(composer, "vlm_review_fn", None) if composer is not None else None
+    if not callable(capture_fn):
+        capture_fn = _capture_single_model
+    if not callable(review_fn):
+        review_fn = _vlm_review_model
     try:
         return review_models_async(
             targets,
-            capture_fn=_capture_single_model,
-            review_fn=_vlm_review_model,
+            capture_fn=capture_fn,
+            review_fn=review_fn,
             engine_gate=engine_gate,
         )
     except Exception as exc:  # noqa: BLE001
@@ -839,6 +905,163 @@ def _repair_recent_imports(
         except Exception as exc:  # noqa: BLE001
             logger.debug("[ProgressiveWorkflow] AABB repair skipped for %s: %s", actor_id, exc)
     return repaired
+
+
+def _post_import_repair_and_review(
+    imported_ids: List[str],
+    batch_id: str,
+    scene_layout: Any,
+    engine_gate: Any,
+    *,
+    zone_aabbs: Dict[str, List[float]],
+    door_aabbs: Dict[str, List[float]],
+    issue_sink: Optional[List[Dict[str, Any]]] = None,
+    interaction_coordinator: Optional[Any] = None,
+    room_id: str = "",
+    plan_id: str = "",
+    session_id: str = "",
+) -> int:
+    before = len(issue_sink or [])
+    repaired = _repair_recent_imports(
+        imported_ids,
+        scene_layout,
+        engine_gate,
+        zone_aabbs=zone_aabbs,
+        door_aabbs=door_aabbs,
+        issue_sink=issue_sink,
+    )
+    new_issues = list((issue_sink or [])[before:])
+    _emit_aabb_review_results(
+        new_issues,
+        batch_id=batch_id,
+        interaction_coordinator=interaction_coordinator,
+        room_id=room_id,
+        plan_id=plan_id,
+        session_id=session_id,
+    )
+    return repaired
+
+
+def _emit_aabb_review_results(
+    issues: List[Dict[str, Any]],
+    *,
+    batch_id: str,
+    interaction_coordinator: Optional[Any],
+    room_id: str,
+    plan_id: str,
+    session_id: str = "",
+) -> None:
+    if not issues or interaction_coordinator is None or not plan_id:
+        return
+    ingest = getattr(interaction_coordinator, "ingest_review_result", None)
+    if not callable(ingest):
+        return
+    for issue in issues:
+        try:
+            ingest({
+                "room_id": room_id or "default",
+                "plan_id": plan_id,
+                "session_id": session_id,
+                "batch_id": batch_id,
+                "actor_id": str(issue.get("actor_id") or ""),
+                "review_type": "geometry",
+                "passed": False,
+                "findings": [str(issue.get("text") or issue.get("reason") or "AABB review failed")],
+                "finding_details": [{
+                    "actor_id": str(issue.get("actor_id") or ""),
+                    "review_type": "geometry",
+                    "issue_type": str(issue.get("type") or issue.get("reason") or "aabb"),
+                    "action": "repair_geometry",
+                    "target_hint": str(issue.get("actor_id") or issue.get("object_id") or ""),
+                    "status": str(issue.get("status") or ""),
+                }],
+                "severity": "fail" if str(issue.get("status") or "") == "needs_confirm" else "warn",
+                "metadata": dict(issue),
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[ProgressiveWorkflow] AABB review result skipped: %s", exc)
+
+
+def _emit_vlm_review_results(
+    vlm_report: Any,
+    *,
+    interaction_coordinator: Optional[Any],
+    room_id: str,
+    plan_id: str,
+    session_id: str = "",
+) -> None:
+    if vlm_report is None or interaction_coordinator is None or not plan_id:
+        return
+    ingest = getattr(interaction_coordinator, "ingest_review_result", None)
+    if not callable(ingest):
+        return
+    advices = list(getattr(vlm_report, "advices", []) or [])
+    skipped = list(getattr(vlm_report, "skipped", []) or [])
+    timed_out = list(getattr(vlm_report, "timed_out", []) or [])
+    actionable = []
+    try:
+        actionable = list(vlm_report.actionable())
+    except Exception:  # noqa: BLE001
+        actionable = [item for item in advices if str(getattr(item, "overall", "")).upper() == "FAIL"]
+
+    if not advices and not skipped and not timed_out:
+        return
+    if not actionable and (skipped or timed_out):
+        try:
+            ingest({
+                "room_id": room_id or "default",
+                "plan_id": plan_id,
+                "session_id": session_id,
+                "review_type": "vlm",
+                "passed": False,
+                "findings": [f"VLM 审查未完整完成：跳过 {len(skipped)} 个，超时 {len(timed_out)} 个"],
+                "severity": "warn",
+                "metadata": {"skipped": skipped, "timed_out": timed_out},
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[ProgressiveWorkflow] VLM skipped review result skipped: %s", exc)
+        return
+
+    for advice in actionable:
+        actor_id = str(getattr(advice, "actor_id", "") or "")
+        issues = [str(item) for item in (getattr(advice, "issues", []) or []) if str(item).strip()]
+        suggestion = str(getattr(advice, "fix_suggestion", "") or "").strip()
+        findings = issues or ([suggestion] if suggestion else [str(getattr(advice, "overall", "WARN"))])
+        position = list(getattr(advice, "position_correction", []) or [])
+        rotation = list(getattr(advice, "rotation_correction", []) or [])
+        scale = list(getattr(advice, "scale_correction", []) or [])
+        try:
+            ingest({
+                "room_id": room_id or "default",
+                "plan_id": plan_id,
+                "session_id": session_id,
+                "actor_id": actor_id,
+                "review_type": "vlm",
+                "passed": False,
+                "findings": findings,
+                "finding_details": [{
+                    "actor_id": actor_id,
+                    "review_type": "vlm",
+                    "issue_type": str(getattr(advice, "overall", "") or "WARN"),
+                    "action": "apply_vlm_advice",
+                    "target_hint": actor_id,
+                    "position_correction": position,
+                    "rotation_correction": rotation,
+                    "scale_correction": scale,
+                    "fix_suggestion": suggestion,
+                    "issues": list(issues),
+                }],
+                "severity": "fail" if str(getattr(advice, "overall", "")).upper() == "FAIL" else "warn",
+                "metadata": {
+                    "overall": str(getattr(advice, "overall", "") or ""),
+                    "position_correction": position,
+                    "rotation_correction": rotation,
+                    "scale_correction": scale,
+                    "fix_suggestion": suggestion,
+                },
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[ProgressiveWorkflow] VLM review result skipped: %s", exc)
 
 
 def _distribute_assets_to_phases(

@@ -11,6 +11,11 @@
  */
 import { reactive, readonly } from 'vue';
 import { lanChatService } from '../utils/bridge.js';
+import {
+  disclosureVisibleForRole,
+  disclosureVisibleForRoom,
+  extractDisclosureFromMessage,
+} from './lanchatDisclosure.js';
 
 // 连接状态机：idle（未进房）-> hosting/joined（在房）
 const ROLE = { NONE: 'none', HOST: 'host', GUEST: 'guest' };
@@ -31,6 +36,7 @@ const state = reactive({
   members: [], // string[]
   memberDetails: [], // [{ member_id, nickname, status }]
   messages: [], // { message_id, sender_id, room_id, seq, from, text, ts, self }
+  disclosures: [], // safe stage/progress cards derived from metadata
   error: '', // 最近一次错误码/信息
   agents: [], // [{agent_id, name, owner}] 来自房主 agent_roster，不含 persona
   myAgents: [], // 我添加的 agent 本地草稿 [{agent_id, name, persona}]，用于显示"我的"
@@ -47,6 +53,7 @@ function _resetRoom() {
   state.members = [];
   state.memberDetails = [];
   state.messages = [];
+  state.disclosures = [];
   state.error = '';
   state.agents = [];
   state.myAgents = [];
@@ -99,6 +106,57 @@ function parseMetadata(msg = {}) {
   }
 }
 
+function upsertDisclosureFromMessage(message) {
+  const disclosure = extractDisclosureFromMessage(message, state.room);
+  if (!disclosure || !disclosure.public_message) return;
+  if (!disclosureVisibleForRoom(disclosure, state.room)) return;
+  if (!disclosureVisibleForRole(disclosure, state.role)) return;
+  const key = disclosure.event_id || `${disclosure.room_id}:${disclosure.stage}:${disclosure.created_at}`;
+  const existing = state.disclosures.find((item) => (item.event_id || '') === key);
+  if (existing) {
+    Object.assign(existing, { ...disclosure, event_id: key });
+  } else {
+    state.disclosures.push({ ...disclosure, event_id: key });
+  }
+  if (state.disclosures.length > 20) {
+    pruneDisclosures();
+  }
+}
+
+function disclosureRetentionKey(item = {}) {
+  return String(item.event_id || proposalIdForDisclosure(item) || `${item.room_id}:${item.stage}:${item.created_at}`);
+}
+
+function isPendingConfirmationDisclosure(item = {}) {
+  return Boolean(item.requires_confirmation && proposalIdForDisclosure(item));
+}
+
+function pruneDisclosures(limit = 20) {
+  const pending = state.disclosures.filter(isPendingConfirmationDisclosure).slice(-limit);
+  const pendingKeys = new Set(pending.map(disclosureRetentionKey));
+  const routineLimit = Math.max(0, limit - pending.length);
+  const routine = state.disclosures
+    .filter((item) => !pendingKeys.has(disclosureRetentionKey(item)))
+    .slice(routineLimit > 0 ? -routineLimit : state.disclosures.length);
+  const keepKeys = new Set([...pending, ...routine].map(disclosureRetentionKey));
+  state.disclosures = state.disclosures.filter((item) => keepKeys.has(disclosureRetentionKey(item)));
+}
+
+function dismissDisclosureByProposal(proposalId = '') {
+  const id = String(proposalId || '').trim();
+  if (!id) return;
+  state.disclosures = state.disclosures.filter((item) => proposalIdForDisclosure(item) !== id);
+}
+
+function proposalIdForDisclosure(item = {}) {
+  return String(
+    item.proposal_id ||
+    item.metadata?.proposal_id ||
+    item.metadata?.intervention?.proposal_id ||
+    ''
+  ).trim();
+}
+
 function normalizeMessage(msg, self = false) {
   return {
     message_id: msg.message_id || '',
@@ -130,11 +188,15 @@ function upsertMessage(msg, self = false) {
     state.messages.push(normalized);
   }
   sortMessages();
+  upsertDisclosureFromMessage(normalized);
 }
 
 function applyHistorySnapshot(history = [], replace = false) {
   if (!Array.isArray(history)) return;
-  if (replace) state.messages = [];
+  if (replace) {
+    state.messages = [];
+    state.disclosures = [];
+  }
   for (const message of history) {
     upsertMessage(message, messageSelf(message, message.from === state.nickname));
   }
@@ -190,9 +252,10 @@ function removeAgentFromRoster(agentId) {
 // ---- 动作 -----------------------------------------------------------------
 
 /** 房主开房。返回 { ok, ip, port } 或 { ok:false, error }。 */
-async function openRoom({ room, password, port }) {
+async function openRoom({ room, password, port, nickname }) {
   state.error = '';
-  const res = await lanChatService.startRoom({ room, password, port });
+  const hostNickname = (nickname || HOST_NICKNAME).trim() || HOST_NICKNAME;
+  const res = await lanChatService.startRoom({ room, password, port, nickname: hostNickname });
   if (res && res.ok) {
     state.role = ROLE.HOST;
     state.inRoom = true;
@@ -201,10 +264,11 @@ async function openRoom({ room, password, port }) {
     state.ip = res.ip;
     state.port = res.port;
     state.peerId = res.peer_id || '';
-    state.nickname = HOST_NICKNAME;
+    state.nickname = res.you || hostNickname;
     applyMemberSnapshot(res);
-    if (!state.members.length) state.members = [HOST_NICKNAME];
+    if (!state.members.length) state.members = [state.nickname];
     state.messages = [];
+    state.disclosures = [];
     state.agents = res.agents || [];
   } else {
     state.error = (res && res.error) || 'START_FAILED';
@@ -400,6 +464,7 @@ export const lanchat = {
   removeAgent,
   handleEvent,
   isJoining,
+  dismissDisclosureByProposal,
 };
 
 export default lanchat;

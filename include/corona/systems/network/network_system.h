@@ -51,6 +51,11 @@ public:
         Client         ///< 客户端：通过房主 IP 主动加入
     };
 
+    struct LanChatRoomEvent {
+        std::string event;
+        std::string room_id;
+    };
+
     NetworkSystem();
     ~NetworkSystem() override;
 
@@ -145,6 +150,21 @@ public:
         const std::string& source_user_id = {},
         const std::string& correlation_id = {},
         const std::string& metadata_json = {});
+    Network::LanChatMessageResult lanchat_send_system_message_to_host_ex(
+        const std::string& sender_id,
+        const std::string& sender_name,
+        const std::string& text,
+        const std::string& message_kind = {},
+        const std::string& correlation_id = {},
+        const std::string& metadata_json = {});
+    Network::LanChatMessageResult lanchat_send_system_message_to_user_ex(
+        const std::string& target_user_id,
+        const std::string& sender_id,
+        const std::string& sender_name,
+        const std::string& text,
+        const std::string& message_kind = {},
+        const std::string& correlation_id = {},
+        const std::string& metadata_json = {});
     Network::LanChatResult lanchat_register_agent(const std::string& agent_id,
                                                   const std::string& name,
                                                   const std::string& persona,
@@ -154,6 +174,8 @@ public:
     [[nodiscard]] const std::vector<Network::LanChatMessage>& lanchat_history() const;
     [[nodiscard]] const std::vector<Network::LanChatAgent>& lanchat_agents() const;
     [[nodiscard]] std::optional<Network::LanChatAgentTrigger> lanchat_pop_agent_trigger();
+    [[nodiscard]] std::optional<Network::LanChatMessage> lanchat_pop_coordinator_sync_message();
+    [[nodiscard]] std::optional<LanChatRoomEvent> lanchat_pop_room_event();
 
     Network::LanChatResult lanchat_lock_object(const std::string& object_id,
                                                const std::string& user_id,

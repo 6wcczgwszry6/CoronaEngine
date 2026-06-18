@@ -48,6 +48,69 @@ _PHASE_DETAILS = {
     "DECORATION": "补充装饰，但不会覆盖你刚刚改过的内容。",
 }
 
+_SENSITIVE_PROGRESS_KEYS = {
+    "api_key",
+    "auth",
+    "chain",
+    "debug",
+    "debug_trace",
+    "error_trace",
+    "finding_details",
+    "hidden_debug_ref",
+    "internal",
+    "job_id",
+    "llm_request",
+    "llm_response",
+    "messages",
+    "model_config",
+    "model_provider",
+    "prompt",
+    "provider",
+    "raw_prompt",
+    "raw_response",
+    "request",
+    "response",
+    "runtime_context",
+    "scheduler_updates",
+    "session_id",
+    "stage_handlers",
+    "stack",
+    "trace",
+    "tool",
+    "tool_call",
+    "tool_calls",
+    "tool_name",
+    "token",
+    "vlm_raw",
+}
+
+
+def _sanitize_progress_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        safe: Dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            key_lower = key_text.lower()
+            if key_lower in _SENSITIVE_PROGRESS_KEYS or key_lower.endswith("_prompt") or "token" in key_lower:
+                continue
+            if item is None or callable(item):
+                continue
+            safe[key_text] = _sanitize_progress_payload(item)
+        return safe
+    if isinstance(value, list):
+        return [
+            _sanitize_progress_payload(item)
+            for item in value
+            if item is not None and not callable(item)
+        ]
+    if isinstance(value, tuple):
+        return [
+            _sanitize_progress_payload(item)
+            for item in value
+            if item is not None and not callable(item)
+        ]
+    return value
+
 # 介入操作类型（突击方案 §B3）
 OP_ADD = "USER_ADD"
 OP_DELETE = "USER_DELETE"
@@ -91,16 +154,113 @@ class FinalReviewReport:
     preserved: List[str] = field(default_factory=list)        # HARD/近因强保护用户物体：只检查不动
     adjusted: List[str] = field(default_factory=list)         # AGENT 物体：自动 nudge/让位
     needs_confirm: List[Dict[str, str]] = field(default_factory=list)  # 早期+不合理用户物体：报告问用户
+    final_adjustments: List[Dict[str, Any]] = field(default_factory=list)  # Coordinator 汇总的最终强介入
+    deferred_interventions: List[Dict[str, Any]] = field(default_factory=list)  # 早期弱介入，保留原因但不压过收尾
+    conflicts: List[Dict[str, Any]] = field(default_factory=list)  # 需要 GM/房主仲裁的冲突
+    resolved_conflicts: List[Dict[str, Any]] = field(default_factory=list)  # 已由 GM/房主确认或拒绝的冲突
+    applied_final_adjustments: List[Dict[str, Any]] = field(default_factory=list)  # 已安全执行的收尾修复动作
+
+    @staticmethod
+    def _safe_user_text(value: Any, *, fallback: str = "") -> str:
+        text = str(value or "").strip()
+        if not text:
+            return fallback
+        lower = text.lower()
+        markers = (
+            "prompt",
+            "raw_prompt",
+            "provider",
+            "model_provider",
+            "runtime_context",
+            "scheduler_updates",
+            "hidden_debug_ref",
+            "debug",
+            "job_id",
+            "session_id",
+            "token",
+            "api_key",
+            "vlm_raw",
+        )
+        cut_points = [lower.find(marker) for marker in markers if lower.find(marker) >= 0]
+        if cut_points:
+            keep = text[:min(cut_points)].strip(" \t\r\n,;；。")
+            return keep or fallback or "内部细节已隐藏"
+        return text
+
+    @staticmethod
+    def _format_conflict(conflict: Dict[str, Any]) -> str:
+        target = str(
+            conflict.get("target_hint")
+            or conflict.get("actor_id")
+            or conflict.get("target_key")
+            or ""
+        ).strip()
+        reason = str(conflict.get("reason") or "").strip()
+        reason_text = {
+            "same_actor_has_remove_and_keep_modify_requests": "同一物体同时存在删除与保留/修改要求",
+            "same_target_has_remove_and_keep_modify_requests": "同一目标同时存在删除与保留/修改要求",
+        }.get(reason, FinalReviewReport._safe_user_text(reason, fallback="存在未决冲突"))
+        target = FinalReviewReport._safe_user_text(target)
+        reason_text = FinalReviewReport._safe_user_text(reason_text, fallback="存在未决冲突")
+        if target and reason_text:
+            return f"{target}：{reason_text}"
+        return target or reason_text or "存在未决冲突"
 
     def to_user_text(self) -> str:
         """生成给用户的自然语言报告（不是日志）。"""
         lines: List[str] = []
         if self.preserved:
-            lines.append("已保留你最近的调整：" + "、".join(self.preserved[:5]) + "。")
+            preserved = [self._safe_user_text(item) for item in self.preserved[:5] if self._safe_user_text(item)]
+            if preserved:
+                lines.append("已保留你最近的调整：" + "、".join(preserved) + "。")
+        if self.final_adjustments:
+            contents = [
+                self._safe_user_text(item.get("content"))
+                for item in self.final_adjustments
+                if self._safe_user_text(item.get("content"))
+            ]
+            if contents:
+                lines.append("最终收尾会优先处理：" + "；".join(contents[:3]) + "。")
         if self.adjusted:
-            lines.append("系统自动调整了：" + "、".join(self.adjusted[:5]) + "。")
+            adjusted = [self._safe_user_text(item) for item in self.adjusted[:5] if self._safe_user_text(item)]
+            if adjusted:
+                lines.append("系统自动调整了：" + "、".join(adjusted) + "。")
+        if self.applied_final_adjustments:
+            executed = [
+                item for item in self.applied_final_adjustments
+                if "skipped_actor_version_mismatch" not in (item.get("actions") or [])
+            ]
+            skipped_stale = [
+                item for item in self.applied_final_adjustments
+                if "skipped_actor_version_mismatch" in (item.get("actions") or [])
+            ]
+            actions = [
+                self._safe_user_text(item.get("action"))
+                for item in executed
+                if self._safe_user_text(item.get("action"))
+            ]
+            if actions:
+                lines.append("已完成收尾调整：" + "、".join(actions[:5]) + "。")
+            if skipped_stale:
+                targets = [
+                    self._safe_user_text(item.get("content") or item.get("actor_id"))
+                    for item in skipped_stale
+                    if self._safe_user_text(item.get("content") or item.get("actor_id"))
+                ]
+                if targets:
+                    lines.append("已跳过过期介入：" + "、".join(targets[:3]) + "，因为目标物体已被后续批次或用户更新。")
         for nc in self.needs_confirm:
-            lines.append(f"需要你确认：{nc.get('detail', nc.get('actor_id', ''))}，是否允许我重新安排？")
+            detail = self._safe_user_text(nc.get("detail", nc.get("actor_id", "")), fallback="这一项")
+            lines.append(f"需要你确认：{detail}，是否允许我重新安排？")
+        for conflict in self.conflicts:
+            lines.append(f"需要 GM/房主确认：{self._format_conflict(conflict)}。")
+        rejected = [
+            self._format_conflict(conflict)
+            for conflict in self.resolved_conflicts
+            if str(conflict.get("status") or "") == "rejected"
+        ]
+        if rejected:
+            lines.append("已按房主决定跳过收尾冲突项：" + "、".join(rejected[:3]) + "。")
         return "\n".join(lines) if lines else "场景已就绪，未发现需要调整的冲突。"
 
 
@@ -131,6 +291,7 @@ class SceneSession:
         self.silent_gm_state: Dict[str, Any] = {}
         self._dirty = False
         self._progress_sink: Optional[Callable[[str], None]] = None
+        self._progress_event_sink: Optional[Callable[[Dict[str, Any]], None]] = None
 
     # ── 介入入队（随时可调，线程安全留给调用方/gate）──────────────
     def enqueue_intervention(self, op: InterventionOp) -> None:
@@ -144,6 +305,10 @@ class SceneSession:
         """注册进度回调（突击方案 E2，复用 phase 边界）。"""
         self._progress_sink = sink
 
+    def set_progress_event_sink(self, sink: Callable[[Dict[str, Any]], None]) -> None:
+        """注册结构化进度事件回调，供 Coordinator 映射 BatchEvent。"""
+        self._progress_event_sink = sink
+
     def _emit_progress(self, phase: str, extra: str = "") -> str:
         msg = PHASE_PROGRESS.get(phase, "处理场景")
         if extra:
@@ -155,6 +320,14 @@ class SceneSession:
         """Publish a sanitized progress message to the outer UI/chat layer."""
         user_message = self.format_progress_message(event)
         event["user_message"] = user_message
+        sanitized = _sanitize_progress_payload(event)
+        event.clear()
+        event.update(sanitized)
+        if self._progress_event_sink:
+            try:
+                self._progress_event_sink(dict(event))
+            except Exception:  # noqa: BLE001
+                pass
         if self._progress_sink:
             try:
                 self._progress_sink(user_message)
@@ -327,6 +500,137 @@ class SceneSession:
             logger.info("[SceneSession] drain 应用 %d 条介入（轮次 %d）", n, self.current_round)
         return n
 
+    def apply_final_adjustments(self, report: FinalReviewReport) -> List[Dict[str, Any]]:
+        """Apply safe, local final adjustments derived from Coordinator summary.
+
+        This intentionally supports only deterministic transform/status fixes.
+        Ambiguous content and conflicts remain in the report for GM/host review.
+        """
+        applied: List[Dict[str, Any]] = []
+        conflict_target_keys: set[str] = set()
+        for item in report.conflicts:
+            conflict_target_keys.update(self._final_adjustment_target_keys(item))
+        for item in report.final_adjustments:
+            actor_id = str(item.get("actor_id") or "").strip()
+            target_keys = self._final_adjustment_target_keys(item)
+            if not actor_id or target_keys.intersection(conflict_target_keys):
+                continue
+            inst = self.scene_layout.get(actor_id)
+            if inst is None or getattr(inst, "layout_status", "active") != "active":
+                continue
+            if self._actor_version_mismatch(item, inst):
+                applied.append({
+                    "actor_id": actor_id,
+                    "intervention_id": item.get("intervention_id", ""),
+                    "actions": ["skipped_actor_version_mismatch"],
+                    "action": f"{actor_id}:skipped_actor_version_mismatch",
+                    "content": item.get("content", ""),
+                    "expected_actor_version": int(item.get("actor_version") or 0),
+                    "actual_actor_version": self._actor_version(inst),
+                })
+                continue
+            content = str(item.get("content") or "").lower()
+            before = {
+                "transform": self._copy_transform(getattr(inst, "transform", {})),
+                "layout_status": getattr(inst, "layout_status", None),
+            }
+            actions: List[str] = []
+            transform = getattr(inst, "transform", None)
+            if isinstance(transform, dict):
+                has_scale_correction = False
+                for detail in item.get("finding_details") or []:
+                    if not isinstance(detail, dict):
+                        continue
+                    position = self._optional_vector3(detail.get("position_correction"))
+                    if position is not None:
+                        transform["pos"] = position
+                        actions.append("apply_position_correction")
+                    rotation = self._optional_vector3(detail.get("rotation_correction"))
+                    if rotation is not None:
+                        transform["rot"] = rotation
+                        actions.append("apply_rotation_correction")
+                    scale_correction = self._optional_vector3(detail.get("scale_correction"))
+                    if scale_correction is not None:
+                        transform["scale"] = [max(0.05, value) for value in scale_correction]
+                        actions.append("apply_scale_correction")
+                        has_scale_correction = True
+                if not has_scale_correction and any(word in content for word in ("缩小", "太大", "偏大", "比例")):
+                    scale = self._vector3(transform.get("scale"), default=1.0)
+                    transform["scale"] = [max(0.05, round(value * 0.85, 6)) for value in scale]
+                    actions.append("scale_down")
+                if any(word in content for word in ("贴地", "接地", "地面", "悬空", "穿模")):
+                    pos = self._vector3(transform.get("pos"), default=0.0)
+                    pos[1] = max(0.0, pos[1])
+                    transform["pos"] = pos
+                    actions.append("ground_fit")
+            if any(word in content for word in ("移除", "删除", "不要")):
+                inst.layout_status = "stale"
+                actions.append("mark_stale")
+            if not actions:
+                continue
+            after = {
+                "transform": self._copy_transform(getattr(inst, "transform", {})),
+                "layout_status": getattr(inst, "layout_status", None),
+            }
+            record = {
+                "actor_id": actor_id,
+                "intervention_id": item.get("intervention_id", ""),
+                "actions": actions,
+                "action": f"{actor_id}:{'+'.join(actions)}",
+                "content": item.get("content", ""),
+            }
+            applied.append(record)
+            self._append_operation(
+                source="SYSTEM",
+                op_type="FINAL_ADJUST",
+                actor_id=actor_id,
+                before=before,
+                after=after,
+                intent_text=str(item.get("content") or ""),
+            )
+        report.applied_final_adjustments.extend(applied)
+        if applied:
+            logger.info("[SceneSession] FinalAdjustment applied: %s", applied)
+        return applied
+
+    @staticmethod
+    def _final_adjustment_target_keys(item: Dict[str, Any]) -> set[str]:
+        keys: set[str] = set()
+        for key in ("actor_id", "target_actor_id", "object_id", "target_object_id", "target_hint", "target_key"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                keys.add(value)
+        for detail in item.get("finding_details") or []:
+            if not isinstance(detail, dict):
+                continue
+            for key in ("actor_id", "target_actor_id", "object_id", "target_object_id", "target_hint", "target_key"):
+                value = str(detail.get(key) or "").strip()
+                if value:
+                    keys.add(value)
+        return keys
+
+    @staticmethod
+    def _actor_version(inst: Any) -> int:
+        metadata = getattr(inst, "metadata", {}) or {}
+        if not isinstance(metadata, dict):
+            return 0
+        for key in ("actor_version", "version"):
+            if metadata.get(key) in (None, ""):
+                continue
+            try:
+                return int(metadata.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+        return 0
+
+    def _actor_version_mismatch(self, item: Dict[str, Any], inst: Any) -> bool:
+        try:
+            expected = int(item.get("actor_version") or 0)
+        except (TypeError, ValueError):
+            expected = 0
+        actual = self._actor_version(inst)
+        return bool(expected and actual and expected != actual)
+
     def poll_viewport(self, snapshot: Any) -> int:
         """采集视口快照 → diff → 把用户介入转成队列操作（路 A 命门解法）。
 
@@ -377,6 +681,8 @@ class SceneSession:
         phase_sequence: Optional[Sequence[str]] = None,
         phase_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
         runtime_mode_provider: Optional[Callable[[], str]] = None,
+        final_adjustment_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        final_review_protection_fn: Any = None,
     ) -> Dict[str, Any]:
         """渐进式主循环。每个 phase：生成→导入→进度→采集视口→drain介入→settle。
 
@@ -553,14 +859,24 @@ class SceneSession:
 
         # 7. FinalReview 只修 AGENT（测试可跳过，因为有专门的独立测试覆盖）
         report = None
+        final_adjustment_plan = None
         if not skip_final_review and not paused:
+            if final_adjustment_provider is not None:
+                try:
+                    final_adjustment_plan = final_adjustment_provider() or None
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("[SceneSession] final adjustment provider skipped: %s", exc)
             report = self.final_review(
-                reasonable_provider() if reasonable_provider else None)
+                reasonable_provider() if reasonable_provider else None,
+                protection_fn=final_review_protection_fn,
+                final_adjustment_plan=final_adjustment_plan,
+            )
         return {
             "phases_run": phases_run,
             "imported": imported_all,
             "round": round_id,
             "final_report": report,
+            "final_adjustment_plan": final_adjustment_plan,
             "progress_timeline": progress_timeline,
             "paused": paused,
             "paused_mode": paused_mode,
@@ -572,6 +888,7 @@ class SceneSession:
         self,
         reasonable_map: Optional[Dict[str, bool]] = None,
         protection_fn: Any = None,
+        final_adjustment_plan: Optional[Dict[str, Any]] = None,
     ) -> FinalReviewReport:
         """最后一轮按近因加权保护分三桶处理。覆盖前必产报告。
 
@@ -586,6 +903,11 @@ class SceneSession:
             PROTECTION_HARD, PROTECTION_NONE = "HARD", "NONE"
         report = FinalReviewReport()
         reasonable_map = reasonable_map or {}
+        if isinstance(final_adjustment_plan, dict):
+            report.final_adjustments = list(final_adjustment_plan.get("selected") or [])
+            report.deferred_interventions = list(final_adjustment_plan.get("deferred") or [])
+            report.conflicts = list(final_adjustment_plan.get("conflicts") or [])
+            report.resolved_conflicts = list(final_adjustment_plan.get("resolved_conflicts") or [])
 
         for inst in self.scene_layout.list_active():
             iid = inst.instance_id
@@ -608,9 +930,39 @@ class SceneSession:
                 if not reasonable:
                     report.adjusted.append(iid)
 
+        self.apply_final_adjustments(report)
         logger.info("[SceneSession] FinalReview: 保留 %d / 调整 %d / 待确认 %d",
                     len(report.preserved), len(report.adjusted), len(report.needs_confirm))
         return report
+
+    @staticmethod
+    def _vector3(value: Any, *, default: float) -> List[float]:
+        if isinstance(value, (list, tuple)):
+            out = [float(item) for item in list(value)[:3]]
+        else:
+            out = []
+        while len(out) < 3:
+            out.append(float(default))
+        return out
+
+    @staticmethod
+    def _optional_vector3(value: Any) -> Optional[List[float]]:
+        if not isinstance(value, (list, tuple)) or len(value) < 3:
+            return None
+        try:
+            return [round(float(item), 6) for item in list(value)[:3]]
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _copy_transform(value: Any) -> Dict[str, List[float]]:
+        if not isinstance(value, dict):
+            return {}
+        copied: Dict[str, List[float]] = {}
+        for key, item in value.items():
+            if isinstance(item, (list, tuple)):
+                copied[key] = [float(v) for v in item]
+        return copied
 
 
 __all__ = [

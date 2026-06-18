@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <algorithm>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -30,6 +31,7 @@ struct NetworkSystem::Impl {
     Network::NetworkIdentityRegistry identity_registry{SharedDataHub::instance()};
     Network::LanChatState lanchat;
     std::function<void(const std::string&)> lanchat_event_callback;
+    std::deque<NetworkSystem::LanChatRoomEvent> pending_lanchat_room_events;
     std::string lanchat_nickname;
     uint64_t next_lanchat_message_id = 1;
     std::unordered_map<std::string, std::string> lanchat_member_by_peer;
@@ -748,11 +750,20 @@ bool NetworkSystem::send_to_connected_host_peer(
 }
 
 void NetworkSystem::notify_lanchat_room_closed() {
-    if (impl_->lanchat.room_id().empty() || !impl_->lanchat_event_callback) {
+    const std::string room_id = impl_->lanchat.room_id();
+    if (room_id.empty()) {
         return;
     }
-    impl_->lanchat_event_callback(
-        "{\"channel\":\"lanchat\",\"event\":\"room_closed\"}");
+    impl_->pending_lanchat_room_events.push_back({"room_closed", room_id});
+    if (impl_->pending_lanchat_room_events.size() > 32) {
+        impl_->pending_lanchat_room_events.pop_front();
+    }
+    const std::string event_json =
+        "{\"channel\":\"lanchat\",\"event\":\"room_closed\",\"room_id\":" +
+        json_string(room_id) + "}";
+    if (impl_->lanchat_event_callback) {
+        impl_->lanchat_event_callback(event_json);
+    }
 }
 
 void NetworkSystem::clear_lanchat_room_state() {
@@ -871,6 +882,8 @@ Network::LanChatMessageResult NetworkSystem::lanchat_send_message_ex(
     const std::string message_id =
         sender_id + ":" + std::to_string(timestamp) + ":" +
         std::to_string(impl_->next_lanchat_message_id++);
+    const std::string local_sender_type =
+        impl_->session_role == SessionRole::Host ? "host" : "user";
 
     if (impl_->session_role == SessionRole::Client) {
         Network::LanChatMessage message;
@@ -881,7 +894,7 @@ Network::LanChatMessageResult NetworkSystem::lanchat_send_message_ex(
         message.text = text;
         message.seq = 0;
         message.timestamp_ms = timestamp;
-        message.sender_type = "user";
+        message.sender_type = local_sender_type;
         message.message_kind = message_kind.empty() ? "chat" : message_kind;
         message.target_agent_id = target_agent_id;
         message.source_user_id = source_user_id.empty() ? sender_id : source_user_id;
@@ -896,7 +909,7 @@ Network::LanChatMessageResult NetworkSystem::lanchat_send_message_ex(
 
     auto result = impl_->lanchat.record_message_ex(
         message_id, sender_id, impl_->lanchat_nickname, text, timestamp,
-        "user", message_kind.empty() ? "chat" : message_kind, target_agent_id,
+        local_sender_type, message_kind.empty() ? "chat" : message_kind, target_agent_id,
         source_user_id.empty() ? sender_id : source_user_id, correlation_id,
         metadata_json);
     if (!result.accepted) {
@@ -980,6 +993,63 @@ Network::LanChatMessageResult NetworkSystem::lanchat_send_agent_reply_ex(
     return result;
 }
 
+Network::LanChatMessageResult NetworkSystem::lanchat_send_system_message_to_host_ex(
+    const std::string& sender_id,
+    const std::string& sender_name,
+    const std::string& text,
+    const std::string& message_kind,
+    const std::string& correlation_id,
+    const std::string& metadata_json) {
+    if (impl_->session_role != SessionRole::Host) {
+        return {false, {}, "NOT_HOST"};
+    }
+    return lanchat_send_system_message_to_user_ex(
+        local_peer_id(),
+        sender_id,
+        sender_name,
+        text,
+        message_kind,
+        correlation_id,
+        metadata_json);
+}
+
+Network::LanChatMessageResult NetworkSystem::lanchat_send_system_message_to_user_ex(
+    const std::string& target_user_id,
+    const std::string& sender_id,
+    const std::string& sender_name,
+    const std::string& text,
+    const std::string& message_kind,
+    const std::string& correlation_id,
+    const std::string& metadata_json) {
+    const std::string local_id = local_peer_id();
+    if (!target_user_id.empty() && target_user_id != local_id && target_user_id != "host") {
+        return {false, {}, "TARGET_NOT_LOCAL"};
+    }
+
+    const uint64_t timestamp = now_ms();
+    const std::string effective_sender_id = sender_id.empty() ? "system" : sender_id;
+    const std::string effective_sender_name = sender_name.empty() ? "系统" : sender_name;
+    const std::string message_id =
+        effective_sender_id + ":" + std::to_string(timestamp) + ":" +
+        std::to_string(impl_->next_lanchat_message_id++);
+    auto result = impl_->lanchat.record_message_ex(
+        message_id,
+        effective_sender_id,
+        effective_sender_name,
+        text,
+        timestamp,
+        "system",
+        message_kind.empty() ? "action_status" : message_kind,
+        {},
+        target_user_id.empty() ? local_id : target_user_id,
+        correlation_id,
+        metadata_json);
+    if (result.accepted && impl_->lanchat_event_callback) {
+        impl_->lanchat_event_callback(message_event_json(result.message));
+    }
+    return result;
+}
+
 Network::LanChatResult NetworkSystem::lanchat_register_agent(const std::string& agent_id,
                                                              const std::string& name,
                                                              const std::string& persona,
@@ -1044,6 +1114,19 @@ const std::vector<Network::LanChatAgent>& NetworkSystem::lanchat_agents() const 
 
 std::optional<Network::LanChatAgentTrigger> NetworkSystem::lanchat_pop_agent_trigger() {
     return impl_->lanchat.pop_agent_trigger();
+}
+
+std::optional<Network::LanChatMessage> NetworkSystem::lanchat_pop_coordinator_sync_message() {
+    return impl_->lanchat.pop_coordinator_sync_message();
+}
+
+std::optional<NetworkSystem::LanChatRoomEvent> NetworkSystem::lanchat_pop_room_event() {
+    if (impl_->pending_lanchat_room_events.empty()) {
+        return std::nullopt;
+    }
+    auto event = impl_->pending_lanchat_room_events.front();
+    impl_->pending_lanchat_room_events.pop_front();
+    return event;
 }
 
 Network::LanChatResult NetworkSystem::lanchat_lock_object(const std::string& object_id,

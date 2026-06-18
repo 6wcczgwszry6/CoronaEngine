@@ -481,6 +481,70 @@ void test_lanchat_state_updates_authoritative_message_and_history_snapshot() {
     expect_true(state.next_seq() == 8, "lanchat state advances next sequence from snapshot");
 }
 
+void test_lanchat_state_queues_plain_chat_for_coordinator_sync() {
+    Corona::Network::LanChatState state;
+    state.open_room("room-a", "host-peer", "Host");
+
+    auto message = state.record_message(
+        "msg-coord", "user-a", "Alice", "第一批后加一座天使雕塑", 1000);
+    expect_true(message.accepted, "lanchat state accepts coordinator sync chat");
+
+    auto sync = state.pop_coordinator_sync_message();
+    expect_true(sync.has_value(), "lanchat state queues ordinary chat for coordinator sync");
+    expect_true(sync->message_id == "msg-coord", "coordinator sync carries message id");
+    expect_true(sync->text == "第一批后加一座天使雕塑", "coordinator sync carries text");
+    expect_true(!state.pop_coordinator_sync_message().has_value(),
+                "coordinator sync queue drains once");
+}
+
+void test_lanchat_state_queues_host_chat_for_coordinator_sync() {
+    Corona::Network::LanChatState state;
+    state.open_room("room-a", "host-peer", "Host");
+
+    auto message = state.record_message_ex(
+        "msg-host", "host-peer", "Host", "房主确认先做室外入口", 1000,
+        "host", "chat");
+    expect_true(message.accepted, "lanchat state accepts host chat");
+
+    auto sync = state.pop_coordinator_sync_message();
+    expect_true(sync.has_value(), "lanchat state queues host chat for coordinator sync");
+    expect_true(sync->sender_type == "host", "coordinator sync preserves host sender type");
+}
+
+void test_lanchat_state_filters_internal_messages_from_coordinator_sync() {
+    Corona::Network::LanChatState state;
+    state.open_room("room-a", "host-peer", "Host");
+
+    auto progress = state.record_message_ex(
+        "msg-progress", "system", "System", "内部进度", 1000,
+        "system", "action_status");
+    auto agent = state.record_message_ex(
+        "msg-agent", "agent-a", "SceneBot", "我来处理", 1001,
+        "agent", "agent_reply");
+
+    expect_true(progress.accepted, "lanchat state accepts progress message");
+    expect_true(agent.accepted, "lanchat state accepts agent message");
+    expect_true(!state.pop_coordinator_sync_message().has_value(),
+                "coordinator sync filters agent and system messages");
+}
+
+void test_lanchat_state_host_message_can_trigger_local_agent() {
+    Corona::Network::LanChatState state;
+    state.open_room("room-a", "host-peer", "Host");
+    expect_true(state.register_agent("agent-1", "SceneBot", "scene helper", "host-peer").ok,
+                "lanchat state registers host-owned agent");
+
+    auto message = state.record_message_ex(
+        "msg-host-agent", "host-peer", "Host", "@SceneBot 整理一下方案", 1000,
+        "host", "chat");
+    expect_true(message.accepted, "lanchat state accepts host agent mention");
+
+    state.enqueue_agent_triggers_for_message(message.message, "host-peer");
+    auto trigger = state.pop_agent_trigger();
+    expect_true(trigger.has_value(), "host chat can trigger local agent");
+    expect_true(trigger->sender_type == "host", "host trigger preserves sender type");
+}
+
 void test_lanchat_state_applies_authoritative_member_snapshot() {
     Corona::Network::LanChatState state;
     state.open_room("room-a", "guest-peer", "Alice");
@@ -1222,6 +1286,10 @@ int main() {
     test_lanchat_join_reject_carries_error_code();
     test_lanchat_state_deduplicates_messages_and_tracks_agents();
     test_lanchat_state_updates_authoritative_message_and_history_snapshot();
+    test_lanchat_state_queues_plain_chat_for_coordinator_sync();
+    test_lanchat_state_queues_host_chat_for_coordinator_sync();
+    test_lanchat_state_filters_internal_messages_from_coordinator_sync();
+    test_lanchat_state_host_message_can_trigger_local_agent();
     test_lanchat_state_applies_authoritative_member_snapshot();
     test_lanchat_state_enqueues_local_agent_trigger_from_mention();
     test_lanchat_state_implicit_trigger_only_for_single_local_agent();

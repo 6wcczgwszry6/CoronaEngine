@@ -38,21 +38,119 @@ def test_advisory_with_corrections():
         # 兽头朝外 → 给旋转修正
         if name == "兽头":
             return {"overall": "WARN", "rotation_correction": [0, 180, 0],
-                    "issues": ["朝向错误：背对房间"], "fix_suggestion": "旋转180度朝内"}
-        return {"overall": "PASS"}
+                    "issues": ["朝向错误：背对房间"], "fix_suggestion": "旋转180度朝内",
+                    "confidence": 0.9}
+        if name == "灯":
+            return {"overall": "WARN", "position_correction": [1.5, 0.0, 2.0],
+                    "issues": ["与桌面穿模"], "fix_suggestion": "移动到不穿模位置",
+                    "confidence": 0.9}
+        return {"overall": "PASS", "confidence": 0.9}
 
     gate = FakeGate()
     report = review_models_async(
-        [{"actor_id": "兽头"}, {"actor_id": "桌子"}],
+        [{"actor_id": "兽头"}, {"actor_id": "灯"}, {"actor_id": "桌子"}],
         capture_fn=capture, review_fn=review, engine_gate=gate,
     )
-    assert len(report.advices) == 2
+    assert len(report.advices) == 3
     actionable = report.actionable()
     ids = {a.actor_id for a in actionable}
     assert "兽头" in ids, "有旋转修正的应进 actionable"
+    assert "灯" in ids, "只有位置修正的也应进 actionable"
+    lamp = next(a for a in actionable if a.actor_id == "灯")
+    assert lamp.position_correction == [1.5, 0.0, 2.0]
     assert "桌子" not in ids, "PASS 无修正的不进 actionable"
-    assert gate.screenshot_calls == 2, "每次截图都必须经 EngineWriteGate.screenshot"
+    assert gate.screenshot_calls == 3, "每次截图都必须经 EngineWriteGate.screenshot"
     print("[OK] 产出 advisory + actionable 只挑有修正 + 截图经 gate 收口")
+
+
+def test_low_confidence_vlm_advice_stays_advisory():
+    def capture(out_dir, name):
+        return f"/shots/{name}"
+
+    def review(shot_dir, name, mtype):
+        if name == "误报模型":
+            return {
+                "overall": "FAIL",
+                "rotation_correction": [0, 180, 0],
+                "issues": ["疑似朝向错误"],
+                "fix_suggestion": "低置信旋转建议",
+                "confidence": 0.2,
+            }
+        return {
+            "overall": "WARN",
+            "scale_correction": [0.8, 0.8, 0.8],
+            "issues": ["比例偏大"],
+            "fix_suggestion": "缩小一点",
+            "confidence": 0.8,
+        }
+
+    report = review_models_async(
+        [{"actor_id": "误报模型"}, {"actor_id": "可信模型"}],
+        capture_fn=capture,
+        review_fn=review,
+    )
+    actionable = report.actionable()
+    ids = {a.actor_id for a in actionable}
+
+    assert len(report.advices) == 2
+    assert "可信模型" in ids
+    assert "误报模型" not in ids
+    assert "可信模型" in report.to_user_text()
+    assert "误报模型" not in report.to_user_text()
+    print("[OK] 低置信 VLM 建议保留为 advisory，不进入 actionable")
+
+
+def test_low_confidence_only_vlm_advice_is_disclosed_without_action():
+    def capture(out_dir, name):
+        return f"/shots/{name}"
+
+    def review(shot_dir, name, mtype):
+        return {
+            "overall": "FAIL",
+            "rotation_correction": [0, 180, 0],
+            "issues": ["疑似朝向错误"],
+            "fix_suggestion": "低置信旋转建议",
+            "confidence": 0.2,
+        }
+
+    report = review_models_async(
+        [{"actor_id": "低置信模型"}],
+        capture_fn=capture,
+        review_fn=review,
+    )
+    text = report.to_user_text()
+
+    assert not report.actionable()
+    assert "低置信建议" in text
+    assert "不自动执行" in text
+    assert "未发现明显语义问题" not in text
+    print("[OK] 低置信 VLM 建议会披露为待确认，不误报为无问题")
+
+
+def test_missing_confidence_vlm_advice_stays_advisory():
+    def capture(out_dir, name):
+        return f"/shots/{name}"
+
+    def review(shot_dir, name, mtype):
+        return {
+            "overall": "FAIL",
+            "rotation_correction": [0, 180, 0],
+            "issues": ["疑似朝向错误但模型未返回置信度"],
+            "fix_suggestion": "缺置信度建议",
+        }
+
+    report = review_models_async(
+        [{"actor_id": "缺置信度模型"}],
+        capture_fn=capture,
+        review_fn=review,
+    )
+    text = report.to_user_text()
+
+    assert not report.actionable()
+    assert "低置信建议" in text
+    assert "不自动执行" in text
+    assert "未发现明显语义问题" not in text
+    print("[OK] 缺置信度 VLM 建议保留为 advisory，不进入 actionable")
 
 
 def test_screenshot_timeout_tolerated():
@@ -354,6 +452,9 @@ def test_screenshot_waits_for_late_png_write():
 
 if __name__ == "__main__":
     test_advisory_with_corrections()
+    test_low_confidence_vlm_advice_stays_advisory()
+    test_low_confidence_only_vlm_advice_is_disclosed_without_action()
+    test_missing_confidence_vlm_advice_stays_advisory()
     test_screenshot_timeout_tolerated()
     test_review_exception_skipped()
     test_no_screenshot_skipped()

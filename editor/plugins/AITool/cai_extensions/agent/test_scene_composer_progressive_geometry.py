@@ -19,11 +19,15 @@ from cai_extensions.agent.scene_composer_progressive import (  # noqa: E402
     _collect_door_clearance_aabbs,
     _collect_zone_aabbs,
     _distribute_assets_to_phases,
+    _emit_aabb_review_results,
+    _emit_vlm_review_results,
     _filter_aabbs_by_zone,
     _generate_post_shell_framework,
     _infer_primary_zone_ids,
+    _run_vlm_advisory_review,
     _vlm_max_targets,
 )
+from cai_extensions.agent.scene_composer import SceneComposer  # noqa: E402
 from cai_extensions.agent.scene_session import SceneSession  # noqa: E402
 from cai_extensions.data_model.zone_tree import Connector, Volume, Zone, ZoneAspect, ZoneTree  # noqa: E402
 
@@ -90,6 +94,24 @@ class FakeComposer:
     def _generate_fence(self, params, anchor=None):
         self.fences.append(dict(params or {}))
         self.anchors.append(dict(anchor or {}))
+
+
+class FakeCoordinator:
+    def __init__(self):
+        self.reviews = []
+
+    def ingest_review_result(self, payload):
+        self.reviews.append(dict(payload))
+        return []
+
+
+class FakeEngineGate:
+    def __init__(self):
+        self.screenshots = []
+
+    def screenshot(self, fn, *args, **kwargs):
+        self.screenshots.append((fn, args, kwargs))
+        return fn(*args, **kwargs)
 
 
 def test_zone_and_asset_routing():
@@ -378,6 +400,202 @@ def test_f5_demo_mode_disables_vlm_by_default():
     print("[OK] F5 demo mode disables VLM by default but explicit target count wins")
 
 
+def test_aabb_review_issues_flow_to_coordinator_review_result():
+    coordinator = FakeCoordinator()
+    _emit_aabb_review_results(
+        [{
+            "kind": "aabb_repair",
+            "text": "actor-statue 仍有重叠或摆放冲突",
+            "status": "needs_confirm",
+            "actor_id": "actor-statue",
+            "reason": "overlap",
+        }],
+        batch_id="r1_OBJECTS_b1",
+        interaction_coordinator=coordinator,
+        room_id="room-a",
+        plan_id="seed-a",
+        session_id="sess-a",
+    )
+
+    assert coordinator.reviews
+    review = coordinator.reviews[-1]
+    assert review["review_type"] == "geometry"
+    assert review["passed"] is False
+    assert review["batch_id"] == "r1_OBJECTS_b1"
+    assert review["actor_id"] == "actor-statue"
+    assert review["finding_details"][0]["actor_id"] == "actor-statue"
+    assert review["finding_details"][0]["target_hint"] == "actor-statue"
+    assert review["finding_details"][0]["action"] == "repair_geometry"
+    assert review["finding_details"][0]["issue_type"] == "overlap"
+    assert "重叠" in review["findings"][0]
+    print("[OK] AABB unresolved issues flow to Coordinator ReviewResult")
+
+
+def test_vlm_actionable_advice_flows_to_coordinator_review_result():
+    coordinator = FakeCoordinator()
+    advice = SimpleNamespace(
+        actor_id="actor-lamp",
+        overall="FAIL",
+        issues=["朝向不符合用户意图"],
+        fix_suggestion="移动到不穿模位置并旋转 90 度",
+        position_correction=[2.5, 0.0, 3.5],
+        rotation_correction=[0.0, 90.0, 0.0],
+        scale_correction=[1.0, 1.0, 1.0],
+    )
+    report = SimpleNamespace(
+        advices=[advice],
+        skipped=[],
+        timed_out=[],
+        actionable=lambda: [advice],
+    )
+
+    _emit_vlm_review_results(
+        report,
+        interaction_coordinator=coordinator,
+        room_id="room-a",
+        plan_id="seed-a",
+        session_id="sess-a",
+    )
+
+    assert coordinator.reviews
+    review = coordinator.reviews[-1]
+    assert review["review_type"] == "vlm"
+    assert review["passed"] is False
+    assert review["actor_id"] == "actor-lamp"
+    assert review["severity"] == "fail"
+    assert "朝向" in review["findings"][0]
+    assert review["metadata"]["position_correction"] == [2.5, 0.0, 3.5]
+    assert review["metadata"]["rotation_correction"] == [0.0, 90.0, 0.0]
+    assert review["finding_details"][0]["actor_id"] == "actor-lamp"
+    assert review["finding_details"][0]["target_hint"] == "actor-lamp"
+    assert review["finding_details"][0]["action"] == "apply_vlm_advice"
+    assert review["finding_details"][0]["position_correction"] == [2.5, 0.0, 3.5]
+    assert review["finding_details"][0]["rotation_correction"] == [0.0, 90.0, 0.0]
+    print("[OK] VLM actionable advice flows to Coordinator ReviewResult")
+
+
+def test_vlm_review_uses_composer_hooks_under_engine_gate():
+    calls = []
+
+    class HookedComposer:
+        def vlm_target_provider(self, imported, max_targets=4):
+            calls.append(("target_provider", list(imported), max_targets))
+            return [
+                {"actor_id": "actor-a", "model_name": "statue", "model_type": "decor"},
+                {"actor_id": "actor-b", "model_name": "lamp", "model_type": "lighting"},
+            ]
+
+        def vlm_capture_fn(self, output_dir, model_name):
+            calls.append(("capture", output_dir, model_name))
+            return f"{output_dir}/shots"
+
+        def vlm_review_fn(self, screenshot_dir, model_name, model_type):
+            calls.append(("review", screenshot_dir, model_name, model_type))
+            return {
+                "overall": "WARN",
+                "position_correction": [0.1, 0.0, 0.0],
+                "rotation_correction": [0.0, 0.2, 0.0],
+                "scale_correction": [1.0, 0.9, 1.0],
+                "issues": ["朝向略偏"],
+                "fix_suggestion": "轻微旋转并缩小",
+                "confidence": 0.9,
+            }
+
+    old_targets = os.environ.get("PROGRESSIVE_VLM_MAX_TARGETS")
+    try:
+        os.environ["PROGRESSIVE_VLM_MAX_TARGETS"] = "2"
+        gate = FakeEngineGate()
+        report = _run_vlm_advisory_review(["legacy-a", "legacy-b"], gate, composer=HookedComposer())
+    finally:
+        if old_targets is None:
+            os.environ.pop("PROGRESSIVE_VLM_MAX_TARGETS", None)
+        else:
+            os.environ["PROGRESSIVE_VLM_MAX_TARGETS"] = old_targets
+
+    assert report is not None
+    assert len(report.advices) == 2
+    assert len(gate.screenshots) == 2
+    assert any(call[0] == "target_provider" for call in calls)
+    assert ("capture", "_vlm_review/actor-a", "statue") in calls
+    assert ("review", "_vlm_review/actor-a/shots", "statue", "decor") in calls
+    assert report.actionable()[0].actor_id == "actor-a"
+    print("[OK] VLM review uses composer target/capture/review hooks under EngineWriteGate")
+
+
+def test_scene_composer_injects_shared_scoped_memory_only():
+    class FakeMemoryCoordinator:
+        def __init__(self):
+            self.calls = []
+
+        def memory_summary(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return {
+                "summary_text": "已确认风格：暗黑集市；最近介入：入口留路，雕像靠后。",
+                "entries": [
+                    {"visibility": "shared", "text": "入口留路"},
+                    {"visibility": "private", "text": "agent-private-secret"},
+                ],
+            }
+
+    coordinator = FakeMemoryCoordinator()
+    composer = SceneComposer(max_items=3)
+    enhanced, context = composer._compose_generation_text(
+        "生成一个市场",
+        interaction_coordinator=coordinator,
+        room_id="room-a",
+        plan_id="seed-a",
+        session_id="room-a",
+    )
+
+    assert coordinator.calls
+    assert coordinator.calls[-1]["visibility"] == "shared"
+    assert "跨批次已确认上下文" in enhanced
+    assert "入口留路" in enhanced
+    assert "agent-private-secret" not in enhanced
+    assert context["entry_count"] == 2
+
+    unchanged, empty_context = composer._compose_generation_text("生成一个市场")
+    assert unchanged == "生成一个市场"
+    assert empty_context == {}
+    print("[OK] SceneComposer injects shared scoped memory without private leakage")
+
+
+def test_scene_composer_can_focus_scoped_memory_on_target_actor():
+    class FakeMemoryCoordinator:
+        def __init__(self):
+            self.calls = []
+
+        def memory_summary(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            actor_id = kwargs.get("actor_id")
+            if actor_id == "actor-statue":
+                return {
+                    "summary_text": "雕像需要缩小并后移。",
+                    "entries": [{"actor_id": "actor-statue", "text": "雕像需要缩小并后移。"}],
+                }
+            return {
+                "summary_text": "灯具需要旋转。",
+                "entries": [{"actor_id": "actor-lamp", "text": "灯具需要旋转。"}],
+            }
+
+    coordinator = FakeMemoryCoordinator()
+    composer = SceneComposer(max_items=3)
+    enhanced, context = composer._compose_generation_text(
+        "调整下一批物体",
+        interaction_coordinator=coordinator,
+        room_id="room-a",
+        plan_id="seed-a",
+        session_id="room-a",
+        actor_id="actor-statue",
+    )
+
+    assert coordinator.calls[-1]["actor_id"] == "actor-statue"
+    assert context["actor_id"] == "actor-statue"
+    assert "雕像需要缩小并后移" in enhanced
+    assert "灯具需要旋转" not in enhanced
+    print("[OK] SceneComposer can focus scoped memory on target actor")
+
+
 if __name__ == "__main__":
     test_zone_and_asset_routing()
     test_zone_and_door_aabb_helpers()
@@ -390,4 +608,9 @@ if __name__ == "__main__":
     test_progress_message_is_user_facing_with_batch_context()
     test_progressive_post_shell_framework_generates_floor_and_boundary()
     test_f5_demo_mode_disables_vlm_by_default()
+    test_aabb_review_issues_flow_to_coordinator_review_result()
+    test_vlm_actionable_advice_flows_to_coordinator_review_result()
+    test_vlm_review_uses_composer_hooks_under_engine_gate()
+    test_scene_composer_injects_shared_scoped_memory_only()
+    test_scene_composer_can_focus_scoped_memory_on_target_actor()
     print("\n=== progressive mixed geometry ALL PASS ===")
