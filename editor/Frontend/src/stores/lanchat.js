@@ -38,6 +38,7 @@ const state = reactive({
   memberDetails: [], // [{ member_id, nickname, status }]
   messages: [], // { message_id, sender_id, room_id, seq, from, text, ts, self }
   disclosures: [], // safe stage/progress cards derived from metadata
+  processedProposalIds: [], // proposal ids already confirmed/rejected locally or by GM reply
   error: '', // 最近一次错误码/信息
   agents: [], // [{agent_id, name, owner}] 来自房主 agent_roster，不含 persona
   myAgents: [], // 我添加的 agent 本地草稿 [{agent_id, name, persona}]，用于显示"我的"
@@ -56,6 +57,7 @@ function _resetRoom() {
   state.memberDetails = [];
   state.messages = [];
   state.disclosures = [];
+  state.processedProposalIds = [];
   state.error = '';
   state.agents = [];
   state.myAgents = [];
@@ -109,7 +111,7 @@ function parseMetadata(msg = {}) {
 }
 
 function upsertDisclosureFromMessage(message) {
-  const disclosure = extractDisclosureFromMessage(message, state.room);
+  const disclosure = extractDisclosureFromMessage(message, state.room, state.role);
   if (!disclosure || !disclosure.public_message) return;
   if (!disclosureVisibleForRoom(disclosure, state.room)) return;
   if (!disclosureVisibleForRole(disclosure, state.role)) return;
@@ -130,7 +132,8 @@ function disclosureRetentionKey(item = {}) {
 }
 
 function isPendingConfirmationDisclosure(item = {}) {
-  return Boolean(item.requires_confirmation && proposalIdForDisclosure(item));
+  const proposalId = proposalIdForDisclosure(item);
+  return Boolean(item.requires_confirmation && proposalId && !isProposalHandled(proposalId));
 }
 
 function pruneDisclosures(limit = 20) {
@@ -147,6 +150,7 @@ function pruneDisclosures(limit = 20) {
 function dismissDisclosureByProposal(proposalId = '') {
   const id = String(proposalId || '').trim();
   if (!id) return;
+  markProposalHandled(id);
   state.disclosures = state.disclosures.filter((item) => proposalIdForDisclosure(item) !== id);
 }
 
@@ -157,6 +161,43 @@ function proposalIdForDisclosure(item = {}) {
     item.metadata?.intervention?.proposal_id ||
     ''
   ).trim();
+}
+
+function normalizeProposalId(proposalId = '') {
+  return String(proposalId || '').trim().toLowerCase();
+}
+
+function markProposalHandled(proposalId = '') {
+  const id = normalizeProposalId(proposalId);
+  if (!id || state.processedProposalIds.includes(id)) return;
+  state.processedProposalIds.push(id);
+  if (state.processedProposalIds.length > 100) {
+    state.processedProposalIds.splice(0, state.processedProposalIds.length - 100);
+  }
+}
+
+function isProposalHandled(proposalId = '') {
+  const id = normalizeProposalId(proposalId);
+  return Boolean(id && state.processedProposalIds.includes(id));
+}
+
+function rememberProcessedProposalFromMessage(message = {}) {
+  const text = String(message.text || '');
+  const kind = String(message.message_kind || '').toLowerCase();
+  const ids = new Set();
+  const metadataProposalId = message.metadata?.proposal_id || message.metadata?.intervention?.proposal_id;
+  if (metadataProposalId && kind === 'confirmation') {
+    ids.add(String(metadataProposalId));
+  }
+  const processedPattern = /(?:已确认|已取消|已拒绝|已处理|不会重复|不会执行)[\s\S]{0,40}\b((?:gm-\d+|fa-[\w.-]+|cr-[\w.-]+))\b|\b((?:gm-\d+|fa-[\w.-]+|cr-[\w.-]+))\b[\s\S]{0,40}(?:已确认|已取消|已拒绝|已处理|不会重复|不会执行)/gi;
+  let match;
+  while ((match = processedPattern.exec(text)) !== null) {
+    ids.add(match[1] || match[2]);
+  }
+  for (const id of ids) {
+    markProposalHandled(id);
+    state.disclosures = state.disclosures.filter((item) => normalizeProposalId(proposalIdForDisclosure(item)) !== normalizeProposalId(id));
+  }
 }
 
 function normalizeMessage(msg, self = false) {
@@ -181,6 +222,7 @@ function normalizeMessage(msg, self = false) {
 
 function upsertMessage(msg, self = false) {
   const normalized = normalizeMessage(msg, self);
+  rememberProcessedProposalFromMessage(normalized);
   const existing = normalized.message_id
     ? state.messages.find((m) => m.message_id === normalized.message_id)
     : null;
@@ -198,6 +240,7 @@ function applyHistorySnapshot(history = [], replace = false) {
   if (replace) {
     state.messages = [];
     state.disclosures = [];
+    state.processedProposalIds = [];
   }
   for (const message of history) {
     upsertMessage(message, messageSelf(message, message.from === state.nickname));
@@ -504,6 +547,8 @@ export const lanchat = {
   handleEvent,
   isJoining,
   dismissDisclosureByProposal,
+  markProposalHandled,
+  isProposalHandled,
 };
 
 export default lanchat;

@@ -159,6 +159,7 @@ class FinalReviewReport:
     conflicts: List[Dict[str, Any]] = field(default_factory=list)  # 需要 GM/房主仲裁的冲突
     resolved_conflicts: List[Dict[str, Any]] = field(default_factory=list)  # 已由 GM/房主确认或拒绝的冲突
     applied_final_adjustments: List[Dict[str, Any]] = field(default_factory=list)  # 已安全执行的收尾修复动作
+    style_contract_summary: Dict[str, Any] = field(default_factory=dict)  # 长周期场景契约摘要，只放用户可读字段
 
     @staticmethod
     def _safe_user_text(value: Any, *, fallback: str = "") -> str:
@@ -206,9 +207,86 @@ class FinalReviewReport:
             return f"{target}：{reason_text}"
         return target or reason_text or "存在未决冲突"
 
+    @staticmethod
+    def _safe_text_list(values: Any, *, limit: int = 5) -> List[str]:
+        if not isinstance(values, list):
+            return []
+        out: List[str] = []
+        for value in values:
+            safe = FinalReviewReport._safe_user_text(value)
+            if safe and safe not in out:
+                out.append(safe)
+            if len(out) >= limit:
+                break
+        return out
+
+    @staticmethod
+    def _safe_contract_spec(spec: Any, *, keys: Sequence[str]) -> List[str]:
+        if not isinstance(spec, dict):
+            return []
+        out: List[str] = []
+        for key in keys:
+            value = spec.get(key)
+            if isinstance(value, list):
+                safe_value = "、".join(FinalReviewReport._safe_text_list(value, limit=3))
+            else:
+                safe_value = FinalReviewReport._safe_user_text(value)
+            if safe_value:
+                out.append(safe_value)
+        return out
+
+    @staticmethod
+    def build_style_contract_summary(contract: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Extract the stable room-level design contract for the final user report."""
+        if not isinstance(contract, dict) or not contract:
+            return {}
+        summary: Dict[str, Any] = {}
+        version = contract.get("version")
+        if isinstance(version, int) and version > 0:
+            summary["version"] = version
+        summary["scene"] = FinalReviewReport._safe_user_text(contract.get("scene_type"))
+        summary["environment"] = FinalReviewReport._safe_user_text(contract.get("environment_type"))
+        summary["style"] = FinalReviewReport._safe_text_list(contract.get("style_keywords"), limit=4)
+        summary["mood"] = FinalReviewReport._safe_text_list(contract.get("mood"), limit=4)
+        summary["avoid"] = FinalReviewReport._safe_text_list(contract.get("avoid_keywords"), limit=4)
+        summary["palette"] = FinalReviewReport._safe_text_list(contract.get("palette"), limit=3)
+        summary["lighting"] = FinalReviewReport._safe_text_list(contract.get("lighting"), limit=3)
+        summary["scale_rules"] = FinalReviewReport._safe_text_list(contract.get("scale_rules"), limit=2)
+        summary["placement_rules"] = FinalReviewReport._safe_text_list(contract.get("placement_rules"), limit=3)
+        summary["terrain"] = FinalReviewReport._safe_contract_spec(
+            contract.get("terrain_spec"),
+            keys=("type", "surface", "walkable"),
+        )
+        summary["boundary"] = FinalReviewReport._safe_contract_spec(
+            contract.get("boundary_spec"),
+            keys=("type", "style", "height", "coverage", "avoid"),
+        )
+        return {key: value for key, value in summary.items() if value not in ("", [], {}, None)}
+
     def to_user_text(self) -> str:
         """生成给用户的自然语言报告（不是日志）。"""
         lines: List[str] = []
+        if self.style_contract_summary:
+            summary = self.style_contract_summary
+            descriptors: List[str] = []
+            for key in ("mood", "style", "palette", "lighting"):
+                values = summary.get(key)
+                if isinstance(values, list):
+                    descriptors.extend(str(item) for item in values if str(item).strip())
+            descriptors = list(dict.fromkeys(descriptors))
+            if descriptors:
+                lines.append("风格收口：" + "、".join(descriptors[:8]) + "。")
+            avoid = summary.get("avoid")
+            if isinstance(avoid, list) and avoid:
+                lines.append("已持续避开：" + "、".join(str(item) for item in avoid[:5]) + "。")
+            placement_bits: List[str] = []
+            for key in ("terrain", "boundary", "scale_rules", "placement_rules"):
+                values = summary.get(key)
+                if isinstance(values, list):
+                    placement_bits.extend(str(item) for item in values if str(item).strip())
+            placement_bits = list(dict.fromkeys(placement_bits))
+            if placement_bits:
+                lines.append("组装约束：" + "；".join(placement_bits[:6]) + "。")
         if self.preserved:
             preserved = [self._safe_user_text(item) for item in self.preserved[:5] if self._safe_user_text(item)]
             if preserved:
@@ -221,6 +299,21 @@ class FinalReviewReport:
             ]
             if contents:
                 lines.append("最终收尾会优先处理：" + "；".join(contents[:3]) + "。")
+        if self.deferred_interventions:
+            deferred_texts = []
+            for item in self.deferred_interventions:
+                text = (
+                    item.get("content")
+                    or item.get("text")
+                    or item.get("original_text")
+                    or item.get("reason")
+                    or item.get("status")
+                )
+                safe = self._safe_user_text(text)
+                if safe:
+                    deferred_texts.append(safe)
+            if deferred_texts:
+                lines.append("仍待后续处理：" + "；".join(deferred_texts[:5]) + "。")
         if self.adjusted:
             adjusted = [self._safe_user_text(item) for item in self.adjusted[:5] if self._safe_user_text(item)]
             if adjusted:
@@ -387,6 +480,89 @@ class SceneSession:
                 text += f"；另有 {len(notes) - limit} 条"
             return text
 
+        def _resource_status(values: Any) -> str:
+            if not isinstance(values, list):
+                return ""
+            requested = 0
+            image_done = 0
+            image_failed = 0
+            resolved = 0
+            failed = 0
+            pending = 0
+            names: list[str] = []
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                plan = item.get("batch_resource_plan") if isinstance(item.get("batch_resource_plan"), dict) else {}
+                requested_items = plan.get("requested_items") if isinstance(plan.get("requested_items"), list) else []
+                requested += len(requested_items)
+                for request in requested_items:
+                    if not isinstance(request, dict):
+                        continue
+                    name = str(request.get("item_name") or "").strip()
+                    if name and name not in names:
+                        names.append(name)
+                resolved_items = item.get("resolved_assets") if isinstance(item.get("resolved_assets"), list) else []
+                failed_items = item.get("failed") if isinstance(item.get("failed"), list) else []
+                image_items = item.get("image_generated") if isinstance(item.get("image_generated"), list) else []
+                image_failed_items = item.get("image_failed") if isinstance(item.get("image_failed"), list) else []
+                image_done += len(image_items)
+                image_failed += len(image_failed_items)
+                resolved += len(resolved_items)
+                failed += len(failed_items)
+                status_text = str(item.get("status") or "")
+                if status_text in {"model_provider_unavailable", "model_generation_failed", "provider_unavailable", "failed"}:
+                    failed += max(0, len(requested_items) - len(failed_items) - len(resolved_items))
+                elif status_text in {"model_generating", "planned"}:
+                    pending += max(0, len(requested_items) - len(resolved_items) - len(failed_items))
+            if not requested:
+                return ""
+            visible = "、".join(names[:3])
+            if len(names) > 3:
+                visible += f" 等 {len(names)} 个"
+            pieces = [f"资源准备：新增请求 {requested} 个"]
+            if visible:
+                pieces.append(f"对象：{visible}")
+            pieces.append(f"图片 {image_done}/{requested}")
+            pieces.append(f"模型 {resolved}/{requested}")
+            if image_failed:
+                pieces.append(f"图片待重试 {image_failed}")
+            if failed:
+                pieces.append(f"失败/待重试 {failed}")
+            elif pending:
+                pieces.append(f"等待 {pending}")
+            return "，".join(pieces)
+
+        def _backlog_status(values: Any) -> str:
+            if not isinstance(values, list):
+                return ""
+            queued = 0
+            overflow = 0
+            names: list[str] = []
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                queued += int(item.get("remaining_count") or 0)
+                overflow += int(item.get("overflow_count") or 0)
+                for key in ("queued_items", "dropped_items"):
+                    raw = item.get(key)
+                    if not isinstance(raw, list):
+                        continue
+                    for value in raw:
+                        name = str(value or "").strip()
+                        if name and name not in names:
+                            names.append(name)
+            if not queued and not overflow:
+                return ""
+            parts = []
+            if queued:
+                parts.append(f"下一批资源队列还有 {queued} 个")
+            if names:
+                parts.append("包括：" + "、".join(names[:4]))
+            if overflow:
+                parts.append(f"已延后 {overflow} 个较早请求")
+            return "，".join(parts)
+
         suffix = ""
         imported = int(event.get("imported_count", 0) or 0)
         assets = int(event.get("asset_count", 0) or 0)
@@ -400,11 +576,18 @@ class SceneSession:
         next_names = _names(event.get("next_batch_asset_names"))
         absorbed = _note_text(event.get("absorbed_notes"))
         deferred = _note_text(event.get("deferred_notes"))
-        if status == "done" and assets:
+        resources = _resource_status(event.get("resource_plans"))
+        backlog = _backlog_status(event.get("resource_backlog"))
+        if status == "done" and (assets or resources):
             suffix = f" {batch_prefix}本批已放入 {imported}/{assets} 个物件"
             if imported_names:
                 suffix += f"：{imported_names}"
             suffix += "。"
+            suffix += f" 导入 {imported}/{assets}。"
+            if resources:
+                suffix += f" {resources}。"
+            if backlog:
+                suffix += f" {backlog}。"
             if total_assets:
                 suffix += f"累计已放入 {cumulative}/{total_assets} 个。"
             if absorbed:
@@ -419,6 +602,10 @@ class SceneSession:
                 suffix += f"准备放入：{batch_names}。"
             else:
                 suffix += "准备推进下一批。"
+            if resources:
+                suffix += f" {resources}。"
+            if backlog:
+                suffix += f" {backlog}。"
             if next_names:
                 suffix += f" 后续还有：{next_names}。"
             suffix += "你可以继续提出调整，我会在下一批前吸收。"
@@ -682,6 +869,7 @@ class SceneSession:
         phase_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
         runtime_mode_provider: Optional[Callable[[], str]] = None,
         final_adjustment_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        scene_design_contract_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         final_review_protection_fn: Any = None,
     ) -> Dict[str, Any]:
         """渐进式主循环。每个 phase：生成→导入→进度→采集视口→drain介入→settle。
@@ -791,6 +979,10 @@ class SceneSession:
                               if str(task.get("status") or "").startswith(("applied", "inserted", "already"))]
             deferred_tasks = [task for task in recent_tasks
                               if str(task.get("status") or "").startswith(("deferred", "pending"))]
+            resource_plan_tasks = [task for task in recent_tasks
+                                   if str(task.get("kind") or "") == "batch_resource_plan"]
+            resource_backlog_tasks = [task for task in recent_tasks
+                                      if str(task.get("kind") or "") == "resource_backlog"]
 
             # 2. 导入（只 add 不 clear，经 EngineWriteGate）
             imported_this_phase: List[str] = []
@@ -836,6 +1028,8 @@ class SceneSession:
                 "imported_asset_names": asset_names[:len(imported_this_phase) or len(asset_names)],
                 "absorbed_notes": absorbed_tasks,
                 "deferred_notes": deferred_tasks,
+                "resource_plans": resource_plan_tasks,
+                "resource_backlog": resource_backlog_tasks,
             })
             self._publish_progress_event(progress_timeline[-1])
 
@@ -860,16 +1054,23 @@ class SceneSession:
         # 7. FinalReview 只修 AGENT（测试可跳过，因为有专门的独立测试覆盖）
         report = None
         final_adjustment_plan = None
+        scene_design_contract = None
         if not skip_final_review and not paused:
             if final_adjustment_provider is not None:
                 try:
                     final_adjustment_plan = final_adjustment_provider() or None
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("[SceneSession] final adjustment provider skipped: %s", exc)
+            if scene_design_contract_provider is not None:
+                try:
+                    scene_design_contract = scene_design_contract_provider() or None
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("[SceneSession] scene design contract provider skipped: %s", exc)
             report = self.final_review(
                 reasonable_provider() if reasonable_provider else None,
                 protection_fn=final_review_protection_fn,
                 final_adjustment_plan=final_adjustment_plan,
+                scene_design_contract=scene_design_contract,
             )
         return {
             "phases_run": phases_run,
@@ -877,6 +1078,7 @@ class SceneSession:
             "round": round_id,
             "final_report": report,
             "final_adjustment_plan": final_adjustment_plan,
+            "scene_design_contract": scene_design_contract,
             "progress_timeline": progress_timeline,
             "paused": paused,
             "paused_mode": paused_mode,
@@ -889,6 +1091,7 @@ class SceneSession:
         reasonable_map: Optional[Dict[str, bool]] = None,
         protection_fn: Any = None,
         final_adjustment_plan: Optional[Dict[str, Any]] = None,
+        scene_design_contract: Optional[Dict[str, Any]] = None,
     ) -> FinalReviewReport:
         """最后一轮按近因加权保护分三桶处理。覆盖前必产报告。
 
@@ -908,6 +1111,8 @@ class SceneSession:
             report.deferred_interventions = list(final_adjustment_plan.get("deferred") or [])
             report.conflicts = list(final_adjustment_plan.get("conflicts") or [])
             report.resolved_conflicts = list(final_adjustment_plan.get("resolved_conflicts") or [])
+        report.style_contract_summary = FinalReviewReport.build_style_contract_summary(scene_design_contract)
+        report.deferred_interventions.extend(self._deferred_resource_tasks_for_report())
 
         for inst in self.scene_layout.list_active():
             iid = inst.instance_id
@@ -934,6 +1139,35 @@ class SceneSession:
         logger.info("[SceneSession] FinalReview: 保留 %d / 调整 %d / 待确认 %d",
                     len(report.preserved), len(report.adjusted), len(report.needs_confirm))
         return report
+
+    def _deferred_resource_tasks_for_report(self) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for task in self.pending_tasks:
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("kind") or "") != "batch_resource_plan":
+                continue
+            status = str(task.get("status") or "")
+            if status not in {"model_provider_unavailable", "model_generation_failed", "empty_request"}:
+                continue
+            plan = task.get("batch_resource_plan") if isinstance(task.get("batch_resource_plan"), dict) else {}
+            requested = plan.get("requested_items") if isinstance(plan.get("requested_items"), list) else []
+            names = [
+                str(item.get("item_name") or item.get("name") or "").strip()
+                for item in requested
+                if isinstance(item, dict) and str(item.get("item_name") or item.get("name") or "").strip()
+            ]
+            reason = {
+                "model_provider_unavailable": "模型生成服务暂不可用",
+                "model_generation_failed": "模型生成失败",
+                "empty_request": "新增对象信息不足",
+            }.get(status, status)
+            out.append({
+                "content": ("、".join(names) + f"：{reason}") if names else reason,
+                "status": status,
+                "reason": reason,
+            })
+        return out
 
     @staticmethod
     def _vector3(value: Any, *, default: float) -> List[float]:

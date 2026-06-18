@@ -1018,6 +1018,49 @@ def normalize_zone_aspects(zone) -> None:
         _add_legacy_aspect(zone, "entrance", {"style": "door"})
 
 
+def apply_scene_semantic_terrain_profile(zone, scene_text: str, scene_type: str = "") -> None:
+    """Apply conservative scene-derived terrain/boundary defaults.
+
+    Explicit LLM aspects still win; this only fills gaps for known F5 scene
+    classes where the old generic boundary made the scene look wrong.
+    """
+    try:
+        from plugins.AITool.services.terrain_component_resolver import TerrainComponentResolver
+    except Exception:  # noqa: BLE001
+        try:
+            from services.terrain_component_resolver import TerrainComponentResolver  # type: ignore
+        except Exception:
+            return
+    profile = TerrainComponentResolver().derive(scene_text, scene_type=scene_type)
+    if not _has_aspect(zone, "ground_profile"):
+        terrain = dict(profile.terrain_spec)
+        material = str(terrain.get("surface") or "neutral")
+        _add_legacy_aspect(
+            zone,
+            "ground_profile",
+            {
+                "type": "flat",
+                "material": material,
+                "detail_pattern": terrain.get("detail_pattern", "none"),
+                "openness": 0.65,
+            },
+        )
+    if not _has_aspect(zone, "boundary"):
+        boundary = dict(profile.boundary_spec)
+        if boundary.get("type") in {"low_decorative_boundary", "camp_boundary"}:
+            _add_legacy_aspect(
+                zone,
+                "boundary",
+                {
+                    "kind": boundary.get("kind", "fence"),
+                    "material": boundary.get("material", "wood"),
+                    "height": boundary.get("height", 0.8),
+                    "style": boundary.get("style", ""),
+                    "coverage": boundary.get("coverage", "partial"),
+                },
+            )
+
+
 def _aspect(zone, capability: str):
     for aspect in getattr(zone, "aspects", []) or []:
         if aspect.capability == capability:
@@ -1275,6 +1318,7 @@ class SceneComposer:
         self.zone_tree = zone_tree
         self._last_zone_decompose_snapshot = None
         self._last_zone_decompose_spec = None
+        self._last_zone_decompose_text = ""
         self._fallback_room_aspects = []
         self._fallback_room_style_context = {}
 
@@ -1319,6 +1363,7 @@ class SceneComposer:
         zones_spec = self._llm_decompose(text)
         if not zones_spec:
             return None
+        self._last_zone_decompose_text = str(text or "")
         self._last_zone_decompose_spec = zones_spec
         try:
             tree = self._build_zone_tree(zones_spec)
@@ -1490,6 +1535,11 @@ class SceneComposer:
             root = nodes[order[0]]
         for zone in nodes.values():
             normalize_zone_aspects(zone)
+            apply_scene_semantic_terrain_profile(
+                zone,
+                getattr(self, "_last_zone_decompose_text", ""),
+                getattr(zone, "role", "") or "",
+            )
         return ZoneTree(root=root)
 
     def _collect_shell_assets(self) -> set:
@@ -1823,6 +1873,7 @@ class SceneComposer:
         # 组装 approved_elements：每项 {item_name, image_prompt}
         # 强化 prompt 避免不同物品生成相似图片 → 模型检索混淆
         approved = []
+        generated_images = {}
         for it in items:
             name = it["name"]
             kw = (it.get("keywords") or "").strip()
@@ -1834,6 +1885,9 @@ class SceneComposer:
                 "item_name": name,
                 "image_prompt": prompt,
             })
+            image_url = str(it.get("image_url") or it.get("generated_image_url") or "").strip()
+            if image_url:
+                generated_images[name] = image_url
 
         state = {
             "session_id": f"compose_{int(__import__('time').time())}",
@@ -1844,7 +1898,7 @@ class SceneComposer:
             "global_assets": {
                 "multi_scene": {
                     "approved_elements": approved,
-                    "generated_images": {},  # 不预置图，让 dispatch 自动文生图
+                    "generated_images": generated_images,  # 显式批次图片优先；缺失项由 dispatch 补偿/降级
                 }
             },
             "intermediate": {},

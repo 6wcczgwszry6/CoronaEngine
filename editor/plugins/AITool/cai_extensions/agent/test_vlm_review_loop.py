@@ -127,6 +127,35 @@ def test_low_confidence_only_vlm_advice_is_disclosed_without_action():
     print("[OK] 低置信 VLM 建议会披露为待确认，不误报为无问题")
 
 
+def test_vlm_user_text_sanitizes_internal_fields():
+    def capture(out_dir, name):
+        return f"/shots/{name}"
+
+    def review(shot_dir, name, mtype):
+        return {
+            "overall": "FAIL",
+            "rotation_correction": [0, 90, 0],
+            "issues": ["朝向异常 vlm_raw=PRIVATE_VLM_RAW_SHOULD_NOT_LEAK"],
+            "fix_suggestion": "旋转到入口方向 prompt=PRIVATE_PROMPT_SHOULD_NOT_LEAK provider=PRIVATE_PROVIDER",
+            "confidence": 0.9,
+        }
+
+    report = review_models_async(
+        [{"actor_id": "入口雕像 debug=PRIVATE_DEBUG_SHOULD_NOT_LEAK"}],
+        capture_fn=capture,
+        review_fn=review,
+    )
+    text = report.to_user_text()
+
+    assert "入口雕像" in text
+    assert "旋转到入口方向" in text
+    assert "PRIVATE_VLM_RAW_SHOULD_NOT_LEAK" not in text
+    assert "PRIVATE_PROMPT_SHOULD_NOT_LEAK" not in text
+    assert "PRIVATE_PROVIDER" not in text
+    assert "PRIVATE_DEBUG_SHOULD_NOT_LEAK" not in text
+    print("[OK] VLM user text sanitizes internal fields")
+
+
 def test_missing_confidence_vlm_advice_stays_advisory():
     def capture(out_dir, name):
         return f"/shots/{name}"
@@ -454,6 +483,7 @@ if __name__ == "__main__":
     test_advisory_with_corrections()
     test_low_confidence_vlm_advice_stays_advisory()
     test_low_confidence_only_vlm_advice_is_disclosed_without_action()
+    test_vlm_user_text_sanitizes_internal_fields()
     test_missing_confidence_vlm_advice_stays_advisory()
     test_screenshot_timeout_tolerated()
     test_review_exception_skipped()

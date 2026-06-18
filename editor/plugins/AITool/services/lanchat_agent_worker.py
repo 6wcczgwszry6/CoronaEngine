@@ -321,6 +321,9 @@ class LANChatAgentWorker:
         clarification_reply = self._handle_coordinator_gm_clarification(trigger)
         if clarification_reply is not None:
             return bool(self._send_final_reply("gm-system", "GM", clarification_reply, trigger))
+        status_reply = self._handle_coordinator_status_query(trigger)
+        if status_reply is not None:
+            return bool(self._send_final_reply(agent_id, agent_name, status_reply, trigger))
 
         try:
             from .agent_progress_context import agent_progress_sink
@@ -500,6 +503,35 @@ class LANChatAgentWorker:
             return f"【GM】{event.message} {question}"
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("Coordinator GM clarification skipped: %s", exc)
+            return None
+
+    def _handle_coordinator_status_query(self, trigger: dict[str, Any]) -> str | None:
+        text = str(trigger.get("text") or "").strip()
+        if not text:
+            return None
+        message_kind = str(trigger.get("message_kind") or "chat").strip().lower()
+        if message_kind not in {"", "chat"}:
+            return None
+        try:
+            coordinator = self._get_interaction_coordinator()
+            is_status_query = getattr(coordinator, "_is_status_query", None)
+            if not callable(is_status_query) or not is_status_query(text):
+                return None
+            room_id = str(trigger.get("room_id") or "default")
+            self._remember_room_id(room_id)
+            event = coordinator.ingest_message(ChatMessage(
+                room_id=room_id,
+                sender_id=str(trigger.get("sender_id") or trigger.get("from") or ""),
+                sender_name=str(trigger.get("sender_name") or trigger.get("from") or ""),
+                text=text,
+                is_host=bool(trigger.get("is_host") or str(trigger.get("sender_type") or "").lower() == "host"),
+                metadata=self._coordinator_sync_metadata(trigger, source="lanchat_agent_trigger"),
+            ))
+            if getattr(event, "event_type", "") != "status_query":
+                return None
+            return str(getattr(event, "message", "") or "当前状态暂不可用，请稍后再试。")
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Coordinator status query skipped: %s", exc)
             return None
 
     @staticmethod
@@ -775,9 +807,14 @@ class LANChatAgentWorker:
             if self._try_send_targeted_host_disclosure(payload, text):
                 continue
             metadata_payload = payload
+            metadata_envelope = {"disclosure": metadata_payload}
             if str(payload.get("audience") or "") == "host":
                 metadata_payload = self._host_disclosure_broadcast_payload(payload, text)
-            metadata = json.dumps({"disclosure": metadata_payload}, ensure_ascii=False)
+                metadata_envelope = {
+                    "disclosure": metadata_payload,
+                    "host_disclosure": self._host_disclosure_fallback_payload(payload, text),
+                }
+            metadata = json.dumps(metadata_envelope, ensure_ascii=False)
             try:
                 if hasattr(self._corona_engine, "network_send_system_message_ex"):
                     self._corona_engine.network_send_system_message_ex(
@@ -853,6 +890,47 @@ class LANChatAgentWorker:
             "available_actions": [],
             "requires_confirmation": False,
             "metadata": safe_metadata,
+        }
+
+    @staticmethod
+    def _host_disclosure_fallback_payload(payload: dict[str, Any], text: str) -> dict[str, Any]:
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        intervention = metadata.get("intervention") if isinstance(metadata.get("intervention"), dict) else {}
+        proposal_id = (
+            payload.get("proposal_id")
+            or metadata.get("proposal_id")
+            or intervention.get("proposal_id")
+            or ""
+        )
+        safe_metadata = {
+            key: metadata.get(key)
+            for key in ("proposal_id", "requires_conflict_resolution", "requires_confirmation", "apply_policy")
+            if key in metadata
+        }
+        if intervention:
+            safe_metadata["intervention"] = {
+                key: intervention.get(key)
+                for key in ("proposal_id", "requires_conflict_resolution", "apply_policy", "intent_type")
+                if key in intervention
+            }
+        available_actions = payload.get("available_actions")
+        return {
+            "event_id": payload.get("event_id"),
+            "room_id": payload.get("room_id"),
+            "audience": "host",
+            "stage": payload.get("stage"),
+            "progress": payload.get("progress"),
+            "public_message": payload.get("public_message") or text,
+            "available_actions": list(available_actions) if isinstance(available_actions, list) else [],
+            "requires_confirmation": bool(payload.get("requires_confirmation")),
+            "requires_conflict_resolution": bool(
+                payload.get("requires_conflict_resolution")
+                or metadata.get("requires_conflict_resolution")
+                or intervention.get("requires_conflict_resolution")
+            ),
+            "proposal_id": proposal_id,
+            "metadata": safe_metadata,
+            "created_at": payload.get("created_at"),
         }
 
     def _start_coordinator_disclosure_watch(

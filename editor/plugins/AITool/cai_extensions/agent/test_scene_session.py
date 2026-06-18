@@ -189,6 +189,46 @@ def test_progress_sink_and_report_text_are_observable():
     print("[OK] 字符串进度 + 结构化进度 + progress_timeline + FinalReview 文案可被上层观测")
 
 
+def test_progressive_compose_exposes_batch_resource_status():
+    layout = FakeLayout()
+    session = SceneSession(layout)
+    progress_events: List[str] = []
+    progress_structured: List[Dict[str, Any]] = []
+    session.set_progress_sink(progress_events.append)
+    session.set_progress_event_sink(progress_structured.append)
+
+    def gen_objects(s, phase):
+        s.pending_tasks.append({
+            "kind": "batch_resource_plan",
+            "status": "completed",
+            "resolved_assets": ["天使雕像"],
+            "batch_resource_plan": {
+                "requested_items": [{"item_name": "天使雕像"}],
+            },
+        })
+        return [{"name": "天使雕像", "path": "/m/angel.glb"}]
+
+    def importer(assets, batch_id):
+        for a in assets:
+            layout.add(FakeInst(a["name"], provenance="AGENT", batch_id=batch_id))
+        return {"imported": [a["name"] for a in assets]}
+
+    result = session.progressive_compose(
+        {"OBJECTS": gen_objects},
+        importer=importer,
+        phase_metadata={"OBJECTS": {"batch_index": 1, "batch_total": 1}},
+        reasonable_provider=lambda: {"天使雕像": True},
+        skip_final_review=True,
+    )
+
+    assert result["progress_timeline"][-1]["resource_plans"]
+    assert "资源准备：新增请求 1 个" in progress_events[-1]
+    assert "模型 1/1" in progress_events[-1]
+    assert "导入 1/1" in progress_events[-1]
+    assert progress_structured[-1]["resource_plans"][0]["status"] == "completed"
+    print("[OK] progressive_compose exposes batch resource status in user-facing progress")
+
+
 def test_progressive_compose_pauses_at_micro_batch_boundary():
     layout = FakeLayout()
     session = SceneSession(layout)
@@ -441,11 +481,87 @@ def test_final_adjustment_plan_is_consumed_by_final_review():
     text = report.to_user_text()
     assert "最终收尾会优先处理" in text
     assert "中心雕塑缩小" in text
+    assert "仍待后续处理" in text
+    assert "第一批旁边加一个很小的摊位" in text
     assert "已完成收尾调整" in text
     assert "GM/房主确认" in text
     assert "入口摊位" in text
     assert "同一目标同时存在删除与保留/修改要求" in text
     print("[OK] FinalReview consumes Coordinator final adjustment plan")
+
+
+def test_final_review_reports_failed_resource_requests_to_user():
+    layout = FakeLayout()
+    session = SceneSession(layout)
+    session.pending_tasks.append({
+        "kind": "batch_resource_plan",
+        "status": "model_provider_unavailable",
+        "batch_resource_plan": {
+            "requested_items": [
+                {"item_name": "天使雕像", "original_text": "新增：再加一个天使雕像"}
+            ],
+        },
+        "provider": "PRIVATE_PROVIDER_SHOULD_NOT_LEAK",
+        "prompt": "PRIVATE_PROMPT_SHOULD_NOT_LEAK",
+    })
+
+    report = session.final_review({}, protection_fn=_fake_protection)
+    text = report.to_user_text()
+
+    assert report.deferred_interventions[-1]["status"] == "model_provider_unavailable"
+    assert "仍待后续处理" in text
+    assert "天使雕像" in text
+    assert "模型生成服务暂不可用" in text
+    assert "PRIVATE_PROVIDER_SHOULD_NOT_LEAK" not in text
+    assert "PRIVATE_PROMPT_SHOULD_NOT_LEAK" not in text
+    print("[OK] FinalReview reports failed resource requests without leaking internals")
+
+
+def test_final_review_reports_scene_design_contract_without_leaking_prompt():
+    layout = FakeLayout()
+    session = SceneSession(layout)
+    contract = {
+        "version": 7,
+        "scene_type": "fantasy_night_market",
+        "environment_type": "outdoor",
+        "mood": ["warm", "mysterious but friendly"],
+        "style_keywords": ["fantasy", "market", "style consistency"],
+        "avoid_keywords": ["too horror", "dark horror"],
+        "palette": ["warm amber"],
+        "lighting": ["coherent warm lights"],
+        "terrain_spec": {
+            "type": "outdoor_market_ground",
+            "surface": "stone_path_with_soft_grass_edges",
+            "debug": "TERRAIN_DEBUG_SHOULD_NOT_LEAK",
+        },
+        "boundary_spec": {
+            "type": "low_decorative_boundary",
+            "style": "vine_wood_lantern",
+            "height": "low",
+            "avoid": ["grassland yurt fence"],
+            "prompt": "BOUNDARY_PROMPT_SHOULD_NOT_LEAK",
+        },
+        "scale_rules": ["天使雕像要足够大"],
+        "placement_rules": ["keep clear visitor paths between entrance, stalls, lighting, and rest area"],
+        "asset_style_prompt": "PRIVATE_STYLE_PROMPT_SHOULD_NOT_LEAK",
+    }
+
+    report = session.final_review({}, protection_fn=_fake_protection, scene_design_contract=contract)
+    text = report.to_user_text()
+
+    assert report.style_contract_summary["version"] == 7
+    assert "风格收口" in text
+    assert "warm" in text
+    assert "fantasy" in text
+    assert "已持续避开" in text
+    assert "too horror" in text
+    assert "组装约束" in text
+    assert "low_decorative_boundary" in text
+    assert "grassland yurt fence" in text
+    assert "PRIVATE_STYLE_PROMPT_SHOULD_NOT_LEAK" not in text
+    assert "BOUNDARY_PROMPT_SHOULD_NOT_LEAK" not in text
+    assert "TERRAIN_DEBUG_SHOULD_NOT_LEAK" not in text
+    print("[OK] FinalReview reports scene design contract without leaking prompts")
 
 
 def test_resolved_final_adjustment_conflicts_are_consumed_by_final_review():
@@ -665,6 +781,7 @@ def test_final_review_user_text_sanitizes_internal_fields():
 if __name__ == "__main__":
     test_phase_loop_runs_provided_only()
     test_progress_sink_and_report_text_are_observable()
+    test_progressive_compose_exposes_batch_resource_status()
     test_progressive_compose_pauses_at_micro_batch_boundary()
     test_intervention_drain_marks_user()
     test_post_import_hook_runs_before_final_review()
@@ -672,6 +789,8 @@ if __name__ == "__main__":
     test_settle_skips_recent_user()
     test_final_review_three_buckets()
     test_final_adjustment_plan_is_consumed_by_final_review()
+    test_final_review_reports_failed_resource_requests_to_user()
+    test_final_review_reports_scene_design_contract_without_leaking_prompt()
     test_resolved_final_adjustment_conflicts_are_consumed_by_final_review()
     test_unresolved_target_hint_conflict_blocks_matching_final_adjustment()
     test_final_adjustment_skips_stale_actor_version()

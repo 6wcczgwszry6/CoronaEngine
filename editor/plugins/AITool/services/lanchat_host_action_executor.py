@@ -179,7 +179,11 @@ class LanChatHostActionExecutor:
         if not isinstance(payload, dict):
             return False
         if payload.get("seed_plan") or payload.get("plan_id"):
-            return str(payload.get("action_type") or "") in {"start_generation", "execute_seed_plan"}
+            return str(payload.get("action_type") or "") in {
+                "start_generation",
+                "execute_seed_plan",
+                "post_generation_add",
+            }
         return False
 
     @staticmethod

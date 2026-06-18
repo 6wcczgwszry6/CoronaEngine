@@ -28,6 +28,35 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _safe_user_text(value: Any, *, fallback: str = "") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    lower = text.lower()
+    markers = (
+        "prompt",
+        "raw_prompt",
+        "provider",
+        "model_provider",
+        "runtime_context",
+        "scheduler_updates",
+        "hidden_debug_ref",
+        "debug",
+        "job_id",
+        "session_id",
+        "token",
+        "api_key",
+        "vlm_raw",
+        "screenshot_dir",
+        "output_dir",
+    )
+    cut_points = [lower.find(marker) for marker in markers if lower.find(marker) >= 0]
+    if cut_points:
+        keep = text[:min(cut_points)].strip(" \t\r\n,;；。")
+        return keep or fallback or "内部细节已隐藏"
+    return text
+
+
 def _coerce_confidence(value: Any) -> float:
     try:
         confidence = float(value)
@@ -95,8 +124,9 @@ class VlmReviewReport:
             return "VLM 审查未发现明显语义问题。"
         lines = ["VLM 审查发现可优化项（建议，非强制）："]
         for a in act[:5]:
-            tip = a.fix_suggestion or "、".join(a.issues[:2]) or a.overall
-            lines.append(f"- {a.actor_id}：{tip}")
+            actor = _safe_user_text(a.actor_id, fallback="某个物体")
+            tip = _safe_user_text(a.fix_suggestion or "、".join(a.issues[:2]) or a.overall)
+            lines.append(f"- {actor}：{tip}")
         return "\n".join(lines)
 
 

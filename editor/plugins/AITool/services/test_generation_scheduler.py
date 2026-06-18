@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import logging
 import threading
 import time
 
@@ -41,6 +42,55 @@ def test_scheduler_runs_all_stages_in_order():
     assert final["status"] == "done"
     assert calls == ["prepare", "submit", "poll", "download", "postprocess", "import"]
     print("[OK] GenerationScheduler runs stages in order")
+
+
+def test_scheduler_logs_safe_job_lifecycle_ids_without_payload_leaks():
+    records = []
+
+    class ListHandler(logging.Handler):
+        def emit(self, record):
+            records.append(self.format(record))
+
+    logger = logging.getLogger("plugins.AITool.services.generation_scheduler")
+    handler = ListHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    old_level = logger.level
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    try:
+        scheduler = GenerationScheduler(stage_order=("prepare",), auto_start=True)
+        try:
+            submitted = scheduler.submit({
+                "room_id": "room-log",
+                "session_id": "exec-log",
+                "plan_id": "seed-log",
+                "batch_id": "batch-log",
+                "priority": 7,
+                "prompt": "secret prompt should not leak",
+                "provider": "secret-provider",
+                "_runtime_context": {"token": "secret-token"},
+            })
+            final = scheduler.wait(submitted["job_id"], timeout=2.0)
+        finally:
+            scheduler.shutdown()
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+
+    joined = "\n".join(records)
+    assert final["status"] == "done"
+    assert "event=submit" in joined
+    assert "event=status_change" in joined
+    assert "room_id=room-log" in joined
+    assert "session_id=exec-log" in joined
+    assert "plan_id=seed-log" in joined
+    assert "job_id=" in joined
+    assert "batch_id=batch-log" in joined
+    assert "status=done" in joined
+    assert "secret prompt" not in joined
+    assert "secret-provider" not in joined
+    assert "secret-token" not in joined
+    print("[OK] GenerationScheduler logs safe lifecycle ids without payload leaks")
 
 
 def test_scheduler_cancel_before_submit_stops_download_and_import():
@@ -847,6 +897,52 @@ def test_scene_composer_job_runner_passes_target_actor_from_intervention():
     print("[OK] SceneComposerJobRunner passes target actor from intervention into compose")
 
 
+def test_scene_composer_job_runner_limits_append_job_and_keeps_style_contract():
+    calls = []
+
+    class FakeComposer:
+        def __init__(self):
+            self.max_items = 8
+
+        def compose(self, text, **kwargs):
+            calls.append({
+                "text": text,
+                "max_items": self.max_items,
+                "kwargs": kwargs,
+            })
+            return {"imported": ["actor-angel-statue"]}
+
+    runner = SceneComposerJobRunner(lambda: FakeComposer())
+    scheduler = GenerationScheduler(
+        stage_handlers=runner.stage_handlers(),
+        stage_order=("compose",),
+    )
+    try:
+        submitted = scheduler.submit({
+            "plan_id": "seed-compose-append",
+            "session_id": "append-seed-compose-append",
+            "room_id": "room-a",
+            "action_type": "post_generation_add",
+            "append_mode": True,
+            "max_items": 2,
+            "intent_text": "添加生成一个天使雕像",
+            "scene_design_contract": {
+                "asset_style_prompt": "warm mysterious fantasy night market, not horror",
+            },
+        })
+        final = scheduler.wait(submitted["job_id"], timeout=2.0)
+    finally:
+        scheduler.shutdown()
+
+    assert final["status"] == "done"
+    assert calls[0]["max_items"] == 2
+    assert "只追加本次新增对象" in calls[0]["text"]
+    assert "添加生成一个天使雕像" in calls[0]["text"]
+    assert "warm mysterious fantasy night market" in calls[0]["text"]
+    assert final["result"]["compose_result"]["imported"] == ["actor-angel-statue"]
+    print("[OK] SceneComposerJobRunner constrains post-generation append jobs")
+
+
 def test_provider_stage_runner_maps_provider_lifecycle_to_scheduler():
     calls = []
 
@@ -1013,6 +1109,7 @@ def test_scheduler_accepts_per_job_stage_handlers():
 
 if __name__ == "__main__":
     test_scheduler_runs_all_stages_in_order()
+    test_scheduler_logs_safe_job_lifecycle_ids_without_payload_leaks()
     test_scheduler_cancel_before_submit_stops_download_and_import()
     test_scheduler_pause_session_blocks_until_resume()
     test_scheduler_cancel_paused_job_without_resume_releases_queue()
@@ -1036,6 +1133,7 @@ if __name__ == "__main__":
     test_scheduler_prunes_terminal_job_history_without_payload_leak()
     test_scene_composer_job_runner_passes_seed_plan_context_to_compose()
     test_scene_composer_job_runner_passes_target_actor_from_intervention()
+    test_scene_composer_job_runner_limits_append_job_and_keeps_style_contract()
     test_provider_stage_runner_maps_provider_lifecycle_to_scheduler()
     test_provider_stage_runner_uses_runtime_provider_without_payload_leak()
     test_deferred_download_provider_runs_under_scheduler_download_stage()

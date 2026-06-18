@@ -71,6 +71,33 @@ def test_disclosure_policy_does_not_leak_internal_fields():
     print("[OK] DisclosurePolicy keeps internal chain/tool/provider details out of public payload")
 
 
+def test_disclosure_policy_queued_stage_is_not_generating_zero_percent():
+    policy = DisclosurePolicy()
+    host = policy.disclose(
+        room_id="room-a",
+        stage="queued",
+        audience="host",
+        progress=0,
+        plan=_plan(),
+    )
+    participant = policy.disclose(
+        room_id="room-a",
+        stage="queued",
+        audience="participant",
+        progress=0,
+        plan=_plan(),
+    )
+
+    assert host.stage == "排队中"
+    assert participant.stage == "排队中"
+    assert "等待资源" in host.public_message
+    assert "已排队" in participant.public_message
+    assert "生成中 0%" not in participant.public_message
+    assert "0%" not in participant.public_message
+    assert "request_add" in participant.available_actions
+    print("[OK] DisclosurePolicy maps queued jobs to waiting-resource copy, not generating 0%")
+
+
 def test_disclosure_policy_recursively_sanitizes_nested_metadata():
     policy = DisclosurePolicy()
     participant = policy.disclose(
@@ -203,7 +230,7 @@ def test_coordinator_records_disclosure_events_for_seed_plan_and_intervention():
     assert {"host", "participant", "agent", "gm"}.issubset(audiences)
     assert "等待房主确认" in stages
     assert "已确认方案" in stages
-    assert "生成中" in stages
+    assert "排队中" in stages
     assert "可介入窗口" in stages
     assert intervention_events
     assert any("第一批已完成" in event["public_message"] for event in intervention_events)
@@ -220,6 +247,7 @@ def test_coordinator_records_disclosure_events_for_seed_plan_and_intervention():
 if __name__ == "__main__":
     test_disclosure_policy_splits_host_participant_agent_gm_views()
     test_disclosure_policy_does_not_leak_internal_fields()
+    test_disclosure_policy_queued_stage_is_not_generating_zero_percent()
     test_disclosure_policy_recursively_sanitizes_nested_metadata()
     test_disclosure_policy_marks_host_confirmation_interventions()
     test_coordinator_records_disclosure_events_for_seed_plan_and_intervention()

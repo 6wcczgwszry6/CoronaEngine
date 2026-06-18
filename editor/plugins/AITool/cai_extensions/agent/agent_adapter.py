@@ -935,10 +935,51 @@ class MasterAgent:
                 return display[len(prefix):]
         return display
 
+    @staticmethod
+    def _canonical_edit_actor_name(name: str) -> str:
+        try:
+            from plugins.AITool.services.terrain_component_resolver import canonical_actor_id
+        except Exception:  # noqa: BLE001
+            try:
+                from ...services.terrain_component_resolver import canonical_actor_id  # type: ignore
+            except Exception:  # noqa: BLE001
+                canonical_actor_id = None  # type: ignore
+        if callable(canonical_actor_id):
+            return str(canonical_actor_id(name) or name)
+        return str(name or "")
+
+    @staticmethod
+    def _looks_like_boundary_reference(user_text: str) -> bool:
+        text = str(user_text or "")
+        return any(token in text for token in (
+            "_terrain_boundary",
+            "__terrain_boundary",
+            "terrain_boundary",
+            "地形边界",
+            "场地边界",
+            "边界",
+            "栅栏",
+            "围栏",
+        ))
+
+    @classmethod
+    def _is_system_edit_actor(cls, name: str) -> bool:
+        canonical = cls._canonical_edit_actor_name(name)
+        return canonical in {"__terrain_boundary", "__room_terrain"} or canonical.startswith("__terrain_")
+
     def _pick_edit_actor(self, user_text: str, actors: List[Any]) -> Any | None:
+        if self._looks_like_boundary_reference(user_text):
+            for actor in actors:
+                name = str(getattr(actor, "name", "") or "")
+                if self._canonical_edit_actor_name(name) == "__terrain_boundary":
+                    return actor
         matches: list[tuple[int, Any]] = []
         for actor in actors:
             name = str(getattr(actor, "name", "") or "")
+            canonical = self._canonical_edit_actor_name(name)
+            if canonical and canonical in user_text:
+                matches.append((len(canonical) + 100, actor))
+                continue
             display = self._actor_display_name(name)
             if name and name in user_text:
                 matches.append((len(name), actor))
@@ -1058,6 +1099,7 @@ class MasterAgent:
             "移远", "靠墙", "靠左", "靠右", "往前", "往后", "居中",
             "删除", "删掉", "移除", "不要这个", "旋转", "转一下",
             "改色", "换色", "颜色", "涂成",
+            "换成", "低矮", "藤蔓", "木栏", "围栏", "栅栏", "边界",
         ))
 
     def _candidate_actor_reply(self, actors: List[Any]) -> str:
@@ -1104,6 +1146,10 @@ class MasterAgent:
                 label, rgb = color
                 if self._try_apply_actor_color(actor, rgb):
                     changed_parts.append(f"颜色调整为{label}")
+
+            boundary_style = self._try_fast_boundary_style_edit(user_text, actor)
+            if boundary_style:
+                changed_parts.extend(boundary_style)
 
             delta = self._parse_fast_position_delta(user_text, actor)
             if delta is not None:
@@ -1160,6 +1206,36 @@ class MasterAgent:
             logger.warning("[MasterAgent] fast edit failed for %s: %s", name, exc)
             return None
 
+    def _try_fast_boundary_style_edit(self, user_text: str, actor: Any) -> list[str]:
+        name = str(getattr(actor, "name", "") or "")
+        if self._canonical_edit_actor_name(name) != "__terrain_boundary":
+            return []
+        text = str(user_text or "")
+        if not any(k in text for k in ("低矮", "矮一点", "藤蔓", "木栏", "围栏", "栅栏", "边界", "不自然", "奇怪")):
+            return []
+        changed: list[str] = []
+        if any(k in text for k in ("低矮", "矮一点", "太高", "别太高")):
+            try:
+                current = [float(v) for v in actor.get_scale()]
+                while len(current) < 3:
+                    current.append(1.0)
+                new_scale = [
+                    round(max(0.02, current[0]), 4),
+                    round(min(max(0.02, current[1]), 0.55), 4),
+                    round(max(0.02, current[2]), 4),
+                ]
+                actor.set_scale(new_scale[:3])
+                changed.append(f"边界高度缩放调整为 {new_scale[:3]}")
+            except Exception:
+                logger.debug("[MasterAgent] boundary scale adjustment unavailable", exc_info=True)
+        if any(k in text for k in ("藤蔓", "木栏", "木质", "温暖", "自然")):
+            rgb = [0.34, 0.45, 0.18] if "藤蔓" in text else [0.42, 0.25, 0.12]
+            if self._try_apply_actor_color(actor, rgb):
+                changed.append("边界颜色调整为自然木藤色")
+        if not changed:
+            changed.append("已定位系统地形边界；当前工具未提供材质替换能力，已避免误改其他物体")
+        return changed
+
     def _handle_edit(self, user_text: str, messages: List[str]) -> str:
         """编辑已有物体（增删改移缩放）→ 委托菜包 agentic 通道执行。
 
@@ -1185,19 +1261,22 @@ class MasterAgent:
         actors_lines = []
         for a in sc.get_actors():
             nm = a.name
-            # 基础设施 actor（地形/草原/盒子/内皮地面）不进 AI 编辑列表（选项 B）：
+            # 基础设施 actor（地形/草原/盒子/内皮地面）默认不进 AI 编辑列表（选项 B）：
             # 草原由建筑足迹自动派生（terrain=platform_radius×8），手动改它既歧义
             # （__room_terrain 地形 mesh + __terrain_grass 草簇是两个 actor）又跟派生冲突。
-            # 用户介入只针对放置物（蒙古包/地毯/家具/壁挂）。
-            if (nm.startswith("__room_") or nm.startswith("__interior_")
-                    or nm.startswith("__terrain_")):
+            # 例外：__terrain_boundary 是用户在 F5 中会直接指出的系统边界，允许低风险 grounding/高度/颜色调整。
+            if (
+                    (nm.startswith("__room_") or nm.startswith("__interior_") or nm.startswith("__terrain_"))
+                    and self._canonical_edit_actor_name(nm) != "__terrain_boundary"
+            ):
                 continue
             editable_actors.append(a)
             try:
                 pos = [round(v, 2) for v in a.get_position()]
                 scl = [round(v, 2) for v in a.get_scale()]
                 rot = [round(v, 1) for v in a.get_rotation()]
-                actors_lines.append(f"  - {nm}: pos={pos} scale={scl} rot={rot}")
+                actor_kind = "system_boundary" if self._canonical_edit_actor_name(nm) == "__terrain_boundary" else "editable"
+                actors_lines.append(f"  - {nm}: kind={actor_kind} pos={pos} scale={scl} rot={rot}")
             except Exception:
                 actors_lines.append(f"  - {nm}")
         if not actors_lines:
@@ -1353,7 +1432,7 @@ class MasterAgent:
             lines.append(f"⚠️ 外壳未完成：{('、'.join(shell_failed[:5]))}")
         if final_report_text:
             lines.append(f"\n🧭 最终检查：{final_report_text}")
-        if vlm_review_text:
+        if vlm_review_text and vlm_review_text not in final_report_text:
             lines.append(f"👁️ VLM 外审：{vlm_review_text}")
         if vlm_skipped or vlm_timed_out:
             lines.append(

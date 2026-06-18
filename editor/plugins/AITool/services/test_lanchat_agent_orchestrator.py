@@ -840,6 +840,28 @@ def test_planning_confirmation_gate_roundtrip():
     print("[OK] planning confirmation gate returns proposal then compose text")
 
 
+def test_planning_gate_records_pre_generation_style_supplement():
+    runtime = get_lanchat_scene_runtime()
+    runtime.end_compose()
+    runtime.consume_notes()
+    action, reply = runtime.handle_planning_gate("商人", "我想做一个有点神秘感的室外集市，不要太恐怖，适合几个人逛。")
+    assert action == "reply"
+    assert "确认开始" in str(reply)
+
+    supplement = "我希望它更温暖一点，有灯光和休息区，不要全是暗黑风。"
+    action, reply = runtime.handle_planning_gate("商人", supplement)
+    assert action == "reply"
+    assert "我已更新方案" in str(reply)
+    assert "没有可编辑" not in str(reply)
+
+    action, compose_text = runtime.handle_planning_gate("商人", "确认开始")
+    assert action == "compose"
+    assert "补充要求" in str(compose_text)
+    assert "更温暖" in str(compose_text)
+    assert "不要全是暗黑风" in str(compose_text)
+    print("[OK] planning gate records pre-generation style supplement instead of edit fallback")
+
+
 def test_worker_async_agent_calls_are_serialized_per_worker():
     active = 0
     max_active = 0
@@ -963,6 +985,56 @@ def test_worker_acknowledges_final_adjustment_confirmation_without_host_executio
         if len(item) > 5 and item[3] == "action_status"
     )
     print("[OK] worker acknowledges final adjustment confirmation without host execution")
+
+
+def test_worker_routes_agent_status_query_to_coordinator_without_model_agent():
+    executor = FakeHostActionExecutor()
+    coordinator = InteractionCoordinator()
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-status",
+        sender_id="host-a",
+        sender_name="房主",
+        text="做一个温暖的夜晚幻想集市",
+        is_host=True,
+    ))
+    plan = coordinator.propose_seed_plan("room-status")
+    coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    coordinator.execute_confirmed_plan(plan.plan_id)
+    before_events = len(coordinator.events)
+
+    def forbidden_agent_factory():
+        def _agent(persona, messages):
+            raise AssertionError("status query should not call role model agent")
+        return _agent
+
+    engine = FakeEngine([
+        {
+            **_trigger("@商人 查看生成情况，到哪步了", "商人"),
+            "room_id": "room-status",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "is_host": True,
+            "agent_id": "merchant",
+            "agent_name": "商人",
+        },
+    ])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=forbidden_agent_factory,
+        host_action_executor=executor,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+    assert worker.process_once() is True
+
+    assert not executor.payloads
+    assert not engine.intents
+    assert engine.replies
+    assert "当前方案" in engine.replies[-1][2]
+    assert not any(item[3] == "gm_proposal" for item in engine.system_messages if len(item) > 3)
+    assert any(item.event_type == "status_query" for item in coordinator.events[before_events:])
+    print("[OK] worker routes @Agent status query to Coordinator without model agent/proposal")
 
 
 def test_worker_acknowledges_conflict_resolution_rejection_without_host_execution():
@@ -1254,7 +1326,9 @@ def test_worker_default_host_executor_uses_coordinator_handler_for_seed_plan():
     metadata = json.loads(disclosure_messages[-1][5])
     disclosure = metadata["disclosure"]
     assert disclosure["audience"] == "participant"
-    assert disclosure["stage"] == "生成中"
+    assert disclosure["stage"] == "排队中"
+    assert "等待资源" in disclosure["public_message"]
+    assert "生成中 0%" not in disclosure["public_message"]
     assert "prompt" not in json.dumps(disclosure, ensure_ascii=False)
     print("[OK] default worker host executor uses Coordinator structured handler")
 
@@ -1302,6 +1376,16 @@ def test_worker_host_confirmation_disclosure_broadcast_is_sanitized_without_targ
     assert "GM 建议采用折中方案" not in json.dumps(disclosure, ensure_ascii=False)
     assert "hidden_debug_ref" not in disclosure
     assert "prompt" not in json.dumps(disclosure, ensure_ascii=False)
+    host_disclosure = metadata["host_disclosure"]
+    assert host_disclosure["audience"] == "host"
+    assert host_disclosure["requires_confirmation"] is True
+    assert host_disclosure["requires_conflict_resolution"] is True
+    assert host_disclosure["public_message"] == "GM 建议采用折中方案，等待房主确认。"
+    assert host_disclosure["proposal_id"] == "conflict-proposal-1"
+    assert host_disclosure["available_actions"] == ["confirm_conflict_resolution", "request_clarification"]
+    assert host_disclosure["metadata"]["proposal_id"] == "conflict-proposal-1"
+    assert "prompt" not in json.dumps(host_disclosure, ensure_ascii=False)
+    assert "hidden_debug_ref" not in json.dumps(host_disclosure, ensure_ascii=False)
     print("[OK] worker host confirmation disclosure broadcast is sanitized without targeted API")
 
 
@@ -2856,9 +2940,11 @@ if __name__ == "__main__":
     test_worker_records_busy_scene_message_without_agent_lock()
     test_worker_records_busy_layout_and_edit_notes()
     test_planning_confirmation_gate_roundtrip()
+    test_planning_gate_records_pre_generation_style_supplement()
     test_worker_async_agent_calls_are_serialized_per_worker()
     test_worker_broadcasts_confirmed_gm_action()
     test_worker_acknowledges_final_adjustment_confirmation_without_host_execution()
+    test_worker_routes_agent_status_query_to_coordinator_without_model_agent()
     test_worker_acknowledges_conflict_resolution_rejection_without_host_execution()
     test_worker_rejects_coordinator_confirmation_without_sender_identity()
     test_worker_rejects_coordinator_confirmation_from_non_host_role()

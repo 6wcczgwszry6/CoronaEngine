@@ -90,6 +90,8 @@ class DisclosurePolicy:
         "clarifying": "方案整理中",
         "proposed": "等待房主确认",
         "confirmed": "已确认方案",
+        "queued": "排队中",
+        "waiting_resource": "等待资源",
         "executing": "生成中",
         "generating": "生成中",
         "batch": "批次生成中",
@@ -176,6 +178,8 @@ class DisclosurePolicy:
                 return f"{label}：{clarification_message}"
             if stage in {"proposed", "clarifying"}:
                 return f"{label}：{summary or '已整理当前方案'}。请确认、继续讨论或暂停。"
+            if stage in {"queued", "waiting_resource"}:
+                return f"{label}：生成任务已进入队列，正在等待资源调度。你可以继续补充要求，我会在后续批次前吸收。"
             if stage in {"executing", "generating", "batch"}:
                 return f"{label} {progress}%：正在按已确认方案分批生成。你可以暂停或要求下一批调整。"
             if stage == "review":
@@ -198,6 +202,8 @@ class DisclosurePolicy:
             return f"{label}：使用已确认约束执行。{detail}".strip()
         if clarification_message:
             return f"{label}：{clarification_message}"
+        if stage in {"queued", "waiting_resource"}:
+            return f"{label}：生成任务已排队，正在等待资源；你可以继续提出调整，我会在下一批前吸收。"
         if stage in {"executing", "generating", "batch"}:
             return f"{label} {progress}%：正在分批生成。你可以继续提出调整，我会在下一批前吸收。"
         if stage == "intervention":
@@ -224,12 +230,14 @@ class DisclosurePolicy:
                 ]
             if stage in {"proposed", "clarifying"}:
                 return ["confirm_plan", "request_clarification", "pause_discussion"]
+            if stage in {"queued", "waiting_resource"}:
+                return ["add_intervention", "pause_after_batch", "request_status"]
             if stage in {"executing", "generating", "batch"}:
                 return ["pause_after_batch", "add_intervention", "request_review"]
             if stage == "review":
                 return ["approve_final", "request_repair", "continue_generation"]
         if audience == "participant":
-            if stage in {"executing", "generating", "batch", "intervention"}:
+            if stage in {"queued", "waiting_resource", "executing", "generating", "batch", "intervention"}:
                 return ["add_note", "request_add", "request_modify", "report_issue"]
             return ["discuss", "clarify_intent"]
         if audience == "gm":

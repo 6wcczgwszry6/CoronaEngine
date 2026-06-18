@@ -84,11 +84,14 @@ function safeDisclosureSource(input = {}) {
   return out;
 }
 
-export function extractDisclosureFromMessage(message = {}, fallbackRoom = '') {
+export function extractDisclosureFromMessage(message = {}, fallbackRoom = '', role = '') {
   const metadata = parseDisclosureMetadata(message);
-  const rawSource = metadata.disclosure && typeof metadata.disclosure === 'object'
-    ? metadata.disclosure
-    : metadata;
+  const shouldUseHostDisclosure = String(role || '') === 'host'
+    && metadata.host_disclosure
+    && typeof metadata.host_disclosure === 'object';
+  const rawSource = shouldUseHostDisclosure
+    ? metadata.host_disclosure
+    : (metadata.disclosure && typeof metadata.disclosure === 'object' ? metadata.disclosure : metadata);
   const source = safeDisclosureSource(rawSource);
   const hasDisclosure = Boolean(
     source.public_message ||

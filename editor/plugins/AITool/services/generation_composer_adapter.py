@@ -27,6 +27,9 @@ class SceneComposerJobRunner:
         )
         if not prompt:
             raise ValueError("generation job has no prompt or SeedPlan intent_summary")
+        if self._is_append_job(job.payload):
+            self._limit_append_batch_size(composer, job.payload)
+            prompt = self._append_prompt(prompt, job.payload)
         actor_id = self._target_actor_id(job.payload)
         result = composer.compose(
             prompt,
@@ -42,6 +45,38 @@ class SceneComposerJobRunner:
 
     def stage_handlers(self) -> dict[str, Callable[[GenerationJob], Any]]:
         return {"compose": self.compose}
+
+    @staticmethod
+    def _is_append_job(payload: dict[str, Any]) -> bool:
+        return bool(payload.get("append_mode") or str(payload.get("action_type") or "") == "post_generation_add")
+
+    @staticmethod
+    def _limit_append_batch_size(composer: Any, payload: dict[str, Any]) -> None:
+        if not hasattr(composer, "max_items"):
+            return
+        try:
+            requested = max(1, int(payload.get("max_items") or 2))
+            current = int(getattr(composer, "max_items") or requested)
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            setattr(composer, "max_items", max(1, min(current, requested)))
+        except Exception:  # noqa: BLE001
+            return
+
+    @staticmethod
+    def _append_prompt(prompt: str, payload: dict[str, Any]) -> str:
+        contract = payload.get("scene_design_contract")
+        style_prompt = ""
+        if isinstance(contract, dict):
+            style_prompt = str(contract.get("asset_style_prompt") or "").strip()
+        parts = [
+            "只追加本次新增对象，不重建整个场景，不覆盖已有布局。",
+            f"新增请求：{prompt}",
+        ]
+        if style_prompt:
+            parts.append(f"保持既有场景风格：{style_prompt}")
+        return "\n".join(parts)
 
     @staticmethod
     def _target_actor_id(payload: dict[str, Any]) -> str:

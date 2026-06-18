@@ -94,6 +94,70 @@ import {
 }
 
 {
+  const message = {
+    message_id: 'm-host-fallback-1',
+    room_id: 'room-a',
+    text: '有一项需要房主确认的事项。',
+    message_kind: 'action_status',
+    metadata_json: JSON.stringify({
+      disclosure: {
+        event_id: 'disc-host-fallback-1',
+        room_id: 'room-a',
+        audience: 'participant',
+        stage: '冲突仲裁',
+        progress: 20,
+        public_message: '有一项需要房主确认的事项。',
+        available_actions: [],
+        requires_confirmation: false,
+        metadata: {
+          proposal_id: 'conflict-proposal-1',
+          prompt: 'do not leak',
+        },
+      },
+      host_disclosure: {
+        event_id: 'disc-host-fallback-1',
+        room_id: 'room-a',
+        audience: 'host',
+        stage: '冲突仲裁',
+        progress: 20,
+        public_message: 'GM 建议采用折中方案，等待房主确认。',
+        available_actions: ['confirm_conflict_resolution', 'request_clarification'],
+        requires_confirmation: true,
+        requires_conflict_resolution: true,
+        proposal_id: 'conflict-proposal-1',
+        metadata: {
+          apply_policy: 'host_confirmation',
+          proposal_id: 'conflict-proposal-1',
+          provider: 'hidden-provider',
+          raw_prompt: 'hidden raw prompt',
+        },
+      },
+    }),
+  };
+
+  const guestDisclosure = extractDisclosureFromMessage(message, 'room-a', 'guest');
+  assert.equal(guestDisclosure.audience, 'participant');
+  assert.equal(guestDisclosure.public_message, '有一项需要房主确认的事项。');
+  assert.equal(guestDisclosure.requires_confirmation, false);
+  assert.deepEqual(guestDisclosure.available_actions, []);
+  assert.equal('prompt' in guestDisclosure.metadata, false);
+
+  const hostDisclosure = extractDisclosureFromMessage(message, 'room-a', 'host');
+  assert.equal(hostDisclosure.audience, 'host');
+  assert.equal(hostDisclosure.public_message, 'GM 建议采用折中方案，等待房主确认。');
+  assert.equal(hostDisclosure.requires_confirmation, true);
+  assert.equal(hostDisclosure.requires_conflict_resolution, true);
+  assert.equal(hostDisclosure.proposal_id, 'conflict-proposal-1');
+  assert.deepEqual(hostDisclosure.available_actions, [
+    'confirm_conflict_resolution',
+    'request_clarification',
+  ]);
+  assert.equal(hostDisclosure.metadata.apply_policy, 'host_confirmation');
+  assert.equal('provider' in hostDisclosure.metadata, false);
+  assert.equal('raw_prompt' in hostDisclosure.metadata, false);
+}
+
+{
   const disclosure = extractDisclosureFromMessage({
     message_id: 'm-final-conflict-1',
     room_id: 'room-a',

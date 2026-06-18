@@ -33,6 +33,12 @@ _EDIT_WORDS = (
     "移远", "靠左", "靠右", "往前", "往后", "删除", "删掉", "移除",
 )
 
+_PLAN_SUPPLEMENT_WORDS = (
+    "补充", "再加", "增加", "我希望", "希望", "更", "不要", "别", "不能",
+    "风格", "统一", "一致", "温暖", "灯光", "灯笼", "休息区", "暗黑风",
+    "不要太恐怖", "不太恐怖", "适合", "整体",
+)
+
 MODE_DISCUSSING = "DISCUSSING"
 MODE_PLANNING = "PLANNING"
 MODE_EXECUTING = "EXECUTING"
@@ -107,6 +113,11 @@ class LanChatSceneRuntime:
             return "generation_delta"
         return "chat"
 
+    @staticmethod
+    def is_plan_supplement(text: str) -> bool:
+        value = str(text or "")
+        return bool(value.strip()) and any(word in value for word in _PLAN_SUPPLEMENT_WORDS)
+
     def set_mode(self, mode: str) -> str:
         normalized = str(mode or "").strip().upper()
         if normalized not in _VALID_MODES:
@@ -145,7 +156,7 @@ class LanChatSceneRuntime:
                 self._mode = MODE_EXECUTING
                 return "compose", compose_text
 
-            if pending and ("补充" in value or "再加" in value or "增加" in value):
+            if pending and self.is_plan_supplement(value):
                 pending.constraints.append(value)
                 for item in self._extract_requested_items(value):
                     if item not in pending.proposed_items:

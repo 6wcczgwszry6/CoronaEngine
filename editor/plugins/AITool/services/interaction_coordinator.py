@@ -8,7 +8,14 @@ from typing import Any, Callable
 
 from .disclosure_policy import DisclosureEvent, DisclosurePolicy
 from .memory_scope import MemoryScope, MemoryScopeStore
+from .scene_design_contract import (
+    SceneDesignContract,
+    build_scene_design_contract,
+    close_contract,
+    update_contract_from_intervention,
+)
 from .seed_plan import ParticipantIntent, SeedPlan, SeedPlanStatus
+from .terrain_component_resolver import TerrainComponentResolver, canonical_actor_id
 
 
 MAX_COORDINATOR_EVENTS = 2048
@@ -307,6 +314,8 @@ class InteractionCoordinator:
         self._active_generation_session_by_plan: dict[str, str] = {}
         self._replan_source_by_plan: dict[str, str] = {}
         self._latest_batch_by_plan: dict[str, tuple[str, int]] = {}
+        self._scene_contracts_by_plan: dict[str, SceneDesignContract] = {}
+        self._terrain_resolver = TerrainComponentResolver()
         self._events: list[CoordinatorEvent] = []
         self._disclosure_events: list[DisclosureEvent] = []
         self._disclosure_events_start_index = 0
@@ -329,6 +338,8 @@ class InteractionCoordinator:
     def ingest_message(self, message: ChatMessage | dict[str, Any]) -> CoordinatorEvent:
         msg = self._coerce_message(message)
         active = self.active_plan_for_room(msg.room_id)
+        if self._is_status_query(msg.text):
+            return self._handle_status_query(msg, active)
         if active and active.status in {SeedPlanStatus.CONFIRMED, SeedPlanStatus.EXECUTING, SeedPlanStatus.PAUSED}:
             request = self._intervention_from_message(msg, active)
             decision = self.ingest_intervention(request)
@@ -340,8 +351,21 @@ class InteractionCoordinator:
                 intervention=decision.payload,
             )
             return self._record("intervention_routed", decision.message, decision.payload)
+        if active and active.status == SeedPlanStatus.COMPLETED and self._intent_type(msg.text) == "add":
+            request = self._intervention_from_message(msg, active)
+            request.intent_type = "post_generation_add"
+            request.apply_policy = "post_generation_add"
+            decision = self.ingest_intervention(request)
+            self._record_disclosures(
+                room_id=msg.room_id,
+                stage="intervention",
+                progress=100,
+                plan=active.as_dict(),
+                intervention=decision.payload,
+            )
+            return self._record("post_generation_add_routed", decision.message, decision.payload)
 
-        plan = active or self.create_or_update_seed_plan(msg)
+        plan = self.create_or_update_seed_plan(msg)
         if active is not None and active.status == SeedPlanStatus.CLARIFYING:
             self._record_clarification_answer(msg, plan)
         self._record_memory(
@@ -677,6 +701,19 @@ class InteractionCoordinator:
                 },
             )
         plan.confirm(host_id)
+        contract_text = "；".join(
+            item.text for item in plan.participants if str(item.text or "").strip()
+        ) or plan.intent_summary
+        contract = build_scene_design_contract(
+            room_id=plan.room_id,
+            plan_id=plan.plan_id,
+            scene_type=plan.scene_type,
+            text=contract_text,
+        )
+        terrain_profile = self._terrain_resolver.derive(contract_text, scene_type=plan.scene_type)
+        contract.terrain_spec = terrain_profile.terrain_spec
+        contract.boundary_spec = terrain_profile.boundary_spec
+        self._scene_contracts_by_plan[plan.plan_id] = contract
         self._record_memory(
             room_id=plan.room_id,
             plan_id=plan.plan_id,
@@ -684,7 +721,11 @@ class InteractionCoordinator:
             text=plan.intent_summary,
             actor_id=host_id,
             visibility="shared",
-            metadata={"plan_version": plan.version, "scene_type": plan.scene_type},
+            metadata={
+                "plan_version": plan.version,
+                "scene_type": plan.scene_type,
+                "scene_design_contract": contract.as_dict(),
+            },
         )
         payload = {
             "action_type": "start_generation",
@@ -695,6 +736,7 @@ class InteractionCoordinator:
             "source_user_id": host_id,
             "intent_text": plan.intent_summary,
             "seed_plan": plan.as_dict(),
+            "scene_design_contract": contract.as_dict(),
             "requires_host_confirm": False,
             "status": "confirmed",
         }
@@ -730,19 +772,15 @@ class InteractionCoordinator:
             "room_id": plan.room_id,
             "session_id": execution_session_id,
             "seed_plan": plan.as_dict(),
+            "scene_design_contract": self.scene_design_contract(plan.plan_id),
             "_runtime_context": {"interaction_coordinator": self},
         }
         if scheduler_resume:
             payload["scheduler_resume"] = scheduler_resume
         if self._scheduler is not None and hasattr(self._scheduler, "submit"):
             submitted = self._scheduler.submit(payload)
-            self._record_disclosures(
-                room_id=plan.room_id,
-                stage="executing",
-                progress=0,
-                plan=plan.as_dict(),
-            )
             if isinstance(submitted, GenerationJobRef):
+                self._record_generation_ref_disclosure(plan, submitted)
                 self._remember_generation_job_ref(submitted)
                 return submitted
             if isinstance(submitted, dict):
@@ -753,11 +791,12 @@ class InteractionCoordinator:
                     session_id=str(submitted.get("session_id") or execution_session_id),
                     payload=submitted,
                 )
+                self._record_generation_ref_disclosure(plan, ref)
                 self._remember_generation_job_ref(ref)
                 return ref
         self._record_disclosures(
             room_id=plan.room_id,
-            stage="executing",
+            stage="queued",
             progress=0,
             plan=plan.as_dict(),
         )
@@ -771,7 +810,27 @@ class InteractionCoordinator:
         self._remember_generation_job_ref(ref)
         return ref
 
+    def _record_generation_ref_disclosure(self, plan: SeedPlan, ref: GenerationJobRef) -> None:
+        status = str(ref.status or "").strip().lower()
+        if status in {"queued", "waiting_user", "paused"}:
+            stage = "queued" if status == "queued" else "waiting_resource"
+            progress = 0
+        elif status in {"done", "completed"}:
+            stage = "completed"
+            progress = 100
+        else:
+            stage = "executing"
+            progress = 0
+        self._record_disclosures(
+            room_id=plan.room_id,
+            stage=stage,
+            progress=progress,
+            plan=plan.as_dict(),
+        )
+
     def execute_action_payload(self, payload: dict[str, Any]) -> str:
+        if str(payload.get("action_type") or "") == "post_generation_add":
+            return self.execute_post_generation_add(payload)
         plan_id = str(payload.get("plan_id") or payload.get("resolved_from_plan_id") or "")
         seed_plan = payload.get("seed_plan")
         if not plan_id and isinstance(seed_plan, dict):
@@ -787,6 +846,129 @@ class InteractionCoordinator:
                 plan.confirm(str(payload.get("source_user_id") or payload.get("host_id") or "host"))
         ref = self.execute_confirmed_plan(plan_id)
         return f"SeedPlan {plan_id} 已进入生成队列：{ref.job_id} ({ref.status})"
+
+    def execute_post_generation_add(self, payload: dict[str, Any]) -> str:
+        room_id = str(payload.get("room_id") or "")
+        plan_id = str(payload.get("plan_id") or payload.get("resolved_from_plan_id") or "")
+        seed_plan = payload.get("seed_plan")
+        if not plan_id and isinstance(seed_plan, dict):
+            plan_id = str(seed_plan.get("plan_id") or "")
+        if plan_id not in self._plans and isinstance(seed_plan, dict) and plan_id:
+            self._plans[plan_id] = SeedPlan.from_dict(seed_plan)
+            self._room_active_plan[self._plans[plan_id].room_id] = plan_id
+        plan = self._plans.get(plan_id) if plan_id else self.active_plan_for_room(room_id)
+        if plan is None:
+            return "no typed actor delta: confirmed add action has no active SeedPlan"
+        content = str(
+            payload.get("resolved_intent_text")
+            or payload.get("intent_text")
+            or payload.get("content")
+            or ""
+        ).strip()
+        if not content:
+            return "no typed actor delta: confirmed add action has no object request"
+        request = InterventionRequest(
+            room_id=plan.room_id,
+            plan_id=plan.plan_id,
+            source_user_id=str(payload.get("source_user_id") or payload.get("host_id") or plan.host_id or ""),
+            session_id=str(payload.get("session_id") or ""),
+            content=content,
+            intent_type="post_generation_add",
+            priority=2,
+            apply_policy="post_generation_add",
+        )
+        if plan.status in {SeedPlanStatus.CONFIRMED, SeedPlanStatus.EXECUTING, SeedPlanStatus.PAUSED}:
+            request.intent_type = "add"
+            request.apply_policy = "next_batch"
+            decision = self.ingest_intervention(request)
+            self._record_disclosures(
+                room_id=plan.room_id,
+                stage="intervention",
+                progress=0,
+                plan=plan.as_dict(),
+                intervention={
+                    **decision.payload,
+                    "status_message": "生成仍在进行，新增请求已进入下一批吸收队列。",
+                },
+            )
+            return "已记录追加请求，将在下一批前吸收。"
+        decision = self.ingest_intervention(request)
+        execution_session_id = f"append-{plan.plan_id}-{uuid.uuid4().hex[:8]}"
+        self._active_generation_session_by_plan[plan.plan_id] = execution_session_id
+        job_payload = {
+            "job_type": "scene_generation_append",
+            "action_type": "post_generation_add",
+            "append_mode": True,
+            "max_items": int(payload.get("max_items") or 2),
+            "plan_id": plan.plan_id,
+            "plan_version": plan.version,
+            "room_id": plan.room_id,
+            "session_id": execution_session_id,
+            "prompt": content,
+            "intent_text": content,
+            "seed_plan": plan.as_dict(),
+            "pending_interventions": [request.as_dict()],
+            "latest_intervention": request.as_dict(),
+            "scene_design_contract": self.scene_design_contract(plan.plan_id),
+            "_runtime_context": {"interaction_coordinator": self},
+        }
+        if self._scheduler is not None and hasattr(self._scheduler, "submit"):
+            submitted = self._scheduler.submit(job_payload)
+            if isinstance(submitted, GenerationJobRef):
+                ref = submitted
+            elif isinstance(submitted, dict):
+                ref = GenerationJobRef(
+                    job_id=str(submitted.get("job_id") or f"job-{uuid.uuid4().hex[:12]}"),
+                    plan_id=plan.plan_id,
+                    status=str(submitted.get("status") or "queued"),
+                    session_id=str(submitted.get("session_id") or execution_session_id),
+                    payload=submitted,
+                )
+            else:
+                ref = GenerationJobRef(
+                    job_id=f"job-{uuid.uuid4().hex[:12]}",
+                    plan_id=plan.plan_id,
+                    status="queued",
+                    session_id=execution_session_id,
+                    payload=job_payload,
+                )
+        else:
+            ref = GenerationJobRef(
+                job_id=f"job-{uuid.uuid4().hex[:12]}",
+                plan_id=plan.plan_id,
+                status="queued",
+                session_id=execution_session_id,
+                payload=job_payload,
+            )
+        self._remember_generation_job_ref(ref)
+        self._record_memory(
+            room_id=plan.room_id,
+            plan_id=plan.plan_id,
+            entry_type="post_generation_add_started",
+            text=content,
+            actor_id=request.source_user_id,
+            visibility="shared",
+            metadata={
+                "intervention": decision.payload,
+                "generation_job": {
+                    "job_id": ref.job_id,
+                    "status": ref.status,
+                    "session_id": ref.session_id,
+                    "plan_id": ref.plan_id,
+                },
+            },
+        )
+        self._record_disclosures(
+            room_id=plan.room_id,
+            stage="executing",
+            progress=100 if plan.status == SeedPlanStatus.COMPLETED else 0,
+            plan=plan.as_dict(),
+            intervention={
+                **decision.payload,
+                "status_message": "追加生成请求已进入生成队列。",
+            },
+        )
+        return f"追加生成请求已进入生成队列：{ref.job_id} ({ref.status})"
 
     def control_pace(
         self,
@@ -944,7 +1126,9 @@ class InteractionCoordinator:
             "geometry_review": "已记录为几何/摆放修复请求，将进入审查队列。",
             "pause_and_replan": "已暂停后续批次，等待 GM 重新整理方案。",
             "final_adjustment": "已记录为最终调整优先项。",
+            "post_generation_add": "已记录为追加生成请求，将创建后续追加批次。",
         }.get(route, "已记录该介入。")
+        self._update_scene_contract_for_intervention(plan, request, route)
         self._record_memory(
             room_id=request.room_id or plan.room_id,
             plan_id=request.plan_id,
@@ -1534,6 +1718,20 @@ class InteractionCoordinator:
             limit=limit,
         )
 
+    def scene_design_contract(self, plan_id: str) -> dict[str, Any]:
+        contract = self._scene_contracts_by_plan.get(plan_id)
+        return contract.as_dict() if contract is not None else {}
+
+    def close_room(self, room_id: str) -> None:
+        room = str(room_id or "default")
+        for plan in list(self._plans.values()):
+            if plan.room_id != room:
+                continue
+            contract = self._scene_contracts_by_plan.get(plan.plan_id)
+            if contract is not None:
+                close_contract(contract)
+        self._memory_store.clear_room(room)
+
     def disclose(
         self,
         *,
@@ -1566,8 +1764,10 @@ class InteractionCoordinator:
     def _intervention_from_message(self, message: ChatMessage, plan: SeedPlan) -> InterventionRequest:
         intent_type = self._intent_type(message.text)
         latest_batch_id = self._latest_batch_by_plan.get(plan.plan_id, ("", 0))[0]
-        actor_id = self._actor_id_from_message(message)
+        actor_id = canonical_actor_id(self._actor_id_from_message(message))
         target_hint = str(message.metadata.get("target_hint") or "").strip()
+        if target_hint:
+            target_hint = canonical_actor_id(target_hint)
         return InterventionRequest(
             room_id=message.room_id,
             plan_id=plan.plan_id,
@@ -1575,7 +1775,7 @@ class InteractionCoordinator:
             batch_id=latest_batch_id,
             actor_id=actor_id,
             actor_version=int(message.metadata.get("actor_version") or 0),
-            target_hint=target_hint or self._target_hint(message.text, actor_id),
+            target_hint=target_hint or canonical_actor_id(self._target_hint(message.text, actor_id)),
             content=message.text,
             intent_type=intent_type,
             priority=2 if message.is_host else 1,
@@ -1586,16 +1786,21 @@ class InteractionCoordinator:
         for key in ("actor_id", "target_actor_id", "object_id", "target_object_id"):
             value = message.metadata.get(key)
             if value:
-                return str(value)
+                return canonical_actor_id(str(value))
         match = re.search(r"(?:actor|object|模型|物体)[:：#]([A-Za-z0-9_.-]+)", message.text)
         if match:
-            return match.group(1)
+            return canonical_actor_id(match.group(1))
         hash_match = re.search(r"#([A-Za-z][A-Za-z0-9_.-]{2,})", message.text)
-        return hash_match.group(1) if hash_match else ""
+        if hash_match:
+            return canonical_actor_id(hash_match.group(1))
+        for alias in ("_terrain_boundary", "__terrain_boundary", "terrain_boundary", "地形边界", "栅栏", "边界"):
+            if alias in message.text:
+                return canonical_actor_id(alias)
+        return ""
 
     def _target_hint(self, text: str, actor_id: str = "") -> str:
         if actor_id:
-            return actor_id
+            return canonical_actor_id(actor_id)
         cleaned = re.sub(r"@\S+\s*", "", str(text or "")).strip()
         patterns = (
             r"(?:删除|移除|去掉|不要)\s*[:：]?\s*(?P<target>[^，。；,.]{1,24})",
@@ -1608,7 +1813,7 @@ class InteractionCoordinator:
             match = re.search(pattern, cleaned)
             if match:
                 target = match.group("target").strip()
-                return target[:24]
+                return canonical_actor_id(target[:24])
         return ""
 
     def _target_hint_from_review(self, review: ReviewResult) -> str:
@@ -1638,6 +1843,8 @@ class InteractionCoordinator:
         return ""
 
     def _intent_type(self, text: str) -> str:
+        if self._is_status_query(text):
+            return "status_query"
         if any(word in text for word in self._WRONG_PLAN_WORDS):
             return "wrong_plan"
         if any(word in text for word in self._REPAIR_WORDS):
@@ -1651,6 +1858,10 @@ class InteractionCoordinator:
         return "modify"
 
     def _apply_policy(self, text: str, intent_type: str) -> str:
+        if intent_type == "status_query":
+            return "status_query"
+        if intent_type == "post_generation_add":
+            return "post_generation_add"
         if intent_type == "wrong_plan":
             return "pause_and_replan"
         if intent_type == "repair":
@@ -1855,9 +2066,98 @@ class InteractionCoordinator:
             plan.style_constraints.append(text)
         if any(word in text for word in ("穿模", "接地", "比例", "摆放", "地形")) and text not in plan.placement_constraints:
             plan.placement_constraints.append(text)
-        if any(word in text for word in ("冲突", "不同意", "不要", "但是")) and text not in plan.conflicts:
+        negative_preference_only = any(word in text for word in ("不要太恐怖", "不太恐怖", "不要全是暗黑风"))
+        if any(word in text for word in ("冲突", "不同意", "但是")) and text not in plan.conflicts:
+            plan.conflicts.append(text)
+        elif "不要" in text and not negative_preference_only and text not in plan.conflicts:
             plan.conflicts.append(text)
         plan.updated_at = time.time()
+
+    @staticmethod
+    def _is_status_query(text: str) -> bool:
+        raw = str(text or "")
+        return any(word in raw for word in (
+            "到哪步", "到哪一步", "到哪里", "生成到哪里", "生成情况", "查看生成情况",
+            "现在的生成计划", "当前生成计划", "进度", "为什么不执行", "怎么还不执行",
+            "执行了吗", "开始了吗",
+        ))
+
+    def _handle_status_query(self, message: ChatMessage, plan: SeedPlan | None) -> CoordinatorEvent:
+        if plan is None:
+            return self._record(
+                "status_query",
+                "当前还没有已整理的生成方案。",
+                {"room_id": message.room_id, "intent_type": "status_query", "status": "no_plan"},
+            )
+        jobs = [ref.payload for ref in self._generation_jobs_by_plan.get(plan.plan_id, [])]
+        latest_batch_id, latest_batch_index = self._latest_batch_by_plan.get(plan.plan_id, ("", 0))
+        payload = {
+            "room_id": message.room_id,
+            "plan_id": plan.plan_id,
+            "intent_type": "status_query",
+            "status": plan.status.value,
+            "latest_batch_id": latest_batch_id,
+            "latest_batch_index": latest_batch_index,
+            "generation_jobs": _sanitize_control_payload(jobs),
+            "scene_design_contract": self.scene_design_contract(plan.plan_id),
+        }
+        self._record_disclosures(
+            room_id=message.room_id,
+            stage=plan.status.value,
+            progress=0,
+            plan=plan.as_dict(),
+            intervention={"intent_type": "status_query", "apply_policy": "read_only", "status_message": "已查询当前生成状态。"},
+        )
+        latest_job_status = self._latest_generation_job_status(plan.plan_id)
+        return self._record("status_query", self._status_query_message(plan, latest_batch_id, latest_job_status), payload)
+
+    def _latest_generation_job_status(self, plan_id: str) -> str:
+        refs = self._generation_jobs_by_plan.get(plan_id, [])
+        for ref in reversed(refs):
+            status = str(ref.status or "").strip().lower()
+            if status:
+                return status
+        return ""
+
+    @staticmethod
+    def _status_query_message(plan: SeedPlan, latest_batch_id: str, latest_job_status: str = "") -> str:
+        if plan.status == SeedPlanStatus.EXECUTING:
+            if latest_job_status in {"queued", "waiting_user", "paused"}:
+                return "当前方案已进入生成队列，正在等待资源调度；你可以继续补充要求，我会在后续批次前吸收。"
+            suffix = f"，最近批次：{latest_batch_id}" if latest_batch_id else ""
+            return f"当前方案正在生成中{suffix}。"
+        if plan.status == SeedPlanStatus.CONFIRMED:
+            return "当前方案已确认，等待进入生成队列。"
+        if plan.status == SeedPlanStatus.COMPLETED:
+            return "当前主生成已完成，可以继续追加生成或做最终调整。"
+        return f"当前方案状态：{plan.status.value}。"
+
+    def _update_scene_contract_for_intervention(
+        self,
+        plan: SeedPlan,
+        request: InterventionRequest,
+        route: str,
+    ) -> None:
+        contract = self._scene_contracts_by_plan.get(plan.plan_id)
+        if contract is None:
+            return
+        update_contract_from_intervention(
+            contract,
+            text=request.content,
+            accepted=True,
+            deferred=route in {"next_batch", "post_generation_add"},
+            rejected=False,
+            actor_id=request.actor_id,
+            batch_id=request.batch_id,
+            updated_by=request.source_user_id,
+        )
+        terrain_profile = self._terrain_resolver.derive(
+            plan.intent_summary + " " + request.content,
+            scene_type=plan.scene_type,
+        )
+        if terrain_profile.scene_key != (plan.scene_type or "mixed"):
+            contract.terrain_spec = terrain_profile.terrain_spec
+            contract.boundary_spec = terrain_profile.boundary_spec
 
     def _looks_ready_to_propose(self, text: str) -> bool:
         return any(word in text for word in ("整理方案", "形成方案", "确认方案", "开始执行", "开始生成", "按这个方案"))

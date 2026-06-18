@@ -746,6 +746,27 @@ class GenerationScheduler:
         self._recent_events.append(event)
         if len(self._recent_events) > self._recent_event_limit:
             self._recent_events = self._recent_events[-self._recent_event_limit:]
+        self._log_event(event)
+
+    def _log_event(self, event: dict[str, Any]) -> None:
+        event_type = str(event.get("event_type") or "")
+        if not event_type:
+            return
+        self._logger.info(
+            "[GenerationScheduler] event=%s room_id=%s session_id=%s plan_id=%s job_id=%s batch_id=%s "
+            "status=%s stage=%s priority=%s cancelled_count=%s pruned_count=%s",
+            event_type,
+            event.get("room_id") or "",
+            event.get("session_id") or "",
+            event.get("plan_id") or "",
+            event.get("job_id") or "",
+            event.get("batch_id") or "",
+            event.get("status") or "",
+            event.get("current_stage") or "",
+            event.get("priority") if "priority" in event else "",
+            event.get("cancelled_count") if "cancelled_count" in event else "",
+            event.get("pruned_count") if "pruned_count" in event else "",
+        )
 
     def _prune_terminal_jobs_locked(self) -> None:
         limit = self._max_retained_terminal_jobs

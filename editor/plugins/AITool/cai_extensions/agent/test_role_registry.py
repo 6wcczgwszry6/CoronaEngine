@@ -16,11 +16,12 @@ from cai_extensions.agent.agent_adapter import MasterAgent  # noqa: E402
 
 
 class FakeRotActor:
-    def __init__(self):
-        self.name = "chair"
+    def __init__(self, name: str = "chair"):
+        self.name = name
         self._rotation = [0.0, 0.0, 0.0]
         self._position = [0.0, 0.0, 0.0]
         self._scale = [1.0, 1.0, 1.0]
+        self._color = None
 
     def get_rotation(self):
         return list(self._rotation)
@@ -33,6 +34,12 @@ class FakeRotActor:
 
     def get_scale(self):
         return list(self._scale)
+
+    def set_scale(self, value):
+        self._scale = list(value)
+
+    def set_color(self, value):
+        self._color = list(value)
 
 
 def test_builtin_role_has_structured_biases():
@@ -84,10 +91,34 @@ def test_fast_rotation_converts_degrees_to_radians():
     assert math.isclose(actor.get_rotation()[1], math.pi / 4, abs_tol=0.0015)
 
 
+def test_boundary_alias_prefers_system_boundary_over_entrance_actor():
+    agent = MasterAgent()
+    boundary = FakeRotActor("__terrain_boundary")
+    arch = FakeRotActor("入口拱门")
+
+    picked = agent._pick_edit_actor("这个栅栏有点奇怪，换成低矮木栏/藤蔓围栏", [arch, boundary])
+
+    assert picked is boundary
+
+
+def test_boundary_fast_edit_uses_low_risk_boundary_adjustment():
+    agent = MasterAgent()
+    boundary = FakeRotActor("__terrain_boundary")
+    arch = FakeRotActor("入口拱门")
+
+    reply = agent._try_fast_transform_edit("换成更幻想集市风的低矮木栏/藤蔓围栏", [arch, boundary])
+
+    assert reply and "__terrain_boundary" in reply
+    assert boundary.get_scale()[1] <= 0.55
+    assert arch.get_scale() == [1.0, 1.0, 1.0]
+
+
 if __name__ == "__main__":
     test_builtin_role_has_structured_biases()
     test_role_voice_injection_keeps_persona_visible()
     test_custom_role_is_supported_without_overwriting_builtin()
     test_master_agent_can_build_role_compose_context()
     test_fast_rotation_converts_degrees_to_radians()
+    test_boundary_alias_prefers_system_boundary_over_entrance_actor()
+    test_boundary_fast_edit_uses_low_risk_boundary_adjustment()
     print("\n=== Role registry ALL PASS ===")

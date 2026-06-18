@@ -11,9 +11,40 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import uuid
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BatchResourcePlan:
+    plan_id: str
+    batch_id: str
+    contract_version: int
+    phase: str
+    requested_items: list[dict[str, Any]] = field(default_factory=list)
+    absorbed_interventions: list[dict[str, Any]] = field(default_factory=list)
+    status: str = "planned"
+    image_status: str = "planned"
+    model_status: str = "planned"
+    import_status: str = "planned"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "plan_id": self.plan_id,
+            "batch_id": self.batch_id,
+            "contract_version": self.contract_version,
+            "phase": self.phase,
+            "requested_items": [dict(item) for item in self.requested_items],
+            "absorbed_interventions": [dict(item) for item in self.absorbed_interventions],
+            "status": self.status,
+            "image_status": self.image_status,
+            "model_status": self.model_status,
+            "import_status": self.import_status,
+        }
 
 
 def run_progressive_workflow(
@@ -129,6 +160,16 @@ def run_progressive_workflow(
                 )
                 micro_phase_assets[phase] = assets
                 _refresh_micro_batch_metadata(phase_sequence, phase_metadata, micro_phase_assets)
+            assets = _resolve_pending_resource_requests_for_batch(
+                composer,
+                assets,
+                sess,
+                plan_id=plan_id,
+                phase=phase,
+                contract_version=_contract_version(interaction_coordinator, plan_id),
+            )
+            micro_phase_assets[phase] = assets
+            _refresh_micro_batch_metadata(phase_sequence, phase_metadata, micro_phase_assets)
             logger.info("[ProgressiveWorkflow] phase %s: %d assets", phase, len(assets))
             return assets
         return gen
@@ -160,6 +201,18 @@ def run_progressive_workflow(
             return provider(plan_id)
         except Exception as exc:  # noqa: BLE001
             logger.debug("[ProgressiveWorkflow] final adjustment plan skipped: %s", exc)
+            return None
+
+    def scene_design_contract_provider() -> Optional[Dict[str, Any]]:
+        if interaction_coordinator is None or not plan_id:
+            return None
+        provider = getattr(interaction_coordinator, "scene_design_contract", None)
+        if not callable(provider):
+            return None
+        try:
+            return provider(plan_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[ProgressiveWorkflow] scene design contract skipped: %s", exc)
             return None
 
     # 4. Importer（调 incremental_import）
@@ -223,6 +276,7 @@ def run_progressive_workflow(
         phase_metadata=phase_metadata,
         runtime_mode_provider=runtime_mode_provider,
         final_adjustment_provider=final_adjustment_provider,
+        scene_design_contract_provider=scene_design_contract_provider,
     )
 
     # 8. 返回（格式与 _run_original_workflow 一致）
@@ -247,6 +301,7 @@ def run_progressive_workflow(
         if hasattr(vlm_report, "to_user_text")
         else None
     )
+    final_report_text = _merge_final_and_vlm_review_text(final_report_text, vlm_review_text)
     return {
         "items": resolved,
         "imported": imported,
@@ -259,12 +314,14 @@ def run_progressive_workflow(
         "final_report": final_report,
         "final_report_text": final_report_text,
         "final_adjustment_plan": prog_result.get("final_adjustment_plan"),
+        "scene_design_contract": prog_result.get("scene_design_contract"),
         "phases_run": prog_result.get("phases_run", []),
         "progress_events": progress_events,
         "progress_timeline": prog_result.get("progress_timeline", []),
         "operation_log": _serialize_operation_log(getattr(session, "operation_log", [])),
         "operation_count": len(getattr(session, "operation_log", [])),
         "pending_tasks": list(getattr(session, "pending_tasks", []) or []),
+        "pending_resource_requests": list(getattr(session, "pending_resource_requests", []) or []),
         "round": prog_result.get("round"),
         "paused": bool(prog_result.get("paused")),
         "paused_mode": prog_result.get("paused_mode"),
@@ -274,6 +331,22 @@ def run_progressive_workflow(
         "vlm_review_skipped": list(getattr(vlm_report, "skipped", []) or []),
         "vlm_review_timed_out": list(getattr(vlm_report, "timed_out", []) or []),
     }
+
+
+def _merge_final_and_vlm_review_text(
+    final_report_text: Optional[str],
+    vlm_review_text: Optional[str],
+) -> Optional[str]:
+    final_text = str(final_report_text or "").strip()
+    vlm_text = str(vlm_review_text or "").strip()
+    if not vlm_text:
+        return final_text or None
+    vlm_line = f"VLM/外观检查：{vlm_text}"
+    if not final_text:
+        return vlm_line
+    if vlm_text in final_text or vlm_line in final_text:
+        return final_text
+    return final_text + "\n" + vlm_line
 
 
 def _build_micro_batch_phase_plan(
@@ -449,7 +522,13 @@ def _apply_pending_notes_to_batch(
                 task["status"] = "inserted_into_remaining_batch"
                 task["affected_assets"] = inserted[:6]
             else:
-                task["status"] = "deferred_missing_asset"
+                request = _resource_request_from_note(text, source=source, current_phase=current_phase)
+                if request:
+                    task["status"] = "resource_request_created"
+                    task["resource_request"] = request
+                    _append_pending_resource_request(session, request)
+                else:
+                    task["status"] = "deferred_missing_asset"
         elif kind == "generation_delta" and negative:
             filtered: List[Dict[str, Any]] = []
             removed: List[str] = []
@@ -476,6 +555,447 @@ def _apply_pending_notes_to_batch(
             task["status"] = "queued_edit_or_waiting_for_actor"
         session.pending_tasks.append(task)
     return remaining
+
+
+def build_batch_resource_plan(
+    *,
+    plan_id: str,
+    batch_id: str,
+    phase: str,
+    requested_items: List[Dict[str, Any]],
+    absorbed_interventions: Optional[List[Dict[str, Any]]] = None,
+    contract_version: int = 0,
+) -> BatchResourcePlan:
+    return BatchResourcePlan(
+        plan_id=str(plan_id or ""),
+        batch_id=str(batch_id or f"batch-{uuid.uuid4().hex[:8]}"),
+        contract_version=int(contract_version or 0),
+        phase=str(phase or "OBJECTS"),
+        requested_items=[dict(item) for item in requested_items if isinstance(item, dict)],
+        absorbed_interventions=[dict(item) for item in (absorbed_interventions or []) if isinstance(item, dict)],
+        status="planned",
+    )
+
+
+def _contract_version(interaction_coordinator: Optional[Any], plan_id: str) -> int:
+    if interaction_coordinator is None or not plan_id:
+        return 0
+    provider = getattr(interaction_coordinator, "scene_design_contract", None)
+    if not callable(provider):
+        return 0
+    try:
+        contract = provider(plan_id)
+    except Exception:  # noqa: BLE001
+        return 0
+    if isinstance(contract, dict):
+        try:
+            return int(contract.get("version") or 0)
+        except Exception:
+            return 0
+    return 0
+
+
+def _resolve_pending_resource_requests_for_batch(
+    composer: Any,
+    assets: List[Dict[str, Any]],
+    session: Any,
+    *,
+    plan_id: str = "",
+    phase: str = "",
+    contract_version: int = 0,
+) -> List[Dict[str, Any]]:
+    requests = getattr(session, "pending_resource_requests", None)
+    if not isinstance(requests, list) or not requests:
+        return list(assets)
+    limit = max(1, int(os.getenv("CORONA_PROGRESSIVE_RESOURCE_REQUESTS_PER_BATCH", "2") or "2"))
+    planned: List[Dict[str, Any]] = []
+    remaining: List[Dict[str, Any]] = []
+    for request in requests:
+        if not isinstance(request, dict):
+            continue
+        status = str(request.get("status") or "planned")
+        if status == "planned" and len(planned) < limit:
+            planned.append(request)
+        else:
+            remaining.append(request)
+    setattr(session, "pending_resource_requests", remaining)
+    _record_resource_backlog_task(session, remaining, phase=phase, per_batch_limit=limit)
+    if not planned:
+        return list(assets)
+
+    batch_id = f"{phase or 'OBJECTS'}-resource"
+    batch_plan = build_batch_resource_plan(
+        plan_id=plan_id,
+        batch_id=batch_id,
+        phase=phase or "OBJECTS",
+        contract_version=contract_version,
+        requested_items=planned,
+        absorbed_interventions=[
+            {"text": str(item.get("original_text") or ""), "request_id": str(item.get("request_id") or "")}
+            for item in planned
+        ],
+    )
+    task = {
+        "kind": "batch_resource_plan",
+        "status": "image_generating",
+        "batch_resource_plan": batch_plan.as_dict(),
+    }
+    pending_tasks = getattr(session, "pending_tasks", None)
+    if isinstance(pending_tasks, list):
+        pending_tasks.append(task)
+
+    image_result = _generate_images_for_resource_requests(composer, planned)
+    image_urls = dict(image_result.get("image_urls") or {})
+    image_failed = list(image_result.get("failed") or [])
+    image_status = str(image_result.get("status") or "provider_unavailable")
+    batch_plan.image_status = image_status
+    batch_plan.status = "image_completed" if image_status == "completed" else image_status
+    task["status"] = "model_generating"
+    task["image_status"] = image_status
+    task["image_generated"] = sorted(image_urls.keys())
+    task["image_failed"] = image_failed
+    task["batch_resource_plan"] = batch_plan.as_dict()
+
+    retrieval = getattr(composer, "_run_model_retrieval", None)
+    if not callable(retrieval):
+        task["status"] = "model_provider_unavailable"
+        batch_plan.status = "model_provider_unavailable"
+        batch_plan.model_status = "provider_unavailable"
+        task["batch_resource_plan"] = batch_plan.as_dict()
+        task["reason"] = "composer has no _run_model_retrieval"
+        _requeue_resource_requests(session, planned, status="provider_unavailable")
+        return list(assets)
+
+    items = [
+        {
+            "name": str(item.get("item_name") or "").strip(),
+            "quantity": int(item.get("quantity") or 1),
+            "keywords": str(item.get("image_prompt") or item.get("item_name") or "").strip(),
+            "image_url": str(image_urls.get(str(item.get("item_name") or "").strip()) or "").strip(),
+            "layout_role": "decoration",
+            "runtime_generation_context": [str(item.get("original_text") or "")],
+            "source": "USER_PENDING_RESOURCE_REQUEST",
+        }
+        for item in planned
+        if str(item.get("item_name") or "").strip()
+    ]
+    if not items:
+        task["status"] = "empty_request"
+        return list(assets)
+
+    try:
+        batch_plan.model_status = "model_generating"
+        task["batch_resource_plan"] = batch_plan.as_dict()
+        resolved = list(retrieval(items) or [])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ProgressiveWorkflow] pending resource retrieval failed: %s", exc)
+        task["status"] = "model_generation_failed"
+        batch_plan.status = "model_generation_failed"
+        batch_plan.model_status = "failed"
+        task["batch_resource_plan"] = batch_plan.as_dict()
+        task["error"] = str(exc)
+        _requeue_resource_requests(session, planned, status="failed")
+        return list(assets)
+
+    resolved_by_name = {str(item.get("name") or ""): dict(item) for item in resolved if isinstance(item, dict)}
+    additions: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+    for item in items:
+        name = str(item.get("name") or "")
+        asset = dict(resolved_by_name.get(name) or {})
+        if not asset or not (asset.get("model_path") or asset.get("path") or asset.get("local_path")):
+            failed.append({"name": name, "error": "model_generation_unavailable"})
+            continue
+        asset.setdefault("name", name)
+        asset.setdefault("source", "USER_PENDING_RESOURCE_REQUEST")
+        asset.setdefault("runtime_generation_context", list(item.get("runtime_generation_context") or []))
+        asset.setdefault("layout_role", "decoration")
+        additions.append(asset)
+
+    out = list(assets) + additions
+    task["status"] = "completed" if additions else "model_generation_failed"
+    batch_plan.status = task["status"]
+    batch_plan.model_status = "completed" if additions else "failed"
+    task["resolved_assets"] = _asset_names(additions)
+    task["failed"] = failed
+    task["batch_resource_plan"] = batch_plan.as_dict()
+    if failed:
+        _requeue_resource_requests(
+            session,
+            [
+                request for request in planned
+                if str(request.get("item_name") or "") in {item["name"] for item in failed}
+            ],
+            status="failed",
+        )
+    return out
+
+
+def _generate_images_for_resource_requests(
+    composer: Any,
+    requests: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not requests:
+        return {"status": "skipped", "image_urls": {}, "failed": []}
+
+    custom = getattr(composer, "_run_batch_image_generation", None)
+    if callable(custom):
+        try:
+            result = custom([
+                {
+                    "item_name": str(item.get("item_name") or "").strip(),
+                    "image_prompt": str(item.get("image_prompt") or item.get("item_name") or "").strip(),
+                    "quantity": int(item.get("quantity") or 1),
+                }
+                for item in requests
+                if str(item.get("item_name") or "").strip()
+            ])
+            return _normalize_batch_image_result(result, requests)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ProgressiveWorkflow] batch image generation hook failed: %s", exc)
+            return {
+                "status": "failed",
+                "image_urls": {},
+                "failed": [
+                    {"item_name": str(item.get("item_name") or ""), "error": "image_generation_failed"}
+                    for item in requests
+                ],
+            }
+
+    try:
+        from ..flows.integrated_multi_scene_workflow.helpers import (
+            extract_image_url,
+            get_generate_image_tool,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[ProgressiveWorkflow] image helpers unavailable: %s", exc)
+        return {
+            "status": "provider_unavailable",
+            "image_urls": {},
+            "failed": [
+                {"item_name": str(item.get("item_name") or ""), "error": "image_provider_unavailable"}
+                for item in requests
+            ],
+        }
+
+    try:
+        image_tool = get_generate_image_tool()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[ProgressiveWorkflow] get image tool failed: %s", exc)
+        image_tool = None
+    if image_tool is None:
+        return {
+            "status": "provider_unavailable",
+            "image_urls": {},
+            "failed": [
+                {"item_name": str(item.get("item_name") or ""), "error": "image_provider_unavailable"}
+                for item in requests
+            ],
+        }
+
+    image_urls: Dict[str, str] = {}
+    failed: List[Dict[str, str]] = []
+    for item in requests:
+        name = str(item.get("item_name") or "").strip()
+        prompt = str(item.get("image_prompt") or name).strip()
+        if not name or not prompt:
+            continue
+        try:
+            raw = image_tool.invoke({"prompt": prompt})
+            url = str(extract_image_url(raw) or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ProgressiveWorkflow] image generation failed for %s: %s", name, exc)
+            url = ""
+        if url:
+            image_urls[name] = url
+        else:
+            failed.append({"item_name": name, "error": "image_generation_failed"})
+
+    if image_urls and not failed:
+        status = "completed"
+    elif image_urls:
+        status = "partial"
+    else:
+        status = "failed"
+    return {"status": status, "image_urls": image_urls, "failed": failed}
+
+
+def _normalize_batch_image_result(result: Any, requests: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        result = {"image_urls": result}
+    raw_urls = result.get("image_urls")
+    image_urls: Dict[str, str] = {}
+    if isinstance(raw_urls, dict):
+        image_urls = {
+            str(key): str(value)
+            for key, value in raw_urls.items()
+            if str(key).strip() and str(value).strip()
+        }
+    elif isinstance(raw_urls, list):
+        for item in raw_urls:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("item_name") or item.get("name") or "").strip()
+            url = str(item.get("image_url") or item.get("url") or "").strip()
+            if name and url:
+                image_urls[name] = url
+    failed = list(result.get("failed") or [])
+    if not failed:
+        requested_names = {str(item.get("item_name") or "").strip() for item in requests}
+        failed = [
+            {"item_name": name, "error": "image_generation_failed"}
+            for name in sorted(requested_names - set(image_urls))
+            if name
+        ]
+    status = str(result.get("status") or "")
+    if not status:
+        if image_urls and not failed:
+            status = "completed"
+        elif image_urls:
+            status = "partial"
+        else:
+            status = "failed"
+    return {"status": status, "image_urls": image_urls, "failed": failed}
+
+
+def _requeue_resource_requests(session: Any, requests: List[Dict[str, Any]], *, status: str) -> None:
+    if not requests:
+        return
+    current = getattr(session, "pending_resource_requests", None)
+    if not isinstance(current, list):
+        current = []
+        setattr(session, "pending_resource_requests", current)
+    for request in requests:
+        item = dict(request)
+        item["status"] = status
+        item["retry_count"] = int(item.get("retry_count") or 0) + 1
+        current.append(item)
+    _trim_pending_resource_requests(session)
+
+
+def _append_pending_resource_request(session: Any, request: Dict[str, Any]) -> None:
+    requests = getattr(session, "pending_resource_requests", None)
+    if not isinstance(requests, list):
+        requests = []
+        setattr(session, "pending_resource_requests", requests)
+    requests.append(dict(request))
+    _trim_pending_resource_requests(session)
+
+
+def _pending_resource_queue_limit() -> int:
+    try:
+        return max(1, int(os.getenv("CORONA_PROGRESSIVE_PENDING_RESOURCE_LIMIT", "16") or "16"))
+    except ValueError:
+        return 16
+
+
+def _trim_pending_resource_requests(session: Any) -> None:
+    requests = getattr(session, "pending_resource_requests", None)
+    if not isinstance(requests, list):
+        return
+    limit = _pending_resource_queue_limit()
+    if len(requests) <= limit:
+        return
+    overflow = requests[:-limit]
+    kept = requests[-limit:]
+    setattr(session, "pending_resource_requests", kept)
+    pending_tasks = getattr(session, "pending_tasks", None)
+    if isinstance(pending_tasks, list):
+        pending_tasks.append({
+            "kind": "resource_backlog",
+            "status": "overflow_trimmed",
+            "overflow_count": len(overflow),
+            "kept_count": len(kept),
+            "dropped_items": [
+                str(item.get("item_name") or "")
+                for item in overflow
+                if isinstance(item, dict) and str(item.get("item_name") or "").strip()
+            ][:6],
+        })
+
+
+def _record_resource_backlog_task(
+    session: Any,
+    remaining: List[Dict[str, Any]],
+    *,
+    phase: str = "",
+    per_batch_limit: int = 0,
+) -> None:
+    planned_remaining = [
+        item for item in remaining
+        if isinstance(item, dict) and str(item.get("status") or "planned") == "planned"
+    ]
+    if not planned_remaining:
+        return
+    pending_tasks = getattr(session, "pending_tasks", None)
+    if not isinstance(pending_tasks, list):
+        return
+    pending_tasks.append({
+        "kind": "resource_backlog",
+        "status": "queued_for_later_batch",
+        "phase": str(phase or ""),
+        "remaining_count": len(planned_remaining),
+        "per_batch_limit": int(per_batch_limit or 0),
+        "queued_items": [
+            str(item.get("item_name") or "")
+            for item in planned_remaining
+            if str(item.get("item_name") or "").strip()
+        ][:6],
+    })
+
+
+def _resource_request_from_note(text: str, *, source: str = "", current_phase: str = "") -> Dict[str, Any]:
+    item_name = _extract_add_item_name(text)
+    if not item_name:
+        return {}
+    return {
+        "request_id": f"resource-{uuid.uuid4().hex[:10]}",
+        "kind": "add_object",
+        "item_name": item_name,
+        "quantity": _extract_quantity(text),
+        "image_prompt": _image_prompt_for_requested_item(item_name, text),
+        "source": source,
+        "phase": current_phase or "OBJECTS",
+        "status": "planned",
+        "original_text": str(text or ""),
+    }
+
+
+def _extract_add_item_name(text: str) -> str:
+    raw = re.sub(r"@\S+\s*", "", str(text or "")).strip()
+    patterns = (
+        r"(?:再加|再增加|新增|增加|添加|补|生成添加|添加生成)\s*[:：]?\s*(?:一个|一只|一座|一件|个|只|座|件)?(?P<name>[^，。；,.]{1,24})",
+        r"(?:加一个|加一只|加一座|生成一个|生成一只|生成一座)\s*[:：]?\s*(?P<name>[^，。；,.]{1,24})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, raw)
+        if not match:
+            continue
+        name = match.group("name").strip(" “”\"'：:，。；,.")
+        name = re.sub(
+            r"^(?:再加一个|再加一只|再加一座|再增加一个|再增加一只|再增加一座|加一个|加一只|加一座|新增|增加|添加|补|的|再|呀|吧|呢|一个|一只|一座)+",
+            "",
+            name,
+        ).strip()
+        if name and name not in {"呀", "吧", "呢"}:
+            return name[:24]
+    return ""
+
+
+def _extract_quantity(text: str) -> int:
+    raw = str(text or "")
+    if any(word in raw for word in ("两", "2")):
+        return 2
+    return 1
+
+
+def _image_prompt_for_requested_item(item_name: str, text: str) -> str:
+    base = str(item_name or "").strip()
+    context = str(text or "").strip()
+    return (
+        f"high quality 3D model of {base}, standalone, white background, "
+        f"consistent with current scene style, request context: {context[:80]}"
+    )
 
 
 def _normalize_asset_text(text: str) -> str:

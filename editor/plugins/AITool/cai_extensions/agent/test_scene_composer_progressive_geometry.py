@@ -7,6 +7,8 @@
 """
 import os
 import sys
+import tempfile
+import types
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import List
@@ -24,12 +26,16 @@ from cai_extensions.agent.scene_composer_progressive import (  # noqa: E402
     _filter_aabbs_by_zone,
     _generate_post_shell_framework,
     _infer_primary_zone_ids,
+    _merge_final_and_vlm_review_text,
     _run_vlm_advisory_review,
+    _resolve_pending_resource_requests_for_batch,
     _vlm_max_targets,
+    build_batch_resource_plan,
 )
-from cai_extensions.agent.scene_composer import SceneComposer  # noqa: E402
+from cai_extensions.agent.scene_composer import SceneComposer, apply_scene_semantic_terrain_profile  # noqa: E402
 from cai_extensions.agent.scene_session import SceneSession  # noqa: E402
 from cai_extensions.data_model.zone_tree import Connector, Volume, Zone, ZoneAspect, ZoneTree  # noqa: E402
+from services.terrain_component_resolver import TerrainComponentResolver  # noqa: E402
 
 
 @dataclass
@@ -359,14 +365,59 @@ def test_progress_message_is_user_facing_with_batch_context():
         "next_batch_asset_names": ["台灯", "书架"],
         "absorbed_notes": [{"text": "后续家具都靠墙"}],
         "deferred_notes": [{"text": "后面再加发光蘑菇"}],
+        "resource_backlog": [{
+            "kind": "resource_backlog",
+            "status": "queued_for_later_batch",
+            "remaining_count": 2,
+            "queued_items": ["小狗", "喷泉"],
+        }],
+        "resource_plans": [{
+            "kind": "batch_resource_plan",
+            "status": "completed",
+            "resolved_assets": ["天使雕像"],
+            "batch_resource_plan": {
+                "requested_items": [{"item_name": "天使雕像"}],
+            },
+        }],
     })
     assert "本批已放入 2/2 个物件：床、书桌" in msg
+    assert "导入 2/2" in msg
+    assert "资源准备：新增请求 1 个" in msg
+    assert "图片 0/1" in msg
+    assert "模型 1/1" in msg
+    assert "下一批资源队列还有 2 个" in msg
     assert "下一批准备：台灯、书架" in msg
     assert "已吸收你的要求：后续家具都靠墙" in msg
     assert "已记录待补：后面再加发光蘑菇" in msg
     forbidden = ("INTERIOR#1", "batch_id", "EngineWriteGate", "SceneDelta", "runtime_generation_context")
     assert not any(item in msg for item in forbidden), msg
     print("[OK] progress message exposes user-facing batch context without internals")
+
+
+def test_progress_message_reports_resource_provider_unavailable():
+    msg = SceneSession.format_progress_message({
+        "phase": "OBJECTS#2",
+        "status": "done",
+        "percent": 75,
+        "asset_count": 0,
+        "imported_count": 0,
+        "resource_plans": [{
+            "kind": "batch_resource_plan",
+            "status": "model_provider_unavailable",
+            "batch_resource_plan": {
+                "requested_items": [{"item_name": "小狗"}],
+            },
+            "provider": "PRIVATE_PROVIDER_SHOULD_NOT_LEAK",
+            "prompt": "PRIVATE_PROMPT_SHOULD_NOT_LEAK",
+        }],
+    })
+    assert "资源准备：新增请求 1 个" in msg
+    assert "图片 0/1" in msg
+    assert "模型 0/1" in msg
+    assert "失败/待重试 1" in msg
+    assert "PRIVATE_PROVIDER_SHOULD_NOT_LEAK" not in msg
+    assert "PRIVATE_PROMPT_SHOULD_NOT_LEAK" not in msg
+    print("[OK] progress message reports resource failures without leaking internals")
 
 
 def test_progressive_post_shell_framework_generates_floor_and_boundary():
@@ -522,6 +573,22 @@ def test_vlm_review_uses_composer_hooks_under_engine_gate():
     print("[OK] VLM review uses composer target/capture/review hooks under EngineWriteGate")
 
 
+def test_final_report_text_includes_vlm_status_without_duplicate():
+    merged = _merge_final_and_vlm_review_text(
+        "风格收口：warm、fantasy。",
+        "VLM 审查未发现明显语义问题。",
+    )
+    assert "风格收口" in merged
+    assert "VLM/外观检查：VLM 审查未发现明显语义问题。" in merged
+
+    duplicate = _merge_final_and_vlm_review_text(merged, "VLM 审查未发现明显语义问题。")
+    assert duplicate == merged
+
+    vlm_only = _merge_final_and_vlm_review_text("", "VLM 外审未完成：截图失败/跳过 1 个，超时 0 个；本轮以 AABB 几何检查为准。")
+    assert vlm_only.startswith("VLM/外观检查")
+    print("[OK] final report text includes VLM status without duplicate")
+
+
 def test_scene_composer_injects_shared_scoped_memory_only():
     class FakeMemoryCoordinator:
         def __init__(self):
@@ -596,6 +663,338 @@ def test_scene_composer_can_focus_scoped_memory_on_target_actor():
     print("[OK] SceneComposer can focus scoped memory on target actor")
 
 
+def test_pending_generation_delta_creates_resource_request_for_missing_asset():
+    session = SimpleNamespace(pending_tasks=[])
+    note = SimpleNamespace(kind="generation_delta", text="新增：再加一个天使雕像", source_agent="host")
+
+    remaining = _apply_pending_notes_to_batch(
+        [{"name": "摊位", "pos": [0, 0, 0]}],
+        [note],
+        session,
+        current_phase="OBJECTS#1",
+        micro_phase_assets={"OBJECTS#1": [], "OBJECTS#2": [{"name": "灯笼"}]},
+        phase_sequence=["OBJECTS#1", "OBJECTS#2"],
+        max_batch_size=3,
+    )
+
+    assert [item["name"] for item in remaining] == ["摊位"]
+    assert session.pending_tasks[-1]["status"] == "resource_request_created"
+    assert session.pending_resource_requests[-1]["item_name"] == "天使雕像"
+    assert session.pending_resource_requests[-1]["status"] == "planned"
+    print("[OK] missing generation delta creates next-batch resource request")
+
+
+def test_batch_resource_plan_carries_contract_version_and_interventions():
+    plan = build_batch_resource_plan(
+        plan_id="seed-a",
+        batch_id="batch-2",
+        phase="OBJECTS#2",
+        contract_version=4,
+        requested_items=[{"item_name": "天使雕像", "quantity": 1}],
+        absorbed_interventions=[{"text": "新增天使雕像"}],
+    )
+
+    assert plan.as_dict()["contract_version"] == 4
+    assert plan.as_dict()["requested_items"][0]["item_name"] == "天使雕像"
+    assert plan.as_dict()["absorbed_interventions"][0]["text"] == "新增天使雕像"
+    assert plan.status == "planned"
+    print("[OK] BatchResourcePlan preserves batch/contract/intervention context")
+
+
+def test_pending_resource_request_resolves_models_into_current_batch():
+    class FakeComposerWithRetrieval:
+        def __init__(self):
+            self.calls = []
+
+        def _run_model_retrieval(self, items):
+            self.calls.append([dict(item) for item in items])
+            return [
+                {
+                    "name": item["name"],
+                    "model_path": f"C:/tmp/{item['name']}.glb",
+                    "source": "fake_generation",
+                }
+                for item in items
+            ]
+
+    session = SimpleNamespace(
+        pending_tasks=[],
+        pending_resource_requests=[{
+            "request_id": "resource-1",
+            "kind": "add_object",
+            "item_name": "天使雕像",
+            "quantity": 1,
+            "image_prompt": "fantasy angel statue",
+            "original_text": "新增：再加一个天使雕像",
+            "status": "planned",
+        }],
+    )
+
+    assets = _resolve_pending_resource_requests_for_batch(
+        FakeComposerWithRetrieval(),
+        [{"name": "摊位", "model_path": "C:/tmp/stall.glb"}],
+        session,
+        plan_id="seed-a",
+        phase="OBJECTS#2",
+        contract_version=5,
+    )
+
+    assert [item["name"] for item in assets] == ["摊位", "天使雕像"]
+    assert assets[-1]["model_path"].endswith("天使雕像.glb")
+    assert session.pending_resource_requests == []
+    assert session.pending_tasks[-1]["status"] == "completed"
+    assert session.pending_tasks[-1]["batch_resource_plan"]["contract_version"] == 5
+    print("[OK] pending resource request resolves generated model into current batch")
+
+
+def test_pending_resource_request_runs_image_stage_before_model_retrieval():
+    class FakeComposerWithImageAndRetrieval:
+        def __init__(self):
+            self.image_calls = []
+            self.model_calls = []
+
+        def _run_batch_image_generation(self, items):
+            self.image_calls.append([dict(item) for item in items])
+            return {
+                "status": "completed",
+                "image_urls": {"天使雕像": "fileid://angel-image"},
+            }
+
+        def _run_model_retrieval(self, items):
+            self.model_calls.append([dict(item) for item in items])
+            return [
+                {
+                    "name": item["name"],
+                    "model_path": "C:/tmp/angel.glb",
+                    "source": "fake_image_to_3d",
+                }
+                for item in items
+            ]
+
+    composer = FakeComposerWithImageAndRetrieval()
+    session = SimpleNamespace(
+        pending_tasks=[],
+        pending_resource_requests=[{
+            "request_id": "resource-1",
+            "kind": "add_object",
+            "item_name": "天使雕像",
+            "quantity": 1,
+            "image_prompt": "fantasy angel statue",
+            "original_text": "新增：再加一个天使雕像",
+            "status": "planned",
+        }],
+    )
+
+    assets = _resolve_pending_resource_requests_for_batch(
+        composer,
+        [],
+        session,
+        plan_id="seed-a",
+        phase="OBJECTS#2",
+        contract_version=6,
+    )
+
+    assert [item["name"] for item in assets] == ["天使雕像"]
+    assert composer.image_calls[0][0]["image_prompt"] == "fantasy angel statue"
+    assert composer.model_calls[0][0]["image_url"] == "fileid://angel-image"
+    task = session.pending_tasks[-1]
+    assert task["image_status"] == "completed"
+    assert task["image_generated"] == ["天使雕像"]
+    assert task["batch_resource_plan"]["image_status"] == "completed"
+    assert task["batch_resource_plan"]["model_status"] == "completed"
+    print("[OK] pending resource request runs explicit image stage before model retrieval")
+
+
+def test_scene_composer_passes_generated_images_to_model_retrieval_workflow():
+    captured = {}
+    function_id = 71001
+
+    class FakeGraph:
+        def invoke(self, state):
+            captured["state"] = state
+            model_path = captured["model_path"]
+            return {
+                "global_assets": {
+                    "model_retrieval": {
+                        "model_results": [{
+                            "item_name": "天使雕像",
+                            "model_path": model_path,
+                            "source": "generation",
+                        }],
+                    },
+                },
+            }
+
+    module_name = "cai_extensions.flows.model_retrieval_workflow"
+    helpers_name = "cai_extensions.flows.model_retrieval_workflow.helpers"
+    old_module = sys.modules.get(module_name)
+    old_helpers = sys.modules.get(helpers_name)
+    fake_module = types.ModuleType(module_name)
+    fake_module.__path__ = []  # mark as package for helper submodule imports
+    fake_module.MODEL_RETRIEVAL_FUNCTION_ID = function_id
+    fake_module.WORKFLOWS = {function_id: FakeGraph()}
+    fake_helpers = types.ModuleType(helpers_name)
+    fake_helpers.resolve_model_file = lambda path: path
+    try:
+        sys.modules[module_name] = fake_module
+        sys.modules[helpers_name] = fake_helpers
+        with tempfile.TemporaryDirectory() as tmp:
+            model_path = os.path.join(tmp, "angel.glb")
+            with open(model_path, "wb") as f:
+                f.write(b"glb")
+            captured["model_path"] = model_path
+
+            composer = SceneComposer(scene_name="image_stage_test", max_items=1)
+            resolved = composer._run_model_retrieval([{
+                "name": "天使雕像",
+                "keywords": "fantasy angel statue",
+                "image_url": "fileid://angel-image",
+            }])
+    finally:
+        if old_module is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = old_module
+        if old_helpers is None:
+            sys.modules.pop(helpers_name, None)
+        else:
+            sys.modules[helpers_name] = old_helpers
+
+    generated_images = (
+        captured["state"]["global_assets"]["multi_scene"]["generated_images"]
+    )
+    assert generated_images == {"天使雕像": "fileid://angel-image"}
+    assert resolved[0]["model_path"] == captured["model_path"]
+    print("[OK] SceneComposer passes explicit batch images into model retrieval workflow")
+
+
+def test_pending_resource_request_backlog_is_visible_when_batch_limit_is_hit():
+    class FakeComposerWithRetrieval:
+        def _run_batch_image_generation(self, items):
+            return {
+                "status": "completed",
+                "image_urls": {item["item_name"]: f"fileid://{item['item_name']}" for item in items},
+            }
+
+        def _run_model_retrieval(self, items):
+            return [
+                {"name": item["name"], "model_path": f"C:/tmp/{item['name']}.glb"}
+                for item in items
+            ]
+
+    old = os.environ.get("CORONA_PROGRESSIVE_RESOURCE_REQUESTS_PER_BATCH")
+    os.environ["CORONA_PROGRESSIVE_RESOURCE_REQUESTS_PER_BATCH"] = "1"
+    try:
+        session = SimpleNamespace(
+            pending_tasks=[],
+            pending_resource_requests=[
+                {"request_id": "r1", "item_name": "天使雕像", "image_prompt": "angel", "status": "planned"},
+                {"request_id": "r2", "item_name": "小狗", "image_prompt": "dog", "status": "planned"},
+                {"request_id": "r3", "item_name": "喷泉", "image_prompt": "fountain", "status": "planned"},
+            ],
+        )
+
+        assets = _resolve_pending_resource_requests_for_batch(
+            FakeComposerWithRetrieval(),
+            [],
+            session,
+            plan_id="seed-a",
+            phase="OBJECTS#1",
+            contract_version=2,
+        )
+    finally:
+        if old is None:
+            os.environ.pop("CORONA_PROGRESSIVE_RESOURCE_REQUESTS_PER_BATCH", None)
+        else:
+            os.environ["CORONA_PROGRESSIVE_RESOURCE_REQUESTS_PER_BATCH"] = old
+
+    assert [item["name"] for item in assets] == ["天使雕像"]
+    assert [item["item_name"] for item in session.pending_resource_requests] == ["小狗", "喷泉"]
+    backlog = [task for task in session.pending_tasks if task.get("kind") == "resource_backlog"][-1]
+    assert backlog["remaining_count"] == 2
+    assert backlog["queued_items"] == ["小狗", "喷泉"]
+    print("[OK] pending resource backlog is visible when per-batch limit is hit")
+
+
+def test_pending_resource_queue_is_bounded_and_reports_overflow():
+    old = os.environ.get("CORONA_PROGRESSIVE_PENDING_RESOURCE_LIMIT")
+    os.environ["CORONA_PROGRESSIVE_PENDING_RESOURCE_LIMIT"] = "2"
+    try:
+        session = SimpleNamespace(pending_tasks=[], pending_resource_requests=[])
+        for name in ("旧灯", "旧椅子", "新雕像"):
+            _apply_pending_notes_to_batch(
+                [],
+                [SimpleNamespace(kind="generation_delta", text=f"新增：{name}", source_agent="host")],
+                session,
+                current_phase="OBJECTS#1",
+                micro_phase_assets={"OBJECTS#1": []},
+                phase_sequence=["OBJECTS#1"],
+                max_batch_size=1,
+            )
+    finally:
+        if old is None:
+            os.environ.pop("CORONA_PROGRESSIVE_PENDING_RESOURCE_LIMIT", None)
+        else:
+            os.environ["CORONA_PROGRESSIVE_PENDING_RESOURCE_LIMIT"] = old
+
+    assert [item["item_name"] for item in session.pending_resource_requests] == ["旧椅子", "新雕像"]
+    overflow = [task for task in session.pending_tasks if task.get("status") == "overflow_trimmed"][-1]
+    assert overflow["overflow_count"] == 1
+    assert overflow["dropped_items"] == ["旧灯"]
+    print("[OK] pending resource queue is bounded and reports overflow")
+
+
+def test_pending_resource_request_reports_provider_unavailable_without_fake_path():
+    session = SimpleNamespace(
+        pending_tasks=[],
+        pending_resource_requests=[{
+            "request_id": "resource-1",
+            "kind": "add_object",
+            "item_name": "小狗",
+            "quantity": 1,
+            "image_prompt": "small dog",
+            "original_text": "新增：再增加一只小狗",
+            "status": "planned",
+        }],
+    )
+
+    assets = _resolve_pending_resource_requests_for_batch(
+        SimpleNamespace(),
+        [{"name": "摊位", "model_path": "C:/tmp/stall.glb"}],
+        session,
+        plan_id="seed-a",
+        phase="OBJECTS#2",
+        contract_version=5,
+    )
+
+    assert [item["name"] for item in assets] == ["摊位"]
+    assert session.pending_tasks[-1]["status"] == "model_provider_unavailable"
+    assert session.pending_resource_requests[-1]["status"] == "provider_unavailable"
+    assert session.pending_resource_requests[-1]["item_name"] == "小狗"
+    print("[OK] missing model provider is explicit and does not invent model path")
+
+
+def test_fantasy_market_terrain_profile_uses_low_decorative_boundary():
+    profile = TerrainComponentResolver().derive("夜晚幻想集市，有入口、摊位、灯光、小休息区", scene_type="outdoor")
+    assert profile.scene_key == "fantasy_night_market"
+    assert profile.boundary_spec["type"] == "low_decorative_boundary"
+    assert profile.boundary_spec["height"] < 0.8
+    assert "grassland yurt fence" in profile.boundary_spec["avoid"]
+
+    zone = Zone(
+        zone_id="market",
+        name="market",
+        role="outdoor",
+        enclosure="terrain",
+        volume=Volume(center=[0.0, 0.0, 0.0], size=[18.0, 18.0, 0.0]),
+    )
+    apply_scene_semantic_terrain_profile(zone, "夜晚幻想集市，有入口、摊位、灯光、小休息区", "outdoor")
+    boundary = [item for item in zone.aspects if item.capability == "boundary"][0]
+    assert boundary.params["style"] == "vine_wood_lantern"
+    assert boundary.params["height"] < 0.8
+    print("[OK] fantasy market derives low decorative terrain boundary")
+
+
 if __name__ == "__main__":
     test_zone_and_asset_routing()
     test_zone_and_door_aabb_helpers()
@@ -606,11 +1005,22 @@ if __name__ == "__main__":
     test_pending_generation_delta_inserts_future_asset()
     test_pending_generation_delta_can_remove_future_asset()
     test_progress_message_is_user_facing_with_batch_context()
+    test_progress_message_reports_resource_provider_unavailable()
     test_progressive_post_shell_framework_generates_floor_and_boundary()
     test_f5_demo_mode_disables_vlm_by_default()
     test_aabb_review_issues_flow_to_coordinator_review_result()
     test_vlm_actionable_advice_flows_to_coordinator_review_result()
     test_vlm_review_uses_composer_hooks_under_engine_gate()
+    test_final_report_text_includes_vlm_status_without_duplicate()
     test_scene_composer_injects_shared_scoped_memory_only()
     test_scene_composer_can_focus_scoped_memory_on_target_actor()
+    test_pending_generation_delta_creates_resource_request_for_missing_asset()
+    test_batch_resource_plan_carries_contract_version_and_interventions()
+    test_pending_resource_request_resolves_models_into_current_batch()
+    test_pending_resource_request_runs_image_stage_before_model_retrieval()
+    test_scene_composer_passes_generated_images_to_model_retrieval_workflow()
+    test_pending_resource_request_backlog_is_visible_when_batch_limit_is_hit()
+    test_pending_resource_queue_is_bounded_and_reports_overflow()
+    test_pending_resource_request_reports_provider_unavailable_without_fake_path()
+    test_fantasy_market_terrain_profile_uses_low_decorative_boundary()
     print("\n=== progressive mixed geometry ALL PASS ===")

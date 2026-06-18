@@ -132,7 +132,113 @@ def test_confirmed_seed_plan_executes_through_scheduler():
     assert ref.session_id.startswith(f"exec-{plan.plan_id}-")
     assert scheduler.submitted[0]["_runtime_context"]["interaction_coordinator"] is coordinator
     assert coordinator.get_plan(plan.plan_id).status == SeedPlanStatus.EXECUTING
+    participant_disclosures = [
+        event for event in coordinator.disclosure_events
+        if event.audience == "participant"
+    ]
+    assert participant_disclosures[-1].stage == "排队中"
+    assert "等待资源" in participant_disclosures[-1].public_message
+    assert "生成中 0%" not in participant_disclosures[-1].public_message
     print("[OK] confirmed SeedPlan enters structured generation scheduler")
+
+
+def test_confirmed_seed_plan_creates_scene_design_contract_with_negative_preferences():
+    coordinator = InteractionCoordinator(scheduler=FakeScheduler())
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="我想做一个有点神秘感的室外集市，不要太恐怖，适合几个人逛。",
+    ))
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="做一个夜晚幻想集市，有入口、摊位、灯光、小休息区，整体风格统一。",
+    ))
+    plan = coordinator.propose_seed_plan("room-a")
+    confirmed = coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    contract = coordinator.scene_design_contract(plan.plan_id)
+
+    assert confirmed.ok is True
+    assert "不要太恐怖" not in plan.conflicts
+    assert "too horror" in contract["avoid_keywords"]
+    assert "dark horror" in contract["avoid_keywords"]
+    assert contract["boundary_spec"]["type"] == "low_decorative_boundary"
+    assert contract["boundary_spec"]["style"] == "vine_wood_lantern"
+    assert confirmed.payload["scene_design_contract"]["contract_id"] == contract["contract_id"]
+    print("[OK] confirmed SeedPlan creates long-lived scene design contract")
+
+
+def test_status_query_does_not_create_intervention_or_generation_job():
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    coordinator.ingest_message(ChatMessage(room_id="room-a", sender_id="host-a", is_host=True, text="室外夜晚幻想集市"))
+    plan = coordinator.propose_seed_plan("room-a")
+    coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    ref = coordinator.execute_confirmed_plan(plan.plan_id)
+
+    event = coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="host-a",
+        is_host=True,
+        text="@GM 生成到哪里了，为什么不执行呀",
+    ))
+
+    assert event.event_type == "status_query"
+    assert event.payload["intent_type"] == "status_query"
+    assert event.payload["status"] == "executing"
+    assert "等待资源调度" in event.message
+    assert coordinator.pending_interventions(plan.plan_id) == []
+    assert len(scheduler.submitted) == 1
+    assert scheduler.submitted[0]["session_id"] == ref.session_id
+    print("[OK] status query is read-only and does not create proposal/intervention")
+
+
+def test_completed_generation_add_routes_to_post_generation_add():
+    coordinator = InteractionCoordinator(scheduler=FakeScheduler())
+    coordinator.ingest_message(ChatMessage(room_id="room-a", sender_id="host-a", is_host=True, text="夜晚幻想集市"))
+    plan = coordinator.propose_seed_plan("room-a")
+    coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    plan.status = SeedPlanStatus.COMPLETED
+
+    event = coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="host-a",
+        is_host=True,
+        text="@GM 添加生成一个天使雕像",
+    ))
+    pending = coordinator.pending_interventions(plan.plan_id)
+
+    assert event.event_type == "post_generation_add_routed"
+    assert event.payload["intent_type"] == "post_generation_add"
+    assert event.payload["apply_policy"] == "post_generation_add"
+    assert pending[-1].intent_type == "post_generation_add"
+    assert pending[-1].apply_policy == "post_generation_add"
+    assert "天使雕像" in pending[-1].target_hint
+    print("[OK] completed generation add request routes to post-generation append batch")
+
+
+def test_system_actor_aliases_are_canonicalized_for_terrain_boundary():
+    coordinator = InteractionCoordinator(scheduler=FakeScheduler())
+    coordinator.ingest_message(ChatMessage(room_id="room-a", sender_id="host-a", is_host=True, text="夜晚幻想集市"))
+    plan = coordinator.propose_seed_plan("room-a")
+    coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    coordinator.execute_confirmed_plan(plan.plan_id)
+
+    event = coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="host-a",
+        is_host=True,
+        text="@商人 你理解错了，我说的是_terrain_boundary，换成低矮木栏/藤蔓围栏。",
+    ))
+
+    assert event.event_type == "intervention_routed"
+    assert event.payload["actor_id"] == "__terrain_boundary"
+    assert event.payload["target_hint"] == "__terrain_boundary"
+    print("[OK] terrain boundary aliases canonicalize to system actor id")
 
 
 def test_seed_plan_confirmation_requires_non_empty_host_identity():
@@ -1502,6 +1608,113 @@ def test_host_executor_uses_structured_handler_for_seed_plan_action():
     print("[OK] host executor avoids natural-language reclassification for SeedPlan actions")
 
 
+def test_host_executor_uses_structured_handler_for_post_generation_add_action():
+    calls = {"agent": 0, "handler": 0}
+
+    def agent_factory():
+        def _agent(persona, messages):
+            calls["agent"] += 1
+            return "agent should not run"
+
+        return _agent
+
+    def handler(payload):
+        calls["handler"] += 1
+        assert payload["action_type"] == "post_generation_add"
+        assert payload["plan_id"] == "seed-1"
+        assert "天使雕像" in payload["intent_text"]
+        return "追加生成请求已进入生成队列：job-append (queued)"
+
+    executor = LanChatHostActionExecutor(
+        agent_factory=agent_factory,
+        engine_gate=FakeGate(),
+        structured_action_handler=handler,
+    )
+    result = executor.enqueue_and_process({
+        "action_type": "post_generation_add",
+        "plan_id": "seed-1",
+        "room_id": "room-a",
+        "status": "confirmed",
+        "intent_text": "添加生成一个天使雕像",
+    })
+
+    assert result is not None
+    assert result.ok is True
+    assert result.event_type == "SceneDelta"
+    assert calls == {"agent": 0, "handler": 1}
+    print("[OK] host executor routes post-generation add through structured handler")
+
+
+def test_coordinator_executes_post_generation_add_as_append_job():
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="做一个温暖的夜晚幻想集市，不要太恐怖，有入口、摊位和灯光",
+    ))
+    plan = coordinator.propose_seed_plan("room-a")
+    coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    plan.status = SeedPlanStatus.COMPLETED
+
+    message = coordinator.execute_action_payload({
+        "action_type": "post_generation_add",
+        "plan_id": plan.plan_id,
+        "room_id": "room-a",
+        "source_user_id": "host-a",
+        "status": "confirmed",
+        "intent_text": "添加生成一个天使雕像",
+    })
+
+    assert "追加生成请求已进入生成队列" in message
+    assert scheduler.submitted
+    submitted = scheduler.submitted[-1]
+    assert submitted["job_type"] == "scene_generation_append"
+    assert submitted["action_type"] == "post_generation_add"
+    assert submitted["append_mode"] is True
+    assert submitted["max_items"] == 2
+    assert submitted["prompt"] == "添加生成一个天使雕像"
+    assert submitted["pending_interventions"][0]["apply_policy"] == "post_generation_add"
+    assert "天使雕像" in submitted["pending_interventions"][0]["content"]
+    assert submitted["scene_design_contract"]["plan_id"] == plan.plan_id
+    assert coordinator.pending_interventions(plan.plan_id)[-1].apply_policy == "post_generation_add"
+    print("[OK] Coordinator submits post-generation add as append generation job")
+
+
+def test_coordinator_keeps_generation_add_in_next_batch_while_executing():
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="做一个夜晚幻想集市",
+    ))
+    plan = coordinator.propose_seed_plan("room-a")
+    coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    coordinator.execute_confirmed_plan(plan.plan_id)
+    existing_session = coordinator._active_generation_session_by_plan[plan.plan_id]  # noqa: SLF001
+    submitted_count = len(scheduler.submitted)
+
+    message = coordinator.execute_action_payload({
+        "action_type": "post_generation_add",
+        "plan_id": plan.plan_id,
+        "room_id": "room-a",
+        "source_user_id": "host-a",
+        "status": "confirmed",
+        "intent_text": "新增一只小狗",
+    })
+
+    assert message == "已记录追加请求，将在下一批前吸收。"
+    assert len(scheduler.submitted) == submitted_count
+    assert coordinator._active_generation_session_by_plan[plan.plan_id] == existing_session  # noqa: SLF001
+    assert coordinator.pending_interventions(plan.plan_id)[-1].apply_policy == "next_batch"
+    print("[OK] Coordinator does not open append job while main generation is still executing")
+
+
 def test_coordinator_event_histories_are_bounded():
     coordinator = InteractionCoordinator(scheduler=FakeScheduler())
     for index in range(MAX_COORDINATOR_EVENTS + 3):
@@ -1707,6 +1920,10 @@ def test_coordinator_generation_job_refs_are_bounded_for_future_updates():
 if __name__ == "__main__":
     test_chat_updates_seed_plan_without_generation()
     test_confirmed_seed_plan_executes_through_scheduler()
+    test_confirmed_seed_plan_creates_scene_design_contract_with_negative_preferences()
+    test_status_query_does_not_create_intervention_or_generation_job()
+    test_completed_generation_add_routes_to_post_generation_add()
+    test_system_actor_aliases_are_canonicalized_for_terrain_boundary()
     test_seed_plan_confirmation_requires_non_empty_host_identity()
     test_gm_conflict_resolution_requires_host_confirmation_before_plan_confirm()
     test_gm_conflict_resolution_requires_non_empty_host_identity()
@@ -1740,6 +1957,9 @@ if __name__ == "__main__":
     test_final_adjustment_conflict_links_target_hint_to_actor_bound_request()
     test_rejected_target_hint_conflict_defers_actor_bound_adjustment()
     test_host_executor_uses_structured_handler_for_seed_plan_action()
+    test_host_executor_uses_structured_handler_for_post_generation_add_action()
+    test_coordinator_executes_post_generation_add_as_append_job()
+    test_coordinator_keeps_generation_add_in_next_batch_while_executing()
     test_coordinator_event_histories_are_bounded()
     test_coordinator_pending_interventions_are_bounded_without_dropping_critical_items()
     test_coordinator_resolved_proposal_histories_are_bounded_without_dropping_pending()

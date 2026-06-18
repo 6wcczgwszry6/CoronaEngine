@@ -135,7 +135,7 @@
           </template>
         </div>
         <div
-          v-if="currentDisclosure.requires_confirmation && currentDisclosure.proposal_id && s.role === 'host'"
+          v-if="currentDisclosure.requires_confirmation && currentDisclosure.proposal_id && !lanchat.isProposalHandled(currentDisclosure.proposal_id) && s.role === 'host'"
           class="mt-2 flex gap-1"
         >
           <button
@@ -171,7 +171,7 @@
                 {{ m.text }}
               </div>
               <div
-                v-if="gmProposalId(m) && s.role === 'host'"
+                v-if="isGmProposalActionable(m) && s.role === 'host'"
                 class="mt-1 flex gap-1"
               >
                 <button
@@ -367,7 +367,11 @@ const currentDisclosure = computed(() => {
   const items = s.disclosures || [];
   if (!items.length) return null;
   if (s.role === 'host') {
-    const pending = [...items].reverse().find((item) => item.requires_confirmation && item.proposal_id);
+    const pending = [...items].reverse().find((item) => (
+      item.requires_confirmation &&
+      item.proposal_id &&
+      !lanchat.isProposalHandled(item.proposal_id)
+    ));
     if (pending) return pending;
   }
   return items[items.length - 1];
@@ -427,10 +431,16 @@ function gmProposalId(message) {
   return match ? match[0] : '';
 }
 
+function isGmProposalActionable(message) {
+  const proposalId = gmProposalId(message);
+  return Boolean(proposalId && !lanchat.isProposalHandled(proposalId));
+}
+
 async function sendGmDecision(proposalId, decision) {
   const message = buildGmDecisionMessage(proposalId, decision);
   if (!message) return;
   await lanchat.sendMessage(message.text, message.options);
+  lanchat.markProposalHandled(proposalId);
   lanchat.dismissDisclosureByProposal(proposalId);
 }
 
