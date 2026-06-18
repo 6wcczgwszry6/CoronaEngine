@@ -23,7 +23,7 @@ float wrapPhaseCentered(float phase)
     return 2.0 * wrapped - 1.0;
 }
 
-float channelSample(int channel, ivec2 pos)
+vec4 channelSample(int channel, ivec2 pos)
 {
     float rgbOffset = pushConsts.rgbSubpixelOffsets[channel];
     float pitch = max(abs(pushConsts.lenticularPitch), 1.0e-5);
@@ -33,7 +33,7 @@ float channelSample(int channel, ivec2 pos)
     float phase = wrapPhaseCentered(phaseAccumulator);
     float sampleX = float(pos.x) + phase * pushConsts.parallaxScale;
     ivec2 samplePos = ivec2(clamp(int(round(sampleX)), 0, int(pushConsts.outputWidth) - 1), pos.y);
-    return imageLoad(images[pushConsts.inputImage], samplePos)[channel];
+    return imageLoad(images[pushConsts.inputImage], samplePos);
 }
 
 void main()
@@ -43,15 +43,18 @@ void main()
         return;
     }
 
-    vec4 center = imageLoad(images[pushConsts.inputImage], pos);
-    if (center.a <= 0.0) {
+    vec4 redSample = channelSample(0, pos);
+    vec4 greenSample = channelSample(1, pos);
+    vec4 blueSample = channelSample(2, pos);
+    float alpha = max(max(redSample.a, greenSample.a), blueSample.a);
+    if (alpha <= 0.0) {
         imageStore(images[pushConsts.outputImage], pos, vec4(0.0));
         return;
     }
 
     vec3 warped;
-    warped.r = channelSample(0, pos);
-    warped.g = channelSample(1, pos);
-    warped.b = channelSample(2, pos);
-    imageStore(images[pushConsts.outputImage], pos, vec4(warped, center.a));
+    warped.r = redSample.r;
+    warped.g = greenSample.g;
+    warped.b = blueSample.b;
+    imageStore(images[pushConsts.outputImage], pos, vec4(warped, alpha));
 }

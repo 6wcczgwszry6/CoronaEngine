@@ -3,7 +3,7 @@ const DEFAULT_CALIBRATION = Object.freeze({
   slantAngleRadians: 0.2333,
   phaseOffset: 10,
   rgbSubpixelOffsets: [0, 1 / 3, 2 / 3],
-  parallaxScale: 0,
+  parallaxScale: 19.1849,
 });
 
 export const wrapPhaseCentered = (phase) => {
@@ -52,5 +52,39 @@ export const computeLfdUiWarpSample = ({
     horizontalOffset,
     sampleX,
     sampleY,
+  };
+};
+
+export const computeLfdUiWarpPixel = ({
+  pixelX,
+  pixelY,
+  rect,
+  depth = 0,
+  calibration,
+  sampleChannel,
+}) => {
+  const samples = [0, 1, 2].map((channel) => {
+    const warp = computeLfdUiWarpSample({
+      pixelX,
+      pixelY,
+      channel,
+      rect,
+      depth,
+      calibration,
+    });
+    const rgba = sampleChannel?.(
+      channel,
+      Math.round(Number(rect?.x || 0) + warp.sampleX),
+      Math.round(Number(rect?.y || 0) + warp.sampleY),
+    ) ?? [0, 0, 0, 0];
+    return {
+      warp,
+      rgba,
+    };
+  });
+  return {
+    samples,
+    color: [samples[0].rgba[0] || 0, samples[1].rgba[1] || 0, samples[2].rgba[2] || 0],
+    alpha: Math.max(samples[0].rgba[3] || 0, samples[1].rgba[3] || 0, samples[2].rgba[3] || 0),
   };
 };

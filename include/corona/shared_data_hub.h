@@ -322,7 +322,7 @@ struct ViewportUiCalibration {
     std::array<float, 3> rgb_subpixel_offsets{0.0f, 1.0f / 3.0f, 2.0f / 3.0f};
     std::uint32_t display_width{1920};
     std::uint32_t display_height{1080};
-    float parallax_scale{2.0f};
+    float parallax_scale{19.1849f};
 };
 
 struct ViewportUiState {

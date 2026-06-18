@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 
 import {
+  computeLfdUiWarpPixel,
   computeLfdUiWarpSample,
   normalizeLfdCalibration,
   wrapPhaseCentered,
@@ -56,5 +57,23 @@ const flat = computeLfdUiWarpSample({
 });
 assert.equal(flat.sampleX, 12);
 assert.equal(flat.sampleY, 6);
+
+const shiftedPixel = computeLfdUiWarpPixel({
+  pixelX: 7,
+  pixelY: 0,
+  rect: { x: 0, y: 0, width: 16, height: 16 },
+  depth: 1,
+  calibration: {
+    lenticularPitch: 8,
+    slantAngleRadians: 0,
+    phaseOffset: 0,
+    rgbSubpixelOffsets: [0, 0, 0],
+    parallaxScale: 2,
+  },
+  sampleChannel: (_channel, x) => (x >= 9 ? [1, 1, 1, 1] : [0, 0, 0, 0]),
+});
+
+assert.deepEqual(shiftedPixel.color, [1, 1, 1]);
+assert.equal(shiftedPixel.alpha, 1);
 
 console.log('viewport UI warp tests passed');
