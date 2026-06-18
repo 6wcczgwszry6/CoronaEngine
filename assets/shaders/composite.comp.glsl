@@ -9,9 +9,10 @@ layout(push_constant) uniform PushConsts {
     uint outputHeight;
     uint bgWidth;
     uint bgHeight;
+    uint fgWidth;
+    uint fgHeight;
 } pushConsts;
 
-layout(set = 0, binding = 0) uniform sampler2D textures[];
 layout(set = 2, binding = 0, rgba16f) uniform image2D images[];
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -44,7 +45,9 @@ void main()
         f.y
     );
 
-    vec4 fg = texture(textures[pushConsts.fgImage], uv);
+    ivec2 fgSize = ivec2(pushConsts.fgWidth, pushConsts.fgHeight);
+    ivec2 fgPos = clamp(ivec2(floor(uv * vec2(fgSize))), ivec2(0), fgSize - ivec2(1));
+    vec4 fg = imageLoad(images[pushConsts.fgImage], fgPos);
     vec3 color = fg.rgb + bg.rgb * (1.0 - fg.a);
 
     imageStore(images[pushConsts.outputImage], pos, vec4(color.rgb, 1.0));
