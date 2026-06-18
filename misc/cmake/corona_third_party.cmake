@@ -201,6 +201,11 @@ if(WIN32)
     unset(_corona_horizon_source_dir)
 endif()
 
+if(CORONA_BUILD_VISION)
+    set(HORIZON_BUILD_OCARINA ON CACHE BOOL "" FORCE)
+    set(HORIZON_BUILD_VISION_HOTFIX ON CACHE BOOL "" FORCE)
+endif()
+
 FetchContent_MakeAvailable(Horizon)
 # Horizon's Helicon / corona_pal targets publish /source-charset:utf-8 and
 # /execution-charset:utf-8 via PUBLIC compile options. Strip the INTERFACE
