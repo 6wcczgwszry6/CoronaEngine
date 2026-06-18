@@ -229,21 +229,27 @@ class SceneTools(PluginBase):
                         "actor_guid": actor_guid}
 
             actor_data = actor_data or {}
+            previous_network_remote = getattr(actor, "network_remote", False)
+            previous_suppress = getattr(actor, "_suppress_network_broadcast", False)
             actor.network_remote = True
             actor._suppress_network_broadcast = True
-            if actor_data.get("name"):
-                actor.name = str(actor_data["name"])
-            geometry = actor_data.get("geometry") or {}
-            if "position" in geometry and hasattr(actor, "set_position"):
-                actor.set_position(geometry["position"], if_init=True)
-            if "rotation" in geometry and hasattr(actor, "set_rotation"):
-                actor.set_rotation(geometry["rotation"], if_init=True)
-            if "scale" in geometry and hasattr(actor, "set_scale"):
-                actor.set_scale(geometry["scale"], if_init=True)
-            if "visible" in actor_data and hasattr(actor, "set_visible"):
-                actor.set_visible(actor_data["visible"])
-            if "follow_camera" in actor_data and hasattr(actor, "set_follow_camera"):
-                actor.set_follow_camera(actor_data["follow_camera"], if_init=True)
+            try:
+                if actor_data.get("name"):
+                    actor.name = str(actor_data["name"])
+                geometry = actor_data.get("geometry") or {}
+                if "position" in geometry and hasattr(actor, "set_position"):
+                    actor.set_position(geometry["position"], if_init=True)
+                if "rotation" in geometry and hasattr(actor, "set_rotation"):
+                    actor.set_rotation(geometry["rotation"], if_init=True)
+                if "scale" in geometry and hasattr(actor, "set_scale"):
+                    actor.set_scale(geometry["scale"], if_init=True)
+                if "visible" in actor_data and hasattr(actor, "set_visible"):
+                    actor.set_visible(actor_data["visible"])
+                if "follow_camera" in actor_data and hasattr(actor, "set_follow_camera"):
+                    actor.set_follow_camera(actor_data["follow_camera"], if_init=True)
+            finally:
+                actor.network_remote = previous_network_remote
+                actor._suppress_network_broadcast = previous_suppress
             try:
                 scene.save_data()
                 if hasattr(scene, "_notify_scene_tree_changed"):
@@ -388,6 +394,9 @@ class SceneTools(PluginBase):
                       parent_scene=scene,
                       actor_data=actor_data)
         scene.add_actor(actor)
+        if actor_data.get("_suppress_network_broadcast"):
+            actor.network_remote = False
+            actor._suppress_network_broadcast = False
         logger.info("Actor %s added to %s type %s", actor.name, scene_name, actor_type)
         if notify_frontend:
             CoronaEditor.js_call_func("import-asset-complete", actor.to_dict())

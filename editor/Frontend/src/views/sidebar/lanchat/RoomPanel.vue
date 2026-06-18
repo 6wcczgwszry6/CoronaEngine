@@ -22,6 +22,22 @@
 
       <!-- 创建房间 -->
       <div v-if="lobbyTab === 'create'" class="space-y-3">
+        <div class="grid grid-cols-2 gap-2">
+          <button
+            class="py-2 rounded text-sm"
+            :class="roomMode === 'multi' ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a]/60'"
+            @click="roomMode = 'multi'"
+          >
+            多人
+          </button>
+          <button
+            class="py-2 rounded text-sm"
+            :class="roomMode === 'single' ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a]/60'"
+            @click="roomMode = 'single'"
+          >
+            单人
+          </button>
+        </div>
         <input v-model="form.room" placeholder="房间号" :class="inputCls" />
         <input v-model="form.password" placeholder="密码（可选）" :class="inputCls" />
         <button class="w-full py-2 rounded bg-[#84A65B] text-white text-sm" @click="onCreate">
@@ -55,7 +71,7 @@
       <div class="flex items-center justify-between px-3 py-2 bg-[#3a3a3a]/70 text-xs">
         <span>
           房间 <b>{{ s.room }}</b>
-          <template v-if="s.role === 'host'"> · {{ s.ip }}:{{ s.port }}</template>
+          <template v-if="s.role === 'host' && s.mode === 'multi'"> · {{ s.ip }}:{{ s.port }}</template>
         </span>
         <button
           class="px-2 py-0.5 rounded bg-[#84A65B]/80 text-white mr-1"
@@ -277,6 +293,7 @@ import MemberList from './MemberList.vue';
 
 const s = lanchat.state;
 const lobbyTab = ref('create');
+const roomMode = ref('multi');
 const draft = ref('');
 const showAddAgent = ref(false);
 const agentForm = reactive({ name: '', persona: '' });
@@ -322,7 +339,7 @@ const form = reactive({
   room: '',
   password: '',
   ip: '',
-  port: 8770,
+  port: 27960,
   nickname: '',
 });
 
@@ -365,7 +382,8 @@ async function onCreate() {
   await lanchat.openRoom({
     room: form.room.trim(),
     password: form.password,
-    port: form.port || 8770,
+    port: form.port || 27960,
+    mode: roomMode.value,
   });
 }
 
@@ -373,7 +391,7 @@ async function onJoin() {
   if (!form.ip.trim() || !form.room.trim()) return;
   await lanchat.joinRoom({
     ip: form.ip.trim(),
-    port: form.port || 8770,
+    port: form.port || 27960,
     room: form.room.trim(),
     password: form.password,
     nickname: form.nickname.trim() || '用户',

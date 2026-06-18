@@ -92,6 +92,7 @@ struct NetworkSystem::Impl {
         std::string scene_name;
         std::string model_path;
         std::vector<std::string> dependency_paths;
+        std::string actor_json;
         Network::ActorCreatePacked actor_packed;
     };
     std::vector<PendingAction> pending_actor_creates;
@@ -138,6 +139,7 @@ struct NetworkSystem::Impl {
         std::string scene_name;
         std::string model_path;
         std::vector<std::string> dependency_paths;
+        std::string actor_json;
         std::vector<uint64_t> transfer_ids;
         uint32_t remaining_files = 0;
         Clock::time_point create_time;
@@ -796,6 +798,17 @@ void NetworkSystem::set_lanchat_event_callback(std::function<void(const std::str
     impl_->lanchat_event_callback = std::move(callback);
 }
 
+bool NetworkSystem::lanchat_start_local_room(const std::string& room_id,
+                                             const std::string& nickname) {
+    const std::string display_name = nickname.empty() ? "房主" : nickname;
+    impl_->lanchat_nickname = display_name;
+    impl_->lanchat_member_by_peer.clear();
+    impl_->lanchat_join_pending = false;
+    impl_->lanchat_join_member_snapshot_received = false;
+    impl_->lanchat_join_history_snapshot_received = false;
+    return impl_->lanchat.open_room(room_id, "local-single-player", display_name);
+}
+
 bool NetworkSystem::lanchat_start_room(const std::string& room_id,
                                        const std::string& nickname,
                                        uint16_t port) {
@@ -812,6 +825,10 @@ bool NetworkSystem::lanchat_start_room(const std::string& room_id,
     impl_->lanchat_join_history_snapshot_received = false;
     const std::string peer_id = local_peer_id();
     return impl_->lanchat.open_room(room_id, peer_id, display_name);
+}
+
+void NetworkSystem::lanchat_stop_local_room() {
+    clear_lanchat_room_state();
 }
 
 bool NetworkSystem::lanchat_join_room(const std::string& ip,
@@ -878,7 +895,8 @@ Network::LanChatMessageResult NetworkSystem::lanchat_send_message_ex(
     }
 
     const uint64_t timestamp = now_ms();
-    const std::string sender_id = local_peer_id();
+    const std::string peer_id = local_peer_id();
+    const std::string sender_id = peer_id.empty() ? "local-single-player" : peer_id;
     const std::string message_id =
         sender_id + ":" + std::to_string(timestamp) + ":" +
         std::to_string(impl_->next_lanchat_message_id++);
@@ -946,7 +964,10 @@ Network::LanChatMessageResult NetworkSystem::lanchat_send_agent_reply_ex(
     const std::string& correlation_id,
     const std::string& metadata_json) {
     const uint64_t timestamp = now_ms();
-    const std::string sender_id = agent_id.empty() ? local_peer_id() : agent_id;
+    const std::string peer_id = local_peer_id();
+    const std::string sender_id = agent_id.empty()
+        ? (peer_id.empty() ? "local-single-player" : peer_id)
+        : agent_id;
     const std::string sender_name = agent_name.empty() ? "Agent" : agent_name;
     const std::string message_id =
         sender_id + ":" + std::to_string(timestamp) + ":" +
@@ -1054,7 +1075,10 @@ Network::LanChatResult NetworkSystem::lanchat_register_agent(const std::string& 
                                                              const std::string& name,
                                                              const std::string& persona,
                                                              const std::string& owner_id) {
-    const std::string owner = owner_id.empty() ? local_peer_id() : owner_id;
+    const std::string peer_id = local_peer_id();
+    const std::string owner = owner_id.empty()
+        ? (peer_id.empty() ? "local-single-player" : peer_id)
+        : owner_id;
     if (impl_->session_role == SessionRole::Client && impl_->session_state == SessionState::Active) {
         auto packet = Network::build_chat_agent_register(
             impl_->lanchat.room_id(), agent_id, name, persona, owner);
@@ -1167,14 +1191,16 @@ void NetworkSystem::broadcast_actor_create(const std::string& actor_guid,
                                            const std::string& model_path,
                                            const std::vector<std::string>& dependency_paths,
                                            const float* transform,
-                                           const void* optics_packed, size_t optics_size) {
+                                           const void* optics_packed, size_t optics_size,
+                                           const std::string& actor_json) {
     if (impl_->session_state != SessionState::Active) return;
     if (impl_->peer_manager.peer_count() == 0) {
         CFW_LOG_DEBUG("NetworkSystem: No peers — skipping actor create broadcast");
         return;
     }
     auto pkt = Network::build_actor_create(actor_guid, scene_name, model_path, transform,
-                                           optics_packed, optics_size, dependency_paths);
+                                           optics_packed, optics_size, dependency_paths,
+                                           actor_json);
     impl_->peer_manager.broadcast(Network::kChannelReliable, pkt.data(), pkt.size(), true);
     CFW_LOG_INFO("NetworkSystem: Broadcast actor create — actor='{}' scene='{}' model='{}' deps={}",
                  actor_guid, scene_name, model_path, dependency_paths.size());
@@ -1265,7 +1291,8 @@ void NetworkSystem::set_sync_paused(bool paused) {
 bool NetworkSystem::pop_pending_actor_create(std::string& actor_guid,
                                               std::string& scene_name,
                                               std::string& model_path,
-                                              void* actor_packed_out, size_t packed_size) {
+                                              void* actor_packed_out, size_t packed_size,
+                                              std::string* actor_json_out) {
     if (impl_->pending_actor_creates.empty()) return false;
     auto& pa = impl_->pending_actor_creates.front();
     actor_guid = pa.actor_guid;
@@ -1273,6 +1300,9 @@ bool NetworkSystem::pop_pending_actor_create(std::string& actor_guid,
     model_path = pa.model_path;
     if (actor_packed_out && packed_size <= sizeof(Network::ActorCreatePacked)) {
         std::memcpy(actor_packed_out, &pa.actor_packed, packed_size);
+    }
+    if (actor_json_out) {
+        *actor_json_out = pa.actor_json;
     }
     impl_->pending_actor_creates.erase(impl_->pending_actor_creates.begin());
     return true;
@@ -1472,6 +1502,13 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
                     dependency_paths.push_back(r.read_string(dep_len));
                 }
             }
+            std::string actor_json;
+            if (r.has_remaining(4)) {
+                uint32_t json_len = r.read_u32();
+                if (r.has_remaining(json_len)) {
+                    actor_json = r.read_string(json_len);
+                }
+            }
 
             CFW_LOG_INFO("NetworkSystem: Received ACTOR_CREATE from {} — actor='{}' scene='{}' model='{}' deps={}",
                          sender_peer_id, actor_guid, scene_name, model_path, dependency_paths.size());
@@ -1499,6 +1536,7 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
                 pa.scene_name = scene_name;
                 pa.model_path = model_path;
                 pa.dependency_paths = dependency_paths;
+                pa.actor_json = actor_json;
                 pa.actor_packed = actor_packed;
                 impl_->pending_actor_creates.push_back(pa);
             } else {
@@ -1508,6 +1546,7 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
                 group.scene_name = scene_name;
                 group.model_path = model_path;
                 group.dependency_paths = dependency_paths;
+                group.actor_json = actor_json;
                 group.actor_packed = actor_packed;
                 group.remaining_files = static_cast<uint32_t>(missing_paths.size());
                 group.create_time = Impl::Clock::now();
@@ -2148,6 +2187,7 @@ void NetworkSystem::handle_file_chunk(const std::string& sender_peer_id,
         pa.scene_name = ft_it->second.scene_name;
         pa.model_path = ft_it->second.model_path;
         pa.dependency_paths = ft_it->second.dependency_paths;
+        pa.actor_json = ft_it->second.actor_json;
         pa.actor_packed = ft_it->second.actor_packed;
         impl_->pending_actor_creates.push_back(pa);
         impl_->pending_file_transfer_groups.erase(ft_it);

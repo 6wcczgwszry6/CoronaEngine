@@ -559,9 +559,16 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
         self.assertEqual(events, [])
 
     def test_internal_actor_name_does_not_broadcast(self):
-        _, events = self._create_actor_with_events(name="__room_box")
+        _, events = self._create_actor_with_events(name="__six_view_tmp_actor")
 
         self.assertEqual(events, [])
+
+    def test_ai_scene_framework_actor_name_does_broadcast(self):
+        _, events = self._create_actor_with_events(name="__room_box")
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "actor-sync-broadcast")
+        self.assertEqual(events[0][1][0]["name"], "__room_box")
 
     def test_suppressed_actor_does_not_broadcast(self):
         with tempfile.TemporaryDirectory() as tmp:

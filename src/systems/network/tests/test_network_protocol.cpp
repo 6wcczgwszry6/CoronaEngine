@@ -126,6 +126,33 @@ void test_actor_create_carries_dependency_paths() {
                 "actor create second dependency path");
 }
 
+void test_actor_create_carries_actor_json_payload() {
+    float transform[9] = {};
+    Corona::Network::ActorCreatePacked optics{};
+    const std::vector<std::string> deps{
+        "Resource/mesh.mtl",
+    };
+    const std::string actor_json =
+        "{\"name\":\"Display Chair\",\"visible\":false,\"scene_framework\":{\"kind\":\"room_box\"}}";
+
+    auto packet = Corona::Network::build_actor_create(
+        "actor-json", "Scene/main.scene", "Resource/mesh.obj",
+        transform, &optics, sizeof(optics), deps, actor_json);
+
+    Corona::Network::BufferReader reader(packet.data(), packet.size());
+    expect_true(static_cast<Corona::Network::MessageType>(reader.read_u8()) ==
+                    Corona::Network::MessageType::ACTOR_CREATE,
+                "actor create json message type");
+    reader.read_string(reader.read_u16());  // actor_guid
+    reader.read_string(reader.read_u16());  // scene_name
+    reader.read_string(reader.read_u16());  // model_path
+    reader.pos += 36 + sizeof(optics);
+    expect_true(reader.read_u16() == deps.size(), "actor create json dependency count");
+    reader.read_string(reader.read_u16());  // dependency
+    expect_true(reader.read_string(reader.read_u32()) == actor_json,
+                "actor create full actor json payload");
+}
+
 void test_actor_transform_update_carries_transform_and_correlation() {
     float transform[9] = {1, 2, 3, 0.1f, 0.2f, 0.3f, 2, 2, 2};
     auto packet = Corona::Network::build_actor_transform_update(
@@ -1270,6 +1297,7 @@ int main() {
     test_actor_create_carries_actor_guid();
     test_actor_create_unpack_preserves_wire_transform();
     test_actor_create_carries_dependency_paths();
+    test_actor_create_carries_actor_json_payload();
     test_actor_transform_update_carries_transform_and_correlation();
     test_actor_delete_carries_scene_guid_and_name();
     test_actor_scene_snapshot_request_carries_scene();

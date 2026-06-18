@@ -17,6 +17,7 @@ const assertNotIncludes = (source, needle, message) => {
 const networkPanel = read('src/views/sidebar/Network.vue');
 const roomPanel = read('src/views/sidebar/lanchat/RoomPanel.vue');
 const useDockPanel = read('src/composables/useDockPanel.js');
+const cefBridge = read('../../src/systems/ui/cef/cef_query_bridge.cpp');
 const networkSystem = read('../../src/systems/network/network_system.cpp');
 const networkFileTransfer = read('../../include/corona/systems/network/file_transfer.h');
 const networkProtocolTests = read('../../src/systems/network/tests/test_network_protocol.cpp');
@@ -72,6 +73,21 @@ assertIncludes(
 );
 assertIncludes(
   networkPanel,
+  'const localIp = ref',
+  'Network panel must track the current local IP address'
+);
+assertIncludes(
+  networkPanel,
+  'localIp.value = info.local_ip',
+  'Network panel must consume the backend local_ip field'
+);
+assertIncludes(
+  networkPanel,
+  '本机 IP',
+  'Network panel must show the current local IP address'
+);
+assertIncludes(
+  networkPanel,
   'const listenPort = Number(info.listen_port || 0)',
   'Network panel must consume the backend listen_port field'
 );
@@ -104,6 +120,11 @@ assertIncludes(
   networkPanel,
   '已连接用户数',
   'Network panel must not imply placeholder peer rows contain real identities'
+);
+assertIncludes(
+  cefBridge,
+  'payload["local_ip"] = detect_local_ipv4()',
+  'Network bridge must expose the current local IPv4 address'
 );
 
 assertIncludes(

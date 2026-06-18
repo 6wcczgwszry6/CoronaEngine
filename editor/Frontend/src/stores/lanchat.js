@@ -26,11 +26,12 @@ const HOST_NICKNAME = '房主';
 
 const state = reactive({
   role: ROLE.NONE, // none / host / guest
+  mode: 'multi', // multi / single
   inRoom: false,
   connection: 'idle', // idle / connecting / syncing / connected / reconnecting
   room: '', // 房间号
   ip: '', // 房主显示用：本机 IP；加入方：房主 IP
-  port: 8770,
+  port: 27960,
   peerId: '',
   nickname: '',
   members: [], // string[]
@@ -44,6 +45,7 @@ const state = reactive({
 
 function _resetRoom() {
   state.role = ROLE.NONE;
+  state.mode = 'multi';
   state.inRoom = false;
   state.connection = 'idle';
   state.room = '';
@@ -251,25 +253,56 @@ function removeAgentFromRoster(agentId) {
 
 // ---- 动作 -----------------------------------------------------------------
 
-/** 房主开房。返回 { ok, ip, port } 或 { ok:false, error }。 */
-async function openRoom({ room, password, port, nickname }) {
+function applyHostRoomState({ room, mode, res, hostNickname = HOST_NICKNAME }) {
+  state.role = ROLE.HOST;
+  state.mode = mode;
+  state.inRoom = true;
+  state.connection = 'connected';
+  state.room = room;
+  state.ip = res.ip || '';
+  state.port = res.port || 0;
+  state.peerId = res.peer_id || '';
+  state.nickname = res.you || hostNickname;
+  applyMemberSnapshot(res);
+  if (!state.members.length) state.members = [state.nickname];
+  state.messages = [];
+  state.disclosures = [];
+  state.agents = res.agents || [];
+}
+
+async function openLocalRoom({ room, password, nickname }) {
   state.error = '';
   const hostNickname = (nickname || HOST_NICKNAME).trim() || HOST_NICKNAME;
-  const res = await lanChatService.startRoom({ room, password, port, nickname: hostNickname });
+  const res = await lanChatService.startLocalRoom({
+    room,
+    password,
+    mode: 'single',
+    nickname: hostNickname,
+  });
   if (res && res.ok) {
-    state.role = ROLE.HOST;
-    state.inRoom = true;
-    state.connection = 'connected';
-    state.room = room;
-    state.ip = res.ip;
-    state.port = res.port;
-    state.peerId = res.peer_id || '';
-    state.nickname = res.you || hostNickname;
-    applyMemberSnapshot(res);
-    if (!state.members.length) state.members = [state.nickname];
-    state.messages = [];
-    state.disclosures = [];
-    state.agents = res.agents || [];
+    applyHostRoomState({ room, mode: 'single', res, hostNickname });
+  } else {
+    state.error = (res && res.error) || 'START_FAILED';
+  }
+  return res;
+}
+
+/** 房主开房。返回 { ok, ip, port } 或 { ok:false, error }。 */
+async function openRoom({ room, password, port, nickname, mode = 'multi' }) {
+  if (mode === 'single') {
+    return openLocalRoom({ room, password, nickname });
+  }
+  state.error = '';
+  const hostNickname = (nickname || HOST_NICKNAME).trim() || HOST_NICKNAME;
+  const res = await lanChatService.startRoom({
+    room,
+    password,
+    port,
+    nickname: hostNickname,
+    mode: 'multi',
+  });
+  if (res && res.ok) {
+    applyHostRoomState({ room, mode: 'multi', res, hostNickname });
   } else {
     state.error = (res && res.error) || 'START_FAILED';
   }
@@ -278,7 +311,11 @@ async function openRoom({ room, password, port, nickname }) {
 
 /** 房主关房。 */
 async function closeRoom() {
-  await lanChatService.stopRoom();
+  if (state.mode === 'single') {
+    await lanChatService.stopLocalRoom();
+  } else {
+    await lanChatService.stopRoom();
+  }
   _resetRoom();
 }
 
@@ -293,6 +330,7 @@ async function joinRoom({ ip, port, room, password, nickname }) {
     state.room = room;
     state.ip = ip;
     state.port = res.port || port;
+    state.mode = 'multi';
     state.peerId = res.peer_id || '';
     // 服务器去重后的最终昵称（如 Alice -> Alice-2）
     state.nickname = res.you || nickname;
@@ -456,6 +494,7 @@ export const lanchat = {
   state: readonly(state),
   ROLE,
   openRoom,
+  openLocalRoom,
   closeRoom,
   joinRoom,
   leaveRoom,

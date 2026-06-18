@@ -310,6 +310,8 @@ inline std::vector<uint8_t> build_hello(const std::string& instance_name,
 //   [1B type] [2B actor_guid_len] [actor_guid]
 //   [2B scene_name_len] [scene_name] [2B model_path_len] [model_path]
 //   [36B transform (9 floats)] [ActorCreatePacked payload]
+//   [2B dependency_count] [[2B dependency_len] [dependency]]*
+//   Optional v2 tail: [4B actor_json_len] [actor_json]
 // The payload keeps legacy optics fields in ActorCreatePacked layout; receivers
 // must copy the leading 36B wire transform into ActorCreatePacked::transform.
 // ============================================================================
@@ -340,7 +342,8 @@ inline std::vector<uint8_t> build_actor_create(
     const std::string& model_path,
     const float* transform,  // 9 floats
     const void* optics_packed, size_t optics_size,
-    const std::vector<std::string>& dependency_paths = {})
+    const std::vector<std::string>& dependency_paths = {},
+    const std::string& actor_json = {})
 {
     std::vector<uint8_t> buf;
     size_t deps_size = 2;
@@ -348,7 +351,8 @@ inline std::vector<uint8_t> build_actor_create(
         deps_size += 2 + dep.size();
     }
     buf.reserve(1 + 2 + actor_guid.size() + 2 + scene_name.size() +
-                2 + model_path.size() + 36 + optics_size + deps_size);
+                2 + model_path.size() + 36 + optics_size + deps_size +
+                4 + actor_json.size());
 
     write_u8(buf, static_cast<uint8_t>(MessageType::ACTOR_CREATE));
     write_string(buf, actor_guid);
@@ -360,6 +364,7 @@ inline std::vector<uint8_t> build_actor_create(
     for (const auto& dep : dependency_paths) {
         write_string(buf, dep);
     }
+    write_string_u32(buf, actor_json);
 
     return buf;
 }

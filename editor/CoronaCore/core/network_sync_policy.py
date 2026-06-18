@@ -23,6 +23,15 @@ _active_transaction: ContextVar[Optional["_TransactionState"]] = ContextVar(
 _preserved_entries_by_key: dict[str, list["_QueuedActorCreate"]] = {}
 _sync_pause_depth = 0
 _DEFAULT_TRANSACTION_KEY = "__default__"
+_AI_SCENE_FRAMEWORK_SYNC_NAMES = {
+    "__room_box",
+    "__room_terrain",
+    "__terrain_grass",
+    "__terrain_boundary",
+    "__interior_floor",
+    "__foundation_surface",
+}
+_AI_SCENE_FRAMEWORK_SYNC_PREFIXES = ("__shell_",)
 
 
 @dataclass
@@ -55,13 +64,30 @@ def is_internal_sync_name(value: object) -> bool:
     return _last_path_part(text).startswith("__")
 
 
+def is_ai_scene_framework_sync_name(value: object) -> bool:
+    text = str(value or "").strip()
+    leaf = _last_path_part(text)
+    return (
+        text in _AI_SCENE_FRAMEWORK_SYNC_NAMES
+        or leaf in _AI_SCENE_FRAMEWORK_SYNC_NAMES
+        or any(
+            text.startswith(prefix) or leaf.startswith(prefix)
+            for prefix in _AI_SCENE_FRAMEWORK_SYNC_PREFIXES
+        )
+    )
+
+
+def is_internal_actor_sync_name(value: object) -> bool:
+    return is_internal_sync_name(value) and not is_ai_scene_framework_sync_name(value)
+
+
 def actor_data_is_syncable(actor_data: dict | None) -> bool:
     """Defensive frontend-facing data filter mirrored from the Python policy."""
     if not isinstance(actor_data, dict):
         return False
     if actor_data.get("_suppress_network_broadcast"):
         return False
-    if is_internal_sync_name(actor_data.get("name")):
+    if is_internal_actor_sync_name(actor_data.get("name")):
         return False
     if is_internal_sync_name(actor_data.get("scene")):
         return False
@@ -78,7 +104,7 @@ def actor_is_syncable(actor: object) -> bool:
         return False
     if not hasattr(actor, "_geometry"):
         return False
-    if is_internal_sync_name(getattr(actor, "name", "")):
+    if is_internal_actor_sync_name(getattr(actor, "name", "")):
         return False
 
     parent = getattr(actor, "parent", None)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-DEFAULT_PORT = 8770
+DEFAULT_PORT = 27960
 
 
 def _engine():
@@ -34,7 +34,32 @@ class LANChat:
         return _unsupported("start_room")
 
     @classmethod
+    def start_local_room(cls, payload: Optional[dict] = None) -> Dict[str, Any]:
+        payload = payload or {}
+        return {
+            "ok": True,
+            "room": payload.get("room") or "",
+            "mode": "single",
+            "ip": "",
+            "port": 0,
+            "peer_id": "local-single-player",
+            "members": ["房主"],
+            "member_details": [
+                {
+                    "member_id": "local-single-player",
+                    "nickname": "房主",
+                    "status": "online",
+                },
+            ],
+            "agents": [],
+        }
+
+    @classmethod
     def stop_room(cls, payload: Optional[dict] = None) -> Dict[str, Any]:
+        return {"ok": True}
+
+    @classmethod
+    def stop_local_room(cls, payload: Optional[dict] = None) -> Dict[str, Any]:
         return {"ok": True}
 
     @classmethod

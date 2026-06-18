@@ -76,6 +76,8 @@ Corona::Systems::NetworkSystem::SessionRole parse_network_session_role(
     return Corona::Systems::NetworkSystem::SessionRole::Host;
 }
 
+std::string detect_local_ipv4();
+
 nlohmann::json build_network_session_info(
     const std::shared_ptr<Corona::Systems::NetworkSystem>& sys) {
     nlohmann::json payload;
@@ -87,6 +89,7 @@ nlohmann::json build_network_session_info(
     payload["host_address"] = sys->host_address();
     payload["host_port"] = sys->host_port();
     payload["listen_port"] = sys->session_port();
+    payload["local_ip"] = detect_local_ipv4();
     return payload;
 }
 
@@ -422,15 +425,26 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     // can call SceneTools.create_actor_internal.
                     nlohmann::json payload;
                     std::string actor_guid, scene_name, model_path;
+                    std::string actor_json;
                     Network::ActorCreatePacked packed;
                     if (sys->pop_pending_actor_create(actor_guid, scene_name, model_path,
-                                                       &packed, sizeof(packed))) {
+                                                       &packed, sizeof(packed), &actor_json)) {
                         payload["has_pending"] = true;
                         payload["actor_guid"] = actor_guid;
                         payload["scene_name"] = scene_name;
                         payload["model_path"] = model_path;
                         // Convert transform (9 floats) and optics for Python
-                        nlohmann::json actor_data;
+                        nlohmann::json actor_data = nlohmann::json::object();
+                        if (!actor_json.empty()) {
+                            try {
+                                actor_data = nlohmann::json::parse(actor_json);
+                                if (!actor_data.is_object()) {
+                                    actor_data = nlohmann::json::object();
+                                }
+                            } catch (const nlohmann::json::parse_error&) {
+                                actor_data = nlohmann::json::object();
+                            }
+                        }
                         actor_data["geometry"]["position"] = {
                             packed.transform[0], packed.transform[1], packed.transform[2]
                         };
@@ -678,8 +692,10 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     // Extract transform (9 floats) — default to identity
                     float transform[9] = {0,0,0, 0,0,0, 1,1,1};
                     std::vector<std::string> dependency_paths;
+                    std::string actor_json;
                     if (args.size() > 3 && args[3].is_object()) {
                         auto& ad = args[3];
+                        actor_json = ad.dump();
                         if (actor_guid.empty() && ad.contains("actor_guid") && ad["actor_guid"].is_string()) {
                             actor_guid = ad["actor_guid"].get<std::string>();
                         }
@@ -732,7 +748,7 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
 
                     sys->broadcast_actor_create(actor_guid, scene_name, model_path,
                                                 dependency_paths, transform,
-                                                &opt, sizeof(opt));
+                                                &opt, sizeof(opt), actor_json);
                     nlohmann::json payload;
                     payload["ok"] = true;
                     callback->Success(create_success_json("broadcast_actor_create", payload));
@@ -766,7 +782,7 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
 
                 if (func == "start_room") {
                     const std::string room = payload_arg.value("room", "");
-                    const uint16_t port = payload_arg.value("port", 8770);
+                    const uint16_t port = payload_arg.value("port", 27960);
                     const std::string nickname = payload_arg.value("nickname", "房主");
                     const std::string host_nickname = nickname.empty() ? "房主" : nickname;
                     bool ok = sys->lanchat_start_room(room, host_nickname, port);
@@ -785,6 +801,26 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     return true;
                 }
 
+                if (func == "start_local_room") {
+                    const std::string room = payload_arg.value("room", "");
+                    const std::string nickname = payload_arg.value("nickname", "房主");
+                    const std::string host_nickname = nickname.empty() ? "房主" : nickname;
+                    bool ok = sys->lanchat_start_local_room(room, host_nickname);
+                    nlohmann::json data;
+                    data["ok"] = ok;
+                    data["you"] = host_nickname;
+                    data["ip"] = "";
+                    data["port"] = 0;
+                    data["room"] = room;
+                    data["mode"] = "single";
+                    data["peer_id"] = "local-single-player";
+                    data["members"] = build_lanchat_members(sys->lanchat_members());
+                    data["member_details"] = build_lanchat_member_details(sys->lanchat_members());
+                    data["agents"] = build_lanchat_agents(sys->lanchat_agents());
+                    callback->Success(create_success_json(func, data));
+                    return true;
+                }
+
                 if (func == "stop_room") {
                     sys->lanchat_leave_room();
                     sys->stop_session();
@@ -794,9 +830,17 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     return true;
                 }
 
+                if (func == "stop_local_room") {
+                    sys->lanchat_stop_local_room();
+                    nlohmann::json data;
+                    data["ok"] = true;
+                    callback->Success(create_success_json(func, data));
+                    return true;
+                }
+
                 if (func == "join_room") {
                     const std::string ip = payload_arg.value("ip", "");
-                    const uint16_t port = payload_arg.value("port", 8770);
+                    const uint16_t port = payload_arg.value("port", 27960);
                     const std::string room = payload_arg.value("room", "");
                     const std::string nickname = payload_arg.value("nickname", "Guest");
                     bool ok = sys->lanchat_join_room(ip, port, room, nickname);
@@ -852,7 +896,10 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                 if (func == "add_agent") {
                     const std::string name = payload_arg.value("name", "Agent");
                     const std::string persona = payload_arg.value("persona", "");
-                    const std::string agent_id = make_agent_id(sys->local_peer_id(), name);
+                    const std::string peer_id = sys->local_peer_id().empty()
+                        ? "local-single-player"
+                        : sys->local_peer_id();
+                    const std::string agent_id = make_agent_id(peer_id, name);
                     auto result = sys->lanchat_register_agent(agent_id, name, persona);
                     nlohmann::json data;
                     data["ok"] = result.ok;
@@ -885,7 +932,7 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     nlohmann::json data;
                     data["ok"] = true;
                     data["ip"] = detect_local_ipv4();
-                    data["port"] = sys->session_port() != 0 ? sys->session_port() : 8770;
+                    data["port"] = sys->session_port() != 0 ? sys->session_port() : 27960;
                     callback->Success(create_success_json(func, data));
                     return true;
                 }

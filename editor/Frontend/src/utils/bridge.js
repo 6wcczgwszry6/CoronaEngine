@@ -283,8 +283,13 @@ export const lanChatService = {
   // 房主开房：{ room, password, port? } -> { ok, ip, port, room } | { ok:false, error }
   startRoom: (payload) =>
     Bridge.callCEF('LANChat', 'start_room', [payload]).then(_unwrap),
+  // 单人本地房：不启动 NetworkSystem 协作会话
+  startLocalRoom: (payload) =>
+    Bridge.callCEF('LANChat', 'start_local_room', [payload]).then(_unwrap),
   // 房主关房 -> { ok }
   stopRoom: () => Bridge.callCEF('LANChat', 'stop_room', [{}]).then(_unwrap),
+  // 关闭单人本地房，不停止 NetworkSystem 协作会话
+  stopLocalRoom: () => Bridge.callCEF('LANChat', 'stop_local_room', [{}]).then(_unwrap),
   // 加入房间：{ ip, port, room, password, nickname } -> { ok, members, history } | { ok:false, code }
   joinRoom: (payload) =>
     Bridge.callCEF('LANChat', 'join_room', [payload]).then(_unwrap),

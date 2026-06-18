@@ -97,6 +97,9 @@ class FakeScene:
     def _notify_scene_tree_changed(self):
         self.notified = True
 
+    def add_actor(self, actor, *_args, **_kwargs):
+        self._actors.append(actor)
+
 
 class FakeSceneManager:
     def __init__(self, scene):
@@ -188,6 +191,58 @@ class ActorAliasRenameTests(unittest.TestCase):
         self.assertTrue(actor.follow_camera)
         self.assertIn(extra, scene.get_actors())
         self.assertTrue(scene.saved)
+
+    def test_apply_actor_state_internal_restores_network_broadcast_flags(self):
+        actor = FakeActor("Local Chair", guid="actor-chair")
+        scene = FakeScene([actor])
+
+        with patch.object(scene_tools_main, "scene_manager", FakeSceneManager(scene)):
+            result = scene_tools_main.SceneTools.apply_actor_state_internal(
+                "Demo.scene",
+                "actor-chair",
+                {
+                    "name": "Host Chair",
+                    "geometry": {"position": [1.0, 2.0, 3.0]},
+                },
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertFalse(actor.network_remote)
+        self.assertFalse(actor._suppress_network_broadcast)
+
+    def test_create_actor_internal_clears_remote_suppress_flags_after_creation(self):
+        scene = FakeScene([])
+
+        def fake_actor_factory(route, source_index, actor_type, parent_scene, actor_data):
+            actor = FakeActor(
+                actor_data.get("name", "Remote Chair"),
+                guid=actor_data.get("actor_guid"),
+                route=route,
+            )
+            actor.network_remote = bool(actor_data.get("_suppress_network_broadcast"))
+            actor._suppress_network_broadcast = bool(actor_data.get("_suppress_network_broadcast"))
+            return actor
+
+        with (
+            patch.object(scene_tools_main, "scene_manager", FakeSceneManager(scene)),
+            patch.object(scene_tools_main, "Actor", side_effect=fake_actor_factory),
+        ):
+            result = scene_tools_main.SceneTools.create_actor_internal(
+                "Demo.scene",
+                "Resource/chair.obj",
+                "model",
+                {
+                    "actor_guid": "actor-chair",
+                    "name": "Remote Chair",
+                    "_suppress_network_broadcast": True,
+                },
+            )
+
+        self.assertIn("actor", result)
+        actor = scene.get_actors()[0]
+        self.assertEqual(actor.name, "Remote Chair")
+        self.assertFalse(actor.network_remote)
+        self.assertFalse(actor._suppress_network_broadcast)
 
 
 if __name__ == "__main__":

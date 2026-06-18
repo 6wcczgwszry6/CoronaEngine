@@ -52,6 +52,11 @@ assertIncludes(store, 'function isPendingConfirmationDisclosure', 'lanchat store
 assertIncludes(store, 'item.requires_confirmation && proposalIdForDisclosure(item)', 'disclosure pruning must protect pending confirmation proposals');
 assertIncludes(store, 'nickname: hostNickname', 'openRoom must send the host nickname to CEF');
 assertIncludes(store, 'state.nickname = res.you || hostNickname', 'openRoom must preserve the final host nickname');
+assertIncludes(store, 'mode:', 'lanchat store must track whether the room is single-player or multiplayer');
+assertIncludes(store, 'async function openLocalRoom', 'lanchat store must support local single-player rooms');
+assertIncludes(store, 'lanChatService.startLocalRoom', 'single-player rooms must use the local LANChat service path');
+assertIncludes(store, 'lanChatService.stopLocalRoom', 'single-player rooms must close without stopping collaboration networking');
+assertIncludes(store, 'lanChatService.startRoom', 'multiplayer rooms must keep using the network room service path');
 
 assertIncludes(roomPanel, 'member.member_id !== s.peerId', 'mention candidates must filter local member_id');
 assertIncludes(roomPanel, 'a.name, isAgent: true', 'mention candidates must include agents');
@@ -107,12 +112,25 @@ assertIncludes(roomPanel, '资源状态：生成已停止', 'RoomPanel must tran
 assertIncludes(roomPanel, '资源状态：队列拥堵', 'RoomPanel must translate saturated scheduler diagnosis without exposing internal codes');
 assertIncludes(disclosureTest, 'diagnosis', 'disclosure test must cover safe scheduler diagnosis metadata');
 assertIncludes(roomPanel, '房主端口', 'RoomPanel must not imply LANChat always uses default 8770');
+assertIncludes(roomPanel, 'port: 27960', 'RoomPanel join form must default to the Network collaboration port');
+assertIncludes(roomPanel, 'form.port || 27960', 'RoomPanel join/create calls must fall back to the Network collaboration port');
+if (roomPanel.includes('port: 8770') || roomPanel.includes('form.port || 8770')) {
+  fail('RoomPanel must not default LANChat room ports to legacy 8770');
+}
+assertIncludes(roomPanel, "roomMode = 'single'", 'RoomPanel must offer a single-player room mode');
+assertIncludes(roomPanel, "roomMode = 'multi'", 'RoomPanel must offer a multiplayer room mode');
+assertIncludes(roomPanel, 'mode: roomMode.value', 'RoomPanel must pass the selected room mode when creating a room');
+assertIncludes(roomPanel, "s.mode === 'multi'", 'RoomPanel must only show host IP/port for multiplayer rooms');
 
 assertIncludes(memberList, 'peerId', 'MemberList must accept peerId prop');
 assertIncludes(memberList, 'a.owner === peerId', 'agent remove visibility must compare owner to peerId');
 
 assertIncludes(networkHeader, 'session_port() const', 'NetworkSystem must expose the active ENet listen port');
+assertIncludes(networkHeader, 'lanchat_start_local_room', 'NetworkSystem must expose a local LANChat room path that does not start collaboration networking');
+assertIncludes(networkHeader, 'lanchat_stop_local_room', 'NetworkSystem must expose a local room close path that does not stop collaboration networking');
 assertIncludes(networkSystem, 'if (impl_->session_role != SessionRole::Host) return;', 'clients must not process LANChat join packets');
+assertIncludes(networkSystem, 'bool NetworkSystem::lanchat_start_local_room', 'NetworkSystem must implement local LANChat rooms');
+assertIncludes(networkSystem, 'void NetworkSystem::lanchat_stop_local_room', 'NetworkSystem must implement local LANChat room close');
 assertIncludes(networkSystem, 'MessageType::CHAT_HISTORY_SNAPSHOT', 'NetworkSystem must handle LANChat history snapshots');
 assertIncludes(networkSystem, 'MessageType::CHAT_JOIN_REJECT', 'NetworkSystem must handle LANChat join rejection');
 assertIncludes(networkSystem, 'lanchat_join_pending', 'NetworkSystem must track pending LANChat joins');
@@ -137,9 +155,33 @@ assertIncludes(cefBridge, 'correlation_id, metadata_json', 'LANChat send_message
 assertIncludes(cefBridge, 'const uint16_t actual_port = sys->session_port() != 0 ? sys->session_port() : port', 'LANChat start_room must return the actual session port');
 assertIncludes(cefBridge, 'const std::string nickname = payload_arg.value("nickname", "房主")', 'LANChat start_room must read host nickname from payload');
 assertIncludes(cefBridge, 'data["you"] = host_nickname', 'LANChat start_room must return the final host nickname');
-assertIncludes(cefBridge, 'sys->session_port() != 0 ? sys->session_port() : 8770', 'LANChat get_local_ip must return the active session port when available');
+assertIncludes(cefBridge, 'func == "start_local_room"', 'LANChat bridge must expose start_local_room for single-player rooms');
+assertIncludes(cefBridge, 'func == "stop_local_room"', 'LANChat bridge must expose stop_local_room for single-player rooms');
+assertIncludes(cefBridge, 'payload_arg.value("port", 27960)', 'LANChat bridge must default room ports to the Network collaboration port');
+assertIncludes(cefBridge, 'sys->session_port() != 0 ? sys->session_port() : 27960', 'LANChat get_local_ip must return the Network collaboration port fallback');
 if (cefBridge.includes('data["port"] = 8770;')) {
   fail('LANChat bridge must not hard-code get_local_ip port to 8770');
+}
+if (cefBridge.includes('payload_arg.value("port", 8770)') || cefBridge.includes(': 8770')) {
+  fail('LANChat bridge must not default room ports to legacy 8770');
+}
+const localRoomStart = networkSystem.indexOf('bool NetworkSystem::lanchat_start_local_room');
+const multiplayerRoomStart = networkSystem.indexOf('bool NetworkSystem::lanchat_start_room');
+if (localRoomStart < 0 || multiplayerRoomStart < 0) {
+  fail('NetworkSystem must implement both local and multiplayer LANChat room start paths');
+}
+const localRoomBody = networkSystem.slice(localRoomStart, multiplayerRoomStart);
+if (localRoomBody.includes('start_session(')) {
+  fail('Local LANChat rooms must not start NetworkSystem collaboration sessions');
+}
+const localStopStart = networkSystem.indexOf('void NetworkSystem::lanchat_stop_local_room');
+const leaveRoomStart = networkSystem.indexOf('void NetworkSystem::lanchat_leave_room');
+if (localStopStart < 0 || leaveRoomStart < 0) {
+  fail('NetworkSystem must implement separate local and network LANChat close paths');
+}
+const localStopBody = networkSystem.slice(localStopStart, leaveRoomStart);
+if (localStopBody.includes('stop_session(') || localStopBody.includes('build_chat_leave(')) {
+  fail('Local LANChat close must not stop collaboration sessions or broadcast leave packets');
 }
 const chatJoinBranch = networkSystem.slice(
   networkSystem.indexOf('} else if (mt == MessageType::CHAT_JOIN) {'),

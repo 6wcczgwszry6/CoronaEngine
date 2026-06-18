@@ -124,6 +124,9 @@ public:
     bool lanchat_start_room(const std::string& room_id,
                             const std::string& nickname,
                             uint16_t port);
+    bool lanchat_start_local_room(const std::string& room_id,
+                                  const std::string& nickname);
+    void lanchat_stop_local_room();
     bool lanchat_join_room(const std::string& ip,
                            uint16_t port,
                            const std::string& room_id,
@@ -204,13 +207,15 @@ public:
      * @param transform  9 个 float: position(3) + rotation(3) + scale(3)
      * @param optics_packed 打包的 OpticsPacked 结构 (72 字节)
      * @param optics_size   optics_packed 的大小
+     * @param actor_json    完整 Actor 数据 JSON，用于保留别名和基础状态
      */
     void broadcast_actor_create(const std::string& actor_guid,
                                 const std::string& scene_name,
                                 const std::string& model_path,
                                 const std::vector<std::string>& dependency_paths,
                                 const float* transform,
-                                const void* optics_packed, size_t optics_size);
+                                const void* optics_packed, size_t optics_size,
+                                const std::string& actor_json = {});
 
     /// Broadcast a demo-grade Actor transform delta. Transform is 9 floats:
     /// position(3) + rotation(3, radians) + scale(3).
@@ -243,7 +248,8 @@ public:
     /// 消费一个待创建的 Actor 数据。返回 true 表示有数据被消费。
     bool pop_pending_actor_create(std::string& actor_guid,
                                   std::string& scene_name, std::string& model_path,
-                                  void* actor_packed_out, size_t packed_size);
+                                  void* actor_packed_out, size_t packed_size,
+                                  std::string* actor_json_out = nullptr);
 
     bool pop_pending_actor_transform_update(std::string& actor_guid,
                                             std::string& scene_name,

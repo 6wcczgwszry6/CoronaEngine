@@ -54,6 +54,9 @@
           <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
           会话运行中 — {{ roleLabel }} — 端口 {{ port }}
         </div>
+        <div v-if="sessionActive && localIp" class="text-gray-400">
+          本机 IP：{{ localIp }}
+        </div>
         <div v-if="sessionActive && sessionRole === 'client' && hostAddress" class="text-gray-400">
           房主：{{ hostAddress }}:{{ hostPort }}
         </div>
@@ -172,6 +175,7 @@ const instanceName = ref('');
 const port = ref(27960);
 const sessionActive = ref(false);
 const sessionRole = ref('none');
+const localIp = ref('');
 const hostAddress = ref('');
 const hostPort = ref(0);
 const errorMsg = ref('');
@@ -186,6 +190,7 @@ const remoteActorLog = ref(''); // latest remote actor creation log
 
 let pollTimer = null;
 const CONNECT_TIMEOUT_MS = 5000;
+const PENDING_POLL_BATCH_LIMIT = 16;
 const connectionAttemptStartedAt = ref(0);
 const ownershipClaimTimes = new Map();
 const currentSceneName = ref('Scene/default.scene');
@@ -206,6 +211,7 @@ function applySessionInfo(info) {
   }
   sessionActive.value = true;
   sessionRole.value = info.role || sessionRole.value || 'none';
+  localIp.value = info.local_ip || localIp.value || '';
   hostAddress.value = info.host_address || '';
   hostPort.value = info.host_port || 0;
   const listenPort = Number(info.listen_port || 0);
@@ -217,6 +223,7 @@ function applySessionInfo(info) {
 function resetSessionInfo() {
   sessionActive.value = false;
   sessionRole.value = 'none';
+  localIp.value = '';
   hostAddress.value = '';
   hostPort.value = 0;
   peers.value = [];
@@ -309,21 +316,47 @@ async function pollPeers() {
         await requestSceneSnapshotOnce(currentSceneName.value);
       }
       if (count > 0 && sessionRole.value === 'host') {
-        await broadcastCurrentSceneSnapshot(currentSceneName.value, false);
+        await broadcastCurrentSceneSnapshot(currentSceneName.value, true);
       }
     }
 
+    // Poll for pending remote actor creation (file transfer completed) before
+    // applying snapshots/state updates that may target those actors.
     try {
-      const pendingRequest = await networkService.pollPendingSceneSnapshotRequest();
-      if (pendingRequest && pendingRequest.has_pending && sessionRole.value === 'host') {
-        const sceneName = pendingRequest.scene_name || currentSceneName.value;
-        await broadcastCurrentSceneSnapshot(sceneName, true);
+      for (let i = 0; i < PENDING_POLL_BATCH_LIMIT; i += 1) {
+        const pending = await networkService.pollPendingActorCreate();
+        if (!pending || !pending.has_pending) break;
+        await networkService.setSyncPaused(true);
+        try {
+          pending.actor_data = pending.actor_data || {};
+          pending.actor_data.actor_guid = pending.actor_guid || '';
+          pending.actor_data._suppress_network_broadcast = true;
+          const created = await Bridge.callCEF('SceneTools', 'create_actor_internal',
+            [pending.scene_name, pending.model_path, 'model', pending.actor_data]
+          );
+          const createdData = unwrapCefResult(created);
+          await registerActorIdentityFromData(createdData?.actor || createdData, false);
+        } finally {
+          await networkService.setSyncPaused(false);
+        }
+      }
+    } catch (_) { /* best effort — actor creation polling is secondary */ }
+
+    try {
+      for (let i = 0; i < PENDING_POLL_BATCH_LIMIT; i += 1) {
+        const pendingRequest = await networkService.pollPendingSceneSnapshotRequest();
+        if (!pendingRequest || !pendingRequest.has_pending) break;
+        if (sessionRole.value === 'host') {
+          const sceneName = pendingRequest.scene_name || currentSceneName.value;
+          await broadcastCurrentSceneSnapshot(sceneName, true);
+        }
       }
     } catch (_) { /* best effort — snapshot request polling is secondary */ }
 
     try {
-      const pendingSnapshot = await networkService.pollPendingSceneSnapshot();
-      if (pendingSnapshot && pendingSnapshot.has_pending) {
+      for (let i = 0; i < PENDING_POLL_BATCH_LIMIT; i += 1) {
+        const pendingSnapshot = await networkService.pollPendingSceneSnapshot();
+        if (!pendingSnapshot || !pendingSnapshot.has_pending) break;
         await applyRemoteSceneSnapshot(
           pendingSnapshot.scene_name || currentSceneName.value,
           pendingSnapshot.snapshot_json,
@@ -332,8 +365,9 @@ async function pollPeers() {
     } catch (_) { /* best effort — snapshot polling is secondary */ }
 
     try {
-      const pendingState = await networkService.pollPendingActorStateUpdate();
-      if (pendingState && pendingState.has_pending) {
+      for (let i = 0; i < PENDING_POLL_BATCH_LIMIT; i += 1) {
+        const pendingState = await networkService.pollPendingActorStateUpdate();
+        if (!pendingState || !pendingState.has_pending) break;
         let actorData = {};
         try {
           actorData = JSON.parse(pendingState.actor_json || '{}');
@@ -355,31 +389,10 @@ async function pollPeers() {
       }
     } catch (_) { /* best effort — state sync is secondary */ }
 
-    // Poll for pending remote actor creation (file transfer completed)
     try {
-      const pending = await networkService.pollPendingActorCreate();
-      if (pending && pending.has_pending) {
-        // Pause sync, create actor, then resume
-        await networkService.setSyncPaused(true);
-        try {
-          pending.actor_data = pending.actor_data || {};
-          pending.actor_data.actor_guid = pending.actor_guid || '';
-          pending.actor_data._suppress_network_broadcast = true;
-          // Call Python SceneTools.create_actor_internal
-          const created = await Bridge.callCEF('SceneTools', 'create_actor_internal',
-            [pending.scene_name, pending.model_path, 'model', pending.actor_data]
-          );
-          const createdData = unwrapCefResult(created);
-          await registerActorIdentityFromData(createdData?.actor || createdData, false);
-        } finally {
-          await networkService.setSyncPaused(false);
-        }
-      }
-    } catch (_) { /* best effort — actor creation polling is secondary */ }
-
-    try {
-      const pendingTransform = await networkService.pollPendingActorTransform();
-      if (pendingTransform && pendingTransform.has_pending) {
+      for (let i = 0; i < PENDING_POLL_BATCH_LIMIT; i += 1) {
+        const pendingTransform = await networkService.pollPendingActorTransform();
+        if (!pendingTransform || !pendingTransform.has_pending) break;
         const actorData = {
           actor_guid: pendingTransform.actor_guid || '',
           geometry: pendingTransform.geometry || {},
@@ -400,8 +413,9 @@ async function pollPeers() {
     } catch (_) { /* best effort — transform sync is demo-grade */ }
 
     try {
-      const pendingDelete = await networkService.pollPendingActorDelete();
-      if (pendingDelete && pendingDelete.has_pending) {
+      for (let i = 0; i < PENDING_POLL_BATCH_LIMIT; i += 1) {
+        const pendingDelete = await networkService.pollPendingActorDelete();
+        if (!pendingDelete || !pendingDelete.has_pending) break;
         const deleted = await Bridge.callCEF('SceneTools', 'remove_actor_internal', [
           pendingDelete.scene_name || 'Scene/default.scene',
           pendingDelete.actor_guid || '',
@@ -474,15 +488,37 @@ function lastPathPart(value) {
   return String(value || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || '';
 }
 
+const AI_SCENE_FRAMEWORK_SYNC_NAMES = new Set([
+  '__room_box',
+  '__room_terrain',
+  '__terrain_grass',
+  '__terrain_boundary',
+  '__interior_floor',
+  '__foundation_surface',
+]);
+const AI_SCENE_FRAMEWORK_SYNC_PREFIXES = ['__shell_'];
+
+function isAiSceneFrameworkSyncName(value) {
+  const text = String(value || '').trim();
+  const leaf = lastPathPart(text);
+  return AI_SCENE_FRAMEWORK_SYNC_NAMES.has(text)
+    || AI_SCENE_FRAMEWORK_SYNC_NAMES.has(leaf)
+    || AI_SCENE_FRAMEWORK_SYNC_PREFIXES.some((prefix) => text.startsWith(prefix) || leaf.startsWith(prefix));
+}
+
 function isInternalSyncName(value) {
   const text = String(value || '').trim();
   return text.startsWith('__') || lastPathPart(text).startsWith('__');
 }
 
+function isInternalActorSyncName(value) {
+  return isInternalSyncName(value) && !isAiSceneFrameworkSyncName(value);
+}
+
 function isActorSyncable(actorData) {
   if (!actorData) return false;
   if (actorData._suppress_network_broadcast) return false;
-  if (isInternalSyncName(actorData.name)) return false;
+  if (isInternalActorSyncName(actorData.name)) return false;
   if (isInternalSyncName(actorData.scene)) return false;
   return Boolean(actorData.path || actorData.model);
 }
