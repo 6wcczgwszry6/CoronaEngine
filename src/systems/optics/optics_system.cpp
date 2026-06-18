@@ -1427,11 +1427,11 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                 calibration.phase_offset;
                             opticsUiWarp.pushConsts.parallaxScale =
                                 calibration.parallax_scale;
-                            opticsUiWarp.pushConsts.rgbSubpixelOffsets = {
+                            opticsUiWarp.pushConsts.rgbSubpixelOffsets = ktm::fvec4(
                                 calibration.rgb_subpixel_offsets[0],
                                 calibration.rgb_subpixel_offsets[1],
                                 calibration.rgb_subpixel_offsets[2],
-                                0.0f};
+                                0.0f);
                             compositeOverlayDescriptor =
                                 target.ui_warped_overlay.storeDescriptor();
                         }
