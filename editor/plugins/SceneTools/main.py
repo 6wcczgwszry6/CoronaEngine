@@ -1046,6 +1046,38 @@ class SceneTools(PluginBase):
             return {"status": "error", "message": str(exc)}
 
     @staticmethod
+    def set_vision_render_mode(scene_name: str, camera_name: str = None,
+                               mode: str = "path_tracing") -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                raise ValueError(f"Scene '{scene_name}' not found")
+            camera = scene.find_camera(camera_name)
+            if camera is None:
+                raise ValueError(f"Camera '{camera_name}' not found")
+            camera.set_vision_render_mode(mode)
+            scene.save_data()
+            actual = camera.get_vision_render_mode()
+            logger.info("Vision render mode set to '%s' for scene %s camera %s",
+                        actual, scene_name, getattr(camera, 'name', camera_name))
+            return {"status": "success", "mode": actual}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def get_vision_render_mode(scene_name: str, camera_name: str = None) -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                raise ValueError(f"Scene '{scene_name}' not found")
+            camera = scene.find_camera(camera_name)
+            if camera is None:
+                raise ValueError(f"Camera '{camera_name}' not found")
+            return {"status": "success", "mode": camera.get_vision_render_mode()}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
     def prepare_external_live_vision_scene(scene) -> str:
         return prepare_external_live_vision_scene(scene)
 
@@ -1078,6 +1110,11 @@ class SceneTools(PluginBase):
                 height=source.height,
                 render_backend=source.get_render_backend(),
                 output_mode=source.get_output_mode(),
+                vision_render_mode=(
+                    source.get_vision_render_mode()
+                    if hasattr(source, "get_vision_render_mode")
+                    else getattr(source, "vision_render_mode", "path_tracing")
+                ),
                 move_speed=source.move_speed,
                 view_open=True,
                 view_x=120 + index * 36,
