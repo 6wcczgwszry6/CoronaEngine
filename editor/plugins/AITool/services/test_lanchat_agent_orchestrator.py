@@ -2743,6 +2743,9 @@ def test_worker_configured_composer_scheduler_runs_confirmed_seed_plan_context()
     class FakeComposer:
         def compose(self, text, **kwargs):
             compose_calls.append((text, kwargs))
+            progress_sink = kwargs.get("progress_sink")
+            assert callable(progress_sink)
+            progress_sink("生成进度 32% [███░░░░░░░] 准备所需模型。正在获取主体和物件资源，界面可能需要等待一会儿。")
             coordinator = kwargs["interaction_coordinator"]
             coordinator.bind_scene_session_progress(
                 FakeProgressSession(),
@@ -2809,6 +2812,18 @@ def test_worker_configured_composer_scheduler_runs_confirmed_seed_plan_context()
         if len(item) >= 6 and item[3] == "action_status" and "第一批已完成" in item[2]
     ]
     assert progress_disclosures
+    resource_progress_disclosures = [
+        item for item in engine.system_messages
+        if len(item) >= 6 and item[3] == "action_status" and "准备所需模型" in item[2]
+    ]
+    assert resource_progress_disclosures
+    resource_metadata = json.loads(resource_progress_disclosures[-1][5])
+    resource_disclosure = resource_metadata["disclosure"]
+    assert resource_disclosure["stage"] == "资源准备"
+    assert resource_disclosure["progress"] == 32
+    assert resource_disclosure["audience"] == "participant"
+    assert "prompt" not in json.dumps(resource_disclosure, ensure_ascii=False)
+    assert "session_id" not in json.dumps(resource_disclosure, ensure_ascii=False)
     metadata = json.loads(progress_disclosures[-1][5])
     disclosure = metadata["disclosure"]
     assert disclosure["stage"] == "可介入窗口"

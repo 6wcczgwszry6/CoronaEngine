@@ -74,6 +74,8 @@ class LANChatAgentWorker:
         self._coordinator_seen_message_order: deque[str] = deque()
         self._active_room_ids: set[str] = set()
         self._active_room_order: deque[str] = deque()
+        self._progress_disclosure_lock = threading.RLock()
+        self._progress_disclosure_last_by_room: dict[str, tuple[str, float]] = {}
         self._logger = logging.getLogger(__name__)
         if self._generation_scheduler is not None:
             self._install_generation_scheduler_hooks(self._generation_scheduler)
@@ -1416,10 +1418,121 @@ class LANChatAgentWorker:
     def _install_generation_scheduler_hooks(self, scheduler: Any) -> None:
         self._install_deferred_download_scheduler(scheduler)
         self._install_media_task_scheduler(scheduler)
+        self._install_progress_disclosure_scheduler(scheduler)
 
     def _clear_generation_scheduler_hooks(self, scheduler: Any) -> None:
         self._clear_deferred_download_scheduler(scheduler)
         self._clear_media_task_scheduler(scheduler)
+        self._clear_progress_disclosure_scheduler(scheduler)
+
+    def _install_progress_disclosure_scheduler(self, scheduler: Any) -> None:
+        submit = getattr(scheduler, "submit", None)
+        if not callable(submit):
+            return
+        if getattr(scheduler, "_lanchat_progress_disclosure_installed", False):
+            return
+        worker = self
+
+        def submit_with_progress(payload: dict[str, Any]) -> Any:
+            job_payload = dict(payload or {})
+            job_type = str(job_payload.get("job_type") or "")
+            if job_type.startswith("scene_generation"):
+                runtime_context = dict(job_payload.get("_runtime_context") or {})
+                if not callable(runtime_context.get("progress_sink")):
+                    runtime_context["progress_sink"] = worker._make_generation_progress_sink(
+                        room_id=str(job_payload.get("room_id") or job_payload.get("session_id") or ""),
+                        plan_id=str(job_payload.get("plan_id") or ""),
+                    )
+                    job_payload["_runtime_context"] = runtime_context
+            return submit(job_payload)
+
+        try:
+            setattr(scheduler, "_lanchat_progress_disclosure_original_submit", submit)
+            setattr(scheduler, "_lanchat_progress_disclosure_installed", True)
+            setattr(scheduler, "submit", submit_with_progress)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to install LANChat progress disclosure scheduler hook: %s", exc)
+
+    def _clear_progress_disclosure_scheduler(self, scheduler: Any) -> None:
+        if not getattr(scheduler, "_lanchat_progress_disclosure_installed", False):
+            return
+        original = getattr(scheduler, "_lanchat_progress_disclosure_original_submit", None)
+        try:
+            if callable(original):
+                setattr(scheduler, "submit", original)
+            setattr(scheduler, "_lanchat_progress_disclosure_installed", False)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to clear LANChat progress disclosure scheduler hook: %s", exc)
+
+    def _make_generation_progress_sink(self, *, room_id: str, plan_id: str) -> Callable[[str], None]:
+        def sink(message: str) -> None:
+            self._emit_generation_progress_disclosure(
+                message,
+                room_id=room_id,
+                plan_id=plan_id,
+            )
+        return sink
+
+    def _emit_generation_progress_disclosure(self, message: str, *, room_id: str, plan_id: str) -> None:
+        text = self._safe_control_text(str(message or "").strip())
+        if not text or self._corona_engine is None:
+            return
+        room = str(room_id or "default")
+        now = time.time()
+        with self._progress_disclosure_lock:
+            last_text, last_at = self._progress_disclosure_last_by_room.get(room, ("", 0.0))
+            if text == last_text and now - float(last_at or 0.0) < 1.0:
+                return
+            self._progress_disclosure_last_by_room[room] = (text, now)
+        stage, progress = self._generation_progress_stage_and_percent(text)
+        event_id = f"generation-progress-{room}-{int(now * 1000)}"
+        disclosure = {
+            "event_id": event_id,
+            "room_id": room,
+            "audience": "participant",
+            "stage": stage,
+            "progress": progress,
+            "public_message": text,
+            "available_actions": ["add_note", "pause_after_batch"],
+            "requires_confirmation": False,
+            "metadata": {
+                "plan_id": str(plan_id or ""),
+                "source": "generation_progress_sink",
+            },
+        }
+        metadata = json.dumps({"disclosure": disclosure}, ensure_ascii=False)
+        try:
+            if hasattr(self._corona_engine, "network_send_system_message_ex"):
+                self._corona_engine.network_send_system_message_ex(
+                    "system",
+                    "系统",
+                    text,
+                    "action_status",
+                    event_id,
+                    metadata,
+                )
+            elif hasattr(self._corona_engine, "network_send_system_message"):
+                self._corona_engine.network_send_system_message("system", "系统", text)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to emit generation progress disclosure: %s", exc)
+
+    @staticmethod
+    def _generation_progress_stage_and_percent(text: str) -> tuple[str, int]:
+        progress = 0
+        match = re.search(r"生成进度\s*(\d{1,3})\s*%", str(text or ""))
+        if match:
+            progress = max(0, min(100, int(match.group(1))))
+        if "排队" in text:
+            return "排队中", progress
+        if "准备所需模型" in text or "图片" in text or "模型" in text:
+            return "资源准备", progress
+        if "开始组装" in text or "导入" in text or "放入" in text or "摆放" in text:
+            return "分批组装", progress
+        if "自动检查" in text or "检查" in text:
+            return "最终检查", progress
+        if "完成空间" in text or "理解场景" in text:
+            return "理解方案", progress
+        return "生成中", progress
 
     def _install_deferred_download_scheduler(self, scheduler: Any) -> None:
         try:
