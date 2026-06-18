@@ -140,13 +140,25 @@ FetchContent_Declare(
         EXCLUDE_FROM_ALL
 )
 
-FetchContent_Declare(
-        oneTBB
-        GIT_REPOSITORY https://github.com/uxlfoundation/oneTBB.git
-        GIT_TAG v2022.3.0
-        GIT_SHALLOW TRUE
-        EXCLUDE_FROM_ALL
+set(_CORONA_ONETBB_LOCAL_SOURCE_DIR
+    "${CMAKE_SOURCE_DIR}/third_party/tbb/oneapi-tbb-2022.3.0"
 )
+if(EXISTS "${_CORONA_ONETBB_LOCAL_SOURCE_DIR}/CMakeLists.txt")
+    set(_CORONA_ONETBB_SOURCE_LABEL "vendored source")
+    FetchContent_Declare(
+            oneTBB
+            SOURCE_DIR "${_CORONA_ONETBB_LOCAL_SOURCE_DIR}"
+            EXCLUDE_FROM_ALL
+    )
+else()
+    set(_CORONA_ONETBB_SOURCE_LABEL "release archive")
+    FetchContent_Declare(
+            oneTBB
+            URL https://github.com/uxlfoundation/oneTBB/archive/refs/tags/v2022.3.0.zip
+            DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+            EXCLUDE_FROM_ALL
+    )
+endif()
 
 # ------------------------------------------------------------------------------
 # Fetch and enable dependencies
@@ -183,17 +195,38 @@ message(STATUS "[3rdparty] nanobind module enabled")
 set(TBB_TEST OFF CACHE BOOL "" FORCE)
 set(TBB_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(TBB_STRICT OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(oneTBB)
-message(STATUS "[3rdparty] oneTBB module enabled")
 
-if(WIN32 AND NOT TARGET TBB::tbb)
+cmake_path(
+    ABSOLUTE_PATH FETCHCONTENT_BASE_DIR
+    BASE_DIRECTORY "${CMAKE_BINARY_DIR}"
+    NORMALIZE
+    OUTPUT_VARIABLE _CORONA_HORIZON_FETCHCONTENT_SOURCE_ROOT
+)
+set(HORIZON_FETCHCONTENT_SOURCE_ROOT "${_CORONA_HORIZON_FETCHCONTENT_SOURCE_ROOT}" CACHE PATH
+    "Shared FetchContent source checkouts used by Horizon" FORCE)
+
+get_filename_component(
+    _corona_local_tbb_dir
+    "${PROJECT_SOURCE_DIR}/third_party/tbb/oneapi-tbb-2022.3.0/lib/cmake/tbb"
+    ABSOLUTE
+)
+set(_corona_tbb_candidate_dirs "${_corona_local_tbb_dir}")
+
+corona_tbb_package_has_runtime("${_corona_local_tbb_dir}" _corona_local_tbb_ok)
+if(EXISTS "${_corona_local_tbb_dir}/TBBConfig.cmake" AND NOT _corona_local_tbb_ok)
+    message(STATUS
+        "[3rdparty] Local TBB package is incomplete; "
+        "falling back to Horizon package or oneTBB FetchContent")
+endif()
+
+if(DEFINED TBB_DIR AND NOT TBB_DIR STREQUAL "")
+    list(PREPEND _corona_tbb_candidate_dirs "${TBB_DIR}")
+endif()
+
+if(WIN32)
     FetchContent_GetProperties(Horizon SOURCE_DIR _corona_horizon_source_dir)
     if(NOT _corona_horizon_source_dir)
-        if(FETCHCONTENT_BASE_DIR)
-            set(_corona_horizon_source_dir "${FETCHCONTENT_BASE_DIR}/horizon-src")
-        else()
-            set(_corona_horizon_source_dir "${CMAKE_BINARY_DIR}/_deps/horizon-src")
-        endif()
+        set(_corona_horizon_source_dir "${_CORONA_HORIZON_FETCHCONTENT_SOURCE_ROOT}/horizon-src")
     endif()
 
     get_filename_component(
@@ -201,20 +234,31 @@ if(WIN32 AND NOT TARGET TBB::tbb)
         "${_corona_horizon_source_dir}/modules/corona/third_party/win/oneapi-tbb-2022.3.0/lib/cmake/tbb"
         ABSOLUTE
     )
+    list(APPEND _corona_tbb_candidate_dirs "${_corona_horizon_tbb_dir}")
+endif()
 
-    if(DEFINED TBB_DIR AND NOT TBB_DIR STREQUAL "")
-        corona_tbb_package_has_runtime("${TBB_DIR}" _corona_existing_tbb_ok)
-    else()
-        set(_corona_existing_tbb_ok FALSE)
-    endif()
+corona_select_valid_tbb_dir(_corona_selected_tbb_dir ${_corona_tbb_candidate_dirs})
 
-    if(NOT _corona_existing_tbb_ok)
-        set(TBB_DIR "${_corona_horizon_tbb_dir}" CACHE PATH
-            "Path to TBB cmake configuration directory" FORCE)
-        message(STATUS "[3rdparty] Using Horizon vendored TBB: ${TBB_DIR}")
-    endif()
+if(_corona_selected_tbb_dir)
+    set(TBB_DIR "${_corona_selected_tbb_dir}" CACHE PATH
+        "Path to TBB cmake configuration directory" FORCE)
+    find_package(TBB CONFIG QUIET)
+endif()
 
-    unset(_corona_existing_tbb_ok)
+if(TARGET TBB::tbb)
+    message(STATUS "[3rdparty] oneTBB module provided by package: ${TBB_DIR}")
+else()
+    FetchContent_MakeAvailable(oneTBB)
+    message(STATUS "[3rdparty] oneTBB module enabled from ${_CORONA_ONETBB_SOURCE_LABEL}")
+endif()
+
+unset(_CORONA_ONETBB_LOCAL_SOURCE_DIR)
+unset(_CORONA_ONETBB_SOURCE_LABEL)
+unset(_corona_local_tbb_dir)
+unset(_corona_local_tbb_ok)
+unset(_corona_selected_tbb_dir)
+unset(_corona_tbb_candidate_dirs)
+if(WIN32)
     unset(_corona_horizon_tbb_dir)
     unset(_corona_horizon_source_dir)
 endif()
@@ -247,6 +291,7 @@ if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
 endif()
 
 message(STATUS "[3rdparty] Horizon module enabled")
+unset(_CORONA_HORIZON_FETCHCONTENT_SOURCE_ROOT)
 
 FetchContent_MakeAvailable(glfw)
 message(STATUS "[3rdparty] glfw module enabled")

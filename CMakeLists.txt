@@ -24,13 +24,37 @@ project(
     LANGUAGES    C CXX
 )
 
-set(_CORONA_OFFLINE_FETCH_BASE "${CMAKE_SOURCE_DIR}/cmake-build-relwithdebinfo/_deps")
-if(WIN32 AND EXISTS "${_CORONA_OFFLINE_FETCH_BASE}")
-    set(FETCHCONTENT_BASE_DIR "${_CORONA_OFFLINE_FETCH_BASE}" CACHE PATH "FetchContent base directory" FORCE)
-    set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "Skip FetchContent updates when local sources are present" FORCE)
-    set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL "Require local FetchContent sources only" FORCE)
-    message(STATUS "[FetchContent] Offline cache enabled: ${FETCHCONTENT_BASE_DIR}")
+set(_CORONA_DEFAULT_FETCHCONTENT_BASE "${CMAKE_BINARY_DIR}/_deps")
+set(_CORONA_FETCHCONTENT_BASE_IS_STALE_HORIZON OFF)
+
+if(DEFINED FETCHCONTENT_BASE_DIR AND NOT FETCHCONTENT_BASE_DIR STREQUAL "")
+    cmake_path(
+        ABSOLUTE_PATH FETCHCONTENT_BASE_DIR
+        BASE_DIRECTORY "${CMAKE_BINARY_DIR}"
+        NORMALIZE
+        OUTPUT_VARIABLE _CORONA_FETCHCONTENT_BASE_ABSOLUTE
+    )
+
+    if(_CORONA_FETCHCONTENT_BASE_ABSOLUTE MATCHES [=[[/\\]horizon-src[/\\]build[/\\]_deps$]=])
+        set(_CORONA_FETCHCONTENT_BASE_IS_STALE_HORIZON ON)
+    endif()
 endif()
+
+if(NOT DEFINED FETCHCONTENT_BASE_DIR
+   OR FETCHCONTENT_BASE_DIR STREQUAL ""
+   OR _CORONA_FETCHCONTENT_BASE_IS_STALE_HORIZON)
+    set(FETCHCONTENT_BASE_DIR "${_CORONA_DEFAULT_FETCHCONTENT_BASE}" CACHE PATH
+        "FetchContent source cache directory" FORCE)
+    message(STATUS "[FetchContent] Source cache: ${FETCHCONTENT_BASE_DIR}")
+elseif(DEFINED _CORONA_FETCHCONTENT_BASE_ABSOLUTE)
+    set(FETCHCONTENT_BASE_DIR "${_CORONA_FETCHCONTENT_BASE_ABSOLUTE}" CACHE PATH
+        "FetchContent source cache directory" FORCE)
+    message(STATUS "[FetchContent] Source cache: ${_CORONA_FETCHCONTENT_BASE_ABSOLUTE}")
+endif()
+
+unset(_CORONA_DEFAULT_FETCHCONTENT_BASE)
+unset(_CORONA_FETCHCONTENT_BASE_ABSOLUTE)
+unset(_CORONA_FETCHCONTENT_BASE_IS_STALE_HORIZON)
 
 # ------------------------------------------------------------------------------
 # Modular Configuration Includes
