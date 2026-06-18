@@ -205,6 +205,16 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         }
     };
 
+    auto route_main_window = [&]() {
+        for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+            if (tab && !tab->camera_view && tab->docking_pos == "main") {
+                *context.active_tab_id = tab_id;
+                url_input_active_tab_ = -1;
+                return;
+            }
+        }
+    };
+
     auto result = event_handler_.process_events(
         context.window, url_input_active_tab_,
         [&](const SDL_Event& event) {
@@ -221,10 +231,23 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         });
 
     if (SDL_Window* focused_window = SDL_GetKeyboardFocus()) {
-        route_camera_window(SDL_GetWindowID(focused_window));
+        if (focused_window == context.window) {
+            route_main_window();
+        } else {
+            route_camera_window(SDL_GetWindowID(focused_window));
+        }
     }
 #ifdef _WIN32
     if (HWND foreground = GetForegroundWindow()) {
+        HWND main_hwnd = context.window
+            ? static_cast<HWND>(SDL_GetPointerProperty(
+                  SDL_GetWindowProperties(context.window),
+                  SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+                  nullptr))
+            : nullptr;
+        if (main_hwnd && foreground == main_hwnd) {
+            route_main_window();
+        }
         for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
             if (tab && tab->camera_view &&
                 tab->platform_handle_raw == foreground) {

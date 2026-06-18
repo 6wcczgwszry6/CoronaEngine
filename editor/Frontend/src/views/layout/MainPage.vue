@@ -347,9 +347,12 @@
 
     <div
       ref="viewportPickSurfaceRef"
+      tabindex="0"
       class="relative flex-1 min-h-0 w-full"
       data-viewport-pick-surface
+      @pointerdown="focusViewportInput"
       @mousedown.left="handleViewportPick"
+      @wheel.prevent="handleWheel"
     >
       <div
         class="absolute left-3 top-3 z-20 flex items-center gap-1 rounded border border-white/10 bg-[#15181d]/80 p-1 shadow-lg backdrop-blur-sm"
@@ -871,6 +874,10 @@ const handleWheel = (event) => {
   }
   const direction = event.deltaY > 0 ? 'backward' : 'forward';
   handleCameraMove(direction);
+};
+
+const focusViewportInput = () => {
+  viewportPickSurfaceRef.value?.focus?.({ preventScroll: true });
 };
 
 const handleKeyDown = (event) => {
