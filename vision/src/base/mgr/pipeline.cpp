@@ -63,11 +63,16 @@ bool Pipeline::create_view_context(uint64_t view_id, uint2 resolution) noexcept 
         scene_.sensor()->prepare();
         scene_.sensor()->update_resolution(resolution);
         scene_.sensor()->update_device_data();
-        renderer().prepare(scene_);
-        frame_buffer()->prepare_view_texture();
+        // Enable the denoiser BEFORE renderer().prepare(): PathTracingIntegrator::prepare()
+        // only allocates the denoiser's buffers (and registers its GBuffer callback) when
+        // the denoiser is enabled. Syncing after prepare() left a denoise-enabled view
+        // context with an unprepared denoiser -> unallocated SVGF buffers -> GPU crash on
+        // the first dispatch. compile() still follows prepare() (canonical order).
         sync_output_denoise();
         OC_INFO_FORMAT("Pipeline::create_view_context synced output denoise: view={} denoise={}",
                        view_id, output_desc_.denoise);
+        renderer().prepare(scene_);
+        frame_buffer()->prepare_view_texture();
         compile();
         upload_bindless_array();
         invalidate();
