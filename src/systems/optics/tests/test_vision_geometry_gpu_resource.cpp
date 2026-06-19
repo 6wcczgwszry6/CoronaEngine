@@ -4,6 +4,7 @@
 #include "base/import/project_desc.h"
 #include "base/mgr/geometry.h"
 #include "base/mgr/global.h"
+#include "base/mgr/image_pool.h"
 #include "base/mgr/pipeline.h"
 #include "base/mgr/registries.h"
 #include "base/mgr/renderer.h"
@@ -76,6 +77,34 @@ void scene_tables_accept_explicit_scene_gpu_bindless() {
                   void (vision::Renderer::*)(vision::Scene&) noexcept>);
 }
 
+void image_pool_accepts_explicit_scene_gpu_bindless() {
+    static_assert(std::is_same_v<
+                  decltype(static_cast<vision::RegistrableTexture3D (vision::ImagePool::*)(
+                               const vision::ShaderNodeDesc&,
+                               vision::BindlessArray&,
+                               vision::Device&) noexcept>(
+                      &vision::ImagePool::load_texture)),
+                  vision::RegistrableTexture3D (vision::ImagePool::*)(
+                      const vision::ShaderNodeDesc&,
+                      vision::BindlessArray&,
+                      vision::Device&) noexcept>);
+    static_assert(std::is_same_v<
+                  decltype(static_cast<vision::RegistrableTexture3D& (vision::ImagePool::*)(
+                               const vision::ShaderNodeDesc&,
+                               vision::BindlessArray&,
+                               vision::Device&) noexcept>(
+                      &vision::ImagePool::obtain_texture)),
+                  vision::RegistrableTexture3D& (vision::ImagePool::*)(
+                      const vision::ShaderNodeDesc&,
+                      vision::BindlessArray&,
+                      vision::Device&) noexcept>);
+    static_assert(std::is_same_v<
+                  decltype(static_cast<void (vision::ImagePool::*)(
+                               vision::Stream&) noexcept>(
+                      &vision::ImagePool::prepare)),
+                  void (vision::ImagePool::*)(vision::Stream&) noexcept>);
+}
+
 void geometry_defaults_to_unbound_gpu_resource() {
     vision::Geometry geometry;
     expect(!geometry.has_gpu_resource(),
@@ -142,6 +171,8 @@ void scene_views_share_logical_scene_containers() {
            "groups should be shared logical scene state across Scene views");
     expect(ssat_scene_view.instances().size() == 1u,
            "instances should be shared logical scene state across Scene views");
+    expect(&svgf_scene_view.image_pool() == &ssat_scene_view.image_pool(),
+           "image textures should be shared scene state across Scene views");
 }
 
 vision::ProjectDesc make_empty_project_desc() {
@@ -227,6 +258,8 @@ void two_pipelines_consume_one_shared_logical_scene() {
                "groups should be shared logical scene data");
         expect(&first->scene().instances() == &second->scene().instances(),
                "instances should be shared logical scene data");
+        expect(&first->image_pool() == &second->image_pool(),
+               "two pipelines should expose one shared scene-owned image pool");
         expect(first->scene().shared_data_identity() == scene_resource.logical_scene_identity(),
                "pipeline Scene views should point at the VisionSceneResource logical scene");
     } catch (const std::exception& e) {
@@ -243,6 +276,7 @@ int main() {
     geometry_gpu_resource_is_external_ownership_boundary();
     geometry_requires_explicit_command_stream_for_gpu_updates();
     scene_tables_accept_explicit_scene_gpu_bindless();
+    image_pool_accepts_explicit_scene_gpu_bindless();
     geometry_defaults_to_unbound_gpu_resource();
     geometry_binds_external_scene_gpu_resource();
     multiple_geometry_views_share_one_scene_gpu_resource();

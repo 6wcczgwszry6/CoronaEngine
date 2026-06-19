@@ -550,6 +550,21 @@ vision::Device* visionDevicePtr = nullptr;
     return project_desc;
 }
 
+void bind_pipeline_scene_resource_early(
+    vision::Pipeline& pipeline,
+    const std::shared_ptr<Corona::Systems::Vision::VisionSceneResource>& scene_resource) {
+    if (!scene_resource) {
+        return;
+    }
+    pipeline.bind_shared_scene_data(
+        scene_resource->ensure_logical_scene(
+            [] { return std::make_shared<vision::SceneData>(); }));
+    pipeline.scene().bind_geometry_gpu_resource(
+        scene_resource->ensure_scene_gpu_resource([&] {
+            return std::make_shared<vision::GeometryGpuResource>(pipeline.device());
+        }));
+}
+
 [[nodiscard]] auto create_vision_pipeline(
     const std::shared_ptr<Corona::Systems::Vision::VisionSceneResource>& scene_resource = {})
     -> ocarina::SP<vision::Pipeline> {
@@ -558,11 +573,7 @@ vision::Device* visionDevicePtr = nullptr;
     if (!pipeline) {
         return {};
     }
-    if (scene_resource) {
-        pipeline->bind_shared_scene_data(
-            scene_resource->ensure_logical_scene(
-                [] { return std::make_shared<vision::SceneData>(); }));
-    }
+    bind_pipeline_scene_resource_early(*pipeline, scene_resource);
     pipeline->init_project(project_desc);
     pipeline->init_postprocessor(project_desc.renderer_desc.denoiser_desc);
     pipeline->init();
@@ -874,11 +885,7 @@ void bind_pipeline_scene_gpu_resource(
                       scene_path.string());
         return {};
     }
-    if (scene_resource) {
-        pipeline->bind_shared_scene_data(
-            scene_resource->ensure_logical_scene(
-                [] { return std::make_shared<vision::SceneData>(); }));
-    }
+    bind_pipeline_scene_resource_early(*pipeline, scene_resource);
     pipeline->init_project(project_desc);
     if (scene_resource) {
         bind_pipeline_scene_gpu_resource(

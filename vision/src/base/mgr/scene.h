@@ -17,6 +17,7 @@
 #include "UI/GUI.h"
 #include "hotfix/hotfix.h"
 #include "base/using.h"
+#include "image_pool.h"
 #include <cstdint>
 
 namespace vision {
@@ -74,6 +75,7 @@ public:
 class SceneData {
 private:
     Geometry geometry_;
+    ImagePool image_pool_;
     Box3f aabb_;
     SP<Material> black_body_{};
     LightManager light_manager_{};
@@ -158,6 +160,8 @@ public:
     // Geometry
     [[nodiscard]] Geometry &geometry() noexcept { return data_->geometry_; }
     [[nodiscard]] const Geometry &geometry() const noexcept { return data_->geometry_; }
+    [[nodiscard]] ImagePool &image_pool() noexcept { return data_->image_pool_; }
+    [[nodiscard]] const ImagePool &image_pool() const noexcept { return data_->image_pool_; }
     void bind_geometry_gpu_resource(SP<GeometryGpuResource> resource) noexcept;
     void update_geometry_instances() noexcept { data_->geometry_.update_instances(data_->instances_); }
 

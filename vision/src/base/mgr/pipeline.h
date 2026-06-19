@@ -202,7 +202,7 @@ public:
     void deregister_buffer(handle_ty index) noexcept;
     void deregister_texture3d(handle_ty index) noexcept;
     void deregister_texture2d(handle_ty index) noexcept;
-    [[nodiscard]] ImagePool &image_pool() noexcept { return Global::instance().image_pool(); }
+    [[nodiscard]] ImagePool &image_pool() noexcept { return scene_view_.image_pool(); }
     [[nodiscard]] BindlessArray &bindless_array() noexcept { return bindless_array_; }
     [[nodiscard]] const BindlessArray &bindless_array() const noexcept { return bindless_array_; }
     void upload_bindless_array() noexcept;
