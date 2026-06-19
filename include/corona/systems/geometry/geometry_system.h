@@ -79,25 +79,6 @@ struct SceneStats {
 /**
  * @brief 单个 LOD 级别的 GPU 缓冲集合
  *
- * 【这是什么】
- * 一个 LOD 级别在 GPU 端需要的全部缓冲。
- * 引擎渲染时用这些缓冲来实际绘制模型。
- *
- * 【为什么需要 4 个缓冲】
- * - vertex_buffer：顶点数据缓冲（位置+法线+UV），用于顶点着色器读取
- * - index_buffer：索引缓冲，告诉 GPU 哪三个顶点组成一个三角形
- * - vertex_storage：顶点数据的 StorageBuffer 版本，用于 Compute Shader
- *   （某些渲染管线需要从 Compute Shader 中访问顶点数据做 GPU 端处理）
- * - index_storage：同上，索引的 StorageBuffer 版本
- *
- * 【ready 标志】
- * GPU 缓冲的创建必须在主线程完成（Horizon 框架的限制）。
- * 异步简化完成后，下一帧主线程会创建缓冲并把 ready 设为 true。
- * 渲染时如果 ready=false（还没准备好），会降级使用 LOD 0（原始网格）。
- *
- * 【screen_threshold】
- * 当物体在屏幕上的占比低于此阈值时，切换到该 LOD 级别。
- * 例如 threshold=0.25 意味着物体占屏幕不到 25% 时就换用这个低模。
  */
 struct LODMeshBuffers {
     HardwareBuffer vertex_buffer;    // GPU 顶点缓冲（Vertex Shader 读取）

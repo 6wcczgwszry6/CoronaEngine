@@ -1046,6 +1046,11 @@ void GeometrySystem::process_async_tasks() {
 
     for (const auto& task : completed_loads) {
         if (task.rid != Resource::IResource::INVALID_UID) {
+            // 重建 GPU 资源（mesh_handles + 纹理），恢复 model_resource_handle
+            // 必须在发布 ActorLoadCompletedEvent 之前完成，
+            // 以保证事件订阅者（渲染线程等）能读到有效的 GPU 缓冲
+            rebuild_actor_gpu_resources(task.actor, task.rid);
+
             impl_->ctx->event_bus()->publish(Events::ActorLoadCompletedEvent{task.scene_handle,task.actor});
             CFW_LOG_DEBUG("[SceneSystem] Actor {} loaded (resource: {})", task.actor, task.rid);
         }else {
@@ -1065,6 +1070,9 @@ void GeometrySystem::process_async_tasks() {
     std::vector<CompletedUnloadTask> failed_unloads;
     for (const auto& task : completed_unloads) {
         if (task.success) {
+            // 释放 actor 关联的 GPU 资源（HardwareBuffer / HardwareImage）
+            release_actor_gpu_resources(task.actor);
+
             {
                 std::unique_lock lock(impl_->mtx);
                 auto scene_it = impl_->scenes.find(task.scene_handle);
@@ -1331,12 +1339,20 @@ void GeometrySystem::upload_lod_from_scene_data() {
     if (!impl_->simplification_cfg.auto_on_load) return;
 
     auto& resource_manager = Resource::ResourceManager::get_instance();
-    auto& geom_storage = SharedDataHub::instance().geometry_storage();
+    auto& hub = SharedDataHub::instance();
+    auto& geom_storage = hub.geometry_storage();
 
     for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
         const GeometryDevice& geom_dev = *it;
         auto geom_handle = reinterpret_cast<std::uintptr_t>(&geom_dev);
         if (!geom_dev.model_resource_handle) continue;
+
+        // 通过 ModelResource 解析真正的 ResourceManager UID
+        std::uint64_t model_id = 0;
+        if (auto model_res = hub.model_resource_storage().try_acquire_read(geom_dev.model_resource_handle)) {
+            model_id = model_res->model_id;
+        }
+        if (model_id == 0) continue;
 
         for (uint32_t mesh_idx = 0; mesh_idx < static_cast<uint32_t>(geom_dev.mesh_handles.size()); ++mesh_idx) {
             uint64_t lod_key = Impl::make_lod_key(geom_handle, mesh_idx);
@@ -1351,7 +1367,7 @@ void GeometrySystem::upload_lod_from_scene_data() {
             }
 
             // 从 ResourceManager 读取 Scene 数据
-            auto scene_read = resource_manager.acquire_read<Resource::Scene>(geom_dev.model_resource_handle);
+            auto scene_read = resource_manager.acquire_read<Resource::Scene>(model_id);
             if (!scene_read.valid()) continue;
 
             auto& scene = *scene_read;
