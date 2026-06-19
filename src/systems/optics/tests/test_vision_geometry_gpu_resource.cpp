@@ -10,6 +10,7 @@
 #include "base/mgr/renderer.h"
 #include "base/mgr/scene.h"
 #include "base/illumination/lightsampler.h"
+#include "render_core/denoiser/SVGF/utils.h"
 
 #include <cstdlib>
 #include <exception>
@@ -84,6 +85,25 @@ void spectrum_accepts_scene_material_state() {
     static_assert(std::is_same_v<
                   decltype(&vision::Spectrum::scene_has_dispersive_materials),
                   bool (vision::Spectrum::*)() const noexcept>);
+}
+
+void svgf_helpers_accept_explicit_scene_resources() {
+    static_assert(std::is_same_v<
+                  decltype(&vision::svgf::PixelStateUtils::is_emissive),
+                  vision::Bool (*)(const vision::Geometry&,
+                                   const vision::TriangleHitVar&) noexcept>);
+    static_assert(std::is_same_v<
+                  decltype(&vision::svgf::PixelStateUtils::query_albedo),
+                  vision::Float3 (*)(vision::Scene&,
+                                     vision::Geometry&,
+                                     vision::TSpectrum&,
+                                     const vision::TriangleHitVar&,
+                                     const vision::Float3&) noexcept>);
+    static_assert(std::is_same_v<
+                  decltype(&vision::svgf::BoundaryUtils::compute_boundary_weight),
+                  vision::Float (*)(const vision::Geometry&,
+                                    const vision::TriangleHitVar&,
+                                    const vision::TriangleHitVar&) noexcept>);
 }
 
 void image_pool_accepts_explicit_scene_gpu_bindless() {
@@ -316,6 +336,7 @@ int main() {
     geometry_requires_explicit_command_stream_for_gpu_updates();
     scene_tables_accept_explicit_scene_gpu_bindless();
     spectrum_accepts_scene_material_state();
+    svgf_helpers_accept_explicit_scene_resources();
     image_pool_accepts_explicit_scene_gpu_bindless();
     geometry_defaults_to_unbound_gpu_resource();
     geometry_medium_state_is_scene_owned();

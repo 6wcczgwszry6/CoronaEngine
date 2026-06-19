@@ -120,6 +120,7 @@ public:
     // ========================================================================
     
     void compile_compute_mask() noexcept {
+        Geometry &geometry_ref = geometry();
         Kernel kernel = [&](Var<AdaptiveSamplerParam> param, Var<LenticularParams> lent) {
             Uint2 dispatch_idx_val = dispatch_idx().xy();
             Uint linear_idx = dispatch_id();
@@ -136,7 +137,7 @@ public:
             
             Float depth = z_ref;  // Default to focal plane
             $if(is_valid) {
-                Interaction prev_it = pipeline()->geometry().compute_surface_interaction(prev_hit, false);
+                Interaction prev_it = geometry_ref.compute_surface_interaction(prev_hit, false);
                 depth = length(prev_it.pos - camera_pos);
             };
             
