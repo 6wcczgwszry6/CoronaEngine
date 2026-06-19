@@ -1690,10 +1690,6 @@ void OpticsSystem::update() {
         }
     }
 
-    // Check for pending backend switch request before executing either render path.
-    int pending = pending_backend_.load(std::memory_order_relaxed);
-    RenderBackend requested = static_cast<RenderBackend>(pending);
-    if (requested != current_backend_) {
 #ifdef CORONA_ENABLE_VISION
     std::vector<std::uintptr_t> requested_vision_cameras;
     bool camera_views_ready = true;
@@ -3663,7 +3659,8 @@ void OpticsSystem::apply_pending_vision_scene_load() {
         return;
     }
 
-    if (renderPipeline && vision_scene_source_ == VisionSceneSource::EngineBuilt) {
+    const auto& runtime = active_vision_runtime();
+    if (runtime.pipeline && runtime.source == VisionPipelineSource::EngineBuilt) {
         // Empty path is a state request: leave ExternalFile mode and use the
         // engine-built scene. If that state is already active, the normal
         // dynamic signature sync below will rebuild only when scene data changed.

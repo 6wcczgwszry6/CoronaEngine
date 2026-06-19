@@ -29,6 +29,33 @@ namespace {
 static std::mutex s_input_mutex;
 static std::vector<InputEvent> s_input_queue;
 
+struct GizmoDragSession {
+    std::uintptr_t camera_handle{0};
+    std::uintptr_t actor_handle{0};
+    std::uintptr_t transform_handle{0};
+    std::string scene_id;
+    std::string request_id;
+    std::string drag_id;
+    std::string mode;
+    std::string axis;
+    ktm::fvec3 center{};
+    ktm::fvec3 axis_vector{};
+    ktm::fvec3 start_rotate_vector{};
+    ktm::fvec3 start_position{};
+    ktm::fvec3 start_rotation{};
+    ktm::fvec3 start_scale{};
+    ktm::fvec3 start_bounds_center_world{};
+    ktm::fvec3 local_bounds_min{};
+    ktm::fvec3 local_bounds_max{};
+    double start_axis_t{0.0};
+    double start_x{0.0};
+    double start_y{0.0};
+    bool has_local_bounds{false};
+};
+
+static std::mutex s_gizmo_drag_mutex;
+static std::unordered_map<std::string, GizmoDragSession> s_gizmo_drags;
+
 #ifdef _WIN32
 struct WindowedPlacement {
     RECT rect{};
@@ -464,6 +491,424 @@ bool get_numeric_arg(const CefRefPtr<CefListValue>& args, size_t index, double& 
         return true;
     }
     return false;
+}
+
+[[nodiscard]] ktm::fvec3 add_vec3(const ktm::fvec3& a, const ktm::fvec3& b) {
+    return make_fvec3(a[0] + b[0], a[1] + b[1], a[2] + b[2]);
+}
+
+[[nodiscard]] ktm::fvec3 sub_vec3(const ktm::fvec3& a, const ktm::fvec3& b) {
+    return make_fvec3(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+
+[[nodiscard]] ktm::fvec3 mul_vec3(const ktm::fvec3& v, float scale) {
+    return make_fvec3(v[0] * scale, v[1] * scale, v[2] * scale);
+}
+
+[[nodiscard]] float dot_vec3(const ktm::fvec3& a, const ktm::fvec3& b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+[[nodiscard]] ktm::fvec3 cross_vec3(const ktm::fvec3& a, const ktm::fvec3& b) {
+    return make_fvec3(a[1] * b[2] - a[2] * b[1],
+                      a[2] * b[0] - a[0] * b[2],
+                      a[0] * b[1] - a[1] * b[0]);
+}
+
+[[nodiscard]] float length_vec3(const ktm::fvec3& v) {
+    return std::sqrt(dot_vec3(v, v));
+}
+
+[[nodiscard]] ktm::fvec3 normalize_vec3(
+    const ktm::fvec3& v,
+    const ktm::fvec3& fallback = make_fvec3(0.0f, 0.0f, 1.0f)) {
+    const float length = length_vec3(v);
+    return length > 1.0e-6f ? mul_vec3(v, 1.0f / length) : fallback;
+}
+
+nlohmann::json json_vec3(const ktm::fvec3& value) {
+    return {value[0], value[1], value[2]};
+}
+
+struct GizmoCameraSnapshot {
+    ktm::fvec3 position{};
+    ktm::fvec3 forward{};
+    ktm::fvec3 up{};
+    ktm::fvec3 right{};
+    float fov{45.0f};
+    double viewport_width{0.0};
+    double viewport_height{0.0};
+};
+
+struct GizmoActorSnapshot {
+    std::uintptr_t transform_handle{0};
+    bool has_local_bounds{false};
+    ktm::fvec3 position{};
+    ktm::fvec3 rotation{};
+    ktm::fvec3 scale{};
+    ktm::fvec3 local_bounds_min{};
+    ktm::fvec3 local_bounds_max{};
+    ktm::fvec3 bounds_center_world{};
+};
+
+struct GizmoActorSource {
+    std::uintptr_t transform_handle{0};
+    std::uintptr_t model_resource_handle{0};
+    bool has_local_bounds{false};
+    ktm::fvec3 local_bounds_min{};
+    ktm::fvec3 local_bounds_max{};
+};
+
+bool fill_model_resource_bounds_nowait(std::uintptr_t model_resource_handle,
+                                       ktm::fvec3& out_min,
+                                       ktm::fvec3& out_max) {
+    if (model_resource_handle == 0) {
+        return false;
+    }
+
+    std::uint64_t model_id = 0;
+    auto& hub = Corona::SharedDataHub::instance();
+    if (auto resource = hub.model_resource_storage().try_acquire_read_nowait(model_resource_handle)) {
+        model_id = resource->model_id;
+    }
+    if (model_id == 0) {
+        return false;
+    }
+
+    auto scene_resource =
+        Corona::Resource::ResourceManager::get_instance()
+            .acquire_read<Corona::Resource::Scene>(model_id);
+    if (!scene_resource) {
+        return false;
+    }
+
+    const auto aabb = scene_resource->get_scene_aabb();
+    out_min = make_fvec3(aabb.min[0], aabb.min[1], aabb.min[2]);
+    out_max = make_fvec3(aabb.max[0], aabb.max[1], aabb.max[2]);
+    return true;
+}
+
+ktm::fvec3 compute_bounds_center_world(const ktm::fvec3& position,
+                                       const ktm::fvec3& rotation,
+                                       const ktm::fvec3& scale,
+                                       const ktm::fvec3& local_min,
+                                       const ktm::fvec3& local_max) {
+    Corona::ModelTransform transform;
+    transform.position = position;
+    transform.euler_rotation = rotation;
+    transform.scale = scale;
+    const auto local_center = make_fvec3((local_min[0] + local_max[0]) * 0.5f,
+                                         (local_min[1] + local_max[1]) * 0.5f,
+                                         (local_min[2] + local_max[2]) * 0.5f);
+    return transform_local_point_to_world(transform.compute_matrix(), local_center);
+}
+
+GizmoActorSource resolve_actor_gizmo_source_nowait(std::uintptr_t actor_handle) {
+    struct GeometryCandidate {
+        std::uintptr_t geometry_handle{0};
+        bool has_local_bounds{false};
+        ktm::fvec3 local_bounds_min{};
+        ktm::fvec3 local_bounds_max{};
+    };
+
+    auto append_candidate = [](std::vector<GeometryCandidate>& candidates,
+                               std::uintptr_t geometry_handle,
+                               bool has_local_bounds,
+                               const ktm::fvec3& local_min,
+                               const ktm::fvec3& local_max) {
+        if (geometry_handle == 0) {
+            return;
+        }
+        for (auto& candidate : candidates) {
+            if (candidate.geometry_handle != geometry_handle) {
+                continue;
+            }
+            if (!candidate.has_local_bounds && has_local_bounds) {
+                candidate.has_local_bounds = true;
+                candidate.local_bounds_min = local_min;
+                candidate.local_bounds_max = local_max;
+            }
+            return;
+        }
+        GeometryCandidate candidate;
+        candidate.geometry_handle = geometry_handle;
+        candidate.has_local_bounds = has_local_bounds;
+        candidate.local_bounds_min = local_min;
+        candidate.local_bounds_max = local_max;
+        candidates.push_back(candidate);
+    };
+
+    std::vector<std::uintptr_t> profile_handles;
+    auto& hub = Corona::SharedDataHub::instance();
+    if (auto actor = hub.actor_storage().try_acquire_read_nowait(actor_handle)) {
+        profile_handles = actor->profile_handles;
+    }
+
+    std::vector<GeometryCandidate> candidates;
+    const auto zero = make_fvec3(0.0f, 0.0f, 0.0f);
+    for (const auto profile_handle : profile_handles) {
+        std::uintptr_t profile_geometry = 0;
+        std::uintptr_t mechanics_handle = 0;
+        std::uintptr_t optics_handle = 0;
+        std::uintptr_t acoustics_handle = 0;
+        if (auto profile = hub.profile_storage().try_acquire_read_nowait(profile_handle)) {
+            profile_geometry = profile->geometry_handle;
+            mechanics_handle = profile->mechanics_handle;
+            optics_handle = profile->optics_handle;
+            acoustics_handle = profile->acoustics_handle;
+        }
+        append_candidate(candidates, profile_geometry, false, zero, zero);
+        if (auto mechanics = hub.mechanics_storage().try_acquire_read_nowait(mechanics_handle)) {
+            append_candidate(candidates,
+                             mechanics->geometry_handle,
+                             true,
+                             mechanics->min_xyz,
+                             mechanics->max_xyz);
+        }
+        if (auto optics = hub.optics_storage().try_acquire_read_nowait(optics_handle)) {
+            append_candidate(candidates, optics->geometry_handle, false, zero, zero);
+        }
+        if (auto acoustics = hub.acoustics_storage().try_acquire_read_nowait(acoustics_handle)) {
+            append_candidate(candidates, acoustics->geometry_handle, false, zero, zero);
+        }
+    }
+
+    for (const auto& candidate : candidates) {
+        GizmoActorSource source;
+        source.has_local_bounds = candidate.has_local_bounds;
+        source.local_bounds_min = candidate.local_bounds_min;
+        source.local_bounds_max = candidate.local_bounds_max;
+        if (auto geometry = hub.geometry_storage().try_acquire_read_nowait(candidate.geometry_handle)) {
+            source.transform_handle = geometry->transform_handle;
+            source.model_resource_handle = geometry->model_resource_handle;
+        }
+        if (source.transform_handle == 0) {
+            continue;
+        }
+        if (!source.has_local_bounds) {
+            source.has_local_bounds = fill_model_resource_bounds_nowait(source.model_resource_handle,
+                                                                        source.local_bounds_min,
+                                                                        source.local_bounds_max);
+        }
+        return source;
+    }
+    return {};
+}
+
+bool read_gizmo_actor_snapshot(std::uintptr_t actor_handle, GizmoActorSnapshot& out) {
+    auto& hub = Corona::SharedDataHub::instance();
+    const auto source = resolve_actor_gizmo_source_nowait(actor_handle);
+    out.transform_handle = source.transform_handle;
+    out.has_local_bounds = source.has_local_bounds;
+    out.local_bounds_min = source.local_bounds_min;
+    out.local_bounds_max = source.local_bounds_max;
+    if (out.transform_handle == 0) {
+        return false;
+    }
+    if (auto transform = hub.model_transform_storage().try_acquire_read_nowait(out.transform_handle)) {
+        out.position = transform->position;
+        out.rotation = transform->euler_rotation;
+        out.scale = transform->scale;
+        out.bounds_center_world = out.has_local_bounds
+            ? compute_bounds_center_world(out.position,
+                                          out.rotation,
+                                          out.scale,
+                                          out.local_bounds_min,
+                                          out.local_bounds_max)
+            : out.position;
+        if (!out.has_local_bounds) {
+            CFW_LOG_DEBUG("ActorGizmo: local bounds unavailable for actor={}, using transform position as scale center",
+                          actor_handle);
+        }
+        return true;
+    }
+    return false;
+}
+
+bool read_gizmo_camera_snapshot(std::uintptr_t camera_handle,
+                                double viewport_width,
+                                double viewport_height,
+                                GizmoCameraSnapshot& out) {
+    if (viewport_width <= 0.0 || viewport_height <= 0.0) {
+        return false;
+    }
+
+    if (auto camera = Corona::SharedDataHub::instance().camera_storage().try_acquire_read_nowait(camera_handle)) {
+        out.position = camera->position;
+        out.forward = normalize_vec3(camera->forward);
+        out.up = normalize_vec3(camera->world_up, make_fvec3(0.0f, 1.0f, 0.0f));
+        out.right = normalize_vec3(cross_vec3(out.up, out.forward), make_fvec3(1.0f, 0.0f, 0.0f));
+        out.up = normalize_vec3(cross_vec3(out.forward, out.right), make_fvec3(0.0f, 1.0f, 0.0f));
+        out.fov = camera->fov;
+        out.viewport_width = viewport_width;
+        out.viewport_height = viewport_height;
+        return true;
+    }
+    return false;
+}
+
+bool project_world_to_screen(const GizmoCameraSnapshot& camera,
+                             const ktm::fvec3& world,
+                             std::array<double, 2>& out) {
+    const auto rel = sub_vec3(world, camera.position);
+    const float view_z = dot_vec3(rel, camera.forward);
+    if (view_z <= 1.0e-4f) {
+        return false;
+    }
+    const float view_x = dot_vec3(rel, camera.right);
+    const float view_y = dot_vec3(rel, camera.up);
+    const double half_tan = std::tan(static_cast<double>(camera.fov) * 3.14159265358979323846 / 360.0);
+    const double aspect = camera.viewport_width / camera.viewport_height;
+    if (half_tan <= 0.0 || aspect <= 0.0) {
+        return false;
+    }
+    const double ndc_x = static_cast<double>(view_x) / (static_cast<double>(view_z) * half_tan * aspect);
+    const double ndc_y = static_cast<double>(view_y) / (static_cast<double>(view_z) * half_tan);
+    out = {
+        (ndc_x * 0.5 + 0.5) * camera.viewport_width,
+        (0.5 - ndc_y * 0.5) * camera.viewport_height,
+    };
+    return std::isfinite(out[0]) && std::isfinite(out[1]);
+}
+
+ktm::fvec3 make_gizmo_axis_vector(const std::string& axis) {
+    if (axis == "x") return make_fvec3(1.0f, 0.0f, 0.0f);
+    if (axis == "y") return make_fvec3(0.0f, 1.0f, 0.0f);
+    if (axis == "z") return make_fvec3(0.0f, 0.0f, 1.0f);
+    return make_fvec3(0.0f, 0.0f, 0.0f);
+}
+
+bool make_gizmo_ring_basis(const std::string& axis,
+                           ktm::fvec3& out_u,
+                           ktm::fvec3& out_v) {
+    if (axis == "x") {
+        out_u = make_fvec3(0.0f, 1.0f, 0.0f);
+        out_v = make_fvec3(0.0f, 0.0f, 1.0f);
+        return true;
+    }
+    if (axis == "y") {
+        out_u = make_fvec3(0.0f, 0.0f, 1.0f);
+        out_v = make_fvec3(1.0f, 0.0f, 0.0f);
+        return true;
+    }
+    if (axis == "z") {
+        out_u = make_fvec3(1.0f, 0.0f, 0.0f);
+        out_v = make_fvec3(0.0f, 1.0f, 0.0f);
+        return true;
+    }
+    return false;
+}
+
+ktm::fvec3 screen_ray_direction(const GizmoCameraSnapshot& camera, double x, double y) {
+    const double nx = (x / camera.viewport_width) * 2.0 - 1.0;
+    const double sy = 1.0 - (y / camera.viewport_height) * 2.0;
+    const double half_tan = std::tan(static_cast<double>(camera.fov) * 3.14159265358979323846 / 360.0);
+    const double aspect = camera.viewport_width / camera.viewport_height;
+    auto dir = add_vec3(camera.forward,
+                        add_vec3(mul_vec3(camera.right, static_cast<float>(nx * half_tan * aspect)),
+                                 mul_vec3(camera.up, static_cast<float>(sy * half_tan))));
+    return normalize_vec3(dir);
+}
+
+bool intersect_axis_drag_plane(const GizmoCameraSnapshot& camera,
+                               const ktm::fvec3& center,
+                               const ktm::fvec3& axis_vector,
+                               double x,
+                               double y,
+                               double& out_axis_t) {
+    const auto ray_dir = screen_ray_direction(camera, x, y);
+    auto plane_normal = cross_vec3(axis_vector, cross_vec3(camera.forward, axis_vector));
+    if (length_vec3(plane_normal) <= 1.0e-5f) {
+        plane_normal = cross_vec3(axis_vector, camera.up);
+    }
+    plane_normal = normalize_vec3(plane_normal, camera.forward);
+    const float denom = dot_vec3(ray_dir, plane_normal);
+    if (std::abs(denom) <= 1.0e-5f) {
+        return false;
+    }
+    const float t = dot_vec3(sub_vec3(center, camera.position), plane_normal) / denom;
+    const auto hit = add_vec3(camera.position, mul_vec3(ray_dir, t));
+    out_axis_t = dot_vec3(sub_vec3(hit, center), axis_vector);
+    return std::isfinite(out_axis_t);
+}
+
+bool intersect_rotation_plane(const GizmoCameraSnapshot& camera,
+                              const ktm::fvec3& center,
+                              const ktm::fvec3& axis_vector,
+                              double x,
+                              double y,
+                              ktm::fvec3& out_vector) {
+    const auto ray_dir = screen_ray_direction(camera, x, y);
+    const float denom = dot_vec3(ray_dir, axis_vector);
+    if (std::abs(denom) <= 1.0e-5f) {
+        return false;
+    }
+    const float t = dot_vec3(sub_vec3(center, camera.position), axis_vector) / denom;
+    if (t <= 0.0f || !std::isfinite(t)) {
+        return false;
+    }
+    const auto hit = add_vec3(camera.position, mul_vec3(ray_dir, t));
+    const auto relative = sub_vec3(hit, center);
+    const auto projected = sub_vec3(relative, mul_vec3(axis_vector, dot_vec3(relative, axis_vector)));
+    if (length_vec3(projected) <= 1.0e-5f) {
+        return false;
+    }
+    out_vector = normalize_vec3(projected);
+    return true;
+}
+
+float signed_rotation_delta(const ktm::fvec3& start_vector,
+                            const ktm::fvec3& current_vector,
+                            const ktm::fvec3& axis_vector) {
+    const float sin_value = dot_vec3(cross_vec3(start_vector, current_vector), axis_vector);
+    const float cos_value = dot_vec3(start_vector, current_vector);
+    return static_cast<float>(std::atan2(static_cast<double>(sin_value),
+                                         static_cast<double>(cos_value)));
+}
+
+nlohmann::json build_gizmo_rings(const GizmoCameraSnapshot& camera,
+                                 const ktm::fvec3& center,
+                                 float radius) {
+    nlohmann::json rings;
+    constexpr int kSegments = 48;
+    constexpr double kPi = 3.14159265358979323846;
+    for (const std::string axis_name : {"x", "y", "z"}) {
+        ktm::fvec3 u{};
+        ktm::fvec3 v{};
+        if (!make_gizmo_ring_basis(axis_name, u, v)) {
+            continue;
+        }
+
+        nlohmann::json points = nlohmann::json::array();
+        bool projectable = true;
+        for (int i = 0; i < kSegments; ++i) {
+            const double angle = (static_cast<double>(i) / static_cast<double>(kSegments)) * kPi * 2.0;
+            const auto world = add_vec3(center,
+                                        add_vec3(mul_vec3(u, static_cast<float>(std::cos(angle) * radius)),
+                                                 mul_vec3(v, static_cast<float>(std::sin(angle) * radius))));
+            std::array<double, 2> screen{};
+            if (!project_world_to_screen(camera, world, screen)) {
+                projectable = false;
+                break;
+            }
+            points.push_back({screen[0], screen[1]});
+        }
+        if (projectable && points.size() >= 3) {
+            rings[axis_name]["points"] = points;
+        }
+    }
+    return rings;
+}
+
+void send_gizmo_event(const CefRefPtr<CefFrame>& frame,
+                      const char* event_name,
+                      const nlohmann::json& payload) {
+    if (!frame) {
+        return;
+    }
+    const std::string js = "window.__coronaEmit&&window.__coronaEmit(" +
+                           nlohmann::json(event_name).dump() + "," + payload.dump() + ")";
+    frame->ExecuteJavaScript(js, "", 0);
 }
 
 bool handle_compute_actor_focus_pose_fast(const CefRefPtr<CefFrame>& frame,
