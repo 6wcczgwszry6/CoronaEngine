@@ -1,5 +1,5 @@
 <template>
-  <div class="lanchat-panel relative flex flex-col h-full text-gray-100">
+  <div class="lanchat-panel relative flex flex-col h-full text-[15px] text-gray-100">
     <!-- 未进房：大厅（开房 / 加入） -->
     <div v-if="!s.inRoom" class="flex-1 overflow-y-auto p-4 space-y-4">
       <!-- tab 切换 -->
@@ -68,7 +68,7 @@
     <!-- 已进房：聊天界面 -->
     <div v-else class="flex flex-col h-full">
       <!-- 房间信息条 -->
-      <div class="flex items-center justify-between px-3 py-2 bg-[#3a3a3a]/70 text-xs">
+      <div class="flex items-center justify-between px-3 py-2 bg-[#3a3a3a]/70 text-sm">
         <span>
           房间 <b>{{ s.room }}</b>
           <template v-if="s.role === 'host' && s.mode === 'multi'"> · {{ s.ip }}:{{ s.port }}</template>
@@ -88,7 +88,7 @@
       <!-- 重连提示条 -->
       <div
         v-if="s.connection === 'reconnecting'"
-        class="px-3 py-1 bg-yellow-500/20 text-yellow-300 text-xs flex items-center gap-2"
+        class="px-3 py-1.5 bg-yellow-500/20 text-yellow-300 text-sm flex items-center gap-2"
       >
         <span class="inline-block w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></span>
         连接已断开
@@ -96,13 +96,13 @@
 
       <div
         v-if="currentDisclosure"
-        class="px-3 py-2 border-b border-gray-700 bg-[#242424] text-xs"
+        class="px-3 py-2.5 border-b border-gray-700 bg-[#242424] text-sm"
       >
         <div class="flex items-center justify-between gap-2">
           <div class="min-w-0">
             <div class="text-[#B8D58D] font-medium truncate">{{ currentDisclosure.stage || '协作状态' }}</div>
-            <div class="text-gray-300 leading-snug mt-0.5">{{ currentDisclosure.public_message }}</div>
-            <div v-if="resourceDiagnosisText" class="text-gray-400 leading-snug mt-1">
+            <div class="text-gray-300 leading-relaxed mt-0.5">{{ currentDisclosure.public_message }}</div>
+            <div v-if="resourceDiagnosisText" class="text-gray-400 leading-relaxed mt-1">
               {{ resourceDiagnosisText }}
             </div>
           </div>
@@ -155,7 +155,7 @@
 
       <div
         v-if="s.role === 'host'"
-        class="px-3 py-1.5 border-b border-gray-700 bg-[#202020] text-xs flex items-center justify-between gap-2"
+        class="px-3 py-2 border-b border-gray-700 bg-[#202020] text-sm flex items-center justify-between gap-2"
       >
         <label class="flex items-center gap-2 text-gray-300 cursor-pointer select-none">
           <input
@@ -172,16 +172,16 @@
       <div class="flex flex-1 min-h-0">
         <!-- 消息区 -->
         <div class="flex-1 flex flex-col min-h-0">
-          <div ref="msgRef" class="flex-1 overflow-y-auto p-3 space-y-2">
+          <div ref="msgRef" class="flex-1 overflow-y-auto p-4 space-y-3">
             <div
               v-for="(m, idx) in s.messages"
               :key="idx"
               class="flex flex-col"
               :class="m.self ? 'items-end' : 'items-start'"
             >
-              <span class="text-[10px] text-gray-400">{{ m.from }}</span>
+              <span class="text-xs text-gray-400 mb-0.5">{{ m.from }}</span>
               <div
-                class="px-3 py-1.5 rounded-lg text-sm max-w-[80%] break-words"
+                class="px-3 py-2 rounded-lg text-[15px] leading-relaxed max-w-[86%] break-words"
                 :class="m.self ? 'bg-[#84A65B] text-white' : 'bg-[#E8E8E8]/90 text-gray-800'"
               >
                 {{ m.text }}
@@ -207,7 +207,7 @@
           </div>
 
           <!-- 输入区 -->
-          <div class="p-2 border-t border-gray-600 flex gap-2">
+          <div class="p-3 border-t border-gray-600 flex gap-2">
             <div class="relative flex-1">
               <input
                 ref="draftInput"
@@ -235,7 +235,7 @@
               </div>
             </div>
             <button
-              class="px-4 rounded bg-[#84A65B] text-white text-sm disabled:opacity-50"
+              class="px-4 rounded bg-[#84A65B] text-white text-[15px] disabled:opacity-50"
               :disabled="s.connection === 'reconnecting'"
               @click="onSend"
             >
@@ -245,7 +245,7 @@
         </div>
 
         <!-- 成员区 -->
-        <div class="w-28 border-l border-gray-600 py-2 overflow-y-auto">
+        <div class="w-32 border-l border-gray-600 py-2 overflow-y-auto">
         <MemberList
           :members="s.members"
           :agents="s.agents"
@@ -380,7 +380,7 @@ const form = reactive({
 });
 
 const inputCls =
-  'w-full px-3 py-2 rounded bg-[#2a2a2a] border border-gray-600 text-sm text-gray-100 outline-none focus:border-[#84A65B]';
+  'w-full px-3 py-2 rounded bg-[#2a2a2a] border border-gray-600 text-[15px] text-gray-100 outline-none focus:border-[#84A65B]';
 
 const ERROR_TEXT = {
   WRONG_PASSWORD: '密码错误',

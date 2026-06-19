@@ -1910,6 +1910,7 @@ class SceneComposer:
             "metadata": {
                 "scene_name": self.scene_name, "room_size": self.room_size,
                 "skip_six_view_capture": True,  # 跳过截图，避免引擎渲染死锁导致页面卡死
+                "progress_sink": getattr(self, "_model_retrieval_progress_sink", None),
             },
             "global_assets": {
                 "multi_scene": {
@@ -2114,7 +2115,11 @@ class SceneComposer:
 
         # ── Phase 1: generate_all (并行, 纯 API) ──
         emit_stage(32, "准备所需模型", "正在获取主体和物件资源，界面可能需要等待一会儿。")
-        resolved = self._run_model_retrieval(items)
+        self._model_retrieval_progress_sink = progress_sink
+        try:
+            resolved = self._run_model_retrieval(items)
+        finally:
+            self._model_retrieval_progress_sink = None
         if not resolved:
             reasons = getattr(self, "_last_fail_reasons", [])
             detail = ("；".join(reasons[:3]) + ("…" if len(reasons) > 3 else "")) if reasons else "未知原因"

@@ -885,6 +885,8 @@ def test_scene_composer_passes_generated_images_to_model_retrieval_workflow():
             captured["model_path"] = model_path
 
             composer = SceneComposer(scene_name="image_stage_test", max_items=1)
+            progress_messages = []
+            composer._model_retrieval_progress_sink = progress_messages.append
             resolved = composer._run_model_retrieval([{
                 "name": "天使雕像",
                 "keywords": "fantasy angel statue",
@@ -904,8 +906,12 @@ def test_scene_composer_passes_generated_images_to_model_retrieval_workflow():
         captured["state"]["global_assets"]["multi_scene"]["generated_images"]
     )
     assert generated_images == {"天使雕像": "fileid://angel-image"}
+    sink = captured["state"]["metadata"].get("progress_sink")
+    assert callable(sink)
+    sink("资源准备-模型：测试进度")
+    assert progress_messages == ["资源准备-模型：测试进度"]
     assert resolved[0]["model_path"] == captured["model_path"]
-    print("[OK] SceneComposer passes explicit batch images into model retrieval workflow")
+    print("[OK] SceneComposer passes explicit batch images and progress sink into model retrieval workflow")
 
 
 def test_pending_resource_request_backlog_is_visible_when_batch_limit_is_hit():

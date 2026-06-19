@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, List
 
@@ -12,9 +13,12 @@ from Quasar.ai_workflow.streaming import stream_output_node
 
 from .formatters import NO_OUTPUT
 from .helpers import normalize_object_id
+from .progress import publish_user_progress
 from .test_cases import get_test_case
 
 logger = logging.getLogger(__name__)
+
+_IMAGE_RETRY_HEARTBEAT_SECONDS = 60.0
 
 
 def _lookup_cached_model(item_name: str) -> str:
@@ -158,6 +162,26 @@ def _retry_failed_images(
     return recovered
 
 
+def _start_image_retry_heartbeat(
+    state: ModelRetrievalWorkflowState,
+    *,
+    total: int,
+) -> threading.Event:
+    stop_event = threading.Event()
+
+    def _run() -> None:
+        while not stop_event.wait(_IMAGE_RETRY_HEARTBEAT_SECONDS):
+            publish_user_progress(
+                state,
+                "image_heartbeat",
+                f"参考图片仍在准备中，本轮共 {total} 个物件；你可以继续补充要求。",
+                progress=38,
+            )
+
+    threading.Thread(target=_run, daemon=True).start()
+    return stop_event
+
+
 @stream_output_node("integrated", NO_OUTPUT)
 def dispatch_node(state: ModelRetrievalWorkflowState) -> Dict[str, Any]:
     """从第一步的输出中组装每个物体的检索/生成任务。"""
@@ -235,8 +259,35 @@ def dispatch_node(state: ModelRetrievalWorkflowState) -> Dict[str, Any]:
             "[Workflow][dispatch] %s 个元素无生成图片，尝试补偿重试",
             len(failed_elements),
         )
+        publish_user_progress(
+            state,
+            "image_start",
+            f"正在为 {len(failed_elements)} 个物件准备参考图片，期间可以继续补充要求。",
+            progress=34,
+            force=True,
+        )
         session_id = str(state.get("session_id", "default") or "default")
-        recovered = _retry_failed_images(failed_elements, session_id)
+        heartbeat_stop = _start_image_retry_heartbeat(state, total=len(failed_elements))
+        try:
+            recovered = _retry_failed_images(failed_elements, session_id)
+        finally:
+            heartbeat_stop.set()
+        if recovered:
+            publish_user_progress(
+                state,
+                "image_done",
+                f"参考图片已准备 {len(recovered)}/{len(failed_elements)}，未完成的会降级为文字直生模型。",
+                progress=42,
+                force=True,
+            )
+        else:
+            publish_user_progress(
+                state,
+                "image_degraded",
+                "参考图片暂不可用，已切换为文字直生模型，不会卡住主流程。",
+                progress=42,
+                force=True,
+            )
         for idx_offset, elem in enumerate(failed_elements, start=len(tasks) + 1):
             name = elem.get("item_name", "")
             image_url = recovered.get(name, "")
@@ -273,6 +324,13 @@ def dispatch_node(state: ModelRetrievalWorkflowState) -> Dict[str, Any]:
         return {"error": "所有物体均无生成图片，无法进行模型检索"}
 
     logger.info("[Workflow][dispatch] 组装 %s 个检索/生成任务", len(tasks))
+    publish_user_progress(
+        state,
+        "retrieval_prepare",
+        f"已整理 {len(tasks)} 个资源请求，准备检索本地素材或生成模型。",
+        progress=44,
+        force=True,
+    )
     return {
         "intermediate": {
             **state.get("intermediate", {}),

@@ -10,6 +10,7 @@ from Quasar.ai_workflow.streaming import stream_output_node
 
 from .constants import SEARCH_MAX_WORKERS
 from .formatters import NO_OUTPUT, publish_node_progress
+from .progress import publish_user_progress
 from .helpers import get_search_tool, parse_search_result
 from .local_model_library import lookup_model
 from .test_cases import get_test_case
@@ -329,6 +330,21 @@ def retrieve_node(state: ModelRetrievalWorkflowState) -> Dict[str, Any]:
     search_tool = get_search_tool()
     if not search_tool:
         logger.warning("[Workflow][retrieve] 检索工具不可用，将全部走生成")
+        publish_user_progress(
+            state,
+            "retrieval_degraded",
+            "素材检索当前不可用，已切换为直接生成模型。",
+            progress=48,
+            force=True,
+        )
+    else:
+        publish_user_progress(
+            state,
+            "retrieval_start",
+            f"正在检索可复用素材，共 {len(tasks)} 个资源请求。",
+            progress=46,
+            force=True,
+        )
 
     retrieval_results: List[Dict[str, Any]] = []
     pending_generation: List[Dict[str, Any]] = []
@@ -415,6 +431,13 @@ def retrieve_node(state: ModelRetrievalWorkflowState) -> Dict[str, Any]:
         "[Workflow][retrieve] 完成: 检索命中 %s, 待生成 %s",
         len(retrieval_results),
         len(pending_generation),
+    )
+    publish_user_progress(
+        state,
+        "retrieval_done",
+        f"素材检索完成：命中 {len(retrieval_results)} 个，需要生成 {len(pending_generation)} 个。",
+        progress=52,
+        force=True,
     )
 
     return {

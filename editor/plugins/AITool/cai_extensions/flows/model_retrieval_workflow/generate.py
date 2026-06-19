@@ -17,11 +17,14 @@ from .formatters import (
     NO_OUTPUT,
     publish_node_progress,
 )
+from .progress import publish_user_progress
 from .helpers import get_3d_generate_tool, parse_3d_result
 from .local_model_library import save_model
 from .test_cases import get_test_case
 
 logger = logging.getLogger(__name__)
+
+_MODEL_BATCH_WAIT_SECONDS = 15.0
 
 
 def _generation_batch_count() -> int:
@@ -421,6 +424,14 @@ def generate_node(state: ModelRetrievalWorkflowState) -> Dict[str, Any]:
         max_workers,
         GENERATION_MAX_WORKERS,
     )
+    if pending_generation:
+        publish_user_progress(
+            state,
+            "model_start",
+            f"开始生成 {len(pending_generation)} 个模型，将分 {len(generation_batches)} 批处理。",
+            progress=54,
+            force=True,
+        )
     for batch_index, batch in enumerate(generation_batches, 1):
         batch_workers = min(len(batch), GENERATION_MAX_WORKERS) or 1
         batch_names = [str(task.get("item_name") or "?") for task in batch]
@@ -432,49 +443,81 @@ def generate_node(state: ModelRetrievalWorkflowState) -> Dict[str, Any]:
             batch_workers,
             "、".join(batch_names[:6]),
         )
+        publish_user_progress(
+            state,
+            "model_batch_start",
+            f"第 {batch_index}/{len(generation_batches)} 批模型生成中：{'、'.join(batch_names[:4])}。",
+            progress=55 + int((batch_index - 1) / max(1, len(generation_batches)) * 18),
+            force=True,
+        )
         with concurrent.futures.ThreadPoolExecutor(max_workers=batch_workers) as pool:
             futures = {
                 pool.submit(generate_single_item, task, generate_tool, session_id): task
                 for task in batch
             }
-            for future in concurrent.futures.as_completed(futures):
-                task = futures[future]
-                try:
-                    result = future.result()
-                except Exception as e:
-                    logger.error(
-                        "[Workflow][generate] %s 生成任务异常: %s",
-                        task.get("item_name", "?"),
-                        e,
-                    )
-                    result = {
-                        "item_name": task.get("item_name", "未知"),
-                        "object_id": task.get("object_id", ""),
-                        "task_index": task.get("task_index", 0),
-                        "input_image_url": task.get("input_image_url", ""),
-                        "source": "generation",
-                        "error": str(e),
-                    }
-
-                result.setdefault("generation_batch_index", batch_index)
-                result.setdefault("generation_batch_total", len(generation_batches))
-                generated_results.append(result)
-                completed_count += 1
-                publish_node_progress(
-                    state,
-                    result,
-                    node_name="generate",
-                    done_count=completed_count,
-                    total_count=len(pending_generation),
+            pending_futures = set(futures)
+            while pending_futures:
+                done_futures, pending_futures = concurrent.futures.wait(
+                    pending_futures,
+                    timeout=_MODEL_BATCH_WAIT_SECONDS,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
                 )
-                # 排入六视图拍摄队列（跳过时为 None，捕获线程不启动）
-                capture_queue.put(result)
+                if not done_futures:
+                    publish_user_progress(
+                        state,
+                        "model_batch_heartbeat",
+                        (
+                            f"第 {batch_index}/{len(generation_batches)} 批模型仍在生成，"
+                            f"已完成 {completed_count}/{len(pending_generation)}。"
+                        ),
+                        progress=55 + int((batch_index - 1) / max(1, len(generation_batches)) * 18),
+                    )
+                    continue
+                for future in done_futures:
+                    task = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        logger.error(
+                            "[Workflow][generate] %s 生成任务异常: %s",
+                            task.get("item_name", "?"),
+                            e,
+                        )
+                        result = {
+                            "item_name": task.get("item_name", "未知"),
+                            "object_id": task.get("object_id", ""),
+                            "task_index": task.get("task_index", 0),
+                            "input_image_url": task.get("input_image_url", ""),
+                            "source": "generation",
+                            "error": str(e),
+                        }
+
+                    result.setdefault("generation_batch_index", batch_index)
+                    result.setdefault("generation_batch_total", len(generation_batches))
+                    generated_results.append(result)
+                    completed_count += 1
+                    publish_node_progress(
+                        state,
+                        result,
+                        node_name="generate",
+                        done_count=completed_count,
+                        total_count=len(pending_generation),
+                    )
+                    # 排入六视图拍摄队列（跳过时为 None，捕获线程不启动）
+                    capture_queue.put(result)
         logger.info(
             "[Workflow][generate] 3D generation batch %s/%s done: completed=%s/%s",
             batch_index,
             len(generation_batches),
             completed_count,
             len(pending_generation),
+        )
+        publish_user_progress(
+            state,
+            "model_batch_done",
+            f"第 {batch_index}/{len(generation_batches)} 批模型完成，累计 {completed_count}/{len(pending_generation)}。",
+            progress=58 + int(batch_index / max(1, len(generation_batches)) * 18),
+            force=True,
         )
 
     # 通知拍摄线程所有生成已完成

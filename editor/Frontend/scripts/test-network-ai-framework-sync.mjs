@@ -10,10 +10,19 @@ const fail = (message) => {
 const assertIncludes = (source, needle, message) => {
   if (!source.includes(needle)) fail(message);
 };
+const assertNotIncludes = (source, needle, message) => {
+  if (source.includes(needle)) fail(message);
+};
 
 const networkPanel = read('src/views/sidebar/Network.vue');
 const syncPolicy = read('../CoronaCore/core/network_sync_policy.py');
 const networkSystem = read('../../src/systems/network/network_system.cpp');
+
+assertIncludes(
+  networkPanel,
+  'space-y-4 text-sm',
+  'Network collaboration panel must keep readable text size in CEF validation'
+);
 
 for (const name of [
   '__room_box',
@@ -107,6 +116,15 @@ assertIncludes(
   networkPanel,
   'snapshotActorCreateKeys',
   'Network panel must dedupe actor-create packets sent as snapshot request fallback'
+);
+const broadcastSnapshotBody = networkPanel.slice(
+  broadcastSnapshotStart,
+  networkPanel.indexOf('async function requestSceneSnapshotOnce')
+);
+assertNotIncludes(
+  broadcastSnapshotBody,
+  'snapshotActorCreateKeys.clear()',
+  'Explicit snapshot requests must not clear actor-create dedupe state and resend all model imports'
 );
 assertIncludes(
   networkPanel,

@@ -128,10 +128,10 @@ def test_network_host_periodic_snapshot_does_not_rebroadcast_actor_creates() -> 
     source = _read("editor/Frontend/src/views/sidebar/Network.vue")
     expected = (
         "if (count > 0 && sessionRole.value === 'host') {\n"
-        "        await broadcastCurrentSceneSnapshot(currentSceneName.value, false);"
+        "        await broadcastCurrentSceneSnapshot(currentSceneName.value, false, false);"
     )
     assert expected in source, "host polling must not rebroadcast actor create every 2 seconds"
-    assert "await broadcastCurrentSceneSnapshot(sceneName, true);" in source, (
+    assert "await broadcastCurrentSceneSnapshot(sceneName, true, true);" in source, (
         "host must still send actor creates when a client explicitly requests a full snapshot"
     )
 

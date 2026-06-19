@@ -962,6 +962,37 @@ def test_scene_composer_job_runner_limits_append_job_and_keeps_style_contract():
     print("[OK] SceneComposerJobRunner constrains post-generation append jobs")
 
 
+def test_scene_composer_job_runner_fails_paused_progressive_compose():
+    class FakeComposer:
+        def compose(self, text, **kwargs):
+            return {
+                "paused": True,
+                "paused_mode": "DISCUSSING",
+                "paused_before_phase": "INTERIOR",
+                "imported": [],
+            }
+
+    runner = SceneComposerJobRunner(lambda: FakeComposer())
+    scheduler = GenerationScheduler(
+        stage_handlers=runner.stage_handlers(),
+        stage_order=("compose",),
+    )
+    try:
+        submitted = scheduler.submit({
+            "plan_id": "seed-compose-paused",
+            "session_id": "sess-paused",
+            "room_id": "room-a",
+            "seed_plan": {"intent_summary": "室外夜市"},
+        })
+        final = scheduler.wait(submitted["job_id"], timeout=2.0)
+    finally:
+        scheduler.shutdown()
+
+    assert final["status"] == "failed"
+    assert "generation paused before INTERIOR" in final.get("error", "")
+    print("[OK] SceneComposerJobRunner fails paused progressive compose instead of fake done")
+
+
 def test_provider_stage_runner_maps_provider_lifecycle_to_scheduler():
     calls = []
 
@@ -1154,6 +1185,7 @@ if __name__ == "__main__":
     test_scene_composer_job_runner_passes_seed_plan_context_to_compose()
     test_scene_composer_job_runner_passes_target_actor_from_intervention()
     test_scene_composer_job_runner_limits_append_job_and_keeps_style_contract()
+    test_scene_composer_job_runner_fails_paused_progressive_compose()
     test_provider_stage_runner_maps_provider_lifecycle_to_scheduler()
     test_provider_stage_runner_uses_runtime_provider_without_payload_leak()
     test_deferred_download_provider_runs_under_scheduler_download_stage()

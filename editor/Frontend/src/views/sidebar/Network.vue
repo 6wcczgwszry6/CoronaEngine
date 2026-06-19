@@ -10,7 +10,7 @@
       @close="closeFloat"
     />
 
-    <div class="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4 text-xs">
+    <div class="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4 text-sm">
       <!-- ═══ 会话控制 ═══ -->
       <div class="space-y-3">
         <div class="flex flex-col gap-1">
@@ -20,7 +20,7 @@
             type="text"
             maxlength="31"
             placeholder="输入名称..."
-            class="bg-[#1e1e1e] border border-gray-600 rounded px-2 py-1 text-white focus:border-[#4a9eff] focus:outline-none"
+            class="bg-[#1e1e1e] border border-gray-600 rounded px-2 py-1.5 text-white focus:border-[#4a9eff] focus:outline-none"
           />
         </div>
 
@@ -31,7 +31,7 @@
             type="number"
             min="1024"
             max="65535"
-            class="bg-[#1e1e1e] border border-gray-600 rounded px-2 py-1 text-white w-24 focus:border-[#4a9eff] focus:outline-none"
+            class="bg-[#1e1e1e] border border-gray-600 rounded px-2 py-1.5 text-white w-24 focus:border-[#4a9eff] focus:outline-none"
           />
         </div>
 
@@ -72,7 +72,7 @@
             v-model="remoteIp"
             type="text"
             placeholder="192.168.1.100"
-            class="bg-[#1e1e1e] border border-gray-600 rounded px-2 py-1 text-white focus:border-[#4a9eff] focus:outline-none"
+            class="bg-[#1e1e1e] border border-gray-600 rounded px-2 py-1.5 text-white focus:border-[#4a9eff] focus:outline-none"
           />
         </div>
         <div class="flex gap-2">
@@ -83,7 +83,7 @@
               type="number"
               min="1024"
               max="65535"
-              class="bg-[#1e1e1e] border border-gray-600 rounded px-2 py-1 text-white w-24 focus:border-[#4a9eff] focus:outline-none"
+              class="bg-[#1e1e1e] border border-gray-600 rounded px-2 py-1.5 text-white w-24 focus:border-[#4a9eff] focus:outline-none"
             />
           </div>
           <div class="flex flex-col gap-1 flex-1">
@@ -92,7 +92,7 @@
               v-model="remotePeerName"
               type="text"
               placeholder="可选"
-              class="bg-[#1e1e1e] border border-gray-600 rounded px-2 py-1 text-white focus:border-[#4a9eff] focus:outline-none"
+              class="bg-[#1e1e1e] border border-gray-600 rounded px-2 py-1.5 text-white focus:border-[#4a9eff] focus:outline-none"
             />
           </div>
         </div>
@@ -601,7 +601,6 @@ async function broadcastCurrentSceneSnapshot(sceneName, includeActorCreates, for
   if (!snapshot || snapshot.status === 'error') return;
   const actors = Array.isArray(snapshot.actors) ? snapshot.actors : [];
   if (includeActorCreates) {
-    snapshotActorCreateKeys.clear();
     for (const actor of actors) {
       if (!isActorSyncable(actor)) continue;
       const actorGuid = actor.actor_guid || '';

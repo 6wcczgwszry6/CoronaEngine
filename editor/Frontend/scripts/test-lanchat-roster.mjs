@@ -67,6 +67,9 @@ assertIncludes(store, 'lanChatService.startRoom', 'multiplayer rooms must keep u
 assertIncludes(roomPanel, 'member.member_id !== s.peerId', 'mention candidates must filter local member_id');
 assertIncludes(roomPanel, 'a.name, isAgent: true', 'mention candidates must include agents');
 assertIncludes(roomPanel, ':peer-id="s.peerId"', 'MemberList must receive stable peerId');
+assertIncludes(roomPanel, 'text-[15px]', 'RoomPanel must keep readable 15px chat/input text for CEF validation');
+assertIncludes(roomPanel, 'leading-relaxed', 'RoomPanel message bubbles must keep readable line height');
+assertIncludes(roomPanel, 'w-32 border-l', 'RoomPanel member rail must be wide enough for readable names');
 assertIncludes(roomPanel, 'isJoining', 'RoomPanel must render pending join state');
 assertIncludes(roomPanel, ':disabled="isJoining"', 'RoomPanel must disable join controls while pending');
 assertIncludes(roomPanel, 'JOIN_TIMEOUT', 'RoomPanel must display join timeout errors');
@@ -137,6 +140,7 @@ assertIncludes(roomPanel, "s.mode === 'multi'", 'RoomPanel must only show host I
 
 assertIncludes(memberList, 'peerId', 'MemberList must accept peerId prop');
 assertIncludes(memberList, 'a.owner === peerId', 'agent remove visibility must compare owner to peerId');
+assertIncludes(memberList, '<div class="text-sm">', 'MemberList must keep readable CEF font size');
 
 assertIncludes(networkHeader, 'session_port() const', 'NetworkSystem must expose the active ENet listen port');
 assertIncludes(networkHeader, 'lanchat_start_local_room', 'NetworkSystem must expose a local LANChat room path that does not start collaboration networking');

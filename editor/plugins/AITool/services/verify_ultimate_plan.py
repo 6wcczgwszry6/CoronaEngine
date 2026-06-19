@@ -30,13 +30,21 @@ PYTHON_TESTS = [
     "editor/plugins/AITool/cai_extensions/agent/test_scene_session.py",
     "editor/plugins/AITool/cai_extensions/agent/test_scene_composer_progressive_geometry.py",
     "editor/plugins/AITool/cai_extensions/agent/test_vlm_review_loop.py",
+    "editor/plugins/AITool/cai_extensions/flows/model_retrieval_workflow/test_resource_progress.py",
+    "editor/plugins/AITool/cai_extensions/flows/model_retrieval_workflow/test_search_tool_precheck.py",
+    "editor/plugins/AITool/cai_extensions/flows/model_retrieval_workflow/test_retrieve_search_circuit.py",
+    "editor/plugins/AITool/cai_extensions/flows/model_retrieval_workflow/test_dispatch_image_retry.py",
+    "editor/plugins/AITool/cai_extensions/flows/model_retrieval_workflow/test_generate_batching.py",
     "editor/plugins/AITool/cai_extensions/flows/scene_composition_workflow/test_incremental_import.py",
     "editor/plugins/LANChat/server/test_gm_arbiter.py",
+    "docs/probes/test_v3_f5_log_check.py",
+    "docs/probes/test_v3_f5_quick_gate.py",
 ]
 
 NODE_TESTS = [
     "editor/Frontend/src/stores/lanchatDisclosure.test.mjs",
     "editor/Frontend/scripts/test-lanchat-roster.mjs",
+    "editor/Frontend/scripts/test-network-ai-framework-sync.mjs",
 ]
 
 PY_COMPILE_TARGETS = [
@@ -57,7 +65,15 @@ PY_COMPILE_TARGETS = [
     "editor/plugins/AITool/cai_extensions/agent/scene_composer.py",
     "editor/plugins/AITool/cai_extensions/agent/scene_composer_progressive.py",
     "editor/plugins/AITool/cai_extensions/agent/vlm_review_loop.py",
+    "editor/plugins/AITool/cai_extensions/flows/model_retrieval_workflow/dispatch.py",
+    "editor/plugins/AITool/cai_extensions/flows/model_retrieval_workflow/retrieve.py",
+    "editor/plugins/AITool/cai_extensions/flows/model_retrieval_workflow/generate.py",
+    "editor/plugins/AITool/cai_extensions/flows/model_retrieval_workflow/formatters.py",
+    "editor/plugins/AITool/cai_extensions/flows/model_retrieval_workflow/helpers.py",
+    "editor/plugins/AITool/cai_extensions/flows/model_retrieval_workflow/progress.py",
     "editor/plugins/LANChat/server/gm_arbiter.py",
+    "docs/probes/v3_f5_log_check.py",
+    "docs/probes/v3_f5_quick_gate.py",
 ]
 
 
