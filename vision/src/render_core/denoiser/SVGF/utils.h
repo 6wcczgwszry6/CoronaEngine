@@ -46,21 +46,32 @@ OC_STRUCT(vision::svgf, SVGFDataDual, illumi_direct, illumi_indirect, moments_di
 namespace vision::svgf {
 using SVGFDataDualVar = Var<SVGFDataDual>;
 
-// Half-precision safe clamping utilities
+// Half-precision safe clamping utilities.
+// In the float radiance path (VS_HALF_RADIANCE == 0) there is no overflow risk, and
+// clamping would clip legitimate HDR highlights/emitters and lose energy, so the clamps
+// degrade to identity. They are only active when radiance is stored as half.
 struct HalfSafeUtils {
     using Cfg = SVGFConfig::HalfSafety;
 
     // Clamp luminance to prevent overflow when squaring (for M2 calculation)
     [[nodiscard]] static Float clamp_luminance(Float lum) noexcept {
+#if VS_HALF_RADIANCE
         return ocarina::select(lum > Cfg::kMaxLuminance, Float(Cfg::kMaxLuminance), lum);
+#else
+        return lum;
+#endif
     }
 
     // Clamp radiance to prevent overflow during accumulation
     [[nodiscard]] static Float3 clamp_radiance(Float3 rad) noexcept {
+#if VS_HALF_RADIANCE
         return make_float3(
             ocarina::select(rad.x > Cfg::kMaxRadiance, Float(Cfg::kMaxRadiance), rad.x),
             ocarina::select(rad.y > Cfg::kMaxRadiance, Float(Cfg::kMaxRadiance), rad.y),
             ocarina::select(rad.z > Cfg::kMaxRadiance, Float(Cfg::kMaxRadiance), rad.z));
+#else
+        return rad;
+#endif
     }
 };
 

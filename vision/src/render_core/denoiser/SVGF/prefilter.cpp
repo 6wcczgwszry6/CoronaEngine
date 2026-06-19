@@ -224,6 +224,17 @@ auto compute_spatial_weight = [](Float history) -> Float {
                 output_variance_direct = max(blended_var_direct, Cfg::Variance::kMinVarianceConsistent);
                 output_variance_indirect = max(blended_var_indirect, Cfg::Variance::kMinVarianceConsistent);
 
+                // Disocclusion variance boost (canonical SVGF). Freshly disoccluded / low-history
+                // pixels have an unreliable, too-small temporal variance, so the variance-guided
+                // a-trous weight (phi_l = l_phi*sqrt(var)+min_phi) refuses to blend them and noise
+                // / fireflies survive. For low history, raise the variance floor (and boost it) so
+                // the spatial filter is allowed to smooth aggressively until temporal history is
+                // rebuilt. apply_min_variance degrades to max(var, kMinVarianceConsistent) when the
+                // pixel is NOT low-history, matching the line above (no effect on stable pixels).
+                Bool low_history = history < Cfg::Variance::kHistoryThreshold;
+                output_variance_direct = VarianceUtils::apply_min_variance(output_variance_direct, low_history);
+                output_variance_indirect = VarianceUtils::apply_min_variance(output_variance_indirect, low_history);
+
                 Float radiance_blend = spatial_weight * Cfg::Prefilter::kMaxRadianceBlend;
                 
                 output_direct = firefly_clamped_direct + radiance_blend * (filtered_direct - firefly_clamped_direct);

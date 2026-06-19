@@ -58,7 +58,10 @@ Kernel kernel = [&](Var<CombinedAtrousParam> param) {
             
         Float3 view_dir = normalize(param.camera_pos.as_vec3() - center_it.pos);
             
-        Uint hash_seed = tea<D>(tea<D>(cast<uint>(cur_pixel.x), cast<uint>(cur_pixel.y)), param.iteration);
+        // Mix frame_index into the seed so the rotated Poisson disk jitters every frame;
+        // a frame-static pattern bakes a fixed structured bias that temporal accumulation
+        // cannot average out (which is the whole point of random-rotation a-trous).
+        Uint hash_seed = tea<D>(tea<D>(tea<D>(cast<uint>(cur_pixel.x), cast<uint>(cur_pixel.y)), param.iteration), param.frame_index);
         Float rotation_angle = lcg<D>(hash_seed) * 2.f * Pi;
         Float cos_rot = cos(rotation_angle);
         Float sin_rot = sin(rotation_angle);
