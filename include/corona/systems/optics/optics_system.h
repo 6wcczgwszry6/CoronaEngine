@@ -135,7 +135,8 @@ class OpticsSystem : public Kernel::SystemBase {
     bool load_external_vision_scene(const std::string& scene_path,
                                     Corona::CameraVisionRenderMode mode,
                                     std::optional<VisionPipelineSource> source_override =
-                                        std::nullopt);
+                                        std::nullopt,
+                                    bool force_reload_scene_resource = false);
     void apply_vision_render_mode(Corona::CameraVisionRenderMode mode);
 
     /// 计算当前 SharedDataHub 场景的轻量签名，用于检测动态变化

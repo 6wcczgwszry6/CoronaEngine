@@ -15,11 +15,16 @@ OC_MAKE_INSTANCE_FUNC_DEF_WITH_HOTFIX(MaterialLut, s_material_lut)
 
 void MaterialLut::load_lut(const string &name, uint3 res,
                            PixelStorage storage, const void *data) noexcept {
-    if (lut_map_.contains(name)) {
-        return;
+    BindlessArray &bindless_array = Global::instance().bindless_array();
+    auto iter = lut_map_.find(name);
+    if (iter != lut_map_.end()) {
+        if (iter->second.bindless_array() == &bindless_array) {
+            return;
+        }
+        lut_map_.erase(iter);
     }
     Pipeline *ppl = Global::instance().pipeline();
-    RegistrableTexture3D texture{ppl->bindless_array()};
+    RegistrableTexture3D texture{bindless_array};
     texture.device_tex() = ppl->device().create_texture3d(res,
                                                           storage,
                                                           name);
@@ -29,8 +34,10 @@ void MaterialLut::load_lut(const string &name, uint3 res,
 }
 
 void MaterialLut::unload_lut(const std::string &name) noexcept {
-    if (lut_map_.contains(name)) {
-        lut_map_.erase(name);
+    auto iter = lut_map_.find(name);
+    if (iter != lut_map_.end()) {
+        iter->second.unregister();
+        lut_map_.erase(iter);
     }
 }
 

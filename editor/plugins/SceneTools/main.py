@@ -630,6 +630,25 @@ def _derived_vision_scene_path(source_path: str, scene) -> str:
     return os.path.join(source_dir, f"{source_stem}.corona_{scene_stem}_{suffix}{source_ext or '.json'}")
 
 
+def _atomic_write_json(path: str, document: dict) -> None:
+    directory = os.path.dirname(os.path.abspath(path))
+    temp_path = os.path.join(directory, f".{os.path.basename(path)}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(temp_path, "w", encoding="utf-8") as file:
+            json.dump(document, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            logger.warning("Failed to remove temporary Vision scene file: %s", temp_path)
+        raise
+
+
 def _write_derived_external_live_scene(scene, source_path: str) -> str:
     if not source_path or not os.path.isfile(source_path):
         return source_path
@@ -667,9 +686,7 @@ def _write_derived_external_live_scene(scene, source_path: str) -> str:
 
     _compact_removed_shapes(derived)
     path = _derived_vision_scene_path(source_path, scene)
-    with open(path, "w", encoding="utf-8") as file:
-        json.dump(derived, file, ensure_ascii=False, indent=2)
-        file.write("\n")
+    _atomic_write_json(path, derived)
     return path
 
 

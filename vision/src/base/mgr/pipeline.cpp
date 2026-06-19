@@ -221,9 +221,10 @@ void Pipeline::update_runtime_object(const vision::IObjectConstructor *construct
 
 void Pipeline::invalidate() noexcept {
     integrator()->invalidation();
-    if (frame_buffer()->enable_accumulation()) {
-        total_time_ = 0;
+    if (auto *fb = frame_buffer(); fb != nullptr && fb->enable_accumulation()) {
+        stream_ << fb->clear_accumulation_history() << synchronize() << commit();
     }
+    total_time_ = 0;
 }
 
 void Pipeline::change_resolution(uint2 res) noexcept {
@@ -237,6 +238,7 @@ void Pipeline::change_resolution(uint2 res) noexcept {
     OC_INFO_FORMAT("Pipeline::change_resolution applied framebuffer=({}, {}), raytracing=({}, {})",
                    frame_buffer()->resolution().x, frame_buffer()->resolution().y,
                    frame_buffer()->raytracing_resolution().x, frame_buffer()->raytracing_resolution().y);
+    upload_scene_bindless_array();
     upload_bindless_array();
 }
 
@@ -313,6 +315,7 @@ void Pipeline::upload_data() noexcept {
     activate_global_context();
     renderer().upload_data(scene_view_);
     if (scene_view_.has_changed() || renderer().has_changed()) {
+        upload_scene_bindless_array();
         upload_bindless_array();
     }
     for (EncodedObject *object : encoded_objects) {

@@ -226,6 +226,56 @@ class ExternalLiveImportTests(unittest.TestCase):
         self.assertAlmostEqual(vertex[1], 22.0)
         self.assertAlmostEqual(vertex[2], -29.0)
 
+    def test_derived_external_live_scene_write_does_not_truncate_existing_file_on_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            vision_scene = root / "scene.json"
+            vision_scene.write_text(json.dumps({
+                "scene": {
+                    "shapes": [{
+                        "type": "model",
+                        "name": "Chair",
+                        "guid": "shape-chair",
+                        "param": {"fn": "chair.obj"},
+                    }],
+                },
+            }), encoding="utf-8")
+
+            actor = FakeActor(name="Chair", route=str(root / "chair.obj"),
+                              actor_type="model", actor_data={
+                                  "actor_guid": "actor-chair",
+                                  "geometry": {
+                                      "position": [1.0, 2.0, 3.0],
+                                      "rotation": [0.0, 0.0, 0.0],
+                                      "scale": [1.0, 1.0, 1.0],
+                                  },
+                              })
+            scene = SimpleNamespace(
+                route="Scene/main.scene",
+                name="main",
+                vision_bindings=[{
+                    "actor_guid": "actor-chair",
+                    "shape_guid": "shape-chair",
+                    "shape_index": "0",
+                    "json_path": "/scene/shapes/0",
+                    "shape_type": "model",
+                }],
+                get_actors=lambda: [actor],
+            )
+            derived_path = Path(scene_tools_module._derived_vision_scene_path(
+                str(vision_scene), scene))
+            derived_path.write_text("{\"previous\": true}\n", encoding="utf-8")
+
+            with patch.object(scene_tools_module.json, "dump",
+                              side_effect=RuntimeError("simulated write failure")):
+                with self.assertRaises(RuntimeError):
+                    scene_tools_module._write_derived_external_live_scene(
+                        scene, str(vision_scene))
+
+            self.assertEqual(derived_path.read_text(encoding="utf-8"),
+                             "{\"previous\": true}\n")
+            self.assertEqual(list(root.glob(f".{derived_path.name}.*.tmp")), [])
+
     def test_import_creates_proxy_actors_and_persists_bindings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

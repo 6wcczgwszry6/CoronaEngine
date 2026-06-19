@@ -59,7 +59,7 @@ void LightSampler::prepare(BindlessArray &bindless_array, Device &device) noexce
 
 void LightSampler::prepare() noexcept {
     auto rp = pipeline();
-    prepare(rp->bindless_array(), rp->device());
+    prepare(Global::instance().bindless_array(), rp->device());
 }
 
 void LightSampler::update_device_data() const noexcept {

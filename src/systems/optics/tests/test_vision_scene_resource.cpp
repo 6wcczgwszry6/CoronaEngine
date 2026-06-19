@@ -208,6 +208,47 @@ void scene_gpu_resource_is_created_once_per_scene_resource() {
            "VisionSceneResource should retain the shared scene GPU resource");
 }
 
+void explicit_reload_resets_loaded_scene_state() {
+    VisionSceneResource resource;
+    resource.key = VisionSceneResourceKey{"d:/scene/vision_scene.json",
+                                          VisionPipelineSource::ExternalLive};
+    auto* fake_scene = reinterpret_cast<::vision::SceneData*>(0x3000);
+    auto* fake_gpu_resource =
+        reinterpret_cast<::vision::GeometryGpuResource*>(0x4000);
+    resource.set_logical_scene(std::shared_ptr<::vision::SceneData>(
+        fake_scene,
+        [](::vision::SceneData*) {}));
+    resource.set_scene_gpu_resource(std::shared_ptr<::vision::GeometryGpuResource>(
+        fake_gpu_resource,
+        [](::vision::GeometryGpuResource*) {}));
+    resource.external_live_transform_signatures.emplace(42u, 100u);
+    resource.mark_transforms_changed();
+    resource.mark_scene_gpu_transforms_uploaded();
+    resource.upsert_logical_instance({
+        .key = VisionLogicalInstanceKey{.shape_index = 2, .instance_index = 0},
+        .actor_handle = 11u,
+        .transform_signature = 100u,
+        .object_to_world = {1.f, 0.f, 0.f, 0.f,
+                            0.f, 1.f, 0.f, 0.f,
+                            0.f, 0.f, 1.f, 0.f,
+                            0.f, 0.f, 0.f, 1.f},
+    });
+
+    resource.reset_loaded_scene();
+
+    expect(!resource.has_logical_scene(),
+           "explicit external scene reload should discard the previous logical scene");
+    expect(!resource.has_scene_gpu_resource(),
+           "explicit external scene reload should discard previous scene GPU resources");
+    expect(resource.external_live_transform_signatures.empty(),
+           "explicit external scene reload should clear external_live transform cache");
+    expect(resource.logical_instance_count() == 0u,
+           "explicit external scene reload should clear cached logical instances");
+    expect(resource.logical_transform_version == 0u &&
+               resource.scene_gpu_transform_version == 0u,
+           "explicit external scene reload should reset transform versions");
+}
+
 void logical_instance_identity_is_shared_per_scene_resource() {
     VisionSceneResource resource;
     VisionLogicalInstanceRecord first{
@@ -269,6 +310,7 @@ int main() {
     logical_scene_is_created_once_per_scene_resource();
     scene_gpu_resource_lives_on_scene_resource();
     scene_gpu_resource_is_created_once_per_scene_resource();
+    explicit_reload_resets_loaded_scene_state();
     logical_instance_identity_is_shared_per_scene_resource();
     ownership_names_are_stable();
     return 0;

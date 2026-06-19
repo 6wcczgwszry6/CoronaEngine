@@ -9,6 +9,7 @@
 #include "base/mgr/registries.h"
 #include "base/mgr/renderer.h"
 #include "base/mgr/scene.h"
+#include "base/scattering/material.h"
 #include "base/illumination/lightsampler.h"
 #include "render_core/denoiser/SVGF/utils.h"
 
@@ -132,6 +133,12 @@ void image_pool_accepts_explicit_scene_gpu_bindless() {
                                vision::Stream&) noexcept>(
                       &vision::ImagePool::prepare)),
                   void (vision::ImagePool::*)(vision::Stream&) noexcept>);
+}
+
+void material_lut_can_detect_the_active_bindless_owner() {
+    static_assert(std::is_same_v<
+                  decltype(&vision::RegistrableTexture3D::bindless_array),
+                  vision::BindlessArray* (vision::RegistrableTexture3D::*)() const noexcept>);
 }
 
 void geometry_defaults_to_unbound_gpu_resource() {
@@ -338,6 +345,7 @@ int main() {
     spectrum_accepts_scene_material_state();
     svgf_helpers_accept_explicit_scene_resources();
     image_pool_accepts_explicit_scene_gpu_bindless();
+    material_lut_can_detect_the_active_bindless_owner();
     geometry_defaults_to_unbound_gpu_resource();
     geometry_medium_state_is_scene_owned();
     geometry_binds_external_scene_gpu_resource();

@@ -45,7 +45,7 @@ RegistrableTexture3D ImagePool::load_texture(const ShaderNodeDesc &desc) noexcep
         }
     }
     return load_texture(desc,
-                        Global::instance().pipeline()->bindless_array(),
+                        Global::instance().bindless_array(),
                         Global::instance().device());
 }
 
@@ -56,8 +56,14 @@ RegistrableTexture3D &ImagePool::obtain_texture(const ShaderNodeDesc &desc,
     if (!is_contain(hash)) {
         textures_.insert(make_pair(hash, load_texture(desc, bindless_array, device)));
     } else {
-        auto scene_path = Global::instance().scene_path();
-        OC_INFO_FORMAT("image load: find {} from image pool", (scene_path / desc.file_name()).string().c_str());
+        auto iter = textures_.find(hash);
+        if (iter->second.bindless_array() != &bindless_array) {
+            textures_.erase(iter);
+            textures_.insert(make_pair(hash, load_texture(desc, bindless_array, device)));
+        } else {
+            auto scene_path = Global::instance().scene_path();
+            OC_INFO_FORMAT("image load: find {} from image pool", (scene_path / desc.file_name()).string().c_str());
+        }
     }
     return textures_[hash];
 }
@@ -71,7 +77,7 @@ RegistrableTexture3D &ImagePool::obtain_texture(const ShaderNodeDesc &desc) noex
         }
     }
     return obtain_texture(desc,
-                          Global::instance().pipeline()->bindless_array(),
+                          Global::instance().bindless_array(),
                           Global::instance().device());
 }
 

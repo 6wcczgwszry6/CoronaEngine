@@ -2509,7 +2509,10 @@ bool OpticsSystem::init_vision_lazy() {
             const auto requested_mode = mode_selection.has_visible_camera
                                             ? mode_selection.mode
                                             : current_vision_render_mode_;
-            if (!load_external_vision_scene(*pending_external_scene, requested_mode)) {
+            if (!load_external_vision_scene(*pending_external_scene,
+                                            requested_mode,
+                                            std::nullopt,
+                                            true)) {
                 CFW_LOG_ERROR("OpticsSystem: failed to initialize Vision from external scene: {}",
                               *pending_external_scene);
                 return false;
@@ -2811,7 +2814,7 @@ void OpticsSystem::apply_pending_vision_scene_load() {
                                     ? mode_selection.mode
                                     : current_vision_render_mode_;
     if (!path.empty()) {
-        if (load_external_vision_scene(path, requested_mode)) {
+        if (load_external_vision_scene(path, requested_mode, std::nullopt, true)) {
             const auto& runtime = active_vision_runtime();
             vision_applied_signature_ = 0;
             vision_pending_signature_ = 0;
@@ -2975,8 +2978,9 @@ void OpticsSystem::apply_vision_render_mode(CameraVisionRenderMode mode) {
 }
 
 bool OpticsSystem::load_external_vision_scene(const std::string& scene_path,
-                                             CameraVisionRenderMode mode,
-                                             std::optional<VisionPipelineSource> source_override) {
+                                              CameraVisionRenderMode mode,
+                                              std::optional<VisionPipelineSource> source_override,
+                                              bool force_reload_scene_resource) {
     try {
         const auto source = source_override.value_or(
             has_external_live_bindings_for_scene(scene_path)
@@ -2986,6 +2990,11 @@ bool OpticsSystem::load_external_vision_scene(const std::string& scene_path,
         auto scene_resource = get_or_create_vision_scene_resource(
             make_vision_scene_resource_key(scene_path, source),
             scene_path);
+        if (force_reload_scene_resource && scene_resource) {
+            CFW_LOG_INFO("OpticsSystem: reloading shared Vision scene resource ({})",
+                         describe_vision_scene_resource_key(scene_resource->key));
+            scene_resource->reset_loaded_scene();
+        }
         auto pipeline = import_vision_scene_from_file(
             std::filesystem::u8path(scene_path), mode, scene_resource, source);
         if (!pipeline) {

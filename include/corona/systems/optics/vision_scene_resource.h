@@ -185,6 +185,15 @@ struct VisionSceneResource {
         scene_gpu_resource = std::move(resource);
     }
 
+    void reset_loaded_scene() noexcept {
+        logical_scene.reset();
+        scene_gpu_resource.reset();
+        logical_transform_version = 0;
+        scene_gpu_transform_version = 0;
+        external_live_transform_signatures.clear();
+        logical_instances.clear();
+    }
+
     std::shared_ptr<::vision::GeometryGpuResource> ensure_scene_gpu_resource(
         const std::function<std::shared_ptr<::vision::GeometryGpuResource>()>& factory) {
         if (!scene_gpu_resource) {

@@ -55,7 +55,7 @@ void TRegistry<T>::prepare(BindlessArray &bindless_array, Device &device) noexce
 template<typename T>
 void TRegistry<T>::prepare() noexcept {
     auto rp = Global::instance().pipeline();
-    prepare(rp->bindless_array(), rp->device());
+    prepare(Global::instance().bindless_array(), rp->device());
 }
 
 template<typename T>
@@ -69,7 +69,7 @@ template<typename T>
 void TRegistry<T>::remedy() noexcept {
     elements_.remedy();
     auto rp = Global::instance().pipeline();
-    elements_.prepare(rp->bindless_array(), rp->device());
+    elements_.prepare(Global::instance().bindless_array(), rp->device());
 }
 
 template<typename T>

@@ -24,7 +24,11 @@ Pipeline *Global::pipeline() {
 }
 
 BindlessArray &Global::bindless_array() {
-    return pipeline()->bindless_array();
+    auto *rp = pipeline();
+    if (rp->scene().geometry().has_gpu_resource()) {
+        return rp->scene().geometry().bindless_array();
+    }
+    return rp->bindless_array();
 }
 
 void Global::set_scene_path(const fs::path &sp) noexcept {
