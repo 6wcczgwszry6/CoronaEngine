@@ -24,7 +24,7 @@ void BrowserManager::destroy_tab_texture(BrowserTab* tab) {
 
     auto it = owned_images_.find(tab->texture_id);
     if (it != owned_images_.end()) {
-        browser_upload_executor_.wait(it->second.upload_receipt);
+        browser_upload_executor_.wait_idle(it->second.upload_receipt);
         owned_images_.erase(it);
     }
 

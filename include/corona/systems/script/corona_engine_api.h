@@ -30,8 +30,13 @@ class Geometry {
 
     Geometry(const Geometry&) = delete;
     Geometry& operator=(const Geometry&) = delete;
-    Geometry(Geometry&&) noexcept = default;
-    Geometry& operator=(Geometry&&) noexcept = default;
+    Geometry(Geometry&& other) noexcept;
+    Geometry& operator=(Geometry&& other) noexcept;
+
+    /// 从图片文件创建一个带贴图的 quad（两个三角形）几何，用作 UI 平面。
+    /// 与普通模型几何不同：不经 Resource::Scene，程序化生成顶点并直接把图片作为
+    /// albedo texture 上传。失败时返回一个所有 handle 为 0 的空 Geometry。
+    [[nodiscard]] static Geometry from_image(const std::string& image_path);
 
     void set_position(const std::array<float, 3>& pos);
     void set_rotation(const std::array<float, 3>& euler);
@@ -48,6 +53,9 @@ class Geometry {
     friend class Mechanics;
     friend class Optics;
     friend class Acoustics;
+
+    /// 空几何（所有 handle 为 0）。仅供 from_image 等静态工厂内部使用。
+    Geometry() = default;
 
    protected:
     [[nodiscard]] std::uintptr_t get_handle() const;
@@ -205,6 +213,17 @@ class Actor {
     [[nodiscard]] std::size_t profile_count() const;
     void set_follow_camera(bool enabled);
     [[nodiscard]] bool get_follow_camera() const;
+    void set_actor_guid(const std::string& actor_guid);
+    [[nodiscard]] std::string get_actor_guid() const;
+    void set_external_vision_binding(const std::string& source_path,
+                                     const std::string& shape_guid,
+                                     int shape_index,
+                                     const std::string& json_path,
+                                     const std::string& shape_type,
+                                     const std::string& shape_identity_key,
+                                     const std::string& model_path);
+    void clear_external_vision_binding();
+    [[nodiscard]] bool has_external_vision_binding() const;
 
     [[nodiscard]] std::uintptr_t get_handle() const;
 
@@ -250,6 +269,12 @@ class Camera {
 
     void set_output_mode(const std::string& mode);
     [[nodiscard]] std::string get_output_mode() const;
+    void set_render_backend(const std::string& mode);
+    [[nodiscard]] std::string get_render_backend() const;
+    void set_vision_render_mode(const std::string& mode);
+    [[nodiscard]] std::string get_vision_render_mode() const;
+    void set_view_state(bool open, int x, int y, int width, int height, float move_speed);
+    [[nodiscard]] std::array<float, 6> get_view_state() const;
 
     [[nodiscard]] std::array<float, 3> get_position() const;
     [[nodiscard]] std::array<float, 3> get_forward() const;
@@ -263,6 +288,7 @@ class Camera {
     void remove_image_effects();
 
     void set_size(int width, int height);
+    [[nodiscard]] std::array<int, 2> get_size() const;
     void set_viewport_rect(int x, int y, int width, int height);
     [[nodiscard]] std::uintptr_t pick_actor_at_pixel(int x, int y) const;
 
@@ -374,10 +400,16 @@ void write_scene(Scene* scene, const std::filesystem::path& scene_path);
 
 /// 请求切换光学渲染后端。mode: "native" 或 "vision"。
 /// 仅当 is_vision_available() 为 true 时生效，否则被忽略。
-void set_render_backend(const std::string& mode);
+void set_render_backend(const std::string& mode, std::uintptr_t camera_handle = 0);
 
 /// 获取当前请求的渲染后端，返回 "native" 或 "vision"。
-[[nodiscard]] std::string get_render_backend();
+[[nodiscard]] std::string get_render_backend(std::uintptr_t camera_handle = 0);
+
+/// 设置 Vision 后端的渲染技术。mode: "path_tracing", "svgf" 或 "ssat"。
+void set_vision_render_mode(const std::string& mode, std::uintptr_t camera_handle = 0);
+
+/// 获取当前 camera 请求的 Vision 渲染技术。
+[[nodiscard]] std::string get_vision_render_mode(std::uintptr_t camera_handle = 0);
 
 /// 请求加载一个外部 Vision 场景文件（.json）。仅当 Vision 后端可用且处于激活
 /// 状态时生效；实际导入在光学系统渲染线程执行。

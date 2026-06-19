@@ -49,6 +49,9 @@ class Optics:
     def set_shininess(self, value: float): self.engine_obj.set_shininess(value)
     def get_shininess(self) -> float: return self.engine_obj.get_shininess()
 
+    def set_lighting_enabled(self, enabled: bool): self.engine_obj.set_lighting_enabled(enabled)
+    def get_lighting_enabled(self) -> bool: return self.engine_obj.get_lighting_enabled()
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             'name': self.name,

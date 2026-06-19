@@ -14,10 +14,12 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cstddef>
 #include <iterator>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "corona/resource/types/audio.h"
@@ -51,6 +53,138 @@ H::HardwareImageDesc make_sampled_texture_desc(uint32_t width,
         format,
         H::ImageUsageFlags::Sampled | H::ImageUsageFlags::TransferDst,
         std::move(name));
+}
+
+// 把一个已导入的图片资源（Resource::Image）同步上传为一张可采样的 HardwareImage。
+// 复用模型加载里 Geometry::Geometry 的图片转换逻辑（压缩分支 + 1/3/4 通道→RGBA8_SRGB），
+// 但做成单图、自包含的同步上传（内部完成 commit + waitForDeferredResources），
+// 供 from_image() 等「程序化几何 + 图片贴图」路径复用，避免重复维护转换代码。
+// 成功返回 true 并写入 out；失败返回 false（out 保持不变，调用方应回退占位纹理）。
+[[nodiscard]] bool upload_image_to_texture(Corona::Resource::TResourceID image_id,
+                                           H::HardwareImage& out) {
+    using namespace Corona;
+    if (image_id == 0) {
+        return false;
+    }
+    auto texture_data =
+        Resource::ResourceManager::get_instance().acquire_read<Resource::Image>(image_id);
+    if (!texture_data) {
+        CFW_LOG_WARNING("[upload_image_to_texture] acquire_read<Image> failed for id={}", image_id);
+        return false;
+    }
+    const int tex_width = texture_data->get_width();
+    const int tex_height = texture_data->get_height();
+    const int tex_channels = texture_data->get_channels();
+
+    H::Format format = H::Format::SRGBA8_UNORM;
+    // staging 数据必须存活到 copyFrom + commit 完成。
+    std::vector<unsigned char> staging;
+    const unsigned char* data_ptr = nullptr;
+
+    if (texture_data->is_compressed()) {
+        const auto& compressed = texture_data->get_compressed_data();
+        if (compressed.format == Resource::CompressedData::Format::BC1) {
+            format = H::Format::BC1_UNORM_SRGB;
+        } else if (compressed.format == Resource::CompressedData::Format::BC3) {
+            format = H::Format::BC3_UNORM_SRGB;
+        } else if (compressed.format == Resource::CompressedData::Format::ASTC_4x4) {
+            CFW_LOG_WARNING("[upload_image_to_texture] ASTC_4x4 texture is not supported by current Horizon main format enum");
+            return false;
+        } else {
+            CFW_LOG_WARNING("[upload_image_to_texture] Unsupported compressed format");
+            return false;
+        }
+        staging.assign(compressed.data.begin(), compressed.data.end());
+        data_ptr = staging.data();
+    } else {
+        unsigned char* src_data = texture_data->get_data();
+        if (src_data == nullptr || tex_width <= 0 || tex_height <= 0 || tex_channels <= 0) {
+            CFW_LOG_WARNING("[upload_image_to_texture] invalid image data ({}x{}, channels={})",
+                            tex_width, tex_height, tex_channels);
+            return false;
+        }
+        const size_t pixel_count = static_cast<size_t>(tex_width) * tex_height;
+        staging.resize(pixel_count * 4);
+        if (tex_channels == 4) {
+            std::copy(src_data, src_data + pixel_count * 4, staging.begin());
+        } else if (tex_channels == 3) {
+            for (size_t i = 0; i < pixel_count; ++i) {
+                staging[i * 4 + 0] = src_data[i * 3 + 0];
+                staging[i * 4 + 1] = src_data[i * 3 + 1];
+                staging[i * 4 + 2] = src_data[i * 3 + 2];
+                staging[i * 4 + 3] = 255;
+            }
+        } else if (tex_channels == 1) {
+            for (size_t i = 0; i < pixel_count; ++i) {
+                staging[i * 4 + 0] = src_data[i];
+                staging[i * 4 + 1] = src_data[i];
+                staging[i * 4 + 2] = src_data[i];
+                staging[i * 4 + 3] = 255;
+            }
+        } else {
+            CFW_LOG_WARNING("[upload_image_to_texture] Unsupported channel count: {}", tex_channels);
+            return false;
+        }
+        data_ptr = staging.data();
+    }
+
+    out = H::HardwareImage(make_sampled_texture_desc(
+        static_cast<uint32_t>(tex_width),
+        static_cast<uint32_t>(tex_height),
+        format,
+        "script.image_texture"));
+    if (!out) {
+        return false;
+    }
+    return out.write_bytes(std::as_bytes(std::span<const unsigned char>(data_ptr, staging.size())));
+}
+
+std::uintptr_t resolve_camera_handle(std::uintptr_t camera_handle) {
+    if (camera_handle != 0) {
+        return camera_handle;
+    }
+
+    std::uintptr_t fallback = 0;
+    for (const auto& scene : Corona::SharedDataHub::instance().scene_storage()) {
+        if (scene.active_camera_handle != 0) {
+            if (scene.enabled) {
+                return scene.active_camera_handle;
+            }
+            if (fallback == 0) {
+                fallback = scene.active_camera_handle;
+            }
+        } else if (!scene.camera_handles.empty() && fallback == 0) {
+            fallback = scene.camera_handles.front();
+        }
+    }
+    return fallback;
+}
+
+Corona::CameraVisionRenderMode parse_vision_render_mode(const std::string& mode) {
+    std::string value = mode;
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    std::replace(value.begin(), value.end(), '-', '_');
+    if (value == "svgf" || value == "vision_svgf") {
+        return Corona::CameraVisionRenderMode::SVGF;
+    }
+    if (value == "ssat" || value == "vision_ssat") {
+        return Corona::CameraVisionRenderMode::SSAT;
+    }
+    return Corona::CameraVisionRenderMode::PathTracing;
+}
+
+std::string vision_render_mode_to_string(Corona::CameraVisionRenderMode mode) {
+    switch (mode) {
+        case Corona::CameraVisionRenderMode::SVGF:
+            return "svgf";
+        case Corona::CameraVisionRenderMode::SSAT:
+            return "ssat";
+        case Corona::CameraVisionRenderMode::PathTracing:
+        default:
+            return "path_tracing";
+    }
 }
 }
 
@@ -832,6 +966,126 @@ Corona::API::Geometry::~Geometry() {
     }
 }
 
+Corona::API::Geometry::Geometry(Corona::API::Geometry&& other) noexcept
+    : handle_(other.handle_),
+      transform_handle_(other.transform_handle_),
+      model_resource_handle_(other.model_resource_handle_) {
+    // 置空源对象，避免移动后两个对象的析构函数重复 deallocate 同一 handle。
+    other.handle_ = 0;
+    other.transform_handle_ = 0;
+    other.model_resource_handle_ = 0;
+}
+
+Corona::API::Geometry& Corona::API::Geometry::operator=(Corona::API::Geometry&& other) noexcept {
+    if (this != &other) {
+        if (handle_ != 0) {
+            SharedDataHub::instance().geometry_storage().deallocate(handle_);
+        }
+        if (transform_handle_ != 0) {
+            SharedDataHub::instance().model_transform_storage().deallocate(transform_handle_);
+        }
+        if (model_resource_handle_ != 0) {
+            SharedDataHub::instance().model_resource_storage().deallocate(model_resource_handle_);
+        }
+        handle_ = other.handle_;
+        transform_handle_ = other.transform_handle_;
+        model_resource_handle_ = other.model_resource_handle_;
+        other.handle_ = 0;
+        other.transform_handle_ = 0;
+        other.model_resource_handle_ = 0;
+    }
+    return *this;
+}
+
+Corona::API::Geometry Corona::API::Geometry::from_image(const std::string& image_path) {
+    using namespace Corona;
+    Geometry geo;  // 默认构造：所有 handle 为 0，失败时直接返回空 Geometry。
+
+    auto image_id =
+        Resource::ResourceManager::get_instance().import_sync(Utils::utf8_to_path(image_path));
+    if (image_id == 0) {
+        CFW_LOG_CRITICAL("[Geometry::from_image] Failed to import image: {}", image_path);
+        return geo;
+    }
+
+    // 读取图片尺寸以按宽高比构造不拉伸的 quad（高度归一为 1，宽度 = aspect）。
+    float aspect = 1.0f;
+    if (auto image = Resource::ResourceManager::get_instance().acquire_read<Resource::Image>(image_id)) {
+        const int w = image->get_width();
+        const int h = image->get_height();
+        if (w > 0 && h > 0) {
+            aspect = static_cast<float>(w) / static_cast<float>(h);
+        }
+    }
+
+    // 程序化 quad（两个三角形）。XY 平面、法线 +Z、UV 满铺 [0,1]。
+    // 顶点格式严格匹配 Resource::Vertex（position/normal/tex_coords，#pragma pack(1)），
+    // 以便与现有 vertexBuffer / vertexStorageBuffer 及 Vision adapter 兼容。
+    const float hw = aspect * 0.5f;
+    const float hh = 0.5f;
+    const std::vector<Resource::Vertex> vertices = {
+        {{-hw, -hh, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},  // 左下
+        {{ hw, -hh, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},  // 右下
+        {{ hw,  hh, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},  // 右上
+        {{-hw,  hh, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},  // 左上
+    };
+    const std::vector<std::uint16_t> indices = {0, 1, 2, 0, 2, 3};
+
+    MeshDevice dev{};
+    dev.vertexBuffer = make_horizon_buffer(
+        vertices,
+        H::BufferUsageFlags::TransferDst | H::BufferUsageFlags::Vertex,
+        "script.image.vertex");
+    dev.indexBuffer = make_horizon_buffer(
+        indices,
+        H::BufferUsageFlags::TransferDst | H::BufferUsageFlags::Index,
+        "script.image.index");
+    dev.vertexStorageBuffer = make_horizon_buffer(
+        vertices,
+        H::BufferUsageFlags::TransferSrc | H::BufferUsageFlags::TransferDst | H::BufferUsageFlags::Storage,
+        "script.image.vertex_storage");
+    dev.indexStorageBuffer = make_horizon_buffer(
+        indices,
+        H::BufferUsageFlags::TransferSrc | H::BufferUsageFlags::TransferDst | H::BufferUsageFlags::Storage,
+        "script.image.index_storage");
+    dev.materialIndex = 0;
+    dev.materialColor = {1.0f, 1.0f, 1.0f, 1.0f};
+
+    if (!upload_image_to_texture(image_id, dev.textureBuffer)) {
+        // 上传失败：回退 1x1 白占位，几何仍可显示（白底），避免整体导入失败。
+        static const unsigned char white_pixel[4] = {255, 255, 255, 255};
+        dev.textureBuffer = H::HardwareImage(make_sampled_texture_desc(
+            1,
+            1,
+            H::Format::SRGBA8_UNORM,
+            "script.image.placeholder_texture"));
+        (void)dev.textureBuffer.write_bytes(
+            std::as_bytes(std::span<const unsigned char>(white_pixel, 4)));
+        CFW_LOG_WARNING("[Geometry::from_image] texture upload failed, using white placeholder: {}",
+                        image_path);
+    }
+
+    std::vector<MeshDevice> mesh_devices;
+    mesh_devices.emplace_back(std::move(dev));
+
+    // 图片无 Resource::Scene，model_resource_handle 保持 0：Vision adapter 会回退到
+    // 从 vertexBuffer 拷回 CPU mesh 的路径（load_cpu_mesh_from_buffers），无需 model resource。
+    geo.transform_handle_ = SharedDataHub::instance().model_transform_storage().allocate();
+    geo.handle_ = SharedDataHub::instance().geometry_storage().allocate();
+    if (auto handle = SharedDataHub::instance().geometry_storage().acquire_write(geo.handle_)) {
+        handle->transform_handle = geo.transform_handle_;
+        handle->model_resource_handle = 0;
+        handle->mesh_handles = std::move(mesh_devices);
+    } else {
+        CFW_LOG_CRITICAL("[Geometry::from_image] Failed to acquire write access to geometry storage");
+        SharedDataHub::instance().model_transform_storage().deallocate(geo.transform_handle_);
+        SharedDataHub::instance().geometry_storage().deallocate(geo.handle_);
+        geo.handle_ = 0;
+        geo.transform_handle_ = 0;
+    }
+    return geo;
+}
+
 void Corona::API::Geometry::set_position(const std::array<float, 3>& pos) {
     if (transform_handle_ == 0) {
         CFW_LOG_WARNING("[Geometry::set_position] Invalid transform handle");
@@ -1438,6 +1692,7 @@ Corona::API::Actor::~Actor() {
     profile_storage_handles_.clear();
 
     if (handle_ != 0) {
+        SharedDataHub::instance().clear_actor_metadata(handle_);
         SharedDataHub::instance().actor_storage().deallocate(handle_);
     }
 }
@@ -1601,6 +1856,66 @@ bool Corona::API::Actor::get_follow_camera() const {
     return false;
 }
 
+void Corona::API::Actor::set_actor_guid(const std::string& actor_guid) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Actor::set_actor_guid] Invalid actor handle");
+        return;
+    }
+
+    SharedDataHub::instance().set_actor_guid(handle_, actor_guid);
+}
+
+std::string Corona::API::Actor::get_actor_guid() const {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Actor::get_actor_guid] Invalid actor handle");
+        return {};
+    }
+
+    return SharedDataHub::instance().actor_guid(handle_);
+}
+
+void Corona::API::Actor::set_external_vision_binding(const std::string& source_path,
+                                                     const std::string& shape_guid,
+                                                     int shape_index,
+                                                     const std::string& json_path,
+                                                     const std::string& shape_type,
+                                                     const std::string& shape_identity_key,
+                                                     const std::string& model_path) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Actor::set_external_vision_binding] Invalid actor handle");
+        return;
+    }
+
+    ExternalVisionBindingDevice binding{};
+    binding.enabled = true;
+    binding.source_path = source_path;
+    binding.shape_guid = shape_guid;
+    binding.shape_index = shape_index;
+    binding.json_path = json_path;
+    binding.shape_type = shape_type;
+    binding.shape_identity_key = shape_identity_key;
+    binding.model_path = model_path;
+    SharedDataHub::instance().set_external_vision_binding(handle_, std::move(binding));
+}
+
+void Corona::API::Actor::clear_external_vision_binding() {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Actor::clear_external_vision_binding] Invalid actor handle");
+        return;
+    }
+
+    SharedDataHub::instance().clear_external_vision_binding(handle_);
+}
+
+bool Corona::API::Actor::has_external_vision_binding() const {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Actor::has_external_vision_binding] Invalid actor handle");
+        return false;
+    }
+
+    return SharedDataHub::instance().has_external_vision_binding(handle_);
+}
+
 std::uintptr_t Corona::API::Actor::get_handle() const {
     return handle_;
 }
@@ -1686,12 +2001,14 @@ Corona::API::Camera::Camera(const std::array<float, 3>& position, const std::arr
 
 Corona::API::Camera::~Camera() {
     if (handle_) {
+        std::uintptr_t actor_pick_handle = 0;
         if (auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(handle_)) {
-            if (camera->actor_pick_handle != 0) {
-                SharedDataHub::instance().actor_pick_storage().deallocate(camera->actor_pick_handle);
-            }
+            actor_pick_handle = camera->actor_pick_handle;
         }
-        SharedDataHub::instance().camera_storage().deallocate(handle_);
+        SharedDataHub::instance().enqueue_camera_release({
+            .camera_handle = handle_,
+            .actor_pick_handle = actor_pick_handle,
+        });
         handle_ = 0;
     }
 }
@@ -1808,12 +2125,11 @@ void Corona::API::Camera::set_surface(void* surface) {
         return;
     }
 
-    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_write(handle_)) {
-        accessor->surface = surface;
-    } else {
-        CFW_LOG_ERROR("[Camera::set_surface] Failed to acquire write access to camera storage");
-        return;
-    }
+    CameraStateUpdateCommand command{};
+    command.camera_handle = handle_;
+    command.fields = CameraStateUpdateField::Surface;
+    command.surface = surface;
+    SharedDataHub::instance().enqueue_camera_state_update(command);
 
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
         event_bus->publish<Events::DisplaySurfaceChangedEvent>({surface});
@@ -1884,13 +2200,17 @@ void Corona::API::Camera::set_output_mode(const std::string& mode) {
         output_mode = CameraOutputMode::WorldPosition;
     } else if (mode == "object_id") {
         output_mode = CameraOutputMode::ObjectID;
+    } else if (mode == "visibility_buffer") {
+        output_mode = CameraOutputMode::VisibilityBuffer;
     } else if (mode != "final_color") {
         CFW_LOG_WARNING("[Camera::set_output_mode] Unknown mode '{}', defaulting to final_color", mode);
     }
 
-    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_write(handle_)) {
-        accessor->output_mode = output_mode;
-    }
+    CameraStateUpdateCommand command{};
+    command.camera_handle = handle_;
+    command.fields = CameraStateUpdateField::OutputMode;
+    command.output_mode = output_mode;
+    SharedDataHub::instance().enqueue_camera_state_update(command);
 }
 
 std::string Corona::API::Camera::get_output_mode() const {
@@ -1908,6 +2228,8 @@ std::string Corona::API::Camera::get_output_mode() const {
                 return "position";
             case CameraOutputMode::ObjectID:
                 return "object_id";
+            case CameraOutputMode::VisibilityBuffer:
+                return "visibility_buffer";
             case CameraOutputMode::FinalColor:
                 [[fallthrough]];
             default:
@@ -1915,6 +2237,58 @@ std::string Corona::API::Camera::get_output_mode() const {
         }
     }
     return "final_color";
+}
+
+void Corona::API::Camera::set_render_backend(const std::string& mode) {
+    Corona::API::set_render_backend(mode, handle_);
+}
+
+std::string Corona::API::Camera::get_render_backend() const {
+    return Corona::API::get_render_backend(handle_);
+}
+
+void Corona::API::Camera::set_vision_render_mode(const std::string& mode) {
+    Corona::API::set_vision_render_mode(mode, handle_);
+}
+
+std::string Corona::API::Camera::get_vision_render_mode() const {
+    return Corona::API::get_vision_render_mode(handle_);
+}
+
+void Corona::API::Camera::set_view_state(bool open, int x, int y, int width, int height, float move_speed) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Camera::set_view_state] Invalid camera handle");
+        return;
+    }
+
+    CameraStateUpdateCommand command{};
+    command.camera_handle = handle_;
+    command.fields = CameraStateUpdateField::ViewState;
+    command.view_open = open;
+    command.view_x = x;
+    command.view_y = y;
+    command.view_width = std::max(width, 1);
+    command.view_height = std::max(height, 1);
+    command.move_speed = std::max(move_speed, 0.01f);
+    SharedDataHub::instance().enqueue_camera_state_update(command);
+}
+
+std::array<float, 6> Corona::API::Camera::get_view_state() const {
+    if (handle_ == 0) {
+        return {0.0f, 120.0f, 120.0f, 960.0f, 540.0f, 1.0f};
+    }
+
+    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_read(handle_)) {
+        return {
+            accessor->view_open ? 1.0f : 0.0f,
+            static_cast<float>(accessor->view_x),
+            static_cast<float>(accessor->view_y),
+            static_cast<float>(accessor->view_width),
+            static_cast<float>(accessor->view_height),
+            accessor->move_speed,
+        };
+    }
+    return {0.0f, 120.0f, 120.0f, 960.0f, 540.0f, 1.0f};
 }
 
 // ########################
@@ -1966,13 +2340,29 @@ void Corona::API::Camera::set_size(int width, int height) {
     width_ = width;
     height_ = height;
 
-    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_write(handle_)) {
-        accessor->width = static_cast<std::uint32_t>(width_);
-        accessor->height = static_cast<std::uint32_t>(height_);
-        accessor->aspect = static_cast<float>(width_) / static_cast<float>(height_);
-    } else {
-        CFW_LOG_ERROR("[Camera::set_size] Failed to acquire write access to camera storage");
+    CameraStateUpdateCommand command{};
+    command.camera_handle = handle_;
+    command.fields = CameraStateUpdateField::Size;
+    command.width = static_cast<std::uint32_t>(width_);
+    command.height = static_cast<std::uint32_t>(height_);
+    SharedDataHub::instance().enqueue_camera_state_update(command);
+}
+
+std::array<int, 2> Corona::API::Camera::get_size() const {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Camera::get_size] Invalid camera handle");
+        return {width_, height_};
     }
+
+    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_read(handle_)) {
+        return {
+            static_cast<int>(accessor->width),
+            static_cast<int>(accessor->height),
+        };
+    }
+
+    CFW_LOG_ERROR("[Camera::get_size] Failed to acquire read access to camera storage");
+    return {width_, height_};
 }
 
 void Corona::API::Camera::set_viewport_rect(int x, int y, int width, int height) {
@@ -2024,7 +2414,9 @@ void set_default_surface(void* surface) {
 
     // 句柄到达时，补写到已存在的相机，避免“先有 camera 后有 surface”的空窗。
     for (auto& camera : SharedDataHub::instance().camera_storage()) {
-        camera.surface = surface;
+        if (camera.follows_default_surface) {
+            camera.surface = surface;
+        }
     }
 }
 
@@ -2040,32 +2432,63 @@ bool is_vision_available() {
 #endif
 }
 
-namespace {
-// Tracks the last requested backend so get_render_backend() can report UI state
-// without reaching into the OpticsSystem render thread. 0 = Native, 1 = Vision.
-#ifdef CORONA_ENABLE_VISION
-std::atomic<int> g_requested_backend{1};
-#else
-std::atomic<int> g_requested_backend{0};
-#endif
-}  // namespace
-
-void set_render_backend(const std::string& mode) {
-    if (!is_vision_available()) {
-        CFW_LOG_WARNING("[set_render_backend] Vision not compiled in; request ignored");
+void set_render_backend(const std::string& mode, std::uintptr_t camera_handle) {
+    const auto resolved_handle = resolve_camera_handle(camera_handle);
+    if (resolved_handle == 0) {
+        CFW_LOG_WARNING("[set_render_backend] No camera is available");
         return;
     }
 
-    int backend = (mode == "vision") ? 1 : 0;
-    g_requested_backend.store(backend, std::memory_order_relaxed);
+    int backend = mode == "vision" ? 1 : 0;
+    if (backend == 1 && !is_vision_available()) {
+        CFW_LOG_WARNING("[set_render_backend] Vision not compiled in; falling back to Native");
+        backend = 0;
+    }
+
+    CameraStateUpdateCommand command{};
+    command.camera_handle = resolved_handle;
+    command.fields = CameraStateUpdateField::RenderBackend;
+    command.render_backend =
+        backend == 1 ? CameraRenderBackend::Vision : CameraRenderBackend::Native;
+    SharedDataHub::instance().enqueue_camera_state_update(command);
 
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
-        event_bus->publish<Events::RenderBackendSwitchEvent>({backend});
+        event_bus->publish<Events::RenderBackendSwitchEvent>({backend, resolved_handle});
     }
 }
 
-std::string get_render_backend() {
-    return g_requested_backend.load(std::memory_order_relaxed) == 1 ? "vision" : "native";
+std::string get_render_backend(std::uintptr_t camera_handle) {
+    const auto resolved_handle = resolve_camera_handle(camera_handle);
+    if (resolved_handle != 0) {
+        if (auto camera = SharedDataHub::instance().camera_storage().acquire_read(resolved_handle)) {
+            return camera->render_backend == CameraRenderBackend::Vision ? "vision" : "native";
+        }
+    }
+    return "native";
+}
+
+void set_vision_render_mode(const std::string& mode, std::uintptr_t camera_handle) {
+    const auto resolved_handle = resolve_camera_handle(camera_handle);
+    if (resolved_handle == 0) {
+        CFW_LOG_WARNING("[set_vision_render_mode] No camera is available");
+        return;
+    }
+
+    CameraStateUpdateCommand command{};
+    command.camera_handle = resolved_handle;
+    command.fields = CameraStateUpdateField::VisionRenderMode;
+    command.vision_render_mode = parse_vision_render_mode(mode);
+    SharedDataHub::instance().enqueue_camera_state_update(command);
+}
+
+std::string get_vision_render_mode(std::uintptr_t camera_handle) {
+    const auto resolved_handle = resolve_camera_handle(camera_handle);
+    if (resolved_handle != 0) {
+        if (auto camera = SharedDataHub::instance().camera_storage().acquire_read(resolved_handle)) {
+            return vision_render_mode_to_string(camera->vision_render_mode);
+        }
+    }
+    return "path_tracing";
 }
 
 void load_vision_scene(const std::string& path) {

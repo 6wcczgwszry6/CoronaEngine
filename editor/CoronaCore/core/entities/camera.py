@@ -1,8 +1,34 @@
+import uuid
 from typing import Any, Dict, List, Optional
 
 from ..corona_editor import CoronaEditor
 
 CoronaEngine = CoronaEditor.CoronaEngine
+
+DEFAULT_VISION_RENDER_MODE = "path_tracing"
+VISION_RENDER_MODES = frozenset(("path_tracing", "svgf", "ssat"))
+VISION_RENDER_MODE_ALIASES = {
+    "pt": "path_tracing",
+    "path-tracing": "path_tracing",
+    "path tracing": "path_tracing",
+    "vision_path_tracing": "path_tracing",
+    "vision pt": "path_tracing",
+    "vision svgf": "svgf",
+    "vision_svgf": "svgf",
+    "vision ssat": "ssat",
+    "vision_ssat": "ssat",
+}
+
+
+def normalize_vision_render_mode(mode: Optional[str]) -> str:
+    value = str(mode or DEFAULT_VISION_RENDER_MODE).strip().lower()
+    value = VISION_RENDER_MODE_ALIASES.get(value, value)
+    if value not in VISION_RENDER_MODES:
+        raise ValueError(
+            f"Invalid Vision render mode '{mode}'. "
+            f"Expected one of: {', '.join(sorted(VISION_RENDER_MODES))}"
+        )
+    return value
 
 
 class Camera:
@@ -13,7 +39,13 @@ class Camera:
 
     def __init__(self, position: Optional[List[float]] = None, forward: Optional[List[float]] = None,
                  world_up: Optional[List[float]] = None, fov: Optional[float] = None, name: str = "Camera",
-                 width: int = 1920, height: int = 1080):
+                 width: int = 1920, height: int = 1080, camera_id: Optional[str] = None,
+                 render_backend: str = "native", output_mode: str = "final_color",
+                 vision_render_mode: str = DEFAULT_VISION_RENDER_MODE,
+                 move_speed: float = 1.0, view_open: bool = False,
+                 view_x: int = 120, view_y: int = 120,
+                 view_width: int = 960, view_height: int = 540,
+                 deletable: bool = True):
         if CoronaEngine is None:
             raise RuntimeError("CoronaEngine 未初始化")
 
@@ -35,8 +67,25 @@ class Camera:
             self._fov = self.engine_obj.get_fov()
 
         self.name = name
+        self.camera_id = camera_id or str(uuid.uuid4())
         self.width = width
         self.height = height
+        self.render_backend = render_backend
+        self.output_mode = output_mode
+        self.vision_render_mode = normalize_vision_render_mode(vision_render_mode)
+        self.move_speed = float(move_speed)
+        self.view_open = bool(view_open)
+        self.view_x = int(view_x)
+        self.view_y = int(view_y)
+        self.view_width = int(view_width)
+        self.view_height = int(view_height)
+        self.deletable = bool(deletable)
+        self.engine_obj.set_size(width, height)
+        self.engine_obj.set_output_mode(output_mode)
+        self.engine_obj.set_render_backend(render_backend)
+        if hasattr(self.engine_obj, 'set_vision_render_mode'):
+            self.engine_obj.set_vision_render_mode(self.vision_render_mode)
+        self._flush_view_state()
         # 持有强引用，避免 ImageEffects 被 GC 后底层句柄被释放
         self._image_effects_ref = None
 
@@ -93,10 +142,66 @@ class Camera:
         self.engine_obj.save_screenshot_sync(path)
 
     def set_output_mode(self, mode: str):
+        self.output_mode = mode
         self.engine_obj.set_output_mode(mode)
 
     def get_output_mode(self) -> str:
-        return self.engine_obj.get_output_mode()
+        return self.output_mode
+
+    def set_render_backend(self, mode: str):
+        actual = mode
+        if mode == "vision" and not CoronaEngine.is_vision_available():
+            actual = "native"
+        self.engine_obj.set_render_backend(actual)
+        self.render_backend = actual
+
+    def get_render_backend(self) -> str:
+        return self.render_backend
+
+    def set_vision_render_mode(self, mode: str):
+        self.vision_render_mode = normalize_vision_render_mode(mode)
+        if hasattr(self.engine_obj, 'set_vision_render_mode'):
+            self.engine_obj.set_vision_render_mode(self.vision_render_mode)
+
+    def get_vision_render_mode(self) -> str:
+        return self.vision_render_mode
+
+    def _flush_view_state(self):
+        self.engine_obj.set_view_state(
+            self.view_open, self.view_x, self.view_y,
+            self.view_width, self.view_height, self.move_speed)
+
+    def set_view_state(self, open_: bool, x: int, y: int,
+                       width: int, height: int, move_speed: Optional[float] = None):
+        self.view_open = bool(open_)
+        self.view_x = int(x)
+        self.view_y = int(y)
+        self.view_width = max(int(width), 1)
+        self.view_height = max(int(height), 1)
+        if move_speed is not None:
+            self.move_speed = max(float(move_speed), 0.01)
+        self._flush_view_state()
+
+    def refresh_view_state(self):
+        return {
+            'open': self.view_open,
+            'x': self.view_x,
+            'y': self.view_y,
+            'width': self.view_width,
+            'height': self.view_height,
+            'move_speed': self.move_speed,
+        }
+
+    def refresh_size(self):
+        if hasattr(self.engine_obj, 'get_size'):
+            size = self.engine_obj.get_size()
+            if size and len(size) >= 2:
+                self.width = max(int(size[0]), 1)
+                self.height = max(int(size[1]), 1)
+        return {
+            'width': self.width,
+            'height': self.height,
+        }
 
     # ========== 图像效果与尺寸管理 ==========
     def set_image_effects(self, effects: Any):
@@ -136,8 +241,11 @@ class Camera:
         return self.engine_obj.pick_actor_at_pixel(x, y)
 
     def to_dict(self) -> Dict[str, Any]:
+        self.refresh_view_state()
+        self.refresh_size()
         return {
-            'id': self.name,
+            'id': self.camera_id,
+            'camera_id': self.camera_id,
             'name': self.name,
             'handle': self.get_handle(),
             'position': list(self.get_position()),
@@ -146,6 +254,16 @@ class Camera:
             'fov': float(self.get_fov()),
             'width': self.width,
             'height': self.height,
+            'output_mode': self.get_output_mode(),
+            'render_backend': self.get_render_backend(),
+            'vision_render_mode': self.get_vision_render_mode(),
+            'move_speed': self.move_speed,
+            'view_open': self.view_open,
+            'view_x': self.view_x,
+            'view_y': self.view_y,
+            'view_width': self.view_width,
+            'view_height': self.view_height,
+            'deletable': self.deletable,
         }
 
     def __repr__(self):

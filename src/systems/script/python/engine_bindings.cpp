@@ -41,6 +41,8 @@ void BindAll(nanobind::module_& m) {
     nb::class_<Geometry>(m, "Geometry")
         .def(nb::init<const std::string&>(), nb::arg("model_path"),
              "Create a Geometry from a model file path")
+        .def_static("from_image", &Geometry::from_image, nb::arg("image_path"),
+                    "Create a Geometry as a textured quad (UI plane) from an image file")
         .def("set_position", &Geometry::set_position, nb::arg("position"),
              "Set local position [x, y, z]")
         .def("set_rotation", &Geometry::set_rotation, nb::arg("euler"),
@@ -240,6 +242,14 @@ void BindAll(nanobind::module_& m) {
              "Render this actor in camera-local orthographic pass 2")
         .def("get_follow_camera", &Actor::get_follow_camera,
              "Return whether this actor renders in camera-local orthographic pass 2")
+        .def("set_actor_guid", &Actor::set_actor_guid, nb::arg("actor_guid"))
+        .def("get_actor_guid", &Actor::get_actor_guid)
+        .def("set_external_vision_binding", &Actor::set_external_vision_binding,
+             nb::arg("source_path"), nb::arg("shape_guid"), nb::arg("shape_index"),
+             nb::arg("json_path"), nb::arg("shape_type"), nb::arg("shape_identity_key"),
+             nb::arg("model_path"))
+        .def("clear_external_vision_binding", &Actor::clear_external_vision_binding)
+        .def("has_external_vision_binding", &Actor::has_external_vision_binding)
         .def("get_handle", &Actor::get_handle, "Get the underlying handle of this actor");
 
     // ============================================================================
@@ -263,6 +273,13 @@ void BindAll(nanobind::module_& m) {
              "Set camera output mode. mode: 'final_color', 'base_color', 'normal', 'position', 'object_id'")
         .def("get_output_mode", &Camera::get_output_mode,
              "Get current camera output mode as string")
+        .def("set_render_backend", &Camera::set_render_backend, nb::arg("mode"))
+        .def("get_render_backend", &Camera::get_render_backend)
+        .def("set_vision_render_mode", &Camera::set_vision_render_mode, nb::arg("mode"))
+        .def("get_vision_render_mode", &Camera::get_vision_render_mode)
+        .def("set_view_state", &Camera::set_view_state, nb::arg("open"), nb::arg("x"),
+             nb::arg("y"), nb::arg("width"), nb::arg("height"), nb::arg("move_speed"))
+        .def("get_view_state", &Camera::get_view_state)
         .def("set_surface", [](Camera& self, std::uintptr_t surface) { self.set_surface(reinterpret_cast<void*>(surface)); }, nb::arg("surface"), "Set render surface (pass window ID as integer)")
         .def("get_surface", [](const Camera& self) -> std::uintptr_t { return reinterpret_cast<std::uintptr_t>(self.get_surface()); }, "Get render surface handle as integer (0 if none)")
         .def("get_position", &Camera::get_position, "Get camera position [x, y, z]")
@@ -274,6 +291,7 @@ void BindAll(nanobind::module_& m) {
         .def("has_image_effects", &Camera::has_image_effects, "Check if camera has image effects")
         .def("remove_image_effects", &Camera::remove_image_effects, "Remove image effects from this camera")
         .def("set_size", &Camera::set_size, nb::arg("width"), nb::arg("height"), "Set camera render dimensions")
+        .def("get_size", &Camera::get_size, "Get camera render dimensions [width, height]")
         .def("set_viewport_rect", &Camera::set_viewport_rect, nb::arg("x"), nb::arg("y"), nb::arg("width"), nb::arg("height"), "Set viewport rectangle")
         .def("pick_actor_at_pixel", &Camera::pick_actor_at_pixel, nb::arg("x"), nb::arg("y"), "Pick actor at pixel coordinates");
 
@@ -412,9 +430,16 @@ void BindAll(nanobind::module_& m) {
     m.def("is_vision_available", &is_vision_available,
           "Return True if the engine was compiled with Vision (CORONA_ENABLE_VISION) support");
     m.def("set_render_backend", &set_render_backend, nb::arg("mode"),
+          nb::arg("camera_handle") = 0,
           "Request a render backend switch. mode: 'native' or 'vision'. Only effective when Vision is available.");
-    m.def("get_render_backend", &get_render_backend,
+    m.def("get_render_backend", &get_render_backend, nb::arg("camera_handle") = 0,
           "Get the currently requested render backend as 'native' or 'vision'");
+    m.def("set_vision_render_mode", &set_vision_render_mode, nb::arg("mode"),
+          nb::arg("camera_handle") = 0,
+          "Set the requested Vision render mode: 'path_tracing', 'svgf', or 'ssat'");
+    m.def("get_vision_render_mode", &get_vision_render_mode,
+          nb::arg("camera_handle") = 0,
+          "Get the requested Vision render mode");
     m.def("load_vision_scene", &load_vision_scene, nb::arg("path"),
           "Load an external Vision scene file (.json). Pass an empty string to "
           "unload and restore the engine-built scene. Only effective when Vision "

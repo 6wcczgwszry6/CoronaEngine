@@ -1,5 +1,5 @@
 <template>
-  <div class="relative flex-1 min-h-0 w-full" tabindex="0">
+  <div class="relative flex flex-col flex-1 min-h-0 h-full w-full" tabindex="0">
     <!-- 顶部菜单栏 -->
     <div
       class="w-full bg-[#2d2d2d] text-gray-200 border-b border-gray-700 h-10 flex items-center px-4 space-x-6 text-sm shadow-md"
@@ -260,6 +260,32 @@
       </div>
 
       <div class="ml-auto flex items-center gap-2">
+        <div class="relative">
+          <button
+            class="px-2.5 py-1 rounded border border-gray-600 text-gray-200 bg-[#252525] hover:bg-[#3d3d3d] transition-colors duration-200 whitespace-nowrap"
+            :class="{ 'bg-[#3d3d3d]': activeMenu === 'mainRenderMode' }"
+            title="主窗口渲染模式"
+            @click="toggleMenu('mainRenderMode')"
+          >
+            {{ mainRenderModeLabel }}
+          </button>
+          <div
+            v-if="activeMenu === 'mainRenderMode'"
+            class="absolute top-full right-0 mt-1 w-52 bg-[#2d2d2d] border border-gray-700 rounded shadow-lg z-50"
+          >
+            <div class="py-1">
+              <button
+                v-for="mode in mainRenderModeOptions"
+                :key="mode.value"
+                class="block w-full text-left px-4 py-2 hover:bg-[#3d3d3d] transition-colors duration-200 disabled:text-gray-600 disabled:hover:bg-transparent"
+                :disabled="mode.backend === 'vision' && !visionAvailable"
+                @click="selectMainRenderMode(mode.value)"
+              >
+                {{ mode.label }}
+              </button>
+            </div>
+          </div>
+        </div>
         <button
           class="px-2.5 py-1 rounded border transition-colors duration-200 whitespace-nowrap"
           :class="previewRunning || previewBusy
@@ -344,6 +370,41 @@
         <span class="text-white/80 text-xs w-8 text-right">{{ cameraSpeed.toFixed(2) }}</span>
       </div>
     </div>
+
+    <div
+      ref="viewportPickSurfaceRef"
+      tabindex="0"
+      class="relative flex-1 min-h-0 w-full"
+      :class="{ 'viewport-cursor-hidden': viewportUiMode === 'stereo3d' }"
+      :style="viewportUiMode === 'stereo3d' ? { cursor: 'none' } : null"
+      data-viewport-pick-surface
+      @pointermove="handleViewportPointer"
+      @pointerdown="handleViewportPointerDown"
+      @pointerup="handleViewportPointer"
+      @pointerleave="handleViewportPointerLeave"
+      @mousedown.left="handleViewportPick"
+      @wheel.prevent="handleWheel"
+    >
+      <div
+        class="absolute left-3 top-3 z-20 flex items-center gap-1 rounded border border-white/10 bg-[#15181d]/80 p-1 shadow-lg backdrop-blur-sm"
+        data-viewport-ui-mode-switch
+        @pointerdown.stop
+        @mousedown.stop
+      >
+        <button
+          v-for="item in viewportUiModeItems"
+          :key="item.mode"
+          class="h-7 min-w-12 rounded px-2 text-[11px] font-medium"
+          :class="viewportUiMode === item.mode ? 'bg-[#4b5563] text-white' : 'text-[#cbd5e1] hover:bg-white/10'"
+          type="button"
+          :title="item.title"
+          @click="selectViewportUiMode(item.mode)"
+        >
+          {{ item.label }}
+        </button>
+      </div>
+    </div>
+
     <!-- 自定义弹窗 -->
     <div
       v-if="showDialog"
@@ -474,6 +535,8 @@ import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { useDockStore } from '@/stores/dockStore.js';
 import { PLUGIN_MANIFEST } from '@/config/pluginManifest.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
+import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
+import { createViewportUiModeStore, createViewportUiCalibrationStore, createViewportUiPointerController } from '@/utils/viewportUiMode.js';
 import AIHintBubble from '@/components/ui/AIHintBubble.vue';
 import { startStageHints, stopStageHints, setHintShowMs } from '@/services/aiHintGenerator.js';
 
@@ -505,6 +568,34 @@ const cameraBindingState = ref({
   cameraName: null,
   cameraHandle: null,
 });
+let actorPickIndex = new Map();
+const viewportPickSurfaceRef = ref(null);
+const viewportUiMode = ref('flat2d');
+const viewportUiModeStore = createViewportUiModeStore();
+const viewportUiModeItems = [
+  { mode: 'flat2d', label: '2D UI', title: '普通屏幕 UI' },
+  { mode: 'stereo3d', label: '3D UI', title: '光场屏立体 UI' },
+];
+
+// 光场 3D UI 标定：dock 面板编辑后经 coronaEventBus 通知，这里用活动相机句柄下发；
+// 切到 stereo3d 自动打开标定 dock 面板并推送当前值，切回 flat2d 关闭。
+const viewportUiCalibrationStore = createViewportUiCalibrationStore();
+const VIEWPORT_UI_CALIBRATION_PANEL = 'LightFieldCalibration';
+const applyViewportUiCalibration = (calibration) => {
+  viewportUiCalibrationStore.applyToBridge({
+    bridge: window.coronaBridge,
+    cameraHandle: cameraBindingState.value.cameraHandle,
+    calibration: calibration ?? viewportUiCalibrationStore.get({}),
+  });
+};
+const syncViewportUiCalibrationPanel = (mode) => {
+  if (mode === 'stereo3d') {
+    dockStore.openPanel(VIEWPORT_UI_CALIBRATION_PANEL);
+    applyViewportUiCalibration();
+  } else {
+    dockStore.closePanel(VIEWPORT_UI_CALIBRATION_PANEL);
+  }
+};
 
 // 摄像头移动速度（可调节）
 const cameraSpeed = ref(0.2);
@@ -516,6 +607,80 @@ const mouseRotate = reactive({
   lastX: 0,
   lastY: 0,
 });
+
+const getViewportHitRect = () => viewportPickSurfaceRef.value?.getBoundingClientRect?.() ?? null;
+
+const getViewportRenderRect = () => {
+  const width = Math.max(Number(window.innerWidth || 0), 0);
+  const height = Math.max(Number(window.innerHeight || 0), 0);
+  return {
+    left: 0,
+    top: 0,
+    width,
+    height,
+    renderWidth: width,
+    renderHeight: height,
+  };
+};
+
+const currentViewportUiDescriptor = () => ({
+  scope: 'main',
+  sceneId: cameraBindingState.value.sceneId || tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME,
+  cameraHandle: cameraBindingState.value.cameraHandle || '',
+});
+
+const emitActorChangeFast = (type, sceneId, actorName) => {
+  if (typeof window.__coronaEmit === 'function') {
+    window.__coronaEmit('actor-change', type, sceneId, actorName);
+  } else {
+    coronaEventBus.emit('actor-change', type, sceneId, actorName);
+  }
+};
+
+const viewportPickController = createViewportPickController({
+  retryDelayMs: 60,
+  getBridge: () => window.coronaBridge,
+  getCameraBinding: () => cameraBindingState.value,
+  getHitRect: getViewportHitRect,
+  getRenderRect: getViewportRenderRect,
+  getActorIndex: () => actorPickIndex,
+  emitActorChange: (type, sceneId, actorName) => emitActorChangeFast(type, sceneId, actorName),
+});
+
+const viewportUiPointerController = createViewportUiPointerController({
+  getBridge: () => window.coronaBridge,
+  getCameraHandle: () => cameraBindingState.value.cameraHandle,
+  getEnabled: () => viewportUiMode.value === 'stereo3d',
+  getHitRect: getViewportHitRect,
+  getRenderRect: getViewportRenderRect,
+});
+
+const syncViewportUiMode = () => {
+  const mode = viewportUiModeStore.get(currentViewportUiDescriptor());
+  viewportUiMode.value = mode;
+  viewportUiModeStore.applyToBridge({
+    bridge: window.coronaBridge,
+    cameraHandle: cameraBindingState.value.cameraHandle,
+    mode,
+  });
+  if (mode !== 'stereo3d') {
+    viewportUiPointerController.hide();
+  }
+  syncViewportUiCalibrationPanel(mode);
+};
+
+const selectViewportUiMode = (mode) => {
+  viewportUiMode.value = viewportUiModeStore.set(currentViewportUiDescriptor(), mode);
+  viewportUiModeStore.applyToBridge({
+    bridge: window.coronaBridge,
+    cameraHandle: cameraBindingState.value.cameraHandle,
+    mode: viewportUiMode.value,
+  });
+  if (viewportUiMode.value !== 'stereo3d') {
+    viewportUiPointerController.hide();
+  }
+  syncViewportUiCalibrationPanel(viewportUiMode.value);
+};
 
 const hasActiveMovementKeys = () => Object.values(movementKeys).some((value) => value);
 
@@ -554,6 +719,9 @@ const activeMenu = ref(null);
 const previewRunning = ref(false);
 const previewBusy = ref(false);
 const previewStatusText = ref('');
+const visionAvailable = ref(false);
+const mainRenderBackend = ref('native');
+const mainVisionRenderMode = ref('path_tracing');
 let previewPollTimer = null;
 window.__coronaGamePreviewInputLocked = false;
 
@@ -582,6 +750,19 @@ const pluginStates = computed(() =>
     open: dockStore.panels[p.id]?.open ?? false,
   }))
 );
+const mainRenderModeOptions = [
+  { value: 'native', backend: 'native', label: 'Native' },
+  { value: 'path_tracing', backend: 'vision', label: 'Vision Path Tracing' },
+  { value: 'svgf', backend: 'vision', label: 'Vision SVGF' },
+  { value: 'ssat', backend: 'vision', label: 'Vision SSAT' },
+];
+const mainRenderModeLabel = computed(() => {
+  if (mainRenderBackend.value !== 'vision') {
+    return 'Native';
+  }
+  return mainRenderModeOptions.find((mode) => mode.value === mainVisionRenderMode.value)?.label
+    || 'Vision Path Tracing';
+});
 
 // ── 包菜提示气泡状态 ──
 const STORAGE_KEY = 'corona_editor_settings';
@@ -629,6 +810,37 @@ const toggleMenu = (menu) => {
     if (menu === 'physics') {
       loadPhysicsParams();
     }
+  }
+};
+
+const selectMainRenderMode = async (mode) => {
+  const sceneId = tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
+  activeMenu.value = null;
+  try {
+    if (mode === 'native') {
+      const result = unwrapBridgeData(
+        await sceneService.setRenderBackend('native', sceneId, null),
+      );
+      mainRenderBackend.value = result?.mode || 'native';
+      await syncSceneCameraBinding(sceneId);
+      return;
+    }
+
+    const backendResult = unwrapBridgeData(
+      await sceneService.setRenderBackend('vision', sceneId, null),
+    );
+    mainRenderBackend.value = backendResult?.mode || 'native';
+    if (mainRenderBackend.value !== 'vision') {
+      return;
+    }
+
+    const modeResult = unwrapBridgeData(
+      await sceneService.setVisionRenderMode(sceneId, null, mode),
+    );
+    mainVisionRenderMode.value = modeResult?.mode || mode;
+    await syncSceneCameraBinding(sceneId);
+  } catch (error) {
+    logError('Failed to set main viewport render mode', error);
   }
 };
 
@@ -707,6 +919,7 @@ const applySceneSnapshot = (sceneId, payload) => {
   const normalizedSceneId =
     snapshot.scene_id ?? snapshot.sceneId ?? snapshot.id ?? sceneId ?? DEFAULT_SCENE_NAME;
   const cameras = Array.isArray(snapshot.cameras) ? snapshot.cameras : [];
+  actorPickIndex = indexActorsByHandle(Array.isArray(snapshot.actors) ? snapshot.actors : []);
   const activeCameraName =
     snapshot.active_camera_name ?? snapshot.activeCameraName ?? cameras[0]?.name ?? null;
   const activeCamera =
@@ -717,6 +930,9 @@ const applySceneSnapshot = (sceneId, payload) => {
     cameraName: activeCameraName,
     cameraHandle: activeCamera?.handle ?? activeCamera?.camera_handle ?? null,
   };
+  syncViewportUiMode();
+  mainRenderBackend.value = activeCamera?.render_backend || 'native';
+  mainVisionRenderMode.value = activeCamera?.vision_render_mode || 'path_tracing';
 
   if (
     activeCamera &&
@@ -752,6 +968,34 @@ const syncSceneCameraBinding = async (sceneId) => {
   }
 };
 
+const handleVisionSceneImported = async (payload = {}) => {
+  const sceneId = payload?.sceneId || tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
+  if (sceneId !== (tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME)) {
+    return;
+  }
+  if (payload?.visionRenderMode) {
+    mainRenderBackend.value = 'vision';
+    mainVisionRenderMode.value = payload.visionRenderMode;
+  }
+  await syncSceneCameraBinding(sceneId);
+};
+
+const restoreCameraViews = async (sceneId) => {
+  if (!sceneId) return;
+  try {
+    const result = await sceneService.listCameraViews(sceneId);
+    const payload = result?.data ?? result;
+    const openCameras = Array.isArray(payload?.cameras)
+      ? payload.cameras.filter((camera) => camera.view_open)
+      : [];
+    for (const camera of openCameras) {
+      await appService.createCameraView({ ...camera, scene_id: sceneId });
+    }
+  } catch (e) {
+    logError('Failed to restore camera views', e);
+  }
+};
+
 const handleWheel = (event) => {
   if (isGamePreviewInputLocked()) return;
   if (event.shiftKey) {
@@ -764,6 +1008,10 @@ const handleWheel = (event) => {
   }
   const direction = event.deltaY > 0 ? 'backward' : 'forward';
   handleCameraMove(direction);
+};
+
+const focusViewportInput = () => {
+  viewportPickSurfaceRef.value?.focus?.({ preventScroll: true });
 };
 
 const handleKeyDown = (event) => {
@@ -1053,12 +1301,12 @@ const handleMouseRotate = (dx, dy) => {
   const worldUp = vec3.normalize(up);
 
   // 水平 yaw
-  const yawRad = (-dx * sensitivity * Math.PI) / 180;
+  const yawRad = (dx * sensitivity * Math.PI) / 180;
   let newFwd = rotateVecAroundAxis(fwd, worldUp, yawRad);
 
   // 垂直 pitch
   const right = vec3.normalize(vec3.cross(newFwd, worldUp));
-  const pitchRad = (dy * sensitivity * Math.PI) / 180;
+  const pitchRad = (-dy * sensitivity * Math.PI) / 180;
   const pitched = rotateVecAroundAxis(newFwd, right, pitchRad);
 
   const dotUp = vec3.dot(vec3.normalize(pitched), worldUp);
@@ -1069,55 +1317,27 @@ const handleMouseRotate = (dx, dy) => {
   cameraState.value.forward = vec3.normalize(newFwd);
 };
 
-// 鼠标左键拾取3D物体的两阶段重试
-let _pickRetryTimer = null;
-const PICK_RETRY_DELAY_MS = 60; // 等待引擎处理拾取请求（约一帧时间）
+const viewportCursorShape = () => (mouseRotate.active ? 'grabbing' : 'arrow');
 
-const handleViewportPick = async (event) => {
-  const sceneId = tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
-  const vpW = window.innerWidth;
-  const vpH = window.innerHeight;
-  const clientX = event.clientX;
-  const clientY = event.clientY;
+const handleViewportPointer = (event) => {
+  viewportUiPointerController.send(event, event.type, viewportCursorShape());
+};
 
-  // ── 快速通道：coronaBridge.pickActor → CEF ProcessMessage → SharedDataHub ──
-  const bridge = window.coronaBridge;
-  if (bridge && typeof bridge.pickActor === 'function') {
-    try {
-      bridge.pickActor(0, clientX, clientY, vpW, vpH);  // scene_handle=0 means use current active scene
-      console.log('[PickFast] pickActor called (%d,%d) vp=(%d,%d)', clientX, clientY, vpW, vpH);
-      return;
-    } catch (e) {
-      console.warn('[PickFast] coronaBridge.pickActor failed, falling back to Python:', e);
-    }
-  }
+const handleViewportPointerDown = (event) => {
+  focusViewportInput();
+  viewportUiPointerController.send(
+    event,
+    event.type,
+    event.button === 2 ? 'grabbing' : viewportCursorShape(),
+  );
+};
 
-  // ── 慢通道：Python cefQuery 回退 ──
-  try {
-    console.log('[Pick] 请求拾取 scene=%s pos=(%d,%d) vp=(%d,%d)', sceneId, clientX, clientY, vpW, vpH);
-    const result = await sceneService.pickActor(
-      sceneId, clientX, clientY, vpW, vpH
-    );
-    const data = result?.data ?? result;
-    console.log('[Pick] 第一次响应:', JSON.stringify(data));
-    if (data?.status === 'pending') {
-      if (_pickRetryTimer) clearTimeout(_pickRetryTimer);
-      _pickRetryTimer = setTimeout(async () => {
-        _pickRetryTimer = null;
-        try {
-          const retryResult = await sceneService.pickActor(
-            sceneId, clientX, clientY, vpW, vpH
-          );
-          const retryData = retryResult?.data ?? retryResult;
-          if (retryData?.status === 'success') {
-            console.log('[Pick] 选中物体:', retryData.actor?.name);
-          }
-        } catch (e) { /* retry silently */ }
-      }, PICK_RETRY_DELAY_MS);
-    } else if (data?.status === 'success') {
-      console.log('[Pick] 命中缓存:', data.actor?.name);
-    }
-  } catch (e) { /* pick silently */ }
+const handleViewportPointerLeave = () => {
+  viewportUiPointerController.hide();
+};
+
+const handleViewportPick = (event) => {
+  viewportPickController.pickAt(event);
 };
 
 const onMouseDown = (event) => {
@@ -1131,16 +1351,7 @@ const onMouseDown = (event) => {
     return;
   }
 
-  // 左键：在3D视口中拾取物体
-  if (event.button === 0) {
-    // 忽略UI交互元素上的点击（菜单栏、按钮、输入框、场景标签等）
-    const interactiveEl = event.target.closest(
-      'button, a, input, select, textarea, [role="button"], [role="menubar"]'
-    );
-    if (interactiveEl) return;
-
-    handleViewportPick(event);
-  }
+  // 左键拾取只由 viewportPickSurfaceRef 对应的视口层触发。
 };
 
 const onMouseMove = (event) => {
@@ -1176,6 +1387,29 @@ const onMouseUp = (event) => {
 const onContextMenu = (event) => {
   if (isGamePreviewInputLocked()) return;
   event.preventDefault();
+};
+
+const handleActorPickResult = (payload) => {
+  const result = viewportPickController.handlePickResult(payload);
+  if (result.status === 'pending' || result.status === 'stale') return;
+
+  if (result.status !== 'selected') {
+    const fallbackActorHandle = Number(payload?.actorHandle || 0);
+    if (
+      result.status === 'unknown' &&
+      payload?.status === 'success' &&
+      Number.isFinite(fallbackActorHandle) &&
+      fallbackActorHandle > 0
+    ) {
+      emitActorChangeFast(
+        payload?.actorType || 'actor',
+        payload?.sceneId || cameraBindingState.value.sceneId || DEFAULT_SCENE_NAME,
+        payload?.actorName || `Actor ${fallbackActorHandle}`
+      );
+      return;
+    }
+    return;
+  }
 };
 
 const sendCameraUpdateFast = () => {
@@ -1313,9 +1547,11 @@ const closeTab = async (index) => {
     tabs.value.splice(index, 1);
 
     if (wasActive) {
+      await appService.suspendCameraViews(removedId).catch(() => {});
       activeTab.value = nextActiveIndex;
       await projectService.sceneSwitch(removedId, tabs.value[nextActiveIndex]?.id);
       await syncSceneCameraBinding(tabs.value[nextActiveIndex]?.id || DEFAULT_SCENE_NAME);
+      await restoreCameraViews(tabs.value[nextActiveIndex]?.id || DEFAULT_SCENE_NAME);
     } else {
       activeTab.value = nextActiveIndex;
     }
@@ -1337,6 +1573,7 @@ const switchTab = async (index, if_new) => {
   }
   const current_name = tabs.value[activeTab.value]?.id;
   const to_name = tabs.value[index]?.id;
+  await appService.suspendCameraViews(current_name).catch(() => {});
   activeTab.value = index;
   if (if_new) {
     await createScene();
@@ -1345,6 +1582,7 @@ const switchTab = async (index, if_new) => {
   await projectService.sceneSwitch(current_name, to_name);
 
   await syncSceneCameraBinding(to_name);
+  await restoreCameraViews(to_name);
 };
 
 const startEngine = () => {
@@ -1670,6 +1908,12 @@ onMounted(async () => {
   const initData = result?.data ?? result;
   const scenes = initData?.scenes ?? [];
   const activeIndex = Number(initData?.active_index ?? 0);
+  try {
+    const visionResult = unwrapBridgeData(await sceneService.isVisionAvailable());
+    visionAvailable.value = !!visionResult?.available;
+  } catch (error) {
+    visionAvailable.value = false;
+  }
 
   if (scenes.length > 0) {
     for (const s of scenes) {
@@ -1694,6 +1938,8 @@ onMounted(async () => {
   const initialSceneId = tabs.value[resolvedActiveIndex]?.id || DEFAULT_SCENE_NAME;
   await projectService.sceneSwitch(null, initialSceneId);
   await syncSceneCameraBinding(tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME);
+  syncViewportUiMode();
+  await restoreCameraViews(initialSceneId);
 
   document.addEventListener('keydown', handleKeyDown);
   document.addEventListener('keyup', handleKeyUp);
@@ -1715,6 +1961,9 @@ onMounted(async () => {
     const panelId = payload?.panelId;
     if (panelId) dockStore.popIn(panelId);
   });
+  coronaEventBus.on('vision-scene-imported', handleVisionSceneImported);
+  coronaEventBus.on('actor-pick-result', handleActorPickResult);
+  coronaEventBus.on('viewport-ui-calibration-changed', applyViewportUiCalibration);
 
   // 启动阶段性包菜提示：每隔一段时间根据用户操作自动弹出 AI 提示气泡
   startStageHints(
@@ -1738,13 +1987,12 @@ onUnmounted(() => {
   coronaEventBus.off('scene-add');
   coronaEventBus.off('scene-rename');
   coronaEventBus.off('panel-closed');
+  coronaEventBus.off('vision-scene-imported', handleVisionSceneImported);
+  coronaEventBus.off('actor-pick-result', handleActorPickResult);
   window.removeEventListener('storage', onStorageChange);
   stopMoveLoop();
-  // 清理拾取重试定时器
-  if (_pickRetryTimer) {
-    clearTimeout(_pickRetryTimer);
-    _pickRetryTimer = null;
-  }
+  viewportPickController.dispose();
+  viewportUiPointerController.dispose();
   document.removeEventListener('keydown', handleKeyDown);
   document.removeEventListener('keyup', handleKeyUp);
   document.removeEventListener('click', handleClickOutside);
@@ -1754,3 +2002,10 @@ onUnmounted(() => {
   document.removeEventListener('contextmenu', onContextMenu);
 });
 </script>
+
+<style scoped>
+.viewport-cursor-hidden,
+.viewport-cursor-hidden * {
+  cursor: none !important;
+}
+</style>

@@ -13,9 +13,9 @@ public:
     VS_MAKE_PLUGIN_NAME_FUNC
     void prepare() noexcept override {
         Pipeline::prepare();
-        scene_.prepare();
-        renderer_.prepare(scene_);
-        image_pool().prepare();
+        scene().prepare();
+        renderer_.prepare(scene());
+        image_pool().prepare(stream());
         prepare_geometry();
         upload_bindless_array();
         compile();
@@ -33,12 +33,15 @@ public:
     }
 
     void compile() noexcept override {
+        Global::SceneGpuContextScope scene_gpu_context{
+            scene().geometry().bindless_array(),
+            scene().geometry().gpu_resource()->device()};
         Pipeline::compile();
-        renderer_.integrator()->compile();
+        integrator()->compile();
     }
 
     void render(double dt) noexcept override {
-        renderer_.integrator()->render();
+        integrator()->render();
     }
 };
 

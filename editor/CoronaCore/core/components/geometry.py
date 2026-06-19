@@ -34,6 +34,33 @@ class Geometry:
         self.engine_obj = GeometryCtor(model_path)
         self.name = name
         self.model_path = model_path
+        self.is_ui_image = False
+
+    @classmethod
+    def from_image(cls, image_path: str, name: str = "UIImage"):
+        """
+        从图片文件创建一个带贴图的 quad（两个三角形）几何，用作光场 UI 平面。
+
+        与普通模型 Geometry 不同：底层走 C++ Geometry.from_image，程序化生成顶点并
+        把图片直接作为 albedo texture 上传，不经 Resource::Scene。
+
+        Args:
+            image_path: 图片文件路径（png/jpg/...）
+            name: 几何体名称
+        """
+        if CoronaEngine is None:
+            raise RuntimeError("CoronaEngine 未初始化")
+
+        GeometryCtor = getattr(CoronaEngine, 'Geometry', None)
+        if GeometryCtor is None or not hasattr(GeometryCtor, 'from_image'):
+            raise RuntimeError("CoronaEngine 未提供 Geometry.from_image")
+
+        obj = cls.__new__(cls)
+        obj.engine_obj = GeometryCtor.from_image(image_path)
+        obj.name = name
+        obj.model_path = image_path
+        obj.is_ui_image = True
+        return obj
 
     def set_position(self, position: List[float]):
         """设置局部位置 [x, y, z]"""

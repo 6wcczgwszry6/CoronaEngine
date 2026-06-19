@@ -3,13 +3,112 @@
 #include <algorithm>
 
 #include <corona/kernel/core/i_logger.h>
+#include <corona/resource/resource_manager.h>
+#include <corona/resource/types/image.h>
 #include <corona/systems/ui/vulkan_backend.h>
 #include <imgui_impl_sdl3.h>
+
+#include <algorithm>
+#include <filesystem>
+#include <optional>
+#include <system_error>
+#include <vector>
+
+#ifdef _WIN32
+#include <Windows.h>
+#endif
 
 #include "cef/browser_manager.h"
 #include "cef/cef_client.h"
 
 namespace Corona::Systems::UI {
+
+namespace {
+constexpr int kViewportCursorPixels = 48;
+constexpr char kMouseIconRelativePath[] = "assets/icon/mouse_icon.png";
+
+struct CursorIconPixels {
+    std::vector<unsigned char> rgba;
+    int width = 0;
+    int height = 0;
+};
+
+std::filesystem::path find_mouse_icon_path() {
+    std::error_code ec;
+    auto current = std::filesystem::current_path(ec);
+    if (!ec) {
+        for (auto dir = current; !dir.empty(); dir = dir.parent_path()) {
+            auto candidate = dir / kMouseIconRelativePath;
+            if (std::filesystem::exists(candidate, ec) && !ec) {
+                return candidate;
+            }
+            ec.clear();
+            if (dir == dir.parent_path()) {
+                break;
+            }
+        }
+    }
+    return std::filesystem::path(kMouseIconRelativePath);
+}
+
+std::optional<CursorIconPixels> load_mouse_icon_pixels() {
+    const auto icon_path = find_mouse_icon_path();
+    const auto image_id = Resource::ResourceManager::get_instance().import_sync(icon_path);
+    if (image_id == Resource::IResource::INVALID_UID) {
+        CFW_LOG_WARNING("Viewport cursor icon load failed: {}", icon_path.string());
+        return std::nullopt;
+    }
+
+    auto image = Resource::ResourceManager::get_instance().acquire_read<Resource::Image>(image_id);
+    if (!image || image->get_width() <= 0 || image->get_height() <= 0 || image->get_data() == nullptr) {
+        CFW_LOG_WARNING("Viewport cursor icon data invalid: {}", icon_path.string());
+        return std::nullopt;
+    }
+
+    CursorIconPixels pixels;
+    pixels.width = image->get_width();
+    pixels.height = image->get_height();
+    const int channels = image->get_channels();
+    const auto pixel_count = static_cast<size_t>(pixels.width) * static_cast<size_t>(pixels.height);
+    pixels.rgba.resize(pixel_count * 4);
+    const unsigned char* src = image->get_data();
+    if (channels == 4) {
+        std::copy(src, src + pixel_count * 4, pixels.rgba.begin());
+    } else if (channels == 3) {
+        for (size_t i = 0; i < pixel_count; ++i) {
+            pixels.rgba[i * 4 + 0] = src[i * 3 + 0];
+            pixels.rgba[i * 4 + 1] = src[i * 3 + 1];
+            pixels.rgba[i * 4 + 2] = src[i * 3 + 2];
+            pixels.rgba[i * 4 + 3] = 255;
+        }
+    } else if (channels == 1) {
+        for (size_t i = 0; i < pixel_count; ++i) {
+            pixels.rgba[i * 4 + 0] = src[i];
+            pixels.rgba[i * 4 + 1] = src[i];
+            pixels.rgba[i * 4 + 2] = src[i];
+            pixels.rgba[i * 4 + 3] = 255;
+        }
+    } else {
+        CFW_LOG_WARNING("Viewport cursor icon has unsupported channel count: {}", channels);
+        return std::nullopt;
+    }
+    return pixels;
+}
+
+std::vector<unsigned char> resize_cursor_icon(const CursorIconPixels& src, int width, int height) {
+    std::vector<unsigned char> dst(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
+    for (int y = 0; y < height; ++y) {
+        const int src_y = std::min(src.height - 1, (y * src.height) / height);
+        for (int x = 0; x < width; ++x) {
+            const int src_x = std::min(src.width - 1, (x * src.width) / width);
+            const size_t src_offset = (static_cast<size_t>(src_y) * src.width + src_x) * 4;
+            const size_t dst_offset = (static_cast<size_t>(y) * width + x) * 4;
+            std::copy_n(src.rgba.data() + src_offset, 4, dst.data() + dst_offset);
+        }
+    }
+    return dst;
+}
+}  // namespace
 
 // ============================================================================
 // SDL/ImGui 生命周期管理
@@ -198,6 +297,89 @@ void UiLayoutManager::end_dockspace() {
     }
 }
 
+SDL_Cursor* UiFrameRunner::ensure_viewport_system_cursor() {
+    if (viewport_system_cursor_ || viewport_system_cursor_load_attempted_) {
+        return viewport_system_cursor_;
+    }
+    viewport_system_cursor_load_attempted_ = true;
+
+    auto pixels = load_mouse_icon_pixels();
+    if (!pixels) {
+        return nullptr;
+    }
+
+    auto resized = resize_cursor_icon(*pixels, kViewportCursorPixels, kViewportCursorPixels);
+    SDL_Surface* surface = SDL_CreateSurfaceFrom(kViewportCursorPixels,
+                                                 kViewportCursorPixels,
+                                                 SDL_PIXELFORMAT_RGBA32,
+                                                 resized.data(),
+                                                 kViewportCursorPixels * 4);
+    if (!surface) {
+        CFW_LOG_WARNING("Viewport cursor SDL surface creation failed: {}", SDL_GetError());
+        return nullptr;
+    }
+
+    viewport_system_cursor_ = SDL_CreateColorCursor(surface, 0, 0);
+    SDL_DestroySurface(surface);
+    if (!viewport_system_cursor_) {
+        CFW_LOG_WARNING("Viewport cursor creation failed: {}", SDL_GetError());
+    }
+    return viewport_system_cursor_;
+}
+
+void UiFrameRunner::apply_system_cursor_visibility(SDL_Window* main_window, int active_tab_id) {
+    bool should_hide = false;
+    bool should_use_custom = false;
+    SDL_Window* mouse_window = SDL_GetMouseFocus();
+    const SDL_WindowID mouse_window_id = mouse_window ? SDL_GetWindowID(mouse_window) : 0;
+
+    if (mouse_window_id != 0) {
+        for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+            if (!tab || !tab->open || tab->minimized) {
+                continue;
+            }
+            if (tab->camera_view && tab->platform_window_id == mouse_window_id) {
+                should_hide = tab->hide_system_cursor.load(std::memory_order_relaxed);
+                should_use_custom = tab->use_custom_system_cursor.load(std::memory_order_relaxed);
+                break;
+            }
+            if (!tab->camera_view && tab->docking_pos == "main" && main_window &&
+                mouse_window == main_window && tab_id == active_tab_id) {
+                should_hide = tab->hide_system_cursor.load(std::memory_order_relaxed);
+                should_use_custom = tab->use_custom_system_cursor.load(std::memory_order_relaxed);
+                break;
+            }
+        }
+    }
+
+    if (should_hide) {
+        // ImGui_ImplSDL3_NewFrame() may restore the OS cursor every frame.
+        // Keep reapplying hidden while an Optics 3D cursor owns this viewport.
+        SDL_HideCursor();
+        system_cursor_hidden_ = true;
+        return;
+    }
+
+    if (system_cursor_hidden_) {
+        SDL_ShowCursor();
+        system_cursor_hidden_ = false;
+    }
+
+    if (should_use_custom) {
+        if (SDL_Cursor* cursor = ensure_viewport_system_cursor()) {
+            SDL_SetCursor(cursor);
+            system_cursor_custom_ = true;
+            return;
+        }
+    }
+
+    if (system_cursor_custom_) {
+        if (SDL_Cursor* default_cursor = SDL_GetDefaultCursor()) {
+            SDL_SetCursor(default_cursor);
+        }
+        system_cursor_custom_ = false;
+    }
+}
 // ============================================================================
 // UiFrameRunner 实现
 // ============================================================================
@@ -207,7 +389,73 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         return;
     }
 
-    auto result = event_handler_.process_events(context.window, url_input_active_tab_, [&](const SDL_Event& e) { input_handler_.process_sdl_key_event(e); }, [&](const SDL_Event& e) { input_handler_.process_sdl_text_event(e); }, [&](const SDL_Event& e) { input_handler_.process_sdl_ime_event(e); });
+    auto route_camera_window = [&](SDL_WindowID window_id) {
+        if (window_id == 0) {
+            return;
+        }
+        for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+            if (tab && tab->camera_view &&
+                tab->platform_window_id == window_id) {
+                *context.active_tab_id = tab_id;
+                url_input_active_tab_ = -1;
+                return;
+            }
+        }
+    };
+
+    auto route_main_window = [&]() {
+        for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+            if (tab && !tab->camera_view && tab->docking_pos == "main") {
+                *context.active_tab_id = tab_id;
+                url_input_active_tab_ = -1;
+                return;
+            }
+        }
+    };
+
+    auto result = event_handler_.process_events(
+        context.window, url_input_active_tab_,
+        [&](const SDL_Event& event) {
+            route_camera_window(event.key.windowID);
+            input_handler_.process_sdl_key_event(event);
+        },
+        [&](const SDL_Event& event) {
+            route_camera_window(event.text.windowID);
+            input_handler_.process_sdl_text_event(event);
+        },
+        [&](const SDL_Event& event) {
+            route_camera_window(event.edit.windowID);
+            input_handler_.process_sdl_ime_event(event);
+        });
+
+    if (SDL_Window* focused_window = SDL_GetKeyboardFocus()) {
+        if (focused_window == context.window) {
+            route_main_window();
+        } else {
+            route_camera_window(SDL_GetWindowID(focused_window));
+        }
+    }
+#ifdef _WIN32
+    if (HWND foreground = GetForegroundWindow()) {
+        HWND main_hwnd = context.window
+            ? static_cast<HWND>(SDL_GetPointerProperty(
+                  SDL_GetWindowProperties(context.window),
+                  SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+                  nullptr))
+            : nullptr;
+        if (main_hwnd && foreground == main_hwnd) {
+            route_main_window();
+        }
+        for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+            if (tab && tab->camera_view &&
+                tab->platform_handle_raw == foreground) {
+                *context.active_tab_id = tab_id;
+                url_input_active_tab_ = -1;
+                break;
+            }
+        }
+    }
+#endif
 
     if (result.should_quit) {
         *context.running = false;
@@ -223,6 +471,7 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
     if (*context.active_tab_id != -1 && url_input_active_tab_ == -1) {
         auto* tab = BrowserManager::instance().get_tab(*context.active_tab_id);
         if (tab && tab->client && tab->client->GetBrowser()) {
+            tab->client->GetBrowser()->GetHost()->SetFocus(true);
             input_handler_.send_key_events_to_browser(tab->client->GetBrowser());
         } else {
             input_handler_.clear_pending_events();
@@ -240,6 +489,7 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
 
     context.vulkan_backend->new_frame();
     ImGui_ImplSDL3_NewFrame();
+    apply_system_cursor_visibility(context.window, *context.active_tab_id);
 
     // Ensure RendererHasTextures stays disabled — our custom renderer does not
     // implement the ImGui texture management API (font atlas is manual).

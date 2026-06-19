@@ -39,6 +39,8 @@ if(DEFINED FETCHCONTENT_BASE_DIR AND NOT FETCHCONTENT_BASE_DIR STREQUAL "")
         set(_CORONA_FETCHCONTENT_BASE_IS_STALE_HORIZON ON)
     endif()
 endif()
+unset(_CORONA_LOCAL_HORIZON_SOURCE)
+unset(_CORONA_OFFLINE_FETCH_BASE)
 
 if(NOT DEFINED FETCHCONTENT_BASE_DIR
    OR FETCHCONTENT_BASE_DIR STREQUAL ""
@@ -73,6 +75,10 @@ include(corona_cef)
 # Testing Support
 # ------------------------------------------------------------------------------
 include(CTest)
+if(BUILD_CORONA_TESTING)
+    enable_testing()
+    set(CORONA_RESOURCE_BUILD_TESTS ON CACHE BOOL "Build CoronaResource tests" FORCE)
+endif()
 
 # ------------------------------------------------------------------------------
 # Subdirectories

@@ -15,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Corona::Systems {
@@ -62,13 +63,23 @@ class DisplaySystem : public Kernel::SystemBase {
         PendingLayer ui;
     };
 
-    void compose_and_present(Horizon::HardwareDisplayer& displayer,
+    struct CompositeResources {
+        Horizon::HardwareExecutor executor;
+        Horizon::HardwareImage output;
+        uint32_t width = 0;
+        uint32_t height = 0;
+    };
+
+    bool compose_and_present(Horizon::HardwareDisplayer& displayer,
                              SurfaceState& state,
+                             CompositeResources& resources,
                              Horizon::HardwareImage& optics_image,
                              const Horizon::SubmitReceipt* optics_receipt,
                              Horizon::HardwareImage& ui_image,
                              const Horizon::SubmitReceipt* ui_receipt);
-    bool ensure_composite_resources(uint32_t width, uint32_t height);
+    bool ensure_composite_resources(CompositeResources& resources,
+                                    uint32_t width,
+                                    uint32_t height);
 
     Kernel::EventId surface_changed_sub_id_ = 0;
     Kernel::EventId surface_removed_sub_id_ = 0;
@@ -81,6 +92,8 @@ class DisplaySystem : public Kernel::SystemBase {
 
     std::unordered_map<uint64_t, Horizon::HardwareDisplayer> displayers_;
     std::unordered_map<uint64_t, SurfaceState> surface_states_;
+    std::unordered_map<uint64_t, CompositeResources> composite_resources_;
+    std::unordered_set<uint64_t> removed_surfaces_;
     std::vector<void*> pending_surfaces_;  ///< Surfaces awaiting displayer creation (deferred to update thread)
 
     // Surfaces awaiting teardown (ImGui secondary viewport closed). The removal event
@@ -96,11 +109,7 @@ class DisplaySystem : public Kernel::SystemBase {
 
     // Compositing resources
     std::optional<Horizon::ComputePipeline<composite_comp_glsl_t>> composite_pipeline_;
-    std::optional<Horizon::HardwareExecutor> compositor_executor_;
-    Horizon::HardwareImage composite_output_;
     Horizon::HardwareImage transparent_storage_;  ///< 1x1 transparent StorageImage fallback for missing layers
-    uint32_t composite_width_ = 0;
-    uint32_t composite_height_ = 0;
     bool composite_pipeline_ready_ = false;
 };
 }  // namespace Corona::Systems

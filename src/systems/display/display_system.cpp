@@ -25,7 +25,9 @@ bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
                 return;
             }
 
+            const auto surface_id = reinterpret_cast<uint64_t>(event.surface);
             std::lock_guard<std::mutex> lock(frame_mutex_);
+            removed_surfaces_.erase(surface_id);
             pending_surfaces_.push_back(event.surface);
         });
 
@@ -46,7 +48,16 @@ bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
                 return;
             }
 
+            const auto surface_id = reinterpret_cast<uint64_t>(event.surface);
             std::lock_guard<std::mutex> lock(frame_mutex_);
+            removed_surfaces_.insert(surface_id);
+            surface_states_.erase(surface_id);
+            pending_surfaces_.erase(
+                std::remove_if(pending_surfaces_.begin(), pending_surfaces_.end(),
+                               [surface_id](void* s) {
+                                   return reinterpret_cast<uint64_t>(s) == surface_id;
+                               }),
+                pending_surfaces_.end());
             pending_removals_.push_back({event.surface, event.done});
         });
 
@@ -59,6 +70,9 @@ bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
 
             const auto surface_id = reinterpret_cast<uint64_t>(event.surface);
             std::lock_guard<std::mutex> lock(frame_mutex_);
+            if (removed_surfaces_.contains(surface_id)) {
+                return;
+            }
             auto& layer = surface_states_[surface_id].optics;
             if (event.frame_index >= layer.frame_index) {
                 layer.image_handle = event.image_handle;
@@ -77,6 +91,9 @@ bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
 
             const auto surface_id = reinterpret_cast<uint64_t>(event.surface);
             std::lock_guard<std::mutex> lock(frame_mutex_);
+            if (removed_surfaces_.contains(surface_id)) {
+                return;
+            }
             auto& layer = surface_states_[surface_id].ui;
             if (event.frame_index >= layer.frame_index) {
                 layer.image_handle = event.image_handle;
@@ -120,6 +137,7 @@ void DisplaySystem::update() {
         if (!removals.empty()) {
             for (const auto& r : removals) {
                 const auto surface_id = reinterpret_cast<uint64_t>(r.surface);
+                removed_surfaces_.insert(surface_id);
                 surface_states_.erase(surface_id);
             }
             pending_surfaces_.erase(
@@ -154,6 +172,7 @@ void DisplaySystem::update() {
     for (auto& r : removals) {
         const auto surface_id = reinterpret_cast<uint64_t>(r.surface);
         displayers_.erase(surface_id);
+        composite_resources_.erase(surface_id);
         if (r.done) {
             r.done->set_value();
         }
@@ -205,16 +224,20 @@ void DisplaySystem::update() {
             continue;
         }
 
-        compose_and_present(displayer,
-                            state,
-                            bg_image,
-                            (optics_img_ptr && *optics_img_ptr) ? optics_receipt_ptr : nullptr,
-                            fg_image,
-                            (ui_img_ptr && *ui_img_ptr) ? ui_receipt_ptr : nullptr);
+        auto& composite_resources = composite_resources_[surface_id];
+        if (!compose_and_present(
+                displayer,
+                state,
+                composite_resources,
+                bg_image,
+                (optics_img_ptr && *optics_img_ptr) ? optics_receipt_ptr : nullptr,
+                fg_image,
+                (ui_img_ptr && *ui_img_ptr) ? ui_receipt_ptr : nullptr)) {
+            continue;
+        }
 
         // Write back the consumed signal so producers know when to safely reuse their image.
-        const Horizon::SubmitReceipt consumed_receipt =
-            compositor_executor_ ? compositor_executor_->last_receipt() : Horizon::SubmitReceipt();
+        const Horizon::SubmitReceipt consumed_receipt = composite_resources.executor.last_receipt();
         if (has_optics && optics_frame) {
             optics_frame->consumed_receipt = consumed_receipt;
         }
@@ -224,7 +247,9 @@ void DisplaySystem::update() {
     }
 }
 
-bool DisplaySystem::ensure_composite_resources(uint32_t width, uint32_t height) {
+bool DisplaySystem::ensure_composite_resources(CompositeResources& resources,
+                                               uint32_t width,
+                                               uint32_t height) {
     if (!composite_pipeline_ready_) {
         if (!composite_pipeline_) {
             composite_pipeline_.emplace(composite_comp_glsl, ktm::uvec3(8, 8, 1));
@@ -236,8 +261,9 @@ bool DisplaySystem::ensure_composite_resources(uint32_t width, uint32_t height) 
         }
     }
 
-    if (composite_width_ != width || composite_height_ != height || !composite_output_) {
-        composite_output_ = Horizon::HardwareImage(Horizon::HardwareImageDesc::texture_2d(
+    if (resources.width != width || resources.height != height || !resources.output) {
+        resources.executor.wait_idle(resources.executor.last_receipt());
+        resources.output = Horizon::HardwareImage(Horizon::HardwareImageDesc::texture_2d(
             width,
             height,
             Horizon::Format::RGBA16_FLOAT,
@@ -245,19 +271,20 @@ bool DisplaySystem::ensure_composite_resources(uint32_t width, uint32_t height) 
                 Horizon::ImageUsageFlags::Sampled | Horizon::ImageUsageFlags::TransferSrc |
                 Horizon::ImageUsageFlags::TransferDst,
             "display.composite_output"));
-        if (!composite_output_) {
+        if (!resources.output) {
             CFW_LOG_ERROR("DisplaySystem: Failed to create composite output ({}x{})", width, height);
             return false;
         }
-        composite_width_ = width;
-        composite_height_ = height;
+        resources.width = width;
+        resources.height = height;
     }
 
     return true;
 }
 
-void DisplaySystem::compose_and_present(Horizon::HardwareDisplayer& displayer,
+bool DisplaySystem::compose_and_present(Horizon::HardwareDisplayer& displayer,
                                         SurfaceState& state,
+                                        CompositeResources& resources,
                                         Horizon::HardwareImage& optics_image,
                                         const Horizon::SubmitReceipt* optics_receipt,
                                         Horizon::HardwareImage& ui_image,
@@ -265,17 +292,17 @@ void DisplaySystem::compose_and_present(Horizon::HardwareDisplayer& displayer,
     const uint32_t output_width = state.ui.width != 0 ? state.ui.width : state.optics.width;
     const uint32_t output_height = state.ui.height != 0 ? state.ui.height : state.optics.height;
     if (output_width == 0 || output_height == 0) {
-        return;
+        return false;
     }
 
-    if (!ensure_composite_resources(output_width, output_height)) {
-        return;
+    if (!ensure_composite_resources(resources, output_width, output_height)) {
+        return false;
     }
 
     auto& composite_pipeline = *composite_pipeline_;
     composite_pipeline.pushConsts.bgImage = optics_image.storeStorageDescriptor();
     composite_pipeline.pushConsts.fgImage = ui_image.storeStorageDescriptor();
-    composite_pipeline.pushConsts.outputImage = composite_output_.storeStorageDescriptor();
+    composite_pipeline.pushConsts.outputImage = resources.output.storeStorageDescriptor();
     composite_pipeline.pushConsts.outputWidth = output_width;
     composite_pipeline.pushConsts.outputHeight = output_height;
     composite_pipeline.pushConsts.bgWidth = std::max(state.optics.width, 1u);
@@ -284,33 +311,29 @@ void DisplaySystem::compose_and_present(Horizon::HardwareDisplayer& displayer,
     composite_pipeline.pushConsts.fgHeight = std::max(state.ui.height, 1u);
     composite_pipeline.bind_storage_image(0, optics_image);
     composite_pipeline.bind_storage_image(1, ui_image);
-    composite_pipeline.bind_storage_image(2, composite_output_);
+    composite_pipeline.bind_storage_image(2, resources.output);
 
-    const uint32_t dispatch_x = output_width;
-    const uint32_t dispatch_y = output_height;
-
-    if (!compositor_executor_) {
-        compositor_executor_.emplace();
-    }
-    auto& compositor_executor = *compositor_executor_;
+    const uint32_t dispatch_x = (output_width + 7u) / 8u;
+    const uint32_t dispatch_y = (output_height + 7u) / 8u;
 
     // GPU sync: wait for each producer's rendering to finish before reading their images
     if (optics_receipt != nullptr && !optics_receipt->empty()) {
-        compositor_executor.wait(*optics_receipt);
+        resources.executor.wait(*optics_receipt);
     }
     if (ui_receipt != nullptr && !ui_receipt->empty()) {
-        compositor_executor.wait(*ui_receipt);
+        resources.executor.wait(*ui_receipt);
     }
 
     const Horizon::SubmitReceipt composite_receipt =
-        compositor_executor.stream()
+        resources.executor.stream()
         << composite_pipeline(dispatch_x, dispatch_y, 1)
         << Horizon::commit();
 
-    compositor_executor.wait(composite_receipt);
-    (void)(compositor_executor.stream()
-           << Horizon::present(displayer, composite_output_)
+    resources.executor.wait(composite_receipt);
+    (void)(resources.executor.stream()
+           << Horizon::present(displayer, resources.output)
            << Horizon::commit());
+    return true;
 }
 
 void DisplaySystem::shutdown() {
@@ -342,12 +365,12 @@ void DisplaySystem::shutdown() {
     }
 
     composite_pipeline_ready_ = false;
-    composite_output_ = Horizon::HardwareImage();
     composite_pipeline_.reset();
-    compositor_executor_.reset();
-
     surface_states_.clear();
+    removed_surfaces_.clear();
     displayers_.clear();
+    composite_resources_.clear();
+    transparent_storage_ = Horizon::HardwareImage();
 }
 
 }  // namespace Corona::Systems
