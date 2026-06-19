@@ -263,6 +263,8 @@ class LanChatAgentOrchestrator:
             "requires_host_confirm": True,
             "execution": "host_single_writer",
         }
+        if action_type == "start_generation":
+            self._pending_proposal["plan_summary"] = self._build_generation_plan_summary(text, pending)
         if isinstance(resolved_plan, dict):
             resolved_intent_text = str(resolved_plan.get("resolved_intent_text") or text)
             original_user_text = text
@@ -288,13 +290,15 @@ class LanChatAgentOrchestrator:
         pending = proposal.get("pending") or []
         conflicts = proposal.get("conflicts") or []
         plan_summary = str(proposal.get("plan_summary") or "").strip()
+        action_type = str(proposal.get("action_type") or "")
         if plan_summary:
+            confirmation_line = self._proposal_confirmation_line(proposal_id, action_type)
             return (
                 f"【GM 提案 {proposal_id}】\n"
-                f"我将按{proposal.get('source_agent_name') or '该助手'}刚才的方案执行：\n"
-                f"{plan_summary}\n"
+                f"方案摘要：\n{plan_summary}\n"
                 f"潜在冲突：{self._join_lines(conflicts)}\n"
-                f"房主可回复：@GM 确认 {proposal_id} / @GM 拒绝 {proposal_id}。"
+                f"确认后动作：{self._proposal_confirmation_effect(action_type)}\n"
+                f"房主可回复：{confirmation_line}"
             )
         return (
             f"【GM 提案 {proposal_id}】\n"
@@ -302,8 +306,37 @@ class LanChatAgentOrchestrator:
             f"待处理意图：{self._join_lines(pending)}\n"
             f"潜在冲突：{self._join_lines(conflicts)}\n"
             "建议：先保留最近用户明确操作，Agent 物体让位；涉及删除、重置或覆盖多人意见时由房主确认。\n"
-            f"房主可回复：@GM 确认 {proposal_id} / @GM 拒绝 {proposal_id}。"
+            f"确认后动作：{self._proposal_confirmation_effect(action_type)}\n"
+            f"房主可回复：{self._proposal_confirmation_line(proposal_id, action_type)}"
         )
+
+    def _build_generation_plan_summary(self, text: str, pending: list[str]) -> str:
+        cleaned_text = self._strip_leading_mention(text)
+        basis = self._join_lines(pending) if pending else cleaned_text
+        lines = [
+            f"- 设计目标：{cleaned_text or basis or '按当前讨论生成场景'}",
+            "- 生成范围：完整 3D 场景，包括空间布局、主体家具和基础装饰。",
+            "- 执行方式：确认后进入生成队列；未确认前只作为方案草案保留。",
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _strip_leading_mention(text: str) -> str:
+        return re.sub(r"^\s*@\S+\s*", "", str(text or "").strip()).strip()
+
+    @staticmethod
+    def _proposal_confirmation_effect(action_type: str) -> str:
+        if action_type == "start_generation":
+            return "开始生成 3D 场景"
+        if action_type == "discussion_only":
+            return "确认讨论方案，但不会自动生成"
+        return "提交给房主单写入执行队列"
+
+    @staticmethod
+    def _proposal_confirmation_line(proposal_id: str, action_type: str) -> str:
+        if action_type == "start_generation":
+            return f"@GM 确认 {proposal_id}（确认该方案并开始生成） / @GM 拒绝 {proposal_id}（继续讨论，不生成）。"
+        return f"@GM 确认 {proposal_id} / @GM 拒绝 {proposal_id}。"
 
     def _proposal_dedupe_key(self, trigger: dict[str, Any]) -> str:
         message_id = str(trigger.get("message_id") or trigger.get("correlation_id") or "")

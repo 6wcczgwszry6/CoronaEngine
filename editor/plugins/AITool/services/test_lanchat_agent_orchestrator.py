@@ -323,6 +323,27 @@ def test_gm_proposal_for_conflict():
     print("[OK] conflict or GM mention produces GM proposal")
 
 
+def test_gm_generation_proposal_explains_plan_and_confirmation_effect():
+    orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
+    trigger = _trigger("@小女孩 我想要一个可爱的卧室，给我一个生成设计方案", "小女孩")
+    trigger["sender_id"] = "host-a"
+    trigger["sender_name"] = "房主"
+    trigger["history"] = [
+        {"message_id": "m0", "from": "用户B", "sender_id": "user-b", "text": "可以做可爱一点。"},
+        {"message_id": "m1", "from": "房主", "sender_id": "host-a", "text": trigger["text"]},
+    ]
+
+    result = orch.handle_trigger(trigger)
+
+    assert result.proposal is True
+    assert "方案摘要" in result.text
+    assert "确认后动作：开始生成 3D 场景" in result.text
+    assert "确认该方案并开始生成" in result.text
+    assert "可爱的卧室" in result.text
+    assert result.action_payload["action_type"] == "start_generation"
+    print("[OK] GM generation proposal explains plan and confirmation effect")
+
+
 def test_gm_summary_does_not_create_proposal():
     orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
     trigger = _trigger("@GM 整理一下大家的想法", "GM")
@@ -909,6 +930,72 @@ def test_planning_confirmation_gate_roundtrip():
     assert "森林奇幻集市" in str(compose_text)
     assert "灯串" in str(compose_text) or "木牌" in str(compose_text)
     print("[OK] planning confirmation gate returns proposal then compose text")
+
+
+def test_planning_confirmation_gate_returns_concrete_design_brief():
+    runtime = get_lanchat_scene_runtime()
+    runtime.end_compose()
+    runtime.consume_notes()
+
+    try:
+        action, reply = runtime.handle_planning_gate("小女孩", "@小女孩 帮我设计一个可爱的卧室")
+
+        assert action == "reply"
+        text = str(reply)
+        assert "方案内容" in text
+        assert "风格定位" in text
+        assert "空间布局" in text
+        assert "核心物件" in text
+        assert "确认开始" in text
+        assert "补充要求：" in text
+        assert "我会先更新方案，不会立刻生成" in text
+        assert "例如：补充要求：床边加一个小书架，整体更粉一点" in text
+        assert "可爱的卧室" in text
+        assert "..." not in text
+        assert "主体建筑或摊位" not in text
+        assert "环境主体" not in text
+    finally:
+        runtime.clear_pending_planning("小女孩")
+    print("[OK] planning gate returns concrete bedroom design brief")
+
+
+def test_worker_routes_plain_chat_supplement_to_pending_planning_gate():
+    runtime = get_lanchat_scene_runtime()
+    runtime.end_compose()
+    runtime.consume_notes()
+    action, reply = runtime.handle_planning_gate("小女孩", "@小女孩 帮我设计一个可爱的卧室")
+    assert action == "reply"
+    assert "方案内容" in str(reply)
+
+    coordinator = InteractionCoordinator()
+    engine = FakeEngine([], coordinator_messages=[{
+        "message_id": "plain-plan-supplement-1",
+        "room_id": "r-plan-supplement",
+        "sender_id": "host-a",
+        "sender_name": "房主",
+        "sender_type": "host",
+        "message_kind": "chat",
+        "text": "补充要求，减少方案中的细碎物体",
+    }])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    try:
+        assert worker.process_once() is True
+    finally:
+        runtime.clear_pending_planning("小女孩")
+        runtime.end_compose("小女孩")
+
+    assert engine.replies
+    reply_text = str(engine.replies[-1][2])
+    assert engine.replies[-1][1] == "小女孩"
+    assert "我已更新方案" in reply_text
+    assert "减少方案中的细碎物体" in reply_text
+    print("[OK] worker routes no-mention supplement to pending planning gate")
 
 
 def test_planning_gate_records_pre_generation_style_supplement():
@@ -3267,6 +3354,7 @@ if __name__ == "__main__":
     test_confirm_start_uses_active_coordinator_plan_instead_of_role_agent_gate()
     test_current_mentioned_agent_identity_overrides_history_mentions()
     test_gm_proposal_for_conflict()
+    test_gm_generation_proposal_explains_plan_and_confirmation_effect()
     test_gm_summary_does_not_create_proposal()
     test_role_agent_not_hijacked_by_prior_agent_or_gm_messages()
     test_role_agent_theme_discussion_not_hijacked_by_gm()
@@ -3294,6 +3382,8 @@ if __name__ == "__main__":
     test_worker_records_busy_scene_message_without_agent_lock()
     test_worker_records_busy_layout_and_edit_notes()
     test_planning_confirmation_gate_roundtrip()
+    test_planning_confirmation_gate_returns_concrete_design_brief()
+    test_worker_routes_plain_chat_supplement_to_pending_planning_gate()
     test_planning_gate_records_pre_generation_style_supplement()
     test_worker_async_agent_calls_are_serialized_per_worker()
     test_worker_broadcasts_confirmed_gm_action()

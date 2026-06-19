@@ -176,6 +176,32 @@ class LanChatSceneRuntime:
 
         return "pass", None
 
+    def handle_pending_planning_message(self, text: str) -> tuple[str, str | None, str | None]:
+        """Route an unmentioned room message to the only pending planning gate."""
+        value = str(text or "").strip()
+        if not value:
+            return "pass", None, None
+        with self._lock:
+            pending_keys = [
+                key
+                for key, pending in self._pending_confirmations.items()
+                if pending.status == "pending"
+            ]
+        if len(pending_keys) != 1:
+            return "pass", None, None
+        agent_key = pending_keys[0]
+        action, payload = self.handle_planning_gate(agent_key, value)
+        if action == "pass":
+            return "pass", None, None
+        return action, payload, agent_key
+
+    def clear_pending_planning(self, agent_name: str | None = None) -> None:
+        with self._lock:
+            if agent_name:
+                self._pending_confirmations.pop(self._agent_key(agent_name), None)
+            else:
+                self._pending_confirmations.clear()
+
     def start_compose(self, agent_name: str, goal: str) -> None:
         with self._lock:
             self._mode = MODE_EXECUTING
@@ -263,8 +289,11 @@ class LanChatSceneRuntime:
         return notes
 
     def _compose_text_from_confirmation(self, confirmation: PlanningConfirmation, user_text: str) -> str:
+        brief = self._design_brief_lines(confirmation)
         parts = [
             f"用户确认开始生成：{confirmation.scene_goal}",
+            "确认方案内容：",
+            *brief,
             "建议物体清单：" + "、".join(confirmation.proposed_items),
         ]
         if confirmation.constraints:
@@ -273,35 +302,121 @@ class LanChatSceneRuntime:
         return "\n".join(parts)
 
     def _format_confirmation(self, confirmation: PlanningConfirmation, *, updated: bool = False) -> str:
-        items = confirmation.proposed_items[:8]
-        while len(items) < 6:
-            filler = ["主体物件", "支撑物件", "灯光装饰", "导视牌", "储物道具", "活动区装饰"][len(items)]
-            if filler not in items:
-                items.append(filler)
         prefix = "我已更新方案。" if updated else f"我理解你的目标是：{confirmation.scene_goal}。"
+        brief = self._design_brief_lines(confirmation)
         lines = [
             prefix,
             "",
+            "方案内容：",
+            *brief,
+        ]
+        if confirmation.constraints:
+            lines.extend([
+                "",
+                "已纳入补充要求：" + "；".join(confirmation.constraints),
+            ])
+        lines.extend([
+            "",
             "建议先做：",
-            "1. 场地：确定主要活动区和通行动线",
-            "2. 主体：" + "、".join(items[:2]),
-            "3. 支撑：" + "、".join(items[2:4]),
-            "4. 装饰：" + "、".join(items[4:8]),
+            "1. 锁定空间边界和主要动线",
+            "2. 先生成核心物件：" + "、".join(self._core_items(confirmation)[:4]),
+            "3. 再补足氛围装饰：" + "、".join(self._decor_items(confirmation)[:4]),
+            "4. 最后检查比例、留空和遮挡关系",
             "",
             "你可以回复：",
-            "- 确认开始",
-            "- 补充：...",
-            "- 直接生成",
-        ]
+            "- 确认开始：按当前方案进入 3D 场景生成。",
+            "- 补充要求：写明要改的风格、物件、布局或限制；我会先更新方案，不会立刻生成。",
+            "- 例如：补充要求：床边加一个小书架，整体更粉一点。",
+            "- 直接生成：跳过继续讨论，立即按当前方案开始生成。",
+        ])
         disclosure = self._classification_disclosure(confirmation.scene_goal, confirmation.proposed_items)
         if disclosure:
             lines.extend(["", "提炼结果：", disclosure])
         return "\n".join(lines)
 
+    def _design_brief_lines(self, confirmation: PlanningConfirmation) -> list[str]:
+        core = self._core_items(confirmation)
+        decor = self._decor_items(confirmation)
+        return [
+            f"1. 风格定位：{self._style_direction(confirmation.scene_goal)}",
+            f"2. 空间布局：{self._layout_direction(confirmation.scene_goal)}",
+            "3. 核心物件：" + "、".join(core[:5]),
+            "4. 氛围装饰：" + "、".join(decor[:5]),
+        ]
+
+    @staticmethod
+    def _style_direction(goal: str) -> str:
+        value = str(goal or "")
+        styles: list[str] = []
+        if any(word in value for word in ("可爱", "少女", "小女孩", "童趣")):
+            styles.append("明亮可爱")
+        if any(word in value for word in ("温暖", "暖", "治愈")):
+            styles.append("温暖治愈")
+        if any(word in value for word in ("暗黑", "神秘", "奇幻")):
+            styles.append("奇幻神秘")
+        if any(word in value for word in ("森林", "草原", "室外")):
+            styles.append("自然户外")
+        if not styles:
+            styles.append("围绕目标主题统一色彩、材质和装饰语言")
+        return "、".join(styles)
+
+    @staticmethod
+    def _layout_direction(goal: str) -> str:
+        value = str(goal or "")
+        if any(word in value for word in ("卧室", "房间")):
+            return "以床区为视觉中心，保留入口到床边的通行动线，侧边安排收纳和学习/梳妆角"
+        if any(word in value for word in ("集市", "摊", "街")):
+            return "以主路为中轴，两侧布置摊位和停留点，入口保持开阔"
+        if any(word in value for word in ("客厅", "休息区")):
+            return "以沙发/茶几形成交流中心，周边留出通行和展示区域"
+        if any(word in value for word in ("草原", "森林", "室外", "露营")):
+            return "用开阔地形承载主体活动区，边缘布置自然元素形成层次"
+        return "先确定主活动区，再围绕它安排支撑物件、装饰和留白"
+
+    @staticmethod
+    def _core_items(confirmation: PlanningConfirmation) -> list[str]:
+        items = list(confirmation.proposed_items or [])
+        value = confirmation.scene_goal
+        if any(word in value for word in ("卧室", "房间")):
+            preferred = ["床", "床头柜", "衣柜/收纳柜", "书桌或梳妆台", "地毯"]
+        elif any(word in value for word in ("集市", "摊", "街")):
+            preferred = ["入口牌", "主路", "摊位", "展示桌", "休息点"]
+        elif any(word in value for word in ("草原", "森林", "室外", "露营")):
+            preferred = ["地形主体", "活动中心", "路径", "树木/花草", "休息点"]
+        else:
+            preferred = ["主体空间", "主要功能物件", "支撑物件", "路径/动线", "停留点"]
+        return LanChatSceneRuntime._merge_unique(preferred, items, limit=8)
+
+    @staticmethod
+    def _decor_items(confirmation: PlanningConfirmation) -> list[str]:
+        items = list(confirmation.proposed_items or [])
+        value = confirmation.scene_goal
+        if any(word in value for word in ("可爱", "少女", "小女孩", "童趣")):
+            preferred = ["玩偶/抱枕", "小花装饰", "暖色灯串", "柔软地毯", "粉色或浅色点缀"]
+        elif any(word in value for word in ("暗黑", "神秘", "奇幻")):
+            preferred = ["灯笼/烛光", "旗帜", "木牌", "雾气氛围", "奇幻小道具"]
+        else:
+            preferred = ["氛围灯光", "主题装饰", "小型道具", "色彩点缀", "导视/标识"]
+        return LanChatSceneRuntime._merge_unique(preferred, items, limit=8)
+
+    @staticmethod
+    def _merge_unique(*groups: list[str], limit: int = 8) -> list[str]:
+        merged: list[str] = []
+        for group in groups:
+            for item in group:
+                value = str(item or "").strip()
+                if value and value not in merged:
+                    merged.append(value)
+                if len(merged) >= limit:
+                    return merged
+        return merged
+
     @staticmethod
     def _extract_scene_goal(text: str) -> str:
-        value = re.sub(r"^.*?(我有一个计划[，,]?)", "", str(text or "")).strip()
-        value = re.sub(r"^(建立|搭建|设计|规划|做)一个", "", value).strip()
+        value = re.sub(r"@\S+\s*", "", str(text or "")).strip()
+        value = re.sub(r"^.*?(我有一个计划[，,]?)", "", value).strip()
+        value = re.sub(r"^(?:请|麻烦你|帮我|给我|我想要|我想做|我们来)?\s*", "", value).strip()
+        value = re.sub(r"^(?:建立|搭建|设计|规划|做|布置)(?:一个|一下|一间)?", "", value).strip()
         return value or str(text or "").strip() or "新的开放场景"
 
     @staticmethod
@@ -323,7 +438,7 @@ class LanChatSceneRuntime:
     @staticmethod
     def _normalize_requested_item(value: str) -> str:
         item = str(value or "").strip(" “‘”\"'，。；;,.")
-        item = re.sub(r"^(?:后面|后续|接下来|之后|再|新增|增加|添加|加入|加|补|一个|一只|一座|一盏|一张|一把)+", "", item).strip()
+        item = re.sub(r"^(?:后面|后续|接下来|之后|再|新增|增加|添加|加入|加|补|帮我|给我|设计|规划|做|布置|一个|一间|一只|一座|一盏|一张|一把)+", "", item).strip()
         item = re.sub(r"^(?:个|只|座|盏|张|把)", "", item).strip()
         item = re.sub(r"(?:要|得|需要|应该|放在|摆在).*$", "", item).strip()
         return item
@@ -334,7 +449,15 @@ class LanChatSceneRuntime:
         for item in cls._candidate_items_from_text(text):
             if item not in items:
                 items.append(item)
-        generic = ["主体建筑或摊位", "环境主体", "功能物件", "灯光装饰", "导视牌", "小型道具", "活动区装饰"]
+        goal = cls._extract_scene_goal(text)
+        if any(word in goal for word in ("卧室", "房间")):
+            generic = ["床", "床头柜", "衣柜/收纳柜", "书桌或梳妆台", "地毯", "玩偶/抱枕", "暖色灯串"]
+        elif any(word in goal for word in ("集市", "摊", "街")):
+            generic = ["入口牌", "主路", "摊位", "展示桌", "休息点", "氛围灯光", "主题装饰"]
+        elif any(word in goal for word in ("草原", "森林", "室外", "露营")):
+            generic = ["地形主体", "活动中心", "路径", "树木/花草", "休息点", "氛围灯光", "小型道具"]
+        else:
+            generic = ["主体空间", "主要功能物件", "支撑物件", "路径/动线", "氛围灯光", "主题装饰", "小型道具"]
         for item in generic:
             if len(items) >= 8:
                 break

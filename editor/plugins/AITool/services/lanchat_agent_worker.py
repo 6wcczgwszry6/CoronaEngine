@@ -209,7 +209,10 @@ class LANChatAgentWorker:
                 and not coordinator._is_post_generation_adjustment(text)
             ):
                 return False
-            if not self._should_sync_chat_to_coordinator(coordinator, room_id, text, source=source):
+            planning_gate_handled = self._handle_plain_chat_planning_gate(message, text)
+            if planning_gate_handled == "compose":
+                return True
+            if not planning_gate_handled and not self._should_sync_chat_to_coordinator(coordinator, room_id, text, source=source):
                 return False
             coordinator.ingest_message(ChatMessage(
                 room_id=room_id,
@@ -227,6 +230,31 @@ class LANChatAgentWorker:
             return False
         finally:
             self._remember_coordinator_seen_message_id(dedupe_key)
+
+    def _handle_plain_chat_planning_gate(self, message: dict[str, Any], text: str) -> str:
+        try:
+            from .lanchat_scene_runtime import get_lanchat_scene_runtime
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to import LANChat scene runtime for plain planning gate: %s", exc)
+            return ""
+        try:
+            action, payload, agent_name = get_lanchat_scene_runtime().handle_pending_planning_message(text)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to handle plain chat planning gate: %s", exc)
+            return ""
+        if action not in {"reply", "compose"} or not agent_name:
+            return ""
+        trigger = dict(message)
+        trigger.setdefault("agent_id", str(agent_name))
+        trigger.setdefault("agent_name", str(agent_name))
+        trigger.setdefault("target_agent_id", str(agent_name))
+        trigger.setdefault("target_agent_name", str(agent_name))
+        if action == "reply":
+            self._send_final_reply(str(agent_name), str(agent_name), str(payload or ""), trigger)
+            return "reply"
+        trigger["text"] = str(payload or text)
+        self._process_trigger(trigger)
+        return "compose"
 
     def _should_sync_chat_to_coordinator(
         self,
