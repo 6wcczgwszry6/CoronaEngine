@@ -26,11 +26,14 @@ from cai_extensions.agent.scene_composer_progressive import (  # noqa: E402
     _generate_post_shell_framework,
     _infer_primary_zone_ids,
     _merge_final_and_vlm_review_text,
+    _prioritize_high_risk_vlm_targets,
     _prioritize_vlm_targets,
     _run_vlm_advisory_review,
     _resolve_pending_resource_requests_for_batch,
+    _vlm_checkpoint_reports_user_text,
     _vlm_max_targets,
     build_batch_resource_plan,
+    VlmCheckpointPolicy,
 )
 from cai_extensions.agent.scene_composer import SceneComposer, apply_scene_semantic_terrain_profile  # noqa: E402
 from cai_extensions.agent.scene_session import SceneSession  # noqa: E402
@@ -624,6 +627,143 @@ def test_vlm_target_priority_prefers_scene_anchors_and_high_risk_additions():
     print("[OK] VLM target priority prefers scene anchors and high-risk additions")
 
 
+def test_vlm_checkpoint_policy_selects_structure_high_risk_and_final_targets():
+    policy = VlmCheckpointPolicy()
+
+    checkpoint_type, targets = policy.select(
+        phase="INTERIOR",
+        imported_this_batch=["展示桌", "入口拱门", "__terrain_boundary"],
+        imported_so_far=["展示桌", "入口拱门", "__terrain_boundary"],
+        max_targets=2,
+    )
+    assert checkpoint_type == "structure_review"
+    assert targets == ["__terrain_boundary", "入口拱门"]
+
+    checkpoint_type, targets = policy.select(
+        phase="OBJECTS",
+        imported_this_batch=["地毯", "展示桌"],
+        imported_so_far=["展示桌", "入口拱门", "__terrain_boundary", "地毯"],
+        max_targets=2,
+    )
+    assert checkpoint_type == ""
+    assert targets == []
+
+    checkpoint_type, targets = policy.select(
+        phase="OBJECTS",
+        imported_this_batch=["普通椅子", "天使雕像", "小狗"],
+        imported_so_far=["展示桌", "入口拱门", "__terrain_boundary", "普通椅子", "天使雕像", "小狗"],
+        max_targets=2,
+    )
+    assert checkpoint_type == "high_risk_object_review"
+    assert targets == ["天使雕像", "小狗"]
+
+    checkpoint_type, targets = policy.select(
+        phase="FINAL",
+        imported_this_batch=[],
+        imported_so_far=["展示桌", "入口拱门", "__terrain_boundary", "天使雕像", "小狗"],
+        max_targets=3,
+        final=True,
+    )
+    assert checkpoint_type == "final_consistency_review"
+    assert targets == ["__terrain_boundary", "入口拱门", "天使雕像"]
+    print("[OK] VLM checkpoint policy selects structure, high-risk, and final targets")
+
+
+def test_vlm_high_risk_priority_skips_plain_small_items():
+    targets = _prioritize_high_risk_vlm_targets(
+        ["普通椅子", "展示桌", "小狗", "大型灯光主体", "入口拱门"],
+        2,
+    )
+    assert targets == ["入口拱门", "小狗"]
+    assert _prioritize_high_risk_vlm_targets(["普通椅子", "展示桌"], 2) == []
+    print("[OK] VLM high-risk checkpoint skips plain small items")
+
+
+def test_vlm_review_result_carries_checkpoint_and_batch_context():
+    coordinator = FakeCoordinator()
+    advice = SimpleNamespace(
+        actor_id="入口拱门",
+        overall="FAIL",
+        issues=["入口方向不清晰"],
+        fix_suggestion="调整到主街前方并朝向入口",
+        position_correction=[0.0, 0.0, -2.0],
+        rotation_correction=[0.0, 180.0, 0.0],
+        scale_correction=[1.0, 1.0, 1.0],
+        confidence=0.92,
+    )
+    report = SimpleNamespace(
+        advices=[advice],
+        skipped=[],
+        timed_out=[],
+        checkpoint_type="structure_review",
+        reviewed_targets=[{"actor_id": "入口拱门", "checkpoint_type": "structure_review"}],
+        advisory_items=[],
+        proposal_items=[{"actor_id": "入口拱门", "checkpoint_type": "structure_review", "proposal": True}],
+        actionable=lambda: [advice],
+    )
+
+    _emit_vlm_review_results(
+        report,
+        interaction_coordinator=coordinator,
+        room_id="room-vlm",
+        plan_id="seed-vlm",
+        session_id="sess-vlm",
+        batch_id="r1_INTERIOR_b1",
+    )
+
+    review = coordinator.reviews[-1]
+    assert review["batch_id"] == "r1_INTERIOR_b1"
+    assert review["metadata"]["checkpoint_type"] == "structure_review"
+    assert review["metadata"]["reviewed_targets"][0]["actor_id"] == "入口拱门"
+    assert review["metadata"]["proposal_items"][0]["proposal"] is True
+    assert review["finding_details"][0]["checkpoint_type"] == "structure_review"
+    print("[OK] VLM review result carries checkpoint and batch context")
+
+
+def test_vlm_checkpoint_reports_summarize_all_stages_without_internal_leakage():
+    reports = [
+        SimpleNamespace(
+            checkpoint_type="structure_review",
+            status="completed",
+            reviewed_targets=[{"actor_id": "__terrain_boundary"}, {"actor_id": "入口拱门"}],
+            proposal_items=[{"actor_id": "入口拱门", "proposal": True}],
+            advisory_items=[],
+            skipped=[],
+            timed_out=[],
+        ),
+        SimpleNamespace(
+            checkpoint_type="high_risk_object_review",
+            status="completed",
+            reviewed_targets=[{"actor_id": "天使雕像"}, {"actor_id": "小狗"}],
+            proposal_items=[],
+            advisory_items=[{"actor_id": "小狗", "proposal": False}],
+            skipped=[],
+            timed_out=[],
+        ),
+        SimpleNamespace(
+            checkpoint_type="final_consistency_review",
+            status="unavailable",
+            reason="provider=PRIVATE job_id=PRIVATE 审查服务不可用",
+            reviewed_targets=[],
+            proposal_items=[],
+            advisory_items=[],
+            skipped=[],
+            timed_out=[],
+        ),
+    ]
+
+    text = _vlm_checkpoint_reports_user_text(reports)
+    assert "第一批结构审查" in text
+    assert "中间批高风险审查" in text
+    assert "最终一致性审查" in text
+    assert "待确认调整建议" in text
+    assert "不自动执行" in text
+    assert "PRIVATE" not in text
+    assert "provider" not in text
+    assert "job_id" not in text
+    print("[OK] VLM checkpoint reports summarize all stages without internal leakage")
+
+
 def test_final_report_text_includes_vlm_status_without_duplicate():
     merged = _merge_final_and_vlm_review_text(
         "风格收口：warm、fantasy。",
@@ -1096,6 +1236,10 @@ if __name__ == "__main__":
     test_vlm_actionable_advice_flows_to_coordinator_review_result()
     test_vlm_review_uses_composer_hooks_under_engine_gate()
     test_vlm_target_priority_prefers_scene_anchors_and_high_risk_additions()
+    test_vlm_checkpoint_policy_selects_structure_high_risk_and_final_targets()
+    test_vlm_high_risk_priority_skips_plain_small_items()
+    test_vlm_review_result_carries_checkpoint_and_batch_context()
+    test_vlm_checkpoint_reports_summarize_all_stages_without_internal_leakage()
     test_final_report_text_includes_vlm_status_without_duplicate()
     test_scene_composer_injects_shared_scoped_memory_only()
     test_scene_composer_can_focus_scoped_memory_on_target_actor()

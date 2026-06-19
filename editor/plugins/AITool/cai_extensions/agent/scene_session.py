@@ -870,6 +870,7 @@ class SceneSession:
         runtime_mode_provider: Optional[Callable[[], str]] = None,
         final_adjustment_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         scene_design_contract_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        pre_final_review_hook: Optional[Callable[[], None]] = None,
         final_review_protection_fn: Any = None,
     ) -> Dict[str, Any]:
         """渐进式主循环。每个 phase：生成→导入→进度→采集视口→drain介入→settle。
@@ -1056,6 +1057,11 @@ class SceneSession:
         final_adjustment_plan = None
         scene_design_contract = None
         if not skip_final_review and not paused:
+            if pre_final_review_hook is not None:
+                try:
+                    pre_final_review_hook()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("[SceneSession] pre-final review hook skipped: %s", exc)
             if final_adjustment_provider is not None:
                 try:
                     final_adjustment_plan = final_adjustment_provider() or None

@@ -182,6 +182,46 @@ def test_missing_confidence_vlm_advice_stays_advisory():
     print("[OK] 缺置信度 VLM 建议保留为 advisory，不进入 actionable")
 
 
+def test_checkpoint_report_records_reviewed_targets_and_structured_items():
+    def capture(out_dir, name):
+        return f"/shots/{name}"
+
+    def review(shot_dir, name, mtype):
+        if name == "天使雕像":
+            return {
+                "overall": "FAIL",
+                "position_correction": [0.0, 0.0, 2.0],
+                "issues": ["大型雕像挡住主街"],
+                "fix_suggestion": "移动到主街后方视觉焦点位置",
+                "confidence": 0.88,
+            }
+        return {
+            "overall": "WARN",
+            "issues": ["小狗朝向略不自然"],
+            "fix_suggestion": "可考虑朝向休息区",
+            "confidence": 0.45,
+        }
+
+    report = review_models_async(
+        [
+            {"actor_id": "天使雕像", "model_name": "天使雕像", "model_type": "large_statue"},
+            {"actor_id": "小狗", "model_name": "小狗", "model_type": "animal"},
+        ],
+        capture_fn=capture,
+        review_fn=review,
+        checkpoint_type="high_risk_object_review",
+    )
+
+    assert report.checkpoint_type == "high_risk_object_review"
+    assert [item["actor_id"] for item in report.reviewed_targets] == ["天使雕像", "小狗"]
+    assert report.proposal_items[0]["actor_id"] == "天使雕像"
+    assert report.proposal_items[0]["checkpoint_type"] == "high_risk_object_review"
+    assert report.advisory_items[0]["actor_id"] == "小狗"
+    assert report.advisory_items[0]["proposal"] is False
+    assert [item.actor_id for item in report.actionable()] == ["天使雕像"]
+    print("[OK] VLM checkpoint report records reviewed targets and structured advisory/proposal items")
+
+
 def test_screenshot_timeout_tolerated():
     def capture(out_dir, name):
         if name == "卡死模型":
@@ -518,6 +558,7 @@ if __name__ == "__main__":
     test_low_confidence_only_vlm_advice_is_disclosed_without_action()
     test_vlm_user_text_sanitizes_internal_fields()
     test_missing_confidence_vlm_advice_stays_advisory()
+    test_checkpoint_report_records_reviewed_targets_and_structured_items()
     test_screenshot_timeout_tolerated()
     test_review_exception_skipped()
     test_no_screenshot_skipped()
