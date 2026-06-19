@@ -1090,7 +1090,8 @@ inline std::vector<LODLevel> generate_lod_levels(
         level.indices = std::move(final_indices);
         level.error = result_error;
         // 屏幕阈值：误差越大，阈值越小（越远才使用）
-        level.screen_threshold = (result_error > 0.0f) ? std::min(1.0f, result_error * 10.0f) : 0.0f;
+        // 使用反比公式：error 越大 → threshold 越小 → 只在屏幕占比更小时选中此 LOD
+        level.screen_threshold = (result_error > 0.0f) ? std::max(0.01f, 1.0f / (1.0f + result_error * 80.0f)) : 0.0f;
 
         (void)mesh_name;
         (void)ratio;
