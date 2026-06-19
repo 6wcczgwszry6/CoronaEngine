@@ -5,6 +5,8 @@
 #include "scene.h"
 #include "pipeline.h"
 
+#include <optional>
+
 namespace vision {
 
 // ========== LightManager ==========
@@ -100,6 +102,12 @@ CommandBatch LightManager::upload(bool async) noexcept {
 
 void Scene::init(const SceneDesc &scene_desc) {
     TIMER(init_scene);
+    std::optional<Global::SceneGpuContextScope> scene_gpu_context;
+    if (geometry().has_gpu_resource()) {
+        scene_gpu_context.emplace(geometry().bindless_array(),
+                                  geometry().gpu_resource()->device());
+    }
+
     if (sensors_.empty()) {
         TSensor s;
         s.init(scene_desc.sensor_desc);
@@ -118,6 +126,11 @@ void Scene::init(const SceneDesc &scene_desc) {
 }
 
 void Scene::prepare() noexcept {
+    std::optional<Global::SceneGpuContextScope> scene_gpu_context;
+    if (geometry().has_gpu_resource()) {
+        scene_gpu_context.emplace(geometry().bindless_array(),
+                                  geometry().gpu_resource()->device());
+    }
     material_registry().remove_unused_elements();
     geometry().set_process_mediums(process_mediums());
     register_instance_meshes();
@@ -126,12 +139,9 @@ void Scene::prepare() noexcept {
     sensor()->prepare();
     sensor()->update_device_data();
     prepare_materials();
-    if (geometry().has_gpu_resource()) {
-        medium_registry().prepare(geometry().bindless_array(),
-                                  geometry().gpu_resource()->device());
-    } else {
-        medium_registry().prepare();
-    }
+    OC_ASSERT(geometry().has_gpu_resource());
+    medium_registry().prepare(geometry().bindless_array(),
+                              geometry().gpu_resource()->device());
 }
 
 void Scene::update_runtime_object(const vision::IObjectConstructor *constructor) noexcept {
@@ -286,12 +296,9 @@ void Scene::load_mediums(const MediumsDesc &md) {
 }
 
 void Scene::prepare_materials() {
-    if (geometry().has_gpu_resource()) {
-        material_registry().prepare(geometry().bindless_array(),
-                                    geometry().gpu_resource()->device());
-    } else {
-        material_registry().prepare();
-    }
+    OC_ASSERT(geometry().has_gpu_resource());
+    material_registry().prepare(geometry().bindless_array(),
+                                geometry().gpu_resource()->device());
 }
 
 }// namespace vision

@@ -29,8 +29,6 @@ public:
     [[nodiscard]] virtual string_view UI_title() const noexcept { return "elements"; }
     void upload_device_data() noexcept;
     void prepare(BindlessArray &bindless_array, Device &device) noexcept;
-    void prepare() noexcept;
-    void remedy() noexcept;
     [[nodiscard]] SP<element_ty> register_(SP<element_ty> elm) noexcept;
     [[nodiscard]] SP<element_ty> get_element(uint64_t hash) noexcept;
     void remove_unused_elements() noexcept;

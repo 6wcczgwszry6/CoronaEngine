@@ -2254,7 +2254,7 @@ Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene(VisionPipelineRunti
         // We must NOT call the full pipeline->prepare() here. That method is
         // a one-shot initialisation path (FixedRenderPipeline::prepare() runs
         // Pipeline::prepare() -> scene().prepare() -> renderer_.prepare(scene()) ->
-        // image_pool().prepare() -> ...). Re-running it on an already-initialised
+        // image_pool().prepare(stream()) -> ...). Re-running it on an already-initialised
         // pipeline reallocates the framebuffer / sensor / image-pool device buffers
         // that the render loop is already holding references to, which crashes the
         // CUDA device (observed: crash on the following prepare_view_texture()).
@@ -2264,7 +2264,7 @@ Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene(VisionPipelineRunti
         // view texture and sensor (resolution unchanged) untouched:
         //   scene.prepare()         -> re-encode materials/sensor for the new scene
         //   prepare_geometry()      -> rebuild geometry device buffers + accel
-        //   prepare_lights()        -> rebuild the light sampler's device buffers
+        //   prepare_lights(scene)   -> rebuild the light sampler's device buffers
         //   upload_scene_bindless_array()
         //                           -> publish scene-owned mesh/light/material handles
         //   upload_bindless_array() -> publish the new material texture handles
@@ -2274,8 +2274,8 @@ Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene(VisionPipelineRunti
         //
         // prepare_lights() is CRITICAL: setup_vision_lights() above changed the light
         // set, but Scene::prepare() does NOT touch the light sampler. The official init
-        // path runs renderer_.prepare(scene()) -> prepare_lights() ->
-        // light_sampler_->prepare(), which rebuilds the on-device light count / PMF /
+        // path runs renderer_.prepare(scene()) -> prepare_lights(scene) ->
+        // light_sampler_->prepare(scene_bindless, scene_device), which rebuilds the on-device light count / PMF /
         // env-index buffers. Skipping it leaves the UniformLightSampler indexing a stale
         // light buffer with the new (different) light_num(), so the very first render()
         // after the rebuild performs an out-of-bounds GPU read and crashes the CUDA
@@ -2290,7 +2290,7 @@ Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene(VisionPipelineRunti
         if (runtime.scene_resource) {
             runtime.scene_resource->mark_scene_gpu_transforms_uploaded();
         }
-        pipeline->renderer().prepare_lights();
+        pipeline->renderer().prepare_lights(scene);
         pipeline->upload_scene_bindless_array();
         pipeline->upload_bindless_array();
         pipeline->compile();

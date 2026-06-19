@@ -27,13 +27,24 @@ private:
     EncodedData<float> scale_{1.f};
     mutable optional<float_array> cache_;
 
+    [[nodiscard]] RegistrableTexture3D &obtain_texture(const ShaderNodeDesc &desc) noexcept {
+        auto *rp = pipeline();
+        if (rp->scene().geometry().has_gpu_resource()) {
+            return rp->image_pool().obtain_texture(
+                desc,
+                rp->scene().geometry().bindless_array(),
+                rp->scene().geometry().gpu_resource()->device());
+        }
+        return rp->image_pool().obtain_texture(desc, rp->bindless_array(), rp->device());
+    }
+
 public:
     ImageNode() = default;
     explicit ImageNode(const ShaderNodeDesc &desc)
         : SlotsShaderNode(desc),
           desc_(desc),
-          scale_(desc["scale"].as_float(1.f)),
-          texture_(&pipeline()->image_pool().obtain_texture(desc)) {
+          scale_(desc["scale"].as_float(1.f)) {
+        texture_ = &obtain_texture(desc);
         tex_id_ = texture_->index();
     }
     VS_MAKE_GUI_STATUS_FUNC(ShaderNode, vector_)
@@ -67,7 +78,7 @@ public:
         if (Widgets::open_file_dialog(path)) {
             desc_.set_value("fn", path.string());
             desc_.reset_hash();
-            texture_ = &pipeline()->image_pool().obtain_texture(desc_);
+            texture_ = &obtain_texture(desc_);
             texture_->upload_immediately();
             tex_id_.hv() = texture_->index().hv();
             changed_ = true;

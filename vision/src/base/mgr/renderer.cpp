@@ -39,20 +39,9 @@ void Renderer::tidy_up() noexcept {
 }
 
 void Renderer::prepare_lights(Scene &scene) noexcept {
-    if (!scene.geometry().has_gpu_resource()) {
-        prepare_lights();
-        return;
-    }
+    OC_ASSERT(scene.geometry().has_gpu_resource());
     light_sampler_->prepare(scene.geometry().bindless_array(),
                             scene.geometry().gpu_resource()->device());
-    auto &light = light_sampler_->lights();
-    OC_INFO_FORMAT("This scene contains {} light types with {} light instances",
-                   light.topology_num(),
-                   light.all_instance_num());
-}
-
-void Renderer::prepare_lights() noexcept {
-    light_sampler_->prepare();
     auto &light = light_sampler_->lights();
     OC_INFO_FORMAT("This scene contains {} light types with {} light instances",
                    light.topology_num(),

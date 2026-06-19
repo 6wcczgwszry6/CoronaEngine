@@ -58,8 +58,20 @@ void LightSampler::prepare(BindlessArray &bindless_array, Device &device) noexce
 }
 
 void LightSampler::prepare() noexcept {
+    if (auto *bindless = Global::instance().scene_bindless_array()) {
+        if (auto *device = Global::instance().scene_device()) {
+            prepare(*bindless, *device);
+            return;
+        }
+    }
     auto rp = pipeline();
-    prepare(Global::instance().bindless_array(), rp->device());
+    OC_ASSERT(rp != nullptr);
+    if (rp->scene().geometry().has_gpu_resource()) {
+        prepare(rp->scene().geometry().bindless_array(),
+                rp->scene().geometry().gpu_resource()->device());
+        return;
+    }
+    prepare(rp->bindless_array(), rp->device());
 }
 
 void LightSampler::update_device_data() const noexcept {

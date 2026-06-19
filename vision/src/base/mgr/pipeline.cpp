@@ -131,7 +131,7 @@ void Pipeline::rebuild_view_context_renderers() noexcept {
         if (!activate_view_context(view_id)) {
             continue;
         }
-        renderer().prepare_lights();
+        renderer().prepare_lights(scene_view_);
         upload_scene_bindless_array();
         compile();
         invalidate();

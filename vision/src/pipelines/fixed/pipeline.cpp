@@ -15,7 +15,7 @@ public:
         Pipeline::prepare();
         scene().prepare();
         renderer_.prepare(scene());
-        image_pool().prepare();
+        image_pool().prepare(stream());
         prepare_geometry();
         upload_bindless_array();
         compile();
@@ -33,6 +33,9 @@ public:
     }
 
     void compile() noexcept override {
+        Global::SceneGpuContextScope scene_gpu_context{
+            scene().geometry().bindless_array(),
+            scene().geometry().gpu_resource()->device()};
         Pipeline::compile();
         integrator()->compile();
     }

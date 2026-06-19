@@ -10,7 +10,6 @@
 #include "base/using.h"
 
 namespace vision {
-class Pipeline;
 class ImagePool {
 private:
     map<uint64_t, RegistrableTexture3D> textures_;
@@ -19,7 +18,6 @@ private:
     ImagePool(ImagePool &&) = delete;
     ImagePool operator=(const ImagePool &) = delete;
     ImagePool operator=(ImagePool &&) = delete;
-    [[nodiscard]] Pipeline *pipeline();
 
 public:
     ImagePool() = default;
@@ -28,13 +26,10 @@ public:
     [[nodiscard]] RegistrableTexture3D load_texture(const ShaderNodeDesc &desc,
                                                     BindlessArray &bindless_array,
                                                     Device &device) noexcept;
-    [[nodiscard]] RegistrableTexture3D load_texture(const ShaderNodeDesc &desc) noexcept;
     [[nodiscard]] RegistrableTexture3D &obtain_texture(const ShaderNodeDesc &desc,
                                                        BindlessArray &bindless_array,
                                                        Device &device) noexcept;
-    [[nodiscard]] RegistrableTexture3D &obtain_texture(const ShaderNodeDesc &desc) noexcept;
     void prepare(Stream &stream) noexcept;
-    void prepare() noexcept;
     [[nodiscard]] bool is_contain(uint64_t hash) const noexcept { return textures_.contains(hash); }
     [[nodiscard]] size_t size() const noexcept { return textures_.size(); }
 };

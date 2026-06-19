@@ -1,6 +1,7 @@
 #include <corona/systems/optics/vision_scene_resource.h>
 
 #include "base/import/parameter_set.h"
+#include "base/import/importer.h"
 #include "base/import/project_desc.h"
 #include "base/mgr/geometry.h"
 #include "base/mgr/global.h"
@@ -62,12 +63,22 @@ void scene_tables_accept_explicit_scene_gpu_bindless() {
                       &vision::MaterialRegistry::prepare)),
                   void (vision::MaterialRegistry::*)(
                       vision::BindlessArray&, vision::Device&) noexcept>);
+    static_assert(!std::is_invocable_v<
+                  decltype(static_cast<void (vision::MaterialRegistry::*)(
+                               vision::BindlessArray&, vision::Device&) noexcept>(
+                      &vision::MaterialRegistry::prepare)),
+                  vision::MaterialRegistry*>);
     static_assert(std::is_same_v<
                   decltype(static_cast<void (vision::MediumRegistry::*)(
                                vision::BindlessArray&, vision::Device&) noexcept>(
                       &vision::MediumRegistry::prepare)),
                   void (vision::MediumRegistry::*)(
                       vision::BindlessArray&, vision::Device&) noexcept>);
+    static_assert(!std::is_invocable_v<
+                  decltype(static_cast<void (vision::MediumRegistry::*)(
+                               vision::BindlessArray&, vision::Device&) noexcept>(
+                      &vision::MediumRegistry::prepare)),
+                  vision::MediumRegistry*>);
     static_assert(std::is_same_v<
                   decltype(static_cast<void (vision::LightSampler::*)(
                                vision::BindlessArray&, vision::Device&) noexcept>(
@@ -79,6 +90,11 @@ void scene_tables_accept_explicit_scene_gpu_bindless() {
                                vision::Scene&) noexcept>(
                       &vision::Renderer::prepare_lights)),
                   void (vision::Renderer::*)(vision::Scene&) noexcept>);
+    static_assert(!std::is_invocable_v<
+                  decltype(static_cast<void (vision::Renderer::*)(
+                               vision::Scene&) noexcept>(
+                      &vision::Renderer::prepare_lights)),
+                  vision::Renderer*>);
 }
 
 void spectrum_accepts_scene_material_state() {
@@ -118,6 +134,14 @@ void image_pool_accepts_explicit_scene_gpu_bindless() {
                       const vision::ShaderNodeDesc&,
                       vision::BindlessArray&,
                       vision::Device&) noexcept>);
+    static_assert(!std::is_invocable_v<
+                  decltype(static_cast<vision::RegistrableTexture3D (vision::ImagePool::*)(
+                               const vision::ShaderNodeDesc&,
+                               vision::BindlessArray&,
+                               vision::Device&) noexcept>(
+                      &vision::ImagePool::load_texture)),
+                  vision::ImagePool*,
+                  const vision::ShaderNodeDesc&>);
     static_assert(std::is_same_v<
                   decltype(static_cast<vision::RegistrableTexture3D& (vision::ImagePool::*)(
                                const vision::ShaderNodeDesc&,
@@ -128,17 +152,107 @@ void image_pool_accepts_explicit_scene_gpu_bindless() {
                       const vision::ShaderNodeDesc&,
                       vision::BindlessArray&,
                       vision::Device&) noexcept>);
+    static_assert(!std::is_invocable_v<
+                  decltype(static_cast<vision::RegistrableTexture3D& (vision::ImagePool::*)(
+                               const vision::ShaderNodeDesc&,
+                               vision::BindlessArray&,
+                               vision::Device&) noexcept>(
+                      &vision::ImagePool::obtain_texture)),
+                  vision::ImagePool*,
+                  const vision::ShaderNodeDesc&>);
     static_assert(std::is_same_v<
                   decltype(static_cast<void (vision::ImagePool::*)(
                                vision::Stream&) noexcept>(
                       &vision::ImagePool::prepare)),
                   void (vision::ImagePool::*)(vision::Stream&) noexcept>);
+    static_assert(!std::is_invocable_v<decltype(&vision::ImagePool::prepare),
+                                       vision::ImagePool*>);
 }
 
 void material_lut_can_detect_the_active_bindless_owner() {
-    static_assert(std::is_same_v<
+    static_assert(std::is_invocable_r_v<
+                  vision::BindlessArray*,
                   decltype(&vision::RegistrableTexture3D::bindless_array),
-                  vision::BindlessArray* (vision::RegistrableTexture3D::*)() const noexcept>);
+                  const vision::RegistrableTexture3D*>);
+}
+
+void importer_accepts_shared_scene_resource_options() {
+    static_assert(std::is_same_v<
+                  decltype(static_cast<vision::SP<vision::Pipeline> (*)(
+                               const vision::fs::path&,
+                               const vision::ImportSceneOptions&)>(
+                      &vision::Importer::import_scene)),
+                  vision::SP<vision::Pipeline> (*)(
+                      const vision::fs::path&,
+                      const vision::ImportSceneOptions&)>);
+    vision::ImportSceneOptions options;
+    auto* fake_scene = reinterpret_cast<vision::SceneData*>(0x5100);
+    auto* fake_gpu_resource =
+        reinterpret_cast<vision::GeometryGpuResource*>(0x5200);
+    auto shared_scene = std::shared_ptr<vision::SceneData>(
+        fake_scene,
+        [](vision::SceneData*) {});
+    auto shared_gpu_resource = std::shared_ptr<vision::GeometryGpuResource>(
+        fake_gpu_resource,
+        [](vision::GeometryGpuResource*) {});
+    options.scene_data = shared_scene;
+    options.geometry_gpu_resource = shared_gpu_resource;
+
+    expect(options.scene_data == shared_scene,
+           "Importer options should carry a shared logical SceneData resource");
+    expect(options.geometry_gpu_resource == shared_gpu_resource,
+           "Importer options should carry a shared scene GPU resource");
+}
+
+void scene_gpu_context_routes_material_lut_to_scene_bindless() {
+    try {
+        ocarina::RHIContext::instance().init(std::filesystem::current_path());
+        auto device = ocarina::RHIContext::instance().create_device("cuda");
+        device.init_rtx();
+        vision::Global::instance().set_device(&device);
+
+        auto first_scene_bindless = device.create_bindless_array();
+        auto second_scene_bindless = device.create_bindless_array();
+        const auto lut_name = std::string{"phase4_scene_context_lut"};
+        const auto texel = vision::make_float4(1.f, 0.f, 0.f, 1.f);
+
+        {
+            vision::Global::SceneGpuContextScope scope{first_scene_bindless, device};
+            expect(vision::Global::instance().scene_bindless_array() == &first_scene_bindless,
+                   "scene GPU context should expose the active scene bindless");
+            expect(vision::Global::instance().scene_device() == &device,
+                   "scene GPU context should expose the active scene device");
+            vision::MaterialLut::instance().load_lut(
+                lut_name,
+                vision::make_uint3(1u),
+                vision::PixelStorage::FLOAT4,
+                &texel);
+            expect(&vision::MaterialLut::instance().bindless_array(lut_name) ==
+                       &first_scene_bindless,
+                   "MaterialLut loaded during first scene prepare should bind to first scene bindless");
+        }
+
+        {
+            vision::Global::SceneGpuContextScope scope{second_scene_bindless, device};
+            vision::MaterialLut::instance().load_lut(
+                lut_name,
+                vision::make_uint3(1u),
+                vision::PixelStorage::FLOAT4,
+                &texel);
+            expect(&vision::MaterialLut::instance().bindless_array(lut_name) ==
+                       &second_scene_bindless,
+                   "same MaterialLut name should bind independently per scene bindless");
+        }
+
+        expect(vision::Global::instance().scene_bindless_array() == nullptr,
+               "scene GPU context should restore after scope exit");
+        vision::MaterialLut::instance().unload_lut(lut_name);
+    } catch (const std::exception& e) {
+        std::cout << "SKIP: CUDA-backed scene GPU context integration unavailable: "
+                  << e.what() << '\n';
+    } catch (...) {
+        std::cout << "SKIP: CUDA-backed scene GPU context integration unavailable\n";
+    }
 }
 
 void geometry_defaults_to_unbound_gpu_resource() {
@@ -346,6 +460,8 @@ int main() {
     svgf_helpers_accept_explicit_scene_resources();
     image_pool_accepts_explicit_scene_gpu_bindless();
     material_lut_can_detect_the_active_bindless_owner();
+    importer_accepts_shared_scene_resource_options();
+    scene_gpu_context_routes_material_lut_to_scene_bindless();
     geometry_defaults_to_unbound_gpu_resource();
     geometry_medium_state_is_scene_owned();
     geometry_binds_external_scene_gpu_resource();

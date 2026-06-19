@@ -120,6 +120,9 @@ public:
         renderer_desc_ = project_desc.renderer_desc;
         sensor_desc_ = project_desc.scene_desc.sensor_desc;
         renderer_.pre_init(project_desc.renderer_desc);
+        if (!scene_view_.geometry().has_gpu_resource()) {
+            scene_view_.geometry().init(device());
+        }
         scene_view_.init(project_desc.scene_desc);
         scene_view_.set_min_radius(project_desc.renderer_desc.render_setting.min_world_radius);
         renderer_.init(project_desc.renderer_desc, scene_view_);

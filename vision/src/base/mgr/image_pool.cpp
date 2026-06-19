@@ -36,19 +36,6 @@ RegistrableTexture3D ImagePool::load_texture(const ShaderNodeDesc &desc,
     return ret;
 }
 
-RegistrableTexture3D ImagePool::load_texture(const ShaderNodeDesc &desc) noexcept {
-    if (auto *p = Global::instance().pipeline()) {
-        if (p->scene().geometry().has_gpu_resource()) {
-            return load_texture(desc,
-                                p->scene().geometry().bindless_array(),
-                                p->scene().geometry().gpu_resource()->device());
-        }
-    }
-    return load_texture(desc,
-                        Global::instance().bindless_array(),
-                        Global::instance().device());
-}
-
 RegistrableTexture3D &ImagePool::obtain_texture(const ShaderNodeDesc &desc,
                                                 BindlessArray &bindless_array,
                                                 Device &device) noexcept {
@@ -68,33 +55,12 @@ RegistrableTexture3D &ImagePool::obtain_texture(const ShaderNodeDesc &desc,
     return textures_[hash];
 }
 
-RegistrableTexture3D &ImagePool::obtain_texture(const ShaderNodeDesc &desc) noexcept {
-    if (auto *p = Global::instance().pipeline()) {
-        if (p->scene().geometry().has_gpu_resource()) {
-            return obtain_texture(desc,
-                                  p->scene().geometry().bindless_array(),
-                                  p->scene().geometry().gpu_resource()->device());
-        }
-    }
-    return obtain_texture(desc,
-                          Global::instance().bindless_array(),
-                          Global::instance().device());
-}
-
 void ImagePool::prepare(Stream &stream) noexcept {
     for (auto &iter : textures_) {
         stream << iter.second.upload();
     }
 
     stream << synchronize() << commit();
-}
-
-void ImagePool::prepare() noexcept {
-    prepare(pipeline()->stream());
-}
-
-Pipeline *ImagePool::pipeline() {
-    return Global::instance().pipeline();
 }
 
 ImagePool *ImagePool::s_image_pool = nullptr;

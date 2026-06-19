@@ -69,7 +69,6 @@ public:
     }
 
     void prepare_lights(Scene &scene) noexcept;
-    void prepare_lights() noexcept;
     void tidy_up() noexcept;
 };
 

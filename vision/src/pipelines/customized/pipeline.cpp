@@ -54,7 +54,7 @@ public:
         auto pixel_num = resolution().x * resolution().y;
         scene().prepare();
         renderer_.prepare(scene());
-        image_pool().prepare();
+        image_pool().prepare(stream());
         prepare_geometry();
         prepare_render_graph();
         upload_bindless_array();
@@ -63,6 +63,9 @@ public:
     }
 
     void compile() noexcept override {
+        Global::SceneGpuContextScope scene_gpu_context{
+            scene().geometry().bindless_array(),
+            scene().geometry().gpu_resource()->device()};
         Pipeline::compile();
         render_graph_.compile();
     }
