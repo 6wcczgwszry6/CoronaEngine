@@ -875,6 +875,320 @@ bool handle_viewport_ui_calibration(const CefRefPtr<CefProcessMessage>& message)
     return true;
 }
 
+bool handle_actor_gizmo_state(const CefRefPtr<CefFrame>& frame,
+                              const CefRefPtr<CefProcessMessage>& message) {
+    auto args = message->GetArgumentList();
+    double camera_value = 0.0;
+    double actor_value = 0.0;
+    double vp_w = 0.0;
+    double vp_h = 0.0;
+    if (!args || args->GetSize() < 6 ||
+        !get_numeric_arg(args, 0, camera_value) ||
+        args->GetType(1) != VTYPE_STRING ||
+        !get_numeric_arg(args, 2, actor_value) ||
+        args->GetType(3) != VTYPE_STRING ||
+        !get_numeric_arg(args, 4, vp_w) ||
+        !get_numeric_arg(args, 5, vp_h)) {
+        CFW_LOG_WARNING("ActorGizmoState dropped: invalid args");
+        return true;
+    }
+
+    const auto camera_handle = static_cast<std::uintptr_t>(camera_value);
+    const std::string scene_id = args->GetString(1).ToString();
+    const auto actor_handle = static_cast<std::uintptr_t>(actor_value);
+    const std::string request_id = args->GetString(3).ToString();
+
+    auto make_payload = [&](const std::string& status, const char* message_text = nullptr) {
+        nlohmann::json payload;
+        payload["status"] = status;
+        payload["sceneId"] = scene_id;
+        payload["cameraHandle"] = static_cast<std::uint64_t>(camera_handle);
+        payload["actorHandle"] = static_cast<std::uint64_t>(actor_handle);
+        payload["requestId"] = request_id;
+        if (message_text) payload["message"] = message_text;
+        return payload;
+    };
+
+    if (camera_handle == 0 || actor_handle == 0 || scene_id.empty() || request_id.empty() ||
+        vp_w <= 0.0 || vp_h <= 0.0 || !std::isfinite(vp_w) || !std::isfinite(vp_h)) {
+        send_gizmo_event(frame, "actor-gizmo-state", make_payload("error", "invalid params"));
+        return true;
+    }
+
+    GizmoCameraSnapshot camera;
+    if (!read_gizmo_camera_snapshot(camera_handle, vp_w, vp_h, camera)) {
+        send_gizmo_event(frame, "actor-gizmo-state", make_payload("error", "camera unavailable"));
+        return true;
+    }
+
+    GizmoActorSnapshot actor;
+    if (!read_gizmo_actor_snapshot(actor_handle, actor)) {
+        send_gizmo_event(frame, "actor-gizmo-state", make_payload("error", "actor transform unavailable"));
+        return true;
+    }
+
+    const auto gizmo_center_world = actor.bounds_center_world;
+    std::array<double, 2> center_screen{};
+    if (!project_world_to_screen(camera, gizmo_center_world, center_screen)) {
+        auto payload = make_payload("error", "actor is not projectable");
+        payload["visible"] = false;
+        send_gizmo_event(frame, "actor-gizmo-state", payload);
+        return true;
+    }
+
+    const float axis_length = std::max(0.75f, length_vec3(actor.scale) * 0.35f);
+    const float ring_radius = std::max(axis_length * 0.82f, 0.6f);
+    nlohmann::json axes;
+    for (const std::string axis_name : {"x", "y", "z"}) {
+        const auto axis = make_gizmo_axis_vector(axis_name);
+        const auto end_world = add_vec3(gizmo_center_world, mul_vec3(axis, axis_length));
+        std::array<double, 2> end_screen{};
+        if (!project_world_to_screen(camera, end_world, end_screen)) {
+            continue;
+        }
+        axes[axis_name]["screenStart"] = {center_screen[0], center_screen[1]};
+        axes[axis_name]["screenEnd"] = {end_screen[0], end_screen[1]};
+    }
+
+    auto payload = make_payload("success");
+    payload["visible"] = true;
+    payload["center"]["world"] = json_vec3(gizmo_center_world);
+    payload["center"]["screen"] = {center_screen[0], center_screen[1]};
+    payload["scaleCenter"]["world"] = json_vec3(gizmo_center_world);
+    payload["scaleCenter"]["screen"] = {center_screen[0], center_screen[1]};
+    payload["axes"] = axes;
+    payload["scaleAxes"] = axes;
+    payload["rings"] = build_gizmo_rings(camera, gizmo_center_world, ring_radius);
+    payload["transform"]["position"] = json_vec3(actor.position);
+    payload["transform"]["rotation"] = json_vec3(actor.rotation);
+    payload["transform"]["scale"] = json_vec3(actor.scale);
+    send_gizmo_event(frame, "actor-gizmo-state", payload);
+    return true;
+}
+
+bool handle_actor_gizmo_drag(const CefRefPtr<CefFrame>& frame,
+                             const CefRefPtr<CefProcessMessage>& message) {
+    auto args = message->GetArgumentList();
+    double camera_value = 0.0;
+    double actor_value = 0.0;
+    double x = 0.0;
+    double y = 0.0;
+    double vp_w = 0.0;
+    double vp_h = 0.0;
+    if (!args || args->GetSize() < 12 ||
+        !get_numeric_arg(args, 0, camera_value) ||
+        args->GetType(1) != VTYPE_STRING ||
+        !get_numeric_arg(args, 2, actor_value) ||
+        args->GetType(3) != VTYPE_STRING ||
+        args->GetType(4) != VTYPE_STRING ||
+        args->GetType(5) != VTYPE_STRING ||
+        args->GetType(6) != VTYPE_STRING ||
+        args->GetType(7) != VTYPE_STRING ||
+        !get_numeric_arg(args, 8, x) ||
+        !get_numeric_arg(args, 9, y) ||
+        !get_numeric_arg(args, 10, vp_w) ||
+        !get_numeric_arg(args, 11, vp_h)) {
+        CFW_LOG_WARNING("ActorGizmoDrag dropped: invalid args");
+        return true;
+    }
+
+    const auto camera_handle = static_cast<std::uintptr_t>(camera_value);
+    const std::string scene_id = args->GetString(1).ToString();
+    const auto actor_handle = static_cast<std::uintptr_t>(actor_value);
+    const std::string request_id = args->GetString(3).ToString();
+    const std::string drag_id = args->GetString(4).ToString();
+    const std::string phase = args->GetString(5).ToString();
+    const std::string mode = args->GetString(6).ToString();
+    const std::string axis = args->GetString(7).ToString();
+
+    auto make_payload = [&](const std::string& status, const char* message_text = nullptr) {
+        nlohmann::json payload;
+        payload["status"] = status;
+        payload["sceneId"] = scene_id;
+        payload["cameraHandle"] = static_cast<std::uint64_t>(camera_handle);
+        payload["actorHandle"] = static_cast<std::uint64_t>(actor_handle);
+        payload["requestId"] = request_id;
+        payload["dragId"] = drag_id;
+        payload["phase"] = phase;
+        payload["mode"] = mode;
+        payload["axis"] = axis;
+        if (message_text) payload["message"] = message_text;
+        return payload;
+    };
+
+    if (camera_handle == 0 || actor_handle == 0 || scene_id.empty() ||
+        request_id.empty() || drag_id.empty() ||
+        (phase != "start" && phase != "move" && phase != "end") ||
+        (mode != "move" && mode != "scale" && mode != "rotate") ||
+        (axis != "x" && axis != "y" && axis != "z" && axis != "uniform") ||
+        (axis == "uniform" && mode != "scale") ||
+        vp_w <= 0.0 || vp_h <= 0.0 || !std::isfinite(x) || !std::isfinite(y) ||
+        !std::isfinite(vp_w) || !std::isfinite(vp_h) ||
+        x < 0.0 || y < 0.0 || x >= vp_w || y >= vp_h) {
+        send_gizmo_event(frame, "actor-gizmo-transform", make_payload("error", "invalid params"));
+        return true;
+    }
+
+    GizmoCameraSnapshot camera;
+    if (!read_gizmo_camera_snapshot(camera_handle, vp_w, vp_h, camera)) {
+        send_gizmo_event(frame, "actor-gizmo-transform", make_payload("error", "camera unavailable"));
+        return true;
+    }
+
+    auto make_result = [&](const GizmoDragSession& session,
+                           const ktm::fvec3& position,
+                           const ktm::fvec3& rotation,
+                           const ktm::fvec3& scale) {
+        auto payload = make_payload("success");
+        payload["transform"]["position"] = json_vec3(position);
+        payload["transform"]["rotation"] = json_vec3(rotation);
+        payload["transform"]["scale"] = json_vec3(scale);
+        send_gizmo_event(frame, "actor-gizmo-transform", payload);
+        (void)session;
+    };
+
+    if (phase == "start") {
+        GizmoActorSnapshot actor;
+        if (!read_gizmo_actor_snapshot(actor_handle, actor)) {
+            send_gizmo_event(frame, "actor-gizmo-transform", make_payload("error", "actor transform unavailable"));
+            return true;
+        }
+
+        GizmoDragSession session;
+        session.camera_handle = camera_handle;
+        session.actor_handle = actor_handle;
+        session.transform_handle = actor.transform_handle;
+        session.scene_id = scene_id;
+        session.request_id = request_id;
+        session.drag_id = drag_id;
+        session.mode = mode;
+        session.axis = axis;
+        session.center = actor.bounds_center_world;
+        session.axis_vector = axis == "uniform" ? make_fvec3(0.0f, 1.0f, 0.0f) : make_gizmo_axis_vector(axis);
+        session.start_position = actor.position;
+        session.start_rotation = actor.rotation;
+        session.start_scale = actor.scale;
+        session.start_bounds_center_world = actor.bounds_center_world;
+        session.local_bounds_min = actor.local_bounds_min;
+        session.local_bounds_max = actor.local_bounds_max;
+        session.has_local_bounds = actor.has_local_bounds;
+        session.start_x = x;
+        session.start_y = y;
+        if (mode == "rotate" &&
+            !intersect_rotation_plane(camera, session.center, session.axis_vector, x, y, session.start_rotate_vector)) {
+            send_gizmo_event(frame, "actor-gizmo-transform", make_payload("error", "rotation plane unavailable"));
+            return true;
+        }
+        if (mode != "rotate" && axis != "uniform" &&
+            !intersect_axis_drag_plane(camera, session.center, session.axis_vector, x, y, session.start_axis_t)) {
+            send_gizmo_event(frame, "actor-gizmo-transform", make_payload("error", "drag plane unavailable"));
+            return true;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(s_gizmo_drag_mutex);
+            s_gizmo_drags[drag_id] = session;
+        }
+        make_result(session, actor.position, actor.rotation, actor.scale);
+        return true;
+    }
+
+    GizmoDragSession session;
+    bool missing_session = false;
+    {
+        std::lock_guard<std::mutex> lock(s_gizmo_drag_mutex);
+        auto it = s_gizmo_drags.find(drag_id);
+        if (it == s_gizmo_drags.end()) {
+            missing_session = true;
+        } else {
+            session = it->second;
+        }
+    }
+    if (missing_session) {
+        send_gizmo_event(frame, "actor-gizmo-transform", make_payload("stale", "drag session is stale"));
+        return true;
+    }
+
+    if (session.actor_handle != actor_handle ||
+        session.camera_handle != camera_handle ||
+        session.request_id != request_id ||
+        session.scene_id != scene_id ||
+        session.mode != mode ||
+        session.axis != axis) {
+        send_gizmo_event(frame, "actor-gizmo-transform", make_payload("stale", "drag session mismatch"));
+        return true;
+    }
+
+    ktm::fvec3 next_position = session.start_position;
+    ktm::fvec3 next_rotation = session.start_rotation;
+    ktm::fvec3 next_scale = session.start_scale;
+    if (session.mode == "move") {
+        double current_axis_t = session.start_axis_t;
+        if (!intersect_axis_drag_plane(camera, session.center, session.axis_vector, x, y, current_axis_t)) {
+            send_gizmo_event(frame, "actor-gizmo-transform", make_payload("error", "drag plane unavailable"));
+            return true;
+        }
+        const float delta = static_cast<float>(current_axis_t - session.start_axis_t);
+        next_position = add_vec3(session.start_position, mul_vec3(session.axis_vector, delta));
+    } else if (session.mode == "rotate") {
+        ktm::fvec3 current_vector{};
+        if (!intersect_rotation_plane(camera, session.center, session.axis_vector, x, y, current_vector)) {
+            send_gizmo_event(frame, "actor-gizmo-transform", make_payload("error", "rotation plane unavailable"));
+            return true;
+        }
+        const float delta = signed_rotation_delta(session.start_rotate_vector, current_vector, session.axis_vector);
+        const int component = session.axis == "x" ? 0 : (session.axis == "y" ? 1 : 2);
+        next_rotation[component] = session.start_rotation[component] + delta;
+    } else if (session.axis == "uniform") {
+        const float factor = std::max(0.001f, 1.0f + static_cast<float>((session.start_y - y) * 0.01));
+        next_scale = mul_vec3(session.start_scale, factor);
+    } else {
+        double current_axis_t = session.start_axis_t;
+        if (!intersect_axis_drag_plane(camera, session.center, session.axis_vector, x, y, current_axis_t)) {
+            send_gizmo_event(frame, "actor-gizmo-transform", make_payload("error", "drag plane unavailable"));
+            return true;
+        }
+        const float delta = static_cast<float>(current_axis_t - session.start_axis_t);
+        int component = session.axis == "x" ? 0 : (session.axis == "y" ? 1 : 2);
+        next_scale[component] = std::max(0.001f, session.start_scale[component] + delta);
+    }
+
+    if (session.mode == "scale" && session.has_local_bounds) {
+        const auto new_center_without_compensation =
+            compute_bounds_center_world(session.start_position,
+                                        session.start_rotation,
+                                        next_scale,
+                                        session.local_bounds_min,
+                                        session.local_bounds_max);
+        const auto compensation = sub_vec3(session.start_bounds_center_world,
+                                           new_center_without_compensation);
+        next_position = add_vec3(session.start_position, compensation);
+    }
+
+    if (auto transform = Corona::SharedDataHub::instance()
+                             .model_transform_storage()
+                             .try_acquire_write(session.transform_handle)) {
+        if (session.mode == "move") {
+            transform->position = next_position;
+        } else if (session.mode == "scale") {
+            transform->position = next_position;
+            transform->scale = next_scale;
+        } else if (session.mode == "rotate") {
+            transform->euler_rotation = next_rotation;
+        }
+    } else {
+        send_gizmo_event(frame, "actor-gizmo-transform", make_payload("error", "transform unavailable"));
+        return true;
+    }
+
+    make_result(session, next_position, next_rotation, next_scale);
+    if (phase == "end") {
+        std::lock_guard<std::mutex> lock(s_gizmo_drag_mutex);
+        s_gizmo_drags.erase(drag_id);
+    }
+    return true;
+}
+
 bool handle_property_fast(const CefRefPtr<CefProcessMessage>& message) {
     auto args = message->GetArgumentList();
     if (!args || args->GetSize() < 3) {
@@ -1590,7 +1904,9 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
 
             int tab_id = find_tab_id_for_browser(browser);
             if (tab_id >= 0) {
-                bm.remove_tab(tab_id);
+                bm.enqueue_main_thread_task([tab_id] {
+                    BrowserManager::instance().remove_tab(tab_id);
+                });
             }
             return true;
         }
@@ -1599,7 +1915,9 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
             int tab_id = command.value("tabId", -1);
             std::string panel_id = command.value("panelId", "");
             if (tab_id >= 0) {
-                bm.remove_tab(tab_id);
+                bm.enqueue_main_thread_task([tab_id] {
+                    BrowserManager::instance().remove_tab(tab_id);
+                });
             }
 
             nlohmann::json payload;
@@ -1683,6 +2001,14 @@ bool handle_realtime_process_message(CefRefPtr<CefBrowser> browser,
 
     if (message->GetName() == "ViewportPick") {
         return handle_viewport_pick(frame, message);
+    }
+
+    if (message->GetName() == "ActorGizmoState") {
+        return handle_actor_gizmo_state(frame, message);
+    }
+
+    if (message->GetName() == "ActorGizmoDrag") {
+        return handle_actor_gizmo_drag(frame, message);
     }
 
     if (message->GetName() == "ViewportUiMode") {
