@@ -45,12 +45,17 @@ void TRegistry<T>::upload_device_data() noexcept {
 }
 
 template<typename T>
-void TRegistry<T>::prepare() noexcept {
+void TRegistry<T>::prepare(BindlessArray &bindless_array, Device &device) noexcept {
     elements_.for_each_instance([&](const SP<element_ty> &element) noexcept {
         element->prepare();
     });
+    elements_.prepare(bindless_array, device);
+}
+
+template<typename T>
+void TRegistry<T>::prepare() noexcept {
     auto rp = Global::instance().pipeline();
-    elements_.prepare(rp->bindless_array(), rp->device());
+    prepare(rp->bindless_array(), rp->device());
 }
 
 template<typename T>

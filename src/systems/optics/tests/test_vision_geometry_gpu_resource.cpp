@@ -5,7 +5,10 @@
 #include "base/mgr/geometry.h"
 #include "base/mgr/global.h"
 #include "base/mgr/pipeline.h"
+#include "base/mgr/registries.h"
+#include "base/mgr/renderer.h"
 #include "base/mgr/scene.h"
+#include "base/illumination/lightsampler.h"
 
 #include <cstdlib>
 #include <exception>
@@ -45,6 +48,32 @@ void geometry_requires_explicit_command_stream_for_gpu_updates() {
                                  void (vision::Geometry::*)(vision::Stream&)>);
     static_assert(std::is_same_v<decltype(&vision::Geometry::upload_bindless_array),
                                  void (vision::Geometry::*)(vision::Stream&)>);
+}
+
+void scene_tables_accept_explicit_scene_gpu_bindless() {
+    static_assert(std::is_same_v<
+                  decltype(static_cast<void (vision::MaterialRegistry::*)(
+                               vision::BindlessArray&, vision::Device&) noexcept>(
+                      &vision::MaterialRegistry::prepare)),
+                  void (vision::MaterialRegistry::*)(
+                      vision::BindlessArray&, vision::Device&) noexcept>);
+    static_assert(std::is_same_v<
+                  decltype(static_cast<void (vision::MediumRegistry::*)(
+                               vision::BindlessArray&, vision::Device&) noexcept>(
+                      &vision::MediumRegistry::prepare)),
+                  void (vision::MediumRegistry::*)(
+                      vision::BindlessArray&, vision::Device&) noexcept>);
+    static_assert(std::is_same_v<
+                  decltype(static_cast<void (vision::LightSampler::*)(
+                               vision::BindlessArray&, vision::Device&) noexcept>(
+                      &vision::LightSampler::prepare)),
+                  void (vision::LightSampler::*)(
+                      vision::BindlessArray&, vision::Device&) noexcept>);
+    static_assert(std::is_same_v<
+                  decltype(static_cast<void (vision::Renderer::*)(
+                               vision::Scene&) noexcept>(
+                      &vision::Renderer::prepare_lights)),
+                  void (vision::Renderer::*)(vision::Scene&) noexcept>);
 }
 
 void geometry_defaults_to_unbound_gpu_resource() {
@@ -213,6 +242,7 @@ void two_pipelines_consume_one_shared_logical_scene() {
 int main() {
     geometry_gpu_resource_is_external_ownership_boundary();
     geometry_requires_explicit_command_stream_for_gpu_updates();
+    scene_tables_accept_explicit_scene_gpu_bindless();
     geometry_defaults_to_unbound_gpu_resource();
     geometry_binds_external_scene_gpu_resource();
     multiple_geometry_views_share_one_scene_gpu_resource();

@@ -50,12 +50,16 @@ void LightSampler::update_runtime_object(const vision::IObjectConstructor *const
     light_manager_->update_runtime_object(constructor);
 }
 
-void LightSampler::prepare() noexcept {
+void LightSampler::prepare(BindlessArray &bindless_array, Device &device) noexcept {
     for_each([&](TLight light, uint index) noexcept {
         light->prepare();
     });
+    lights().prepare(bindless_array, device);
+}
+
+void LightSampler::prepare() noexcept {
     auto rp = pipeline();
-    lights().prepare(rp->bindless_array(), rp->device());
+    prepare(rp->bindless_array(), rp->device());
 }
 
 void LightSampler::update_device_data() const noexcept {

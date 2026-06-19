@@ -55,6 +55,12 @@ void ownership_audit_covers_phase4_required_dependencies() {
     expect(audit_contains("FrameBuffer and denoiser state",
                           VisionResourceOwnership::PerPipelineRenderState),
            "Phase 4 audit should keep framebuffer and denoiser per pipeline");
+    expect(audit_contains("Material and medium registries",
+                          VisionResourceOwnership::SharedSceneGpu),
+           "Phase 4 audit should classify material/medium tables as shared scene GPU data");
+    expect(audit_contains("Light tables",
+                          VisionResourceOwnership::SharedSceneGpu),
+           "Phase 4 audit should classify light tables as shared scene GPU data");
     expect(audit_contains("Global::pipeline() and Global::bindless_array() users",
                           VisionResourceOwnership::LegacyPipelineOwned),
            "Phase 4 audit should cover Global pipeline/bindless callers");

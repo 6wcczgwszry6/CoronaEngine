@@ -125,7 +125,12 @@ void Scene::prepare() noexcept {
     sensor()->prepare();
     sensor()->update_device_data();
     prepare_materials();
-    medium_registry().prepare();
+    if (geometry().has_gpu_resource()) {
+        medium_registry().prepare(geometry().bindless_array(),
+                                  geometry().gpu_resource()->device());
+    } else {
+        medium_registry().prepare();
+    }
 }
 
 void Scene::update_runtime_object(const vision::IObjectConstructor *constructor) noexcept {
@@ -278,7 +283,12 @@ void Scene::load_mediums(const MediumsDesc &md) {
 }
 
 void Scene::prepare_materials() {
-    material_registry().prepare();
+    if (geometry().has_gpu_resource()) {
+        material_registry().prepare(geometry().bindless_array(),
+                                    geometry().gpu_resource()->device());
+    } else {
+        material_registry().prepare();
+    }
 }
 
 }// namespace vision
