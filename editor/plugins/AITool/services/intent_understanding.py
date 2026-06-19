@@ -30,9 +30,48 @@ class IntentDecision:
     entities: list[dict[str, Any]] = field(default_factory=list)
     reason: str = ""
 
+    @property
+    def route(self) -> str:
+        if self.intent == "discussion":
+            if str(self.target_agent or "").strip().lower() == "gm":
+                return "gm_control"
+            return "agent_self" if self.target_agent else "chat"
+        if self.intent in {
+            "status_query",
+            "plan_drafting",
+            "plan_revision",
+            "generation_start",
+        }:
+            return self.intent
+        if self.intent in {
+            "intervention_add",
+            "intervention_modify",
+            "intervention_delete",
+            "post_generation_add",
+            "final_adjustment_request",
+        }:
+            return "edit_existing"
+        return "chat"
+
+    @property
+    def state_hint(self) -> str:
+        if self.intent in {"plan_drafting", "plan_revision", "generation_start"}:
+            return "planning"
+        if self.intent in {"intervention_add", "intervention_modify", "intervention_delete"}:
+            if str(self.reason or "").startswith("active generation"):
+                return "active_generation"
+            return "completed_scene"
+        if self.intent in {"post_generation_add", "final_adjustment_request"}:
+            return "completed_scene"
+        if self.intent == "status_query":
+            return "any"
+        return "discussion"
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "intent": self.intent,
+            "route": self.route,
+            "state_hint": self.state_hint,
             "confidence": self.confidence,
             "target_agent": self.target_agent,
             "requires_confirmation": self.requires_confirmation,

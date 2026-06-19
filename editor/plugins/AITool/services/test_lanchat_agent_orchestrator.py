@@ -998,6 +998,50 @@ def test_worker_routes_plain_chat_supplement_to_pending_planning_gate():
     print("[OK] worker routes no-mention supplement to pending planning gate")
 
 
+def test_worker_disambiguates_plain_chat_supplement_when_multiple_plans_pending():
+    runtime = get_lanchat_scene_runtime()
+    runtime.end_compose()
+    runtime.consume_notes()
+    action, reply = runtime.handle_planning_gate("小女孩", "@小女孩 帮我设计一个可爱的卧室")
+    assert action == "reply"
+    assert "方案内容" in str(reply)
+    action, reply = runtime.handle_planning_gate("商人", "@商人 帮我设计一个暗黑集市")
+    assert action == "reply"
+    assert "方案内容" in str(reply)
+
+    coordinator = InteractionCoordinator()
+    engine = FakeEngine([], coordinator_messages=[{
+        "message_id": "plain-plan-supplement-ambiguous-1",
+        "room_id": "r-plan-supplement",
+        "sender_id": "host-a",
+        "sender_name": "房主",
+        "sender_type": "host",
+        "message_kind": "chat",
+        "text": "补充要求，减少方案中的细碎物体",
+    }])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    try:
+        assert worker.process_once() is True
+    finally:
+        runtime.clear_pending_planning("小女孩")
+        runtime.clear_pending_planning("商人")
+        runtime.end_compose()
+
+    assert engine.replies
+    reply_text = str(engine.replies[-1][2])
+    assert "请先 @ 指定要更新哪个方案" in reply_text
+    assert "小女孩" in reply_text
+    assert "商人" in reply_text
+    assert coordinator.active_plan_for_room("r-plan-supplement") is None
+    print("[OK] ambiguous no-mention supplement asks user to target one pending plan")
+
+
 def test_planning_gate_records_pre_generation_style_supplement():
     runtime = get_lanchat_scene_runtime()
     runtime.end_compose()
@@ -3384,6 +3428,7 @@ if __name__ == "__main__":
     test_planning_confirmation_gate_roundtrip()
     test_planning_confirmation_gate_returns_concrete_design_brief()
     test_worker_routes_plain_chat_supplement_to_pending_planning_gate()
+    test_worker_disambiguates_plain_chat_supplement_when_multiple_plans_pending()
     test_planning_gate_records_pre_generation_style_supplement()
     test_worker_async_agent_calls_are_serialized_per_worker()
     test_worker_broadcasts_confirmed_gm_action()

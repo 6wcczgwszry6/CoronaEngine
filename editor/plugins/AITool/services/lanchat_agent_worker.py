@@ -210,9 +210,27 @@ class LANChatAgentWorker:
             ):
                 return False
             planning_gate_handled = self._handle_plain_chat_planning_gate(message, text)
-            if planning_gate_handled == "compose":
+            if planning_gate_handled in {"reply", "compose"}:
+                self._log_scene_route(
+                    room_id=room_id,
+                    sender=str(message.get("sender_name") or message.get("sender_id") or ""),
+                    target_agent=str(message.get("target_agent_name") or message.get("agent_name") or ""),
+                    room_state="planning",
+                    intent="planning_gate",
+                    action=planning_gate_handled,
+                    reason="pending planning message",
+                )
                 return True
             if not planning_gate_handled and not self._should_sync_chat_to_coordinator(coordinator, room_id, text, source=source):
+                self._log_scene_route(
+                    room_id=room_id,
+                    sender=str(message.get("sender_name") or message.get("sender_id") or ""),
+                    target_agent=str(message.get("target_agent_name") or message.get("agent_name") or ""),
+                    room_state=str(active.status.value if active is not None else "none"),
+                    intent="chat",
+                    action="skip_coordinator",
+                    reason="not scene-write intent",
+                )
                 return False
             coordinator.ingest_message(ChatMessage(
                 room_id=room_id,
@@ -222,6 +240,15 @@ class LANChatAgentWorker:
                 is_host=bool(message.get("is_host") or sender_type == "host"),
                 metadata=metadata,
             ))
+            self._log_scene_route(
+                room_id=room_id,
+                sender=str(message.get("sender_name") or message.get("sender_id") or ""),
+                target_agent=str(message.get("target_agent_name") or message.get("agent_name") or ""),
+                room_state=str(active.status.value if active is not None else "draft"),
+                intent="scene_write",
+                action="coordinator_ingest",
+                reason=f"source={source}",
+            )
             if emit_disclosure:
                 self._emit_new_disclosure_events(coordinator, disclosure_start)
             return True
@@ -255,6 +282,28 @@ class LANChatAgentWorker:
         trigger["text"] = str(payload or text)
         self._process_trigger(trigger)
         return "compose"
+
+    def _log_scene_route(
+        self,
+        *,
+        room_id: str,
+        sender: str,
+        target_agent: str,
+        room_state: str,
+        intent: str,
+        action: str,
+        reason: str,
+    ) -> None:
+        self._logger.info(
+            "[LANChatIntentRoute] room=%s sender=%s target=%s state=%s intent=%s action=%s reason=%s",
+            room_id or "default",
+            sender or "",
+            target_agent or "",
+            room_state or "",
+            intent or "",
+            action or "",
+            reason or "",
+        )
 
     def _should_sync_chat_to_coordinator(
         self,

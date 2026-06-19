@@ -7,6 +7,7 @@ import re
 from typing import Any, Callable
 
 from .disclosure_policy import DisclosureEvent, DisclosurePolicy
+from .intent_understanding import get_intent_understanding_service
 from .memory_scope import MemoryScope, MemoryScopeStore
 from .scene_design_contract import (
     SceneDesignContract,
@@ -1966,8 +1967,22 @@ class InteractionCoordinator:
         return ""
 
     def _intent_type(self, text: str) -> str:
-        if self._is_status_query(text):
+        service = get_intent_understanding_service()
+        decision = service.classify(text, allow_llm=False)
+        if decision.intent == "status_query" or self._is_status_query(text):
             return "status_query"
+        if decision.intent == "intervention_delete":
+            if any(word in text for word in ("换成", "替换", "改成", "调整")):
+                return "modify"
+            return "remove"
+        if decision.intent in {"intervention_add", "post_generation_add"}:
+            return "add"
+        if decision.intent == "final_adjustment_request":
+            return "modify"
+        if decision.intent == "intervention_modify":
+            if any(word in text for word in self._STYLE_WORDS):
+                return "style_adjust"
+            return "modify"
         if any(word in text for word in self._WRONG_PLAN_WORDS):
             return "wrong_plan"
         if any(word in text for word in self._REPAIR_WORDS):
@@ -1994,7 +2009,17 @@ class InteractionCoordinator:
         return "next_batch"
 
     def _is_post_generation_adjustment(self, text: str) -> bool:
-        if self._is_status_query(text):
+        service = get_intent_understanding_service()
+        decision = service.classify(text, allow_llm=False)
+        if decision.intent == "status_query" or self._is_status_query(text):
+            return False
+        if decision.intent in {
+            "intervention_modify",
+            "intervention_delete",
+            "final_adjustment_request",
+        }:
+            return True
+        if decision.intent in {"intervention_add", "post_generation_add"}:
             return False
         intent_type = self._intent_type(text)
         if intent_type in {"remove", "repair", "style_adjust", "wrong_plan"}:
@@ -2348,7 +2373,11 @@ class InteractionCoordinator:
             contract.boundary_spec = terrain_profile.boundary_spec
 
     def _looks_ready_to_propose(self, text: str) -> bool:
-        return any(word in text for word in ("整理方案", "形成方案", "确认方案", "开始执行", "开始生成", "按这个方案"))
+        decision = get_intent_understanding_service().classify(text, allow_llm=False)
+        return decision.intent == "generation_start" or any(
+            word in text
+            for word in ("整理方案", "形成方案", "确认方案", "开始执行", "开始生成", "按这个方案")
+        )
 
     def _default_proposal(self, plan: SeedPlan) -> str:
         return (

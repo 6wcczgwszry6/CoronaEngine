@@ -187,13 +187,34 @@ class LanChatSceneRuntime:
                 for key, pending in self._pending_confirmations.items()
                 if pending.status == "pending"
             ]
+        if not pending_keys:
+            return "pass", None, None
+        decision = get_intent_understanding_service().classify(value, allow_llm=False)
         if len(pending_keys) != 1:
+            if decision.intent in {
+                "generation_start",
+                "plan_revision",
+                "intervention_add",
+                "intervention_modify",
+                "intervention_delete",
+                "final_adjustment_request",
+            }:
+                return "reply", self._format_pending_disambiguation(pending_keys), "系统"
             return "pass", None, None
         agent_key = pending_keys[0]
         action, payload = self.handle_planning_gate(agent_key, value)
         if action == "pass":
             return "pass", None, None
         return action, payload, agent_key
+
+    @staticmethod
+    def _format_pending_disambiguation(pending_keys: list[str]) -> str:
+        targets = "、".join(str(key) for key in pending_keys if str(key).strip())
+        return (
+            "请先 @ 指定要更新哪个方案。"
+            f"当前有多个待确认方案：{targets}。"
+            "例如：@小女孩 补充要求：减少细碎装饰，保留核心家具。"
+        )
 
     def clear_pending_planning(self, agent_name: str | None = None) -> None:
         with self._lock:
