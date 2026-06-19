@@ -15,6 +15,7 @@
 
 namespace vision {
 class GeometryGpuResource;
+class SceneData;
 }
 
 namespace Corona::Systems::Vision {
@@ -37,7 +38,11 @@ inline constexpr VisionOwnershipAuditEntry kVisionPhase4OwnershipAudit[] = {
     {"Pipeline::scene_",
      VisionResourceOwnership::SharedLogicalScene,
      "vision::Pipeline",
-     "Replace value ownership with a shared scene reference in Phase 4D."},
+     "Replaced by per-pipeline Scene view bound to shared VisionSceneResource SceneData in Phase 4D."},
+    {"SceneData logical objects",
+     VisionResourceOwnership::SharedLogicalScene,
+     "VisionSceneResource",
+     "Own parsed logical scene identity once per external source."},
     {"Scene::geometry_",
      VisionResourceOwnership::SharedSceneGpu,
      "vision::Scene",
@@ -125,6 +130,7 @@ struct VisionSceneResource {
     std::string display_source_path;
     std::string overlay_path;
     std::string overlay_guid;
+    std::shared_ptr<::vision::SceneData> logical_scene;
     std::shared_ptr<::vision::GeometryGpuResource> scene_gpu_resource;
     std::uint64_t logical_transform_version{0};
     std::uint64_t scene_gpu_transform_version{0};
@@ -142,8 +148,28 @@ struct VisionSceneResource {
         return scene_gpu_resource != nullptr;
     }
 
+    [[nodiscard]] bool has_logical_scene() const noexcept {
+        return logical_scene != nullptr;
+    }
+
+    [[nodiscard]] std::uintptr_t logical_scene_identity() const noexcept {
+        return reinterpret_cast<std::uintptr_t>(logical_scene.get());
+    }
+
     [[nodiscard]] std::uintptr_t scene_gpu_resource_identity() const noexcept {
         return reinterpret_cast<std::uintptr_t>(scene_gpu_resource.get());
+    }
+
+    void set_logical_scene(std::shared_ptr<::vision::SceneData> scene) noexcept {
+        logical_scene = std::move(scene);
+    }
+
+    std::shared_ptr<::vision::SceneData> ensure_logical_scene(
+        const std::function<std::shared_ptr<::vision::SceneData>()>& factory) {
+        if (!logical_scene) {
+            logical_scene = factory();
+        }
+        return logical_scene;
     }
 
     void set_scene_gpu_resource(

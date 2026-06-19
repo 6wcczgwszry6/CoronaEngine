@@ -25,8 +25,8 @@ void BakePipeline::init_postprocessor(const DenoiserDesc &desc) {
 
 void BakePipeline::prepare() noexcept {
     Pipeline::prepare();
-    scene_.prepare();
-    renderer_.prepare(scene_);
+    scene().prepare();
+    renderer_.prepare(scene());
     image_pool().prepare();
     preprocess();
     prepare_geometry();

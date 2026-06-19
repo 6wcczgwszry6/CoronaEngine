@@ -43,6 +43,9 @@ void ownership_audit_covers_phase4_required_dependencies() {
     expect(audit_contains("Pipeline::scene_",
                           VisionResourceOwnership::SharedLogicalScene),
            "Phase 4 audit should cover Pipeline::scene_ as shared logical scene");
+    expect(audit_contains("SceneData logical objects",
+                          VisionResourceOwnership::SharedLogicalScene),
+           "Phase 4D audit should cover SceneData as shared logical scene");
     expect(audit_contains("Scene::geometry_",
                           VisionResourceOwnership::SharedSceneGpu),
            "Phase 4 audit should cover Scene::geometry_ as shared scene GPU");
@@ -129,6 +132,50 @@ void scene_gpu_resource_lives_on_scene_resource() {
            "scene GPU resource should be clearable when the scene resource is released");
 }
 
+void logical_scene_lives_on_scene_resource() {
+    VisionSceneResource resource;
+    expect(!resource.has_logical_scene(),
+           "fresh scene resource should not own a logical scene");
+    expect(resource.logical_scene_identity() == 0u,
+           "fresh logical scene identity should be empty");
+
+    auto* fake_scene = reinterpret_cast<::vision::SceneData*>(0x1800);
+    std::shared_ptr<::vision::SceneData> shared_scene(
+        fake_scene,
+        [](::vision::SceneData*) {});
+    resource.set_logical_scene(shared_scene);
+
+    expect(resource.has_logical_scene(),
+           "logical scene should be stored on VisionSceneResource");
+    expect(resource.logical_scene_identity() ==
+               reinterpret_cast<std::uintptr_t>(fake_scene),
+           "logical scene identity should be the shared SceneData pointer");
+    expect(resource.logical_scene == shared_scene,
+           "VisionSceneResource should reuse the supplied logical scene pointer");
+}
+
+void logical_scene_is_created_once_per_scene_resource() {
+    VisionSceneResource resource;
+    int factory_calls = 0;
+    auto* fake_scene = reinterpret_cast<::vision::SceneData*>(0x2800);
+    auto factory = [&]() {
+        ++factory_calls;
+        return std::shared_ptr<::vision::SceneData>(
+            fake_scene,
+            [](::vision::SceneData*) {});
+    };
+
+    auto first = resource.ensure_logical_scene(factory);
+    auto second = resource.ensure_logical_scene(factory);
+
+    expect(factory_calls == 1,
+           "logical scene factory should run only once per VisionSceneResource");
+    expect(first == second,
+           "same VisionSceneResource should return the same logical scene");
+    expect(resource.logical_scene == first,
+           "VisionSceneResource should retain the shared logical scene");
+}
+
 void scene_gpu_resource_is_created_once_per_scene_resource() {
     VisionSceneResource resource;
     int factory_calls = 0;
@@ -209,6 +256,8 @@ int main() {
     ownership_audit_covers_phase4_required_dependencies();
     scene_resource_key_is_mode_independent();
     transform_state_lives_on_scene_resource();
+    logical_scene_lives_on_scene_resource();
+    logical_scene_is_created_once_per_scene_resource();
     scene_gpu_resource_lives_on_scene_resource();
     scene_gpu_resource_is_created_once_per_scene_resource();
     logical_instance_identity_is_shared_per_scene_resource();

@@ -1,5 +1,10 @@
+#include <corona/systems/optics/vision_scene_resource.h>
+
+#include "base/import/parameter_set.h"
+#include "base/import/project_desc.h"
 #include "base/mgr/geometry.h"
 #include "base/mgr/global.h"
+#include "base/mgr/pipeline.h"
 #include "base/mgr/scene.h"
 
 #include <cstdlib>
@@ -94,6 +99,37 @@ void shape_instance_mesh_constructor_is_cpu_only() {
            "ShapeInstance(Mesh) should not register a mesh id during construction");
 }
 
+void scene_views_share_logical_scene_containers() {
+    auto shared_scene = std::make_shared<vision::SceneData>();
+    vision::Scene svgf_scene_view{shared_scene};
+    vision::Scene ssat_scene_view{shared_scene};
+
+    svgf_scene_view.groups().push_back({});
+    svgf_scene_view.instances().push_back({});
+
+    expect(svgf_scene_view.shared_data_identity() == ssat_scene_view.shared_data_identity(),
+           "Scene views should share one logical SceneData identity");
+    expect(ssat_scene_view.groups().size() == 1u,
+           "groups should be shared logical scene state across Scene views");
+    expect(ssat_scene_view.instances().size() == 1u,
+           "instances should be shared logical scene state across Scene views");
+}
+
+vision::ProjectDesc make_empty_project_desc() {
+    const vision::ParameterSet empty_ps{vision::DataWrap::object()};
+    vision::ProjectDesc project_desc;
+    project_desc.pipeline_desc.init(empty_ps);
+    project_desc.renderer_desc.sampler_desc.init(empty_ps);
+    project_desc.renderer_desc.spectrum_desc.init(empty_ps);
+    project_desc.renderer_desc.light_sampler_desc.init(empty_ps);
+    project_desc.renderer_desc.integrator_desc.init(empty_ps);
+    project_desc.renderer_desc.warper_desc.init(empty_ps);
+    project_desc.renderer_desc.render_setting.init(empty_ps);
+    project_desc.scene_desc.sensor_desc.init(empty_ps);
+    project_desc.output_desc.init(empty_ps);
+    return project_desc;
+}
+
 void two_scene_views_bind_one_real_scene_gpu_resource() {
     try {
         ocarina::RHIContext::instance().init(std::filesystem::current_path());
@@ -129,6 +165,49 @@ void two_scene_views_bind_one_real_scene_gpu_resource() {
     }
 }
 
+void two_pipelines_consume_one_shared_logical_scene() {
+    try {
+        ocarina::RHIContext::instance().init(std::filesystem::current_path());
+        auto device = ocarina::RHIContext::instance().create_device("cuda");
+        device.init_rtx();
+        vision::Global::instance().set_device(&device);
+
+        Corona::Systems::Vision::VisionSceneResource scene_resource;
+        auto shared_scene = scene_resource.ensure_logical_scene(
+            [] { return std::make_shared<vision::SceneData>(); });
+        auto project_desc = make_empty_project_desc();
+
+        auto first = vision::Node::create_shared<vision::Pipeline>(
+            project_desc.pipeline_desc);
+        auto second = vision::Node::create_shared<vision::Pipeline>(
+            project_desc.pipeline_desc);
+        expect(first != nullptr && second != nullptr,
+               "test should create two Vision pipelines");
+
+        first->bind_shared_scene_data(shared_scene);
+        second->bind_shared_scene_data(shared_scene);
+
+        expect(first->shared_scene_data() == shared_scene,
+               "first Pipeline should consume the VisionSceneResource logical scene");
+        expect(second->shared_scene_data() == shared_scene,
+               "second Pipeline should consume the same logical scene");
+        expect(first->scene().shared_data_identity() ==
+                   second->scene().shared_data_identity(),
+               "two pipelines should expose one shared logical SceneData identity");
+        expect(&first->scene().groups() == &second->scene().groups(),
+               "groups should be shared logical scene data");
+        expect(&first->scene().instances() == &second->scene().instances(),
+               "instances should be shared logical scene data");
+        expect(first->scene().shared_data_identity() == scene_resource.logical_scene_identity(),
+               "pipeline Scene views should point at the VisionSceneResource logical scene");
+    } catch (const std::exception& e) {
+        std::cout << "SKIP: CUDA-backed Pipeline shared-scene integration unavailable: "
+                  << e.what() << '\n';
+    } catch (...) {
+        std::cout << "SKIP: CUDA-backed Pipeline shared-scene integration unavailable\n";
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -138,6 +217,8 @@ int main() {
     geometry_binds_external_scene_gpu_resource();
     multiple_geometry_views_share_one_scene_gpu_resource();
     shape_instance_mesh_constructor_is_cpu_only();
+    scene_views_share_logical_scene_containers();
     two_scene_views_bind_one_real_scene_gpu_resource();
+    two_pipelines_consume_one_shared_logical_scene();
     return 0;
 }

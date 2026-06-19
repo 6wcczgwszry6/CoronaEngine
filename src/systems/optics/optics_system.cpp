@@ -550,11 +550,18 @@ vision::Device* visionDevicePtr = nullptr;
     return project_desc;
 }
 
-[[nodiscard]] auto create_vision_pipeline() -> ocarina::SP<vision::Pipeline> {
+[[nodiscard]] auto create_vision_pipeline(
+    const std::shared_ptr<Corona::Systems::Vision::VisionSceneResource>& scene_resource = {})
+    -> ocarina::SP<vision::Pipeline> {
     auto project_desc = make_default_vision_project_desc();
     auto pipeline = vision::Node::create_shared<vision::Pipeline>(project_desc.pipeline_desc);
     if (!pipeline) {
         return {};
+    }
+    if (scene_resource) {
+        pipeline->bind_shared_scene_data(
+            scene_resource->ensure_logical_scene(
+                [] { return std::make_shared<vision::SceneData>(); }));
     }
     pipeline->init_project(project_desc);
     pipeline->init_postprocessor(project_desc.renderer_desc.denoiser_desc);
@@ -790,6 +797,21 @@ void bind_pipeline_scene_gpu_resource(
     Corona::Systems::Vision::VisionPipelineSource source,
     Corona::CameraVisionRenderMode mode,
     const std::string& scene_path) {
+    auto logical_scene = scene_resource.ensure_logical_scene(
+        [] { return std::make_shared<vision::SceneData>(); });
+    if (pipeline.shared_scene_data() != logical_scene) {
+        if (!pipeline.scene().is_initialized()) {
+            pipeline.bind_shared_scene_data(logical_scene);
+        } else {
+            CFW_LOG_WARNING(
+                "OpticsSystem: Vision pipeline already has a different initialized "
+                "logical scene view (source={}, mode={}, path={})",
+                std::string(Corona::Systems::Vision::vision_pipeline_source_name(source)),
+                std::string(Corona::Systems::Vision::vision_render_mode_name(mode)),
+                scene_path);
+        }
+    }
+
     const bool created_gpu_resource = !scene_resource.has_scene_gpu_resource();
     auto scene_gpu_resource = scene_resource.ensure_scene_gpu_resource([&] {
         return std::make_shared<vision::GeometryGpuResource>(pipeline.device());
@@ -851,6 +873,11 @@ void bind_pipeline_scene_gpu_resource(
         CFW_LOG_ERROR("OpticsSystem: Vision pipeline creation returned null for {}",
                       scene_path.string());
         return {};
+    }
+    if (scene_resource) {
+        pipeline->bind_shared_scene_data(
+            scene_resource->ensure_logical_scene(
+                [] { return std::make_shared<vision::SceneData>(); }));
     }
     pipeline->init_project(project_desc);
     if (scene_resource) {
@@ -2219,7 +2246,7 @@ Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene(VisionPipelineRunti
         //
         // We must NOT call the full pipeline->prepare() here. That method is
         // a one-shot initialisation path (FixedRenderPipeline::prepare() runs
-        // Pipeline::prepare() -> scene_.prepare() -> renderer_.prepare(scene_) ->
+        // Pipeline::prepare() -> scene().prepare() -> renderer_.prepare(scene()) ->
         // image_pool().prepare() -> ...). Re-running it on an already-initialised
         // pipeline reallocates the framebuffer / sensor / image-pool device buffers
         // that the render loop is already holding references to, which crashes the
@@ -2238,7 +2265,7 @@ Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene(VisionPipelineRunti
         //
         // prepare_lights() is CRITICAL: setup_vision_lights() above changed the light
         // set, but Scene::prepare() does NOT touch the light sampler. The official init
-        // path runs renderer_.prepare(scene_) -> prepare_lights() ->
+        // path runs renderer_.prepare(scene()) -> prepare_lights() ->
         // light_sampler_->prepare(), which rebuilds the on-device light count / PMF /
         // env-index buffers. Skipping it leaves the UniformLightSampler indexing a stale
         // light buffer with the new (different) light_num(), so the very first render()
@@ -2489,17 +2516,16 @@ bool OpticsSystem::init_vision_lazy() {
             return true;
         }
 
-        auto pipeline = create_vision_pipeline();
-        if (!pipeline) {
-            CFW_LOG_ERROR("OpticsSystem: Failed to create Vision pipeline without external scene import");
-            return false;
-        }
-
         const auto key = make_vision_pipeline_key(
             "", current_vision_render_mode_, VisionPipelineSource::EngineBuilt);
         auto scene_resource = get_or_create_vision_scene_resource(
             make_vision_scene_resource_key("", VisionPipelineSource::EngineBuilt),
             "");
+        auto pipeline = create_vision_pipeline(scene_resource);
+        if (!pipeline) {
+            CFW_LOG_ERROR("OpticsSystem: Failed to create Vision pipeline without external scene import");
+            return false;
+        }
         bind_pipeline_scene_gpu_resource(*pipeline,
                                          *scene_resource,
                                          VisionPipelineSource::EngineBuilt,
@@ -2791,16 +2817,16 @@ void OpticsSystem::apply_pending_vision_scene_load() {
     }
 
     try {
-        auto pipeline = create_vision_pipeline();
-        if (!pipeline) {
-            CFW_LOG_ERROR("OpticsSystem: failed to recreate engine-built Vision pipeline");
-            return;
-        }
         const auto key = make_vision_pipeline_key(
             "", requested_mode, VisionPipelineSource::EngineBuilt);
         auto scene_resource = get_or_create_vision_scene_resource(
             make_vision_scene_resource_key("", VisionPipelineSource::EngineBuilt),
             "");
+        auto pipeline = create_vision_pipeline(scene_resource);
+        if (!pipeline) {
+            CFW_LOG_ERROR("OpticsSystem: failed to recreate engine-built Vision pipeline");
+            return;
+        }
         bind_pipeline_scene_gpu_resource(*pipeline,
                                          *scene_resource,
                                          VisionPipelineSource::EngineBuilt,

@@ -13,8 +13,8 @@ public:
     VS_MAKE_PLUGIN_NAME_FUNC
     void prepare() noexcept override {
         Pipeline::prepare();
-        scene_.prepare();
-        renderer_.prepare(scene_);
+        scene().prepare();
+        renderer_.prepare(scene());
         image_pool().prepare();
         prepare_geometry();
         upload_bindless_array();

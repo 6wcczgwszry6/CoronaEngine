@@ -52,8 +52,8 @@ public:
     void prepare() noexcept override {
         Pipeline::prepare();
         auto pixel_num = resolution().x * resolution().y;
-        scene_.prepare();
-        renderer_.prepare(scene_);
+        scene().prepare();
+        renderer_.prepare(scene());
         image_pool().prepare();
         prepare_geometry();
         prepare_render_graph();

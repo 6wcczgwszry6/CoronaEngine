@@ -100,15 +100,21 @@ CommandBatch LightManager::upload(bool async) noexcept {
 
 void Scene::init(const SceneDesc &scene_desc) {
     TIMER(init_scene);
-    light_manager_.init(scene_desc.light_descs);
-    load_materials(scene_desc.material_descs);
-    load_mediums(scene_desc.mediums_desc);
-    {
+    if (sensors_.empty()) {
         TSensor s;
         s.init(scene_desc.sensor_desc);
         sensors_.push_back(ocarina::move(s));
     }
+
+    if (data_->initialized_) {
+        return;
+    }
+
+    data_->light_manager_.init(scene_desc.light_descs);
+    load_materials(scene_desc.material_descs);
+    load_mediums(scene_desc.mediums_desc);
     load_shapes(scene_desc.shape_descs);
+    data_->initialized_ = true;
 }
 
 void Scene::prepare() noexcept {
@@ -129,8 +135,8 @@ void Scene::update_runtime_object(const vision::IObjectConstructor *constructor)
 
 void Scene::tidy_up() noexcept {
     material_registry().tidy_up();
-    medium_registry_->tidy_up();
-    if (auto *data = geometry_.data()) {
+    data_->medium_registry_->tidy_up();
+    if (auto *data = data_->geometry_.data()) {
         data->tidy_up_meshes();
     }
     light_manager().tidy_up();
@@ -140,13 +146,13 @@ void Scene::tidy_up() noexcept {
 }
 
 SP<Material> Scene::obtain_black_body() noexcept {
-    if (!black_body_) {
+    if (!data_->black_body_) {
         MaterialDesc md;
         md.sub_type = "black_body";
-        black_body_ = Material::create_root(md);
-        materials().push_back(black_body_);
+        data_->black_body_ = Material::create_root(md);
+        materials().push_back(data_->black_body_);
     }
-    return black_body_;
+    return data_->black_body_;
 }
 
 void Scene::add_material(SP<vision::Material> material) noexcept {
@@ -154,12 +160,12 @@ void Scene::add_material(SP<vision::Material> material) noexcept {
 }
 
 void Scene::add_light(TLight light) noexcept {
-    light_manager_.add_light(ocarina::move(light));
+    data_->light_manager_.add_light(ocarina::move(light));
 }
 
 TLight Scene::load_light(const LightDesc &desc) noexcept {
     auto light = Light::create_root(desc);
-    light_manager_.add_light(light);
+    data_->light_manager_.add_light(light);
     return light;
 }
 
@@ -171,8 +177,8 @@ void Scene::load_materials(const vector<MaterialDesc> &material_descs) {
 }
 
 void Scene::add_shape(const SP<vision::ShapeGroup> &group, ShapeDesc desc) {
-    groups_.push_back(group);
-    aabb_.extend(group->aabb);
+    data_->groups_.push_back(group);
+    data_->aabb_.extend(group->aabb);
     group->for_each([&](SP<ShapeInstance> instance, uint i) {
         auto iter = materials().find_if([&](SP<Material> &material) {
             return material->name() == instance->material_name();
@@ -183,7 +189,7 @@ void Scene::add_shape(const SP<vision::ShapeGroup> &group, ShapeDesc desc) {
         }
 
         if (desc.emission.valid()) {
-            desc.emission.set_value("inst_id", instances_.size());
+            desc.emission.set_value("inst_id", data_->instances_.size());
             TObject<IAreaLight> light = dynamic_object_cast<IAreaLight>(load_light(desc.emission));
             instance->set_emission(light);
         }
@@ -201,7 +207,7 @@ void Scene::add_shape(const SP<vision::ShapeGroup> &group, ShapeDesc desc) {
                 instance->set_outside(*outside);
             }
         }
-        instances_.push_back(instance);
+        data_->instances_.push_back(instance);
     });
 }
 
@@ -209,17 +215,17 @@ void Scene::bind_geometry_gpu_resource(SP<GeometryGpuResource> resource) noexcep
     if (!resource) {
         return;
     }
-    geometry_.bind_gpu_resource(ocarina::move(resource));
+    data_->geometry_.bind_gpu_resource(ocarina::move(resource));
     register_instance_meshes();
     fill_instances();
 }
 
 void Scene::register_instance_meshes() noexcept {
-    auto *data = geometry_.data();
+    auto *data = data_->geometry_.data();
     if (!data) {
         return;
     }
-    for (auto &instance : instances_) {
+    for (auto &instance : data_->instances_) {
         if (!instance || !instance->mesh()) {
             continue;
         }
@@ -231,8 +237,9 @@ void Scene::register_instance_meshes() noexcept {
 }
 
 void Scene::clear_shapes() noexcept {
-    instances_.clear();
-    groups_.clear();
+    data_->instances_.clear();
+    data_->groups_.clear();
+    data_->aabb_ = {};
 }
 
 void Scene::load_shapes(const vector<ShapeDesc> &descs) {
@@ -243,14 +250,14 @@ void Scene::load_shapes(const vector<ShapeDesc> &descs) {
 }
 
 void Scene::fill_instances() {
-    for (auto &instance : instances_) {
+    for (auto &instance : data_->instances_) {
         if (instance->has_material()) {
             const Material *material = instance->material().get();
             instance->update_material_id(materials().encode_id(material->index(), material));
         }
         if (instance->has_emission()) {
             const Light *emission = instance->emission().get();
-            instance->update_light_id(light_manager_.lights().encode_id(emission->index(), emission));
+            instance->update_light_id(data_->light_manager_.lights().encode_id(emission->index(), emission));
         }
         instance->fill_mesh_id();
         if (process_mediums()) {
