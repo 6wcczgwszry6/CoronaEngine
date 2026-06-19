@@ -8,7 +8,7 @@
 
 库结构（<project>/assets/local_model_library/）：
     index.json                 {归一化名: {model_dir, image_file, created_at}}
-    models/<safe>_<hash>/       复制进来的模型目录（base.glb + mtl + 贴图）
+    models/<safe>_<hash>/       original/ 原始模型目录 + runtime/ 轻量运行时目录
     images/<safe>_<hash>.png    复制进来的文生图图片
 """
 
@@ -122,18 +122,20 @@ def lookup_model(item_name: str) -> Optional[str]:
             entry = index.get(key)
             if not entry:
                 return None
-            model_dir = entry.get("model_dir", "")
-            if not model_dir:
-                return None
-            abs_dir = _abs(root, model_dir)
-
             from .helpers import resolve_model_file
 
-            resolved = resolve_model_file(abs_dir)
-            if resolved and os.path.exists(resolved):
-                return abs_dir  # 返回目录，下游 collect_models 会再 resolve 取首个模型文件
+            candidates = []
+            for key_name in ("runtime_model_dir", "model_dir", "original_model_dir"):
+                value = entry.get(key_name, "")
+                if value and value not in candidates:
+                    candidates.append(value)
+            for model_dir in candidates:
+                abs_dir = _abs(root, model_dir)
+                resolved = resolve_model_file(abs_dir)
+                if resolved and os.path.exists(resolved):
+                    return abs_dir  # 返回目录，下游 collect_models 会再 resolve 取首个模型文件
             # 脏条目：模型文件已不存在 → 清理，视为未命中
-            logger.info("[LocalModelLib] %s 库条目失效（文件缺失），清理: %s", item_name, model_dir)
+            logger.info("[LocalModelLib] %s 库条目失效（文件缺失），清理: %s", item_name, entry)
             index.pop(key, None)
             _save_index(root, index)
             return None
@@ -157,16 +159,25 @@ def save_model(item_name: str, model_path: str) -> None:
             from .helpers import resolve_model_file
 
             index = _load_index(root)
-            # 幂等：已有有效条目则跳过
-            existing = index.get(key, {}).get("model_dir", "")
-            if existing and resolve_model_file(_abs(root, existing)):
+            # 幂等：已有 runtime 有效条目则跳过；旧 model_dir-only 条目允许本次升级。
+            existing_entry = index.get(key, {})
+            existing_runtime = (
+                existing_entry.get("runtime_model_dir")
+                or (
+                    existing_entry.get("model_dir", "")
+                    if "/runtime" in existing_entry.get("model_dir", "").replace("\\", "/")
+                    else ""
+                )
+            )
+            if existing_runtime and resolve_model_file(_abs(root, existing_runtime)):
                 return
 
             resolved = resolve_model_file(model_path)
             if not resolved or not os.path.exists(resolved):
                 logger.warning("[LocalModelLib] %s 存库跳过：模型文件解析失败 %s", item_name, model_path)
                 return
-            src_dir = os.path.dirname(resolved)
+            original_model = _resolve_original_model_path(resolved)
+            src_dir = os.path.dirname(original_model)
             if not os.path.isdir(src_dir):
                 return
 
@@ -176,16 +187,46 @@ def save_model(item_name: str, model_path: str) -> None:
             dst_dir = os.path.join(models_root, dirname)
             if os.path.isdir(dst_dir):
                 shutil.rmtree(dst_dir, ignore_errors=True)
-            shutil.copytree(src_dir, dst_dir)
+            original_dir = os.path.join(dst_dir, "original")
+            shutil.copytree(
+                src_dir,
+                original_dir,
+                ignore=shutil.ignore_patterns("runtime", "original"),
+            )
+            copied_original_model = os.path.join(original_dir, os.path.basename(original_model))
+
+            from .runtime_assets import prepare_runtime_model_bundle
+
+            runtime_bundle = prepare_runtime_model_bundle(copied_original_model)
+            runtime_dir = os.path.dirname(runtime_bundle.runtime_model_path)
 
             entry = index.get(key, {})
-            entry["model_dir"] = os.path.join(_MODELS_SUBDIR, dirname)
+            entry["original_model_dir"] = os.path.join(_MODELS_SUBDIR, dirname, "original")
+            entry["runtime_model_dir"] = os.path.relpath(runtime_dir, root)
+            entry["runtime_texture_max"] = 1024
+            entry["model_dir"] = entry["runtime_model_dir"]
             entry["created_at"] = _now()
             index[key] = entry
             _save_index(root, index)
-            logger.info("[LocalModelLib] %s 已存入本地模型库: %s", item_name, dst_dir)
+            logger.info("[LocalModelLib] %s 已存入本地模型库: %s", item_name, runtime_dir)
     except Exception as e:  # noqa: BLE001
         logger.warning("[LocalModelLib] save_model 异常（不影响主链路）: %s", e)
+
+
+def _resolve_original_model_path(model_path: str) -> str:
+    path = os.path.abspath(model_path)
+    parent = os.path.basename(os.path.dirname(path))
+    if parent != "runtime":
+        return path
+    model_name = os.path.basename(path)
+    root_dir = os.path.dirname(os.path.dirname(path))
+    direct_sibling = os.path.join(root_dir, model_name)
+    if os.path.isfile(direct_sibling):
+        return direct_sibling
+    original_sibling = os.path.join(root_dir, "original", model_name)
+    if os.path.isfile(original_sibling):
+        return original_sibling
+    return path
 
 
 # ---------------------------------------------------------------------------

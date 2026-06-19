@@ -243,7 +243,20 @@ def generate_single_item(
                 retry_times=3,
                 retry_interval_seconds=0.2,
             )
-            save_model(name, final_model_path or raw_model_path)
+            selected_model_path = final_model_path or raw_model_path
+            try:
+                from .runtime_assets import prepare_runtime_model_bundle
+
+                runtime_bundle = prepare_runtime_model_bundle(selected_model_path)
+                selected_model_path = runtime_bundle.runtime_model_path
+                result["model_path"] = selected_model_path
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[Workflow][generate] %s runtime 素材准备失败，回退原模型: %s",
+                    name,
+                    exc,
+                )
+            save_model(name, selected_model_path)
             return result
         except Exception as e:
             last_error = str(e)

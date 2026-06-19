@@ -153,12 +153,18 @@ class OpticsSystem : public Kernel::SystemBase {
     /// width/height 为本次相机分辨率；surface 不可为 nullptr。
     SurfaceRenderTarget& acquire_surface_target(void* surface, uint32_t width,
                                                 uint32_t height, uint64_t frame_index);
+    SurfaceRenderTarget& acquire_offscreen_screenshot_target(std::uintptr_t camera_handle,
+                                                             uint32_t width,
+                                                             uint32_t height,
+                                                             uint64_t frame_index);
 
     /// 回收连续多帧未被任何相机使用的 surface 目标（释放 GPU 图与存储句柄），
     /// 应对“任意多个、自由开关”的视口生命周期，避免长期累积泄漏。
     void evict_idle_surface_targets(uint64_t frame_index);
+    void evict_idle_offscreen_screenshot_targets(uint64_t frame_index);
 
     std::unordered_map<void*, SurfaceRenderTarget> surface_targets_;
+    std::unordered_map<std::uintptr_t, SurfaceRenderTarget> offscreen_screenshot_targets_;
     /// 空闲多少帧后回收一个 surface 目标（约 2s @120fps）。
     static constexpr uint64_t kSurfaceTargetIdleEvictFrames = 240;
 
@@ -205,6 +211,9 @@ class OpticsSystem : public Kernel::SystemBase {
     };
     std::vector<PendingScreenshot> pending_screenshots_;
     std::mutex screenshot_mutex_;
+    bool has_pending_screenshot(std::uintptr_t camera_handle);
+    void fail_pending_screenshots(std::uintptr_t camera_handle);
+    void fail_unrenderable_pending_screenshots();
     Kernel::EventId screenshot_request_sub_id_ = 0;
     Kernel::EventId backend_switch_sub_id_ = 0;
     Kernel::EventId vision_scene_load_sub_id_ = 0;

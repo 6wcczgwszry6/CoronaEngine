@@ -2,10 +2,77 @@
   <div class="lanchat-panel relative flex flex-col h-full text-[15px] text-gray-100">
     <!-- 未进房：大厅（开房 / 加入） -->
     <div v-if="!s.inRoom" class="flex-1 overflow-y-auto p-4 space-y-4">
+      <div class="space-y-2">
+        <div class="flex items-center justify-between">
+          <div class="text-sm font-medium text-gray-200">历史记录</div>
+          <button
+            class="px-2 py-1 rounded bg-[#3a3a3a] text-xs text-gray-200 disabled:opacity-50"
+            :disabled="s.historyLoading"
+            @click="refreshHistoryRooms"
+          >
+            刷新
+          </button>
+        </div>
+        <div v-if="s.historyError" class="text-red-400 text-xs">{{ s.historyError }}</div>
+        <div v-if="s.historyLoading && !s.historyRooms.length" class="text-gray-400 text-sm">
+          正在加载历史记录…
+        </div>
+        <div v-else-if="!s.historyRooms.length" class="text-gray-500 text-sm">
+          暂无历史记录
+        </div>
+        <div v-else class="space-y-1">
+          <button
+            v-for="room in s.historyRooms"
+            :key="room.room_id"
+            class="w-full text-left px-3 py-2 rounded bg-[#2a2a2a] border border-gray-700 hover:border-[#84A65B] transition-colors"
+            :class="s.selectedHistoryRoom?.room_id === room.room_id ? 'border-[#84A65B]' : ''"
+            @click="loadHistoryRoom(room)"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-medium text-gray-100 truncate">{{ historyRoomTitle(room) }}</span>
+              <span class="text-xs text-gray-500 shrink-0">{{ formatHistoryTime(room.last_ts) }}</span>
+            </div>
+            <div class="mt-1 text-xs text-gray-400 truncate">
+              {{ room.message_count || 0 }} 条 · {{ room.last_sender_name || '未知' }}：{{ room.last_text || '' }}
+            </div>
+          </button>
+        </div>
+        <div
+          v-if="s.selectedHistoryRoom"
+          class="mt-3 border-t border-gray-700 pt-3 space-y-2"
+        >
+          <div class="flex items-center justify-between">
+            <div class="text-sm text-[#B8D58D] truncate">
+              {{ historyRoomTitle(s.selectedHistoryRoom) }}
+            </div>
+            <div class="text-xs text-gray-500">{{ s.messages.length }} 条</div>
+          </div>
+          <button
+            class="w-full py-2 rounded bg-[#84A65B] text-white text-sm disabled:opacity-50"
+            :disabled="s.historyLoading"
+            @click="continueHistoryAsSingle"
+          >
+            作为单人聊天室继续
+          </button>
+          <div class="max-h-56 overflow-y-auto space-y-2 pr-1">
+            <div
+              v-for="m in s.messages"
+              :key="m.message_id || `${m.from}-${m.ts}-${m.text}`"
+              class="text-sm"
+            >
+              <div class="text-xs text-gray-500">{{ m.from }} · {{ formatHistoryTime(m.ts) }}</div>
+              <div class="mt-0.5 rounded bg-[#E8E8E8]/90 text-gray-800 px-3 py-2 leading-relaxed break-words">
+                {{ m.text }}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- tab 切换 -->
       <div class="flex gap-2">
-        <button
-          class="flex-1 py-2 rounded text-sm"
+          <button
+            class="flex-1 py-2 rounded text-sm"
           :class="lobbyTab === 'create' ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a]/60'"
           @click="lobbyTab = 'create'"
         >
@@ -38,10 +105,12 @@
             单人
           </button>
         </div>
-        <input v-model="form.room" placeholder="房间号" :class="inputCls" />
-        <input v-model="form.password" placeholder="密码（可选）" :class="inputCls" />
+        <template v-if="roomMode === 'multi'">
+          <input v-model="form.room" placeholder="房间号" :class="inputCls" />
+          <input v-model="form.password" placeholder="密码（可选）" :class="inputCls" />
+        </template>
         <button class="w-full py-2 rounded bg-[#84A65B] text-white text-sm" @click="onCreate">
-          创建并进入
+          {{ roomMode === 'single' ? (s.selectedHistoryRoom ? '继续所选历史' : '进入单人聊天室') : '创建并进入' }}
         </button>
       </div>
 
@@ -70,7 +139,7 @@
       <!-- 房间信息条 -->
       <div class="flex items-center justify-between px-3 py-2 bg-[#3a3a3a]/70 text-sm">
         <span>
-          房间 <b>{{ s.room }}</b>
+          房间 <b>{{ s.mode === 'single' ? '单人聊天室' : s.room }}</b>
           <template v-if="s.role === 'host' && s.mode === 'multi'"> · {{ s.ip }}:{{ s.port }}</template>
         </span>
         <button
@@ -308,7 +377,7 @@
 </template>
 
 <script setup>
-import { reactive, ref, computed, nextTick, watch } from 'vue';
+import { reactive, ref, computed, nextTick, watch, onMounted } from 'vue';
 import lanchat from '../../../stores/lanchat.js';
 import {
   buildGmDecisionMessage,
@@ -417,7 +486,43 @@ const resourceDiagnosisText = computed(() => {
   return resourceDiagnosisLabel(currentDisclosure.value.metadata?.diagnosis);
 });
 
+function refreshHistoryRooms() {
+  return lanchat.refreshHistoryRooms();
+}
+
+function loadHistoryRoom(room) {
+  return lanchat.loadHistoryRoom(room);
+}
+
+function historyRoomTitle(room) {
+  if (!room) return '';
+  return room.room_id === 'single-default' ? '单人聊天室' : room.room_id;
+}
+
+function formatHistoryTime(ts) {
+  const seconds = Number(ts || 0);
+  if (!seconds) return '';
+  const date = new Date(seconds * 1000);
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+onMounted(refreshHistoryRooms);
+
 async function onCreate() {
+  if (roomMode.value === 'single') {
+    if (s.selectedHistoryRoom) {
+      await continueHistoryAsSingle();
+      return;
+    }
+    await lanchat.openRoom({
+      room: makeLocalRoomId(),
+      password: '',
+      port: form.port || 27960,
+      mode: 'single',
+    });
+    return;
+  }
   if (!form.room.trim()) return;
   await lanchat.openRoom({
     room: form.room.trim(),
@@ -425,6 +530,19 @@ async function onCreate() {
     port: form.port || 27960,
     mode: roomMode.value,
   });
+}
+
+async function continueHistoryAsSingle() {
+  if (!s.selectedHistoryRoom?.room_id) return;
+  roomMode.value = 'single';
+  lobbyTab.value = 'create';
+  await lanchat.continueHistoryAsLocalRoom({
+    room: s.selectedHistoryRoom.room_id,
+  });
+}
+
+function makeLocalRoomId() {
+  return 'single-default';
 }
 
 async function onJoin() {

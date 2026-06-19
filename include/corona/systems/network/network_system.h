@@ -6,6 +6,7 @@
 #include <corona/kernel/system/system_base.h>
 
 #include <corona/systems/network/protocol.h>
+#include <corona/systems/network/lanchat_history_store.h>
 #include <corona/systems/network/lanchat_state.h>
 #include <corona/systems/network/network_identity.h>
 #include <corona/systems/network/peer_manager.h>
@@ -175,6 +176,13 @@ public:
     Network::LanChatResult lanchat_remove_agent(const std::string& agent_id);
     [[nodiscard]] const std::vector<Network::LanChatMember>& lanchat_members() const;
     [[nodiscard]] const std::vector<Network::LanChatMessage>& lanchat_history() const;
+    bool lanchat_restore_history_room(const std::string& room_id);
+    [[nodiscard]] std::vector<Network::LanChatHistoryRoomSummary> lanchat_history_rooms() const;
+    [[nodiscard]] std::vector<Network::LanChatMessage> lanchat_load_history_room(
+        const std::string& room_id,
+        size_t max_messages = 5000) const;
+    [[nodiscard]] std::vector<Network::LanChatAgent> lanchat_load_history_agents(
+        const std::string& room_id) const;
     [[nodiscard]] const std::vector<Network::LanChatAgent>& lanchat_agents() const;
     [[nodiscard]] std::optional<Network::LanChatAgentTrigger> lanchat_pop_agent_trigger();
     [[nodiscard]] std::optional<Network::LanChatMessage> lanchat_pop_coordinator_sync_message();
@@ -323,6 +331,8 @@ private:
     bool send_to_connected_host_peer(const std::vector<uint8_t>& packet);
     void notify_lanchat_room_closed();
     void clear_lanchat_room_state();
+    void persist_lanchat_message(const Network::LanChatMessage& message);
+    void persist_lanchat_agents(const std::string& room_id);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

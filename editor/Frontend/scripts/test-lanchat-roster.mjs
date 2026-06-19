@@ -61,6 +61,23 @@ assertIncludes(store, 'state.nickname = res.you || hostNickname', 'openRoom must
 assertIncludes(store, 'mode:', 'lanchat store must track whether the room is single-player or multiplayer');
 assertIncludes(store, 'async function openLocalRoom', 'lanchat store must support local single-player rooms');
 assertIncludes(store, 'lanChatService.startLocalRoom', 'single-player rooms must use the local LANChat service path');
+if (store.includes('await refreshRoomHistory()')) {
+  fail('opening a LANChat room must not automatically load persisted history; users choose history explicitly');
+}
+if (store.includes('function applyHostRoomState') && store.slice(
+  store.indexOf('function applyHostRoomState'),
+  store.indexOf('async function refreshHistoryRooms'),
+).includes('applyHistorySnapshot(res.history || [], true)')) {
+  fail('host/local room startup must ignore persisted history returned by older native builds');
+}
+assertIncludes(store, 'historyRooms:', 'lanchat store must track persisted history room summaries');
+assertIncludes(store, 'selectedHistoryRoom:', 'lanchat store must track the selected persisted history room');
+assertIncludes(store, 'async function refreshHistoryRooms', 'lanchat store must load persisted history rooms before joining a room');
+assertIncludes(store, 'async function loadHistoryRoom', 'lanchat store must load a selected persisted history transcript without opening a room');
+assertIncludes(store, 'state.agents = Array.isArray(res.agents) ? res.agents : []', 'loading persisted history must restore its agent roster');
+assertIncludes(store, "agent.owner === 'local-single-player'", 'single-player history agents must be treated as locally owned after restore');
+assertIncludes(store, 'async function continueHistoryAsLocalRoom', 'lanchat store must let users continue a selected history as a single-player room');
+assertIncludes(store, 'restore_history: true', 'continuing a selected history must explicitly ask native to restore it into the active room');
 assertIncludes(store, 'lanChatService.stopLocalRoom', 'single-player rooms must close without stopping collaboration networking');
 assertIncludes(store, 'lanChatService.startRoom', 'multiplayer rooms must keep using the network room service path');
 
@@ -122,6 +139,9 @@ assertIncludes(disclosureTest, "buildManualGmMessageOptions('guest')", 'disclosu
 assertIncludes(store, 'lanChatService.sendMessage(trimmed, options)', 'lanchat store must pass structured message options through');
 assertIncludes(bridge, '{ text, ...(options || {}) }', 'LANChat bridge must preserve structured sendMessage options');
 assertIncludes(bridge, "Bridge.callCEF('LANChat', 'send_message'", 'LANChat bridge must route sendMessage through CEF LANChat module');
+assertIncludes(bridge, "Bridge.callCEF('LANChat', 'get_history'", 'LANChat bridge must expose explicit persisted history reload');
+assertIncludes(bridge, "Bridge.callCEF('LANChat', 'list_history_rooms'", 'LANChat bridge must expose persisted history room listing');
+assertIncludes(bridge, "Bridge.callCEF('LANChat', 'load_history_room'", 'LANChat bridge must expose loading a selected persisted history room');
 assertIncludes(roomPanel, 'resourceDiagnosisText', 'RoomPanel must render safe resource diagnosis text');
 assertIncludes(roomPanel, 'function resourceDiagnosisLabel', 'RoomPanel must map scheduler diagnosis to user-facing text');
 assertIncludes(roomPanel, '资源状态：生成已停止', 'RoomPanel must translate stopped scheduler diagnosis without exposing internal codes');
@@ -136,6 +156,17 @@ if (roomPanel.includes('port: 8770') || roomPanel.includes('form.port || 8770'))
 assertIncludes(roomPanel, "roomMode = 'single'", 'RoomPanel must offer a single-player room mode');
 assertIncludes(roomPanel, "roomMode = 'multi'", 'RoomPanel must offer a multiplayer room mode');
 assertIncludes(roomPanel, 'mode: roomMode.value', 'RoomPanel must pass the selected room mode when creating a room');
+assertIncludes(roomPanel, "v-if=\"roomMode === 'multi'\"", 'RoomPanel must only show room/password inputs for multiplayer room creation');
+assertIncludes(roomPanel, 'function makeLocalRoomId', 'RoomPanel must auto-generate an internal local room id for single-player rooms');
+assertIncludes(roomPanel, "return 'single-default'", 'single-player room id must be stable so local history can be restored');
+assertIncludes(roomPanel, "roomMode.value === 'single'", 'RoomPanel create flow must branch before requiring a manually typed room id');
+assertIncludes(roomPanel, "s.mode === 'single' ? '单人聊天室' : s.room", 'RoomPanel must not expose internal local room ids as the single-player room title');
+assertIncludes(roomPanel, 'onMounted(refreshHistoryRooms)', 'RoomPanel must load persisted history list when the dock opens');
+assertIncludes(roomPanel, '历史记录', 'RoomPanel must show persisted history before entering a room');
+assertIncludes(roomPanel, 'loadHistoryRoom', 'RoomPanel must let users choose which persisted history to display');
+assertIncludes(roomPanel, 'continueHistoryAsSingle', 'RoomPanel must let users continue a selected history as a single-player room');
+assertIncludes(roomPanel, '作为单人聊天室继续', 'RoomPanel must expose a clear continue-history action');
+assertIncludes(roomPanel, '继续所选历史', 'RoomPanel single-room create button must reflect selected history');
 assertIncludes(roomPanel, "s.mode === 'multi'", 'RoomPanel must only show host IP/port for multiplayer rooms');
 
 assertIncludes(memberList, 'peerId', 'MemberList must accept peerId prop');
@@ -145,9 +176,21 @@ assertIncludes(memberList, '<div class="text-sm">', 'MemberList must keep readab
 assertIncludes(networkHeader, 'session_port() const', 'NetworkSystem must expose the active ENet listen port');
 assertIncludes(networkHeader, 'lanchat_start_local_room', 'NetworkSystem must expose a local LANChat room path that does not start collaboration networking');
 assertIncludes(networkHeader, 'lanchat_stop_local_room', 'NetworkSystem must expose a local room close path that does not stop collaboration networking');
+assertIncludes(networkHeader, 'lanchat_restore_history_room', 'NetworkSystem must expose explicit selected-history restore for local continuation');
 assertIncludes(networkSystem, 'if (impl_->session_role != SessionRole::Host) return;', 'clients must not process LANChat join packets');
 assertIncludes(networkSystem, 'bool NetworkSystem::lanchat_start_local_room', 'NetworkSystem must implement local LANChat rooms');
 assertIncludes(networkSystem, 'void NetworkSystem::lanchat_stop_local_room', 'NetworkSystem must implement local LANChat room close');
+const localRoomStartForHistory = networkSystem.indexOf('bool NetworkSystem::lanchat_start_local_room');
+const multiRoomStartForHistory = networkSystem.indexOf('bool NetworkSystem::lanchat_start_room');
+const stopLocalForHistory = networkSystem.indexOf('void NetworkSystem::lanchat_stop_local_room');
+if (localRoomStartForHistory < 0 || multiRoomStartForHistory < 0 || stopLocalForHistory < 0) {
+  fail('NetworkSystem must expose local and multiplayer LANChat room paths');
+}
+const startRoomBodiesForHistory = networkSystem.slice(localRoomStartForHistory, stopLocalForHistory);
+if (startRoomBodiesForHistory.includes('restore_lanchat_history(room_id)')) {
+  fail('opening a LANChat room must not automatically restore persisted history');
+}
+assertIncludes(networkSystem, 'persist_lanchat_message(result.message)', 'NetworkSystem must persist accepted LANChat messages');
 assertIncludes(networkSystem, 'MessageType::CHAT_HISTORY_SNAPSHOT', 'NetworkSystem must handle LANChat history snapshots');
 assertIncludes(networkSystem, 'MessageType::CHAT_JOIN_REJECT', 'NetworkSystem must handle LANChat join rejection');
 assertIncludes(networkSystem, 'lanchat_join_pending', 'NetworkSystem must track pending LANChat joins');
@@ -174,6 +217,13 @@ assertIncludes(cefBridge, 'const std::string nickname = payload_arg.value("nickn
 assertIncludes(cefBridge, 'data["you"] = host_nickname', 'LANChat start_room must return the final host nickname');
 assertIncludes(cefBridge, 'func == "start_local_room"', 'LANChat bridge must expose start_local_room for single-player rooms');
 assertIncludes(cefBridge, 'func == "stop_local_room"', 'LANChat bridge must expose stop_local_room for single-player rooms');
+assertIncludes(cefBridge, 'func == "get_history"', 'LANChat bridge must expose get_history for explicit history reload');
+assertIncludes(cefBridge, 'func == "list_history_rooms"', 'LANChat bridge must expose persisted history room listing');
+assertIncludes(cefBridge, 'func == "load_history_room"', 'LANChat bridge must expose loading selected persisted history rooms');
+assertIncludes(cefBridge, 'sys->lanchat_load_history_agents(room)', 'LANChat load_history_room must return the persisted agent roster');
+assertIncludes(cefBridge, '{"persona", agent.persona}', 'LANChat agent JSON must include persona for restored agents');
+assertIncludes(cefBridge, 'payload_arg.value("restore_history", false)', 'LANChat start_local_room must require explicit restore_history before applying persisted history');
+assertIncludes(cefBridge, 'sys->lanchat_restore_history_room', 'LANChat start_local_room must restore selected history only when requested');
 assertIncludes(cefBridge, 'payload_arg.value("port", 27960)', 'LANChat bridge must default room ports to the Network collaboration port');
 assertIncludes(cefBridge, 'sys->session_port() != 0 ? sys->session_port() : 27960', 'LANChat get_local_ip must return the Network collaboration port fallback');
 if (cefBridge.includes('data["port"] = 8770;')) {
@@ -190,6 +240,13 @@ if (localRoomStart < 0 || multiplayerRoomStart < 0) {
 const localRoomBody = networkSystem.slice(localRoomStart, multiplayerRoomStart);
 if (localRoomBody.includes('start_session(')) {
   fail('Local LANChat rooms must not start NetworkSystem collaboration sessions');
+}
+const startRoomBranch = cefBridge.slice(
+  cefBridge.indexOf('if (func == "start_room")'),
+  cefBridge.indexOf('if (func == "stop_room")'),
+);
+if (startRoomBranch.includes('sys->lanchat_load_history_room')) {
+  fail('LANChat start_room/start_local_room responses must not load persisted history implicitly');
 }
 const localStopStart = networkSystem.indexOf('void NetworkSystem::lanchat_stop_local_room');
 const leaveRoomStart = networkSystem.indexOf('void NetworkSystem::lanchat_leave_room');

@@ -254,6 +254,8 @@ class FakeCamera:
         self.fov = 45.0
         self.output_mode = kwargs.get("output_mode", "beauty")
         self.surface = 123
+        self.offscreen_capture_mode = False
+        self.offscreen_capture_calls = []
         self.view_state = {
             "open": kwargs.get("view_open", False),
             "x": 120,
@@ -297,6 +299,13 @@ class FakeCamera:
 
     def get_surface(self):
         return self.surface
+
+    def set_offscreen_capture_mode(self, enabled):
+        self.offscreen_capture_mode = bool(enabled)
+        self.offscreen_capture_calls.append(bool(enabled))
+        if enabled:
+            self.surface = 0
+            self.view_state["open"] = False
 
     def set_view_state(self, open_, x, y, width, height, move_speed=None):
         self.view_state = {
@@ -350,6 +359,8 @@ def test_vlm_review_camera_reuses_existing():
     camera = model_reviewer.get_or_create_vlm_review_camera(scene, camera_factory=FakeCamera)
     assert camera is existing
     assert not scene.added
+    assert existing.offscreen_capture_calls == [True]
+    assert existing.offscreen_capture_mode is True
     print("[OK] VLM review camera reuses existing camera")
 
 
@@ -362,6 +373,8 @@ def test_vlm_review_camera_created_without_switching_active():
     assert scene.get_active_camera() is active_before
     assert camera.kwargs.get("view_open") is False
     assert camera.kwargs.get("deletable") is False
+    assert camera.offscreen_capture_calls == [True]
+    assert camera.offscreen_capture_mode is True
     assert camera.get_surface() == 0
     assert camera.view_state["open"] is False
     assert camera.internal is True
@@ -418,6 +431,10 @@ def test_vlm_capture_restores_and_skips_when_main_camera_leaks():
 
 def test_vlm_review_camera_without_offscreen_surface_is_skipped():
     class NoSurfaceCamera(FakeCamera):
+        def set_offscreen_capture_mode(self, enabled):
+            self.offscreen_capture_calls.append(bool(enabled))
+            self.offscreen_capture_mode = False
+
         def set_surface(self, surface):
             self.surface = 123
 
@@ -425,6 +442,22 @@ def test_vlm_review_camera_without_offscreen_surface_is_skipped():
     camera = model_reviewer.get_or_create_vlm_review_camera(scene, camera_factory=NoSurfaceCamera)
     assert camera is None
     print("[OK] VLM review skips when offscreen surface cannot be isolated")
+
+
+def test_vlm_review_camera_legacy_surface_api_still_works():
+    class LegacyCamera(FakeCamera):
+        def __getattribute__(self, name):
+            if name == "set_offscreen_capture_mode":
+                raise AttributeError(name)
+            return super().__getattribute__(name)
+
+    scene = FakeScene()
+    camera = model_reviewer.get_or_create_vlm_review_camera(scene, camera_factory=LegacyCamera)
+    assert camera is scene.added[0]
+    assert camera.get_surface() == 0
+    assert camera.view_state["open"] is False
+    assert camera.offscreen_capture_calls == []
+    print("[OK] VLM review camera falls back to legacy surface API when needed")
 
 
 def test_main_camera_fallback_env_is_ignored(monkeypatch=None):
@@ -494,6 +527,7 @@ if __name__ == "__main__":
     test_vlm_capture_uses_review_camera_not_main()
     test_vlm_capture_restores_and_skips_when_main_camera_leaks()
     test_vlm_review_camera_without_offscreen_surface_is_skipped()
+    test_vlm_review_camera_legacy_surface_api_still_works()
     test_main_camera_fallback_env_is_ignored()
     test_screenshot_waits_for_late_png_write()
     print("\n=== COMMIT 5 VLM 外回路 ALL PASS ===")

@@ -3,6 +3,7 @@
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/systems/network/file_transfer.h>
+#include <corona/systems/network/lanchat_history_store.h>
 #include <corona/systems/network/network_identity.h>
 #include <corona/systems/network/network_system.h>
 #include <corona/shared_data_hub.h>
@@ -259,6 +260,7 @@ std::string agents_json(const std::vector<Network::LanChatAgent>& agents) {
         if (i > 0) out << ",";
         out << "{\"agent_id\":" << json_string(agent.agent_id)
             << ",\"name\":" << json_string(agent.name)
+            << ",\"persona\":" << json_string(agent.persona)
             << ",\"owner\":" << json_string(agent.owner_id)
             << "}";
     }
@@ -304,6 +306,13 @@ std::string lanchat_error_event_json(const std::string& code,
     }
     out << "}";
     return out.str();
+}
+
+std::filesystem::path lanchat_history_root_from_project(const std::string& project_root) {
+    const auto base = project_root.empty()
+        ? std::filesystem::current_path()
+        : std::filesystem::path(project_root);
+    return base / "Saved" / "LANChat" / "history";
 }
 
 bool read_chat_message(Network::BufferReader& r, Network::LanChatMessage& message,
@@ -931,6 +940,7 @@ Network::LanChatMessageResult NetworkSystem::lanchat_send_message_ex(
     if (!result.accepted) {
         return result;
     }
+    persist_lanchat_message(result.message);
 
     auto packet = build_chat_packet_for_type(result.message, Network::MessageType::CHAT_MESSAGE);
     if (impl_->session_state == SessionState::Active) {
@@ -1001,6 +1011,7 @@ Network::LanChatMessageResult NetworkSystem::lanchat_send_agent_reply_ex(
     if (!result.accepted) {
         return result;
     }
+    persist_lanchat_message(result.message);
 
     auto packet = build_chat_packet_for_type(result.message, Network::MessageType::CHAT_AGENT_REPLY);
     if (impl_->session_state == SessionState::Active) {
@@ -1066,6 +1077,9 @@ Network::LanChatMessageResult NetworkSystem::lanchat_send_system_message_to_user
     if (result.accepted && impl_->lanchat_event_callback) {
         impl_->lanchat_event_callback(message_event_json(result.message));
     }
+    if (result.accepted) {
+        persist_lanchat_message(result.message);
+    }
     return result;
 }
 
@@ -1087,6 +1101,9 @@ Network::LanChatResult NetworkSystem::lanchat_register_agent(const std::string& 
     }
 
     auto result = impl_->lanchat.register_agent(agent_id, name, persona, owner);
+    if (result.ok) {
+        persist_lanchat_agents(impl_->lanchat.room_id());
+    }
     if (result.ok && impl_->session_state == SessionState::Active) {
         auto packet = Network::build_chat_agent_register(
             impl_->lanchat.room_id(), agent_id, name, persona, owner);
@@ -1110,6 +1127,9 @@ Network::LanChatResult NetworkSystem::lanchat_remove_agent(const std::string& ag
     }
 
     auto result = impl_->lanchat.remove_agent(agent_id);
+    if (result.ok) {
+        persist_lanchat_agents(impl_->lanchat.room_id());
+    }
     if (result.ok && impl_->session_state == SessionState::Active) {
         auto packet = Network::build_chat_agent_remove(impl_->lanchat.room_id(), agent_id);
         impl_->peer_manager.broadcast(Network::kChannelReliable, packet.data(), packet.size(), true);
@@ -1128,6 +1148,40 @@ const std::vector<Network::LanChatMember>& NetworkSystem::lanchat_members() cons
 
 const std::vector<Network::LanChatMessage>& NetworkSystem::lanchat_history() const {
     return impl_->lanchat.history();
+}
+
+bool NetworkSystem::lanchat_restore_history_room(const std::string& room_id) {
+    if (room_id.empty() || impl_->lanchat.room_id().empty()) return false;
+    const auto root = lanchat_history_root_from_project(impl_->project_root);
+    Network::LanChatHistoryStore store(root);
+    auto history = store.load_room(room_id);
+    auto agents = store.load_agents(room_id);
+    impl_->lanchat.apply_history_snapshot(history);
+    for (const auto& agent : agents) {
+        impl_->lanchat.register_agent(
+            agent.agent_id, agent.name, agent.persona, agent.owner_id);
+    }
+    CFW_LOG_INFO("NetworkSystem: LANChat explicitly restored selected history — room='{}' messages={} agents={}",
+                 room_id, history.size(), agents.size());
+    return true;
+}
+
+std::vector<Network::LanChatHistoryRoomSummary> NetworkSystem::lanchat_history_rooms() const {
+    Network::LanChatHistoryStore store(lanchat_history_root_from_project(impl_->project_root));
+    return store.list_rooms();
+}
+
+std::vector<Network::LanChatMessage> NetworkSystem::lanchat_load_history_room(
+    const std::string& room_id,
+    size_t max_messages) const {
+    Network::LanChatHistoryStore store(lanchat_history_root_from_project(impl_->project_root));
+    return store.load_room(room_id, max_messages);
+}
+
+std::vector<Network::LanChatAgent> NetworkSystem::lanchat_load_history_agents(
+    const std::string& room_id) const {
+    Network::LanChatHistoryStore store(lanchat_history_root_from_project(impl_->project_root));
+    return store.load_agents(room_id);
 }
 
 const std::vector<Network::LanChatAgent>& NetworkSystem::lanchat_agents() const {
@@ -1405,6 +1459,20 @@ bool NetworkSystem::claim_actor_ownership(const std::string& actor_guid) {
 
 void NetworkSystem::set_project_root(const std::string& project_root) {
     impl_->project_root = project_root;
+}
+
+void NetworkSystem::persist_lanchat_message(const Network::LanChatMessage& message) {
+    if (message.room_id.empty() || message.message_id.empty()) return;
+    const auto root = lanchat_history_root_from_project(impl_->project_root);
+    Network::LanChatHistoryStore store(root);
+    store.append_message(message.room_id, message);
+}
+
+void NetworkSystem::persist_lanchat_agents(const std::string& room_id) {
+    if (room_id.empty()) return;
+    const auto root = lanchat_history_root_from_project(impl_->project_root);
+    Network::LanChatHistoryStore store(root);
+    store.save_agents(room_id, impl_->lanchat.agents());
 }
 
 // ============================================================================
@@ -1988,6 +2056,9 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
         }
         if (result.accepted && impl_->lanchat_event_callback) {
             impl_->lanchat_event_callback(message_event_json(result.message));
+        }
+        if (result.accepted && impl_->session_role == SessionRole::Host) {
+            persist_lanchat_message(result.message);
         }
         if (result.accepted &&
             (mt == MessageType::CHAT_MESSAGE || mt == MessageType::CHAT_MESSAGE_V2)) {

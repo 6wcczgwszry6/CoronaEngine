@@ -330,6 +330,46 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
             self.assertEqual(actor_data["model_dependencies"], [])
             self.assertEqual((project_root / stable_path).read_bytes(), b"glb-data")
 
+    def test_models_path_prefers_runtime_sibling_before_broadcast(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            model_dir = project_root / "models" / "书桌"
+            runtime_dir = model_dir / "runtime"
+            runtime_dir.mkdir(parents=True)
+            (model_dir / "base.glb").write_bytes(b"original-glb-data")
+            (runtime_dir / "base.glb").write_bytes(b"runtime-glb-data")
+
+            events = []
+            fake_editor = SimpleNamespace(
+                CoronaEngine=SimpleNamespace(
+                    active_project_path=str(project_root),
+                    Actor=FakeActorEngineObject,
+                    ActorProfile=SimpleNamespace,
+                ),
+                js_call_func=lambda name, args: events.append((name, args)),
+            )
+            parent = SimpleNamespace(route="Scene/main.scene")
+
+            with patch.object(actor_module, "CoronaEditor", fake_editor), \
+                 patch.object(actor_module, "CoronaEngine", fake_editor.CoronaEngine), \
+                 patch.object(actor_module, "Geometry", FakeGeometry), \
+                 patch.object(actor_module, "Optics", FakeOptics), \
+                 patch.object(actor_module, "Mechanics", FakeComponent), \
+                 patch.object(actor_module, "Acoustics", FakeComponent):
+                actor_module.Actor(
+                    route="models/书桌/base.glb",
+                    actor_type="model",
+                    parent_scene=parent,
+                )
+
+            actor_data = events[0][1][0]
+            stable_path = "Resource/models/书桌/runtime/base.glb"
+            self.assertEqual(actor_data["path"], stable_path)
+            self.assertEqual(actor_data["model"], stable_path)
+            self.assertEqual(actor_data["model_dependencies"], [])
+            self.assertEqual((project_root / stable_path).read_bytes(), b"runtime-glb-data")
+            self.assertFalse((project_root / "Resource" / "models" / "书桌" / "base.glb").exists())
+
     def test_models_path_is_copied_to_resource_with_obj_dependencies_before_broadcast(self):
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp)

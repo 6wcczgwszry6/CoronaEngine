@@ -311,6 +311,7 @@ void BindAll(nanobind::module_& m) {
         .def("get_view_state", &Camera::get_view_state)
         .def("set_surface", [](Camera& self, std::uintptr_t surface) { self.set_surface(reinterpret_cast<void*>(surface)); }, nb::arg("surface"), "Set render surface (pass window ID as integer)")
         .def("get_surface", [](const Camera& self) -> std::uintptr_t { return reinterpret_cast<std::uintptr_t>(self.get_surface()); }, "Get render surface handle as integer (0 if none)")
+        .def("set_offscreen_capture_mode", &Camera::set_offscreen_capture_mode, nb::arg("enabled"), "Detach camera from the default surface for screenshot-only rendering")
         .def("get_position", &Camera::get_position, "Get camera position [x, y, z]")
         .def("get_forward", &Camera::get_forward, "Get camera forward direction [x, y, z]")
         .def("get_world_up", &Camera::get_world_up, "Get camera world up vector [x, y, z]")

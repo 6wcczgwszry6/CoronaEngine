@@ -433,6 +433,11 @@ def resolve_model_file(model_path: str) -> str:
         """扫描目录，返回第一个支持的模型文件。"""
         if not os.path.isdir(dir_path):
             return ""
+        runtime_dir = os.path.join(dir_path, "runtime")
+        if os.path.isdir(runtime_dir):
+            runtime_result = _scan_dir(runtime_dir)
+            if runtime_result:
+                return runtime_result
         for entry in sorted(os.listdir(dir_path)):
             _, ext = os.path.splitext(entry)
             if ext.lower() in supported_exts:

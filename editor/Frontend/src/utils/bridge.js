@@ -293,6 +293,13 @@ export const lanChatService = {
   // 加入房间：{ ip, port, room, password, nickname } -> { ok, members, history } | { ok:false, code }
   joinRoom: (payload) =>
     Bridge.callCEF('LANChat', 'join_room', [payload]).then(_unwrap),
+  // 显式读取当前房间历史，用于开房后兜底恢复持久化记录
+  getHistory: () => Bridge.callCEF('LANChat', 'get_history', [{}]).then(_unwrap),
+  // 读取持久化历史房间列表，打开 Dock 时展示给用户选择
+  listHistoryRooms: () => Bridge.callCEF('LANChat', 'list_history_rooms', [{}]).then(_unwrap),
+  // 读取指定持久化房间历史，不自动进入该房间
+  loadHistoryRoom: (room) =>
+    Bridge.callCEF('LANChat', 'load_history_room', [{ room }]).then(_unwrap),
   // 离开房间 -> { ok }
   leaveRoom: () => Bridge.callCEF('LANChat', 'leave_room', [{}]).then(_unwrap),
   // 发送消息：{ text } -> { ok } | { ok:false, error }

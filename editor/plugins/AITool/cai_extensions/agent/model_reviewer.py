@@ -64,6 +64,18 @@ def _mark_vlm_camera_internal(camera: Any) -> None:
 
 def _force_review_camera_offscreen(camera: Any) -> bool:
     """Keep VLM screenshots away from the default/main viewport surface."""
+    set_offscreen_capture_mode = getattr(camera, "set_offscreen_capture_mode", None)
+    has_offscreen_capture_mode = callable(set_offscreen_capture_mode)
+    if has_offscreen_capture_mode:
+        try:
+            set_offscreen_capture_mode(True)
+        except Exception as exc:
+            logger.warning("[ModelReviewer] VLM 相机进入离屏截图模式失败: %s", exc)
+            return False
+        if getattr(camera, "offscreen_capture_mode", True) is not True:
+            logger.warning("[ModelReviewer] VLM 相机未进入离屏截图模式, 跳过截图")
+            return False
+
     try:
         set_view_state = getattr(camera, "set_view_state", None)
         if callable(set_view_state):
@@ -75,6 +87,8 @@ def _force_review_camera_offscreen(camera: Any) -> bool:
     set_surface = getattr(camera, "set_surface", None)
     get_surface = getattr(camera, "get_surface", None)
     if not callable(set_surface) or not callable(get_surface):
+        if has_offscreen_capture_mode:
+            return True
         logger.warning("[ModelReviewer] VLM 相机缺少离屏 surface 接口, 跳过截图")
         return False
 
@@ -84,7 +98,7 @@ def _force_review_camera_offscreen(camera: Any) -> bool:
     except Exception as exc:
         logger.warning("[ModelReviewer] VLM 相机设置离屏 surface 失败: %s", exc)
         return False
-    if int(surface or 0) != 0:
+    if not has_offscreen_capture_mode and int(surface or 0) != 0:
         logger.warning("[ModelReviewer] VLM 相机未进入离屏 surface(surface=%s), 跳过截图", surface)
         return False
     return True

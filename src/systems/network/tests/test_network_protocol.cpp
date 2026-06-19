@@ -1,4 +1,5 @@
 #include <corona/systems/network/file_transfer.h>
+#include <corona/systems/network/lanchat_history_store.h>
 #include <corona/systems/network/lanchat_state.h>
 #include <corona/systems/network/network_identity.h>
 #include <corona/systems/network/network_system.h>
@@ -824,6 +825,171 @@ void test_lanchat_start_room_reuses_active_network_session_role() {
     sys.stop_session();
 }
 
+void test_lanchat_history_persists_for_local_room() {
+    const auto root = std::filesystem::temp_directory_path() /
+        "corona_lanchat_history_persistence_test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    {
+        Corona::Systems::NetworkSystem sys;
+        sys.set_project_root(root.string());
+        expect_true(sys.lanchat_start_local_room("single-default", "Host"),
+                    "local lanchat room starts before history write");
+        auto sent = sys.lanchat_send_message_ex(
+            "继续生成夜市场景", "confirmation", "gm", "local-single-player",
+            "gm-42", "{\"decision\":\"confirm\"}");
+        expect_true(sent.accepted, "local lanchat message accepted for persistence");
+        auto agent_result = sys.lanchat_register_agent(
+            "agent-elder", "长者", "沉稳、传统、实用", "local-single-player");
+        expect_true(agent_result.ok, "local lanchat agent accepted for persistence");
+        expect_true(sys.lanchat_history().size() == 1,
+                    "local lanchat history has first message");
+        sys.lanchat_stop_local_room();
+    }
+
+    {
+        Corona::Systems::NetworkSystem sys;
+        sys.set_project_root(root.string());
+        expect_true(sys.lanchat_start_local_room("single-default", "Host"),
+                    "local lanchat room starts without auto-loading history");
+        const auto& history = sys.lanchat_history();
+        const auto& agents = sys.lanchat_agents();
+        expect_true(history.empty(),
+                    "local lanchat room does not auto-enter persisted history");
+        expect_true(agents.empty(),
+                    "local lanchat room does not auto-enter persisted agents");
+
+        const auto loaded_history = sys.lanchat_load_history_room("single-default");
+        const auto loaded_agents = sys.lanchat_load_history_agents("single-default");
+        expect_true(loaded_history.size() == 1,
+                    "explicit lanchat history load returns persisted messages");
+        expect_true(loaded_agents.size() == 1,
+                    "explicit lanchat history load returns persisted agents");
+        expect_true(sys.lanchat_restore_history_room("single-default"),
+                    "explicit lanchat history restore applies selected history");
+        expect_true(sys.lanchat_history().size() == 1,
+                    "selected lanchat history becomes active room content");
+        expect_true(sys.lanchat_agents().size() == 1,
+                    "selected lanchat history restores active room agents");
+        if (!loaded_history.empty()) {
+            expect_true(loaded_history.front().text == "继续生成夜市场景",
+                        "explicit lanchat history load preserves text");
+            expect_true(loaded_history.front().message_kind == "confirmation",
+                        "explicit lanchat history load preserves message kind");
+            expect_true(loaded_history.front().target_agent_id == "gm",
+                        "explicit lanchat history load preserves target agent");
+            expect_true(loaded_history.front().correlation_id == "gm-42",
+                        "explicit lanchat history load preserves correlation id");
+            expect_true(loaded_history.front().metadata_json == "{\"decision\":\"confirm\"}",
+                        "explicit lanchat history load preserves metadata json");
+        }
+        if (!loaded_agents.empty()) {
+            expect_true(loaded_agents.front().agent_id == "agent-elder",
+                        "explicit lanchat history load preserves agent id");
+            expect_true(loaded_agents.front().persona == "沉稳、传统、实用",
+                        "explicit lanchat history load preserves agent persona");
+        }
+        sys.lanchat_stop_local_room();
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+void test_lanchat_history_store_lists_rooms_with_summaries() {
+    const auto root = std::filesystem::temp_directory_path() /
+        "corona_lanchat_history_list_test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    Corona::Network::LanChatHistoryStore store(root / "Saved" / "LANChat" / "history");
+
+    Corona::Network::LanChatMessage first{};
+    first.message_id = "single:1";
+    first.sender_id = "local-single-player";
+    first.sender_name = "房主";
+    first.room_id = "single-default";
+    first.text = "第一条单人历史";
+    first.seq = 1;
+    first.timestamp_ms = 1000;
+    store.append_message(first.room_id, first);
+
+    Corona::Network::LanChatMessage latest{};
+    latest.message_id = "single:2";
+    latest.sender_id = "system";
+    latest.sender_name = "系统";
+    latest.room_id = "single-default";
+    latest.text = "最后一条单人历史";
+    latest.seq = 2;
+    latest.timestamp_ms = 3000;
+    latest.message_kind = "action_status";
+    store.append_message(latest.room_id, latest);
+
+    Corona::Network::LanChatMessage other{};
+    other.message_id = "multi:1";
+    other.sender_id = "host";
+    other.sender_name = "房主";
+    other.room_id = "room-42";
+    other.text = "多人房间历史";
+    other.seq = 1;
+    other.timestamp_ms = 2000;
+    store.append_message(other.room_id, other);
+
+    const auto rooms = store.list_rooms();
+    expect_true(rooms.size() == 2, "history store lists persisted rooms");
+    if (rooms.size() >= 2) {
+        expect_true(rooms[0].room_id == "single-default",
+                    "history store sorts rooms by newest message");
+        expect_true(rooms[0].message_count == 2,
+                    "history store summary records message count");
+        expect_true(rooms[0].last_timestamp_ms == 3000,
+                    "history store summary records last timestamp");
+        expect_true(rooms[0].last_text == "最后一条单人历史",
+                    "history store summary records last message text");
+        expect_true(rooms[1].room_id == "room-42",
+                    "history store includes older rooms");
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+void test_lanchat_history_store_persists_agent_roster() {
+    const auto root = std::filesystem::temp_directory_path() /
+        "corona_lanchat_history_agents_test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    Corona::Network::LanChatHistoryStore store(root / "Saved" / "LANChat" / "history");
+
+    std::vector<Corona::Network::LanChatAgent> agents;
+    agents.push_back({"agent-elder", "长者", "沉稳、传统、实用", "local-single-player"});
+    agents.push_back({"agent-merchant", "商人", "交易、摊位、动线", "local-single-player"});
+
+    store.save_agents("single-default", agents);
+
+    const auto loaded = store.load_agents("single-default");
+    expect_true(loaded.size() == 2, "history store persists lanchat agent roster");
+    if (loaded.size() >= 2) {
+        expect_true(loaded[0].agent_id == "agent-elder",
+                    "history store preserves first agent id");
+        expect_true(loaded[0].name == "长者",
+                    "history store preserves first agent name");
+        expect_true(loaded[0].persona == "沉稳、传统、实用",
+                    "history store preserves first agent persona");
+        expect_true(loaded[0].owner_id == "local-single-player",
+                    "history store preserves first agent owner");
+        expect_true(loaded[1].agent_id == "agent-merchant",
+                    "history store preserves second agent id");
+    }
+
+    store.save_agents("single-default", {agents.front()});
+    const auto replaced = store.load_agents("single-default");
+    expect_true(replaced.size() == 1,
+                "history store replaces stale agent roster snapshots");
+
+    std::filesystem::remove_all(root);
+}
+
 void test_actor_device_follow_camera_defaults_false_and_round_trips() {
     auto& hub = Corona::SharedDataHub::instance();
 
@@ -1365,6 +1531,9 @@ int main() {
     test_network_system_session_role_defaults_to_none();
     test_network_system_repeated_start_preserves_active_role();
     test_lanchat_start_room_reuses_active_network_session_role();
+    test_lanchat_history_persists_for_local_room();
+    test_lanchat_history_store_lists_rooms_with_summaries();
+    test_lanchat_history_store_persists_agent_roster();
     test_actor_device_follow_camera_defaults_false_and_round_trips();
     test_network_identity_registry_resolves_actor_components();
     test_network_identity_registry_tracks_local_ownership();

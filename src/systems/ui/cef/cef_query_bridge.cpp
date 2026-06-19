@@ -152,6 +152,22 @@ nlohmann::json build_lanchat_history(
     return result;
 }
 
+nlohmann::json build_lanchat_history_rooms(
+    const std::vector<Corona::Network::LanChatHistoryRoomSummary>& rooms) {
+    nlohmann::json result = nlohmann::json::array();
+    for (const auto& room : rooms) {
+        result.push_back({
+            {"room_id", room.room_id},
+            {"message_count", room.message_count},
+            {"last_timestamp_ms", room.last_timestamp_ms},
+            {"last_ts", room.last_timestamp_ms / 1000},
+            {"last_sender_name", room.last_sender_name},
+            {"last_text", room.last_text},
+        });
+    }
+    return result;
+}
+
 nlohmann::json build_lanchat_agents(
     const std::vector<Corona::Network::LanChatAgent>& agents) {
     nlohmann::json result = nlohmann::json::array();
@@ -159,6 +175,7 @@ nlohmann::json build_lanchat_agents(
         result.push_back({
             {"agent_id", agent.agent_id},
             {"name", agent.name},
+            {"persona", agent.persona},
             {"owner", agent.owner_id},
         });
     }
@@ -796,6 +813,7 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     data["peer_id"] = sys->local_peer_id();
                     data["members"] = build_lanchat_members(sys->lanchat_members());
                     data["member_details"] = build_lanchat_member_details(sys->lanchat_members());
+                    data["history"] = build_lanchat_history(sys->lanchat_history());
                     data["agents"] = build_lanchat_agents(sys->lanchat_agents());
                     callback->Success(create_success_json(func, data));
                     return true;
@@ -804,8 +822,14 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                 if (func == "start_local_room") {
                     const std::string room = payload_arg.value("room", "");
                     const std::string nickname = payload_arg.value("nickname", "房主");
+                    const bool restore_history = payload_arg.value("restore_history", false);
+                    const std::string history_room = payload_arg.value("history_room", room);
                     const std::string host_nickname = nickname.empty() ? "房主" : nickname;
                     bool ok = sys->lanchat_start_local_room(room, host_nickname);
+                    bool restored_history = false;
+                    if (ok && restore_history) {
+                        restored_history = sys->lanchat_restore_history_room(history_room);
+                    }
                     nlohmann::json data;
                     data["ok"] = ok;
                     data["you"] = host_nickname;
@@ -816,7 +840,9 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     data["peer_id"] = "local-single-player";
                     data["members"] = build_lanchat_members(sys->lanchat_members());
                     data["member_details"] = build_lanchat_member_details(sys->lanchat_members());
+                    data["history"] = build_lanchat_history(sys->lanchat_history());
                     data["agents"] = build_lanchat_agents(sys->lanchat_agents());
+                    data["restored_history"] = restored_history;
                     callback->Success(create_success_json(func, data));
                     return true;
                 }
@@ -834,6 +860,38 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     sys->lanchat_stop_local_room();
                     nlohmann::json data;
                     data["ok"] = true;
+                    callback->Success(create_success_json(func, data));
+                    return true;
+                }
+
+                if (func == "get_history") {
+                    nlohmann::json data;
+                    data["ok"] = true;
+                    data["history"] = build_lanchat_history(sys->lanchat_history());
+                    callback->Success(create_success_json(func, data));
+                    return true;
+                }
+
+                if (func == "list_history_rooms") {
+                    nlohmann::json data;
+                    data["ok"] = true;
+                    data["rooms"] = build_lanchat_history_rooms(sys->lanchat_history_rooms());
+                    callback->Success(create_success_json(func, data));
+                    return true;
+                }
+
+                if (func == "load_history_room") {
+                    const std::string room = payload_arg.value("room", "");
+                    nlohmann::json data;
+                    data["ok"] = !room.empty();
+                    data["room"] = room;
+                    data["history"] = room.empty()
+                        ? nlohmann::json::array()
+                        : build_lanchat_history(sys->lanchat_load_history_room(room));
+                    data["agents"] = room.empty()
+                        ? nlohmann::json::array()
+                        : build_lanchat_agents(sys->lanchat_load_history_agents(room));
+                    if (room.empty()) data["error"] = "ROOM_REQUIRED";
                     callback->Success(create_success_json(func, data));
                     return true;
                 }

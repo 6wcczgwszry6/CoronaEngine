@@ -46,6 +46,10 @@ const state = reactive({
   error: '', // 最近一次错误码/信息
   agents: [], // [{agent_id, name, owner}] 来自房主 agent_roster，不含 persona
   myAgents: [], // 我添加的 agent 本地草稿 [{agent_id, name, persona}]，用于显示"我的"
+  historyRooms: [], // persisted summaries [{ room_id, message_count, last_ts, last_text }]
+  selectedHistoryRoom: null,
+  historyLoading: false,
+  historyError: '',
 });
 
 function _resetRoom() {
@@ -312,11 +316,60 @@ function applyHostRoomState({ room, mode, res, hostNickname = HOST_NICKNAME }) {
   state.port = res.port || 0;
   state.peerId = res.peer_id || '';
   state.nickname = res.you || hostNickname;
+  state.selectedHistoryRoom = null;
   applyMemberSnapshot(res);
   if (!state.members.length) state.members = [state.nickname];
   state.messages = [];
   state.disclosures = [];
-  state.agents = res.agents || [];
+  state.agents = [];
+  state.myAgents = [];
+}
+
+async function refreshHistoryRooms() {
+  state.historyLoading = true;
+  state.historyError = '';
+  try {
+    const res = await lanChatService.listHistoryRooms();
+    if (res && res.ok) {
+      state.historyRooms = Array.isArray(res.rooms) ? res.rooms : [];
+    } else {
+      state.historyError = (res && res.error) || 'LIST_HISTORY_FAILED';
+    }
+    return res;
+  } catch (error) {
+    state.historyError = error?.message || 'LIST_HISTORY_FAILED';
+    return { ok: false, error: state.historyError };
+  } finally {
+    state.historyLoading = false;
+  }
+}
+
+async function loadHistoryRoom(room) {
+  const roomId = typeof room === 'string' ? room : (room?.room_id || '');
+  if (!roomId) return { ok: false, error: 'ROOM_REQUIRED' };
+  state.historyLoading = true;
+  state.historyError = '';
+  try {
+    const res = await lanChatService.loadHistoryRoom(roomId);
+    if (res && res.ok) {
+      state.selectedHistoryRoom =
+        state.historyRooms.find((item) => item.room_id === roomId) ||
+        { room_id: roomId, message_count: Array.isArray(res.history) ? res.history.length : 0 };
+      state.agents = Array.isArray(res.agents) ? res.agents : [];
+      state.myAgents = state.agents
+        .filter((agent) => !agent.owner || agent.owner === state.peerId || agent.owner === 'local-single-player')
+        .map((agent) => ({ ...agent }));
+      applyHistorySnapshot(res.history || [], true);
+    } else {
+      state.historyError = (res && res.error) || 'LOAD_HISTORY_FAILED';
+    }
+    return res;
+  } catch (error) {
+    state.historyError = error?.message || 'LOAD_HISTORY_FAILED';
+    return { ok: false, error: state.historyError };
+  } finally {
+    state.historyLoading = false;
+  }
 }
 
 async function openLocalRoom({ room, password, nickname }) {
@@ -330,6 +383,41 @@ async function openLocalRoom({ room, password, nickname }) {
   });
   if (res && res.ok) {
     applyHostRoomState({ room, mode: 'single', res, hostNickname });
+  } else {
+    state.error = (res && res.error) || 'START_FAILED';
+  }
+  return res;
+}
+
+async function continueHistoryAsLocalRoom({ room, nickname } = {}) {
+  const roomId = String(room || state.selectedHistoryRoom?.room_id || '').trim();
+  if (!roomId) return { ok: false, error: 'ROOM_REQUIRED' };
+
+  state.error = '';
+  const hostNickname = (nickname || HOST_NICKNAME).trim() || HOST_NICKNAME;
+  const previewMessages = [...state.messages];
+  const previewAgents = [...state.agents];
+  const res = await lanChatService.startLocalRoom({
+    room: roomId,
+    password: '',
+    mode: 'single',
+    nickname: hostNickname,
+    restore_history: true,
+    history_room: roomId,
+  });
+  if (res && res.ok) {
+    applyHostRoomState({ room: roomId, mode: 'single', res, hostNickname });
+    const restoredHistory = Array.isArray(res.history) && res.history.length
+      ? res.history
+      : previewMessages;
+    const restoredAgents = Array.isArray(res.agents) && res.agents.length
+      ? res.agents
+      : previewAgents;
+    state.agents = restoredAgents;
+    state.myAgents = restoredAgents
+      .filter((agent) => !agent.owner || agent.owner === state.peerId || agent.owner === 'local-single-player')
+      .map((agent) => ({ ...agent }));
+    applyHistorySnapshot(restoredHistory, true);
   } else {
     state.error = (res && res.error) || 'START_FAILED';
   }
@@ -381,6 +469,7 @@ async function joinRoom({ ip, port, room, password, nickname }) {
     state.port = res.port || port;
     state.mode = 'multi';
     state.peerId = res.peer_id || '';
+    state.selectedHistoryRoom = null;
     // 服务器去重后的最终昵称（如 Alice -> Alice-2）
     state.nickname = res.you || nickname;
     applyMemberSnapshot(res);
@@ -562,6 +651,7 @@ export const lanchat = {
   ROLE,
   openRoom,
   openLocalRoom,
+  continueHistoryAsLocalRoom,
   closeRoom,
   joinRoom,
   leaveRoom,
@@ -571,6 +661,8 @@ export const lanchat = {
   addAgent,
   removeAgent,
   handleEvent,
+  refreshHistoryRooms,
+  loadHistoryRoom,
   isJoining,
   dismissDisclosureByProposal,
   markProposalHandled,

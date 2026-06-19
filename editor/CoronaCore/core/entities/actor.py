@@ -417,6 +417,7 @@ class Actor:
         route_path = Path(self.route)
         source_path = route_path if route_path.is_absolute() else (project_root / route_path)
         source_path = source_path.resolve()
+        source_path = self._prefer_runtime_model_path(source_path)
 
         try:
             source_path.relative_to(project_root)
@@ -480,6 +481,19 @@ class Actor:
         self.model_path = copied_paths[0]
         self.final_model_path = str(project_root / copied_paths[0])
         self.model_dependencies = copied_paths[1:]
+
+    @staticmethod
+    def _prefer_runtime_model_path(source_path: Path) -> Path:
+        if not source_path.is_file() or source_path.parent.name == "runtime":
+            return source_path
+        runtime_candidate = source_path.parent / "runtime" / source_path.name
+        if runtime_candidate.is_file():
+            return runtime_candidate.resolve()
+        if source_path.parent.name == "original":
+            sibling_candidate = source_path.parent.parent / "runtime" / source_path.name
+            if sibling_candidate.is_file():
+                return sibling_candidate.resolve()
+        return source_path
 
     @staticmethod
     def _local_model_library_resource_subdir(rel_path: str) -> Optional[str]:
