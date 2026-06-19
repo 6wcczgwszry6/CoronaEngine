@@ -1,14 +1,14 @@
-# 2026-06-20 当前执行方案
+# 2026-06-20 终稿执行方案
 
-> 本节是当前执行入口。下面旧正文和评审记录仍保留为历史审计材料，但其中 `origin/main = 5f5f6d41`、`HEAD = 47a1a7af`、`ahead 7 / behind 77`、`预测 10 个冲突文件` 等结论已经过期，不再作为本次 merge 的执行依据。
+> 本节是当前终稿执行入口。下面旧正文和评审记录仍保留为历史审计材料，但其中 `origin/main = 5f5f6d41`、`HEAD = 47a1a7af`、`ahead 7 / behind 77`、`预测 10 个冲突文件` 等结论已经过期，不再作为本次 merge 的执行依据。
 
 ## 当前 Git 快照
 
 - 当前分支：`merge_horizon_into_engine`
-- 当前 HEAD：`5c9cab7d34e17d76b3f52d1be586bee630918f58`
+- 当前 HEAD：`7403d843e81e8a47b5d5868a4b326e7eaab0d121`
 - 当前 `origin/main`：`518d112e12031bcd2f34f9fd8b33dad1036a3da0`
 - 当前 merge base：`5f5f6d416f554dbab7a09590e9fe4c52ad79f878`
-- 当前分支相对 `origin/main`：`ahead 8 / behind 145`
+- 当前分支相对 `origin/main`：`ahead 9 / behind 145`
 - 当前工作区状态：无 merge 进行中；除本文档外不应有其它工作区改动。
 
 本次正式 merge 前必须先刷新并复核：
@@ -26,7 +26,7 @@ git merge-tree --write-tree --name-only HEAD origin/main
 
 ## 当前预测冲突范围
 
-基于当前 `HEAD=5c9cab7d34e17d76b3f52d1be586bee630918f58` 与 `origin/main=518d112e12031bcd2f34f9fd8b33dad1036a3da0` 的非破坏式 `git merge-tree --write-tree --name-only HEAD origin/main`，预测文本冲突文件为 3 个：
+基于当前 `HEAD=7403d843e81e8a47b5d5868a4b326e7eaab0d121` 与 `origin/main=518d112e12031bcd2f34f9fd8b33dad1036a3da0` 的非破坏式 `git merge-tree --write-tree --name-only HEAD origin/main`，预测文本冲突文件为 3 个：
 
 - `src/systems/optics/optics_system.cpp`
 - `src/systems/ui/cef/browser_manager.h`
