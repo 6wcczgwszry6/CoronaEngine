@@ -43,6 +43,14 @@ const state = reactive({
     vlmEnabled: false,
     vlmMaxTargets: 0,
   },
+  workspaceMode: 'multiplayer_multi_agent',
+  draftAction: 'chat',
+  activeTarget: {
+    scope: 'scene',
+    agentId: '',
+    agentName: '',
+    planId: '',
+  },
   error: '', // 最近一次错误码/信息
   agents: [], // [{agent_id, name, owner}] 来自房主 agent_roster，不含 persona
   myAgents: [], // 我添加的 agent 本地草稿 [{agent_id, name, persona}]，用于显示"我的"
@@ -68,6 +76,14 @@ function _resetRoom() {
   state.processedProposalIds = [];
   state.generationOptions.vlmEnabled = false;
   state.generationOptions.vlmMaxTargets = 0;
+  state.workspaceMode = 'multiplayer_multi_agent';
+  state.draftAction = 'chat';
+  state.activeTarget = {
+    scope: 'scene',
+    agentId: '',
+    agentName: '',
+    planId: '',
+  };
   state.error = '';
   state.agents = [];
   state.myAgents = [];
@@ -323,6 +339,12 @@ function applyHostRoomState({ room, mode, res, hostNickname = HOST_NICKNAME }) {
   state.disclosures = [];
   state.agents = [];
   state.myAgents = [];
+  if (mode === 'single' && !String(state.workspaceMode || '').startsWith('solo_')) {
+    state.workspaceMode = 'solo_single_agent';
+  }
+  if (mode === 'multi') {
+    state.workspaceMode = 'multiplayer_multi_agent';
+  }
 }
 
 async function refreshHistoryRooms() {
@@ -374,6 +396,9 @@ async function loadHistoryRoom(room) {
 
 async function openLocalRoom({ room, password, nickname }) {
   state.error = '';
+  if (!String(state.workspaceMode || '').startsWith('solo_')) {
+    state.workspaceMode = 'solo_single_agent';
+  }
   const hostNickname = (nickname || HOST_NICKNAME).trim() || HOST_NICKNAME;
   const res = await lanChatService.startLocalRoom({
     room,
@@ -394,6 +419,9 @@ async function continueHistoryAsLocalRoom({ room, nickname } = {}) {
   if (!roomId) return { ok: false, error: 'ROOM_REQUIRED' };
 
   state.error = '';
+  if (!String(state.workspaceMode || '').startsWith('solo_')) {
+    state.workspaceMode = 'solo_single_agent';
+  }
   const hostNickname = (nickname || HOST_NICKNAME).trim() || HOST_NICKNAME;
   const previewMessages = [...state.messages];
   const previewAgents = [...state.agents];
@@ -495,7 +523,7 @@ async function sendMessage(text, options = {}) {
     state.error = state.connection === 'syncing' ? 'SYNCING' : 'CONNECTING';
     return { ok: false, error: state.error };
   }
-  const res = await lanChatService.sendMessage(trimmed, options);
+  const res = await lanChatService.sendMessage(trimmed, withStructuredRouteOptions(options));
   if (res && res.ok === false) {
     state.error = res.error || 'SEND_FAILED';
     if (state.error === 'CONNECTING') {
@@ -504,6 +532,89 @@ async function sendMessage(text, options = {}) {
   } else {
     state.error = '';
   }
+  return res;
+}
+
+function setWorkspaceMode(mode) {
+  const value = String(mode || '').trim();
+  if (![
+    'solo_single_agent',
+    'solo_multi_agent',
+    'multiplayer_multi_agent',
+  ].includes(value)) {
+    return;
+  }
+  state.workspaceMode = value;
+  if (value === 'solo_single_agent') {
+    state.mode = 'single';
+    setActiveTarget({ scope: 'agent', agentId: '', agentName: state.activeTarget.agentName || '设计助手' });
+  } else if (value === 'solo_multi_agent') {
+    state.mode = 'single';
+    setActiveTarget({ scope: 'group' });
+  } else {
+    state.mode = 'multi';
+    setActiveTarget({ scope: 'group' });
+  }
+}
+
+function setDraftAction(action) {
+  const value = String(action || '').trim();
+  if (!['chat', 'plan', 'supplement', 'generate', 'edit', 'gm_control'].includes(value)) {
+    return;
+  }
+  state.draftAction = value;
+}
+
+function setActiveTarget(target = {}) {
+  const scope = String(target.scope || 'scene').trim() || 'scene';
+  state.activeTarget = {
+    scope,
+    agentId: String(target.agentId || target.agent_id || '').trim(),
+    agentName: String(target.agentName || target.agent_name || '').trim(),
+    planId: String(target.planId || target.plan_id || '').trim(),
+  };
+}
+
+function structuredRouteMetadata(overrides = {}) {
+  const target = state.activeTarget || {};
+  const metadata = {
+    workspace_mode: state.workspaceMode,
+    draft_action: state.draftAction,
+    target_scope: target.scope || 'scene',
+  };
+  if (target.agentId) metadata.target_agent_id = target.agentId;
+  if (target.agentName) metadata.target_agent_name = target.agentName;
+  if (target.planId) metadata.target_plan_id = target.planId;
+  if ((target.scope || '') === 'group') {
+    const agentNames = state.agents.map((agent) => agent.name || agent.agent_name || '').filter(Boolean);
+    const agentIds = state.agents.map((agent) => agent.agent_id || agent.id || '').filter(Boolean);
+    if (agentNames.length) metadata.target_agent_names = agentNames;
+    if (agentIds.length) metadata.target_agent_ids = agentIds;
+  }
+  for (const [key, value] of Object.entries(overrides || {})) {
+    if (value !== undefined && value !== null && value !== '') metadata[key] = value;
+  }
+  return metadata;
+}
+
+function mergeMetadata(base = {}, extra = {}) {
+  const out = { ...(base || {}) };
+  for (const [key, value] of Object.entries(extra || {})) {
+    if (value !== undefined && value !== null && value !== '') out[key] = value;
+  }
+  return out;
+}
+
+function withStructuredRouteOptions(options = {}) {
+  if ((options || {}).skipStructuredRoute) {
+    const { skipStructuredRoute, ...rest } = options || {};
+    return rest;
+  }
+  const routeMetadata = structuredRouteMetadata();
+  return {
+    ...(options || {}),
+    metadata: mergeMetadata(routeMetadata, (options || {}).metadata || {}),
+  };
 }
 
 function setGenerationOptions(options = {}) {
@@ -656,6 +767,11 @@ export const lanchat = {
   joinRoom,
   leaveRoom,
   sendMessage,
+  setWorkspaceMode,
+  setDraftAction,
+  setActiveTarget,
+  structuredRouteMetadata,
+  withStructuredRouteOptions,
   setGenerationOptions,
   generationOptionsMetadata,
   addAgent,

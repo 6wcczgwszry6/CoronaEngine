@@ -207,6 +207,76 @@ class LanChatSceneRuntime:
             return "pass", None, None
         return action, payload, agent_key
 
+    def handle_targeted_planning_message(
+        self,
+        target: str,
+        text: str,
+        *,
+        draft_action: str = "",
+    ) -> tuple[str, str | None, str | None]:
+        """Route a structured UI action to a pending planning gate.
+
+        `target` can be a target agent name/id or a pending proposal id. This is
+        used by the LANChat UI metadata path so the user does not have to type
+        @Agent or magic confirmation words.
+        """
+        value = str(text or "").strip()
+        if not value:
+            return "pass", None, None
+        action = str(draft_action or "").strip().lower()
+        with self._lock:
+            agent_key = self._pending_agent_for_target(target)
+            if not agent_key:
+                return "pass", None, None
+        routed_text = value
+        if action == "generate" and not self.is_direct_generate(routed_text):
+            routed_text = f"确认开始：{routed_text}"
+        elif action == "supplement" and not self.is_plan_supplement(routed_text):
+            routed_text = f"补充要求：{routed_text}"
+        result, payload = self.handle_planning_gate(agent_key, routed_text)
+        if result == "pass":
+            return "pass", None, None
+        return result, payload, agent_key
+
+    def pending_planning_snapshot(self) -> list[dict[str, Any]]:
+        with self._lock:
+            pending = [
+                confirmation
+                for confirmation in self._pending_confirmations.values()
+                if confirmation.status == "pending"
+            ]
+            pending.sort(key=lambda item: item.created_at)
+            return [
+                {
+                    "proposal_id": item.proposal_id,
+                    "target_agent": item.target_agent,
+                    "scene_goal": item.scene_goal,
+                    "proposed_items": list(item.proposed_items),
+                    "constraints": list(item.constraints),
+                    "status": item.status,
+                    "created_at": item.created_at,
+                }
+                for item in pending
+            ]
+
+    def _pending_agent_for_target(self, target: str) -> str:
+        wanted = str(target or "").strip()
+        if not wanted:
+            return ""
+        wanted_lower = wanted.lower()
+        for key, pending in self._pending_confirmations.items():
+            if pending.status != "pending":
+                continue
+            if (
+                key == wanted
+                or key.lower() == wanted_lower
+                or pending.target_agent == wanted
+                or pending.target_agent.lower() == wanted_lower
+                or pending.proposal_id == wanted
+            ):
+                return key
+        return ""
+
     @staticmethod
     def _format_pending_disambiguation(pending_keys: list[str]) -> str:
         targets = "、".join(str(key) for key in pending_keys if str(key).strip())

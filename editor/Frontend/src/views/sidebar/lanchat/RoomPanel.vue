@@ -69,8 +69,78 @@
         </div>
       </div>
 
+      <div class="grid grid-cols-3 gap-2">
+        <button
+          v-for="mode in workspaceModes"
+          :key="mode.key"
+          class="rounded border px-2 py-2 text-left transition-colors"
+          :class="selectedWorkspaceMode === mode.key ? 'border-[#84A65B] bg-[#2f3b2b]' : 'border-gray-700 bg-[#2a2a2a] hover:border-gray-500'"
+          @click="selectWorkspaceMode(mode.key)"
+        >
+          <div class="text-sm font-medium text-gray-100">{{ mode.label }}</div>
+          <div class="mt-1 text-[11px] leading-snug text-gray-400">{{ mode.hint }}</div>
+        </button>
+      </div>
+
+      <div
+        v-if="selectedWorkspaceMode === 'solo_multi_agent'"
+        class="rounded border border-gray-700 bg-[#242424] p-3 space-y-3"
+      >
+        <div class="flex items-center justify-between gap-2">
+          <div>
+            <div class="text-sm font-medium text-gray-100">配置 AI 专家组</div>
+            <div class="mt-0.5 text-[12px] text-gray-500">选择要加入本地聊天室的 Agent，也可以添加自定义角色</div>
+          </div>
+          <div class="text-[12px] text-[#B8D58D]">{{ selectedExpertPayloads.length }} 个</div>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <label
+            v-for="role in roleTemplates"
+            :key="role.key"
+            class="flex items-start gap-2 rounded bg-[#2a2a2a] border border-gray-700 px-2.5 py-2 cursor-pointer hover:border-[#84A65B]"
+          >
+            <input
+              type="checkbox"
+              class="mt-1 accent-[#84A65B]"
+              :checked="expertGroupConfig.selectedRoleKeys.has(role.key)"
+              @change="setExpertRoleSelected(role.key, $event.target.checked)"
+            />
+            <span class="min-w-0">
+              <span class="block text-sm text-gray-100">{{ role.name }}</span>
+              <span class="block truncate text-[11px] text-gray-500">{{ role.hint }}</span>
+            </span>
+          </label>
+        </div>
+        <div v-if="expertGroupConfig.customExperts.length" class="space-y-1.5">
+          <div
+            v-for="(expert, index) in expertGroupConfig.customExperts"
+            :key="`${expert.name}-${index}`"
+            class="flex items-center justify-between gap-2 rounded bg-[#2a2a2a] px-2.5 py-1.5 text-sm"
+          >
+            <span class="truncate text-gray-200">{{ expert.name }}</span>
+            <button
+              class="text-red-400 text-xs hover:text-red-300"
+              @click="removeCustomExpertAt(index)"
+            >
+              移除
+            </button>
+          </div>
+        </div>
+        <div class="grid grid-cols-[1fr_1.5fr_auto] gap-2">
+          <input v-model="customExpertForm.name" placeholder="自定义名字" :class="inputCls" />
+          <input v-model="customExpertForm.persona" placeholder="角色职责 / 人设" :class="inputCls" />
+          <button
+            class="px-3 rounded bg-[#3a3a3a] text-sm text-gray-100 hover:bg-[#84A65B]/80 disabled:opacity-50"
+            :disabled="!customExpertForm.name.trim()"
+            @click="addCustomExpertFromForm"
+          >
+            添加
+          </button>
+        </div>
+      </div>
+
       <!-- tab 切换 -->
-      <div class="flex gap-2">
+      <div v-if="selectedWorkspaceMode === 'multiplayer_multi_agent'" class="flex gap-2">
           <button
             class="flex-1 py-2 rounded text-sm"
           :class="lobbyTab === 'create' ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a]/60'"
@@ -89,28 +159,16 @@
 
       <!-- 创建房间 -->
       <div v-if="lobbyTab === 'create'" class="space-y-3">
-        <div class="grid grid-cols-2 gap-2">
-          <button
-            class="py-2 rounded text-sm"
-            :class="roomMode === 'multi' ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a]/60'"
-            @click="roomMode = 'multi'"
-          >
-            多人
-          </button>
-          <button
-            class="py-2 rounded text-sm"
-            :class="roomMode === 'single' ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a]/60'"
-            @click="roomMode = 'single'"
-          >
-            单人
-          </button>
-        </div>
         <template v-if="roomMode === 'multi'">
           <input v-model="form.room" placeholder="房间号" :class="inputCls" />
           <input v-model="form.password" placeholder="密码（可选）" :class="inputCls" />
         </template>
-        <button class="w-full py-2 rounded bg-[#84A65B] text-white text-sm" @click="onCreate">
-          {{ roomMode === 'single' ? (s.selectedHistoryRoom ? '继续所选历史' : '进入单人聊天室') : '创建并进入' }}
+        <button
+          class="w-full py-2 rounded bg-[#84A65B] text-white text-sm disabled:opacity-50"
+          :disabled="selectedWorkspaceMode === 'solo_multi_agent' && !selectedExpertPayloads.length"
+          @click="onCreate"
+        >
+          {{ createButtonText }}
         </button>
       </div>
 
@@ -332,7 +390,43 @@
             {{ inputAssistText }}
           </div>
           <div class="p-3 border-t border-gray-600 flex gap-2">
-            <div class="relative flex-1">
+            <div class="relative flex-1 space-y-2">
+              <div class="flex flex-wrap items-center gap-1.5">
+                <button
+                  v-for="action in draftActions"
+                  :key="action.key"
+                  class="px-2.5 py-1 rounded text-xs"
+                  :class="selectedDraftAction === action.key ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a] text-gray-300 hover:bg-[#4a4a4a]'"
+                  :title="action.hint"
+                  @click="selectDraftAction(action.key)"
+                >
+                  {{ action.label }}
+                </button>
+                <select
+                  v-model="selectedTargetKey"
+                  class="ml-auto min-w-[112px] rounded bg-[#2a2a2a] border border-gray-600 px-2 py-1 text-xs text-gray-100 outline-none focus:border-[#84A65B]"
+                  @change="applyInputRouteState"
+                >
+                  <option
+                    v-for="target in targetOptions"
+                    :key="target.key"
+                    :value="target.key"
+                  >
+                    {{ target.label }}
+                  </option>
+                </select>
+              </div>
+              <div class="flex flex-wrap gap-1.5">
+                <button
+                  v-for="target in targetQuickOptions"
+                  :key="target.key"
+                  class="px-2 py-1 rounded text-[11px]"
+                  :class="selectedTargetKey === target.key ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a] text-gray-300 hover:bg-[#4a4a4a]'"
+                  @click="selectTarget(target.key)"
+                >
+                  {{ target.label }}
+                </button>
+              </div>
               <input
                 ref="draftInput"
                 v-model="draft"
@@ -342,6 +436,12 @@
                 @input="onDraftInput"
                 @keydown="onDraftKeydown"
               />
+              <div
+                class="text-[11px]"
+                :class="routeGuardText ? 'text-yellow-300' : 'text-gray-500'"
+              >
+                {{ routeGuardText || inputRouteHint }}
+              </div>
               <div
                 v-if="mentionCandidates.length"
                 class="absolute bottom-full left-0 mb-1 w-full bg-[#2a2a2a] border border-gray-600 rounded max-h-32 overflow-y-auto z-10"
@@ -360,7 +460,7 @@
             </div>
             <button
               class="px-4 rounded bg-[#84A65B] text-white text-base disabled:opacity-50"
-              :disabled="s.connection === 'reconnecting'"
+              :disabled="sendDisabled"
               @click="onSend"
             >
               发送
@@ -441,13 +541,29 @@ import {
   buildParticipantDisclosureDraft,
 } from '../../../stores/lanchatDisclosure.js';
 import MemberList from './MemberList.vue';
+import {
+  resolveSelectedTargetKey,
+  routeGuardMessage,
+  targetPayloadForKey,
+} from './routeSelection.js';
+import {
+  addCustomExpert,
+  createExpertGroupConfig,
+  removeCustomExpert,
+  selectedExpertPayloads as buildSelectedExpertPayloads,
+  setRoleSelected,
+} from './expertGroupConfig.js';
 
 const s = lanchat.state;
 const lobbyTab = ref('create');
 const roomMode = ref('multi');
 const draft = ref('');
+const selectedWorkspaceMode = ref(s.workspaceMode || 'multiplayer_multi_agent');
+const selectedDraftAction = ref(s.draftAction || 'chat');
+const selectedTargetKey = ref('scene');
 const showAddAgent = ref(false);
 const agentForm = reactive({ name: '', persona: '' });
+const customExpertForm = reactive({ name: '', persona: '' });
 const mentionCandidates = ref([]);
 const mentionActiveIndex = ref(0);
 const msgRef = ref(null);
@@ -498,6 +614,34 @@ const roleTemplateBundles = [
     roles: ['elder', 'merchant', 'little_girl', 'bandit'],
   },
 ];
+const defaultExpertRoleKeys = roleTemplateBundles[0]?.roles || [];
+const expertGroupConfig = reactive(createExpertGroupConfig(roleTemplates, defaultExpertRoleKeys));
+
+const workspaceModes = [
+  {
+    key: 'solo_single_agent',
+    label: '自己设计',
+    hint: '本地单人，默认设计助手',
+  },
+  {
+    key: 'solo_multi_agent',
+    label: 'AI 专家组',
+    hint: '本地单人，多助手讨论',
+  },
+  {
+    key: 'multiplayer_multi_agent',
+    label: '多人共创',
+    hint: '房主开房，成员加入',
+  },
+];
+
+const draftActions = [
+  { key: 'chat', label: '问一下', hint: '只让目标回复，不生成场景' },
+  { key: 'plan', label: '生成方案', hint: '先整理可确认方案' },
+  { key: 'supplement', label: '补充要求', hint: '更新当前目标方案' },
+  { key: 'generate', label: '确认生成', hint: '按当前方案进入生成' },
+  { key: 'edit', label: '调整场景', hint: '对已有场景提出修改' },
+];
 
 const form = reactive({
   room: '',
@@ -527,6 +671,12 @@ const ERROR_TEXT = {
 const errorText = computed(() => ERROR_TEXT[s.error] || s.error || '');
 const isJoining = computed(() => lanchat.isJoining());
 const joinStatusText = computed(() => (s.connection === 'syncing' ? '正在同步房间…' : '正在连接房主…'));
+const createButtonText = computed(() => {
+  if (roomMode.value === 'multi') return '创建多人房间';
+  if (s.selectedHistoryRoom) return '继续所选历史';
+  return selectedWorkspaceMode.value === 'solo_multi_agent' ? '进入 AI 专家组' : '进入自己设计';
+});
+const selectedExpertPayloads = computed(() => buildSelectedExpertPayloads(expertGroupConfig, roleTemplates));
 const roomStatusLabel = computed(() => {
   if (s.connection === 'connected') return s.role === 'host' ? '房主在线' : '已连接';
   if (s.connection === 'reconnecting') return '重连中';
@@ -612,7 +762,11 @@ const inputAssistText = computed(() => {
 const draftPlaceholder = computed(() => {
   if (s.connection === 'reconnecting') return '连接已断开';
   if (isWaitingDisclosure.value) return '生成中也可输入：新增一个… / 调整… / 问题…';
-  return '输入消息，回车发送';
+  if (selectedDraftAction.value === 'plan') return '描述你想设计什么';
+  if (selectedDraftAction.value === 'supplement') return '写清要改的风格、物件、布局或限制';
+  if (selectedDraftAction.value === 'generate') return '确认按当前方案生成，也可补一句生成范围';
+  if (selectedDraftAction.value === 'edit') return '描述要调整的已有物体或位置';
+  return '输入要问的问题';
 });
 const showAiReplySpinner = computed(() => {
   if (!pendingReplySinceMs.value) return false;
@@ -636,6 +790,51 @@ const resourceDiagnosisText = computed(() => {
   if (!currentDisclosure.value || currentDisclosure.value.stage !== '资源调度') return '';
   return resourceDiagnosisLabel(currentDisclosure.value.metadata?.diagnosis);
 });
+const targetOptions = computed(() => {
+  const options = [];
+  const agents = Array.isArray(s.agents) ? s.agents : [];
+  if (agents.length) {
+    for (const agent of agents) {
+      options.push({
+        key: `agent:${agent.agent_id || agent.name}`,
+        label: agent.name,
+        scope: 'agent',
+        agentId: agent.agent_id || agent.name || '',
+        agentName: agent.name || agent.agent_name || '',
+      });
+    }
+  } else {
+    options.push({
+      key: 'agent:design-assistant',
+      label: '设计助手',
+      scope: 'agent',
+      agentId: 'design-assistant',
+      agentName: '设计助手',
+    });
+  }
+  options.push({ key: 'group', label: '专家组', scope: 'group' });
+  options.push({ key: 'gm', label: '主持人', scope: 'gm', agentId: 'gm', agentName: 'GM' });
+  options.push({ key: 'scene', label: '当前场景', scope: 'scene' });
+  return options;
+});
+const selectedTarget = computed(() => (
+  targetOptions.value.find((item) => item.key === selectedTargetKey.value) ||
+  targetOptions.value[0]
+));
+const targetQuickOptions = computed(() => targetOptions.value.filter((item) => (
+  item.scope === 'agent' || item.scope === 'group' || item.scope === 'scene'
+)));
+const inputRouteHint = computed(() => {
+  const target = selectedTarget.value?.label || '当前目标';
+  const action = draftActions.find((item) => item.key === selectedDraftAction.value)?.label || '发送';
+  return `${action} · 发给 ${target}`;
+});
+const routeGuardText = computed(() => routeGuardMessage(
+  selectedDraftAction.value,
+  selectedTarget.value,
+  draft.value
+));
+const sendDisabled = computed(() => s.connection === 'reconnecting' || Boolean(routeGuardText.value));
 
 function refreshHistoryRooms() {
   return lanchat.refreshHistoryRooms();
@@ -671,18 +870,64 @@ onBeforeUnmount(() => {
   waitClock = null;
 });
 
+function selectWorkspaceMode(mode) {
+  selectedWorkspaceMode.value = mode;
+  lanchat.setWorkspaceMode(mode);
+  if (mode === 'multiplayer_multi_agent') {
+    roomMode.value = 'multi';
+  } else {
+    roomMode.value = 'single';
+    lobbyTab.value = 'create';
+  }
+}
+
+function selectDraftAction(action) {
+  selectedDraftAction.value = action;
+  lanchat.setDraftAction(action);
+  applyInputRouteState();
+}
+
+function selectTarget(key) {
+  selectedTargetKey.value = resolveSelectedTargetKey(key, targetOptions.value);
+  applyInputRouteState();
+}
+
+function applyInputRouteState() {
+  lanchat.setDraftAction(selectedDraftAction.value);
+  lanchat.setActiveTarget(targetPayloadForKey(selectedTargetKey.value, targetOptions.value));
+}
+
+function setExpertRoleSelected(key, selected) {
+  setRoleSelected(expertGroupConfig, key, selected);
+}
+
+function addCustomExpertFromForm() {
+  addCustomExpert(expertGroupConfig, customExpertForm);
+  customExpertForm.name = '';
+  customExpertForm.persona = '';
+}
+
+function removeCustomExpertAt(index) {
+  removeCustomExpert(expertGroupConfig, index);
+}
+
 async function onCreate() {
+  selectWorkspaceMode(selectedWorkspaceMode.value);
   if (roomMode.value === 'single') {
     if (s.selectedHistoryRoom) {
       await continueHistoryAsSingle();
       return;
     }
-    await lanchat.openRoom({
+    const res = await lanchat.openRoom({
       room: makeLocalRoomId(),
       password: '',
       port: form.port || 27960,
       mode: 'single',
     });
+    if (!(res && res.ok)) return;
+    if (selectedWorkspaceMode.value === 'solo_multi_agent') {
+      await addDefaultExpertGroup();
+    }
     return;
   }
   if (!form.room.trim()) return;
@@ -698,9 +943,13 @@ async function continueHistoryAsSingle() {
   if (!s.selectedHistoryRoom?.room_id) return;
   roomMode.value = 'single';
   lobbyTab.value = 'create';
-  await lanchat.continueHistoryAsLocalRoom({
+  lanchat.setWorkspaceMode(selectedWorkspaceMode.value === 'solo_multi_agent' ? 'solo_multi_agent' : 'solo_single_agent');
+  const res = await lanchat.continueHistoryAsLocalRoom({
     room: s.selectedHistoryRoom.room_id,
   });
+  if (res && res.ok && selectedWorkspaceMode.value === 'solo_multi_agent') {
+    await addDefaultExpertGroup();
+  }
 }
 
 function makeLocalRoomId() {
@@ -728,12 +977,18 @@ async function onLeave() {
 
 function onSend() {
   const text = draft.value;
-  if (!text.trim()) return;
-  draft.value = '';
-  mentionCandidates.value = [];
-  mentionActiveIndex.value = 0;
+  if (!text.trim() || sendDisabled.value) return;
+  applyInputRouteState();
   startPendingReply(text);
-  lanchat.sendMessage(text, messageOptionsForText(text)).catch((error) => {
+  lanchat.sendMessage(text, messageOptionsForText(text)).then((res) => {
+    if (res && res.ok === false) {
+      clearPendingReply();
+      return;
+    }
+    draft.value = '';
+    mentionCandidates.value = [];
+    mentionActiveIndex.value = 0;
+  }).catch((error) => {
     clearPendingReply();
     console.warn('[LANChat] send message failed', error);
   });
@@ -753,6 +1008,7 @@ function pendingTargetForText(text) {
   const trimmed = String(text || '').trim();
   const mention = trimmed.match(/^@([^\s，,：:]+)/);
   if (mention?.[1]) return mention[1];
+  if (selectedTarget.value?.label) return selectedTarget.value.label;
   if (s.mode === 'single' && s.agents.length === 1) return s.agents[0].name || 'AI 助手';
   return 'AI 助手';
 }
@@ -783,7 +1039,7 @@ function isGmProposalActionable(message) {
 async function sendGmDecision(proposalId, decision) {
   const message = buildGmDecisionMessage(proposalId, decision);
   if (!message) return;
-  await lanchat.sendMessage(message.text, message.options);
+  await lanchat.sendMessage(message.text, { ...(message.options || {}), skipStructuredRoute: true });
   lanchat.markProposalHandled(proposalId);
   lanchat.dismissDisclosureByProposal(proposalId);
 }
@@ -798,7 +1054,7 @@ function isDisclosureActionSendable(action) {
 async function sendDisclosureAction(action) {
   const message = buildGmDisclosureActionMessage(action);
   if (message) {
-    await lanchat.sendMessage(message.text, message.options);
+    await lanchat.sendMessage(message.text, { ...(message.options || {}), skipStructuredRoute: true });
     return;
   }
   const draftText = buildParticipantDisclosureDraft(action, currentDisclosure.value);
@@ -833,6 +1089,20 @@ async function addRoleTemplateBundle(bundle) {
   agentForm.name = '';
   agentForm.persona = '';
   showAddAgent.value = false;
+}
+
+async function addDefaultExpertGroup() {
+  const existingNames = new Set(
+    (s.agents || [])
+      .map((agent) => String(agent.name || '').trim())
+      .filter(Boolean)
+  );
+  for (const expert of selectedExpertPayloads.value) {
+    const name = String(expert?.name || '').trim();
+    if (!name || existingNames.has(name)) continue;
+    const res = await lanchat.addAgent(expert);
+    if (res && res.ok) existingNames.add(name);
+  }
 }
 
 async function onRemoveAgent(agentId) {
@@ -885,6 +1155,7 @@ function pickMention(c) {
 function messageOptionsForText(text) {
   const trimmed = String(text || '').trim();
   const generationMetadata = s.role === 'host' ? lanchat.generationOptionsMetadata() : {};
+  applyInputRouteState();
   if (/^@GM(?:\s|$)/i.test(trimmed)) {
     if (!Object.keys(generationMetadata).length) return buildManualGmMessageOptions(s.role);
     const options = buildManualGmMessageOptions(s.role);
@@ -1012,6 +1283,34 @@ watch(
   async () => {
     await nextTick();
     if (msgRef.value) msgRef.value.scrollTop = msgRef.value.scrollHeight;
+  }
+);
+
+watch(
+  targetOptions,
+  (options) => {
+    if (!options.length) return;
+    selectedTargetKey.value = resolveSelectedTargetKey(selectedTargetKey.value, options);
+    applyInputRouteState();
+  },
+  { immediate: true }
+);
+
+watch(
+  () => s.workspaceMode,
+  (mode) => {
+    if (mode && mode !== selectedWorkspaceMode.value) {
+      selectedWorkspaceMode.value = mode;
+    }
+  }
+);
+
+watch(
+  () => s.draftAction,
+  (action) => {
+    if (action && action !== selectedDraftAction.value) {
+      selectedDraftAction.value = action;
+    }
   }
 );
 </script>

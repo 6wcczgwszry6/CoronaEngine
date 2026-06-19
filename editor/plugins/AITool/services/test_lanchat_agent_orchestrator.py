@@ -1042,6 +1042,215 @@ def test_worker_disambiguates_plain_chat_supplement_when_multiple_plans_pending(
     print("[OK] ambiguous no-mention supplement asks user to target one pending plan")
 
 
+def test_runtime_routes_metadata_targeted_pending_plan_without_mention():
+    runtime = get_lanchat_scene_runtime()
+    runtime.end_compose()
+    runtime.consume_notes()
+    action, reply = runtime.handle_planning_gate("小女孩", "@小女孩 帮我设计一个可爱的卧室")
+    assert action == "reply"
+    action, reply = runtime.handle_planning_gate("商人", "@商人 帮我设计一个暗黑集市")
+    assert action == "reply"
+
+    try:
+        action, payload, agent_name = runtime.handle_targeted_planning_message(
+            "小女孩",
+            "减少方案中的细碎物体",
+            draft_action="supplement",
+        )
+    finally:
+        runtime.clear_pending_planning("小女孩")
+        runtime.clear_pending_planning("商人")
+        runtime.end_compose()
+
+    assert action == "reply"
+    assert agent_name == "小女孩"
+    assert "我已更新方案" in str(payload)
+    assert "减少方案中的细碎物体" in str(payload)
+    assert "暗黑集市" not in str(payload)
+    print("[OK] runtime routes metadata-targeted supplement to matching pending plan")
+
+
+def test_runtime_metadata_generate_confirms_pending_plan_without_magic_text():
+    runtime = get_lanchat_scene_runtime()
+    runtime.end_compose()
+    runtime.consume_notes()
+    action, reply = runtime.handle_planning_gate("小女孩", "@小女孩 帮我设计一个可爱的卧室")
+    assert action == "reply"
+
+    try:
+        action, payload, agent_name = runtime.handle_targeted_planning_message(
+            "小女孩",
+            "就按这个执行",
+            draft_action="generate",
+        )
+    finally:
+        runtime.clear_pending_planning("小女孩")
+        runtime.end_compose("小女孩")
+
+    assert action == "compose"
+    assert agent_name == "小女孩"
+    assert "用户确认开始生成" in str(payload)
+    assert "可爱的卧室" in str(payload)
+    print("[OK] runtime metadata generate starts from pending plan without typed confirmation")
+
+
+def test_worker_metadata_chat_targets_agent_without_at_or_coordinator_sync():
+    coordinator = InteractionCoordinator()
+    engine = FakeEngine([], coordinator_messages=[{
+        "message_id": "metadata-chat-agent-1",
+        "room_id": "r-metadata-chat",
+        "sender_id": "host-a",
+        "sender_name": "房主",
+        "sender_type": "host",
+        "message_kind": "chat",
+        "text": "你是谁",
+        "metadata": {
+            "workspace_mode": "solo_single_agent",
+            "draft_action": "chat",
+            "target_scope": "agent",
+            "target_agent_id": "agent-girl",
+            "target_agent_name": "小女孩",
+        },
+    }])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+    assert engine.replies
+    assert engine.replies[-1][0] == "agent-girl"
+    assert engine.replies[-1][1] == "小女孩"
+    assert coordinator.active_plan_for_room("r-metadata-chat") is None
+    print("[OK] worker metadata chat targets agent without @ and skips Coordinator")
+
+
+def test_worker_metadata_group_chat_triggers_each_agent_without_at():
+    coordinator = InteractionCoordinator()
+    engine = FakeEngine([], coordinator_messages=[{
+        "message_id": "metadata-chat-group-1",
+        "room_id": "r-metadata-group-chat",
+        "sender_id": "host-a",
+        "sender_name": "房主",
+        "sender_type": "host",
+        "message_kind": "chat",
+        "text": "大家怎么看这个卧室？",
+        "metadata": {
+            "workspace_mode": "solo_multi_agent",
+            "draft_action": "chat",
+            "target_scope": "group",
+            "target_agent_ids": ["agent-girl", "agent-merchant"],
+            "target_agent_names": ["小女孩", "商人"],
+        },
+    }])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+    assert [item[1] for item in engine.replies[-2:]] == ["小女孩", "商人"]
+    assert coordinator.active_plan_for_room("r-metadata-group-chat") is None
+    print("[OK] worker metadata group chat triggers each target agent without @")
+
+
+def test_worker_metadata_plan_targets_agent_and_returns_plan_reply_without_at():
+    runtime = get_lanchat_scene_runtime()
+    runtime.end_compose()
+    runtime.consume_notes()
+    runtime.clear_pending_planning("长者")
+
+    coordinator = InteractionCoordinator()
+    engine = FakeEngine([], coordinator_messages=[{
+        "message_id": "metadata-plan-agent-1",
+        "room_id": "r-metadata-plan",
+        "sender_id": "host-a",
+        "sender_name": "房主",
+        "sender_type": "host",
+        "message_kind": "chat",
+        "text": "帮我设计一个现代客厅，方案尽可能详细，且方案合理",
+        "metadata": {
+            "workspace_mode": "solo_multi_agent",
+            "draft_action": "plan",
+            "target_scope": "agent",
+            "target_agent_id": "agent-elder",
+            "target_agent_name": "长者",
+        },
+    }])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    try:
+        assert worker.process_once() is True
+    finally:
+        runtime.clear_pending_planning("长者")
+        runtime.end_compose()
+
+    assert engine.replies
+    assert engine.replies[-1][0] == "agent-elder"
+    assert engine.replies[-1][1] == "长者"
+    reply_text = str(engine.replies[-1][2])
+    assert "方案内容" in reply_text
+    assert "现代客厅" in reply_text
+    assert "确认开始" in reply_text
+    assert coordinator.active_plan_for_room("r-metadata-plan") is None
+    print("[OK] worker metadata plan targets agent and returns plan reply without @")
+
+
+def test_worker_metadata_supplement_selects_plan_when_multiple_pending():
+    runtime = get_lanchat_scene_runtime()
+    runtime.end_compose()
+    runtime.consume_notes()
+    action, reply = runtime.handle_planning_gate("小女孩", "@小女孩 帮我设计一个可爱的卧室")
+    assert action == "reply"
+    action, reply = runtime.handle_planning_gate("商人", "@商人 帮我设计一个暗黑集市")
+    assert action == "reply"
+
+    coordinator = InteractionCoordinator()
+    engine = FakeEngine([], coordinator_messages=[{
+        "message_id": "metadata-plan-supplement-1",
+        "room_id": "r-plan-supplement",
+        "sender_id": "host-a",
+        "sender_name": "房主",
+        "sender_type": "host",
+        "message_kind": "chat",
+        "text": "减少方案中的细碎物体",
+        "metadata": {
+            "draft_action": "supplement",
+            "target_scope": "plan",
+            "target_agent_name": "小女孩",
+        },
+    }])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    try:
+        assert worker.process_once() is True
+    finally:
+        runtime.clear_pending_planning("小女孩")
+        runtime.clear_pending_planning("商人")
+        runtime.end_compose()
+
+    assert engine.replies
+    reply_text = str(engine.replies[-1][2])
+    assert engine.replies[-1][1] == "小女孩"
+    assert "我已更新方案" in reply_text
+    assert "请先 @ 指定" not in reply_text
+    print("[OK] worker metadata supplement selects target plan when multiple plans are pending")
+
+
 def test_planning_gate_records_pre_generation_style_supplement():
     runtime = get_lanchat_scene_runtime()
     runtime.end_compose()
@@ -3429,6 +3638,12 @@ if __name__ == "__main__":
     test_planning_confirmation_gate_returns_concrete_design_brief()
     test_worker_routes_plain_chat_supplement_to_pending_planning_gate()
     test_worker_disambiguates_plain_chat_supplement_when_multiple_plans_pending()
+    test_runtime_routes_metadata_targeted_pending_plan_without_mention()
+    test_runtime_metadata_generate_confirms_pending_plan_without_magic_text()
+    test_worker_metadata_chat_targets_agent_without_at_or_coordinator_sync()
+    test_worker_metadata_group_chat_triggers_each_agent_without_at()
+    test_worker_metadata_plan_targets_agent_and_returns_plan_reply_without_at()
+    test_worker_metadata_supplement_selects_plan_when_multiple_pending()
     test_planning_gate_records_pre_generation_style_supplement()
     test_worker_async_agent_calls_are_serialized_per_worker()
     test_worker_broadcasts_confirmed_gm_action()

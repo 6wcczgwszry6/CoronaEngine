@@ -200,6 +200,24 @@ class LANChatAgentWorker:
             self._remember_room_id(room_id)
             metadata = self._coordinator_sync_metadata(message, source=source)
             active = coordinator.active_plan_for_room(room_id)
+            structured_handled = self._handle_structured_chat_route(message, text, metadata)
+            if structured_handled:
+                self._log_scene_route(
+                    room_id=room_id,
+                    sender=str(message.get("sender_name") or message.get("sender_id") or ""),
+                    target_agent=str(
+                        metadata.get("target_agent_name")
+                        or metadata.get("target_agent_id")
+                        or message.get("target_agent_name")
+                        or message.get("agent_name")
+                        or ""
+                    ),
+                    room_state=str(active.status.value if active is not None else "structured"),
+                    intent=str(metadata.get("draft_action") or "structured"),
+                    action=structured_handled,
+                    reason="metadata route",
+                )
+                return True
             if (
                 source == "lanchat_history_snapshot"
                 and active is not None
@@ -257,6 +275,135 @@ class LANChatAgentWorker:
             return False
         finally:
             self._remember_coordinator_seen_message_id(dedupe_key)
+
+    def _handle_structured_chat_route(
+        self,
+        message: dict[str, Any],
+        text: str,
+        metadata: dict[str, Any],
+    ) -> str:
+        draft_action = str(metadata.get("draft_action") or "").strip().lower()
+        target_scope = str(metadata.get("target_scope") or "").strip().lower()
+        target_agent_id = str(metadata.get("target_agent_id") or "").strip()
+        target_agent_name = str(metadata.get("target_agent_name") or "").strip()
+        target_plan_id = str(metadata.get("target_plan_id") or "").strip()
+        if not any((draft_action, target_scope, target_agent_id, target_agent_name, target_plan_id)):
+            return ""
+        if draft_action == "chat" and target_scope == "group":
+            group_agents = self._structured_group_agents(metadata)
+            if not group_agents:
+                return ""
+            for agent_id, agent_name in group_agents:
+                trigger = self._structured_trigger(message, metadata, agent_id=agent_id, agent_name=agent_name)
+                self._process_trigger(trigger)
+            return "group_chat"
+        if draft_action == "chat" and (target_agent_id or target_agent_name or target_scope == "agent"):
+            agent_id = target_agent_id or target_agent_name or "agent"
+            agent_name = target_agent_name or target_agent_id or "Agent"
+            trigger = self._structured_trigger(message, metadata, agent_id=agent_id, agent_name=agent_name)
+            self._process_trigger(trigger)
+            return "agent_chat"
+        if draft_action in {"plan", "supplement", "generate"} or target_scope == "plan" or target_plan_id:
+            return self._handle_structured_planning_gate(message, text, metadata)
+        if draft_action == "gm_control" or target_scope == "gm":
+            trigger = self._structured_trigger(
+                message,
+                metadata,
+                agent_id=target_agent_id or "gm",
+                agent_name=target_agent_name or "GM",
+            )
+            self._process_trigger(trigger)
+            return "gm_control"
+        return ""
+
+    def _handle_structured_planning_gate(
+        self,
+        message: dict[str, Any],
+        text: str,
+        metadata: dict[str, Any],
+    ) -> str:
+        try:
+            from .lanchat_scene_runtime import get_lanchat_scene_runtime
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to import LANChat scene runtime for metadata planning route: %s", exc)
+            return ""
+        draft_action = str(metadata.get("draft_action") or "").strip().lower()
+        target = (
+            str(metadata.get("target_plan_id") or "").strip()
+            or str(metadata.get("target_agent_name") or "").strip()
+            or str(metadata.get("target_agent_id") or "").strip()
+        )
+        try:
+            runtime = get_lanchat_scene_runtime()
+            if draft_action == "plan":
+                agent_name = (
+                    str(metadata.get("target_agent_name") or "").strip()
+                    or str(metadata.get("target_agent_id") or "").strip()
+                    or "设计助手"
+                )
+                action, payload = runtime.handle_planning_gate(agent_name, text)
+                if action == "pass":
+                    return ""
+            elif target:
+                action, payload, agent_name = runtime.handle_targeted_planning_message(
+                    target,
+                    text,
+                    draft_action=draft_action,
+                )
+            else:
+                agent_name = str(metadata.get("target_agent_name") or metadata.get("target_agent_id") or "").strip()
+                action, payload = runtime.handle_planning_gate(agent_name or "设计助手", text)
+                if action == "pass":
+                    return ""
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to handle metadata planning route: %s", exc)
+            return ""
+        if action not in {"reply", "compose"} or not agent_name:
+            return ""
+        trigger = self._structured_trigger(
+            message,
+            metadata,
+            agent_id=str(metadata.get("target_agent_id") or agent_name),
+            agent_name=str(agent_name),
+        )
+        if action == "reply":
+            self._send_final_reply(str(trigger.get("agent_id") or agent_name), str(agent_name), str(payload or ""), trigger)
+            return "planning_reply"
+        trigger["text"] = str(payload or text)
+        self._process_trigger(trigger)
+        return "planning_compose"
+
+    def _structured_trigger(
+        self,
+        message: dict[str, Any],
+        metadata: dict[str, Any],
+        *,
+        agent_id: str,
+        agent_name: str,
+    ) -> dict[str, Any]:
+        trigger = dict(message)
+        trigger["agent_id"] = str(agent_id or "agent")
+        trigger["agent_name"] = str(agent_name or "Agent")
+        trigger["target_agent_id"] = str(agent_id or "")
+        trigger["target_agent_name"] = str(agent_name or "")
+        trigger["metadata"] = dict(metadata or {})
+        trigger["metadata_json"] = json.dumps(trigger["metadata"], ensure_ascii=False)
+        return trigger
+
+    @staticmethod
+    def _structured_group_agents(metadata: dict[str, Any]) -> list[tuple[str, str]]:
+        names_raw = metadata.get("target_agent_names")
+        ids_raw = metadata.get("target_agent_ids")
+        names = names_raw if isinstance(names_raw, list) else []
+        ids = ids_raw if isinstance(ids_raw, list) else []
+        out: list[tuple[str, str]] = []
+        for index, raw_name in enumerate(names):
+            name = str(raw_name or "").strip()
+            if not name:
+                continue
+            agent_id = str(ids[index] if index < len(ids) else name).strip() or name
+            out.append((agent_id, name))
+        return out
 
     def _handle_plain_chat_planning_gate(self, message: dict[str, Any], text: str) -> str:
         try:
@@ -1028,6 +1175,14 @@ class LANChatAgentWorker:
             "target_object_id",
             "actor_version",
             "target_hint",
+            "workspace_mode",
+            "draft_action",
+            "target_agent_id",
+            "target_agent_name",
+            "target_agent_ids",
+            "target_agent_names",
+            "target_plan_id",
+            "target_scope",
         ):
             value = raw_metadata.get(key)
             if value is not None and value != "":
