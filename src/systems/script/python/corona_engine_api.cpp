@@ -665,8 +665,11 @@ float Corona::API::Environment::get_fixed_dt() const {
 //         Geometry
 // ########################
 Corona::API::Geometry::Geometry(const std::string& model_path) {
+    // 保存路径供 Actor 标识和 GeometrySystem 资源加载/卸载使用
+    model_path_ = Utils::utf8_to_path(model_path);
+
     // 使用 utf8_to_path 确保 UTF-8 编码的路径在 Windows 上正确转换
-    auto model_id = Resource::ResourceManager::get_instance().import_sync(Utils::utf8_to_path(model_path));
+    auto model_id = Resource::ResourceManager::get_instance().import_sync(model_path_);
     if (model_id == 0) {
         CFW_LOG_CRITICAL("[Geometry::Geometry] Failed to load model: {}", model_path);
         return;
@@ -1153,6 +1156,10 @@ std::array<float, 3> Corona::API::Geometry::get_scale() const {
 
 std::uintptr_t Corona::API::Geometry::get_handle() const {
     return handle_;
+}
+
+const std::filesystem::path& Corona::API::Geometry::get_model_path() const {
+    return model_path_;
 }
 
 std::array<float, 6> Corona::API::Geometry::get_aabb() const {
@@ -1706,6 +1713,9 @@ Corona::API::Actor::Profile* Corona::API::Actor::add_profile(const Profile& prof
             if (storage_profile_handle != 0) {
                 accessor->profile_handles.push_back(storage_profile_handle);
             }
+            // 将 Geometry 的 model_path 同步到 ActorDevice，
+            // GeometrySystem 的 load/unload 路径依赖此字段
+            accessor->model_path = profile.geometry->get_model_path();
         } else {
             CFW_LOG_ERROR("[Actor::add_profile] Failed to acquire write access to actor storage");
         }

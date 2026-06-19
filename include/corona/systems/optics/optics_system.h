@@ -24,6 +24,8 @@ struct Hardware;
 
 namespace Corona::Systems {
 
+class GeometrySystem;  // 前向声明，用于 LOD 查询
+
 #ifdef CORONA_ENABLE_VISION
 namespace Vision {
 struct VisionBuildResult;  // 定义见 vision/vision_geometry_adapter.h
@@ -282,6 +284,10 @@ class OpticsSystem : public Kernel::SystemBase {
     static constexpr uint64_t kUiViewIdleEvictFrames = 240;
 
     std::unique_ptr<Hardware> hardware_;
+
+    // LOD 系统引用（渲染时查询 LOD 缓冲）
+    GeometrySystem* geometry_system_ = nullptr;
+    bool geometry_system_queried_ = false;  // 避免每帧重试失败的获取
 
     // Vision 后端状态
     bool vision_initialized_{false};

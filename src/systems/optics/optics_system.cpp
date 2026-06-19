@@ -1,11 +1,13 @@
 #include <corona/events/display_system_events.h>
 #include <corona/events/optics_system_events.h>
 #include <corona/kernel/core/i_logger.h>
+#include <corona/kernel/core/kernel_context.h>
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/resource/resource_manager.h>
 #include <corona/resource/types/image.h>
 #include <corona/shared_data_hub.h>
+#include <corona/systems/geometry/geometry_system.h>
 #include <corona/systems/optics/optics_system.h>
 
 #include <array>
@@ -1677,6 +1679,21 @@ void OpticsSystem::update() {
     apply_pending_camera_state_updates();
     apply_pending_camera_releases();
 
+    // 延迟获取 GeometrySystem 指针（不能在 initialize() 中获取，会死锁）
+    // initialize_all() 持锁遍历系统，get_system() 也需同锁 → 非递归 mutex 重入崩溃
+    if (!geometry_system_ && !geometry_system_queried_) {
+        geometry_system_queried_ = true;
+        auto& kernel = Kernel::KernelContext::instance();
+        if (auto* sys_mgr = kernel.system_manager()) {
+            auto sys = sys_mgr->get_system("Geometry");
+            geometry_system_ = dynamic_cast<GeometrySystem*>(sys ? sys.get() : nullptr);
+        }
+    }
+
+    // Check for pending backend switch request before executing either render path.
+    int pending = pending_backend_.load(std::memory_order_relaxed);
+    RenderBackend requested = static_cast<RenderBackend>(pending);
+    if (requested != current_backend_) {
 #ifdef CORONA_ENABLE_VISION
     std::vector<std::uintptr_t> requested_vision_cameras;
     bool camera_views_ready = true;
@@ -1848,14 +1865,56 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                             // 版 try_acquire_write 等锁（不漏帧），槽位失效时返回无效句柄而非抛异常。
                             if (auto geom = geom_storage.try_acquire_write(optics.geometry_handle)) {
                                 ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
+                                ktm::fvec3 world_center{0.0f, 0.0f, 0.0f};
                                 if (auto transform = transform_storage.try_acquire_read(geom->transform_handle)) {
                                     model_matrix = transform->compute_matrix();
+                                    // 必须在 camera_basis 变换前提取世界位置（否则 model_matrix[3] 不再是世界坐标）
+                                    world_center = transform->position;
                                     if (camera_basis != nullptr) {
                                         model_matrix = multiply_ktm_mat4(*camera_basis, model_matrix);
                                     }
                                 }
 
-                                for (auto& m : geom->mesh_handles) {
+                                // ---- 计算物体在世界空间中的包围信息（用于LOD选择） ----
+                                float bounding_radius = 1.0f;
+                                bool use_lod = false;
+
+                                if (geometry_system_) {
+                                    auto& ms = SharedDataHub::instance().mechanics_storage();
+                                    if (auto mech = ms.try_acquire_read(profile->mechanics_handle)) {
+                                        float dx = mech->max_xyz.x - mech->min_xyz.x;
+                                        float dy = mech->max_xyz.y - mech->min_xyz.y;
+                                        float dz = mech->max_xyz.z - mech->min_xyz.z;
+                                        bounding_radius = std::sqrt(dx*dx + dy*dy + dz*dz) * 0.5f;
+                                        use_lod = true;
+                                    }
+                                }
+
+                                for (uint32_t mesh_index = 0; mesh_index < static_cast<uint32_t>(geom->mesh_handles.size()); ++mesh_index) {
+                                    auto& m = geom->mesh_handles[mesh_index];
+
+                                    // ---- LOD 缓冲替换 ----
+                                    HardwareBuffer render_vb = m.vertexBuffer;
+                                    HardwareBuffer render_ib = m.indexBuffer;
+                                    HardwareBuffer render_vs = m.vertexStorageBuffer;
+                                    HardwareBuffer render_is = m.indexStorageBuffer;
+
+                                    if (use_lod && geometry_system_) {
+                                        float screen_ratio = GeometrySystem::compute_screen_ratio(
+                                            camera->position, camera->fov,
+                                            world_center, bounding_radius);
+
+                                        if (auto* lod_buf = geometry_system_->resolve_lod_buffers(
+                                                optics.geometry_handle, mesh_index,
+                                                screen_ratio)) {
+                                            if (lod_buf->vertex_buffer && lod_buf->index_buffer) {
+                                                render_vb = lod_buf->vertex_buffer;
+                                                render_ib = lod_buf->index_buffer;
+                                                if (lod_buf->vertex_storage) render_vs = lod_buf->vertex_storage;
+                                                if (lod_buf->index_storage)  render_is = lod_buf->index_storage;
+                                            }
+                                        }
+                                    }
                                     // --- Collect material info ---
                                     auto materialID = static_cast<uint32_t>(batch.materials.size());
                                     {
@@ -1906,11 +1965,11 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                     {
                                         Hardware::InstanceInfo inst{};
                                         inst.modelMatrix = model_matrix;
-                                        inst.vertexBufferIndex = m.vertexStorageBuffer
-                                                                     ? m.vertexStorageBuffer.storeDescriptor()
+                                        inst.vertexBufferIndex = render_vs
+                                                                     ? render_vs.storeDescriptor()
                                                                      : 0;
-                                        inst.indexBufferIndex = m.indexStorageBuffer
-                                                                    ? m.indexStorageBuffer.storeDescriptor()
+                                        inst.indexBufferIndex = render_is
+                                                                    ? render_is.storeDescriptor()
                                                                     : 0;
                                         inst.materialID = materialID;
                                         inst.objectID = object_id;
@@ -1933,7 +1992,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                         target_visibility[visibility_frag_glsl::pushConsts::textureIndex] =
                                             static_cast<uint32_t>(0);
                                     }
-                                    target_visibility.record(m.indexBuffer, m.vertexBuffer);
+                                    target_visibility.record(render_ib, render_vb);
                                 }
                             }
                             ++object_id;
