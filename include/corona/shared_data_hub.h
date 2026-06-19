@@ -471,6 +471,8 @@ class SharedDataHub {
     void enqueue_camera_release(CameraReleaseCommand command);
     std::vector<CameraReleaseCommand> drain_camera_releases();
     void set_viewport_ui_mode(std::uintptr_t camera_handle, ViewportUiMode mode);
+    void set_viewport_ui_calibration(std::uintptr_t camera_handle,
+                                     const ViewportUiCalibration& calibration);
     [[nodiscard]] ViewportUiState viewport_ui_state(std::uintptr_t camera_handle) const;
     void enqueue_viewport_ui_pointer(ViewportUiPointerCommand command);
     std::vector<ViewportUiPointerCommand> drain_viewport_ui_pointer_commands();

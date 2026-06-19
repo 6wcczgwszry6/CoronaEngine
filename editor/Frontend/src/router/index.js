@@ -12,6 +12,7 @@ import ProjectSettings from '../views/sidebar/ProjectSettings.vue';
 import BlocklyWorkspace from '../blockly/components/BlocklyWorkspace.vue';
 import EditorSettings from '../views/sidebar/EditorSettings.vue';
 import NetworkPanel from '../views/sidebar/Network.vue';
+import LightFieldCalibrationPanel from '../components/panels/LightFieldCalibrationPanel.vue';
 
 const routes = [
   {
@@ -98,6 +99,11 @@ const routes = [
     path: '/CameraView',
     name: 'CameraView',
     component: () => import('../views/tools/CameraView.vue'),
+  },
+  {
+    path: '/LightFieldCalibration',
+    name: 'LightFieldCalibration',
+    component: LightFieldCalibrationPanel,
   },
 ];
 

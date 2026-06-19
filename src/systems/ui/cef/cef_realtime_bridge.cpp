@@ -719,6 +719,26 @@ Corona::ViewportUiCursorShape parse_viewport_ui_cursor_shape(const std::string& 
     return Corona::ViewportUiCursorShape::Arrow;
 }
 
+// 把 Vision 光场语义参数 (pe/angle/offset, 子像素单位) 转成 warp 消费的
+// ViewportUiCalibration (像素单位)。推导见计划文档：
+//   pitch = pe/3   (子像素周期→像素周期)
+//   slant_angle_radians = -angle  (Vision 相位场 +tan·y vs shader -tan·y)
+//   phase_offset = offset/pe      (子像素偏移→周期数)
+// parallax_scale 是 UI 专有视差增益，无 Vision 对应，直接透传。
+Corona::ViewportUiCalibration calibration_from_lenticular(double pe,
+                                                          double angle,
+                                                          double offset,
+                                                          double parallax_scale) {
+    Corona::ViewportUiCalibration calibration;
+    const double safe_pe = std::abs(pe) > 1.0e-5 ? pe : 1.0e-5;
+    calibration.lenticular_pitch = static_cast<float>(safe_pe / 3.0);
+    calibration.slant_angle_radians = static_cast<float>(-angle);
+    calibration.phase_offset = static_cast<float>(offset / safe_pe);
+    calibration.rgb_subpixel_offsets = {0.0f, 1.0f / 3.0f, 2.0f / 3.0f};
+    calibration.parallax_scale = static_cast<float>(parallax_scale);
+    return calibration;
+}
+
 bool handle_viewport_ui_mode(const CefRefPtr<CefProcessMessage>& message) {
     auto args = message->GetArgumentList();
     double camera_value = 0.0;
@@ -772,6 +792,34 @@ bool handle_viewport_ui_pointer(const CefRefPtr<CefProcessMessage>& message) {
     }
 
     Corona::SharedDataHub::instance().enqueue_viewport_ui_pointer(std::move(command));
+    return true;
+}
+
+bool handle_viewport_ui_calibration(const CefRefPtr<CefProcessMessage>& message) {
+    auto args = message->GetArgumentList();
+    double camera_value = 0.0;
+    double pe = 0.0;
+    double angle = 0.0;
+    double offset = 0.0;
+    double parallax_scale = 0.0;
+    if (!args || args->GetSize() < 5 ||
+        !get_numeric_arg(args, 0, camera_value) ||
+        !get_numeric_arg(args, 1, pe) ||
+        !get_numeric_arg(args, 2, angle) ||
+        !get_numeric_arg(args, 3, offset) ||
+        !get_numeric_arg(args, 4, parallax_scale)) {
+        CFW_LOG_WARNING(
+            "ViewportUiCalibration dropped: expected (cameraHandle, pe, angle, offset, parallaxScale)");
+        return true;
+    }
+
+    const auto camera_handle = static_cast<std::uintptr_t>(camera_value);
+    const auto calibration =
+        calibration_from_lenticular(pe, angle, offset, parallax_scale);
+    Corona::SharedDataHub::instance().set_viewport_ui_calibration(camera_handle, calibration);
+    CFW_LOG_INFO(
+        "ViewportUiCalibration set: camera={} pe={:.4f} angle={:.4f} offset={:.4f} parallax={:.4f}",
+        camera_handle, pe, angle, offset, parallax_scale);
     return true;
 }
 
@@ -1591,6 +1639,10 @@ bool handle_realtime_process_message(CefRefPtr<CefBrowser> browser,
 
     if (message->GetName() == "ViewportUiPointer") {
         return handle_viewport_ui_pointer(message);
+    }
+
+    if (message->GetName() == "ViewportUiCalibration") {
+        return handle_viewport_ui_calibration(message);
     }
 
     if (message->GetName() == "InputInject") {

@@ -253,6 +253,18 @@ void SharedDataHub::set_viewport_ui_mode(std::uintptr_t camera_handle, ViewportU
     state.mode = mode;
 }
 
+void SharedDataHub::set_viewport_ui_calibration(std::uintptr_t camera_handle,
+                                                const ViewportUiCalibration& calibration) {
+    if (camera_handle == 0) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(viewport_ui_mutex_);
+    auto& state = viewport_ui_states_[camera_handle];
+    state.camera_handle = camera_handle;
+    state.calibration = calibration;
+}
+
 ViewportUiState SharedDataHub::viewport_ui_state(std::uintptr_t camera_handle) const {
     std::lock_guard<std::mutex> lock(viewport_ui_mutex_);
     const auto it = viewport_ui_states_.find(camera_handle);

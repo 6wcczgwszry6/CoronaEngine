@@ -505,7 +505,7 @@ import { useDockStore } from '@/stores/dockStore.js';
 import { PLUGIN_MANIFEST } from '@/config/pluginManifest.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
-import { createViewportUiModeStore } from '@/utils/viewportUiMode.js';
+import { createViewportUiModeStore, createViewportUiCalibrationStore } from '@/utils/viewportUiMode.js';
 import AIHintBubble from '@/components/ui/AIHintBubble.vue';
 import { startStageHints, stopStageHints, setHintShowMs } from '@/services/aiHintGenerator.js';
 
@@ -545,6 +545,26 @@ const viewportUiModeItems = [
   { mode: 'flat2d', label: '2D UI', title: '普通屏幕 UI' },
   { mode: 'stereo3d', label: '3D UI', title: '光场屏立体 UI' },
 ];
+
+// 光场 3D UI 标定：dock 面板编辑后经 coronaEventBus 通知，这里用活动相机句柄下发；
+// 切到 stereo3d 自动打开标定 dock 面板并推送当前值，切回 flat2d 关闭。
+const viewportUiCalibrationStore = createViewportUiCalibrationStore();
+const VIEWPORT_UI_CALIBRATION_PANEL = 'LightFieldCalibration';
+const applyViewportUiCalibration = (calibration) => {
+  viewportUiCalibrationStore.applyToBridge({
+    bridge: window.coronaBridge,
+    cameraHandle: cameraBindingState.value.cameraHandle,
+    calibration: calibration ?? viewportUiCalibrationStore.get({}),
+  });
+};
+const syncViewportUiCalibrationPanel = (mode) => {
+  if (mode === 'stereo3d') {
+    dockStore.openPanel(VIEWPORT_UI_CALIBRATION_PANEL);
+    applyViewportUiCalibration();
+  } else {
+    dockStore.closePanel(VIEWPORT_UI_CALIBRATION_PANEL);
+  }
+};
 
 // 摄像头移动速度（可调节）
 const cameraSpeed = ref(0.2);
@@ -598,6 +618,7 @@ const syncViewportUiMode = () => {
     cameraHandle: cameraBindingState.value.cameraHandle,
     mode,
   });
+  syncViewportUiCalibrationPanel(mode);
 };
 
 const selectViewportUiMode = (mode) => {
@@ -607,6 +628,7 @@ const selectViewportUiMode = (mode) => {
     cameraHandle: cameraBindingState.value.cameraHandle,
     mode: viewportUiMode.value,
   });
+  syncViewportUiCalibrationPanel(viewportUiMode.value);
 };
 
 const hasActiveMovementKeys = () => Object.values(movementKeys).some((value) => value);
@@ -1803,6 +1825,7 @@ onMounted(async () => {
     if (panelId) dockStore.popIn(panelId);
   });
   coronaEventBus.on('actor-pick-result', handleActorPickResult);
+  coronaEventBus.on('viewport-ui-calibration-changed', applyViewportUiCalibration);
 
   // 启动阶段性包菜提示：每隔一段时间根据用户操作自动弹出 AI 提示气泡
   startStageHints(

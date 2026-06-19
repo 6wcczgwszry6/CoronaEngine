@@ -118,6 +118,35 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
                 return true;
             }
 
+            if (name == "setViewportUiCalibration") {
+                bool args_ok = arguments.size() >= 5;
+                for (size_t i = 0; args_ok && i < 5; ++i) {
+                    if (!arguments[i] || (!arguments[i]->IsInt() && !arguments[i]->IsDouble())) {
+                        args_ok = false;
+                    }
+                }
+                if (!args_ok) {
+                    exception =
+                        "setViewportUiCalibration(cameraHandle, pe, angle, offset, parallaxScale) requires 5 numbers";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                auto ctx = CefV8Context::GetCurrentContext();
+                if (!ctx || !ctx->GetBrowser()) {
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                CefRefPtr<CefProcessMessage> msg =
+                    CefProcessMessage::Create("ViewportUiCalibration");
+                CefRefPtr<CefListValue> args = msg->GetArgumentList();
+                for (size_t i = 0; i < 5; ++i) {
+                    args->SetDouble(static_cast<int>(i), arguments[i]->GetDoubleValue());
+                }
+                ctx->GetFrame()->SendProcessMessage(PID_BROWSER, msg);
+                retval = CefV8Value::CreateBool(true);
+                return true;
+            }
+
             if (name == "viewportUiPointer") {
                 if (arguments.size() < 4 ||
                     !arguments[0] || (!arguments[0]->IsInt() && !arguments[0]->IsDouble()) ||
@@ -444,6 +473,8 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
         CefRefPtr<CefV8Value> pick_actor = CefV8Value::CreateFunction("pickActor", handler);
         CefRefPtr<CefV8Value> set_viewport_ui_mode =
             CefV8Value::CreateFunction("setViewportUiMode", handler);
+        CefRefPtr<CefV8Value> set_viewport_ui_calibration =
+            CefV8Value::CreateFunction("setViewportUiCalibration", handler);
         CefRefPtr<CefV8Value> viewport_ui_pointer =
             CefV8Value::CreateFunction("viewportUiPointer", handler);
         CefRefPtr<CefV8Value> inject_input = CefV8Value::CreateFunction("injectInput", handler);
@@ -455,6 +486,7 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
         bridge->SetValue("setProperty", set_property, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("pickActor", pick_actor, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("setViewportUiMode", set_viewport_ui_mode, V8_PROPERTY_ATTRIBUTE_NONE);
+        bridge->SetValue("setViewportUiCalibration", set_viewport_ui_calibration, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("viewportUiPointer", viewport_ui_pointer, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("injectInput", inject_input, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("dockCommand", dock_command, V8_PROPERTY_ATTRIBUTE_NONE);
