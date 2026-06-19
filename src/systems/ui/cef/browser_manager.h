@@ -6,6 +6,7 @@
 #include <include/internal/cef_types.h>
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <functional>
@@ -125,6 +126,7 @@ class BrowserManager {
     SDL_Window* main_window_ = nullptr;
     ImTextureID create_browser_texture(int width, int height);
     void destroy_tab_texture(BrowserTab* tab);
+    void retire_deferred_tab_textures(bool force = false);
 
     struct OwnedImage {
         Horizon::HardwareImage image;
@@ -133,12 +135,19 @@ class BrowserManager {
         uint32_t height = 0;
     };
 
+    struct DeferredTextureDestroy {
+        OwnedImage image;
+        uint64_t queued_frame = 0;
+    };
+
     std::unordered_map<int, std::unique_ptr<BrowserTab>> tabs_;
     std::vector<int> tabs_to_close_;
     std::mutex pending_tasks_mutex_;
     std::vector<std::function<void()>> pending_tasks_;
     std::unordered_map<ImTextureID, OwnedImage> owned_images_;
     Horizon::HardwareExecutor browser_upload_executor_;
+    std::vector<DeferredTextureDestroy> deferred_texture_destroys_;
+    uint64_t frame_index_ = 0;
     int tab_counter_ = 0;
 
 };

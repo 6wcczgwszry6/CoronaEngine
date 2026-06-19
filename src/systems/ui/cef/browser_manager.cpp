@@ -217,6 +217,9 @@ std::unordered_map<int, std::unique_ptr<BrowserTab>>& BrowserManager::get_tabs()
 }
 
 void BrowserManager::update() {
+    ++frame_index_;
+    retire_deferred_tab_textures();
+
     std::function<void()> task;
     {
         std::lock_guard lock(pending_tasks_mutex_);
@@ -271,6 +274,7 @@ void BrowserManager::close_all_tabs() {
             CFW_LOG_WARNING("Timed out waiting for a CEF browser to close");
         }
     }
+    retire_deferred_tab_textures(true);
 }
 
 void BrowserManager::set_tab_drag_regions(int tab_id, const std::vector<DragRegion>& regions) {

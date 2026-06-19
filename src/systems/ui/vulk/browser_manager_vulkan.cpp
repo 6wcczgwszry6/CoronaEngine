@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "cef/browser_manager.h"
@@ -12,6 +14,8 @@
 
 namespace Corona::Systems::UI {
 namespace {
+constexpr uint64_t kDeferredTextureDestroyFrames = 4;
+
 ImTextureID descriptor_to_texture_id(uint32_t descriptor) {
     return static_cast<ImTextureID>(static_cast<ImU64>(descriptor) + 1u);
 }
@@ -22,13 +26,32 @@ void BrowserManager::destroy_tab_texture(BrowserTab* tab) {
         return;
     }
 
-    auto it = owned_images_.find(tab->texture_id);
+    const ImTextureID texture_id = tab->texture_id;
+    tab->texture_id = k_invalid_texture_id;
+
+    auto it = owned_images_.find(texture_id);
     if (it != owned_images_.end()) {
-        browser_upload_executor_.wait_idle(it->second.upload_receipt);
-        owned_images_.erase(it);
+        deferred_texture_destroys_.push_back(
+            DeferredTextureDestroy{std::move(it->second), frame_index_});
+        owned_images_.erase(texture_id);
+    }
+}
+
+void BrowserManager::retire_deferred_tab_textures(bool force) {
+    if (deferred_texture_destroys_.empty()) {
+        return;
     }
 
-    tab->texture_id = k_invalid_texture_id;
+    std::erase_if(
+        deferred_texture_destroys_,
+        [this, force](DeferredTextureDestroy& pending) {
+            if (!force &&
+                frame_index_ < pending.queued_frame + kDeferredTextureDestroyFrames) {
+                return false;
+            }
+            browser_upload_executor_.wait_idle(pending.image.upload_receipt);
+            return true;
+        });
 }
 
 ImTextureID BrowserManager::create_browser_texture(int width, int height) {
