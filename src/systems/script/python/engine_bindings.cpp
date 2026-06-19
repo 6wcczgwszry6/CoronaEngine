@@ -41,6 +41,8 @@ void BindAll(nanobind::module_& m) {
     nb::class_<Geometry>(m, "Geometry")
         .def(nb::init<const std::string&>(), nb::arg("model_path"),
              "Create a Geometry from a model file path")
+        .def_static("from_image", &Geometry::from_image, nb::arg("image_path"),
+                    "Create a Geometry as a textured quad (UI plane) from an image file")
         .def("set_position", &Geometry::set_position, nb::arg("position"),
              "Set local position [x, y, z]")
         .def("set_rotation", &Geometry::set_rotation, nb::arg("euler"),

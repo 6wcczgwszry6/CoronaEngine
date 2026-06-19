@@ -212,6 +212,12 @@
             >
               🎵 多媒体
             </button>
+            <button
+              class="block w-full px-3 py-1.5 text-xs text-[#e0e0e0] hover:bg-[#545454] text-left"
+              @click.stop="HandleUiImageImport"
+            >
+              🖼 UI图片
+            </button>
           </div>
         </div>
         <button
@@ -1682,6 +1688,56 @@ const HandleFileImport = async () => {
     }
   } catch (e) {
     logError('File import failed', e);
+  } finally {
+    try {
+      await appService.callDockFunction('', 'hideLoading', []);
+    } catch (e) {
+      // 忽略关闭加载条失败
+    }
+  }
+};
+
+const HandleUiImageImport = async () => {
+  // 导入一张图片，自动创建一个带该图为纹理的 quad（光场 UI 平面），默认作为 UI。
+  if (typeof window.cefQuery === 'undefined') {
+    alert('错误：window.cefQuery 未定义！CEF bridge 未初始化。');
+    return;
+  }
+
+  ShowModelDropdown.value = false;
+  if (!currentSceneName.value) {
+    logWarn('UI image import aborted: no active scene');
+    return;
+  }
+  try {
+    await appService.callDockFunction('', 'showLoading', ['加载中', '请稍候...', 0]);
+  } catch (e) {
+    // showLoading 失败不阻塞主流程
+  }
+  try {
+    const result = await projectService.importResourceFileByDialog(currentSceneName.value, 'ui_image');
+    const payload = result?.data ?? result;
+    const status = payload?.status;
+    if (result?.success === false || status === 'error') {
+      logError('UI image import failed', payload?.message || result?.error || 'unknown error');
+      return;
+    }
+    if (status === 'canceled') {
+      return;
+    }
+    const actor = payload?.actor;
+    if (actor && actor.name) {
+      await addActorToList(actor);
+      try {
+        await appService.callDockFunction('', 'updateLoading', ['导入完成', 100]);
+      } catch (e) {
+        // 忽略加载条更新失败
+      }
+    } else {
+      logWarn('UI image import returned without actor payload', payload);
+    }
+  } catch (e) {
+    logError('UI image import failed', e);
   } finally {
     try {
       await appService.callDockFunction('', 'hideLoading', []);

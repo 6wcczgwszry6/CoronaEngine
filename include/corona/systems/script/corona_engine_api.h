@@ -30,8 +30,13 @@ class Geometry {
 
     Geometry(const Geometry&) = delete;
     Geometry& operator=(const Geometry&) = delete;
-    Geometry(Geometry&&) noexcept = default;
-    Geometry& operator=(Geometry&&) noexcept = default;
+    Geometry(Geometry&& other) noexcept;
+    Geometry& operator=(Geometry&& other) noexcept;
+
+    /// 从图片文件创建一个带贴图的 quad（两个三角形）几何，用作 UI 平面。
+    /// 与普通模型几何不同：不经 Resource::Scene，程序化生成顶点并直接把图片作为
+    /// albedo texture 上传。失败时返回一个所有 handle 为 0 的空 Geometry。
+    [[nodiscard]] static Geometry from_image(const std::string& image_path);
 
     void set_position(const std::array<float, 3>& pos);
     void set_rotation(const std::array<float, 3>& euler);
@@ -48,6 +53,9 @@ class Geometry {
     friend class Mechanics;
     friend class Optics;
     friend class Acoustics;
+
+    /// 空几何（所有 handle 为 0）。仅供 from_image 等静态工厂内部使用。
+    Geometry() = default;
 
    protected:
     [[nodiscard]] std::uintptr_t get_handle() const;

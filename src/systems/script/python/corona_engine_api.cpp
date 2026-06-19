@@ -24,6 +24,94 @@
 namespace {
 std::atomic<void*> g_default_surface{nullptr};
 
+// 把一个已导入的图片资源（Resource::Image）同步上传为一张可采样的 HardwareImage。
+// 复用模型加载里 Geometry::Geometry 的图片转换逻辑（压缩分支 + 1/3/4 通道→RGBA8_SRGB），
+// 但做成单图、自包含的同步上传（内部完成 commit + waitForDeferredResources），
+// 供 from_image() 等「程序化几何 + 图片贴图」路径复用，避免重复维护转换代码。
+// 成功返回 true 并写入 out；失败返回 false（out 保持不变，调用方应回退占位纹理）。
+[[nodiscard]] bool upload_image_to_texture(Corona::Resource::TResourceID image_id,
+                                           HardwareImage& out) {
+    using namespace Corona;
+    if (image_id == 0) {
+        return false;
+    }
+    auto texture_data =
+        Resource::ResourceManager::get_instance().acquire_read<Resource::Image>(image_id);
+    if (!texture_data) {
+        CFW_LOG_WARNING("[upload_image_to_texture] acquire_read<Image> failed for id={}", image_id);
+        return false;
+    }
+    const int tex_width = texture_data->get_width();
+    const int tex_height = texture_data->get_height();
+    const int tex_channels = texture_data->get_channels();
+
+    HardwareImageCreateInfo create_info{};
+    create_info.arrayLayers = 1;
+    create_info.mipLevels = 1;
+    create_info.usage = ImageUsage::SampledImage;
+
+    // staging 数据必须存活到 copyFrom + commit 完成。
+    std::vector<unsigned char> staging;
+    const unsigned char* data_ptr = nullptr;
+
+    if (texture_data->is_compressed()) {
+        const auto& compressed = texture_data->get_compressed_data();
+        create_info.width = tex_width;
+        create_info.height = tex_height;
+        if (compressed.format == Resource::CompressedData::Format::BC1) {
+            create_info.format = ImageFormat::BC1_RGB_SRGB;
+        } else if (compressed.format == Resource::CompressedData::Format::BC3) {
+            create_info.format = ImageFormat::BC3_RGBA_SRGB;
+        } else if (compressed.format == Resource::CompressedData::Format::ASTC_4x4) {
+            create_info.format = ImageFormat::ASTC_4x4_SRGB;
+        } else {
+            CFW_LOG_WARNING("[upload_image_to_texture] Unsupported compressed format");
+            return false;
+        }
+        staging.assign(compressed.data.begin(), compressed.data.end());
+        data_ptr = staging.data();
+    } else {
+        unsigned char* src_data = texture_data->get_data();
+        if (src_data == nullptr || tex_width <= 0 || tex_height <= 0 || tex_channels <= 0) {
+            CFW_LOG_WARNING("[upload_image_to_texture] invalid image data ({}x{}, channels={})",
+                            tex_width, tex_height, tex_channels);
+            return false;
+        }
+        create_info.width = tex_width;
+        create_info.height = tex_height;
+        create_info.format = ImageFormat::RGBA8_SRGB;
+        const size_t pixel_count = static_cast<size_t>(tex_width) * tex_height;
+        staging.resize(pixel_count * 4);
+        if (tex_channels == 4) {
+            std::copy(src_data, src_data + pixel_count * 4, staging.begin());
+        } else if (tex_channels == 3) {
+            for (size_t i = 0; i < pixel_count; ++i) {
+                staging[i * 4 + 0] = src_data[i * 3 + 0];
+                staging[i * 4 + 1] = src_data[i * 3 + 1];
+                staging[i * 4 + 2] = src_data[i * 3 + 2];
+                staging[i * 4 + 3] = 255;
+            }
+        } else if (tex_channels == 1) {
+            for (size_t i = 0; i < pixel_count; ++i) {
+                staging[i * 4 + 0] = src_data[i];
+                staging[i * 4 + 1] = src_data[i];
+                staging[i * 4 + 2] = src_data[i];
+                staging[i * 4 + 3] = 255;
+            }
+        } else {
+            CFW_LOG_WARNING("[upload_image_to_texture] Unsupported channel count: {}", tex_channels);
+            return false;
+        }
+        data_ptr = staging.data();
+    }
+
+    out = HardwareImage(create_info);
+    HardwareExecutor executor;
+    executor << out.copyFrom(data_ptr) << executor.commit();
+    executor.waitForDeferredResources();
+    return true;
+}
+
 std::uintptr_t resolve_camera_handle(std::uintptr_t camera_handle) {
     if (camera_handle != 0) {
         return camera_handle;
@@ -817,6 +905,118 @@ Corona::API::Geometry::~Geometry() {
     if (model_resource_handle_ != 0) {
         SharedDataHub::instance().model_resource_storage().deallocate(model_resource_handle_);
     }
+}
+
+Corona::API::Geometry::Geometry(Corona::API::Geometry&& other) noexcept
+    : handle_(other.handle_),
+      transform_handle_(other.transform_handle_),
+      model_resource_handle_(other.model_resource_handle_) {
+    // 置空源对象，避免移动后两个对象的析构函数重复 deallocate 同一 handle。
+    other.handle_ = 0;
+    other.transform_handle_ = 0;
+    other.model_resource_handle_ = 0;
+}
+
+Corona::API::Geometry& Corona::API::Geometry::operator=(Corona::API::Geometry&& other) noexcept {
+    if (this != &other) {
+        if (handle_ != 0) {
+            SharedDataHub::instance().geometry_storage().deallocate(handle_);
+        }
+        if (transform_handle_ != 0) {
+            SharedDataHub::instance().model_transform_storage().deallocate(transform_handle_);
+        }
+        if (model_resource_handle_ != 0) {
+            SharedDataHub::instance().model_resource_storage().deallocate(model_resource_handle_);
+        }
+        handle_ = other.handle_;
+        transform_handle_ = other.transform_handle_;
+        model_resource_handle_ = other.model_resource_handle_;
+        other.handle_ = 0;
+        other.transform_handle_ = 0;
+        other.model_resource_handle_ = 0;
+    }
+    return *this;
+}
+
+Corona::API::Geometry Corona::API::Geometry::from_image(const std::string& image_path) {
+    using namespace Corona;
+    Geometry geo;  // 默认构造：所有 handle 为 0，失败时直接返回空 Geometry。
+
+    auto image_id =
+        Resource::ResourceManager::get_instance().import_sync(Utils::utf8_to_path(image_path));
+    if (image_id == 0) {
+        CFW_LOG_CRITICAL("[Geometry::from_image] Failed to import image: {}", image_path);
+        return geo;
+    }
+
+    // 读取图片尺寸以按宽高比构造不拉伸的 quad（高度归一为 1，宽度 = aspect）。
+    float aspect = 1.0f;
+    if (auto image = Resource::ResourceManager::get_instance().acquire_read<Resource::Image>(image_id)) {
+        const int w = image->get_width();
+        const int h = image->get_height();
+        if (w > 0 && h > 0) {
+            aspect = static_cast<float>(w) / static_cast<float>(h);
+        }
+    }
+
+    // 程序化 quad（两个三角形）。XY 平面、法线 +Z、UV 满铺 [0,1]。
+    // 顶点格式严格匹配 Resource::Vertex（position/normal/tex_coords，#pragma pack(1)），
+    // 以便与现有 vertexBuffer / vertexStorageBuffer 及 Vision adapter 兼容。
+    const float hw = aspect * 0.5f;
+    const float hh = 0.5f;
+    const std::vector<Resource::Vertex> vertices = {
+        {{-hw, -hh, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},  // 左下
+        {{ hw, -hh, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},  // 右下
+        {{ hw,  hh, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},  // 右上
+        {{-hw,  hh, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},  // 左上
+    };
+    const std::vector<std::uint16_t> indices = {0, 1, 2, 0, 2, 3};
+
+    MeshDevice dev{};
+    dev.vertexBuffer = HardwareBuffer(vertices, BufferUsage::VertexBuffer);
+    dev.indexBuffer = HardwareBuffer(indices, BufferUsage::IndexBuffer);
+    dev.vertexStorageBuffer = HardwareBuffer(vertices, BufferUsage::StorageBuffer);
+    dev.indexStorageBuffer = HardwareBuffer(indices, BufferUsage::StorageBuffer);
+    dev.materialIndex = 0;
+    dev.materialColor = {1.0f, 1.0f, 1.0f, 1.0f};
+
+    if (!upload_image_to_texture(image_id, dev.textureBuffer)) {
+        // 上传失败：回退 1x1 白占位，几何仍可显示（白底），避免整体导入失败。
+        HardwareImageCreateInfo placeholder_info{};
+        placeholder_info.width = 1;
+        placeholder_info.height = 1;
+        placeholder_info.format = ImageFormat::RGBA8_SRGB;
+        placeholder_info.usage = ImageUsage::SampledImage;
+        placeholder_info.arrayLayers = 1;
+        placeholder_info.mipLevels = 1;
+        static const unsigned char white_pixel[4] = {255, 255, 255, 255};
+        dev.textureBuffer = HardwareImage(placeholder_info);
+        HardwareExecutor executor;
+        executor << dev.textureBuffer.copyFrom(white_pixel) << executor.commit();
+        executor.waitForDeferredResources();
+        CFW_LOG_WARNING("[Geometry::from_image] texture upload failed, using white placeholder: {}",
+                        image_path);
+    }
+
+    std::vector<MeshDevice> mesh_devices;
+    mesh_devices.emplace_back(std::move(dev));
+
+    // 图片无 Resource::Scene，model_resource_handle 保持 0：Vision adapter 会回退到
+    // 从 vertexBuffer 拷回 CPU mesh 的路径（load_cpu_mesh_from_buffers），无需 model resource。
+    geo.transform_handle_ = SharedDataHub::instance().model_transform_storage().allocate();
+    geo.handle_ = SharedDataHub::instance().geometry_storage().allocate();
+    if (auto handle = SharedDataHub::instance().geometry_storage().acquire_write(geo.handle_)) {
+        handle->transform_handle = geo.transform_handle_;
+        handle->model_resource_handle = 0;
+        handle->mesh_handles = std::move(mesh_devices);
+    } else {
+        CFW_LOG_CRITICAL("[Geometry::from_image] Failed to acquire write access to geometry storage");
+        SharedDataHub::instance().model_transform_storage().deallocate(geo.transform_handle_);
+        SharedDataHub::instance().geometry_storage().deallocate(geo.handle_);
+        geo.handle_ = 0;
+        geo.transform_handle_ = 0;
+    }
+    return geo;
 }
 
 void Corona::API::Geometry::set_position(const std::array<float, 3>& pos) {

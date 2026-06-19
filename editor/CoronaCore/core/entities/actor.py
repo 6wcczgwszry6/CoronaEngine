@@ -92,8 +92,10 @@ class Actor:
             self.final_model_path = data_path
             if not self.actor_guid:
                 self.actor_guid = f"actor-{uuid.uuid4().hex}"
-            self._geometry = Geometry(self.final_model_path)
+            self._geometry = self._build_geometry(self.final_model_path)
             self._create_and_add_profile()
+            if self.actor_type == "ui_image":
+                self._apply_ui_image_defaults()
 
         if not self.actor_guid:
             self.actor_guid = f"actor-{uuid.uuid4().hex}"
@@ -205,7 +207,7 @@ class Actor:
             raise FileNotFoundError(f"模型文件不存在: {self.final_model_path}")
 
         # 创建几何体
-        self._geometry = Geometry(self.final_model_path)
+        self._geometry = self._build_geometry(self.final_model_path)
 
         # 从actor_data读取变换参数
         self.set_position(actor_data["geometry"]["position"], True)
@@ -214,6 +216,35 @@ class Actor:
 
         self._create_and_add_profile()
         self._apply_mechanics_data(actor_data.get("mechanics", {}))
+
+    def _build_geometry(self, path: str):
+        """根据 actor_type 选择几何构造方式：
+        ui_image → 程序化贴图 quad（Geometry.from_image）；其余 → 普通模型 Geometry。"""
+        if self.actor_type == "ui_image" and hasattr(Geometry, "from_image"):
+            return Geometry.from_image(path)
+        return Geometry(path)
+
+    def _apply_ui_image_defaults(self):
+        """UI 图片平面的默认表现：作为 UI（跟随相机、屏幕正中、大小适中），
+        不受光照、不参与物理。位置/大小用户后续可手动调整。"""
+        # 默认作为 UI：follow_camera=True（其 setter 也会自动关闭物理）。
+        try:
+            self.set_follow_camera(True)
+        except Exception:
+            pass
+        # UI 不受场景光照影响。
+        if hasattr(self, "_optics") and self._optics is not None:
+            try:
+                self._optics.set_lighting_enabled(False)
+            except Exception:
+                pass
+        # 默认放在相机正前方居中、大小适中（正交视口高度为 2.0，平面本地高度 1.0，
+        # scale 0.8 → 约占屏幕高度的 40%，不铺满也不太小）。
+        try:
+            self.set_position([0.0, 0.0, 0.0], True)
+            self.set_scale([0.8, 0.8, 0.8], True)
+        except Exception:
+            pass
 
     def _create_and_add_profile(self):
         """创建组件、配置集合并添加到actor"""

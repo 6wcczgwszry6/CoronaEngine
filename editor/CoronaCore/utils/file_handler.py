@@ -11,6 +11,7 @@ _FILE_TYPE_CONFIG = {
     "actor": ("选择单位文件", "单位文件 (*.actor)"),
     "script": ("选择脚本文件", "脚本文件 (*.py)"),
     "terrain": ("选择地形文件", "地形文件 (*.terrain)"),
+    "ui_image": ("选择UI图片", "图片文件 (*.png *.jpg *.jpeg *.bmp *.tga *.webp)"),
 }
 
 class FileHandler:
