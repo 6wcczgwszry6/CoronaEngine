@@ -133,6 +133,7 @@ public:
     virtual void clear_geometry() noexcept;
     virtual void prepare_geometry() noexcept;
     virtual void update_geometry() noexcept;
+    void upload_scene_bindless_array() noexcept;
     virtual void prepare_render_graph() noexcept {}
     virtual void compile() noexcept {
         activate_global_context();

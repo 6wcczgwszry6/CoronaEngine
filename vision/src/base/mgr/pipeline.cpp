@@ -71,6 +71,7 @@ bool Pipeline::create_view_context(uint64_t view_id, uint2 resolution) noexcept 
         scene_view_.sensor()->update_resolution(resolution);
         scene_view_.sensor()->update_device_data();
         renderer().prepare(scene_view_);
+        upload_scene_bindless_array();
         frame_buffer()->prepare_view_texture();
         sync_output_denoise();
         compile();
@@ -131,6 +132,7 @@ void Pipeline::rebuild_view_context_renderers() noexcept {
             continue;
         }
         renderer().prepare_lights();
+        upload_scene_bindless_array();
         compile();
         invalidate();
     }
@@ -252,6 +254,14 @@ void Pipeline::update_geometry() noexcept {
     scene_view_.update_geometry_instances();
     scene_view_.geometry().upload(stream());
     scene_view_.geometry().update_accel(stream());
+    scene_view_.geometry().upload_bindless_array(stream());
+}
+
+void Pipeline::upload_scene_bindless_array() noexcept {
+    activate_global_context();
+    if (!scene_view_.geometry().has_gpu_resource()) {
+        return;
+    }
     scene_view_.geometry().upload_bindless_array(stream());
 }
 

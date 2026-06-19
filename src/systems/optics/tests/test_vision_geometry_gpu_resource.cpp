@@ -50,6 +50,8 @@ void geometry_requires_explicit_command_stream_for_gpu_updates() {
                                  void (vision::Geometry::*)(vision::Stream&)>);
     static_assert(std::is_same_v<decltype(&vision::Geometry::upload_bindless_array),
                                  void (vision::Geometry::*)(vision::Stream&)>);
+    static_assert(std::is_same_v<decltype(&vision::Pipeline::upload_scene_bindless_array),
+                                 void (vision::Pipeline::*)() noexcept>);
 }
 
 void scene_tables_accept_explicit_scene_gpu_bindless() {

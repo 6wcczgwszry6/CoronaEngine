@@ -2265,6 +2265,8 @@ Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene(VisionPipelineRunti
         //   scene.prepare()         -> re-encode materials/sensor for the new scene
         //   prepare_geometry()      -> rebuild geometry device buffers + accel
         //   prepare_lights()        -> rebuild the light sampler's device buffers
+        //   upload_scene_bindless_array()
+        //                           -> publish scene-owned mesh/light/material handles
         //   upload_bindless_array() -> publish the new material texture handles
         //   compile()               -> recompile the integrator for the new
         //                              light/material/instance counts
@@ -2289,6 +2291,7 @@ Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene(VisionPipelineRunti
             runtime.scene_resource->mark_scene_gpu_transforms_uploaded();
         }
         pipeline->renderer().prepare_lights();
+        pipeline->upload_scene_bindless_array();
         pipeline->upload_bindless_array();
         pipeline->compile();
         pipeline->rebuild_view_context_renderers();
