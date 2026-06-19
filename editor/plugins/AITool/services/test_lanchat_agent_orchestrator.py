@@ -2228,6 +2228,9 @@ def test_worker_rejects_gm_clarification_from_non_host_role():
 
 
 def test_worker_syncs_plain_chat_history_to_coordinator_without_generation():
+    from plugins.AITool.cai_extensions.agent import agent_adapter
+
+    old_classify = agent_adapter.classify_intent
     scheduler = FakeScheduler()
     coordinator = InteractionCoordinator(scheduler=scheduler)
     trigger = _trigger("@小B 你觉得这些想法怎么整理？", "小B")
@@ -2278,7 +2281,11 @@ def test_worker_syncs_plain_chat_history_to_coordinator_without_generation():
         async_agent_execution=False,
     )
 
-    assert worker.process_once() is True
+    agent_adapter.classify_intent = lambda text: "compose"
+    try:
+        assert worker.process_once() is True
+    finally:
+        agent_adapter.classify_intent = old_classify
 
     plan = coordinator.active_plan_for_room("r1")
     assert plan is not None
@@ -2290,6 +2297,61 @@ def test_worker_syncs_plain_chat_history_to_coordinator_without_generation():
     assert engine.replies
     assert not any(item[3] == "action_status" for item in engine.system_messages)
     print("[OK] worker syncs plain chat history into Coordinator without triggering generation")
+
+
+def test_worker_syncs_only_scene_write_chat_to_coordinator_draft():
+    from plugins.AITool.cai_extensions.agent import agent_adapter
+
+    old_classify = agent_adapter.classify_intent
+    coordinator = InteractionCoordinator()
+    worker = LANChatAgentWorker(
+        corona_engine=FakeEngine([]),
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    def classify(text: str) -> str:
+        return "compose" if "设计" in str(text or "") else "chat"
+
+    agent_adapter.classify_intent = classify
+    try:
+        assert worker.sync_chat_message_to_coordinator({
+            "message_id": "scene-filter-chat-1",
+            "room_id": "r-scene-filter",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "text": "@小女孩 我想看你在大草原上跳舞",
+        }) is False
+        assert worker.sync_chat_message_to_coordinator({
+            "message_id": "scene-filter-chat-2",
+            "room_id": "r-scene-filter",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "text": "@‘",
+        }) is False
+        assert coordinator.active_plan_for_room("r-scene-filter") is None
+        assert worker.sync_chat_message_to_coordinator({
+            "message_id": "scene-filter-compose-1",
+            "room_id": "r-scene-filter",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "text": "帮我设计一个明亮可爱的卧室",
+        }) is True
+    finally:
+        agent_adapter.classify_intent = old_classify
+
+    plan = coordinator.active_plan_for_room("r-scene-filter")
+    assert plan is not None
+    assert len(plan.participants) == 1
+    assert plan.participants[0].text == "帮我设计一个明亮可爱的卧室"
+    print("[OK] worker syncs only scene-write chat into Coordinator draft")
 
 
 def test_worker_syncs_direct_plain_chat_as_runtime_intervention():
@@ -2530,6 +2592,9 @@ def test_worker_polls_native_plain_chat_queue_into_coordinator():
 
 
 def test_worker_polls_native_host_chat_as_host_message():
+    from plugins.AITool.cai_extensions.agent import agent_adapter
+
+    old_classify = agent_adapter.classify_intent
     coordinator = InteractionCoordinator(scheduler=FakeScheduler())
     native_message = {
         "message_id": "native-host-1",
@@ -2548,7 +2613,11 @@ def test_worker_polls_native_host_chat_as_host_message():
         async_agent_execution=False,
     )
 
-    assert worker.process_once() is True
+    agent_adapter.classify_intent = lambda text: "compose"
+    try:
+        assert worker.process_once() is True
+    finally:
+        agent_adapter.classify_intent = old_classify
     plan = coordinator.active_plan_for_room("r-native-host")
     assert plan is not None
     assert plan.host_id == "host-a"
@@ -2558,6 +2627,9 @@ def test_worker_polls_native_host_chat_as_host_message():
 
 
 def test_worker_does_not_starve_agent_trigger_behind_native_chat_queue():
+    from plugins.AITool.cai_extensions.agent import agent_adapter
+
+    old_classify = agent_adapter.classify_intent
     coordinator = InteractionCoordinator(scheduler=FakeScheduler())
     native_messages = [
         {
@@ -2581,7 +2653,11 @@ def test_worker_does_not_starve_agent_trigger_behind_native_chat_queue():
         async_agent_execution=False,
     )
 
-    assert worker.process_once() is True
+    agent_adapter.classify_intent = lambda text: "compose"
+    try:
+        assert worker.process_once() is True
+    finally:
+        agent_adapter.classify_intent = old_classify
     assert engine.replies
     assert len(engine.coordinator_messages) == 2
     plan = coordinator.active_plan_for_room("r-burst")
@@ -3249,6 +3325,7 @@ if __name__ == "__main__":
     test_worker_routes_gm_clarification_through_coordinator()
     test_worker_rejects_gm_clarification_from_non_host_role()
     test_worker_syncs_plain_chat_history_to_coordinator_without_generation()
+    test_worker_syncs_only_scene_write_chat_to_coordinator_draft()
     test_worker_syncs_direct_plain_chat_as_runtime_intervention()
     test_worker_syncs_plain_chat_without_message_id_once()
     test_worker_plain_chat_dedupe_cache_is_bounded()

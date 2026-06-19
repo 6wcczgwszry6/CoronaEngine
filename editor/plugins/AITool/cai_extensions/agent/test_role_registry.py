@@ -12,6 +12,7 @@ from cai_extensions.agent.role_registry import (  # noqa: E402
     inject_persona_voice,
     resolve_role_template,
 )
+from cai_extensions.agent import agent_adapter  # noqa: E402
 from cai_extensions.agent.agent_adapter import MasterAgent  # noqa: E402
 
 
@@ -81,6 +82,60 @@ def test_master_agent_can_build_role_compose_context():
     assert "SceneState, AABB, VLM and user intent have priority" in ctx
 
 
+def test_structured_scene_intent_keeps_agent_performance_request_as_chat():
+    old_structured = getattr(agent_adapter, "_llm_classify_scene_intent", None)
+    old_legacy = agent_adapter._llm_classify_intent
+
+    def structured(_text, timeout=20.0):
+        return {
+            "intent": "compose",
+            "scene_write_intent": False,
+            "target": "agent_self",
+            "confidence": 0.95,
+            "reason": "User asks the addressed agent to perform, not to write the 3D scene.",
+        }
+
+    agent_adapter._llm_classify_scene_intent = structured
+    agent_adapter._llm_classify_intent = lambda _text, timeout=20.0: "compose"
+    try:
+        intent = agent_adapter.classify_intent("@小女孩 我想看你在大草原上跳舞")
+    finally:
+        if old_structured is None:
+            delattr(agent_adapter, "_llm_classify_scene_intent")
+        else:
+            agent_adapter._llm_classify_scene_intent = old_structured
+        agent_adapter._llm_classify_intent = old_legacy
+
+    assert intent == "chat"
+
+
+def test_structured_scene_intent_allows_explicit_scene_write_request():
+    old_structured = getattr(agent_adapter, "_llm_classify_scene_intent", None)
+    old_legacy = agent_adapter._llm_classify_intent
+
+    def structured(_text, timeout=20.0):
+        return {
+            "intent": "compose",
+            "scene_write_intent": True,
+            "target": "scene_world",
+            "confidence": 0.9,
+            "reason": "User asks to create a 3D scene.",
+        }
+
+    agent_adapter._llm_classify_scene_intent = structured
+    agent_adapter._llm_classify_intent = lambda _text, timeout=20.0: "chat"
+    try:
+        intent = agent_adapter.classify_intent("生成一个小女孩在大草原跳舞的场景")
+    finally:
+        if old_structured is None:
+            delattr(agent_adapter, "_llm_classify_scene_intent")
+        else:
+            agent_adapter._llm_classify_scene_intent = old_structured
+        agent_adapter._llm_classify_intent = old_legacy
+
+    assert intent == "compose"
+
+
 def test_fast_rotation_converts_degrees_to_radians():
     agent = MasterAgent()
     actor = FakeRotActor()
@@ -120,6 +175,8 @@ if __name__ == "__main__":
     test_role_voice_injection_keeps_persona_visible()
     test_custom_role_is_supported_without_overwriting_builtin()
     test_master_agent_can_build_role_compose_context()
+    test_structured_scene_intent_keeps_agent_performance_request_as_chat()
+    test_structured_scene_intent_allows_explicit_scene_write_request()
     test_fast_rotation_converts_degrees_to_radians()
     test_boundary_alias_prefers_system_boundary_over_entrance_actor()
     test_boundary_fast_edit_uses_low_risk_boundary_adjustment()

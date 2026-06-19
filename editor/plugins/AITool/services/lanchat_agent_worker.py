@@ -209,6 +209,8 @@ class LANChatAgentWorker:
                 and not coordinator._is_post_generation_adjustment(text)
             ):
                 return False
+            if not self._should_sync_chat_to_coordinator(coordinator, room_id, text, source=source):
+                return False
             coordinator.ingest_message(ChatMessage(
                 room_id=room_id,
                 sender_id=str(message.get("sender_id") or message.get("from") or ""),
@@ -225,6 +227,43 @@ class LANChatAgentWorker:
             return False
         finally:
             self._remember_coordinator_seen_message_id(dedupe_key)
+
+    def _should_sync_chat_to_coordinator(
+        self,
+        coordinator: InteractionCoordinator,
+        room_id: str,
+        text: str,
+        *,
+        source: str,
+    ) -> bool:
+        active = coordinator.active_plan_for_room(room_id)
+        if active is not None and active.status in {
+            SeedPlanStatus.CONFIRMED,
+            SeedPlanStatus.EXECUTING,
+            SeedPlanStatus.PAUSED,
+        }:
+            return True
+        if active is not None and coordinator._is_status_query(text):
+            return True
+        if active is not None and active.status == SeedPlanStatus.COMPLETED:
+            return (
+                coordinator._intent_type(text) == "add"
+                or coordinator._is_post_generation_adjustment(text)
+            )
+        try:
+            from plugins.AITool.cai_extensions.agent.agent_adapter import classify_intent
+        except Exception:  # noqa: BLE001
+            try:
+                from cai_extensions.agent.agent_adapter import classify_intent  # type: ignore
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("Failed to import scene intent classifier for %s: %s", source, exc)
+                return False
+        try:
+            intent = classify_intent(text)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to classify LANChat chat message for Coordinator sync: %s", exc)
+            return False
+        return intent in {"compose", "edit"}
 
     def process_once(self) -> bool:
         if not self._has_engine_api():
