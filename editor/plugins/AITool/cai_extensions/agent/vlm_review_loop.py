@@ -97,6 +97,10 @@ class VlmReviewReport:
     confidence_threshold: float = 0.55
     status: str = "completed"                              # completed | disabled | skipped | unavailable
     reason: str = ""
+    checkpoint_type: str = "final_consistency_review"       # structure_review | high_risk_object_review | final_consistency_review
+    reviewed_targets: List[Dict[str, Any]] = field(default_factory=list)
+    advisory_items: List[Dict[str, Any]] = field(default_factory=list)
+    proposal_items: List[Dict[str, Any]] = field(default_factory=list)
 
     def actionable(self) -> List[VlmAdvice]:
         """返回有可执行修正建议的条目（供 FinalReview 选择性采纳）。"""
@@ -138,6 +142,18 @@ class VlmReviewReport:
         return "\n".join(lines)
 
 
+def _advice_item(advice: VlmAdvice, *, checkpoint_type: str, proposal: bool) -> Dict[str, Any]:
+    return {
+        "actor_id": _safe_user_text(advice.actor_id, fallback=""),
+        "checkpoint_type": checkpoint_type,
+        "overall": _safe_user_text(advice.overall, fallback="WARN"),
+        "issues": [_safe_user_text(item) for item in list(advice.issues or []) if _safe_user_text(item)],
+        "fix_suggestion": _safe_user_text(advice.fix_suggestion),
+        "confidence": _coerce_confidence(advice.confidence),
+        "proposal": bool(proposal),
+    }
+
+
 def review_models_async(
     targets: List[Dict[str, Any]],
     *,
@@ -145,6 +161,7 @@ def review_models_async(
     review_fn: Callable[[str, str, str], Dict[str, Any]],
     engine_gate: Any = None,
     screenshot_timeout: float = 5.0,
+    checkpoint_type: str = "final_consistency_review",
 ) -> VlmReviewReport:
     """对一批模型跑 VLM 外回路审查，产出 advisory 报告（绝不改场景、绝不阻塞）。
 
@@ -156,7 +173,7 @@ def review_models_async(
 
     任一目标的截图/审查失败 → 记 skipped/timed_out，**不中断整批、不抛**。
     """
-    report = VlmReviewReport()
+    report = VlmReviewReport(checkpoint_type=str(checkpoint_type or "final_consistency_review"))
     if not targets:
         return report
 
@@ -167,6 +184,12 @@ def review_models_async(
         model_name = tgt.get("model_name") or actor_id
         model_type = tgt.get("model_type") or model_name
         out_dir = tgt.get("output_dir") or f"_vlm_review/{actor_id}"
+        report.reviewed_targets.append({
+            "actor_id": _safe_user_text(actor_id),
+            "model_name": _safe_user_text(model_name),
+            "model_type": _safe_user_text(model_type),
+            "checkpoint_type": report.checkpoint_type,
+        })
 
         # 1. 截图（经 EngineWriteGate 收口；capture_fn 自带 timeout+skip 兜底卡死源）
         try:
@@ -207,6 +230,15 @@ def review_models_async(
             confidence=_coerce_confidence(raw.get("confidence")),
         )
         report.advices.append(advice)
+        item = _advice_item(
+            advice,
+            checkpoint_type=report.checkpoint_type,
+            proposal=advice in report.actionable(),
+        )
+        if item["proposal"]:
+            report.proposal_items.append(item)
+        elif advice.overall != "PASS" or advice.issues or advice.fix_suggestion:
+            report.advisory_items.append(item)
 
     logger.info(
         "[VlmReviewLoop] 完成 — 审查 %d, 跳过 %d, 超时 %d, 可执行建议 %d",

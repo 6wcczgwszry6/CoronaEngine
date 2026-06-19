@@ -47,6 +47,40 @@ class BatchResourcePlan:
         }
 
 
+@dataclass
+class VlmCheckpointPolicy:
+    """Select small, visible VLM checkpoints without making VLM a hard gate."""
+
+    structure_done: bool = False
+
+    def select(
+        self,
+        *,
+        phase: str,
+        imported_this_batch: List[str],
+        imported_so_far: List[str],
+        max_targets: int,
+        final: bool = False,
+    ) -> Tuple[str, List[str]]:
+        if max_targets <= 0:
+            return "", []
+        if final:
+            return "final_consistency_review", _prioritize_vlm_targets(imported_so_far, max_targets)
+
+        batch_targets = [str(item or "").strip() for item in imported_this_batch if str(item or "").strip()]
+        if not batch_targets:
+            return "", []
+
+        if not self.structure_done:
+            self.structure_done = True
+            return "structure_review", _prioritize_vlm_targets(imported_so_far or batch_targets, max_targets)
+
+        high_risk = _prioritize_high_risk_vlm_targets(batch_targets, max_targets)
+        if high_risk:
+            return "high_risk_object_review", high_risk
+        return "", []
+
+
 def run_progressive_workflow(
     composer: Any,  # SceneComposer 实例
     prompt: str,
@@ -215,6 +249,81 @@ def run_progressive_workflow(
             logger.debug("[ProgressiveWorkflow] scene design contract skipped: %s", exc)
             return None
 
+    vlm_checkpoint_policy = VlmCheckpointPolicy()
+    vlm_imported_so_far: List[str] = []
+    vlm_checkpoint_reports: List[Any] = []
+    vlm_checkpoint_max_targets = _vlm_max_targets()
+
+    def run_vlm_checkpoint(
+        imported_this_batch: List[str],
+        batch_id: str,
+        *,
+        phase: str = "",
+        final: bool = False,
+    ) -> Optional[Any]:
+        if vlm_checkpoint_max_targets <= 0:
+            return None
+        checkpoint_type, targets = vlm_checkpoint_policy.select(
+            phase=phase,
+            imported_this_batch=imported_this_batch,
+            imported_so_far=vlm_imported_so_far,
+            max_targets=vlm_checkpoint_max_targets,
+            final=final,
+        )
+        if not checkpoint_type or not targets:
+            return None
+        _progress_sink(_vlm_checkpoint_user_message(checkpoint_type, targets, "start"))
+        report = _run_vlm_advisory_review(
+            targets,
+            engine_gate,
+            composer=composer,
+            checkpoint_type=checkpoint_type,
+        )
+        setattr(report, "checkpoint_type", checkpoint_type)
+        vlm_checkpoint_reports.append(report)
+        _emit_vlm_review_results(
+            report,
+            interaction_coordinator=interaction_coordinator,
+            room_id=coordinator_room_id,
+            plan_id=plan_id,
+            session_id=session_id,
+            batch_id=batch_id,
+        )
+        _progress_sink(_vlm_checkpoint_user_message(checkpoint_type, targets, "done", report=report))
+        return report
+
+    def post_import_repair_review_and_vlm(imported_ids: List[str], batch_id: str) -> None:
+        _post_import_repair_and_review(
+            imported_ids,
+            batch_id,
+            scene_layout,
+            engine_gate,
+            zone_aabbs=_collect_zone_aabbs(getattr(composer, "zone_tree", None)),
+            door_aabbs=_collect_door_clearance_aabbs(getattr(composer, "zone_tree", None)),
+            issue_sink=session.pending_tasks,
+            interaction_coordinator=interaction_coordinator,
+            room_id=coordinator_room_id,
+            plan_id=plan_id,
+            session_id=session_id,
+        )
+        for actor_id in imported_ids:
+            if actor_id and actor_id not in vlm_imported_so_far:
+                vlm_imported_so_far.append(actor_id)
+        phase = ""
+        for item in (phase_metadata or {}).values():
+            if item.get("batch_id") == batch_id:
+                phase = str(item.get("phase") or "")
+                break
+        run_vlm_checkpoint(imported_ids, batch_id, phase=phase)
+
+    def pre_final_vlm_checkpoint() -> None:
+        run_vlm_checkpoint(
+            [],
+            f"r{getattr(session, 'current_round', 0)}_FINAL",
+            phase="FINAL",
+            final=True,
+        )
+
     # 4. Importer（调 incremental_import）
     from ..flows.scene_composition_workflow.helpers import get_tool, parse_import_result
     import_tool = get_tool("import_model")
@@ -259,24 +368,13 @@ def run_progressive_workflow(
         importer=importer,
         viewport_sampler=viewport_sampler,
         reasonable_provider=reasonable_provider,
-        post_import_hook=lambda imported_ids, _batch_id: _post_import_repair_and_review(
-            imported_ids,
-            _batch_id,
-            scene_layout,
-            engine_gate,
-            zone_aabbs=_collect_zone_aabbs(getattr(composer, "zone_tree", None)),
-            door_aabbs=_collect_door_clearance_aabbs(getattr(composer, "zone_tree", None)),
-            issue_sink=session.pending_tasks,
-            interaction_coordinator=interaction_coordinator,
-            room_id=coordinator_room_id,
-            plan_id=plan_id,
-            session_id=session_id,
-        ),
+        post_import_hook=post_import_repair_review_and_vlm,
         phase_sequence=phase_sequence,
         phase_metadata=phase_metadata,
         runtime_mode_provider=runtime_mode_provider,
         final_adjustment_provider=final_adjustment_provider,
         scene_design_contract_provider=scene_design_contract_provider,
+        pre_final_review_hook=pre_final_vlm_checkpoint,
     )
 
     # 8. 返回（格式与 _run_original_workflow 一致）
@@ -288,18 +386,23 @@ def run_progressive_workflow(
         if hasattr(final_report, "to_user_text")
         else None
     )
-    vlm_report = _run_vlm_advisory_review(imported, engine_gate, composer=composer)
-    _emit_vlm_review_results(
-        vlm_report,
-        interaction_coordinator=interaction_coordinator,
-        room_id=coordinator_room_id,
-        plan_id=plan_id,
-        session_id=session_id,
+    vlm_report = (
+        vlm_checkpoint_reports[-1]
+        if vlm_checkpoint_reports
+        else _run_vlm_advisory_review(imported, engine_gate, composer=composer)
     )
+    if not vlm_checkpoint_reports:
+        _emit_vlm_review_results(
+            vlm_report,
+            interaction_coordinator=interaction_coordinator,
+            room_id=coordinator_room_id,
+            plan_id=plan_id,
+            session_id=session_id,
+        )
     vlm_review_text = (
-        vlm_report.to_user_text()
-        if hasattr(vlm_report, "to_user_text")
-        else None
+        _vlm_checkpoint_reports_user_text(vlm_checkpoint_reports)
+        if vlm_checkpoint_reports
+        else (vlm_report.to_user_text() if hasattr(vlm_report, "to_user_text") else None)
     )
     final_report_text = _merge_final_and_vlm_review_text(final_report_text, vlm_review_text)
     return {
@@ -327,6 +430,7 @@ def run_progressive_workflow(
         "paused_mode": prog_result.get("paused_mode"),
         "paused_before_phase": prog_result.get("paused_before_phase"),
         "vlm_review": vlm_report,
+        "vlm_checkpoint_reports": vlm_checkpoint_reports,
         "vlm_review_text": vlm_review_text,
         "vlm_review_skipped": list(getattr(vlm_report, "skipped", []) or []),
         "vlm_review_timed_out": list(getattr(vlm_report, "timed_out", []) or []),
@@ -1171,7 +1275,13 @@ def _generate_post_shell_framework(composer: Any) -> None:
         logger.warning("[ProgressiveWorkflow] post-shell framework skipped: %s", exc)
 
 
-def _run_vlm_advisory_review(imported: List[str], engine_gate: Any, composer: Any = None) -> Any:
+def _run_vlm_advisory_review(
+    imported: List[str],
+    engine_gate: Any,
+    composer: Any = None,
+    *,
+    checkpoint_type: str = "final_consistency_review",
+) -> Any:
     """Run the optional VLM outer loop; failures are advisory-only."""
     try:
         from .model_reviewer import _capture_single_model, _vlm_review_model
@@ -1192,9 +1302,12 @@ def _run_vlm_advisory_review(imported: List[str], engine_gate: Any, composer: An
     target_provider = getattr(composer, "vlm_target_provider", None) if composer is not None else None
     if callable(target_provider):
         try:
-            provided = target_provider(imported, max_targets=max_targets)
+            provided = target_provider(imported, max_targets=max_targets, checkpoint_type=checkpoint_type)
         except TypeError:
-            provided = target_provider(imported)
+            try:
+                provided = target_provider(imported, max_targets=max_targets)
+            except TypeError:
+                provided = target_provider(imported)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ProgressiveWorkflow] VLM target provider failed, using imported actors: %s", exc)
             provided = None
@@ -1225,6 +1338,7 @@ def _run_vlm_advisory_review(imported: List[str], engine_gate: Any, composer: An
             capture_fn=capture_fn,
             review_fn=review_fn,
             engine_gate=engine_gate,
+            checkpoint_type=checkpoint_type,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ProgressiveWorkflow] VLM 外回路异常，已跳过: %s", exc)
@@ -1237,6 +1351,18 @@ _VLM_TARGET_PRIORITY_RULES: tuple[tuple[int, tuple[str, ...]], ...] = (
     (2, ("主摊", "摊位", "焦点", "地标", "招牌", "market", "stall", "landmark", "sign")),
     (3, ("雕像", "天使", "大型", "巨型", "动物", "小狗", "狗", "statue", "angel", "animal", "dog")),
     (4, ("灯笼", "灯光", "火盆", "休息区", "长椅", "lantern", "light", "bench", "rest")),
+)
+
+
+_VLM_HIGH_RISK_KEYWORDS: tuple[str, ...] = (
+    "__terrain_boundary", "_terrain_boundary", "terrain_boundary",
+    "地形边界", "边界", "围栏", "栅栏",
+    "入口", "拱门", "门楼", "主街", "通道",
+    "雕像", "天使", "大型", "巨型", "动物", "小狗", "狗",
+    "灯笼", "灯光", "火盆", "桥", "吊灯",
+    "entrance", "gate", "arch", "path", "boundary", "fence",
+    "statue", "angel", "animal", "dog", "large", "giant",
+    "lantern", "light", "bridge",
 )
 
 
@@ -1270,6 +1396,100 @@ def _prioritize_vlm_targets(imported: List[Any], max_targets: int) -> List[str]:
         return 99, names.index(name)
 
     return sorted(names, key=_rank)[:max_targets]
+
+
+def _prioritize_high_risk_vlm_targets(imported: List[Any], max_targets: int) -> List[str]:
+    candidates = []
+    for item in imported or []:
+        if isinstance(item, dict):
+            raw = item.get("actor_id") or item.get("name") or item.get("model_name") or ""
+        else:
+            raw = item
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        lower = name.lower()
+        if any(keyword.lower() in lower for keyword in _VLM_HIGH_RISK_KEYWORDS):
+            candidates.append(name)
+    return _prioritize_vlm_targets(candidates, max_targets)
+
+
+def _vlm_checkpoint_user_message(checkpoint_type: str, targets: List[str], status: str, report: Any = None) -> str:
+    label = {
+        "structure_review": "结构外观审查",
+        "high_risk_object_review": "新增高风险物体审查",
+        "final_consistency_review": "最终一致性审查",
+    }.get(str(checkpoint_type or ""), "外观审查")
+    names = "、".join(str(item) for item in targets[:4] if str(item).strip())
+    if len(targets) > 4:
+        names += f" 等 {len(targets)} 个"
+    if status == "start":
+        return f"VLM {label}中：正在检查{names or '关键对象'}，结果只会生成建议，不会直接改场景。"
+    if report is not None and str(getattr(report, "status", "") or "") in {"disabled", "skipped", "unavailable"}:
+        reason = str(getattr(report, "reason", "") or "审查条件不满足")
+        return f"VLM {label}未完成：{reason}。"
+    proposal_count = len(getattr(report, "proposal_items", []) or []) if report is not None else 0
+    advisory_count = len(getattr(report, "advisory_items", []) or []) if report is not None else 0
+    if proposal_count:
+        return f"VLM {label}完成：发现 {proposal_count} 条可确认调整建议，等待房主/GM 确认。"
+    if advisory_count:
+        return f"VLM {label}完成：发现 {advisory_count} 条低风险/低置信提示，已记录但不自动执行。"
+    return f"VLM {label}完成：未发现明显语义问题。"
+
+
+def _vlm_checkpoint_reports_user_text(reports: List[Any]) -> str:
+    label_map = {
+        "structure_review": "第一批结构审查",
+        "high_risk_object_review": "中间批高风险审查",
+        "final_consistency_review": "最终一致性审查",
+    }
+
+    def _safe(value: Any, fallback: str = "") -> str:
+        text = str(value or "").strip()
+        if not text:
+            return fallback
+        lower = text.lower()
+        markers = ("prompt", "provider", "job_id", "session_id", "api_key", "token", "vlm_raw", "screenshot")
+        cut_points = [lower.find(marker) for marker in markers if lower.find(marker) >= 0]
+        if cut_points:
+            text = text[:min(cut_points)].strip(" \t\r\n,;；。")
+        return text or fallback
+
+    lines: List[str] = []
+    for report in reports or []:
+        checkpoint_type = str(getattr(report, "checkpoint_type", "") or "final_consistency_review")
+        label = label_map.get(checkpoint_type, "外观审查")
+        status = str(getattr(report, "status", "") or "completed")
+        reviewed_targets = list(getattr(report, "reviewed_targets", []) or [])
+        names: List[str] = []
+        for item in reviewed_targets:
+            if isinstance(item, dict):
+                name = _safe(item.get("actor_id") or item.get("model_name"))
+            else:
+                name = _safe(item)
+            if name and name not in names:
+                names.append(name)
+        target_text = "、".join(names[:4]) if names else "关键对象"
+        if len(names) > 4:
+            target_text += f" 等 {len(names)} 个"
+
+        proposal_count = len(getattr(report, "proposal_items", []) or [])
+        advisory_count = len(getattr(report, "advisory_items", []) or [])
+        skipped_count = len(getattr(report, "skipped", []) or [])
+        timed_out_count = len(getattr(report, "timed_out", []) or [])
+        reason = _safe(getattr(report, "reason", ""))
+
+        if status in {"disabled", "skipped", "unavailable"} and reason:
+            lines.append(f"{label}：未完成（{reason}）。")
+        elif proposal_count:
+            lines.append(f"{label}：已审查 {target_text}；生成 {proposal_count} 条待确认调整建议。")
+        elif advisory_count:
+            lines.append(f"{label}：已审查 {target_text}；记录 {advisory_count} 条提示，不自动执行。")
+        elif skipped_count or timed_out_count:
+            lines.append(f"{label}：已审查 {target_text}；跳过 {skipped_count} 个，超时 {timed_out_count} 个。")
+        else:
+            lines.append(f"{label}：已审查 {target_text}，未发现明显语义问题。")
+    return "；".join(lines)
 
 
 def _vlm_max_targets() -> int:
@@ -1577,6 +1797,7 @@ def _emit_vlm_review_results(
     room_id: str,
     plan_id: str,
     session_id: str = "",
+    batch_id: str = "",
 ) -> None:
     if vlm_report is None or interaction_coordinator is None or not plan_id:
         return
@@ -1588,6 +1809,10 @@ def _emit_vlm_review_results(
     advices = list(getattr(vlm_report, "advices", []) or [])
     skipped = list(getattr(vlm_report, "skipped", []) or [])
     timed_out = list(getattr(vlm_report, "timed_out", []) or [])
+    checkpoint_type = str(getattr(vlm_report, "checkpoint_type", "") or "final_consistency_review")
+    reviewed_targets = list(getattr(vlm_report, "reviewed_targets", []) or [])
+    advisory_items = list(getattr(vlm_report, "advisory_items", []) or [])
+    proposal_items = list(getattr(vlm_report, "proposal_items", []) or [])
     actionable = []
     try:
         actionable = list(vlm_report.actionable())
@@ -1602,11 +1827,17 @@ def _emit_vlm_review_results(
                 "room_id": room_id or "default",
                 "plan_id": plan_id,
                 "session_id": session_id,
+                "batch_id": batch_id,
                 "review_type": "vlm",
                 "passed": False,
                 "findings": [f"VLM 审查未完整完成：跳过 {len(skipped)} 个，超时 {len(timed_out)} 个"],
                 "severity": "warn",
-                "metadata": {"skipped": skipped, "timed_out": timed_out},
+                "metadata": {
+                    "checkpoint_type": checkpoint_type,
+                    "reviewed_targets": reviewed_targets,
+                    "skipped": skipped,
+                    "timed_out": timed_out,
+                },
             })
         except Exception as exc:  # noqa: BLE001
             logger.debug("[ProgressiveWorkflow] VLM skipped review result skipped: %s", exc)
@@ -1625,6 +1856,7 @@ def _emit_vlm_review_results(
                 "room_id": room_id or "default",
                 "plan_id": plan_id,
                 "session_id": session_id,
+                "batch_id": batch_id,
                 "actor_id": actor_id,
                 "review_type": "vlm",
                 "passed": False,
@@ -1632,6 +1864,7 @@ def _emit_vlm_review_results(
                 "finding_details": [{
                     "actor_id": actor_id,
                     "review_type": "vlm",
+                    "checkpoint_type": checkpoint_type,
                     "issue_type": str(getattr(advice, "overall", "") or "WARN"),
                     "action": "apply_vlm_advice",
                     "target_hint": actor_id,
@@ -1643,7 +1876,12 @@ def _emit_vlm_review_results(
                 }],
                 "severity": "fail" if str(getattr(advice, "overall", "")).upper() == "FAIL" else "warn",
                 "metadata": {
+                    "checkpoint_type": checkpoint_type,
+                    "reviewed_targets": reviewed_targets,
+                    "advisory_items": advisory_items,
+                    "proposal_items": proposal_items,
                     "overall": str(getattr(advice, "overall", "") or ""),
+                    "confidence": float(getattr(advice, "confidence", 0.0) or 0.0),
                     "position_correction": position,
                     "rotation_correction": rotation,
                     "scale_correction": scale,

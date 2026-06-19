@@ -1971,6 +1971,10 @@ class InteractionCoordinator:
         decision = service.classify(text, allow_llm=False)
         if decision.intent == "status_query" or self._is_status_query(text):
             return "status_query"
+        if any(word in text for word in self._WRONG_PLAN_WORDS):
+            return "wrong_plan"
+        if any(word in text for word in self._REPAIR_WORDS):
+            return "repair"
         if decision.intent == "intervention_delete":
             if any(word in text for word in ("换成", "替换", "改成", "调整")):
                 return "modify"
@@ -1983,10 +1987,6 @@ class InteractionCoordinator:
             if any(word in text for word in self._STYLE_WORDS):
                 return "style_adjust"
             return "modify"
-        if any(word in text for word in self._WRONG_PLAN_WORDS):
-            return "wrong_plan"
-        if any(word in text for word in self._REPAIR_WORDS):
-            return "repair"
         if any(word in text for word in self._ADD_WORDS):
             return "add"
         if any(word in text for word in self._REMOVE_WORDS):
