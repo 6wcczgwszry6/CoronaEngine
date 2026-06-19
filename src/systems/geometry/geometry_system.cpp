@@ -83,7 +83,13 @@ void GeometrySystem::update() {
     process_async_tasks();
 
     // ---- 动态减面管线 ----
-    if (impl_->simplification_cfg.enabled) {
+    // 用 shared_lock 快照 simplification_cfg，与 set_simplification_config 的 unique_lock 互斥
+    bool run_simplification = false;
+    {
+        std::shared_lock lock(impl_->mtx);
+        run_simplification = impl_->simplification_cfg.enabled;
+    }
+    if (run_simplification) {
         upload_lod_from_scene_data();
     }
 
@@ -449,6 +455,9 @@ void GeometrySystem::shutdown() {
 
     impl_->scenes.clear();
     impl_->offline_actors.clear();
+
+    // 显式释放共享占位纹理，确保在 GPU device 仍存活时析构 HardwareImage
+    impl_->shared_placeholder_texture.reset();
 }
 
 // ============================================================================
@@ -760,10 +769,9 @@ void GeometrySystem::rebuild_actor_gpu_resources(std::uintptr_t actor, std::uint
 
             // ---- 创建共享的 1x1 白色占位纹理 ----
             // 用于无纹理的 mesh，确保渲染管线始终有纹理可采样
-            // static → 全局唯一，所有无纹理 mesh 共享同一张（节省显存）
-            // lambda 立即执行 → 程序启动时构造一次
-            static HardwareImage shared_placeholder_texture = []() {
-                // 构造 1×1 像素、RGBA8 sRGB 格式的纹理创建信息
+            // 生命周期由 Impl::shared_placeholder_texture 管理，shutdown() 中显式释放
+            // 避免 static 局部变量在 GPU device 析构后才析构导致 crash
+            if (!impl_->shared_placeholder_texture) {
                 HardwareImageCreateInfo placeholder_info{};
                 placeholder_info.width        = 1;                       // 1 像素宽
                 placeholder_info.height       = 1;                       // 1 像素高
@@ -773,12 +781,12 @@ void GeometrySystem::rebuild_actor_gpu_resources(std::uintptr_t actor, std::uint
                 placeholder_info.mipLevels    = 1;                       // 无 mipmap
 
                 static const unsigned char white_pixel[4] = {255, 255, 255, 255};  // 不透明白色
-                HardwareImage texture(placeholder_info);               // 创建 GPU 纹理对象
+                impl_->shared_placeholder_texture = std::make_unique<HardwareImage>(placeholder_info);
                 HardwareExecutor temp_executor;                        // 临时命令执行器
                 // 将白色像素数据拷贝到 GPU 纹理，提交执行
-                temp_executor << texture.copyFrom(white_pixel) << temp_executor.commit();
-                return texture;  // 返回创建好的纹理（move 语义）
-            }();
+                temp_executor << impl_->shared_placeholder_texture->copyFrom(white_pixel)
+                              << temp_executor.commit();
+            }
 
             // ---- 第一阶段：遍历所有 mesh，创建 GPU 缓冲 ----
             for (std::uint32_t mesh_idx = 0; mesh_idx < scene.data.meshes.size(); ++mesh_idx) {
@@ -917,7 +925,7 @@ void GeometrySystem::rebuild_actor_gpu_resources(std::uintptr_t actor, std::uint
                 // ---- 无纹理的兜底：使用共享白色占位纹理 ----
                 // 确保每个 mesh 都有纹理句柄，避免渲染时空指针
                 if (!texture_created) {
-                    dev.textureBuffer = shared_placeholder_texture;  // 拷贝共享纹理句柄
+                    dev.textureBuffer = *impl_->shared_placeholder_texture;  // 拷贝共享纹理句柄
                 }
 
                 // ---- 将构建好的 MeshDevice 加入数组 ----
@@ -1045,6 +1053,20 @@ void GeometrySystem::process_async_tasks() {
     }
 
     for (const auto& task : completed_loads) {
+        // 检查加载是否已被 on_unload_requested 取消（状态被改为非 Loading）
+        {
+            std::shared_lock lock(impl_->mtx);
+            auto scene_it = impl_->scenes.find(task.scene_handle);
+            if (scene_it != impl_->scenes.end()) {
+                auto state_it = scene_it->second.actor_load_states.find(task.actor);
+                if (state_it == scene_it->second.actor_load_states.end() ||
+                    state_it->second != ActorLoadState::Loading) {
+                    CFW_LOG_DEBUG("[SceneSystem] Actor {} load completed but was cancelled — skipping", task.actor);
+                    continue;
+                }
+            }
+        }
+
         if (task.rid != Resource::IResource::INVALID_UID) {
             // 重建 GPU 资源（mesh_handles + 纹理），恢复 model_resource_handle
             // 必须在发布 ActorLoadCompletedEvent 之前完成，
@@ -1110,11 +1132,10 @@ void GeometrySystem::process_async_tasks() {
                                (unsigned long)task.actor, retry_count + 1);
 
                 if (++retry_count >= 10) {
-                    CFW_LOG_ERROR("[SceneSystem] Actor 0x%lx unload failed after 10 retries, resource is permanently in use",
+                    CFW_LOG_ERROR("[SceneSystem] Actor 0x%lx unload failed after 10 retries, resource is permanently in use — reverting to Loaded",
                                  (unsigned long)task.actor);
                     scene_state.unload_retry_counts.erase(task.actor);
-                    // 不强制设为Loaded，保留Unloading状态，由业务层处理
-                    // 同时不发布任何事件，避免状态混乱
+                    scene_state.actor_load_states[task.actor] = ActorLoadState::Loaded;
                 } else {
                     auto actor_read = actor_storage.try_acquire_read(task.actor);
                     if (actor_read.valid()) {
@@ -1199,7 +1220,11 @@ void GeometrySystem::on_unload_requested(const Events::ActorUnloadRequestedEvent
             scene_state.actor_load_states[e.actor] = ActorLoadState::Loaded;
             CFW_LOG_NOTICE("[GeometrySystem] Cancelled pending unload for actor {}", e.actor);
         }
-
+        if (scene_state.loading_tasks.count(e.actor)) {
+            // 加载进行中 — 将状态设为 Unloaded，加载完成时 process_async_tasks 检测到非 Loading 状态会跳过
+            scene_state.actor_load_states[e.actor] = ActorLoadState::Unloaded;
+            CFW_LOG_NOTICE("[GeometrySystem] Unload requested during load for actor {} — cancelling load", e.actor);
+        }
         return;
     }
 
@@ -1231,10 +1256,12 @@ void GeometrySystem::on_unload_requested(const Events::ActorUnloadRequestedEvent
 // ============================================================================
 
 void GeometrySystem::set_simplification_config(const MeshSimplificationConfig& cfg) {
+    std::unique_lock lock(impl_->mtx);
     impl_->simplification_cfg = cfg;
 }
 
 const MeshSimplificationConfig& GeometrySystem::get_simplification_config() const {
+    std::shared_lock lock(impl_->mtx);
     return impl_->simplification_cfg;
 }
 
@@ -1336,7 +1363,15 @@ const LODMeshBuffers* GeometrySystem::resolve_lod_buffers(
 // ============================================================================
 
 void GeometrySystem::upload_lod_from_scene_data() {
-    if (!impl_->simplification_cfg.auto_on_load) return;
+    // 快照 simplification_cfg，与 set_simplification_config 同步
+    bool auto_on_load;
+    int max_lod_levels;
+    {
+        std::shared_lock lock(impl_->mtx);
+        auto_on_load = impl_->simplification_cfg.auto_on_load;
+        max_lod_levels = impl_->simplification_cfg.max_lod_levels;
+    }
+    if (!auto_on_load) return;
 
     auto& resource_manager = Resource::ResourceManager::get_instance();
     auto& hub = SharedDataHub::instance();
@@ -1357,12 +1392,12 @@ void GeometrySystem::upload_lod_from_scene_data() {
         for (uint32_t mesh_idx = 0; mesh_idx < static_cast<uint32_t>(geom_dev.mesh_handles.size()); ++mesh_idx) {
             uint64_t lod_key = Impl::make_lod_key(geom_handle, mesh_idx);
 
-            // 已有缓存且模型未变更则跳过（model_resource_handle 比较防止 slot 复用）
+            // 已有缓存且模型未变更则跳过（model_id 比较防止 slot 复用）
             {
                 std::shared_lock lock(impl_->lod_cache_mutex);
                 auto cache_it = impl_->lod_cache.find(lod_key);
                 if (cache_it != impl_->lod_cache.end()
-                    && cache_it->second.model_resource_handle == geom_dev.model_resource_handle)
+                    && cache_it->second.model_id == model_id)
                     continue;
             }
 
@@ -1378,7 +1413,7 @@ void GeometrySystem::upload_lod_from_scene_data() {
 
             // 创建缓存条目
             Impl::LODCacheEntry entry;
-            entry.model_resource_handle = geom_dev.model_resource_handle;
+            entry.model_id = model_id;
             auto& mesh_dev = geom_dev.mesh_handles[mesh_idx];
 
             // LOD 0：复用现有的 GPU 缓冲
@@ -1393,7 +1428,7 @@ void GeometrySystem::upload_lod_from_scene_data() {
             entry.levels.push_back(std::move(lod0));
 
             // LOD 1..N：从导入时 meshoptimizer 生成的数据创建 GPU 缓冲
-            for (size_t lod_idx = 0; lod_idx < mesh.lod_levels.size() && lod_idx < static_cast<size_t>(impl_->simplification_cfg.max_lod_levels - 1); ++lod_idx) {
+            for (size_t lod_idx = 0; lod_idx < mesh.lod_levels.size() && lod_idx < static_cast<size_t>(max_lod_levels - 1); ++lod_idx) {
                 auto& lod_data = mesh.lod_levels[lod_idx];
                 if (lod_data.vertices.empty() || lod_data.indices.empty()) continue;
 

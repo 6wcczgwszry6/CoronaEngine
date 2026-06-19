@@ -104,12 +104,16 @@ struct GeometrySystem::Impl {
     // ========================================
     struct LODCacheEntry {
         std::vector<LODMeshBuffers> levels;
-        std::uintptr_t model_resource_handle = 0;  // 用于检测模型变更（slot 复用）
+        std::uint64_t model_id = 0;  // 用于检测模型变更（比地址指针可靠，不受 slot 复用影响）
     };
 
     MeshSimplificationConfig           simplification_cfg;
     mutable std::shared_mutex          lod_cache_mutex;
     std::unordered_map<uint64_t, LODCacheEntry> lod_cache;
+
+    // 共享占位纹理：所有无纹理 mesh 共用，生命周期与 Impl 一致
+    // 使用 unique_ptr 避免 static 局部变量在 GPU device 析构后才析构
+    std::unique_ptr<HardwareImage>      shared_placeholder_texture;
 
     [[nodiscard]] static uint64_t make_lod_key(std::uintptr_t geometry_handle,
                                                uint32_t       mesh_index) {
