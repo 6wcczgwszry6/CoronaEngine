@@ -1,5 +1,5 @@
 <template>
-  <div class="lanchat-panel relative flex flex-col h-full text-[15px] text-gray-100">
+  <div class="lanchat-panel relative flex flex-col h-full text-base text-gray-100">
     <!-- 未进房：大厅（开房 / 加入） -->
     <div v-if="!s.inRoom" class="flex-1 overflow-y-auto p-4 space-y-4">
       <div class="space-y-2">
@@ -137,21 +137,32 @@
     <!-- 已进房：聊天界面 -->
     <div v-else class="flex flex-col h-full">
       <!-- 房间信息条 -->
-      <div class="flex items-center justify-between px-3 py-2 bg-[#3a3a3a]/70 text-sm">
-        <span>
-          房间 <b>{{ s.mode === 'single' ? '单人聊天室' : s.room }}</b>
-          <template v-if="s.role === 'host' && s.mode === 'multi'"> · {{ s.ip }}:{{ s.port }}</template>
-        </span>
-        <button
-          class="px-2 py-0.5 rounded bg-[#84A65B]/80 text-white mr-1"
-          title="添加 AI 助手"
-          @click="showAddAgent = true"
-        >
-          ＋助手
-        </button>
-        <button class="px-2 py-0.5 rounded bg-red-500/80 text-white" @click="onLeave">
-          {{ s.role === 'host' ? '关闭房间' : '离开' }}
-        </button>
+      <div class="flex items-center justify-between gap-3 px-3 py-2.5 bg-[#343434] text-sm">
+        <div class="min-w-0">
+          <div class="text-[13px] text-gray-400">{{ s.mode === 'single' ? '本地单人协作' : '局域网协作' }}</div>
+          <div class="truncate text-base font-semibold text-gray-100">
+            {{ s.mode === 'single' ? '单人聊天室' : s.room }}
+            <template v-if="s.role === 'host' && s.mode === 'multi'"> · {{ s.ip }}:{{ s.port }}</template>
+          </div>
+        </div>
+        <div class="flex shrink-0 items-center gap-2">
+          <span
+            class="rounded-full px-2 py-1 text-[12px]"
+            :class="s.connection === 'connected' ? 'bg-[#84A65B]/20 text-[#B8D58D]' : 'bg-yellow-500/20 text-yellow-300'"
+          >
+            {{ roomStatusLabel }}
+          </span>
+          <button
+            class="px-2.5 py-1.5 rounded bg-[#84A65B]/85 text-white text-sm"
+            title="添加 AI 助手"
+            @click="showAddAgent = true"
+          >
+            ＋助手
+          </button>
+          <button class="px-2.5 py-1.5 rounded bg-red-500/80 text-white text-sm" @click="onLeave">
+            {{ s.role === 'host' ? '关闭' : '离开' }}
+          </button>
+        </div>
       </div>
 
       <!-- 重连提示条 -->
@@ -165,39 +176,61 @@
 
       <div
         v-if="currentDisclosure"
-        class="px-3 py-2.5 border-b border-gray-700 bg-[#242424] text-sm"
+        class="px-3 py-3 border-b border-gray-700 bg-[#222722] text-sm"
       >
         <div class="flex items-center justify-between gap-2">
           <div class="min-w-0">
-            <div class="text-[#B8D58D] font-medium truncate">{{ currentDisclosure.stage || '协作状态' }}</div>
-            <div class="text-gray-300 leading-relaxed mt-0.5">{{ currentDisclosure.public_message }}</div>
+            <div class="flex items-center gap-2">
+              <span
+                v-if="isWaitingDisclosure"
+                class="inline-block h-2.5 w-2.5 rounded-full bg-[#B8D58D] animate-pulse"
+              ></span>
+              <span class="text-[#B8D58D] font-semibold truncate">{{ currentDisclosure.stage || '协作状态' }}</span>
+              <span v-if="disclosureAgeText" class="shrink-0 text-[12px] text-gray-500">{{ disclosureAgeText }}</span>
+            </div>
+            <div class="text-[15px] text-gray-200 leading-relaxed mt-1">{{ currentDisclosure.public_message }}</div>
             <div v-if="resourceDiagnosisText" class="text-gray-400 leading-relaxed mt-1">
               {{ resourceDiagnosisText }}
             </div>
+            <div v-if="waitHintText" class="mt-1.5 text-[13px] text-gray-400">
+              {{ waitHintText }}
+            </div>
           </div>
-          <div class="shrink-0 text-gray-300 tabular-nums">{{ currentDisclosure.progress }}%</div>
+          <div class="shrink-0 text-right">
+            <div class="text-lg font-semibold text-gray-100 tabular-nums">{{ currentDisclosure.progress }}%</div>
+            <div class="text-[11px] text-gray-500">{{ isWaitingDisclosure ? '处理中' : '状态' }}</div>
+          </div>
         </div>
-        <div class="mt-2 h-1.5 rounded bg-[#3a3a3a] overflow-hidden">
+        <div class="mt-2.5 h-2 rounded bg-[#3a3a3a] overflow-hidden">
           <div
-            class="h-full bg-[#84A65B]"
+            class="h-full bg-[#84A65B] transition-all duration-300"
             :style="{ width: `${currentDisclosure.progress}%` }"
           ></div>
         </div>
-        <div v-if="currentDisclosure.available_actions.length" class="mt-2 flex flex-wrap gap-1">
+        <div v-if="waitSteps.length" class="mt-2.5 grid grid-cols-5 gap-1">
+          <div
+            v-for="step in waitSteps"
+            :key="step.key"
+            class="h-1.5 rounded-full"
+            :class="step.active ? 'bg-[#84A65B]' : (step.done ? 'bg-[#84A65B]/45' : 'bg-[#3a3a3a]')"
+            :title="step.label"
+          ></div>
+        </div>
+        <div v-if="currentDisclosure.available_actions.length" class="mt-2.5 flex flex-wrap gap-1.5">
           <template
             v-for="action in currentDisclosure.available_actions"
             :key="action"
           >
             <button
               v-if="isDisclosureActionSendable(action)"
-              class="px-2 py-0.5 rounded bg-[#3a3a3a] text-gray-200 hover:bg-[#84A65B]/70"
+              class="px-2.5 py-1 rounded bg-[#3a3a3a] text-gray-200 hover:bg-[#84A65B]/70"
               @click="sendDisclosureAction(action)"
             >
               {{ disclosureActionLabel(action) }}
             </button>
             <span
               v-else
-              class="px-2 py-0.5 rounded bg-[#3a3a3a] text-gray-200"
+              class="px-2.5 py-1 rounded bg-[#3a3a3a] text-gray-200"
             >
               {{ disclosureActionLabel(action) }}
             </span>
@@ -205,16 +238,16 @@
         </div>
         <div
           v-if="currentDisclosure.requires_confirmation && currentDisclosure.proposal_id && !lanchat.isProposalHandled(currentDisclosure.proposal_id) && s.role === 'host'"
-          class="mt-2 flex gap-1"
+          class="mt-2.5 flex gap-2"
         >
           <button
-            class="px-2 py-0.5 rounded bg-[#84A65B] text-white text-[11px]"
+            class="px-3 py-1.5 rounded bg-[#84A65B] text-white text-sm"
             @click="sendGmDecision(currentDisclosure.proposal_id, 'confirm')"
           >
             确认
           </button>
           <button
-            class="px-2 py-0.5 rounded bg-[#3a3a3a] text-gray-100 text-[11px]"
+            class="px-3 py-1.5 rounded bg-[#3a3a3a] text-gray-100 text-sm"
             @click="sendGmDecision(currentDisclosure.proposal_id, 'reject')"
           >
             拒绝
@@ -241,16 +274,16 @@
       <div class="flex flex-1 min-h-0">
         <!-- 消息区 -->
         <div class="flex-1 flex flex-col min-h-0">
-          <div ref="msgRef" class="flex-1 overflow-y-auto p-4 space-y-3">
+          <div ref="msgRef" class="flex-1 overflow-y-auto p-4 space-y-3.5">
             <div
               v-for="(m, idx) in s.messages"
               :key="idx"
               class="flex flex-col"
               :class="m.self ? 'items-end' : 'items-start'"
             >
-              <span class="text-xs text-gray-400 mb-0.5">{{ m.from }}</span>
+              <span class="text-[12px] text-gray-400 mb-1">{{ m.from }}</span>
               <div
-                class="px-3 py-2 rounded-lg text-[15px] leading-relaxed max-w-[86%] break-words"
+                class="px-3.5 py-2.5 rounded-lg text-base leading-relaxed max-w-[88%] whitespace-pre-wrap break-words"
                 :class="m.self ? 'bg-[#84A65B] text-white' : 'bg-[#E8E8E8]/90 text-gray-800'"
               >
                 {{ m.text }}
@@ -273,9 +306,31 @@
                 </button>
               </div>
             </div>
+            <div
+              v-if="showAiReplySpinner"
+              class="flex flex-col items-start"
+            >
+              <span class="text-[12px] text-gray-400 mb-1">{{ pendingReplyTarget }}</span>
+              <div class="max-w-[88%] rounded-lg bg-[#E8E8E8]/90 px-3.5 py-2.5 text-gray-800 shadow-sm">
+                <div class="flex items-center gap-2 text-[15px] leading-relaxed">
+                  <span class="inline-block h-4 w-4 rounded-full border-2 border-gray-400 border-t-[#84A65B] animate-spin"></span>
+                  <span>{{ pendingReplyText }}</span>
+                  <span class="typing-dots text-gray-500"><span>.</span><span>.</span><span>.</span></span>
+                </div>
+                <div v-if="pendingReplyHint" class="mt-1 text-[12px] text-gray-500">
+                  {{ pendingReplyHint }}
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- 输入区 -->
+          <div
+            v-if="isWaitingDisclosure"
+            class="px-3 py-2 border-t border-gray-700 bg-[#242424] text-[13px] text-gray-400"
+          >
+            {{ inputAssistText }}
+          </div>
           <div class="p-3 border-t border-gray-600 flex gap-2">
             <div class="relative flex-1">
               <input
@@ -283,7 +338,7 @@
                 v-model="draft"
                 :class="inputCls"
                 :disabled="s.connection === 'reconnecting'"
-                :placeholder="s.connection === 'reconnecting' ? '连接已断开' : '输入消息，回车发送'"
+                :placeholder="draftPlaceholder"
                 @input="onDraftInput"
                 @keydown="onDraftKeydown"
               />
@@ -304,7 +359,7 @@
               </div>
             </div>
             <button
-              class="px-4 rounded bg-[#84A65B] text-white text-[15px] disabled:opacity-50"
+              class="px-4 rounded bg-[#84A65B] text-white text-base disabled:opacity-50"
               :disabled="s.connection === 'reconnecting'"
               @click="onSend"
             >
@@ -314,7 +369,7 @@
         </div>
 
         <!-- 成员区 -->
-        <div class="w-32 border-l border-gray-600 py-2 overflow-y-auto">
+        <div class="w-36 border-l border-gray-600 py-2 overflow-y-auto">
         <MemberList
           :members="s.members"
           :agents="s.agents"
@@ -377,7 +432,7 @@
 </template>
 
 <script setup>
-import { reactive, ref, computed, nextTick, watch, onMounted } from 'vue';
+import { reactive, ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
 import lanchat from '../../../stores/lanchat.js';
 import {
   buildGmDecisionMessage,
@@ -397,6 +452,10 @@ const mentionCandidates = ref([]);
 const mentionActiveIndex = ref(0);
 const msgRef = ref(null);
 const draftInput = ref(null);
+const nowMs = ref(Date.now());
+const pendingReplyTarget = ref('AI 助手');
+const pendingReplySinceMs = ref(0);
+let waitClock = null;
 
 const roleTemplates = [
   {
@@ -468,6 +527,13 @@ const ERROR_TEXT = {
 const errorText = computed(() => ERROR_TEXT[s.error] || s.error || '');
 const isJoining = computed(() => lanchat.isJoining());
 const joinStatusText = computed(() => (s.connection === 'syncing' ? '正在同步房间…' : '正在连接房主…'));
+const roomStatusLabel = computed(() => {
+  if (s.connection === 'connected') return s.role === 'host' ? '房主在线' : '已连接';
+  if (s.connection === 'reconnecting') return '重连中';
+  if (s.connection === 'syncing') return '同步中';
+  if (s.connection === 'connecting') return '连接中';
+  return '未连接';
+});
 const currentDisclosure = computed(() => {
   const items = s.disclosures || [];
   if (!items.length) return null;
@@ -480,6 +546,91 @@ const currentDisclosure = computed(() => {
     if (pending) return pending;
   }
   return items[items.length - 1];
+});
+const isWaitingDisclosure = computed(() => {
+  const disclosure = currentDisclosure.value;
+  if (!disclosure) return false;
+  if (disclosure.requires_confirmation) return false;
+  const stage = String(disclosure.stage || '');
+  const message = String(disclosure.public_message || '');
+  const progress = Number(disclosure.progress || 0);
+  if (progress > 0 && progress < 100) return true;
+  return /排队|等待|生成|资源|图片|模型|检索|下载|导入|组装|审查|检查|可介入|执行中/.test(`${stage} ${message}`);
+});
+const disclosureAgeText = computed(() => {
+  const disclosure = currentDisclosure.value;
+  if (!disclosure?.created_at) return '';
+  const elapsed = Math.max(0, Math.floor((nowMs.value - Number(disclosure.created_at) * 1000) / 1000));
+  if (elapsed < 15) return '刚刚更新';
+  if (elapsed < 60) return `${elapsed} 秒前`;
+  const minutes = Math.floor(elapsed / 60);
+  if (minutes < 60) return `${minutes} 分钟前`;
+  return `${Math.floor(minutes / 60)} 小时前`;
+});
+const waitHintText = computed(() => {
+  if (!isWaitingDisclosure.value) return '';
+  const disclosure = currentDisclosure.value || {};
+  const stage = `${disclosure.stage || ''} ${disclosure.public_message || ''}`;
+  if (/排队|等待资源/.test(stage)) return '任务已进入队列，生成资源空出来后会自动继续。';
+  if (/图片/.test(stage)) return '图片阶段耗时可能较长，期间可以继续补充风格或新增物体。';
+  if (/模型|检索|下载/.test(stage)) return '模型资源正在准备，慢任务会分批完成并继续更新。';
+  if (/导入|组装/.test(stage)) return '正在把本批模型放入场景，建议等当前批次落地后再评价布局。';
+  if (/审查|检查|VLM/.test(stage)) return '正在做外观或摆放检查，结果只会形成建议，不会直接覆盖你的场景。';
+  if (/可介入/.test(stage)) return '现在可以补充“新增、调整、说明、问题”，系统会优先带入下一批。';
+  return '系统仍在处理；长耗时阶段会持续更新，未完成前不要反复确认同一任务。';
+});
+const waitSteps = computed(() => {
+  const disclosure = currentDisclosure.value;
+  if (!disclosure || !isWaitingDisclosure.value) return [];
+  const labels = [
+    { key: 'plan', label: '理解方案' },
+    { key: 'image', label: '图片/素材' },
+    { key: 'model', label: '模型生成' },
+    { key: 'import', label: '导入组装' },
+    { key: 'review', label: '检查收尾' },
+  ];
+  const progress = Number(disclosure.progress || 0);
+  const text = `${disclosure.stage || ''} ${disclosure.public_message || ''}`;
+  let activeIndex = Math.min(labels.length - 1, Math.max(0, Math.floor(progress / 25)));
+  if (/图片|素材|检索|下载/.test(text)) activeIndex = 1;
+  if (/模型/.test(text)) activeIndex = 2;
+  if (/导入|组装|摆放/.test(text)) activeIndex = 3;
+  if (/审查|检查|最终|完成/.test(text)) activeIndex = 4;
+  return labels.map((step, index) => ({
+    ...step,
+    active: index === activeIndex,
+    done: index < activeIndex,
+  }));
+});
+const inputAssistText = computed(() => {
+  if (!isWaitingDisclosure.value) return '';
+  if (s.role === 'host') {
+    return '等待期间可以继续输入：说明、调整、新增或 @GM 查询状态；系统会按批次吸收。';
+  }
+  return '等待期间可以继续补充想法；涉及执行和确认的操作会交给房主处理。';
+});
+const draftPlaceholder = computed(() => {
+  if (s.connection === 'reconnecting') return '连接已断开';
+  if (isWaitingDisclosure.value) return '生成中也可输入：新增一个… / 调整… / 问题…';
+  return '输入消息，回车发送';
+});
+const showAiReplySpinner = computed(() => {
+  if (!pendingReplySinceMs.value) return false;
+  if (isWaitingDisclosure.value) return false;
+  if (s.connection === 'reconnecting') return false;
+  return nowMs.value - pendingReplySinceMs.value < 90000;
+});
+const pendingReplyText = computed(() => {
+  const elapsed = Math.max(0, Math.floor((nowMs.value - pendingReplySinceMs.value) / 1000));
+  if (elapsed >= 20) return `${pendingReplyTarget.value} 仍在处理`;
+  if (elapsed >= 8) return `${pendingReplyTarget.value} 正在整理`;
+  return `${pendingReplyTarget.value} 正在思考`;
+});
+const pendingReplyHint = computed(() => {
+  if (!pendingReplySinceMs.value) return '';
+  const elapsed = Math.max(0, Math.floor((nowMs.value - pendingReplySinceMs.value) / 1000));
+  if (elapsed < 12) return '';
+  return '复杂方案或工具调用可能需要更久，你可以继续补充要求。';
 });
 const resourceDiagnosisText = computed(() => {
   if (!currentDisclosure.value || currentDisclosure.value.stage !== '资源调度') return '';
@@ -508,6 +659,17 @@ function formatHistoryTime(ts) {
 }
 
 onMounted(refreshHistoryRooms);
+
+onMounted(() => {
+  waitClock = window.setInterval(() => {
+    nowMs.value = Date.now();
+  }, 1000);
+});
+
+onBeforeUnmount(() => {
+  if (waitClock) window.clearInterval(waitClock);
+  waitClock = null;
+});
 
 async function onCreate() {
   if (roomMode.value === 'single') {
@@ -570,9 +732,37 @@ function onSend() {
   draft.value = '';
   mentionCandidates.value = [];
   mentionActiveIndex.value = 0;
+  startPendingReply(text);
   lanchat.sendMessage(text, messageOptionsForText(text)).catch((error) => {
+    clearPendingReply();
     console.warn('[LANChat] send message failed', error);
   });
+}
+
+function startPendingReply(text) {
+  const target = pendingTargetForText(text);
+  pendingReplyTarget.value = target || 'AI 助手';
+  pendingReplySinceMs.value = Date.now();
+}
+
+function clearPendingReply() {
+  pendingReplySinceMs.value = 0;
+}
+
+function pendingTargetForText(text) {
+  const trimmed = String(text || '').trim();
+  const mention = trimmed.match(/^@([^\s，,：:]+)/);
+  if (mention?.[1]) return mention[1];
+  if (s.mode === 'single' && s.agents.length === 1) return s.agents[0].name || 'AI 助手';
+  return 'AI 助手';
+}
+
+function isAiReplyMessage(message) {
+  if (!message || message.self) return false;
+  const from = String(message.from || '');
+  if (!from || from === '系统') return false;
+  if (from === s.nickname) return false;
+  return true;
 }
 
 function gmProposalId(message) {
@@ -800,6 +990,25 @@ function onDraftKeydown(e) {
 // 新消息自动滚到底
 watch(
   () => s.messages.length,
+  async () => {
+    const latest = s.messages[s.messages.length - 1];
+    if (isAiReplyMessage(latest)) clearPendingReply();
+    await nextTick();
+    if (msgRef.value) msgRef.value.scrollTop = msgRef.value.scrollHeight;
+  }
+);
+
+watch(
+  () => currentDisclosure.value?.event_id,
+  async () => {
+    if (currentDisclosure.value) clearPendingReply();
+    await nextTick();
+    if (msgRef.value) msgRef.value.scrollTop = msgRef.value.scrollHeight;
+  }
+);
+
+watch(
+  showAiReplySpinner,
   async () => {
     await nextTick();
     if (msgRef.value) msgRef.value.scrollTop = msgRef.value.scrollHeight;

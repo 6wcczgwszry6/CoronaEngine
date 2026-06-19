@@ -86,7 +86,7 @@ assertIncludes(roomPanel, 'a.name, isAgent: true', 'mention candidates must incl
 assertIncludes(roomPanel, ':peer-id="s.peerId"', 'MemberList must receive stable peerId');
 assertIncludes(roomPanel, 'text-[15px]', 'RoomPanel must keep readable 15px chat/input text for CEF validation');
 assertIncludes(roomPanel, 'leading-relaxed', 'RoomPanel message bubbles must keep readable line height');
-assertIncludes(roomPanel, 'w-32 border-l', 'RoomPanel member rail must be wide enough for readable names');
+assertIncludes(roomPanel, 'w-36 border-l', 'RoomPanel member rail must be wide enough for readable names');
 assertIncludes(roomPanel, 'isJoining', 'RoomPanel must render pending join state');
 assertIncludes(roomPanel, ':disabled="isJoining"', 'RoomPanel must disable join controls while pending');
 assertIncludes(roomPanel, 'JOIN_TIMEOUT', 'RoomPanel must display join timeout errors');
