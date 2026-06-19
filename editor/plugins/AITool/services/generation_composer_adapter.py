@@ -44,7 +44,12 @@ class SceneComposerJobRunner:
         if result.get("paused"):
             mode = str(result.get("paused_mode") or "PAUSED")
             phase = str(result.get("paused_before_phase") or "")
-            raise RuntimeError(f"generation paused before {phase or 'next phase'} ({mode})")
+            return {
+                "compose_result": result,
+                "paused": True,
+                "paused_mode": mode,
+                "paused_before_phase": phase,
+            }
         return {"compose_result": result}
 
     def stage_handlers(self) -> dict[str, Callable[[GenerationJob], Any]]:

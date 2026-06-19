@@ -350,13 +350,18 @@ class LANChatAgentWorker:
             from .agent_progress_context import agent_progress_sink
             from .lanchat_scene_runtime import get_lanchat_scene_runtime
 
-            quick_reply = get_lanchat_scene_runtime().record_busy_message(
-                agent_name=agent_name,
-                text=str(trigger.get("text") or ""),
-                source_user_id=str(trigger.get("sender_id") or ""),
+            is_gm_target = (
+                str(trigger.get("agent_id") or trigger.get("target_agent_id") or "").strip().lower() == "gm"
+                or str(trigger.get("agent_name") or "").strip().lower() in {"gm", "主持人", "裁判", "game master"}
             )
-            if quick_reply:
-                return bool(self._send_final_reply(agent_id, agent_name, quick_reply, trigger))
+            if not is_gm_target and str(trigger.get("message_kind") or "chat").strip().lower() in {"", "chat"}:
+                quick_reply = get_lanchat_scene_runtime().record_busy_message(
+                    agent_name=agent_name,
+                    text=str(trigger.get("text") or ""),
+                    source_user_id=str(trigger.get("sender_id") or ""),
+                )
+                if quick_reply:
+                    return bool(self._send_final_reply(agent_id, agent_name, quick_reply, trigger))
 
             if self._async_agent_execution and self._should_send_fast_ack(trigger):
                 _send_progress("已收到你的要求；如果当前正在生成，我会在下一阶段吸收这条调整。")

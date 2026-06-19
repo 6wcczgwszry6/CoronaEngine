@@ -798,6 +798,7 @@ class InteractionCoordinator:
         if scheduler_resume:
             payload["scheduler_resume"] = scheduler_resume
         if self._scheduler is not None and hasattr(self._scheduler, "submit"):
+            self._start_lanchat_runtime_compose(plan)
             submitted = self._scheduler.submit(payload)
             if isinstance(submitted, GenerationJobRef):
                 self._record_generation_ref_disclosure(plan, submitted)
@@ -1281,10 +1282,12 @@ class InteractionCoordinator:
         if status in {"done", "completed"}:
             plan.mark_completed()
             self._active_generation_session_by_plan.pop(plan_id, None)
+            self._end_lanchat_runtime_compose(plan)
             stage = "completed"
             message = "主生成任务已完成，可以继续追加生成或做最终调整。"
             event_type = "generation_completed"
         elif status in {"failed", "cancelled", "abandoned"}:
+            self._end_lanchat_runtime_compose(plan)
             stage = "failed" if status == "failed" else "cancelled"
             message = "生成任务已结束但未完成，请查看资源状态或重新发起。"
             event_type = "generation_terminal"
@@ -1325,6 +1328,23 @@ class InteractionCoordinator:
         if not incoming or not expected:
             return True
         return incoming == expected
+
+    def _start_lanchat_runtime_compose(self, plan: SeedPlan) -> None:
+        try:
+            from .lanchat_scene_runtime import get_lanchat_scene_runtime
+            get_lanchat_scene_runtime().start_compose(
+                plan.confirmed_by or plan.host_id or "host",
+                plan.intent_summary,
+            )
+        except Exception:
+            return
+
+    def _end_lanchat_runtime_compose(self, plan: SeedPlan) -> None:
+        try:
+            from .lanchat_scene_runtime import get_lanchat_scene_runtime
+            get_lanchat_scene_runtime().end_compose(plan.confirmed_by or plan.host_id or None)
+        except Exception:
+            return
 
     def final_adjustment_plan(
         self,

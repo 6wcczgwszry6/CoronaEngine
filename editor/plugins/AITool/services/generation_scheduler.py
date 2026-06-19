@@ -551,9 +551,13 @@ class GenerationScheduler:
                         return
                     result = await self._run_stage_handler(stage, job)
                     if isinstance(result, dict):
+                        paused_result = self._paused_stage_result(result)
                         with self._lock:
                             job.result.update(result)
                             job.updated_at = time.time()
+                            if paused_result:
+                                self._set_status_locked(job, GenerationJobStatus.PAUSED, stage=stage)
+                                return
             with self._lock:
                 self._set_status_locked(job, GenerationJobStatus.DONE, stage="")
         except asyncio.CancelledError:
@@ -582,6 +586,15 @@ class GenerationScheduler:
         if inspect.isawaitable(value):
             value = await value
         return value
+
+    @staticmethod
+    def _paused_stage_result(result: dict[str, Any]) -> dict[str, Any] | None:
+        if result.get("paused"):
+            return result
+        compose_result = result.get("compose_result")
+        if isinstance(compose_result, dict) and compose_result.get("paused"):
+            return compose_result
+        return None
 
     def _notify_terminal_job(self, job: GenerationJob) -> None:
         if job.status not in TERMINAL_STATUSES:

@@ -20,6 +20,7 @@ from plugins.AITool.services.interaction_coordinator import (  # noqa: E402
     ReviewResult,
 )
 from plugins.AITool.services.lanchat_host_action_executor import LanChatHostActionExecutor  # noqa: E402
+from plugins.AITool.services.lanchat_scene_runtime import get_lanchat_scene_runtime  # noqa: E402
 from plugins.AITool.services.seed_plan import SeedPlanStatus  # noqa: E402
 
 
@@ -307,6 +308,36 @@ def test_execute_confirmed_plan_payload_uses_full_contract_prompt():
     assert "boundary_spec" in prompt
     assert payload["intent_text"] == prompt
     print("[OK] confirmed generation payload carries full SeedPlan contract prompt")
+
+
+def test_execute_confirmed_plan_sets_lanchat_runtime_executing():
+    runtime = get_lanchat_scene_runtime()
+    runtime.end_compose()
+    runtime.set_mode("DISCUSSING")
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-runtime",
+        sender_id="host-runtime",
+        sender_name="房主",
+        is_host=True,
+        text="做一个二战前线小型交战场地",
+    ))
+    plan = coordinator.propose_seed_plan("room-runtime")
+    coordinator.confirm_seed_plan(plan.plan_id, "host-runtime")
+
+    try:
+        coordinator.execute_confirmed_plan(plan.plan_id)
+        snapshot = runtime.active_snapshot()
+    finally:
+        runtime.end_compose()
+
+    assert scheduler.submitted
+    assert runtime.mode() == "DISCUSSING"
+    assert snapshot["mode"] == "EXECUTING"
+    assert snapshot["active"] is True
+    assert snapshot["active_goal"]
+    print("[OK] executing confirmed SeedPlan flips LANChat scene runtime into executing mode")
 
 
 def test_system_actor_aliases_are_canonicalized_for_terrain_boundary():
@@ -2049,6 +2080,7 @@ if __name__ == "__main__":
     test_completed_generation_boundary_alias_routes_to_final_adjustment()
     test_generation_add_target_hint_strips_followup_verbs_and_mentions()
     test_execute_confirmed_plan_payload_uses_full_contract_prompt()
+    test_execute_confirmed_plan_sets_lanchat_runtime_executing()
     test_system_actor_aliases_are_canonicalized_for_terrain_boundary()
     test_seed_plan_confirmation_requires_non_empty_host_identity()
     test_gm_conflict_resolution_requires_host_confirmation_before_plan_confirm()

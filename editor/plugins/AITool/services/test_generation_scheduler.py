@@ -112,6 +112,44 @@ def test_scene_generation_without_stage_handler_fails_instead_of_fake_done():
     print("[OK] scene_generation without stage handler fails instead of fake done")
 
 
+def test_scene_composer_paused_result_marks_job_paused_not_failed():
+    class PausingComposer:
+        def compose(self, *args, **kwargs):
+            return {
+                "paused": True,
+                "paused_mode": "DISCUSSING",
+                "paused_before_phase": "OBJECTS#1",
+            }
+
+    runner = SceneComposerJobRunner(lambda: PausingComposer())
+    scheduler = GenerationScheduler(
+        stage_handlers=runner.stage_handlers(),
+        stage_order=("compose",),
+        auto_start=True,
+    )
+    try:
+        submitted = scheduler.submit({
+            "room_id": "room-paused-compose",
+            "session_id": "exec-paused-compose",
+            "plan_id": "seed-paused-compose",
+            "job_type": "scene_generation",
+            "prompt": "生成一个二战前线小型交战场地",
+        })
+        deadline = time.time() + 2.0
+        current = scheduler.status(submitted["job_id"])
+        while current["status"] in {"queued", "composing"} and time.time() < deadline:
+            time.sleep(0.02)
+            current = scheduler.status(submitted["job_id"])
+    finally:
+        scheduler.shutdown()
+
+    assert current["status"] == "paused"
+    assert current["error"] == ""
+    assert current["result"]["compose_result"]["paused"] is True
+    assert current["result"]["paused_before_phase"] == "OBJECTS#1"
+    print("[OK] paused SceneComposer result keeps GenerationScheduler out of failed state")
+
+
 def test_scheduler_cancel_before_submit_stops_download_and_import():
     calls = []
 
@@ -962,7 +1000,7 @@ def test_scene_composer_job_runner_limits_append_job_and_keeps_style_contract():
     print("[OK] SceneComposerJobRunner constrains post-generation append jobs")
 
 
-def test_scene_composer_job_runner_fails_paused_progressive_compose():
+def test_scene_composer_job_runner_pauses_progressive_compose_without_failure():
     class FakeComposer:
         def compose(self, text, **kwargs):
             return {
@@ -988,9 +1026,12 @@ def test_scene_composer_job_runner_fails_paused_progressive_compose():
     finally:
         scheduler.shutdown()
 
-    assert final["status"] == "failed"
-    assert "generation paused before INTERIOR" in final.get("error", "")
-    print("[OK] SceneComposerJobRunner fails paused progressive compose instead of fake done")
+    assert final["status"] == "paused"
+    assert final.get("error", "") == ""
+    assert final["result"]["compose_result"]["paused"] is True
+    assert final["result"]["paused_mode"] == "DISCUSSING"
+    assert final["result"]["paused_before_phase"] == "INTERIOR"
+    print("[OK] SceneComposerJobRunner pauses progressive compose without failing")
 
 
 def test_provider_stage_runner_maps_provider_lifecycle_to_scheduler():
@@ -1185,7 +1226,8 @@ if __name__ == "__main__":
     test_scene_composer_job_runner_passes_seed_plan_context_to_compose()
     test_scene_composer_job_runner_passes_target_actor_from_intervention()
     test_scene_composer_job_runner_limits_append_job_and_keeps_style_contract()
-    test_scene_composer_job_runner_fails_paused_progressive_compose()
+    test_scene_composer_job_runner_pauses_progressive_compose_without_failure()
+    test_scene_composer_paused_result_marks_job_paused_not_failed()
     test_provider_stage_runner_maps_provider_lifecycle_to_scheduler()
     test_provider_stage_runner_uses_runtime_provider_without_payload_leak()
     test_deferred_download_provider_runs_under_scheduler_download_stage()
