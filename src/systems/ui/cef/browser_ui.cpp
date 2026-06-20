@@ -290,6 +290,23 @@ void sync_tab_platform_window(BrowserTab* tab) {
                                   : 0;
 }
 
+void focus_browser_tab_exclusively(int focused_tab_id) {
+    for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+        if (!tab || !tab->client) {
+            continue;
+        }
+        auto browser = tab->client->GetBrowser();
+        if (!browser) {
+            continue;
+        }
+        if (tab_id == focused_tab_id) {
+            browser->GetHost()->SetFocus(true);
+        } else {
+            browser->GetHost()->SetFocus(false);
+        }
+    }
+}
+
 }  // namespace
 
 void BrowserRenderer::setup_window_transform(BrowserTab* tab,
@@ -373,7 +390,7 @@ void BrowserRenderer::handle_browser_mouse_events(BrowserTab* tab,
             if (ImGui::IsMouseClicked(imgui_btn)) {
                 active_tab_id = tab_id;
                 url_input_active_tab = -1;
-                browser->GetHost()->SetFocus(true);
+                focus_browser_tab_exclusively(tab_id);
 
                 int clicks = (imgui_btn == ImGuiMouseButton_Left) ? mouse_state.handle_mouse_click(mouse_pos, SDL_GetTicks()) : 1;
 
