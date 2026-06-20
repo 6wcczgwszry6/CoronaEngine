@@ -55,7 +55,7 @@ export const PLUGIN_MANIFEST = [
     defaultDock: 'bottom',
     defaultWidth: 200,
     defaultHeight: 200,
-    autoInit: true,
+    autoInit: false,
     component: Pet,
   },
   {
@@ -66,7 +66,7 @@ export const PLUGIN_MANIFEST = [
     defaultDock: 'bottom',
     defaultWidth: 1100,
     defaultHeight: 200,
-    autoInit: true,
+    autoInit: false,
     component: LogView,
   },
   {
@@ -105,11 +105,11 @@ export const PLUGIN_MANIFEST = [
   {
     id: 'EditorSettings',
     routePath: '/SetUp',
-    displayName: '编辑器设置',
+    displayName: '暂停菜单',
     pageType: 'special',
     defaultDock: 'center',
-    defaultWidth: 450,
-    defaultHeight: 550,
+    defaultWidth: 420,
+    defaultHeight: 500,
     autoInit: false,
     component: EditorSettings,
   },
