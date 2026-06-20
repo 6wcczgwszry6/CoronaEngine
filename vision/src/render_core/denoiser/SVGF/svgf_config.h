@@ -28,6 +28,13 @@ struct Epsilon {
 
     struct Modulator {
         static constexpr float kSoftEpsilon = 0.1f;
+        // Diffuse/specular signal mode (channels are diffuse=direct buffer, specular=indirect).
+        // Diffuse is demodulated by DIFFUSE albedo. Specular is left in radiance space by
+        // default (kDemodulateSpecular=false): a highlight is a directional spike not
+        // proportional to specular reflectance, and dividing by tiny F0 would re-create
+        // fireflies. Set kDualSignal=false to restore the old "full albedo on both channels".
+        static constexpr bool kDualSignal = true;
+        static constexpr bool kDemodulateSpecular = false;
     };
 
     struct Temporal {
@@ -40,11 +47,32 @@ struct Epsilon {
         static constexpr float kAlbedoThreshold = 0.15f;
         static constexpr float kNormalExp = 128.f;
         static constexpr float kNormalThreshold = 0.5f;
-        static constexpr float kMaxHistoryStatic = 16.f;   // static alpha_min 1/16 vs 1/48 (was 48)
+        static constexpr float kMaxHistoryStatic = 32.f;   // long clean history; ghosting handled by HistoryClamp (was 16/48)
         static constexpr float kMaxHistoryFast = 4.f;      // fast-motion alpha_min 1/4 (was 8)
         static constexpr float kMotionScaleDivisor = 16.f;
         static constexpr float kMotionAlphaScale = 0.5f;   // motion can reach alpha 0.5 (was 0.15)
         static constexpr float kMotionAlphaDivisor = 8.f;
+    };
+
+    // NRD/ReLAX-style temporal history color clamping (anti-ghosting).
+    // Reprojected history is clamped to the current frame's local luminance box
+    // [mean - kSigmaScale*sigma, mean + kSigmaScale*sigma] computed over a small
+    // neighborhood. This decouples anti-ghosting from history length, so a long,
+    // clean history can be used for noise reduction without trailing/smearing.
+    struct HistoryClamp {
+        static constexpr float kSigmaScale = 2.0f;   // ReLAX default; lower = stronger anti-ghost, more flicker risk
+        static constexpr int kRadius = 1;            // 3x3 neighborhood
+    };
+
+    // Input anti-firefly clamp (NRD-style). Specular highlights leave isolated
+    // single-pixel luminance spikes that SVGF cannot remove. Clamp the current pixel's
+    // luminance to max(neighbourMax, mean + kSigmaScale*sigma) over the neighbours
+    // (centre excluded) BEFORE it pollutes moments/history. The neighbourMax floor
+    // protects real multi-pixel highlights; only lone outliers above the local max are
+    // reined in. kSigmaScale is generous on purpose to avoid dimming highlights.
+    struct InputFirefly {
+        static constexpr float kSigmaScale = 4.0f;
+        static constexpr int kRadius = 1;            // 3x3 neighborhood
     };
 
     struct Ghosting {
@@ -98,6 +126,14 @@ struct Epsilon {
         static constexpr uint kLargeStepThreshold = 4;
         static constexpr float kLargeStepLPhiMultiplier = 1.4f;
         static constexpr float kLargeStepNPhiMultiplier = 0.85f;
+
+        // Colour-history feedback (Schied 2017). kFeedbackEnabled is the master switch
+        // (turn off to cut the over-blur that compounds across frames). kFeedbackSpecular
+        // controls whether the SPECULAR channel is fed back too: default false, because
+        // feeding back a view-dependent specular signal (reprojected by surface motion)
+        // both over-blurs and ghosts highlights. Diffuse is always fed back when enabled.
+        static constexpr bool kFeedbackEnabled = true;
+        static constexpr bool kFeedbackSpecular = false;
     };
 
     struct PoissonDisk {

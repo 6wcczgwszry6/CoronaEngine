@@ -47,8 +47,31 @@ Kernel kernel = [&, pipeline_ref](Var<CombinedAtrousParam> param) {
         Float lum_center_direct = HalfSafeUtils::clamp_luminance(luminance(direct_center.xyz()));
         Float lum_center_indirect = HalfSafeUtils::clamp_luminance(luminance(indirect_center.xyz()));
 
-        Float var_direct_clamped = max(Float(direct_center.w), Cfg::Epsilon::kVariance);
-        Float var_indirect_clamped = max(Float(indirect_center.w), Cfg::Epsilon::kVariance);
+        // Variance must be 3x3 Gaussian pre-filtered before deriving the luminance
+        // edge-stopping width (Schied et al. 2017). Using raw per-pixel variance makes
+        // phi_l noisy, and at large a-trous steps that noisy edge-stopping collapses to
+        // axis-aligned taps -> visible "grid"/streak lines. Smoothing the variance makes
+        // phi_l spatially coherent, removing the streaks; it also lets noisy specular
+        // highlights borrow a larger phi_l from neighbours so they actually get filtered.
+        constexpr float kGauss3[3] = {0.25f, 0.5f, 0.25f};// separable 1D -> {1,2,1}/{2,4,2}/{1,2,1}
+        Float var_sum_direct = 0.f;
+        Float var_sum_indirect = 0.f;
+        Float var_gw_sum = 0.f;
+        for (int gy = -1; gy <= 1; ++gy) {
+            for (int gx = -1; gx <= 1; ++gx) {
+                float gw = kGauss3[gx + 1] * kGauss3[gy + 1];
+                Int2 gp = cur_pixel + make_int2(gx, gy);
+                $if(all(gp >= 0) && all(gp < screen_size)) {
+                    Uint gidx = cast<uint>(gp.y) * cast<uint>(screen_size.x) + cast<uint>(gp.x);
+                    var_sum_direct += max(Float(param.direct_src.read(gidx).w), Cfg::Epsilon::kVariance) * gw;
+                    var_sum_indirect += max(Float(param.indirect_src.read(gidx).w), Cfg::Epsilon::kVariance) * gw;
+                    var_gw_sum += gw;
+                };
+            }
+        }
+        Float inv_var_gw = 1.f / max(var_gw_sum, 1e-4f);
+        Float var_direct_clamped = max(var_sum_direct * inv_var_gw, Cfg::Epsilon::kVariance);
+        Float var_indirect_clamped = max(var_sum_indirect * inv_var_gw, Cfg::Epsilon::kVariance);
         Float phi_l_direct = LuminanceWeightUtils::compute_phi_l(param.l_phi, var_direct_clamped);
         Float phi_l_indirect = LuminanceWeightUtils::compute_phi_l(param.l_phi, var_indirect_clamped);
 
@@ -116,12 +139,40 @@ Kernel kernel = [&, pipeline_ref](Var<CombinedAtrousParam> param) {
             }
         }
 
-        param.direct_dst.write(cur_idx, make_RadType4(make_float4(
-            sum_direct / max(weight_sum_direct, Cfg::Epsilon::kWeight),
-            VarianceUtils::propagate_filtered_variance(variance_sum_direct, weight_sum_direct * weight_sum_direct))));
-        param.indirect_dst.write(cur_idx, make_RadType4(make_float4(
-            sum_indirect / max(weight_sum_indirect, Cfg::Epsilon::kWeight),
-            VarianceUtils::propagate_filtered_variance(variance_sum_indirect, weight_sum_indirect * weight_sum_indirect))));
+        Float3 filtered_direct = sum_direct / max(weight_sum_direct, Cfg::Epsilon::kWeight);
+        Float3 filtered_indirect = sum_indirect / max(weight_sum_indirect, Cfg::Epsilon::kWeight);
+        Float out_var_direct = VarianceUtils::propagate_filtered_variance(variance_sum_direct, weight_sum_direct * weight_sum_direct);
+        Float out_var_indirect = VarianceUtils::propagate_filtered_variance(variance_sum_indirect, weight_sum_indirect * weight_sum_indirect);
+
+        param.direct_dst.write(cur_idx, make_RadType4(make_float4(filtered_direct, out_var_direct)));
+        param.indirect_dst.write(cur_idx, make_RadType4(make_float4(filtered_indirect, out_var_indirect)));
+
+        // === SVGF colour-history feedback (Schied et al. 2017) ===
+        // Feed the FIRST a-trous iteration's output back as the colour history so
+        // spatial filtering compounds across frames instead of being recomputed from
+        // scratch every frame. Without this the temporal history only ever holds the
+        // raw 1-spp accumulation, so residual noise can only be reduced by history
+        // length -- the root cause of the residual "blocky" noise. Only iteration 0 is
+        // fed back (a mild 5x5 blur) to avoid the over-blur/lag of feeding back the
+        // full multi-iteration result. Moments (M1/M2/history) are intentionally left
+        // untouched: they must keep tracking the RAW signal so variance still drives
+        // edge stopping. svgf_buffer is not read by this pass (only input buffers are),
+        // so this center-only write is race-free. The history-clamp in the temporal
+        // stage keeps the fed-back history from drifting (ReLAX-style pairing).
+        //
+        // illumi_direct = DIFFUSE channel, illumi_indirect = SPECULAR channel. The
+        // specular channel is NOT fed back by default (kFeedbackSpecular=false): feeding
+        // back a view-dependent specular signal over-blurs and ghosts highlights.
+        if constexpr (Cfg::Atrous::kFeedbackEnabled) {
+            $if(param.write_history != 0u) {
+                SVGFDataDualVar hist = param.svgf_buffer.read(cur_idx);
+                hist.illumi_direct = make_RadType4(make_RadType3(filtered_direct), out_var_direct);
+                if constexpr (Cfg::Atrous::kFeedbackSpecular) {
+                    hist.illumi_indirect = make_RadType4(make_RadType3(filtered_indirect), out_var_indirect);
+                }
+                param.svgf_buffer.write(cur_idx, hist);
+            };
+        }
     }
     $else {
         param.direct_dst.write(cur_idx, direct_center);
@@ -153,22 +204,25 @@ CommandBatch AtrousFilter::dispatch_combined(vision::RealTimeDenoiseInput &input
     }
     
     param.visibility_buffer = input.visibility.descriptor();
+    param.svgf_buffer = svgf_->svgf_buffer().descriptor();
     param.camera_pos = input.camera_pos;
-    
+
     float l_phi = svgf_->sigma_rt();
     float n_phi = svgf_->sigma_normal();
-    
+
     if (step_width >= Cfg::Atrous::kLargeStepThreshold) {
         l_phi *= Cfg::Atrous::kLargeStepLPhiMultiplier;
         n_phi *= Cfg::Atrous::kLargeStepNPhiMultiplier;
     }
-    
+
     param.l_phi = l_phi;
     param.n_phi = n_phi;
     param.z_phi = svgf_->sigma_depth();
     param.step_size = static_cast<int>(step_width);
     param.iteration = iteration;
     param.frame_index = input.frame_index;
+    // Feed back only the first a-trous iteration as colour history (Schied 2017).
+    param.write_history = (iteration == 0u) ? 1u : 0u;
     
     CommandBatch ret;
     ret << combined_shader_(param).dispatch(input.resolution);
