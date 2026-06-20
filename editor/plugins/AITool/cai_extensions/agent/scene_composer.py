@@ -2411,10 +2411,10 @@ class SceneComposer:
                        "terrain", "mountain", "landscape"]
         indoor_kw = ["卧室", "客厅", "厨房", "室内", "房间", "书房", "浴室",
                       "bedroom", "living", "kitchen", "indoor", "room", "bath"]
-        if any(k in text for k in outdoor_kw):
-            return False
         if any(k in text for k in indoor_kw):
             return True
+        if any(k in text for k in outdoor_kw):
+            return False
         return True  # 默认室内
 
     def _generate_room_box(self) -> None:

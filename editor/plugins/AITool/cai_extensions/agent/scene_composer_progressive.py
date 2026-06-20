@@ -194,6 +194,9 @@ def run_progressive_workflow(
                 )
                 micro_phase_assets[phase] = assets
                 _refresh_micro_batch_metadata(phase_sequence, phase_metadata, micro_phase_assets)
+            defer_resource_requests = bool(
+                assets and _has_later_phase_assets(phase, phase_sequence, micro_phase_assets)
+            )
             assets = _resolve_pending_resource_requests_for_batch(
                 composer,
                 assets,
@@ -201,6 +204,7 @@ def run_progressive_workflow(
                 plan_id=plan_id,
                 phase=phase,
                 contract_version=_contract_version(interaction_coordinator, plan_id),
+                defer_when_assets_ready=defer_resource_requests,
             )
             micro_phase_assets[phase] = assets
             _refresh_micro_batch_metadata(phase_sequence, phase_metadata, micro_phase_assets)
@@ -527,6 +531,21 @@ def _refresh_micro_batch_metadata(
         meta["next_batch_asset_names"] = next_names
 
 
+def _has_later_phase_assets(
+    current_phase: str,
+    phase_sequence: List[str],
+    micro_phase_assets: Dict[str, List[Dict[str, Any]]],
+) -> bool:
+    try:
+        current_index = phase_sequence.index(current_phase)
+    except ValueError:
+        current_index = -1
+    for phase in phase_sequence[current_index + 1:]:
+        if micro_phase_assets.get(phase):
+            return True
+    return False
+
+
 def _micro_batch_sort_key(asset: Dict[str, Any]) -> Tuple[int, str]:
     role = str(asset.get("layout_role") or "").lower()
     name = str(asset.get("name") or "")
@@ -707,11 +726,21 @@ def _resolve_pending_resource_requests_for_batch(
     plan_id: str = "",
     phase: str = "",
     contract_version: int = 0,
+    defer_when_assets_ready: bool = False,
 ) -> List[Dict[str, Any]]:
     requests = getattr(session, "pending_resource_requests", None)
     if not isinstance(requests, list) or not requests:
         return list(assets)
     limit = max(1, int(os.getenv("CORONA_PROGRESSIVE_RESOURCE_REQUESTS_PER_BATCH", "2") or "2"))
+    if defer_when_assets_ready and assets:
+        _record_resource_backlog_task(session, requests, phase=phase, per_batch_limit=limit)
+        logger.info(
+            "[ProgressiveWorkflow] defer %d pending resource requests until later batch; phase=%s ready_assets=%d",
+            len(requests),
+            phase,
+            len(assets),
+        )
+        return list(assets)
     planned: List[Dict[str, Any]] = []
     remaining: List[Dict[str, Any]] = []
     for request in requests:
@@ -1414,6 +1443,43 @@ def _prioritize_high_risk_vlm_targets(imported: List[Any], max_targets: int) -> 
     return _prioritize_vlm_targets(candidates, max_targets)
 
 
+def _safe_vlm_user_text(value: Any, fallback: str = "") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    lower = text.lower()
+    markers = ("prompt", "provider", "job_id", "session_id", "api_key", "token", "vlm_raw", "screenshot")
+    cut_points = [lower.find(marker) for marker in markers if lower.find(marker) >= 0]
+    if cut_points:
+        text = text[:min(cut_points)].strip(" \t\r\n,;；。")
+    return text or fallback
+
+
+def _vlm_advisory_items_user_text(items: Any, limit: int = 4) -> str:
+    if not isinstance(items, list):
+        return ""
+    details: List[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        actor = _safe_vlm_user_text(item.get("actor_id") or item.get("model_name"), "某个对象")
+        issues = item.get("issues") if isinstance(item.get("issues"), list) else []
+        tip = _safe_vlm_user_text(item.get("fix_suggestion"))
+        if not tip:
+            issue_texts = [_safe_vlm_user_text(value) for value in issues if _safe_vlm_user_text(value)]
+            tip = "、".join(issue_texts[:2])
+        if not tip:
+            tip = _safe_vlm_user_text(item.get("overall"), "存在低置信提示")
+        details.append(f"{actor}：{tip}")
+        if len(details) >= limit:
+            break
+    if not details:
+        return ""
+    if len(items) > limit:
+        details.append(f"另有 {len(items) - limit} 条")
+    return "；".join(details)
+
+
 def _vlm_checkpoint_user_message(checkpoint_type: str, targets: List[str], status: str, report: Any = None) -> str:
     label = {
         "structure_review": "结构外观审查",
@@ -1433,7 +1499,9 @@ def _vlm_checkpoint_user_message(checkpoint_type: str, targets: List[str], statu
     if proposal_count:
         return f"VLM {label}完成：发现 {proposal_count} 条可确认调整建议，等待房主/GM 确认。"
     if advisory_count:
-        return f"VLM {label}完成：发现 {advisory_count} 条低风险/低置信提示，已记录但不自动执行。"
+        detail_text = _vlm_advisory_items_user_text(getattr(report, "advisory_items", []) or [])
+        suffix = f"包括：{detail_text}；" if detail_text else ""
+        return f"VLM {label}完成：发现 {advisory_count} 条低风险/低置信提示，{suffix}已记录但不自动执行。"
     return f"VLM {label}完成：未发现明显语义问题。"
 
 
@@ -1484,7 +1552,9 @@ def _vlm_checkpoint_reports_user_text(reports: List[Any]) -> str:
         elif proposal_count:
             lines.append(f"{label}：已审查 {target_text}；生成 {proposal_count} 条待确认调整建议。")
         elif advisory_count:
-            lines.append(f"{label}：已审查 {target_text}；记录 {advisory_count} 条提示，不自动执行。")
+            detail_text = _vlm_advisory_items_user_text(getattr(report, "advisory_items", []) or [])
+            suffix = f"；{detail_text}" if detail_text else ""
+            lines.append(f"{label}：已审查 {target_text}；记录 {advisory_count} 条提示，不自动执行{suffix}。")
         elif skipped_count or timed_out_count:
             lines.append(f"{label}：已审查 {target_text}；跳过 {skipped_count} 个，超时 {timed_out_count} 个。")
         else:
@@ -1841,6 +1911,71 @@ def _emit_vlm_review_results(
             })
         except Exception as exc:  # noqa: BLE001
             logger.debug("[ProgressiveWorkflow] VLM skipped review result skipped: %s", exc)
+        return
+
+    if not actionable and advisory_items:
+        advice_by_actor = {
+            str(getattr(item, "actor_id", "") or ""): item
+            for item in advices
+            if str(getattr(item, "actor_id", "") or "")
+        }
+        for advisory in advisory_items:
+            if not isinstance(advisory, dict):
+                continue
+            actor_id = str(advisory.get("actor_id") or advisory.get("target_hint") or "").strip()
+            advice = advice_by_actor.get(actor_id)
+            issues = advisory.get("issues") if isinstance(advisory.get("issues"), list) else []
+            issues = [str(item) for item in issues if str(item).strip()]
+            suggestion = str(advisory.get("fix_suggestion") or "").strip()
+            if advice is not None:
+                if not issues:
+                    issues = [str(item) for item in (getattr(advice, "issues", []) or []) if str(item).strip()]
+                if not suggestion:
+                    suggestion = str(getattr(advice, "fix_suggestion", "") or "").strip()
+            findings = issues or ([suggestion] if suggestion else [str(advisory.get("overall") or "WARN")])
+            position = list(getattr(advice, "position_correction", []) or []) if advice is not None else []
+            rotation = list(getattr(advice, "rotation_correction", []) or []) if advice is not None else []
+            scale = list(getattr(advice, "scale_correction", []) or []) if advice is not None else []
+            try:
+                ingest({
+                    "room_id": room_id or "default",
+                    "plan_id": plan_id,
+                    "session_id": session_id,
+                    "batch_id": batch_id,
+                    "actor_id": actor_id,
+                    "review_type": "vlm",
+                    "passed": False,
+                    "findings": findings,
+                    "finding_details": [{
+                        "actor_id": actor_id,
+                        "review_type": "vlm",
+                        "checkpoint_type": checkpoint_type,
+                        "issue_type": str(advisory.get("overall") or "WARN"),
+                        "action": "apply_vlm_advisory",
+                        "target_hint": actor_id,
+                        "position_correction": position,
+                        "rotation_correction": rotation,
+                        "scale_correction": scale,
+                        "fix_suggestion": suggestion,
+                        "issues": list(issues),
+                        "confidence": advisory.get("confidence"),
+                    }],
+                    "severity": "warn",
+                    "metadata": {
+                        "checkpoint_type": checkpoint_type,
+                        "reviewed_targets": reviewed_targets,
+                        "advisory_items": advisory_items,
+                        "proposal_items": proposal_items,
+                        "overall": str(advisory.get("overall") or ""),
+                        "confidence": advisory.get("confidence"),
+                        "position_correction": position,
+                        "rotation_correction": rotation,
+                        "scale_correction": scale,
+                        "fix_suggestion": suggestion,
+                    },
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[ProgressiveWorkflow] VLM advisory review result skipped: %s", exc)
         return
 
     for advice in actionable:

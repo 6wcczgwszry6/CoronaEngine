@@ -129,9 +129,21 @@ class VlmReviewReport:
                 and (advice.has_correction() or advice.overall == "FAIL")
             )
             if low_confidence_count:
+                details = []
+                for item in self.advisory_items[:5]:
+                    actor = _safe_user_text(item.get("actor_id"), fallback="某个物体")
+                    issues = item.get("issues") if isinstance(item.get("issues"), list) else []
+                    tip = _safe_user_text(item.get("fix_suggestion"))
+                    if not tip:
+                        issue_texts = [_safe_user_text(value) for value in issues if _safe_user_text(value)]
+                        tip = "、".join(issue_texts[:2])
+                    tip = tip or _safe_user_text(item.get("overall"), fallback="存在低置信提示")
+                    details.append(f"{actor}：{tip}")
+                detail_text = "；".join(details)
+                suffix = f"包括：{detail_text}；" if detail_text else ""
                 return (
                     f"VLM 审查发现 {low_confidence_count} 条低置信建议；"
-                    "本轮不自动执行，等待后续批次或人工确认。"
+                    f"{suffix}本轮不自动执行，等待后续批次或人工确认。"
                 )
             return "VLM 审查未发现明显语义问题。"
         lines = ["VLM 审查发现可优化项（建议，非强制）："]

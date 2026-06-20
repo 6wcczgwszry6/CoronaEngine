@@ -31,6 +31,7 @@ from cai_extensions.agent.scene_composer_progressive import (  # noqa: E402
     _prioritize_vlm_targets,
     _run_vlm_advisory_review,
     _resolve_pending_resource_requests_for_batch,
+    _vlm_checkpoint_user_message,
     _vlm_checkpoint_reports_user_text,
     _vlm_max_targets,
     build_batch_resource_plan,
@@ -568,6 +569,59 @@ def test_vlm_actionable_advice_flows_to_coordinator_review_result():
     print("[OK] VLM actionable advice flows to Coordinator ReviewResult")
 
 
+def test_vlm_low_confidence_advisory_flows_to_coordinator_review_result():
+    coordinator = FakeCoordinator()
+    advice = SimpleNamespace(
+        actor_id="地毯",
+        overall="WARN",
+        issues=["地毯偏大"],
+        fix_suggestion="地毯偏大，缩小一点",
+        position_correction=[],
+        rotation_correction=[0.0, 0.0, 0.0],
+        scale_correction=[1.0, 1.0, 1.0],
+        confidence=0.42,
+    )
+    report = SimpleNamespace(
+        advices=[advice],
+        skipped=[],
+        timed_out=[],
+        checkpoint_type="final_consistency_review",
+        reviewed_targets=[{"actor_id": "地毯", "checkpoint_type": "final_consistency_review"}],
+        advisory_items=[{
+            "actor_id": "地毯",
+            "checkpoint_type": "final_consistency_review",
+            "overall": "WARN",
+            "issues": ["地毯偏大"],
+            "fix_suggestion": "地毯偏大，缩小一点",
+            "confidence": 0.42,
+            "proposal": False,
+        }],
+        proposal_items=[],
+        actionable=lambda: [],
+    )
+
+    _emit_vlm_review_results(
+        report,
+        interaction_coordinator=coordinator,
+        room_id="room-low",
+        plan_id="seed-low",
+        session_id="sess-low",
+        batch_id="batch-low",
+    )
+
+    assert coordinator.reviews
+    review = coordinator.reviews[-1]
+    assert review["review_type"] == "vlm"
+    assert review["passed"] is False
+    assert review["actor_id"] == "地毯"
+    assert review["severity"] == "warn"
+    assert review["finding_details"][0]["actor_id"] == "地毯"
+    assert review["finding_details"][0]["action"] == "apply_vlm_advisory"
+    assert review["finding_details"][0]["fix_suggestion"] == "地毯偏大，缩小一点"
+    assert review["metadata"]["advisory_items"][0]["confidence"] == 0.42
+    print("[OK] low confidence VLM advisory flows to Coordinator ReviewResult")
+
+
 def test_vlm_review_uses_composer_hooks_under_engine_gate():
     calls = []
 
@@ -737,7 +791,13 @@ def test_vlm_checkpoint_reports_summarize_all_stages_without_internal_leakage():
             status="completed",
             reviewed_targets=[{"actor_id": "天使雕像"}, {"actor_id": "小狗"}],
             proposal_items=[],
-            advisory_items=[{"actor_id": "小狗", "proposal": False}],
+            advisory_items=[{
+                "actor_id": "小狗",
+                "issues": ["尺寸偏大"],
+                "fix_suggestion": "缩小一点并靠边摆放",
+                "confidence": 0.42,
+                "proposal": False,
+            }],
             skipped=[],
             timed_out=[],
         ),
@@ -759,10 +819,44 @@ def test_vlm_checkpoint_reports_summarize_all_stages_without_internal_leakage():
     assert "最终一致性审查" in text
     assert "待确认调整建议" in text
     assert "不自动执行" in text
+    assert "小狗：缩小一点并靠边摆放" in text
     assert "PRIVATE" not in text
     assert "provider" not in text
     assert "job_id" not in text
     print("[OK] VLM checkpoint reports summarize all stages without internal leakage")
+
+
+def test_vlm_checkpoint_progress_message_includes_advisory_details():
+    report = SimpleNamespace(
+        status="completed",
+        proposal_items=[],
+        advisory_items=[
+            {
+                "actor_id": "床头柜",
+                "issues": ["可能离床过远"],
+                "fix_suggestion": "靠近床头一侧",
+                "confidence": 0.43,
+            },
+            {
+                "actor_id": "台灯",
+                "issues": ["朝向不明确"],
+                "fix_suggestion": "",
+                "confidence": 0.39,
+            },
+        ],
+    )
+
+    text = _vlm_checkpoint_user_message(
+        "final_consistency_review",
+        ["床头柜", "台灯"],
+        "done",
+        report=report,
+    )
+
+    assert "发现 2 条低风险/低置信提示" in text
+    assert "床头柜：靠近床头一侧" in text
+    assert "台灯：朝向不明确" in text
+    print("[OK] VLM checkpoint progress message includes advisory details")
 
 
 def test_final_report_text_includes_vlm_status_without_duplicate():
@@ -937,6 +1031,52 @@ def test_pending_resource_request_resolves_models_into_current_batch():
     assert session.pending_tasks[-1]["status"] == "completed"
     assert session.pending_tasks[-1]["batch_resource_plan"]["contract_version"] == 5
     print("[OK] pending resource request resolves generated model into current batch")
+
+
+def test_pending_resource_request_defers_while_ready_assets_can_still_import():
+    class FakeComposerWithRetrieval:
+        def __init__(self):
+            self.calls = []
+
+        def _run_model_retrieval(self, items):
+            self.calls.append([dict(item) for item in items])
+            return [
+                {"name": item["name"], "model_path": f"C:/tmp/{item['name']}.glb"}
+                for item in items
+            ]
+
+    composer = FakeComposerWithRetrieval()
+    request = {
+        "request_id": "resource-1",
+        "kind": "add_object",
+        "item_name": "布娃娃",
+        "quantity": 1,
+        "image_prompt": "small rag doll",
+        "original_text": "新增一个布娃娃",
+        "status": "planned",
+    }
+    session = SimpleNamespace(
+        pending_tasks=[],
+        pending_resource_requests=[dict(request)],
+    )
+
+    assets = _resolve_pending_resource_requests_for_batch(
+        composer,
+        [{"name": "床", "model_path": "C:/tmp/bed.glb"}],
+        session,
+        plan_id="seed-a",
+        phase="INTERIOR",
+        contract_version=7,
+        defer_when_assets_ready=True,
+    )
+
+    assert [item["name"] for item in assets] == ["床"]
+    assert composer.calls == []
+    assert session.pending_resource_requests == [request]
+    backlog = [task for task in session.pending_tasks if task.get("kind") == "resource_backlog"][-1]
+    assert backlog["status"] == "queued_for_later_batch"
+    assert backlog["queued_items"] == ["布娃娃"]
+    print("[OK] ready assets import before pending generated resource requests")
 
 
 def test_pending_resource_request_runs_image_stage_before_model_retrieval():
@@ -1460,6 +1600,17 @@ def test_room_box_generation_is_not_blocked_by_existing_room_terrain():
     print("[OK] existing __room_terrain no longer blocks __room_box generation")
 
 
+def test_indoor_detection_prefers_explicit_room_over_terrain_context():
+    prompt = (
+        "用户确认开始生成：奶油风卧室\n"
+        "## 地形与边界约束\n"
+        "terrain_spec={'type': 'neutral_ground', 'surface': 'neutral', 'walkable': True}"
+    )
+
+    assert SceneComposer._detect_scene_indoor(prompt) is True
+    print("[OK] explicit indoor room wins over generic terrain context")
+
+
 if __name__ == "__main__":
     test_zone_and_asset_routing()
     test_zone_and_door_aabb_helpers()
@@ -1476,18 +1627,21 @@ if __name__ == "__main__":
     test_f5_demo_mode_reports_vlm_disabled_in_final_text()
     test_aabb_review_issues_flow_to_coordinator_review_result()
     test_vlm_actionable_advice_flows_to_coordinator_review_result()
+    test_vlm_low_confidence_advisory_flows_to_coordinator_review_result()
     test_vlm_review_uses_composer_hooks_under_engine_gate()
     test_vlm_target_priority_prefers_scene_anchors_and_high_risk_additions()
     test_vlm_checkpoint_policy_selects_structure_high_risk_and_final_targets()
     test_vlm_high_risk_priority_skips_plain_small_items()
     test_vlm_review_result_carries_checkpoint_and_batch_context()
     test_vlm_checkpoint_reports_summarize_all_stages_without_internal_leakage()
+    test_vlm_checkpoint_progress_message_includes_advisory_details()
     test_final_report_text_includes_vlm_status_without_duplicate()
     test_scene_composer_injects_shared_scoped_memory_only()
     test_scene_composer_can_focus_scoped_memory_on_target_actor()
     test_pending_generation_delta_creates_resource_request_for_missing_asset()
     test_batch_resource_plan_carries_contract_version_and_interventions()
     test_pending_resource_request_resolves_models_into_current_batch()
+    test_pending_resource_request_defers_while_ready_assets_can_still_import()
     test_pending_resource_request_runs_image_stage_before_model_retrieval()
     test_scene_composer_passes_generated_images_to_model_retrieval_workflow()
     test_pending_resource_request_backlog_is_visible_when_batch_limit_is_hit()
@@ -1499,4 +1653,5 @@ if __name__ == "__main__":
     test_scene_framework_outdoor_fallback_generates_terrain_only()
     test_scene_framework_mixed_zone_tree_generates_terrain_and_room_box()
     test_room_box_generation_is_not_blocked_by_existing_room_terrain()
+    test_indoor_detection_prefers_explicit_room_over_terrain_context()
     print("\n=== progressive mixed geometry ALL PASS ===")

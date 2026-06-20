@@ -122,6 +122,7 @@ def test_low_confidence_only_vlm_advice_is_disclosed_without_action():
 
     assert not report.actionable()
     assert "低置信建议" in text
+    assert "低置信模型：低置信旋转建议" in text
     assert "不自动执行" in text
     assert "未发现明显语义问题" not in text
     print("[OK] 低置信 VLM 建议会披露为待确认，不误报为无问题")

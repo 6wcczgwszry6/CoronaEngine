@@ -173,6 +173,106 @@ def test_confirmed_seed_plan_creates_scene_design_contract_with_negative_prefere
     print("[OK] confirmed SeedPlan creates long-lived scene design contract")
 
 
+def test_seed_plan_design_brief_survives_confirmation_phrases():
+    coordinator = InteractionCoordinator(scheduler=FakeScheduler())
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-dark-market",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="围绕暗黑集市主题讨论一下",
+    ))
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-dark-market",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="给一个简化方案，我没那么多钱",
+    ))
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-dark-market",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="还是采用暗黑集市方案吧",
+    ))
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-dark-market",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="确认生成",
+    ))
+    plan = coordinator.active_plan_for_room("room-dark-market")
+    confirmed = coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+
+    assert confirmed.ok is True
+    assert "暗黑集市" in plan.design_brief
+    assert plan.design_brief != "确认生成"
+    assert "暗黑集市" in confirmed.payload["intent_text"]
+    print("[OK] SeedPlan design brief remains authoritative through confirmation phrases")
+
+
+def test_seed_plan_confirmation_rejects_confirmation_only_context():
+    coordinator = InteractionCoordinator(scheduler=FakeScheduler())
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-empty-confirm",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="确认生成",
+    ))
+    plan = coordinator.active_plan_for_room("room-empty-confirm")
+    assert plan is not None
+
+    confirmed = coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+
+    assert confirmed.ok is False
+    assert "具体方案" in confirmed.message
+    print("[OK] SeedPlan refuses confirmation-only context")
+
+
+def test_seed_plan_design_brief_ignores_opinion_and_elaboration_queries():
+    coordinator = InteractionCoordinator(scheduler=FakeScheduler())
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-opinion-query",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="做一个现代风客厅，有沙发、茶几和电视墙",
+    ))
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-opinion-query",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="你对于小女孩的方案怎么看",
+    ))
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-opinion-query",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="你觉得这个现代客厅设计怎么样",
+    ))
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-opinion-query",
+        sender_id="host-a",
+        sender_name="房主",
+        is_host=True,
+        text="继续输出风格方案、布局、物品清单",
+    ))
+    plan = coordinator.active_plan_for_room("room-opinion-query")
+    confirmed = coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+
+    assert confirmed.ok is True
+    assert "现代风客厅" in plan.design_brief
+    assert "怎么看" not in plan.design_brief
+    assert "怎么样" not in plan.design_brief
+    assert "继续输出" not in plan.design_brief
+    print("[OK] SeedPlan design brief skips opinion/detail-only queries")
+
+
 def test_status_query_does_not_create_intervention_or_generation_job():
     scheduler = FakeScheduler()
     coordinator = InteractionCoordinator(scheduler=scheduler)
@@ -2074,6 +2174,9 @@ if __name__ == "__main__":
     test_chat_updates_seed_plan_without_generation()
     test_confirmed_seed_plan_executes_through_scheduler()
     test_confirmed_seed_plan_creates_scene_design_contract_with_negative_preferences()
+    test_seed_plan_design_brief_survives_confirmation_phrases()
+    test_seed_plan_confirmation_rejects_confirmation_only_context()
+    test_seed_plan_design_brief_ignores_opinion_and_elaboration_queries()
     test_status_query_does_not_create_intervention_or_generation_job()
     test_completed_generation_add_routes_to_post_generation_add()
     test_completed_generation_modify_routes_to_final_adjustment()

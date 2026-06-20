@@ -200,6 +200,18 @@ class LANChatAgentWorker:
             self._remember_room_id(room_id)
             metadata = self._coordinator_sync_metadata(message, source=source)
             active = coordinator.active_plan_for_room(room_id)
+            authoritative_synced = False
+            if self._should_sync_metadata_scene_message_to_seed_plan(coordinator, room_id, text, metadata):
+                coordinator.ingest_message(ChatMessage(
+                    room_id=room_id,
+                    sender_id=str(message.get("sender_id") or message.get("from") or ""),
+                    sender_name=str(message.get("sender_name") or message.get("from") or ""),
+                    text=text,
+                    is_host=bool(message.get("is_host") or sender_type == "host"),
+                    metadata=metadata,
+                ))
+                authoritative_synced = True
+                active = coordinator.active_plan_for_room(room_id)
             structured_handled = self._handle_structured_chat_route(message, text, metadata)
             if structured_handled:
                 self._log_scene_route(
@@ -259,6 +271,10 @@ class LANChatAgentWorker:
                         reason=f"source={source}",
                     )
                     return True
+            if authoritative_synced:
+                if emit_disclosure:
+                    self._emit_new_disclosure_events(coordinator, disclosure_start)
+                return True
             if not planning_gate_handled and not self._should_sync_chat_to_coordinator(coordinator, room_id, text, source=source):
                 self._log_scene_route(
                     room_id=room_id,
@@ -295,6 +311,46 @@ class LANChatAgentWorker:
             return False
         finally:
             self._remember_coordinator_seen_message_id(dedupe_key)
+
+    def _should_sync_metadata_scene_message_to_seed_plan(
+        self,
+        coordinator: InteractionCoordinator,
+        room_id: str,
+        text: str,
+        metadata: dict[str, Any],
+    ) -> bool:
+        if not metadata:
+            return False
+        draft_action = str(metadata.get("draft_action") or "").strip().lower()
+        target_scope = str(metadata.get("target_scope") or "").strip().lower()
+        if draft_action in {"plan", "supplement", "generate"} or target_scope == "plan":
+            return True
+        if draft_action != "chat":
+            return False
+        active = coordinator.active_plan_for_room(room_id)
+        if active is not None and active.status in {SeedPlanStatus.CONFIRMED, SeedPlanStatus.EXECUTING, SeedPlanStatus.PAUSED}:
+            return False
+        return self._looks_like_seedplan_design_message(text)
+
+    @staticmethod
+    def _looks_like_seedplan_design_message(text: str) -> bool:
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        opinion_patterns = ("怎么看", "你觉得", "大家觉得", "对于", "评价", "看法")
+        strong_update_words = ("采用", "按", "确认", "补充", "新增", "调整", "修改", "生成", "开始")
+        if any(word in raw for word in opinion_patterns) and not any(word in raw for word in strong_update_words):
+            return False
+        scene_words = (
+            "方案", "场景", "主题", "设计", "布局", "风格", "物品", "清单",
+            "集市", "鬼市", "卧室", "客厅", "房间", "展厅", "商业空间",
+            "草原", "电竞房", "庭院", "街区", "摊位",
+        )
+        action_words = (
+            "围绕", "讨论", "设计", "优化", "简化", "采用", "生成", "做",
+            "帮我", "补充", "调整", "新增", "改成", "还是", "整理",
+        )
+        return any(word in raw for word in scene_words) and any(word in raw for word in action_words)
 
     def _handle_structured_chat_route(
         self,
@@ -1103,13 +1159,17 @@ class LANChatAgentWorker:
             or ""
         ).strip()
         actor = self._pick_completed_adjustment_actor(text, target_hint)
-        if actor is None:
-            return ""
-        changes = self._apply_completed_adjustment_to_actor(actor, text)
-        if not changes:
-            return ""
-        name = str(getattr(actor, "name", "") or target_hint or "目标物体")
-        return f"已执行低风险最终调整：{name}，{'；'.join(changes)}。"
+        if actor is not None:
+            changes = self._apply_completed_adjustment_to_actor(actor, text)
+            if changes:
+                name = str(getattr(actor, "name", "") or target_hint or "目标物体")
+                return f"已执行低风险最终调整：{name}，{'；'.join(changes)}。"
+        review_changes = self._apply_completed_review_adjustments(event, trigger, text)
+        if review_changes:
+            return f"已执行低风险最终调整：{'；'.join(review_changes)}。"
+        if self._looks_like_review_result_application(text):
+            return "已检查最近的审查建议，但没有找到可自动执行的低风险缩放/贴地调整；已保留为人工最终调整记录。"
+        return ""
 
     def _pick_completed_adjustment_actor(self, text: str, target_hint: str = "") -> Any | None:
         actors = self._current_scene_actors()
@@ -1160,6 +1220,117 @@ class LANChatAgentWorker:
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("Failed to read scene actors for completed adjustment: %s", exc)
             return []
+
+    def _apply_completed_review_adjustments(
+        self,
+        event: Any,
+        trigger: dict[str, Any],
+        text: str,
+    ) -> list[str]:
+        if not self._looks_like_review_result_application(text):
+            return []
+        payload = getattr(event, "payload", None)
+        payload = payload if isinstance(payload, dict) else {}
+        plan_id = str(payload.get("plan_id") or "").strip()
+        try:
+            coordinator = self._get_interaction_coordinator()
+            if not plan_id:
+                room_id = str(trigger.get("room_id") or payload.get("room_id") or "default")
+                plan = coordinator.active_plan_for_room(room_id)
+                plan_id = str(getattr(plan, "plan_id", "") or "").strip()
+            if not plan_id:
+                return []
+            pending = list(coordinator.pending_interventions(plan_id))
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Completed review adjustment lookup failed: %s", exc)
+            return []
+        changes: list[str] = []
+        for intervention in reversed(pending):
+            details = getattr(intervention, "finding_details", None)
+            if not isinstance(details, list) or not details:
+                continue
+            route = str(getattr(intervention, "apply_policy", "") or "")
+            intent = str(getattr(intervention, "intent_type", "") or "")
+            if route != "final_adjustment" and "review" not in intent:
+                continue
+            for detail in details[:8]:
+                if not isinstance(detail, dict):
+                    continue
+                actor_hint = self._review_detail_actor_hint(detail)
+                advice_text = self._review_detail_adjustment_text(detail)
+                if not actor_hint and not advice_text:
+                    continue
+                actor = self._pick_completed_adjustment_actor(advice_text or text, actor_hint)
+                if actor is None:
+                    continue
+                actor_changes = self._apply_completed_review_detail_to_actor(actor, detail, advice_text)
+                if actor_changes:
+                    name = str(getattr(actor, "name", "") or actor_hint or "目标物体")
+                    changes.append(f"{name}，{'、'.join(actor_changes)}")
+            if changes:
+                break
+        return changes
+
+    @staticmethod
+    def _looks_like_review_result_application(text: str) -> bool:
+        raw = str(text or "")
+        review_words = ("审查", "检查", "外观", "VLM", "vlm", "建议", "结果", "参考", "参照", "参茶")
+        action_words = ("按", "根据", "应用", "执行", "处理", "调整", "摆放", "修正", "优化")
+        if any(word in raw for word in review_words) and any(word in raw for word in action_words):
+            return True
+        return (
+            any(word in raw for word in ("摆放", "布局", "大小", "尺寸", "比例"))
+            and any(word in raw for word in ("问题", "不对", "不合理", "有问题"))
+        )
+
+    @staticmethod
+    def _review_detail_actor_hint(detail: dict[str, Any]) -> str:
+        for key in ("actor_id", "target_actor_id", "object_id", "target_object_id", "target", "target_hint"):
+            value = detail.get(key)
+            if value:
+                return str(value).strip()
+        return ""
+
+    @staticmethod
+    def _review_detail_adjustment_text(detail: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for key in ("fix_suggestion", "suggestion", "message", "overall"):
+            value = str(detail.get(key) or "").strip()
+            if value:
+                parts.append(value)
+        issues = detail.get("issues")
+        if isinstance(issues, list):
+            parts.extend(str(item or "").strip() for item in issues if str(item or "").strip())
+        return "；".join(parts)
+
+    def _apply_completed_review_detail_to_actor(
+        self,
+        actor: Any,
+        detail: dict[str, Any],
+        advice_text: str,
+    ) -> list[str]:
+        changes: list[str] = []
+        scale_vector = detail.get("scale_correction")
+        if isinstance(scale_vector, list) and len(scale_vector) >= 3:
+            try:
+                factors = [float(value) for value in scale_vector[:3]]
+                if any(abs(value - 1.0) > 1e-3 for value in factors):
+                    current = [float(v) for v in actor.get_scale()]
+                    while len(current) < 3:
+                        current.append(1.0)
+                    new_scale = [
+                        round(max(0.02, min(20.0, current[index] * factors[index])), 4)
+                        for index in range(3)
+                    ]
+                    actor.set_scale(new_scale)
+                    changes.append(f"缩放调整为 {new_scale}")
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("Completed VLM review scale vector adjustment failed: %s", exc)
+        text_changes = self._apply_completed_adjustment_to_actor(actor, advice_text)
+        for item in text_changes:
+            if item not in changes:
+                changes.append(item)
+        return changes
 
     @staticmethod
     def _completed_adjustment_display_name(name: str) -> str:
@@ -1248,6 +1419,10 @@ class LANChatAgentWorker:
             return max(0.05, 1.0 / max(0.05, float(numeric.group(1))))
         if "一半" in text and any(word in text for word in ("缩小", "变小")):
             return 0.5
+        if any(word in text for word in ("太大", "过大", "偏大", "尺寸大", "比例大")):
+            return 0.8
+        if any(word in text for word in ("太小", "过小", "偏小", "尺寸小", "比例小")):
+            return 1.2
         if any(word in text for word in ("大一点", "变大", "放大")):
             return 1.35
         if any(word in text for word in ("小一点", "变小", "缩小")):

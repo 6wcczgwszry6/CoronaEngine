@@ -432,6 +432,7 @@ class InteractionCoordinator:
             priority=1 if msg.is_host else 0,
         ))
         self._infer_constraints(plan, msg.text)
+        self._refresh_plan_design_brief(plan, source="coordinator_message")
         return plan
 
     def propose_seed_plan(self, room_id: str) -> SeedPlan:
@@ -718,10 +719,28 @@ class InteractionCoordinator:
                     "requires_conflict_resolution": True,
                 },
             )
+        contract_text = self._resolved_design_text(plan)
+        if not contract_text:
+            self._record_disclosures(
+                room_id=plan.room_id,
+                stage=plan.status.value,
+                progress=0,
+                plan=plan.as_dict(),
+                intervention={
+                    "intent_type": "clarification",
+                    "apply_policy": "request_concrete_plan",
+                    "priority": 2,
+                    "requires_clarification": True,
+                    "status_message": "当前没有可确认的具体方案，请先整理或选择一个场景方案。",
+                },
+            )
+            return ConfirmResult(
+                False,
+                plan.plan_id,
+                "当前没有可确认的具体方案，请先整理或选择一个场景方案。",
+                {"plan": plan.as_dict(), "requires_concrete_plan": True},
+            )
         plan.confirm(host_id)
-        contract_text = "；".join(
-            item.text for item in plan.participants if str(item.text or "").strip()
-        ) or plan.intent_summary
         contract = build_scene_design_contract(
             room_id=plan.room_id,
             plan_id=plan.plan_id,
@@ -2232,6 +2251,116 @@ class InteractionCoordinator:
             plan.conflicts.append(text)
         plan.updated_at = time.time()
 
+    def _refresh_plan_design_brief(self, plan: SeedPlan, *, source: str = "") -> None:
+        if plan.status in {SeedPlanStatus.CONFIRMED, SeedPlanStatus.EXECUTING, SeedPlanStatus.COMPLETED}:
+            return
+        texts = [
+            str(item.text or "").strip()
+            for item in plan.participants
+            if self._is_meaningful_design_text(str(item.text or ""))
+        ]
+        if not texts:
+            return
+        brief = "；".join(texts[-6:])
+        items = self._design_items_from_text(brief)
+        plan.set_design_brief(brief, items, source=source)
+
+    def _resolved_design_text(self, plan: SeedPlan) -> str:
+        brief = str(getattr(plan, "design_brief", "") or "").strip()
+        if brief and self._is_meaningful_design_text(brief):
+            return brief
+        texts = [
+            str(item.text or "").strip()
+            for item in plan.participants
+            if self._is_meaningful_design_text(str(item.text or ""))
+        ]
+        return "；".join(texts[-6:]).strip()
+
+    @staticmethod
+    def _is_meaningful_design_text(text: str) -> bool:
+        raw = re.sub(r"@\S+\s*", "", str(text or "")).strip()
+        if not raw:
+            return False
+        if InteractionCoordinator._is_status_query(raw):
+            return False
+        if InteractionCoordinator._is_confirmation_only_text(raw):
+            return False
+        placeholders = (
+            "写明要改的风格",
+            "物件、布局或限制",
+            "新增一个...",
+            "调整...",
+            "问题...",
+            "请输入",
+        )
+        if any(item in raw for item in placeholders):
+            return False
+        strong_update_words = ("采用", "按", "确认", "补充", "新增", "调整", "修改", "生成", "开始", "做一个")
+        opinion_patterns = ("怎么看", "你觉得", "大家觉得", "评价", "看法")
+        if any(word in raw for word in opinion_patterns) and not any(word in raw for word in strong_update_words):
+            return False
+        elaboration_prefixes = (
+            "继续输出",
+            "继续说",
+            "展开说明",
+            "详细说明",
+            "说说",
+            "讲讲",
+        )
+        if raw.startswith(elaboration_prefixes) and not any(word in raw for word in strong_update_words):
+            return False
+        return True
+
+    @staticmethod
+    def _is_confirmation_only_text(text: str) -> bool:
+        raw = str(text or "").strip()
+        if not raw:
+            return True
+        normalized = re.sub(r"[\s:：，,。.!！?？、；;\"'“”‘’（）()【】\[\]-]+", "", raw)
+        control_words = (
+            "确认开始生成",
+            "确认开始",
+            "确认生成",
+            "确认方案",
+            "开始生成",
+            "开始执行",
+            "直接生成",
+            "执行生成",
+            "按当前方案",
+            "按这个方案",
+            "生成",
+            "确认",
+            "开始",
+        )
+        if normalized in control_words:
+            return True
+        reduced = normalized
+        for word in control_words:
+            reduced = reduced.replace(word, "")
+        reduced = reduced.replace("方案", "").replace("当前", "").replace("这个", "")
+        return not reduced.strip()
+
+    @staticmethod
+    def _design_items_from_text(text: str) -> list[str]:
+        raw = str(text or "")
+        candidates: list[str] = []
+        for token in re.split(r"[、,，；;\n]+", raw):
+            value = token.strip(" ：:。.!！?？")
+            if not value:
+                continue
+            if len(value) > 24:
+                continue
+            if any(word in value for word in ("摊", "灯", "门", "牌", "桌", "椅", "柜", "箱", "墙", "路", "棚", "台")):
+                candidates.append(value)
+        seen: set[str] = set()
+        out: list[str] = []
+        for item in candidates:
+            if item in seen:
+                continue
+            seen.add(item)
+            out.append(item)
+        return out[:12]
+
     @staticmethod
     def _is_status_query(text: str) -> bool:
         raw = str(text or "")
@@ -2316,7 +2445,11 @@ class InteractionCoordinator:
     def _execution_prompt_for_plan(plan: SeedPlan, contract: dict[str, Any] | None = None) -> str:
         contract = dict(contract or {})
         parts: list[str] = []
-        if plan.intent_summary:
+        design_brief = str(getattr(plan, "design_brief", "") or "").strip()
+        if design_brief:
+            parts.append("## 已确认 SeedPlan 方案")
+            parts.append(design_brief)
+        elif plan.intent_summary:
             parts.append("## 已确认多人方案")
             parts.append(plan.intent_summary)
         if plan.style_constraints:

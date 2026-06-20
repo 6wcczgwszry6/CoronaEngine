@@ -21,6 +21,7 @@ from plugins.AITool.services.generation_scheduler import GenerationScheduler  # 
 from plugins.AITool.services.interaction_coordinator import (  # noqa: E402
     ChatMessage,
     InteractionCoordinator,
+    ReviewResult,
 )
 from plugins.AITool.services.seed_plan import SeedPlanStatus  # noqa: E402
 from plugins.AITool.services.disclosure_policy import DisclosureEvent  # noqa: E402
@@ -1437,6 +1438,77 @@ def test_worker_metadata_group_chat_triggers_each_agent_without_at():
     print("[OK] worker metadata group chat triggers each target agent without @")
 
 
+def test_worker_metadata_scene_discussion_feeds_seed_plan_before_confirmation():
+    scheduler = FakeScheduler()
+    coordinator = InteractionCoordinator(scheduler=scheduler)
+    metadata = {
+        "workspace_mode": "solo_single_agent",
+        "draft_action": "chat",
+        "target_scope": "agent",
+        "target_agent_id": "agent-elder",
+        "target_agent_name": "长者",
+    }
+    engine = FakeEngine([], coordinator_messages=[
+        {
+            "message_id": "dark-market-discussion-1",
+            "room_id": "r-dark-market-authority",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "text": "围绕暗黑集市主题讨论一下",
+            "metadata": metadata,
+        },
+        {
+            "message_id": "dark-market-discussion-2",
+            "room_id": "r-dark-market-authority",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "text": "给一个简化方案，我没那么多钱",
+            "metadata": metadata,
+        },
+        {
+            "message_id": "dark-market-discussion-3",
+            "room_id": "r-dark-market-authority",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "text": "还是采用暗黑集市方案吧",
+            "metadata": metadata,
+        },
+        {
+            "message_id": "dark-market-confirm-1",
+            "room_id": "r-dark-market-authority",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "text": "确认生成",
+        },
+    ])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        generation_scheduler=scheduler,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+
+    plan = coordinator.active_plan_for_room("r-dark-market-authority")
+    assert plan is not None
+    assert plan.status == SeedPlanStatus.EXECUTING
+    assert "暗黑集市" in plan.design_brief
+    assert scheduler.submitted
+    assert "暗黑集市" in scheduler.submitted[-1]["prompt"]
+    assert "确认生成" != plan.design_brief
+    print("[OK] metadata scene discussion feeds authoritative SeedPlan before confirmation")
+
+
 def test_worker_metadata_plan_targets_agent_and_returns_plan_reply_without_at():
     runtime = get_lanchat_scene_runtime()
     runtime.end_compose()
@@ -1913,6 +1985,83 @@ def test_worker_executes_completed_boundary_adjustment_without_model_agent():
     assert pending[-1].target_hint == "__terrain_boundary"
     assert pending[-1].apply_policy == "final_adjustment"
     print("[OK] completed terrain boundary adjustment executes deterministic low-risk path")
+
+
+def test_worker_applies_completed_vlm_review_advice_from_metadata_chat():
+    executor = FakeHostActionExecutor()
+    coordinator = InteractionCoordinator()
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-vlm-apply",
+        sender_id="host-a",
+        sender_name="房主",
+        text="做一个奶油风卧室",
+        is_host=True,
+    ))
+    plan = coordinator.propose_seed_plan("room-vlm-apply")
+    coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    plan.status = SeedPlanStatus.COMPLETED
+    coordinator._active_generation_session_by_plan[plan.plan_id] = "session-vlm-apply"
+    coordinator.ingest_review_result(ReviewResult(
+        room_id="room-vlm-apply",
+        plan_id=plan.plan_id,
+        session_id="session-vlm-apply",
+        batch_id="batch-final",
+        review_type="vlm",
+        passed=False,
+        findings=["地毯偏大，建议缩小一点"],
+        finding_details=[{
+            "actor_id": "地毯",
+            "fix_suggestion": "地毯偏大，缩小一点",
+            "confidence": 0.42,
+        }],
+        severity="warn",
+    ))
+    rug = FakeSceneActor("地毯", scale=[1.0, 1.0, 1.0])
+
+    def forbidden_agent_factory():
+        def _agent(persona, messages):
+            raise AssertionError("applying completed VLM advice should not call role model agent")
+        return _agent
+
+    metadata = {
+        "draft_action": "chat",
+        "target_scope": "agent",
+        "target_agent_id": "girl",
+        "target_agent_name": "小女孩",
+    }
+    engine = FakeEngine(
+        [],
+        coordinator_messages=[{
+            "message_id": "m-vlm-apply",
+            "room_id": "room-vlm-apply",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "is_host": True,
+            "agent_id": "girl",
+            "agent_name": "小女孩",
+            "target_agent_id": "girl",
+            "target_agent_name": "小女孩",
+            "text": "帮我按审查结果摆放物体",
+            "metadata_json": json.dumps(metadata, ensure_ascii=False),
+        }],
+    )
+    engine.get_scene_actors = lambda: [rug]
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=forbidden_agent_factory,
+        host_action_executor=executor,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+    assert worker.process_once() is True
+
+    assert not executor.payloads
+    assert rug.get_scale()[0] < 1.0
+    assert engine.replies
+    assert "已执行低风险最终调整" in engine.replies[-1][2]
+    assert "地毯" in engine.replies[-1][2]
+    print("[OK] completed metadata chat can apply recent VLM review advice")
 
 
 def test_worker_acknowledges_conflict_resolution_rejection_without_host_execution():
@@ -3926,6 +4075,7 @@ if __name__ == "__main__":
     test_runtime_metadata_generate_confirms_pending_plan_without_magic_text()
     test_worker_metadata_chat_targets_agent_without_at_or_coordinator_sync()
     test_worker_metadata_group_chat_triggers_each_agent_without_at()
+    test_worker_metadata_scene_discussion_feeds_seed_plan_before_confirmation()
     test_worker_metadata_plan_targets_agent_and_returns_plan_reply_without_at()
     test_worker_metadata_supplement_selects_plan_when_multiple_pending()
     test_planning_gate_records_pre_generation_style_supplement()
@@ -3937,6 +4087,7 @@ if __name__ == "__main__":
     test_worker_applies_host_vlm_generation_option_from_metadata()
     test_worker_routes_completed_layout_adjustment_to_coordinator_without_model_agent()
     test_worker_executes_completed_boundary_adjustment_without_model_agent()
+    test_worker_applies_completed_vlm_review_advice_from_metadata_chat()
     test_worker_acknowledges_conflict_resolution_rejection_without_host_execution()
     test_worker_rejects_coordinator_confirmation_without_sender_identity()
     test_worker_rejects_coordinator_confirmation_from_non_host_role()
