@@ -56,6 +56,10 @@ class DisplaySystem : public Kernel::SystemBase {
         uint64_t frame_index = 0;
         uint32_t width = 0;
         uint32_t height = 0;
+        uint32_t viewport_x = 0;
+        uint32_t viewport_y = 0;
+        uint32_t viewport_width = 0;
+        uint32_t viewport_height = 0;
     };
 
     struct SurfaceState {
@@ -71,6 +75,7 @@ class DisplaySystem : public Kernel::SystemBase {
     };
 
     bool compose_and_present(Horizon::HardwareDisplayer& displayer,
+                             void* surface,
                              SurfaceState& state,
                              CompositeResources& resources,
                              Horizon::HardwareImage& optics_image,
@@ -91,6 +96,7 @@ class DisplaySystem : public Kernel::SystemBase {
     std::mutex frame_mutex_;
 
     std::unordered_map<uint64_t, Horizon::HardwareDisplayer> displayers_;
+    std::unordered_map<uint64_t, void*> surfaces_;
     std::unordered_map<uint64_t, SurfaceState> surface_states_;
     std::unordered_map<uint64_t, CompositeResources> composite_resources_;
     std::unordered_set<uint64_t> removed_surfaces_;

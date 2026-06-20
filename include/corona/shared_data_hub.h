@@ -193,6 +193,7 @@ struct CameraDevice {
     CameraRenderBackend render_backend{CameraRenderBackend::Native};
     CameraVisionRenderMode vision_render_mode{CameraVisionRenderMode::PathTracing};
     bool view_open{false};
+    bool viewport_rect_active{false};
     int view_x{120};
     int view_y{120};
     int view_width{960};

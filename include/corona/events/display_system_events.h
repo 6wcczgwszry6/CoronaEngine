@@ -60,6 +60,10 @@ struct OpticsFrameReadyEvent {
     uint64_t frame_index = 0;
     uint32_t width = 0;
     uint32_t height = 0;
+    uint32_t viewport_x = 0;
+    uint32_t viewport_y = 0;
+    uint32_t viewport_width = 0;
+    uint32_t viewport_height = 0;
 };
 
 /**

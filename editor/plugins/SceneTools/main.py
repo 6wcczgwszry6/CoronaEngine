@@ -1461,7 +1461,6 @@ class SceneTools(PluginBase):
                 if camera is None:
                     raise ValueError(f"Camera '{camera_name}' not found")
                 camera.set_render_backend(mode)
-                scene.save_data()
                 actual = camera.get_render_backend()
             else:
                 CoronaEditor.CoronaEngine.set_render_backend(mode)
@@ -1502,7 +1501,6 @@ class SceneTools(PluginBase):
             if camera is None:
                 raise ValueError(f"Camera '{camera_name}' not found")
             camera.set_vision_render_mode(mode)
-            scene.save_data()
             actual = camera.get_vision_render_mode()
             logger.info("Vision render mode set to '%s' for scene %s camera %s",
                         actual, scene_name, getattr(camera, 'name', camera_name))

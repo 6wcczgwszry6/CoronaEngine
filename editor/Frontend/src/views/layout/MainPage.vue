@@ -574,6 +574,7 @@ const cameraState = ref({
 
 const cameraBindingState = ref({
   sceneId: DEFAULT_SCENE_NAME,
+  cameraId: null,
   cameraName: null,
   cameraHandle: null,
 });
@@ -625,15 +626,17 @@ const mouseRotate = reactive({
 const getViewportHitRect = () => viewportPickSurfaceRef.value?.getBoundingClientRect?.() ?? null;
 
 const getViewportRenderRect = () => {
-  const width = Math.max(Number(window.innerWidth || 0), 0);
-  const height = Math.max(Number(window.innerHeight || 0), 0);
+  const rect = getViewportHitRect();
+  const width = Math.max(Number(rect?.width || 0), 0);
+  const height = Math.max(Number(rect?.height || 0), 0);
+  const scale = Math.max(Number(window.devicePixelRatio || 1), 0.01);
   return {
-    left: 0,
-    top: 0,
+    left: Number(rect?.left || 0),
+    top: Number(rect?.top || 0),
     width,
     height,
-    renderWidth: width,
-    renderHeight: height,
+    renderWidth: Math.max(Math.round(width * scale), 1),
+    renderHeight: Math.max(Math.round(height * scale), 1),
   };
 };
 
@@ -698,6 +701,43 @@ const emitTransformUpdateFast = (sceneId, actorName, position, rotation, scale, 
   }
 };
 
+let cameraViewportSyncRafId = null;
+let cameraViewportResizeObserver = null;
+let lastCameraViewportSignature = '';
+
+const syncCameraViewportRect = () => {
+  const bridge = window.coronaBridge;
+  const cameraHandle = Number(cameraBindingState.value.cameraHandle || 0);
+  const rect = getViewportHitRect();
+  if (!bridge || typeof bridge.setCameraViewport !== 'function' || !cameraHandle || !rect) {
+    return false;
+  }
+
+  const scale = Math.max(Number(window.devicePixelRatio || 1), 0.01);
+  const x = Math.max(Math.round(Number(rect.left || 0) * scale), 0);
+  const y = Math.max(Math.round(Number(rect.top || 0) * scale), 0);
+  const width = Math.max(Math.round(Number(rect.width || 0) * scale), 1);
+  const height = Math.max(Math.round(Number(rect.height || 0) * scale), 1);
+  const signature = `${cameraHandle}:${x}:${y}:${width}:${height}`;
+  if (signature === lastCameraViewportSignature) {
+    return true;
+  }
+
+  if (bridge.setCameraViewport(cameraHandle, x, y, width, height, width, height)) {
+    lastCameraViewportSignature = signature;
+    return true;
+  }
+  return false;
+};
+
+const scheduleCameraViewportSync = () => {
+  if (cameraViewportSyncRafId != null) return;
+  cameraViewportSyncRafId = requestAnimationFrame(() => {
+    cameraViewportSyncRafId = null;
+    syncCameraViewportRect();
+  });
+};
+
 const commitGizmoTransform = async (sceneId, actorName) => {
   if (!sceneId || !actorName) return;
   try {
@@ -746,6 +786,7 @@ const scheduleGizmoStateRefresh = () => {
 
 const handleViewportLayoutChange = () => {
   viewportLayoutVersion.value += 1;
+  scheduleCameraViewportSync();
   scheduleGizmoStateRefresh();
 };
 
@@ -857,6 +898,9 @@ const mainRenderModeLabel = computed(() => {
   return mainRenderModeOptions.find((mode) => mode.value === mainVisionRenderMode.value)?.label
     || 'Vision Path Tracing';
 });
+let pendingMainRenderSelection = null;
+const currentMainCameraId = () =>
+  cameraBindingState.value.cameraId || cameraBindingState.value.cameraName || null;
 
 // ── 包菜提示气泡状态 ──
 const STORAGE_KEY = 'corona_editor_settings';
@@ -909,31 +953,50 @@ const toggleMenu = (menu) => {
 
 const selectMainRenderMode = async (mode) => {
   const sceneId = tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
+  const cameraId = currentMainCameraId();
   activeMenu.value = null;
   try {
     if (mode === 'native') {
+      pendingMainRenderSelection = {
+        sceneId,
+        backend: 'native',
+        visionMode: mainVisionRenderMode.value,
+        expiresAt: Date.now() + 3000,
+      };
+      mainRenderBackend.value = 'native';
       const result = unwrapBridgeData(
-        await sceneService.setRenderBackend('native', sceneId, null),
+        await sceneService.setRenderBackend('native', sceneId, cameraId),
       );
       mainRenderBackend.value = result?.mode || 'native';
-      await syncSceneCameraBinding(sceneId);
       return;
     }
 
+    pendingMainRenderSelection = {
+      sceneId,
+      backend: 'vision',
+      visionMode: mode,
+      expiresAt: Date.now() + 3000,
+    };
+    mainRenderBackend.value = 'vision';
+    mainVisionRenderMode.value = mode;
+
+    const modeResult = unwrapBridgeData(
+      await sceneService.setVisionRenderMode(sceneId, cameraId, mode),
+    );
+    mainVisionRenderMode.value = modeResult?.mode || mode;
+
+    await sceneService.setOutputMode(sceneId, cameraId, 'final_color');
+
     const backendResult = unwrapBridgeData(
-      await sceneService.setRenderBackend('vision', sceneId, null),
+      await sceneService.setRenderBackend('vision', sceneId, cameraId),
     );
     mainRenderBackend.value = backendResult?.mode || 'native';
     if (mainRenderBackend.value !== 'vision') {
+      pendingMainRenderSelection = null;
       return;
     }
-
-    const modeResult = unwrapBridgeData(
-      await sceneService.setVisionRenderMode(sceneId, null, mode),
-    );
-    mainVisionRenderMode.value = modeResult?.mode || mode;
-    await syncSceneCameraBinding(sceneId);
   } catch (error) {
+    pendingMainRenderSelection = null;
     logError('Failed to set main viewport render mode', error);
   }
 };
@@ -1034,12 +1097,25 @@ const applySceneSnapshot = (sceneId, payload) => {
 
   cameraBindingState.value = {
     sceneId: normalizedSceneId,
+    cameraId: activeCamera?.camera_id ?? activeCamera?.id ?? null,
     cameraName: activeCameraName,
     cameraHandle: activeCamera?.handle ?? activeCamera?.camera_handle ?? null,
   };
+  lastCameraViewportSignature = '';
+  scheduleCameraViewportSync();
   syncViewportUiMode();
-  mainRenderBackend.value = activeCamera?.render_backend || 'native';
-  mainVisionRenderMode.value = activeCamera?.vision_render_mode || 'path_tracing';
+  if (
+    pendingMainRenderSelection &&
+    pendingMainRenderSelection.sceneId === normalizedSceneId &&
+    Date.now() < pendingMainRenderSelection.expiresAt
+  ) {
+    mainRenderBackend.value = pendingMainRenderSelection.backend;
+    mainVisionRenderMode.value = pendingMainRenderSelection.visionMode;
+  } else {
+    pendingMainRenderSelection = null;
+    mainRenderBackend.value = activeCamera?.render_backend || 'native';
+    mainVisionRenderMode.value = activeCamera?.vision_render_mode || 'path_tracing';
+  }
 
   if (
     activeCamera &&
@@ -2033,6 +2109,7 @@ const setupListener = () => {
       cameraBindingState.value = {
         ...cameraBindingState.value,
         cameraHandle: Number(pose.cameraHandle),
+        cameraId: pose.cameraId ?? cameraBindingState.value.cameraId,
         cameraName: pose.cameraName ?? cameraBindingState.value.cameraName,
       };
     }
@@ -2118,6 +2195,11 @@ onMounted(async () => {
   await projectService.sceneSwitch(null, initialSceneId);
   await syncSceneCameraBinding(tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME);
   syncViewportUiMode();
+  scheduleCameraViewportSync();
+  if (typeof ResizeObserver !== 'undefined' && viewportPickSurfaceRef.value) {
+    cameraViewportResizeObserver = new ResizeObserver(handleViewportLayoutChange);
+    cameraViewportResizeObserver.observe(viewportPickSurfaceRef.value);
+  }
   await restoreCameraViews(initialSceneId);
 
   document.addEventListener('keydown', handleKeyDown);
@@ -2182,6 +2264,12 @@ onUnmounted(() => {
     cancelAnimationFrame(gizmoRefreshRafId);
     gizmoRefreshRafId = null;
   }
+  if (cameraViewportSyncRafId != null) {
+    cancelAnimationFrame(cameraViewportSyncRafId);
+    cameraViewportSyncRafId = null;
+  }
+  cameraViewportResizeObserver?.disconnect?.();
+  cameraViewportResizeObserver = null;
   viewportPickController.dispose();
   viewportGizmoController.dispose();
   viewportUiPointerController.dispose();

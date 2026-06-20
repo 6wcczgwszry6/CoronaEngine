@@ -86,6 +86,72 @@ inline ImTextureID descriptor_to_texture_id(uint32_t descriptor) {
 constexpr auto kUiRenderTargetUsage =
     Corona::Horizon::ImageUsageFlags::Sampled | Corona::Horizon::ImageUsageFlags::Storage;
 
+struct PixelExtent {
+    uint32_t width = 0;
+    uint32_t height = 0;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return width != 0 && height != 0;
+    }
+};
+
+[[nodiscard]] PixelExtent window_pixel_extent(SDL_Window* window) {
+    if (window == nullptr) {
+        return {};
+    }
+
+    int width = 0;
+    int height = 0;
+    if (SDL_GetWindowSizeInPixels(window, &width, &height) && width > 0 && height > 0) {
+        return {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    }
+
+    width = 0;
+    height = 0;
+    if (SDL_GetWindowSize(window, &width, &height) && width > 0 && height > 0) {
+        return {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    }
+
+    return {};
+}
+
+[[nodiscard]] PixelExtent draw_data_pixel_extent(const ImDrawData* draw_data) {
+    if (draw_data == nullptr) {
+        return {};
+    }
+
+    const float scale_x = draw_data->FramebufferScale.x > 0.0f
+                              ? draw_data->FramebufferScale.x
+                              : 1.0f;
+    const float scale_y = draw_data->FramebufferScale.y > 0.0f
+                              ? draw_data->FramebufferScale.y
+                              : 1.0f;
+    const auto width = static_cast<int>(std::lround(draw_data->DisplaySize.x * scale_x));
+    const auto height = static_cast<int>(std::lround(draw_data->DisplaySize.y * scale_y));
+    if (width <= 0 || height <= 0) {
+        return {};
+    }
+    return {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+}
+
+[[nodiscard]] ktm::fvec2 framebuffer_scale_for(const ImDrawData& draw_data,
+                                               PixelExtent extent) {
+    if (draw_data.DisplaySize.x <= 0.0f || draw_data.DisplaySize.y <= 0.0f) {
+        return ktm::fvec2(1.0f, 1.0f);
+    }
+    return ktm::fvec2(static_cast<float>(extent.width) / draw_data.DisplaySize.x,
+                      static_cast<float>(extent.height) / draw_data.DisplaySize.y);
+}
+
+[[nodiscard]] SDL_Window* sdl_window_from_viewport(ImGuiViewport* viewport) {
+    if (viewport == nullptr || viewport->PlatformHandle == nullptr) {
+        return nullptr;
+    }
+    const auto window_id =
+        static_cast<SDL_WindowID>(reinterpret_cast<std::intptr_t>(viewport->PlatformHandle));
+    return SDL_GetWindowFromID(window_id);
+}
+
 std::uintptr_t select_main_camera_handle(const Corona::SceneDevice& scene) {
     if (scene.active_camera_handle != 0 &&
         std::find(scene.camera_handles.begin(),
@@ -196,12 +262,9 @@ bool VulkanBackend::initialize() {
         event_bus->publish<Events::DisplaySurfaceChangedEvent>({surface_});
     }
 
-    int w = 0;
-    int h = 0;
-    SDL_GetWindowSize(window_, &w, &h);
-
-    if (w > 0 && h > 0) {
-        if (!ensure_render_target(main_resources_, static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+    const PixelExtent initial_extent = window_pixel_extent(window_);
+    if (initial_extent) {
+        if (!ensure_render_target(main_resources_, initial_extent.width, initial_extent.height,
                                   kUiRenderTargetUsage)) {
             CFW_LOG_ERROR("VulkanBackend: failed to create initial render target");
             return false;
@@ -327,7 +390,21 @@ void VulkanBackend::render_frame(ImDrawData* draw_data) {
     }
 
     main_resources_.executor.wait(font_upload_receipt_);
-    if (render_draw_data(draw_data, main_resources_, *imgui_pipeline_, font_atlas_image_, kUiRenderTargetUsage)) {
+    PixelExtent target_extent = draw_data_pixel_extent(draw_data);
+    if (!target_extent) {
+        target_extent = window_pixel_extent(window_);
+    }
+    if (!target_extent) {
+        return;
+    }
+
+    if (render_draw_data(draw_data,
+                         main_resources_,
+                         *imgui_pipeline_,
+                         font_atlas_image_,
+                         target_extent.width,
+                         target_extent.height,
+                         kUiRenderTargetUsage)) {
         main_resources_.frame_ready = true;
     }
 }
@@ -341,19 +418,27 @@ bool VulkanBackend::render_draw_data(
     ViewportRenderResources& res,
     Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>& pipeline,
     const Horizon::HardwareImage& font_atlas,
+    uint32_t target_width,
+    uint32_t target_height,
     Horizon::ImageUsageFlags render_target_usage) {
     if (draw_data == nullptr) {
         return false;
     }
-
-    const int fb_w = static_cast<int>(draw_data->DisplaySize.x * draw_data->FramebufferScale.x);
-    const int fb_h = static_cast<int>(draw_data->DisplaySize.y * draw_data->FramebufferScale.y);
-    if (fb_w <= 0 || fb_h <= 0) {
+    if (draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f) {
         return false;
     }
 
-    const auto fb_width = static_cast<uint32_t>(fb_w);
-    const auto fb_height = static_cast<uint32_t>(fb_h);
+    PixelExtent target_extent{target_width, target_height};
+    if (!target_extent) {
+        target_extent = draw_data_pixel_extent(draw_data);
+    }
+    if (!target_extent) {
+        return false;
+    }
+
+    const uint32_t fb_width = target_extent.width;
+    const uint32_t fb_height = target_extent.height;
+    const ktm::fvec2 framebuffer_scale = framebuffer_scale_for(*draw_data, target_extent);
 
     // --- Ensure render target ---
     if (!ensure_render_target(res, fb_width, fb_height, render_target_usage)) {
@@ -483,10 +568,10 @@ bool VulkanBackend::render_draw_data(
                 continue;
             }
 
-            ImVec2 clip_min((pcmd.ClipRect.x - draw_data->DisplayPos.x) * draw_data->FramebufferScale.x,
-                            (pcmd.ClipRect.y - draw_data->DisplayPos.y) * draw_data->FramebufferScale.y);
-            ImVec2 clip_max((pcmd.ClipRect.z - draw_data->DisplayPos.x) * draw_data->FramebufferScale.x,
-                            (pcmd.ClipRect.w - draw_data->DisplayPos.y) * draw_data->FramebufferScale.y);
+            ImVec2 clip_min((pcmd.ClipRect.x - draw_data->DisplayPos.x) * framebuffer_scale.x,
+                            (pcmd.ClipRect.y - draw_data->DisplayPos.y) * framebuffer_scale.y);
+            ImVec2 clip_max((pcmd.ClipRect.z - draw_data->DisplayPos.x) * framebuffer_scale.x,
+                            (pcmd.ClipRect.w - draw_data->DisplayPos.y) * framebuffer_scale.y);
 
             clip_min.x = std::max(clip_min.x, 0.0f);
             clip_min.y = std::max(clip_min.y, 0.0f);
@@ -499,15 +584,13 @@ bool VulkanBackend::render_draw_data(
 
             const ImTextureID tex_id = pcmd.GetTexID();
             uint32_t texture_index = texture_id_to_descriptor(tex_id);
-            if (const auto* browser_texture = UI::BrowserManager::instance().get_texture_image(pcmd.GetTexID())) {
-                UI::BrowserManager::instance().wait_for_texture_upload(pcmd.GetTexID());
+            if (const auto* browser_texture = UI::BrowserManager::instance().get_texture_image(tex_id)) {
+                UI::BrowserManager::instance().wait_for_texture_upload(tex_id);
                 texture_index = browser_texture->storeSampledDescriptor();
-                pipeline[imgui_frag_glsl_t::textures] = *browser_texture;
             } else if (font_atlas) {
                 const uint32_t font_descriptor = font_atlas.storeSampledDescriptor();
                 if (texture_index == 0 || texture_index == font_descriptor) {
                     texture_index = font_descriptor;
-                    pipeline[imgui_frag_glsl_t::textures] = font_atlas;
                 }
             }
 
@@ -592,8 +675,13 @@ void VulkanBackend::rebuild(int width, int height) {
         return;
     }
 
-    const auto target_width = static_cast<uint32_t>(width);
-    const auto target_height = static_cast<uint32_t>(height);
+    PixelExtent target_extent = window_pixel_extent(window_);
+    if (!target_extent) {
+        target_extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    }
+
+    const auto target_width = target_extent.width;
+    const auto target_height = target_extent.height;
     const bool size_changed = !main_resources_.render_target ||
                               main_resources_.width != target_width ||
                               main_resources_.height != target_height;
@@ -821,9 +909,11 @@ void VulkanBackend::renderer_render_window(ImGuiViewport* vp, void* /*render_arg
         return;
     }
 
-    const int fb_w = static_cast<int>(draw_data->DisplaySize.x * draw_data->FramebufferScale.x);
-    const int fb_h = static_cast<int>(draw_data->DisplaySize.y * draw_data->FramebufferScale.y);
-    if (fb_w <= 0 || fb_h <= 0) {
+    PixelExtent target_extent = draw_data_pixel_extent(draw_data);
+    if (!target_extent) {
+        target_extent = window_pixel_extent(sdl_window_from_viewport(vp));
+    }
+    if (!target_extent) {
         return;
     }
 
@@ -843,6 +933,7 @@ void VulkanBackend::renderer_render_window(ImGuiViewport* vp, void* /*render_arg
 
     if (!vd->pipeline ||
         !render_draw_data(draw_data, vd->resources, *vd->pipeline, s_instance_->font_atlas_image_,
+                          target_extent.width, target_extent.height,
                           kUiRenderTargetUsage)) {
         return;
     }

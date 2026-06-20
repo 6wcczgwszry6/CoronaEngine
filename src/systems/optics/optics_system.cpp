@@ -90,6 +90,34 @@ struct Mat4Upload {
     float values[16];
 };
 
+struct ImagePixelExtent {
+    uint32_t width = 0;
+    uint32_t height = 0;
+};
+
+struct OpticsEventViewport {
+    uint32_t x = 0;
+    uint32_t y = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+};
+
+[[nodiscard]] OpticsEventViewport optics_event_viewport(
+    const Corona::CameraDevice& camera,
+    const ImagePixelExtent& presented_extent) {
+    if (!camera.viewport_rect_active || camera.view_open ||
+        camera.view_width <= 0 || camera.view_height <= 0) {
+        return {0, 0, presented_extent.width, presented_extent.height};
+    }
+
+    return {
+        static_cast<uint32_t>(std::max(camera.view_x, 0)),
+        static_cast<uint32_t>(std::max(camera.view_y, 0)),
+        static_cast<uint32_t>(std::max(camera.view_width, 1)),
+        static_cast<uint32_t>(std::max(camera.view_height, 1)),
+    };
+}
+
 [[nodiscard]] UVec2Upload upload_value(const ktm::uvec2& value) {
     return {value.x, value.y};
 }
@@ -107,6 +135,14 @@ struct Mat4Upload {
     static_assert(sizeof(upload) == sizeof(value));
     std::memcpy(&upload, &value, sizeof(upload));
     return upload;
+}
+
+[[nodiscard]] ImagePixelExtent hardware_image_extent(const Corona::Horizon::HardwareImage& image) {
+    if (!image) {
+        return {};
+    }
+    const auto extent = image.extent();
+    return {extent.width, extent.height};
 }
 
 [[nodiscard]] Corona::Horizon::RasterizerPipelineDesc make_visibility_pipeline_desc() {
@@ -399,6 +435,7 @@ void apply_pending_camera_viewport_updates() {
             camera->surface = update.surface;
             camera->follows_default_surface = false;
             camera->view_open = update.view_open;
+            camera->viewport_rect_active = true;
             camera->view_x = update.x;
             camera->view_y = update.y;
             camera->view_width = update.width;
@@ -1137,6 +1174,9 @@ struct OpticsSystem::VisionPipelineRuntime {
     // Zero-copy path: shares Vision's pre-tonemap linear color buffer with Vulkan
     // and resolves it via the vision_resolve compute pass.
     std::unordered_map<std::uintptr_t, std::unique_ptr<Vision::VisionZeroCopyBridge>> bridges;
+    std::unordered_set<std::uintptr_t> zero_copy_disabled;
+    std::unordered_map<std::uintptr_t, Horizon::HardwareBuffer> readback_buffers;
+    std::unordered_map<std::uintptr_t, std::vector<ocarina::float4>> readback_pixels;
     std::unordered_set<std::uintptr_t> retained_contexts;
 
     void commit_and_clear_contexts() noexcept {
@@ -1151,6 +1191,9 @@ struct OpticsSystem::VisionPipelineRuntime {
 
     void clear_camera_runtime_state() noexcept {
         bridges.clear();
+        zero_copy_disabled.clear();
+        readback_buffers.clear();
+        readback_pixels.clear();
         retained_contexts.clear();
     }
 
@@ -1775,17 +1818,18 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
                 if (event.camera_handle == 0) {
                     return;
                 }
-                if (auto camera = SharedDataHub::instance().camera_storage().acquire_write(
-                        event.camera_handle)) {
+                CameraStateUpdateCommand command{};
+                command.camera_handle = event.camera_handle;
+                command.fields = CameraStateUpdateField::RenderBackend;
 #ifdef CORONA_ENABLE_VISION
-                    camera->render_backend =
-                        event.backend == static_cast<int>(RenderBackend::Vision)
-                            ? CameraRenderBackend::Vision
-                            : CameraRenderBackend::Native;
+                command.render_backend =
+                    event.backend == static_cast<int>(RenderBackend::Vision)
+                        ? CameraRenderBackend::Vision
+                        : CameraRenderBackend::Native;
 #else
-                    camera->render_backend = CameraRenderBackend::Native;
+                command.render_backend = CameraRenderBackend::Native;
 #endif
-                }
+                SharedDataHub::instance().enqueue_camera_state_update(command);
             });
 
 #ifdef CORONA_ENABLE_VISION
@@ -2117,7 +2161,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                     // VBuffer uses 1-based instanceID (0 = background sentinel after clear)
                                     target_visibility[visibility_vert_glsl_t::pushConsts::instanceID] =
                                         instanceID + 1;
-                                    // Alpha-cutout: pass texture descriptor for discard test
+                                    // Keep texture descriptor in the push constants for shader ABI compatibility.
                                     if (m.textureBuffer) {
                                         target_visibility[visibility_frag_glsl_t::pushConsts::textureIndex] =
                                             m.textureBuffer.storeSampledDescriptor();
@@ -2189,7 +2233,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 (void)write_object_bytes(hardware_->uniformBuffer,
                                          hardware_->uniformBufferObjects);
                 const uint32_t uboDescriptor = hardware_->uniformBuffer.storeDescriptor();
-                const uint32_t depthDescriptor = hardware_->depthImage.storeDescriptor();
+                const uint32_t depthSampledDescriptor =
+                    hardware_->depthImage.storeSampledDescriptor();
 
                 // Offscreen cameras (no surface) render to a dedicated image so
                 // they never collide with the display pipeline's per-surface output.
@@ -2204,7 +2249,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 lighting.pushConsts.gbufferSize = upload_value(hardware_->gbufferSize);
                 lighting.pushConsts.visibilityImageIndex =
                     hardware_->visibilityImage.storeStorageDescriptor();
-                lighting.pushConsts.depthImageIndex = depthDescriptor;
+                lighting.pushConsts.depthImageIndex = depthSampledDescriptor;
                 lighting.pushConsts.instanceInfoBufferIndex =
                     hardware_->instanceInfoBuffer.storeDescriptor();
                 lighting.pushConsts.materialTableBufferIndex =
@@ -2229,7 +2274,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 // 6. Sky pass: atmospheric scattering + floor grid
                 // ================================================================
                 sky.pushConsts.gbufferSize = upload_value(hardware_->gbufferSize);
-                sky.pushConsts.gbufferDepthImage = depthDescriptor;
+                sky.pushConsts.gbufferDepthImage = depthSampledDescriptor;
                 sky.pushConsts.finalOutputImage = finalOutputDescriptor;
                 sky.pushConsts.uniformBufferIndex = uboDescriptor;
                 sky.pushConsts.sun_dir = upload_value(sun_dir);
@@ -2312,8 +2357,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
 
                             debugResolve.pushConsts.gbufferSize = upload_value(hardware_->gbufferSize);
                             debugResolve.pushConsts.visibilityImageIndex =
-                                hardware_->visibilityImage.storeDescriptor();
-                            debugResolve.pushConsts.depthImageIndex = depthDescriptor;
+                                hardware_->visibilityImage.storeSampledDescriptor();
+                            debugResolve.pushConsts.depthImageIndex = depthSampledDescriptor;
                             debugResolve.pushConsts.instanceInfoBufferIndex =
                                 hardware_->instanceInfoBuffer.storeDescriptor();
                             debugResolve.pushConsts.materialTableBufferIndex =
@@ -2377,11 +2422,18 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 }
 
                 if (auto* event_bus = context()->event_bus()) {
+                    const auto presented_extent = hardware_image_extent(*presented_target);
+                    const auto viewport =
+                        optics_event_viewport(*camera, presented_extent);
                     event_bus->publish<Events::OpticsFrameReadyEvent>({surface,
                                                                        target.image_handle,
                                                                        frame_index,
-                                                                       hardware_->gbufferSize.x,
-                                                                       hardware_->gbufferSize.y});
+                                                                       presented_extent.width,
+                                                                       presented_extent.height,
+                                                                       viewport.x,
+                                                                       viewport.y,
+                                                                       viewport.width,
+                                                                       viewport.height});
                 }
 
 #ifdef CORONA_ENABLE_VISION
@@ -3547,6 +3599,42 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                     pipeline->remove_view_context(camera_handle);
                 }
             }
+            for (auto it = runtime.readback_buffers.begin();
+                 it != runtime.readback_buffers.end();) {
+                if (active_contexts.contains(it->first)) {
+                    ++it;
+                    continue;
+                }
+                const auto camera_handle = it->first;
+                bool camera_exists = false;
+                bool retain_context = false;
+                if (auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(
+                        camera_handle)) {
+                    camera_exists = true;
+                    retain_context = camera->surface != nullptr;
+                }
+
+                if (retain_context) {
+                    if (!runtime.retained_contexts.contains(camera_handle)) {
+                        pipeline->commit_command();
+                        pipeline->invalidate_view_context(camera_handle);
+                        runtime.retained_contexts.insert(camera_handle);
+                    }
+                    ++it;
+                    continue;
+                }
+
+                pipeline->commit_command();
+                runtime.readback_pixels.erase(camera_handle);
+                runtime.zero_copy_disabled.erase(camera_handle);
+                it = runtime.readback_buffers.erase(it);
+                if (camera_exists) {
+                    pipeline->invalidate_view_context(camera_handle);
+                    runtime.retained_contexts.insert(camera_handle);
+                } else {
+                    pipeline->remove_view_context(camera_handle);
+                }
+            }
             for (auto it = runtime.retained_contexts.begin();
                  it != runtime.retained_contexts.end();) {
                 if (SharedDataHub::instance().camera_storage().try_acquire_read(*it)) {
@@ -3577,6 +3665,27 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 const auto resolution =
                     ocarina::make_uint2(std::max(camera.width, 1u),
                                        std::max(camera.height, 1u));
+                if (pipeline->has_view_context(cam_handle)) {
+                    if (!pipeline->activate_view_context(cam_handle)) {
+                        return;
+                    }
+                    const auto* existing_fb = pipeline->frame_buffer();
+                    bool recreate_context = existing_fb == nullptr;
+                    if (existing_fb != nullptr) {
+                        const auto existing_res = existing_fb->resolution();
+                        recreate_context = existing_res.x != resolution.x ||
+                                           existing_res.y != resolution.y;
+                    }
+                    if (recreate_context) {
+                        pipeline->commit_command();
+                        runtime.bridges.erase(cam_handle);
+                        runtime.zero_copy_disabled.erase(cam_handle);
+                        runtime.readback_buffers.erase(cam_handle);
+                        runtime.readback_pixels.erase(cam_handle);
+                        runtime.retained_contexts.erase(cam_handle);
+                        pipeline->remove_view_context(cam_handle);
+                    }
+                }
                 if (!pipeline->has_view_context(cam_handle) &&
                     !pipeline->create_view_context(cam_handle, resolution)) {
                     CFW_LOG_ERROR(
@@ -3597,18 +3706,47 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 const uint32_t w = res.x;
                 const uint32_t h = res.y;
 
-                auto& bridge = runtime.bridges[cam_handle];
-                if (!bridge) {
-                    bridge = std::make_unique<Vision::VisionZeroCopyBridge>();
+                const uint64_t pixel_count = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
+                std::optional<uint32_t> vision_src_descriptor;
+                if (!runtime.zero_copy_disabled.contains(cam_handle)) {
+                    auto& bridge = runtime.bridges[cam_handle];
+                    if (!bridge) {
+                        bridge = std::make_unique<Vision::VisionZeroCopyBridge>();
+                    }
+                    if (bridge->ensure(*pipeline, w, h) &&
+                        bridge->copy_from_framebuffer(*pipeline)) {
+                        vision_src_descriptor = bridge->imported().storeDescriptor();
+                    } else {
+                        runtime.bridges.erase(cam_handle);
+                        runtime.zero_copy_disabled.insert(cam_handle);
+                    }
                 }
-                if (!bridge->ensure(*pipeline, w, h) ||
-                    !bridge->copy_from_framebuffer(*pipeline)) {
-                    CFW_LOG_WARNING(
-                        "OpticsSystem: Vision bridge unavailable for camera {} ({}x{})",
-                        cam_handle,
-                        w,
-                        h);
-                    return;
+
+                if (!vision_src_descriptor) {
+                    auto& pixels = runtime.readback_pixels[cam_handle];
+                    pixels.resize(pixel_count);
+
+                    const auto src = fb->display_source_buffer();
+                    pipeline->stream() << src.download(pixels.data())
+                                       << ocarina::synchronize()
+                                       << ocarina::commit();
+
+                    auto& fallback_buffer = runtime.readback_buffers[cam_handle];
+                    const uint64_t float_count = pixel_count * 4u;
+                    if (!fallback_buffer ||
+                        fallback_buffer.get_element_count() != float_count) {
+                        fallback_buffer = make_storage_buffer<float>(
+                            float_count, "optics.vision_readback");
+                    }
+                    if (!fallback_buffer.write_bytes(
+                            std::as_bytes(std::span<const ocarina::float4>(
+                                pixels.data(), pixels.size())))) {
+                        CFW_LOG_ERROR(
+                            "OpticsSystem: unable to upload Vision fallback buffer for camera {}",
+                            cam_handle);
+                        return;
+                    }
+                    vision_src_descriptor = fallback_buffer.storeDescriptor();
                 }
 
                 void* surface = camera.surface;
@@ -3624,8 +3762,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 {
                     auto& visionResolve = *hardware_->visionResolvePipeline;
                     visionResolve.pushConsts.gbufferSize = upload_value(hardware_->gbufferSize);
-                    visionResolve.pushConsts.srcBufferIndex =
-                        bridge->imported().storeDescriptor();
+                    visionResolve.pushConsts.srcBufferIndex = *vision_src_descriptor;
                     visionResolve.pushConsts.outputImage =
                         target.final_output.storeStorageDescriptor();
                     visionResolve.pushConsts.exposure = 1.0f;
@@ -3660,8 +3797,18 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 }
 
                 if (auto* event_bus = context()->event_bus()) {
+                    const auto presented_extent = hardware_image_extent(*presented);
+                    const auto viewport = optics_event_viewport(camera, presented_extent);
                     event_bus->publish<Events::OpticsFrameReadyEvent>(
-                        {surface, target.image_handle, frame_index, w, h});
+                        {surface,
+                         target.image_handle,
+                         frame_index,
+                         presented_extent.width,
+                         presented_extent.height,
+                         viewport.x,
+                         viewport.y,
+                         viewport.width,
+                         viewport.height});
                 }
             } catch (const std::exception& error) {
                 CFW_LOG_ERROR("OpticsSystem: Vision camera {} failed: {}",

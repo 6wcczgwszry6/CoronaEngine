@@ -60,6 +60,8 @@ class VulkanBackend {
         ViewportRenderResources& resources,
         Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>& pipeline,
         const Horizon::HardwareImage& font_atlas,
+        uint32_t target_width,
+        uint32_t target_height,
         Horizon::ImageUsageFlags render_target_usage = Horizon::ImageUsageFlags::Sampled);
 
     // Accessors for shared resources (used by viewport callbacks)

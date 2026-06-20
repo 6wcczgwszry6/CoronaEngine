@@ -239,12 +239,20 @@ const selectBackend = async (mode) => {
 
 const selectVisionRenderMode = async (mode) => {
   visionModeMenuOpen.value = false;
-  if (visionRenderMode.value === mode) return;
+  if (visionRenderMode.value === mode && backend.value === 'vision') return;
   try {
     const result = unwrap(await sceneService.setVisionRenderMode(sceneId, cameraId, mode));
     visionRenderMode.value = result.mode || mode;
     if (camera.value) {
       camera.value.vision_render_mode = visionRenderMode.value;
+    }
+    if (backend.value !== 'vision') {
+      const backendResult = unwrap(await sceneService.setRenderBackend('vision', sceneId, cameraId));
+      backend.value = backendResult.mode || 'vision';
+      if (backend.value === 'vision') {
+        outputMode.value = 'final_color';
+        await sceneService.setOutputMode(sceneId, cameraId, 'final_color');
+      }
     }
   } catch (error) {
     errorText.value = error.message;

@@ -118,6 +118,35 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
                 return true;
             }
 
+            if (name == "setCameraViewport") {
+                if (arguments.size() < 7) {
+                    exception =
+                        "setCameraViewport(cameraHandle, x, y, width, height, renderWidth, renderHeight) requires 7 numbers";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                for (size_t i = 0; i < 7; ++i) {
+                    if (!arguments[i] || (!arguments[i]->IsInt() && !arguments[i]->IsDouble())) {
+                        exception = "setCameraViewport arguments must be numbers";
+                        retval = CefV8Value::CreateBool(false);
+                        return true;
+                    }
+                }
+                auto ctx = CefV8Context::GetCurrentContext();
+                if (!ctx || !ctx->GetBrowser()) {
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("CameraViewportFast");
+                CefRefPtr<CefListValue> args = msg->GetArgumentList();
+                for (size_t i = 0; i < 7; ++i) {
+                    args->SetDouble(static_cast<int>(i), arguments[i]->GetDoubleValue());
+                }
+                ctx->GetFrame()->SendProcessMessage(PID_BROWSER, msg);
+                retval = CefV8Value::CreateBool(true);
+                return true;
+            }
+
             if (name == "setViewportUiCalibration") {
                 bool args_ok = arguments.size() >= 5;
                 for (size_t i = 0; args_ok && i < 5; ++i) {
@@ -498,6 +527,8 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
         CefRefPtr<CefV8Value> pick_actor = CefV8Value::CreateFunction("pickActor", handler);
         CefRefPtr<CefV8Value> set_viewport_ui_mode =
             CefV8Value::CreateFunction("setViewportUiMode", handler);
+        CefRefPtr<CefV8Value> set_camera_viewport =
+            CefV8Value::CreateFunction("setCameraViewport", handler);
         CefRefPtr<CefV8Value> set_viewport_ui_calibration =
             CefV8Value::CreateFunction("setViewportUiCalibration", handler);
         CefRefPtr<CefV8Value> viewport_system_cursor =
@@ -513,6 +544,7 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
         bridge->SetValue("setProperty", set_property, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("pickActor", pick_actor, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("setViewportUiMode", set_viewport_ui_mode, V8_PROPERTY_ATTRIBUTE_NONE);
+        bridge->SetValue("setCameraViewport", set_camera_viewport, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("setViewportUiCalibration", set_viewport_ui_calibration, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("setViewportSystemCursorHidden", viewport_system_cursor, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("viewportUiPointer", viewport_ui_pointer, V8_PROPERTY_ATTRIBUTE_NONE);
