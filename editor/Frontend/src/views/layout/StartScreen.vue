@@ -82,7 +82,7 @@ function handleStoryMode() {
 }
 
 function handleCreativeMode() {
-  router.push('/CreateGame');
+  router.push('/JoinGame');
 }
 
 function handleRecentGames() {
