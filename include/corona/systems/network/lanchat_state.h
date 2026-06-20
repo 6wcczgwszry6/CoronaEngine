@@ -127,9 +127,11 @@ public:
 
     void enqueue_agent_triggers_for_message(const LanChatMessage& message,
                                             const std::string& local_peer_id,
-                                            bool is_agent_reply = false);
+                                            bool is_agent_reply = false,
+                                            bool allow_generation_start = true);
     [[nodiscard]] std::optional<LanChatAgentTrigger> pop_agent_trigger();
-    [[nodiscard]] std::optional<LanChatMessage> pop_coordinator_sync_message();
+    [[nodiscard]] std::optional<LanChatMessage> pop_coordinator_sync_message(
+        bool allow_generation_start = true);
 
     LanChatResult lock_object(const std::string& object_id,
                               const std::string& user_id,

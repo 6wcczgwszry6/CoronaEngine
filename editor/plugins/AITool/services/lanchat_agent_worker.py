@@ -39,6 +39,13 @@ _SENSITIVE_WORKER_PAYLOAD_KEYS = {
 _SENSITIVE_WORKER_TEXT_MARKERS = tuple(sorted(_SENSITIVE_WORKER_PAYLOAD_KEYS))
 
 
+def _trace_preview(value: Any, limit: int = 80) -> str:
+    text = str(value or "").replace("\r", "\\r").replace("\n", "\\n")
+    if len(text) > limit:
+        return f"{text[:limit]}..."
+    return text
+
+
 class LANChatAgentWorker:
     """Poll C++ LANChat agent triggers and return replies through C++."""
 
@@ -183,14 +190,61 @@ class LANChatAgentWorker:
         sender_type = str(message.get("sender_type") or "user").lower()
         dedupe_key = self._coordinator_sync_dedupe_key(message, source=source)
         if not dedupe_key:
+            self._logger.info(
+                "[LANChatSyncTrace] phase=skip_no_dedupe source=%s message_id=%s room=%s sender=%s/%s text=%s",
+                source,
+                message.get("message_id") or "",
+                message.get("room_id") or "",
+                message.get("sender_type") or "",
+                message.get("sender_id") or message.get("from") or "",
+                _trace_preview(message.get("text")),
+            )
             return False
         if dedupe_key in self._coordinator_seen_message_ids:
+            self._logger.info(
+                "[LANChatSyncTrace] phase=dedupe_skip source=%s dedupe=%s message_id=%s room=%s sender=%s/%s text=%s",
+                source,
+                dedupe_key,
+                message.get("message_id") or "",
+                message.get("room_id") or "",
+                message.get("sender_type") or "",
+                message.get("sender_id") or message.get("from") or "",
+                _trace_preview(message.get("text")),
+            )
             return False
+        self._logger.info(
+            "[LANChatSyncTrace] phase=received source=%s dedupe=%s message_id=%s correlation=%s room=%s kind=%s sender=%s/%s/%s target=%s/%s text=%s",
+            source,
+            dedupe_key,
+            message.get("message_id") or "",
+            message.get("correlation_id") or "",
+            message.get("room_id") or "",
+            message_kind,
+            sender_type,
+            message.get("sender_id") or message.get("from") or "",
+            message.get("sender_name") or "",
+            message.get("target_agent_id") or message.get("agent_id") or "",
+            message.get("target_agent_name") or message.get("agent_name") or "",
+            _trace_preview(message.get("text")),
+        )
         if message_kind != "chat" or sender_type not in {"user", "host"}:
+            self._logger.info(
+                "[LANChatSyncTrace] phase=skip_non_chat source=%s dedupe=%s kind=%s sender_type=%s",
+                source,
+                dedupe_key,
+                message_kind,
+                sender_type,
+            )
             self._remember_coordinator_seen_message_id(dedupe_key)
             return False
         text = str(message.get("text") or "").strip()
         if not text:
+            self._logger.info(
+                "[LANChatSyncTrace] phase=skip_empty_text source=%s dedupe=%s message_id=%s",
+                source,
+                dedupe_key,
+                message.get("message_id") or "",
+            )
             self._remember_coordinator_seen_message_id(dedupe_key)
             return False
         try:
@@ -200,8 +254,30 @@ class LANChatAgentWorker:
             self._remember_room_id(room_id)
             metadata = self._coordinator_sync_metadata(message, source=source)
             active = coordinator.active_plan_for_room(room_id)
+            self._logger.info(
+                "[LANChatSyncTrace] phase=route_start source=%s dedupe=%s room=%s active=%s plan=%s draft_action=%s target_scope=%s target_agent=%s/%s metadata_keys=%s",
+                source,
+                dedupe_key,
+                room_id,
+                str(active.status.value if active is not None else "none"),
+                str(getattr(active, "plan_id", "") or ""),
+                metadata.get("draft_action") or "",
+                metadata.get("target_scope") or "",
+                metadata.get("target_agent_id") or "",
+                metadata.get("target_agent_name") or "",
+                ",".join(sorted(str(key) for key in metadata.keys())),
+            )
             authoritative_synced = False
             if self._should_sync_metadata_scene_message_to_seed_plan(coordinator, room_id, text, metadata):
+                self._logger.info(
+                    "[LANChatSyncTrace] phase=authoritative_ingest source=%s dedupe=%s room=%s sender=%s host=%s text=%s",
+                    source,
+                    dedupe_key,
+                    room_id,
+                    message.get("sender_id") or message.get("from") or "",
+                    bool(message.get("is_host") or sender_type == "host"),
+                    _trace_preview(text),
+                )
                 coordinator.ingest_message(ChatMessage(
                     room_id=room_id,
                     sender_id=str(message.get("sender_id") or message.get("from") or ""),
@@ -214,6 +290,16 @@ class LANChatAgentWorker:
                 active = coordinator.active_plan_for_room(room_id)
             structured_handled = self._handle_structured_chat_route(message, text, metadata)
             if structured_handled:
+                self._logger.info(
+                    "[LANChatSyncTrace] phase=structured_handled source=%s dedupe=%s room=%s action=%s authoritative=%s active=%s plan=%s",
+                    source,
+                    dedupe_key,
+                    room_id,
+                    structured_handled,
+                    authoritative_synced,
+                    str(active.status.value if active is not None else "none"),
+                    str(getattr(active, "plan_id", "") or ""),
+                )
                 self._log_scene_route(
                     room_id=room_id,
                     sender=str(message.get("sender_name") or message.get("sender_id") or ""),
@@ -243,6 +329,14 @@ class LANChatAgentWorker:
             if source != "lanchat_history_snapshot":
                 planning_gate_handled = self._handle_plain_chat_planning_gate(message, text)
             if planning_gate_handled in {"reply", "compose"}:
+                self._logger.info(
+                    "[LANChatSyncTrace] phase=planning_gate_handled source=%s dedupe=%s room=%s action=%s authoritative=%s",
+                    source,
+                    dedupe_key,
+                    room_id,
+                    planning_gate_handled,
+                    authoritative_synced,
+                )
                 self._log_scene_route(
                     room_id=room_id,
                     sender=str(message.get("sender_name") or message.get("sender_id") or ""),
@@ -272,10 +366,25 @@ class LANChatAgentWorker:
                     )
                     return True
             if authoritative_synced:
+                self._logger.info(
+                    "[LANChatSyncTrace] phase=authoritative_only_done source=%s dedupe=%s room=%s plan=%s",
+                    source,
+                    dedupe_key,
+                    room_id,
+                    str(getattr(active, "plan_id", "") or ""),
+                )
                 if emit_disclosure:
                     self._emit_new_disclosure_events(coordinator, disclosure_start)
                 return True
             if not planning_gate_handled and not self._should_sync_chat_to_coordinator(coordinator, room_id, text, source=source):
+                self._logger.info(
+                    "[LANChatSyncTrace] phase=skip_not_scene_write source=%s dedupe=%s room=%s active=%s text=%s",
+                    source,
+                    dedupe_key,
+                    room_id,
+                    str(active.status.value if active is not None else "none"),
+                    _trace_preview(text),
+                )
                 self._log_scene_route(
                     room_id=room_id,
                     sender=str(message.get("sender_name") or message.get("sender_id") or ""),
@@ -294,6 +403,17 @@ class LANChatAgentWorker:
                 is_host=bool(message.get("is_host") or sender_type == "host"),
                 metadata=metadata,
             ))
+            updated = coordinator.active_plan_for_room(room_id)
+            self._logger.info(
+                "[LANChatSyncTrace] phase=coordinator_ingested source=%s dedupe=%s room=%s before=%s after=%s plan=%s design_len=%s",
+                source,
+                dedupe_key,
+                room_id,
+                str(active.status.value if active is not None else "none"),
+                str(updated.status.value if updated is not None else "none"),
+                str(getattr(updated, "plan_id", "") or ""),
+                len(str(getattr(updated, "design_brief", "") or "")) if updated is not None else 0,
+            )
             self._log_scene_route(
                 room_id=room_id,
                 sender=str(message.get("sender_name") or message.get("sender_id") or ""),
@@ -690,6 +810,18 @@ class LANChatAgentWorker:
         if not trigger:
             return processed_room_event or processed_coordinator_sync
 
+        self._logger.info(
+            "[LANChatAgentTrace] phase=trigger_pop message_id=%s correlation=%s room=%s sender=%s/%s target=%s/%s kind=%s text=%s",
+            trigger.get("message_id") or "",
+            trigger.get("correlation_id") or "",
+            trigger.get("room_id") or "",
+            trigger.get("sender_type") or "",
+            trigger.get("sender_id") or trigger.get("from") or "",
+            trigger.get("target_agent_id") or trigger.get("agent_id") or "",
+            trigger.get("target_agent_name") or trigger.get("agent_name") or "",
+            trigger.get("message_kind") or "",
+            _trace_preview(trigger.get("text")),
+        )
         self._sync_trigger_history_to_coordinator(trigger)
 
         if self._async_agent_execution:
@@ -737,6 +869,17 @@ class LANChatAgentWorker:
             if not message:
                 break
             processed = True
+            self._logger.info(
+                "[LANChatSyncTrace] phase=native_queue_pop message_id=%s correlation=%s room=%s sender=%s/%s target=%s/%s text=%s",
+                message.get("message_id") or "",
+                message.get("correlation_id") or "",
+                message.get("room_id") or "",
+                message.get("sender_type") or "",
+                message.get("sender_id") or message.get("from") or "",
+                message.get("target_agent_id") or message.get("agent_id") or "",
+                message.get("target_agent_name") or message.get("agent_name") or "",
+                _trace_preview(message.get("text")),
+            )
             self.sync_chat_message_to_coordinator(
                 dict(message),
                 source="lanchat_native_queue",
@@ -749,6 +892,18 @@ class LANChatAgentWorker:
         agent_id = str(trigger.get("agent_id") or "agent")
         agent_name = str(trigger.get("agent_name") or "Agent")
         action_payload = None
+        self._logger.info(
+            "[LANChatAgentTrace] phase=process_start message_id=%s correlation=%s room=%s agent=%s/%s sender=%s/%s kind=%s text=%s",
+            trigger.get("message_id") or "",
+            self._correlation_id(trigger),
+            trigger.get("room_id") or "",
+            agent_id,
+            agent_name,
+            trigger.get("sender_type") or "",
+            trigger.get("sender_id") or trigger.get("from") or "",
+            trigger.get("message_kind") or "",
+            _trace_preview(trigger.get("text")),
+        )
 
         def _send_progress(message: str) -> None:
             text = str(message or "").strip()
@@ -827,6 +982,17 @@ class LANChatAgentWorker:
 
         try:
             self._broadcast_confirmed_action(action_payload)
+            self._logger.info(
+                "[LANChatAgentTrace] phase=process_reply message_id=%s correlation=%s room=%s agent=%s/%s reply_len=%s action=%s status=%s",
+                trigger.get("message_id") or "",
+                self._correlation_id(trigger),
+                trigger.get("room_id") or "",
+                agent_id,
+                agent_name,
+                len(str(reply or "")),
+                str((action_payload or {}).get("action_type") or ""),
+                str((action_payload or {}).get("status") or ""),
+            )
             return bool(
                 self._send_final_reply(agent_id, agent_name, str(reply or ""), trigger, action_payload)
             )
@@ -856,6 +1022,18 @@ class LANChatAgentWorker:
             metadata = self._sanitize_control_payload(action_payload)
             metadata.setdefault("requires_host_confirm", True)
             if hasattr(self._corona_engine, "network_send_system_message_ex"):
+                self._logger.info(
+                    "[LANChatReplyTrace] phase=send_system_message_ex message_id=%s correlation=%s proposal=%s agent=%s/%s text_len=%s action=%s status=%s text=%s",
+                    trigger.get("message_id") or "",
+                    self._correlation_id(trigger),
+                    proposal_id,
+                    agent_id,
+                    agent_name,
+                    len(str(text or "")),
+                    str((action_payload or {}).get("action_type") or ""),
+                    str((action_payload or {}).get("status") or ""),
+                    _trace_preview(text),
+                )
                 return bool(self._corona_engine.network_send_system_message_ex(
                     agent_id,
                     agent_name,
@@ -865,6 +1043,16 @@ class LANChatAgentWorker:
                     json.dumps(metadata, ensure_ascii=False),
                 ))
         if hasattr(self._corona_engine, "network_send_agent_reply_ex"):
+            self._logger.info(
+                "[LANChatReplyTrace] phase=send_agent_reply_ex message_id=%s correlation=%s reply_to=%s agent=%s/%s text_len=%s text=%s",
+                trigger.get("message_id") or "",
+                self._correlation_id(trigger),
+                trigger.get("message_id") or "",
+                agent_id,
+                agent_name,
+                len(str(text or "")),
+                _trace_preview(text),
+            )
             return bool(self._corona_engine.network_send_agent_reply_ex(
                 agent_id,
                 agent_name,
@@ -874,6 +1062,15 @@ class LANChatAgentWorker:
                 self._correlation_id(trigger),
                 json.dumps({"reply_to": str(trigger.get("message_id") or "")}, ensure_ascii=False),
             ))
+        self._logger.info(
+            "[LANChatReplyTrace] phase=send_agent_reply message_id=%s correlation=%s agent=%s/%s text_len=%s text=%s",
+            trigger.get("message_id") or "",
+            self._correlation_id(trigger),
+            agent_id,
+            agent_name,
+            len(str(text or "")),
+            _trace_preview(text),
+        )
         return bool(self._corona_engine.network_send_agent_reply(agent_id, agent_name, text))
 
     def _remember_room_id(self, room_id: str) -> None:
@@ -917,6 +1114,19 @@ class LANChatAgentWorker:
             and hasattr(self._corona_engine, "network_pop_lanchat_agent_trigger")
             and hasattr(self._corona_engine, "network_send_agent_reply")
         )
+
+    def _can_execute_generation_locally(self) -> bool:
+        if self._corona_engine is None:
+            return True
+        session_role_name = getattr(self._corona_engine, "network_session_role_name", None)
+        if not callable(session_role_name):
+            return True
+        try:
+            role = str(session_role_name() or "none").strip().lower()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("LANChat generation role check skipped: %s", exc)
+            return True
+        return role != "client"
 
     def _get_orchestrator(self) -> LanChatAgentOrchestrator:
         if self._orchestrator is None:
@@ -1019,11 +1229,33 @@ class LANChatAgentWorker:
             coordinator = self._get_interaction_coordinator()
             room_id = str(trigger.get("room_id") or "default")
             plan = coordinator.active_plan_for_room(room_id)
+            self._logger.info(
+                "[LANChatGenerationTrace] phase=trigger_generation_start room=%s sender=%s/%s plan=%s status=%s text=%s",
+                room_id,
+                trigger.get("sender_id") or trigger.get("from") or "",
+                trigger.get("sender_name") or trigger.get("from") or "",
+                str(getattr(plan, "plan_id", "") or ""),
+                str(getattr(getattr(plan, "status", ""), "value", getattr(plan, "status", "")) or ""),
+                _trace_preview(text),
+            )
             if plan is None:
                 return None
             if plan.status == SeedPlanStatus.CONFIRMED:
                 disclosure_start = len(coordinator.disclosure_events)
+                self._logger.info(
+                    "[LANChatGenerationTrace] phase=execute_confirmed room=%s plan=%s design_len=%s",
+                    room_id,
+                    plan.plan_id,
+                    len(str(getattr(plan, "design_brief", "") or "")),
+                )
                 ref = coordinator.execute_confirmed_plan(plan.plan_id)
+                self._logger.info(
+                    "[LANChatGenerationTrace] phase=execute_result room=%s plan=%s job=%s status=%s",
+                    room_id,
+                    plan.plan_id,
+                    getattr(ref, "job_id", ""),
+                    getattr(ref, "status", ""),
+                )
                 emitted = self._emit_new_disclosure_events(coordinator, disclosure_start)
                 self._start_coordinator_disclosure_watch(coordinator, disclosure_start + emitted)
                 self._emit_generation_scheduler_disclosure()
@@ -1043,9 +1275,30 @@ class LANChatAgentWorker:
         room_id: str,
         host_id: str,
     ) -> str | None:
+        if not self._can_execute_generation_locally():
+            self._logger.info(
+                "[LANChatGenerationTrace] phase=blocked_non_host room=%s host=%s",
+                room_id,
+                host_id,
+            )
+            return None
         plan = coordinator.active_plan_for_room(room_id)
         if plan is None:
+            self._logger.info(
+                "[LANChatGenerationTrace] phase=start_request_no_plan room=%s host=%s",
+                room_id,
+                host_id,
+            )
             return None
+        self._logger.info(
+            "[LANChatGenerationTrace] phase=start_request room=%s host=%s plan=%s status=%s design_len=%s summary=%s",
+            room_id,
+            host_id,
+            plan.plan_id,
+            str(getattr(plan.status, "value", plan.status)),
+            len(str(getattr(plan, "design_brief", "") or "")),
+            _trace_preview(getattr(plan, "intent_summary", "") or "", 100),
+        )
         if plan.status == SeedPlanStatus.EXECUTING:
             latest_status = coordinator._latest_generation_job_status(plan.plan_id)
             return coordinator._status_query_message(plan, "", latest_status)
@@ -1054,6 +1307,16 @@ class LANChatAgentWorker:
                 return None
             disclosure_start = len(coordinator.disclosure_events)
             confirmed = coordinator.confirm_seed_plan(plan.plan_id, str(host_id or ""))
+            self._logger.info(
+                "[LANChatGenerationTrace] phase=confirm_result room=%s host=%s plan=%s ok=%s message=%s payload_plan=%s design_len=%s",
+                room_id,
+                host_id,
+                plan.plan_id,
+                bool(getattr(confirmed, "ok", False)),
+                _trace_preview(getattr(confirmed, "message", "") or ""),
+                str((getattr(confirmed, "payload", {}) or {}).get("plan_id") or ""),
+                len(str(getattr(plan, "design_brief", "") or "")),
+            )
             emitted = self._emit_new_disclosure_events(coordinator, disclosure_start)
             self._start_coordinator_disclosure_watch(coordinator, disclosure_start + emitted)
             if not getattr(confirmed, "ok", False):
@@ -1061,7 +1324,20 @@ class LANChatAgentWorker:
             plan = coordinator.active_plan_for_room(room_id) or plan
         if plan.status == SeedPlanStatus.CONFIRMED:
             disclosure_start = len(coordinator.disclosure_events)
+            self._logger.info(
+                "[LANChatGenerationTrace] phase=execute_confirmed room=%s plan=%s design_len=%s",
+                room_id,
+                plan.plan_id,
+                len(str(getattr(plan, "design_brief", "") or "")),
+            )
             ref = coordinator.execute_confirmed_plan(plan.plan_id)
+            self._logger.info(
+                "[LANChatGenerationTrace] phase=execute_result room=%s plan=%s job=%s status=%s",
+                room_id,
+                plan.plan_id,
+                getattr(ref, "job_id", ""),
+                getattr(ref, "status", ""),
+            )
             emitted = self._emit_new_disclosure_events(coordinator, disclosure_start)
             self._start_coordinator_disclosure_watch(coordinator, disclosure_start + emitted)
             self._emit_generation_scheduler_disclosure()

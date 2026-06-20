@@ -1193,7 +1193,8 @@ std::optional<Network::LanChatAgentTrigger> NetworkSystem::lanchat_pop_agent_tri
 }
 
 std::optional<Network::LanChatMessage> NetworkSystem::lanchat_pop_coordinator_sync_message() {
-    return impl_->lanchat.pop_coordinator_sync_message();
+    const bool allow_generation_start = impl_->session_role != SessionRole::Client;
+    return impl_->lanchat.pop_coordinator_sync_message(allow_generation_start);
 }
 
 std::optional<NetworkSystem::LanChatRoomEvent> NetworkSystem::lanchat_pop_room_event() {
@@ -2062,7 +2063,12 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
         }
         if (result.accepted &&
             (mt == MessageType::CHAT_MESSAGE || mt == MessageType::CHAT_MESSAGE_V2)) {
-            impl_->lanchat.enqueue_agent_triggers_for_message(result.message, local_peer_id());
+            const bool allow_generation_start = impl_->session_role != SessionRole::Client;
+            impl_->lanchat.enqueue_agent_triggers_for_message(
+                result.message,
+                local_peer_id(),
+                /*is_agent_reply=*/false,
+                allow_generation_start);
         }
         if (result.accepted && impl_->session_role == SessionRole::Host) {
             auto packet = build_chat_packet_for_type(result.message, mt);

@@ -608,6 +608,14 @@ void BindAll(nanobind::module_& m) {
             return nb::object(lanchat_message_to_dict(*message));
         }, "Pop one ordinary LANChat message that should be synced into InteractionCoordinator.");
 
+        m.def("network_session_role_name", []() -> std::string {
+            auto sys = get_network_system();
+            if (!sys) {
+                return "none";
+            }
+            return std::string(sys->session_role_name());
+        }, "Return current networking session role: none, host, or client.");
+
         m.def("network_pop_lanchat_room_event", []() -> nb::object {
             auto sys = get_network_system();
             if (!sys) {

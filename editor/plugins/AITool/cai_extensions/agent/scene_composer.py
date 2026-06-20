@@ -1648,6 +1648,7 @@ class SceneComposer:
         logger.info("[SceneComposer] 提取物体清单, 文本长度=%d", len(text))
         items = self._llm_extract(text)
         if not items:
+            logger.info("[SceneComposerTrace] phase=extract_fallback_regex reason=llm_empty text_len=%d", len(text))
             items = self._regex_extract(text)
 
         # 黑名单过滤 + 去重（剔除床品/背景墙/建筑设施等不该单独建模的琐碎项）
@@ -1678,6 +1679,11 @@ class SceneComposer:
             except Exception:
                 from scene_element_classifier import route_model_items, summarize_classification  # type: ignore
 
+            logger.info(
+                "[SceneComposerTrace] phase=element_classification_start candidates=%d names=%s",
+                len(classification_candidates),
+                [it.get("name") for it in classification_candidates],
+            )
             filtered, classified = route_model_items(text, classification_candidates)
             self._last_element_classification = [item.as_dict() for item in classified]
             self._last_element_classification_summary = summarize_classification(classified)
@@ -1689,6 +1695,11 @@ class SceneComposer:
                     routed.target_pipeline,
                     routed.confidence,
                 )
+            logger.info(
+                "[SceneComposerTrace] phase=element_classification_done model_items=%d classified=%d",
+                len(filtered),
+                len(classified),
+            )
         except Exception as exc:  # noqa: BLE001
             logger.debug("[SceneComposer] SceneElementClassifier skipped: %s", exc)
             filtered = expanded_candidates
@@ -1775,16 +1786,32 @@ class SceneComposer:
                 HumanMessage(content=json.dumps(prompt, ensure_ascii=False)),
             ])
 
+        logger.info(
+            "[SceneComposerTrace] phase=llm_expand_inventory_start existing=%d target_min=%d max_items=%d text_len=%d",
+            len(existing),
+            target_min,
+            self.max_items,
+            len(text),
+        )
         ex = ThreadPoolExecutor(max_workers=1)
         fut = ex.submit(_call)
         try:
             resp = fut.result(timeout=40.0)
         except FTimeout:
             ex.shutdown(wait=False, cancel_futures=True)
+            logger.warning(
+                "[SceneComposerTrace] phase=llm_expand_inventory_timeout existing=%d target_min=%d",
+                len(existing),
+                target_min,
+            )
             return []
         finally:
             ex.shutdown(wait=False)
         raw = (resp.content if hasattr(resp, "content") else str(resp)).strip()
+        logger.info(
+            "[SceneComposerTrace] phase=llm_expand_inventory_response raw_len=%d",
+            len(raw),
+        )
         if "```" in raw:
             s = raw.find("["); e = raw.rfind("]")
             if s != -1 and e != -1:
@@ -1802,6 +1829,11 @@ class SceneComposer:
                 "keywords": str(item.get("keywords") or item.get("name") or "").strip(),
                 "layout_role": str(item.get("layout_role") or "").strip(),
             })
+        logger.info(
+            "[SceneComposerTrace] phase=llm_expand_inventory_items count=%d names=%s",
+            len(out),
+            [item.get("name") for item in out],
+        )
         return out
 
     @staticmethod
@@ -1842,6 +1874,13 @@ class SceneComposer:
         max_attempts = 2
         for attempt in range(1, max_attempts + 1):
             try:
+                logger.info(
+                    "[SceneComposerTrace] phase=llm_extract_attempt attempt=%d/%d text_len=%d prompt_len=%d",
+                    attempt,
+                    max_attempts,
+                    len(text),
+                    len(text[:2000]),
+                )
                 ex = ThreadPoolExecutor(max_workers=1)
                 fut = ex.submit(_call)
                 try:
@@ -1856,12 +1895,24 @@ class SceneComposer:
                     ex.shutdown(wait=False)
 
                 raw = (resp.content if hasattr(resp, "content") else str(resp)).strip()
+                logger.info(
+                    "[SceneComposerTrace] phase=llm_extract_response attempt=%d/%d raw_len=%d",
+                    attempt,
+                    max_attempts,
+                    len(raw),
+                )
                 if "```" in raw:
                     s = raw.find("["); e = raw.rfind("]")
                     if s != -1 and e != -1:
                         raw = raw[s:e + 1]
                 data = json.loads(raw)
                 if not isinstance(data, list):
+                    logger.info(
+                        "[SceneComposerTrace] phase=llm_extract_non_list attempt=%d/%d type=%s",
+                        attempt,
+                        max_attempts,
+                        type(data).__name__,
+                    )
                     return []
                 items = []
                 for d in data[:20]:
@@ -1873,6 +1924,13 @@ class SceneComposer:
                         })
                 if attempt > 1:
                     logger.info("[SceneComposer] LLM 提取第 %d 次重试成功", attempt)
+                logger.info(
+                    "[SceneComposerTrace] phase=llm_extract_items attempt=%d/%d count=%d names=%s",
+                    attempt,
+                    max_attempts,
+                    len(items),
+                    [item.get("name") for item in items],
+                )
                 return items
             except Exception as e:
                 logger.warning("[SceneComposer] LLM 提取失败 (第 %d/%d 次): %s%s",

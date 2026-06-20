@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -24,6 +25,7 @@ MAX_COORDINATOR_DISCLOSURE_EVENTS = 2048
 MAX_PENDING_INTERVENTIONS_PER_PLAN = 256
 MAX_RESOLVED_COORDINATOR_PROPOSALS = 256
 MAX_GENERATION_JOB_REFS_PER_PLAN = 64
+logger = logging.getLogger(__name__)
 _SENSITIVE_CONTROL_PAYLOAD_KEYS = {
     "api_key",
     "auth",
@@ -60,6 +62,13 @@ _SENSITIVE_CONTROL_PAYLOAD_KEYS = {
     "token",
     "vlm_raw",
 }
+
+
+def _coordinator_trace_preview(value: Any, limit: int = 100) -> str:
+    text = str(value or "").replace("\r", "\\r").replace("\n", "\\n")
+    if len(text) > limit:
+        return f"{text[:limit]}..."
+    return text
 
 
 def _sanitize_control_payload(value: Any) -> Any:
@@ -433,6 +442,22 @@ class InteractionCoordinator:
         ))
         self._infer_constraints(plan, msg.text)
         self._refresh_plan_design_brief(plan, source="coordinator_message")
+        logger.info(
+            "[SeedPlanTrace] phase=update room=%s plan=%s status=%s sender=%s/%s host=%s agent=%s/%s participants=%s text_len=%s design_len=%s source=%s text=%s",
+            msg.room_id,
+            plan.plan_id,
+            str(getattr(plan.status, "value", plan.status)),
+            msg.sender_id,
+            msg.sender_name,
+            msg.is_host,
+            msg.agent_id,
+            msg.agent_name,
+            len(getattr(plan, "participants", {}) or {}),
+            len(str(msg.text or "")),
+            len(str(getattr(plan, "design_brief", "") or "")),
+            str((msg.metadata or {}).get("source") or ""),
+            _coordinator_trace_preview(msg.text),
+        )
         return plan
 
     def propose_seed_plan(self, room_id: str) -> SeedPlan:
@@ -720,7 +745,26 @@ class InteractionCoordinator:
                 },
             )
         contract_text = self._resolved_design_text(plan)
+        logger.info(
+            "[SeedPlanTrace] phase=confirm_attempt room=%s plan=%s status=%s host=%s participants=%s design_len=%s contract_len=%s summary=%s",
+            plan.room_id,
+            plan.plan_id,
+            str(getattr(plan.status, "value", plan.status)),
+            host_id,
+            len(getattr(plan, "participants", {}) or {}),
+            len(str(getattr(plan, "design_brief", "") or "")),
+            len(str(contract_text or "")),
+            _coordinator_trace_preview(getattr(plan, "intent_summary", "") or ""),
+        )
         if not contract_text:
+            logger.info(
+                "[SeedPlanTrace] phase=confirm_reject_no_contract room=%s plan=%s status=%s host=%s design_len=%s",
+                plan.room_id,
+                plan.plan_id,
+                str(getattr(plan.status, "value", plan.status)),
+                host_id,
+                len(str(getattr(plan, "design_brief", "") or "")),
+            )
             self._record_disclosures(
                 room_id=plan.room_id,
                 stage=plan.status.value,
@@ -783,6 +827,15 @@ class InteractionCoordinator:
             stage="confirmed",
             progress=0,
             plan=plan.as_dict(),
+        )
+        logger.info(
+            "[SeedPlanTrace] phase=confirm_ok room=%s plan=%s host=%s version=%s contract_len=%s scene_type=%s",
+            plan.room_id,
+            plan.plan_id,
+            host_id,
+            plan.version,
+            len(str(contract_text or "")),
+            plan.scene_type,
         )
         return ConfirmResult(True, plan.plan_id, f"SeedPlan {plan.plan_id} 已确认。", payload)
 
