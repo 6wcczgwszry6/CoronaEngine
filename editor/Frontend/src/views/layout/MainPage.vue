@@ -315,49 +315,6 @@
       </div>
     </div>
 
-    <!-- 场景栏 -->
-    <div
-      class="w-full bg-gradient-to-r from-teal-700 to-green-600 border-b border-teal-800/60 h-13 relative shadow-md flex items-center"
-    >
-      <div
-        class="flex items-center space-x-1 px-3 overflow-x-auto scroll-smooth tab-container flex-1"
-      >
-        <div
-          v-for="(tab, index) in tabs"
-          :key="tab.id"
-          class="px-5 py-2.5 cursor-pointer rounded-t-lg flex items-center gap-2 transition-all duration-200 ease-in-out"
-          :class="{
-            'bg-white/90 border-b-2 border-teal-500 shadow-sm': activeTab === index,
-            'hover:bg-white/20 text-white/90': activeTab !== index,
-            'text-gray-800': activeTab === index,
-          }"
-          @click="switchTab(index, false)"
-        >
-          <span class="max-w-[140px] truncate px-2 py-1 select-none font-medium">
-            {{ tab.name }}
-          </span>
-
-          <button
-            v-if="tabs.length > 1"
-            class="hover:bg-gray-300/50 rounded-full p-1 transition-colors duration-200 hover:text-red-500"
-            aria-label="关闭标签"
-            @click.stop="closeTab(index)"
-          >
-            ×
-          </button>
-        </div>
-        <!-- 新建场景按钮 -->
-        <button
-          class="ml-1 w-7 h-7 flex items-center justify-center rounded-full text-white/80 hover:bg-white/20 hover:text-white transition-colors duration-200 shrink-0 text-lg leading-none"
-          aria-label="新建场景"
-          title="新建场景"
-          @click.stop="addNewTab"
-        >
-          +
-        </button>
-      </div>
-    </div>
-
     <div
       ref="viewportPickSurfaceRef"
       tabindex="0"
