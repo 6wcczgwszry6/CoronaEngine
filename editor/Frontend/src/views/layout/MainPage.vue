@@ -2,6 +2,7 @@
   <div class="relative flex flex-col flex-1 min-h-0 h-full w-full" tabindex="0">
     <!-- 顶部菜单栏 -->
     <div
+      v-if="false"
       class="w-full bg-[#2d2d2d] text-gray-200 border-b border-gray-700 h-10 flex items-center px-4 space-x-6 text-sm shadow-md"
     >
       <!-- 项目菜单 -->
@@ -818,6 +819,7 @@ const mainRenderBackend = ref('native');
 const mainVisionRenderMode = ref('path_tracing');
 let previewPollTimer = null;
 window.__coronaGamePreviewInputLocked = false;
+const EDITOR_CONTROLS_KEY = '__coronaEditorControls';
 
 // 物理参数状态
 const physicsParams = ref({
@@ -917,7 +919,7 @@ const selectMainRenderMode = async (mode) => {
       );
       mainRenderBackend.value = result?.mode || 'native';
       await syncSceneCameraBinding(sceneId);
-      return;
+      return true;
     }
 
     const backendResult = unwrapBridgeData(
@@ -925,7 +927,7 @@ const selectMainRenderMode = async (mode) => {
     );
     mainRenderBackend.value = backendResult?.mode || 'native';
     if (mainRenderBackend.value !== 'vision') {
-      return;
+      return false;
     }
 
     const modeResult = unwrapBridgeData(
@@ -933,8 +935,10 @@ const selectMainRenderMode = async (mode) => {
     );
     mainVisionRenderMode.value = modeResult?.mode || mode;
     await syncSceneCameraBinding(sceneId);
+    return true;
   } catch (error) {
     logError('Failed to set main viewport render mode', error);
+    return false;
   }
 };
 
@@ -1678,7 +1682,7 @@ const handleApplyPhysics = async () => {
   const sceneId = tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
   activeMenu.value = null;
   try {
-    await sceneService.setPhysicsParams(sceneId, {
+    const result = await sceneService.setPhysicsParams(sceneId, {
       gravity: [
         physicsParams.value.gravityX,
         physicsParams.value.gravityY,
@@ -1688,8 +1692,15 @@ const handleApplyPhysics = async () => {
       floor_restitution: physicsParams.value.floorRestitution,
       fixed_dt: physicsParams.value.fixedDt,
     });
+    const data = unwrapBridgeData(result);
+    if (data?.status === 'error' || data?.success === false) {
+      logError('Apply physics params failed', data?.message || data?.error);
+      return false;
+    }
+    return true;
   } catch (e) {
     logError('Apply physics params failed', e);
+    return false;
   }
 };
 
@@ -1706,9 +1717,12 @@ const loadPhysicsParams = async () => {
       physicsParams.value.floorY = data.floor_y ?? 0.0;
       physicsParams.value.floorRestitution = data.floor_restitution ?? 0.6;
       physicsParams.value.fixedDt = data.fixed_dt ?? 1.0 / 60.0;
+      return true;
     }
+    return false;
   } catch (e) {
     logError('Load physics params failed', e);
+    return false;
   }
 };
 
@@ -1848,7 +1862,7 @@ const pollGamePreviewStatus = () => {
 };
 
 const handleStartGamePreview = async () => {
-  if (previewRunning.value || previewBusy.value) return;
+  if (previewRunning.value || previewBusy.value) return false;
   previewBusy.value = true;
   previewStatusText.value = '准备预览...';
   try {
@@ -1862,7 +1876,7 @@ const handleStartGamePreview = async () => {
       setGamePreviewInputLocked(false);
       previewStatusText.value = '预览启动失败';
       logError('开始预览失败', payload.message);
-      return;
+      return false;
     }
     previewRunning.value = payload?.status === 'running' || (payload?.started_count || 0) > 0;
     setGamePreviewInputLocked(Boolean(payload?.input_locked ?? previewRunning.value));
@@ -1870,11 +1884,13 @@ const handleStartGamePreview = async () => {
       ? `预览中 ${payload?.started_count || 0}`
       : '没有可运行积木';
     if (previewRunning.value) pollGamePreviewStatus();
+    return previewRunning.value;
   } catch (error) {
     previewRunning.value = false;
     setGamePreviewInputLocked(false);
     previewStatusText.value = '预览启动失败';
     logError('开始预览失败', error);
+    return false;
   } finally {
     previewBusy.value = false;
     activeMenu.value = null;
@@ -1882,7 +1898,7 @@ const handleStartGamePreview = async () => {
 };
 
 const handleStopGamePreview = async () => {
-  if (!previewRunning.value || previewBusy.value) return;
+  if (!previewRunning.value || previewBusy.value) return false;
   previewBusy.value = true;
   previewStatusText.value = '正在恢复预览前参数...';
   let keepPreviewActive = false;
@@ -1894,7 +1910,7 @@ const handleStopGamePreview = async () => {
       setGamePreviewInputLocked(Boolean(payload?.input_locked ?? true));
       previewStatusText.value = '预览恢复失败';
       logError('结束预览恢复失败', payload.restore_error);
-      return;
+      return false;
     }
     setGamePreviewInputLocked(Boolean(payload?.input_locked ?? false));
     if (payload?.restored) {
@@ -1907,9 +1923,11 @@ const handleStopGamePreview = async () => {
     } else {
       previewStatusText.value = '';
     }
+    return true;
   } catch (error) {
     previewStatusText.value = '结束预览失败';
     logError('结束预览失败', error);
+    return false;
   } finally {
     clearPreviewPoll();
     previewRunning.value = keepPreviewActive;
@@ -1930,11 +1948,14 @@ const handleRunProject = async () => {
 
     if (result.success) {
       // TODO: 可以显示一个成功提示
+      return true;
     } else {
       logError('运行项目返回失败', result?.message);
+      return false;
     }
   } catch (error) {
     logError('运行项目失败', error);
+    return false;
   } finally {
     activeMenu.value = null;
   }
@@ -1947,7 +1968,7 @@ const handleRunCurrentScene = async () => {
 
     if (!currentSceneId) {
       logError('没有当前场景');
-      return;
+      return false;
     }
 
     // 传入场景路径，运行指定场景
@@ -1955,13 +1976,88 @@ const handleRunCurrentScene = async () => {
 
     if (result.success) {
       // TODO: 可以显示一个成功提示
+      return true;
     } else {
       logError('运行当前场景返回失败', result?.message);
+      return false;
     }
   } catch (error) {
     logError('运行当前场景失败', error);
+    return false;
   } finally {
     activeMenu.value = null;
+  }
+};
+
+const getPhysicsSnapshot = () => ({
+  gravityX: Number(physicsParams.value.gravityX),
+  gravityY: Number(physicsParams.value.gravityY),
+  gravityZ: Number(physicsParams.value.gravityZ),
+  floorY: Number(physicsParams.value.floorY),
+  floorRestitution: Number(physicsParams.value.floorRestitution),
+  fixedDt: Number(physicsParams.value.fixedDt),
+});
+
+const coerceNumber = (value, fallback) => {
+  const next = Number(value);
+  return Number.isFinite(next) ? next : fallback;
+};
+
+const applyPhysicsFromSettings = async (nextParams = {}) => {
+  const current = getPhysicsSnapshot();
+  physicsParams.value = {
+    gravityX: coerceNumber(nextParams.gravityX, current.gravityX),
+    gravityY: coerceNumber(nextParams.gravityY, current.gravityY),
+    gravityZ: coerceNumber(nextParams.gravityZ, current.gravityZ),
+    floorY: coerceNumber(nextParams.floorY, current.floorY),
+    floorRestitution: coerceNumber(nextParams.floorRestitution, current.floorRestitution),
+    fixedDt: Math.max(0.001, coerceNumber(nextParams.fixedDt, current.fixedDt)),
+  };
+  const applied = await handleApplyPhysics();
+  if (applied === false) return false;
+  return getEditorControlsState();
+};
+
+const currentMainRenderMode = () =>
+  mainRenderBackend.value === 'vision' ? mainVisionRenderMode.value : 'native';
+
+const getEditorControlsState = () => ({
+  available: true,
+  sceneId: tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME,
+  previewRunning: previewRunning.value,
+  previewBusy: previewBusy.value,
+  previewStatusText: previewStatusText.value,
+  visionAvailable: visionAvailable.value,
+  renderMode: currentMainRenderMode(),
+  renderLabel: mainRenderModeLabel.value,
+  renderModes: mainRenderModeOptions.map((mode) => ({
+    ...mode,
+    active: currentMainRenderMode() === mode.value,
+    disabled: mode.backend === 'vision' && !visionAvailable.value,
+  })),
+  physics: getPhysicsSnapshot(),
+});
+
+const registerEditorControls = () => {
+  window[EDITOR_CONTROLS_KEY] = {
+    getState: getEditorControlsState,
+    refreshPhysics: async () => {
+      const loaded = await loadPhysicsParams();
+      if (loaded === false) return false;
+      return getEditorControlsState();
+    },
+    applyPhysics: applyPhysicsFromSettings,
+    startPreview: handleStartGamePreview,
+    stopPreview: handleStopGamePreview,
+    runProject: handleRunProject,
+    runCurrentScene: handleRunCurrentScene,
+    selectRenderMode: selectMainRenderMode,
+  };
+};
+
+const unregisterEditorControls = () => {
+  if (window[EDITOR_CONTROLS_KEY]?.getState === getEditorControlsState) {
+    delete window[EDITOR_CONTROLS_KEY];
   }
 };
 
@@ -2131,6 +2227,7 @@ onMounted(async () => {
   document.addEventListener('contextmenu', onContextMenu);
   window.addEventListener('resize', handleViewportLayoutChange);
   setupListener();
+  registerEditorControls();
 
   // 跨窗口事件监听：scene-add / scene-rename / panel-closed
   coronaEventBus.on('scene-add', (name, id) => {
@@ -2167,6 +2264,7 @@ onMounted(async () => {
 onUnmounted(() => {
   clearPreviewPoll();
   setGamePreviewInputLocked(false);
+  unregisterEditorControls();
   stopStageHints();
   coronaEventBus.off('scene-add');
   coronaEventBus.off('scene-rename');

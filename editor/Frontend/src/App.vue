@@ -30,11 +30,26 @@ function isEscapeKey(event) {
   return event.key === 'Escape' && (event.code === 'Escape' || event.keyCode === 27 || event.which === 27);
 }
 
+function isEditableTarget(target) {
+  const tag = target?.tagName;
+  return Boolean(
+    target?.isContentEditable ||
+      tag === 'INPUT' ||
+      tag === 'TEXTAREA' ||
+      tag === 'SELECT'
+  );
+}
+
 function onGlobalKeyDown(event) {
   if (event.defaultPrevented) return;
-  if (isEscapeKey(event)) {
-    dockStore.togglePanel('EditorSettings');
-  }
+  if (!isEditorRoute.value || !isEscapeKey(event)) return;
+
+  const settingsOpen = Boolean(dockStore.panels.EditorSettings?.open);
+  if (isEditableTarget(event.target) && !settingsOpen) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  dockStore.togglePanel('EditorSettings');
 }
 
 onMounted(() => {
