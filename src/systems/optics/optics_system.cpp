@@ -3833,7 +3833,7 @@ void OpticsSystem::apply_vision_render_mode(CameraVisionRenderMode mode) {
     if (runtime.scene_path.empty()) {
         const bool was_denoise_enabled =
             Vision::vision_render_mode_uses_denoise(current_vision_render_mode_);
-        pipeline->set_output_denoise(true);
+        pipeline->set_output_denoise(Vision::vision_render_mode_uses_denoise(mode));
         if (!was_denoise_enabled) {
             prepare_enabled_denoiser_for_runtime_switch(*pipeline);
             pipeline->clear_view_contexts();
