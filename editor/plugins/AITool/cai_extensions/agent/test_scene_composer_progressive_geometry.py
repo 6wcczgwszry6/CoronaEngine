@@ -1472,6 +1472,34 @@ def test_scene_framework_outdoor_fallback_generates_terrain_only():
     print("[OK] outdoor fallback creates terrain only")
 
 
+def test_single_indoor_box_decompose_fallback_keeps_room_box():
+    scene, restore = _install_fake_corona_scene()
+    try:
+        composer = SceneComposer(room_size=[5.0, 3.0, 3.0], scene_name="treasure_room")
+        asset_dir = Path(_named_test_dir("framework_treasure_room"))
+        composer._generated_asset_dir = lambda: (asset_dir, "tmp/framework_treasure_room")
+        composer._llm_decompose = lambda _text: [{  # type: ignore[method-assign]
+            "id": "treasure",
+            "name": "山贼藏宝室",
+            "role": "indoor",
+            "enclosure": "box",
+            "size": [6.0, 5.0, 3.0],
+            "style_context": {"material_palette": ["stone", "wood"]},
+        }]
+
+        composer.zone_tree = composer.decompose_zone_tree("山贼据点里的藏宝室，有藏宝箱、木桶和武器架")
+        composer._generate_scene_framework("山贼据点里的藏宝室，有藏宝箱、木桶和武器架")
+    finally:
+        restore()
+
+    room_box = _actor_by_name(scene, "__room_box")
+    assert room_box is not None
+    assert _actor_by_name(scene, "__room_terrain") is None
+    assert room_box.scale == [6.0, 3.0, 5.0]
+    assert room_box.position == [0.0, 1.5, 0.0]
+    print("[OK] single indoor box decompose fallback keeps room_box")
+
+
 def test_scene_framework_mixed_zone_tree_generates_terrain_and_room_box():
     scene, restore = _install_fake_corona_scene()
     try:
@@ -1611,6 +1639,82 @@ def test_indoor_detection_prefers_explicit_room_over_terrain_context():
     print("[OK] explicit indoor room wins over generic terrain context")
 
 
+def test_indoor_room_budget_expands_for_many_items():
+    composer = SceneComposer(room_size=[5.0, 3.0, 3.0])
+    items = [{"name": f"家具{i}"} for i in range(8)]
+
+    composer._apply_indoor_room_budget(items, "做一个可爱的卧室")
+
+    assert 6.5 <= composer.room_size[0] <= 8.5
+    assert 6.5 <= composer.room_size[1] <= 8.5
+    assert composer.room_size[2] >= 3.0
+    assert composer._last_room_budget_summary["changed"] is True
+    print("[OK] indoor room budget expands moderately for dense furniture lists")
+
+
+def test_indoor_room_budget_stays_compact_for_small_rooms():
+    composer = SceneComposer(room_size=[5.0, 3.0, 3.0])
+
+    composer._apply_indoor_room_budget([{"name": "床"}, {"name": "台灯"}, {"name": "地毯"}], "可爱卧室")
+
+    assert 5.5 <= composer.room_size[0] <= 6.8
+    assert 5.5 <= composer.room_size[1] <= 6.8
+    assert composer.room_size[2] >= 3.0
+    print("[OK] indoor room budget stays compact for small rooms")
+
+
+def test_indoor_room_budget_expands_for_large_furniture():
+    composer = SceneComposer(room_size=[5.0, 3.0, 3.0])
+
+    composer._apply_indoor_room_budget([{"name": "床"}, {"name": "衣柜"}], "可爱卧室")
+
+    assert 5.5 <= composer.room_size[0] <= 7.2
+    assert 5.5 <= composer.room_size[1] <= 7.2
+    assert composer.room_size[2] >= 3.2
+    print("[OK] large indoor furniture expands room footprint")
+
+
+def test_indoor_room_budget_respects_larger_zone_tree_box():
+    composer = SceneComposer(room_size=[5.0, 3.0, 3.0])
+    composer.zone_tree = ZoneTree(root=Zone(
+        zone_id="room",
+        name="room",
+        role="indoor",
+        enclosure="box",
+        volume=Volume(center=[0.0, 1.6, 0.0], size=[9.0, 9.0, 3.2]),
+    ))
+
+    composer._apply_indoor_room_budget([{"name": "床"}], "卧室")
+
+    assert composer.room_size == [9.0, 9.0, 3.2]
+    assert composer.zone_tree.root.volume.size == [9.0, 9.0, 3.2]
+    print("[OK] larger zone_tree boxes are not shrunk by room budget")
+
+
+def test_room_bounds_clamp_uses_actor_extents_and_reports_oversized():
+    pos, changed, issue, fit_scale = SceneComposer._clamp_position_to_room_bounds(
+        [2.4, 0.2, 2.4],
+        [0.5, 0.5, 0.5],
+        [5.0, 5.0, 3.0],
+    )
+
+    assert changed is True
+    assert issue == ""
+    assert fit_scale == 1.0
+    assert pos[0] <= 1.85
+    assert pos[2] <= 1.85
+
+    _pos, changed, issue, fit_scale = SceneComposer._clamp_position_to_room_bounds(
+        [0.0, 0.0, 0.0],
+        [5.0, 1.0, 5.0],
+        [5.0, 5.0, 3.0],
+    )
+    assert changed is False
+    assert issue == "object_too_large_for_room_bounds"
+    assert fit_scale < 0.65
+    print("[OK] room bounds clamp accounts for actor extents and reports oversized objects")
+
+
 if __name__ == "__main__":
     test_zone_and_asset_routing()
     test_zone_and_door_aabb_helpers()
@@ -1651,7 +1755,13 @@ if __name__ == "__main__":
     test_warm_mysterious_market_overrides_generic_stone_wall_boundary()
     test_scene_framework_indoor_fallback_generates_room_box_only()
     test_scene_framework_outdoor_fallback_generates_terrain_only()
+    test_single_indoor_box_decompose_fallback_keeps_room_box()
     test_scene_framework_mixed_zone_tree_generates_terrain_and_room_box()
     test_room_box_generation_is_not_blocked_by_existing_room_terrain()
     test_indoor_detection_prefers_explicit_room_over_terrain_context()
+    test_indoor_room_budget_expands_for_many_items()
+    test_indoor_room_budget_stays_compact_for_small_rooms()
+    test_indoor_room_budget_expands_for_large_furniture()
+    test_indoor_room_budget_respects_larger_zone_tree_box()
+    test_room_bounds_clamp_uses_actor_extents_and_reports_oversized()
     print("\n=== progressive mixed geometry ALL PASS ===")

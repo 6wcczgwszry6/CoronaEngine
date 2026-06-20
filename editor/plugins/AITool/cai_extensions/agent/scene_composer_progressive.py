@@ -310,6 +310,7 @@ def run_progressive_workflow(
             plan_id=plan_id,
             session_id=session_id,
         )
+        _repair_indoor_room_bounds(composer, imported_ids, scene_layout, prompt)
         for actor_id in imported_ids:
             if actor_id and actor_id not in vlm_imported_so_far:
                 vlm_imported_so_far.append(actor_id)
@@ -1817,6 +1818,86 @@ def _post_import_repair_and_review(
         plan_id=plan_id,
         session_id=session_id,
     )
+    return repaired
+
+
+def _repair_indoor_room_bounds(
+    composer: Any,
+    imported_ids: List[str],
+    scene_layout: Any,
+    prompt: str = "",
+) -> int:
+    detector = getattr(composer, "_detect_scene_indoor", None)
+    if callable(detector):
+        try:
+            if not detector(prompt or getattr(composer, "_last_zone_decompose_text", "") or ""):
+                return 0
+        except Exception:
+            pass
+    room_size = list(getattr(composer, "room_size", []) or [])
+    if len(room_size) < 3:
+        return 0
+    clamp_fn = getattr(composer, "_clamp_position_to_room_bounds", None)
+    if not callable(clamp_fn):
+        return 0
+    scene = _get_current_scene()
+    if scene is None:
+        return 0
+
+    report = getattr(composer, "_last_indoor_bounds_report", None)
+    if not isinstance(report, dict) or not report:
+        report = {"checked": [], "clamped": [], "scaled": [], "unresolved": [], "room_size": room_size}
+    repaired = 0
+    for actor_id in imported_ids:
+        actor_id = str(actor_id or "").strip()
+        if not actor_id or actor_id.startswith("__"):
+            continue
+        actor = _scene_actor(scene, actor_id)
+        if actor is None:
+            continue
+        try:
+            pos = list(actor.get_position())
+        except Exception:
+            continue
+        bb = _actor_aabb(actor)
+        if bb and len(bb) >= 6:
+            half_extents = [
+                max(0.0, (float(bb[3]) - float(bb[0])) / 2.0),
+                max(0.0, (float(bb[4]) - float(bb[1])) / 2.0),
+                max(0.0, (float(bb[5]) - float(bb[2])) / 2.0),
+            ]
+        else:
+            half_extents = [0.25, 0.25, 0.25]
+        report.setdefault("checked", []).append(actor_id)
+        new_pos, changed, issue, fit_scale = clamp_fn(pos, half_extents, room_size, margin=0.15)
+        if issue:
+            report.setdefault("unresolved", []).append(f"{actor_id}: {issue}")
+            continue
+        if changed:
+            try:
+                actor.set_position(new_pos)
+                report.setdefault("clamped", []).append(actor_id)
+                repaired += 1
+            except Exception:
+                continue
+        if fit_scale < 0.999:
+            try:
+                current_scale = list(actor.get_scale())
+            except Exception:
+                current_scale = [1.0, 1.0, 1.0]
+            if len(current_scale) >= 3:
+                try:
+                    actor.set_scale([
+                        float(current_scale[0]) * fit_scale,
+                        float(current_scale[1]) * fit_scale,
+                        float(current_scale[2]) * fit_scale,
+                    ])
+                    report.setdefault("scaled", []).append(f"{actor_id}: {fit_scale:.2f}")
+                except Exception:
+                    pass
+    setattr(composer, "_last_indoor_bounds_report", report)
+    if repaired:
+        logger.info("[ProgressiveWorkflow] 室内边界二次修正: %d actors", repaired)
     return repaired
 
 

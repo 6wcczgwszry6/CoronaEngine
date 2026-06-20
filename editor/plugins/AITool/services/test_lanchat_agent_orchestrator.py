@@ -144,11 +144,12 @@ class FakeGate:
 
 
 class FakeSceneActor:
-    def __init__(self, name, position=None, rotation=None, scale=None):
+    def __init__(self, name, position=None, rotation=None, scale=None, aabb=None):
         self.name = name
         self._position = list(position or [0.0, 0.0, 0.0])
         self._rotation = list(rotation or [0.0, 0.0, 0.0])
         self._scale = list(scale or [1.0, 1.0, 1.0])
+        self._aabb = list(aabb) if aabb is not None else None
         self.color = None
 
     def get_position(self):
@@ -171,6 +172,11 @@ class FakeSceneActor:
 
     def set_color(self, value):
         self.color = list(value)
+
+    def get_aabb(self):
+        if self._aabb is None:
+            raise AttributeError("aabb unavailable")
+        return list(self._aabb)
 
 
 class TargetedHostFakeEngine(FakeEngine):
@@ -1639,6 +1645,44 @@ def test_worker_metadata_plan_targets_agent_and_returns_plan_reply_without_at():
     print("[OK] worker metadata plan targets agent and returns plan reply without @")
 
 
+def test_worker_explicit_at_agent_overrides_stale_metadata_owner():
+    coordinator = InteractionCoordinator()
+    engine = FakeEngine([])
+    engine.network_lanchat_agents_snapshot = lambda: [
+        {"agent_id": "agent-bandit", "name": "山贼"},
+        {"agent_id": "agent-merchant", "name": "商人"},
+    ]
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+    handled = worker.sync_chat_message_to_coordinator({
+        "message_id": "explicit-merchant-over-stale-bandit",
+        "room_id": "r-agent-owner",
+        "sender_id": "host-a",
+        "sender_name": "房主",
+        "sender_type": "host",
+        "message_kind": "chat",
+        "text": "@商人 在山贼方案基础上，给出一个藏宝室设计",
+        "metadata": {
+            "draft_action": "generate",
+            "target_scope": "agent",
+            "target_agent_id": "agent-bandit",
+            "target_agent_name": "山贼",
+        },
+    })
+
+    plan = coordinator.active_plan_for_room("r-agent-owner")
+    assert handled is True
+    assert plan is not None
+    assert plan.review_policy["owner_agent_id"] == "agent-merchant"
+    assert plan.review_policy["owner_agent_name"] == "商人"
+    assert "山贼" in plan.review_policy["source_context_agents"]
+    print("[OK] explicit @ agent overrides stale metadata owner before Coordinator ingest")
+
+
 def test_worker_metadata_supplement_selects_plan_when_multiple_pending():
     runtime = get_lanchat_scene_runtime()
     runtime.end_compose()
@@ -2012,10 +2056,158 @@ def test_worker_routes_completed_layout_adjustment_to_coordinator_without_model_
     pending = coordinator.pending_interventions(plan.plan_id)
     assert not executor.payloads
     assert engine.replies
-    assert "最终调整" in engine.replies[-1][2]
+    assert "布局调整建议" in engine.replies[-1][2]
     assert pending[-1].apply_policy == "final_adjustment"
-    assert any(item.event_type == "final_adjustment_routed" for item in coordinator.events[before_events:])
-    print("[OK] worker routes completed layout adjustment to Coordinator without model agent")
+    assert any(item.event_type == "layout_reflow_proposal_created" for item in coordinator.events[before_events:])
+    print("[OK] worker routes completed layout adjustment to layout proposal without model agent")
+
+
+def test_worker_confirms_completed_layout_reflow_and_moves_ordinary_actors():
+    executor = FakeHostActionExecutor()
+    coordinator = InteractionCoordinator()
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-layout-confirm",
+        sender_id="host-a",
+        sender_name="房主",
+        text="做一个藏宝室",
+        is_host=True,
+    ))
+    plan = coordinator.propose_seed_plan("room-layout-confirm")
+    coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    plan.status = SeedPlanStatus.COMPLETED
+    room_box = FakeSceneActor("__room_box", position=[0.0, 1.5, 0.0], scale=[6.5, 3.0, 6.5])
+    chest = FakeSceneActor("藏宝箱", position=[0.0, 0.0, 0.0])
+    table = FakeSceneActor("木桌", position=[0.1, 0.0, 0.0])
+    statue = FakeSceneActor("天使雕像", position=[0.2, 0.0, 0.0])
+
+    def forbidden_agent_factory():
+        def _agent(persona, messages):
+            raise AssertionError("layout reflow confirmation should not call role model agent")
+        return _agent
+
+    engine = FakeEngine([
+        {
+            **_trigger("@商人 调整一下布局，我看模型位置冲突", "商人"),
+            "room_id": "room-layout-confirm",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "is_host": True,
+            "agent_id": "merchant",
+            "agent_name": "商人",
+        },
+        {
+            **_trigger("确认调整", "商人"),
+            "room_id": "room-layout-confirm",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "is_host": True,
+            "agent_id": "merchant",
+            "agent_name": "商人",
+        },
+    ])
+    engine.get_scene_actors = lambda: [room_box, chest, table, statue]
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=forbidden_agent_factory,
+        host_action_executor=executor,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+    assert worker.process_once() is True
+    assert worker.process_once() is True
+
+    assert not executor.payloads
+    assert room_box.get_position() == [0.0, 1.5, 0.0]
+    assert chest.get_position() != [0.0, 0.0, 0.0]
+    assert table.get_position() != [0.1, 0.0, 0.0]
+    assert statue.get_position() != [0.2, 0.0, 0.0]
+    assert "布局调整完成" in engine.replies[-1][2]
+    print("[OK] worker confirms completed layout reflow and moves ordinary actors")
+
+
+def test_worker_layout_reflow_grounds_floating_actor_and_allows_repeat_adjustment():
+    coordinator = InteractionCoordinator()
+    coordinator.ingest_message(ChatMessage(
+        room_id="room-layout-ground",
+        sender_id="host-a",
+        sender_name="房主",
+        text="做一个藏宝室",
+        is_host=True,
+    ))
+    plan = coordinator.propose_seed_plan("room-layout-ground")
+    coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    plan.status = SeedPlanStatus.COMPLETED
+    room_box = FakeSceneActor("__room_box", position=[0.0, 1.5, 0.0], scale=[6.5, 3.0, 6.5])
+    floating = FakeSceneActor(
+        "藏宝箱",
+        position=[0.0, 2.0, 0.0],
+        aabb=[-0.4, 1.5, -0.4, 0.4, 2.5, 0.4],
+    )
+    table = FakeSceneActor("木桌", position=[0.2, 0.0, 0.0])
+    wall_torch = FakeSceneActor(
+        "火把",
+        position=[0.0, 1.8, 0.0],
+        aabb=[-0.1, 1.2, -0.1, 0.1, 2.0, 0.1],
+    )
+
+    def forbidden_agent_factory():
+        def _agent(persona, messages):
+            raise AssertionError("layout grounding should not call role model agent")
+        return _agent
+
+    engine = FakeEngine([
+        {
+            **_trigger("@商人 浮空了，调整一下布局", "商人"),
+            "room_id": "room-layout-ground",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "is_host": True,
+            "agent_id": "merchant",
+            "agent_name": "商人",
+        },
+        {
+            **_trigger("确认调整", "商人"),
+            "room_id": "room-layout-ground",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "is_host": True,
+            "agent_id": "merchant",
+            "agent_name": "商人",
+        },
+        {
+            **_trigger("@商人 还是没贴地，再调整一下布局", "商人"),
+            "room_id": "room-layout-ground",
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "is_host": True,
+            "agent_id": "merchant",
+            "agent_name": "商人",
+        },
+    ])
+    engine.get_scene_actors = lambda: [room_box, floating, table, wall_torch]
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=forbidden_agent_factory,
+        host_action_executor=FakeHostActionExecutor(),
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+    assert worker.process_once() is True
+    assert floating.get_position()[1] == 0.5
+    assert wall_torch.get_position()[1] == 1.8
+    assert room_box.get_position() == [0.0, 1.5, 0.0]
+    assert "布局调整完成" in engine.replies[-1][2]
+    assert "已贴地修正地面物体" in engine.replies[-1][2]
+    assert worker.process_once() is True
+    assert "布局调整建议" in engine.replies[-1][2]
+    print("[OK] worker layout reflow grounds floating actor and allows repeat adjustment")
 
 
 def test_worker_executes_completed_boundary_adjustment_without_model_agent():
@@ -4160,6 +4352,7 @@ if __name__ == "__main__":
     test_worker_metadata_group_chat_triggers_each_agent_without_at()
     test_worker_metadata_scene_discussion_feeds_seed_plan_before_confirmation()
     test_worker_metadata_plan_targets_agent_and_returns_plan_reply_without_at()
+    test_worker_explicit_at_agent_overrides_stale_metadata_owner()
     test_worker_metadata_supplement_selects_plan_when_multiple_pending()
     test_planning_gate_records_pre_generation_style_supplement()
     test_worker_async_agent_calls_are_serialized_per_worker()
@@ -4169,6 +4362,8 @@ if __name__ == "__main__":
     test_worker_does_not_crash_when_coordinator_blocks_start_generation()
     test_worker_applies_host_vlm_generation_option_from_metadata()
     test_worker_routes_completed_layout_adjustment_to_coordinator_without_model_agent()
+    test_worker_confirms_completed_layout_reflow_and_moves_ordinary_actors()
+    test_worker_layout_reflow_grounds_floating_actor_and_allows_repeat_adjustment()
     test_worker_executes_completed_boundary_adjustment_without_model_agent()
     test_worker_applies_completed_vlm_review_advice_from_metadata_chat()
     test_worker_acknowledges_conflict_resolution_rejection_without_host_execution()

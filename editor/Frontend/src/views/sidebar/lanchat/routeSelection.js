@@ -27,20 +27,9 @@ export function effectiveDraftAction(action, text = '') {
   return String(action || '').trim();
 }
 
-export function routeGuardMessage(action, target = {}, text = '') {
+export function routeGuardMessage(_action, _target = {}, text = '') {
   const value = String(text || '').trim();
   if (/^@([^\s，,：:]+)/.test(value)) return '';
   if (isGenerationStartText(value)) return '';
-  const draftAction = effectiveDraftAction(action, value);
-  const scope = String(target?.scope || '').trim();
-  if (draftAction === 'plan' && scope === 'group') {
-    return '整理方案需要先选择一个负责出方案的 Agent。';
-  }
-  if (draftAction === 'supplement' && scope !== 'agent' && scope !== 'plan') {
-    return '补充方案需要选择已有方案对应的 Agent。';
-  }
-  if (draftAction === 'generate' && scope !== 'agent' && scope !== 'plan') {
-    return '开始生成需要选择已有方案对应的 Agent。';
-  }
   return '';
 }

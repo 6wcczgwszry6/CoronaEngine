@@ -41,6 +41,14 @@ def test_active_generation_add_is_pending_intervention() -> None:
     assert service.scene_note_kind("后面再加入一个天使雕像") == "generation_delta"
 
 
+def test_floating_layout_request_routes_to_final_adjustment() -> None:
+    service = IntentUnderstandingService()
+    decision = service.classify("这个宝箱浮空了，没贴地，调整一下布局", allow_llm=False)
+    assert decision.intent == "final_adjustment_request"
+    assert decision.as_dict()["route"] == "edit_existing"
+    assert decision.as_dict()["state_hint"] == "completed_scene"
+
+
 def test_structured_route_exposes_agent_self_and_scene_actions() -> None:
     service = IntentUnderstandingService()
     identity = service.classify("@小女孩 你是谁", allow_llm=False)
@@ -209,10 +217,72 @@ def test_planning_reply_keeps_light_role_voice() -> None:
     assert "温柔" in girl_reply or "可爱" in girl_reply
 
 
+def test_treasure_room_plan_uses_concrete_profile_and_no_abstract_models() -> None:
+    runtime = LanChatSceneRuntime()
+    action, reply = runtime.handle_planning_gate("山贼", "帮我设计一个强盗藏宝室")
+    assert action == "reply"
+    assert reply is not None
+    assert "藏宝箱" in reply
+    assert "金币堆" in reply
+    assert "木桌" in reply
+    snapshot = runtime.pending_planning_snapshot()
+    assert snapshot
+    assert "藏宝箱" in snapshot[0]["proposed_items"]
+    assert "主活动区" not in snapshot[0]["proposed_items"]
+    assert "视觉焦点" not in snapshot[0]["proposed_items"]
+
+
+def test_pending_plan_elaboration_reuses_existing_treasure_room_goal() -> None:
+    runtime = LanChatSceneRuntime()
+    action, reply = runtime.handle_planning_gate("山贼", "帮我设计一个强盗藏宝室")
+    assert action == "reply"
+    assert reply is not None
+
+    action, payload = runtime.handle_planning_gate("山贼", "整理一下方案")
+    assert action == "reply"
+    assert payload is not None
+    assert "方案展开：强盗藏宝室" in payload
+    assert "藏宝箱" in payload
+    assert "整理一下方案" not in payload
+
+    action, compose_text = runtime.handle_planning_gate("山贼", "确认生成")
+    assert action == "compose"
+    assert compose_text is not None
+    assert "用户确认开始生成：强盗藏宝室" in compose_text
+    assert "整理一下方案" not in compose_text
+
+
+def test_targeted_plan_can_clone_source_agent_context() -> None:
+    runtime = LanChatSceneRuntime()
+    action, reply = runtime.handle_planning_gate("山贼", "帮我设计一个强盗藏宝室")
+    assert action == "reply"
+    assert reply is not None
+
+    action, payload, agent_name = runtime.handle_targeted_planning_message(
+        "商人",
+        "在山贼方案基础上进行调整",
+        draft_action="plan",
+        source_context_agent="山贼",
+    )
+    assert action == "reply"
+    assert agent_name == "商人"
+    assert payload is not None
+    assert "我已更新方案" in payload
+    assert "强盗藏宝室" in payload
+    assert "参考来源：山贼" in payload
+    snapshot = runtime.pending_planning_snapshot()
+    merchant = [item for item in snapshot if item["target_agent"] == "商人"]
+    assert merchant
+    assert merchant[0]["scene_goal"] == "强盗藏宝室"
+    assert "藏宝箱" in merchant[0]["proposed_items"]
+    assert "山贼" in merchant[0]["source_context_agents"]
+
+
 if __name__ == "__main__":
     test_status_query_overrides_bad_llm_generation_start()
     test_generation_start_requires_explicit_confirmation_language()
     test_active_generation_add_is_pending_intervention()
+    test_floating_layout_request_routes_to_final_adjustment()
     test_structured_route_exposes_agent_self_and_scene_actions()
     test_design_opinion_question_stays_discussion_even_with_plan_words()
     test_planning_disclosure_splits_models_from_scene_substrate()
@@ -222,4 +292,7 @@ if __name__ == "__main__":
     test_busy_generation_does_not_capture_plain_chat()
     test_scene_plans_use_general_profile_instead_of_topic_specific_fallbacks()
     test_planning_reply_keeps_light_role_voice()
+    test_treasure_room_plan_uses_concrete_profile_and_no_abstract_models()
+    test_pending_plan_elaboration_reuses_existing_treasure_room_goal()
+    test_targeted_plan_can_clone_source_agent_context()
     print("[OK] Intent understanding service tests passed")
