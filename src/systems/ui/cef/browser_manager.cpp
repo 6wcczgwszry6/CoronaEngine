@@ -170,7 +170,7 @@ int BrowserManager::create_tab(const std::string& url, const std::string& path,
     const bool transparent_overlay = camera_view || docking_pos == "main";
     tab->transparent_overlay = transparent_overlay;
     browser_settings.background_color =
-        CefColorSetARGB(transparent_overlay ? 0 : 255, 255, 255, 255);
+        CefColorSetARGB(transparent_overlay ? 0 : 255, 16, 19, 16);
 
     if (!CefBrowserHost::CreateBrowser(window_info, CefRefPtr<CefClient>(tab->client),
                                        full_url, browser_settings, nullptr, nullptr)) {

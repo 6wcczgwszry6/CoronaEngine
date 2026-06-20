@@ -44,7 +44,8 @@ async function handlePopOut() {
       props.panelId,
       '#' + (m.routePath || ''),
       m.defaultWidth || 400,
-      m.defaultHeight || 600
+      m.defaultHeight || 600,
+      m.defaultFloatPosition || 'right_top'
     );
     const tabId = result?.tab_id ?? result?.data?.tab_id;
     dockStore.setExternal(props.panelId, tabId);

@@ -1,8 +1,8 @@
 <template>
-  <div class="flex flex-col flex-1 min-h-0 w-full rounded-lg overflow-hidden relative bg-[#282828]/90">
+  <div class="flex flex-col flex-1 min-h-0 h-full w-full rounded-lg overflow-hidden relative bg-[#282828]/90">
     <DockTitleBar
       v-if="!isDocked"
-      title="局域网聊天"
+      title="AI 对话"
       extraClass="bg-[#84A65B]"
       routePath="/AITalkBar"
       @close="closeFloat"
@@ -10,8 +10,7 @@
 
     <!-- 局域网聊天（单一模式） -->
     <div
-      class="w-full bg-[#282828]/90"
-      style="height: calc(100vh - 80px)"
+      class="w-full flex-1 min-h-0 bg-[#282828]/90"
     >
       <RoomPanel />
     </div>

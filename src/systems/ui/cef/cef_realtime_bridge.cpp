@@ -2321,6 +2321,13 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
             std::string route = command.value("routePath", "");
             int width = command.value("width", 400);
             int height = command.value("height", 600);
+            std::string docking_pos = command.value("dockingPos", "right_top");
+            if (docking_pos != "right_top" &&
+                docking_pos != "right_bottom" &&
+                docking_pos != "left_bottom" &&
+                docking_pos != "center") {
+                docking_pos = "right_top";
+            }
 
             if (!route.empty() && route[0] == '#') {
                 route = route.substr(1);
@@ -2329,7 +2336,7 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
             standalone_route += (standalone_route.find('?') == std::string::npos) ? "?standalone=1" : "&standalone=1";
 
             int tab_id = bm.create_tab(source_base_url(browser), standalone_route,
-                                       "right_top", width, height, false);
+                                       docking_pos, width, height, false);
             nlohmann::json result;
             result["tab_id"] = tab_id;
             result["panel_id"] = panel_id;

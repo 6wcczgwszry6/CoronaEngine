@@ -1,5 +1,5 @@
 <template>
-  <div class="rounded-lg overflow-hidden relative bg-[#282828]/70 flex-1 min-h-0 w-full flex flex-col">
+  <div class="rounded-lg overflow-hidden relative bg-[#282828]/70 flex-1 min-h-0 h-full w-full flex flex-col">
     <DockTitleBar
       v-if="!isDocked"
       title="详情"

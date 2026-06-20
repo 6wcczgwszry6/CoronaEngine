@@ -356,20 +356,6 @@
           +
         </button>
       </div>
-      <!-- 摄像头速度调节 -->
-      <div class="flex items-center gap-2 px-3 shrink-0 select-none">
-        <span class="text-white/80 text-xs whitespace-nowrap">速度</span>
-        <input
-          v-model.number="cameraSpeed"
-          type="range"
-          :min="0.01"
-          :max="2"
-          :step="0.01"
-          class="w-20 h-1 accent-white cursor-pointer"
-          title="摄像头移动速度（Shift+滚轮调节）"
-        />
-        <span class="text-white/80 text-xs w-8 text-right">{{ cameraSpeed.toFixed(2) }}</span>
-      </div>
     </div>
 
     <div
@@ -386,24 +372,6 @@
       @mousedown.left="handleViewportPick"
       @wheel.prevent="handleWheel"
     >
-      <div
-        class="absolute left-3 top-3 z-20 flex items-center gap-1 rounded border border-white/10 bg-[#15181d]/80 p-1 shadow-lg backdrop-blur-sm"
-        data-viewport-ui-mode-switch
-        @pointerdown.stop
-        @mousedown.stop
-      >
-        <button
-          v-for="item in viewportUiModeItems"
-          :key="item.mode"
-          class="h-7 min-w-12 rounded px-2 text-[11px] font-medium"
-          :class="viewportUiMode === item.mode ? 'bg-[#4b5563] text-white' : 'text-[#cbd5e1] hover:bg-white/10'"
-          type="button"
-          :title="item.title"
-          @click="selectViewportUiMode(item.mode)"
-        >
-          {{ item.label }}
-        </button>
-      </div>
       <ViewportGizmoOverlay
         :state="gizmoState"
         :mode="gizmoMode"
@@ -543,6 +511,7 @@ import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { useDockStore } from '@/stores/dockStore.js';
 import { PLUGIN_MANIFEST } from '@/config/pluginManifest.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
+import { floatingPanelManifests, isFloatingPanel, openFloatingPanel } from '@/utils/panelWindows.js';
 import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
 import { createViewportGizmoController } from '@/utils/viewportGizmo.js';
 import { createViewportUiModeStore, createViewportUiCalibrationStore, createViewportUiPointerController } from '@/utils/viewportUiMode.js';
@@ -2003,6 +1972,22 @@ const coerceNumber = (value, fallback) => {
   return Number.isFinite(next) ? next : fallback;
 };
 
+const setCameraSpeedFromPanel = (value) => {
+  const next = Math.min(2, Math.max(0.01, coerceNumber(value, cameraSpeed.value)));
+  cameraSpeed.value = next;
+  broadcastViewportControlsState();
+  return getEditorControlsState();
+};
+
+const setViewportUiModeFromPanel = (mode) => {
+  if (!viewportUiModeItems.some((item) => item.mode === mode)) {
+    return false;
+  }
+  selectViewportUiMode(mode);
+  broadcastViewportControlsState();
+  return getEditorControlsState();
+};
+
 const applyPhysicsFromSettings = async (nextParams = {}) => {
   const current = getPhysicsSnapshot();
   physicsParams.value = {
@@ -2035,8 +2020,39 @@ const getEditorControlsState = () => ({
     active: currentMainRenderMode() === mode.value,
     disabled: mode.backend === 'vision' && !visionAvailable.value,
   })),
+  viewportUiMode: viewportUiMode.value,
+  viewportUiModes: viewportUiModeItems.map((item) => ({
+    ...item,
+    active: item.mode === viewportUiMode.value,
+  })),
+  cameraSpeed: Number(cameraSpeed.value),
   physics: getPhysicsSnapshot(),
 });
+
+const broadcastViewportControlsState = () => {
+  appService
+    .crossTabBroadcast('viewport-controls-state', getEditorControlsState())
+    .catch(() => {});
+};
+
+const handleViewportControlsRequest = (payload = {}) => {
+  if (!payload || typeof payload !== 'object') {
+    broadcastViewportControlsState();
+    return;
+  }
+
+  if (payload.action === 'setViewportUiMode') {
+    setViewportUiModeFromPanel(payload.mode);
+    return;
+  }
+
+  if (payload.action === 'setCameraSpeed') {
+    setCameraSpeedFromPanel(payload.value);
+    return;
+  }
+
+  broadcastViewportControlsState();
+};
 
 const registerEditorControls = () => {
   window[EDITOR_CONTROLS_KEY] = {
@@ -2052,7 +2068,15 @@ const registerEditorControls = () => {
     runProject: handleRunProject,
     runCurrentScene: handleRunCurrentScene,
     selectRenderMode: selectMainRenderMode,
+    setViewportUiMode: setViewportUiModeFromPanel,
+    setCameraSpeed: setCameraSpeedFromPanel,
   };
+};
+
+const openDefaultFloatingToolPanels = async () => {
+  for (const panel of floatingPanelManifests()) {
+    await openFloatingPanel(dockStore, panel.id);
+  }
 };
 
 const unregisterEditorControls = () => {
@@ -2238,13 +2262,22 @@ onMounted(async () => {
   });
   coronaEventBus.on('panel-closed', (payload) => {
     const panelId = payload?.panelId;
-    if (panelId) dockStore.popIn(panelId);
+    if (!panelId) return;
+    if (isFloatingPanel(panelId)) {
+      dockStore.markExternalClosed(panelId);
+      return;
+    }
+    dockStore.popIn(panelId);
   });
+  coronaEventBus.on('viewport-controls-request', handleViewportControlsRequest);
   coronaEventBus.on('vision-scene-imported', handleVisionSceneImported);
   coronaEventBus.on('actor-pick-result', handleActorPickResult);
   coronaEventBus.on('actor-gizmo-state', handleGizmoStateResult);
   coronaEventBus.on('actor-gizmo-transform', handleGizmoTransformResult);
   coronaEventBus.on('viewport-ui-calibration-changed', applyViewportUiCalibration);
+
+  await openDefaultFloatingToolPanels();
+  broadcastViewportControlsState();
 
   // 启动阶段性包菜提示：每隔一段时间根据用户操作自动弹出 AI 提示气泡
   startStageHints(
@@ -2269,6 +2302,7 @@ onUnmounted(() => {
   coronaEventBus.off('scene-add');
   coronaEventBus.off('scene-rename');
   coronaEventBus.off('panel-closed');
+  coronaEventBus.off('viewport-controls-request', handleViewportControlsRequest);
   coronaEventBus.off('vision-scene-imported', handleVisionSceneImported);
   coronaEventBus.off('actor-pick-result', handleActorPickResult);
   coronaEventBus.off('actor-gizmo-state', handleGizmoStateResult);

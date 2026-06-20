@@ -206,8 +206,8 @@ export const projectService = {
 };
 
 export const appService = {
-  createPanelTab: (panelId, routePath, width, height) =>
-    Bridge.callDockCommand({ cmd: 'createPanelTab', panelId, routePath, width, height }),
+  createPanelTab: (panelId, routePath, width, height, dockingPos) =>
+    Bridge.callDockCommand({ cmd: 'createPanelTab', panelId, routePath, width, height, dockingPos }),
   closeThisTab: (panelId) =>
     Bridge.callDockCommand({ cmd: 'closeThisTab', panelId }),
   closePanelTab: (tabId, panelId) =>

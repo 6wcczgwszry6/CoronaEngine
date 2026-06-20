@@ -4,6 +4,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstdint>
 
@@ -18,6 +19,13 @@
 namespace Corona::Systems::UI {
 
 namespace {
+float clamp_float(float value, float min_value, float max_value) {
+    if (max_value < min_value) {
+        return min_value;
+    }
+    return std::clamp(value, min_value, max_value);
+}
+
 #ifdef _WIN32
 bool is_extended_windows_key(int windows_key_code) {
     switch (windows_key_code) {
@@ -293,23 +301,48 @@ void BrowserRenderer::setup_window_transform(BrowserTab* tab,
         ImVec2 work_pos = browser_viewport->WorkPos;
         ImVec2 work_size = browser_viewport->WorkSize;
 
+        constexpr float panel_margin = 24.0f;
+        constexpr float scene_bar_offset = 64.0f;
+        constexpr float right_stack_gap = 16.0f;
+
         auto target_w = static_cast<float>(tab->dock_width);
         auto target_h = static_cast<float>(tab->dock_height);
+
+        const bool left_panel = tab->docking_pos == "left_bottom";
+        const bool right_panel = tab->docking_pos == "right_top" ||
+                                 tab->docking_pos == "right_bottom";
+
+        const float min_w = left_panel ? 300.0f : 320.0f;
+        const float width_ratio = left_panel ? 0.22f : (right_panel ? 0.27f : 0.42f);
+        const float max_w = std::max(min_w, work_size.x * width_ratio);
+        target_w = clamp_float(target_w, min_w, max_w);
+
+        const float usable_h = std::max(
+            260.0f, work_size.y - scene_bar_offset - panel_margin - right_stack_gap);
+        if (tab->docking_pos == "right_top") {
+            target_h = clamp_float(target_h, 320.0f, usable_h * 0.54f);
+        } else if (tab->docking_pos == "right_bottom") {
+            target_h = clamp_float(target_h, 300.0f, usable_h * 0.46f);
+        } else if (tab->docking_pos == "left_bottom") {
+            target_h = clamp_float(target_h, 300.0f, std::max(300.0f, usable_h * 0.48f));
+        } else {
+            target_h = clamp_float(target_h, 320.0f, usable_h);
+        }
 
         ImVec2 final_pos = work_pos;
 
         if (tab->docking_pos == "left_top") {
-            final_pos.x = work_pos.x;
-            final_pos.y = work_pos.y + 50.f;
+            final_pos.x = work_pos.x + panel_margin;
+            final_pos.y = work_pos.y + scene_bar_offset;
         } else if (tab->docking_pos == "left_bottom") {
-            final_pos.x = work_pos.x;
-            final_pos.y = work_pos.y + work_size.y - target_h;
+            final_pos.x = work_pos.x + panel_margin;
+            final_pos.y = work_pos.y + work_size.y - target_h - panel_margin;
         } else if (tab->docking_pos == "right_top") {
-            final_pos.x = work_pos.x + work_size.x - target_w;
-            final_pos.y = work_pos.y + 50.f;
+            final_pos.x = work_pos.x + work_size.x - target_w - panel_margin;
+            final_pos.y = work_pos.y + scene_bar_offset;
         } else if (tab->docking_pos == "right_bottom") {
-            final_pos.x = work_pos.x + work_size.x - target_w;
-            final_pos.y = work_pos.y + work_size.y - target_h;
+            final_pos.x = work_pos.x + work_size.x - target_w - panel_margin;
+            final_pos.y = work_pos.y + work_size.y - target_h - panel_margin;
         } else if (tab->docking_pos == "bottom_left") {
             final_pos.x = work_pos.x + 300.f;
             final_pos.y = work_pos.y + work_size.y - target_h;
@@ -320,8 +353,8 @@ void BrowserRenderer::setup_window_transform(BrowserTab* tab,
             final_pos.x = work_pos.x + (work_size.x - target_w) * 0.5f;
             final_pos.y = work_pos.y + (work_size.y - target_h) * 0.5f;
         } else {
-            final_pos.x = work_pos.x + 300.f;
-            final_pos.y = work_pos.y + 50.f;
+            final_pos.x = work_pos.x + work_size.x - target_w - panel_margin;
+            final_pos.y = work_pos.y + scene_bar_offset + right_stack_gap;
         }
 
         ImGui::SetNextWindowPos(final_pos, ImGuiCond_FirstUseEver);
@@ -417,7 +450,8 @@ void BrowserRenderer::render_single_tab(int tab_id,
 
     bool is_main_tab = (tab->docking_pos == "main");
     if (is_main_tab) {
-        browser_window_flags |= ImGuiWindowFlags_NoMove;  // 主窗口始终禁止移动
+        browser_window_flags |= ImGuiWindowFlags_NoMove |
+                                ImGuiWindowFlags_NoBackground;
     }
     if (tab->camera_view) {
         browser_window_flags |= ImGuiWindowFlags_NoDocking |

@@ -41,7 +41,7 @@
           <button
             class="action-button"
             type="button"
-            @click="openPanelOrRoute('AITalkBar', '/AITalkBar')"
+            @click="openFloatingPanelOrRoute('AITalkBar', '/AITalkBar')"
           >
             AI 对话
           </button>
@@ -63,14 +63,14 @@
           <button
             class="action-button"
             type="button"
-            @click="openPanelOrRoute('SceneTools', '/SceneBar')"
+            @click="openFloatingPanelOrRoute('SceneTools', '/SceneBar')"
           >
             场景管理
           </button>
           <button
             class="action-button"
             type="button"
-            @click="openPanelOrRoute('SceneDatas', '/Object')"
+            @click="openFloatingPanelOrRoute('SceneDatas', '/Object')"
           >
             详情
           </button>
@@ -274,6 +274,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useDockStore } from '@/stores/dockStore.js';
 import { useDockPanel } from '@/composables/useDockPanel.js';
+import { isFloatingPanel, openFloatingPanel } from '@/utils/panelWindows.js';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 
 const EDITOR_CONTROLS_KEY = '__coronaEditorControls';
@@ -568,6 +569,22 @@ function openPanelOrRoute(panelId, routePath) {
   }
 
   router.push(routePath);
+}
+
+async function openFloatingPanelOrRoute(panelId, routePath) {
+  confirmHome.value = false;
+
+  if (isDocked && isFloatingPanel(panelId)) {
+    const opened = await openFloatingPanel(dockStore, panelId);
+    if (opened) {
+      closePanel();
+    } else {
+      setStatus('打开悬浮窗失败，请查看日志', 'error');
+    }
+    return;
+  }
+
+  openPanelOrRoute(panelId, routePath);
 }
 
 function cancelHome() {
