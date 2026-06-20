@@ -854,6 +854,9 @@ def test_worker_async_sends_fast_ack_before_agent_lock_finishes():
     assert engine.replies
     assert engine.replies[0][3] == "progress"
     assert "已收到" in engine.replies[0][2]
+    assert "正在生成" not in engine.replies[0][2]
+    assert "下一阶段" not in engine.replies[0][2]
+    assert "吸收" not in engine.replies[0][2]
     deadline = time.time() + 1.0
     while time.time() < deadline and "slow compose done" not in engine.replies[-1][2]:
         time.sleep(0.01)
@@ -996,6 +999,49 @@ def test_worker_routes_plain_chat_supplement_to_pending_planning_gate():
     assert "我已更新方案" in reply_text
     assert "减少方案中的细碎物体" in reply_text
     print("[OK] worker routes no-mention supplement to pending planning gate")
+
+
+def test_plain_chat_generation_start_confirms_and_executes_active_seed_plan():
+    coordinator = InteractionCoordinator()
+    room_id = "r-plain-generation-start"
+    coordinator.create_or_update_seed_plan(ChatMessage(
+        room_id=room_id,
+        sender_id="host-a",
+        sender_name="房主",
+        text="帮我设计一个现代简约客厅",
+        is_host=True,
+    ))
+    engine = FakeEngine([], coordinator_messages=[
+        {
+            "message_id": "plain-generation-start-1",
+            "room_id": room_id,
+            "sender_id": "host-a",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "text": "开始生成",
+        },
+    ])
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    plan = coordinator.active_plan_for_room(room_id)
+    assert plan is not None
+    assert plan.status in {SeedPlanStatus.DRAFT, SeedPlanStatus.PROPOSED}
+
+    assert worker.process_once() is True
+    plan = coordinator.active_plan_for_room(room_id)
+    assert plan is not None
+    assert plan.status == SeedPlanStatus.EXECUTING
+    visible_text = "\n".join(str(item[2]) for item in [*engine.replies, *engine.system_messages])
+    assert "已进入生成队列" in visible_text
+    assert "等待房主确认：开始生成" not in visible_text
+    assert "开始生成；开始生成" not in str(plan.intent_summary)
+    print("[OK] plain chat generation start confirms and executes active SeedPlan")
 
 
 def test_worker_disambiguates_plain_chat_supplement_when_multiple_plans_pending():
@@ -3637,6 +3683,7 @@ if __name__ == "__main__":
     test_planning_confirmation_gate_roundtrip()
     test_planning_confirmation_gate_returns_concrete_design_brief()
     test_worker_routes_plain_chat_supplement_to_pending_planning_gate()
+    test_plain_chat_generation_start_confirms_and_executes_active_seed_plan()
     test_worker_disambiguates_plain_chat_supplement_when_multiple_plans_pending()
     test_runtime_routes_metadata_targeted_pending_plan_without_mention()
     test_runtime_metadata_generate_confirms_pending_plan_without_magic_text()

@@ -239,6 +239,24 @@ class LANChatAgentWorker:
                     reason="pending planning message",
                 )
                 return True
+            if self._is_generation_start_text(text):
+                generation_reply = self._start_active_coordinator_generation(
+                    coordinator,
+                    room_id=room_id,
+                    host_id=str(message.get("sender_id") or message.get("from") or ""),
+                )
+                if generation_reply is not None:
+                    self._send_coordinator_sync_system_reply(message, generation_reply)
+                    self._log_scene_route(
+                        room_id=room_id,
+                        sender=str(message.get("sender_name") or message.get("sender_id") or ""),
+                        target_agent=str(message.get("target_agent_name") or message.get("agent_name") or ""),
+                        room_state=str(coordinator.active_plan_for_room(room_id).status.value if coordinator.active_plan_for_room(room_id) is not None else "none"),
+                        intent="generation_start",
+                        action="confirm_and_execute",
+                        reason=f"source={source}",
+                    )
+                    return True
             if not planning_gate_handled and not self._should_sync_chat_to_coordinator(coordinator, room_id, text, source=source):
                 self._log_scene_route(
                     room_id=room_id,
@@ -627,7 +645,7 @@ class LANChatAgentWorker:
                     return bool(self._send_final_reply(agent_id, agent_name, quick_reply, trigger))
 
             if self._async_agent_execution and self._should_send_fast_ack(trigger):
-                _send_progress("已收到你的要求；如果当前正在生成，我会在下一阶段吸收这条调整。")
+                _send_progress("已收到，我正在整理你的请求。生成尚未开始；需要确认后才会进入生成队列。")
 
             with agent_progress_sink(_send_progress):
                 with self._agent_call_lock:
@@ -852,6 +870,62 @@ class LANChatAgentWorker:
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("Coordinator generation start skipped: %s", exc)
             return None
+
+    def _start_active_coordinator_generation(
+        self,
+        coordinator: InteractionCoordinator,
+        *,
+        room_id: str,
+        host_id: str,
+    ) -> str | None:
+        plan = coordinator.active_plan_for_room(room_id)
+        if plan is None:
+            return None
+        if plan.status == SeedPlanStatus.EXECUTING:
+            latest_status = coordinator._latest_generation_job_status(plan.plan_id)
+            return coordinator._status_query_message(plan, "", latest_status)
+        if plan.status != SeedPlanStatus.CONFIRMED:
+            if plan.status not in {SeedPlanStatus.DRAFT, SeedPlanStatus.CLARIFYING, SeedPlanStatus.PROPOSED}:
+                return None
+            disclosure_start = len(coordinator.disclosure_events)
+            confirmed = coordinator.confirm_seed_plan(plan.plan_id, str(host_id or ""))
+            emitted = self._emit_new_disclosure_events(coordinator, disclosure_start)
+            self._start_coordinator_disclosure_watch(coordinator, disclosure_start + emitted)
+            if not getattr(confirmed, "ok", False):
+                return str(getattr(confirmed, "message", "") or "当前方案还不能确认生成，请先补充必要信息。")
+            plan = coordinator.active_plan_for_room(room_id) or plan
+        if plan.status == SeedPlanStatus.CONFIRMED:
+            disclosure_start = len(coordinator.disclosure_events)
+            ref = coordinator.execute_confirmed_plan(plan.plan_id)
+            emitted = self._emit_new_disclosure_events(coordinator, disclosure_start)
+            self._start_coordinator_disclosure_watch(coordinator, disclosure_start + emitted)
+            self._emit_generation_scheduler_disclosure()
+            return f"【执行结果】SeedPlan {plan.plan_id} 已进入生成队列：{ref.job_id} ({ref.status})"
+        return None
+
+    def _send_coordinator_sync_system_reply(self, message: dict[str, Any], text: str) -> bool:
+        if self._corona_engine is None:
+            return False
+        safe_text = self._safe_control_text(text)
+        metadata = {
+            "reply_to": str(message.get("message_id") or ""),
+            "phase": "generation_start",
+        }
+        try:
+            if hasattr(self._corona_engine, "network_send_system_message_ex"):
+                return bool(self._corona_engine.network_send_system_message_ex(
+                    "system",
+                    "系统",
+                    safe_text,
+                    "action_status",
+                    str(message.get("message_id") or ""),
+                    json.dumps(metadata, ensure_ascii=False),
+                ))
+            if hasattr(self._corona_engine, "network_send_system_message"):
+                return bool(self._corona_engine.network_send_system_message("system", "系统", safe_text))
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to send Coordinator sync system reply: %s", exc)
+        return False
 
     @staticmethod
     def _is_generation_start_text(text: str) -> bool:

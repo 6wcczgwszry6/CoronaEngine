@@ -61,6 +61,12 @@ def test_structured_route_exposes_agent_self_and_scene_actions() -> None:
     assert gm.as_dict()["route"] == "gm_control"
 
 
+def test_design_opinion_question_stays_discussion_even_with_plan_words() -> None:
+    service = IntentUnderstandingService()
+    decision = service.classify("你对于长者的设计方案怎么看", allow_llm=False)
+    assert decision.intent == "discussion"
+
+
 def test_planning_disclosure_splits_models_from_scene_substrate() -> None:
     runtime = LanChatSceneRuntime()
     action, reply = runtime.handle_planning_gate(
@@ -79,10 +85,65 @@ def test_planning_disclosure_splits_models_from_scene_substrate() -> None:
     assert "森林" in reply
 
 
+def test_pending_plan_ignores_opinion_question_and_ui_placeholder() -> None:
+    runtime = LanChatSceneRuntime()
+    action, reply = runtime.handle_planning_gate("长者", "帮我设计一个现代风客厅")
+    assert action == "reply"
+    assert reply is not None
+
+    action, payload, agent_name = runtime.handle_pending_planning_message("你对于长者的设计方案怎么看")
+    assert (action, payload, agent_name) == ("pass", None, None)
+
+    action, payload, agent_name = runtime.handle_pending_planning_message("补充要求：写明要改的风格、物件、布局或限制")
+    assert (action, payload, agent_name) == ("pass", None, None)
+
+    snapshot = runtime.pending_planning_snapshot()
+    assert len(snapshot) == 1
+    assert snapshot[0]["scene_goal"] == "现代风客厅"
+    assert snapshot[0]["constraints"] == []
+
+
+def test_scene_plans_use_general_profile_instead_of_topic_specific_fallbacks() -> None:
+    runtime = LanChatSceneRuntime()
+    cases = [
+        ("长者", "帮我设计一个科技展厅", ("展台", "展墙", "导视")),
+        ("小女孩", "帮我规划一个温暖的商业咖啡店", ("吧台", "座位", "收银")),
+        ("商人", "设计一个户外亲子活动区", ("入口", "活动", "休息")),
+    ]
+    banned = ("主体空间", "主要功能物件", "支撑物件", "主题装饰", "小型道具")
+    for agent_name, prompt, expected_terms in cases:
+        action, reply = runtime.handle_planning_gate(agent_name, prompt)
+        assert action == "reply"
+        assert reply is not None
+        assert not any(term in reply for term in banned), reply
+        assert sum(1 for term in expected_terms if term in reply) >= 2, reply
+        assert "风格定位" in reply
+        assert "空间布局" in reply
+
+
+def test_planning_reply_keeps_light_role_voice() -> None:
+    runtime = LanChatSceneRuntime()
+    action, elder_reply = runtime.handle_planning_gate("长者", "帮我设计一个现代简约客厅")
+    assert action == "reply"
+    assert elder_reply is not None
+    assert "长者" in elder_reply
+    assert "稳妥" in elder_reply
+
+    action, girl_reply = runtime.handle_planning_gate("小女孩", "帮我设计一个温暖的商业咖啡店")
+    assert action == "reply"
+    assert girl_reply is not None
+    assert "小女孩" in girl_reply
+    assert "温柔" in girl_reply or "可爱" in girl_reply
+
+
 if __name__ == "__main__":
     test_status_query_overrides_bad_llm_generation_start()
     test_generation_start_requires_explicit_confirmation_language()
     test_active_generation_add_is_pending_intervention()
     test_structured_route_exposes_agent_self_and_scene_actions()
+    test_design_opinion_question_stays_discussion_even_with_plan_words()
     test_planning_disclosure_splits_models_from_scene_substrate()
+    test_pending_plan_ignores_opinion_question_and_ui_placeholder()
+    test_scene_plans_use_general_profile_instead_of_topic_specific_fallbacks()
+    test_planning_reply_keeps_light_role_voice()
     print("[OK] Intent understanding service tests passed")

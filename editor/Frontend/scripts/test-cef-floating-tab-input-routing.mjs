@@ -1,0 +1,43 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(__dirname, '..', '..', '..');
+
+const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), 'utf8');
+
+const assertIncludes = (source, needle, message) => {
+  if (!source.includes(needle)) {
+    throw new Error(message);
+  }
+};
+
+const imguiUi = read('src/systems/ui/imgui/imgui_ui.cpp');
+const browserUi = read('src/systems/ui/cef/browser_ui.cpp');
+
+assertIncludes(
+  imguiUi,
+  'auto route_browser_platform_window = [&](SDL_WindowID window_id)',
+  'Keyboard/text events from ImGui platform windows must route by SDL window ID for every browser tab.',
+);
+assertIncludes(
+  imguiUi,
+  'tab->platform_window_id == window_id',
+  'Focused platform-window routing must match BrowserTab::platform_window_id.',
+);
+assertIncludes(
+  imguiUi,
+  'tab->platform_handle_raw == foreground',
+  'Foreground native-window routing must match BrowserTab::platform_handle_raw.',
+);
+assertIncludes(
+  browserUi,
+  'sync_tab_platform_window(tab);',
+  'Every rendered browser tab must publish its ImGui platform window before input routing runs next frame.',
+);
+assertIncludes(
+  browserUi,
+  'void sync_tab_platform_window(BrowserTab* tab)',
+  'Platform-window synchronization must be shared by camera and floating CEF tabs.',
+);

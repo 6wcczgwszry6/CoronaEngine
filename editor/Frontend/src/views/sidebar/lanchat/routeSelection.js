@@ -16,18 +16,31 @@ export function targetPayloadForKey(key, options = []) {
   };
 }
 
+export function isGenerationStartText(text = '') {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  return /(确认开始|确认生成|开始生成|直接生成|开始执行|执行生成|按.*方案.*生成|按这个方案生成|就按方案生成)/.test(value);
+}
+
+export function effectiveDraftAction(action, text = '') {
+  if (isGenerationStartText(text)) return 'generate';
+  return String(action || '').trim();
+}
+
 export function routeGuardMessage(action, target = {}, text = '') {
-  if (/^@([^\s，,：:]+)/.test(String(text || '').trim())) return '';
-  const draftAction = String(action || '').trim();
+  const value = String(text || '').trim();
+  if (/^@([^\s，,：:]+)/.test(value)) return '';
+  if (isGenerationStartText(value)) return '';
+  const draftAction = effectiveDraftAction(action, value);
   const scope = String(target?.scope || '').trim();
   if (draftAction === 'plan' && scope === 'group') {
-    return '生成方案需要先选择一个负责整理方案的 Agent。';
+    return '整理方案需要先选择一个负责出方案的 Agent。';
   }
   if (draftAction === 'supplement' && scope !== 'agent' && scope !== 'plan') {
-    return '补充要求需要选择已有方案对应的 Agent。';
+    return '补充方案需要选择已有方案对应的 Agent。';
   }
   if (draftAction === 'generate' && scope !== 'agent' && scope !== 'plan') {
-    return '确认生成需要选择已有方案对应的 Agent。';
+    return '开始生成需要选择已有方案对应的 Agent。';
   }
   return '';
 }

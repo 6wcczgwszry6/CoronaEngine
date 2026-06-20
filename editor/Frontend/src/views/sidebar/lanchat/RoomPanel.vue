@@ -542,6 +542,7 @@ import {
 } from '../../../stores/lanchatDisclosure.js';
 import MemberList from './MemberList.vue';
 import {
+  effectiveDraftAction,
   resolveSelectedTargetKey,
   routeGuardMessage,
   targetPayloadForKey,
@@ -636,10 +637,10 @@ const workspaceModes = [
 ];
 
 const draftActions = [
-  { key: 'chat', label: '问一下', hint: '只让目标回复，不生成场景' },
-  { key: 'plan', label: '生成方案', hint: '先整理可确认方案' },
-  { key: 'supplement', label: '补充要求', hint: '更新当前目标方案' },
-  { key: 'generate', label: '确认生成', hint: '按当前方案进入生成' },
+  { key: 'chat', label: '咨询', hint: '只让目标回复，不生成场景' },
+  { key: 'plan', label: '整理方案', hint: '只整理方案，不进入生成队列' },
+  { key: 'supplement', label: '补充方案', hint: '只更新当前方案，不启动生成' },
+  { key: 'generate', label: '开始生成', hint: '确认当前方案并进入生成队列' },
   { key: 'edit', label: '调整场景', hint: '对已有场景提出修改' },
 ];
 
@@ -763,8 +764,8 @@ const draftPlaceholder = computed(() => {
   if (s.connection === 'reconnecting') return '连接已断开';
   if (isWaitingDisclosure.value) return '生成中也可输入：新增一个… / 调整… / 问题…';
   if (selectedDraftAction.value === 'plan') return '描述你想设计什么';
-  if (selectedDraftAction.value === 'supplement') return '写清要改的风格、物件、布局或限制';
-  if (selectedDraftAction.value === 'generate') return '确认按当前方案生成，也可补一句生成范围';
+  if (selectedDraftAction.value === 'supplement') return '只写补充内容，例如：新增柜式空调、整体更明亮';
+  if (selectedDraftAction.value === 'generate') return '输入“开始生成”，或补一句生成范围';
   if (selectedDraftAction.value === 'edit') return '描述要调整的已有物体或位置';
   return '输入要问的问题';
 });
@@ -1155,6 +1156,7 @@ function pickMention(c) {
 function messageOptionsForText(text) {
   const trimmed = String(text || '').trim();
   const generationMetadata = s.role === 'host' ? lanchat.generationOptionsMetadata() : {};
+  const routedDraftAction = effectiveDraftAction(selectedDraftAction.value, trimmed);
   applyInputRouteState();
   if (/^@GM(?:\s|$)/i.test(trimmed)) {
     if (!Object.keys(generationMetadata).length) return buildManualGmMessageOptions(s.role);
@@ -1165,9 +1167,11 @@ function messageOptionsForText(text) {
     };
     return options;
   }
-  return Object.keys(generationMetadata).length
-    ? { metadata: generationMetadata }
-    : {};
+  const metadata = {
+    ...generationMetadata,
+    draft_action: routedDraftAction,
+  };
+  return { metadata };
 }
 
 function onVlmToggle(event) {

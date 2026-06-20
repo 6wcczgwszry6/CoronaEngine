@@ -270,6 +270,26 @@ SDL_Window* sdl_window_from_viewport(ImGuiViewport* viewport) {
     return SDL_GetWindowFromID(window_id);
 }
 
+void sync_tab_platform_window(BrowserTab* tab) {
+    if (!tab) {
+        return;
+    }
+
+    auto* viewport = ImGui::GetWindowViewport();
+    SDL_Window* platform_window = sdl_window_from_viewport(viewport);
+    void* native_surface = viewport ? viewport->PlatformHandleRaw : nullptr;
+    if (!native_surface && platform_window) {
+        native_surface = SDL_GetPointerProperty(
+            SDL_GetWindowProperties(platform_window),
+            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+            nullptr);
+    }
+    tab->platform_handle_raw = native_surface;
+    tab->platform_window_id = platform_window
+                                  ? SDL_GetWindowID(platform_window)
+                                  : 0;
+}
+
 }  // namespace
 
 void BrowserRenderer::setup_window_transform(BrowserTab* tab,
@@ -468,21 +488,10 @@ void BrowserRenderer::render_single_tab(int tab_id,
             BrowserManager::instance().resize_tab(tab_id, new_width, new_height);
         }
 
+        sync_tab_platform_window(tab);
+
         if (tab->camera_view) {
-            auto* viewport = ImGui::GetWindowViewport();
-            SDL_Window* platform_window = sdl_window_from_viewport(viewport);
-            void* native_surface = viewport ? viewport->PlatformHandleRaw : nullptr;
-            if (!native_surface && platform_window) {
-                native_surface = SDL_GetPointerProperty(
-                    SDL_GetWindowProperties(platform_window),
-                    SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-                    nullptr);
-            }
-            tab->platform_handle_raw =
-                native_surface;
-            tab->platform_window_id = platform_window
-                                          ? SDL_GetWindowID(platform_window)
-                                          : 0;
+            void* native_surface = tab->platform_handle_raw;
             if (native_surface) {
                 CameraViewportManager::instance().bind_surface(
                     tab_id, native_surface,

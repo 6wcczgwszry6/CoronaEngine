@@ -136,7 +136,7 @@ assertIncludes(disclosureStore, "sender_role: 'host'", 'GM confirmation builder 
 assertIncludes(disclosureStore, 'is_host: true', 'GM confirmation builder must carry explicit host boolean');
 assertIncludes(disclosureTest, 'confirm.options.sender_role', 'disclosure test must cover explicit host role in GM confirmation options');
 assertIncludes(disclosureTest, "buildManualGmMessageOptions('guest')", 'disclosure test must cover participant manual GM role options');
-assertIncludes(store, 'lanChatService.sendMessage(trimmed, options)', 'lanchat store must pass structured message options through');
+assertIncludes(store, 'lanChatService.sendMessage(trimmed, withStructuredRouteOptions(options))', 'lanchat store must inject structured route metadata while preserving message options');
 assertIncludes(bridge, '{ text, ...(options || {}) }', 'LANChat bridge must preserve structured sendMessage options');
 assertIncludes(bridge, "Bridge.callCEF('LANChat', 'send_message'", 'LANChat bridge must route sendMessage through CEF LANChat module');
 assertIncludes(bridge, "Bridge.callCEF('LANChat', 'get_history'", 'LANChat bridge must expose explicit persisted history reload');
@@ -153,8 +153,8 @@ assertIncludes(roomPanel, 'form.port || 27960', 'RoomPanel join/create calls mus
 if (roomPanel.includes('port: 8770') || roomPanel.includes('form.port || 8770')) {
   fail('RoomPanel must not default LANChat room ports to legacy 8770');
 }
-assertIncludes(roomPanel, "roomMode = 'single'", 'RoomPanel must offer a single-player room mode');
-assertIncludes(roomPanel, "roomMode = 'multi'", 'RoomPanel must offer a multiplayer room mode');
+assertIncludes(roomPanel, "roomMode.value = 'single'", 'RoomPanel must offer a single-player room mode');
+assertIncludes(roomPanel, "roomMode.value = 'multi'", 'RoomPanel must offer a multiplayer room mode');
 assertIncludes(roomPanel, 'mode: roomMode.value', 'RoomPanel must pass the selected room mode when creating a room');
 assertIncludes(roomPanel, "v-if=\"roomMode === 'multi'\"", 'RoomPanel must only show room/password inputs for multiplayer room creation');
 assertIncludes(roomPanel, 'function makeLocalRoomId', 'RoomPanel must auto-generate an internal local room id for single-player rooms');
@@ -168,6 +168,10 @@ assertIncludes(roomPanel, 'continueHistoryAsSingle', 'RoomPanel must let users c
 assertIncludes(roomPanel, '作为单人聊天室继续', 'RoomPanel must expose a clear continue-history action');
 assertIncludes(roomPanel, '继续所选历史', 'RoomPanel single-room create button must reflect selected history');
 assertIncludes(roomPanel, "s.mode === 'multi'", 'RoomPanel must only show host IP/port for multiplayer rooms');
+assertIncludes(roomPanel, "label: '整理方案'", 'RoomPanel planning action must avoid implying generation has started');
+assertIncludes(roomPanel, "label: '补充方案'", 'RoomPanel supplement action must say it only updates the current plan');
+assertIncludes(roomPanel, "label: '开始生成'", 'RoomPanel generation action must be the only button that implies entering generation');
+assertIncludes(roomPanel, 'effectiveDraftAction(selectedDraftAction.value, trimmed)', 'RoomPanel must route confirmation phrases as generate even from another selected mode');
 
 assertIncludes(memberList, 'peerId', 'MemberList must accept peerId prop');
 assertIncludes(memberList, 'a.owner === peerId', 'agent remove visibility must compare owner to peerId');

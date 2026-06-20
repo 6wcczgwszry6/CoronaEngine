@@ -1487,7 +1487,7 @@ class MasterAgent:
         if force_compose or is_compose_request(user_text) or is_compose_request(compose_text):
             if get_current_progress_sink() is not None:
                 logger.info("[MasterAgent] LANChat compose request blocked from direct RoleAgent compose")
-                return "已收到生成类请求，请由房主确认方案后通过生成队列执行。"
+                return "这是生成类请求，但尚未开始生成。请先由房主确认当前方案，确认后系统会通过生成队列执行。"
             logger.info("[MasterAgent] scene → compose (整体场景组合)")
             return self._handle_scene_compose(user_text, messages, specialist, persona)
 

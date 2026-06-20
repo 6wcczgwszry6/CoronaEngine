@@ -6,6 +6,8 @@ import { getPluginManifest } from '@/config/pluginManifest.js';
 import DockLayout from '@/components/dock/DockLayout.vue';
 import DockPanel from '@/components/dock/DockPanel.vue';
 import CameraFollowPanel from '@/components/panels/CameraFollowPanel.vue';
+import { Bridge } from '@/utils/bridge.js';
+import { shouldDisableEditorCameraInput } from '@/utils/editorInputFocusGate.js';
 import '@/utils/eventBus.js'; // init window.__coronaEmit
 
 const route = useRoute();
@@ -15,6 +17,8 @@ const isEditorRoute = computed(() => route.path === '/');
 const centerPanels = computed(() => dockStore.panelsByZone('center'));
 
 let gcTimer = null;
+let editorCameraInputDisabledForFocus = false;
+let editorCameraInputFocusTimer = null;
 
 function isEscapeKey(event) {
   const modifierKeys = new Set([
@@ -33,6 +37,43 @@ function onGlobalKeyDown(event) {
   if (isEscapeKey(event)) {
     dockStore.togglePanel('EditorSettings');
   }
+}
+
+function canCallCEF() {
+  return typeof window !== 'undefined' && typeof window.cefQuery === 'function';
+}
+
+function setEditorCameraInputForFocus(enabled) {
+  if (enabled && window.__coronaGamePreviewInputLocked) return;
+  if (!canCallCEF()) return;
+  Bridge.callCEF('CoronaEditor', 'set_editor_camera_input_enabled', [enabled, 'focus']).catch(() => {});
+}
+
+function syncEditorCameraInputFocusGate() {
+  const shouldDisable = shouldDisableEditorCameraInput(document);
+  if (shouldDisable === editorCameraInputDisabledForFocus) return;
+  editorCameraInputDisabledForFocus = shouldDisable;
+  setEditorCameraInputForFocus(!shouldDisable);
+}
+
+function scheduleEditorCameraInputFocusGate() {
+  if (editorCameraInputFocusTimer) {
+    window.clearTimeout(editorCameraInputFocusTimer);
+  }
+  editorCameraInputFocusTimer = window.setTimeout(() => {
+    editorCameraInputFocusTimer = null;
+    syncEditorCameraInputFocusGate();
+  }, 0);
+}
+
+function releaseEditorCameraInputFocusGate() {
+  if (editorCameraInputFocusTimer) {
+    window.clearTimeout(editorCameraInputFocusTimer);
+    editorCameraInputFocusTimer = null;
+  }
+  if (!editorCameraInputDisabledForFocus) return;
+  editorCameraInputDisabledForFocus = false;
+  setEditorCameraInputForFocus(true);
 }
 
 // ── 面板缩放 ──
@@ -81,6 +122,9 @@ onMounted(() => {
   }, 60000);
 
   document.addEventListener('keydown', onGlobalKeyDown, true);
+  document.addEventListener('focusin', syncEditorCameraInputFocusGate, true);
+  document.addEventListener('focusout', scheduleEditorCameraInputFocusGate, true);
+  window.addEventListener('blur', releaseEditorCameraInputFocusGate);
   document.addEventListener('mousemove', onResizeMove);
   document.addEventListener('mouseup', onResizeUp);
 });
@@ -91,6 +135,10 @@ onUnmounted(() => {
     gcTimer = null;
   }
   document.removeEventListener('keydown', onGlobalKeyDown, true);
+  document.removeEventListener('focusin', syncEditorCameraInputFocusGate, true);
+  document.removeEventListener('focusout', scheduleEditorCameraInputFocusGate, true);
+  window.removeEventListener('blur', releaseEditorCameraInputFocusGate);
+  releaseEditorCameraInputFocusGate();
   document.removeEventListener('mousemove', onResizeMove);
   document.removeEventListener('mouseup', onResizeUp);
 });

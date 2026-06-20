@@ -115,6 +115,10 @@ _DISCUSSION_PATTERNS = (
     r"^(你好|你是谁|谢谢|哈喽|hello|hi|在吗|介绍一下)",
     r"(怎么看|觉得|建议|可以吗|为什么)",
 )
+_OPINION_DISCUSSION_PATTERNS = (
+    r"(怎么看|怎么评价|如何评价|看法|观点|觉得|认为).*(方案|设计|布局|计划)",
+    r"(方案|设计|布局|计划).*(怎么看|怎么评价|如何评价|看法|观点|觉得|认为|是否合理|合不合理)",
+)
 _HIGH_RISK_PATTERNS = (
     r"(删除|删掉|移除|清空|重置|覆盖|全部|所有)",
 )
@@ -234,6 +238,8 @@ class IntentUnderstandingService:
         normalized = re.sub(r"@\S+\s*", "", value).strip()
         if _contains(_STATUS_QUERY_PATTERNS, normalized):
             return IntentDecision("status_query", 0.98, target_agent, reason="protocol/status query")
+        if _contains(_OPINION_DISCUSSION_PATTERNS, normalized):
+            return IntentDecision("discussion", 0.96, target_agent, reason="protocol/design opinion discussion")
         if _contains(_GENERATION_START_PATTERNS, normalized):
             return IntentDecision(
                 "generation_start",
@@ -319,6 +325,8 @@ class IntentUnderstandingService:
         generation_active: bool,
     ) -> IntentDecision:
         normalized = re.sub(r"@\S+\s*", "", value).strip()
+        if _contains(_OPINION_DISCUSSION_PATTERNS, normalized):
+            return IntentDecision("discussion", 0.9, target_agent, reason="fallback design opinion discussion")
         if _contains(_DISCUSSION_PATTERNS, normalized) and not _contains(_PLAN_DRAFT_PATTERNS, normalized):
             return IntentDecision("discussion", 0.88, target_agent, reason="fallback discussion")
         if _contains(_FINAL_LAYOUT_PATTERNS, normalized):
