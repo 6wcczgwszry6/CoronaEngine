@@ -1189,6 +1189,9 @@ const std::vector<Network::LanChatAgent>& NetworkSystem::lanchat_agents() const 
 }
 
 std::optional<Network::LanChatAgentTrigger> NetworkSystem::lanchat_pop_agent_trigger() {
+    if (impl_->session_role == SessionRole::Client) {
+        return std::nullopt;
+    }
     return impl_->lanchat.pop_agent_trigger();
 }
 
@@ -2063,11 +2066,13 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
         }
         if (result.accepted &&
             (mt == MessageType::CHAT_MESSAGE || mt == MessageType::CHAT_MESSAGE_V2)) {
-            const bool allow_generation_start = impl_->session_role != SessionRole::Client;
+            const bool allow_agent_execution = impl_->session_role != SessionRole::Client;
+            const bool allow_generation_start = allow_agent_execution;
             impl_->lanchat.enqueue_agent_triggers_for_message(
                 result.message,
                 local_peer_id(),
                 /*is_agent_reply=*/false,
+                allow_agent_execution,
                 allow_generation_start);
         }
         if (result.accepted && impl_->session_role == SessionRole::Host) {

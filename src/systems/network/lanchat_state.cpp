@@ -317,6 +317,7 @@ LanChatResult LanChatState::register_agent(const std::string& agent_id,
 void LanChatState::enqueue_agent_triggers_for_message(const LanChatMessage& message,
                                                       const std::string& local_peer_id,
                                                       bool is_agent_reply,
+                                                      bool allow_agent_execution,
                                                       bool allow_generation_start) {
     if (is_agent_reply || message.message_id.empty() || local_peer_id.empty()) {
         return;
@@ -328,6 +329,9 @@ void LanChatState::enqueue_agent_triggers_for_message(const LanChatMessage& mess
     if (!message.sender_type.empty() &&
         message.sender_type != "user" &&
         message.sender_type != "host") {
+        return;
+    }
+    if (!allow_agent_execution) {
         return;
     }
     if (!allow_generation_start && is_generation_start_for_coordinator(message)) {
