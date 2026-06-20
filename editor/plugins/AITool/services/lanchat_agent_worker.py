@@ -253,6 +253,7 @@ class LANChatAgentWorker:
             room_id = str(message.get("room_id") or "default")
             self._remember_room_id(room_id)
             metadata = self._coordinator_sync_metadata(message, source=source)
+            metadata = self._normalize_coordinator_target_metadata(message, text, metadata)
             active = coordinator.active_plan_for_room(room_id)
             self._logger.info(
                 "[LANChatSyncTrace] phase=route_start source=%s dedupe=%s room=%s active=%s plan=%s draft_action=%s target_scope=%s target_agent=%s/%s metadata_keys=%s",
@@ -284,6 +285,8 @@ class LANChatAgentWorker:
                     sender_name=str(message.get("sender_name") or message.get("from") or ""),
                     text=text,
                     is_host=bool(message.get("is_host") or sender_type == "host"),
+                    agent_id=str(metadata.get("target_agent_id") or ""),
+                    agent_name=str(metadata.get("target_agent_name") or ""),
                     metadata=metadata,
                 ))
                 authoritative_synced = True
@@ -395,14 +398,25 @@ class LANChatAgentWorker:
                     reason="not scene-write intent",
                 )
                 return False
-            coordinator.ingest_message(ChatMessage(
+            event = coordinator.ingest_message(ChatMessage(
                 room_id=room_id,
                 sender_id=str(message.get("sender_id") or message.get("from") or ""),
                 sender_name=str(message.get("sender_name") or message.get("from") or ""),
                 text=text,
                 is_host=bool(message.get("is_host") or sender_type == "host"),
+                agent_id=str(metadata.get("target_agent_id") or ""),
+                agent_name=str(metadata.get("target_agent_name") or ""),
                 metadata=metadata,
             ))
+            event_type = str(getattr(event, "event_type", "") or "")
+            if event_type in {"layout_reflow_proposal_created", "layout_reflow_confirmed", "layout_reflow_rejected", "layout_reflow_confirmation_failed"}:
+                reply = str(getattr(event, "message", "") or "")
+                if event_type == "layout_reflow_confirmed":
+                    executed = self._execute_layout_reflow_confirmation(getattr(event, "payload", {}) or {})
+                    if executed:
+                        reply = f"{reply}\n{executed}" if reply else executed
+                if reply:
+                    self._send_coordinator_sync_system_reply(message, reply)
             updated = coordinator.active_plan_for_room(room_id)
             self._logger.info(
                 "[LANChatSyncTrace] phase=coordinator_ingested source=%s dedupe=%s room=%s before=%s after=%s plan=%s design_len=%s",
@@ -443,7 +457,7 @@ class LANChatAgentWorker:
             return False
         draft_action = str(metadata.get("draft_action") or "").strip().lower()
         target_scope = str(metadata.get("target_scope") or "").strip().lower()
-        if draft_action in {"plan", "supplement", "generate"} or target_scope == "plan":
+        if draft_action in {"supplement", "generate"} or target_scope == "plan":
             return True
         if draft_action != "chat":
             return False
@@ -478,6 +492,7 @@ class LANChatAgentWorker:
         text: str,
         metadata: dict[str, Any],
     ) -> str:
+        metadata = self._normalize_coordinator_target_metadata(message, text, metadata)
         draft_action = str(metadata.get("draft_action") or "").strip().lower()
         target_scope = str(metadata.get("target_scope") or "").strip().lower()
         target_agent_id = str(metadata.get("target_agent_id") or "").strip()
@@ -558,6 +573,7 @@ class LANChatAgentWorker:
                     target,
                     text,
                     draft_action=draft_action,
+                    source_context_agent=str(metadata.get("source_context_agent") or ""),
                 )
             else:
                 agent_name = str(metadata.get("target_agent_name") or metadata.get("target_agent_id") or "").strip()
@@ -691,6 +707,7 @@ class LANChatAgentWorker:
                     target,
                     text,
                     draft_action=draft_action,
+                    source_context_agent=str(metadata.get("source_context_agent") or ""),
                 )
                 if action in {"reply", "compose"} and agent_name:
                     return self._send_runtime_planning_action(trigger, action, payload, agent_name)
@@ -1414,9 +1431,9 @@ class LANChatAgentWorker:
     def _is_generation_start_text(text: str) -> bool:
         raw = str(text or "")
         return any(word in raw for word in (
-            "确认开始", "直接生成", "开始生成", "开始执行", "执行生成",
+            "确认开始", "确认生成", "确认执行", "直接生成", "开始生成", "开始执行", "执行生成",
             "按照方案执行生成", "按方案执行生成", "就按方案生成", "按这个方案生成",
-            "按照方案生成", "开始搭建", "开始布置",
+            "按照方案生成", "就按照这个方案生成", "就按照方案生成", "开始搭建", "开始布置",
         ))
 
     def _handle_coordinator_completed_intervention(self, trigger: dict[str, Any]) -> str | None:
@@ -1432,6 +1449,8 @@ class LANChatAgentWorker:
             plan = coordinator.active_plan_for_room(room_id)
             if plan is None or plan.status != SeedPlanStatus.COMPLETED:
                 return None
+            if self._is_generation_start_text(text):
+                return "当前方案已生成完成；如需继续，请说“添加生成...”或“调整一下布局”。"
             is_status_query = getattr(coordinator, "_is_status_query", None)
             if callable(is_status_query) and is_status_query(text):
                 return None
@@ -1451,7 +1470,24 @@ class LANChatAgentWorker:
                 metadata=self._coordinator_sync_metadata(trigger, source="lanchat_agent_completed_intervention"),
             ))
             self._emit_new_disclosure_events(coordinator, disclosure_start)
-            if getattr(event, "event_type", "") in {"post_generation_add_routed", "final_adjustment_routed"}:
+            if getattr(event, "event_type", "") in {
+                "post_generation_add_routed",
+                "final_adjustment_routed",
+                "layout_reflow_proposal_created",
+                "layout_reflow_confirmed",
+                "layout_reflow_rejected",
+                "layout_reflow_confirmation_failed",
+            }:
+                if getattr(event, "event_type", "") == "layout_reflow_proposal_created":
+                    return str(getattr(event, "message", "") or "已生成布局调整建议。")
+                if getattr(event, "event_type", "") == "layout_reflow_confirmed":
+                    executed = self._execute_layout_reflow_confirmation(getattr(event, "payload", {}) or {})
+                    base = str(getattr(event, "message", "") or "布局调整建议已确认。").strip()
+                    return f"{base}\n{executed}" if executed else base
+                if getattr(event, "event_type", "") == "layout_reflow_rejected":
+                    return str(getattr(event, "message", "") or "布局调整建议已取消。")
+                if getattr(event, "event_type", "") == "layout_reflow_confirmation_failed":
+                    return str(getattr(event, "message", "") or "找不到对应布局调整建议。")
                 executed = self._try_execute_completed_final_adjustment(event, trigger)
                 if executed:
                     base = str(getattr(event, "message", "") or "已记录该调整。").strip()
@@ -1538,6 +1574,217 @@ class LANChatAgentWorker:
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("Failed to read scene actors for completed adjustment: %s", exc)
             return []
+
+    def _execute_layout_reflow_confirmation(self, payload: dict[str, Any]) -> str:
+        if not isinstance(payload, dict) or str(payload.get("status") or "") != "confirmed":
+            return ""
+        actors = [actor for actor in self._current_scene_actors() if self._is_layout_reflow_actor(actor)]
+        if not actors:
+            return "已确认布局调整建议，但当前没有可执行的普通场景物体坐标；请刷新场景物体列表后再试。"
+        applied: list[str] = []
+        grounded: list[str] = []
+        skipped_ground: list[str] = []
+        max_targets = min(len(actors), 8)
+        for index, actor in enumerate(actors[:max_targets]):
+            name = str(getattr(actor, "name", "") or f"物体{index + 1}")
+            try:
+                current = [float(value) for value in actor.get_position()]
+                while len(current) < 3:
+                    current.append(0.0)
+                side = -1.0 if index % 2 == 0 else 1.0
+                row = index // 2
+                if index == max_targets - 1 and max_targets >= 4:
+                    target = [0.0, current[1], round(2.2 + 0.35 * row, 3)]
+                    label = "后方焦点区"
+                else:
+                    target = [
+                        round(side * (1.8 + 0.25 * row), 3),
+                        current[1],
+                        round(-1.2 + 0.7 * row, 3),
+                    ]
+                    label = "侧边分区"
+                target = self._clamp_layout_reflow_to_room(target, actor)
+                if [round(v, 3) for v in current[:3]] != target:
+                    actor.set_position(target)
+                snapped, reason = self._selective_ground_actor_if_floor_supported(actor)
+                if snapped:
+                    grounded.append(name)
+                elif reason:
+                    skipped_ground.append(f"{name}: {reason}")
+                final_pos = [round(float(value), 3) for value in actor.get_position()[:3]]
+                if [round(v, 3) for v in current[:3]] != final_pos:
+                    applied.append(f"{name} -> {label} {final_pos}")
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("Layout reflow actor move skipped for %s: %s", name, exc)
+        if not applied:
+            return "已确认布局调整建议，但当前没有可安全移动的物体；已保留为最终调整记录。"
+        suffix = ""
+        if grounded:
+            suffix = f" 并已贴地修正地面物体：{'、'.join(grounded[:8])}。"
+        elif skipped_ground:
+            suffix = " 未发现需要自动贴地的地面物体。"
+        return "布局调整完成：" + "；".join(applied[:8]) + "。" + suffix
+
+    def _ground_layout_reflow_position(self, actor: Any, target: list[float]) -> list[float]:
+        grounded = [float(value) for value in target[:3]]
+        while len(grounded) < 3:
+            grounded.append(0.0)
+        aabb = self._safe_actor_aabb(actor)
+        if aabb and len(aabb) >= 6:
+            try:
+                current = [float(value) for value in actor.get_position()]
+            except Exception:
+                current = [grounded[0], grounded[1], grounded[2]]
+            while len(current) < 3:
+                current.append(0.0)
+            min_y = float(aabb[1])
+            max_y = float(aabb[4])
+            is_world_aabb = min_y - 1e-4 <= current[1] <= max_y + 1e-4
+            grounded[1] = current[1] - min_y if is_world_aabb else -min_y
+        else:
+            grounded[1] = max(0.0, grounded[1])
+        grounded[1] = max(0.0, grounded[1])
+        return [round(value, 3) for value in grounded[:3]]
+
+    def _clamp_layout_reflow_to_room(self, target: list[float], actor: Any) -> list[float]:
+        room_size = self._current_room_box_size()
+        if len(room_size) < 3:
+            return [round(float(value), 3) for value in target[:3]]
+        aabb = self._safe_actor_aabb(actor)
+        if aabb and len(aabb) >= 6:
+            half_x = max(0.0, (float(aabb[3]) - float(aabb[0])) / 2.0)
+            half_z = max(0.0, (float(aabb[5]) - float(aabb[2])) / 2.0)
+        else:
+            half_x = half_z = 0.25
+        margin = 0.18
+        width, depth = float(room_size[0]), float(room_size[1])
+        min_x = -width / 2.0 + margin + half_x
+        max_x = width / 2.0 - margin - half_x
+        min_z = -depth / 2.0 + margin + half_z
+        max_z = depth / 2.0 - margin - half_z
+        out = [float(value) for value in target[:3]]
+        if min_x <= max_x:
+            out[0] = min(max(out[0], min_x), max_x)
+        if min_z <= max_z:
+            out[2] = min(max(out[2], min_z), max_z)
+        return [round(value, 3) for value in out[:3]]
+
+    def _selective_ground_actor_if_floor_supported(self, actor: Any) -> tuple[bool, str]:
+        support_type = self._layout_support_type(actor)
+        if support_type == "floor_supported":
+            return self._snap_actor_bottom_to_ground(actor)
+        if support_type in {"system", "wall_mounted", "ceiling_hung"}:
+            return False, f"跳过{support_type}"
+        return False, "未知支撑类型，未自动贴地"
+
+    def _snap_actor_bottom_to_ground(
+        self,
+        actor: Any,
+        *,
+        ground_y: float = 0.0,
+        epsilon: float = 0.03,
+    ) -> tuple[bool, str]:
+        aabb = self._safe_actor_aabb(actor)
+        if not aabb or len(aabb) < 6:
+            return False, "AABB不可读"
+        try:
+            current = [float(value) for value in actor.get_position()]
+        except Exception:
+            return False, "位置不可读"
+        while len(current) < 3:
+            current.append(0.0)
+        bottom_y = float(aabb[1])
+        delta = bottom_y - float(ground_y)
+        if abs(delta) <= float(epsilon):
+            return False, "已贴地"
+        current[1] = current[1] - delta
+        actor.set_position([round(value, 3) for value in current[:3]])
+        return True, "已贴地"
+
+    @staticmethod
+    def _layout_support_type(actor: Any) -> str:
+        name = str(getattr(actor, "name", "") or "").strip()
+        lowered = name.lower()
+        if not name:
+            return "unknown"
+        if (
+            lowered.startswith("__room")
+            or lowered.startswith("__terrain")
+            or lowered.startswith("_terrain")
+            or lowered in {"terrain", "ground", "sky", "room_box", "__room_box", "__room_terrain"}
+            or any(term in name for term in ("地形", "天空", "边界"))
+        ):
+            return "system"
+
+        ceiling_terms = (
+            "吊灯", "吊旗", "吊笼", "悬挂", "铁链", "天花", "ceiling", "chandelier", "hanging",
+        )
+        if any(term in lowered or term in name for term in ceiling_terms):
+            return "ceiling_hung"
+
+        wall_terms = (
+            "火把", "壁灯", "墙灯", "墙饰", "地图", "旗帜", "窗", "门", "招牌", "武器架",
+            "torch", "sconce", "wall", "map", "flag", "window", "door", "sign", "weapon rack",
+        )
+        if any(term in lowered or term in name for term in wall_terms):
+            return "wall_mounted"
+
+        floor_terms = (
+            "桌", "椅", "箱", "宝箱", "金币", "木桶", "酒桶", "麻袋", "床", "柜", "地毯",
+            "雕像", "动物", "长椅", "沙发", "桶", "袋",
+            "table", "chair", "box", "chest", "coin", "barrel", "sack", "bed", "cabinet",
+            "rug", "carpet", "statue", "animal", "bench", "sofa",
+        )
+        if any(term in lowered or term in name for term in floor_terms):
+            return "floor_supported"
+        return "unknown"
+
+    def _current_room_box_size(self) -> list[float]:
+        for actor in self._current_scene_actors():
+            name = str(getattr(actor, "name", "") or "").lower()
+            if name not in {"__room_box", "room_box"}:
+                continue
+            try:
+                scale = [float(value) for value in actor.get_scale()]
+                if len(scale) >= 3:
+                    return [abs(scale[0]), abs(scale[2]), abs(scale[1])]
+            except Exception:
+                pass
+        return []
+
+    @staticmethod
+    def _safe_actor_aabb(actor: Any) -> list[float]:
+        getter = getattr(actor, "get_aabb", None)
+        if not callable(getter):
+            getter = getattr(actor, "get_bounding_box", None)
+        if not callable(getter):
+            return []
+        try:
+            raw = getter()
+        except Exception:
+            return []
+        if isinstance(raw, dict):
+            values = raw.get("aabb") or raw.get("bounds") or raw.get("box")
+        else:
+            values = raw
+        if not isinstance(values, (list, tuple)) or len(values) < 6:
+            return []
+        try:
+            return [float(value) for value in values[:6]]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _is_layout_reflow_actor(actor: Any) -> bool:
+        name = str(getattr(actor, "name", "") or "")
+        if not name:
+            return False
+        lowered = name.lower()
+        if lowered.startswith("__room") or lowered.startswith("__terrain") or lowered.startswith("_terrain"):
+            return False
+        if lowered in {"terrain", "ground", "sky", "room_box"}:
+            return False
+        return callable(getattr(actor, "get_position", None)) and callable(getattr(actor, "set_position", None))
 
     def _apply_completed_review_adjustments(
         self,
@@ -1693,14 +1940,14 @@ class LANChatAgentWorker:
                 changes.append(f"缩放调整为 {new_scale}")
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug("Completed final adjustment scale failed: %s", exc)
-        if any(word in raw for word in ("贴地", "落地", "悬空", "穿模", "接地")):
+        if any(word in raw for word in ("贴地", "落地", "悬空", "浮空", "飘起", "飘起来", "离地", "没贴地", "穿模", "接地")):
             try:
                 current = [float(v) for v in actor.get_position()]
                 while len(current) < 3:
                     current.append(0.0)
-                if current[1] < 0.0 or any(word in raw for word in ("贴地", "落地", "接地")):
-                    current[1] = max(0.0, current[1])
-                    actor.set_position([round(v, 4) for v in current[:3]])
+                grounded = self._ground_layout_reflow_position(actor, current)
+                if [round(v, 3) for v in current[:3]] != grounded:
+                    actor.set_position(grounded)
                     changes.append("已校正贴地高度")
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug("Completed final adjustment grounding failed: %s", exc)
@@ -1868,6 +2115,62 @@ class LANChatAgentWorker:
             if value:
                 metadata[key] = str(value)
         return metadata
+
+    def _normalize_coordinator_target_metadata(
+        self,
+        message: dict[str, Any],
+        text: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized = dict(metadata or {})
+        mention = self._explicit_agent_mention(text)
+        if mention:
+            agent_id, agent_name = self._resolve_lanchat_agent_mention(mention)
+            normalized["target_scope"] = "agent"
+            normalized["target_agent_name"] = agent_name or mention
+            normalized["target_agent_id"] = agent_id or str(message.get("target_agent_id") or message.get("agent_id") or agent_name or mention)
+        elif str(message.get("target_agent_id") or "").strip() or str(message.get("target_agent_name") or "").strip():
+            normalized.setdefault("target_scope", "agent")
+            normalized["target_agent_id"] = str(message.get("target_agent_id") or "").strip()
+            normalized["target_agent_name"] = str(message.get("target_agent_name") or "").strip()
+        source_context = self._source_context_agent_from_text(text)
+        if source_context and source_context != str(normalized.get("target_agent_name") or ""):
+            normalized["source_context_agent"] = source_context
+        return normalized
+
+    @staticmethod
+    def _explicit_agent_mention(text: str) -> str:
+        match = re.search(r"@([^\s，,。；;：:]+)", str(text or ""))
+        return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _source_context_agent_from_text(text: str) -> str:
+        raw = str(text or "")
+        match = re.search(r"在\s*([^，,。；;\s@]+)\s*方案基础上", raw)
+        if match:
+            return match.group(1).strip()
+        match = re.search(r"基于\s*([^，,。；;\s@]+)\s*方案", raw)
+        return match.group(1).strip() if match else ""
+
+    def _resolve_lanchat_agent_mention(self, mention: str) -> tuple[str, str]:
+        wanted = str(mention or "").strip()
+        if not wanted:
+            return "", ""
+        roster = []
+        getter = getattr(self._corona_engine, "network_lanchat_agents_snapshot", None)
+        if callable(getter):
+            try:
+                roster = list(getter() or [])
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("Failed to read LANChat agent roster: %s", exc)
+        for item in roster:
+            if not isinstance(item, dict):
+                continue
+            agent_id = str(item.get("agent_id") or item.get("id") or "").strip()
+            agent_name = str(item.get("name") or item.get("agent_name") or "").strip()
+            if wanted in {agent_id, agent_name}:
+                return agent_id, agent_name
+        return "", wanted
 
     def _apply_generation_options_from_message(self, message: dict[str, Any]) -> None:
         metadata = self._metadata_from_trigger(message)

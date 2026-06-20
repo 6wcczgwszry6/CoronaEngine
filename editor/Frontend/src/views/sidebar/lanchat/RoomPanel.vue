@@ -535,7 +535,6 @@ const lobbyTab = ref('create');
 const roomMode = ref('multi');
 const draft = ref('');
 const selectedWorkspaceMode = ref(s.workspaceMode || 'multiplayer_multi_agent');
-const selectedDraftAction = ref('chat');
 const selectedTargetKey = ref('scene');
 const showAddAgent = ref(false);
 const agentForm = reactive({ name: '', persona: '' });
@@ -793,7 +792,7 @@ const inputRouteHint = computed(() => {
   return `发送给 ${target}`;
 });
 const routeGuardText = computed(() => routeGuardMessage(
-  selectedDraftAction.value,
+  'chat',
   selectedTarget.value,
   draft.value
 ));
@@ -850,7 +849,6 @@ function selectTarget(key) {
 }
 
 function applyInputRouteState() {
-  selectedDraftAction.value = 'chat';
   lanchat.setDraftAction('chat');
   lanchat.setActiveTarget(targetPayloadForKey(selectedTargetKey.value, targetOptions.value));
 }
@@ -935,7 +933,8 @@ async function onLeave() {
 
 function onSend() {
   const text = draft.value;
-  if (!text.trim() || sendDisabled.value) return;
+  const trimmed = text.trim();
+  if (!trimmed || sendDisabled.value) return;
   applyInputRouteState();
   startPendingReply(text);
   lanchat.sendMessage(text, messageOptionsForText(text)).then((res) => {
@@ -946,6 +945,7 @@ function onSend() {
     draft.value = '';
     mentionCandidates.value = [];
     mentionActiveIndex.value = 0;
+    applyInputRouteState();
   }).catch((error) => {
     clearPendingReply();
     console.warn('[LANChat] send message failed', error);
@@ -1114,7 +1114,7 @@ function messageOptionsForText(text) {
   const trimmed = String(text || '').trim();
   const generationMetadata = s.role === 'host' ? lanchat.generationOptionsMetadata() : {};
   const routedDraftAction = effectiveDraftAction('chat', trimmed);
-  applyInputRouteState();
+  const targetPayload = targetPayloadForKey(selectedTargetKey.value, targetOptions.value);
   if (/^@GM(?:\s|$)/i.test(trimmed)) {
     if (!Object.keys(generationMetadata).length) return buildManualGmMessageOptions(s.role);
     const options = buildManualGmMessageOptions(s.role);
@@ -1127,7 +1127,11 @@ function messageOptionsForText(text) {
   const metadata = {
     ...generationMetadata,
     draft_action: routedDraftAction,
+    target_scope: targetPayload.scope || 'scene',
   };
+  if (targetPayload.agentId) metadata.target_agent_id = targetPayload.agentId;
+  if (targetPayload.agentName) metadata.target_agent_name = targetPayload.agentName;
+  if (targetPayload.planId) metadata.target_plan_id = targetPayload.planId;
   return { metadata };
 }
 

@@ -35,33 +35,17 @@ assert.deepEqual(targetPayloadForKey('scene', options), {
 });
 
 assert.equal(routeGuardMessage('chat', options[0]), '');
-assert.equal(routeGuardMessage('plan', options[0]), '');
 assert.equal(isGenerationStartText('确认开始'), true);
 assert.equal(isGenerationStartText('开始生成'), true);
 assert.equal(isGenerationStartText('直接生成'), true);
 assert.equal(isGenerationStartText('新增一个柜式空调'), false);
-assert.equal(effectiveDraftAction('supplement', '确认开始'), 'generate');
-assert.equal(effectiveDraftAction('plan', '开始生成'), 'generate');
 assert.equal(effectiveDraftAction('chat', '新增一个柜式空调'), 'chat');
+assert.equal(effectiveDraftAction('chat', '确认开始'), 'generate');
+assert.equal(effectiveDraftAction('chat', '开始生成'), 'generate');
 assert.equal(
-  routeGuardMessage('plan', { key: 'group', label: '专家组', scope: 'group' }),
-  '整理方案需要先选择一个负责出方案的 Agent。'
-);
-assert.equal(
-  routeGuardMessage('generate', { key: 'scene', label: '当前场景', scope: 'scene' }),
-  '开始生成需要选择已有方案对应的 Agent。'
-);
-assert.equal(
-  routeGuardMessage('supplement', { key: 'group', label: '专家组', scope: 'group' }),
-  '补充方案需要选择已有方案对应的 Agent。'
-);
-assert.equal(
-  routeGuardMessage('supplement', { key: 'scene', label: '当前场景', scope: 'scene' }, '确认开始'),
+  routeGuardMessage('chat', { key: 'group', label: '专家组', scope: 'group' }, '@长者 帮我设计客厅'),
   ''
 );
-assert.equal(
-  routeGuardMessage('plan', { key: 'group', label: '专家组', scope: 'group' }, '@长者 帮我设计客厅'),
-  ''
-);
+assert.equal(routeGuardMessage('chat', { key: 'scene', label: '当前场景', scope: 'scene' }, '整理一下方案'), '');
 
 console.log('[OK] lanchat route selection keeps explicit target stable');

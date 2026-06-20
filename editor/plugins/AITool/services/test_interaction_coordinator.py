@@ -337,12 +337,42 @@ def test_completed_generation_modify_routes_to_final_adjustment():
     ))
     pending = coordinator.pending_interventions(plan.plan_id)
 
-    assert event.event_type == "final_adjustment_routed"
+    assert event.event_type == "layout_reflow_proposal_created"
     assert event.payload["apply_policy"] == "final_adjustment"
+    assert event.payload["layout_reflow_proposal"]["status"] == "proposed"
+    assert event.payload["layout_reflow_proposal"]["proposal_id"].startswith("layout-")
     assert pending[-1].apply_policy == "final_adjustment"
     assert coordinator.active_plan_for_room("room-a").plan_id == plan.plan_id
     assert "布局" in pending[-1].content
-    print("[OK] completed generation modify request routes to final adjustment")
+    print("[OK] completed generation layout request creates final adjustment proposal")
+
+
+def test_completed_layout_reflow_confirmation_confirms_latest_proposal():
+    coordinator = InteractionCoordinator(scheduler=FakeScheduler())
+    coordinator.ingest_message(ChatMessage(room_id="room-a", sender_id="host-a", is_host=True, text="夜晚幻想集市"))
+    plan = coordinator.propose_seed_plan("room-a")
+    coordinator.confirm_seed_plan(plan.plan_id, "host-a")
+    plan.status = SeedPlanStatus.COMPLETED
+    created = coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="host-a",
+        is_host=True,
+        text="调整一下布局，我看模型位置冲突",
+    ))
+
+    confirmed = coordinator.ingest_message(ChatMessage(
+        room_id="room-a",
+        sender_id="host-a",
+        is_host=True,
+        text="确认调整",
+    ))
+
+    assert created.event_type == "layout_reflow_proposal_created"
+    assert confirmed.event_type == "layout_reflow_confirmed"
+    assert confirmed.payload["status"] == "confirmed"
+    assert confirmed.payload["proposal_id"] == created.payload["layout_reflow_proposal"]["proposal_id"]
+    assert coordinator.active_plan_for_room("room-a").plan_id == plan.plan_id
+    print("[OK] completed layout reflow confirmation confirms latest proposal")
 
 
 def test_completed_generation_boundary_alias_routes_to_final_adjustment():
@@ -2180,6 +2210,7 @@ if __name__ == "__main__":
     test_status_query_does_not_create_intervention_or_generation_job()
     test_completed_generation_add_routes_to_post_generation_add()
     test_completed_generation_modify_routes_to_final_adjustment()
+    test_completed_layout_reflow_confirmation_confirms_latest_proposal()
     test_completed_generation_boundary_alias_routes_to_final_adjustment()
     test_generation_add_target_hint_strips_followup_verbs_and_mentions()
     test_execute_confirmed_plan_payload_uses_full_contract_prompt()

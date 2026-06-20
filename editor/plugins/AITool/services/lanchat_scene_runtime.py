@@ -14,8 +14,22 @@ _DISCLOSURE_CANDIDATE_TERMS = (
     "草原", "天空", "森林", "树林", "地形", "地面", "地板", "墙面", "天花板",
     "床", "柜", "桌", "椅", "灯", "灯笼", "台灯", "雕像", "玩偶", "摊位",
     "导视牌", "展示架", "绿植", "植物", "地毯", "沙发", "小狗", "狗", "猫",
+    "木门", "石门", "藏宝箱", "宝箱", "金币堆", "金币", "珠宝", "木箱", "酒桶", "武器架", "火把", "烛台",
     "入口", "通道", "主街", "边界", "休息区",
 )
+_ABSTRACT_MODEL_TERMS = {
+    "入口/边界",
+    "主活动区",
+    "视觉焦点",
+    "功能支撑点",
+    "通行动线",
+    "停留点",
+    "重点照明",
+    "材质/色彩点缀",
+    "主路",
+    "路径",
+    "安全边界",
+}
 _UI_INSTRUCTION_PLACEHOLDER_PATTERNS = (
     r"^补充要求[:：]?\s*(写明|写清|描述|填写).*(风格|物件|布局|限制)",
     r"^确认按当前方案生成",
@@ -38,6 +52,7 @@ class PlanningConfirmation:
     scene_goal: str
     proposed_items: list[str] = field(default_factory=list)
     constraints: list[str] = field(default_factory=list)
+    source_context_agents: list[str] = field(default_factory=list)
     status: str = "pending"
     created_at: float = field(default_factory=time.time)
 
@@ -138,7 +153,7 @@ class LanChatSceneRuntime:
                 self._mode = MODE_EXECUTING
                 return "compose", compose_text
 
-            if pending and self.is_plan_elaboration_request(value):
+            if pending and self._is_pending_plan_elaboration_text(value):
                 return "reply", self._format_plan_elaboration(pending)
 
             if pending and self.is_plan_supplement(value):
@@ -149,13 +164,7 @@ class LanChatSceneRuntime:
                 return "reply", self._format_confirmation(pending, updated=True)
 
             if decision.intent == "plan_drafting":
-                confirmation = PlanningConfirmation(
-                    proposal_id=f"plan-{uuid.uuid4().hex[:8]}",
-                    target_agent=key,
-                    scene_goal=self._extract_scene_goal(value),
-                    proposed_items=self._seed_items_from_text(value),
-                    constraints=[],
-                )
+                confirmation = self._new_confirmation(key, value)
                 self._pending_confirmations[key] = confirmation
                 self._mode = MODE_PLANNING
                 return "reply", self._format_confirmation(confirmation)
@@ -196,6 +205,7 @@ class LanChatSceneRuntime:
         text: str,
         *,
         draft_action: str = "",
+        source_context_agent: str = "",
     ) -> tuple[str, str | None, str | None]:
         """Route a structured UI action to a pending planning gate.
 
@@ -210,7 +220,26 @@ class LanChatSceneRuntime:
         with self._lock:
             agent_key = self._pending_agent_for_target(target)
             if not agent_key:
-                return "pass", None, None
+                agent_key = self._agent_key(target)
+                source = self._pending_agent_for_target(source_context_agent)
+                if action in {"plan", "supplement"} and source:
+                    base = self._pending_confirmations[source]
+                    confirmation = self._clone_confirmation_for_target(
+                        base,
+                        agent_key,
+                        value,
+                        source_context_agent=source,
+                    )
+                    self._pending_confirmations[agent_key] = confirmation
+                    self._mode = MODE_PLANNING
+                    return "reply", self._format_confirmation(confirmation, updated=True), agent_key
+                if action == "plan":
+                    confirmation = self._new_confirmation(agent_key, value)
+                    self._pending_confirmations[agent_key] = confirmation
+                    self._mode = MODE_PLANNING
+                    return "reply", self._format_confirmation(confirmation), agent_key
+                if action == "supplement":
+                    return "pass", None, None
         routed_text = value
         if action == "generate" and not self.is_direct_generate(routed_text):
             routed_text = f"确认开始：{routed_text}"
@@ -236,6 +265,7 @@ class LanChatSceneRuntime:
                     "scene_goal": item.scene_goal,
                     "proposed_items": list(item.proposed_items),
                     "constraints": list(item.constraints),
+                    "source_context_agents": list(item.source_context_agents),
                     "status": item.status,
                     "created_at": item.created_at,
                 }
@@ -370,6 +400,8 @@ class LanChatSceneRuntime:
         ]
         if confirmation.constraints:
             parts.append("补充要求：" + "；".join(confirmation.constraints))
+        if confirmation.source_context_agents:
+            parts.append("参考来源 Agent：" + "、".join(confirmation.source_context_agents))
         parts.append("最新指令：" + user_text)
         return "\n".join(parts)
 
@@ -388,6 +420,11 @@ class LanChatSceneRuntime:
             lines.extend([
                 "",
                 "已纳入补充要求：" + "；".join(confirmation.constraints),
+            ])
+        if confirmation.source_context_agents:
+            lines.extend([
+                "",
+                "参考来源：" + "、".join(confirmation.source_context_agents),
             ])
         lines.extend([
             "",
@@ -434,6 +471,11 @@ class LanChatSceneRuntime:
             lines.extend([
                 "",
                 "已纳入要求：" + "；".join(confirmation.constraints),
+            ])
+        if confirmation.source_context_agents:
+            lines.extend([
+                "",
+                "参考来源：" + "、".join(confirmation.source_context_agents),
             ])
         lines.extend([
             "",
@@ -503,6 +545,12 @@ class LanChatSceneRuntime:
         value = str(goal or "")
         scene_rules: tuple[tuple[tuple[str, ...], str, str, list[str]], ...] = (
             (
+                ("藏宝室", "宝库", "密室", "宝藏室", "地下宝库", "treasure room", "vault", "chamber"),
+                "treasure_room",
+                "以窄入口进入，中央宝藏区作为视觉焦点，一侧安排分赃/休息区，后墙保留暗门或首领位",
+                ["木门/石门", "藏宝箱", "金币堆", "珠宝堆", "木桌", "木椅", "木箱", "酒桶"],
+            ),
+            (
                 ("卧室", "睡眠", "房间"),
                 "residential_bedroom",
                 "以床区为视觉中心，保留入口到床边的通行动线，侧边安排收纳和学习/梳妆角",
@@ -571,6 +619,7 @@ class LanChatSceneRuntime:
         if any(word in value for word in ("现代", "简约", "现代风")):
             decor.extend(["装饰画", "绿植", "几何灯具", "低饱和色彩点缀"])
         scene_decor = {
+            "treasure_room": ["火把/烛台", "武器架", "旧地图", "麻袋/货物", "暗门提示"],
             "exhibition": ["导视系统", "展品标签", "重点照明", "拍照点"],
             "commercial": ["品牌标识", "菜单/价签", "橱窗展示", "氛围照明"],
             "market": ["摊位招牌", "挂灯", "商品陈列", "休息标识"],
@@ -582,15 +631,23 @@ class LanChatSceneRuntime:
 
     @staticmethod
     def _core_items(confirmation: PlanningConfirmation, profile: ScenePlanProfile | None = None) -> list[str]:
-        items = list(confirmation.proposed_items or [])
+        items = LanChatSceneRuntime._concrete_items(confirmation.proposed_items or [])
         profile = profile or LanChatSceneRuntime._build_scene_plan_profile(confirmation.scene_goal)
         return LanChatSceneRuntime._merge_unique(profile.core_items, items, limit=8)
 
     @staticmethod
     def _decor_items(confirmation: PlanningConfirmation, profile: ScenePlanProfile | None = None) -> list[str]:
-        items = list(confirmation.proposed_items or [])
+        items = LanChatSceneRuntime._concrete_items(confirmation.proposed_items or [])
         profile = profile or LanChatSceneRuntime._build_scene_plan_profile(confirmation.scene_goal)
         return LanChatSceneRuntime._merge_unique(profile.decor_items, items, limit=8)
+
+    @staticmethod
+    def _concrete_items(items: list[str]) -> list[str]:
+        return [
+            str(item or "").strip()
+            for item in items
+            if str(item or "").strip() and str(item or "").strip() not in _ABSTRACT_MODEL_TERMS
+        ]
 
     @staticmethod
     def _merge_unique(*groups: list[str], limit: int = 8) -> list[str]:
@@ -646,9 +703,53 @@ class LanChatSceneRuntime:
         for item in cls._merge_unique(profile.core_items, profile.decor_items, limit=8):
             if len(items) >= 8:
                 break
-            if item not in items:
+            if item not in items and item not in _ABSTRACT_MODEL_TERMS:
                 items.append(item)
-        return items
+        return cls._concrete_items(items)
+
+    @staticmethod
+    def _is_pending_plan_elaboration_text(text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return False
+        if LanChatSceneRuntime.is_plan_elaboration_request(value):
+            return True
+        return bool(re.search(r"(整理|汇总|总结|梳理).{0,12}(方案|计划|讨论)", value))
+
+    @classmethod
+    def _new_confirmation(cls, agent_key: str, text: str) -> PlanningConfirmation:
+        return PlanningConfirmation(
+            proposal_id=f"plan-{uuid.uuid4().hex[:8]}",
+            target_agent=agent_key,
+            scene_goal=cls._extract_scene_goal(text),
+            proposed_items=cls._seed_items_from_text(text),
+            constraints=[],
+        )
+
+    @staticmethod
+    def _clone_confirmation_for_target(
+        base: PlanningConfirmation,
+        target_agent: str,
+        constraint: str,
+        *,
+        source_context_agent: str = "",
+    ) -> PlanningConfirmation:
+        source = str(source_context_agent or base.target_agent or "").strip()
+        sources = list(base.source_context_agents)
+        if source and source not in sources:
+            sources.append(source)
+        constraints = list(base.constraints)
+        value = str(constraint or "").strip()
+        if value:
+            constraints.append(value)
+        return PlanningConfirmation(
+            proposal_id=f"plan-{uuid.uuid4().hex[:8]}",
+            target_agent=target_agent,
+            scene_goal=base.scene_goal,
+            proposed_items=LanChatSceneRuntime._concrete_items(list(base.proposed_items)),
+            constraints=constraints,
+            source_context_agents=sources,
+        )
 
     @staticmethod
     def _is_ui_instruction_placeholder(text: str) -> bool:
@@ -675,7 +776,7 @@ class LanChatSceneRuntime:
             )
         except Exception:
             return ""
-        rows = [{"name": item} for item in proposed_items if str(item or "").strip()]
+        rows = [{"name": item} for item in LanChatSceneRuntime._concrete_items(proposed_items) if str(item or "").strip()]
         if not rows:
             return ""
         _, routes = route_model_items(scene_goal, rows)
