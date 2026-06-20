@@ -2490,7 +2490,7 @@ class SceneComposer:
             return
 
         existing = {a.name for a in scene.get_actors()}
-        if any(n.startswith("__room_") for n in existing):
+        if "__room_box" in existing:
             return
 
         # 3. 单个盒子 Actor
@@ -2963,6 +2963,20 @@ class SceneComposer:
         # 退化：纯室内单房间走旧路径
         if self._detect_scene_indoor(prompt):
             self._generate_room_box()
+        else:
+            from ..data_model.zone_tree import Zone, Volume
+
+            width = max(float(self.room_size[0]) * 4.0, 18.0)
+            depth = max(float(self.room_size[1]) * 4.0, 18.0)
+            zone = Zone(
+                zone_id="zone_outdoor_fallback",
+                name=self.scene_name or "outdoor",
+                role="outdoor",
+                enclosure="terrain",
+                volume=Volume(center=[0.0, 0.0, 0.0], size=[width, depth, 0.0]),
+            )
+            apply_scene_semantic_terrain_profile(zone, prompt, "outdoor")
+            self._generate_terrain(zone)
 
     def _place_shells(self, shell_models: List[Dict[str, Any]]) -> Dict[str, List[str]]:
         """15a：把 shell 建筑模型确定性放置成围合体（不经布局 LLM）。

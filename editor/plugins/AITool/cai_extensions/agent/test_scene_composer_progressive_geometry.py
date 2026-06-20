@@ -9,6 +9,7 @@ import os
 import sys
 import types
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import List
 
@@ -1218,6 +1219,247 @@ def test_warm_mysterious_market_overrides_generic_stone_wall_boundary():
     print("[OK] warm mysterious market overrides generic stone wall boundary")
 
 
+def _install_fake_corona_scene(initial_actor_names=None):
+    class ExistingActor:
+        def __init__(self, name):
+            self.name = name
+
+    class FakeGeometry:
+        def get_aabb(self):
+            return [-0.5, -0.5, -0.5, 0.5, 0.5, 0.5]
+
+    class FakeActor(ExistingActor):
+        def __init__(self, name, route="", actor_type="", parent_scene=None):
+            super().__init__(name)
+            self.route = route
+            self.actor_type = actor_type
+            self.parent_scene = parent_scene
+            self.position = None
+            self.scale = None
+            self._geometry = FakeGeometry()
+            self._mechanics = SimpleNamespace(set_physics_enabled=lambda _enabled: None)
+
+        def set_position(self, value, _world=True):
+            self.position = list(value)
+
+        def set_scale(self, value, _world=True):
+            self.scale = list(value)
+
+    class FakeScene:
+        def __init__(self):
+            self.actors = [ExistingActor(name) for name in (initial_actor_names or [])]
+
+        def get_actors(self):
+            return list(self.actors)
+
+        def add_actor(self, actor):
+            self.actors.append(actor)
+
+    scene = FakeScene()
+    fake_scene_manager = SimpleNamespace(get=lambda _route="": scene, list_all=lambda: ["fake.scene"])
+
+    fake_corona = types.ModuleType("CoronaCore")
+    fake_core = types.ModuleType("CoronaCore.core")
+    fake_managers = types.ModuleType("CoronaCore.core.managers")
+    fake_entities = types.ModuleType("CoronaCore.core.entities")
+    fake_actor_module = types.ModuleType("CoronaCore.core.entities.actor")
+    fake_managers.scene_manager = fake_scene_manager
+    fake_actor_module.Actor = FakeActor
+
+    module_names = [
+        "CoronaCore",
+        "CoronaCore.core",
+        "CoronaCore.core.managers",
+        "CoronaCore.core.entities",
+        "CoronaCore.core.entities.actor",
+    ]
+    old_modules = {name: sys.modules.get(name) for name in module_names}
+    sys.modules["CoronaCore"] = fake_corona
+    sys.modules["CoronaCore.core"] = fake_core
+    sys.modules["CoronaCore.core.managers"] = fake_managers
+    sys.modules["CoronaCore.core.entities"] = fake_entities
+    sys.modules["CoronaCore.core.entities.actor"] = fake_actor_module
+
+    def restore():
+        for name, old in old_modules.items():
+            if old is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = old
+
+    return scene, restore
+
+
+def _actor_by_name(scene, name):
+    return next((actor for actor in scene.get_actors() if actor.name == name), None)
+
+
+def test_scene_framework_indoor_fallback_generates_room_box_only():
+    scene, restore = _install_fake_corona_scene()
+    try:
+        composer = SceneComposer(room_size=[5.0, 3.0, 3.0], scene_name="indoor_matrix")
+        asset_dir = Path(_named_test_dir("framework_indoor"))
+        composer._generated_asset_dir = lambda: (asset_dir, "tmp/framework_indoor")
+
+        composer._generate_scene_framework("一个可爱的室内卧室，有床、台灯和小书桌")
+    finally:
+        restore()
+
+    room_box = _actor_by_name(scene, "__room_box")
+    assert room_box is not None
+    assert _actor_by_name(scene, "__room_terrain") is None
+    assert room_box.scale == [5.0, 3.0, 3.0]
+    assert room_box.position == [0.0, 1.5, 0.0]
+    print("[OK] indoor fallback creates room_box only")
+
+
+def test_scene_framework_outdoor_fallback_generates_terrain_only():
+    scene, restore = _install_fake_corona_scene()
+    try:
+        composer = SceneComposer(room_size=[5.0, 3.0, 3.0], scene_name="outdoor_matrix")
+        asset_dir = Path(_named_test_dir("framework_outdoor"))
+        composer._generated_asset_dir = lambda: (asset_dir, "tmp/framework_outdoor")
+
+        composer._generate_scene_framework("一个温暖神秘的室外夜晚幻想集市，有入口、摊位和灯光")
+    finally:
+        restore()
+
+    terrain = _actor_by_name(scene, "__room_terrain")
+    assert terrain is not None
+    assert _actor_by_name(scene, "__room_box") is None
+    assert terrain.scale and terrain.scale[0] >= 18.0
+    assert terrain.position and len(terrain.position) == 3
+    print("[OK] outdoor fallback creates terrain only")
+
+
+def test_scene_framework_mixed_zone_tree_generates_terrain_and_room_box():
+    scene, restore = _install_fake_corona_scene()
+    try:
+        terrain = Zone(
+            zone_id="market",
+            name="night market",
+            role="outdoor",
+            enclosure="terrain",
+            volume=Volume(center=[0.0, 0.0, 0.0], size=[18.0, 18.0, 0.0]),
+        )
+        room = Zone(
+            zone_id="rest_area",
+            name="rest area",
+            role="indoor",
+            enclosure="box",
+            volume=Volume(center=[0.0, 1.5, 0.0], size=[5.0, 5.0, 3.0]),
+            connectors=[
+                Connector(
+                    connector_id="door_rest_area",
+                    type="door",
+                    position=[0.0, 0.0, 2.5],
+                    size=[1.2, 2.2],
+                    target_zone_id="rest_area",
+                )
+            ],
+        )
+        terrain.sub_zones.append(room)
+        composer = SceneComposer(room_size=[5.0, 3.0, 3.0], scene_name="mixed_matrix")
+        composer.zone_tree = ZoneTree(root=terrain)
+        asset_dir = Path(_named_test_dir("framework_mixed"))
+        composer._generated_asset_dir = lambda: (asset_dir, "tmp/framework_mixed")
+
+        composer._generate_scene_framework("室外夜晚幻想集市里有一个可进入的小休息区")
+    finally:
+        restore()
+
+    terrain_actor = _actor_by_name(scene, "__room_terrain")
+    room_box = _actor_by_name(scene, "__room_box")
+    assert terrain_actor is not None
+    assert room_box is not None
+    assert terrain_actor.scale and terrain_actor.scale[0] >= 18.0
+    assert room_box.scale == [5.0, 3.0, 5.0]
+    assert room_box.position == [0.0, 1.5, 0.0]
+    print("[OK] mixed zone_tree creates terrain and room_box")
+
+
+def test_room_box_generation_is_not_blocked_by_existing_room_terrain():
+    class ExistingActor:
+        def __init__(self, name):
+            self.name = name
+
+    class FakeActor(ExistingActor):
+        def __init__(self, name, route="", actor_type="", parent_scene=None):
+            super().__init__(name)
+            self.route = route
+            self.actor_type = actor_type
+            self.parent_scene = parent_scene
+            self.position = None
+            self.scale = None
+            self._mechanics = SimpleNamespace(set_physics_enabled=lambda _enabled: None)
+
+        def set_position(self, value, _world=True):
+            self.position = list(value)
+
+        def set_scale(self, value, _world=True):
+            self.scale = list(value)
+
+    class FakeScene:
+        def __init__(self):
+            self.actors = [ExistingActor("__room_terrain")]
+
+        def get_actors(self):
+            return list(self.actors)
+
+        def add_actor(self, actor):
+            self.actors.append(actor)
+
+    scene = FakeScene()
+    fake_scene_manager = SimpleNamespace(get=lambda _route="": scene, list_all=lambda: ["fake.scene"])
+
+    fake_corona = types.ModuleType("CoronaCore")
+    fake_core = types.ModuleType("CoronaCore.core")
+    fake_managers = types.ModuleType("CoronaCore.core.managers")
+    fake_entities = types.ModuleType("CoronaCore.core.entities")
+    fake_actor_module = types.ModuleType("CoronaCore.core.entities.actor")
+    fake_managers.scene_manager = fake_scene_manager
+    fake_actor_module.Actor = FakeActor
+
+    module_names = [
+        "CoronaCore",
+        "CoronaCore.core",
+        "CoronaCore.core.managers",
+        "CoronaCore.core.entities",
+        "CoronaCore.core.entities.actor",
+    ]
+    old_modules = {name: sys.modules.get(name) for name in module_names}
+    try:
+        sys.modules["CoronaCore"] = fake_corona
+        sys.modules["CoronaCore.core"] = fake_core
+        sys.modules["CoronaCore.core.managers"] = fake_managers
+        sys.modules["CoronaCore.core.entities"] = fake_entities
+        sys.modules["CoronaCore.core.entities.actor"] = fake_actor_module
+
+        composer = SceneComposer()
+        composer.zone_tree = ZoneTree(root=Zone(
+            zone_id="room",
+            name="room",
+            role="indoor",
+            enclosure="box",
+            volume=Volume(center=[0.0, 1.5, 0.0], size=[5.0, 5.0, 3.0]),
+        ))
+        asset_dir = Path(_named_test_dir("room_box_with_terrain"))
+        composer._generated_asset_dir = lambda: (asset_dir, "tmp/room_box_with_terrain")
+
+        composer._generate_room_box()
+    finally:
+        for name, old in old_modules.items():
+            if old is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = old
+
+    names = [actor.name for actor in scene.get_actors()]
+    assert "__room_terrain" in names
+    assert "__room_box" in names
+    print("[OK] existing __room_terrain no longer blocks __room_box generation")
+
+
 if __name__ == "__main__":
     test_zone_and_asset_routing()
     test_zone_and_door_aabb_helpers()
@@ -1253,4 +1495,8 @@ if __name__ == "__main__":
     test_pending_resource_request_reports_provider_unavailable_without_fake_path()
     test_fantasy_market_terrain_profile_uses_low_decorative_boundary()
     test_warm_mysterious_market_overrides_generic_stone_wall_boundary()
+    test_scene_framework_indoor_fallback_generates_room_box_only()
+    test_scene_framework_outdoor_fallback_generates_terrain_only()
+    test_scene_framework_mixed_zone_tree_generates_terrain_and_room_box()
+    test_room_box_generation_is_not_blocked_by_existing_room_terrain()
     print("\n=== progressive mixed geometry ALL PASS ===")
