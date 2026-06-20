@@ -2,13 +2,6 @@
   <div
     class="relative min-h-screen bg-[#0d0d0d] text-white overflow-hidden flex flex-col font-sans"
   >
-    <DockTitleBar
-      title="创造世界"
-      extraClass="bg-[#84A65B]"
-      routePath="/NewGame"
-      @close="closeFloat"
-    />
-
     <!-- 背景装饰：径向辉光，延续 StartScreen 视觉 -->
     <div class="absolute inset-0 bg-gradient-to-b from-[#1a2a1a]/30 via-transparent to-transparent pointer-events-none"></div>
     <div class="absolute top-0 left-1/2 -translate-x-1/2 w-[700px] h-[700px] bg-[#84a65b]/[0.04] rounded-full blur-3xl pointer-events-none"></div>
@@ -108,7 +101,6 @@
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { projectLauncherService, appService } from '@/utils/bridge';
-import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 
 const router = useRouter();
 
@@ -173,10 +165,6 @@ const handleCreate = async () => {
   } finally {
     creating.value = false;
   }
-};
-
-const closeFloat = async () => {
-  window.close();
 };
 </script>
 

@@ -2,13 +2,6 @@
   <div
     class="relative min-h-screen bg-[#0d0d0d] text-white overflow-hidden flex flex-col font-sans"
   >
-    <DockTitleBar
-      title="局域网联机"
-      extraClass="bg-[#84A65B]"
-      routePath="/JoinGame"
-      @close="closeFloat"
-    />
-
     <!-- 背景装饰：径向辉光，延续 StartScreen 视觉 -->
     <div class="absolute inset-0 bg-gradient-to-b from-[#1a2a1a]/30 via-transparent to-transparent pointer-events-none"></div>
     <div class="absolute top-0 left-1/2 -translate-x-1/2 w-[700px] h-[700px] bg-[#84a65b]/[0.04] rounded-full blur-3xl pointer-events-none"></div>
@@ -271,7 +264,6 @@
 <script setup>
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
-import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 
 const router = useRouter();
 
@@ -328,10 +320,6 @@ const handleCreateRoom = () => {
 
 const goHome = () => {
   router.push('/StartScreen');
-};
-
-const closeFloat = async () => {
-  window.close();
 };
 </script>
 
