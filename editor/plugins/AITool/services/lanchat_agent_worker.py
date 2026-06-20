@@ -485,6 +485,19 @@ class LANChatAgentWorker:
         target_plan_id = str(metadata.get("target_plan_id") or "").strip()
         if not any((draft_action, target_scope, target_agent_id, target_agent_name, target_plan_id)):
             return ""
+        if not self._can_execute_agent_locally():
+            self._logger.info(
+                "[LANChatAgentTrace] phase=blocked_non_host_agent route=structured_chat role=%s message_id=%s room=%s action=%s target_scope=%s target_agent=%s/%s text=%s",
+                self._network_session_role_name(),
+                message.get("message_id") or "",
+                message.get("room_id") or "",
+                draft_action,
+                target_scope,
+                target_agent_id,
+                target_agent_name,
+                _trace_preview(text),
+            )
+            return "blocked_non_host_agent"
         if draft_action == "chat" and target_scope == "group":
             group_agents = self._structured_group_agents(metadata)
             if not group_agents:
@@ -604,6 +617,15 @@ class LANChatAgentWorker:
         return out
 
     def _handle_plain_chat_planning_gate(self, message: dict[str, Any], text: str) -> str:
+        if not self._can_execute_agent_locally():
+            self._logger.info(
+                "[LANChatAgentTrace] phase=blocked_non_host_agent route=plain_planning_gate role=%s message_id=%s room=%s text=%s",
+                self._network_session_role_name(),
+                message.get("message_id") or "",
+                message.get("room_id") or "",
+                _trace_preview(text),
+            )
+            return ""
         try:
             from .lanchat_scene_runtime import get_lanchat_scene_runtime
         except Exception as exc:  # noqa: BLE001
@@ -892,6 +914,21 @@ class LANChatAgentWorker:
         agent_id = str(trigger.get("agent_id") or "agent")
         agent_name = str(trigger.get("agent_name") or "Agent")
         action_payload = None
+        if not self._can_execute_agent_locally():
+            self._logger.info(
+                "[LANChatAgentTrace] phase=blocked_non_host_agent route=process_trigger role=%s message_id=%s correlation=%s room=%s agent=%s/%s sender=%s/%s kind=%s text=%s",
+                self._network_session_role_name(),
+                trigger.get("message_id") or "",
+                self._correlation_id(trigger),
+                trigger.get("room_id") or "",
+                agent_id,
+                agent_name,
+                trigger.get("sender_type") or "",
+                trigger.get("sender_id") or trigger.get("from") or "",
+                trigger.get("message_kind") or "",
+                _trace_preview(trigger.get("text")),
+            )
+            return False
         self._logger.info(
             "[LANChatAgentTrace] phase=process_start message_id=%s correlation=%s room=%s agent=%s/%s sender=%s/%s kind=%s text=%s",
             trigger.get("message_id") or "",
@@ -1115,18 +1152,23 @@ class LANChatAgentWorker:
             and hasattr(self._corona_engine, "network_send_agent_reply")
         )
 
-    def _can_execute_generation_locally(self) -> bool:
+    def _network_session_role_name(self) -> str:
         if self._corona_engine is None:
-            return True
+            return "none"
         session_role_name = getattr(self._corona_engine, "network_session_role_name", None)
         if not callable(session_role_name):
-            return True
+            return "none"
         try:
-            role = str(session_role_name() or "none").strip().lower()
+            return str(session_role_name() or "none").strip().lower()
         except Exception as exc:  # noqa: BLE001
-            self._logger.debug("LANChat generation role check skipped: %s", exc)
-            return True
-        return role != "client"
+            self._logger.debug("LANChat network role check skipped: %s", exc)
+            return "none"
+
+    def _can_execute_agent_locally(self) -> bool:
+        return self._network_session_role_name() != "client"
+
+    def _can_execute_generation_locally(self) -> bool:
+        return self._can_execute_agent_locally()
 
     def _get_orchestrator(self) -> LanChatAgentOrchestrator:
         if self._orchestrator is None:

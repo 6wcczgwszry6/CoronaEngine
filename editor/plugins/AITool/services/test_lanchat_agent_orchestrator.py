@@ -60,10 +60,11 @@ def _trigger(text="@小B 添加一个篝火", agent_name="小B"):
 
 
 class FakeEngine:
-    def __init__(self, triggers, coordinator_messages=None, room_events=None):
+    def __init__(self, triggers, coordinator_messages=None, room_events=None, session_role="none"):
         self.triggers = list(triggers)
         self.coordinator_messages = list(coordinator_messages or [])
         self.room_events = list(room_events or [])
+        self.session_role = session_role
         self.replies = []
         self.intents = []
         self.system_messages = []
@@ -76,6 +77,9 @@ class FakeEngine:
 
     def network_pop_lanchat_agent_trigger(self):
         return self.triggers.pop(0) if self.triggers else None
+
+    def network_session_role_name(self):
+        return self.session_role
 
     def network_send_agent_reply(self, agent_id, agent_name, text):
         self.replies.append((agent_id, agent_name, text))
@@ -858,6 +862,19 @@ def test_worker_uses_orchestrator_and_sends_reply():
     print("[OK] worker polls C++ trigger and replies through C++")
 
 
+def test_worker_client_role_does_not_execute_direct_agent_trigger():
+    engine = FakeEngine([_trigger()], session_role="client")
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is False
+    assert engine.replies == []
+    print("[OK] client role does not execute direct native agent trigger")
+
+
 def test_worker_streams_sanitized_progress_reply_before_final():
     def progress_agent_factory():
         def _agent(persona, messages):
@@ -1078,6 +1095,41 @@ def test_worker_routes_plain_chat_supplement_to_pending_planning_gate():
     assert "我已更新方案" in reply_text
     assert "减少方案中的细碎物体" in reply_text
     print("[OK] worker routes no-mention supplement to pending planning gate")
+
+
+def test_worker_client_sync_does_not_reply_from_plain_pending_planning_gate():
+    runtime = get_lanchat_scene_runtime()
+    runtime.end_compose()
+    runtime.consume_notes()
+    action, reply = runtime.handle_planning_gate("小女孩", "@小女孩 帮我设计一个可爱的卧室")
+    assert action == "reply"
+    assert "方案内容" in str(reply)
+
+    coordinator = InteractionCoordinator()
+    engine = FakeEngine([], coordinator_messages=[{
+        "message_id": "client-plain-plan-supplement-1",
+        "room_id": "r-client-plan-supplement",
+        "sender_id": "host-a",
+        "sender_name": "房主",
+        "sender_type": "host",
+        "message_kind": "chat",
+        "text": "补充要求，减少方案中的细碎物体",
+    }], session_role="client")
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    try:
+        assert worker.process_once() is True
+    finally:
+        runtime.clear_pending_planning("小女孩")
+        runtime.end_compose("小女孩")
+
+    assert engine.replies == []
+    print("[OK] client sync does not reply from plain pending planning gate")
 
 
 def test_plain_chat_generation_start_confirms_and_executes_active_seed_plan():
@@ -1405,6 +1457,37 @@ def test_worker_metadata_chat_targets_agent_without_at_or_coordinator_sync():
     assert engine.replies[-1][1] == "小女孩"
     assert coordinator.active_plan_for_room("r-metadata-chat") is None
     print("[OK] worker metadata chat targets agent without @ and skips Coordinator")
+
+
+def test_worker_client_sync_does_not_execute_targeted_agent_chat():
+    coordinator = InteractionCoordinator()
+    engine = FakeEngine([], coordinator_messages=[{
+        "message_id": "client-sync-agent-chat-1",
+        "room_id": "r-client-sync-agent-chat",
+        "sender_id": "host-a",
+        "sender_name": "房主",
+        "sender_type": "host",
+        "message_kind": "chat",
+        "text": "你是谁",
+        "metadata": {
+            "workspace_mode": "solo_single_agent",
+            "draft_action": "chat",
+            "target_scope": "agent",
+            "target_agent_id": "agent-girl",
+            "target_agent_name": "小女孩",
+        },
+    }], session_role="client")
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=coordinator,
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+    assert engine.replies == []
+    assert coordinator.active_plan_for_room("r-client-sync-agent-chat") is None
+    print("[OK] client coordinator sync does not execute targeted agent chat locally")
 
 
 def test_worker_metadata_group_chat_triggers_each_agent_without_at():
