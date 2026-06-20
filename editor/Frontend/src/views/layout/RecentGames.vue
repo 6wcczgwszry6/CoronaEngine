@@ -2,13 +2,6 @@
   <div
     class="relative min-h-screen border-2 border-[#84a65b] bg-[#282828]/95 text-white overflow-hidden flex flex-col font-sans"
   >
-    <DockTitleBar
-      title="最近游戏"
-      extraClass="bg-[#84A65B]"
-      routePath="/RecentGames"
-      @close="closeFloat"
-    />
-
     <div class="flex-1 p-20 bg-[#1e1e1e] flex flex-col">
       <div class="mb-10">
         <h2 class="text-5xl font-bold text-[#84a65b] mb-2">Corona Editor</h2>
@@ -86,7 +79,6 @@
 import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { projectLauncherService, appService } from '@/utils/bridge';
-import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 
 const router = useRouter();
 
@@ -127,10 +119,6 @@ const handleImport = async () => {
   if (result && result.data.path) {
     handleOpenProject(result.data.path);
   }
-};
-
-const closeFloat = async () => {
-  window.close();
 };
 </script>
 
