@@ -103,6 +103,79 @@ def test_pending_plan_ignores_opinion_question_and_ui_placeholder() -> None:
     assert snapshot[0]["constraints"] == []
 
 
+def test_plan_supplement_is_explicit_and_does_not_swallow_edits() -> None:
+    service = IntentUnderstandingService()
+    assert service.is_plan_supplement("补充要求：新增一个柜式空调") is True
+    assert service.is_plan_supplement("我希望整体更明亮") is True
+    assert service.is_plan_supplement("新增一个柜式空调") is False
+    assert service.is_plan_supplement("调整沙发位置") is False
+    assert service.is_plan_supplement("删除电视墙") is False
+
+    runtime = LanChatSceneRuntime()
+    action, reply = runtime.handle_planning_gate("长者", "帮我设计一个现代风客厅")
+    assert action == "reply"
+    assert reply is not None
+
+    action, payload, agent_name = runtime.handle_pending_planning_message("调整沙发位置")
+    assert (action, payload, agent_name) == ("pass", None, None)
+    snapshot = runtime.pending_planning_snapshot()
+    assert snapshot and snapshot[0]["constraints"] == []
+
+    action, payload, agent_name = runtime.handle_pending_planning_message("补充要求：新增一个柜式空调")
+    assert action == "reply"
+    assert agent_name == "长者"
+    assert payload is not None
+    assert "柜式空调" in payload
+
+
+def test_pending_plan_elaboration_expands_without_generation_or_supplement() -> None:
+    service = IntentUnderstandingService()
+    assert service.is_plan_elaboration_request("继续输出风格方案、布局、物品清单") is True
+    assert service.is_plan_supplement("继续输出风格方案、布局、物品清单") is False
+    assert service.is_plan_elaboration_request("新增一个柜式空调") is False
+    assert service.is_plan_elaboration_request("确认开始") is False
+
+    runtime = LanChatSceneRuntime()
+    action, reply = runtime.handle_planning_gate("小女孩", "帮我设计一个现代风客厅")
+    assert action == "reply"
+    assert reply is not None
+
+    action, payload, agent_name = runtime.handle_pending_planning_message("继续输出风格方案、布局、物品清单")
+    assert action == "reply"
+    assert agent_name == "小女孩"
+    assert payload is not None
+    assert "方案展开" in payload
+    assert "风格方案" in payload
+    assert "布局" in payload
+    assert "物品清单" in payload
+    assert "现代风客厅" in payload
+    assert "生成类请求" not in payload
+    assert "请先由房主确认" not in payload
+    snapshot = runtime.pending_planning_snapshot()
+    assert len(snapshot) == 1
+    assert snapshot[0]["scene_goal"] == "现代风客厅"
+
+
+def test_busy_generation_does_not_capture_plain_chat() -> None:
+    runtime = LanChatSceneRuntime()
+    runtime.start_compose("长者", "现代风客厅")
+    try:
+        assert runtime.record_busy_message(
+            agent_name="小女孩",
+            text="你是谁",
+            source_user_id="host-a",
+        ) is None
+        add_reply = runtime.record_busy_message(
+            agent_name="小女孩",
+            text="新增一个柜式空调",
+            source_user_id="host-a",
+        )
+        assert add_reply is not None
+        assert "后续补充" in add_reply
+    finally:
+        runtime.end_compose()
+
+
 def test_scene_plans_use_general_profile_instead_of_topic_specific_fallbacks() -> None:
     runtime = LanChatSceneRuntime()
     cases = [
@@ -144,6 +217,9 @@ if __name__ == "__main__":
     test_design_opinion_question_stays_discussion_even_with_plan_words()
     test_planning_disclosure_splits_models_from_scene_substrate()
     test_pending_plan_ignores_opinion_question_and_ui_placeholder()
+    test_plan_supplement_is_explicit_and_does_not_swallow_edits()
+    test_pending_plan_elaboration_expands_without_generation_or_supplement()
+    test_busy_generation_does_not_capture_plain_chat()
     test_scene_plans_use_general_profile_instead_of_topic_specific_fallbacks()
     test_planning_reply_keeps_light_role_voice()
     print("[OK] Intent understanding service tests passed")

@@ -391,31 +391,6 @@
           </div>
           <div class="p-3 border-t border-gray-600 flex gap-2">
             <div class="relative flex-1 space-y-2">
-              <div class="flex flex-wrap items-center gap-1.5">
-                <button
-                  v-for="action in draftActions"
-                  :key="action.key"
-                  class="px-2.5 py-1 rounded text-xs"
-                  :class="selectedDraftAction === action.key ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a] text-gray-300 hover:bg-[#4a4a4a]'"
-                  :title="action.hint"
-                  @click="selectDraftAction(action.key)"
-                >
-                  {{ action.label }}
-                </button>
-                <select
-                  v-model="selectedTargetKey"
-                  class="ml-auto min-w-[112px] rounded bg-[#2a2a2a] border border-gray-600 px-2 py-1 text-xs text-gray-100 outline-none focus:border-[#84A65B]"
-                  @change="applyInputRouteState"
-                >
-                  <option
-                    v-for="target in targetOptions"
-                    :key="target.key"
-                    :value="target.key"
-                  >
-                    {{ target.label }}
-                  </option>
-                </select>
-              </div>
               <div class="flex flex-wrap gap-1.5">
                 <button
                   v-for="target in targetQuickOptions"
@@ -560,7 +535,7 @@ const lobbyTab = ref('create');
 const roomMode = ref('multi');
 const draft = ref('');
 const selectedWorkspaceMode = ref(s.workspaceMode || 'multiplayer_multi_agent');
-const selectedDraftAction = ref(s.draftAction || 'chat');
+const selectedDraftAction = ref('chat');
 const selectedTargetKey = ref('scene');
 const showAddAgent = ref(false);
 const agentForm = reactive({ name: '', persona: '' });
@@ -634,14 +609,6 @@ const workspaceModes = [
     label: '多人共创',
     hint: '房主开房，成员加入',
   },
-];
-
-const draftActions = [
-  { key: 'chat', label: '咨询', hint: '只让目标回复，不生成场景' },
-  { key: 'plan', label: '整理方案', hint: '只整理方案，不进入生成队列' },
-  { key: 'supplement', label: '补充方案', hint: '只更新当前方案，不启动生成' },
-  { key: 'generate', label: '开始生成', hint: '确认当前方案并进入生成队列' },
-  { key: 'edit', label: '调整场景', hint: '对已有场景提出修改' },
 ];
 
 const form = reactive({
@@ -763,11 +730,7 @@ const inputAssistText = computed(() => {
 const draftPlaceholder = computed(() => {
   if (s.connection === 'reconnecting') return '连接已断开';
   if (isWaitingDisclosure.value) return '生成中也可输入：新增一个… / 调整… / 问题…';
-  if (selectedDraftAction.value === 'plan') return '描述你想设计什么';
-  if (selectedDraftAction.value === 'supplement') return '只写补充内容，例如：新增柜式空调、整体更明亮';
-  if (selectedDraftAction.value === 'generate') return '输入“开始生成”，或补一句生成范围';
-  if (selectedDraftAction.value === 'edit') return '描述要调整的已有物体或位置';
-  return '输入要问的问题';
+  return '输入消息，例如：设计一个现代风客厅 / 新增一个柜式空调 / 确认开始';
 });
 const showAiReplySpinner = computed(() => {
   if (!pendingReplySinceMs.value) return false;
@@ -827,8 +790,7 @@ const targetQuickOptions = computed(() => targetOptions.value.filter((item) => (
 )));
 const inputRouteHint = computed(() => {
   const target = selectedTarget.value?.label || '当前目标';
-  const action = draftActions.find((item) => item.key === selectedDraftAction.value)?.label || '发送';
-  return `${action} · 发给 ${target}`;
+  return `发送给 ${target}`;
 });
 const routeGuardText = computed(() => routeGuardMessage(
   selectedDraftAction.value,
@@ -882,19 +844,14 @@ function selectWorkspaceMode(mode) {
   }
 }
 
-function selectDraftAction(action) {
-  selectedDraftAction.value = action;
-  lanchat.setDraftAction(action);
-  applyInputRouteState();
-}
-
 function selectTarget(key) {
   selectedTargetKey.value = resolveSelectedTargetKey(key, targetOptions.value);
   applyInputRouteState();
 }
 
 function applyInputRouteState() {
-  lanchat.setDraftAction(selectedDraftAction.value);
+  selectedDraftAction.value = 'chat';
+  lanchat.setDraftAction('chat');
   lanchat.setActiveTarget(targetPayloadForKey(selectedTargetKey.value, targetOptions.value));
 }
 
@@ -1156,7 +1113,7 @@ function pickMention(c) {
 function messageOptionsForText(text) {
   const trimmed = String(text || '').trim();
   const generationMetadata = s.role === 'host' ? lanchat.generationOptionsMetadata() : {};
-  const routedDraftAction = effectiveDraftAction(selectedDraftAction.value, trimmed);
+  const routedDraftAction = effectiveDraftAction('chat', trimmed);
   applyInputRouteState();
   if (/^@GM(?:\s|$)/i.test(trimmed)) {
     if (!Object.keys(generationMetadata).length) return buildManualGmMessageOptions(s.role);
@@ -1309,12 +1266,4 @@ watch(
   }
 );
 
-watch(
-  () => s.draftAction,
-  (action) => {
-    if (action && action !== selectedDraftAction.value) {
-      selectedDraftAction.value = action;
-    }
-  }
-);
 </script>

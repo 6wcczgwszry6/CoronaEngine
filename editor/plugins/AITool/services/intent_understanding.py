@@ -96,6 +96,15 @@ _PLAN_REVISION_PATTERNS = (
     r"^(补充|说明|调整|修改)[:：]?",
     r"(我希望|希望|不要|别|不能|更|风格|统一|一致|温暖|灯光|灯笼|休息区|暗黑风|恐怖)",
 )
+_PLAN_SUPPLEMENT_PATTERNS = (
+    r"^(补充|补充要求|补充方案|说明)[:：，,\s]?",
+    r"^(我希望|希望|不要|别|不能|整体|风格|布局|限制|要求)",
+    r"(更|统一|一致|温暖|灯光|灯笼|休息区|暗黑风|恐怖)",
+)
+_PLAN_ELABORATION_PATTERNS = (
+    r"(继续|展开|详细|具体|细化|列出|输出|给出).*(方案|风格|布局|清单|物品|动线|材质|灯光)",
+    r"(风格方案|布局方案|物品清单|设计细节|详细方案|具体方案)",
+)
 _ADD_PATTERNS = (
     r"(再加|增加|新增|添加|加入|生成添加|添加生成)",
 )
@@ -210,23 +219,27 @@ class IntentUnderstandingService:
             return "edit_existing"
         return "chat"
 
-    def is_plan_like(self, text: str) -> bool:
-        decision = self.classify(text, allow_llm=False)
-        return decision.intent in ("plan_drafting", "plan_revision")
-
     def is_generation_start(self, text: str) -> bool:
         decision = self.classify(text, allow_llm=False)
         return decision.intent == "generation_start"
 
     def is_plan_supplement(self, text: str) -> bool:
-        decision = self.classify(text, allow_llm=False)
-        return decision.intent in (
-            "plan_revision",
-            "intervention_add",
-            "intervention_modify",
-            "intervention_delete",
-            "final_adjustment_request",
-        )
+        value = str(text or "").strip()
+        if not value:
+            return False
+        decision = self.classify(value, allow_llm=False)
+        return decision.intent == "plan_revision" and _contains(_PLAN_SUPPLEMENT_PATTERNS, value)
+
+    def is_plan_elaboration_request(self, text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return False
+        if self.is_generation_start(value) or self.is_plan_supplement(value):
+            return False
+        if _contains(_ADD_PATTERNS + _MODIFY_PATTERNS + _DELETE_PATTERNS, value):
+            return False
+        decision = self.classify(value, allow_llm=False)
+        return decision.intent in {"discussion", "plan_revision"} and _contains(_PLAN_ELABORATION_PATTERNS, value)
 
     def _protocol_guardrail(
         self,
@@ -331,6 +344,8 @@ class IntentUnderstandingService:
             return IntentDecision("discussion", 0.88, target_agent, reason="fallback discussion")
         if _contains(_FINAL_LAYOUT_PATTERNS, normalized):
             return IntentDecision("final_adjustment_request", 0.9, target_agent, reason="fallback layout")
+        if _contains(_PLAN_DRAFT_PATTERNS, normalized):
+            return IntentDecision("plan_drafting", 0.82, target_agent, reason="fallback plan")
         if _contains(_PLAN_REVISION_PATTERNS, normalized):
             return IntentDecision("plan_revision", 0.88, target_agent, reason="fallback plan revision")
         if _contains(_DELETE_PATTERNS, normalized):
@@ -351,8 +366,6 @@ class IntentUnderstandingService:
             )
         if _contains(_MODIFY_PATTERNS, normalized):
             return IntentDecision("intervention_modify", 0.84, target_agent, reason="fallback modify")
-        if _contains(_PLAN_DRAFT_PATTERNS, normalized):
-            return IntentDecision("plan_drafting", 0.82, target_agent, reason="fallback plan")
         return IntentDecision("discussion", 0.7, target_agent, reason="fallback default")
 
     def _apply_safety_guardrail(self, decision: IntentDecision, value: str) -> IntentDecision:

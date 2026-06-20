@@ -41,6 +41,10 @@ class LanChatAgentOrchestrator:
         "其他人都可以提出", "大家都可以提出",
     )
     _PLAN_WORDS = ("方案", "建议", "设计", "布局", "清单", "步骤", "动线", "区域", "主题")
+    _PLAN_OPINION_WORDS = (
+        "怎么看", "怎么评价", "如何评价", "看法", "观点",
+        "觉得", "认为", "是否合理", "合不合理", "评价一下",
+    )
     _PLAN_REFERENCE_WORDS = (
         "按你的方案", "按照你的方案", "按你说的", "按刚才那个方案",
         "按上面的方案", "就这样生成", "执行你的方案", "开始执行你的方案",
@@ -98,6 +102,10 @@ class LanChatAgentOrchestrator:
         if isinstance(plan_resolution, dict):
             trigger = self._with_resolved_plan(trigger, plan_resolution)
             text = str(trigger.get("text") or "")
+        else:
+            opinion_plan = self._resolve_opinion_plan_context(trigger)
+            if isinstance(opinion_plan, dict):
+                trigger = self._with_opinion_plan_context(trigger, opinion_plan)
 
         if self._is_gm_trigger(trigger) and self._is_control_without_proposal_id(text):
             control = self._gm_control_response(trigger, state)
@@ -571,6 +579,9 @@ class LanChatAgentOrchestrator:
                 f"最新用户消息是发给你的：{latest}\n"
                 "请以该助手身份回应，不要因为历史中出现其他 @对象 而拒绝执行或越位判断。"
             ] + messages
+            referenced_plan = trigger.get("_referenced_plan_context")
+            if isinstance(referenced_plan, dict):
+                messages = [self._format_referenced_plan_context(referenced_plan)] + messages
             context = state.to_prompt_context()
             if context:
                 messages = [f"【静默监听摘要】\n{context}"] + messages
@@ -669,6 +680,61 @@ class LanChatAgentOrchestrator:
         )
         return resolved
 
+    def _resolve_opinion_plan_context(self, trigger: dict[str, Any]) -> dict[str, Any] | None:
+        text = str(trigger.get("text") or "")
+        if self._is_gm_trigger(trigger) or not self._is_plan_opinion_reference(text):
+            return None
+        current_agent_id = str(trigger.get("agent_id") or "").strip().lower()
+        current_agent_name = str(trigger.get("agent_name") or "").strip().lower()
+        candidates = []
+        seen: set[int] = set()
+        for plan in self._latest_agent_plans.values():
+            if not isinstance(plan, dict) or id(plan) in seen:
+                continue
+            seen.add(id(plan))
+            if plan.get("status") != "active":
+                continue
+            agent_id = str(plan.get("agent_id") or "").strip()
+            agent_name = str(plan.get("agent_name") or "").strip()
+            if (
+                agent_id
+                and agent_id.lower() == current_agent_id
+                or agent_name
+                and agent_name.lower() == current_agent_name
+            ):
+                continue
+            score = 0
+            if agent_name and agent_name in text:
+                score += 100 + len(agent_name)
+            if agent_id and agent_id in text:
+                score += 80 + len(agent_id)
+            if score:
+                candidates.append((score, plan))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    @staticmethod
+    def _with_opinion_plan_context(trigger: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+        updated = dict(trigger)
+        updated["_referenced_plan_context"] = dict(plan)
+        return updated
+
+    @staticmethod
+    def _format_referenced_plan_context(plan: dict[str, Any]) -> str:
+        agent_name = str(plan.get("agent_name") or plan.get("agent_id") or "该助手").strip()
+        raw_text = str(plan.get("raw_text") or plan.get("compact_summary") or "").strip()
+        if len(raw_text) > 1600:
+            raw_text = raw_text[:1600].rstrip() + "..."
+        return (
+            "【被评价方案上下文】\n"
+            f"用户正在询问你评价 {agent_name} 最近的方案。请基于下面方案内容回应，"
+            "不要说对方尚未给出具体方案；可以指出优点、风险和可调整建议。\n"
+            f"方案来源：{agent_name}\n"
+            f"方案内容：\n{raw_text}"
+        )
+
     def _with_resolved_plan(self, trigger: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
         updated = dict(trigger)
         agent_name = str(updated.get("agent_name") or plan.get("agent_name") or "该助手")
@@ -703,6 +769,14 @@ class LanChatAgentOrchestrator:
     @classmethod
     def _is_plan_reference(cls, text: str) -> bool:
         return any(word in str(text or "") for word in cls._PLAN_REFERENCE_WORDS)
+
+    @classmethod
+    def _is_plan_opinion_reference(cls, text: str) -> bool:
+        value = str(text or "")
+        return (
+            any(word in value for word in cls._PLAN_WORDS)
+            and any(word in value for word in cls._PLAN_OPINION_WORDS)
+        )
 
     @classmethod
     def _looks_like_plan(cls, text: str) -> bool:

@@ -86,20 +86,16 @@ class LanChatSceneRuntime:
         return get_intent_understanding_service().is_generation_start(text)
 
     @staticmethod
-    def is_plan_like(text: str) -> bool:
-        return get_intent_understanding_service().is_plan_like(text)
-
-    @staticmethod
-    def is_pending_scene_note(text: str) -> bool:
-        return get_intent_understanding_service().scene_note_kind(text) != "chat"
-
-    @staticmethod
     def classify_scene_note(text: str) -> str:
         return get_intent_understanding_service().scene_note_kind(text)
 
     @staticmethod
     def is_plan_supplement(text: str) -> bool:
         return get_intent_understanding_service().is_plan_supplement(text)
+
+    @staticmethod
+    def is_plan_elaboration_request(text: str) -> bool:
+        return get_intent_understanding_service().is_plan_elaboration_request(text)
 
     def set_mode(self, mode: str) -> str:
         normalized = str(mode or "").strip().upper()
@@ -135,12 +131,15 @@ class LanChatSceneRuntime:
 
         with self._lock:
             pending = self._pending_confirmations.get(key)
-            if pending and self.is_direct_generate(value):
+            if pending and decision.intent == "generation_start":
                 compose_text = self._compose_text_from_confirmation(pending, value)
                 pending.status = "confirmed"
                 self._pending_confirmations.pop(key, None)
                 self._mode = MODE_EXECUTING
                 return "compose", compose_text
+
+            if pending and self.is_plan_elaboration_request(value):
+                return "reply", self._format_plan_elaboration(pending)
 
             if pending and self.is_plan_supplement(value):
                 pending.constraints.append(value)
@@ -149,7 +148,7 @@ class LanChatSceneRuntime:
                         pending.proposed_items.append(item)
                 return "reply", self._format_confirmation(pending, updated=True)
 
-            if self.is_plan_like(value) and not self.is_direct_generate(value):
+            if decision.intent == "plan_drafting":
                 confirmation = PlanningConfirmation(
                     proposal_id=f"plan-{uuid.uuid4().hex[:8]}",
                     target_agent=key,
@@ -178,14 +177,11 @@ class LanChatSceneRuntime:
             return "pass", None, None
         decision = get_intent_understanding_service().classify(value, allow_llm=False)
         if len(pending_keys) != 1:
-            if decision.intent in {
-                "generation_start",
-                "plan_revision",
-                "intervention_add",
-                "intervention_modify",
-                "intervention_delete",
-                "final_adjustment_request",
-            }:
+            if (
+                decision.intent == "generation_start"
+                or self.is_plan_supplement(value)
+                or self.is_plan_elaboration_request(value)
+            ):
                 return "reply", self._format_pending_disambiguation(pending_keys), "系统"
             return "pass", None, None
         agent_key = pending_keys[0]
@@ -338,8 +334,6 @@ class LanChatSceneRuntime:
                 if requested:
                     return f"已记录后续补充：{'、'.join(requested[:4])}。我会优先尝试加入后续批次；若当前没有可用模型，会在最终报告里标为待补。"
                 return "已记录后续生成补充。我会优先尝试加入后续批次；若当前没有可用模型，会在最终报告里标为待补。"
-            if self._agent_key(agent_name) != self._active_agent:
-                return f"{self._active_agent} 正在生成。我先帮你记录这条意见，等下一批前一起吸收。"
         return None
 
     def consume_notes_for_prompt(self) -> str:
@@ -412,6 +406,39 @@ class LanChatSceneRuntime:
         disclosure = self._classification_disclosure(confirmation.scene_goal, confirmation.proposed_items)
         if disclosure:
             lines.extend(["", "提炼结果：", disclosure])
+        return "\n".join(lines)
+
+    def _format_plan_elaboration(self, confirmation: PlanningConfirmation) -> str:
+        profile = self._build_scene_plan_profile(confirmation.scene_goal)
+        core = self._core_items(confirmation, profile)
+        decor = self._decor_items(confirmation, profile)
+        agent_name = str(confirmation.target_agent or "").strip() or "设计助手"
+        lines = [
+            f"{agent_name}继续把当前方案展开，先把可落地的细节说清楚。",
+            "",
+            f"方案展开：{confirmation.scene_goal}",
+            "",
+            "风格方案：",
+            f"- {profile.style_direction}",
+            "- 色彩、材质和灯光先保持同一套语言，避免局部装饰抢走主要空间。",
+            "",
+            "布局：",
+            f"- {profile.layout_direction}",
+            "- 入口、主通道、停留点和视觉焦点分开处理，核心家具先定位置，再补装饰。",
+            "",
+            "物品清单：",
+            "- 核心物件：" + "、".join(core[:6]),
+            "- 氛围装饰：" + "、".join(decor[:6]),
+        ]
+        if confirmation.constraints:
+            lines.extend([
+                "",
+                "已纳入要求：" + "；".join(confirmation.constraints),
+            ])
+        lines.extend([
+            "",
+            "当前仍处于方案确认阶段，还没有进入生成队列。你可以继续补充要求，或回复“确认开始”进入生成。",
+        ])
         return "\n".join(lines)
 
     @staticmethod

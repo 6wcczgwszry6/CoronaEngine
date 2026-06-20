@@ -227,7 +227,9 @@ class LANChatAgentWorker:
                 and not coordinator._is_post_generation_adjustment(text)
             ):
                 return False
-            planning_gate_handled = self._handle_plain_chat_planning_gate(message, text)
+            planning_gate_handled = ""
+            if source != "lanchat_history_snapshot":
+                planning_gate_handled = self._handle_plain_chat_planning_gate(message, text)
             if planning_gate_handled in {"reply", "compose"}:
                 self._log_scene_route(
                     room_id=room_id,
@@ -387,6 +389,8 @@ class LANChatAgentWorker:
         if action == "reply":
             self._send_final_reply(str(trigger.get("agent_id") or agent_name), str(agent_name), str(payload or ""), trigger)
             return "planning_reply"
+        if self._execute_runtime_planning_compose(trigger, str(payload or text), str(agent_name)):
+            return "planning_compose"
         trigger["text"] = str(payload or text)
         self._process_trigger(trigger)
         return "planning_compose"
@@ -444,9 +448,112 @@ class LANChatAgentWorker:
         if action == "reply":
             self._send_final_reply(str(agent_name), str(agent_name), str(payload or ""), trigger)
             return "reply"
+        if self._execute_runtime_planning_compose(trigger, str(payload or text), str(agent_name)):
+            return "compose"
         trigger["text"] = str(payload or text)
         self._process_trigger(trigger)
         return "compose"
+
+    def _handle_agent_trigger_planning_gate(self, trigger: dict[str, Any]) -> bool:
+        text = str(trigger.get("text") or "").strip()
+        if not text:
+            return False
+        message_kind = str(trigger.get("message_kind") or "chat").strip().lower()
+        if message_kind not in {"", "chat"}:
+            return False
+        is_gm_target = (
+            str(trigger.get("agent_id") or trigger.get("target_agent_id") or "").strip().lower() == "gm"
+            or str(trigger.get("agent_name") or "").strip().lower() in {"gm", "主持人", "裁判", "game master"}
+        )
+        if is_gm_target:
+            return False
+        try:
+            from .lanchat_scene_runtime import get_lanchat_scene_runtime
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to import LANChat scene runtime for agent planning gate: %s", exc)
+            return False
+
+        metadata = self._metadata_from_trigger(trigger)
+        draft_action = str(metadata.get("draft_action") or "").strip().lower()
+        targets = [
+            str(metadata.get("target_plan_id") or "").strip(),
+            str(metadata.get("target_agent_name") or "").strip(),
+            str(metadata.get("target_agent_id") or "").strip(),
+            str(trigger.get("target_agent_name") or "").strip(),
+            str(trigger.get("agent_name") or "").strip(),
+            str(trigger.get("target_agent_id") or "").strip(),
+            str(trigger.get("agent_id") or "").strip(),
+        ]
+        try:
+            runtime = get_lanchat_scene_runtime()
+            for target in targets:
+                if not target:
+                    continue
+                action, payload, agent_name = runtime.handle_targeted_planning_message(
+                    target,
+                    text,
+                    draft_action=draft_action,
+                )
+                if action in {"reply", "compose"} and agent_name:
+                    return self._send_runtime_planning_action(trigger, action, payload, agent_name)
+            action, payload, agent_name = runtime.handle_pending_planning_message(text)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to handle agent planning gate: %s", exc)
+            return False
+        if action in {"reply", "compose"} and agent_name:
+            return self._send_runtime_planning_action(trigger, action, payload, agent_name)
+        return False
+
+    def _send_runtime_planning_action(
+        self,
+        trigger: dict[str, Any],
+        action: str,
+        payload: str | None,
+        agent_name: str,
+    ) -> bool:
+        agent_id = str(trigger.get("agent_id") or trigger.get("target_agent_id") or agent_name)
+        visible_name = str(agent_name or trigger.get("agent_name") or "设计助手")
+        if action == "reply":
+            return bool(self._send_final_reply(agent_id, visible_name, str(payload or ""), trigger))
+        if action == "compose":
+            return self._execute_runtime_planning_compose(trigger, str(payload or ""), visible_name)
+        return False
+
+    def _execute_runtime_planning_compose(
+        self,
+        trigger: dict[str, Any],
+        compose_text: str,
+        agent_name: str,
+    ) -> bool:
+        text = str(compose_text or "").strip()
+        if not text:
+            return False
+        try:
+            coordinator = self._get_interaction_coordinator()
+            room_id = str(trigger.get("room_id") or "default")
+            host_id = str(trigger.get("sender_id") or trigger.get("from") or "host")
+            self._remember_room_id(room_id)
+            coordinator.create_or_update_seed_plan(ChatMessage(
+                room_id=room_id,
+                sender_id=host_id,
+                sender_name=str(trigger.get("sender_name") or trigger.get("from") or "房主"),
+                text=text,
+                is_host=True,
+                agent_id=str(trigger.get("agent_id") or trigger.get("target_agent_id") or agent_name or ""),
+                agent_name=str(agent_name or trigger.get("agent_name") or ""),
+                metadata=self._coordinator_sync_metadata(trigger, source="lanchat_runtime_planning_gate"),
+            ))
+            reply = self._start_active_coordinator_generation(
+                coordinator,
+                room_id=room_id,
+                host_id=host_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to execute runtime planning compose: %s", exc)
+            return False
+        if reply is None:
+            return False
+        return bool(self._send_final_reply("gm-system", "系统", reply, trigger))
 
     def _log_scene_route(
         self,
@@ -626,6 +733,8 @@ class LANChatAgentWorker:
         completed_intervention_reply = self._handle_coordinator_completed_intervention(trigger)
         if completed_intervention_reply is not None:
             return bool(self._send_final_reply(agent_id, agent_name, completed_intervention_reply, trigger))
+        if self._handle_agent_trigger_planning_gate(trigger):
+            return True
 
         try:
             from .agent_progress_context import agent_progress_sink
