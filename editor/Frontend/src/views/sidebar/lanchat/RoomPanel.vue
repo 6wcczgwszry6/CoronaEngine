@@ -689,16 +689,21 @@ const draftPlaceholder = computed(() => {
   if (selectedDraftAction.value === 'edit') return '描述要调整的已有物体或位置';
   return '输入@来指定AI助手~';
 });
+const currentPendingReply = computed(() => (
+  pendingReplyBelongsToCurrentRoom(pendingReply.value) ? pendingReply.value : null
+));
 const pendingReplyText = computed(() => {
-  const target = pendingReply.value?.targetLabel || 'AI 助手';
-  const elapsed = Math.max(0, Math.floor((nowMs.value - Number(pendingReply.value?.createdAtMs || 0)) / 1000));
+  const pending = currentPendingReply.value;
+  const target = pending?.targetLabel || 'AI 助手';
+  const elapsed = Math.max(0, Math.floor((nowMs.value - Number(pending?.createdAtMs || 0)) / 1000));
   if (elapsed >= 20) return `${target} 仍在处理`;
   if (elapsed >= 8) return `${target} 正在整理`;
   return `${target} 正在思考`;
 });
 const pendingReplyHint = computed(() => {
-  if (!pendingReply.value) return '';
-  const elapsed = Math.max(0, Math.floor((nowMs.value - Number(pendingReply.value.createdAtMs || 0)) / 1000));
+  const pending = currentPendingReply.value;
+  if (!pending) return '';
+  const elapsed = Math.max(0, Math.floor((nowMs.value - Number(pending.createdAtMs || 0)) / 1000));
   if (elapsed < 12) return '';
   return '复杂方案或工具调用可能需要更久，你可以继续补充要求。';
 });
@@ -710,7 +715,7 @@ const displayMessages = computed(() => {
     renderKey: message.message_id || `message-${index}`,
     kind: 'message',
   }));
-  const pending = pendingReply.value;
+  const pending = currentPendingReply.value;
   if (!pending) return messages;
   const pendingMessage = {
     ...pending,
@@ -785,6 +790,7 @@ function refreshHistoryRooms() {
 }
 
 function loadHistoryRoom(room) {
+  clearPendingReply();
   return lanchat.loadHistoryRoom(room);
 }
 
@@ -830,6 +836,15 @@ watch(
     requestModelTransferSnapshotForJoin();
   },
   { flush: 'post' },
+);
+
+watch(
+  () => [s.inRoom, s.mode, s.room],
+  () => {
+    if (pendingReply.value && !pendingReplyBelongsToCurrentRoom()) {
+      clearPendingReply();
+    }
+  }
 );
 
 function selectWorkspaceMode(mode) {
@@ -1195,6 +1210,7 @@ async function onJoin() {
 }
 
 async function onLeave() {
+  clearPendingReply();
   if (s.role === 'host') {
     await lanchat.closeRoom();
   } else {
@@ -1233,6 +1249,14 @@ function clearPendingReply(correlationId = '') {
   pendingReply.value = null;
 }
 
+function pendingReplyBelongsToCurrentRoom(pending = pendingReply.value) {
+  if (!pending || !s.inRoom) return false;
+  return (
+    String(pending.roomId || '') === String(s.room || '') &&
+    String(pending.roomMode || '') === String(s.mode || '')
+  );
+}
+
 function makePendingCorrelationId() {
   const randomPart = Math.random().toString(36).slice(2, 8);
   return `ui-${Date.now().toString(36)}-${randomPart}`;
@@ -1247,6 +1271,8 @@ function pendingReplyForText() {
     : plainTargetLabel;
   return {
     correlationId: makePendingCorrelationId(),
+    roomId: s.room || '',
+    roomMode: s.mode || '',
     targetAgentId: target.agentId || '',
     targetLabel,
     createdAtMs: Date.now(),
@@ -1261,7 +1287,7 @@ function isAiReplyMessage(message) {
   return true;
 }
 
-function isPendingReplyMessage(message, pending = pendingReply.value) {
+function isPendingReplyMessage(message, pending = currentPendingReply.value) {
   if (!pending || !isAiReplyMessage(message)) return false;
   return pendingReplyMatchesMessage(message, pending);
 }
