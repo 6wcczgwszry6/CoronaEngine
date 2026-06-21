@@ -368,6 +368,20 @@ class FakeCamera:
         return True
 
 
+class AsciiOnlyFakeCamera(FakeCamera):
+    def __init__(self, name="main", **kwargs):
+        super().__init__(name, **kwargs)
+        self.screenshot_paths = []
+
+    def save_screenshot_sync(self, path):
+        self.screenshot_paths.append(path)
+        try:
+            path.encode("ascii")
+        except UnicodeEncodeError:
+            return False
+        return super().save_screenshot_sync(path)
+
+
 class FakeScene:
     def __init__(self, cameras=None):
         self.cameras = list(cameras or [])
@@ -457,6 +471,30 @@ def test_vlm_capture_uses_review_camera_not_main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("[OK] VLM capture uses review camera and leaves main camera untouched")
+
+
+def test_vlm_capture_bridges_unicode_output_paths_for_engine():
+    scene = FakeScene()
+    review_camera = AsciiOnlyFakeCamera(model_reviewer.VLM_REVIEW_CAMERA_NAME)
+    tmp = _test_tmp_dir("中文项目_截图")
+    try:
+        result = vlm_capture.capture_vlm_views(
+            "",
+            tmp,
+            actor_name="床",
+            scope="actor",
+            scene=scene,
+            review_camera=review_camera,
+        )
+        assert result.status == "success"
+        assert len(result.files) == 4
+        assert all(os.path.exists(path) for path in result.files)
+        assert any("床" in os.path.basename(path) for path in result.files)
+        assert review_camera.screenshot_paths
+        assert all(path == path.encode("ascii").decode("ascii") for path in review_camera.screenshot_paths)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("[OK] VLM capture bridges unicode output paths for engine")
 
 
 def test_vlm_review_default_output_dir_uses_project_screenshots():
@@ -610,6 +648,7 @@ if __name__ == "__main__":
     test_vlm_review_camera_reuses_existing()
     test_vlm_review_camera_created_without_switching_active()
     test_vlm_capture_uses_review_camera_not_main()
+    test_vlm_capture_bridges_unicode_output_paths_for_engine()
     test_vlm_review_default_output_dir_uses_project_screenshots()
     test_vlm_capture_restores_and_skips_when_main_camera_leaks()
     test_vlm_review_camera_without_offscreen_surface_is_skipped()

@@ -8,6 +8,9 @@ from __future__ import annotations
 import logging
 import math
 import os
+import hashlib
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Optional
@@ -49,6 +52,73 @@ def resolve_vlm_output_dir(output_dir: str) -> str:
         resolved = get_project_screenshots_root() / path
     resolved.mkdir(parents=True, exist_ok=True)
     return str(resolved)
+
+
+def _is_ascii_path(path: str) -> bool:
+    try:
+        str(path).encode("ascii")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _ascii_bridge_root() -> Path:
+    candidates = [
+        os.environ.get("CORONA_VLM_ASCII_TEMP_DIR"),
+        tempfile.gettempdir(),
+        os.environ.get("LOCALAPPDATA"),
+        os.environ.get("ProgramData"),
+        str(Path.cwd()),
+    ]
+    if os.name == "nt":
+        candidates.append(os.environ.get("SystemDrive", "C:") + os.sep)
+    else:
+        candidates.append("/tmp")
+    for candidate in candidates:
+        if not candidate or not _is_ascii_path(candidate):
+            continue
+        root = Path(candidate) / "CoronaEngineVlmCapture"
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            return root
+        except OSError:
+            continue
+    root = Path(tempfile.gettempdir()) / "CoronaEngineVlmCapture"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _engine_safe_screenshot_path(final_path: str, view_index: int) -> tuple[str, bool]:
+    """Return an ASCII path for engine screenshot APIs that reject unicode paths."""
+    final = Path(final_path)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    if _is_ascii_path(str(final)):
+        return str(final), False
+    suffix = final.suffix or ".png"
+    digest = hashlib.sha1(str(final).encode("utf-8", errors="surrogatepass")).hexdigest()[:16]
+    bridge_name = f"vlm_{digest}_{view_index:02d}{suffix}"
+    return str(_ascii_bridge_root() / bridge_name), True
+
+
+def _copy_engine_screenshot_to_final(engine_path: str, final_path: str) -> bool:
+    if os.path.abspath(engine_path) == os.path.abspath(final_path):
+        return True
+    try:
+        Path(final_path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(engine_path, final_path)
+        try:
+            os.remove(engine_path)
+        except OSError:
+            pass
+        return os.path.exists(final_path) and os.path.getsize(final_path) > 0
+    except Exception as exc:
+        logger.warning(
+            "[VlmCapture] copy screenshot back to unicode path failed src=%s dst=%s error=%s",
+            engine_path,
+            final_path,
+            exc,
+        )
+        return False
 
 
 @dataclass
@@ -330,7 +400,14 @@ def _get_review_camera(scene: Any, review_camera: Any = None, camera_factory: An
     return get_or_create_vlm_review_camera(scene, camera_factory=camera_factory)
 
 
-def capture_pose_with_review_camera(scene: Any, camera: Any, pose: ViewPose, output_path: str, timeout_sec: float) -> bool:
+def capture_pose_with_review_camera(
+    scene: Any,
+    camera: Any,
+    pose: ViewPose,
+    output_path: str,
+    timeout_sec: float,
+    view_index: int = 0,
+) -> bool:
     try:
         camera.set(pose.position, pose.forward, pose.up, pose.fov)
         if hasattr(camera, "set_output_mode") and getattr(camera, "get_output_mode", lambda: VLM_OUTPUT_MODE)() != VLM_OUTPUT_MODE:
@@ -339,7 +416,11 @@ def capture_pose_with_review_camera(scene: Any, camera: Any, pose: ViewPose, out
             from .model_reviewer import _save_camera_screenshot_with_timeout
         except ImportError:
             from model_reviewer import _save_camera_screenshot_with_timeout
-        return bool(_save_camera_screenshot_with_timeout(camera, output_path, timeout=timeout_sec))
+        engine_path, needs_copy = _engine_safe_screenshot_path(output_path, view_index)
+        saved = bool(_save_camera_screenshot_with_timeout(camera, engine_path, timeout=timeout_sec))
+        if not saved:
+            return False
+        return _copy_engine_screenshot_to_final(engine_path, output_path) if needs_copy else True
     except Exception as exc:
         logger.warning("[VlmCapture] capture pose failed name=%s path=%s error=%s", pose.name, output_path, exc)
         return False
@@ -396,7 +477,7 @@ def capture_vlm_views(
         for index, pose in enumerate(poses):
             safe_target = (actor_name or scope or "scene").replace(os.sep, "_")
             output_path = os.path.join(output_dir, f"{safe_target}_{index:02d}_{pose.name}_{VLM_OUTPUT_MODE}.png")
-            if capture_pose_with_review_camera(resolved_scene, camera, pose, output_path, timeout_sec):
+            if capture_pose_with_review_camera(resolved_scene, camera, pose, output_path, timeout_sec, index):
                 files.append(output_path)
     finally:
         if old_review_mode and old_review_mode != VLM_OUTPUT_MODE:
