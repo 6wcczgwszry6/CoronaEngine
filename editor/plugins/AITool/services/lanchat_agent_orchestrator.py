@@ -108,7 +108,7 @@ class LanChatAgentOrchestrator:
                 trigger = self._with_opinion_plan_context(trigger, opinion_plan)
 
         if self._is_gm_trigger(trigger) and self._is_control_without_proposal_id(text):
-            control = self._gm_control_response(trigger, state)
+            control = self._gm_control_response(trigger, state, history)
             if control is not None:
                 return AgentOrchestrationResult(
                     text=control,
@@ -130,7 +130,7 @@ class LanChatAgentOrchestrator:
             )
 
         if self._is_gm_trigger(trigger):
-            control = self._gm_control_response(trigger, state)
+            control = self._gm_control_response(trigger, state, history)
             if control is not None:
                 return AgentOrchestrationResult(
                     text=control,
@@ -189,7 +189,12 @@ class LanChatAgentOrchestrator:
     def _is_discussion_intent(self, text: str) -> bool:
         return any(word in str(text or "") for word in self._DISCUSSION_WORDS)
 
-    def _gm_control_response(self, trigger: dict[str, Any], state: DiscussionState) -> str | None:
+    def _gm_control_response(
+        self,
+        trigger: dict[str, Any],
+        state: DiscussionState,
+        history: list[dict[str, Any]] | None = None,
+    ) -> str | None:
         text = str(trigger.get("text") or "").strip()
         if any(word in text for word in ("暂停", "先停", "等一下")):
             self._session_mode = "PAUSED"
@@ -204,7 +209,8 @@ class LanChatAgentOrchestrator:
             self._set_runtime_mode("DISCUSSING")
             return "【GM】已切到讨论模式。当前只整理方案和约束，不会写入场景。"
         if any(word in text for word in ("整理", "总结", "大家的想法", "当前想法")):
-            return self._build_gm_summary(state)
+            gm_state = self._summary_service.monitor_for_gm_summary(history or self._history_from_trigger(trigger))
+            return self._build_gm_summary(gm_state)
         return None
 
     def _set_runtime_mode(self, mode: str) -> None:

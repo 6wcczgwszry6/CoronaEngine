@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from plugins.AITool.services.lanchat_agent_orchestrator import LanChatAgentOrchestrator  # noqa: E402
+from plugins.AITool.services.lanchat_summary_service import LANChatSummaryService  # noqa: E402
 from plugins.AITool.services.lanchat_host_action_executor import LanChatHostActionExecutor  # noqa: E402
 from plugins.AITool.services.lanchat_agent_worker import (  # noqa: E402
     LANChatAgentWorker,
@@ -366,6 +367,58 @@ def test_gm_summary_does_not_create_proposal():
     assert "GM 总结" in result.text
     assert "GM 提案" not in result.text
     print("[OK] @GM summary stays on GM control path without proposal")
+
+
+def test_gm_summary_reads_agent_design_context_without_affecting_normal_summary():
+    history = [
+        {
+            "message_id": "m0",
+            "from": "房主",
+            "sender_type": "user",
+            "message_kind": "chat",
+            "text": "围绕强盗藏宝室主题讨论一下",
+        },
+        {
+            "message_id": "m1",
+            "from": "长者",
+            "sender_type": "agent",
+            "message_kind": "agent_reply",
+            "text": "方案建议：地下藏宝室，中央放金币堆和藏宝箱，两侧布置火把、武器架和酒桶。",
+        },
+        {
+            "message_id": "m2",
+            "from": "商人",
+            "sender_type": "agent",
+            "message_kind": "agent_reply",
+            "text": "评价：这个方案适合包装成强盗首领的秘密金库，建议增加核心宝物和入口引导。",
+        },
+        {
+            "message_id": "m3",
+            "from": "GM",
+            "sender_type": "user",
+            "message_kind": "chat",
+            "text": "@GM 总结一下当前方案",
+        },
+    ]
+
+    normal_state = LANChatSummaryService().monitor(history)
+    assert "长者" not in normal_state.summary
+    assert "商人" not in normal_state.summary
+
+    orch = LanChatAgentOrchestrator(agent_factory=_agent_factory)
+    trigger = _trigger("@GM 总结一下当前方案", "GM")
+    trigger["agent_id"] = "gm"
+    trigger["history"] = history
+    result = orch.handle_trigger(trigger)
+
+    assert result.sender_id == "gm-system"
+    assert result.proposal is False
+    assert "GM 总结" in result.text
+    assert "长者" in result.text
+    assert "商人" in result.text
+    assert "藏宝箱" in result.text
+    assert "GM 提案" not in result.text
+    print("[OK] @GM summary reads selected Agent design context without proposal")
 
 
 def test_role_agent_not_hijacked_by_prior_agent_or_gm_messages():
@@ -4312,6 +4365,7 @@ if __name__ == "__main__":
     test_gm_proposal_for_conflict()
     test_gm_generation_proposal_explains_plan_and_confirmation_effect()
     test_gm_summary_does_not_create_proposal()
+    test_gm_summary_reads_agent_design_context_without_affecting_normal_summary()
     test_role_agent_not_hijacked_by_prior_agent_or_gm_messages()
     test_role_agent_theme_discussion_not_hijacked_by_gm()
     test_role_agent_advice_request_not_hijacked_by_gm()
