@@ -227,6 +227,10 @@ assertIncludes(cefBridge, 'correlation_id, metadata_json', 'LANChat send_message
 assertIncludes(cefBridge, 'const uint16_t actual_port = sys->session_port() != 0 ? sys->session_port() : port', 'LANChat start_room must return the actual session port');
 assertIncludes(cefBridge, 'const std::string nickname = payload_arg.value("nickname", "房主")', 'LANChat start_room must read host nickname from payload');
 assertIncludes(cefBridge, 'data["you"] = host_nickname', 'LANChat start_room must return the final host nickname');
+assertIncludes(cefBridge, 'detect_wlan_ipv4', 'LANChat displayed IP must use a WLAN-preferred adapter detector');
+assertIncludes(cefBridge, 'GetAdaptersAddresses', 'Windows LANChat displayed IP must enumerate adapters instead of hostname DNS order');
+assertIncludes(cefBridge, 'looks_like_wlan_adapter', 'LANChat displayed IP must explicitly prefer WLAN/Wi-Fi adapters');
+assertIncludes(cefBridge, 'data["ip"] = detect_wlan_ipv4()', 'LANChat start_room must display the WLAN-preferred host IP');
 assertIncludes(cefBridge, 'func == "start_local_room"', 'LANChat bridge must expose start_local_room for single-player rooms');
 assertIncludes(cefBridge, 'func == "stop_local_room"', 'LANChat bridge must expose stop_local_room for single-player rooms');
 assertIncludes(cefBridge, 'func == "get_history"', 'LANChat bridge must expose get_history for explicit history reload');
