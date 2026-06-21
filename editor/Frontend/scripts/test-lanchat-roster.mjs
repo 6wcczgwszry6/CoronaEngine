@@ -183,6 +183,29 @@ if (roomPanel.includes("label: 'AI 专家组'") || roomPanel.includes("key: 'sol
 assertIncludes(memberList, 'peerId', 'MemberList must accept peerId prop');
 assertIncludes(memberList, 'a.owner === peerId', 'agent remove visibility must compare owner to peerId');
 assertIncludes(memberList, '<div class="text-sm">', 'MemberList must keep readable CEF font size');
+assertIncludes(roomPanel, '@add-agent="showAddAgent = true"', 'RoomPanel must move add-agent entry into the member list');
+assertIncludes(memberList, "defineEmits(['remove-agent', 'add-agent'])", 'MemberList must expose add-agent from the AI list');
+assertIncludes(memberList, 'group-hover:opacity-100', 'MemberList agent remove button must appear only on hover');
+assertIncludes(memberList, '添加助手', 'MemberList must render add assistant as the final AI list action');
+if (roomPanel.includes('v-for="action in draftActions"') || roomPanel.includes('selectedDraftAction === action.key')) {
+  fail('RoomPanel must not render the draft action button row above the target/agent row');
+}
+if (roomPanel.includes('＋助手')) {
+  fail('RoomPanel room header must not render the old add assistant button');
+}
+if (
+  roomPanel.includes('快速模板') ||
+  roomPanel.includes('夜市验证组') ||
+  roomPanel.includes('selectRoleTemplate') ||
+  roomPanel.includes('addRoleTemplateBundle')
+) {
+  fail('RoomPanel add assistant dialog must only keep custom name/persona inputs and actions');
+}
+assertIncludes(roomPanel, 'function onAddAgentBackdropPointerDown', 'RoomPanel add assistant backdrop must track pointer starts');
+assertIncludes(roomPanel, 'function onAddAgentBackdropPointerUp', 'RoomPanel add assistant backdrop must not close after textarea resize drags');
+if (roomPanel.includes('@click.self="showAddAgent = false"')) {
+  fail('RoomPanel add assistant dialog must not close from click.self because textarea resize drags can end on the backdrop');
+}
 
 assertIncludes(networkHeader, 'session_port() const', 'NetworkSystem must expose the active ENet listen port');
 assertIncludes(networkHeader, 'lanchat_start_local_room', 'NetworkSystem must expose a local LANChat room path that does not start collaboration networking');

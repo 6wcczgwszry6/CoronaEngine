@@ -152,13 +152,6 @@
           >
             {{ roomStatusLabel }}
           </span>
-          <button
-            class="px-2.5 py-1.5 rounded bg-[#84A65B]/85 text-white text-sm"
-            title="添加 AI 助手"
-            @click="showAddAgent = true"
-          >
-            ＋助手
-          </button>
           <button class="px-2.5 py-1.5 rounded bg-red-500/80 text-white text-sm" @click="onLeave">
             {{ s.role === 'host' ? '关闭' : '离开' }}
           </button>
@@ -333,31 +326,6 @@
           </div>
           <div class="p-3 border-t border-gray-600 flex gap-2">
             <div class="relative flex-1 space-y-2">
-              <div class="flex flex-wrap items-center gap-1.5">
-                <button
-                  v-for="action in draftActions"
-                  :key="action.key"
-                  class="px-2.5 py-1 rounded text-xs"
-                  :class="selectedDraftAction === action.key ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a] text-gray-300 hover:bg-[#4a4a4a]'"
-                  :title="action.hint"
-                  @click="selectDraftAction(action.key)"
-                >
-                  {{ action.label }}
-                </button>
-                <select
-                  v-model="selectedTargetKey"
-                  class="ml-auto min-w-[112px] rounded bg-[#2a2a2a] border border-gray-600 px-2 py-1 text-xs text-gray-100 outline-none focus:border-[#84A65B]"
-                  @change="applyInputRouteState"
-                >
-                  <option
-                    v-for="target in targetOptions"
-                    :key="target.key"
-                    :value="target.key"
-                  >
-                    {{ target.label }}
-                  </option>
-                </select>
-              </div>
               <div class="flex flex-wrap gap-1.5">
                 <button
                   v-for="target in targetQuickOptions"
@@ -417,6 +385,7 @@
           :agents="s.agents"
           :peer-id="s.peerId"
           @remove-agent="onRemoveAgent"
+          @add-agent="showAddAgent = true"
         />
         </div>
       </div>
@@ -427,42 +396,18 @@
       <div
         v-if="showAddAgent"
         class="absolute inset-0 bg-black/50 flex items-center justify-center z-10"
-        @click.self="showAddAgent = false"
+        @pointerdown="onAddAgentBackdropPointerDown"
+        @pointerup="onAddAgentBackdropPointerUp"
       >
-	        <div class="bg-[#2a2a2a] p-4 rounded w-72 space-y-3">
-	          <div class="text-sm text-gray-200">添加 AI 助手</div>
-	          <div class="space-y-2">
-	            <div class="text-[11px] text-gray-400">快速模板</div>
-		            <div class="grid grid-cols-3 gap-1.5">
-		              <button
-		                v-for="role in roleTemplates"
-		                :key="role.key"
-	                class="px-2 py-1 rounded bg-[#3a3a3a] text-xs text-gray-200 hover:bg-[#84A65B]/70"
-	                :title="role.hint"
-	                @click="selectRoleTemplate(role)"
-	              >
-		                {{ role.name }}
-		              </button>
-		            </div>
-		            <div class="flex gap-1.5 pt-1">
-		              <button
-		                v-for="bundle in roleTemplateBundles"
-		                :key="bundle.key"
-		                class="flex-1 px-2 py-1 rounded bg-[#42543b] text-xs text-gray-100 hover:bg-[#84A65B]/80"
-		                :title="bundle.hint"
-		                @click="addRoleTemplateBundle(bundle)"
-		              >
-		                {{ bundle.name }}
-		              </button>
-		            </div>
-		          </div>
-	          <input v-model="agentForm.name" placeholder="助手名字（如 小策）" :class="inputCls" />
-	          <textarea
-	            v-model="agentForm.persona"
-	            placeholder="人设提示词（可选，也可直接写自定义角色）"
-	            rows="3"
-	            :class="inputCls"
-	          ></textarea>
+        <div class="bg-[#2a2a2a] p-4 rounded w-[26rem] max-w-[calc(100%-2rem)] space-y-3">
+          <div class="text-sm text-gray-200">添加 AI 助手</div>
+          <input v-model="agentForm.name" placeholder="助手名字（如 小策）" :class="inputCls" />
+          <textarea
+            v-model="agentForm.persona"
+            placeholder="人设提示词（可选，也可直接写自定义角色）"
+            rows="3"
+            :class="inputCls"
+          ></textarea>
           <div class="flex gap-2">
             <button class="flex-1 py-1.5 rounded bg-[#3a3a3a] text-gray-200 text-sm" @click="showAddAgent = false">取消</button>
             <button class="flex-1 py-1.5 rounded bg-[#84A65B] text-white text-sm" @click="onAddAgent">添加</button>
@@ -509,6 +454,7 @@ const selectedDraftAction = ref(s.draftAction || 'chat');
 const selectedTargetKey = ref('group');
 const showAddAgent = ref(false);
 const agentForm = reactive({ name: '', persona: '' });
+const addAgentBackdropPointerStarted = ref(false);
 const mentionCandidates = ref([]);
 const mentionActiveIndex = ref(0);
 const msgRef = ref(null);
@@ -556,14 +502,6 @@ const roleTemplates = [
   },
 ];
 
-const roleTemplateBundles = [
-  {
-    key: 'night_market_validation',
-    name: '夜市验证组',
-    hint: '一键添加长者、商人、小女孩、山贼，适合今晚多人/多 Agent 验证',
-    roles: ['elder', 'merchant', 'little_girl', 'bandit'],
-  },
-];
 const defaultExpertRoleKeys = roleTemplates.map((role) => role.key);
 const expertGroupConfig = reactive(createExpertGroupConfig(roleTemplates, defaultExpertRoleKeys));
 
@@ -1254,23 +1192,21 @@ async function onAddAgent() {
   agentForm.name = '';
   agentForm.persona = '';
   showAddAgent.value = false;
+  addAgentBackdropPointerStarted.value = false;
 }
 
-function selectRoleTemplate(role) {
-  agentForm.name = role.name;
-  agentForm.persona = role.persona;
+function onAddAgentBackdropPointerDown(event) {
+  addAgentBackdropPointerStarted.value = event.target === event.currentTarget;
 }
 
-async function addRoleTemplateBundle(bundle) {
-  const keys = Array.isArray(bundle?.roles) ? bundle.roles : [];
-  for (const key of keys) {
-    const role = roleTemplates.find((item) => item.key === key);
-    if (!role) continue;
-    await lanchat.addAgent({ name: role.name, persona: role.persona });
+function onAddAgentBackdropPointerUp(event) {
+  const shouldClose =
+    addAgentBackdropPointerStarted.value &&
+    event.target === event.currentTarget;
+  addAgentBackdropPointerStarted.value = false;
+  if (shouldClose) {
+    showAddAgent.value = false;
   }
-  agentForm.name = '';
-  agentForm.persona = '';
-  showAddAgent.value = false;
 }
 
 async function addDefaultExpertGroup() {
