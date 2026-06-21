@@ -473,6 +473,26 @@ void test_lanchat_state_deduplicates_messages_and_tracks_agents() {
     expect_true(state.agents().empty(), "lanchat state agent roster is empty");
 }
 
+void test_lanchat_state_assigns_unique_duplicate_member_names() {
+    Corona::Network::LanChatState state;
+    expect_true(state.open_room("room-a", "host-peer", "Alice"),
+                "lanchat state opens room with host nickname");
+    expect_true(state.join_member("peer-b", "Alice").ok,
+                "lanchat state accepts first duplicate nickname");
+    expect_true(state.join_member("peer-c", "Alice").ok,
+                "lanchat state accepts second duplicate nickname");
+    expect_true(state.join_member("peer-d", "Alice_1").ok,
+                "lanchat state accepts duplicate suffixed nickname");
+
+    const auto& members = state.members();
+    expect_true(members.size() == 4, "lanchat state keeps all duplicate-name members");
+    expect_true(members[0].nickname == "Alice", "host keeps original duplicate base name");
+    expect_true(members[1].nickname == "Alice_1", "first duplicate gets _1 suffix");
+    expect_true(members[2].nickname == "Alice_2", "second duplicate gets _2 suffix");
+    expect_true(members[3].nickname == "Alice_1_1",
+                "duplicate explicit suffixed nickname gets its own suffix");
+}
+
 void test_lanchat_state_updates_authoritative_message_and_history_snapshot() {
     Corona::Network::LanChatState state;
     state.open_room("room-a", "guest-peer", "Alice");
@@ -617,6 +637,30 @@ void test_lanchat_state_enqueues_local_agent_trigger_from_mention() {
     expect_true(trigger->history.size() == 1, "lanchat trigger carries recent history");
     expect_true(!state.pop_agent_trigger().has_value(),
                 "lanchat state does not trigger remote owned agent");
+}
+
+void test_lanchat_state_structured_target_overrides_text_mentions() {
+    Corona::Network::LanChatState state;
+    state.open_room("room-a", "local-peer", "Host");
+    expect_true(state.register_agent("agent-1", "SceneBot", "scene helper", "local-peer").ok,
+                "lanchat state registers first local agent");
+    expect_true(state.register_agent("agent-2", "HelperBot", "helper", "local-peer").ok,
+                "lanchat state registers second local agent");
+
+    auto message = state.record_message_ex(
+        "msg-targeted", "user-peer", "Alice", "@SceneBot @HelperBot 只问第二个", 1000,
+        "user", "chat", "agent-2", "user-peer", "corr-1", "{}");
+    expect_true(message.accepted, "lanchat state accepts targeted agent message");
+
+    state.enqueue_agent_triggers_for_message(message.message, "local-peer");
+    auto trigger = state.pop_agent_trigger();
+    expect_true(trigger.has_value(), "structured target enqueues selected local agent");
+    expect_true(trigger->agent_id == "agent-2",
+                "structured target overrides extra text mentions");
+    expect_true(trigger->correlation_id == "corr-1",
+                "structured target trigger preserves correlation id");
+    expect_true(!state.pop_agent_trigger().has_value(),
+                "structured target does not enqueue mentioned non-target agents");
 }
 
 void test_lanchat_state_implicit_trigger_only_for_single_local_agent() {
@@ -1589,6 +1633,7 @@ int main() {
     test_lanchat_v2_history_snapshot_preserves_message_kind();
     test_lanchat_join_reject_carries_error_code();
     test_lanchat_state_deduplicates_messages_and_tracks_agents();
+    test_lanchat_state_assigns_unique_duplicate_member_names();
     test_lanchat_state_updates_authoritative_message_and_history_snapshot();
     test_lanchat_state_queues_plain_chat_for_coordinator_sync();
     test_lanchat_state_queues_host_chat_for_coordinator_sync();
@@ -1596,6 +1641,7 @@ int main() {
     test_lanchat_state_host_message_can_trigger_local_agent();
     test_lanchat_state_applies_authoritative_member_snapshot();
     test_lanchat_state_enqueues_local_agent_trigger_from_mention();
+    test_lanchat_state_structured_target_overrides_text_mentions();
     test_lanchat_state_implicit_trigger_only_for_single_local_agent();
     test_lanchat_state_deduplicates_agent_triggers();
     test_lanchat_state_does_not_trigger_agent_reply_or_duplicate_names();

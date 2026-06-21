@@ -20,6 +20,7 @@ from .generation_composer_adapter import SceneComposerJobRunner
 MAX_COORDINATOR_SYNC_MESSAGES_PER_TICK = 4
 MAX_ROOM_EVENTS_PER_TICK = 4
 MAX_COORDINATOR_SEEN_MESSAGE_IDS = 2048
+MAX_AGENT_TRIGGER_SEEN_IDS = 2048
 MAX_ACTIVE_ROOM_IDS = 256
 _SENSITIVE_WORKER_PAYLOAD_KEYS = {
     "prompt",
@@ -72,6 +73,8 @@ class LANChatAgentWorker:
         self._agent_call_lock = threading.RLock()
         self._coordinator_seen_message_ids: set[str] = set()
         self._coordinator_seen_message_order: deque[str] = deque()
+        self._agent_trigger_seen_ids: set[str] = set()
+        self._agent_trigger_seen_order: deque[str] = deque()
         self._active_room_ids: set[str] = set()
         self._active_room_order: deque[str] = deque()
         self._progress_disclosure_lock = threading.RLock()
@@ -200,6 +203,22 @@ class LANChatAgentWorker:
             self._remember_room_id(room_id)
             metadata = self._coordinator_sync_metadata(message, source=source)
             active = coordinator.active_plan_for_room(room_id)
+            if self._is_direct_single_agent_chat_route(message, metadata):
+                self._log_scene_route(
+                    room_id=room_id,
+                    sender=str(message.get("sender_name") or message.get("sender_id") or ""),
+                    target_agent=str(
+                        metadata.get("target_agent_name")
+                        or metadata.get("target_agent_id")
+                        or message.get("target_agent_id")
+                        or ""
+                    ),
+                    room_state=str(active.status.value if active is not None else "direct"),
+                    intent="chat",
+                    action="skip_coordinator",
+                    reason="single targeted AI is handled by native agent trigger",
+                )
+                return False
             structured_handled = self._handle_structured_chat_route(message, text, metadata)
             if structured_handled:
                 self._log_scene_route(
@@ -275,6 +294,22 @@ class LANChatAgentWorker:
             return False
         finally:
             self._remember_coordinator_seen_message_id(dedupe_key)
+
+    @staticmethod
+    def _is_direct_single_agent_chat_route(message: dict[str, Any], metadata: dict[str, Any]) -> bool:
+        draft_action = str(metadata.get("draft_action") or "").strip().lower()
+        if draft_action not in {"", "chat"}:
+            return False
+        target_scope = str(metadata.get("target_scope") or "").strip().lower()
+        if target_scope == "group":
+            return False
+        target_agent_id = str(
+            message.get("target_agent_id")
+            or metadata.get("target_agent_id")
+            or ""
+        ).strip()
+        target_agent_name = str(metadata.get("target_agent_name") or "").strip()
+        return bool(target_agent_id or target_agent_name or target_scope in {"agent", "gm"})
 
     def _handle_structured_chat_route(
         self,
@@ -564,6 +599,8 @@ class LANChatAgentWorker:
         return processed
 
     def _process_trigger(self, trigger: dict[str, Any]) -> bool:
+        if not self._claim_agent_trigger(trigger):
+            return False
         self._apply_generation_options_from_message(trigger)
         agent_id = str(trigger.get("agent_id") or "agent")
         agent_name = str(trigger.get("agent_name") or "Agent")
@@ -727,6 +764,37 @@ class LANChatAgentWorker:
         while len(self._coordinator_seen_message_order) > MAX_COORDINATOR_SEEN_MESSAGE_IDS:
             oldest = self._coordinator_seen_message_order.popleft()
             self._coordinator_seen_message_ids.discard(oldest)
+
+    def _claim_agent_trigger(self, trigger: dict[str, Any]) -> bool:
+        key = self._agent_trigger_dedupe_key(trigger)
+        if not key:
+            return True
+        if key in self._agent_trigger_seen_ids:
+            return False
+        self._agent_trigger_seen_ids.add(key)
+        self._agent_trigger_seen_order.append(key)
+        while len(self._agent_trigger_seen_order) > MAX_AGENT_TRIGGER_SEEN_IDS:
+            oldest = self._agent_trigger_seen_order.popleft()
+            self._agent_trigger_seen_ids.discard(oldest)
+        return True
+
+    @staticmethod
+    def _agent_trigger_dedupe_key(trigger: dict[str, Any]) -> str:
+        message_id = str(trigger.get("message_id") or "").strip()
+        correlation_id = str(trigger.get("correlation_id") or "").strip()
+        source_id = message_id or correlation_id
+        if not source_id:
+            return ""
+        room_id = str(trigger.get("room_id") or "default").strip()
+        agent_id = str(
+            trigger.get("agent_id")
+            or trigger.get("target_agent_id")
+            or trigger.get("agent_name")
+            or ""
+        ).strip()
+        if not agent_id:
+            return ""
+        return f"{room_id}:{source_id}:{agent_id}"
 
     def _has_engine_api(self) -> bool:
         return (

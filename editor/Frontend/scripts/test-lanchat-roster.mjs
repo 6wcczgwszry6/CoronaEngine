@@ -20,6 +20,7 @@ const memberList = read('src/views/sidebar/lanchat/MemberList.vue');
 const cefBridge = read('../../src/systems/ui/cef/cef_query_bridge.cpp');
 const networkHeader = read('../../include/corona/systems/network/network_system.h');
 const networkSystem = read('../../src/systems/network/network_system.cpp');
+const lanchatState = read('../../src/systems/network/lanchat_state.cpp');
 
 assertIncludes(store, 'peerId:', 'lanchat store must track local peerId');
 assertIncludes(store, 'memberDetails:', 'lanchat store must track memberDetails');
@@ -40,6 +41,7 @@ assertIncludes(store, 'upsertAgent(added)', 'addAgent must make new agents immed
 assertIncludes(store, 'removeAgentFromRoster(agentId)', 'removeAgent must clear local mention roster optimistically');
 assertIncludes(store, "const scope = String(target.scope || '').trim()", 'lanchat store must allow an empty active target');
 assertIncludes(store, 'if (target.scope) metadata.target_scope = target.scope', 'lanchat store must not serialize scene as the default target scope');
+assertIncludes(store, 'const selfMember = state.peerId', 'lanchat store must sync the final authoritative nickname from member snapshots');
 if (store.includes("setActiveTarget({ scope: 'group' })")) {
   fail('lanchat store must not default workspace mode changes to the all-assistant group target');
 }
@@ -90,7 +92,16 @@ assertIncludes(store, 'lanChatService.startRoom', 'multiplayer rooms must keep u
 
 assertIncludes(roomPanel, 'member.member_id !== s.peerId', 'mention candidates must filter local member_id');
 assertIncludes(roomPanel, 'targetKey: `agent:${a.agent_id || a.name}`', 'mention candidates must include agents with route targets');
-if (roomPanel.includes(':peer-id="s.peerId"') || memberList.includes('a.owner === peerId')) {
+assertIncludes(roomPanel, ':peer-id="s.peerId"', 'MemberList must know the local peer id for the self marker');
+assertIncludes(roomPanel, ':member-details="s.memberDetails"', 'MemberList must receive stable member ids for the self marker');
+assertIncludes(roomPanel, ':show-self-marker="s.mode === \'multi\'"', 'MemberList must only mark the local user in multiplayer rooms');
+assertIncludes(roomPanel, 'displayText: aiReplyDisplayText(message, s.messages || [], s.memberDetails || [])', 'RoomPanel must decorate AI replies only at render time');
+assertIncludes(roomPanel, 'displayFrom: displaySenderName(message)', 'RoomPanel must decorate assistant sender names only at render time');
+assertIncludes(roomPanel, 'm.displayFrom || m.from', 'RoomPanel must render decorated sender names in chat messages');
+assertIncludes(roomPanel, 'text-base leading-relaxed text-gray-400 mb-1', 'RoomPanel chat sender names must match message text size');
+assertIncludes(roomPanel, "`🤖${plainTargetLabel}`", 'RoomPanel pending assistant replies must show the assistant emoji');
+assertIncludes(roomPanel, 'displaySenderName,', 'RoomPanel must import assistant sender-name decoration');
+if (memberList.includes('a.owner === peerId')) {
   fail('MemberList must allow every AI assistant row to show its delete action');
 }
 assertIncludes(roomPanel, 'text-[15px]', 'RoomPanel must keep readable 15px chat/input text for CEF validation');
@@ -218,12 +229,14 @@ assertIncludes(roomPanel, 'function currentModelTransferSceneName', 'RoomPanel m
 assertIncludes(roomPanel, "s.role !== 'guest' || s.mode !== 'multi'", 'RoomPanel model transfer request must only run for multiplayer guests');
 assertIncludes(roomPanel, "s.connection !== 'connected'", 'RoomPanel model transfer request must wait until LANChat join is connected');
 assertIncludes(roomPanel, 'v-if="s.mode === \'multi\'"', 'RoomPanel must only show connection status pill for multiplayer rooms');
-assertIncludes(roomPanel, "s.mode === 'single' ? '退出聊天'", 'RoomPanel single-player close button must read as exiting chat');
+assertIncludes(roomPanel, "s.mode === 'multi' && s.role === 'host' ? '关闭房间' : '退出聊天'", 'RoomPanel room close button must distinguish host close from participant exit');
 if (roomPanel.includes("key: 'solo_multi_agent'")) {
   fail('RoomPanel first-level lobby must not expose a separate all-AI entry');
 }
 
 assertIncludes(memberList, '<div class="text-sm">', 'MemberList must keep readable CEF font size');
+assertIncludes(memberList, 'displayedMembers', 'MemberList must render member display rows from stable ids');
+assertIncludes(memberList, '`${nickname}（我）`', 'MemberList must mark the current user in multiplayer rooms');
 assertIncludes(roomPanel, '@add-agent="showAddAgent = true"', 'RoomPanel must move add-agent entry into the member list');
 assertIncludes(memberList, "defineEmits(['remove-agent', 'add-agent'])", 'MemberList must expose add-agent from the AI list');
 assertIncludes(memberList, 'group-hover:opacity-100', 'MemberList agent remove button must appear only on hover');
@@ -313,6 +326,9 @@ assertIncludes(networkSystem, 'send_to_connected_host_peer(packet)', 'clients mu
 assertIncludes(networkSystem, 'result = impl_->lanchat.record_message', 'host must assign authoritative LANChat message sequence');
 assertIncludes(networkSystem, 'result = impl_->lanchat.apply_remote_message', 'clients must only apply authoritative LANChat messages');
 assertIncludes(networkSystem, 'skipped history snapshot', 'missing join peer must not fall back to broadcasting history');
+assertIncludes(networkSystem, 'impl_->lanchat_nickname = member.nickname', 'clients must use the authoritative de-duplicated nickname when sending messages');
+assertIncludes(lanchatState, 'unique_member_nickname', 'LANChat state must assign unique nicknames for duplicate room members');
+assertIncludes(lanchatState, 'base + "_" + std::to_string(suffix)', 'LANChat duplicate nicknames must use underscore-number suffixes');
 assertIncludes(cefBridge, 'payload["listen_port"] = sys->session_port()', 'Network bridge must expose the local ENet listen port');
 assertIncludes(cefBridge, 'payload_arg["metadata"].dump()', 'LANChat send_message must serialize structured metadata for native delivery');
 assertIncludes(cefBridge, 'const std::string message_kind = payload_arg.value("message_kind", "chat")', 'LANChat send_message must preserve structured message_kind');

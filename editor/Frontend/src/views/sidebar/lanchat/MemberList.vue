@@ -3,11 +3,11 @@
     <!-- 人类成员 -->
     <div class="px-2 pb-1 text-gray-400">成员</div>
     <div
-      v-for="(m, idx) in members"
-      :key="'m-' + idx"
+      v-for="m in displayedMembers"
+      :key="m.key"
       class="px-2 py-1.5 truncate text-gray-200"
     >
-      {{ m }}
+      {{ m.label }}
     </div>
 
     <!-- AI 助手 -->
@@ -40,9 +40,32 @@
 </template>
 
 <script setup>
-defineProps({
+import { computed } from 'vue';
+
+const props = defineProps({
   members: { type: Array, default: () => [] },
+  memberDetails: { type: Array, default: () => [] },
+  peerId: { type: String, default: '' },
+  showSelfMarker: { type: Boolean, default: false },
   agents: { type: Array, default: () => [] },
 });
 defineEmits(['remove-agent', 'add-agent']);
+
+const displayedMembers = computed(() => {
+  const details = Array.isArray(props.memberDetails) ? props.memberDetails : [];
+  if (details.length) {
+    return details.map((member, index) => {
+      const memberId = String(member.member_id || member.id || '');
+      const nickname = String(member.nickname || member.name || '');
+      const isSelf = props.showSelfMarker && memberId && memberId === props.peerId;
+      return {
+        key: memberId || `m-${index}`,
+        label: isSelf ? `${nickname}（我）` : nickname,
+      };
+    }).filter((member) => member.label);
+  }
+  return (Array.isArray(props.members) ? props.members : [])
+    .map((name, index) => ({ key: `m-${index}`, label: String(name || '') }))
+    .filter((member) => member.label);
+});
 </script>

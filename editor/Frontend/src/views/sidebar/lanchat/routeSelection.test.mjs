@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 
 import {
+  aiReplyAddressedUserName,
+  aiReplyDisplayText,
+  displaySenderName,
   pendingReplyMatchesMessage,
   resolveSelectedTargetKey,
   routeGuardMessage,
@@ -68,6 +71,103 @@ assert.equal(
     pending
   ),
   false
+);
+
+const memberDetails = [
+  { member_id: 'u1', nickname: 'Alice' },
+  { member_id: 'u2', nickname: 'Alice_1' },
+];
+const sourceMessages = [
+  {
+    message_id: 'ask-1',
+    sender_id: 'u1',
+    from: 'Alice',
+    sender_type: 'user',
+    message_kind: 'chat',
+    target_agent_id: 'agent-merchant',
+    correlation_id: 'corr-1',
+    text: '@鍟嗕汉 方案一',
+  },
+  {
+    message_id: 'ask-2',
+    sender_id: 'u2',
+    from: 'Alice_1',
+    sender_type: 'user',
+    message_kind: 'chat',
+    target_agent_id: 'agent-merchant',
+    correlation_id: 'corr-2',
+    text: '@鍟嗕汉 方案二',
+  },
+];
+assert.equal(
+  aiReplyDisplayText(
+    {
+      sender_id: 'agent-merchant',
+      sender_type: 'agent',
+      message_kind: 'agent_reply',
+      source_user_id: 'u1',
+      correlation_id: 'corr-1',
+      text: '回复一',
+    },
+    sourceMessages,
+    memberDetails
+  ),
+  '@Alice 回复一'
+);
+assert.equal(
+  aiReplyDisplayText(
+    {
+      sender_id: 'agent-merchant',
+      sender_type: 'agent',
+      message_kind: 'agent_reply',
+      source_user_id: 'u2',
+      correlation_id: 'corr-2',
+      text: '回复二',
+    },
+    sourceMessages,
+    memberDetails
+  ),
+  '@Alice_1 回复二'
+);
+assert.equal(
+  displaySenderName({
+    sender_id: 'agent-merchant',
+    from: '商人',
+    sender_type: 'agent',
+    message_kind: 'agent_reply',
+  }),
+  '🤖商人'
+);
+assert.equal(
+  displaySenderName({
+    sender_id: 'u1',
+    from: 'Alice',
+    sender_type: 'user',
+    message_kind: 'chat',
+  }),
+  'Alice'
+);
+assert.equal(
+  aiReplyAddressedUserName(
+    {
+      sender_id: 'agent-merchant',
+      sender_type: 'agent',
+      message_kind: 'agent_reply',
+      correlation_id: 'corr-2',
+      text: '缺 source_user_id 时按 correlation 回找',
+    },
+    sourceMessages,
+    []
+  ),
+  'Alice_1'
+);
+assert.equal(
+  aiReplyDisplayText(
+    { sender_id: 'u1', sender_type: 'user', message_kind: 'chat', text: '普通消息' },
+    sourceMessages,
+    memberDetails
+  ),
+  '普通消息'
 );
 
 assert.equal(routeGuardMessage('chat', options[0]), '');

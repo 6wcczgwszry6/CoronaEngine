@@ -183,7 +183,7 @@
             {{ roomStatusLabel }}
           </span>
           <button class="px-2.5 py-1.5 rounded bg-red-500/80 text-white text-sm" @click="onLeave">
-            {{ s.mode === 'single' ? '退出聊天' : (s.role === 'host' ? '关闭' : '离开') }}
+            {{ s.mode === 'multi' && s.role === 'host' ? '关闭房间' : '退出聊天' }}
           </button>
         </div>
       </div>
@@ -289,7 +289,7 @@
               :class="m.self ? 'items-end' : 'items-start'"
             >
               <template v-if="m.kind === 'pending_reply'">
-                <span class="max-w-[88%] truncate text-[12px] text-gray-400 mb-1">{{ m.targetLabel }}</span>
+                <span class="max-w-[88%] truncate text-base leading-relaxed text-gray-400 mb-1">{{ m.targetLabel }}</span>
                 <div class="lanchat-message-bubble rounded-lg bg-[#E8E8E8]/90 px-3.5 py-2.5 text-gray-800 shadow-sm">
                   <div class="flex items-center gap-2 text-[15px] leading-relaxed">
                     <span class="inline-block h-4 w-4 rounded-full border-2 border-gray-400 border-t-[#84A65B] animate-spin"></span>
@@ -302,12 +302,12 @@
                 </div>
               </template>
               <template v-else>
-                <span class="max-w-[88%] truncate text-[12px] text-gray-400 mb-1">{{ m.from }}</span>
+                <span class="max-w-[88%] truncate text-base leading-relaxed text-gray-400 mb-1">{{ m.displayFrom || m.from }}</span>
                 <div
                   class="lanchat-message-bubble px-3.5 py-2.5 rounded-lg text-base leading-relaxed"
                   :class="m.self ? 'bg-[#84A65B] text-white' : 'bg-[#E8E8E8]/90 text-gray-800'"
                 >
-                  {{ m.text }}
+                  {{ m.displayText || m.text }}
                 </div>
                 <div
                   v-if="isGmProposalActionable(m) && s.role === 'host'"
@@ -407,6 +407,9 @@
         <div class="w-36 border-l border-gray-600 py-2 overflow-y-auto">
         <MemberList
           :members="s.members"
+          :member-details="s.memberDetails"
+          :peer-id="s.peerId"
+          :show-self-marker="s.mode === 'multi'"
           :agents="s.agents"
           @remove-agent="onRemoveAgent"
           @add-agent="showAddAgent = true"
@@ -456,6 +459,8 @@ import {
 } from '../../../stores/lanchatDisclosure.js';
 import MemberList from './MemberList.vue';
 import {
+  aiReplyDisplayText,
+  displaySenderName,
   pendingReplyMatchesMessage,
   resolveSelectedTargetKey,
   routeGuardMessage,
@@ -700,6 +705,8 @@ const pendingReplyHint = computed(() => {
 const displayMessages = computed(() => {
   const messages = (s.messages || []).map((message, index) => ({
     ...message,
+    displayFrom: displaySenderName(message),
+    displayText: aiReplyDisplayText(message, s.messages || [], s.memberDetails || []),
     renderKey: message.message_id || `message-${index}`,
     kind: 'message',
   }));
@@ -1234,7 +1241,10 @@ function makePendingCorrelationId() {
 function pendingReplyForText() {
   const target = selectedTarget.value;
   if (!target || !['agent', 'gm'].includes(target.scope)) return null;
-  const targetLabel = target.label || target.agentName || 'AI 助手';
+  const plainTargetLabel = target.label || target.agentName || 'AI 助手';
+  const targetLabel = target.scope === 'agent' && !plainTargetLabel.startsWith('🤖')
+    ? `🤖${plainTargetLabel}`
+    : plainTargetLabel;
   return {
     correlationId: makePendingCorrelationId(),
     targetAgentId: target.agentId || '',

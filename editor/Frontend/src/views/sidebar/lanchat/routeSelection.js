@@ -62,6 +62,71 @@ export function pendingReplyMatchesMessage(message = {}, pending = {}) {
   return !pendingTargetId || !targetId || targetId === pendingTargetId || pendingTargetId === 'gm';
 }
 
+export function isAiAssistantReply(message = {}) {
+  const kind = String(message.message_kind || '').toLowerCase();
+  if (kind !== 'agent_reply') return false;
+  const senderType = String(message.sender_type || '').toLowerCase();
+  return !['user', 'host', 'system'].includes(senderType);
+}
+
+function userMessageMatchesCorrelation(message = {}, correlationId = '') {
+  if (!correlationId) return false;
+  if (String(message.correlation_id || '').trim() !== correlationId) return false;
+  const kind = String(message.message_kind || '').toLowerCase();
+  if (kind && kind !== 'chat' && kind !== 'confirmation') return false;
+  const senderType = String(message.sender_type || '').toLowerCase();
+  return !['agent', 'gm', 'system'].includes(senderType);
+}
+
+export function displayNameForMemberId(memberId = '', memberDetails = [], messages = []) {
+  const id = String(memberId || '').trim();
+  if (!id) return '';
+  const members = Array.isArray(memberDetails) ? memberDetails : [];
+  const member = members.find((item) => String(item.member_id || item.id || '') === id);
+  if (member?.nickname || member?.name) return member.nickname || member.name;
+  const history = Array.isArray(messages) ? messages : [];
+  const authored = history.find((item) => (
+    String(item.sender_id || '').trim() === id &&
+    !['agent', 'gm', 'system'].includes(String(item.sender_type || '').toLowerCase()) &&
+    String(item.from || '').trim()
+  ));
+  return authored?.from || '';
+}
+
+export function aiReplyAddressedUserName(message = {}, messages = [], memberDetails = []) {
+  if (!isAiAssistantReply(message)) return '';
+  const sourceUserId = String(message.source_user_id || '').trim();
+  const bySource = displayNameForMemberId(sourceUserId, memberDetails, messages);
+  if (bySource) return bySource;
+
+  const correlationId = String(message.correlation_id || '').trim();
+  const sourceMessage = (Array.isArray(messages) ? messages : []).find((item) => (
+    item !== message && userMessageMatchesCorrelation(item, correlationId)
+  ));
+  if (sourceMessage?.from) return sourceMessage.from;
+  return '';
+}
+
+export function aiReplyDisplayText(message = {}, messages = [], memberDetails = []) {
+  const text = String(message.text || '');
+  const userName = aiReplyAddressedUserName(message, messages, memberDetails);
+  return userName ? `@${userName} ${text}` : text;
+}
+
+export function displaySenderName(message = {}) {
+  const name = String(message.from || '').trim();
+  if (!name) return '';
+  const senderType = String(message.sender_type || '').toLowerCase();
+  const kind = String(message.message_kind || '').toLowerCase();
+  const isAssistant = (
+    (kind === 'agent_reply' && !['user', 'host', 'system'].includes(senderType)) ||
+    senderType === 'agent' ||
+    senderType === 'gm'
+  );
+  if (!isAssistant || name.startsWith('🤖')) return name;
+  return `🤖${name}`;
+}
+
 export function routeGuardMessage(action, target = {}, text = '') {
   if (/^@([^\s，,：:]+)/.test(String(text || '').trim())) return '';
   const draftAction = String(action || '').trim();

@@ -2836,6 +2836,53 @@ def test_worker_plain_chat_dedupe_cache_is_bounded():
     print("[OK] worker plain chat Coordinator dedupe cache is bounded")
 
 
+def test_worker_targeted_agent_message_replies_once_across_sync_and_trigger():
+    metadata = {
+        "draft_action": "chat",
+        "target_scope": "agent",
+        "target_agent_id": "agent-b",
+        "target_agent_name": "小B",
+    }
+    message = {
+        "message_id": "targeted-agent-1",
+        "room_id": "r-targeted",
+        "sender_id": "user-a",
+        "sender_name": "用户A",
+        "sender_type": "user",
+        "message_kind": "chat",
+        "target_agent_id": "agent-b",
+        "correlation_id": "corr-targeted-1",
+        "text": "@小B 你好",
+        "metadata_json": json.dumps(metadata, ensure_ascii=False),
+    }
+    trigger = {
+        **message,
+        "trigger_id": "targeted-agent-1:agent-b",
+        "agent_id": "agent-b",
+        "agent_name": "小B",
+        "persona": "山贼",
+        "history": [message],
+    }
+    engine = FakeEngine(
+        [dict(trigger), dict(trigger)],
+        coordinator_messages=[dict(message)],
+    )
+    worker = LANChatAgentWorker(
+        corona_engine=engine,
+        agent_factory=_agent_factory,
+        interaction_coordinator=InteractionCoordinator(scheduler=FakeScheduler()),
+        generation_scheduler=FakeScheduler(),
+        async_agent_execution=False,
+    )
+
+    assert worker.process_once() is True
+    assert len(engine.replies) == 1
+    assert engine.replies[0][0] == "agent-b"
+    assert worker.process_once() is False
+    assert len(engine.replies) == 1
+    print("[OK] targeted agent chat replies once across Coordinator sync and native trigger")
+
+
 def test_worker_syncs_plain_chat_metadata_actor_target_to_coordinator():
     scheduler = FakeScheduler()
     coordinator = InteractionCoordinator(scheduler=scheduler)
@@ -3679,6 +3726,7 @@ if __name__ == "__main__":
     test_worker_syncs_direct_plain_chat_as_runtime_intervention()
     test_worker_syncs_plain_chat_without_message_id_once()
     test_worker_plain_chat_dedupe_cache_is_bounded()
+    test_worker_targeted_agent_message_replies_once_across_sync_and_trigger()
     test_worker_syncs_plain_chat_metadata_actor_target_to_coordinator()
     test_worker_polls_native_plain_chat_queue_into_coordinator()
     test_worker_polls_native_host_chat_as_host_message()
