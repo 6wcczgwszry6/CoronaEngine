@@ -452,6 +452,43 @@ async function continueHistoryAsLocalRoom({ room, nickname } = {}) {
   return res;
 }
 
+async function continueHistoryAsMultiRoom({ room, port, nickname } = {}) {
+  const roomId = String(room || state.selectedHistoryRoom?.room_id || '').trim();
+  if (!roomId) return { ok: false, error: 'ROOM_REQUIRED' };
+
+  state.error = '';
+  state.workspaceMode = 'multiplayer_multi_agent';
+  const hostNickname = (nickname || HOST_NICKNAME).trim() || HOST_NICKNAME;
+  const previewMessages = [...state.messages];
+  const previewAgents = [...state.agents];
+  const res = await lanChatService.startRoom({
+    room: roomId,
+    password: '',
+    port,
+    nickname: hostNickname,
+    mode: 'multi',
+    restore_history: true,
+    history_room: roomId,
+  });
+  if (res && res.ok) {
+    applyHostRoomState({ room: roomId, mode: 'multi', res, hostNickname });
+    const restoredHistory = Array.isArray(res.history) && res.history.length
+      ? res.history
+      : previewMessages;
+    const restoredAgents = Array.isArray(res.agents) && res.agents.length
+      ? res.agents
+      : previewAgents;
+    state.agents = restoredAgents;
+    state.myAgents = restoredAgents
+      .filter((agent) => !agent.owner || agent.owner === state.peerId)
+      .map((agent) => ({ ...agent }));
+    applyHistorySnapshot(restoredHistory, true);
+  } else {
+    state.error = (res && res.error) || 'START_FAILED';
+  }
+  return res;
+}
+
 /** 房主开房。返回 { ok, ip, port } 或 { ok:false, error }。 */
 async function openRoom({ room, password, port, nickname, mode = 'multi' }) {
   if (mode === 'single') {
@@ -763,6 +800,7 @@ export const lanchat = {
   openRoom,
   openLocalRoom,
   continueHistoryAsLocalRoom,
+  continueHistoryAsMultiRoom,
   closeRoom,
   joinRoom,
   leaveRoom,

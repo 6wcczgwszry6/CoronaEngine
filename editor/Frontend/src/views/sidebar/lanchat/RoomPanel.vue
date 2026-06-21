@@ -102,6 +102,7 @@
             class="w-full text-left px-3 py-2 rounded bg-[#2a2a2a] border border-gray-700 hover:border-[#84A65B] transition-colors"
             :class="s.selectedHistoryRoom?.room_id === room.room_id ? 'border-[#84A65B]' : ''"
             @click="loadHistoryRoom(room)"
+            @dblclick="continueHistoryFromList(room)"
           >
             <div class="flex items-center justify-between gap-2">
               <span class="font-medium text-gray-100 truncate">{{ historyRoomTitle(room) }}</span>
@@ -111,36 +112,6 @@
               {{ room.message_count || 0 }} 条 · {{ room.last_sender_name || '未知' }}：{{ room.last_text || '' }}
             </div>
           </button>
-        </div>
-        <div
-          v-if="s.selectedHistoryRoom"
-          class="mt-3 border-t border-gray-700 pt-3 space-y-2"
-        >
-          <div class="flex items-center justify-between">
-            <div class="text-sm text-[#B8D58D] truncate">
-              {{ historyRoomTitle(s.selectedHistoryRoom) }}
-            </div>
-            <div class="text-xs text-gray-500">{{ s.messages.length }} 条</div>
-          </div>
-          <button
-            class="w-full py-2 rounded bg-[#84A65B] text-white text-sm disabled:opacity-50"
-            :disabled="s.historyLoading"
-            @click="continueHistoryAsSingle"
-          >
-            作为单人聊天室继续
-          </button>
-          <div class="max-h-56 overflow-y-auto space-y-2 pr-1">
-            <div
-              v-for="m in s.messages"
-              :key="m.message_id || `${m.from}-${m.ts}-${m.text}`"
-              class="text-sm"
-            >
-              <div class="text-xs text-gray-500">{{ m.from }} · {{ formatHistoryTime(m.ts) }}</div>
-              <div class="mt-0.5 rounded bg-[#E8E8E8]/90 text-gray-800 px-3 py-2 leading-relaxed break-words">
-                {{ m.text }}
-              </div>
-            </div>
-          </div>
         </div>
       </div>
 
@@ -178,6 +149,7 @@
             class="w-full text-left px-3 py-2 rounded bg-[#2a2a2a] border border-gray-700 hover:border-[#84A65B] transition-colors"
             :class="s.selectedHistoryRoom?.room_id === room.room_id ? 'border-[#84A65B]' : ''"
             @click="loadHistoryRoom(room)"
+            @dblclick="continueHistoryFromList(room)"
           >
             <div class="flex items-center justify-between gap-2">
               <span class="font-medium text-gray-100 truncate">{{ historyRoomTitle(room) }}</span>
@@ -187,36 +159,6 @@
               {{ room.message_count || 0 }} 条 · {{ room.last_sender_name || '未知' }}：{{ room.last_text || '' }}
             </div>
           </button>
-        </div>
-        <div
-          v-if="s.selectedHistoryRoom"
-          class="border-t border-gray-700 pt-3 space-y-2"
-        >
-          <div class="flex items-center justify-between">
-            <div class="text-sm text-[#B8D58D] truncate">
-              {{ historyRoomTitle(s.selectedHistoryRoom) }}
-            </div>
-            <div class="text-xs text-gray-500">{{ s.messages.length }} 条</div>
-          </div>
-          <button
-            class="w-full py-2 rounded bg-[#84A65B] text-white text-sm disabled:opacity-50"
-            :disabled="s.historyLoading"
-            @click="continueHistoryAsSingle"
-          >
-            作为单人聊天室继续
-          </button>
-          <div class="max-h-56 overflow-y-auto space-y-2 pr-1">
-            <div
-              v-for="m in s.messages"
-              :key="m.message_id || `${m.from}-${m.ts}-${m.text}`"
-              class="text-sm"
-            >
-              <div class="text-xs text-gray-500">{{ m.from }} · {{ formatHistoryTime(m.ts) }}</div>
-              <div class="mt-0.5 rounded bg-[#E8E8E8]/90 text-gray-800 px-3 py-2 leading-relaxed break-words">
-                {{ m.text }}
-              </div>
-            </div>
-          </div>
         </div>
       </div>
     </div>
@@ -645,7 +587,6 @@ const isJoining = computed(() => lanchat.isJoining());
 const joinStatusText = computed(() => (s.connection === 'syncing' ? '正在同步房间…' : '正在连接房主…'));
 const createButtonText = computed(() => {
   if (roomMode.value === 'multi') return '创建多人房间';
-  if (s.selectedHistoryRoom) return '继续所选历史';
   return '进入自己设计';
 });
 const selectedExpertPayloads = computed(() => buildSelectedExpertPayloads(expertGroupConfig, roleTemplates));
@@ -820,7 +761,9 @@ function loadHistoryRoom(room) {
 
 function historyRoomTitle(room) {
   if (!room) return '';
-  return room.room_id === 'single-default' ? '单人聊天室' : room.room_id;
+  const roomId = String(room.room_id || '');
+  if (!roomId) return '';
+  return isLocalSingleRoomId(roomId) ? '单人聊天室' : `多人聊天室-${roomId}`;
 }
 
 function formatHistoryTime(ts) {
@@ -890,10 +833,6 @@ function applyInputRouteState() {
 async function onCreate() {
   selectWorkspaceMode(selectedWorkspaceMode.value);
   if (roomMode.value === 'single') {
-    if (s.selectedHistoryRoom) {
-      await continueHistoryAsSingle();
-      return;
-    }
     const res = await lanchat.openRoom({
       room: makeLocalRoomId(),
       password: '',
@@ -916,13 +855,40 @@ async function onCreate() {
   }
 }
 
-async function continueHistoryAsSingle() {
-  if (!s.selectedHistoryRoom?.room_id) return;
+async function continueHistoryFromList(room) {
+  const roomId = typeof room === 'string' ? room : room?.room_id;
+  if (!roomId) return;
+  await loadHistoryRoom(room);
+  if (isLocalSingleRoomId(roomId)) {
+    await continueHistoryAsSingle(roomId);
+  } else {
+    await continueHistoryAsMulti(roomId);
+  }
+}
+
+async function continueHistoryAsSingle(room = s.selectedHistoryRoom) {
+  const roomId = typeof room === 'string' ? room : room?.room_id;
+  if (!roomId) return;
   roomMode.value = 'single';
   lobbyTab.value = 'create';
   lanchat.setWorkspaceMode('solo_single_agent');
   const res = await lanchat.continueHistoryAsLocalRoom({
-    room: s.selectedHistoryRoom.room_id,
+    room: roomId,
+  });
+  if (res && res.ok) {
+    await addDefaultExpertGroup();
+  }
+}
+
+async function continueHistoryAsMulti(room = s.selectedHistoryRoom) {
+  const roomId = typeof room === 'string' ? room : room?.room_id;
+  if (!roomId) return;
+  roomMode.value = 'multi';
+  lobbyTab.value = 'create';
+  lanchat.setWorkspaceMode('multiplayer_multi_agent');
+  const res = await lanchat.continueHistoryAsMultiRoom({
+    room: roomId,
+    port: form.port || 27960,
   });
   if (res && res.ok) {
     await addDefaultExpertGroup();
@@ -930,7 +896,25 @@ async function continueHistoryAsSingle() {
 }
 
 function makeLocalRoomId() {
-  return 'single-default';
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, '0');
+  const datePart = [
+    now.getFullYear(),
+    pad(now.getMonth() + 1),
+    pad(now.getDate()),
+  ].join('');
+  const timePart = [
+    pad(now.getHours()),
+    pad(now.getMinutes()),
+    pad(now.getSeconds()),
+  ].join('');
+  const suffix = Math.random().toString(36).slice(2, 8);
+  return `single-${datePart}-${timePart}-${suffix}`;
+}
+
+function isLocalSingleRoomId(roomId) {
+  const value = String(roomId || '');
+  return value === 'single-default' || /^single-\d{8}-\d{6}-[a-z0-9]+$/.test(value);
 }
 
 function currentModelTransferSceneName() {

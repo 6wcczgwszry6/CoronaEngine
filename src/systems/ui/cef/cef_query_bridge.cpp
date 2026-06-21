@@ -801,8 +801,14 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     const std::string room = payload_arg.value("room", "");
                     const uint16_t port = payload_arg.value("port", 27960);
                     const std::string nickname = payload_arg.value("nickname", "房主");
+                    const bool restore_history = payload_arg.value("restore_history", false);
+                    const std::string history_room = payload_arg.value("history_room", room);
                     const std::string host_nickname = nickname.empty() ? "房主" : nickname;
                     bool ok = sys->lanchat_start_room(room, host_nickname, port);
+                    bool restored_history = false;
+                    if (ok && restore_history) {
+                        restored_history = sys->lanchat_restore_history_room(history_room);
+                    }
                     const uint16_t actual_port = sys->session_port() != 0 ? sys->session_port() : port;
                     nlohmann::json data;
                     data["ok"] = ok;
@@ -815,6 +821,7 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                     data["member_details"] = build_lanchat_member_details(sys->lanchat_members());
                     data["history"] = build_lanchat_history(sys->lanchat_history());
                     data["agents"] = build_lanchat_agents(sys->lanchat_agents());
+                    data["restored_history"] = restored_history;
                     callback->Success(create_success_json(func, data));
                     return true;
                 }

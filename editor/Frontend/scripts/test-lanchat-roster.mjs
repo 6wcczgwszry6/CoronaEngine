@@ -77,6 +77,8 @@ assertIncludes(store, 'async function loadHistoryRoom', 'lanchat store must load
 assertIncludes(store, 'state.agents = Array.isArray(res.agents) ? res.agents : []', 'loading persisted history must restore its agent roster');
 assertIncludes(store, "agent.owner === 'local-single-player'", 'single-player history agents must be treated as locally owned after restore');
 assertIncludes(store, 'async function continueHistoryAsLocalRoom', 'lanchat store must let users continue a selected history as a single-player room');
+assertIncludes(store, 'async function continueHistoryAsMultiRoom', 'lanchat store must let users continue a selected history as a multiplayer room');
+assertIncludes(store, "state.workspaceMode = 'multiplayer_multi_agent'", 'continuing multiplayer history must keep the LAN collaboration workspace mode');
 assertIncludes(store, 'restore_history: true', 'continuing a selected history must explicitly ask native to restore it into the active room');
 assertIncludes(store, 'lanChatService.stopLocalRoom', 'single-player rooms must close without stopping collaboration networking');
 assertIncludes(store, 'lanChatService.startRoom', 'multiplayer rooms must keep using the network room service path');
@@ -158,7 +160,13 @@ assertIncludes(roomPanel, "roomMode.value = 'multi'", 'RoomPanel must offer a mu
 assertIncludes(roomPanel, 'mode: roomMode.value', 'RoomPanel must pass the selected room mode when creating a room');
 assertIncludes(roomPanel, "v-if=\"roomMode === 'multi'\"", 'RoomPanel must only show room/password inputs for multiplayer room creation');
 assertIncludes(roomPanel, 'function makeLocalRoomId', 'RoomPanel must auto-generate an internal local room id for single-player rooms');
-assertIncludes(roomPanel, "return 'single-default'", 'single-player room id must be stable so local history can be restored');
+assertIncludes(roomPanel, "return `single-${datePart}-${timePart}-${suffix}`", 'new single-player rooms must get a fresh local room id');
+assertIncludes(roomPanel, 'Math.random().toString(36)', 'single-player room ids must avoid reusing the same id within the same second');
+if (roomPanel.includes("return 'single-default'")) {
+  fail('new single-player room creation must not reuse the legacy fixed room id');
+}
+assertIncludes(roomPanel, 'function isLocalSingleRoomId', 'RoomPanel must still recognize local single-player history room ids');
+assertIncludes(roomPanel, "value === 'single-default'", 'RoomPanel must keep old single-player history readable');
 assertIncludes(roomPanel, "roomMode.value === 'single'", 'RoomPanel create flow must branch before requiring a manually typed room id');
 assertIncludes(roomPanel, "s.mode === 'single' ? '单人聊天室' : s.room", 'RoomPanel must not expose internal local room ids as the single-player room title');
 assertIncludes(roomPanel, 'onMounted(refreshHistoryRooms)', 'RoomPanel must load persisted history list when the dock opens');
@@ -173,8 +181,23 @@ assertIncludes(roomPanel, '全部历史记录', 'RoomPanel must label the second
 assertIncludes(roomPanel, 'v-for="room in visibleHistoryRooms"', 'RoomPanel primary history list must render the capped history collection');
 assertIncludes(roomPanel, 'v-for="room in s.historyRooms"', 'RoomPanel secondary history page must render all history rooms');
 assertIncludes(roomPanel, 'continueHistoryAsSingle', 'RoomPanel must let users continue a selected history as a single-player room');
-assertIncludes(roomPanel, '作为单人聊天室继续', 'RoomPanel must expose a clear continue-history action');
-assertIncludes(roomPanel, '继续所选历史', 'RoomPanel single-room create button must reflect selected history');
+assertIncludes(roomPanel, 'continueHistoryAsMulti', 'RoomPanel must let users continue multiplayer history as a LAN collaboration room');
+assertIncludes(roomPanel, 'isLocalSingleRoomId(roomId)', 'RoomPanel must branch history restore by single-player room id');
+assertIncludes(roomPanel, "lanchat.setWorkspaceMode('multiplayer_multi_agent')", 'RoomPanel must switch multiplayer history into LAN collaboration mode');
+assertIncludes(roomPanel, '@dblclick="continueHistoryFromList(room)"', 'RoomPanel history lists must enter a history room on double click');
+const historyDoubleClickCount = (roomPanel.match(/@dblclick="continueHistoryFromList\(room\)"/g) || []).length;
+if (historyDoubleClickCount < 2) {
+  fail('RoomPanel primary and all-history lists must both enter a history room on double click');
+}
+if (roomPanel.includes('作为单人聊天室继续')) {
+  fail('RoomPanel history lists must not show the old continue-history detail panel');
+}
+assertIncludes(roomPanel, '`多人聊天室-${roomId}`', 'RoomPanel must label multiplayer history rooms with a multiplayer prefix');
+if (roomPanel.includes("if (s.selectedHistoryRoom) return '继续所选历史'")) {
+  fail('RoomPanel create button must not change into a continue-history action');
+}
+assertIncludes(cefBridge, 'const bool restore_history = payload_arg.value("restore_history", false)', 'CEF start_room must accept explicit history restore requests');
+assertIncludes(cefBridge, 'restored_history = sys->lanchat_restore_history_room(history_room)', 'CEF start_room must restore selected multiplayer history into NetworkSystem');
 assertIncludes(roomPanel, "s.mode === 'multi'", 'RoomPanel must only show host IP/port for multiplayer rooms');
 assertIncludes(roomPanel, "label: '自己设计'", 'RoomPanel lobby must expose the solo design entry');
 assertIncludes(roomPanel, "label: '多人共创'", 'RoomPanel lobby must expose the multiplayer co-creation entry');
