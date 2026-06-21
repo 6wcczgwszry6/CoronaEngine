@@ -296,6 +296,12 @@ function applyMemberSnapshot(payload = {}) {
   const normalized = normalizeMembers(payload);
   state.members = normalized.members;
   state.memberDetails = normalized.memberDetails;
+  const selfMember = state.peerId
+    ? state.memberDetails.find((member) => member.member_id === state.peerId)
+    : null;
+  if (selfMember?.nickname) {
+    state.nickname = selfMember.nickname;
+  }
 }
 
 function upsertAgent(agent = {}) {

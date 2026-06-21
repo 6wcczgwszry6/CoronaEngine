@@ -1988,6 +1988,12 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
         }
         if (impl_->lanchat.room_id() != room_id) return;
         impl_->lanchat.apply_member_snapshot(members);
+        for (const auto& member : members) {
+            if (member.member_id == local_peer_id() && !member.nickname.empty()) {
+                impl_->lanchat_nickname = member.nickname;
+                break;
+            }
+        }
         if (impl_->session_role == SessionRole::Client && impl_->lanchat_join_pending) {
             impl_->lanchat_join_member_snapshot_received = true;
             complete_lanchat_join_if_ready(
