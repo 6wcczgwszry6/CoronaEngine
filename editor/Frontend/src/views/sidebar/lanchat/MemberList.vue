@@ -21,6 +21,7 @@
     >
       <span class="truncate">🤖 {{ a.name }}</span>
       <button
+        v-if="a.owner === peerId"
         class="h-5 w-5 shrink-0 rounded text-red-400 opacity-0 transition-opacity hover:bg-red-500/20 hover:text-red-300 focus:opacity-100 group-hover:opacity-100"
         title="移除"
         @click="$emit('remove-agent', a.agent_id)"

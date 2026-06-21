@@ -68,7 +68,7 @@
         <div v-if="s.error" class="text-red-400 text-xs">{{ errorText }}</div>
       </div>
 
-      <div class="mt-auto space-y-2 border-t border-gray-700 pt-3">
+      <div class="mt-auto space-y-2 border-t border-gray-700 pt-4">
         <div class="flex items-center justify-between">
           <div class="text-sm font-medium text-gray-200">历史记录</div>
           <div class="flex items-center gap-1.5">
@@ -113,6 +113,13 @@
             </div>
           </button>
         </div>
+        <button
+          v-if="s.selectedHistoryRoom"
+          class="w-full py-1.5 rounded bg-[#3a3a3a] text-xs text-[#B8D58D] hover:bg-[#46553d]"
+          @click="continueHistoryAsSingle(s.selectedHistoryRoom)"
+        >
+          作为单人聊天室继续
+        </button>
       </div>
 
       <div
@@ -428,6 +435,17 @@
       >
         <div class="bg-[#2a2a2a] p-4 rounded w-[26rem] max-w-[calc(100%-2rem)] space-y-3">
           <div class="text-sm text-gray-200">添加 AI 助手</div>
+          <div class="flex gap-1.5">
+            <button
+              v-for="bundle in roleTemplateBundles"
+              :key="bundle.key"
+              class="flex-1 px-2 py-1 rounded bg-[#42543b] text-xs text-gray-100 hover:bg-[#84A65B]/80"
+              :title="bundle.hint"
+              @click="addRoleTemplateBundle(bundle)"
+            >
+              {{ bundle.name }}
+            </button>
+          </div>
           <input v-model="agentForm.name" placeholder="助手名字（如 小策）" :class="inputCls" />
           <textarea
             v-model="agentForm.persona"
@@ -461,6 +479,7 @@ import MemberList from './MemberList.vue';
 import {
   aiReplyDisplayText,
   displaySenderName,
+  effectiveDraftAction,
   pendingReplyMatchesMessage,
   resolveSelectedTargetKey,
   routeGuardMessage,
@@ -482,8 +501,7 @@ const lobbyTab = ref('create');
 const roomMode = ref(initialWorkspaceMode === 'multiplayer_multi_agent' ? 'multi' : 'single');
 const selectedWorkspaceMode = ref(initialWorkspaceMode);
 const showAllHistory = ref(false);
-const selectedDraftAction = ref(s.draftAction || 'chat');
-const selectedTargetKey = ref('');
+const selectedTargetKey = ref('scene');
 const showAddAgent = ref(false);
 const agentForm = reactive({ name: '', persona: '' });
 const addAgentBackdropPointerStarted = ref(false);
@@ -537,7 +555,16 @@ const roleTemplates = [
   },
 ];
 
-const defaultExpertRoleKeys = roleTemplates.map((role) => role.key);
+const roleTemplateBundles = [
+  {
+    key: 'night_market_validation',
+    name: '夜市验证组',
+    hint: '一键添加长者、商人、小女孩、山贼，适合今晚多人/多 Agent 验证',
+    roles: ['elder', 'merchant', 'little_girl', 'bandit'],
+  },
+];
+
+const defaultExpertRoleKeys = roleTemplateBundles[0]?.roles || [];
 const expertGroupConfig = reactive(createExpertGroupConfig(roleTemplates, defaultExpertRoleKeys));
 
 const workspaceModes = [
@@ -551,14 +578,6 @@ const workspaceModes = [
     label: '多人共创',
     hint: '房主开房，内置专家默认启用',
   },
-];
-
-const draftActions = [
-  { key: 'chat', label: '问一下', hint: '只让目标回复，不生成场景' },
-  { key: 'plan', label: '生成方案', hint: '先整理可确认方案' },
-  { key: 'supplement', label: '补充要求', hint: '更新当前目标方案' },
-  { key: 'generate', label: '确认生成', hint: '按当前方案进入生成' },
-  { key: 'edit', label: '调整场景', hint: '对已有场景提出修改' },
 ];
 
 const form = reactive({
@@ -593,6 +612,7 @@ const isJoining = computed(() => lanchat.isJoining());
 const joinStatusText = computed(() => (s.connection === 'syncing' ? '正在同步房间…' : '正在连接房主…'));
 const createButtonText = computed(() => {
   if (roomMode.value === 'multi') return '创建多人房间';
+  if (s.selectedHistoryRoom) return '继续所选历史';
   return '进入自己设计';
 });
 const selectedExpertPayloads = computed(() => buildSelectedExpertPayloads(expertGroupConfig, roleTemplates));
@@ -683,10 +703,6 @@ const inputAssistText = computed(() => {
 const draftPlaceholder = computed(() => {
   if (s.connection === 'reconnecting') return '连接已断开';
   if (isWaitingDisclosure.value) return '生成中也可输入：新增一个… / 调整… / 问题…';
-  if (selectedDraftAction.value === 'plan') return '描述你想设计什么';
-  if (selectedDraftAction.value === 'supplement') return '写清要改的风格、物件、布局或限制';
-  if (selectedDraftAction.value === 'generate') return '确认按当前方案生成，也可补一句生成范围';
-  if (selectedDraftAction.value === 'edit') return '描述要调整的已有物体或位置';
   return '输入@来指定AI助手~';
 });
 const currentPendingReply = computed(() => (
@@ -765,6 +781,7 @@ const targetOptions = computed(() => {
       agentName: '设计助手',
     });
   }
+  options.push({ key: 'scene', label: '当前场景', scope: 'scene' });
   return options;
 });
 const selectedTarget = computed(() => (
@@ -775,11 +792,10 @@ const inputRouteHint = computed(() => {
     return '直接发送；输入 @ 指定AI助手';
   }
   const target = selectedTarget.value?.label || '当前目标';
-  const action = draftActions.find((item) => item.key === selectedDraftAction.value)?.label || '发送';
-  return `${action} · 发给 ${target}`;
+  return `发送给 ${target}`;
 });
 const routeGuardText = computed(() => routeGuardMessage(
-  selectedDraftAction.value,
+  'chat',
   selectedTarget.value,
   draft.value
 ));
@@ -796,7 +812,8 @@ function loadHistoryRoom(room) {
 
 function historyRoomTitle(room) {
   if (!room) return '';
-  const roomId = String(room.room_id || '');
+  const displayRoomId = room.display_room_id || room.room_id;
+  const roomId = String(displayRoomId || '');
   if (!roomId) return '';
   return isLocalSingleRoomId(roomId) ? '单人聊天室' : `多人聊天室-${roomId}`;
 }
@@ -851,7 +868,7 @@ function selectWorkspaceMode(mode) {
   const visibleMode = normalizeVisibleWorkspaceMode(mode);
   selectedWorkspaceMode.value = visibleMode;
   lanchat.setWorkspaceMode(visibleMode);
-  selectedTargetKey.value = '';
+  selectedTargetKey.value = 'scene';
   applyInputRouteState();
   if (visibleMode === 'multiplayer_multi_agent') {
     roomMode.value = 'multi';
@@ -861,25 +878,23 @@ function selectWorkspaceMode(mode) {
   }
 }
 
-function selectDraftAction(action) {
-  selectedDraftAction.value = action;
-  lanchat.setDraftAction(action);
-  applyInputRouteState();
-}
-
 function selectTarget(key) {
   selectedTargetKey.value = resolveSelectedTargetKey(key, targetOptions.value);
   applyInputRouteState();
 }
 
 function applyInputRouteState() {
-  lanchat.setDraftAction(selectedDraftAction.value);
+  lanchat.setDraftAction('chat');
   lanchat.setActiveTarget(targetPayloadForKey(selectedTargetKey.value, targetOptions.value));
 }
 
 async function onCreate() {
   selectWorkspaceMode(selectedWorkspaceMode.value);
   if (roomMode.value === 'single') {
+    if (s.selectedHistoryRoom) {
+      await continueHistoryAsSingle(s.selectedHistoryRoom);
+      return;
+    }
     const res = await lanchat.openRoom({
       room: makeLocalRoomId(),
       password: '',
@@ -943,20 +958,7 @@ async function continueHistoryAsMulti(room = s.selectedHistoryRoom) {
 }
 
 function makeLocalRoomId() {
-  const now = new Date();
-  const pad = (value) => String(value).padStart(2, '0');
-  const datePart = [
-    now.getFullYear(),
-    pad(now.getMonth() + 1),
-    pad(now.getDate()),
-  ].join('');
-  const timePart = [
-    pad(now.getHours()),
-    pad(now.getMinutes()),
-    pad(now.getSeconds()),
-  ].join('');
-  const suffix = Math.random().toString(36).slice(2, 8);
-  return `single-${datePart}-${timePart}-${suffix}`;
+  return 'single-default';
 }
 
 function isLocalSingleRoomId(roomId) {
@@ -1360,6 +1362,18 @@ function onAddAgentBackdropPointerUp(event) {
   }
 }
 
+async function addRoleTemplateBundle(bundle) {
+  const keys = Array.isArray(bundle?.roles) ? bundle.roles : [];
+  for (const key of keys) {
+    const role = roleTemplates.find((item) => item.key === key);
+    if (!role) continue;
+    await lanchat.addAgent({ name: role.name, persona: role.persona });
+  }
+  agentForm.name = '';
+  agentForm.persona = '';
+  showAddAgent.value = false;
+}
+
 async function addDefaultExpertGroup() {
   const existingNames = new Set(
     (s.agents || [])
@@ -1443,11 +1457,7 @@ function buildMentionCandidates(prefix = '') {
     : [];
   const agents = s.agents
     .filter((a) => String(a.name || '').toLowerCase() !== 'gm')
-    .map((a) => ({
-      name: a.name,
-      isAgent: true,
-      targetKey: `agent:${a.agent_id || a.name}`,
-    }));
+    .map((a) => ({ name: a.name, isAgent: true, targetKey: `agent:${a.agent_id || a.name}` }));
   return [...gm, ...group, ...agents, ...members].filter((c) => (
     !query || String(c.name || '').toLowerCase().startsWith(query)
   ));
@@ -1516,19 +1526,29 @@ function messageOptionsForText(text, pending = null) {
   const trimmed = String(text || '').trim();
   const generationMetadata = s.role === 'host' ? lanchat.generationOptionsMetadata() : {};
   syncSelectedTargetFromDraft(text);
+  const routedDraftAction = effectiveDraftAction('chat', trimmed);
+  const targetPayload = targetPayloadForKey(selectedTargetKey.value, targetOptions.value);
   if (/^@GM(?:\s|$)/i.test(trimmed)) {
+    if (!pending?.correlationId && !Object.keys(generationMetadata).length) {
+      return buildManualGmMessageOptions(s.role);
+    }
     const options = buildManualGmMessageOptions(s.role);
     if (pending?.correlationId) options.correlation_id = pending.correlationId;
-    if (!Object.keys(generationMetadata).length) return options;
     options.metadata = {
       ...(options.metadata || {}),
       ...generationMetadata,
     };
     return options;
   }
-  const options = Object.keys(generationMetadata).length
-    ? { metadata: generationMetadata }
-    : {};
+  const metadata = {
+    ...generationMetadata,
+    draft_action: routedDraftAction,
+    target_scope: targetPayload.scope || 'scene',
+  };
+  if (targetPayload.agentId) metadata.target_agent_id = targetPayload.agentId;
+  if (targetPayload.agentName) metadata.target_agent_name = targetPayload.agentName;
+  if (targetPayload.planId) metadata.target_plan_id = targetPayload.planId;
+  const options = { metadata };
   if (pending?.correlationId) options.correlation_id = pending.correlationId;
   if (pending?.targetAgentId) options.target_agent_id = pending.targetAgentId;
   return options;
@@ -1669,15 +1689,6 @@ watch(
   (mode) => {
     if (mode && mode !== selectedWorkspaceMode.value) {
       selectedWorkspaceMode.value = mode;
-    }
-  }
-);
-
-watch(
-  () => s.draftAction,
-  (action) => {
-    if (action && action !== selectedDraftAction.value) {
-      selectedDraftAction.value = action;
     }
   }
 );

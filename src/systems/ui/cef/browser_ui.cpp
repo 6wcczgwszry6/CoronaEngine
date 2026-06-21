@@ -1,8 +1,10 @@
 #include "browser_ui.h"
 
 #include <corona/systems/ui/camera_viewport_manager.h>
+#include <corona/systems/ui/viewport_gizmo_manager.h>
 
 #include <SDL3/SDL.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cstdlib>
@@ -268,6 +270,46 @@ static MouseUtils::MouseStateManager mouse_state;
 
 namespace {
 
+void emit_native_viewport_gizmo_events(BrowserTab* tab) {
+    if (!tab || !tab->client) {
+        return;
+    }
+    const auto browser = tab->client->GetBrowser();
+    if (!browser) {
+        return;
+    }
+    const auto frame = browser->GetMainFrame();
+    if (!frame) {
+        return;
+    }
+
+    auto emit_json_event = [&](const char* event_name, const nlohmann::json& payload) {
+        const std::string script =
+            std::string("window.__coronaEmit && window.__coronaEmit(") +
+            nlohmann::json(event_name).dump() + "," + payload.dump() + ");";
+        frame->ExecuteJavaScript(script, frame->GetURL(), 0);
+    };
+
+    for (const auto& event : ViewportGizmoManager::instance().drain_selection_events()) {
+        nlohmann::json payload;
+        payload["sceneId"] = event.scene_id;
+        payload["cameraHandle"] = static_cast<std::uint64_t>(event.camera_handle);
+        payload["actorHandle"] = static_cast<std::uint64_t>(event.actor_handle);
+        emit_json_event("native-gizmo-selection", payload);
+    }
+
+    for (const auto& event : ViewportGizmoManager::instance().drain_transform_events()) {
+        nlohmann::json payload;
+        payload["sceneId"] = event.scene_id;
+        payload["cameraHandle"] = static_cast<std::uint64_t>(event.camera_handle);
+        payload["actorHandle"] = static_cast<std::uint64_t>(event.actor_handle);
+        payload["transform"]["position"] = {event.position[0], event.position[1], event.position[2]};
+        payload["transform"]["rotation"] = {event.rotation[0], event.rotation[1], event.rotation[2]};
+        payload["transform"]["scale"] = {event.scale[0], event.scale[1], event.scale[2]};
+        emit_json_event("native-gizmo-transform", payload);
+    }
+}
+
 SDL_Window* sdl_window_from_viewport(ImGuiViewport* viewport) {
     if (!viewport || !viewport->PlatformHandle) {
         return nullptr;
@@ -276,6 +318,43 @@ SDL_Window* sdl_window_from_viewport(ImGuiViewport* viewport) {
     auto window_id = static_cast<SDL_WindowID>(
         reinterpret_cast<std::intptr_t>(viewport->PlatformHandle));
     return SDL_GetWindowFromID(window_id);
+}
+
+void sync_tab_platform_window(BrowserTab* tab) {
+    if (!tab) {
+        return;
+    }
+
+    auto* viewport = ImGui::GetWindowViewport();
+    SDL_Window* platform_window = sdl_window_from_viewport(viewport);
+    void* native_surface = viewport ? viewport->PlatformHandleRaw : nullptr;
+    if (!native_surface && platform_window) {
+        native_surface = SDL_GetPointerProperty(
+            SDL_GetWindowProperties(platform_window),
+            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+            nullptr);
+    }
+    tab->platform_handle_raw = native_surface;
+    tab->platform_window_id = platform_window
+                                  ? SDL_GetWindowID(platform_window)
+                                  : 0;
+}
+
+void focus_browser_tab_exclusively(int focused_tab_id) {
+    for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+        if (!tab || !tab->client) {
+            continue;
+        }
+        auto browser = tab->client->GetBrowser();
+        if (!browser) {
+            continue;
+        }
+        if (tab_id == focused_tab_id) {
+            browser->GetHost()->SetFocus(true);
+        } else {
+            browser->GetHost()->SetFocus(false);
+        }
+    }
 }
 
 }  // namespace
@@ -386,7 +465,7 @@ void BrowserRenderer::handle_browser_mouse_events(BrowserTab* tab,
             if (ImGui::IsMouseClicked(imgui_btn)) {
                 active_tab_id = tab_id;
                 url_input_active_tab = -1;
-                browser->GetHost()->SetFocus(true);
+                focus_browser_tab_exclusively(tab_id);
 
                 int clicks = (imgui_btn == ImGuiMouseButton_Left) ? mouse_state.handle_mouse_click(mouse_pos, SDL_GetTicks()) : 1;
 
@@ -502,21 +581,10 @@ void BrowserRenderer::render_single_tab(int tab_id,
             BrowserManager::instance().resize_tab(tab_id, new_width, new_height);
         }
 
+        sync_tab_platform_window(tab);
+
         if (tab->camera_view) {
-            auto* viewport = ImGui::GetWindowViewport();
-            SDL_Window* platform_window = sdl_window_from_viewport(viewport);
-            void* native_surface = viewport ? viewport->PlatformHandleRaw : nullptr;
-            if (!native_surface && platform_window) {
-                native_surface = SDL_GetPointerProperty(
-                    SDL_GetWindowProperties(platform_window),
-                    SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-                    nullptr);
-            }
-            tab->platform_handle_raw =
-                native_surface;
-            tab->platform_window_id = platform_window
-                                          ? SDL_GetWindowID(platform_window)
-                                          : 0;
+            void* native_surface = tab->platform_handle_raw;
             if (native_surface) {
                 CameraViewportManager::instance().bind_surface(
                     tab_id, native_surface,
@@ -608,13 +676,42 @@ void BrowserRenderer::render_single_tab(int tab_id,
         }
         // -------------------------------------------------------------
 
+        ImVec2 image_origin = ImGui::GetCursorScreenPos();
+        ImVec2 image_size = avail_size;
+        bool viewport_gizmo_captures_mouse = false;
+
         // 渲染浏览器纹理
         if (is_valid_texture_id(tab->texture_id)) {
             ImGui::Image(tab->texture_id, avail_size);
+            image_origin = ImGui::GetItemRectMin();
+            image_size = ImGui::GetItemRectSize();
+        }
+
+        if (tab->camera_view) {
+            if (auto record = CameraViewportManager::instance().find_by_tab(tab_id)) {
+                viewport_gizmo_captures_mouse = ViewportGizmoManager::instance().render(
+                    record->scene_id,
+                    record->camera_handle,
+                    image_origin,
+                    image_size,
+                    ImGui::GetWindowDrawList());
+            }
+        } else if (is_main_tab) {
+            const auto selected_camera = ViewportGizmoManager::instance().selected_camera_handle();
+            if (selected_camera != 0) {
+                viewport_gizmo_captures_mouse = ViewportGizmoManager::instance().render(
+                    std::string{},
+                    selected_camera,
+                    image_origin,
+                    image_size,
+                    ImGui::GetWindowDrawList());
+            }
+            emit_native_viewport_gizmo_events(tab);
         }
 
         // 仅当未拖拽时传递鼠标事件给浏览器
-        if (!tab->dragging_window && !tab->drag_pending && !in_drag_region) {
+        if (!tab->dragging_window && !tab->drag_pending && !in_drag_region &&
+            !viewport_gizmo_captures_mouse) {
             handle_browser_mouse_events(tab, tab_id, active_tab_id, url_input_active_tab, io);
         }
     }

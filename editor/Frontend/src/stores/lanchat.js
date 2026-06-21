@@ -55,7 +55,7 @@ const state = reactive({
   error: '', // 最近一次错误码/信息
   agents: [], // [{agent_id, name, owner}] 来自房主 agent_roster，不含 persona
   myAgents: [], // 我添加的 agent 本地草稿 [{agent_id, name, persona}]，用于显示"我的"
-  historyRooms: [], // persisted summaries [{ room_id, message_count, last_ts, last_text }]
+  historyRooms: [], // persisted summaries [{ room_id: session id, display_room_id, message_count, last_ts, last_text }]
   selectedHistoryRoom: null,
   historyLoading: false,
   historyError: '',
@@ -597,13 +597,13 @@ function setWorkspaceMode(mode) {
   state.workspaceMode = value;
   if (value === 'solo_single_agent') {
     state.mode = 'single';
-    setActiveTarget({});
+    setActiveTarget({ scope: 'agent', agentId: '', agentName: state.activeTarget.agentName || '设计助手' });
   } else if (value === 'solo_multi_agent') {
     state.mode = 'single';
-    setActiveTarget({});
+    setActiveTarget({ scope: 'group' });
   } else {
     state.mode = 'multi';
-    setActiveTarget({});
+    setActiveTarget({ scope: 'group' });
   }
 }
 
@@ -616,7 +616,7 @@ function setDraftAction(action) {
 }
 
 function setActiveTarget(target = {}) {
-  const scope = String(target.scope || '').trim();
+  const scope = String(target.scope || 'scene').trim() || 'scene';
   state.activeTarget = {
     scope,
     agentId: String(target.agentId || target.agent_id || '').trim(),
@@ -630,8 +630,8 @@ function structuredRouteMetadata(overrides = {}) {
   const metadata = {
     workspace_mode: state.workspaceMode,
     draft_action: state.draftAction,
+    target_scope: target.scope || 'scene',
   };
-  if (target.scope) metadata.target_scope = target.scope;
   if (target.agentId) metadata.target_agent_id = target.agentId;
   if (target.agentName) metadata.target_agent_name = target.agentName;
   if (target.planId) metadata.target_plan_id = target.planId;

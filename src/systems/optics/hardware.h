@@ -14,6 +14,7 @@ using uint = uint32_t;
 #include GLSL(../../../assets/shaders/visibility.frag.glsl)
 #include GLSL(../../../assets/shaders/lighting.comp.glsl)
 #include GLSL(../../../assets/shaders/sky.comp.glsl)
+#include GLSL(../../../assets/shaders/sky_sh_project.comp.glsl)
 #include GLSL(../../../assets/shaders/tonemap.comp.glsl)
 #include GLSL(../../../assets/shaders/debug_resolve.comp.glsl)
 #include GLSL(../../../assets/shaders/actor_pick.comp.glsl)
@@ -50,6 +51,7 @@ struct Hardware {
     HardwareBuffer uiInstanceInfoBuffer;
     HardwareBuffer uiMaterialTableBuffer;
     HardwareBuffer actorPickBuffer;
+    HardwareBuffer skyIrradianceSHBuffer;  // 9 vec3 SH coeffs (sky-driven ambient)
 
     // === Shader pipelines ===
     bool shaderHasInit = false;
@@ -57,6 +59,7 @@ struct Hardware {
     std::optional<RasterizerPipeline<visibility_vert_glsl, visibility_frag_glsl>> uiVisibilityPipeline;
     std::optional<ComputePipeline<lighting_comp_glsl>> lightingPipeline;
     std::optional<ComputePipeline<sky_comp_glsl>> skyPipeline;
+    std::optional<ComputePipeline<sky_sh_project_comp_glsl>> skySHProjectPipeline;
     std::optional<ComputePipeline<tonemap_comp_glsl>> tonemapPipeline;
     std::optional<ComputePipeline<debug_resolve_comp_glsl>> debugResolvePipeline;
     std::optional<ComputePipeline<actor_pick_comp_glsl>> actorPickPipeline;

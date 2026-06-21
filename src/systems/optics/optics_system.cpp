@@ -1382,6 +1382,11 @@ bool OpticsSystem::initialize_hardware_resources() {
             BufferUsage::StorageBuffer);
         hardware_->actorPickBuffer = HardwareBuffer(sizeof(std::uint32_t), BufferUsage::StorageBuffer);
 
+        // Sky-driven ambient: 9 SH coefficients × vec3 = 27 floats. Written by
+        // sky_sh_project.comp each environment change, read by lighting.comp.
+        hardware_->skyIrradianceSHBuffer = HardwareBuffer(
+            27u * static_cast<uint32_t>(sizeof(float)), BufferUsage::StorageBuffer);
+
         // finalOutputImage 不再在此创建：每个 surface 的最终输出由
         // acquire_surface_target() 按需创建（改造1: per-surface 输出）。
     } catch (const std::exception&) {
@@ -1398,6 +1403,7 @@ bool OpticsSystem::initialize_render_pipelines() {
         hardware_->uiVisibilityPipeline.emplace();
         hardware_->lightingPipeline.emplace();
         hardware_->skyPipeline.emplace();
+        hardware_->skySHProjectPipeline.emplace();
         hardware_->tonemapPipeline.emplace();
         hardware_->debugResolvePipeline.emplace();
         hardware_->actorPickPipeline.emplace();
@@ -1768,6 +1774,7 @@ void OpticsSystem::update() {
 
     if (!hardware_->shaderHasInit || !hardware_->lightingPipeline ||
         !hardware_->skyPipeline || !hardware_->tonemapPipeline ||
+        !hardware_->skySHProjectPipeline ||
         !hardware_->debugResolvePipeline || !hardware_->opticsOverlayPipeline ||
         !hardware_->opticsCursorPipeline || !hardware_->opticsUiWarpPipeline ||
         !hardware_->opticsCompositePipeline) {
@@ -2114,6 +2121,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     hardware_->vpUniformBuffer.storeDescriptor();
                 lighting.pushConsts.finalOutputImage = finalOutputDescriptor;
                 lighting.pushConsts.uniformBufferIndex = uboDescriptor;
+                lighting.pushConsts.skyIrradianceSHBufferIndex =
+                    hardware_->skyIrradianceSHBuffer.storeDescriptor();
                 lighting.pushConsts.sun_dir = sun_dir;
                 {
                     ktm::fvec3 lightColor;
@@ -2122,7 +2131,31 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     lightColor.z = sun_color.z * sun_intensity;
                     lighting.pushConsts.lightColor = lightColor;
                 }
-                lighting.pushConsts.ambientIntensity = sun_intensity * 0.02f;
+
+                // ================================================================
+                // 5b. Sky → SH9 projection (sky-driven ambient).
+                // Recompute the 9 SH coefficients only when the environment
+                // lighting signature (sun_dir + sky_intensity) changes; otherwise
+                // reuse the persistent skyIrradianceSHBuffer. Static lighting
+                // amortizes to ~zero. The dispatch (when needed) is recorded
+                // before lighting so program order guarantees the SH write lands
+                // before lighting reads it on the same executor.
+                // ================================================================
+                std::size_t sky_sig = 0;
+                mix_hash_float(sky_sig, sun_dir.x);
+                mix_hash_float(sky_sig, sun_dir.y);
+                mix_hash_float(sky_sig, sun_dir.z);
+                mix_hash_float(sky_sig, sky_intensity);
+                const bool sky_sh_needs_update =
+                    !sky_sh_initialized_ || sky_sig != sky_sh_signature_;
+                if (sky_sh_needs_update) {
+                    auto& skySH = *hardware_->skySHProjectPipeline;
+                    skySH.pushConsts.outputBufferIndex =
+                        hardware_->skyIrradianceSHBuffer.storeDescriptor();
+                    skySH.pushConsts.sampleCount = 64u;
+                    skySH.pushConsts.sun_dir = sun_dir;
+                    skySH.pushConsts.sky_intensity = sky_intensity;
+                }
 
                 // ================================================================
                 // 6. Sky pass: atmospheric scattering + floor grid
@@ -2210,10 +2243,18 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     // ============================================================
                     // Normal rendering path: full pipeline
                     // ============================================================
+                    // Sky→SH projection (single workgroup) recorded before
+                    // lighting so the SH buffer write precedes the read.
+                    if (sky_sh_needs_update) {
+                        hardware_->executor << (*hardware_->skySHProjectPipeline)(1, 1, 1);
+                    }
                     hardware_->executor << visibility(hardware_->gbufferSize.x, hardware_->gbufferSize.y)
                                         << lighting(dispatchX, dispatchY, 1)
                                         << sky(dispatchX, dispatchY, 1)
                                         << tonemap(dispatchX, dispatchY, 1);
+                    // SH coefficients now resident; mark this signature applied.
+                    sky_sh_signature_ = sky_sig;
+                    sky_sh_initialized_ = true;
                 }
 
                 if (actor_pick_request) {
