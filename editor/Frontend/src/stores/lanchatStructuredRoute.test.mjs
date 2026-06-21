@@ -31,6 +31,7 @@ lanchat.handleEvent({
   ],
 });
 lanchat.setWorkspaceMode('solo_single_agent');
+assert.equal(lanchat.state.activeTarget.scope, 'group');
 lanchat.setDraftAction('plan');
 lanchat.setActiveTarget({
   scope: 'agent',

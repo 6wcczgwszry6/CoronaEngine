@@ -69,7 +69,7 @@
         </div>
       </div>
 
-      <div class="grid grid-cols-3 gap-2">
+      <div class="grid grid-cols-2 gap-2">
         <button
           v-for="mode in workspaceModes"
           :key="mode.key"
@@ -80,63 +80,6 @@
           <div class="text-sm font-medium text-gray-100">{{ mode.label }}</div>
           <div class="mt-1 text-[11px] leading-snug text-gray-400">{{ mode.hint }}</div>
         </button>
-      </div>
-
-      <div
-        v-if="selectedWorkspaceMode === 'solo_multi_agent'"
-        class="rounded border border-gray-700 bg-[#242424] p-3 space-y-3"
-      >
-        <div class="flex items-center justify-between gap-2">
-          <div>
-            <div class="text-sm font-medium text-gray-100">配置 AI 专家组</div>
-            <div class="mt-0.5 text-[12px] text-gray-500">选择要加入本地聊天室的 Agent，也可以添加自定义角色</div>
-          </div>
-          <div class="text-[12px] text-[#B8D58D]">{{ selectedExpertPayloads.length }} 个</div>
-        </div>
-        <div class="grid grid-cols-2 gap-2">
-          <label
-            v-for="role in roleTemplates"
-            :key="role.key"
-            class="flex items-start gap-2 rounded bg-[#2a2a2a] border border-gray-700 px-2.5 py-2 cursor-pointer hover:border-[#84A65B]"
-          >
-            <input
-              type="checkbox"
-              class="mt-1 accent-[#84A65B]"
-              :checked="expertGroupConfig.selectedRoleKeys.has(role.key)"
-              @change="setExpertRoleSelected(role.key, $event.target.checked)"
-            />
-            <span class="min-w-0">
-              <span class="block text-sm text-gray-100">{{ role.name }}</span>
-              <span class="block truncate text-[11px] text-gray-500">{{ role.hint }}</span>
-            </span>
-          </label>
-        </div>
-        <div v-if="expertGroupConfig.customExperts.length" class="space-y-1.5">
-          <div
-            v-for="(expert, index) in expertGroupConfig.customExperts"
-            :key="`${expert.name}-${index}`"
-            class="flex items-center justify-between gap-2 rounded bg-[#2a2a2a] px-2.5 py-1.5 text-sm"
-          >
-            <span class="truncate text-gray-200">{{ expert.name }}</span>
-            <button
-              class="text-red-400 text-xs hover:text-red-300"
-              @click="removeCustomExpertAt(index)"
-            >
-              移除
-            </button>
-          </div>
-        </div>
-        <div class="grid grid-cols-[1fr_1.5fr_auto] gap-2">
-          <input v-model="customExpertForm.name" placeholder="自定义名字" :class="inputCls" />
-          <input v-model="customExpertForm.persona" placeholder="角色职责 / 人设" :class="inputCls" />
-          <button
-            class="px-3 rounded bg-[#3a3a3a] text-sm text-gray-100 hover:bg-[#84A65B]/80 disabled:opacity-50"
-            :disabled="!customExpertForm.name.trim()"
-            @click="addCustomExpertFromForm"
-          >
-            添加
-          </button>
-        </div>
       </div>
 
       <!-- tab 切换 -->
@@ -165,7 +108,6 @@
         </template>
         <button
           class="w-full py-2 rounded bg-[#84A65B] text-white text-sm disabled:opacity-50"
-          :disabled="selectedWorkspaceMode === 'solo_multi_agent' && !selectedExpertPayloads.length"
           @click="onCreate"
         >
           {{ createButtonText }}
@@ -547,23 +489,23 @@ import {
   targetPayloadForKey,
 } from './routeSelection.js';
 import {
-  addCustomExpert,
   createExpertGroupConfig,
-  removeCustomExpert,
   selectedExpertPayloads as buildSelectedExpertPayloads,
-  setRoleSelected,
 } from './expertGroupConfig.js';
 
 const s = lanchat.state;
-const lobbyTab = ref('create');
-const roomMode = ref('multi');
 const draft = ref('');
-const selectedWorkspaceMode = ref(s.workspaceMode || 'multiplayer_multi_agent');
+const normalizeVisibleWorkspaceMode = (mode) => (
+  mode === 'multiplayer_multi_agent' ? 'multiplayer_multi_agent' : 'solo_single_agent'
+);
+const initialWorkspaceMode = normalizeVisibleWorkspaceMode(s.workspaceMode);
+const lobbyTab = ref('create');
+const roomMode = ref(initialWorkspaceMode === 'multiplayer_multi_agent' ? 'multi' : 'single');
+const selectedWorkspaceMode = ref(initialWorkspaceMode);
 const selectedDraftAction = ref(s.draftAction || 'chat');
-const selectedTargetKey = ref('scene');
+const selectedTargetKey = ref('group');
 const showAddAgent = ref(false);
 const agentForm = reactive({ name: '', persona: '' });
-const customExpertForm = reactive({ name: '', persona: '' });
 const mentionCandidates = ref([]);
 const mentionActiveIndex = ref(0);
 const msgRef = ref(null);
@@ -614,24 +556,19 @@ const roleTemplateBundles = [
     roles: ['elder', 'merchant', 'little_girl', 'bandit'],
   },
 ];
-const defaultExpertRoleKeys = roleTemplateBundles[0]?.roles || [];
+const defaultExpertRoleKeys = roleTemplates.map((role) => role.key);
 const expertGroupConfig = reactive(createExpertGroupConfig(roleTemplates, defaultExpertRoleKeys));
 
 const workspaceModes = [
   {
     key: 'solo_single_agent',
     label: '自己设计',
-    hint: '本地单人，默认设计助手',
-  },
-  {
-    key: 'solo_multi_agent',
-    label: 'AI 专家组',
-    hint: '本地单人，多助手讨论',
+    hint: '本地单人，内置专家默认启用',
   },
   {
     key: 'multiplayer_multi_agent',
     label: '多人共创',
-    hint: '房主开房，成员加入',
+    hint: '房主开房，内置专家默认启用',
   },
 ];
 
@@ -674,7 +611,7 @@ const joinStatusText = computed(() => (s.connection === 'syncing' ? '正在同�
 const createButtonText = computed(() => {
   if (roomMode.value === 'multi') return '创建多人房间';
   if (s.selectedHistoryRoom) return '继续所选历史';
-  return selectedWorkspaceMode.value === 'solo_multi_agent' ? '进入 AI 专家组' : '进入自己设计';
+  return '进入自己设计';
 });
 const selectedExpertPayloads = computed(() => buildSelectedExpertPayloads(expertGroupConfig, roleTemplates));
 const roomStatusLabel = computed(() => {
@@ -871,9 +808,12 @@ onBeforeUnmount(() => {
 });
 
 function selectWorkspaceMode(mode) {
-  selectedWorkspaceMode.value = mode;
-  lanchat.setWorkspaceMode(mode);
-  if (mode === 'multiplayer_multi_agent') {
+  const visibleMode = normalizeVisibleWorkspaceMode(mode);
+  selectedWorkspaceMode.value = visibleMode;
+  lanchat.setWorkspaceMode(visibleMode);
+  selectedTargetKey.value = 'group';
+  applyInputRouteState();
+  if (visibleMode === 'multiplayer_multi_agent') {
     roomMode.value = 'multi';
   } else {
     roomMode.value = 'single';
@@ -897,20 +837,6 @@ function applyInputRouteState() {
   lanchat.setActiveTarget(targetPayloadForKey(selectedTargetKey.value, targetOptions.value));
 }
 
-function setExpertRoleSelected(key, selected) {
-  setRoleSelected(expertGroupConfig, key, selected);
-}
-
-function addCustomExpertFromForm() {
-  addCustomExpert(expertGroupConfig, customExpertForm);
-  customExpertForm.name = '';
-  customExpertForm.persona = '';
-}
-
-function removeCustomExpertAt(index) {
-  removeCustomExpert(expertGroupConfig, index);
-}
-
 async function onCreate() {
   selectWorkspaceMode(selectedWorkspaceMode.value);
   if (roomMode.value === 'single') {
@@ -925,29 +851,30 @@ async function onCreate() {
       mode: 'single',
     });
     if (!(res && res.ok)) return;
-    if (selectedWorkspaceMode.value === 'solo_multi_agent') {
-      await addDefaultExpertGroup();
-    }
+    await addDefaultExpertGroup();
     return;
   }
   if (!form.room.trim()) return;
-  await lanchat.openRoom({
+  const res = await lanchat.openRoom({
     room: form.room.trim(),
     password: form.password,
     port: form.port || 27960,
     mode: roomMode.value,
   });
+  if (res && res.ok) {
+    await addDefaultExpertGroup();
+  }
 }
 
 async function continueHistoryAsSingle() {
   if (!s.selectedHistoryRoom?.room_id) return;
   roomMode.value = 'single';
   lobbyTab.value = 'create';
-  lanchat.setWorkspaceMode(selectedWorkspaceMode.value === 'solo_multi_agent' ? 'solo_multi_agent' : 'solo_single_agent');
+  lanchat.setWorkspaceMode('solo_single_agent');
   const res = await lanchat.continueHistoryAsLocalRoom({
     room: s.selectedHistoryRoom.room_id,
   });
-  if (res && res.ok && selectedWorkspaceMode.value === 'solo_multi_agent') {
+  if (res && res.ok) {
     await addDefaultExpertGroup();
   }
 }

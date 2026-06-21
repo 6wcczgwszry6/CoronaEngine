@@ -547,7 +547,7 @@ function setWorkspaceMode(mode) {
   state.workspaceMode = value;
   if (value === 'solo_single_agent') {
     state.mode = 'single';
-    setActiveTarget({ scope: 'agent', agentId: '', agentName: state.activeTarget.agentName || '设计助手' });
+    setActiveTarget({ scope: 'group' });
   } else if (value === 'solo_multi_agent') {
     state.mode = 'single';
     setActiveTarget({ scope: 'group' });
