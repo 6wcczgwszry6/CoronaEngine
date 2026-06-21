@@ -164,6 +164,14 @@ assertIncludes(roomPanel, "s.mode === 'single' ? '单人聊天室' : s.room", 'R
 assertIncludes(roomPanel, 'onMounted(refreshHistoryRooms)', 'RoomPanel must load persisted history list when the dock opens');
 assertIncludes(roomPanel, '历史记录', 'RoomPanel must show persisted history before entering a room');
 assertIncludes(roomPanel, 'loadHistoryRoom', 'RoomPanel must let users choose which persisted history to display');
+assertIncludes(roomPanel, 'const visibleHistoryRooms = computed(() => (s.historyRooms || []).slice(0, 2))', 'RoomPanel primary lobby must show at most two history rooms');
+assertIncludes(roomPanel, 'const hasMoreHistoryRooms = computed(() => (s.historyRooms || []).length > 2)', 'RoomPanel must detect when more history rooms are available');
+assertIncludes(roomPanel, 'mt-auto space-y-2 border-t border-gray-700 pt-3', 'RoomPanel primary history section must be pinned to the bottom of the lobby');
+assertIncludes(roomPanel, 'v-if="hasMoreHistoryRooms"', 'RoomPanel must show the more history button only when needed');
+assertIncludes(roomPanel, 'showAllHistory = true', 'RoomPanel must open a secondary all-history page');
+assertIncludes(roomPanel, '全部历史记录', 'RoomPanel must label the secondary all-history page');
+assertIncludes(roomPanel, 'v-for="room in visibleHistoryRooms"', 'RoomPanel primary history list must render the capped history collection');
+assertIncludes(roomPanel, 'v-for="room in s.historyRooms"', 'RoomPanel secondary history page must render all history rooms');
 assertIncludes(roomPanel, 'continueHistoryAsSingle', 'RoomPanel must let users continue a selected history as a single-player room');
 assertIncludes(roomPanel, '作为单人聊天室继续', 'RoomPanel must expose a clear continue-history action');
 assertIncludes(roomPanel, '继续所选历史', 'RoomPanel single-room create button must reflect selected history');
@@ -176,6 +184,8 @@ assertIncludes(roomPanel, 'networkService.requestSceneSnapshot(sceneName)', 'Roo
 assertIncludes(roomPanel, 'function currentModelTransferSceneName', 'RoomPanel multiplayer join must resolve the current scene before requesting model transfer');
 assertIncludes(roomPanel, "s.role !== 'guest' || s.mode !== 'multi'", 'RoomPanel model transfer request must only run for multiplayer guests');
 assertIncludes(roomPanel, "s.connection !== 'connected'", 'RoomPanel model transfer request must wait until LANChat join is connected');
+assertIncludes(roomPanel, 'v-if="s.mode === \'multi\'"', 'RoomPanel must only show connection status pill for multiplayer rooms');
+assertIncludes(roomPanel, "s.mode === 'single' ? '退出聊天'", 'RoomPanel single-player close button must read as exiting chat');
 if (roomPanel.includes("label: 'AI 专家组'") || roomPanel.includes("key: 'solo_multi_agent'")) {
   fail('RoomPanel first-level lobby must not expose a separate AI expert group entry');
 }

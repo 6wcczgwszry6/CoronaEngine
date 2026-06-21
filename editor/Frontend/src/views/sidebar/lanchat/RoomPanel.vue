@@ -1,17 +1,92 @@
 <template>
   <div class="lanchat-panel relative flex flex-col h-full text-base text-gray-100">
     <!-- 未进房：大厅（开房 / 加入） -->
-    <div v-if="!s.inRoom" class="flex-1 overflow-y-auto p-4 space-y-4">
-      <div class="space-y-2">
+    <div v-if="!s.inRoom" class="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col gap-4">
+      <div class="space-y-4">
+        <div class="grid grid-cols-2 gap-2">
+          <button
+            v-for="mode in workspaceModes"
+            :key="mode.key"
+            class="rounded border px-2 py-2 text-left transition-colors"
+            :class="selectedWorkspaceMode === mode.key ? 'border-[#84A65B] bg-[#2f3b2b]' : 'border-gray-700 bg-[#2a2a2a] hover:border-gray-500'"
+            @click="selectWorkspaceMode(mode.key)"
+          >
+            <div class="text-sm font-medium text-gray-100">{{ mode.label }}</div>
+            <div class="mt-1 text-[11px] leading-snug text-gray-400">{{ mode.hint }}</div>
+          </button>
+        </div>
+
+        <!-- tab 切换 -->
+        <div v-if="selectedWorkspaceMode === 'multiplayer_multi_agent'" class="flex gap-2">
+            <button
+              class="flex-1 py-2 rounded text-sm"
+            :class="lobbyTab === 'create' ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a]/60'"
+            @click="lobbyTab = 'create'"
+          >
+            创建房间
+          </button>
+          <button
+            class="flex-1 py-2 rounded text-sm"
+            :class="lobbyTab === 'join' ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a]/60'"
+            @click="lobbyTab = 'join'"
+          >
+            加入房间
+          </button>
+        </div>
+
+        <!-- 创建房间 -->
+        <div v-if="lobbyTab === 'create'" class="space-y-3">
+          <template v-if="roomMode === 'multi'">
+            <input v-model="form.room" placeholder="房间号" :class="inputCls" />
+            <input v-model="form.password" placeholder="密码（可选）" :class="inputCls" />
+          </template>
+          <button
+            class="w-full py-2 rounded bg-[#84A65B] text-white text-sm disabled:opacity-50"
+            @click="onCreate"
+          >
+            {{ createButtonText }}
+          </button>
+        </div>
+
+        <!-- 加入房间 -->
+        <div v-else class="space-y-3">
+          <input v-model="form.ip" placeholder="房主 IP（如 192.168.1.5）" :class="inputCls" :disabled="isJoining" />
+          <input v-model.number="form.port" placeholder="房主端口" :class="inputCls" :disabled="isJoining" />
+          <input v-model="form.room" placeholder="房间号" :class="inputCls" :disabled="isJoining" />
+          <input v-model="form.password" placeholder="密码（可选）" :class="inputCls" :disabled="isJoining" />
+          <input v-model="form.nickname" placeholder="你的昵称" :class="inputCls" :disabled="isJoining" />
+          <button
+            class="w-full py-2 rounded bg-[#84A65B] text-white text-sm disabled:opacity-50"
+            :disabled="isJoining"
+            @click="onJoin"
+          >
+            {{ isJoining ? joinStatusText : '加入' }}
+          </button>
+          <div v-if="isJoining" class="text-[#B8D58D] text-xs">{{ joinStatusText }}</div>
+        </div>
+
+        <div v-if="s.error" class="text-red-400 text-xs">{{ errorText }}</div>
+      </div>
+
+      <div class="mt-auto space-y-2 border-t border-gray-700 pt-3">
         <div class="flex items-center justify-between">
           <div class="text-sm font-medium text-gray-200">历史记录</div>
-          <button
-            class="px-2 py-1 rounded bg-[#3a3a3a] text-xs text-gray-200 disabled:opacity-50"
-            :disabled="s.historyLoading"
-            @click="refreshHistoryRooms"
-          >
-            刷新
-          </button>
+          <div class="flex items-center gap-1.5">
+            <button
+              class="px-2 py-1 rounded bg-[#3a3a3a] text-xs text-gray-200 disabled:opacity-50"
+              :disabled="s.historyLoading"
+              @click="refreshHistoryRooms"
+            >
+              刷新
+            </button>
+            <button
+              v-if="hasMoreHistoryRooms"
+              class="px-2 py-1 rounded bg-[#3a3a3a] text-xs text-[#B8D58D] hover:bg-[#46553d]"
+              @click="showAllHistory = true"
+            >
+              更多
+            </button>
+          </div>
         </div>
         <div v-if="s.historyError" class="text-red-400 text-xs">{{ s.historyError }}</div>
         <div v-if="s.historyLoading && !s.historyRooms.length" class="text-gray-400 text-sm">
@@ -22,7 +97,7 @@
         </div>
         <div v-else class="space-y-1">
           <button
-            v-for="room in s.historyRooms"
+            v-for="room in visibleHistoryRooms"
             :key="room.room_id"
             class="w-full text-left px-3 py-2 rounded bg-[#2a2a2a] border border-gray-700 hover:border-[#84A65B] transition-colors"
             :class="s.selectedHistoryRoom?.room_id === room.room_id ? 'border-[#84A65B]' : ''"
@@ -69,69 +144,81 @@
         </div>
       </div>
 
-      <div class="grid grid-cols-2 gap-2">
-        <button
-          v-for="mode in workspaceModes"
-          :key="mode.key"
-          class="rounded border px-2 py-2 text-left transition-colors"
-          :class="selectedWorkspaceMode === mode.key ? 'border-[#84A65B] bg-[#2f3b2b]' : 'border-gray-700 bg-[#2a2a2a] hover:border-gray-500'"
-          @click="selectWorkspaceMode(mode.key)"
-        >
-          <div class="text-sm font-medium text-gray-100">{{ mode.label }}</div>
-          <div class="mt-1 text-[11px] leading-snug text-gray-400">{{ mode.hint }}</div>
-        </button>
-      </div>
-
-      <!-- tab 切换 -->
-      <div v-if="selectedWorkspaceMode === 'multiplayer_multi_agent'" class="flex gap-2">
+      <div
+        v-if="showAllHistory"
+        class="absolute inset-0 z-20 overflow-y-auto bg-[#282828] p-4 space-y-3"
+      >
+        <div class="flex items-center justify-between gap-2">
           <button
-            class="flex-1 py-2 rounded text-sm"
-          :class="lobbyTab === 'create' ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a]/60'"
-          @click="lobbyTab = 'create'"
+            class="px-2 py-1 rounded bg-[#3a3a3a] text-xs text-gray-200 hover:bg-[#4a4a4a]"
+            @click="showAllHistory = false"
+          >
+            返回
+          </button>
+          <div class="text-sm font-medium text-gray-200">全部历史记录</div>
+          <button
+            class="px-2 py-1 rounded bg-[#3a3a3a] text-xs text-gray-200 disabled:opacity-50"
+            :disabled="s.historyLoading"
+            @click="refreshHistoryRooms"
+          >
+            刷新
+          </button>
+        </div>
+        <div v-if="s.historyError" class="text-red-400 text-xs">{{ s.historyError }}</div>
+        <div v-if="s.historyLoading && !s.historyRooms.length" class="text-gray-400 text-sm">
+          正在加载历史记录…
+        </div>
+        <div v-else-if="!s.historyRooms.length" class="text-gray-500 text-sm">
+          暂无历史记录
+        </div>
+        <div v-else class="space-y-1">
+          <button
+            v-for="room in s.historyRooms"
+            :key="room.room_id"
+            class="w-full text-left px-3 py-2 rounded bg-[#2a2a2a] border border-gray-700 hover:border-[#84A65B] transition-colors"
+            :class="s.selectedHistoryRoom?.room_id === room.room_id ? 'border-[#84A65B]' : ''"
+            @click="loadHistoryRoom(room)"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-medium text-gray-100 truncate">{{ historyRoomTitle(room) }}</span>
+              <span class="text-xs text-gray-500 shrink-0">{{ formatHistoryTime(room.last_ts) }}</span>
+            </div>
+            <div class="mt-1 text-xs text-gray-400 truncate">
+              {{ room.message_count || 0 }} 条 · {{ room.last_sender_name || '未知' }}：{{ room.last_text || '' }}
+            </div>
+          </button>
+        </div>
+        <div
+          v-if="s.selectedHistoryRoom"
+          class="border-t border-gray-700 pt-3 space-y-2"
         >
-          创建房间
-        </button>
-        <button
-          class="flex-1 py-2 rounded text-sm"
-          :class="lobbyTab === 'join' ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a]/60'"
-          @click="lobbyTab = 'join'"
-        >
-          加入房间
-        </button>
+          <div class="flex items-center justify-between">
+            <div class="text-sm text-[#B8D58D] truncate">
+              {{ historyRoomTitle(s.selectedHistoryRoom) }}
+            </div>
+            <div class="text-xs text-gray-500">{{ s.messages.length }} 条</div>
+          </div>
+          <button
+            class="w-full py-2 rounded bg-[#84A65B] text-white text-sm disabled:opacity-50"
+            :disabled="s.historyLoading"
+            @click="continueHistoryAsSingle"
+          >
+            作为单人聊天室继续
+          </button>
+          <div class="max-h-56 overflow-y-auto space-y-2 pr-1">
+            <div
+              v-for="m in s.messages"
+              :key="m.message_id || `${m.from}-${m.ts}-${m.text}`"
+              class="text-sm"
+            >
+              <div class="text-xs text-gray-500">{{ m.from }} · {{ formatHistoryTime(m.ts) }}</div>
+              <div class="mt-0.5 rounded bg-[#E8E8E8]/90 text-gray-800 px-3 py-2 leading-relaxed break-words">
+                {{ m.text }}
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-
-      <!-- 创建房间 -->
-      <div v-if="lobbyTab === 'create'" class="space-y-3">
-        <template v-if="roomMode === 'multi'">
-          <input v-model="form.room" placeholder="房间号" :class="inputCls" />
-          <input v-model="form.password" placeholder="密码（可选）" :class="inputCls" />
-        </template>
-        <button
-          class="w-full py-2 rounded bg-[#84A65B] text-white text-sm disabled:opacity-50"
-          @click="onCreate"
-        >
-          {{ createButtonText }}
-        </button>
-      </div>
-
-      <!-- 加入房间 -->
-      <div v-else class="space-y-3">
-        <input v-model="form.ip" placeholder="房主 IP（如 192.168.1.5）" :class="inputCls" :disabled="isJoining" />
-        <input v-model.number="form.port" placeholder="房主端口" :class="inputCls" :disabled="isJoining" />
-        <input v-model="form.room" placeholder="房间号" :class="inputCls" :disabled="isJoining" />
-        <input v-model="form.password" placeholder="密码（可选）" :class="inputCls" :disabled="isJoining" />
-        <input v-model="form.nickname" placeholder="你的昵称" :class="inputCls" :disabled="isJoining" />
-        <button
-          class="w-full py-2 rounded bg-[#84A65B] text-white text-sm disabled:opacity-50"
-          :disabled="isJoining"
-          @click="onJoin"
-        >
-          {{ isJoining ? joinStatusText : '加入' }}
-        </button>
-        <div v-if="isJoining" class="text-[#B8D58D] text-xs">{{ joinStatusText }}</div>
-      </div>
-
-      <div v-if="s.error" class="text-red-400 text-xs">{{ errorText }}</div>
     </div>
 
     <!-- 已进房：聊天界面 -->
@@ -147,13 +234,14 @@
         </div>
         <div class="flex shrink-0 items-center gap-2">
           <span
+            v-if="s.mode === 'multi'"
             class="rounded-full px-2 py-1 text-[12px]"
             :class="s.connection === 'connected' ? 'bg-[#84A65B]/20 text-[#B8D58D]' : 'bg-yellow-500/20 text-yellow-300'"
           >
             {{ roomStatusLabel }}
           </span>
           <button class="px-2.5 py-1.5 rounded bg-red-500/80 text-white text-sm" @click="onLeave">
-            {{ s.role === 'host' ? '关闭' : '离开' }}
+            {{ s.mode === 'single' ? '退出聊天' : (s.role === 'host' ? '关闭' : '离开') }}
           </button>
         </div>
       </div>
@@ -450,6 +538,7 @@ const initialWorkspaceMode = normalizeVisibleWorkspaceMode(s.workspaceMode);
 const lobbyTab = ref('create');
 const roomMode = ref(initialWorkspaceMode === 'multiplayer_multi_agent' ? 'multi' : 'single');
 const selectedWorkspaceMode = ref(initialWorkspaceMode);
+const showAllHistory = ref(false);
 const selectedDraftAction = ref(s.draftAction || 'chat');
 const selectedTargetKey = ref('group');
 const showAddAgent = ref(false);
@@ -560,6 +649,8 @@ const createButtonText = computed(() => {
   return '进入自己设计';
 });
 const selectedExpertPayloads = computed(() => buildSelectedExpertPayloads(expertGroupConfig, roleTemplates));
+const visibleHistoryRooms = computed(() => (s.historyRooms || []).slice(0, 2));
+const hasMoreHistoryRooms = computed(() => (s.historyRooms || []).length > 2);
 const roomStatusLabel = computed(() => {
   if (s.connection === 'connected') return s.role === 'host' ? '房主在线' : '已连接';
   if (s.connection === 'reconnecting') return '重连中';
