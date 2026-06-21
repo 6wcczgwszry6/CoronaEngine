@@ -13,7 +13,7 @@
       <div class="titlebar-button-group">
         <button
           v-if="showFloatToggle"
-          title="切换浮动/停靠"
+          :title="t('dock.toggleFloat')"
           class="titlebar-button"
           @click.stop="onToggleFloat"
         >
@@ -21,7 +21,7 @@
         </button>
 
         <button
-          title="关闭"
+          :title="t('dock.close')"
           class="titlebar-button titlebar-close"
           @click.stop="onClose"
         >
@@ -34,6 +34,7 @@
 
 <script setup>
 import { onMounted, onUnmounted, ref, defineProps, defineEmits } from 'vue';
+import { useI18n } from 'vue-i18n';
 // 引入 projectService
 import { projectService } from '@/utils/bridge.js';
 
@@ -46,6 +47,7 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['close', 'toggleFloat']);
+const { t } = useI18n();
 
 // DOM 引用
 const titleBarRef = ref(null);

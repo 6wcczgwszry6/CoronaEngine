@@ -16,18 +16,36 @@ export function targetPayloadForKey(key, options = []) {
   };
 }
 
-export function routeGuardMessage(action, target = {}, text = '') {
+function translateOrFallback(translate, key, fallback) {
+  if (typeof translate !== 'function') return fallback;
+  const value = translate(key);
+  return value && value !== key ? value : fallback;
+}
+
+export function routeGuardMessage(action, target = {}, text = '', translate = null) {
   if (/^@([^\s，,：:]+)/.test(String(text || '').trim())) return '';
   const draftAction = String(action || '').trim();
   const scope = String(target?.scope || '').trim();
   if (draftAction === 'plan' && scope === 'group') {
-    return '生成方案需要先选择一个负责整理方案的 Agent。';
+    return translateOrFallback(
+      translate,
+      'lanchat.routeGuardPlanAgent',
+      '生成方案需要先选择一个负责整理方案的 Agent。'
+    );
   }
   if (draftAction === 'supplement' && scope !== 'agent' && scope !== 'plan') {
-    return '补充要求需要选择已有方案对应的 Agent。';
+    return translateOrFallback(
+      translate,
+      'lanchat.routeGuardSupplementAgent',
+      '补充要求需要选择已有方案对应的 Agent。'
+    );
   }
   if (draftAction === 'generate' && scope !== 'agent' && scope !== 'plan') {
-    return '确认生成需要选择已有方案对应的 Agent。';
+    return translateOrFallback(
+      translate,
+      'lanchat.routeGuardGenerateAgent',
+      '确认生成需要选择已有方案对应的 Agent。'
+    );
   }
   return '';
 }

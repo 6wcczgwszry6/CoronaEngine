@@ -2,7 +2,7 @@
   <main class="esc-panel">
     <DockTitleBar
       v-if="!isDocked"
-      title="暂停菜单"
+      :title="t('editorSettings.title')"
       extraClass="bg-[#242724]"
       routePath="/SetUp"
       @close="handleContinue"
@@ -12,10 +12,10 @@
       <header class="esc-header">
         <div>
           <p class="esc-kicker">ESC</p>
-          <h2 id="esc-menu-title">暂停菜单</h2>
+          <h2 id="esc-menu-title">{{ t('editorSettings.title') }}</h2>
         </div>
         <span class="esc-state" :class="{ offline: !runtimeState.available }">
-          {{ runtimeState.available ? runtimeState.sceneId || '编辑中' : '面板模式' }}
+          {{ runtimeState.available ? runtimeState.sceneId || t('editorSettings.editorMode') : t('editorSettings.panelMode') }}
         </span>
       </header>
 
@@ -25,39 +25,62 @@
 
       <section class="settings-section">
         <div class="section-heading">
-          <h3>常用</h3>
+          <h3>{{ t('editorSettings.common') }}</h3>
         </div>
+        <label class="locale-field">
+          <span>{{ t('locale.language') }}</span>
+          <div class="locale-switch" role="group" :aria-label="t('locale.switchTo')">
+            <button
+              type="button"
+              class="locale-option"
+              :class="{ active: locale === 'zh-CN' }"
+              :aria-pressed="locale === 'zh-CN'"
+              @click="handleLocaleChange('zh-CN')"
+            >
+              {{ t('locale.zhCN') }}
+            </button>
+            <button
+              type="button"
+              class="locale-option"
+              :class="{ active: locale === 'en-US' }"
+              :aria-pressed="locale === 'en-US'"
+              @click="handleLocaleChange('en-US')"
+            >
+              English
+            </button>
+          </div>
+        </label>
         <div class="button-grid four">
           <button class="action-button primary" type="button" @click="handleContinue">
-            继续编辑
+            {{ t('editorSettings.continueEditing') }}
           </button>
           <button
             class="action-button"
             type="button"
             @click="openPanelOrRoute('ProjectSettings', '/ProjectSettings')"
           >
-            项目设置
+            {{ t('layout.projectSettings') }}
           </button>
           <button
             class="action-button"
             type="button"
             @click="openFloatingPanelOrRoute('AITalkBar', '/AITalkBar')"
           >
-            AI 对话
+            {{ t('common.aiChat') }}
           </button>
           <button
             class="action-button"
             type="button"
             @click="openPanelOrRoute('LogTool', '/LogView')"
           >
-            日志
+            {{ t('editorSettings.log') }}
           </button>
         </div>
       </section>
 
       <section class="settings-section">
         <div class="section-heading">
-          <h3>工具面板</h3>
+          <h3>{{ t('editorSettings.toolPanels') }}</h3>
         </div>
         <div class="button-grid tools">
           <button
@@ -65,43 +88,43 @@
             type="button"
             @click="openFloatingPanelOrRoute('SceneTools', '/SceneBar')"
           >
-            场景管理
+            {{ t('plugins.SceneTools') }}
           </button>
           <button
             class="action-button"
             type="button"
             @click="openFloatingPanelOrRoute('SceneDatas', '/Object')"
           >
-            详情
+            {{ t('plugins.SceneDatas') }}
           </button>
           <button
             class="action-button"
             type="button"
             @click="openPanelOrRoute('FileManager', '/FileManager')"
           >
-            文件管理器
+            {{ t('editorSettings.fileManager') }}
           </button>
           <button
             class="action-button"
             type="button"
             @click="openPanelOrRoute('Network', '/Network')"
           >
-            网络协作
+            {{ t('editorSettings.network') }}
           </button>
           <button
             class="action-button"
             type="button"
             @click="openPanelOrRoute('LightFieldCalibration', '/LightFieldCalibration')"
           >
-            光场标定
+            {{ t('plugins.LightFieldCalibration') }}
           </button>
         </div>
       </section>
 
       <section class="settings-section">
         <div class="section-heading split">
-          <h3>运行</h3>
-          <span>{{ runtimeState.previewStatusText || '就绪' }}</span>
+          <h3>{{ t('editorSettings.run') }}</h3>
+          <span>{{ runtimeState.previewStatusText || t('editorSettings.ready') }}</span>
         </div>
         <div class="button-grid four">
           <button
@@ -110,7 +133,7 @@
             :disabled="startPreviewDisabled"
             @click="startPreview"
           >
-            开始预览
+            {{ t('layout.previewStart') }}
           </button>
           <button
             class="action-button"
@@ -118,7 +141,7 @@
             :disabled="stopPreviewDisabled"
             @click="stopPreview"
           >
-            结束预览
+            {{ t('layout.previewStop') }}
           </button>
           <button
             class="action-button"
@@ -126,7 +149,7 @@
             :disabled="runtimeActionDisabled"
             @click="runProject"
           >
-            运行项目
+            {{ t('layout.runProject') }}
           </button>
           <button
             class="action-button"
@@ -134,14 +157,14 @@
             :disabled="runtimeActionDisabled"
             @click="runCurrentScene"
           >
-            运行当前场景
+            {{ t('layout.runCurrentScene') }}
           </button>
         </div>
       </section>
 
       <section class="settings-section">
         <div class="section-heading split">
-          <h3>渲染</h3>
+          <h3>{{ t('editorSettings.render') }}</h3>
           <span>{{ runtimeState.renderLabel }}</span>
         </div>
         <div class="button-grid render">
@@ -161,19 +184,19 @@
 
       <section class="settings-section">
         <div class="section-heading split">
-          <h3>物理</h3>
+          <h3>{{ t('editorSettings.physics') }}</h3>
           <button
             class="text-button"
             type="button"
             :disabled="runtimeActionDisabled"
             @click="refreshPhysics"
           >
-            刷新
+            {{ t('common.refresh') }}
           </button>
         </div>
         <div class="physics-grid">
           <label class="field">
-            <span>重力 X</span>
+            <span>{{ t('editorSettings.gravityX') }}</span>
             <input
               v-model.number="physicsForm.gravityX"
               type="number"
@@ -183,7 +206,7 @@
             />
           </label>
           <label class="field">
-            <span>重力 Y</span>
+            <span>{{ t('editorSettings.gravityY') }}</span>
             <input
               v-model.number="physicsForm.gravityY"
               type="number"
@@ -193,7 +216,7 @@
             />
           </label>
           <label class="field">
-            <span>重力 Z</span>
+            <span>{{ t('editorSettings.gravityZ') }}</span>
             <input
               v-model.number="physicsForm.gravityZ"
               type="number"
@@ -203,7 +226,7 @@
             />
           </label>
           <label class="field">
-            <span>地面高度</span>
+            <span>{{ t('editorSettings.floorY') }}</span>
             <input
               v-model.number="physicsForm.floorY"
               type="number"
@@ -213,7 +236,7 @@
             />
           </label>
           <label class="field">
-            <span>弹性</span>
+            <span>{{ t('editorSettings.floorRestitution') }}</span>
             <input
               v-model.number="physicsForm.floorRestitution"
               type="number"
@@ -225,7 +248,7 @@
             />
           </label>
           <label class="field">
-            <span>固定步长</span>
+            <span>{{ t('editorSettings.fixedDt') }}</span>
             <input
               v-model.number="physicsForm.fixedDt"
               type="number"
@@ -242,26 +265,26 @@
           :disabled="runtimeActionDisabled"
           @click="applyPhysics"
         >
-          应用物理参数
+          {{ t('editorSettings.applyPhysics') }}
         </button>
       </section>
 
       <section class="settings-section leave-section">
         <div class="section-heading">
-          <h3>离开</h3>
+          <h3>{{ t('editorSettings.leave') }}</h3>
         </div>
         <div class="home-panel" :class="{ confirming: confirmHome }">
           <template v-if="confirmHome">
-            <p>确定回到主页？</p>
+            <p>{{ t('editorSettings.confirmHome') }}</p>
             <div class="confirm-actions">
-              <button class="small-button" type="button" @click="cancelHome">取消</button>
+              <button class="small-button" type="button" @click="cancelHome">{{ t('common.cancel') }}</button>
               <button class="small-button danger" type="button" @click="goHome">
-                确认回主页
+                {{ t('editorSettings.confirmHomeButton') }}
               </button>
             </div>
           </template>
           <button v-else class="home-button" type="button" @click="confirmHome = true">
-            回到主页
+            {{ t('editorSettings.home') }}
           </button>
         </div>
       </section>
@@ -272,9 +295,11 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
+import { useI18n } from 'vue-i18n';
 import { useDockStore } from '@/stores/dockStore.js';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 import { isFloatingPanel, openFloatingPanel } from '@/utils/panelWindows.js';
+import { setLocale } from '@/i18n/index.js';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 
 const EDITOR_CONTROLS_KEY = '__coronaEditorControls';
@@ -302,6 +327,7 @@ const defaultRenderModes = [
 ];
 
 const router = useRouter();
+const { t, locale } = useI18n();
 const dockStore = useDockStore();
 const { closePanel, isDocked } = useDockPanel();
 
@@ -412,6 +438,10 @@ function setStatus(message, kind = 'info') {
   }, 3200);
 }
 
+function handleLocaleChange(nextLocale) {
+  setLocale(nextLocale);
+}
+
 function refreshRuntime({ syncPhysics = false } = {}) {
   const controls = getRuntimeControls();
   if (!controls || typeof controls.getState !== 'function') {
@@ -449,7 +479,7 @@ async function runRuntimeAction(actionName, successMessage, ...args) {
   const controls = getRuntimeControls();
   if (!controls || typeof controls[actionName] !== 'function') {
     refreshRuntime();
-    setStatus('当前没有主编辑器上下文', 'warn');
+    setStatus(t('editorSettings.status.currentContextMissing'), 'warn');
     return false;
   }
 
@@ -459,7 +489,7 @@ async function runRuntimeAction(actionName, successMessage, ...args) {
     const succeeded = result !== false;
     refreshRuntime({ syncPhysics: actionName === 'applyPhysics' && succeeded });
     if (!succeeded) {
-      setStatus('操作失败，请查看日志', 'error');
+      setStatus(t('editorSettings.status.actionFailed'), 'error');
       return false;
     }
     setStatus(successMessage, 'success');
@@ -467,7 +497,7 @@ async function runRuntimeAction(actionName, successMessage, ...args) {
   } catch (error) {
     console.error(`ESC 执行 ${actionName} 失败`, error);
     refreshRuntime();
-    setStatus('操作失败，请查看日志', 'error');
+    setStatus(t('editorSettings.status.actionFailed'), 'error');
     return false;
   } finally {
     busyAction.value = '';
@@ -484,34 +514,34 @@ function renderModeDisabled(mode) {
 
 function startPreview() {
   if (startPreviewDisabled.value) return;
-  runRuntimeAction('startPreview', '已开始预览');
+  runRuntimeAction('startPreview', t('editorSettings.status.startPreview'));
 }
 
 function stopPreview() {
   if (stopPreviewDisabled.value) return;
-  runRuntimeAction('stopPreview', '已结束预览');
+  runRuntimeAction('stopPreview', t('editorSettings.status.stopPreview'));
 }
 
 function runProject() {
   if (runtimeActionDisabled.value) return;
-  runRuntimeAction('runProject', '已运行项目');
+  runRuntimeAction('runProject', t('editorSettings.status.runProject'));
 }
 
 function runCurrentScene() {
   if (runtimeActionDisabled.value) return;
-  runRuntimeAction('runCurrentScene', '已运行当前场景');
+  runRuntimeAction('runCurrentScene', t('editorSettings.status.runCurrentScene'));
 }
 
 function selectRenderMode(mode) {
   if (renderModeDisabled(mode)) return;
-  runRuntimeAction('selectRenderMode', `已切换到 ${mode.label}`, mode.value);
+  runRuntimeAction('selectRenderMode', t('editorSettings.status.selectRenderMode', { mode: mode.label }), mode.value);
 }
 
 async function refreshPhysics() {
   const controls = getRuntimeControls();
   if (!controls || typeof controls.refreshPhysics !== 'function') {
     refreshRuntime();
-    setStatus('当前没有主编辑器上下文', 'warn');
+    setStatus(t('editorSettings.status.currentContextMissing'), 'warn');
     return;
   }
 
@@ -520,15 +550,15 @@ async function refreshPhysics() {
     const nextState = await controls.refreshPhysics();
     if (nextState === false) {
       refreshRuntime();
-      setStatus('刷新失败，请查看日志', 'error');
+      setStatus(t('editorSettings.status.physicsRefreshFailed'), 'error');
       return;
     }
     runtimeState.value = normalizeState(nextState);
     syncPhysicsForm(runtimeState.value.physics);
-    setStatus('已刷新物理参数', 'success');
+    setStatus(t('editorSettings.status.physicsRefreshed'), 'success');
   } catch (error) {
     console.error('刷新物理参数失败', error);
-    setStatus('刷新失败，请查看日志', 'error');
+    setStatus(t('editorSettings.status.physicsRefreshFailed'), 'error');
   } finally {
     busyAction.value = '';
   }
@@ -536,7 +566,7 @@ async function refreshPhysics() {
 
 async function applyPhysics() {
   if (runtimeActionDisabled.value) return;
-  const applied = await runRuntimeAction('applyPhysics', '已应用物理参数', { ...physicsForm.value });
+  const applied = await runRuntimeAction('applyPhysics', t('editorSettings.status.applyPhysics'), { ...physicsForm.value });
   if (applied) {
     physicsDirty.value = false;
   }
@@ -579,7 +609,7 @@ async function openFloatingPanelOrRoute(panelId, routePath) {
     if (opened) {
       closePanel();
     } else {
-      setStatus('打开悬浮窗失败，请查看日志', 'error');
+      setStatus(t('editorSettings.status.floatingOpenFailed'), 'error');
     }
     return;
   }
@@ -638,7 +668,12 @@ onUnmounted(() => {
   flex-direction: column;
   background: linear-gradient(180deg, #1b1d1b 0%, var(--panel-bg) 100%);
   color: var(--text-main);
-  font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+  font-family:
+    "Segoe UI",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "Noto Sans SC",
+    sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -763,6 +798,69 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+.locale-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  background: rgba(24, 27, 24, 0.58);
+}
+
+.locale-field span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.locale-switch {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-width: 148px;
+  max-width: 58%;
+  padding: 2px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: rgba(17, 19, 17, 0.96);
+  gap: 2px;
+}
+
+.locale-option {
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 26px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.locale-option:hover {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.locale-option.active {
+  color: #f4f7ef;
+  background: rgba(132, 166, 91, 0.32);
+  box-shadow: inset 0 0 0 1px rgba(132, 166, 91, 0.35);
+}
+
 .button-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -795,6 +893,7 @@ onUnmounted(() => {
 }
 
 .action-button {
+  min-width: 0;
   min-height: 40px;
   padding: 8px 10px;
   overflow: hidden;
@@ -996,6 +1095,16 @@ onUnmounted(() => {
 
   .esc-state {
     max-width: 100%;
+  }
+
+  .locale-field {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .locale-switch {
+    max-width: 100%;
+    width: 100%;
   }
 
   .button-grid,

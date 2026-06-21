@@ -12,11 +12,13 @@ import AITalkBar from '@/views/sidebar/AITalkBar.vue';
 import EditorSettings from '@/views/sidebar/EditorSettings.vue';
 import NetworkPanel from '@/views/sidebar/Network.vue';
 import LightFieldCalibrationPanel from '@/components/panels/LightFieldCalibrationPanel.vue';
+import { translate } from '@/i18n/index.js';
 
 export const PLUGIN_MANIFEST = [
   {
     id: 'SceneTools',
     routePath: '/SceneBar',
+    displayNameKey: 'plugins.SceneTools',
     displayName: '场景管理',
     pageType: 'view',
     defaultDock: 'right',
@@ -32,6 +34,7 @@ export const PLUGIN_MANIFEST = [
   {
     id: 'LightFieldCalibration',
     routePath: '/LightFieldCalibration',
+    displayNameKey: 'plugins.LightFieldCalibration',
     displayName: '光场3D UI标定',
     pageType: 'view',
     defaultDock: 'right',
@@ -43,6 +46,7 @@ export const PLUGIN_MANIFEST = [
   {
     id: 'SceneDatas',
     routePath: '/Object',
+    displayNameKey: 'plugins.SceneDatas',
     displayName: '详情',
     pageType: 'view',
     defaultDock: 'right',
@@ -58,6 +62,7 @@ export const PLUGIN_MANIFEST = [
   {
     id: 'AITool',
     routePath: '/Pet',
+    displayNameKey: 'plugins.AITool',
     displayName: '白菜助手',
     pageType: 'plugin',
     defaultDock: 'bottom',
@@ -69,6 +74,7 @@ export const PLUGIN_MANIFEST = [
   {
     id: 'LogTool',
     routePath: '/LogView',
+    displayNameKey: 'plugins.LogTool',
     displayName: '日志工具',
     pageType: 'view',
     defaultDock: 'bottom',
@@ -80,6 +86,7 @@ export const PLUGIN_MANIFEST = [
   {
     id: 'FileManager',
     routePath: '/FileManager',
+    displayNameKey: 'plugins.FileManager',
     displayName: '文件管理器',
     pageType: 'view',
     defaultDock: 'left',
@@ -91,6 +98,7 @@ export const PLUGIN_MANIFEST = [
   {
     id: 'ProjectSettings',
     routePath: '/ProjectSettings',
+    displayNameKey: 'plugins.ProjectSettings',
     displayName: '项目设置',
     pageType: 'special',
     defaultDock: 'center',
@@ -102,6 +110,7 @@ export const PLUGIN_MANIFEST = [
   {
     id: 'AITalkBar',
     routePath: '/AITalkBar',
+    displayNameKey: 'plugins.AITalkBar',
     displayName: 'AI 对话',
     pageType: 'plugin',
     defaultDock: 'right',
@@ -117,6 +126,7 @@ export const PLUGIN_MANIFEST = [
   {
     id: 'EditorSettings',
     routePath: '/SetUp',
+    displayNameKey: 'plugins.EditorSettings',
     displayName: '暂停菜单',
     pageType: 'special',
     defaultDock: 'center',
@@ -128,6 +138,7 @@ export const PLUGIN_MANIFEST = [
   {
     id: 'Network',
     routePath: '/Network',
+    displayNameKey: 'plugins.Network',
     displayName: '局域网聊天',
     pageType: 'plugin',
     defaultDock: 'right',
@@ -141,4 +152,9 @@ export const PLUGIN_MANIFEST = [
 /** 按 id 快速查找 */
 export function getPluginManifest(id) {
   return PLUGIN_MANIFEST.find((p) => p.id === id);
+}
+
+export function getPluginDisplayName(plugin) {
+  if (!plugin) return '';
+  return plugin.displayNameKey ? translate(plugin.displayNameKey) : plugin.displayName;
 }

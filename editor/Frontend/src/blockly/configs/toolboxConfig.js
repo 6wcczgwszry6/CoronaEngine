@@ -304,3 +304,28 @@ export const TOOLBOX_CONFIG = {
     },
   ],
 };
+
+const CATEGORY_KEYS = {
+  引擎: 'blocklyToolbox.engine',
+  摄像机: 'blocklyToolbox.camera',
+  外观: 'blocklyToolbox.appearance',
+  事件: 'blocklyToolbox.event',
+  控制: 'blocklyToolbox.control',
+  侦测: 'blocklyToolbox.detect',
+  运算: 'blocklyToolbox.math',
+  变量: 'blocklyToolbox.variable',
+  列表: 'blocklyToolbox.list',
+  文本: 'blocklyToolbox.text',
+  音效: 'blocklyToolbox.audio',
+  函数: 'blocklyToolbox.functions',
+};
+
+export function createToolboxConfig(t = (key) => key) {
+  const clone = structuredClone(TOOLBOX_CONFIG);
+  for (const category of clone.contents || []) {
+    if (category.kind === 'category' && CATEGORY_KEYS[category.name]) {
+      category.name = t(CATEGORY_KEYS[category.name]);
+    }
+  }
+  return clone;
+}
