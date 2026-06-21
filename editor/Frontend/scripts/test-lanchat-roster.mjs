@@ -34,6 +34,8 @@ assertIncludes(store, "event.code === 'JOIN_TIMEOUT'", 'lanchat store must handl
 assertIncludes(store, 'function isJoining', 'lanchat store must expose pending join state');
 assertIncludes(store, "case 'history_snapshot':", 'history snapshot must be the join success signal');
 assertIncludes(store, 'msg.sender_id === state.peerId', 'lanchat store must prefer peerId for self messages');
+assertIncludes(store, "LOCAL_SINGLE_PLAYER_PEER_ID = 'local-single-player'", 'lanchat store must know the stable local single-player sender id');
+assertIncludes(store, "state.mode === 'single'", 'lanchat store must scope local single-player self detection to single-player rooms');
 assertIncludes(store, 'state.agents = res.agents || []', 'joinRoom must initialize agent roster');
 assertIncludes(store, 'event.member_details', 'member_update must consume member_details');
 assertIncludes(store, 'function upsertAgent', 'lanchat store must support local agent roster upsert');
@@ -273,6 +275,11 @@ assertIncludes(roomPanel, 'targetKeyFromMentionText', 'RoomPanel must clear stal
 assertIncludes(roomPanel, 'displayMessages', 'RoomPanel must render pending replies inside the message flow');
 assertIncludes(roomPanel, "kind: 'pending_reply'", 'RoomPanel pending reply must be a virtual message entry');
 assertIncludes(roomPanel, 'pendingReplyMatchesMessage', 'RoomPanel pending reply must clear only on the matching AI reply');
+assertIncludes(roomPanel, 'pendingReplyBelongsToCurrentRoom', 'RoomPanel pending reply must be scoped to the active room');
+assertIncludes(roomPanel, "roomId: s.room || ''", 'RoomPanel pending reply must remember the room it belongs to');
+assertIncludes(roomPanel, "roomMode: s.mode || ''", 'RoomPanel pending reply must remember the room mode it belongs to');
+assertIncludes(roomPanel, 'const pending = currentPendingReply.value', 'RoomPanel must render only the pending reply for the current room');
+assertIncludes(roomPanel, '() => [s.inRoom, s.mode, s.room]', 'RoomPanel must clear stale pending replies when the active conversation changes');
 assertIncludes(roomPanel, "if (!target || !['agent', 'gm'].includes(target.scope)) return null", 'RoomPanel must not show thinking placeholder when no single AI helper is targeted');
 assertIncludes(roomPanel, 'options.correlation_id = pending.correlationId', 'RoomPanel targeted messages must carry a correlation id for pending reply matching');
 if (roomPanel.includes('showAiReplySpinner') || roomPanel.includes('pendingReplySinceMs')) {
