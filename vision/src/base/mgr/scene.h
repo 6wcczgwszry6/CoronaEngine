@@ -172,6 +172,7 @@ public:
     [[nodiscard]] const vector<SP<ShapeInstance>> &instances() const noexcept { return data_->instances_; }
     void load_shapes(const vector<ShapeDesc> &descs);
     void add_shape(const SP<ShapeGroup> &group, ShapeDesc desc = {});
+    void remove_shape(uint group_index) noexcept;
     void clear_shapes() noexcept;
 
     // Materials
