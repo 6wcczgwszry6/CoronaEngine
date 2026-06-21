@@ -38,6 +38,11 @@ assertIncludes(store, 'event.member_details', 'member_update must consume member
 assertIncludes(store, 'function upsertAgent', 'lanchat store must support local agent roster upsert');
 assertIncludes(store, 'upsertAgent(added)', 'addAgent must make new agents immediately mentionable');
 assertIncludes(store, 'removeAgentFromRoster(agentId)', 'removeAgent must clear local mention roster optimistically');
+assertIncludes(store, "const scope = String(target.scope || '').trim()", 'lanchat store must allow an empty active target');
+assertIncludes(store, 'if (target.scope) metadata.target_scope = target.scope', 'lanchat store must not serialize scene as the default target scope');
+if (store.includes("setActiveTarget({ scope: 'group' })")) {
+  fail('lanchat store must not default workspace mode changes to the all-assistant group target');
+}
 assertIncludes(store, 'sender_type:', 'lanchat store must preserve LANChat message v2 sender_type');
 assertIncludes(store, 'message_kind:', 'lanchat store must preserve LANChat message v2 message_kind');
 assertIncludes(store, 'correlation_id:', 'lanchat store must preserve LANChat message v2 correlation_id');
@@ -77,15 +82,22 @@ assertIncludes(store, 'async function loadHistoryRoom', 'lanchat store must load
 assertIncludes(store, 'state.agents = Array.isArray(res.agents) ? res.agents : []', 'loading persisted history must restore its agent roster');
 assertIncludes(store, "agent.owner === 'local-single-player'", 'single-player history agents must be treated as locally owned after restore');
 assertIncludes(store, 'async function continueHistoryAsLocalRoom', 'lanchat store must let users continue a selected history as a single-player room');
+assertIncludes(store, 'async function continueHistoryAsMultiRoom', 'lanchat store must let users continue a selected history as a multiplayer room');
+assertIncludes(store, "state.workspaceMode = 'multiplayer_multi_agent'", 'continuing multiplayer history must keep the LAN collaboration workspace mode');
 assertIncludes(store, 'restore_history: true', 'continuing a selected history must explicitly ask native to restore it into the active room');
 assertIncludes(store, 'lanChatService.stopLocalRoom', 'single-player rooms must close without stopping collaboration networking');
 assertIncludes(store, 'lanChatService.startRoom', 'multiplayer rooms must keep using the network room service path');
 
 assertIncludes(roomPanel, 'member.member_id !== s.peerId', 'mention candidates must filter local member_id');
-assertIncludes(roomPanel, 'a.name, isAgent: true', 'mention candidates must include agents');
-assertIncludes(roomPanel, ':peer-id="s.peerId"', 'MemberList must receive stable peerId');
+assertIncludes(roomPanel, 'targetKey: `agent:${a.agent_id || a.name}`', 'mention candidates must include agents with route targets');
+if (roomPanel.includes(':peer-id="s.peerId"') || memberList.includes('a.owner === peerId')) {
+  fail('MemberList must allow every AI assistant row to show its delete action');
+}
 assertIncludes(roomPanel, 'text-[15px]', 'RoomPanel must keep readable 15px chat/input text for CEF validation');
 assertIncludes(roomPanel, 'leading-relaxed', 'RoomPanel message bubbles must keep readable line height');
+assertIncludes(roomPanel, 'overflow-x-hidden', 'RoomPanel message list must not grow horizontally for long messages');
+assertIncludes(roomPanel, 'lanchat-message-bubble', 'RoomPanel message bubbles must use bounded wrapping styles');
+assertIncludes(roomPanel, 'overflow-wrap: anywhere', 'RoomPanel message bubbles must wrap long continuous text');
 assertIncludes(roomPanel, 'w-36 border-l', 'RoomPanel member rail must be wide enough for readable names');
 assertIncludes(roomPanel, 'isJoining', 'RoomPanel must render pending join state');
 assertIncludes(roomPanel, ':disabled="isJoining"', 'RoomPanel must disable join controls while pending');
@@ -108,7 +120,7 @@ assertIncludes(roomPanel, 'buildManualGmMessageOptions', 'RoomPanel must use the
 assertIncludes(roomPanel, 'buildParticipantDisclosureDraft', 'RoomPanel must use the shared participant intervention draft builder');
 assertIncludes(roomPanel, 'function sendDisclosureAction', 'RoomPanel must send clickable disclosure actions through the shared builder');
 assertIncludes(roomPanel, 'function isDisclosureActionSendable', 'RoomPanel must only render supported disclosure actions as buttons');
-assertIncludes(roomPanel, 'return buildManualGmMessageOptions(s.role)', 'manual @GM messages must derive host identity through the shared builder');
+assertIncludes(roomPanel, 'const options = buildManualGmMessageOptions(s.role)', 'manual @GM messages must derive host identity through the shared builder');
 assertIncludes(roomPanel, 'ref="draftInput"', 'RoomPanel must be able to focus input after participant quick-action draft');
 assertIncludes(roomPanel, 'draft.value = draftText', 'RoomPanel participant quick actions must prefill the chat draft instead of sending vague empty actions');
 assertIncludes(roomPanel, "reject_conflict_resolution: '拒绝仲裁'", 'RoomPanel must translate reject conflict action without leaking internal ids');
@@ -158,7 +170,13 @@ assertIncludes(roomPanel, "roomMode.value = 'multi'", 'RoomPanel must offer a mu
 assertIncludes(roomPanel, 'mode: roomMode.value', 'RoomPanel must pass the selected room mode when creating a room');
 assertIncludes(roomPanel, "v-if=\"roomMode === 'multi'\"", 'RoomPanel must only show room/password inputs for multiplayer room creation');
 assertIncludes(roomPanel, 'function makeLocalRoomId', 'RoomPanel must auto-generate an internal local room id for single-player rooms');
-assertIncludes(roomPanel, "return 'single-default'", 'single-player room id must be stable so local history can be restored');
+assertIncludes(roomPanel, "return `single-${datePart}-${timePart}-${suffix}`", 'new single-player rooms must get a fresh local room id');
+assertIncludes(roomPanel, 'Math.random().toString(36)', 'single-player room ids must avoid reusing the same id within the same second');
+if (roomPanel.includes("return 'single-default'")) {
+  fail('new single-player room creation must not reuse the legacy fixed room id');
+}
+assertIncludes(roomPanel, 'function isLocalSingleRoomId', 'RoomPanel must still recognize local single-player history room ids');
+assertIncludes(roomPanel, "value === 'single-default'", 'RoomPanel must keep old single-player history readable');
 assertIncludes(roomPanel, "roomMode.value === 'single'", 'RoomPanel create flow must branch before requiring a manually typed room id');
 assertIncludes(roomPanel, "s.mode === 'single' ? '单人聊天室' : s.room", 'RoomPanel must not expose internal local room ids as the single-player room title');
 assertIncludes(roomPanel, 'onMounted(refreshHistoryRooms)', 'RoomPanel must load persisted history list when the dock opens');
@@ -173,8 +191,23 @@ assertIncludes(roomPanel, '全部历史记录', 'RoomPanel must label the second
 assertIncludes(roomPanel, 'v-for="room in visibleHistoryRooms"', 'RoomPanel primary history list must render the capped history collection');
 assertIncludes(roomPanel, 'v-for="room in s.historyRooms"', 'RoomPanel secondary history page must render all history rooms');
 assertIncludes(roomPanel, 'continueHistoryAsSingle', 'RoomPanel must let users continue a selected history as a single-player room');
-assertIncludes(roomPanel, '作为单人聊天室继续', 'RoomPanel must expose a clear continue-history action');
-assertIncludes(roomPanel, '继续所选历史', 'RoomPanel single-room create button must reflect selected history');
+assertIncludes(roomPanel, 'continueHistoryAsMulti', 'RoomPanel must let users continue multiplayer history as a LAN collaboration room');
+assertIncludes(roomPanel, 'isLocalSingleRoomId(roomId)', 'RoomPanel must branch history restore by single-player room id');
+assertIncludes(roomPanel, "lanchat.setWorkspaceMode('multiplayer_multi_agent')", 'RoomPanel must switch multiplayer history into LAN collaboration mode');
+assertIncludes(roomPanel, '@dblclick="continueHistoryFromList(room)"', 'RoomPanel history lists must enter a history room on double click');
+const historyDoubleClickCount = (roomPanel.match(/@dblclick="continueHistoryFromList\(room\)"/g) || []).length;
+if (historyDoubleClickCount < 2) {
+  fail('RoomPanel primary and all-history lists must both enter a history room on double click');
+}
+if (roomPanel.includes('作为单人聊天室继续')) {
+  fail('RoomPanel history lists must not show the old continue-history detail panel');
+}
+assertIncludes(roomPanel, '`多人聊天室-${roomId}`', 'RoomPanel must label multiplayer history rooms with a multiplayer prefix');
+if (roomPanel.includes("if (s.selectedHistoryRoom) return '继续所选历史'")) {
+  fail('RoomPanel create button must not change into a continue-history action');
+}
+assertIncludes(cefBridge, 'const bool restore_history = payload_arg.value("restore_history", false)', 'CEF start_room must accept explicit history restore requests');
+assertIncludes(cefBridge, 'restored_history = sys->lanchat_restore_history_room(history_room)', 'CEF start_room must restore selected multiplayer history into NetworkSystem');
 assertIncludes(roomPanel, "s.mode === 'multi'", 'RoomPanel must only show host IP/port for multiplayer rooms');
 assertIncludes(roomPanel, "label: '自己设计'", 'RoomPanel lobby must expose the solo design entry');
 assertIncludes(roomPanel, "label: '多人共创'", 'RoomPanel lobby must expose the multiplayer co-creation entry');
@@ -186,12 +219,10 @@ assertIncludes(roomPanel, "s.role !== 'guest' || s.mode !== 'multi'", 'RoomPanel
 assertIncludes(roomPanel, "s.connection !== 'connected'", 'RoomPanel model transfer request must wait until LANChat join is connected');
 assertIncludes(roomPanel, 'v-if="s.mode === \'multi\'"', 'RoomPanel must only show connection status pill for multiplayer rooms');
 assertIncludes(roomPanel, "s.mode === 'single' ? '退出聊天'", 'RoomPanel single-player close button must read as exiting chat');
-if (roomPanel.includes("label: 'AI 专家组'") || roomPanel.includes("key: 'solo_multi_agent'")) {
-  fail('RoomPanel first-level lobby must not expose a separate AI expert group entry');
+if (roomPanel.includes("key: 'solo_multi_agent'")) {
+  fail('RoomPanel first-level lobby must not expose a separate all-AI entry');
 }
 
-assertIncludes(memberList, 'peerId', 'MemberList must accept peerId prop');
-assertIncludes(memberList, 'a.owner === peerId', 'agent remove visibility must compare owner to peerId');
 assertIncludes(memberList, '<div class="text-sm">', 'MemberList must keep readable CEF font size');
 assertIncludes(roomPanel, '@add-agent="showAddAgent = true"', 'RoomPanel must move add-agent entry into the member list');
 assertIncludes(memberList, "defineEmits(['remove-agent', 'add-agent'])", 'MemberList must expose add-agent from the AI list');
@@ -199,6 +230,40 @@ assertIncludes(memberList, 'group-hover:opacity-100', 'MemberList agent remove b
 assertIncludes(memberList, '添加助手', 'MemberList must render add assistant as the final AI list action');
 if (roomPanel.includes('v-for="action in draftActions"') || roomPanel.includes('selectedDraftAction === action.key')) {
   fail('RoomPanel must not render the draft action button row above the target/agent row');
+}
+if (roomPanel.includes('v-for="target in targetQuickOptions"') || roomPanel.includes('targetQuickOptions')) {
+  fail('RoomPanel must not render the target quick button row above the chat input');
+}
+assertIncludes(roomPanel, 'rows="2"', 'RoomPanel chat input must allow two visible lines');
+assertIncludes(roomPanel, 'const DRAFT_MIN_ROWS = 2', 'RoomPanel chat input must default to two rows');
+assertIncludes(roomPanel, 'const DRAFT_MAX_ROWS = 4', 'RoomPanel chat input must grow only up to four rows before scrolling');
+assertIncludes(roomPanel, 'function resizeDraftInput', 'RoomPanel chat input must resize with draft content');
+assertIncludes(roomPanel, "el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden'", 'RoomPanel chat input must scroll only after four rows');
+assertIncludes(roomPanel, 'class="self-stretch px-4 rounded bg-[#84A65B]', 'RoomPanel send button must stretch with the input height');
+assertIncludes(roomPanel, 'toggleMentionPicker', 'RoomPanel input plus button must open the shared mention picker');
+assertIncludes(roomPanel, 'ref="mentionRoot"', 'RoomPanel mention picker must know its root for outside-click close');
+assertIncludes(roomPanel, "document.addEventListener('pointerdown', onDocumentPointerDown)", 'RoomPanel mention picker must close on outside pointer down');
+assertIncludes(roomPanel, "document.removeEventListener('pointerdown', onDocumentPointerDown)", 'RoomPanel mention picker must clean up outside-click listener');
+assertIncludes(roomPanel, 'max-h-64', 'RoomPanel mention picker must be taller than the old compact list');
+assertIncludes(roomPanel, 'lanchat-scrollbar', 'RoomPanel mention picker must use the themed scrollbar');
+assertIncludes(roomPanel, '全部AI助手', 'RoomPanel must rename the group target to all AI assistants');
+assertIncludes(roomPanel, "return '输入@来指定AI助手~'", 'RoomPanel chat placeholder must guide users to @ AI assistants');
+if (roomPanel.includes('pb-8 pl-10')) {
+  fail('RoomPanel plus button must overlay the textarea instead of reserving a left column');
+}
+if (roomPanel.includes('专家组') || roomPanel.includes('当前场景') || roomPanel.includes('输入要问的问题')) {
+  fail('RoomPanel must not show the old expert group, current scene, or question placeholder text');
+}
+assertIncludes(roomPanel, "selectedTargetKey = ref('')", 'RoomPanel default chat target must be empty direct send');
+assertIncludes(roomPanel, 'syncSelectedTargetFromDraft(text)', 'RoomPanel must derive the structured target from the current draft text');
+assertIncludes(roomPanel, 'targetKeyFromMentionText', 'RoomPanel must clear stale targets when @ text is removed');
+assertIncludes(roomPanel, 'displayMessages', 'RoomPanel must render pending replies inside the message flow');
+assertIncludes(roomPanel, "kind: 'pending_reply'", 'RoomPanel pending reply must be a virtual message entry');
+assertIncludes(roomPanel, 'pendingReplyMatchesMessage', 'RoomPanel pending reply must clear only on the matching AI reply');
+assertIncludes(roomPanel, "if (!target || !['agent', 'gm'].includes(target.scope)) return null", 'RoomPanel must not show thinking placeholder when no single AI helper is targeted');
+assertIncludes(roomPanel, 'options.correlation_id = pending.correlationId', 'RoomPanel targeted messages must carry a correlation id for pending reply matching');
+if (roomPanel.includes('showAiReplySpinner') || roomPanel.includes('pendingReplySinceMs')) {
+  fail('RoomPanel must not use the old global AI reply spinner state');
 }
 if (roomPanel.includes('＋助手')) {
   fail('RoomPanel room header must not render the old add assistant button');

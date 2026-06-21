@@ -29,6 +29,7 @@ export const DOM_TEXT_TRANSLATIONS = {
   '创建场景': 'Create Scene',
   '上次编辑': 'Last Edited',
   '添加助手': 'Add Assistant',
+  '指定 AI 助手': 'Choose AI Assistant',
   '更多': 'More',
   '全部历史记录': 'All History',
   'Python 代码': 'Python Code',

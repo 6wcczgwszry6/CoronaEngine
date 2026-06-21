@@ -46,7 +46,7 @@ const state = reactive({
   workspaceMode: 'multiplayer_multi_agent',
   draftAction: 'chat',
   activeTarget: {
-    scope: 'scene',
+    scope: '',
     agentId: '',
     agentName: '',
     planId: '',
@@ -79,7 +79,7 @@ function _resetRoom() {
   state.workspaceMode = 'multiplayer_multi_agent';
   state.draftAction = 'chat';
   state.activeTarget = {
-    scope: 'scene',
+    scope: '',
     agentId: '',
     agentName: '',
     planId: '',
@@ -452,6 +452,43 @@ async function continueHistoryAsLocalRoom({ room, nickname } = {}) {
   return res;
 }
 
+async function continueHistoryAsMultiRoom({ room, port, nickname } = {}) {
+  const roomId = String(room || state.selectedHistoryRoom?.room_id || '').trim();
+  if (!roomId) return { ok: false, error: 'ROOM_REQUIRED' };
+
+  state.error = '';
+  state.workspaceMode = 'multiplayer_multi_agent';
+  const hostNickname = (nickname || HOST_NICKNAME).trim() || HOST_NICKNAME;
+  const previewMessages = [...state.messages];
+  const previewAgents = [...state.agents];
+  const res = await lanChatService.startRoom({
+    room: roomId,
+    password: '',
+    port,
+    nickname: hostNickname,
+    mode: 'multi',
+    restore_history: true,
+    history_room: roomId,
+  });
+  if (res && res.ok) {
+    applyHostRoomState({ room: roomId, mode: 'multi', res, hostNickname });
+    const restoredHistory = Array.isArray(res.history) && res.history.length
+      ? res.history
+      : previewMessages;
+    const restoredAgents = Array.isArray(res.agents) && res.agents.length
+      ? res.agents
+      : previewAgents;
+    state.agents = restoredAgents;
+    state.myAgents = restoredAgents
+      .filter((agent) => !agent.owner || agent.owner === state.peerId)
+      .map((agent) => ({ ...agent }));
+    applyHistorySnapshot(restoredHistory, true);
+  } else {
+    state.error = (res && res.error) || 'START_FAILED';
+  }
+  return res;
+}
+
 /** 房主开房。返回 { ok, ip, port } 或 { ok:false, error }。 */
 async function openRoom({ room, password, port, nickname, mode = 'multi' }) {
   if (mode === 'single') {
@@ -547,13 +584,13 @@ function setWorkspaceMode(mode) {
   state.workspaceMode = value;
   if (value === 'solo_single_agent') {
     state.mode = 'single';
-    setActiveTarget({ scope: 'group' });
+    setActiveTarget({});
   } else if (value === 'solo_multi_agent') {
     state.mode = 'single';
-    setActiveTarget({ scope: 'group' });
+    setActiveTarget({});
   } else {
     state.mode = 'multi';
-    setActiveTarget({ scope: 'group' });
+    setActiveTarget({});
   }
 }
 
@@ -566,7 +603,7 @@ function setDraftAction(action) {
 }
 
 function setActiveTarget(target = {}) {
-  const scope = String(target.scope || 'scene').trim() || 'scene';
+  const scope = String(target.scope || '').trim();
   state.activeTarget = {
     scope,
     agentId: String(target.agentId || target.agent_id || '').trim(),
@@ -580,8 +617,8 @@ function structuredRouteMetadata(overrides = {}) {
   const metadata = {
     workspace_mode: state.workspaceMode,
     draft_action: state.draftAction,
-    target_scope: target.scope || 'scene',
   };
+  if (target.scope) metadata.target_scope = target.scope;
   if (target.agentId) metadata.target_agent_id = target.agentId;
   if (target.agentName) metadata.target_agent_name = target.agentName;
   if (target.planId) metadata.target_plan_id = target.planId;
@@ -763,6 +800,7 @@ export const lanchat = {
   openRoom,
   openLocalRoom,
   continueHistoryAsLocalRoom,
+  continueHistoryAsMultiRoom,
   closeRoom,
   joinRoom,
   leaveRoom,
