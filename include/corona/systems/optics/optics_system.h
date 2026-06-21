@@ -289,6 +289,12 @@ class OpticsSystem : public Kernel::SystemBase {
     GeometrySystem* geometry_system_ = nullptr;
     bool geometry_system_queried_ = false;  // 避免每帧重试失败的获取
 
+    // 天空驱动环境光 (SH9)：仅当环境光照签名（sun_dir + sky_intensity）变化时
+    // 才重新把大气天空投影到 9 个球谐系数，结果常驻 skyIrradianceSHBuffer 供
+    // lighting pass 逐像素求值。静态光照下摊销成本接近零。
+    std::size_t sky_sh_signature_{0};
+    bool sky_sh_initialized_{false};
+
     // Vision 后端状态
     bool vision_initialized_{false};
 

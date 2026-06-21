@@ -465,6 +465,31 @@ void apply_pending_camera_releases() {
     return out;
 }
 
+[[nodiscard]] bool has_native_local_correction(const Corona::GeometryDevice& geom) {
+    const auto& offset = geom.native_local_correction_offset;
+    return std::abs(geom.native_local_correction_scale - 1.0f) > 1e-6f ||
+           std::abs(offset.x) > 1e-6f ||
+           std::abs(offset.y) > 1e-6f ||
+           std::abs(offset.z) > 1e-6f;
+}
+
+[[nodiscard]] ktm::fmat4x4 apply_native_local_correction(
+    const ktm::fmat4x4& model_matrix,
+    const Corona::GeometryDevice& geom) {
+    if (!has_native_local_correction(geom)) {
+        return model_matrix;
+    }
+
+    ktm::fmat4x4 correction = ktm::fmat4x4::from_eye();
+    correction[0][0] = geom.native_local_correction_scale;
+    correction[1][1] = geom.native_local_correction_scale;
+    correction[2][2] = geom.native_local_correction_scale;
+    correction[3][0] = geom.native_local_correction_offset.x;
+    correction[3][1] = geom.native_local_correction_offset.y;
+    correction[3][2] = geom.native_local_correction_offset.z;
+    return multiply_ktm_mat4(model_matrix, correction);
+}
+
 bool collect_actor_instances_for_visibility(
     const Corona::SceneDevice& scene,
     RasterizerPipeline<visibility_vert_glsl, visibility_frag_glsl>& target_visibility,
@@ -513,6 +538,7 @@ bool collect_actor_instances_for_visibility(
                 ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
                 if (auto transform = transform_storage.try_acquire_read(geom->transform_handle)) {
                     model_matrix = transform->compute_matrix();
+                    model_matrix = apply_native_local_correction(model_matrix, *geom);
                     if (camera_basis != nullptr) {
                         model_matrix = multiply_ktm_mat4(*camera_basis, model_matrix);
                     }
@@ -643,9 +669,12 @@ void bind_pipeline_scene_resource_early(
 }
 
 [[nodiscard]] auto create_vision_pipeline(
+    Corona::CameraVisionRenderMode mode,
     const std::shared_ptr<Corona::Systems::Vision::VisionSceneResource>& scene_resource = {})
     -> ocarina::SP<vision::Pipeline> {
     auto project_desc = make_default_vision_project_desc();
+    project_desc.output_desc.denoise =
+        Corona::Systems::Vision::vision_render_mode_uses_denoise(mode);
     auto pipeline = vision::Node::create_shared<vision::Pipeline>(project_desc.pipeline_desc);
     if (!pipeline) {
         return {};
@@ -654,8 +683,23 @@ void bind_pipeline_scene_resource_early(
     pipeline->init_project(project_desc);
     pipeline->init_postprocessor(project_desc.renderer_desc.denoiser_desc);
     pipeline->init();
-    pipeline->set_output_denoise(true);
+    pipeline->set_output_denoise(project_desc.output_desc.denoise);
     return pipeline;
+}
+
+void prepare_enabled_denoiser_for_runtime_switch(vision::Pipeline& pipeline) {
+    auto* integrator = pipeline.renderer().integrator().get();
+    auto* illum = dynamic_cast<vision::IlluminationIntegrator*>(integrator);
+    if (illum == nullptr) {
+        return;
+    }
+    auto* denoiser = illum->denoiser();
+    if (denoiser == nullptr || !denoiser->enabled()) {
+        return;
+    }
+    denoiser->prepare();
+    denoiser->compile();
+    pipeline.upload_bindless_array();
 }
 
 [[nodiscard]] auto select_scene_camera_handle(const Corona::SceneDevice& scene) -> std::uintptr_t {
@@ -962,13 +1006,11 @@ void bind_pipeline_scene_gpu_resource(
     }
     pipeline->init_postprocessor(project_desc.renderer_desc.denoiser_desc);
     pipeline->init();
-    pipeline->set_output_denoise(true);
+    pipeline->set_output_denoise(project_desc.output_desc.denoise);
     pipeline->prepare();
     // prepare() does not create FrameBuffer::view_texture_; the render path tone
     // maps into it and we later read it back, so create it explicitly here.
     pipeline->frame_buffer()->prepare_view_texture();
-    pipeline->set_output_denoise(
-        Corona::Systems::Vision::vision_render_mode_uses_denoise(mode));
     return pipeline;
 }
 
@@ -1340,6 +1382,11 @@ bool OpticsSystem::initialize_hardware_resources() {
             BufferUsage::StorageBuffer);
         hardware_->actorPickBuffer = HardwareBuffer(sizeof(std::uint32_t), BufferUsage::StorageBuffer);
 
+        // Sky-driven ambient: 9 SH coefficients × vec3 = 27 floats. Written by
+        // sky_sh_project.comp each environment change, read by lighting.comp.
+        hardware_->skyIrradianceSHBuffer = HardwareBuffer(
+            27u * static_cast<uint32_t>(sizeof(float)), BufferUsage::StorageBuffer);
+
         // finalOutputImage 不再在此创建：每个 surface 的最终输出由
         // acquire_surface_target() 按需创建（改造1: per-surface 输出）。
     } catch (const std::exception&) {
@@ -1356,6 +1403,7 @@ bool OpticsSystem::initialize_render_pipelines() {
         hardware_->uiVisibilityPipeline.emplace();
         hardware_->lightingPipeline.emplace();
         hardware_->skyPipeline.emplace();
+        hardware_->skySHProjectPipeline.emplace();
         hardware_->tonemapPipeline.emplace();
         hardware_->debugResolvePipeline.emplace();
         hardware_->actorPickPipeline.emplace();
@@ -1726,6 +1774,7 @@ void OpticsSystem::update() {
 
     if (!hardware_->shaderHasInit || !hardware_->lightingPipeline ||
         !hardware_->skyPipeline || !hardware_->tonemapPipeline ||
+        !hardware_->skySHProjectPipeline ||
         !hardware_->debugResolvePipeline || !hardware_->opticsOverlayPipeline ||
         !hardware_->opticsCursorPipeline || !hardware_->opticsUiWarpPipeline ||
         !hardware_->opticsCompositePipeline) {
@@ -1866,6 +1915,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                     model_matrix = transform->compute_matrix();
                                     // 必须在 camera_basis 变换前提取世界位置（否则 model_matrix[3] 不再是世界坐标）
                                     world_center = transform->position;
+                                    model_matrix = apply_native_local_correction(model_matrix, *geom);
                                     if (camera_basis != nullptr) {
                                         model_matrix = multiply_ktm_mat4(*camera_basis, model_matrix);
                                     }
@@ -2071,6 +2121,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     hardware_->vpUniformBuffer.storeDescriptor();
                 lighting.pushConsts.finalOutputImage = finalOutputDescriptor;
                 lighting.pushConsts.uniformBufferIndex = uboDescriptor;
+                lighting.pushConsts.skyIrradianceSHBufferIndex =
+                    hardware_->skyIrradianceSHBuffer.storeDescriptor();
                 lighting.pushConsts.sun_dir = sun_dir;
                 {
                     ktm::fvec3 lightColor;
@@ -2079,7 +2131,31 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     lightColor.z = sun_color.z * sun_intensity;
                     lighting.pushConsts.lightColor = lightColor;
                 }
-                lighting.pushConsts.ambientIntensity = sun_intensity * 0.02f;
+
+                // ================================================================
+                // 5b. Sky → SH9 projection (sky-driven ambient).
+                // Recompute the 9 SH coefficients only when the environment
+                // lighting signature (sun_dir + sky_intensity) changes; otherwise
+                // reuse the persistent skyIrradianceSHBuffer. Static lighting
+                // amortizes to ~zero. The dispatch (when needed) is recorded
+                // before lighting so program order guarantees the SH write lands
+                // before lighting reads it on the same executor.
+                // ================================================================
+                std::size_t sky_sig = 0;
+                mix_hash_float(sky_sig, sun_dir.x);
+                mix_hash_float(sky_sig, sun_dir.y);
+                mix_hash_float(sky_sig, sun_dir.z);
+                mix_hash_float(sky_sig, sky_intensity);
+                const bool sky_sh_needs_update =
+                    !sky_sh_initialized_ || sky_sig != sky_sh_signature_;
+                if (sky_sh_needs_update) {
+                    auto& skySH = *hardware_->skySHProjectPipeline;
+                    skySH.pushConsts.outputBufferIndex =
+                        hardware_->skyIrradianceSHBuffer.storeDescriptor();
+                    skySH.pushConsts.sampleCount = 64u;
+                    skySH.pushConsts.sun_dir = sun_dir;
+                    skySH.pushConsts.sky_intensity = sky_intensity;
+                }
 
                 // ================================================================
                 // 6. Sky pass: atmospheric scattering + floor grid
@@ -2167,10 +2243,18 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     // ============================================================
                     // Normal rendering path: full pipeline
                     // ============================================================
+                    // Sky→SH projection (single workgroup) recorded before
+                    // lighting so the SH buffer write precedes the read.
+                    if (sky_sh_needs_update) {
+                        hardware_->executor << (*hardware_->skySHProjectPipeline)(1, 1, 1);
+                    }
                     hardware_->executor << visibility(hardware_->gbufferSize.x, hardware_->gbufferSize.y)
                                         << lighting(dispatchX, dispatchY, 1)
                                         << sky(dispatchX, dispatchY, 1)
                                         << tonemap(dispatchX, dispatchY, 1);
+                    // SH coefficients now resident; mark this signature applied.
+                    sky_sh_signature_ = sky_sig;
+                    sky_sh_initialized_ = true;
                 }
 
                 if (actor_pick_request) {
@@ -3179,7 +3263,7 @@ bool OpticsSystem::init_vision_lazy() {
         auto scene_resource = get_or_create_vision_scene_resource(
             make_vision_scene_resource_key("", VisionPipelineSource::EngineBuilt),
             "");
-        auto pipeline = create_vision_pipeline(scene_resource);
+        auto pipeline = create_vision_pipeline(current_vision_render_mode_, scene_resource);
         if (!pipeline) {
             CFW_LOG_ERROR("OpticsSystem: Failed to create Vision pipeline without external scene import");
             return false;
@@ -3673,7 +3757,7 @@ void OpticsSystem::apply_pending_vision_scene_load() {
         auto scene_resource = get_or_create_vision_scene_resource(
             make_vision_scene_resource_key("", VisionPipelineSource::EngineBuilt),
             "");
-        auto pipeline = create_vision_pipeline(scene_resource);
+        auto pipeline = create_vision_pipeline(requested_mode, scene_resource);
         if (!pipeline) {
             CFW_LOG_ERROR("OpticsSystem: failed to recreate engine-built Vision pipeline");
             return;
@@ -3788,7 +3872,13 @@ void OpticsSystem::apply_vision_render_mode(CameraVisionRenderMode mode) {
     }
 
     if (runtime.scene_path.empty()) {
+        const bool was_denoise_enabled =
+            Vision::vision_render_mode_uses_denoise(current_vision_render_mode_);
         pipeline->set_output_denoise(true);
+        if (!was_denoise_enabled) {
+            prepare_enabled_denoiser_for_runtime_switch(*pipeline);
+            pipeline->clear_view_contexts();
+        }
         runtime.mode = mode;
         current_vision_render_mode_ = mode;
         rekey_active_runtime();
