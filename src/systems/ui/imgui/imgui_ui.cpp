@@ -383,7 +383,18 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         }
     };
 
+    auto active_tab_belongs_to_main_window = [&]() {
+        if (!context.active_tab_id || *context.active_tab_id == -1) {
+            return false;
+        }
+        auto* active_tab = BrowserManager::instance().get_tab(*context.active_tab_id);
+        return active_tab && active_tab->open && !active_tab->minimized && !active_tab->camera_view;
+    };
+
     auto route_main_window = [&]() {
+        if (active_tab_belongs_to_main_window()) {
+            return;
+        }
         for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
             if (tab && !tab->camera_view && tab->docking_pos == "main") {
                 *context.active_tab_id = tab_id;
