@@ -476,6 +476,9 @@
 <script setup>
 import { reactive, ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
 import lanchat from '../../../stores/lanchat.js';
+import { Bridge, networkService } from '../../../utils/bridge.js';
+import { coronaEventBus } from '../../../utils/eventBus.js';
+import { getActorContext } from '../../../blockly/composables/useActorContext.js';
 import {
   buildGmDecisionMessage,
   buildGmDisclosureActionMessage,
@@ -514,6 +517,11 @@ const nowMs = ref(Date.now());
 const pendingReplyTarget = ref('AI 助手');
 const pendingReplySinceMs = ref(0);
 let waitClock = null;
+let modelTransferPollTimer = null;
+const PENDING_MODEL_TRANSFER_POLL_LIMIT = 16;
+const modelTransferSnapshotRequests = new Set();
+const remoteRegisteredActorIdentities = new Set();
+const snapshotActorCreateKeys = new Set();
 
 const roleTemplates = [
   {
@@ -800,12 +808,25 @@ onMounted(() => {
   waitClock = window.setInterval(() => {
     nowMs.value = Date.now();
   }, 1000);
+  ensureModelTransferPolling();
+  coronaEventBus.on('actor-sync-broadcast', handleActorSyncBroadcast);
 });
 
 onBeforeUnmount(() => {
   if (waitClock) window.clearInterval(waitClock);
   waitClock = null;
+  stopModelTransferPolling();
+  coronaEventBus.off('actor-sync-broadcast', handleActorSyncBroadcast);
 });
+
+watch(
+  () => [s.inRoom, s.connection, s.role, s.mode, s.room, s.ip],
+  () => {
+    ensureModelTransferPolling();
+    requestModelTransferSnapshotForJoin();
+  },
+  { flush: 'post' },
+);
 
 function selectWorkspaceMode(mode) {
   const visibleMode = normalizeVisibleWorkspaceMode(mode);
@@ -881,6 +902,240 @@ async function continueHistoryAsSingle() {
 
 function makeLocalRoomId() {
   return 'single-default';
+}
+
+function currentModelTransferSceneName() {
+  const context = getActorContext();
+  return String(context?.scene || '').trim() || 'Scene/default.scene';
+}
+
+function unwrapCefResult(res) {
+  return res && res.data !== undefined ? res.data : res;
+}
+
+function hashString(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i += 1) {
+    const ch = str.charCodeAt(i);
+    hash = (hash << 5) - hash + ch;
+    hash |= 0;
+  }
+  return hash >>> 0;
+}
+
+function lastPathPart(value) {
+  return (
+    String(value || '')
+      .replace(/\\/g, '/')
+      .split('/')
+      .filter(Boolean)
+      .pop() || ''
+  );
+}
+
+function isInternalSyncName(value) {
+  const text = String(value || '').trim();
+  return text.startsWith('__') || lastPathPart(text).startsWith('__');
+}
+
+function isActorSyncable(actorData) {
+  if (!actorData) return false;
+  if (actorData._suppress_network_broadcast) return false;
+  if (actorData.actor_type === 'actor') return false;
+  if (!actorData.geometry || typeof actorData.geometry !== 'object') return false;
+  if (isInternalSyncName(actorData.name)) return false;
+  if (isInternalSyncName(actorData.scene)) return false;
+  return Boolean(actorData.path || actorData.model);
+}
+
+function actorCreateBroadcastKey(sceneName, actorGuid, modelPath) {
+  return `${sceneName}:${actorGuid}:${modelPath}`;
+}
+
+function rememberActorCreateBroadcast(sceneName, actorGuid, modelPath) {
+  if (!sceneName || !actorGuid || !modelPath) return;
+  snapshotActorCreateKeys.add(actorCreateBroadcastKey(sceneName, actorGuid, modelPath));
+}
+
+function modelTransferActive() {
+  return s.inRoom && s.connection === 'connected' && s.mode === 'multi';
+}
+
+function ensureModelTransferPolling() {
+  if (!modelTransferActive()) {
+    stopModelTransferPolling();
+    return;
+  }
+  if (modelTransferPollTimer) return;
+  modelTransferPollTimer = window.setInterval(pollModelTransfer, 2000);
+  pollModelTransfer();
+}
+
+function stopModelTransferPolling() {
+  if (modelTransferPollTimer) {
+    window.clearInterval(modelTransferPollTimer);
+    modelTransferPollTimer = null;
+  }
+  modelTransferSnapshotRequests.clear();
+  remoteRegisteredActorIdentities.clear();
+  snapshotActorCreateKeys.clear();
+}
+
+async function getActorSnapshot(sceneName) {
+  const raw = await Bridge.callCEF('SceneTools', 'get_actor_sync_snapshot', [sceneName]);
+  return unwrapCefResult(raw);
+}
+
+async function registerActorIdentityFromData(actorData, locallyOwned = true) {
+  if (!modelTransferActive() || !actorData) return false;
+  const actorGuid = actorData.actor_guid || '';
+  const actorHandle = actorData.handle || '';
+  if (!actorGuid || !actorHandle) return false;
+  const identityKey = `${actorGuid}:${actorHandle}:${locallyOwned ? 'local' : 'remote'}`;
+  if (!locallyOwned && remoteRegisteredActorIdentities.has(identityKey)) return true;
+  const registered = await networkService.registerActorIdentity(actorGuid, actorHandle, locallyOwned);
+  if (registered?.ok !== true) return false;
+  if (!locallyOwned) {
+    remoteRegisteredActorIdentities.add(identityKey);
+  }
+  return true;
+}
+
+async function broadcastCurrentSceneSnapshot(sceneName, includeActorCreates = true) {
+  if (!modelTransferActive()) return;
+  const targetScene = String(sceneName || '').trim() || currentModelTransferSceneName();
+  const snapshot = await getActorSnapshot(targetScene);
+  if (!snapshot || snapshot.status === 'error') return;
+  const actors = Array.isArray(snapshot.actors) ? snapshot.actors : [];
+  if (includeActorCreates) {
+    for (const actor of actors) {
+      if (!isActorSyncable(actor)) continue;
+      const actorGuid = actor.actor_guid || '';
+      const modelPath = actor.path || actor.model || '';
+      if (!actorGuid || !modelPath) continue;
+      const key = actorCreateBroadcastKey(targetScene, actorGuid, modelPath);
+      if (snapshotActorCreateKeys.has(key)) continue;
+      const sent = await networkService
+        .broadcastActorCreate(actorGuid, targetScene, modelPath, { ...actor, scene: targetScene })
+        .then(() => true)
+        .catch(() => false);
+      if (sent) rememberActorCreateBroadcast(targetScene, actorGuid, modelPath);
+    }
+  }
+  await networkService.broadcastSceneSnapshot(targetScene, snapshot).catch(() => {});
+}
+
+async function applyRemoteSceneSnapshot(sceneName, snapshotPayload) {
+  const targetScene = String(sceneName || '').trim() || currentModelTransferSceneName();
+  let snapshot = snapshotPayload || {};
+  if (typeof snapshotPayload === 'string') {
+    try {
+      snapshot = JSON.parse(snapshotPayload);
+    } catch (_) {
+      snapshot = {};
+    }
+  }
+  if (!snapshot || !Array.isArray(snapshot.actors)) return;
+  snapshot.actors = snapshot.actors.map((actor) => ({
+    ...(actor || {}),
+    _suppress_network_broadcast: true,
+  }));
+  await networkService.setSyncPaused(true);
+  try {
+    const applied = await Bridge.callCEF('SceneTools', 'apply_actor_sync_snapshot_internal', [
+      targetScene,
+      snapshot,
+    ]);
+    const appliedData = unwrapCefResult(applied);
+    const changedActors = [...(appliedData?.created || []), ...(appliedData?.updated || [])];
+    for (const actorData of changedActors) {
+      await registerActorIdentityFromData(actorData, false);
+    }
+  } finally {
+    await networkService.setSyncPaused(false);
+  }
+}
+
+async function pollPendingActorCreates() {
+  for (let i = 0; i < PENDING_MODEL_TRANSFER_POLL_LIMIT; i += 1) {
+    const pending = await networkService.pollPendingActorCreate();
+    if (!pending || !pending.has_pending) break;
+    await networkService.setSyncPaused(true);
+    try {
+      pending.actor_data = pending.actor_data || {};
+      pending.actor_data.actor_guid = pending.actor_guid || '';
+      pending.actor_data._suppress_network_broadcast = true;
+      const created = await Bridge.callCEF('SceneTools', 'create_actor_internal', [
+        pending.scene_name,
+        pending.model_path,
+        'model',
+        pending.actor_data,
+      ]);
+      const createdData = unwrapCefResult(created);
+      await registerActorIdentityFromData(createdData?.actor || createdData, false);
+    } finally {
+      await networkService.setSyncPaused(false);
+    }
+  }
+}
+
+async function pollModelTransfer() {
+  if (!modelTransferActive()) return;
+  try {
+    await pollPendingActorCreates();
+    if (s.role === 'host') {
+      for (let i = 0; i < PENDING_MODEL_TRANSFER_POLL_LIMIT; i += 1) {
+        const pendingRequest = await networkService.pollPendingSceneSnapshotRequest();
+        if (!pendingRequest || !pendingRequest.has_pending) break;
+        await broadcastCurrentSceneSnapshot(pendingRequest.scene_name || currentModelTransferSceneName(), true);
+      }
+    } else if (s.role === 'guest') {
+      for (let i = 0; i < PENDING_MODEL_TRANSFER_POLL_LIMIT; i += 1) {
+        const pendingSnapshot = await networkService.pollPendingSceneSnapshot();
+        if (!pendingSnapshot || !pendingSnapshot.has_pending) break;
+        await applyRemoteSceneSnapshot(
+          pendingSnapshot.scene_name || currentModelTransferSceneName(),
+          pendingSnapshot.snapshot_json,
+        );
+      }
+    }
+  } catch (error) {
+    console.warn('[LANChat] model transfer polling failed', error);
+  }
+}
+
+function handleActorSyncBroadcast(actorData) {
+  if (!modelTransferActive()) return;
+  if (!isActorSyncable(actorData)) return;
+  const modelPath = actorData.path || actorData.model || '';
+  if (!modelPath) return;
+  const sceneName = String(actorData.scene || '').trim() || currentModelTransferSceneName();
+  const actorGuid =
+    actorData.actor_guid ||
+    `actor-${hashString(`${sceneName}|${modelPath}|${actorData.name || ''}`)}`;
+  actorData.actor_guid = actorGuid;
+  registerActorIdentityFromData(actorData).catch(() => {});
+  networkService
+    .broadcastActorCreate(actorGuid, sceneName, modelPath, actorData)
+    .then(() => {
+      rememberActorCreateBroadcast(sceneName, actorGuid, modelPath);
+    })
+    .catch(() => {});
+}
+
+async function requestModelTransferSnapshotForJoin() {
+  if (!s.inRoom || s.connection !== 'connected') return;
+  if (s.role !== 'guest' || s.mode !== 'multi') return;
+  const sceneName = currentModelTransferSceneName();
+  const requestKey = `${s.room || ''}|${s.ip || ''}|${sceneName}`;
+  if (modelTransferSnapshotRequests.has(requestKey)) return;
+  modelTransferSnapshotRequests.add(requestKey);
+  try {
+    await networkService.requestSceneSnapshot(sceneName);
+  } catch (error) {
+    modelTransferSnapshotRequests.delete(requestKey);
+    console.warn('[LANChat] request model transfer snapshot failed', error);
+  }
 }
 
 async function onJoin() {

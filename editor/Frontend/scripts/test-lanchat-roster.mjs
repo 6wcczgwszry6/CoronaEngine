@@ -172,6 +172,10 @@ assertIncludes(roomPanel, "label: '自己设计'", 'RoomPanel lobby must expose 
 assertIncludes(roomPanel, "label: '多人共创'", 'RoomPanel lobby must expose the multiplayer co-creation entry');
 assertIncludes(roomPanel, 'const defaultExpertRoleKeys = roleTemplates.map((role) => role.key)', 'RoomPanel must default-enable every built-in expert role');
 assertIncludes(roomPanel, 'await addDefaultExpertGroup()', 'RoomPanel must add built-in experts when entering a room');
+assertIncludes(roomPanel, 'networkService.requestSceneSnapshot(sceneName)', 'RoomPanel multiplayer join must request a scene snapshot for model transfer');
+assertIncludes(roomPanel, 'function currentModelTransferSceneName', 'RoomPanel multiplayer join must resolve the current scene before requesting model transfer');
+assertIncludes(roomPanel, "s.role !== 'guest' || s.mode !== 'multi'", 'RoomPanel model transfer request must only run for multiplayer guests');
+assertIncludes(roomPanel, "s.connection !== 'connected'", 'RoomPanel model transfer request must wait until LANChat join is connected');
 if (roomPanel.includes("label: 'AI 专家组'") || roomPanel.includes("key: 'solo_multi_agent'")) {
   fail('RoomPanel first-level lobby must not expose a separate AI expert group entry');
 }
