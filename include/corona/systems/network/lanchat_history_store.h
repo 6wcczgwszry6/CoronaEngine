@@ -9,6 +9,7 @@
 namespace Corona::Network {
 
 struct LanChatHistoryRoomSummary {
+    std::string session_id;
     std::string room_id;
     size_t message_count = 0;
     uint64_t last_timestamp_ms = 0;

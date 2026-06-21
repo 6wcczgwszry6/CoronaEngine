@@ -10,6 +10,11 @@ const fail = (message) => {
 const assertIncludes = (source, needle, message) => {
   if (!source.includes(needle)) fail(message);
 };
+const assertAppearsAfter = (source, laterNeedle, earlierNeedle, message) => {
+  const laterIndex = source.indexOf(laterNeedle);
+  const earlierIndex = source.indexOf(earlierNeedle);
+  if (laterIndex < 0 || earlierIndex < 0 || laterIndex <= earlierIndex) fail(message);
+};
 
 const store = read('src/stores/lanchat.js');
 const disclosureStore = read('src/stores/lanchatDisclosure.js');
@@ -163,6 +168,8 @@ assertIncludes(roomPanel, "roomMode.value === 'single'", 'RoomPanel create flow 
 assertIncludes(roomPanel, "s.mode === 'single' ? '单人聊天室' : s.room", 'RoomPanel must not expose internal local room ids as the single-player room title');
 assertIncludes(roomPanel, 'onMounted(refreshHistoryRooms)', 'RoomPanel must load persisted history list when the dock opens');
 assertIncludes(roomPanel, '历史记录', 'RoomPanel must show persisted history before entering a room');
+assertAppearsAfter(roomPanel, '历史记录', '<!-- 加入房间 -->', 'RoomPanel history list must be placed in the lower half of the lobby after create/join controls');
+assertIncludes(roomPanel, 'mt-auto space-y-2 border-t border-gray-700 pt-4', 'RoomPanel history section must anchor to the lower lobby when vertical space is available');
 assertIncludes(roomPanel, 'loadHistoryRoom', 'RoomPanel must let users choose which persisted history to display');
 assertIncludes(roomPanel, 'continueHistoryAsSingle', 'RoomPanel must let users continue a selected history as a single-player room');
 assertIncludes(roomPanel, '作为单人聊天室继续', 'RoomPanel must expose a clear continue-history action');

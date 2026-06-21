@@ -1017,6 +1017,55 @@ void test_lanchat_history_persists_for_local_room() {
     std::filesystem::remove_all(root);
 }
 
+void test_lanchat_history_uses_one_file_per_room_session() {
+    const auto root = std::filesystem::temp_directory_path() /
+        "corona_lanchat_history_session_file_test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    {
+        Corona::Systems::NetworkSystem sys;
+        sys.set_project_root(root.string());
+        expect_true(sys.lanchat_start_local_room("single-default", "Host"),
+                    "first local lanchat session starts");
+        auto sent = sys.lanchat_send_message("第一轮会话");
+        expect_true(sent.accepted, "first session message accepted");
+        sys.lanchat_stop_local_room();
+    }
+
+    {
+        Corona::Systems::NetworkSystem sys;
+        sys.set_project_root(root.string());
+        expect_true(sys.lanchat_start_local_room("single-default", "Host"),
+                    "second local lanchat session starts");
+        auto sent = sys.lanchat_send_message("第二轮会话");
+        expect_true(sent.accepted, "second session message accepted");
+        sys.lanchat_stop_local_room();
+    }
+
+    {
+        Corona::Systems::NetworkSystem sys;
+        sys.set_project_root(root.string());
+        const auto rooms = sys.lanchat_history_rooms();
+        expect_true(rooms.size() == 2,
+                    "same lanchat room id creates one persisted file per session");
+        if (rooms.size() >= 2) {
+            expect_true(rooms[0].room_id == "single-default",
+                        "history summary preserves display room id");
+            expect_true(!rooms[0].session_id.empty(),
+                        "history summary exposes session id");
+            expect_true(rooms[0].session_id != rooms[1].session_id,
+                        "history sessions have distinct file ids");
+            const auto latest = sys.lanchat_load_history_room(rooms[0].session_id);
+            const auto older = sys.lanchat_load_history_room(rooms[1].session_id);
+            expect_true(latest.size() == 1 && older.size() == 1,
+                        "each persisted session file contains only its own messages");
+        }
+    }
+
+    std::filesystem::remove_all(root);
+}
+
 void test_lanchat_history_store_lists_rooms_with_summaries() {
     const auto root = std::filesystem::temp_directory_path() /
         "corona_lanchat_history_list_test";
@@ -1059,6 +1108,8 @@ void test_lanchat_history_store_lists_rooms_with_summaries() {
     const auto rooms = store.list_rooms();
     expect_true(rooms.size() == 2, "history store lists persisted rooms");
     if (rooms.size() >= 2) {
+        expect_true(!rooms[0].session_id.empty(),
+                    "history store summary records session file id");
         expect_true(rooms[0].room_id == "single-default",
                     "history store sorts rooms by newest message");
         expect_true(rooms[0].message_count == 2,
@@ -1732,6 +1783,7 @@ int main() {
     test_network_system_repeated_start_preserves_active_role();
     test_lanchat_start_room_reuses_active_network_session_role();
     test_lanchat_history_persists_for_local_room();
+    test_lanchat_history_uses_one_file_per_room_session();
     test_lanchat_history_store_lists_rooms_with_summaries();
     test_lanchat_history_store_persists_agent_roster();
     test_actor_device_follow_camera_defaults_false_and_round_trips();

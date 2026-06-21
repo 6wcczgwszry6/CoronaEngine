@@ -54,7 +54,7 @@ const state = reactive({
   error: '', // 最近一次错误码/信息
   agents: [], // [{agent_id, name, owner}] 来自房主 agent_roster，不含 persona
   myAgents: [], // 我添加的 agent 本地草稿 [{agent_id, name, persona}]，用于显示"我的"
-  historyRooms: [], // persisted summaries [{ room_id, message_count, last_ts, last_text }]
+  historyRooms: [], // persisted summaries [{ room_id: session id, display_room_id, message_count, last_ts, last_text }]
   selectedHistoryRoom: null,
   historyLoading: false,
   historyError: '',

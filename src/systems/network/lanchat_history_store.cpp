@@ -204,7 +204,8 @@ std::vector<LanChatHistoryRoomSummary> LanChatHistoryStore::list_rooms() const {
         if (!file) continue;
 
         LanChatHistoryRoomSummary summary;
-        summary.room_id = entry.path().stem().string();
+        summary.session_id = entry.path().stem().string();
+        summary.room_id = summary.session_id;
 
         std::string line;
         while (std::getline(file, line)) {

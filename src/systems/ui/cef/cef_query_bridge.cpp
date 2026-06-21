@@ -156,8 +156,11 @@ nlohmann::json build_lanchat_history_rooms(
     const std::vector<Corona::Network::LanChatHistoryRoomSummary>& rooms) {
     nlohmann::json result = nlohmann::json::array();
     for (const auto& room : rooms) {
+        const std::string load_id = room.session_id.empty() ? room.room_id : room.session_id;
         result.push_back({
-            {"room_id", room.room_id},
+            {"room_id", load_id},
+            {"session_id", load_id},
+            {"display_room_id", room.room_id},
             {"message_count", room.message_count},
             {"last_timestamp_ms", room.last_timestamp_ms},
             {"last_ts", room.last_timestamp_ms / 1000},
