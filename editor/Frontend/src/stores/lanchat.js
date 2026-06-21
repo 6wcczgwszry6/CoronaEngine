@@ -46,7 +46,7 @@ const state = reactive({
   workspaceMode: 'multiplayer_multi_agent',
   draftAction: 'chat',
   activeTarget: {
-    scope: 'scene',
+    scope: '',
     agentId: '',
     agentName: '',
     planId: '',
@@ -79,7 +79,7 @@ function _resetRoom() {
   state.workspaceMode = 'multiplayer_multi_agent';
   state.draftAction = 'chat';
   state.activeTarget = {
-    scope: 'scene',
+    scope: '',
     agentId: '',
     agentName: '',
     planId: '',
@@ -584,13 +584,13 @@ function setWorkspaceMode(mode) {
   state.workspaceMode = value;
   if (value === 'solo_single_agent') {
     state.mode = 'single';
-    setActiveTarget({ scope: 'group' });
+    setActiveTarget({});
   } else if (value === 'solo_multi_agent') {
     state.mode = 'single';
-    setActiveTarget({ scope: 'group' });
+    setActiveTarget({});
   } else {
     state.mode = 'multi';
-    setActiveTarget({ scope: 'group' });
+    setActiveTarget({});
   }
 }
 
@@ -603,7 +603,7 @@ function setDraftAction(action) {
 }
 
 function setActiveTarget(target = {}) {
-  const scope = String(target.scope || 'scene').trim() || 'scene';
+  const scope = String(target.scope || '').trim();
   state.activeTarget = {
     scope,
     agentId: String(target.agentId || target.agent_id || '').trim(),
@@ -617,8 +617,8 @@ function structuredRouteMetadata(overrides = {}) {
   const metadata = {
     workspace_mode: state.workspaceMode,
     draft_action: state.draftAction,
-    target_scope: target.scope || 'scene',
   };
+  if (target.scope) metadata.target_scope = target.scope;
   if (target.agentId) metadata.target_agent_id = target.agentId;
   if (target.agentName) metadata.target_agent_name = target.agentName;
   if (target.planId) metadata.target_plan_id = target.planId;
