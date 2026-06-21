@@ -664,8 +664,13 @@ def test_vlm_review_uses_composer_hooks_under_engine_gate():
     assert len(report.advices) == 2
     assert len(gate.screenshots) == 2
     assert any(call[0] == "target_provider" for call in calls)
-    assert ("capture", "_vlm_review/actor-a", "statue") in calls
-    assert ("review", "_vlm_review/actor-a/shots", "statue", "decor") in calls
+    capture_calls = [call for call in calls if call[0] == "capture" and call[2] == "statue"]
+    assert capture_calls
+    capture_dir = capture_calls[0][1]
+    assert os.path.isabs(capture_dir)
+    assert os.path.isdir(capture_dir)
+    assert not capture_dir.replace("\\", "/").startswith("_vlm_review/")
+    assert ("review", f"{capture_dir}/shots", "statue", "decor") in calls
     assert report.actionable()[0].actor_id == "actor-a"
     print("[OK] VLM review uses composer target/capture/review hooks under EngineWriteGate")
 
@@ -1546,6 +1551,98 @@ def test_scene_framework_mixed_zone_tree_generates_terrain_and_room_box():
     print("[OK] mixed zone_tree creates terrain and room_box")
 
 
+def test_mixed_outdoor_structure_fallback_creates_terrain_and_room_box_when_llm_fails():
+    composer = SceneComposer(room_size=[5.0, 3.0, 3.0], scene_name="mixed_yurt")
+    composer._llm_decompose = lambda _text: []
+
+    tree = composer.decompose_zone_tree("草原上有一个蒙古包，里面有毯子、桌子和火炉")
+
+    assert tree is not None
+    zones = tree.list_all_zones()
+    assert [zone.enclosure for zone in zones] == ["terrain", "box"]
+    assert zones[0].role == "outdoor"
+    assert zones[1].role == "indoor"
+    assert zones[1].metadata.get("parent") == "outdoor_ground"
+    assert any(connector.type == "door" for connector in zones[1].connectors)
+    print("[OK] mixed outdoor structure fallback creates terrain + room box when LLM fails")
+
+
+def test_mixed_outdoor_structure_repairs_terrain_only_llm_decompose():
+    composer = SceneComposer(room_size=[5.0, 3.0, 3.0], scene_name="mixed_terrain_only")
+    composer._llm_decompose = lambda _text: [
+        {
+            "id": "grassland",
+            "name": "草原地形",
+            "role": "outdoor",
+            "enclosure": "terrain",
+            "size": [18.0, 18.0, 0.0],
+        }
+    ]
+
+    tree = composer.decompose_zone_tree("草原上有一个蒙古包，里面有毯子、桌子和火炉")
+
+    assert tree is not None
+    zones = tree.list_all_zones()
+    assert [zone.enclosure for zone in zones] == ["terrain", "box"]
+    assert zones[1].metadata.get("parent") == "grassland"
+    assert any(connector.type == "door" for connector in zones[1].connectors)
+    print("[OK] mixed guardrail repairs terrain-only LLM zone into terrain + room_box")
+
+
+def test_mixed_outdoor_structure_repairs_box_only_llm_decompose():
+    composer = SceneComposer(room_size=[5.0, 3.0, 3.0], scene_name="mixed_box_only")
+    composer._llm_decompose = lambda _text: [
+        {
+            "id": "yurt_inside",
+            "name": "蒙古包内部",
+            "role": "indoor",
+            "enclosure": "box",
+            "size": [5.0, 5.0, 3.0],
+        }
+    ]
+
+    tree = composer.decompose_zone_tree("户外营地有一个蒙古包，内部有地毯和桌子")
+
+    assert tree is not None
+    zones = tree.list_all_zones()
+    assert [zone.enclosure for zone in zones] == ["terrain", "box"]
+    assert zones[1].zone_id == "yurt_inside"
+    assert zones[1].metadata.get("parent") == "outdoor_ground"
+    assert any(connector.type == "door" for connector in zones[1].connectors)
+    print("[OK] mixed guardrail repairs box-only LLM zone into terrain + room_box")
+
+
+def test_mixed_outdoor_structure_keeps_valid_shell_zone():
+    composer = SceneComposer(room_size=[5.0, 3.0, 3.0], scene_name="mixed_shell")
+    composer._llm_decompose = lambda _text: [
+        {
+            "id": "camp_ground",
+            "name": "营地地形",
+            "role": "outdoor",
+            "enclosure": "terrain",
+            "size": [18.0, 18.0, 0.0],
+        },
+        {
+            "id": "yurt_shell",
+            "name": "蒙古包",
+            "role": "indoor",
+            "enclosure": "shell",
+            "parent": "camp_ground",
+            "shell_asset": "蒙古包",
+            "size": [5.0, 5.0, 3.0],
+        },
+    ]
+
+    tree = composer.decompose_zone_tree("户外营地有一个蒙古包，里面有毯子和桌子")
+
+    assert tree is not None
+    zones = tree.list_all_zones()
+    assert [zone.enclosure for zone in zones] == ["terrain", "shell"]
+    assert zones[1].metadata.get("parent") == "camp_ground"
+    assert zones[1].primary_shell_asset_id == "蒙古包"
+    print("[OK] mixed guardrail preserves valid terrain + shell zone")
+
+
 def test_room_box_generation_is_not_blocked_by_existing_room_terrain():
     class ExistingActor:
         def __init__(self, name):
@@ -1757,6 +1854,10 @@ if __name__ == "__main__":
     test_scene_framework_outdoor_fallback_generates_terrain_only()
     test_single_indoor_box_decompose_fallback_keeps_room_box()
     test_scene_framework_mixed_zone_tree_generates_terrain_and_room_box()
+    test_mixed_outdoor_structure_fallback_creates_terrain_and_room_box_when_llm_fails()
+    test_mixed_outdoor_structure_repairs_terrain_only_llm_decompose()
+    test_mixed_outdoor_structure_repairs_box_only_llm_decompose()
+    test_mixed_outdoor_structure_keeps_valid_shell_zone()
     test_room_box_generation_is_not_blocked_by_existing_room_terrain()
     test_indoor_detection_prefers_explicit_room_over_terrain_context()
     test_indoor_room_budget_expands_for_many_items()

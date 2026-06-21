@@ -1581,6 +1581,10 @@ class SceneComposer:
         失败/格式错误 → 返回 None（保守退化到单盒，不影响主链路）。
         """
         zones_spec = self._llm_decompose(text)
+        if not zones_spec and self._looks_like_outdoor_with_indoor_structure(text):
+            zones_spec = self._fallback_mixed_zone_specs(text)
+        elif zones_spec and self._looks_like_outdoor_with_indoor_structure(text):
+            zones_spec = self._ensure_mixed_zone_specs(zones_spec, text)
         if not zones_spec:
             return None
         self._last_zone_decompose_text = str(text or "")
@@ -1772,6 +1776,109 @@ class SceneComposer:
                 getattr(zone, "role", "") or "",
             )
         return ZoneTree(root=root)
+
+    @staticmethod
+    def _looks_like_outdoor_with_indoor_structure(text: str) -> bool:
+        value = str(text or "").lower()
+        outdoor_terms = (
+            "室外", "户外", "草原", "森林", "营地", "山坡", "野外",
+            "outdoor", "grassland", "forest", "camp",
+        )
+        structure_terms = (
+            "蒙古包", "帐篷", "木屋", "小屋", "房子", "建筑", "商铺", "屋子",
+            "yurt", "tent", "cabin", "hut", "building",
+        )
+        inside_terms = ("里面", "内部", "里有", "内有", "可进入", "inside", "interior")
+        return (
+            any(term in value for term in outdoor_terms)
+            and any(term in value for term in structure_terms)
+            and any(term in value for term in inside_terms)
+        )
+
+    @staticmethod
+    def _fallback_mixed_zone_specs(text: str) -> List[Dict[str, Any]]:
+        value = str(text or "")
+        shell_asset = "可进入建筑"
+        for term in ("蒙古包", "帐篷", "木屋", "小屋", "商铺", "建筑", "房子"):
+            if term in value:
+                shell_asset = term
+                break
+        return [
+            {
+                "id": "outdoor_ground",
+                "name": "室外地形",
+                "role": "outdoor",
+                "enclosure": "terrain",
+                "size": [20.0, 20.0, 0.0],
+                "aspects": [{"capability": "ground_profile", "params": {"type": "flat", "material": "grass"}}],
+            },
+            {
+                "id": "indoor_structure",
+                "name": shell_asset,
+                "role": "indoor",
+                "enclosure": "box",
+                "parent": "outdoor_ground",
+                "has_door": True,
+                "size": [5.0, 5.0, 3.0],
+                "aspects": [{"capability": "interior_surface", "params": {"floor_material": "woven_rug"}}],
+                "style_context": {"shell_asset": shell_asset},
+            },
+        ]
+
+    @classmethod
+    def _ensure_mixed_zone_specs(cls, zones_spec: List[Dict[str, Any]], text: str) -> List[Dict[str, Any]]:
+        specs = [dict(spec) for spec in (zones_spec or []) if isinstance(spec, dict)]
+        if not specs:
+            return cls._fallback_mixed_zone_specs(text)
+        first_two = specs[:2]
+        has_terrain = any(
+            str(spec.get("enclosure") or "").lower() == "terrain"
+            or str(spec.get("role") or "").lower() == "outdoor"
+            for spec in first_two
+        )
+        has_indoor_structure = any(
+            str(spec.get("enclosure") or "").lower() in {"box", "shell"}
+            and str(spec.get("role") or "").lower() in {"", "indoor"}
+            for spec in first_two
+        )
+        if has_terrain and has_indoor_structure:
+            return specs
+
+        fallback = cls._fallback_mixed_zone_specs(text)
+        terrain = next(
+            (
+                spec for spec in first_two
+                if str(spec.get("enclosure") or "").lower() == "terrain"
+                or str(spec.get("role") or "").lower() == "outdoor"
+            ),
+            None,
+        )
+        indoor = next(
+            (
+                spec for spec in first_two
+                if str(spec.get("enclosure") or "").lower() in {"box", "shell"}
+                and str(spec.get("role") or "").lower() in {"", "indoor"}
+            ),
+            None,
+        )
+        if terrain is None:
+            terrain = fallback[0]
+        if indoor is None:
+            indoor = fallback[1]
+
+        terrain = dict(terrain)
+        indoor = dict(indoor)
+        terrain_id = str(terrain.get("id") or "outdoor_ground")
+        terrain["id"] = terrain_id
+        terrain.setdefault("role", "outdoor")
+        terrain.setdefault("enclosure", "terrain")
+        indoor.setdefault("id", "indoor_structure")
+        indoor.setdefault("role", "indoor")
+        indoor.setdefault("enclosure", "box")
+        indoor["parent"] = terrain_id
+        if str(indoor.get("enclosure") or "").lower() == "box":
+            indoor["has_door"] = True
+        return [terrain, indoor]
 
     def _collect_shell_assets(self) -> set:
         """15a：从 zone_tree 收集所有 shell zone 的主外壳 asset 名（用于从家具清单剔除）。"""
