@@ -319,8 +319,8 @@
       ref="viewportPickSurfaceRef"
       tabindex="0"
       class="relative flex-1 min-h-0 w-full"
-      :class="{ 'viewport-cursor-hidden': viewportUiMode === 'stereo3d' }"
-      :style="viewportUiMode === 'stereo3d' ? { cursor: 'none' } : null"
+      :class="{ 'viewport-cursor-hidden': nativeViewportCursorEnabled && viewportUiMode === 'stereo3d' }"
+      :style="nativeViewportCursorEnabled && viewportUiMode === 'stereo3d' ? { cursor: 'none' } : null"
       data-viewport-pick-surface
       @pointermove="handleViewportPointer"
       @pointerdown="handleViewportPointerDown"
@@ -471,7 +471,12 @@ import { coronaEventBus } from '@/utils/eventBus.js';
 import { floatingPanelManifests, isFloatingPanel, openFloatingPanel } from '@/utils/panelWindows.js';
 import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
 import { createViewportGizmoController } from '@/utils/viewportGizmo.js';
-import { createViewportUiModeStore, createViewportUiCalibrationStore, createViewportUiPointerController } from '@/utils/viewportUiMode.js';
+import {
+  createViewportUiModeStore,
+  createViewportUiCalibrationStore,
+  createViewportUiPointerController,
+  isNativeViewportCursorEnabled,
+} from '@/utils/viewportUiMode.js';
 import AIHintBubble from '@/components/ui/AIHintBubble.vue';
 import ViewportGizmoOverlay from '@/components/viewport/ViewportGizmoOverlay.vue';
 import { startStageHints, stopStageHints, setHintShowMs } from '@/services/aiHintGenerator.js';
@@ -513,6 +518,7 @@ let gizmoRefreshRafId = null;
 const viewportLayoutVersion = ref(0);
 const viewportUiMode = ref('flat2d');
 const viewportUiModeStore = createViewportUiModeStore();
+const nativeViewportCursorEnabled = isNativeViewportCursorEnabled();
 const viewportUiModeItems = [
   { mode: 'flat2d', label: '2D UI', title: '普通屏幕 UI' },
   { mode: 'stereo3d', label: '3D UI', title: '光场屏立体 UI' },
@@ -601,6 +607,7 @@ const viewportUiPointerController = createViewportUiPointerController({
   getBridge: () => window.coronaBridge,
   getCameraHandle: () => cameraBindingState.value.cameraHandle,
   getEnabled: () => viewportUiMode.value === 'stereo3d',
+  getNativeCursorEnabled: () => nativeViewportCursorEnabled,
   getHitRect: getViewportHitRect,
   getRenderRect: getViewportRenderRect,
 });
