@@ -453,6 +453,14 @@ void BindAll(nanobind::module_& m) {
     m.def("drain_logs", []() -> std::vector<Corona::Kernel::LogEntry> { return Corona::Kernel::CoronaLogger::drain_logs(); }, "Drain all pending log entries from the engine log queue");
 
     m.def("send_log", [](const std::string& level, const std::string& message) {
+              const auto is_optional_tool_config_error = [&message]() {
+                  return message.find("Failed to load tools from") != std::string::npos &&
+                         (message.find("api_key") != std::string::npos ||
+                          message.find("base_url") != std::string::npos ||
+                          message.find("placeholder") != std::string::npos ||
+                          message.find("not configured") != std::string::npos ||
+                          message.find("missing") != std::string::npos);
+              };
               if (level == "TRACE") {
                   PY_LOG_TRACE("{}", message.c_str());
               } else if (level == "DEBUG") {
@@ -462,7 +470,11 @@ void BindAll(nanobind::module_& m) {
               } else if (level == "WARNING") {
                   PY_LOG_WARNING("{}", message.c_str());
               } else if (level == "ERROR") {
-                  PY_LOG_ERROR("{}", message.c_str());
+                  if (is_optional_tool_config_error()) {
+                      PY_LOG_WARNING("{}", message.c_str());
+                  } else {
+                      PY_LOG_ERROR("{}", message.c_str());
+                  }
               } else if (level == "CRITICAL") {
                   PY_LOG_CRITICAL("{}", message.c_str());
               } else {
