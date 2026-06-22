@@ -90,6 +90,9 @@ void BindAll(nanobind::module_& m) {
              "Set local rotation (Euler angles ZYX order) [pitch, yaw, roll]")
         .def("set_scale", &Geometry::set_scale, nb::arg("scale"),
              "Set local scale [x, y, z]")
+        .def("set_native_local_correction", &Geometry::set_native_local_correction,
+             nb::arg("offset"), nb::arg("scale"),
+             "Set native-only local correction applied before rendering")
         .def("get_position", &Geometry::get_position,
              "Get local position [x, y, z]")
         .def("get_rotation", &Geometry::get_rotation,
@@ -607,6 +610,14 @@ void BindAll(nanobind::module_& m) {
             }
             return nb::object(lanchat_message_to_dict(*message));
         }, "Pop one ordinary LANChat message that should be synced into InteractionCoordinator.");
+
+        m.def("network_session_role_name", []() -> std::string {
+            auto sys = get_network_system();
+            if (!sys) {
+                return "none";
+            }
+            return std::string(sys->session_role_name());
+        }, "Return current networking session role: none, host, or client.");
 
         m.def("network_pop_lanchat_room_event", []() -> nb::object {
             auto sys = get_network_system();

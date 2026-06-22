@@ -22,20 +22,6 @@ layout(set = 2, binding = 0, rgba16f) uniform image2D images[];
 
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 
-// Linear -> sRGB OETF (IEC 61966-2-1). The whole optics/UI pipeline works in
-// linear light and tone-maps with ACES but never gamma-encodes; the swapchain
-// is R8G8B8A8_UNORM, so the present blit does NOT encode either. Without this
-// the linear values reach an sRGB display un-encoded and the image looks too
-// dark. This is the final present-producing pass, so encode here (and ONLY
-// here — earlier composite/tonemap outputs are re-read as linear).
-vec3 linearToSrgb(vec3 c)
-{
-    c = clamp(c, 0.0, 1.0);
-    return mix(c * 12.92,
-               1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,
-               step(vec3(0.0031308), c));
-}
-
 void main()
 {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
@@ -83,5 +69,5 @@ void main()
     float fgAlpha = pushConsts.fgOpaque != 0u ? 1.0 : fg.a;
     vec3 color = fg.rgb + bg.rgb * (1.0 - fgAlpha);
 
-    imageStore(images[pushConsts.outputImage], pos, vec4(linearToSrgb(color), 1.0));
+    imageStore(images[pushConsts.outputImage], pos, vec4(color.rgb, 1.0));
 }

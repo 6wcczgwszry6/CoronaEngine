@@ -87,8 +87,8 @@
     <div
       ref="inputLayerRef"
       class="input-layer"
-      :class="{ 'viewport-cursor-hidden': viewportUiMode === 'stereo3d' }"
-      :style="viewportUiMode === 'stereo3d' ? { cursor: 'none' } : null"
+      :class="{ 'viewport-cursor-hidden': nativeViewportCursorEnabled && viewportUiMode === 'stereo3d' }"
+      :style="nativeViewportCursorEnabled && viewportUiMode === 'stereo3d' ? { cursor: 'none' } : null"
       @pointermove="handleViewportPointer"
       @pointerdown="handleViewportPointerDown"
       @pointerup="handleViewportPointer"
@@ -111,6 +111,7 @@ import {
   createViewportUiCalibrationStore,
   createViewportUiModeStore,
   createViewportUiPointerController,
+  isNativeViewportCursorEnabled,
 } from '@/utils/viewportUiMode.js';
 
 const route = useRoute();
@@ -153,6 +154,7 @@ const visionRenderModes = [
 const viewportUiModeStore = createViewportUiModeStore();
 const viewportUiCalibrationStore = createViewportUiCalibrationStore();
 const viewportUiCalibrationDescriptor = {};
+const nativeViewportCursorEnabled = isNativeViewportCursorEnabled();
 const viewportUiModeItems = [
   { mode: 'flat2d', label: '2D UI', title: '普通屏幕 UI' },
   { mode: 'stereo3d', label: '3D UI', title: '光场屏立体 UI' },
@@ -301,6 +303,7 @@ const viewportUiPointerController = createViewportUiPointerController({
   getBridge: () => window.coronaBridge,
   getCameraHandle: () => camera.value?.handle,
   getEnabled: () => viewportUiMode.value === 'stereo3d',
+  getNativeCursorEnabled: () => nativeViewportCursorEnabled,
   getHitRect: getCameraViewHitRect,
   getRenderRect: getCameraRenderRect,
 });

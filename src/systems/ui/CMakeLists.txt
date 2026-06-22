@@ -17,6 +17,7 @@ file(GLOB IMGUI_SYSTEM_SOURCES
     imgui/imgui_ui.cpp
 
     camera_viewport_manager.cpp
+    viewport_gizmo_manager.cpp
     cef/browser_manager.cpp
     cef/browser_ui.cpp
     cef/cef_client.cpp
@@ -28,6 +29,7 @@ file(GLOB IMGUI_SYSTEM_SOURCES
 
 list(APPEND IMGUI_SYSTEM_SOURCES
     ${PROJECT_SOURCE_DIR}/include/corona/systems/ui/vulkan_backend.h
+    ${PROJECT_SOURCE_DIR}/vision/src/ext/window/imgui/gizmo/ImGuizmo.cpp
 )
 
 
@@ -56,6 +58,7 @@ corona_add_system(imgui
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/cef
         ${CMAKE_SOURCE_DIR}/build_deps/imgui-src
+        ${CMAKE_SOURCE_DIR}/vision/src/ext/window/imgui/gizmo
         ${CEF_INCLUDE_DIR}
         ${CEF_ROOT}
 )

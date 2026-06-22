@@ -9,6 +9,7 @@
 #include "cef_client.h"
 #include "corona/kernel/core/i_logger.h"
 #include "corona/systems/ui/camera_viewport_manager.h"
+#include "corona/systems/ui/viewport_gizmo_manager.h"
 
 namespace fs = std::filesystem;
 
@@ -171,7 +172,7 @@ int BrowserManager::create_tab(const std::string& url, const std::string& path,
     const bool transparent_overlay = camera_view || docking_pos == "main";
     tab->transparent_overlay = transparent_overlay;
     browser_settings.background_color =
-        CefColorSetARGB(transparent_overlay ? 0 : 255, 255, 255, 255);
+        CefColorSetARGB(transparent_overlay ? 0 : 255, 16, 19, 16);
 
     if (!CefBrowserHost::CreateBrowser(window_info, CefRefPtr<CefClient>(tab->client),
                                        full_url, browser_settings, nullptr, nullptr)) {
@@ -193,6 +194,9 @@ void BrowserManager::remove_tab(int tab_id) {
 
     BrowserTab* tab = tabs_[tab_id].get();
     if (tab->camera_view) {
+        if (const auto record = CameraViewportManager::instance().find_by_tab(tab_id)) {
+            ViewportGizmoManager::instance().clear_camera(record->camera_handle);
+        }
         CameraViewportManager::instance().unregister_view(
             tab_id, tab->preserve_camera_open_on_close);
     }

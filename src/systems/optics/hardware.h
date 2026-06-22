@@ -22,6 +22,7 @@ struct Array {};
 #include GLSL(../../../assets/shaders/visibility.frag.glsl)
 #include GLSL(../../../assets/shaders/lighting.comp.glsl)
 #include GLSL(../../../assets/shaders/sky.comp.glsl)
+#include GLSL(../../../assets/shaders/sky_sh_project.comp.glsl)
 #include GLSL(../../../assets/shaders/tonemap.comp.glsl)
 #include GLSL(../../../assets/shaders/debug_resolve.comp.glsl)
 #include GLSL(../../../assets/shaders/visibility_debug_resolve.comp.glsl)
@@ -59,6 +60,7 @@ struct Hardware {
     Corona::Horizon::HardwareBuffer uiInstanceInfoBuffer;
     Corona::Horizon::HardwareBuffer uiMaterialTableBuffer;
     Corona::Horizon::HardwareBuffer actorPickBuffer;
+    Corona::Horizon::HardwareBuffer skyIrradianceSHBuffer;  // 9 vec3 SH coeffs (sky-driven ambient)
 
     // === Shader pipelines ===
     bool shaderHasInit = false;
@@ -66,6 +68,7 @@ struct Hardware {
     std::optional<Corona::Horizon::RasterizerPipeline<visibility_vert_glsl_t, visibility_frag_glsl_t>> uiVisibilityPipeline;
     std::optional<Corona::Horizon::ComputePipeline<lighting_comp_glsl_t>> lightingPipeline;
     std::optional<Corona::Horizon::ComputePipeline<sky_comp_glsl_t>> skyPipeline;
+    std::optional<Corona::Horizon::ComputePipeline<sky_sh_project_comp_glsl_t>> skySHProjectPipeline;
     std::optional<Corona::Horizon::ComputePipeline<tonemap_comp_glsl_t>> tonemapPipeline;
     std::optional<Corona::Horizon::ComputePipeline<debug_resolve_comp_glsl_t>> debugResolvePipeline;
     std::optional<Corona::Horizon::ComputePipeline<visibility_debug_resolve_comp_glsl_t>> visibilityDebugResolvePipeline;

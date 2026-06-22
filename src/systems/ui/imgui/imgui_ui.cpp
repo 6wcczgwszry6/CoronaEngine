@@ -389,12 +389,12 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         return;
     }
 
-    auto route_camera_window = [&](SDL_WindowID window_id) {
+    auto route_browser_platform_window = [&](SDL_WindowID window_id) {
         if (window_id == 0) {
             return;
         }
         for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
-            if (tab && tab->camera_view &&
+            if (tab && tab->docking_pos != "main" &&
                 tab->platform_window_id == window_id) {
                 *context.active_tab_id = tab_id;
                 url_input_active_tab_ = -1;
@@ -403,36 +403,33 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         }
     };
 
-    auto route_main_window = [&]() {
-        for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
-            if (tab && !tab->camera_view && tab->docking_pos == "main") {
-                *context.active_tab_id = tab_id;
-                url_input_active_tab_ = -1;
-                return;
-            }
+    auto route_event_window = [&](SDL_WindowID window_id) {
+        if (context.window && window_id == SDL_GetWindowID(context.window)) {
+            // Embedded browser docks share the main SDL window with the main
+            // editor tab. Preserve the tab selected by ImGui mouse hit-testing.
+            return;
         }
+        route_browser_platform_window(window_id);
     };
 
     auto result = event_handler_.process_events(
         context.window, url_input_active_tab_,
         [&](const SDL_Event& event) {
-            route_camera_window(event.key.windowID);
+            route_event_window(event.key.windowID);
             input_handler_.process_sdl_key_event(event);
         },
         [&](const SDL_Event& event) {
-            route_camera_window(event.text.windowID);
+            route_event_window(event.text.windowID);
             input_handler_.process_sdl_text_event(event);
         },
         [&](const SDL_Event& event) {
-            route_camera_window(event.edit.windowID);
+            route_event_window(event.edit.windowID);
             input_handler_.process_sdl_ime_event(event);
         });
 
     if (SDL_Window* focused_window = SDL_GetKeyboardFocus()) {
-        if (focused_window == context.window) {
-            route_main_window();
-        } else {
-            route_camera_window(SDL_GetWindowID(focused_window));
+        if (focused_window != context.window) {
+            route_browser_platform_window(SDL_GetWindowID(focused_window));
         }
     }
 #ifdef _WIN32
@@ -443,15 +440,14 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
                   SDL_PROP_WINDOW_WIN32_HWND_POINTER,
                   nullptr))
             : nullptr;
-        if (main_hwnd && foreground == main_hwnd) {
-            route_main_window();
-        }
-        for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
-            if (tab && tab->camera_view &&
-                tab->platform_handle_raw == foreground) {
-                *context.active_tab_id = tab_id;
-                url_input_active_tab_ = -1;
-                break;
+        if (!main_hwnd || foreground != main_hwnd) {
+            for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+                if (tab && tab->docking_pos != "main" &&
+                    tab->platform_handle_raw == foreground) {
+                    *context.active_tab_id = tab_id;
+                    url_input_active_tab_ = -1;
+                    break;
+                }
             }
         }
     }
