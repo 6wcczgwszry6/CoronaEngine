@@ -51,7 +51,7 @@ class AITool(PluginBase):
     _STREAM_QUEUE_MAXSIZE = 128
     _request_service = AIRequestService()
     _media_ingress = MediaIngress(base64_to_image_file, upload_file_to_server)
-    _stream_dispatcher = StreamDispatcher(CoronaEditor.js_call_func)
+    _stream_dispatcher = StreamDispatcher(CoronaEditor.emit_editor_event)
     _cai_app = CAIApp.from_legacy_entrance(lambda: get_ai_entrance())
     _install_cai_extensions(_cai_app)
     _cai_client = CAIClient(_cai_app, _executor, _STREAM_QUEUE_MAXSIZE)

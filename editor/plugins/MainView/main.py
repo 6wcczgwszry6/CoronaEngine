@@ -237,7 +237,7 @@ class MainView(PluginBase):
         scene.set_enabled(True)
         MainView._apply_vision_source_for_scene(scene)
 
-        CoronaEditor.js_call_func("actor-change", ['scene', scene.route, ""])
+        CoronaEditor.emit_editor_event("actor-change", ['scene', scene.route, ""])
         MainView._save_project_field("active_scene", scene.route)
         return True
 

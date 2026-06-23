@@ -192,7 +192,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                 Actor=FakeActorEngineObject,
                 ActorProfile=SimpleNamespace,
             ),
-            js_call_func=lambda name, args: events.append((name, args)),
+            emit_editor_event=lambda name, args: events.append((name, args)),
         )
         if parent is None:
             parent = SimpleNamespace(route="Scene/main.scene")
@@ -220,7 +220,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                 Actor=FakeActorEngineObject,
                 ActorProfile=SimpleNamespace,
             ),
-            js_call_func=lambda name, args: events.append((name, args)),
+            emit_editor_event=lambda name, args: events.append((name, args)),
         )
         parent = SimpleNamespace(route="Scene/main.scene")
 
@@ -262,7 +262,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                     Actor=FakeActorEngineObject,
                     ActorProfile=SimpleNamespace,
                 ),
-                js_call_func=lambda name, args: events.append((name, args)),
+                emit_editor_event=lambda name, args: events.append((name, args)),
             )
             parent = SimpleNamespace(route="Scene/main.scene")
             unsafe_route = "../External/Ball.obj"
@@ -307,7 +307,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                     Actor=FakeActorEngineObject,
                     ActorProfile=SimpleNamespace,
                 ),
-                js_call_func=lambda name, args: events.append((name, args)),
+                emit_editor_event=lambda name, args: events.append((name, args)),
             )
             parent = SimpleNamespace(route="Scene/main.scene")
 
@@ -346,7 +346,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                     Actor=FakeActorEngineObject,
                     ActorProfile=SimpleNamespace,
                 ),
-                js_call_func=lambda name, args: events.append((name, args)),
+                emit_editor_event=lambda name, args: events.append((name, args)),
             )
             parent = SimpleNamespace(route="Scene/main.scene")
 
@@ -393,7 +393,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                     Actor=FakeActorEngineObject,
                     ActorProfile=SimpleNamespace,
                 ),
-                js_call_func=lambda name, args: events.append((name, args)),
+                emit_editor_event=lambda name, args: events.append((name, args)),
             )
             parent = SimpleNamespace(route="Scene/main.scene")
 
@@ -502,7 +502,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
     def test_scene_remove_actor_emits_delete_sync_broadcast(self):
         events = []
         fake_editor = SimpleNamespace(
-            js_call_func=lambda name, args: events.append((name, args)),
+            emit_editor_event=lambda name, args: events.append((name, args)),
         )
         scene = scene_module.Scene.__new__(scene_module.Scene)
         scene.route = "Scene/main.scene"
@@ -532,7 +532,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
     def test_scene_remove_remote_actor_does_not_rebroadcast_delete(self):
         events = []
         fake_editor = SimpleNamespace(
-            js_call_func=lambda name, args: events.append((name, args)),
+            emit_editor_event=lambda name, args: events.append((name, args)),
         )
         scene = scene_module.Scene.__new__(scene_module.Scene)
         scene.route = "Scene/main.scene"
@@ -564,7 +564,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                     Actor=FakeActorEngineObject,
                     ActorProfile=SimpleNamespace,
                 ),
-                js_call_func=lambda name, args: None,
+                emit_editor_event=lambda name, args: None,
             )
             parent = SimpleNamespace(route="Scene/main.scene")
 
@@ -710,7 +710,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                 Actor=FakeActorEngineObject,
                 ActorProfile=SimpleNamespace,
             ),
-            js_call_func=lambda name, args: events.append((name, args)),
+            emit_editor_event=lambda name, args: events.append((name, args)),
         )
         parent = SimpleNamespace(route="Scene/main.scene")
 
@@ -814,7 +814,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                 Actor=FakeActorEngineObject,
                 ActorProfile=SimpleNamespace,
             ),
-            js_call_func=lambda name, args: events.append((name, args)),
+            emit_editor_event=lambda name, args: events.append((name, args)),
         )
         parent = SimpleNamespace(route="Scene/main.scene")
 
@@ -845,7 +845,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                 Actor=FakeActorEngineObject,
                 ActorProfile=SimpleNamespace,
             ),
-            js_call_func=lambda name, args: events.append((name, args)),
+            emit_editor_event=lambda name, args: events.append((name, args)),
         )
         parent = SimpleNamespace(route="Scene/main.scene")
 
@@ -884,7 +884,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                 Actor=FakeActorEngineObject,
                 ActorProfile=SimpleNamespace,
             ),
-            js_call_func=lambda name, args: events.append((name, args)),
+            emit_editor_event=lambda name, args: events.append((name, args)),
         )
         parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
 
@@ -911,7 +911,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                 Actor=FakeActorEngineObject,
                 ActorProfile=SimpleNamespace,
             ),
-            js_call_func=lambda name, args: events.append((name, args)),
+            emit_editor_event=lambda name, args: events.append((name, args)),
         )
         parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
 
@@ -946,7 +946,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                 Actor=FakeActorEngineObject,
                 ActorProfile=SimpleNamespace,
             ),
-            js_call_func=lambda name, args: events.append((name, args)),
+            emit_editor_event=lambda name, args: events.append((name, args)),
         )
         parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
 
@@ -974,7 +974,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                 Actor=FakeActorEngineObject,
                 ActorProfile=SimpleNamespace,
             ),
-            js_call_func=lambda name, args: None,
+            emit_editor_event=lambda name, args: None,
         )
         parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
 
@@ -1026,7 +1026,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                 Actor=FakeActorEngineObject,
                 ActorProfile=SimpleNamespace,
             ),
-            js_call_func=lambda name, args: None,
+            emit_editor_event=lambda name, args: None,
         )
         parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
 
@@ -1068,7 +1068,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                 Actor=FakeActorEngineObject,
                 ActorProfile=SimpleNamespace,
             ),
-            js_call_func=lambda name, args: None,
+            emit_editor_event=lambda name, args: None,
         )
         parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
 
@@ -1103,7 +1103,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                 Actor=FakeActorEngineObject,
                 ActorProfile=SimpleNamespace,
             ),
-            js_call_func=lambda name, args: None,
+            emit_editor_event=lambda name, args: None,
         )
         parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
 
@@ -1221,7 +1221,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                     Actor=FakeActorEngineObject,
                     ActorProfile=SimpleNamespace,
                 ),
-                js_call_func=lambda name, args: None,
+                emit_editor_event=lambda name, args: None,
             )
             parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
 
@@ -1383,7 +1383,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                     Actor=FakeActorEngineObject,
                     ActorProfile=SimpleNamespace,
                 ),
-                js_call_func=lambda name, args: None,
+                emit_editor_event=lambda name, args: None,
             )
 
             with patch.object(actor_module, "CoronaEditor", fake_editor), \
@@ -1420,7 +1420,7 @@ class ActorNetworkBroadcastTests(unittest.TestCase):
                     Actor=FakeActorEngineObject,
                     ActorProfile=SimpleNamespace,
                 ),
-                js_call_func=lambda name, args: None,
+                emit_editor_event=lambda name, args: None,
             )
             parent = SimpleNamespace(route="Scene/main.scene", save_data=lambda: None)
             actor_data = {

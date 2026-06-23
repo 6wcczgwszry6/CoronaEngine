@@ -26,7 +26,7 @@ class FakeCoronaEditor:
         return None
 
     @classmethod
-    def js_call_func(cls, *args):
+    def emit_editor_event(cls, *args):
         if len(args) == 2:
             _event_name, payload = args
             cls.calls.append(("/AITalkBar", "receiveAIMessageChunk", payload))

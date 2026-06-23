@@ -542,7 +542,7 @@ class Actor:
             network_sync_policy.publish_actor_created(
                 self,
                 prepare=lambda actor: actor._ensure_network_model_path_in_project(),
-                emit=lambda actor_data: CoronaEditor.js_call_func(
+                emit=lambda actor_data: CoronaEditor.emit_editor_event(
                     "actor-sync-broadcast",
                     [actor_data],
                 ),
@@ -571,7 +571,7 @@ class Actor:
                 "source_user_id": "",
                 "correlation_id": "",
             }
-            CoronaEditor.js_call_func("actor-transform-sync-broadcast", [payload])
+            CoronaEditor.emit_editor_event("actor-transform-sync-broadcast", [payload])
         except Exception as exc:
             logging.warning("Actor network transform broadcast failed for %s: %s",
                             self.name or self.route, exc)
@@ -1196,11 +1196,11 @@ class Actor:
         """
         移动回调方法，子类可重写此方法以实现自定义行为。
         """
-        CoronaEditor.js_call_func("transform-update",
+        CoronaEditor.emit_editor_event("transform-update",
                                   [self.parent.route if self.parent else "", self.name, self.get_position(),
                                    self.get_rotation(), self.get_scale(), self.actor_type])
         if self.actor_guid:
-            CoronaEditor.js_call_func("actor-ownership-claim",
+            CoronaEditor.emit_editor_event("actor-ownership-claim",
                                       [{"actor_guid": self.actor_guid}])
             self._broadcast_actor_transform_updated()
         self.save_data()

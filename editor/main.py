@@ -1,8 +1,6 @@
 import logging
 import os
 import sys
-import threading
-import time
 from pathlib import Path
 
 from CoronaCore.core.corona_editor import CoronaEditor
@@ -47,15 +45,4 @@ def run():
     except:
         pass
 
-    # 启动延迟：确保 CEF 就绪后创建起始 Tab（与旧行为一致，从 StartScreen 开始）
-    def delayed_startup():
-        logging.info("Creating initial CEF tab at StartScreen...")
-        tab_id = editor.CoronaEngine.create_browser_tab(
-            editor.url, "/StartScreen", "main", 1920, 1080, True
-        )
-        CoronaEditor._main_tab_id = tab_id
-        logging.info("Main CEF tab created: ID=%s", tab_id)
-
-    startup_timer = threading.Timer(0.0, delayed_startup)
-    startup_timer.daemon = True
-    startup_timer.start()
+    logging.info("Python editor backend initialized; C++ UI owns the Vue/CEF frontend tab.")

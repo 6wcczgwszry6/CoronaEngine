@@ -449,7 +449,7 @@ class Scene:
         """通知 SceneBar 前端刷新场景树"""
         try:
             scene_name = getattr(self, 'route', '') or getattr(self, 'name', '')
-            CoronaEditor.js_call_func("scene-tree-changed", [scene_name])
+            CoronaEditor.emit_editor_event("scene-tree-changed", [scene_name])
         except Exception:
             pass
 
@@ -493,7 +493,7 @@ class Scene:
         self._notify_scene_tree_changed()
         if should_broadcast_delete and (delete_payload["actor_guid"] or delete_payload["actor_name"]):
             try:
-                CoronaEditor.js_call_func("actor-delete-sync-broadcast", [delete_payload])
+                CoronaEditor.emit_editor_event("actor-delete-sync-broadcast", [delete_payload])
             except Exception as exc:
                 logger.warning("Actor delete network broadcast failed for %s: %s",
                                delete_payload["actor_guid"] or delete_payload["actor_name"], exc)

@@ -1252,7 +1252,7 @@ class SceneTools(PluginBase):
             actor._suppress_network_broadcast = False
         logger.info("Actor %s added to %s type %s", actor.name, scene_name, actor_type)
         if notify_frontend:
-            CoronaEditor.js_call_func("import-asset-complete", actor.to_dict())
+            CoronaEditor.emit_editor_event("import-asset-complete", actor.to_dict())
         return {"scene": scene_name, "actor": actor.to_dict()}
 
     @staticmethod
@@ -1315,7 +1315,7 @@ class SceneTools(PluginBase):
             scene._notify_scene_tree_changed()
             try:
                 if not getattr(actor, "_suppress_network_broadcast", False) and not getattr(actor, "network_remote", False):
-                    CoronaEditor.js_call_func("actor-state-sync-broadcast", [actor.to_dict()])
+                    CoronaEditor.emit_editor_event("actor-state-sync-broadcast", [actor.to_dict()])
             except Exception:
                 logger.debug("rename_actor: state broadcast failed", exc_info=True)
             return {
@@ -2113,7 +2113,7 @@ class SceneTools(PluginBase):
             if actor is None:
                 logger.error(f"open_actor: actor '{actor_name}' not found in scene '{scene_name}'")
                 return False
-            CoronaEditor.js_call_func("actor-change", [actor.actor_type, scene_name, actor_name])
+            CoronaEditor.emit_editor_event("actor-change", [actor.actor_type, scene_name, actor_name])
             return True
         except Exception as e:
             logger.error(f"open actor error: {e}")
@@ -2172,7 +2172,7 @@ class SceneTools(PluginBase):
                     # 设置选中状态并通知前端更新属性面板
                     CoronaEditor._selected_scene = scene_name
                     CoronaEditor._selected_actor = actor.name
-                    CoronaEditor.js_call_func(
+                    CoronaEditor.emit_editor_event(
                         "actor-change",
                         [actor.actor_type, scene_name, actor.name]
                     )

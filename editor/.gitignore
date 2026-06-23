@@ -34,6 +34,10 @@ logs/
 
 # Runtime/generated editor data
 Backend/**
+!backend/
+!backend/**
+backend/**/__pycache__/
+backend/**/*.py[cod]
 autosave/
 media/
 models/

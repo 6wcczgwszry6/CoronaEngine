@@ -201,7 +201,7 @@ def set_engine_sync_paused(paused: bool) -> None:
     try:
         from .corona_editor import CoronaEditor
 
-        CoronaEditor.js_call_func("network-sync-pause-request", [{"paused": bool(paused)}])
+        CoronaEditor.emit_editor_event("network-sync-pause-request", [{"paused": bool(paused)}])
     except Exception:
         logger.debug("Failed to emit network sync pause request", exc_info=True)
 

@@ -16,6 +16,43 @@ _NOISY_FUNCTIONS = frozenset({
     "on_init",
 })
 
+_PYTHON_ROUTE_MODULE_ALLOWLIST = frozenset({
+    "AITool",
+    "ScratchTool",
+})
+
+_PYTHON_ROUTE_METHOD_ALLOWLIST = {
+    "MainView": frozenset({
+        "scene_save",
+        "import_resource_file",
+        "import_model",
+        "import_media",
+        "import_scene_file",
+    }),
+    "ProjectLauncher": frozenset({
+        "open_project_file",
+        "browse_folder",
+    }),
+    "FileManager": frozenset({
+        "open_file",
+    }),
+    "ProjectSettings": frozenset({
+        "save_active_project_info",
+        "browse_scene_file",
+    }),
+    "SceneDatas": frozenset({
+        "save_actor",
+        "select_model_file",
+    }),
+    "SceneTools": frozenset({
+        "save_screenshot",
+        "select_screenshot_path",
+        "select_vision_scene_path",
+        "load_vision_scene",
+        "import_vision_scene_into_current_scene",
+    }),
+}
+
 
 class CoronaEditor:
     CoronaEngine = get_corona_engine()
@@ -24,7 +61,12 @@ class CoronaEditor:
 
     _selected_scene = None
     _selected_actor = None
-    _main_tab_id = None  # 主 CEF Tab ID（由 main.py 设置）
+
+    @staticmethod
+    def is_python_route_allowed(module_name, func_name):
+        if module_name in _PYTHON_ROUTE_MODULE_ALLOWLIST:
+            return True
+        return func_name in _PYTHON_ROUTE_METHOD_ALLOWLIST.get(module_name, ())
 
     @classmethod
     def deal_func_from_js(cls, json_str):
@@ -38,6 +80,11 @@ class CoronaEditor:
             if not module_name or not func_name:
                 return create_error_response(f"Please input module and function")
 
+            if not cls.is_python_route_allowed(module_name, func_name):
+                return create_error_response(
+                    f"{module_name}.{func_name} is not allowed on Python route"
+                )
+
             if module_name not in cls.module_list or not hasattr(cls.module_list[module_name], func_name):
                 return create_error_response(f"Not find module or function")
 
@@ -50,49 +97,17 @@ class CoronaEditor:
             return create_error_response(f"Error processing request: {str(e)}")
 
     @classmethod
-    def js_call_func(cls, event_name, args=None):
-        """Python -> Vue 推送：通过 window.__coronaEmit 向主 Tab 发送事件"""
-        if cls.CoronaEngine and cls._main_tab_id is not None:
-            try:
-                if args is None:
-                    args = []
-                args_str = ', '.join(
-                    json.dumps(arg, ensure_ascii=False)
-                    for arg in args
-                )
-                js_code = f"""
-                    if (window.__coronaEmit) {{
-                        window.__coronaEmit('{event_name}', {args_str});
-                    }}
-                """
-                cls.CoronaEngine.execute_javascript(cls._main_tab_id, js_code)
-                result = f"Emitted event '{event_name}' with args: {args_str}"
-                return result
-            except Exception as e:
-                return f"Failed to emit event: {str(e)}"
-        else:
-            return f"CoronaEngine not available. Would emit: {event_name}"
-
-    @classmethod
-    def start_corona_engine(cls):
-        """Vue 接管面板管理，Python 仅发送引擎就绪事件"""
-        cls.js_call_func("engine-started", [])
+    def emit_editor_event(cls, event_name, args=None):
+        """记录 Python 后端事件；前端投递由 C++ 明确事件通道负责。"""
+        if args is None:
+            args = []
+        logger.debug("Python editor event emitted: %s args=%s", event_name, args)
+        return f"Editor event emitted: {event_name}"
 
     @classmethod
     def register_page(cls, module_name: str, c_cls: object):
         if module_name not in cls.module_list:
             cls.module_list[module_name] = c_cls
-
-    @classmethod
-    def reload_frontend(cls):
-        """强制刷新主浏览器标签页"""
-        if cls.CoronaEngine and cls._main_tab_id is not None:
-            try:
-                cls.CoronaEngine.execute_javascript(cls._main_tab_id, "location.reload(true)")
-            except Exception:
-                pass
-            return "Frontend reloaded"
-        return "CoronaEngine not available"
 
     @classmethod
     def close_process(cls) -> None:
@@ -434,6 +449,4 @@ class CoronaEditor:
         except Exception:
             pass
 
-        if "LogTool" in cls.module_list and cls.CoronaEngine:
-            cls.module_list["LogTool"].show_log()
         return True
