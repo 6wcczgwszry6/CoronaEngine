@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -14,6 +16,49 @@
 #include "imgui/imgui_ui.h"
 
 namespace Corona::Systems {
+
+namespace {
+
+std::filesystem::path find_frontend_index_path() {
+    std::error_code ec;
+    const auto cwd = std::filesystem::current_path(ec);
+    if (ec) {
+        CFW_LOG_WARNING("ImguiSystem: Unable to resolve current path: {}", ec.message());
+        return {};
+    }
+
+    const std::vector<std::filesystem::path> candidates{
+        cwd / "CabbageEditor" / "Frontend" / "dist" / "index.html",
+        cwd / "editor" / "Frontend" / "dist" / "index.html",
+    };
+
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::exists(candidate, ec) && !ec) {
+            return candidate;
+        }
+        ec.clear();
+    }
+    return candidates.front();
+}
+
+void create_initial_frontend_tab() {
+    const auto frontend_index = find_frontend_index_path();
+    if (frontend_index.empty()) {
+        CFW_LOG_WARNING("ImguiSystem: Initial frontend tab skipped; frontend path is empty");
+        return;
+    }
+
+    if (!std::filesystem::exists(frontend_index)) {
+        CFW_LOG_WARNING("ImguiSystem: Initial frontend file not found: {}",
+                        frontend_index.string());
+    }
+
+    const int tab_id = UI::BrowserManager::instance().create_tab(
+        frontend_index.string(), "/StartScreen", "main", 1920, 1080, true);
+    CFW_LOG_INFO("ImguiSystem: Initial Vue/CEF tab created: ID={}", tab_id);
+}
+
+}  // namespace
 
 bool ImguiSystem::initialize(Kernel::ISystemContext* ctx) {
     CFW_LOG_NOTICE("ImguiSystem: Initializing...");
@@ -37,6 +82,7 @@ bool ImguiSystem::initialize(Kernel::ISystemContext* ctx) {
     active_tab_id_ = -1;
 
     SDL_ShowWindow(window_);
+    create_initial_frontend_tab();
 
     CFW_LOG_NOTICE("ImguiSystem: Initialized successfully (main thread mode)");
     state_ = Kernel::SystemState::running;

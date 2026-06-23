@@ -26,6 +26,8 @@
 #include <stdexcept>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -39,6 +41,61 @@ std::string create_success_json(const std::string& func,
     r["success"] = true;
     r["data"] = data;
     r["function"] = func;
+    return r.dump();
+}
+
+bool is_python_fallback_allowed(const std::string& module, const std::string& func) {
+    static const std::unordered_set<std::string> module_allowlist = {
+        "AITool",
+        "ScratchTool",
+    };
+    if (module_allowlist.contains(module)) {
+        return true;
+    }
+
+    static const std::unordered_map<std::string, std::unordered_set<std::string>> method_allowlist = {
+        {"MainView", {
+            "scene_save",
+            "import_resource_file",
+            "import_model",
+            "import_media",
+            "import_scene_file",
+        }},
+        {"ProjectLauncher", {
+            "open_project_file",
+            "browse_folder",
+        }},
+        {"FileManager", {
+            "open_file",
+        }},
+        {"ProjectSettings", {
+            "save_active_project_info",
+            "browse_scene_file",
+        }},
+        {"SceneDatas", {
+            "save_actor",
+            "select_model_file",
+        }},
+        {"SceneTools", {
+            "save_screenshot",
+            "select_screenshot_path",
+            "select_vision_scene_path",
+            "load_vision_scene",
+            "import_vision_scene_into_current_scene",
+        }},
+    };
+
+    const auto it = method_allowlist.find(module);
+    return it != method_allowlist.end() && it->second.contains(func);
+}
+
+std::string unsupported_python_route_json(const std::string& module, const std::string& func) {
+    nlohmann::json r;
+    r["success"] = false;
+    r["error"] = module + "." + func + " is not allowed on Python route";
+    r["module"] = module;
+    r["function"] = func;
+    r["route"] = "unsupported";
     return r.dump();
 }
 
@@ -367,6 +424,11 @@ std::string detect_wlan_ipv4() {
 }  // namespace
 
 BrowserSideJSHandler::~BrowserSideJSHandler() {
+    if (!Py_IsInitialized()) {
+        pFunc_ = nullptr;
+        return;
+    }
+
     PyGILState_STATE state = PyGILState_Ensure();
     Py_XDECREF(pFunc_);
     PyGILState_Release(state);
@@ -374,8 +436,7 @@ BrowserSideJSHandler::~BrowserSideJSHandler() {
 
 void BrowserSideJSHandler::initialize_python() {
     if (!Py_IsInitialized()) {
-        Py_Initialize();
-        PyEval_SaveThread();
+        throw std::runtime_error("Python interpreter is not initialized");
     }
 
     PyGILState_STATE state = PyGILState_Ensure();
@@ -1142,9 +1203,22 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
         }
     }
 
+    try {
+        auto j = nlohmann::json::parse(req);
+        const std::string module = j.value("module", "");
+        const std::string func = j.value("function", "");
+        if (!module.empty() && !func.empty() && !is_python_fallback_allowed(module, func)) {
+            callback->Success(unsupported_python_route_json(module, func));
+            return true;
+        }
+    } catch (const nlohmann::json::parse_error&) {
+        callback->Success(unsupported_python_route_json("", ""));
+        return true;
+    }
+
     if (!Py_IsInitialized()) {
-        Py_Initialize();
-        PyEval_SaveThread();
+        callback->Failure(503, "Python backend is not initialized");
+        return true;
     }
 
     PyGILState_STATE gstate = PyGILState_Ensure();

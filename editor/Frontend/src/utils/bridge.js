@@ -247,7 +247,6 @@ export const appService = {
     }
     return Promise.resolve({ success: true });
   },
-  start_engine: () => Bridge.callCEF('CoronaEditor', 'start_corona_engine', []),
 };
 
 export const aiService = {
@@ -432,10 +431,8 @@ export const fileService = {
 };
 
 export const logService = {
-  // 对应 Python 中的 LogTool.set_log_ready
-  setLogReady: () => Bridge.callCEF('LogTool', 'set_log_ready', []),
-  // 如果需要，也可以添加关闭接口
-  setLogClose: () => Bridge.callCEF('LogTool', 'set_log_close', []),
+  setLogReady: () => Promise.resolve({ success: true, disabled: true }),
+  setLogClose: () => Promise.resolve({ success: true, disabled: true }),
 };
 
 /**

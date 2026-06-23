@@ -1,9 +1,10 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (path) => readFileSync(join(root, path), 'utf8');
+const exists = (path) => existsSync(join(root, path));
 const fail = (message) => {
   throw new Error(message);
 };
@@ -21,7 +22,6 @@ const cefBridge = read('../../src/systems/ui/cef/cef_query_bridge.cpp');
 const networkSystem = read('../../src/systems/network/network_system.cpp');
 const networkFileTransfer = read('../../include/corona/systems/network/file_transfer.h');
 const networkProtocolTests = read('../../src/systems/network/tests/test_network_protocol.cpp');
-const legacyLanChat = read('../../editor/plugins/LANChat/main.py');
 const actorCore = read('../../editor/CoronaCore/core/entities/actor.py');
 const sceneCore = read('../../editor/CoronaCore/core/entities/scene.py');
 const actorBroadcastTests = read('../../editor/CoronaCore/tests/test_actor_network_broadcast.py');
@@ -123,7 +123,7 @@ assertIncludes(
 );
 assertIncludes(
   cefBridge,
-  'payload["local_ip"] = detect_local_ipv4()',
+  'payload["local_ip"] = detect_wlan_ipv4()',
   'Network bridge must expose the current local IPv4 address'
 );
 
@@ -142,11 +142,9 @@ assertNotIncludes(
   '重连中',
   'RoomPanel input placeholder must not imply automatic reconnect is implemented'
 );
-assertIncludes(
-  legacyLanChat,
-  'not a source of truth for current UI port display',
-  'Legacy Python LANChat shim must state that C++/CEF owns current port state'
-);
+if (exists('../../editor/plugins/LANChat/main.py')) {
+  fail('Legacy Python LANChat shim must be deleted; C++/CEF owns LANChat state');
+}
 assertIncludes(
   actorCore,
   '_local_model_library_resource_subdir(rel_path)',

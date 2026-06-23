@@ -4,7 +4,7 @@ import { Bridge } from '@/utils/bridge.js';
  * 事件总线 —— 同一 JS 上下文内的发布-订阅
  *
  * 消息流：
- *   C++/Python → ExecuteJavaScript
+ *   C++ → ExecuteJavaScript
  *     → window.__coronaEmit(event, ...args)        ← 仅主 Tab 收到
  *     → 内部 emit → dock 内所有面板组件收到
  *     → 自动 relay 到 C++ DockCommand broadcast  → 所有 pop-out Tab 也收到
@@ -45,7 +45,7 @@ export const coronaEventBus = {
 };
 
 /**
- * 统一入口：C++ ExecuteJavaScript 或 Python execute_javascript 调用
+ * 统一入口：C++ ExecuteJavaScript 调用
  * 主 Tab 收到本地推送后，通过 C++ DockCommand 中转给所有 pop-out Tab
  */
 window.__coronaEmit = (event, ...rest) => {
