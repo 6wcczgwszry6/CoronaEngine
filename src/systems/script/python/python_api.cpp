@@ -78,7 +78,7 @@ std::string PythonAPI::wstr2str(const std::wstring& wstr) {
     return out;
 }
 
-bool PythonAPI::ensureInitialized() {
+bool PythonAPI::initializeInterpreterLocked() {
     if (Py_IsInitialized()) {
         return true;
     }
@@ -88,19 +88,51 @@ bool PythonAPI::ensureInitialized() {
     PyImport_AppendInittab("CoronaEngine", &PyInit_CoronaEngine);
 
     PyConfig_InitPythonConfig(&config);
-    PyConfig_SetBytesString(&config, &config.home, CORONA_PYTHON_HOME_DIR);
-    PyConfig_SetBytesString(&config, &config.pythonpath_env, CORONA_PYTHON_HOME_DIR);
+    auto check_status = [&](PyStatus status, const char* step) {
+        if (!PyStatus_Exception(status)) {
+            return true;
+        }
+        CFW_LOG_CRITICAL("PythonAPI: {} failed: {}", step, status.err_msg ? status.err_msg : "unknown Python error");
+        PyConfig_Clear(&config);
+        config = PyConfig{};
+        return false;
+    };
+
+    if (!check_status(PyConfig_SetBytesString(&config, &config.home, CORONA_PYTHON_HOME_DIR),
+                      "set Python home")) {
+        return false;
+    }
+    if (!check_status(PyConfig_SetBytesString(&config, &config.pythonpath_env, CORONA_PYTHON_HOME_DIR),
+                      "set Python path")) {
+        return false;
+    }
     config.module_search_paths_set = 1;
 
     {
         std::string runtimePath = PathCfg::runtime_backend_abs();
-        PyWideStringList_Append(&config.module_search_paths, str2wstr(runtimePath).c_str());
-        PyWideStringList_Append(&config.module_search_paths, str2wstr(CORONA_PYTHON_MODULE_DLL_DIR).c_str());
-        PyWideStringList_Append(&config.module_search_paths, str2wstr(CORONA_PYTHON_MODULE_LIB_DIR).c_str());
-        PyWideStringList_Append(&config.module_search_paths, str2wstr(PathCfg::site_packages_dir()).c_str());
+        if (!check_status(PyWideStringList_Append(&config.module_search_paths, str2wstr(runtimePath).c_str()),
+                          "append runtime backend path")) {
+            return false;
+        }
+        if (!check_status(PyWideStringList_Append(&config.module_search_paths, str2wstr(CORONA_PYTHON_MODULE_DLL_DIR).c_str()),
+                          "append Python DLL path")) {
+            return false;
+        }
+        if (!check_status(PyWideStringList_Append(&config.module_search_paths, str2wstr(CORONA_PYTHON_MODULE_LIB_DIR).c_str()),
+                          "append Python lib path")) {
+            return false;
+        }
+        if (!check_status(PyWideStringList_Append(&config.module_search_paths, str2wstr(PathCfg::site_packages_dir()).c_str()),
+                          "append site-packages path")) {
+            return false;
+        }
     }
 
-    Py_InitializeFromConfig(&config);
+    if (!check_status(Py_InitializeFromConfig(&config), "initialize Python interpreter")) {
+        return false;
+    }
+    PyEval_SaveThread();
+    CFW_LOG_INFO("PythonAPI: Python interpreter initialized successfully");
 
     if (!Py_IsInitialized()) {
         CFW_LOG_CRITICAL("Python failed to initialize. Diagnostics:");
@@ -118,6 +150,27 @@ bool PythonAPI::ensureInitialized() {
         } catch (...) {
             CFW_LOG_ERROR("Failed to print Python configuration diagnostics");
         }
+        return false;
+    }
+
+    return true;
+}
+
+bool PythonAPI::initializeInterpreter() {
+    std::lock_guard init_lock(initMtx);
+    return initializeInterpreterLocked();
+}
+
+bool PythonAPI::ensureInitialized() {
+    if (backend_initialized_.load()) {
+        return true;
+    }
+
+    std::lock_guard init_lock(initMtx);
+    if (backend_initialized_.load()) {
+        return true;
+    }
+    if (!initializeInterpreterLocked()) {
         return false;
     }
 
@@ -153,7 +206,8 @@ bool PythonAPI::ensureInitialized() {
             if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
                 event_bus->publish<Events::ScriptFinishStartEvent>({});
             }
-            CFW_LOG_INFO("PythonAPI: Python interpreter initialized successfully");
+            backend_initialized_.store(true);
+            CFW_LOG_INFO("PythonAPI: Python backend initialized successfully");
         } catch (const nanobind::python_error& e) {
             log_python_error(e);
             // pModule.reset();
@@ -166,6 +220,50 @@ bool PythonAPI::ensureInitialized() {
         }
     }
     return true;
+}
+
+void PythonAPI::invokeStartFromEvent() {
+    if (shutting_down_.load()) {
+        return;
+    }
+    if (!ensureInitialized()) {
+        CFW_LOG_ERROR("PythonAPI: Python initialization failed before start event");
+        return;
+    }
+
+    std::shared_lock lk(queMtx);
+    if (!pStartFunc.is_valid()) {
+        return;
+    }
+
+    nanobind::gil_scoped_acquire gil;
+    try {
+        pStartFunc();
+    } catch (const nanobind::python_error& e) {
+        log_python_error(e);
+    }
+}
+
+void PythonAPI::invokeJsCallFromEvent(void* args) {
+    if (shutting_down_.load()) {
+        return;
+    }
+    if (!ensureInitialized()) {
+        CFW_LOG_ERROR("PythonAPI: Python initialization failed before JS event");
+        return;
+    }
+
+    std::shared_lock lk(queMtx);
+    if (!pJsCallFunc.is_valid()) {
+        return;
+    }
+
+    nanobind::gil_scoped_acquire gil;
+    try {
+        pJsCallFunc(args);
+    } catch (const nanobind::python_error& e) {
+        log_python_error(e);
+    }
 }
 
 bool PythonAPI::performHotReload() {

@@ -2,9 +2,11 @@
 
 #include <windows.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <system_error>
 
 #include <corona/kernel/core/i_logger.h>
 
@@ -369,7 +371,8 @@ void CefAppConfig::OnBeforeCommandLineProcessing(const CefString& process_type,
     command_line->AppendSwitch("no-sandbox");
     command_line->AppendSwitch("disable-gpu");
     command_line->AppendSwitch("disable-gpu-compositing");
-    command_line->AppendSwitch("enable-plugins");
+    command_line->AppendSwitch("disable-extensions");
+    command_line->AppendSwitch("disable-component-extensions-with-background-pages");
     command_line->AppendSwitch("enable-net-benchmarking");
     command_line->AppendSwitch("disable-pdf-extension");
     command_line->AppendSwitch("disable-pdf-viewer");
@@ -402,11 +405,41 @@ bool initialize_cef() {
 
     CefString(&settings.locale).FromASCII("zh-CN");
 
-    std::filesystem::path cache_path = std::filesystem::current_path() / "cache";
-    if (!std::filesystem::exists(cache_path)) {
-        std::filesystem::create_directories(cache_path);
+#ifdef _WIN32
+    std::filesystem::path root_cache_path;
+    if (const char* local_app_data = std::getenv("LOCALAPPDATA")) {
+        root_cache_path = std::filesystem::path(local_app_data) / "CoronaEngine" / "CEFRoot";
+    } else {
+        root_cache_path = std::filesystem::current_path() / "cef_root";
     }
-    CefString(&settings.cache_path).FromString(cache_path.string());
+#else
+    std::filesystem::path root_cache_path = std::filesystem::current_path() / "cef_root";
+#endif
+    std::filesystem::path cache_path = root_cache_path / "Default";
+    std::error_code cache_ec;
+    if (!std::filesystem::exists(cache_path, cache_ec)) {
+        std::filesystem::create_directories(cache_path, cache_ec);
+    }
+    if (cache_ec) {
+        CFW_LOG_WARNING("CEF: failed to prepare cache path {}: {}; falling back to local cache",
+                        cache_path.string(), cache_ec.message());
+        cache_ec.clear();
+        root_cache_path = std::filesystem::current_path() / "cef_root";
+        cache_path = root_cache_path / "Default";
+        if (!std::filesystem::exists(cache_path, cache_ec)) {
+            std::filesystem::create_directories(cache_path, cache_ec);
+        }
+        if (cache_ec) {
+            CFW_LOG_WARNING("CEF: local cache path {} is unavailable: {}", cache_path.string(),
+                            cache_ec.message());
+            root_cache_path.clear();
+            cache_path.clear();
+        }
+    }
+    if (!cache_path.empty()) {
+        CefString(&settings.root_cache_path).FromString(root_cache_path.string());
+        CefString(&settings.cache_path).FromString(cache_path.string());
+    }
 
     // 使用单独的子进程可执行文件
     wchar_t exe_path[MAX_PATH];

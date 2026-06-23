@@ -30,11 +30,7 @@ bool ScriptSystem::initialize(Kernel::ISystemContext* ctx) {
                     return;
                 }
                 CFW_LOG_INFO("ScriptSystem: Received ImguiToPythonEvent start");
-                nanobind::gil_scoped_acquire gil;
-                if (!python_api_->pStartFunc.is_valid()) {
-                    return;
-                }
-                python_api_->pStartFunc();
+                python_api_->invokeStartFromEvent();
             });
 
         js_call_python_id_ = event_bus->subscribe<Events::ImguiCallPythonEvent>(
@@ -44,17 +40,20 @@ bool ScriptSystem::initialize(Kernel::ISystemContext* ctx) {
                     return;
                 }
                 CFW_LOG_INFO("ScriptSystem: Received ImguiCallPythonEvent js_call");
-                nanobind::gil_scoped_acquire gil;
-                if (!python_api_->pJsCallFunc.is_valid()) {
-                    return;
-                }
-                python_api_->pJsCallFunc(event.args);
+                python_api_->invokeJsCallFromEvent(event.args);
             });
 
         CFW_LOG_DEBUG("ScriptSystem: EventBus subscriptions ready");
     } else {
         CFW_LOG_WARNING("ScriptSystem: No event bus available");
     }
+
+#ifdef CORONA_ENABLE_PYTHON_API
+    if (!python_api_->initializeInterpreter()) {
+        CFW_LOG_ERROR("ScriptSystem: Python interpreter initialization failed");
+        return false;
+    }
+#endif
 
     return true;
 }

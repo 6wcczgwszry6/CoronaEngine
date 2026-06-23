@@ -8,6 +8,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <string>
 
@@ -27,7 +28,10 @@ struct PythonAPI {
 
     void begin_shutdown();
 
+    bool initializeInterpreter();
     void runPythonScript();
+    void invokeStartFromEvent();
+    void invokeJsCallFromEvent(void* args);
     static void checkPythonScriptChange();
     void checkReleaseScriptChange();
     void sendMessage(const std::string& message) const;
@@ -44,11 +48,13 @@ struct PythonAPI {
     static const std::string codePath;
 
     PythonHotfix hotfixManger;
+    mutable std::mutex initMtx;
     mutable std::shared_mutex queMtx;
 
     int64_t lastHotReloadTime = 0;  // ms
     bool hasHotReload = false;
     std::atomic<bool> shutting_down_{false};  // 标记是否正在关闭
+    std::atomic<bool> backend_initialized_{false};
 
     nanobind::object pModule;      // module 'main'
     nanobind::object pFunc;        // callable 'run'
@@ -60,6 +66,7 @@ struct PythonAPI {
     PyConfig config{};  // 值初始化
 
     bool ensureInitialized();
+    bool initializeInterpreterLocked();
     bool performHotReload();
     void invokeEntry(bool isReload) const;
     static int64_t nowMsec();
