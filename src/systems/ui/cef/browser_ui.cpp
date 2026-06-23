@@ -363,7 +363,12 @@ void BrowserRenderer::setup_window_transform(BrowserTab* tab,
                                              ImGuiID dock_space_id,
                                              bool is_main_tab) {
     if (is_main_tab) {
-        ImGui::SetNextWindowDockID(dock_space_id, ImGuiCond_Always);
+        (void)dock_space_id;
+        ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowViewport(main_viewport->ID);
+        ImGui::SetNextWindowPos(main_viewport->WorkPos, ImGuiCond_Always);
+        ImGui::SetNextWindowSize(main_viewport->WorkSize, ImGuiCond_Always);
+        tab->dock_initialized = true;
     } else {
         if (tab->camera_view) {
             ImGui::SetNextWindowPos(
@@ -529,8 +534,14 @@ void BrowserRenderer::render_single_tab(int tab_id,
 
     bool is_main_tab = (tab->docking_pos == "main");
     if (is_main_tab) {
-        browser_window_flags |= ImGuiWindowFlags_NoMove |
-                                ImGuiWindowFlags_NoBackground;
+        browser_window_flags |= ImGuiWindowFlags_NoBackground |
+                                ImGuiWindowFlags_NoDocking |
+                                ImGuiWindowFlags_NoResize |
+                                ImGuiWindowFlags_NoCollapse |
+                                ImGuiWindowFlags_NoBringToFrontOnFocus;
+    }
+    if (is_main_tab) {
+        browser_window_flags |= ImGuiWindowFlags_NoMove;  // 主窗口始终禁止移动
     }
     if (tab->camera_view) {
         browser_window_flags |= ImGuiWindowFlags_NoDocking |
@@ -584,12 +595,36 @@ void BrowserRenderer::render_single_tab(int tab_id,
         sync_tab_platform_window(tab);
 
         if (tab->camera_view) {
-            void* native_surface = tab->platform_handle_raw;
+            auto* viewport = ImGui::GetWindowViewport();
+            SDL_Window* platform_window = sdl_window_from_viewport(viewport);
+            void* native_surface = viewport ? viewport->PlatformHandleRaw : nullptr;
+            if (!native_surface && platform_window) {
+                native_surface = SDL_GetPointerProperty(
+                    SDL_GetWindowProperties(platform_window),
+                    SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+                    nullptr);
+            }
+            tab->platform_handle_raw =
+                native_surface;
+            tab->platform_window_id = platform_window
+                                          ? SDL_GetWindowID(platform_window)
+                                          : 0;
+            int render_width = new_width;
+            int render_height = new_height;
+            if (platform_window != nullptr) {
+                int pixel_width = 0;
+                int pixel_height = 0;
+                if (SDL_GetWindowSizeInPixels(platform_window, &pixel_width, &pixel_height) &&
+                    pixel_width > 0 && pixel_height > 0) {
+                    render_width = pixel_width;
+                    render_height = pixel_height;
+                }
+            }
             if (native_surface) {
                 CameraViewportManager::instance().bind_surface(
                     tab_id, native_surface,
                     static_cast<int>(window_pos.x), static_cast<int>(window_pos.y),
-                    new_width, new_height);
+                    render_width, render_height);
             }
             CameraViewportManager::instance().update_layout(
                 tab_id, static_cast<int>(window_pos.x), static_cast<int>(window_pos.y),

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build --configLoader runner",
     "preview": "vite preview",
     "format": "prettier --write \"src/**/*.{js,vue,css,html}\"",
     "format:check": "prettier --check \"src/**/*.{js,vue,css,html}\"",

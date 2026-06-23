@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Horizon.h>
+#include <horizon.h>
 
 #include <corona/events/geometry_system_events.h>
 #include <corona/events/scene_system_events.h>
@@ -81,10 +81,10 @@ struct SceneStats {
  *
  */
 struct LODMeshBuffers {
-    HardwareBuffer vertex_buffer;    // GPU 顶点缓冲（Vertex Shader 读取）
-    HardwareBuffer index_buffer;     // GPU 索引缓冲（组装三角形）
-    HardwareBuffer vertex_storage;   // GPU 顶点 StorageBuffer（Compute Shader 用）
-    HardwareBuffer index_storage;    // GPU 索引 StorageBuffer（Compute Shader 用）
+    Horizon::HardwareBuffer vertex_buffer;    // GPU 顶点缓冲（Vertex Shader 读取）
+    Horizon::HardwareBuffer index_buffer;     // GPU 索引缓冲（组装三角形）
+    Horizon::HardwareBuffer vertex_storage;   // GPU 顶点 StorageBuffer（Compute Shader 用）
+    Horizon::HardwareBuffer index_storage;    // GPU 索引 StorageBuffer（Compute Shader 用）
     float  error            = 0.0f;  // 该级别的几何误差（QEM 计算得出，用于调试）
     float  screen_threshold = 1.0f;  // 屏幕占比阈值：低于此值时切换到此级别
     bool   ready            = false; // GPU 缓冲是否已创建完毕（创建前不能用于渲染）

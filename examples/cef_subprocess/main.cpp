@@ -118,6 +118,35 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
                 return true;
             }
 
+            if (name == "setCameraViewport") {
+                if (arguments.size() < 7) {
+                    exception =
+                        "setCameraViewport(cameraHandle, x, y, width, height, renderWidth, renderHeight) requires 7 numbers";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                for (size_t i = 0; i < 7; ++i) {
+                    if (!arguments[i] || (!arguments[i]->IsInt() && !arguments[i]->IsDouble())) {
+                        exception = "setCameraViewport arguments must be numbers";
+                        retval = CefV8Value::CreateBool(false);
+                        return true;
+                    }
+                }
+                auto ctx = CefV8Context::GetCurrentContext();
+                if (!ctx || !ctx->GetBrowser()) {
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("CameraViewportFast");
+                CefRefPtr<CefListValue> args = msg->GetArgumentList();
+                for (size_t i = 0; i < 7; ++i) {
+                    args->SetDouble(static_cast<int>(i), arguments[i]->GetDoubleValue());
+                }
+                ctx->GetFrame()->SendProcessMessage(PID_BROWSER, msg);
+                retval = CefV8Value::CreateBool(true);
+                return true;
+            }
+
             if (name == "setViewportGizmoMode") {
                 if (arguments.size() < 1 || !arguments[0] || !arguments[0]->IsString()) {
                     exception = "setViewportGizmoMode(mode) requires a string mode";
@@ -553,6 +582,8 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
         CefRefPtr<CefV8Value> pick_actor = CefV8Value::CreateFunction("pickActor", handler);
         CefRefPtr<CefV8Value> set_viewport_ui_mode =
             CefV8Value::CreateFunction("setViewportUiMode", handler);
+        CefRefPtr<CefV8Value> set_camera_viewport =
+            CefV8Value::CreateFunction("setCameraViewport", handler);
         CefRefPtr<CefV8Value> set_viewport_gizmo_mode =
             CefV8Value::CreateFunction("setViewportGizmoMode", handler);
         CefRefPtr<CefV8Value> clear_viewport_gizmo_selection =
@@ -574,6 +605,7 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
         bridge->SetValue("setProperty", set_property, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("pickActor", pick_actor, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("setViewportUiMode", set_viewport_ui_mode, V8_PROPERTY_ATTRIBUTE_NONE);
+        bridge->SetValue("setCameraViewport", set_camera_viewport, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("setViewportGizmoMode", set_viewport_gizmo_mode, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("clearViewportGizmoSelection",
                          clear_viewport_gizmo_selection,

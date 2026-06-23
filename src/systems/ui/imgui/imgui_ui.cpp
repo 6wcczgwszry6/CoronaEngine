@@ -1,5 +1,7 @@
 #include "imgui_ui.h"
 
+#include <algorithm>
+
 #include <corona/kernel/core/i_logger.h>
 #include <corona/resource/resource_manager.h>
 #include <corona/resource/types/image.h>
@@ -120,11 +122,12 @@ bool initialize_sdl_imgui(SDL_Window*& window, ImGuiIO*& io, std::unique_ptr<Vul
 
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
 
-    // 获取当前桌面分辨率，并为 SDL 窗口标题栏预留高度（估计值）
+    // SDL desktop modes are physical pixels on high-DPI Windows; SDL window
+    // sizes are desktop/window coordinates.
     int initial_width = 1920;
     int initial_height = 1080;
-    // SDL3: SDL_GetDesktopDisplayMode 接受一个 SDL_DisplayID
-    const int kTitlebarEstimate = 80;  // 估计的标题栏高度（像素）
+    int initial_x = SDL_WINDOWPOS_CENTERED;
+    int initial_y = SDL_WINDOWPOS_CENTERED;
     SDL_DisplayID primary_display = SDL_GetPrimaryDisplay();
     const SDL_DisplayMode* desktop_mode = nullptr;
     if (primary_display != 0) {
@@ -132,8 +135,25 @@ bool initialize_sdl_imgui(SDL_Window*& window, ImGuiIO*& io, std::unique_ptr<Vul
     }
 
     if (desktop_mode) {
-        initial_width = desktop_mode->w * 0.8;
-        initial_height = desktop_mode->h * 0.8;
+        float display_scale = SDL_GetDisplayContentScale(primary_display);
+        if (display_scale <= 0.0f) {
+            display_scale = 1.0f;
+        }
+
+        float desktop_width = static_cast<float>(desktop_mode->w) / display_scale;
+        float desktop_height = static_cast<float>(desktop_mode->h) / display_scale;
+
+        SDL_Rect usable_bounds{};
+        if (SDL_GetDisplayUsableBounds(primary_display, &usable_bounds) &&
+            usable_bounds.w > 0 && usable_bounds.h > 0) {
+            desktop_width = std::min(desktop_width, static_cast<float>(usable_bounds.w));
+            desktop_height = std::min(desktop_height, static_cast<float>(usable_bounds.h));
+        }
+
+        initial_width = static_cast<int>(desktop_width * 0.8f);
+        initial_height = static_cast<int>(desktop_height * 0.8f);
+        initial_x = static_cast<int>((desktop_width - static_cast<float>(initial_width)) * 0.5f);
+        initial_y = static_cast<int>((desktop_height - static_cast<float>(initial_height)) * 0.5f);
     }
 
     window = SDL_CreateWindow("Corona Engine (Horizon)", initial_width, initial_height, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
@@ -143,7 +163,7 @@ bool initialize_sdl_imgui(SDL_Window*& window, ImGuiIO*& io, std::unique_ptr<Vul
         return false;
     }
 
-    SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    SDL_SetWindowPosition(window, initial_x, initial_y);
     // SDL_ShowWindow(window);
     SDL_StartTextInput(window);
     // SDL_MaximizeWindow(window);
@@ -246,8 +266,8 @@ ImGuiID UiLayoutManager::setup_dockspace() {
                                     ImGuiWindowFlags_NoResize |
                                     ImGuiWindowFlags_NoMove |
                                     ImGuiWindowFlags_NoBringToFrontOnFocus |
-                                    ImGuiWindowFlags_NoNavFocus |
-                                    ImGuiWindowFlags_NoBackground;
+                                    ImGuiWindowFlags_NoNavFocus;
+    window_flags |= ImGuiWindowFlags_NoBackground;
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);

@@ -24,7 +24,7 @@ layout (local_size_x = 8, local_size_y = 8) in;
 // Bindless SSBO pool (matches lighting.comp.glsl set=1 layout).
 layout (set = 1, binding = 0) readonly buffer SSBOPool { uint data[]; } ssbos[];
 // Bindless storage-image pool (matches tonemap.comp.glsl set=2 rgba16 layout).
-layout (set = 2, binding = 0, rgba16) uniform image2D imagesRGBA16[];
+layout (set = 2, binding = 0, rgba16f) uniform image2D imagesRGBA16[];
 
 layout(push_constant) uniform PushConsts
 {

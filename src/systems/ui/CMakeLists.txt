@@ -52,7 +52,6 @@ corona_add_system(imgui
         winmm
         Python::Python
         nanobind-static
-        ktm
         corona::resource::manager
         nlohmann_json::nlohmann_json
     INCLUDE_DIRS
@@ -68,4 +67,8 @@ target_compile_definitions(corona_imgui_system PUBLIC VK_NO_PROTOTYPES)
 
 helicon_compile_shaders(corona_imgui_system
     OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
+)
+
+target_include_directories(corona_imgui_system BEFORE PUBLIC
+    "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
 )

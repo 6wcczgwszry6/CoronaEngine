@@ -4,6 +4,7 @@
 #include <corona/resource/resource_manager.h>
 #include <corona/resource/types/scene.h>
 #include <corona/shared_data_hub.h>
+#include <corona/systems/script/corona_engine_api.h>
 #include <corona/systems/ui/camera_viewport_manager.h>
 #include <corona/systems/ui/viewport_gizmo_manager.h>
 #include <include/cef_values.h>
@@ -261,6 +262,65 @@ bool handle_camera_move_fast(const CefRefPtr<CefProcessMessage>& message) {
     move.fov = fov;
     Corona::SharedDataHub::instance().enqueue_camera_move(move);
 
+    return true;
+}
+
+bool handle_camera_viewport_fast(const CefRefPtr<CefProcessMessage>& message) {
+    auto args = message->GetArgumentList();
+    if (!args || args->GetSize() < 7) {
+        return true;
+    }
+
+    auto read_number = [args](int index, double& value) -> bool {
+        const auto type = args->GetType(index);
+        if (type == VTYPE_INT) {
+            value = static_cast<double>(args->GetInt(index));
+            return true;
+        }
+        if (type == VTYPE_DOUBLE) {
+            value = args->GetDouble(index);
+            return true;
+        }
+        return false;
+    };
+
+    double handle_value = 0.0;
+    if (!read_number(0, handle_value)) {
+        return true;
+    }
+
+    const auto camera_handle = static_cast<std::uintptr_t>(handle_value);
+    if (camera_handle == 0) {
+        return true;
+    }
+
+    std::array<double, 6> values{};
+    for (int i = 0; i < 6; ++i) {
+        if (!read_number(i + 1, values[static_cast<size_t>(i)])) {
+            return true;
+        }
+    }
+
+    void* surface = nullptr;
+    if (auto camera = Corona::SharedDataHub::instance().camera_storage().try_acquire_read(
+            camera_handle)) {
+        surface = camera->surface;
+    }
+    if (surface == nullptr) {
+        surface = Corona::API::get_default_surface();
+    }
+
+    Corona::SharedDataHub::instance().enqueue_camera_viewport_update({
+        .camera_handle = camera_handle,
+        .surface = surface,
+        .view_open = false,
+        .x = std::max(static_cast<int>(std::lround(values[0])), 0),
+        .y = std::max(static_cast<int>(std::lround(values[1])), 0),
+        .width = std::max(static_cast<int>(std::lround(values[2])), 1),
+        .height = std::max(static_cast<int>(std::lround(values[3])), 1),
+        .render_width = std::max(static_cast<int>(std::lround(values[4])), 1),
+        .render_height = std::max(static_cast<int>(std::lround(values[5])), 1),
+    });
     return true;
 }
 
@@ -2491,6 +2551,10 @@ bool handle_realtime_process_message(CefRefPtr<CefBrowser> browser,
 
     if (message->GetName() == "CameraMoveFast") {
         return handle_camera_move_fast(message);
+    }
+
+    if (message->GetName() == "CameraViewportFast") {
+        return handle_camera_viewport_fast(message);
     }
 
     if (message->GetName() == "ComputeActorFocusPoseFast") {
