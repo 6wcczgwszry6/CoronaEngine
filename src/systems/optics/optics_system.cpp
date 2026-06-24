@@ -3484,6 +3484,7 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
     }
 
     // Append new engine-native shapes (always land at the high end of groups_).
+    std::unordered_set<std::uintptr_t> just_added_actors;
     for (auto actor_handle : actors_to_add) {
         const auto result = Vision::add_vision_shape_for_actor(
             vision_scene, actor_handle, Corona::ExternalVisionBindingDevice{});
@@ -3496,6 +3497,7 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
                 .shape_index = result.shape_index,
                 .transform_signature = 0,
             };
+        just_added_actors.insert(actor_handle);
         geometry_changed = true;
         material_registry_changed = true;
         needs_compile = needs_compile ||
@@ -3504,21 +3506,54 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
 
     if (geometry_changed) {
         try {
+            CFW_LOG_INFO("[MIX-DIAG] geom sync begin: needs_compile={} mat_changed={}",
+                         needs_compile, material_registry_changed);
             pipeline->activate_view_context(0u);
-            vision_scene.register_instance_meshes();
-            vision_scene.tidy_up();
-            if (material_registry_changed) {
-                vision_scene.prepare_materials();
-            }
-            vision_scene.fill_instances();
-            pipeline->rebuild_geometry_gpu();
             if (needs_compile) {
+                // A new material TYPE was introduced (e.g. the first engine-native
+                // PrincipledBSDF in a cbox scene that had none). Recompiling the
+                // integrator requires the renderer's light sampler + scene to be
+                // fully re-prepared first: PathTracingIntegrator::compile walks the
+                // light sampler during codegen, and a stale sampler (after tidy_up
+                // re-indexed lights) faults. So mirror rebuild_vision_scene's proven
+                // post-build sequence exactly (scene.prepare → prepare_geometry →
+                // prepare_lights → bindless → compile → per-view-context recompile)
+                // instead of the lighter incremental path below.
+                vision_scene.prepare();
+                CFW_LOG_INFO("[MIX-DIAG] after scene.prepare");
+                pipeline->prepare_geometry();
+                CFW_LOG_INFO("[MIX-DIAG] after prepare_geometry");
+                pipeline->renderer().prepare_lights(vision_scene);
+                CFW_LOG_INFO("[MIX-DIAG] after prepare_lights");
+                pipeline->upload_scene_bindless_array();
+                pipeline->upload_bindless_array();
+                CFW_LOG_INFO("[MIX-DIAG] after bindless upload");
                 pipeline->compile();
+                CFW_LOG_INFO("[MIX-DIAG] after compile");
+                pipeline->rebuild_view_context_renderers();
+                CFW_LOG_INFO("[MIX-DIAG] after rebuild_view_context_renderers");
+            } else {
+                // Same material topology (e.g. another PrincipledBSDF object):
+                // cheap incremental geometry update, no integrator recompile. New
+                // material texture slots still need their bindless handles published
+                // (update_slotSOA + upload_handles) or the kernel reads unpublished
+                // slots for the new material instance.
+                vision_scene.register_instance_meshes();
+                vision_scene.tidy_up();
+                if (material_registry_changed) {
+                    vision_scene.prepare_materials();
+                }
+                vision_scene.fill_instances();
+                pipeline->rebuild_geometry_gpu();
+                pipeline->upload_scene_bindless_array();
+                pipeline->upload_bindless_array();
+                CFW_LOG_INFO("[MIX-DIAG] incremental (no recompile) done");
             }
             scene_resource->mark_transforms_changed();
             scene_resource->mark_scene_gpu_transforms_uploaded();
             runtime.scene_gpu_transform_version = scene_resource->logical_transform_version;
             pipeline->invalidate_all_view_contexts();
+            CFW_LOG_INFO("[MIX-DIAG] geom sync done");
         } catch (const std::exception& e) {
             CFW_LOG_ERROR("OpticsSystem: engine-native mixed geometry sync failed: {}", e.what());
         }
@@ -3563,6 +3598,18 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
             group->aabb.extend(instance->aabb);
         });
         record.transform_signature = resolved->signature;
+        // Mirror sync_external_live_vision_transforms' first_time_actor_sync guard:
+        // an actor ADDED this frame was already fully built+uploaded by the geometry
+        // block above (prepare_geometry/rebuild_geometry_gpu), so it must NOT also
+        // trigger the transform-block update_geometry() — issuing an update_accel
+        // (TLAS refit) right after a full build_accel + compile corrupts the
+        // accel/SBT and faults the render kernel. We still apply o2w + register the
+        // logical instance above (needed for shared-resource transform tracking);
+        // we just skip flagging a GPU transform flush this frame. Subsequent real
+        // moves (not in just_added_actors) flush normally.
+        if (just_added_actors.contains(actor_handle)) {
+            continue;
+        }
         changed = true;
         ++updated_actors;
     }
@@ -3572,14 +3619,15 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
     }
 
     try {
+        CFW_LOG_INFO("[MIX-DIAG] xform sync begin: updated_actors={}", updated_actors);
         pipeline->activate_view_context(0u);
         scene_resource->mark_transforms_changed();
         pipeline->update_geometry();
+        CFW_LOG_INFO("[MIX-DIAG] after update_geometry");
         scene_resource->mark_scene_gpu_transforms_uploaded();
         runtime.scene_gpu_transform_version = scene_resource->logical_transform_version;
         pipeline->invalidate_all_view_contexts();
-        CFW_LOG_DEBUG("OpticsSystem: engine-native mixed updated {} actor transform(s)",
-                      updated_actors);
+        CFW_LOG_INFO("[MIX-DIAG] xform sync done");
     } catch (const std::exception& e) {
         CFW_LOG_ERROR("OpticsSystem: engine-native mixed transform sync failed: {}", e.what());
     }
