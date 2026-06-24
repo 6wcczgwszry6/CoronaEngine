@@ -1,7 +1,7 @@
 ﻿#pragma once
 
 #include <SDL3/SDL.h>
-#include <corona/events/imgui_system_events.h>
+#include <corona/events/script_system_events.h>
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/kernel/system/i_system.h>

@@ -47,7 +47,6 @@ add_library(CoronaEngine STATIC
         ${PROJECT_SOURCE_DIR}/include/corona/events/network_system_events.h
         ${PROJECT_SOURCE_DIR}/include/corona/events/optics_system_events.h
         ${PROJECT_SOURCE_DIR}/include/corona/events/script_system_events.h
-        ${PROJECT_SOURCE_DIR}/include/corona/events/imgui_system_events.h
 )
 
 add_library(corona::engine ALIAS CoronaEngine)

@@ -6,7 +6,6 @@
 #include <corona/shared_data_hub.h>
 #include <corona/systems/script/corona_engine_api.h>
 #include <corona/systems/ui/camera_viewport_manager.h>
-#include <corona/systems/ui/viewport_gizmo_manager.h>
 #include <include/cef_values.h>
 #include <nlohmann/json.hpp>
 #include <SDL3/SDL.h>
@@ -1285,59 +1284,6 @@ bool handle_viewport_ui_mode(const CefRefPtr<CefProcessMessage>& message) {
     return true;
 }
 
-bool handle_viewport_gizmo_mode(const CefRefPtr<CefProcessMessage>& message) {
-    auto args = message->GetArgumentList();
-    if (!args || args->GetSize() < 1 || args->GetType(0) != VTYPE_STRING) {
-        CFW_LOG_WARNING("ViewportGizmoMode dropped: expected (mode)");
-        return true;
-    }
-
-    const std::string mode = args->GetString(0).ToString();
-    ViewportGizmoManager::instance().set_mode(mode);
-    CFW_LOG_DEBUG("ViewportGizmoMode set: mode={}", mode);
-    return true;
-}
-
-bool handle_viewport_gizmo_selection(const CefRefPtr<CefProcessMessage>& message) {
-    auto args = message->GetArgumentList();
-    double camera_value = 0.0;
-    double actor_value = 0.0;
-    if (!args || args->GetSize() < 3 ||
-        args->GetType(0) != VTYPE_STRING ||
-        !get_numeric_arg(args, 1, camera_value) ||
-        !get_numeric_arg(args, 2, actor_value)) {
-        CFW_LOG_WARNING("ViewportGizmoSelection dropped: expected (sceneId, cameraHandle, actorHandle)");
-        return true;
-    }
-
-    const std::string scene_id = args->GetString(0).ToString();
-    const auto camera_handle = static_cast<std::uintptr_t>(camera_value);
-    const auto actor_handle = static_cast<std::uintptr_t>(actor_value);
-    if (camera_handle == 0) {
-        CFW_LOG_WARNING("ViewportGizmoSelection dropped: camera handle is 0");
-        return true;
-    }
-
-    ViewportGizmoManager::instance().set_selection(scene_id, camera_handle, actor_handle);
-    CFW_LOG_DEBUG("ViewportGizmoSelection set: scene='{}' camera={} actor={}",
-                  scene_id,
-                  camera_handle,
-                  actor_handle);
-    return true;
-}
-
-bool handle_viewport_gizmo_clear_selection(const CefRefPtr<CefProcessMessage>& message) {
-    auto args = message->GetArgumentList();
-    double camera_value = 0.0;
-    if (args && args->GetSize() >= 1 && get_numeric_arg(args, 0, camera_value) &&
-        static_cast<std::uintptr_t>(camera_value) != 0) {
-        ViewportGizmoManager::instance().clear_camera(static_cast<std::uintptr_t>(camera_value));
-    } else {
-        ViewportGizmoManager::instance().clear_selection();
-    }
-    return true;
-}
-
 bool handle_viewport_system_cursor(CefRefPtr<CefBrowser> browser,
                                    const CefRefPtr<CefProcessMessage>& message) {
     auto args = message->GetArgumentList();
@@ -2579,18 +2525,6 @@ bool handle_realtime_process_message(CefRefPtr<CefBrowser> browser,
 
     if (message->GetName() == "ActorGizmoDrag") {
         return handle_actor_gizmo_drag(frame, message);
-    }
-
-    if (message->GetName() == "ViewportGizmoMode") {
-        return handle_viewport_gizmo_mode(message);
-    }
-
-    if (message->GetName() == "ViewportGizmoSelection") {
-        return handle_viewport_gizmo_selection(message);
-    }
-
-    if (message->GetName() == "ViewportGizmoClearSelection") {
-        return handle_viewport_gizmo_clear_selection(message);
     }
 
     if (message->GetName() == "ViewportUiMode") {
