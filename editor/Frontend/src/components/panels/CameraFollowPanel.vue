@@ -36,7 +36,6 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue';
-import { Bridge } from '@/utils/bridge.js';
 import { shouldHandleCameraFollowKey } from '@/utils/editorInputFocusGate.js';
 
 const visible = ref(false);
@@ -112,36 +111,11 @@ function updatePanelPosition() {
 
 // ── API 调用 ──
 async function applyLock() {
-  try {
-    const resp = await Bridge.callCEF('CoronaEditor', 'camera_lock_set', [
-      enabled.value,
-      ox.value,
-      oy.value,
-      oz.value,
-      0,
-      0,
-      0,
-    ]);
-    if (resp?.data?.ok) {
-      following.value = enabled.value;
-      if (enabled.value && resp.data.offset) {
-        ox.value = Number(resp.data.offset[0].toFixed?.(1) ?? resp.data.offset[0]);
-        oy.value = Number(resp.data.offset[1].toFixed?.(1) ?? resp.data.offset[1]);
-        oz.value = Number(resp.data.offset[2].toFixed?.(1) ?? resp.data.offset[2]);
-      }
-    } else {
-      enabled.value = false;
-      following.value = false;
-    }
-  } catch {
-    enabled.value = false;
-    following.value = false;
-  }
+  following.value = enabled.value;
 }
 
 function updateOffset() {
   if (!following.value) return;
-  Bridge.callCEF('CoronaEditor', 'camera_lock_set', [true, ox.value, oy.value, oz.value, 0, 0, 0]);
 }
 
 function isGamePreviewInputLocked() {
@@ -165,7 +139,6 @@ function onKeyDown(e) {
   if (['w', 'a', 's', 'd'].includes(k) && following.value) {
     e.preventDefault();
     e.stopImmediatePropagation();
-    Bridge.callCEF('CoronaEditor', 'object_key_down', [k]);
   }
 }
 
@@ -178,7 +151,6 @@ function onKeyUp(e) {
   if (['w', 'a', 's', 'd'].includes(k) && following.value) {
     e.preventDefault();
     e.stopImmediatePropagation();
-    Bridge.callCEF('CoronaEditor', 'object_key_up', [k]);
   }
 }
 

@@ -100,7 +100,7 @@
 <script setup>
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { projectLauncherService, appService } from '@/utils/bridge';
+import { projectLauncherService } from '@/utils/bridge';
 
 const router = useRouter();
 
@@ -153,7 +153,6 @@ const handleCreate = async () => {
       await projectLauncherService.setProjectMode(mode.value, { prompt });
       const opened = await projectLauncherService.openProject(info.path);
       if (opened?.data) {
-        await appService.start_engine();
         router.push('/');
         return;
       }

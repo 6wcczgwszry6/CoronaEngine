@@ -466,7 +466,7 @@
 <script setup>
 import { reactive, ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
 import lanchat from '../../../stores/lanchat.js';
-import { Bridge, networkService } from '../../../utils/bridge.js';
+import { networkService } from '../../../utils/bridge.js';
 import { coronaEventBus } from '../../../utils/eventBus.js';
 import { getActorContext } from '../../../blockly/composables/useActorContext.js';
 import {
@@ -971,10 +971,6 @@ function currentModelTransferSceneName() {
   return String(context?.scene || '').trim() || 'Scene/default.scene';
 }
 
-function unwrapCefResult(res) {
-  return res && res.data !== undefined ? res.data : res;
-}
-
 function hashString(str) {
   let hash = 0;
   for (let i = 0; i < str.length; i += 1) {
@@ -1044,8 +1040,8 @@ function stopModelTransferPolling() {
 }
 
 async function getActorSnapshot(sceneName) {
-  const raw = await Bridge.callCEF('SceneTools', 'get_actor_sync_snapshot', [sceneName]);
-  return unwrapCefResult(raw);
+  console.info('[LANChat] SceneTools native snapshot interface is not connected', sceneName);
+  return null;
 }
 
 async function registerActorIdentityFromData(actorData, locallyOwned = true) {
@@ -1104,15 +1100,10 @@ async function applyRemoteSceneSnapshot(sceneName, snapshotPayload) {
   }));
   await networkService.setSyncPaused(true);
   try {
-    const applied = await Bridge.callCEF('SceneTools', 'apply_actor_sync_snapshot_internal', [
-      targetScene,
-      snapshot,
-    ]);
-    const appliedData = unwrapCefResult(applied);
-    const changedActors = [...(appliedData?.created || []), ...(appliedData?.updated || [])];
-    for (const actorData of changedActors) {
-      await registerActorIdentityFromData(actorData, false);
-    }
+    console.info('[LANChat] Remote scene snapshot received; native SceneTools apply is not connected', {
+      sceneName: targetScene,
+      actorCount: snapshot.actors.length,
+    });
   } finally {
     await networkService.setSyncPaused(false);
   }
@@ -1127,14 +1118,10 @@ async function pollPendingActorCreates() {
       pending.actor_data = pending.actor_data || {};
       pending.actor_data.actor_guid = pending.actor_guid || '';
       pending.actor_data._suppress_network_broadcast = true;
-      const created = await Bridge.callCEF('SceneTools', 'create_actor_internal', [
-        pending.scene_name,
-        pending.model_path,
-        'model',
-        pending.actor_data,
-      ]);
-      const createdData = unwrapCefResult(created);
-      await registerActorIdentityFromData(createdData?.actor || createdData, false);
+      console.info('[LANChat] Remote actor create received; native SceneTools create is not connected', {
+        sceneName: pending.scene_name,
+        modelPath: pending.model_path,
+      });
     } finally {
       await networkService.setSyncPaused(false);
     }

@@ -134,7 +134,7 @@
 <script setup>
 import { ref, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
-import { projectLauncherService, appService } from '@/utils/bridge';
+import { projectLauncherService } from '@/utils/bridge';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 
 const router = useRouter();
@@ -218,7 +218,6 @@ const handleOpenProject = async (path) => {
     // 执行打开
     const success = await projectLauncherService.openProject(path);
     if (success.data) {
-      await appService.start_engine();
       router.push('/');
     }
   } catch (error) {

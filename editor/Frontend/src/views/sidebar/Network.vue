@@ -168,7 +168,7 @@
 <script setup>
 import { computed, ref, onMounted, onUnmounted } from 'vue';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
-import { Bridge, networkService } from '@/utils/bridge';
+import { networkService } from '@/utils/bridge';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 import { coronaEventBus } from '@/utils/eventBus';
 
@@ -373,14 +373,8 @@ async function pollPeers() {
           pending.actor_data = pending.actor_data || {};
           pending.actor_data.actor_guid = pending.actor_guid || '';
           pending.actor_data._suppress_network_broadcast = true;
-          const created = await Bridge.callCEF('SceneTools', 'create_actor_internal', [
-            pending.scene_name,
-            pending.model_path,
-            'model',
-            pending.actor_data,
-          ]);
-          const createdData = unwrapCefResult(created);
-          await registerActorIdentityFromData(createdData?.actor || createdData, false);
+          remoteActorLog.value =
+            '收到远程 Actor 创建事件；SceneTools native 创建接口尚未接入';
         } finally {
           await networkService.setSyncPaused(false);
         }
@@ -427,18 +421,11 @@ async function pollPeers() {
         }
         actorData.actor_guid = actorData.actor_guid || pendingState.actor_guid || '';
         actorData._suppress_network_broadcast = true;
-        const updated = await Bridge.callCEF('SceneTools', 'apply_actor_state_internal', [
-          pendingState.scene_name || currentSceneName.value,
-          pendingState.actor_guid || actorData.actor_guid || '',
-          actorData,
-        ]);
-        const updatedData = unwrapCefResult(updated);
-        if (updatedData?.status !== 'error') {
-          remoteActorLog.value = `远程 Actor 状态已更新: ${actorData.name || actorData.actor_guid || 'unknown'}`;
-          setTimeout(() => {
-            remoteActorLog.value = '';
-          }, 3000);
-        }
+        remoteActorLog.value =
+          `收到远程 Actor 状态事件: ${actorData.name || actorData.actor_guid || 'unknown'}`;
+        setTimeout(() => {
+          remoteActorLog.value = '';
+        }, 3000);
       }
     } catch (_) {
       /* best effort — state sync is secondary */
@@ -454,18 +441,10 @@ async function pollPeers() {
           source_user_id: pendingTransform.source_user_id || '',
           correlation_id: pendingTransform.correlation_id || '',
         };
-        const updated = await Bridge.callCEF('SceneTools', 'apply_actor_transform_internal', [
-          pendingTransform.scene_name || 'Scene/default.scene',
-          pendingTransform.actor_guid || '',
-          actorData,
-        ]);
-        const updatedData = unwrapCefResult(updated);
-        if (updatedData?.status !== 'error') {
-          remoteActorLog.value = `远程 Actor 已更新: ${pendingTransform.actor_guid || 'unknown'}`;
-          setTimeout(() => {
-            remoteActorLog.value = '';
-          }, 3000);
-        }
+        remoteActorLog.value = `收到远程 Actor Transform 事件: ${actorData.actor_guid || 'unknown'}`;
+        setTimeout(() => {
+          remoteActorLog.value = '';
+        }, 3000);
       }
     } catch (_) {
       /* best effort — transform sync is demo-grade */
@@ -475,18 +454,11 @@ async function pollPeers() {
       for (let i = 0; i < PENDING_POLL_BATCH_LIMIT; i += 1) {
         const pendingDelete = await networkService.pollPendingActorDelete();
         if (!pendingDelete || !pendingDelete.has_pending) break;
-        const deleted = await Bridge.callCEF('SceneTools', 'remove_actor_internal', [
-          pendingDelete.scene_name || 'Scene/default.scene',
-          pendingDelete.actor_guid || '',
-          pendingDelete.actor_name || '',
-        ]);
-        const deletedData = unwrapCefResult(deleted);
-        if (deletedData?.status !== 'error') {
-          remoteActorLog.value = `远程 Actor 已删除: ${pendingDelete.actor_name || pendingDelete.actor_guid || 'unknown'}`;
-          setTimeout(() => {
-            remoteActorLog.value = '';
-          }, 3000);
-        }
+        remoteActorLog.value =
+          `收到远程 Actor 删除事件: ${pendingDelete.actor_name || pendingDelete.actor_guid || 'unknown'}`;
+        setTimeout(() => {
+          remoteActorLog.value = '';
+        }, 3000);
       }
     } catch (_) {
       /* best effort — actor delete polling is secondary */
@@ -643,8 +615,8 @@ function unwrapCefResult(res) {
 }
 
 async function getActorSnapshot(sceneName) {
-  const raw = await Bridge.callCEF('SceneTools', 'get_actor_sync_snapshot', [sceneName]);
-  return unwrapCefResult(raw);
+  remoteActorLog.value = 'SceneTools native 快照接口尚未接入，跳过场景快照同步';
+  return null;
 }
 
 async function broadcastCurrentSceneSnapshot(sceneName, includeActorCreates, force = false) {
@@ -702,21 +674,7 @@ async function applyRemoteSceneSnapshot(sceneName, snapshotPayload) {
   }));
   await networkService.setSyncPaused(true);
   try {
-    const applied = await Bridge.callCEF('SceneTools', 'apply_actor_sync_snapshot_internal', [
-      targetScene,
-      snapshot,
-    ]);
-    const appliedData = unwrapCefResult(applied);
-    const changedActors = [...(appliedData?.created || []), ...(appliedData?.updated || [])];
-    for (const actorData of changedActors) {
-      await registerActorIdentityFromData(actorData, false);
-    }
-    if (changedActors.length > 0) {
-      remoteActorLog.value = `远程场景快照已同步: ${changedActors.length} 个 Actor`;
-      setTimeout(() => {
-        remoteActorLog.value = '';
-      }, 3000);
-    }
+    remoteActorLog.value = '收到远程场景快照；SceneTools native 应用接口尚未接入';
   } finally {
     await networkService.setSyncPaused(false);
   }

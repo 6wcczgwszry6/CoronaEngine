@@ -87,7 +87,7 @@
 <script setup>
 import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { projectLauncherService, appService } from '@/utils/bridge';
+import { projectLauncherService } from '@/utils/bridge';
 
 const router = useRouter();
 
@@ -115,7 +115,6 @@ const handleOpenProject = async (path) => {
   try {
     const success = await projectLauncherService.openProject(path);
     if (success.data) {
-      await appService.start_engine();
       router.push('/');
     }
   } catch (error) {
