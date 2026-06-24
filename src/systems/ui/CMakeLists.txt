@@ -18,6 +18,7 @@ file(GLOB IMGUI_SYSTEM_SOURCES
     imgui/imgui_ui.cpp
 
     camera_viewport_manager.cpp
+    panel_layout.cpp
     cef/browser_manager.cpp
     cef/browser_ui.cpp
     cef/cef_client.cpp
@@ -27,6 +28,8 @@ file(GLOB IMGUI_SYSTEM_SOURCES
     cef/cef_realtime_bridge.cpp
     cef/cef_py_bind.cpp
     sdl/sdl_utils.cpp
+    sdl/sdl_window_manager.cpp
+    sdl/sdl_input_router.cpp
 )
 
 list(APPEND IMGUI_SYSTEM_SOURCES

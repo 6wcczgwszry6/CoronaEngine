@@ -68,6 +68,33 @@ void send_mouse_move(CefRefPtr<CefBrowser> browser, const ImVec2& mouse_pos,
 void send_mouse_wheel(CefRefPtr<CefBrowser> browser, const ImVec2& mouse_pos,
                       const ImVec2& item_pos, float wheel_delta);
 
+// ----------------------------------------------------------------------------
+// Phase 5 (ImGui-removal plan): ImGui-free explicit-modifier overloads.
+//
+// The functions above read ImGui IO internally (io.KeyShift/Ctrl/Alt and
+// ImGui::IsMouseDown) to fill CEF modifier flags. These *_ex variants take the
+// modifier/button state explicitly so the SDL input router can forward to CEF
+// without an ImGui context. Coordinates are plain floats so callers need not
+// depend on ImVec2. Given the same state, they produce byte-identical CefMouseEvents
+// as the ImGui-reading versions. Additive in Phase 5 (no existing caller); the
+// frame loop switches to them in Phase 6.
+// ----------------------------------------------------------------------------
+[[nodiscard]] uint32_t make_modifiers(bool left_down, bool right_down,
+                                      bool shift, bool ctrl, bool alt);
+[[nodiscard]] CefMouseEvent create_mouse_event_ex(float mouse_x, float mouse_y,
+                                                  float item_x, float item_y,
+                                                  uint32_t modifiers);
+void send_mouse_click_ex(CefRefPtr<CefBrowser> browser, float mouse_x, float mouse_y,
+                         float item_x, float item_y,
+                         CefBrowserHost::MouseButtonType button, bool mouse_up,
+                         int click_count, bool shift, bool ctrl, bool alt);
+void send_mouse_move_ex(CefRefPtr<CefBrowser> browser, float mouse_x, float mouse_y,
+                        float item_x, float item_y, bool left_down, bool right_down,
+                        bool shift, bool ctrl, bool alt, bool mouse_leave = false);
+void send_mouse_wheel_ex(CefRefPtr<CefBrowser> browser, float mouse_x, float mouse_y,
+                         float item_x, float item_y, float wheel_delta,
+                         bool left_down, bool right_down, bool shift, bool ctrl, bool alt);
+
 }  // namespace MouseUtils
 
 // ============================================================================

@@ -280,6 +280,66 @@ void send_mouse_wheel(CefRefPtr<CefBrowser> browser, const ImVec2& mouse_pos,
     browser->GetHost()->SendMouseWheelEvent(mouse_event, 0, static_cast<int>(wheel_delta * 120));
 }
 
+// ----------------------------------------------------------------------------
+// Phase 5: ImGui-free explicit-modifier overloads. These mirror the CEF event
+// construction of the functions above exactly, but take all state explicitly.
+// ----------------------------------------------------------------------------
+
+uint32_t make_modifiers(bool left_down, bool right_down, bool shift, bool ctrl, bool alt) {
+    uint32_t modifiers = 0;
+    if (left_down) modifiers |= EVENTFLAG_LEFT_MOUSE_BUTTON;
+    if (right_down) modifiers |= EVENTFLAG_RIGHT_MOUSE_BUTTON;
+    if (shift) modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (ctrl) modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (alt) modifiers |= EVENTFLAG_ALT_DOWN;
+    return modifiers;
+}
+
+CefMouseEvent create_mouse_event_ex(float mouse_x, float mouse_y, float item_x, float item_y,
+                                    uint32_t modifiers) {
+    CefMouseEvent mouse_event;
+    mouse_event.x = static_cast<int>(mouse_x - item_x);
+    mouse_event.y = static_cast<int>(mouse_y - item_y);
+    mouse_event.modifiers = modifiers;
+    return mouse_event;
+}
+
+void send_mouse_click_ex(CefRefPtr<CefBrowser> browser, float mouse_x, float mouse_y,
+                         float item_x, float item_y, CefBrowserHost::MouseButtonType button,
+                         bool mouse_up, int click_count, bool shift, bool ctrl, bool alt) {
+    if (!browser) return;
+
+    const bool is_left = (button == MBT_LEFT);
+    const bool is_right = (button == MBT_RIGHT);
+    const uint32_t modifiers =
+        make_modifiers(!mouse_up && is_left, !mouse_up && is_right, shift, ctrl, alt);
+
+    CefMouseEvent mouse_event = create_mouse_event_ex(mouse_x, mouse_y, item_x, item_y, modifiers);
+    browser->GetHost()->SendMouseClickEvent(mouse_event, button, mouse_up, click_count);
+}
+
+void send_mouse_move_ex(CefRefPtr<CefBrowser> browser, float mouse_x, float mouse_y,
+                        float item_x, float item_y, bool left_down, bool right_down,
+                        bool shift, bool ctrl, bool alt, bool mouse_leave) {
+    if (!browser) return;
+
+    const uint32_t modifiers = make_modifiers(left_down, right_down, shift, ctrl, alt);
+    CefMouseEvent mouse_event = create_mouse_event_ex(mouse_x, mouse_y, item_x, item_y, modifiers);
+    browser->GetHost()->SendMouseMoveEvent(mouse_event, mouse_leave);
+}
+
+void send_mouse_wheel_ex(CefRefPtr<CefBrowser> browser, float mouse_x, float mouse_y,
+                         float item_x, float item_y, float wheel_delta, bool left_down,
+                         bool right_down, bool shift, bool ctrl, bool alt) {
+    if (!browser) return;
+
+    const uint32_t modifiers = make_modifiers(left_down, right_down, shift, ctrl, alt);
+    CefMouseEvent mouse_event = create_mouse_event_ex(mouse_x, mouse_y, item_x, item_y, modifiers);
+
+    // Windows 标准滚轮增量通常是 120
+    browser->GetHost()->SendMouseWheelEvent(mouse_event, 0, static_cast<int>(wheel_delta * 120));
+}
+
 }  // namespace MouseUtils
 
 // ============================================================================
