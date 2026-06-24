@@ -6,6 +6,7 @@
 #include "pipeline.h"
 
 #include <optional>
+#include <unordered_set>
 
 namespace vision {
 
@@ -257,6 +258,33 @@ void Scene::clear_shapes() noexcept {
     data_->instances_.clear();
     data_->groups_.clear();
     data_->aabb_ = {};
+}
+
+void Scene::remove_shape(uint group_index) noexcept {
+    if (group_index >= data_->groups_.size()) {
+        return;
+    }
+
+    const auto &group = data_->groups_[group_index];
+    if (group) {
+        std::unordered_set<const ShapeInstance *> to_remove;
+        group->for_each([&](SP<ShapeInstance> instance, uint) {
+            if (instance) {
+                to_remove.insert(instance.get());
+            }
+        });
+        std::erase_if(data_->instances_, [&](const SP<ShapeInstance> &instance) {
+            return instance && to_remove.contains(instance.get());
+        });
+    }
+
+    data_->groups_.erase(data_->groups_.begin() + group_index);
+    data_->aabb_ = {};
+    for (const auto &remaining_group : data_->groups_) {
+        if (remaining_group) {
+            data_->aabb_.extend(remaining_group->aabb);
+        }
+    }
 }
 
 void Scene::load_shapes(const vector<ShapeDesc> &descs) {

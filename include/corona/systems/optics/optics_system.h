@@ -173,6 +173,13 @@ class OpticsSystem : public Kernel::SystemBase {
     /// -> Pipeline::update_geometry() -> invalidate view contexts.
     void sync_external_live_vision_transforms(VisionPipelineRuntime& runtime);
 
+    /// Mixed-rendering path: incrementally add/remove/transform engine-native
+    /// actors (those WITHOUT an external_vision_binding) into an ExternalLive
+    /// Vision scene, so engine-imported models appear alongside the imported
+    /// external scene's shapes. Tracked in VisionSceneResource::
+    /// engine_mixed_shapes_by_actor; never full-rebuilds the external scene.
+    void sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtime);
+
     Corona::CameraVisionRenderMode current_vision_render_mode_{
         Corona::CameraVisionRenderMode::PathTracing};
     std::size_t last_vision_mode_conflict_signature_{0};

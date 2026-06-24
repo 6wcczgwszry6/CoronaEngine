@@ -133,6 +133,26 @@ struct VisionLogicalInstanceRecord {
     std::array<float, 16> object_to_world{};
 };
 
+struct ExternalLiveShapeRecord {
+    std::uintptr_t actor_handle{0};
+    int shape_index{-1};
+    std::string shape_guid;
+    std::string shape_identity_key;
+    bool dynamically_added{false};
+};
+
+// Tracks an engine-native actor (one WITHOUT an external_vision_binding) that has
+// been mixed into an ExternalLive Vision scene as an appended shape. Kept in a map
+// separate from external_live_shapes_by_actor because the bound-proxy reaper would
+// otherwise delete these every frame (they never appear in active_bound_actors).
+// Both maps index the same vision::Scene::groups_ vector, so removals must remap
+// indices in BOTH (see remap_external_live_shape_indices_after_remove).
+struct EngineMixedShapeRecord {
+    std::uintptr_t actor_handle{0};
+    int shape_index{-1};
+    std::size_t transform_signature{0};
+};
+
 struct VisionSceneResource {
     VisionSceneResourceKey key;
     std::string display_source_path;
@@ -147,6 +167,11 @@ struct VisionSceneResource {
                        VisionLogicalInstanceRecord,
                        VisionLogicalInstanceKeyHash>
         logical_instances;
+    std::unordered_map<std::uintptr_t, ExternalLiveShapeRecord>
+        external_live_shapes_by_actor;
+    // Engine-native actors mixed into this ExternalLive scene (no binding).
+    std::unordered_map<std::uintptr_t, EngineMixedShapeRecord>
+        engine_mixed_shapes_by_actor;
 
     [[nodiscard]] bool is_external_live() const noexcept {
         return key.source == VisionPipelineSource::ExternalLive;
@@ -192,6 +217,8 @@ struct VisionSceneResource {
         scene_gpu_transform_version = 0;
         external_live_transform_signatures.clear();
         logical_instances.clear();
+        external_live_shapes_by_actor.clear();
+        engine_mixed_shapes_by_actor.clear();
     }
 
     std::shared_ptr<::vision::GeometryGpuResource> ensure_scene_gpu_resource(
@@ -244,6 +271,111 @@ struct VisionSceneResource {
         for (auto& record : records) {
             logical_instances.emplace(record.key, std::move(record));
         }
+    }
+
+    [[nodiscard]] const ExternalLiveShapeRecord* find_external_live_shape(
+        std::uintptr_t actor_handle) const noexcept {
+        const auto iter = external_live_shapes_by_actor.find(actor_handle);
+        return iter == external_live_shapes_by_actor.end() ? nullptr : &iter->second;
+    }
+
+    bool upsert_external_live_shape(ExternalLiveShapeRecord record) {
+        if (record.actor_handle == 0 || record.shape_index < 0) {
+            return false;
+        }
+        const auto actor_handle = record.actor_handle;
+        auto iter = external_live_shapes_by_actor.find(actor_handle);
+        if (iter == external_live_shapes_by_actor.end()) {
+            external_live_shapes_by_actor.emplace(actor_handle, std::move(record));
+            return true;
+        }
+        if (iter->second.shape_index == record.shape_index &&
+            iter->second.shape_guid == record.shape_guid &&
+            iter->second.shape_identity_key == record.shape_identity_key &&
+            iter->second.dynamically_added == record.dynamically_added) {
+            return false;
+        }
+        iter->second = std::move(record);
+        return true;
+    }
+
+    void erase_external_live_shape(std::uintptr_t actor_handle) noexcept {
+        external_live_shapes_by_actor.erase(actor_handle);
+        external_live_transform_signatures.erase(actor_handle);
+    }
+
+    [[nodiscard]] const EngineMixedShapeRecord* find_engine_mixed_shape(
+        std::uintptr_t actor_handle) const noexcept {
+        const auto iter = engine_mixed_shapes_by_actor.find(actor_handle);
+        return iter == engine_mixed_shapes_by_actor.end() ? nullptr : &iter->second;
+    }
+
+    void erase_engine_mixed_shape(std::uintptr_t actor_handle) noexcept {
+        engine_mixed_shapes_by_actor.erase(actor_handle);
+    }
+
+    [[nodiscard]] std::vector<std::uintptr_t> remap_external_live_shape_indices_after_remove(
+        int removed_shape_index) {
+        std::vector<std::uintptr_t> actors_to_rewrite;
+        if (removed_shape_index < 0) {
+            return actors_to_rewrite;
+        }
+
+        std::vector<VisionLogicalInstanceRecord> remapped_logical_instances;
+        remapped_logical_instances.reserve(logical_instances.size());
+        for (auto& [key, existing_record] : logical_instances) {
+            (void)key;
+            auto record = std::move(existing_record);
+            if (record.key.shape_index == removed_shape_index) {
+                continue;
+            }
+            if (record.key.shape_index > removed_shape_index) {
+                --record.key.shape_index;
+            }
+            remapped_logical_instances.push_back(std::move(record));
+        }
+        logical_instances.clear();
+        for (auto& record : remapped_logical_instances) {
+            logical_instances.emplace(record.key, std::move(record));
+        }
+
+        for (auto iter = external_live_shapes_by_actor.begin();
+             iter != external_live_shapes_by_actor.end();) {
+            auto& record = iter->second;
+            if (record.shape_index == removed_shape_index) {
+                external_live_transform_signatures.erase(iter->first);
+                iter = external_live_shapes_by_actor.erase(iter);
+                continue;
+            }
+            if (record.shape_index > removed_shape_index) {
+                --record.shape_index;
+                external_live_transform_signatures.erase(iter->first);
+                actors_to_rewrite.push_back(iter->first);
+            }
+            ++iter;
+        }
+
+        // Engine-native mixed shapes index into the same groups_ vector, so they
+        // must be remapped too. They have no binding to write back, so they are
+        // NOT added to actors_to_rewrite; their index is fixed in place and the
+        // transform signature is zeroed to force a re-apply at the new index.
+        // (Their per-instance entries in logical_instances were already remapped
+        // by the loop above.)
+        for (auto iter = engine_mixed_shapes_by_actor.begin();
+             iter != engine_mixed_shapes_by_actor.end();) {
+            auto& record = iter->second;
+            if (record.shape_index == removed_shape_index) {
+                iter = engine_mixed_shapes_by_actor.erase(iter);
+                continue;
+            }
+            if (record.shape_index > removed_shape_index) {
+                --record.shape_index;
+                record.transform_signature = 0;
+            }
+            ++iter;
+        }
+
+        return actors_to_rewrite;
     }
 };
 
