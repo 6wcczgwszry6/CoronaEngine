@@ -30,8 +30,15 @@ _PYTHON_ROUTE_METHOD_ALLOWLIST = {
         "import_scene_file",
     }),
     "ProjectLauncher": frozenset({
+        "get_default_project_path",
+        "get_app_version",
+        "get_recent_projects",
+        "create_project",
+        "create_world_project",
+        "open_project",
         "open_project_file",
         "browse_folder",
+        "set_project_mode",
     }),
     "FileManager": frozenset({
         "open_file",

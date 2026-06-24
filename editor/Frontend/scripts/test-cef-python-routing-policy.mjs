@@ -7,6 +7,7 @@ const root = path.resolve(__dirname, '..', '..', '..');
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), 'utf8');
 
 const cefBridge = read('src/systems/ui/cef/cef_query_bridge.cpp');
+const nativeRpc = read('src/systems/ui/cef/cef_native_rpc.cpp');
 const coronaEditor = read('editor/CoronaCore/core/corona_editor.py');
 
 function assertIncludes(haystack, needle, message) {
@@ -25,6 +26,11 @@ assertIncludes(
   cefBridge,
   'is_python_fallback_allowed',
   'CEF query bridge must gate Python fallback behind an explicit allowlist',
+);
+assertIncludes(
+  nativeRpc,
+  'create_world_project',
+  'CEF native RPC Python fallback allowlist must keep ProjectLauncher world project creation on Python',
 );
 assertIncludes(
   cefBridge,
@@ -55,6 +61,11 @@ assertIncludes(
   coronaEditor,
   '"AITool"',
   'AITool must remain on the Python route',
+);
+assertIncludes(
+  coronaEditor,
+  '"create_world_project"',
+  'CoronaEditor allowlist must keep ProjectLauncher world project creation on Python',
 );
 
 console.log('[OK] CEF/Python routing policy is explicit');
