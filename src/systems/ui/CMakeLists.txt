@@ -13,6 +13,7 @@ target_link_libraries(imgui_backends PUBLIC imgui SDL3::SDL3-static)
 file(GLOB IMGUI_SYSTEM_SOURCES
     imgui_system.cpp
     vulk/vulkan_backend.cpp
+    vulk/quad_compositor.cpp
     vulk/browser_manager_vulkan.cpp
     imgui/imgui_ui.cpp
 

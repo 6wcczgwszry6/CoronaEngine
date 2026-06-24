@@ -64,6 +64,11 @@ class VulkanBackend {
         uint32_t target_height,
         Horizon::ImageUsageFlags render_target_usage = Horizon::ImageUsageFlags::Sampled);
 
+    // Ensure `resources` holds a render target of the given size, (re)creating it on
+    // size change. Shared by the ImGui renderer and the Phase 2+ quad compositor.
+    static bool ensure_render_target(ViewportRenderResources& resources, uint32_t width, uint32_t height,
+                                     Horizon::ImageUsageFlags usage = Horizon::ImageUsageFlags::Sampled);
+
     // Accessors for shared resources (used by viewport callbacks)
     [[nodiscard]] Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>& pipeline() { return *imgui_pipeline_; }
     [[nodiscard]] const Horizon::HardwareImage& font_atlas() const { return font_atlas_image_; }
@@ -71,9 +76,6 @@ class VulkanBackend {
    private:
     bool ensure_imgui_pipeline();
     bool ensure_font_texture();
-
-    static bool ensure_render_target(ViewportRenderResources& resources, uint32_t width, uint32_t height,
-                                     Horizon::ImageUsageFlags usage = Horizon::ImageUsageFlags::Sampled);
 
     // --- Multi-Viewport renderer callbacks (static, access shared state via s_instance_) ---
     static void renderer_create_window(ImGuiViewport* vp);
