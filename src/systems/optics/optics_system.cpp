@@ -3506,8 +3506,6 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
 
     if (geometry_changed) {
         try {
-            CFW_LOG_INFO("[MIX-DIAG] geom sync begin: needs_compile={} mat_changed={}",
-                         needs_compile, material_registry_changed);
             pipeline->activate_view_context(0u);
             if (needs_compile) {
                 // A new material TYPE was introduced (e.g. the first engine-native
@@ -3520,18 +3518,12 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
                 // prepare_lights → bindless → compile → per-view-context recompile)
                 // instead of the lighter incremental path below.
                 vision_scene.prepare();
-                CFW_LOG_INFO("[MIX-DIAG] after scene.prepare");
                 pipeline->prepare_geometry();
-                CFW_LOG_INFO("[MIX-DIAG] after prepare_geometry");
                 pipeline->renderer().prepare_lights(vision_scene);
-                CFW_LOG_INFO("[MIX-DIAG] after prepare_lights");
                 pipeline->upload_scene_bindless_array();
                 pipeline->upload_bindless_array();
-                CFW_LOG_INFO("[MIX-DIAG] after bindless upload");
                 pipeline->compile();
-                CFW_LOG_INFO("[MIX-DIAG] after compile");
                 pipeline->rebuild_view_context_renderers();
-                CFW_LOG_INFO("[MIX-DIAG] after rebuild_view_context_renderers");
             } else {
                 // Same material topology (e.g. another PrincipledBSDF object):
                 // cheap incremental geometry update, no integrator recompile. New
@@ -3547,13 +3539,11 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
                 pipeline->rebuild_geometry_gpu();
                 pipeline->upload_scene_bindless_array();
                 pipeline->upload_bindless_array();
-                CFW_LOG_INFO("[MIX-DIAG] incremental (no recompile) done");
             }
             scene_resource->mark_transforms_changed();
             scene_resource->mark_scene_gpu_transforms_uploaded();
             runtime.scene_gpu_transform_version = scene_resource->logical_transform_version;
             pipeline->invalidate_all_view_contexts();
-            CFW_LOG_INFO("[MIX-DIAG] geom sync done");
         } catch (const std::exception& e) {
             CFW_LOG_ERROR("OpticsSystem: engine-native mixed geometry sync failed: {}", e.what());
         }
@@ -3619,15 +3609,14 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
     }
 
     try {
-        CFW_LOG_INFO("[MIX-DIAG] xform sync begin: updated_actors={}", updated_actors);
         pipeline->activate_view_context(0u);
         scene_resource->mark_transforms_changed();
         pipeline->update_geometry();
-        CFW_LOG_INFO("[MIX-DIAG] after update_geometry");
         scene_resource->mark_scene_gpu_transforms_uploaded();
         runtime.scene_gpu_transform_version = scene_resource->logical_transform_version;
         pipeline->invalidate_all_view_contexts();
-        CFW_LOG_INFO("[MIX-DIAG] xform sync done");
+        CFW_LOG_DEBUG("OpticsSystem: engine-native mixed updated {} actor transform(s)",
+                      updated_actors);
     } catch (const std::exception& e) {
         CFW_LOG_ERROR("OpticsSystem: engine-native mixed transform sync failed: {}", e.what());
     }
