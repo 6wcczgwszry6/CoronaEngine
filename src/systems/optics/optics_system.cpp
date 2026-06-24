@@ -325,6 +325,57 @@ struct ExternalLiveResolvedTransform {
 
     return std::nullopt;
 }
+
+// Engine-native variant: resolves a NON-bound engine actor's renderable transform
+// for mixed rendering into an ExternalLive scene. Unlike resolve_external_live_transform
+// it is driven by the engine geometry's own OpticsDevice/ModelTransform (no binding).
+// Returns std::nullopt when the actor is not currently renderable (no visible optics
+// with a geometry + transform) — the caller treats that as "remove from mix".
+// `shape_index` is the actor's current Vision group index, folded into the signature
+// so a remap-induced index change forces a transform re-apply.
+[[nodiscard]] std::optional<ExternalLiveResolvedTransform> resolve_engine_native_transform(
+    std::uintptr_t actor_handle,
+    int shape_index) {
+    if (actor_handle == 0) {
+        return std::nullopt;
+    }
+
+    auto& hub = Corona::SharedDataHub::instance();
+    auto actor = hub.actor_storage().try_acquire_read(actor_handle);
+    if (!actor) {
+        return std::nullopt;
+    }
+
+    for (auto profile_handle : actor->profile_handles) {
+        auto profile = hub.profile_storage().try_acquire_read(profile_handle);
+        if (!profile || profile->optics_handle == 0) {
+            continue;
+        }
+
+        auto optics = hub.optics_storage().try_acquire_read(profile->optics_handle);
+        if (!optics || !optics->visible || optics->geometry_handle == 0) {
+            continue;
+        }
+
+        auto geometry = hub.geometry_storage().try_acquire_read(optics->geometry_handle);
+        if (!geometry || geometry->transform_handle == 0) {
+            continue;
+        }
+
+        auto transform = hub.model_transform_storage().try_acquire_read(geometry->transform_handle);
+        if (!transform) {
+            continue;
+        }
+
+        ExternalLiveResolvedTransform result;
+        result.shape_index = shape_index;
+        result.signature = external_live_transform_signature(*transform, shape_index);
+        result.o2w = corona_transform_to_vision_o2w(*transform);
+        return result;
+    }
+
+    return std::nullopt;
+}
 #endif
 
 void apply_pending_camera_moves() {
@@ -3034,18 +3085,29 @@ void OpticsSystem::sync_vision_dynamic_scene(VisionPipelineRuntime& runtime) {
 
     const Vision::VisionBuildResult result = rebuild_vision_scene(runtime);
 
-    if (result.instance_count > 0 || result.candidate_count == 0) {
-        // 重建成功，或场景本就为空（candidate_count==0 是合法的 0）：接受签名，
+    // "数据未就绪"判定：本帧仍有候选物体的网格数据没加载好。包含两种情况：
+    //   1) 有候选但 0 实例（首个/全部物体数据未就绪）；
+    //   2) 已有物体撑起 instance_count>0，但本次新加入的物体被 skipped_no_data 跳过。
+    // 情况 2 正是 Vision 模式下"添加物体不显示"的根因：旧逻辑只要 instance_count>0
+    // 就锁定签名，导致刚添加、mesh 资源仍在异步加载的物体被永久丢弃——资源稍后就绪
+    // 并不改变场景签名（签名只折入句柄与设备 buffer 元素数，不查询 ResourceManager
+    // 加载状态），因此再也不会触发重建。把 skipped_no_data>0 一并纳入重试条件即可修复。
+    const bool data_not_ready =
+        result.skipped_no_data > 0 ||
+        (result.candidate_count > 0 && result.instance_count == 0);
+
+    if (!data_not_ready) {
+        // 全部候选物体都已建成（含 candidate_count==0 的真正空场景）：接受签名，
         // 停止重试，避免对空场景每帧空转重建。
         vision_applied_signature_ = sig;
         vision_rebuild_retries_ = 0;
     } else {
-        // 有候选物体但 0 实例 → 网格数据尚未就绪：不锁定签名，下一帧继续重试。
+        // 仍有候选物体数据未就绪：不锁定签名，去抖每隔几帧继续重试，直到数据落地或达上限。
         if (++vision_rebuild_retries_ >= kVisionRebuildMaxRetries) {
             CFW_LOG_ERROR(
-                "OpticsSystem: Vision rebuild produced 0 instances from {} candidates after {} "
-                "retries; accepting empty result to avoid busy-loop",
-                result.candidate_count, vision_rebuild_retries_);
+                "OpticsSystem: Vision rebuild left {} candidate mesh(es) unrealized "
+                "({} instances built) after {} retries; accepting to avoid busy-loop",
+                result.skipped_no_data, result.instance_count, vision_rebuild_retries_);
             vision_applied_signature_ = sig;  // 兜底：达到上限后接受，停止重试
             vision_rebuild_retries_ = 0;
         }
@@ -3321,6 +3383,205 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
                       updated_actors);
     } catch (const std::exception& e) {
         CFW_LOG_ERROR("OpticsSystem: external_live transform sync failed: {}", e.what());
+    }
+}
+
+void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtime) {
+    auto& pipeline = runtime.pipeline;
+    auto scene_resource = runtime.scene_resource;
+    if (!vision_initialized_ || !pipeline || !scene_resource ||
+        runtime.source != VisionPipelineSource::ExternalLive ||
+        runtime.scene_path.empty()) {
+        return;
+    }
+
+    auto& hub = SharedDataHub::instance();
+    auto& vision_scene = pipeline->scene();
+    auto& groups = vision_scene.groups();
+
+    // 1. Enumerate engine-native candidate actors: present in an enabled scene and
+    //    WITHOUT an external_vision_binding (bound proxies are handled by
+    //    sync_external_live_vision_transforms, which must have run first).
+    std::unordered_set<std::uintptr_t> active_native_actors;
+    for (auto scene_it = hub.scene_storage().cbegin(); scene_it != hub.scene_storage().cend(); ++scene_it) {
+        const auto& scene_dev = *scene_it;
+        if (!scene_dev.enabled) {
+            continue;
+        }
+        for (auto actor_handle : scene_dev.actor_handles) {
+            if (actor_handle == 0 || hub.has_external_vision_binding(actor_handle)) {
+                continue;
+            }
+            active_native_actors.insert(actor_handle);
+        }
+    }
+
+    // 2. Diff against the tracked set: remove actors that left the scene or are no
+    //    longer renderable (invisible / geometry cleared); add newly-renderable ones.
+    std::vector<std::uintptr_t> actors_to_remove;
+    std::vector<std::uintptr_t> actors_to_add;
+    for (const auto& [actor_handle, record] : scene_resource->engine_mixed_shapes_by_actor) {
+        (void)record;
+        if (!active_native_actors.contains(actor_handle)) {
+            actors_to_remove.push_back(actor_handle);
+        }
+    }
+    for (auto actor_handle : active_native_actors) {
+        const auto* record = scene_resource->find_engine_mixed_shape(actor_handle);
+        const auto resolved = resolve_engine_native_transform(
+            actor_handle, record != nullptr ? record->shape_index : -1);
+        if (record == nullptr) {
+            // Only attempt to add a renderable (visible + transform) actor. Mesh
+            // readiness is checked inside add_vision_shape_for_actor.
+            if (resolved) {
+                actors_to_add.push_back(actor_handle);
+            }
+        } else if (!resolved) {
+            // Tracked but no longer renderable -> remove from the mix.
+            actors_to_remove.push_back(actor_handle);
+        }
+    }
+
+    bool geometry_changed = false;
+    bool material_registry_changed = false;
+    bool needs_compile = false;
+
+    auto remove_native = [&](std::uintptr_t actor_handle) {
+        const auto* record = scene_resource->find_engine_mixed_shape(actor_handle);
+        if (record == nullptr || record->shape_index < 0) {
+            scene_resource->erase_engine_mixed_shape(actor_handle);
+            return;
+        }
+        const int removed_index = record->shape_index;
+        if (!Vision::remove_vision_shape_for_actor(
+                vision_scene, static_cast<unsigned int>(removed_index))) {
+            scene_resource->erase_engine_mixed_shape(actor_handle);
+            return;
+        }
+        // Erase BEFORE remap so this record is not double-decremented.
+        scene_resource->erase_engine_mixed_shape(actor_handle);
+        auto actors_to_rewrite =
+            scene_resource->remap_external_live_shape_indices_after_remove(removed_index);
+        for (auto rewrite_actor : actors_to_rewrite) {
+            if (const auto* rewritten = scene_resource->find_external_live_shape(rewrite_actor)) {
+                write_external_live_binding_shape_index(rewrite_actor, rewritten->shape_index);
+            }
+        }
+        geometry_changed = true;
+    };
+
+    // Remove in descending shape_index order so each erase only shifts strictly
+    // higher, not-yet-processed indices (mirrors the bound-proxy removal pass).
+    std::sort(actors_to_remove.begin(), actors_to_remove.end(), [&](auto lhs, auto rhs) {
+        const auto* l = scene_resource->find_engine_mixed_shape(lhs);
+        const auto* r = scene_resource->find_engine_mixed_shape(rhs);
+        const int li = l == nullptr ? -1 : l->shape_index;
+        const int ri = r == nullptr ? -1 : r->shape_index;
+        return li > ri;
+    });
+    for (auto actor_handle : actors_to_remove) {
+        remove_native(actor_handle);
+    }
+
+    // Append new engine-native shapes (always land at the high end of groups_).
+    for (auto actor_handle : actors_to_add) {
+        const auto result = Vision::add_vision_shape_for_actor(
+            vision_scene, actor_handle, Corona::ExternalVisionBindingDevice{});
+        if (!result.added) {
+            continue;  // mesh data not ready yet -> retry next frame
+        }
+        scene_resource->engine_mixed_shapes_by_actor[actor_handle] =
+            Vision::EngineMixedShapeRecord{
+                .actor_handle = actor_handle,
+                .shape_index = result.shape_index,
+                .transform_signature = 0,
+            };
+        geometry_changed = true;
+        material_registry_changed = true;
+        needs_compile = needs_compile ||
+            result.material_topology_after != result.material_topology_before;
+    }
+
+    if (geometry_changed) {
+        try {
+            pipeline->activate_view_context(0u);
+            vision_scene.register_instance_meshes();
+            vision_scene.tidy_up();
+            if (material_registry_changed) {
+                vision_scene.prepare_materials();
+            }
+            vision_scene.fill_instances();
+            pipeline->rebuild_geometry_gpu();
+            if (needs_compile) {
+                pipeline->compile();
+            }
+            scene_resource->mark_transforms_changed();
+            scene_resource->mark_scene_gpu_transforms_uploaded();
+            runtime.scene_gpu_transform_version = scene_resource->logical_transform_version;
+            pipeline->invalidate_all_view_contexts();
+        } catch (const std::exception& e) {
+            CFW_LOG_ERROR("OpticsSystem: engine-native mixed geometry sync failed: {}", e.what());
+        }
+    }
+
+    // Transform sync for tracked engine-native shapes (driven by the engine
+    // geometry's ModelTransform; no binding). Newly-added shapes have
+    // transform_signature==0 so they also pass through here once to register their
+    // logical instances.
+    bool changed = false;
+    std::size_t updated_actors = 0;
+    for (auto& [actor_handle, record] : scene_resource->engine_mixed_shapes_by_actor) {
+        const auto resolved = resolve_engine_native_transform(actor_handle, record.shape_index);
+        if (!resolved) {
+            continue;
+        }
+        const auto group_index = static_cast<std::size_t>(resolved->shape_index);
+        if (group_index >= groups.size() || !groups[group_index]) {
+            continue;
+        }
+        if (record.transform_signature == resolved->signature) {
+            continue;
+        }
+
+        auto& group = groups[group_index];
+        group->aabb = ::vision::Box3f{};
+        const auto object_to_world = flatten_vision_matrix(resolved->o2w);
+        group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
+                            uint instance_index) {
+            if (!instance) {
+                return;
+            }
+            scene_resource->upsert_logical_instance({
+                .key = {.shape_index = resolved->shape_index,
+                        .instance_index = static_cast<int>(instance_index)},
+                .actor_handle = actor_handle,
+                .transform_signature = resolved->signature,
+                .object_to_world = object_to_world,
+            });
+            instance->set_o2w(resolved->o2w);
+            instance->init_aabb();
+            group->aabb.extend(instance->aabb);
+        });
+        record.transform_signature = resolved->signature;
+        changed = true;
+        ++updated_actors;
+    }
+
+    if (!changed) {
+        return;
+    }
+
+    try {
+        pipeline->activate_view_context(0u);
+        scene_resource->mark_transforms_changed();
+        pipeline->update_geometry();
+        scene_resource->mark_scene_gpu_transforms_uploaded();
+        runtime.scene_gpu_transform_version = scene_resource->logical_transform_version;
+        pipeline->invalidate_all_view_contexts();
+        CFW_LOG_DEBUG("OpticsSystem: engine-native mixed updated {} actor transform(s)",
+                      updated_actors);
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("OpticsSystem: engine-native mixed transform sync failed: {}", e.what());
     }
 }
 
@@ -3738,6 +3999,10 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 runtime->scene_resource &&
                 synced_external_live_resources.insert(runtime->scene_resource.get()).second) {
                 sync_external_live_vision_transforms(*runtime);
+                // Mix engine-native (unbound) actors into the same external scene.
+                // Must run AFTER the bound-proxy sync so bound shapes are at their
+                // final indices and engine shapes append after them.
+                sync_engine_native_mixed_shapes(*runtime);
             }
             if (runtime->source == VisionPipelineSource::ExternalLive &&
                 runtime->scene_resource) {
@@ -3822,6 +4087,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
     } else if (mode_selection.has_visible_camera &&
                runtime.source == VisionPipelineSource::ExternalLive) {
         sync_external_live_vision_transforms(runtime);
+        sync_engine_native_mixed_shapes(runtime);
     }
 #endif
 
