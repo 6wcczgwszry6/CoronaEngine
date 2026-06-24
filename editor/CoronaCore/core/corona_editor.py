@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 # 高频 UI 心跳类回调，日志降到 DEBUG，避免淹没业务日志
 _NOISY_FUNCTIONS = frozenset({
-    "on_init",
 })
 
 _PYTHON_ROUTE_MODULE_ALLOWLIST = frozenset({
@@ -28,6 +27,7 @@ _PYTHON_ROUTE_METHOD_ALLOWLIST = {
         "import_model",
         "import_media",
         "import_scene_file",
+        "run_project",
     }),
     "ProjectLauncher": frozenset({
         "get_default_project_path",
@@ -55,7 +55,6 @@ _PYTHON_ROUTE_METHOD_ALLOWLIST = {
         "save_screenshot",
         "select_screenshot_path",
         "select_vision_scene_path",
-        "load_vision_scene",
         "import_vision_scene_into_current_scene",
     }),
 }

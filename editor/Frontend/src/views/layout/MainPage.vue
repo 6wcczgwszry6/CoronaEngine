@@ -909,49 +909,12 @@ const handleClickOutside = (event) => {
 };
 
 const addNewTab = async () => {
-  const sceneNumbers = tabs.value
-    .map((tab) => {
-      const match = tab.name.match(/^场景(\d+)$/);
-      return match ? parseInt(match[1]) : null;
-    })
-    .filter((num) => num !== null);
-
-  const maxSceneNumber = sceneNumbers.length > 0 ? Math.max(...sceneNumbers) : 0;
-
-  inputState.newTabName = `场景${maxSceneNumber + 1}`;
-  showDialog.value = true;
+  logError('Single-scene editor mode does not support creating extra scenes');
 };
 
 const confirmAddTab = async () => {
-  if (inputState.newTabName.trim()) {
-    const finalName = inputState.newTabName.trim();
-
-    try {
-      // 先在项目文件夹中创建 .scene 文件，再初始化引擎场景
-      const result = await projectService.createNewScene(finalName);
-      const scenePath = result?.data?.path ?? result?.path;
-      const sceneName = result?.data?.name ?? result?.name ?? finalName;
-
-      if (!scenePath) {
-        logError('创建场景文件失败：未返回路径');
-        return;
-      }
-
-      // 添加新标签页（使用文件路径作为 id）
-      tabs.value.push({
-        name: sceneName,
-        id: scenePath,
-      });
-
-      await switchTab(tabs.value.length - 1, false);
-      showDialog.value = false;
-      inputState.newTabName = '';
-    } catch (e) {
-      logError('创建场景失败', e);
-    }
-  } else {
-    alert('请输入标签名称');
-  }
+  showDialog.value = false;
+  inputState.newTabName = '';
 };
 
 // 清空输入框
@@ -1703,54 +1666,15 @@ const loadPhysicsParams = async () => {
 
 // 关闭标签页
 const closeTab = async (index) => {
-  if (tabs.value.length > 1) {
-    const removedId = tabs.value[index]?.id;
-    const wasActive = activeTab.value === index;
-    const nextActiveIndex = wasActive
-      ? Math.min(index, tabs.value.length - 2)
-      : activeTab.value > index
-        ? activeTab.value - 1
-        : activeTab.value;
-
-    tabs.value.splice(index, 1);
-
-    if (wasActive) {
-      await appService.suspendCameraViews(removedId).catch(() => {});
-      activeTab.value = nextActiveIndex;
-      await projectService.sceneSwitch(removedId, tabs.value[nextActiveIndex]?.id);
-      await syncSceneCameraBinding(tabs.value[nextActiveIndex]?.id || DEFAULT_SCENE_NAME);
-      await restoreCameraViews(tabs.value[nextActiveIndex]?.id || DEFAULT_SCENE_NAME);
-    } else {
-      activeTab.value = nextActiveIndex;
-    }
-
-    if (removedId) {
-      try {
-        await projectService.removeScene(removedId);
-      } catch (e) {
-        logError('Failed to remove scene from project', e);
-      }
-    }
-  }
+  activeTab.value = 0;
 };
 
 // 切换标签页
 const switchTab = async (index, if_new) => {
-  if (activeTab.value === index) {
-    return;
-  }
-  const current_name = tabs.value[activeTab.value]?.id;
-  const to_name = tabs.value[index]?.id;
-  await appService.suspendCameraViews(current_name).catch(() => {});
-  activeTab.value = index;
-  if (if_new) {
-    await createScene();
-  }
-
-  await projectService.sceneSwitch(current_name, to_name);
-
-  await syncSceneCameraBinding(to_name);
-  await restoreCameraViews(to_name);
+  activeTab.value = 0;
+  const sceneId = tabs.value[0]?.id || DEFAULT_SCENE_NAME;
+  await syncSceneCameraBinding(sceneId);
+  await restoreCameraViews(sceneId);
 };
 
 const startEngine = () => {
@@ -1758,13 +1682,7 @@ const startEngine = () => {
 };
 
 const createScene = async () => {
-  const payload = tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
-  try {
-    const result = await sceneService.createScene(payload);
-    applySceneSnapshot(payload, result);
-  } catch (e) {
-    logError('Failed to create scene', e);
-  }
+  await syncSceneCameraBinding(tabs.value[0]?.id || DEFAULT_SCENE_NAME);
 };
 
 // ========== 预留的空函数 ==========
@@ -2160,35 +2078,25 @@ const applyCameraPose = (pose = {}) => {
 };
 
 const addSceneTab = (name, id) => {
-  const existingIndex = tabs.value.findIndex((tab) => tab.id === id);
-  if (existingIndex !== -1) {
-    switchTab(existingIndex, false);
-    return false;
-  }
-  tabs.value.push({
-    name: name,
-    id: id,
-  });
-  switchTab(tabs.value.length - 1, false);
+  tabs.value = [{ name, id }];
+  activeTab.value = 0;
+  syncSceneCameraBinding(id);
   return true;
 };
 
 const renameSceneTab = (oldId, newId, newName) => {
-  const tabIndex = tabs.value.findIndex((tab) => tab.id === oldId);
-  if (tabIndex === -1) {
+  if (!tabs.value[0] || tabs.value[0].id !== oldId) {
     return false;
   }
 
-  tabs.value[tabIndex] = {
-    ...tabs.value[tabIndex],
+  tabs.value[0] = {
+    ...tabs.value[0],
     id: newId,
-    name: newName || tabs.value[tabIndex].name,
+    name: newName || tabs.value[0].name,
   };
 
-  if (activeTab.value === tabIndex) {
-    cameraBindingState.value.sceneId = newId;
-    syncSceneCameraBinding(newId);
-  }
+  cameraBindingState.value.sceneId = newId;
+  syncSceneCameraBinding(newId);
 
   return true;
 };
@@ -2244,7 +2152,6 @@ onMounted(async () => {
   // 等待 Vue 渲染 dock 面板（SceneBar/Object 等），确保 eventBus 监听就绪
   await nextTick();
   const initialSceneId = tabs.value[resolvedActiveIndex]?.id || DEFAULT_SCENE_NAME;
-  await projectService.sceneSwitch(null, initialSceneId);
   await syncSceneCameraBinding(tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME);
   syncViewportUiMode();
   scheduleCameraViewportSync();

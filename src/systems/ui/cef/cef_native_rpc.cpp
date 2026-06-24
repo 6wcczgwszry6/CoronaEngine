@@ -7,6 +7,8 @@
 namespace Corona::Systems::UI {
 
 void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry);
+void register_scene_datas_rpc_handlers(NativeRpcRegistry& registry);
+void register_main_view_rpc_handlers(NativeRpcRegistry& registry);
 void register_network_rpc_handlers(NativeRpcRegistry& registry);
 void register_lanchat_rpc_handlers(NativeRpcRegistry& registry);
 
@@ -107,6 +109,7 @@ bool is_python_fallback_allowed(const std::string& module, const std::string& fu
             "import_model",
             "import_media",
             "import_scene_file",
+            "run_project",
         }},
         {"ProjectLauncher", {
             "get_default_project_path",
@@ -134,7 +137,6 @@ bool is_python_fallback_allowed(const std::string& module, const std::string& fu
             "save_screenshot",
             "select_screenshot_path",
             "select_vision_scene_path",
-            "load_vision_scene",
             "import_vision_scene_into_current_scene",
         }},
     };
@@ -147,6 +149,8 @@ void register_builtin_native_rpc_handlers() {
     static std::once_flag once;
     std::call_once(once, [] {
         auto& registry = NativeRpcRegistry::instance();
+        register_main_view_rpc_handlers(registry);
+        register_scene_datas_rpc_handlers(registry);
         register_scene_tools_rpc_handlers(registry);
         register_network_rpc_handlers(registry);
         register_lanchat_rpc_handlers(registry);

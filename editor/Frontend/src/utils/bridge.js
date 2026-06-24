@@ -174,14 +174,11 @@ export const sceneService = {
 };
 
 export const projectService = {
-  OnInit: () => Bridge.callCEF('MainView', 'on_init', []),
+  OnInit: (projectPath = window.localStorage?.getItem('corona.activeProjectPath') || '') =>
+    Bridge.callCEF('MainView', 'on_init', projectPath ? [projectPath] : []),
   importResourceFileByDialog: (sceneName, fileType) =>
     Bridge.callCEF('MainView', 'import_resource_file', [sceneName, fileType]),
   sceneSave: (sceneName) => Bridge.callCEF('MainView', 'scene_save', [sceneName]),
-  sceneSwitch: (currentName, toName) =>
-    Bridge.callCEF('MainView', 'switch_scene', [currentName, toName]),
-  createNewScene: (sceneName) => Bridge.callCEF('MainView', 'create_new_scene', [sceneName]),
-  removeScene: (scenePath) => Bridge.callCEF('MainView', 'remove_scene', [scenePath]),
 
   // 菜单数据接口
   getMenuData: () => Bridge.callCEF('MainView', 'get_menu_data', []),
@@ -397,7 +394,14 @@ export const projectLauncherService = {
   createWorldProject: (worldData) =>
     Bridge.callCEF('ProjectLauncher', 'create_world_project', [worldData]),
   // 打开项目（执行加载逻辑）
-  openProject: (projectPath) => Bridge.callCEF('ProjectLauncher', 'open_project', [projectPath]),
+  openProject: (projectPath) =>
+    Bridge.callCEF('ProjectLauncher', 'open_project', [projectPath]).then((result) => {
+      const success = result?.data ?? result;
+      if (success && projectPath) {
+        window.localStorage?.setItem('corona.activeProjectPath', projectPath);
+      }
+      return result;
+    }),
   // 设置项目模式 (2D/3D/渲染)
   setProjectMode: (mode, settings) =>
     Bridge.callCEF('ProjectLauncher', 'set_project_mode', [{ mode, settings }]),
