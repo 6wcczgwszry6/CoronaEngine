@@ -282,6 +282,17 @@ std::optional<CursorIconPixels> load_mouse_icon_pixels() {
     return false;
 }
 
+void mix_hash(std::size_t& sig, std::size_t value) {
+    sig ^= value + 0x9e3779b97f4a7c15ULL + (sig << 6) + (sig >> 2);
+}
+
+void mix_hash_float(std::size_t& sig, float value) {
+    std::uint32_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value), "float must be 32-bit");
+    std::memcpy(&bits, &value, sizeof(bits));
+    mix_hash(sig, static_cast<std::size_t>(bits));
+}
+
 #ifdef CORONA_ENABLE_VISION
 constexpr uint64_t kVisionRuntimeIdleEvictFrames = 240;
 
@@ -301,17 +312,6 @@ constexpr uint64_t kVisionRuntimeIdleEvictFrames = 240;
         }
     }
     return o2w;
-}
-
-void mix_hash(std::size_t& sig, std::size_t value) {
-    sig ^= value + 0x9e3779b97f4a7c15ULL + (sig << 6) + (sig >> 2);
-}
-
-void mix_hash_float(std::size_t& sig, float value) {
-    std::uint32_t bits = 0;
-    static_assert(sizeof(bits) == sizeof(value), "float must be 32-bit");
-    std::memcpy(&bits, &value, sizeof(bits));
-    mix_hash(sig, static_cast<std::size_t>(bits));
 }
 
 [[nodiscard]] std::size_t external_live_transform_signature(
