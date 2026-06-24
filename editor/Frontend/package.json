@@ -10,9 +10,7 @@
     "format": "prettier --write \"src/**/*.{js,vue,css,html}\"",
     "format:check": "prettier --check \"src/**/*.{js,vue,css,html}\"",
     "lint": "eslint \"src/**/*.{js,vue}\"",
-    "lint:fix": "eslint --fix \"src/**/*.{js,vue}\"",
-    "test:i18n": "node scripts/test-i18n.mjs",
-    "test:rich-text": "node scripts/test-rich-text-markdown.mjs"
+    "lint:fix": "eslint --fix \"src/**/*.{js,vue}\""
   },
   "dependencies": {
     "blockly": "^13.0.0",
