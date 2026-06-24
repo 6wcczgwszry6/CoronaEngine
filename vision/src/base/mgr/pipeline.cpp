@@ -163,7 +163,11 @@ void Pipeline::sync_output_denoise() noexcept {
     /// merges of the mode mapping. `VISION_DISABLE_DENOISER` still hard-disables at the
     /// integrator gate. NOTE: output_desc_.denoise (and the create_view_context log)
     /// keep reporting the mode's nominal value, so logs may say denoise=false while it runs.
-    renderer().integrator()->set_denoise_enabled(output_desc_.denoise);
+    const bool force_svgf_for_path_tracing =
+        !output_desc_.denoise &&
+        renderer_desc_.integrator_desc.denoiser_desc.sub_type == "svgf";
+    renderer().integrator()->set_denoise_enabled(output_desc_.denoise ||
+                                                 force_svgf_for_path_tracing);
 }
 
 void Pipeline::prepare() noexcept {
@@ -267,6 +271,10 @@ void Pipeline::prepare_geometry() noexcept {
     scene_view_.geometry().upload(stream());
     scene_view_.geometry().build_accel(stream());
     scene_view_.geometry().upload_bindless_array(stream());
+}
+
+void Pipeline::rebuild_geometry_gpu() noexcept {
+    prepare_geometry();
 }
 
 void Pipeline::update_geometry() noexcept {

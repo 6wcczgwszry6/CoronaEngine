@@ -135,6 +135,7 @@ public:
     virtual void invalidate() noexcept;
     virtual void clear_geometry() noexcept;
     virtual void prepare_geometry() noexcept;
+    virtual void rebuild_geometry_gpu() noexcept;
     virtual void update_geometry() noexcept;
     void upload_scene_bindless_array() noexcept;
     virtual void prepare_render_graph() noexcept {}

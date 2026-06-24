@@ -10,6 +10,7 @@
 namespace {
 
 using Corona::Systems::Vision::VisionOwnershipAuditEntry;
+using Corona::Systems::Vision::ExternalLiveShapeRecord;
 using Corona::Systems::Vision::VisionPipelineSource;
 using Corona::Systems::Vision::VisionLogicalInstanceKey;
 using Corona::Systems::Vision::VisionLogicalInstanceRecord;
@@ -222,6 +223,13 @@ void explicit_reload_resets_loaded_scene_state() {
         fake_gpu_resource,
         [](::vision::GeometryGpuResource*) {}));
     resource.external_live_transform_signatures.emplace(42u, 100u);
+    resource.upsert_external_live_shape({
+        .actor_handle = 42u,
+        .shape_index = 2,
+        .shape_guid = "shape-42",
+        .shape_identity_key = "identity-42",
+        .dynamically_added = true,
+    });
     resource.mark_transforms_changed();
     resource.mark_scene_gpu_transforms_uploaded();
     resource.upsert_logical_instance({
@@ -242,11 +250,113 @@ void explicit_reload_resets_loaded_scene_state() {
            "explicit external scene reload should discard previous scene GPU resources");
     expect(resource.external_live_transform_signatures.empty(),
            "explicit external scene reload should clear external_live transform cache");
+    expect(resource.external_live_shapes_by_actor.empty(),
+           "explicit external scene reload should clear external_live actor-shape records");
     expect(resource.logical_instance_count() == 0u,
            "explicit external scene reload should clear cached logical instances");
     expect(resource.logical_transform_version == 0u &&
                resource.scene_gpu_transform_version == 0u,
            "explicit external scene reload should reset transform versions");
+}
+
+void external_live_shape_mapping_tracks_actor_membership() {
+    VisionSceneResource resource;
+    expect(resource.find_external_live_shape(7u) == nullptr,
+           "fresh scene resource should not contain external_live shape membership");
+
+    expect(resource.upsert_external_live_shape({
+               .actor_handle = 7u,
+               .shape_index = 3,
+               .shape_guid = "shape-7",
+               .shape_identity_key = "identity-7",
+               .dynamically_added = true,
+           }),
+           "first external_live shape mapping insert should report a change");
+    const auto* record = resource.find_external_live_shape(7u);
+    expect(record != nullptr && record->shape_index == 3,
+           "external_live shape mapping should be findable by actor handle");
+    expect(!resource.upsert_external_live_shape({
+               .actor_handle = 7u,
+               .shape_index = 3,
+               .shape_guid = "shape-7",
+               .shape_identity_key = "identity-7",
+               .dynamically_added = true,
+           }),
+           "identical external_live shape mapping upsert should report no change");
+    expect(resource.upsert_external_live_shape({
+               .actor_handle = 7u,
+               .shape_index = 4,
+               .shape_guid = "shape-7",
+               .shape_identity_key = "identity-7",
+               .dynamically_added = true,
+           }),
+           "changed external_live shape mapping should report a change");
+    resource.external_live_transform_signatures.emplace(7u, 99u);
+    resource.erase_external_live_shape(7u);
+    expect(resource.find_external_live_shape(7u) == nullptr,
+           "erasing external_live shape should remove actor membership");
+    expect(resource.external_live_transform_signatures.empty(),
+           "erasing external_live shape should clear actor transform signature");
+}
+
+void external_live_shape_remap_updates_indices_after_remove() {
+    VisionSceneResource resource;
+    resource.upsert_external_live_shape({
+        .actor_handle = 10u,
+        .shape_index = 0,
+        .shape_guid = "shape-10",
+        .shape_identity_key = "identity-10",
+        .dynamically_added = false,
+    });
+    resource.upsert_external_live_shape({
+        .actor_handle = 11u,
+        .shape_index = 1,
+        .shape_guid = "shape-11",
+        .shape_identity_key = "identity-11",
+        .dynamically_added = true,
+    });
+    resource.upsert_external_live_shape({
+        .actor_handle = 12u,
+        .shape_index = 2,
+        .shape_guid = "shape-12",
+        .shape_identity_key = "identity-12",
+        .dynamically_added = true,
+    });
+    resource.external_live_transform_signatures.emplace(11u, 101u);
+    resource.external_live_transform_signatures.emplace(12u, 102u);
+    resource.upsert_logical_instance({
+        .key = VisionLogicalInstanceKey{.shape_index = 1, .instance_index = 0},
+        .actor_handle = 11u,
+        .transform_signature = 101u,
+        .object_to_world = {},
+    });
+    resource.upsert_logical_instance({
+        .key = VisionLogicalInstanceKey{.shape_index = 2, .instance_index = 0},
+        .actor_handle = 12u,
+        .transform_signature = 102u,
+        .object_to_world = {},
+    });
+
+    const auto actors_to_rewrite =
+        resource.remap_external_live_shape_indices_after_remove(1);
+
+    expect(resource.find_external_live_shape(11u) == nullptr,
+           "removed shape actor membership should be erased");
+    const auto* shifted = resource.find_external_live_shape(12u);
+    expect(shifted != nullptr && shifted->shape_index == 1,
+           "shape indices after the removed slot should shift down");
+    expect(resource.find_logical_instance({.shape_index = 1, .instance_index = 0}) != nullptr,
+           "logical instance after removed slot should shift down");
+    expect(resource.find_logical_instance({.shape_index = 2, .instance_index = 0}) == nullptr,
+           "old shifted logical instance key should be removed");
+    expect(resource.external_live_transform_signatures.find(11u) ==
+               resource.external_live_transform_signatures.end(),
+           "removed actor transform signature should be cleared");
+    expect(resource.external_live_transform_signatures.find(12u) ==
+               resource.external_live_transform_signatures.end(),
+           "shifted actor transform signature should be cleared for recompute");
+    expect(actors_to_rewrite.size() == 1u && actors_to_rewrite.front() == 12u,
+           "remap should report shifted actors requiring binding rewrite");
 }
 
 void logical_instance_identity_is_shared_per_scene_resource() {
@@ -311,6 +421,8 @@ int main() {
     scene_gpu_resource_lives_on_scene_resource();
     scene_gpu_resource_is_created_once_per_scene_resource();
     explicit_reload_resets_loaded_scene_state();
+    external_live_shape_mapping_tracks_actor_membership();
+    external_live_shape_remap_updates_indices_after_remove();
     logical_instance_identity_is_shared_per_scene_resource();
     ownership_names_are_stable();
     return 0;
