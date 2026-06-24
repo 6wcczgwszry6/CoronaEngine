@@ -691,6 +691,159 @@ nlohmann::json scene_to_json(const NativeEditorScene& scene) {
     };
 }
 
+NativeEditorActor* find_native_actor(NativeEditorScene& scene, const std::string& actor_name) {
+    for (auto& actor : scene.actors) {
+        if (actor.name == actor_name || actor.actor_guid == actor_name ||
+            (actor.engine_actor && std::to_string(actor.engine_actor->get_handle()) == actor_name))
+        {
+            return &actor;
+        }
+    }
+    return nullptr;
+}
+
+NativeEditorCamera* find_native_camera(NativeEditorScene& scene, const std::string& camera_name) {
+    if (camera_name.empty() && !scene.cameras.empty()) {
+        return &scene.cameras[std::min(scene.active_camera_index, scene.cameras.size() - 1)];
+    }
+    for (auto& camera : scene.cameras) {
+        if (camera.name == camera_name || camera.camera_id == camera_name ||
+            (camera.engine_camera && std::to_string(camera.engine_camera->get_handle()) == camera_name))
+        {
+            return &camera;
+        }
+    }
+    return nullptr;
+}
+
+float json_float_at(const nlohmann::json& value, size_t index, float fallback = 0.0f) {
+    if (!value.is_array() || index >= value.size() || !value[index].is_number()) {
+        return fallback;
+    }
+    return value[index].get<float>();
+}
+
+bool json_bool_at(const nlohmann::json& value, size_t index, bool fallback = false) {
+    if (!value.is_array() || index >= value.size()) {
+        return fallback;
+    }
+    if (value[index].is_boolean()) {
+        return value[index].get<bool>();
+    }
+    if (value[index].is_number_integer()) {
+        return value[index].get<int>() != 0;
+    }
+    if (value[index].is_string()) {
+        return parse_bool(value[index].get<std::string>(), fallback);
+    }
+    return fallback;
+}
+
+std::string json_string_at(const nlohmann::json& value,
+                           size_t index,
+                           std::string fallback = {}) {
+    if (!value.is_array() || index >= value.size()) {
+        return fallback;
+    }
+    if (value[index].is_string()) {
+        return value[index].get<std::string>();
+    }
+    return value[index].dump();
+}
+
+NativeResult apply_actor_operation(NativeEditorScene& scene,
+                                   NativeEditorActor& actor,
+                                   const std::string& operation,
+                                   const nlohmann::json& vector) {
+    if (operation == "SetMass") {
+        if (actor.mechanics) actor.mechanics->set_mass(json_float_at(vector, 0, 1.0f));
+    } else if (operation == "SetRestitution") {
+        if (actor.mechanics) actor.mechanics->set_restitution(json_float_at(vector, 0, 0.8f));
+    } else if (operation == "SetDamping") {
+        if (actor.mechanics) actor.mechanics->set_damping(json_float_at(vector, 0, 0.99f));
+    } else if (operation == "SetPhysicsEnabled") {
+        if (actor.mechanics) actor.mechanics->set_physics_enabled(json_bool_at(vector, 0, true));
+    } else if (operation == "SetCollision") {
+        const auto value = json_string_at(vector, 0, "true");
+        if (actor.mechanics) actor.mechanics->set_collision_enabled(
+            value != "none" && value != "false" && value != "0");
+    } else if (operation == "SetVisible") {
+        if (actor.optics) actor.optics->set_visible(json_bool_at(vector, 0, true));
+    } else if (operation == "SetFollowCamera") {
+        actor.follow_camera = json_bool_at(vector, 0, false);
+        if (actor.engine_actor) actor.engine_actor->set_follow_camera(actor.follow_camera);
+    } else if (operation == "SetLinearLock") {
+        if (actor.mechanics) {
+            actor.mechanics->set_linear_lock(json_bool_at(vector, 0),
+                                             json_bool_at(vector, 1),
+                                             json_bool_at(vector, 2));
+        }
+    } else if (operation == "SetAngularLock") {
+        if (actor.mechanics) {
+            actor.mechanics->set_angular_lock(json_bool_at(vector, 0),
+                                              json_bool_at(vector, 1),
+                                              json_bool_at(vector, 2));
+        }
+    } else if (operation == "SetCameraLock" ||
+               operation == "SetCameraLockOffset" ||
+               operation == "SetCameraLockRotation") {
+        // Camera-lock metadata is not yet stored natively; keep the RPC shape
+        // alive so the details panel remains usable while native persistence catches up.
+    } else {
+        return native_failure("Unsupported actor operation: " + operation, 2);
+    }
+
+    return native_success({
+        {"scene", scene.route},
+        {"actor", actor.name},
+        {"operation", operation},
+        {"vector", vector},
+    });
+}
+
+void emit_actor_change(const NativeContext& context,
+                       const NativeEditorScene& scene,
+                       const NativeEditorActor& actor) {
+    if (!context.frame) {
+        return;
+    }
+    const std::string script =
+        "window.__coronaEmit&&window.__coronaEmit(" +
+        nlohmann::json("actor-change").dump() + "," +
+        nlohmann::json(actor.actor_type).dump() + "," +
+        nlohmann::json(scene.route).dump() + "," +
+        nlohmann::json(actor.name).dump() + ");";
+    context.frame->ExecuteJavaScript(script, context.frame->GetURL(), 0);
+}
+
+nlohmann::json active_project_info_json() {
+    auto& state = native_editor_state();
+    const auto project_path = normalize_route(
+        state.project_path.empty() ? resolve_active_project_path(nlohmann::json::array())
+                                   : state.project_path);
+    if (project_path.empty()) {
+        throw std::runtime_error("No active project path");
+    }
+
+    const auto project_root = path_from_utf8(project_path);
+    const auto project_ini = read_ini_file(project_root / "project.ini");
+    const auto project = project_ini.contains("project") ? project_ini.at("project") : IniSection{};
+    const auto value = [&](const std::string& key, const std::string& fallback = {}) {
+        const auto it = project.find(to_lower_ascii(key));
+        return it == project.end() ? fallback : it->second;
+    };
+
+    return {
+        {"name", value("name", project_root.filename().string())},
+        {"mode", value("mode", "3d")},
+        {"entrance_scene", value("entrance_scene", choose_single_scene_route(project_root, project_ini))},
+        {"core_version", value("core_version", value("version", ""))},
+        {"create_time", value("create_time", value("created_at", ""))},
+        {"last_opened", value("last_opened", value("last_open_time", ""))},
+        {"project_path", path_to_utf8(project_root)},
+    };
+}
+
 std::string detect_hostname_ipv4() {
     char host_name[256] = {};
     if (gethostname(host_name, sizeof(host_name)) != 0) {
@@ -1021,11 +1174,56 @@ void register_main_view_rpc_handlers(NativeRpcRegistry& registry) {
     });
 }
 
+void register_project_settings_rpc_handlers(NativeRpcRegistry& registry) {
+    static const NativeMethodTable methods = {
+        {"get_active_project_info", [](const NativeRequest&, const NativeContext&) {
+            return native_success(active_project_info_json());
+        }},
+    };
+
+    registry.register_module("ProjectSettings", [](const NativeRequest& request,
+                                                   const NativeContext& context) {
+        const auto it = methods.find(request.function);
+        if (it == methods.end()) {
+            return native_unhandled();
+        }
+        try {
+            return it->second(request, context);
+        } catch (const std::exception& e) {
+            return native_failure(e.what(), 2);
+        } catch (...) {
+            return native_failure("ProjectSettings native handler error", 2);
+        }
+    });
+}
+
 void register_scene_datas_rpc_handlers(NativeRpcRegistry& registry) {
     static const NativeMethodTable methods = {
         {"get_scene", [](const NativeRequest&, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             return native_success(scene_to_json(*scene));
+        }},
+        {"get_actor", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto actor_name = arg_string(request.args, 1);
+            auto* actor = find_native_actor(*scene, actor_name);
+            if (!actor) {
+                return native_failure("Actor not found: " + actor_name, 2);
+            }
+            return native_success(actor_to_json(*scene, *actor));
+        }},
+        {"actor_operation", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto actor_name = arg_string(request.args, 1);
+            const auto operation = arg_string(request.args, 2);
+            const auto vector = request.args.is_array() && request.args.size() > 3
+                                    ? request.args[3]
+                                    : nlohmann::json::array();
+            auto* actor = find_native_actor(*scene, actor_name);
+            if (!actor) {
+                return native_failure("Actor not found: " + actor_name, 2);
+            }
+            return apply_actor_operation(*scene, *actor, operation, vector);
         }},
     };
 
@@ -1091,6 +1289,36 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
         {"load_vision_scene", [](const NativeRequest& request, const NativeContext&) {
             Corona::API::load_vision_scene(arg_string(request.args, 0));
             return native_success({{"status", "success"}});
+        }},
+        {"set_output_mode", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto camera_name = arg_string(request.args, 1);
+            const auto mode = arg_string(request.args, 2, "final_color");
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+            camera->engine_camera->set_output_mode(mode);
+            return native_success({{"status", "success"}, {"mode", camera->engine_camera->get_output_mode()}});
+        }},
+        {"get_output_mode", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto camera_name = arg_string(request.args, 1);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+            return native_success({{"status", "success"}, {"mode", camera->engine_camera->get_output_mode()}});
+        }},
+        {"open_actor", [](const NativeRequest& request, const NativeContext& context) {
+            auto* scene = ensure_native_editor_scene();
+            const auto actor_name = arg_string(request.args, 1);
+            auto* actor = find_native_actor(*scene, actor_name);
+            if (!actor) {
+                return native_failure("Actor not found: " + actor_name, 2);
+            }
+            emit_actor_change(context, *scene, *actor);
+            return native_success({{"status", "success"}, {"actor", actor_to_json(*scene, *actor)}});
         }},
         {"play_audio", [](const NativeRequest& request, const NativeContext&) {
             auto* event_bus = Corona::Kernel::KernelContext::instance().event_bus();

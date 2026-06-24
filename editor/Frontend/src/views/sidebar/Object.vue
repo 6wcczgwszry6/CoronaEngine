@@ -8,7 +8,7 @@
       @close="CloseFloat"
     />
 
-    <!-- 主标签页 - 场景、单位、模型 -->
+    <!-- 主标签页 - 场景、对象、时间轴 -->
     <div class="bg-[#3c3c3c]/60 border-b border-[#1a1a1a]/30">
       <div class="flex px-2">
         <!-- 场景标签 -->
@@ -23,7 +23,7 @@
           <span class="select-none font-medium">场景</span>
         </div>
 
-        <!-- 单位标签 -->
+        <!-- 对象标签 -->
         <div
           class="flex-1 px-4 py-2 cursor-pointer transition-all duration-200 ease-in-out text-center text-xs"
           :class="{
@@ -35,22 +35,7 @@
           }"
           @click="switchMainTab('actor')"
         >
-          <span class="select-none font-medium">单位</span>
-        </div>
-
-        <!-- 模型标签 -->
-        <div
-          class="flex-1 px-4 py-2 cursor-pointer transition-all duration-200 ease-in-out text-center text-xs"
-          :class="{
-            'bg-[#264f78]/60 text-white border-b-2 border-[#84a65b]':
-              mainActiveTab === 'model' && currentModelFile,
-            'bg-[#3c3c3c]/30 text-gray-500 border-b-2 border-[#84a65b]/30':
-              mainActiveTab === 'model' && !currentModelFile,
-            'hover:bg-[#545454] text-[#e0e0e0]': mainActiveTab !== 'model',
-          }"
-          @click="switchMainTab('model')"
-        >
-          <span class="select-none font-medium">模型</span>
+          <span class="select-none font-medium">对象</span>
         </div>
 
         <!-- 时间轴标签 -->
@@ -76,12 +61,9 @@
         </div>
       </div>
 
-      <!-- 未打开文件提示 - 只对单位和模型标签显示 -->
+      <!-- 未打开文件提示 - 只对对象标签显示 -->
       <div
-        v-if="
-          (mainActiveTab === 'actor' && !currentActorFile) ||
-          (mainActiveTab === 'model' && !currentModelFile)
-        "
+        v-if="mainActiveTab === 'actor' && !currentActorFile"
         class="flex-1 flex items-center justify-center text-[#909090] text-xs"
       >
         <span>未打开文件</span>
@@ -115,25 +97,6 @@
         >
           <button
             v-for="tab in actorTabs"
-            :key="tab.id"
-            :class="[
-              ActiveSubTab === tab.id
-                ? 'bg-[#264f78]/60 text-white'
-                : 'text-[#909090] hover:bg-[#545454] hover:text-[#e0e0e0]',
-            ]"
-            class="flex-1 px-2 py-1 text-xs transition-colors duration-200"
-            @click="ActiveSubTab = tab.id"
-          >
-            {{ tab.label }}
-          </button>
-        </div>
-
-        <div
-          v-else-if="mainActiveTab === 'model'"
-          class="flex bg-[#3c3c3c]/30 border-b border-[#1a1a1a]/30"
-        >
-          <button
-            v-for="tab in modelTabs"
             :key="tab.id"
             :class="[
               ActiveSubTab === tab.id
@@ -1385,7 +1348,7 @@ const debounced = (key, fn, delay = 200) => {
 const route = useRoute();
 
 // ========== 主标签页状态 ==========
-const mainActiveTab = ref('scene'); // 'scene', 'actor', 'model'
+const mainActiveTab = ref('scene'); // 'scene', 'actor', 'timeline'
 const ActiveSubTab = ref('Basic');
 
 // ========== 标签页定义 ==========
@@ -1708,7 +1671,7 @@ const sceneData = ref({
   },
 });
 
-// ========== 单位数据 ==========
+// ========== 对象数据 ==========
 const actorData = ref({
   name: '',
   handle: 0,
@@ -1788,17 +1751,16 @@ const currentFileInfo = computed(() => {
     return `🎬 场景: ${sceneData.value.name}`;
   } else if (mainActiveTab.value === 'actor') {
     const fileName = currentActorFile.value ? actorData.value.name : '未打开';
-    return `👤 单位: ${fileName}`;
+    return `👤 对象: ${fileName}`;
   } else if (mainActiveTab.value === 'timeline') {
     return `⏱ 时间轴: ${formatTimelineTime(timelineState.currentTime)} / ${formatTimelineTime(timelineState.duration)}`;
-  } else {
-    const fileName = currentModelFile.value ? modelData.value.name : '未打开';
-    return `📦 模型: ${fileName}`;
   }
+  return '';
 });
 
 // ========== 方法 ==========
 const switchMainTab = (tab) => {
+  if (tab === 'model') tab = 'actor';
   mainActiveTab.value = tab;
   ActiveSubTab.value = 'Basic'; // 重置子标签
 };
@@ -1947,12 +1909,12 @@ const loadSceneData = async (sceneId) => {
   }
 };
 
-// 加载单位数据 - 需要场景ID和单位ID
+// 加载对象数据 - 需要场景ID和对象ID
 const loadActorData = async (sceneId, actorId) => {
   if (!actorId) return;
 
   try {
-    // 调用后端接口获取单位数据，传入场景ID和单位ID
+    // 调用后端接口获取对象数据，传入场景ID和对象ID
     const result = await sceneService.getActor(sceneId, actorId);
     if (result) {
       const data = result.data;
@@ -2027,68 +1989,13 @@ const loadActorData = async (sceneId, actorId) => {
       }
     }
   } catch (e) {
-    logError('加载单位数据失败', e);
+    logError('加载对象数据失败', e);
   }
 };
 
-// 加载模型数据 - 需要场景ID和模型ID
+// 顶层模型详情已合并到对象详情，保留内部调用统一入口。
 const loadModelData = async (sceneId, modelId) => {
-  if (!modelId) return;
-
-  try {
-    // 调用后端接口获取模型数据，传入场景ID和模型ID
-    const result = await sceneService.getActor(sceneId, modelId);
-    if (result) {
-      const data = result.data;
-      const displayName = data.name || modelId;
-      modelData.value.name = displayName;
-      modelAliasDraft.value = displayName;
-      modelAliasError.value = '';
-      modelData.value.handle = Number(data.handle || 0);
-      modelData.value.targetScene = sceneId || '';
-      modelData.value.file = data.path;
-      const followCamera = readFollowCameraState(data);
-      modelData.value.follow_camera = followCamera;
-      modelData.value.render_space = followCamera ? 'ui' : 'scene';
-
-      if (data.geometry) {
-        modelData.value.defaultTransform.position = {
-          x: data.geometry.position?.[0] || 0,
-          y: data.geometry.position?.[1] || 0,
-          z: data.geometry.position?.[2] || 0,
-        };
-        modelData.value.defaultTransform.rotation = {
-          x: data.geometry.rotation?.[0] || 0,
-          y: data.geometry.rotation?.[1] || 0,
-          z: data.geometry.rotation?.[2] || 0,
-        };
-        modelData.value.defaultTransform.scale = {
-          x: data.geometry.scale?.[0] || 1,
-          y: data.geometry.scale?.[1] || 1,
-          z: data.geometry.scale?.[2] || 1,
-        };
-      }
-
-      modelData.value.collision.type = data.collision || 'none';
-
-      if (data.mechanics) {
-        modelData.value.mechanics.mass = data.mechanics.mass ?? 1.0;
-        modelData.value.mechanics.restitution = data.mechanics.restitution ?? 0.8;
-        modelData.value.mechanics.damping = data.mechanics.damping ?? 0.99;
-        modelData.value.mechanics.physics_enabled = data.mechanics.physics_enabled ?? true;
-        if (data.mechanics.linear_lock !== undefined) {
-          const ll = data.mechanics.linear_lock;
-          modelData.value.mechanics.linear_lock = [Boolean(ll[0]), Boolean(ll[1]), Boolean(ll[2])];
-        }
-        if (data.mechanics.angular_lock !== undefined) {
-          const al = data.mechanics.angular_lock;
-          modelData.value.mechanics.angular_lock = [Boolean(al[0]), Boolean(al[1]), Boolean(al[2])];
-        }
-      }
-    }
-  } catch (e) {
-    logError('加载模型数据失败', e);
-  }
+  await loadActorData(sceneId, modelId);
 };
 
 // 更新光照方向
@@ -2784,7 +2691,7 @@ const onModelTransformUpdated = (position, rotation, scale) => {
 // ========== 事件监听 ==========
 const setupWindowListener = () => {
   // 监听文件打开事件
-  // 参数: type (scene/actor/model), scene_id, actor_id, old_path (可选，重命名时传入)
+  // 参数: type (scene/actor/model/ui_image/obj...), scene_id, actor_id, old_path (可选，重命名时传入)
   window.onActorChange = async (type, scene_id, actor_id, old_path) => {
     if (!type) return;
 
@@ -2808,8 +2715,8 @@ const setupWindowListener = () => {
         await loadSceneData(scene_id);
         ActiveSubTab.value = 'Basic';
       }
-    } else if (type === 'actor') {
-      // --- 通知积木编辑器：选中了场景中的 Actor ---
+    } else {
+      // --- 通知积木编辑器：选中了场景中的对象 ---
       setActorContext(scene_id, actor_id);
 
       // 如果是重命名，检查当前是否正在编辑该文件
@@ -2820,35 +2727,11 @@ const setupWindowListener = () => {
           ActiveSubTab.value = 'Basic';
         }
       }
-      // 打开文件操作，直接切换到单位标签并加载
+      // 打开文件操作，直接切换到对象标签并加载
       else {
         mainActiveTab.value = 'actor';
         currentActorFile.value = actor_id;
         await loadActorData(scene_id, actor_id);
-        ActiveSubTab.value = 'Basic';
-      }
-    } else if (type === 'model') {
-      // 如果是重命名，检查当前是否正在编辑该文件
-      if (isRename) {
-        if (old_path === currentModelFile.value) {
-          currentModelFile.value = actor_id;
-          await loadModelData(scene_id, actor_id);
-          ActiveSubTab.value = 'Basic';
-        }
-      }
-      // 打开文件操作，直接切换到模型标签并加载
-      else {
-        mainActiveTab.value = 'model';
-        currentModelFile.value = actor_id;
-        await loadModelData(scene_id, actor_id);
-        ActiveSubTab.value = 'Basic';
-      }
-    } else {
-      // 未知类型（multimedia、mesh、文件扩展名等），按模型处理
-      if (!isRename) {
-        mainActiveTab.value = 'model';
-        currentModelFile.value = actor_id;
-        await loadModelData(scene_id, actor_id);
         ActiveSubTab.value = 'Basic';
       }
     }
@@ -2857,17 +2740,10 @@ const setupWindowListener = () => {
   // 注册全局回调接收器
   window.onTransformUpdate = (sceneName, actorName, position, rotation, scale, type) => {
     if (
-      type === 'actor' &&
       sceneName === actorData.value.parentScene &&
       actorName === actorData.value.name
     ) {
       onActorTransformUpdated(position, rotation, scale);
-    } else if (
-      type === 'model' &&
-      sceneName === modelData.value.targetScene &&
-      actorName === modelData.value.name
-    ) {
-      onModelTransformUpdated(position, rotation, scale);
     }
   };
 };

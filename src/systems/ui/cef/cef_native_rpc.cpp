@@ -9,6 +9,7 @@ namespace Corona::Systems::UI {
 void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry);
 void register_scene_datas_rpc_handlers(NativeRpcRegistry& registry);
 void register_main_view_rpc_handlers(NativeRpcRegistry& registry);
+void register_project_settings_rpc_handlers(NativeRpcRegistry& registry);
 void register_network_rpc_handlers(NativeRpcRegistry& registry);
 void register_lanchat_rpc_handlers(NativeRpcRegistry& registry);
 
@@ -150,6 +151,7 @@ void register_builtin_native_rpc_handlers() {
     std::call_once(once, [] {
         auto& registry = NativeRpcRegistry::instance();
         register_main_view_rpc_handlers(registry);
+        register_project_settings_rpc_handlers(registry);
         register_scene_datas_rpc_handlers(registry);
         register_scene_tools_rpc_handlers(registry);
         register_network_rpc_handlers(registry);
