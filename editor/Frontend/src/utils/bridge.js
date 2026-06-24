@@ -239,14 +239,6 @@ export const appService = {
   crossTabBroadcast: (event, payload) =>
     Bridge.callDockCommand({ cmd: 'broadcast', event, payload }),
   closeProcess: () => Bridge.callCEF('CoronaEditor', 'close_process'),
-  callDockFunction: (routename, functionname, args) => {
-    // 单 CEF Tab 架构：直接调 window.xxx，不需要 Python 中转
-    const fn = window[functionname];
-    if (typeof fn === 'function') {
-      try { fn(...(args || [])); } catch (e) { /* ignore */ }
-    }
-    return Promise.resolve({ success: true });
-  },
 };
 
 export const aiService = {

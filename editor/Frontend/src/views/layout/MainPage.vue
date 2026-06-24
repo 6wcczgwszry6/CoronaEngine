@@ -2104,101 +2104,103 @@ const handleAbout = () => {
   // TODO: 实现显示关于信息逻辑
 };
 
-const setupListener = () => {
-  // 显示弹窗（智能选择主窗口或本地）
-  window.showLoading = (title, message, progress = 0) => {
-    localModalTitle.value = title;
-    localModalMessage.value = message;
-    localModalProgress.value = progress;
-    showLocalModal.value = true;
+const showLoading = ({ title = '加载中', message = '请稍候...', progress = 0 } = {}) => {
+  localModalTitle.value = title;
+  localModalMessage.value = message;
+  localModalProgress.value = progress;
+  showLocalModal.value = true;
+};
+
+const updateLoading = ({ message, progress } = {}) => {
+  if (message !== undefined) localModalMessage.value = message;
+  if (progress !== undefined) localModalProgress.value = progress;
+};
+
+const hideLoading = () => {
+  showLocalModal.value = false;
+  setTimeout(() => {
+    localModalTitle.value = '';
+    localModalMessage.value = '';
+    localModalProgress.value = 0;
+  }, 300);
+};
+
+const applyCameraPose = (pose = {}) => {
+  const toVector3 = (value) => {
+    if (!isVector3(value)) return null;
+    const next = value.map((item) => Number(item));
+    return next.every((item) => Number.isFinite(item)) ? next : null;
   };
 
-  // 更新弹窗
-  window.updateLoading = (message, progress) => {
-    if (message !== undefined) localModalMessage.value = message;
-    if (progress !== undefined) localModalProgress.value = progress;
+  const position = toVector3(pose.position);
+  const forward = toVector3(pose.forward);
+  const up = toVector3(pose.up);
+  if (!position || !forward || !up) {
+    return false;
+  }
+
+  cameraState.value = {
+    position,
+    forward,
+    up,
+    fov: Number.isFinite(Number(pose.fov)) ? Number(pose.fov) : cameraState.value.fov,
   };
 
-  // 隐藏弹窗
-  window.hideLoading = () => {
-    showLocalModal.value = false;
-    setTimeout(() => {
-      localModalTitle.value = '';
-      localModalMessage.value = '';
-      localModalProgress.value = 0;
-    }, 300);
-  };
-
-  window.syncCameraState = () => {
-    const sceneId = tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
-    syncSceneCameraBinding(sceneId);
-  };
-
-  window.applyCameraPose = (pose = {}) => {
-    const toVector3 = (value) => {
-      if (!isVector3(value)) return null;
-      const next = value.map((item) => Number(item));
-      return next.every((item) => Number.isFinite(item)) ? next : null;
+  if (Number.isFinite(Number(pose.cameraHandle))) {
+    cameraBindingState.value = {
+      ...cameraBindingState.value,
+      cameraHandle: Number(pose.cameraHandle),
+      cameraId: pose.cameraId ?? cameraBindingState.value.cameraId,
+      cameraName: pose.cameraName ?? cameraBindingState.value.cameraName,
     };
+  }
 
-    const position = toVector3(pose.position);
-    const forward = toVector3(pose.forward);
-    const up = toVector3(pose.up);
-    if (!position || !forward || !up) {
-      return false;
-    }
+  scheduleCameraUpdate();
+  return true;
+};
 
-    cameraState.value = {
-      position,
-      forward,
-      up,
-      fov: Number.isFinite(Number(pose.fov)) ? Number(pose.fov) : cameraState.value.fov,
-    };
+const addSceneTab = (name, id) => {
+  const existingIndex = tabs.value.findIndex((tab) => tab.id === id);
+  if (existingIndex !== -1) {
+    switchTab(existingIndex, false);
+    return false;
+  }
+  tabs.value.push({
+    name: name,
+    id: id,
+  });
+  switchTab(tabs.value.length - 1, false);
+  return true;
+};
 
-    if (Number.isFinite(Number(pose.cameraHandle))) {
-      cameraBindingState.value = {
-        ...cameraBindingState.value,
-        cameraHandle: Number(pose.cameraHandle),
-        cameraId: pose.cameraId ?? cameraBindingState.value.cameraId,
-        cameraName: pose.cameraName ?? cameraBindingState.value.cameraName,
-      };
-    }
+const renameSceneTab = (oldId, newId, newName) => {
+  const tabIndex = tabs.value.findIndex((tab) => tab.id === oldId);
+  if (tabIndex === -1) {
+    return false;
+  }
 
-    scheduleCameraUpdate();
-    return true;
+  tabs.value[tabIndex] = {
+    ...tabs.value[tabIndex],
+    id: newId,
+    name: newName || tabs.value[tabIndex].name,
   };
 
-  window.addTab = (name, id) => {
-    const existingIndex = tabs.value.findIndex((tab) => tab.id === id);
-    if (existingIndex !== -1) {
-      switchTab(existingIndex, false);
-      return false;
-    }
-    tabs.value.push({
-      name: name,
-      id: id,
-    });
-    switchTab(tabs.value.length - 1, false);
-    return true;
-  };
+  if (activeTab.value === tabIndex) {
+    cameraBindingState.value.sceneId = newId;
+    syncSceneCameraBinding(newId);
+  }
 
-  window.renameTab = (oldId, newId, newName) => {
-    const tabIndex = tabs.value.findIndex((tab) => tab.id === oldId);
-    if (tabIndex !== -1) {
-      tabs.value[tabIndex] = {
-        ...tabs.value[tabIndex],
-        id: newId,
-        name: newName || tabs.value[tabIndex].name, // 如果没有提供新名称，保留原名称
-      };
+  return true;
+};
 
-      if (activeTab.value === tabIndex) {
-        cameraBindingState.value.sceneId = newId;
-        syncSceneCameraBinding(newId);
-      }
-
-      return true;
-    }
-  };
+const handlePanelClosed = (payload) => {
+  const panelId = payload?.panelId;
+  if (!panelId) return;
+  if (isFloatingPanel(panelId)) {
+    dockStore.markExternalClosed(panelId);
+    return;
+  }
+  dockStore.popIn(panelId);
 };
 
 // 监听其他窗口（如设置页面）修改了 cabbage_hint_time
@@ -2261,25 +2263,16 @@ onMounted(async () => {
   document.addEventListener('mouseup', onMouseUp);
   document.addEventListener('contextmenu', onContextMenu);
   window.addEventListener('resize', handleViewportLayoutChange);
-  setupListener();
   registerEditorControls();
 
   // 跨窗口事件监听：scene-add / scene-rename / panel-closed
-  coronaEventBus.on('scene-add', (name, id) => {
-    if (window.addTab) window.addTab(name, id);
-  });
-  coronaEventBus.on('scene-rename', (oldId, newId, newName) => {
-    if (window.renameTab) window.renameTab(oldId, newId, newName);
-  });
-  coronaEventBus.on('panel-closed', (payload) => {
-    const panelId = payload?.panelId;
-    if (!panelId) return;
-    if (isFloatingPanel(panelId)) {
-      dockStore.markExternalClosed(panelId);
-      return;
-    }
-    dockStore.popIn(panelId);
-  });
+  coronaEventBus.on('scene-add', addSceneTab);
+  coronaEventBus.on('scene-rename', renameSceneTab);
+  coronaEventBus.on('panel-closed', handlePanelClosed);
+  coronaEventBus.on('loading-show', showLoading);
+  coronaEventBus.on('loading-update', updateLoading);
+  coronaEventBus.on('loading-hide', hideLoading);
+  coronaEventBus.on('camera-pose-request', applyCameraPose);
   coronaEventBus.on('viewport-controls-request', handleViewportControlsRequest);
   coronaEventBus.on('vision-scene-imported', handleVisionSceneImported);
   coronaEventBus.on('actor-pick-result', handleActorPickResult);
@@ -2310,9 +2303,13 @@ onUnmounted(() => {
   setGamePreviewInputLocked(false);
   unregisterEditorControls();
   stopStageHints();
-  coronaEventBus.off('scene-add');
-  coronaEventBus.off('scene-rename');
-  coronaEventBus.off('panel-closed');
+  coronaEventBus.off('scene-add', addSceneTab);
+  coronaEventBus.off('scene-rename', renameSceneTab);
+  coronaEventBus.off('panel-closed', handlePanelClosed);
+  coronaEventBus.off('loading-show', showLoading);
+  coronaEventBus.off('loading-update', updateLoading);
+  coronaEventBus.off('loading-hide', hideLoading);
+  coronaEventBus.off('camera-pose-request', applyCameraPose);
   coronaEventBus.off('viewport-controls-request', handleViewportControlsRequest);
   coronaEventBus.off('vision-scene-imported', handleVisionSceneImported);
   coronaEventBus.off('actor-pick-result', handleActorPickResult);

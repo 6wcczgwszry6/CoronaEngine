@@ -793,6 +793,18 @@ const onViewportControlsState = (state) => {
   syncViewportControls(state);
 };
 
+const showLoading = (title, message, progress = 0) => {
+  coronaEventBus.emit('loading-show', { title, message, progress });
+};
+
+const updateLoading = (message, progress) => {
+  coronaEventBus.emit('loading-update', { message, progress });
+};
+
+const hideLoading = () => {
+  coronaEventBus.emit('loading-hide');
+};
+
 const getTypeShort = (type) => {
   const lowerType = (type || 'obj').toLowerCase();
   const typeMap = {
@@ -843,7 +855,6 @@ const CAMERA_LIST_HOVER_REFRESH_MS = 500;
 let actorSingleClickTimer = null;
 let actorFocusSeq = 0;
 let focusPoseRequestSeq = 0;
-let previousFocusPoseResult = null;
 const pendingFocusPoseRequests = new Map();
 const pendingFocusCameraMoveFrames = new Set();
 let lastActorFocusPose = null;
@@ -1372,14 +1383,12 @@ const focusActorFromList = async (scene) => {
       return;
     }
 
-    await appService.callDockFunction('', 'applyCameraPose', [
-      {
-        ...pose,
-        fov,
-        cameraHandle,
-        cameraName: camera?.name,
-      },
-    ]);
+    coronaEventBus.emit('camera-pose-request', {
+      ...pose,
+      fov,
+      cameraHandle,
+      cameraName: camera?.name,
+    });
   } catch (e) {
     if (focusSeq === actorFocusSeq) {
       logError('Actor focus failed', e);
@@ -1747,11 +1756,7 @@ const HandleFileImport = async () => {
     logWarn('File import aborted: no active scene');
     return;
   }
-  try {
-    await appService.callDockFunction('', 'showLoading', ['加载中', '请稍候...', 0]);
-  } catch (e) {
-    // showLoading 失败不阻塞主流程
-  }
+  showLoading('加载中', '请稍候...', 0);
   try {
     const result = await projectService.importResourceFileByDialog(currentSceneName.value, 'model');
     // 兼容两种返回形态:
@@ -1770,22 +1775,14 @@ const HandleFileImport = async () => {
     const actor = payload?.actor;
     if (actor && actor.name) {
       await addActorToList(actor);
-      try {
-        await appService.callDockFunction('', 'updateLoading', ['导入完成', 100]);
-      } catch (e) {
-        // 忽略加载条更新失败
-      }
+      updateLoading('导入完成', 100);
     } else {
       logWarn('File import returned without actor payload', payload);
     }
   } catch (e) {
     logError('File import failed', e);
   } finally {
-    try {
-      await appService.callDockFunction('', 'hideLoading', []);
-    } catch (e) {
-      // 忽略关闭加载条失败
-    }
+    hideLoading();
   }
 };
 
@@ -1801,11 +1798,7 @@ const HandleUiImageImport = async () => {
     logWarn('UI image import aborted: no active scene');
     return;
   }
-  try {
-    await appService.callDockFunction('', 'showLoading', ['加载中', '请稍候...', 0]);
-  } catch (e) {
-    // showLoading 失败不阻塞主流程
-  }
+  showLoading('加载中', '请稍候...', 0);
   try {
     const result = await projectService.importResourceFileByDialog(currentSceneName.value, 'ui_image');
     const payload = result?.data ?? result;
@@ -1820,43 +1813,35 @@ const HandleUiImageImport = async () => {
     const actor = payload?.actor;
     if (actor && actor.name) {
       await addActorToList(actor);
-      try {
-        await appService.callDockFunction('', 'updateLoading', ['导入完成', 100]);
-      } catch (e) {
-        // 忽略加载条更新失败
-      }
+      updateLoading('导入完成', 100);
     } else {
       logWarn('UI image import returned without actor payload', payload);
     }
   } catch (e) {
     logError('UI image import failed', e);
   } finally {
-    try {
-      await appService.callDockFunction('', 'hideLoading', []);
-    } catch (e) {
-      // 忽略关闭加载条失败
-    }
+    hideLoading();
   }
 };
 
 const HandleActorImport = async () => {
   ShowModelDropdown.value = false;
-  await appService.callDockFunction('', 'showLoading', ['加载中', '请稍候...', 0]);
+  showLoading('加载中', '请稍候...', 0);
   try {
     const result = await projectService.importResourceFileByDialog(currentSceneName.value, 'actor');
     if (result.success && result.data.actor) {
       await addActorToList(result.data.actor);
-      await appService.callDockFunction('', 'updateLoading', ['导入完成', 100]);
+      updateLoading('导入完成', 100);
     }
   } catch (e) {
     logError('Actor import failed', e);
   }
-  await appService.callDockFunction('', 'hideLoading', []);
+  hideLoading();
 };
 
 const HandleMultimediaImport = async () => {
   ShowModelDropdown.value = false;
-  await appService.callDockFunction('', 'showLoading', ['加载中', '请稍候...', 0]);
+  showLoading('加载中', '请稍候...', 0);
   try {
     const result = await projectService.importResourceFileByDialog(
       currentSceneName.value,
@@ -1876,12 +1861,12 @@ const HandleMultimediaImport = async () => {
     const media = payload?.media;
     if (media && media.name) {
       await addMediaToList(media);
-      await appService.callDockFunction('', 'updateLoading', ['导入完成', 100]);
+      updateLoading('导入完成', 100);
     }
   } catch (e) {
     logError('Multimedia import failed', e);
   }
-  await appService.callDockFunction('', 'hideLoading', []);
+  hideLoading();
 };
 
 const addMediaToList = async (media) => {
@@ -1905,7 +1890,7 @@ const addMediaToList = async (media) => {
 
 const HandleSceneImport = async () => {
   ShowModelDropdown.value = false;
-  await appService.callDockFunction('', 'showLoading', ['加载中', '请稍候...', 0]);
+  showLoading('加载中', '请稍候...', 0);
   try {
     const result = await projectService.importResourceFileByDialog(currentSceneName.value, 'scene');
     const payload = result?.data ?? result;
@@ -1918,13 +1903,13 @@ const HandleSceneImport = async () => {
       return;
     }
 
-    await appService.callDockFunction('', 'updateLoading', ['导入中', 40]);
+    updateLoading('导入中', 40);
     await OnInitObjTree();
-    await appService.callDockFunction('', 'updateLoading', ['导入完成', 100]);
+    updateLoading('导入完成', 100);
   } catch (e) {
     logError('Scene import failed', e);
   } finally {
-    await appService.callDockFunction('', 'hideLoading', []);
+    hideLoading();
   }
 };
 
@@ -1941,29 +1926,6 @@ const DeleteActor = async (scene) => {
 
 const CloseFloat = async () => {
   if (closeDockPanel) { closeDockPanel(); return; }
-};
-
-const setupFragmentListener = () => {
-  window.onFragmentChanged = (fragment) => {
-    const queryString = fragment.split('?')[1];
-    if (!queryString) return;
-    console.log(queryString);
-    const params = new URLSearchParams(queryString);
-    const sceneName = params.get('sceneName');
-
-    if (sceneName) {
-      // 无论 sceneName 是否变化，都要刷新 actor 列表
-      // 场景切换后后端数据已更新，必须重新拉取
-      currentSceneName.value = sceneName;
-      OnInitObjTree();
-    }
-  };
-
-  window.onSceneTreeChanged = (sceneName) => {
-    if (!sceneName || sceneName === currentSceneName.value) {
-      OnInitObjTree();
-    }
-  };
 };
 
 const OnInitObjTree = async () => {
@@ -2002,9 +1964,6 @@ const OnInitObjTree = async () => {
 };
 
 onMounted(async () => {
-  previousFocusPoseResult = window.__coronaFocusPoseResult;
-  window.__coronaFocusPoseResult = handleFocusPoseResult;
-
   const result = await projectService.OnInit();
   if (RESOURCE_SEARCH_ENABLED) {
     resourceService.prepareIndex().catch((error) => {
@@ -2019,7 +1978,6 @@ onMounted(async () => {
   const activeScene = initData?.scenes?.[initData?.active_index ?? 0];
   currentSceneName.value = urlSceneName || activeScene?.path || DEFAULT_SCENE_NAME;
 
-  setupFragmentListener();
   await OnInitObjTree();
   await RefreshRenderBackendState();
   requestViewportControlsState();
@@ -2029,6 +1987,7 @@ onMounted(async () => {
   coronaEventBus.on('viewport-controls-state', onViewportControlsState);
   coronaEventBus.on('actor-change', onActorChangeEvent);
   coronaEventBus.on('scene-tree-changed', onSceneTreeChangedEvent);
+  coronaEventBus.on('focus-pose-result', handleFocusPoseResult);
 });
 
 // 场景切换或 actor 变化时刷新当前场景树
@@ -2125,13 +2084,11 @@ onUnmounted(() => {
   pendingFocusPoseRequests.clear();
   pendingFocusCameraMoveFrames.forEach((rafId) => window.cancelAnimationFrame(rafId));
   pendingFocusCameraMoveFrames.clear();
-  if (window.__coronaFocusPoseResult === handleFocusPoseResult) {
-    window.__coronaFocusPoseResult = previousFocusPoseResult;
-  }
 
   coronaEventBus.off('viewport-controls-state', onViewportControlsState);
   coronaEventBus.off('actor-change', onActorChangeEvent);
   coronaEventBus.off('scene-tree-changed', onSceneTreeChangedEvent);
+  coronaEventBus.off('focus-pose-result', handleFocusPoseResult);
 });
 </script>
 

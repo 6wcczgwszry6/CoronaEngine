@@ -532,7 +532,7 @@ void send_focus_pose_result(const CefRefPtr<CefFrame>& frame,
         return;
     }
 
-    const std::string js = "window.__coronaFocusPoseResult&&window.__coronaFocusPoseResult(" +
+    const std::string js = "window.__coronaEmit&&window.__coronaEmit(\"focus-pose-result\"," +
                            nlohmann::json(request_id).dump() + "," + payload.dump() + ")";
     frame->ExecuteJavaScript(js, "", 0);
 }
