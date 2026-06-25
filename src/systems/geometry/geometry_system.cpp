@@ -510,11 +510,6 @@ void GeometrySystem::set_distance_config(std::uintptr_t scene, float unload_dist
     scene_state.cfg.preload_distance = preload_dist;
 }
 
-void GeometrySystem::set_invisible_frames_to_evict(std::uintptr_t scene, int frames) {
-    std::unique_lock lock(impl_->mtx);
-    impl_->get_or_create(scene).cfg.invisible_frames_to_evict = frames;
-}
-
 // ============================================================================
 // 私有事件处理
 // ============================================================================

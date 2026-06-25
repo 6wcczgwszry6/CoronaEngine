@@ -8,6 +8,7 @@
 #include <corona/resource/types/scene.h>
 #include <corona/shared_data_hub.h>
 #include <corona/systems/script/corona_engine_api.h>
+#include <corona/systems/geometry/geometry_system.h>
 #include <corona/systems/optics/optics_system.h>
 #include <corona/utils/path_utils.h>
 
@@ -540,6 +541,47 @@ bool Corona::API::Scene::is_simulation_enabled() const {
         return accessor->simulation_enabled;
     }
     return false;
+}
+
+void Corona::API::Scene::set_visibility_config(int invisible_frames_to_evict) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Scene::set_visibility_config] Invalid scene handle");
+        return;
+    }
+    auto* sys_mgr = Kernel::KernelContext::instance().system_manager();
+    if (!sys_mgr) {
+        CFW_LOG_ERROR("[Scene::set_visibility_config] SystemManager not available");
+        return;
+    }
+    auto geom_sys = std::dynamic_pointer_cast<Corona::Systems::GeometrySystem>(
+        sys_mgr->get_system("Geometry"));
+    if (!geom_sys) {
+        CFW_LOG_ERROR("[Scene::set_visibility_config] GeometrySystem not found");
+        return;
+    }
+    Corona::Systems::SceneVisibilityConfig cfg;
+    cfg.invisible_frames_to_evict = invisible_frames_to_evict;
+    cfg.collect_stats = true;
+    geom_sys->set_visibility_config(handle_, cfg);
+}
+
+void Corona::API::Scene::set_distance_config(float unload_dist, float preload_dist, bool enable) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Scene::set_distance_config] Invalid scene handle");
+        return;
+    }
+    auto* sys_mgr = Kernel::KernelContext::instance().system_manager();
+    if (!sys_mgr) {
+        CFW_LOG_ERROR("[Scene::set_distance_config] SystemManager not available");
+        return;
+    }
+    auto geom_sys = std::dynamic_pointer_cast<Corona::Systems::GeometrySystem>(
+        sys_mgr->get_system("Geometry"));
+    if (!geom_sys) {
+        CFW_LOG_ERROR("[Scene::set_distance_config] GeometrySystem not found");
+        return;
+    }
+    geom_sys->set_distance_config(handle_, unload_dist, preload_dist, enable);
 }
 
 // ########################
