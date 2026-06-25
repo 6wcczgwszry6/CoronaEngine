@@ -16,8 +16,8 @@ namespace Corona::Systems::UI {
 namespace {
 constexpr uint64_t kDeferredTextureDestroyFrames = 4;
 
-ImTextureID descriptor_to_texture_id(uint32_t descriptor) {
-    return static_cast<ImTextureID>(static_cast<ImU64>(descriptor) + 1u);
+UiTextureId descriptor_to_texture_id(uint32_t descriptor) {
+    return static_cast<UiTextureId>(static_cast<std::uint64_t>(descriptor) + 1u);
 }
 }  // namespace
 
@@ -26,7 +26,7 @@ void BrowserManager::destroy_tab_texture(BrowserTab* tab) {
         return;
     }
 
-    const ImTextureID texture_id = tab->texture_id;
+    const UiTextureId texture_id = tab->texture_id;
     tab->texture_id = k_invalid_texture_id;
 
     auto it = owned_images_.find(texture_id);
@@ -54,7 +54,7 @@ void BrowserManager::retire_deferred_tab_textures(bool force) {
         });
 }
 
-ImTextureID BrowserManager::create_browser_texture(int width, int height) {
+UiTextureId BrowserManager::create_browser_texture(int width, int height) {
     const uint32_t safe_width = static_cast<uint32_t>(std::max(width, 1));
     const uint32_t safe_height = static_cast<uint32_t>(std::max(height, 1));
 
@@ -82,7 +82,7 @@ ImTextureID BrowserManager::create_browser_texture(int width, int height) {
         << Horizon::commit();
 
     const uint32_t descriptor = owned.image.storeSampledDescriptor();
-    const ImTextureID texture_id = descriptor_to_texture_id(descriptor);
+    const UiTextureId texture_id = descriptor_to_texture_id(descriptor);
 
     owned_images_[texture_id] = std::move(owned);
     return texture_id;
@@ -97,7 +97,7 @@ void BrowserManager::update_texture(int tab_id) {
     BrowserTab* tab = it->second.get();
 
     std::vector<uint8_t> pixels;
-    ImTextureID texture_id = k_invalid_texture_id;
+    UiTextureId texture_id = k_invalid_texture_id;
 
     {
         std::unique_lock<std::mutex> lock(tab->mutex);
@@ -131,7 +131,7 @@ void BrowserManager::update_texture(int tab_id) {
     }
 }
 
-const Horizon::HardwareImage* BrowserManager::get_texture_image(ImTextureID texture_id) const {
+const Horizon::HardwareImage* BrowserManager::get_texture_image(UiTextureId texture_id) const {
     auto image_it = owned_images_.find(texture_id);
     if (image_it == owned_images_.end()) {
         return nullptr;
@@ -139,7 +139,7 @@ const Horizon::HardwareImage* BrowserManager::get_texture_image(ImTextureID text
     return &image_it->second.image;
 }
 
-void BrowserManager::wait_for_texture_upload(ImTextureID texture_id) {
+void BrowserManager::wait_for_texture_upload(UiTextureId texture_id) {
     auto image_it = owned_images_.find(texture_id);
     if (image_it == owned_images_.end()) {
         return;

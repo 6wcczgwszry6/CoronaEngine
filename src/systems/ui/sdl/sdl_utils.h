@@ -2,7 +2,6 @@
 
 #include <SDL3/SDL.h>
 #include <cef_browser.h>
-#include <imgui.h>
 #include <include/internal/cef_types.h>
 
 #include <functional>
@@ -29,55 +28,15 @@ bool should_send_char_event(int key, int modifiers);
 
 namespace MouseUtils {
 
-class MouseStateManager {
-   public:
-    MouseStateManager() = default;
-
-    int handle_mouse_click(const ImVec2& current_pos, Uint32 current_time);
-
-    void set_mouse_down(bool down) { is_left_down_ = down; }
-    bool is_mouse_down() const { return is_left_down_; }
-
-    int get_click_count() const { return click_count_; }
-
-    void set_dragging(bool dragging) { is_dragging_ = dragging; }
-    bool is_dragging() const { return is_dragging_; }
-
-    void reset();
-
-   private:
-    Uint32 last_click_time_ = 0;
-    ImVec2 last_click_pos_{0, 0};
-    int click_count_ = 0;
-    bool is_left_down_ = false;
-    bool is_dragging_ = false;
-
-    static constexpr Uint32 kDoubleClickTime = 500;
-    static constexpr float kDoubleClickDist = 5.0f;
-};
-
 CefBrowserHost::MouseButtonType convert_mouse_button(Uint8 sdl_button);
-CefMouseEvent create_mouse_event(const ImVec2& mouse_pos, const ImVec2& item_pos, uint32_t modifiers = 0);
-uint32_t get_modifiers(bool is_left_down = false);
-
-void send_mouse_click(CefRefPtr<CefBrowser> browser, const ImVec2& mouse_pos,
-                      const ImVec2& item_pos, CefBrowserHost::MouseButtonType button,
-                      bool mouse_up, int click_count);
-void send_mouse_move(CefRefPtr<CefBrowser> browser, const ImVec2& mouse_pos,
-                     const ImVec2& item_pos, bool mouse_leave = false);
-void send_mouse_wheel(CefRefPtr<CefBrowser> browser, const ImVec2& mouse_pos,
-                      const ImVec2& item_pos, float wheel_delta);
 
 // ----------------------------------------------------------------------------
-// Phase 5 (ImGui-removal plan): ImGui-free explicit-modifier overloads.
+// ImGui-free CEF mouse forwarding (Phase 6 of the ImGui-removal plan).
 //
-// The functions above read ImGui IO internally (io.KeyShift/Ctrl/Alt and
-// ImGui::IsMouseDown) to fill CEF modifier flags. These *_ex variants take the
-// modifier/button state explicitly so the SDL input router can forward to CEF
-// without an ImGui context. Coordinates are plain floats so callers need not
-// depend on ImVec2. Given the same state, they produce byte-identical CefMouseEvents
-// as the ImGui-reading versions. Additive in Phase 5 (no existing caller); the
-// frame loop switches to them in Phase 6.
+// The SDL input router tracks pointer/modifier state directly from SDL events and
+// forwards to CEF through these explicit-state functions. Coordinates are plain
+// floats (mouse_* is global, item_* is the panel's top-left); modifier/button state
+// is passed in rather than read from an ImGui context.
 // ----------------------------------------------------------------------------
 [[nodiscard]] uint32_t make_modifiers(bool left_down, bool right_down,
                                       bool shift, bool ctrl, bool alt);
@@ -113,15 +72,18 @@ class SDLEventHandler {
 
     using KeyEventCallback = std::function<void(const SDL_Event&)>;
 
+    // Phase 6: on_mouse_event receives every mouse/wheel SDL_Event so the SDL input router
+    // can track pointer state (replacing ImGui_ImplSDL3_ProcessEvent). Keyboard/text/IME
+    // events still go to their respective callbacks.
     EventProcessResult process_events(SDL_Window* window,
                                       int current_url_input_active_tab,
                                       KeyEventCallback on_key_event = nullptr,
                                       KeyEventCallback on_text_event = nullptr,
-                                      KeyEventCallback on_ime_event = nullptr);
+                                      KeyEventCallback on_ime_event = nullptr,
+                                      KeyEventCallback on_mouse_event = nullptr);
 
    private:
     bool is_input_method_switch(const SDL_Event& event);
-    bool should_process_in_imgui(const SDL_Event& event, int url_input_active_tab);
 };
 
 }  // namespace Corona::Systems::UI

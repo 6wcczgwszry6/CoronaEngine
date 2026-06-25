@@ -1,37 +1,24 @@
-﻿#pragma once
+#pragma once
 
-#include "horizon.h"
-#include <corona/shader_include.h>
-// clang-format off
-#include GLSL(../../../assets/shaders/imgui.vert.glsl)
-#include GLSL(../../../assets/shaders/imgui.frag.glsl)
-// clang-format on
+// quad_compositor.h is the self-contained base: it owns the GLSL pipeline includes,
+// ViewportRenderResources, QuadDraw, and QuadCompositor. Include it (not the reverse) to
+// avoid a circular dependency.
+#include <corona/systems/ui/quad_compositor.h>
+
 #include <SDL3/SDL.h>
-#include <imgui.h>
 
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace Corona::Systems {
 
-// ============================================================================
-// Per-viewport rendering resources (render target, executor, geometry buffers).
-// Used by both the main viewport and secondary (dragged-out) viewports.
-// ============================================================================
-struct ViewportRenderResources {
-    Horizon::HardwareImage render_target;
-    Horizon::HardwareExecutor executor;
-    Horizon::HardwareBuffer vertex_buffer;
-    Horizon::HardwareBuffer index_buffer;
-    size_t vertex_buffer_capacity = 0;
-    size_t index_buffer_capacity = 0;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    bool frame_ready = false;
-};
-
+// VulkanBackend (post-ImGui): owns the main window's UI render target and publishes it to
+// the DisplaySystem via UIFrameReadyEvent. UI geometry is now built as textured quads by
+// the UI frame runner (panel textures + chrome) and rendered through QuadCompositor — there
+// is no ImGui draw-data path, font atlas, or multi-viewport renderer callback anymore.
 class VulkanBackend {
    public:
     explicit VulkanBackend(SDL_Window* window);
@@ -40,71 +27,47 @@ class VulkanBackend {
     bool initialize();
     void shutdown();
 
-    // Must be called AFTER ImGui::CreateContext() + ImGui_ImplSDL3_InitForOther().
-    // Registers renderer viewport callbacks and enables RendererHasViewports.
-    void register_viewport_callbacks();
-
+    // GPU back-pressure: wait for DisplaySystem to finish consuming the previous frame's
+    // image before we render new UI content into it.
     void new_frame();
-    void render_frame(ImDrawData* draw_data);
+
+    // Render the given quads into the main render target (via QuadCompositor) and mark the
+    // frame ready for present_frame(). Replaces the old render_frame(ImDrawData*).
+    void render_quads(std::span<const QuadDraw> quads);
+
+    // Publish the main render target to DisplaySystem (UIFrameReadyEvent).
     void present_frame();
 
     [[nodiscard]] bool is_rebuild_needed() const noexcept { return rebuild_needed_; }
     void request_rebuild() noexcept { rebuild_needed_ = true; }
     void rebuild(int width, int height);
 
-    // Render ImDrawData into arbitrary per-viewport resources.
-    // Shared pipeline and font atlas are provided externally.
-    // Returns true if draw commands were recorded and submitted.
-    static bool render_draw_data(
-        ImDrawData* draw_data,
-        ViewportRenderResources& resources,
-        Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>& pipeline,
-        const Horizon::HardwareImage& font_atlas,
-        uint32_t target_width,
-        uint32_t target_height,
-        Horizon::ImageUsageFlags render_target_usage = Horizon::ImageUsageFlags::Sampled);
+    // Current main render-target pixel size (0 until first target is created).
+    [[nodiscard]] uint32_t width() const noexcept { return main_resources_.width; }
+    [[nodiscard]] uint32_t height() const noexcept { return main_resources_.height; }
 
     // Ensure `resources` holds a render target of the given size, (re)creating it on
-    // size change. Shared by the ImGui renderer and the Phase 2+ quad compositor.
+    // size change. Shared with the quad compositor.
     static bool ensure_render_target(ViewportRenderResources& resources, uint32_t width, uint32_t height,
                                      Horizon::ImageUsageFlags usage = Horizon::ImageUsageFlags::Sampled);
 
-    // Accessors for shared resources (used by viewport callbacks)
-    [[nodiscard]] Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>& pipeline() { return *imgui_pipeline_; }
-    [[nodiscard]] const Horizon::HardwareImage& font_atlas() const { return font_atlas_image_; }
-
    private:
-    bool ensure_imgui_pipeline();
-    bool ensure_font_texture();
-
-    // --- Multi-Viewport renderer callbacks (static, access shared state via s_instance_) ---
-    static void renderer_create_window(ImGuiViewport* vp);
-    static void renderer_destroy_window(ImGuiViewport* vp);
-    static void renderer_set_window_size(ImGuiViewport* vp, ImVec2 size);
-    static void renderer_render_window(ImGuiViewport* vp, void* render_arg);
-    static void renderer_swap_buffers(ImGuiViewport* vp, void* render_arg);
-
-   private:
-    static VulkanBackend* s_instance_;
+    // Lazily create the shared quad pipeline (reuses the imgui.vert/frag GLSL).
+    bool ensure_pipeline();
 
     bool initialized_ = false;
     bool rebuild_needed_ = false;
-    bool imgui_pipeline_ready_ = false;
-    bool font_ready_ = false;
+    bool pipeline_ready_ = false;
 
     SDL_Window* window_ = nullptr;
     void* surface_ = nullptr;
 
-    // Main viewport rendering resources
+    // Main window rendering resources + the quad compositor that renders into them.
     ViewportRenderResources main_resources_;
+    QuadCompositor compositor_;
+    std::optional<Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>> pipeline_;
 
-    // Shared across all viewports
-    Horizon::HardwareImage font_atlas_image_;
-    Horizon::HardwareExecutor font_upload_executor_;
-    Horizon::SubmitReceipt font_upload_receipt_;
-    std::optional<Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>> imgui_pipeline_;
-
-    // Main viewport presentation (SharedDataHub path)
+    // Main window presentation (SharedDataHub path)
     uint64_t frame_index_ = 0;
     std::uintptr_t image_handle_ = 0;
 };

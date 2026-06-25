@@ -9,12 +9,38 @@
 // This file is purely additive in Phase 2 — nothing references it yet. It is wired
 // into the frame loop in Phase 6.
 
-#include <corona/systems/ui/vulkan_backend.h>  // ViewportRenderResources, pipeline type, imgui_*_glsl_t
+// This is the self-contained base header for the UI quad rendering layer. It owns the
+// GLSL pipeline includes, the ViewportRenderResources struct, QuadDraw, and QuadCompositor.
+// vulkan_backend.h includes THIS header (not the other way around) to avoid a circular
+// include — QuadCompositor must not depend on VulkanBackend's definition.
+#include "horizon.h"
+#include <corona/shader_include.h>
+// clang-format off
+#include GLSL(../../../assets/shaders/imgui.vert.glsl)
+#include GLSL(../../../assets/shaders/imgui.frag.glsl)
+// clang-format on
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 
 namespace Corona::Systems {
+
+// ============================================================================
+// Per-window rendering resources (render target, executor, geometry buffers).
+// Used by the main window and (Phase 7) secondary windows.
+// ============================================================================
+struct ViewportRenderResources {
+    Horizon::HardwareImage render_target;
+    Horizon::HardwareExecutor executor;
+    Horizon::HardwareBuffer vertex_buffer;
+    Horizon::HardwareBuffer index_buffer;
+    size_t vertex_buffer_capacity = 0;
+    size_t index_buffer_capacity = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    bool frame_ready = false;
+};
 
 // One textured (or solid) quad to draw into the UI render target.
 //   - texture == nullptr  -> a solid quad tinted by `color` (1x1 white texture is used)

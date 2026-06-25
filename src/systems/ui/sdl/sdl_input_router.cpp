@@ -24,8 +24,12 @@ bool SdlInputRouter::process_event(const SDL_Event& event) {
             const bool down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
             state_.mouse_x = event.button.x;
             state_.mouse_y = event.button.y;
+
+            MouseButton button = MouseButton::Left;
+            bool known_button = true;
             switch (event.button.button) {
                 case SDL_BUTTON_LEFT:
+                    button = MouseButton::Left;
                     state_.left_down = down;
                     if (down) {
                         // Double/triple-click detection, mirroring
@@ -49,13 +53,28 @@ bool SdlInputRouter::process_event(const SDL_Event& event) {
                     }
                     break;
                 case SDL_BUTTON_RIGHT:
+                    button = MouseButton::Right;
                     state_.right_down = down;
                     break;
                 case SDL_BUTTON_MIDDLE:
+                    button = MouseButton::Middle;
                     state_.middle_down = down;
                     break;
                 default:
+                    known_button = false;
                     break;
+            }
+
+            if (known_button) {
+                ButtonEvent be;
+                be.button = button;
+                be.pressed = down;
+                be.mouse_x = state_.mouse_x;
+                be.mouse_y = state_.mouse_y;
+                // click_count is meaningful for left-button presses; 1 otherwise.
+                be.click_count =
+                    (down && button == MouseButton::Left) ? click_count_ : 1;
+                button_events_.push_back(be);
             }
             return true;
         }
@@ -80,6 +99,12 @@ float SdlInputRouter::consume_wheel() {
     const float w = state_.wheel;
     state_.wheel = 0.0f;
     return w;
+}
+
+std::vector<ButtonEvent> SdlInputRouter::drain_button_events() {
+    std::vector<ButtonEvent> events;
+    events.swap(button_events_);
+    return events;
 }
 
 HitResult SdlInputRouter::hit_test(const std::vector<HitTarget>& targets) const {

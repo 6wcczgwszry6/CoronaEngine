@@ -24,6 +24,17 @@ namespace Corona::Systems::UI {
 // Mouse button identifiers, independent of SDL/ImGui button numbering.
 enum class MouseButton { Left, Right, Middle };
 
+// A button press/release transition recorded during event processing. The frame loop
+// drains these each frame and forwards them to the hit panel's CEF browser. `click_count`
+// is meaningful for left-button presses (double/triple click); 1 otherwise.
+struct ButtonEvent {
+    MouseButton button = MouseButton::Left;
+    bool pressed = false;   // true = down, false = up
+    float mouse_x = 0.0f;   // global position at the time of the transition
+    float mouse_y = 0.0f;
+    int click_count = 1;
+};
+
 // Snapshot of pointer + modifier state, rebuilt from SDL events (no ImGui IO).
 struct InputState {
     float mouse_x = 0.0f;   // global, in render-target pixels
@@ -84,8 +95,14 @@ class SdlInputRouter {
     // targets in draw order (last = topmost); the last containing rect wins.
     [[nodiscard]] HitResult hit_test(const std::vector<HitTarget>& targets) const;
 
+    // Drain the button press/release transitions recorded since the last call. The frame
+    // loop forwards these to the hit panel's CEF browser (press/release with click-count),
+    // mirroring the old handle_browser_mouse_events. Cleared each frame after dispatch.
+    [[nodiscard]] std::vector<ButtonEvent> drain_button_events();
+
    private:
     InputState state_;
+    std::vector<ButtonEvent> button_events_;
 
     // Double/triple-click tracking (mirror of MouseStateManager).
     Uint32 last_click_time_ = 0;

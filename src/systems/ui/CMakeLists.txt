@@ -1,21 +1,13 @@
-﻿# Create a library target for ImGui backend files
-add_library(imgui_backends STATIC
-        "${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp"
-)
-target_include_directories(imgui_backends PUBLIC
-        "${imgui_SOURCE_DIR}"
-        "${imgui_SOURCE_DIR}/backends"
-)
-target_link_libraries(imgui_backends PUBLIC imgui SDL3::SDL3-static)
-
-
-# ImGui System 配置
+﻿# UI System 配置 (ImGui removed — Phase 6 of the ImGui-removal plan).
+# The frame loop is now ui_frame_runner.cpp (raw SDL + quad compositor); there is no
+# longer an imgui or imgui_backends (imgui_impl_sdl3) target. The imgui.vert/frag GLSL
+# shaders are still used by the quad compositor and remain compiled below.
 file(GLOB IMGUI_SYSTEM_SOURCES
     imgui_system.cpp
     vulk/vulkan_backend.cpp
     vulk/quad_compositor.cpp
     vulk/browser_manager_vulkan.cpp
-    imgui/imgui_ui.cpp
+    ui_frame_runner.cpp
 
     camera_viewport_manager.cpp
     panel_layout.cpp
@@ -46,8 +38,6 @@ corona_add_system(imgui
         debug "${CEF_LIBCEF_DEBUG}"
         optimized "${CEF_LIBCEF_RELEASE}"
         SDL3::SDL3-static
-        imgui
-        imgui_backends
         ws2_32
         shlwapi
         dbghelp
@@ -61,7 +51,6 @@ corona_add_system(imgui
     INCLUDE_DIRS
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/cef
-        ${CMAKE_SOURCE_DIR}/build_deps/imgui-src
         ${CEF_INCLUDE_DIR}
         ${CEF_ROOT}
 )
