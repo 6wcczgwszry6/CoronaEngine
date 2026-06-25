@@ -1,7 +1,10 @@
 #include <corona/events/engine_events.h>
 #include <corona/kernel/core/i_logger.h>
-#include <corona/shared_data_hub.h>
 #include <corona/kernel/utils/storage.h>
+#include <corona/resource/resource.h>
+#include <corona/resource/resource_manager.h>
+#include <corona/resource/types/scene.h>
+#include <corona/shared_data_hub.h>
 #include <corona/spatial/octree.h>
 #include <corona/systems/geometry/geometry_system.h>
 #include <corona/utils/path_utils.h>
@@ -10,6 +13,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
+#include <future>
 #include <limits>
 #include <mutex>
 #include <shared_mutex>
@@ -17,13 +22,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <filesystem>
-#include <future>
 #include <utility>
-
-#include <corona/resource/resource.h>
-#include <corona/resource/resource_manager.h>
-#include <corona/resource/types/scene.h>
 
 #include "geometry_internal.h"
 
@@ -436,6 +435,8 @@ void GeometrySystem::update() {
             scene_dev_write.min_world = root_aabb.min;
             scene_dev_write.max_world = root_aabb.max;
             scene_dev_write.center_world = root_aabb.center();
+            scene_dev_write.visible_actor_handles.assign(visible_actors.begin(),
+                                                         visible_actors.end());
         }
     }
 }
@@ -509,6 +510,11 @@ void GeometrySystem::set_distance_config(std::uintptr_t scene, float unload_dist
     scene_state.cfg.preload_distance = preload_dist;
 }
 
+void GeometrySystem::set_invisible_frames_to_evict(std::uintptr_t scene, int frames) {
+    std::unique_lock lock(impl_->mtx);
+    impl_->get_or_create(scene).cfg.invisible_frames_to_evict = frames;
+}
+
 // ============================================================================
 // 私有事件处理
 // ============================================================================
@@ -546,7 +552,7 @@ void GeometrySystem::on_unload_completed(const Events::ActorUnloadCompletedEvent
         if (actor_it != state_map.end() && actor_it->second == ActorLoadState::Unloading) {
             old_state = actor_it->second;
             actor_it->second = ActorLoadState::Unloaded;
-            impl_->offline_actors[event.actor] = false;
+            impl_->offline_actors[event.actor] = true;
         }
     }
     if (old_state == ActorLoadState::Unloading) {
@@ -1393,8 +1399,87 @@ const LODMeshBuffers* GeometrySystem::resolve_lod_buffers(
 }
 
 // ============================================================================
+// BVH 射线查询
+// ============================================================================
+
+std::vector<uint32_t> GeometrySystem::query_mesh_ray(
+    std::uintptr_t   geometry_handle,
+    uint32_t         mesh_index,
+    int              lod_level,
+    const ktm::fvec3& origin,
+    const ktm::fvec3& inv_dir) const
+{
+    std::shared_lock lock(impl_->lod_cache_mutex);
+    auto key = Impl::make_lod_key(geometry_handle, mesh_index);
+    auto it  = impl_->lod_cache.find(key);
+    if (it == impl_->lod_cache.end()) return {};
+    if (lod_level < 0 || static_cast<size_t>(lod_level) >= it->second.per_level_bvh.size())
+        return {};
+
+    std::vector<uint32_t> hits;
+    it->second.per_level_bvh[lod_level].query_ray(origin, inv_dir, hits);
+    return hits;
+}
+
+std::optional<Spatial::BVH<uint32_t>::Hit> GeometrySystem::query_mesh_closest_hit(
+    std::uintptr_t   geometry_handle,
+    uint32_t         mesh_index,
+    int              lod_level,
+    const ktm::fvec3& origin,
+    const ktm::fvec3& inv_dir,
+    float            t_max) const
+{
+    std::shared_lock lock(impl_->lod_cache_mutex);
+    auto key = Impl::make_lod_key(geometry_handle, mesh_index);
+    auto it  = impl_->lod_cache.find(key);
+    if (it == impl_->lod_cache.end()) return std::nullopt;
+    if (lod_level < 0 || static_cast<size_t>(lod_level) >= it->second.per_level_bvh.size())
+        return std::nullopt;
+
+    return it->second.per_level_bvh[lod_level].closest_hit(origin, inv_dir, t_max);
+}
+
+// ============================================================================
 // 动态减面内部管线
 // ============================================================================
+
+namespace {
+
+/// 从 CPU 端顶点+索引构建 BVH（payload = 三角形下标）
+/// @param vertices 顶点数组
+/// @param indices  uint16 索引数组（每 3 个一组构成三角形）
+/// @return 构建好的 BVH，无数据时返回空 BVH
+
+[[nodiscard]] Spatial::BVH<uint32_t> build_triangle_bvh(
+    const std::vector<Resource::Vertex>&    vertices,
+    const std::vector<std::uint16_t>&       indices)
+{
+    Spatial::BVH<uint32_t> bvh;
+    if (indices.size() < 3) return bvh;
+
+    std::vector<Spatial::BVH<uint32_t>::Entry> entries;
+    entries.reserve(indices.size() / 3);
+
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        const auto& v0 = vertices[indices[i]];
+        const auto& v1 = vertices[indices[i + 1]];
+        const auto& v2 = vertices[indices[i + 2]];
+
+        Spatial::AABB aabb;
+        aabb.min.x = std::min({v0.position[0], v1.position[0], v2.position[0]});
+        aabb.min.y = std::min({v0.position[1], v1.position[1], v2.position[1]});
+        aabb.min.z = std::min({v0.position[2], v1.position[2], v2.position[2]});
+        aabb.max.x = std::max({v0.position[0], v1.position[0], v2.position[0]});
+        aabb.max.y = std::max({v0.position[1], v1.position[1], v2.position[1]});
+        aabb.max.z = std::max({v0.position[2], v1.position[2], v2.position[2]});
+        entries.push_back({static_cast<uint32_t>(i / 3), aabb});
+    }
+
+    bvh.build(entries);
+    return bvh;
+}
+
+}  // namespace
 
 void GeometrySystem::upload_lod_from_scene_data() {
     // 快照 simplification_cfg，与 set_simplification_config 同步
@@ -1461,39 +1546,28 @@ void GeometrySystem::upload_lod_from_scene_data() {
             lod0.ready            = true;
             entry.levels.push_back(std::move(lod0));
 
+            // 为 LOD 0 构建 BVH（三角形级空间索引）
+            entry.per_level_bvh.push_back(build_triangle_bvh(mesh.vertices, mesh.indices));
+
             // LOD 1..N：从导入时 meshoptimizer 生成的数据创建 GPU 缓冲
             for (size_t lod_idx = 0; lod_idx < mesh.lod_levels.size() && lod_idx < static_cast<size_t>(max_lod_levels - 1); ++lod_idx) {
                 auto& lod_data = mesh.lod_levels[lod_idx];
                 if (lod_data.vertices.empty() || lod_data.indices.empty()) continue;
 
                 LODMeshBuffers lod_buf;
-                // 转换为 uint32 索引（meshopt 输出 uint16，GPU 需要 uint32）
-                std::vector<uint32_t> indices32;
-                indices32.reserve(lod_data.indices.size());
-                for (auto idx : lod_data.indices) indices32.push_back(static_cast<uint32_t>(idx));
-
-                lod_buf.vertex_buffer = make_geometry_buffer(
-                    lod_data.vertices,
-                    Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Vertex,
-                    "geometry.lod_vertex");
-                lod_buf.index_buffer = make_geometry_buffer(
-                    indices32,
-                    Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Index,
-                    "geometry.lod_index");
-                lod_buf.vertex_storage = make_geometry_buffer(
-                    lod_data.vertices,
-                    Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst |
-                        Horizon::BufferUsageFlags::Storage,
-                    "geometry.lod_vertex_storage");
-                lod_buf.index_storage = make_geometry_buffer(
-                    indices32,
-                    Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst |
-                        Horizon::BufferUsageFlags::Storage,
-                    "geometry.lod_index_storage");
+                // LOD 索引保持 uint16（与 LOD0 一致），不转换为 uint32。
+                // 之前转为 uint32 导致 GPU 索引缓冲格式与 pipeline 预期不匹配→渲染缺口。
+                lod_buf.vertex_buffer    = make_geometry_buffer(lod_data.vertices, Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Vertex,     "geometry.lod_vertex");
+                lod_buf.index_buffer     = make_geometry_buffer(lod_data.indices,  Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Index,      "geometry.lod_index");
+                lod_buf.vertex_storage   = make_geometry_buffer(lod_data.vertices, Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_vertex_storage");
+                lod_buf.index_storage    = make_geometry_buffer(lod_data.indices,  Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_index_storage");
                 lod_buf.error            = lod_data.error;
                 lod_buf.screen_threshold = lod_data.screen_threshold;
                 lod_buf.ready            = true;
                 entry.levels.push_back(std::move(lod_buf));
+
+                // 为该 LOD 级别构建 BVH
+                entry.per_level_bvh.push_back(build_triangle_bvh(lod_data.vertices, lod_data.indices));
             }
 
             std::unique_lock lock(impl_->lod_cache_mutex);
