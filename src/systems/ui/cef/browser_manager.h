@@ -80,6 +80,23 @@ struct BrowserTab {
     int initial_x = 120;
     int initial_y = 120;
 
+    // Phase 7 (detach / re-dock): the surface this tab is rendered into.
+    //   nullptr  ⇒ docked in the main window (composed into the main layout)
+    //   non-null ⇒ detached, rendered full-bleed into its own secondary OS window (this is
+    //             that window's native surface handle / DisplaySystem key).
+    // host_surface is owned/driven by the UI thread only (frame runner + DockCommand tasks).
+    void* host_surface = nullptr;
+    // Detach lifecycle state. Only the UI thread mutates it; guards against double-detach and
+    // detach-during-teardown (ABA). Docked is the initial/redocked state.
+    enum class DetachState { Docked, Detaching, Detached, Redocking };
+    DetachState detach_state = DetachState::Docked;
+    // Desired secondary-window geometry (logical px), filled by detachPanel and consumed by
+    // the frame runner's reconcile step when it creates the OS window.
+    int detach_x = 120;
+    int detach_y = 120;
+    int detach_w = 640;
+    int detach_h = 480;
+
     char url_buffer[1024] = "";
     std::vector<uint8_t> pixel_buffer;
     std::mutex mutex;  // 保护 pixel_buffer 和 buffer_dirty

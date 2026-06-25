@@ -1,10 +1,11 @@
+#include <corona/systems/ui/vulkan_backend.h>
+
 #include <corona/events/display_system_events.h>
 #include <corona/kernel/core/i_logger.h>
 #include <corona/kernel/core/kernel_context.h>
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/shared_data_hub.h>
 #include <corona/systems/script/corona_engine_api.h>
-#include <corona/systems/ui/vulkan_backend.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -25,35 +26,6 @@ namespace {
 
 constexpr auto kUiRenderTargetUsage =
     Corona::Horizon::ImageUsageFlags::Sampled | Corona::Horizon::ImageUsageFlags::Storage;
-
-struct PixelExtent {
-    uint32_t width = 0;
-    uint32_t height = 0;
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return width != 0 && height != 0;
-    }
-};
-
-[[nodiscard]] PixelExtent window_pixel_extent(SDL_Window* window) {
-    if (window == nullptr) {
-        return {};
-    }
-
-    int width = 0;
-    int height = 0;
-    if (SDL_GetWindowSizeInPixels(window, &width, &height) && width > 0 && height > 0) {
-        return {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
-    }
-
-    width = 0;
-    height = 0;
-    if (SDL_GetWindowSize(window, &width, &height) && width > 0 && height > 0) {
-        return {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
-    }
-
-    return {};
-}
 
 std::uintptr_t select_main_camera_handle(const Corona::SceneDevice& scene) {
     if (scene.active_camera_handle != 0 &&
@@ -102,6 +74,15 @@ VulkanBackend::VulkanBackend(SDL_Window* window)
     : window_(window) {
 }
 
+VulkanBackend::PerSurfaceRender* VulkanBackend::find_surface(void* surface) {
+    const auto it = surfaces_.find(surface);
+    return it != surfaces_.end() ? it->second.get() : nullptr;
+}
+
+bool VulkanBackend::has_surface(void* surface) const {
+    return surfaces_.contains(surface);
+}
+
 bool VulkanBackend::initialize() {
     if (initialized_) {
         return true;
@@ -136,24 +117,9 @@ bool VulkanBackend::initialize() {
         event_bus->publish<Events::DisplaySurfaceChangedEvent>({surface_});
     }
 
-    const PixelExtent initial_extent = window_pixel_extent(window_);
-    if (initial_extent) {
-        if (!ensure_render_target(main_resources_, initial_extent.width, initial_extent.height,
-                                  kUiRenderTargetUsage)) {
-            CFW_LOG_ERROR("VulkanBackend: failed to create initial render target");
-            return false;
-        }
-    } else {
-        rebuild_needed_ = true;
-    }
-
-    image_handle_ = SharedDataHub::instance().image_storage().allocate();
-    if (auto image_device = SharedDataHub::instance().image_storage().acquire_write(image_handle_)) {
-        // Keep storage entry alive; per-frame values are updated in present_frame().
-    } else {
-        CFW_LOG_ERROR("VulkanBackend: failed to acquire shared image storage handle");
-        SharedDataHub::instance().image_storage().deallocate(image_handle_);
-        image_handle_ = 0;
+    // Register the main window's surface (allocates its image handle, creates initial RT).
+    if (!register_surface(surface_, window_)) {
+        CFW_LOG_ERROR("VulkanBackend: failed to register main surface");
         return false;
     }
 
@@ -167,44 +133,91 @@ void VulkanBackend::shutdown() {
         return;
     }
 
-    main_resources_.frame_ready = false;
-    rebuild_needed_ = false;
-    pipeline_ready_ = false;
-
-    main_resources_.render_target = Horizon::HardwareImage();
-    pipeline_.reset();
-
-    main_resources_.vertex_buffer = Horizon::HardwareBuffer();
-    main_resources_.index_buffer = Horizon::HardwareBuffer();
-    main_resources_.vertex_buffer_capacity = 0;
-    main_resources_.index_buffer_capacity = 0;
-
-    main_resources_.width = 0;
-    main_resources_.height = 0;
-
-    surface_ = nullptr;
-    frame_index_ = 0;
-
-    if (image_handle_ != 0) {
-        SharedDataHub::instance().image_storage().deallocate(image_handle_);
-        image_handle_ = 0;
+    // Release every surface's image handle and GPU resources.
+    for (auto& [surface, render] : surfaces_) {
+        if (render && render->image_handle != 0) {
+            SharedDataHub::instance().image_storage().deallocate(render->image_handle);
+            render->image_handle = 0;
+        }
     }
+    surfaces_.clear();
+
+    pipeline_ready_ = false;
+    pipeline_.reset();
+    rebuild_needed_ = false;
+    surface_ = nullptr;
 
     initialized_ = false;
     CFW_LOG_INFO("VulkanBackend: shutdown");
 }
 
-void VulkanBackend::new_frame() {
-    if (!initialized_) {
+bool VulkanBackend::register_surface(void* surface, SDL_Window* window) {
+    if (surface == nullptr) {
+        return false;
+    }
+    if (surfaces_.contains(surface)) {
+        return true;  // idempotent
+    }
+
+    auto render = std::make_unique<PerSurfaceRender>();
+    render->image_handle = SharedDataHub::instance().image_storage().allocate();
+    if (auto image_device =
+            SharedDataHub::instance().image_storage().acquire_write(render->image_handle)) {
+        // Keep storage entry alive; per-frame values updated in present_surface().
+    } else {
+        CFW_LOG_ERROR("VulkanBackend: failed to acquire image storage handle for surface {}", surface);
+        SharedDataHub::instance().image_storage().deallocate(render->image_handle);
+        return false;
+    }
+
+    // Best-effort initial render target from the window's current pixel size.
+    if (window != nullptr) {
+        int w = 0;
+        int h = 0;
+        if (SDL_GetWindowSizeInPixels(window, &w, &h) && w > 0 && h > 0) {
+            ensure_render_target(render->resources, static_cast<uint32_t>(w),
+                                 static_cast<uint32_t>(h), kUiRenderTargetUsage);
+        }
+    }
+
+    surfaces_.emplace(surface, std::move(render));
+    CFW_LOG_INFO("VulkanBackend: registered surface {}", surface);
+    return true;
+}
+
+void VulkanBackend::unregister_surface(void* surface) {
+    auto it = surfaces_.find(surface);
+    if (it == surfaces_.end()) {
         return;
     }
 
-    // GPU sync: wait for Display to finish consuming our image
-    // before we clear and render new UI content into it.
-    if (image_handle_ != 0) {
-        if (auto image_device = SharedDataHub::instance().image_storage().acquire_write(image_handle_)) {
-            main_resources_.executor.wait(image_device->consumed_receipt);
-        }
+    // Drain GPU work referencing this surface's render target before releasing it. The
+    // DisplaySystem teardown (promise-synced in SdlWindowManager) has already idled the
+    // device for the swapchain; this waits on our own last submit for safety.
+    auto& render = *it->second;
+    render.resources.executor.wait_idle(render.resources.executor.last_receipt());
+
+    if (render.image_handle != 0) {
+        SharedDataHub::instance().image_storage().deallocate(render.image_handle);
+        render.image_handle = 0;
+    }
+    surfaces_.erase(it);
+    CFW_LOG_INFO("VulkanBackend: unregistered surface {}", surface);
+}
+
+void VulkanBackend::new_frame(void* surface) {
+    if (!initialized_) {
+        return;
+    }
+    auto* render = find_surface(surface);
+    if (render == nullptr || render->image_handle == 0) {
+        return;
+    }
+
+    // GPU sync: wait for Display to finish consuming our image before we render new content.
+    if (auto image_device =
+            SharedDataHub::instance().image_storage().acquire_write(render->image_handle)) {
+        render->resources.executor.wait(image_device->consumed_receipt);
     }
 }
 
@@ -226,95 +239,112 @@ bool VulkanBackend::ensure_pipeline() {
     return pipeline_ready_;
 }
 
-void VulkanBackend::render_quads(std::span<const QuadDraw> quads) {
+void VulkanBackend::render_quads(void* surface, std::span<const QuadDraw> quads,
+                                 uint32_t target_pixels_w, uint32_t target_pixels_h) {
     if (!initialized_) {
         return;
     }
-
+    auto* render = find_surface(surface);
+    if (render == nullptr) {
+        return;
+    }
     if (!ensure_pipeline()) {
         return;
     }
 
-    PixelExtent target_extent{main_resources_.width, main_resources_.height};
-    if (!target_extent) {
-        target_extent = window_pixel_extent(window_);
+    uint32_t tw = target_pixels_w;
+    uint32_t th = target_pixels_h;
+    if (tw == 0 || th == 0) {
+        tw = render->resources.width;
+        th = render->resources.height;
     }
-    if (!target_extent) {
+    if (tw == 0 || th == 0) {
         return;
     }
 
-    if (compositor_.composite(quads,
-                              main_resources_,
-                              *pipeline_,
-                              target_extent.width,
-                              target_extent.height,
-                              kUiRenderTargetUsage)) {
-        main_resources_.frame_ready = true;
+    if (compositor_.composite(quads, render->resources, *pipeline_, tw, th, kUiRenderTargetUsage)) {
+        render->resources.frame_ready = true;
     }
 }
 
-void VulkanBackend::present_frame() {
-    if (!initialized_ || !main_resources_.frame_ready || !main_resources_.render_target ||
-        surface_ == nullptr || image_handle_ == 0) {
+void VulkanBackend::present_surface(void* surface) {
+    if (!initialized_) {
+        return;
+    }
+    auto* render = find_surface(surface);
+    if (render == nullptr || !render->resources.frame_ready ||
+        !render->resources.render_target || render->image_handle == 0) {
         return;
     }
 
-    if (auto image_device = SharedDataHub::instance().image_storage().acquire_write(image_handle_)) {
-        image_device->image = main_resources_.render_target;
-        image_device->submit_receipt = main_resources_.executor.last_receipt();
+    if (auto image_device =
+            SharedDataHub::instance().image_storage().acquire_write(render->image_handle)) {
+        image_device->image = render->resources.render_target;
+        image_device->submit_receipt = render->resources.executor.last_receipt();
     } else {
         return;
     }
 
-    sync_default_surface_camera_size(surface_, main_resources_.width, main_resources_.height);
+    // Only the main window drives the default-surface camera size.
+    if (surface == surface_) {
+        sync_default_surface_camera_size(surface, render->resources.width, render->resources.height);
+    }
 
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
-        ++frame_index_;
-        event_bus->publish<Events::UIFrameReadyEvent>({surface_,
-                                                       image_handle_,
-                                                       frame_index_,
-                                                       main_resources_.width,
-                                                       main_resources_.height});
+        ++render->frame_index;
+        event_bus->publish<Events::UIFrameReadyEvent>({surface,
+                                                       render->image_handle,
+                                                       render->frame_index,
+                                                       render->resources.width,
+                                                       render->resources.height});
     }
 
-    main_resources_.frame_ready = false;
+    render->resources.frame_ready = false;
 }
 
-void VulkanBackend::rebuild(int width, int height) {
-    if (!initialized_) {
+void VulkanBackend::rebuild(void* surface, uint32_t pixel_w, uint32_t pixel_h) {
+    if (!initialized_ || pixel_w == 0 || pixel_h == 0) {
+        return;
+    }
+    auto* render = find_surface(surface);
+    if (render == nullptr) {
         return;
     }
 
-    if (width <= 0 || height <= 0) {
-        return;
-    }
-
-    PixelExtent target_extent = window_pixel_extent(window_);
-    if (!target_extent) {
-        target_extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
-    }
-
-    const auto target_width = target_extent.width;
-    const auto target_height = target_extent.height;
-    const bool size_changed = !main_resources_.render_target ||
-                              main_resources_.width != target_width ||
-                              main_resources_.height != target_height;
+    const bool size_changed = !render->resources.render_target ||
+                              render->resources.width != pixel_w ||
+                              render->resources.height != pixel_h;
     if (size_changed) {
-        if (image_handle_ != 0) {
-            if (auto image_device = SharedDataHub::instance().image_storage().acquire_write(image_handle_)) {
-                main_resources_.executor.wait_idle(image_device->consumed_receipt);
+        if (render->image_handle != 0) {
+            if (auto image_device =
+                    SharedDataHub::instance().image_storage().acquire_write(render->image_handle)) {
+                render->resources.executor.wait_idle(image_device->consumed_receipt);
             }
         }
-        main_resources_.executor.wait_idle(main_resources_.executor.last_receipt());
+        render->resources.executor.wait_idle(render->resources.executor.last_receipt());
     }
 
-    if (!ensure_render_target(main_resources_, target_width, target_height, kUiRenderTargetUsage)) {
-        rebuild_needed_ = true;
+    if (!ensure_render_target(render->resources, pixel_w, pixel_h, kUiRenderTargetUsage)) {
+        if (surface == surface_) {
+            rebuild_needed_ = true;
+        }
         return;
     }
 
-    sync_default_surface_camera_size(surface_, target_width, target_height);
-    rebuild_needed_ = false;
+    if (surface == surface_) {
+        sync_default_surface_camera_size(surface, pixel_w, pixel_h);
+        rebuild_needed_ = false;
+    }
+}
+
+uint32_t VulkanBackend::surface_width(void* surface) const {
+    const auto it = surfaces_.find(surface);
+    return it != surfaces_.end() ? it->second->resources.width : 0;
+}
+
+uint32_t VulkanBackend::surface_height(void* surface) const {
+    const auto it = surfaces_.find(surface);
+    return it != surfaces_.end() ? it->second->resources.height : 0;
 }
 
 bool VulkanBackend::ensure_render_target(ViewportRenderResources& resources, uint32_t width, uint32_t height,

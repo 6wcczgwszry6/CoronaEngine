@@ -3,6 +3,7 @@
 #include <corona/kernel/core/i_logger.h>
 #include <corona/systems/ui/camera_viewport_manager.h>
 #include <corona/systems/ui/quad_compositor.h>
+#include <corona/systems/ui/sdl_window_manager.h>
 #include <corona/systems/ui/vulkan_backend.h>
 
 #include <algorithm>
@@ -77,6 +78,10 @@ bool initialize_sdl_ui(SDL_Window*& window, std::unique_ptr<VulkanBackend>& vulk
     SDL_SetHint(SDL_HINT_IME_IMPLEMENTED_UI, "1");
     BrowserManager::instance().set_main_window(window);
 
+    // Adopt the main window into the window manager singleton so the frame runner can iterate
+    // all windows (main + detached) and detach/redock commands can mutate the set.
+    SdlWindowManager::instance().adopt_main_window(window);
+
     vulkan_backend = std::make_unique<VulkanBackend>(window);
     if (!vulkan_backend->initialize()) {
         CFW_LOG_ERROR("Failed to initialize Corona UI backend");
@@ -90,6 +95,11 @@ bool initialize_sdl_ui(SDL_Window*& window, std::unique_ptr<VulkanBackend>& vulk
 }
 
 void shutdown_sdl_ui(SDL_Window*& window, std::unique_ptr<VulkanBackend>& vulkan_backend) {
+    // Tear down any detached (secondary) windows first: this publishes DisplaySurfaceRemovedEvent
+    // and blocks on the promise so the DisplaySystem destroys each swapchain before we proceed,
+    // matching the per-window teardown ordering used on redock.
+    SdlWindowManager::instance().destroy_all_secondary();
+
     if (vulkan_backend) {
         vulkan_backend->shutdown();
         vulkan_backend.reset();
@@ -110,16 +120,23 @@ void shutdown_sdl_ui(SDL_Window*& window, std::unique_ptr<VulkanBackend>& vulkan
 
 namespace {
 
-// Build the layout inputs from the current browser tabs (main + docked panels).
-std::vector<PanelLayoutInput> collect_layout_inputs() {
+// Build the layout inputs for one window: the tabs whose host_surface matches.
+//   - host_filter == nullptr  -> the main window: all docked/main tabs (host_surface null).
+//   - host_filter != nullptr  -> a secondary window: the single detached tab on that surface,
+//     rewritten to docking_pos "main" so it fills the window.
+std::vector<PanelLayoutInput> collect_layout_inputs(void* host_filter) {
     std::vector<PanelLayoutInput> inputs;
     for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
         if (!tab || !tab->open || tab->minimized) {
             continue;
         }
+        if (tab->host_surface != host_filter) {
+            continue;
+        }
         PanelLayoutInput in;
         in.tab_id = tab_id;
-        in.docking_pos = tab->docking_pos;
+        // A detached tab fills its own window regardless of its original docking_pos.
+        in.docking_pos = (host_filter != nullptr) ? std::string("main") : tab->docking_pos;
         in.dock_width = tab->dock_width;
         in.dock_height = tab->dock_height;
         in.camera_view = tab->camera_view;
@@ -144,7 +161,8 @@ void UiFrameRunner::dispatch_keyboard_to_active_tab(int active_tab_id) {
     input_handler_.clear_pending_events();
 }
 
-void UiFrameRunner::route_mouse_to_panels(const std::vector<PanelPlacement>& placements,
+void UiFrameRunner::route_mouse_to_panels(SDL_WindowID window_id,
+                                          const std::vector<PanelPlacement>& placements,
                                           int& active_tab_id) {
     // Build hit targets with an explicit z-order: the main panel is always bottom-most and
     // docked panels sit on top. hit_test() scans last-first (topmost wins), so we must push
@@ -170,13 +188,13 @@ void UiFrameRunner::route_mouse_to_panels(const std::vector<PanelPlacement>& pla
         }
     }
 
-    const HitResult hit = input_router_.hit_test(targets);
-    const InputState& st = input_router_.state();
+    const HitResult hit = input_router_.hit_test(window_id, targets);
+    const InputState st = input_router_.state(window_id);
 
     // Drain button transitions regardless of hit, so a release outside the panel still
     // closes a click that began inside it (mirrors the old was_down/is_active handling).
-    std::vector<ButtonEvent> button_events = input_router_.drain_button_events();
-    const float wheel = input_router_.consume_wheel();
+    std::vector<ButtonEvent> button_events = input_router_.drain_button_events(window_id);
+    const float wheel = input_router_.consume_wheel(window_id);
 
     // Determine which tab (if any) receives mouse events.
     auto* tab = (hit.hit && hit.tab_id != -1) ? BrowserManager::instance().get_tab(hit.tab_id) : nullptr;
@@ -227,7 +245,10 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         return;
     }
 
-    // 1) Pump SDL events.
+    auto& window_manager = SdlWindowManager::instance();
+
+    // 1) Pump SDL events ONCE for all windows. Mouse/wheel events carry a windowID and are
+    //    bucketed per window by the input router; keyboard/text/IME go to the focused tab.
     input_router_.refresh_modifiers();
     auto result = event_handler_.process_events(
         context.window, url_input_active_tab_,
@@ -245,21 +266,37 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         context.vulkan_backend->request_rebuild();
     }
 
-    // 2) Forward queued keyboard/text/IME to the active tab.
-    dispatch_keyboard_to_active_tab(*context.active_tab_id);
-
-    // 3) Rebuild render target on resize.
-    if (context.vulkan_backend->is_rebuild_needed()) {
-        int width = 0;
-        int height = 0;
-        SDL_GetWindowSize(context.window, &width, &height);
-        context.vulkan_backend->rebuild(width, height);
+    // A secondary (detached) window was closed by the user (its OS close button). Treat it as a
+    // redock request: find the tab hosted on that window's surface and flip it to Redocking, so
+    // the reconcile step below tears the window + surface down (promise-synced) this frame. This
+    // runs on the UI thread, so flipping detach_state directly is safe.
+    for (const SDL_WindowID closed_id : result.closed_window_ids) {
+        const ManagedWindow* mw = SdlWindowManager::instance().find_by_id(closed_id);
+        if (mw == nullptr || mw->surface == nullptr) {
+            continue;
+        }
+        for (auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+            if (tab && tab->host_surface == mw->surface &&
+                tab->detach_state == BrowserTab::DetachState::Detached) {
+                tab->detach_state = BrowserTab::DetachState::Redocking;
+                break;
+            }
+        }
     }
 
-    context.vulkan_backend->new_frame();
+    // 2) Forward queued keyboard/text/IME to the active tab (whichever window it lives in).
+    dispatch_keyboard_to_active_tab(*context.active_tab_id);
 
-    // 4) Drive browser texture updates + close handling.
+    // 3) Drive browser texture updates + collect closed tabs (once for all tabs). This also
+    //    drains one queued main-thread task (e.g. a detachPanel/redockPanel state flip).
     BrowserManager::instance().update();
+
+    // 4) Reconcile detach/redock intent to actual window + surface state (UI thread is the sole
+    //    owner of the window set and the backend). Runs AFTER update() drained the state flip,
+    //    and BEFORE the render loop so a newly-created window is rendered this frame and a
+    //    redocked window is already gone.
+    reconcile_detach_states(context);
+
     std::vector<int> tabs_to_close;
     for (auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
         if (!tab || !tab->open) {
@@ -272,57 +309,193 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         BrowserManager::instance().update_texture(tab_id);
     }
 
-    // 5) Compute fixed-rect layout in LOGICAL coordinates.
+    // 5) Render every window (main + detached). Snapshot the window list first, since
+    //    render_window does not mutate it (detach/redock already reconciled above).
+    std::vector<ManagedWindow> windows;
+    window_manager.for_each_window([&](const ManagedWindow& w) { windows.push_back(w); });
+    for (const ManagedWindow& managed : windows) {
+        render_window(context, managed);
+    }
+
+    // 6) Close tabs flagged closed.
+    for (int tab_id : tabs_to_close) {
+        BrowserManager::instance().remove_tab(tab_id);
+        if (tab_id == *context.active_tab_id) {
+            *context.active_tab_id = -1;
+        }
+        if (tab_id == url_input_active_tab_) {
+            url_input_active_tab_ = -1;
+        }
+    }
+}
+
+void UiFrameRunner::reconcile_detach_states(UiFrameContext& context) {
+    // The UI thread is the sole owner of the window set + the backend, so all window create/
+    // destroy + surface register/unregister happens here. bridge commands only flipped the
+    // per-tab detach_state (Detaching / Redocking); this turns that intent into reality.
     //
-    // Coordinate contract (matches the former ImGui path):
-    //   - Layout, hit-testing, CEF buffer sizes, and CEF-local mouse coords are all LOGICAL
-    //     (SDL window coordinates). CEF/Vue work in CSS/logical pixels, so feeding logical
-    //     sizes keeps the page laid out correctly on high-DPI displays.
-    //   - Only the GPU render target and the compositor surface are in PHYSICAL pixels. The
-    //     UI quad dest rects and the camera surface bounds are converted logical -> pixels
-    //     via the per-axis DPI scale below.
-    int logical_w = 0;
-    int logical_h = 0;
-    SDL_GetWindowSize(context.window, &logical_w, &logical_h);
-    if (logical_w <= 0 || logical_h <= 0) {
+    // Collect target tab ids first: the reconcile actions mutate BrowserManager's tab map
+    // indirectly (resize_tab) and the window set, so we avoid iterating the map while acting.
+    std::vector<int> detaching;
+    std::vector<int> redocking;
+    for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+        if (!tab) {
+            continue;
+        }
+        if (tab->detach_state == BrowserTab::DetachState::Detaching) {
+            detaching.push_back(tab_id);
+        } else if (tab->detach_state == BrowserTab::DetachState::Redocking) {
+            redocking.push_back(tab_id);
+        }
+    }
+
+    auto& window_manager = SdlWindowManager::instance();
+
+    // --- Detaching: Docked->Detaching (by bridge) -> create window + register surface -> Detached.
+    for (const int tab_id : detaching) {
+        auto* tab = BrowserManager::instance().get_tab(tab_id);
+        if (!tab) {
+            continue;
+        }
+
+        void* surface = window_manager.create_secondary_window(
+            tab->detach_x, tab->detach_y, tab->detach_w, tab->detach_h);
+        if (surface == nullptr) {
+            CFW_LOG_ERROR("reconcile: failed to create secondary window for tab {}; reverting to Docked",
+                          tab_id);
+            tab->detach_state = BrowserTab::DetachState::Docked;
+            continue;
+        }
+
+        const ManagedWindow* mw = window_manager.find_by_surface(surface);
+        SDL_Window* sdl_window = mw ? mw->window : nullptr;
+        if (!context.vulkan_backend->register_surface(surface, sdl_window)) {
+            CFW_LOG_ERROR("reconcile: failed to register surface for tab {}; tearing window back down",
+                          tab_id);
+            window_manager.destroy_secondary_window(surface);
+            tab->detach_state = BrowserTab::DetachState::Docked;
+            continue;
+        }
+
+        tab->host_surface = surface;
+        tab->platform_window_id = mw ? mw->window_id : 0;
+        tab->platform_handle_raw = surface;
+        tab->detach_state = BrowserTab::DetachState::Detached;
+
+        // Enable title-bar drag + edge-resize on the borderless window. The callback reads
+        // tab->drag_regions (the Vue-reported title-bar rects) keyed by this tab id.
+        window_manager.enable_drag_hit_test(surface, tab_id);
+
+        CFW_LOG_INFO("reconcile: tab {} detached to surface {}", tab_id, surface);
+    }
+
+    // --- Redocking: Detached->Redocking (by bridge) -> clear host + unregister + destroy -> Docked.
+    for (const int tab_id : redocking) {
+        auto* tab = BrowserManager::instance().get_tab(tab_id);
+        if (!tab) {
+            continue;
+        }
+
+        void* surface = tab->host_surface;
+
+        // Detach the tab from its window FIRST so render_window stops drawing into this surface
+        // this frame; then release GPU resources, then the OS window (promise-synced).
+        tab->host_surface = nullptr;
+        tab->platform_window_id = 0;
+        tab->platform_handle_raw = nullptr;
+
+        if (surface != nullptr) {
+            context.vulkan_backend->unregister_surface(surface);
+            window_manager.destroy_secondary_window(surface);
+        }
+
+        tab->detach_state = BrowserTab::DetachState::Docked;
+        CFW_LOG_INFO("reconcile: tab {} redocked (surface {} destroyed)", tab_id, surface);
+    }
+}
+
+void UiFrameRunner::render_window(UiFrameContext& context, const ManagedWindow& managed) {
+    SDL_Window* const sdl_window = managed.window;
+    void* const surface = managed.surface;
+    if (sdl_window == nullptr || surface == nullptr) {
+        return;
+    }
+    if (!context.vulkan_backend->has_surface(surface)) {
+        return;  // surface not yet registered (e.g. mid-detach)
+    }
+
+    const SDL_WindowID window_id = managed.window_id;
+
+    // Rebuild this window's render target on resize. The main window uses the shared
+    // rebuild_needed_ flag; secondary windows always reconcile to their current pixel size.
+    int pixel_iw = 0;
+    int pixel_ih = 0;
+    if (!SDL_GetWindowSizeInPixels(sdl_window, &pixel_iw, &pixel_ih) || pixel_iw <= 0 || pixel_ih <= 0) {
+        SDL_GetWindowSize(sdl_window, &pixel_iw, &pixel_ih);
+    }
+    if (pixel_iw <= 0 || pixel_ih <= 0) {
         return;  // window not ready this frame
     }
 
-    // Pixel size of the render target. On the very first frame(s) it may not exist yet
-    // (width()/height() == 0); fall back to a 1:1 scale so we never collapse quads or
-    // camera bounds to zero.
-    const uint32_t pixel_w = context.vulkan_backend->width();
-    const uint32_t pixel_h = context.vulkan_backend->height();
+    const bool main_window = managed.is_main;
+    const bool needs_rebuild =
+        main_window ? context.vulkan_backend->is_rebuild_needed()
+                    : (context.vulkan_backend->surface_width(surface) != static_cast<uint32_t>(pixel_iw) ||
+                       context.vulkan_backend->surface_height(surface) != static_cast<uint32_t>(pixel_ih));
+    if (needs_rebuild) {
+        context.vulkan_backend->rebuild(surface, static_cast<uint32_t>(pixel_iw),
+                                        static_cast<uint32_t>(pixel_ih));
+    }
+
+    context.vulkan_backend->new_frame(surface);
+
+    // Logical size for layout / CEF / hit-testing (see coordinate contract below).
+    int logical_w = 0;
+    int logical_h = 0;
+    SDL_GetWindowSize(sdl_window, &logical_w, &logical_h);
+    if (logical_w <= 0 || logical_h <= 0) {
+        return;
+    }
+
+    const uint32_t pixel_w = context.vulkan_backend->surface_width(surface);
+    const uint32_t pixel_h = context.vulkan_backend->surface_height(surface);
     const float scale_x = (pixel_w > 0) ? static_cast<float>(pixel_w) / static_cast<float>(logical_w) : 1.0f;
     const float scale_y = (pixel_h > 0) ? static_cast<float>(pixel_h) / static_cast<float>(logical_h) : 1.0f;
 
+    // Coordinate contract (matches the former ImGui path):
+    //   - Layout, hit-testing, CEF buffer sizes, and CEF-local mouse coords are LOGICAL.
+    //   - Only the GPU render target and camera surface bounds are PHYSICAL pixels, obtained
+    //     by scaling the logical rects with this window's own DPI scale.
     const WorkArea work = make_client_work_area(logical_w, logical_h);
-    const std::vector<PanelLayoutInput> inputs = collect_layout_inputs();
-    const std::vector<PanelPlacement> placements = compute_panel_layout(work, inputs);
 
-    // 6) Resize every visible tab's CEF buffer to its LOGICAL panel size (matches the old
-    //    per-tab resize_tab(avail_size)), and bind camera viewports onto the main surface
-    //    using PIXEL bounds (the DisplaySystem composites optics against the pixel surface).
-    void* main_surface = nullptr;
-#if defined(_WIN32)
-    if (context.window) {
-        main_surface = SDL_GetPointerProperty(SDL_GetWindowProperties(context.window),
-                                              SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+    std::vector<PanelPlacement> placements;
+    if (main_window) {
+        // Main window: all tabs whose host_surface == nullptr, via the docking layout.
+        const std::vector<PanelLayoutInput> inputs = collect_layout_inputs(nullptr);
+        placements = compute_panel_layout(work, inputs);
+    } else {
+        // Secondary window: the single tab hosted here fills the whole client area.
+        for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+            if (!tab || !tab->open || tab->minimized || tab->host_surface != surface) {
+                continue;
+            }
+            PanelPlacement p;
+            p.tab_id = tab_id;
+            p.is_main = false;
+            p.rect = LayoutRect{work.x, work.y, work.width, work.height};
+            placements.push_back(p);
+            break;  // one panel per detached window
+        }
     }
-#elif defined(__APPLE__)
-    if (context.window) {
-        main_surface = SDL_GetPointerProperty(SDL_GetWindowProperties(context.window),
-                                              SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, nullptr);
-    }
-#endif
 
+    // Resize each tab's CEF buffer to its LOGICAL panel size; bind camera viewports onto THIS
+    // window's surface using PIXEL bounds.
     for (const PanelPlacement& placement : placements) {
         auto* tab = BrowserManager::instance().get_tab(placement.tab_id);
         if (!tab) {
             continue;
         }
 
-        // Logical panel size -> CEF buffer.
         const int lw = std::max(1, static_cast<int>(std::lround(placement.rect.w)));
         const int lh = std::max(1, static_cast<int>(std::lround(placement.rect.h)));
         if (lw != tab->width || lh != tab->height) {
@@ -333,26 +506,20 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
             continue;
         }
 
-        // Pixel bounds for the camera viewport composited onto the main surface.
         const int px = static_cast<int>(std::lround(placement.rect.x * scale_x));
         const int py = static_cast<int>(std::lround(placement.rect.y * scale_y));
         const int pw = std::max(1, static_cast<int>(std::lround(placement.rect.w * scale_x)));
         const int ph = std::max(1, static_cast<int>(std::lround(placement.rect.h * scale_y)));
-        tab->platform_handle_raw = main_surface;
-        tab->platform_window_id = context.window ? SDL_GetWindowID(context.window) : 0;
-        if (main_surface) {
-            CameraViewportManager::instance().bind_surface(placement.tab_id, main_surface,
-                                                           px, py, pw, ph);
-        }
+        tab->platform_handle_raw = surface;
+        tab->platform_window_id = window_id;
+        CameraViewportManager::instance().bind_surface(placement.tab_id, surface, px, py, pw, ph);
         CameraViewportManager::instance().update_layout(placement.tab_id, px, py, pw, ph);
     }
 
-    // 7) Route mouse input to the hit panel's browser (LOGICAL coordinates throughout).
-    route_mouse_to_panels(placements, *context.active_tab_id);
+    // Route this window's mouse input (per-window bucket) to the hit panel's browser.
+    route_mouse_to_panels(window_id, placements, *context.active_tab_id);
 
-    // 8) Build quad list (one quad per visible panel texture) and render. Quad dest rects are
-    //    in PIXELS (the render target is pixel-sized); the CEF texture (logical-sized) is
-    //    upscaled by the sampler.
+    // Build quad list (PIXEL dest rects) and render + present this window's surface.
     std::vector<QuadDraw> quads;
     quads.reserve(placements.size());
     for (const PanelPlacement& placement : placements) {
@@ -373,18 +540,12 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         quads.push_back(quad);
     }
 
-    context.vulkan_backend->render_quads(quads);
-    context.vulkan_backend->present_frame();
+    context.vulkan_backend->render_quads(surface, quads, pixel_w, pixel_h);
+    context.vulkan_backend->present_surface(surface);
 
-    // 9) Close tabs flagged closed.
-    for (int tab_id : tabs_to_close) {
-        BrowserManager::instance().remove_tab(tab_id);
-        if (tab_id == *context.active_tab_id) {
-            *context.active_tab_id = -1;
-        }
-        if (tab_id == url_input_active_tab_) {
-            url_input_active_tab_ = -1;
-        }
+    // Deferred show: reveal a freshly-detached window once its first frame is published.
+    if (managed.pending_show) {
+        SdlWindowManager::instance().reveal_pending_window(surface);
     }
 }
 

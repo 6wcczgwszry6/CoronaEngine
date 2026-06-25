@@ -43,6 +43,9 @@ struct UiFrameContext {
     bool* window_size_changed = nullptr;
 };
 
+// Forward declaration: the manager that owns the main + secondary OS windows.
+struct ManagedWindow;
+
 class UiFrameRunner {
    public:
     UiFrameRunner() = default;
@@ -53,8 +56,24 @@ class UiFrameRunner {
     // Forward queued keyboard/text/IME events to the active tab's browser (unchanged logic).
     void dispatch_keyboard_to_active_tab(int active_tab_id);
 
-    // Build hit targets from the computed layout, forward mouse to the hit panel's browser.
-    void route_mouse_to_panels(const std::vector<PanelPlacement>& placements,
+    // Render one window (main or secondary): compute layout, resize CEF, bind cameras, route
+    // mouse, build quads, render + present that window's surface. Phase 7c: the main window
+    // renders all tabs with host_surface == nullptr via the docking layout; a secondary window
+    // renders the single tab whose host_surface == that window's surface, filling it.
+    void render_window(UiFrameContext& context, const ManagedWindow& managed);
+
+    // Phase 7d: reconcile each tab's detach intent (set by the detachPanel/redockPanel
+    // DockCommands) to actual OS-window + surface state. Runs once per frame on the UI thread,
+    // before the window-render loop, so window creation/destruction + surface register/unregister
+    // all happen single-threaded here (no cross-thread GPU access). Detaching -> create secondary
+    // window, register its surface, set host_surface -> Detached. Redocking -> clear host_surface,
+    // unregister surface, destroy the window (promise-synced) -> Docked.
+    void reconcile_detach_states(UiFrameContext& context);
+
+    // Build hit targets for one window's placements and forward mouse to the hit panel's
+    // browser, using that window's per-window input bucket (window_id) and surface.
+    void route_mouse_to_panels(SDL_WindowID window_id,
+                               const std::vector<PanelPlacement>& placements,
                                int& active_tab_id);
 
     int url_input_active_tab_ = -1;

@@ -35,19 +35,25 @@
 <script setup>
 import { onMounted, onUnmounted, ref, defineProps, defineEmits } from 'vue';
 import { useI18n } from 'vue-i18n';
-// 引入 projectService
-import { projectService } from '@/utils/bridge.js';
+// 引入 projectService / appService
+import { projectService, appService } from '@/utils/bridge.js';
 
 const props = defineProps({
   title: { type: String, default: '' },
   extraClass: { type: String, default: '' },
-  showFloatToggle: { type: Boolean, default: false },
+  // 默认显示浮动切换按钮：DockTitleBar 仅在 standalone 模式渲染（独立 CEF Tab），
+  // 此时点击可把面板 detach 成独立无边框 OS 窗口、或从独立窗口收回主窗口。
+  showFloatToggle: { type: Boolean, default: true },
   // 必须传入当前页面的 routePath，以便后端 Python 查找对应的 tab-Id
   routePath: { type: String, required: true },
 });
 
 const emit = defineEmits(['close', 'toggleFloat']);
 const { t } = useI18n();
+
+// 本地跟踪 detach 状态。detach/redock 不会重建 CEF Tab（只改变它渲染到哪个 OS 窗口），
+// 因此本页面及该 ref 在 detach 前后持续存活，可可靠反映当前是否已浮出为独立窗口。
+const floated = ref(false);
 
 // DOM 引用
 const titleBarRef = ref(null);
@@ -126,8 +132,22 @@ onUnmounted(() => {
 // 按钮事件处理
 // ============================================================================
 
-function onToggleFloat() {
-  emit('toggleFloat');
+async function onToggleFloat() {
+  // detach（浮出独立窗口）/ redock（收回主窗口）由 C++ 从调用方 browser 解析 tabId，
+  // 因此无需显式传 tabId。先翻转本地状态再发命令，命令失败则回滚。
+  const goingFloat = !floated.value;
+  floated.value = goingFloat;
+  try {
+    if (goingFloat) {
+      await appService.detachPanel();
+    } else {
+      await appService.redockPanel();
+    }
+  } catch (e) {
+    floated.value = !goingFloat; // 回滚
+    console.error('[DockTitleBar] toggle float failed:', e);
+  }
+  emit('toggleFloat', floated.value);
 }
 
 function onClose() {

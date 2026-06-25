@@ -313,6 +313,11 @@ EventProcessResult SDLEventHandler::process_events(
             case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
                 if (event.window.windowID == SDL_GetWindowID(window)) {
                     result.should_quit = true;
+                } else {
+                    // A secondary (detached) window's close button: report its id so the frame
+                    // runner can redock that panel (promise-synced teardown). Never destroy the
+                    // window here — destruction is the UI thread's reconcile job.
+                    result.closed_window_ids.push_back(event.window.windowID);
                 }
                 break;
 

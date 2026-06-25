@@ -64,6 +64,10 @@ struct EventProcessResult {
     bool should_quit = false;
     bool window_resized = false;
     int url_input_active_tab = -1;
+    // Phase 7d: SDL_WindowIDs of SECONDARY windows the user closed (clicked the OS X button)
+    // this pump. The main window's close request still sets should_quit; secondary closes are
+    // reported here so the frame runner can redock the hosted tab (promise-synced teardown).
+    std::vector<SDL_WindowID> closed_window_ids;
 };
 
 class SDLEventHandler {

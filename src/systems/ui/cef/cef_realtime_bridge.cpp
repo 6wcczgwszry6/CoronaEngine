@@ -2470,6 +2470,60 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
             return true;
         }
 
+        if (cmd == "detachPanel") {
+            int tab_id = find_tab_id_for_browser(browser);
+            if (command.contains("tabId") && command["tabId"].is_number_integer()) {
+                tab_id = command.value("tabId", -1);
+            }
+            // Optional desired secondary-window geometry (logical px).
+            const int x = command.value("x", 120);
+            const int y = command.value("y", 120);
+            const int w = command.value("width", 0);
+            const int h = command.value("height", 0);
+
+            // Desired-state only: flip Docked -> Detaching on the UI thread. The frame runner's
+            // reconcile step does the actual window create + surface register next frame. All
+            // mutation of detach_state goes through enqueue_main_thread_task so the field stays
+            // single-threaded (UI thread), needing no lock. See Phase 7d design notes.
+            bm.enqueue_main_thread_task([tab_id, x, y, w, h] {
+                auto* tab = BrowserManager::instance().get_tab(tab_id);
+                if (!tab || tab->detach_state != BrowserTab::DetachState::Docked) {
+                    return;  // unknown tab or mid-transition: reject (guards ABA / double-detach)
+                }
+                tab->detach_x = x;
+                tab->detach_y = y;
+                tab->detach_w = (w > 0) ? w : std::max(1, tab->width);
+                tab->detach_h = (h > 0) ? h : std::max(1, tab->height);
+                tab->detach_state = BrowserTab::DetachState::Detaching;
+            });
+
+            nlohmann::json result;
+            result["queued"] = tab_id >= 0;
+            send_dock_callback(frame, request_id, nullptr, result);
+            return true;
+        }
+
+        if (cmd == "redockPanel") {
+            int tab_id = find_tab_id_for_browser(browser);
+            if (command.contains("tabId") && command["tabId"].is_number_integer()) {
+                tab_id = command.value("tabId", -1);
+            }
+            // Desired-state only: flip Detached -> Redocking on the UI thread. The frame runner
+            // tears the window down (promise-synced) next frame.
+            bm.enqueue_main_thread_task([tab_id] {
+                auto* tab = BrowserManager::instance().get_tab(tab_id);
+                if (!tab || tab->detach_state != BrowserTab::DetachState::Detached) {
+                    return;  // only a fully Detached panel can be redocked (guards ABA)
+                }
+                tab->detach_state = BrowserTab::DetachState::Redocking;
+            });
+
+            nlohmann::json result;
+            result["queued"] = tab_id >= 0;
+            send_dock_callback(frame, request_id, nullptr, result);
+            return true;
+        }
+
         nlohmann::json error;
         error["message"] = "Unknown DockCommand: " + cmd;
         send_dock_callback(frame, request_id, error, nullptr);

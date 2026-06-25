@@ -15,6 +15,7 @@
 #include <SDL3/SDL.h>
 
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 #include "panel_layout.h"
@@ -73,42 +74,60 @@ class SdlInputRouter {
    public:
     SdlInputRouter() = default;
 
-    // Feed one SDL event. Updates the tracked InputState. Mouse-button transitions update
-    // click-count (double/triple click) using the same 500ms / 5px thresholds as
-    // MouseUtils::MouseStateManager. Returns true if the event was a recognized input
-    // event (mouse/wheel); keyboard/text events are left to the existing BrowserInputHandler.
+    // Feed one SDL event. SDL mouse coordinates are WINDOW-LOCAL and every mouse/wheel event
+    // carries a windowID, so state is tracked per window: the event updates the bucket for its
+    // own window. Mouse-button transitions update that window's click-count (double/triple
+    // click) using the same 500ms / 5px thresholds as the old MouseStateManager. Returns true
+    // if the event was a recognized mouse/wheel event; keyboard/text events are left to
+    // BrowserInputHandler.
     bool process_event(const SDL_Event& event);
 
-    // Pull modifier state from the OS at frame start (SDL_GetModState), matching how ImGui
-    // refreshes io.KeyShift/Ctrl/Alt each NewFrame. Call once per frame before dispatching.
+    // Pull modifier state from the OS at frame start (SDL_GetModState). Modifiers are global
+    // in SDL (keyboard state is not per-window), so they are stored once and merged into every
+    // window's reported state. Call once per frame before dispatching.
     void refresh_modifiers();
 
-    [[nodiscard]] const InputState& state() const { return state_; }
+    // Per-window pointer/modifier snapshot. Returns a zeroed state for an unknown window.
+    [[nodiscard]] InputState state(SDL_WindowID window_id) const;
 
-    // Click count for the most recent left-button press (1, 2, or 3).
-    [[nodiscard]] int click_count() const { return click_count_; }
+    // Consume a window's accumulated wheel delta (returns it and resets to 0).
+    [[nodiscard]] float consume_wheel(SDL_WindowID window_id);
 
-    // Consume the accumulated wheel delta (returns it and resets to 0).
-    [[nodiscard]] float consume_wheel();
+    // Hit-test a window's current mouse position against targets, topmost-first (the last
+    // containing rect in draw order wins).
+    [[nodiscard]] HitResult hit_test(SDL_WindowID window_id,
+                                     const std::vector<HitTarget>& targets) const;
 
-    // Hit-test the current mouse position against targets, topmost-first. The caller passes
-    // targets in draw order (last = topmost); the last containing rect wins.
-    [[nodiscard]] HitResult hit_test(const std::vector<HitTarget>& targets) const;
-
-    // Drain the button press/release transitions recorded since the last call. The frame
-    // loop forwards these to the hit panel's CEF browser (press/release with click-count),
-    // mirroring the old handle_browser_mouse_events. Cleared each frame after dispatch.
-    [[nodiscard]] std::vector<ButtonEvent> drain_button_events();
+    // Drain a window's button press/release transitions recorded since the last call.
+    [[nodiscard]] std::vector<ButtonEvent> drain_button_events(SDL_WindowID window_id);
 
    private:
-    InputState state_;
-    std::vector<ButtonEvent> button_events_;
+    // Per-window pointer + click state. Modifiers live in the shared block below and are
+    // merged in on query, since SDL keyboard modifier state is global.
+    struct PerWindowInput {
+        float mouse_x = 0.0f;
+        float mouse_y = 0.0f;
+        bool left_down = false;
+        bool right_down = false;
+        bool middle_down = false;
+        float wheel = 0.0f;
+        std::vector<ButtonEvent> button_events;
 
-    // Double/triple-click tracking (mirror of MouseStateManager).
-    Uint32 last_click_time_ = 0;
-    float last_click_x_ = 0.0f;
-    float last_click_y_ = 0.0f;
-    int click_count_ = 0;
+        Uint32 last_click_time = 0;
+        float last_click_x = 0.0f;
+        float last_click_y = 0.0f;
+        int click_count = 0;
+    };
+
+    PerWindowInput& bucket(SDL_WindowID window_id);
+
+    std::unordered_map<SDL_WindowID, PerWindowInput> windows_;
+
+    // Global modifier state (SDL_GetModState), merged into every window's reported state.
+    bool shift_ = false;
+    bool ctrl_ = false;
+    bool alt_ = false;
+    bool gui_ = false;
 
     static constexpr Uint32 kDoubleClickTime = 500;
     static constexpr float kDoubleClickDist = 5.0f;

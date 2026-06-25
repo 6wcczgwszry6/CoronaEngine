@@ -209,6 +209,14 @@ export const appService = {
     Bridge.callDockCommand({ cmd: 'closeThisTab', panelId }),
   closePanelTab: (tabId, panelId) =>
     Bridge.callDockCommand({ cmd: 'closePanelTab', tabId, panelId }),
+  // Detach the calling panel into its own borderless OS window (tabId omitted ⇒ C++
+  // resolves it from the calling browser). x/y/width/height are optional desired geometry
+  // in logical px; width/height default to the panel's current size on the C++ side.
+  detachPanel: (opts = {}) =>
+    Bridge.callDockCommand({ cmd: 'detachPanel', ...opts }),
+  // Re-dock the calling panel back into the main window (destroys its secondary window).
+  redockPanel: (opts = {}) =>
+    Bridge.callDockCommand({ cmd: 'redockPanel', ...opts }),
   toggleMaximizeThisCameraView: (sceneId = '', cameraId = '') =>
     Bridge.callDockCommand({ cmd: 'toggleMaximizeThisCameraView', sceneId, cameraId }),
   cycleThisCameraViewWindowMode: (sceneId = '', cameraId = '') =>
