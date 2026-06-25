@@ -146,15 +146,28 @@ void UiFrameRunner::dispatch_keyboard_to_active_tab(int active_tab_id) {
 
 void UiFrameRunner::route_mouse_to_panels(const std::vector<PanelPlacement>& placements,
                                           int& active_tab_id) {
-    // Build hit targets in layout order; main panel is bottom-most, docked panels on top.
+    // Build hit targets with an explicit z-order: the main panel is always bottom-most and
+    // docked panels sit on top. hit_test() scans last-first (topmost wins), so we must push
+    // the main panel FIRST regardless of the unordered_map iteration order of get_tabs() —
+    // otherwise a click on a docked panel can fall through to the full-screen main panel.
     std::vector<HitTarget> targets;
     targets.reserve(placements.size());
-    for (const PanelPlacement& placement : placements) {
+    auto append_target = [&](const PanelPlacement& placement) {
         HitTarget target;
         target.tab_id = placement.tab_id;
         target.rect = placement.rect;
         target.is_main = placement.is_main;
         targets.push_back(target);
+    };
+    for (const PanelPlacement& placement : placements) {
+        if (placement.is_main) {
+            append_target(placement);
+        }
+    }
+    for (const PanelPlacement& placement : placements) {
+        if (!placement.is_main) {
+            append_target(placement);
+        }
     }
 
     const HitResult hit = input_router_.hit_test(targets);
@@ -259,14 +272,37 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         BrowserManager::instance().update_texture(tab_id);
     }
 
-    // 5) Compute fixed-rect layout (render-target pixels).
-    const uint32_t fb_w = context.vulkan_backend->width();
-    const uint32_t fb_h = context.vulkan_backend->height();
-    const WorkArea work = make_client_work_area(static_cast<int>(fb_w), static_cast<int>(fb_h));
+    // 5) Compute fixed-rect layout in LOGICAL coordinates.
+    //
+    // Coordinate contract (matches the former ImGui path):
+    //   - Layout, hit-testing, CEF buffer sizes, and CEF-local mouse coords are all LOGICAL
+    //     (SDL window coordinates). CEF/Vue work in CSS/logical pixels, so feeding logical
+    //     sizes keeps the page laid out correctly on high-DPI displays.
+    //   - Only the GPU render target and the compositor surface are in PHYSICAL pixels. The
+    //     UI quad dest rects and the camera surface bounds are converted logical -> pixels
+    //     via the per-axis DPI scale below.
+    int logical_w = 0;
+    int logical_h = 0;
+    SDL_GetWindowSize(context.window, &logical_w, &logical_h);
+    if (logical_w <= 0 || logical_h <= 0) {
+        return;  // window not ready this frame
+    }
+
+    // Pixel size of the render target. On the very first frame(s) it may not exist yet
+    // (width()/height() == 0); fall back to a 1:1 scale so we never collapse quads or
+    // camera bounds to zero.
+    const uint32_t pixel_w = context.vulkan_backend->width();
+    const uint32_t pixel_h = context.vulkan_backend->height();
+    const float scale_x = (pixel_w > 0) ? static_cast<float>(pixel_w) / static_cast<float>(logical_w) : 1.0f;
+    const float scale_y = (pixel_h > 0) ? static_cast<float>(pixel_h) / static_cast<float>(logical_h) : 1.0f;
+
+    const WorkArea work = make_client_work_area(logical_w, logical_h);
     const std::vector<PanelLayoutInput> inputs = collect_layout_inputs();
     const std::vector<PanelPlacement> placements = compute_panel_layout(work, inputs);
 
-    // 6) Bind camera viewports to the main surface using the computed rect.
+    // 6) Resize every visible tab's CEF buffer to its LOGICAL panel size (matches the old
+    //    per-tab resize_tab(avail_size)), and bind camera viewports onto the main surface
+    //    using PIXEL bounds (the DisplaySystem composites optics against the pixel surface).
     void* main_surface = nullptr;
 #if defined(_WIN32)
     if (context.window) {
@@ -282,29 +318,41 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
 
     for (const PanelPlacement& placement : placements) {
         auto* tab = BrowserManager::instance().get_tab(placement.tab_id);
-        if (!tab || !tab->camera_view) {
+        if (!tab) {
             continue;
         }
-        const int rx = static_cast<int>(placement.rect.x);
-        const int ry = static_cast<int>(placement.rect.y);
-        const int rw = static_cast<int>(placement.rect.w);
-        const int rh = static_cast<int>(placement.rect.h);
-        if (rw > 0 && rh > 0 && (rw != tab->width || rh != tab->height)) {
-            BrowserManager::instance().resize_tab(placement.tab_id, rw, rh);
+
+        // Logical panel size -> CEF buffer.
+        const int lw = std::max(1, static_cast<int>(std::lround(placement.rect.w)));
+        const int lh = std::max(1, static_cast<int>(std::lround(placement.rect.h)));
+        if (lw != tab->width || lh != tab->height) {
+            BrowserManager::instance().resize_tab(placement.tab_id, lw, lh);
         }
+
+        if (!tab->camera_view) {
+            continue;
+        }
+
+        // Pixel bounds for the camera viewport composited onto the main surface.
+        const int px = static_cast<int>(std::lround(placement.rect.x * scale_x));
+        const int py = static_cast<int>(std::lround(placement.rect.y * scale_y));
+        const int pw = std::max(1, static_cast<int>(std::lround(placement.rect.w * scale_x)));
+        const int ph = std::max(1, static_cast<int>(std::lround(placement.rect.h * scale_y)));
         tab->platform_handle_raw = main_surface;
         tab->platform_window_id = context.window ? SDL_GetWindowID(context.window) : 0;
         if (main_surface) {
             CameraViewportManager::instance().bind_surface(placement.tab_id, main_surface,
-                                                           rx, ry, rw, rh);
+                                                           px, py, pw, ph);
         }
-        CameraViewportManager::instance().update_layout(placement.tab_id, rx, ry, rw, rh);
+        CameraViewportManager::instance().update_layout(placement.tab_id, px, py, pw, ph);
     }
 
-    // 7) Route mouse input to the hit panel's browser.
+    // 7) Route mouse input to the hit panel's browser (LOGICAL coordinates throughout).
     route_mouse_to_panels(placements, *context.active_tab_id);
 
-    // 8) Build quad list (one quad per visible panel texture) and render.
+    // 8) Build quad list (one quad per visible panel texture) and render. Quad dest rects are
+    //    in PIXELS (the render target is pixel-sized); the CEF texture (logical-sized) is
+    //    upscaled by the sampler.
     std::vector<QuadDraw> quads;
     quads.reserve(placements.size());
     for (const PanelPlacement& placement : placements) {
@@ -319,9 +367,9 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         }
         QuadDraw quad;
         quad.texture = image;
-        quad.dest_min = ktm::fvec2(placement.rect.x, placement.rect.y);
-        quad.dest_max = ktm::fvec2(placement.rect.x + placement.rect.w,
-                                   placement.rect.y + placement.rect.h);
+        quad.dest_min = ktm::fvec2(placement.rect.x * scale_x, placement.rect.y * scale_y);
+        quad.dest_max = ktm::fvec2((placement.rect.x + placement.rect.w) * scale_x,
+                                   (placement.rect.y + placement.rect.h) * scale_y);
         quads.push_back(quad);
     }
 
