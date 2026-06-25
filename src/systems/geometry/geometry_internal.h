@@ -1,5 +1,6 @@
 #pragma once
 
+#include <corona/spatial/bvh.h>
 #include <corona/spatial/octree.h>
 #include <corona/systems/geometry/geometry_system.h>
 
@@ -105,6 +106,10 @@ struct GeometrySystem::Impl {
     struct LODCacheEntry {
         std::vector<LODMeshBuffers> levels;
         std::uint64_t model_id = 0;  // 用于检测模型变更（比地址指针可靠，不受 slot 复用影响）
+
+        // 每个 LOD 级别一个 BVH（下标与 levels 一一对应）
+        // payload = 三角形下标（i/3），用于射线→三角形加速查询
+        std::vector<Spatial::BVH<uint32_t>> per_level_bvh;
     };
 
     MeshSimplificationConfig           simplification_cfg;

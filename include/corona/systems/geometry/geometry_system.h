@@ -9,9 +9,11 @@
 #include <corona/kernel/system/system_base.h>
 #include <corona/math/frustum.h>
 #include <corona/spatial/aabb.h>
+#include <corona/spatial/bvh.h>
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -276,6 +278,46 @@ class GeometrySystem : public Kernel::SystemBase {
         std::uintptr_t geometry_handle,
         uint32_t       mesh_index,
         float          screen_ratio) const;
+
+    // ========================================
+    // BVH 射线查询（三角形级加速）
+    // ========================================
+    //
+    // 使用场景：拿到 Octree 粗筛的 actor 列表后，对每个 mesh 调用以下方法
+    // 获取射线命中的三角形下标。payload = 三角形序号（i/3）。
+    //
+    // 命中基于三角形 AABB，调用方拿到候选三角形后需自行做精确
+    // ray-tri 相交检测（Möller-Trumbore）以确认最终命中。
+
+    /// 穿透查询：返回射线命中的所有三角形下标（AABB 级，无序）
+    /// @param geometry_handle GeometryDevice 句柄
+    /// @param mesh_index      子网格索引
+    /// @param lod_level       LOD 级别（0=原始精度）
+    /// @param origin          射线起点（mesh 局部空间）
+    /// @param inv_dir         射线方向倒数（1/dir.x, 1/dir.y, 1/dir.z）
+    /// @return 命中的三角形下标列表，未命中或无 BVH 时返回空 vector
+    [[nodiscard]] std::vector<uint32_t> query_mesh_ray(
+        std::uintptr_t   geometry_handle,
+        uint32_t         mesh_index,
+        int              lod_level,
+        const ktm::fvec3& origin,
+        const ktm::fvec3& inv_dir) const;
+
+    /// 最近命中查询：返回离射线起点最近的三角形及其距离
+    /// @param geometry_handle GeometryDevice 句柄
+    /// @param mesh_index      子网格索引
+    /// @param lod_level       LOD 级别
+    /// @param origin          射线起点（mesh 局部空间）
+    /// @param inv_dir         射线方向倒数
+    /// @param t_max           最大搜索距离
+    /// @return 命中返回 Hit{payload=三角形下标, t=距离}，未命中返回 std::nullopt
+    [[nodiscard]] std::optional<Spatial::BVH<uint32_t>::Hit> query_mesh_closest_hit(
+        std::uintptr_t   geometry_handle,
+        uint32_t         mesh_index,
+        int              lod_level,
+        const ktm::fvec3& origin,
+        const ktm::fvec3& inv_dir,
+        float            t_max) const;
 
     // ========================================
     // 统计
