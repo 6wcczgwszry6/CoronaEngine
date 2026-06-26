@@ -342,8 +342,8 @@ class GeometrySystem : public Kernel::SystemBase {
     [[nodiscard]] SceneStats stats(std::uintptr_t scene) const;
 
    private:
-    void on_load_completed(const Events::ActorLoadCompletedEvent& event);
-    void on_unload_completed(const Events::ActorUnloadCompletedEvent& event);
+    void on_load_finished(const Events::ActorLoadFinishedEvent& event);
+    void on_unload_finished(const Events::ActorUnloadFinishedEvent& event);
     void on_load_requested(const Events::ActorLoadRequestedEvent& event);
     void on_unload_requested(const Events::ActorUnloadRequestedEvent& event);
     void on_evict_requested(const Events::ActorEvictRequestedEvent& event);

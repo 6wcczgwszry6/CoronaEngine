@@ -3,8 +3,10 @@
 #include <corona/kernel/core/i_logger.h>
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <regex>
+#include <stdexcept>
 #include <system_error>
 
 namespace Corona::Cache {
@@ -180,7 +182,27 @@ DiskCache::DiskCache(size_t capacity_bytes, std::filesystem::path directory)
 DiskCache::~DiskCache() = default;
 
 std::filesystem::path DiskCache::safe_path(const std::string& key) const {
-    // 将 key 中的非法字符替换为 '_'
+    // 1. 拒绝空 key
+    if (key.empty()) {
+        throw std::invalid_argument("DiskCache: key is empty");
+    }
+
+    // 2. 拒绝路径穿越（".." 组件）
+    if (key.find("..") != std::string::npos) {
+        throw std::invalid_argument("DiskCache: key contains '..': " + key);
+    }
+
+    // 3. 拒绝绝对路径（Unix '/' / Windows 盘符 'C:' / UNC '\\\\'）
+    if (key[0] == '/' || key[0] == '\\') {
+        throw std::invalid_argument("DiskCache: key is absolute path: " + key);
+    }
+    if (key.size() >= 3 && std::isalpha(static_cast<unsigned char>(key[0]))
+        && key[1] == ':' && (key[2] == '/' || key[2] == '\\')) {
+        throw std::invalid_argument("DiskCache: key is absolute path: " + key);
+    }
+
+    // —— 字符清洗 ————————————————————————————————
+    // 4. 将非法文件名字符替换为 '_'
     std::string safe;
     safe.reserve(key.size());
     for (char c : key) {
@@ -197,6 +219,10 @@ std::filesystem::path DiskCache::safe_path(const std::string& key) const {
 std::optional<CacheItem> DiskCache::read_file(const std::string& key) const {
     auto path = safe_path(key);
     std::error_code ec;
+
+    // 拒绝符号链接（防止通过 symlink 读取缓存目录外文件）
+    if (std::filesystem::is_symlink(path, ec)) return std::nullopt;
+
     if (!std::filesystem::exists(path, ec)) return std::nullopt;
 
     auto fsize = std::filesystem::file_size(path, ec);
@@ -226,6 +252,13 @@ bool DiskCache::write_file(const CacheItem& item) const {
     }
     if (!std::filesystem::exists(parent, ec)) {
         std::filesystem::create_directories(parent, ec);
+    }
+
+    // 确保文件路径本身非符号链接（防止通过 symlink 写入任意位置）
+    if (std::filesystem::is_symlink(path, ec)) {
+        CFW_LOG_ERROR("[DiskCache] Refusing to write to symlinked file: {}",
+                      path.string());
+        return false;
     }
 
     std::ofstream file(path, std::ios::binary | std::ios::trunc);

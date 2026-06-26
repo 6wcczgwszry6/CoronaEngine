@@ -73,13 +73,13 @@ bool GeometrySystem::initialize(Kernel::ISystemContext* ctx) {
     CFW_LOG_NOTICE("GeometrySystem: Initializing (octree host)");
 
     if (ctx && ctx->event_bus()) {
-        auto id1 = ctx->event_bus()->subscribe<Events::ActorLoadCompletedEvent>(
-            [this](const Events::ActorLoadCompletedEvent& e) {
-                this->on_load_completed(e);
+        auto id1 = ctx->event_bus()->subscribe<Events::ActorLoadFinishedEvent>(
+            [this](const Events::ActorLoadFinishedEvent& e) {
+                this->on_load_finished(e);
             });
-        auto id2 = ctx->event_bus()->subscribe<Events::ActorUnloadCompletedEvent>(
-           [this](const Events::ActorUnloadCompletedEvent& e) {
-               this->on_unload_completed(e);
+        auto id2 = ctx->event_bus()->subscribe<Events::ActorUnloadFinishedEvent>(
+           [this](const Events::ActorUnloadFinishedEvent& e) {
+               this->on_unload_finished(e);
            });
         auto id3 = ctx->event_bus()->subscribe<Events::ActorLoadRequestedEvent>(
             [this](const Events::ActorLoadRequestedEvent& e) {
@@ -574,8 +574,7 @@ void GeometrySystem::set_cache_directory(std::filesystem::path dir) {
 // 私有事件处理
 // ============================================================================
 
-void GeometrySystem::on_load_completed(const Events::ActorLoadCompletedEvent& event) {
-    ActorLoadState old_state = ActorLoadState::Unloaded;
+void GeometrySystem::on_load_finished(const Events::ActorLoadFinishedEvent& event) {
     {
         std::unique_lock lock(impl_->mtx);
         auto scene_it = impl_->scenes.find(event.scene);
@@ -583,20 +582,18 @@ void GeometrySystem::on_load_completed(const Events::ActorLoadCompletedEvent& ev
             auto& state_map = scene_it->second.actor_load_states;
             auto actor_it = state_map.find(event.actor);
             if (actor_it != state_map.end() && actor_it->second == ActorLoadState::Loading) {
-                old_state = actor_it->second;
                 actor_it->second = ActorLoadState::Loaded;
                 impl_->offline_actors[event.actor] = false;
+                CFW_LOG_NOTICE("GeometrySystem: Actor {} (scene: {}) load finished",
+                               event.actor, event.scene);
             }
         }
-    } // 释放锁后发布事件
-    if (old_state == ActorLoadState::Loading) {
-        CFW_LOG_NOTICE("GeometrySystem: Actor {} (scene: {}) load completed", event.actor, event.scene);
-        impl_->ctx->event_bus()->publish(event);
     }
+    // 不再重新发布事件 — ActorLoadFinishedEvent 由 process_async_tasks()
+    // 在 GPU 资源重建完成后发布，外部系统直接订阅该事件即可。
 }
 
-void GeometrySystem::on_unload_completed(const Events::ActorUnloadCompletedEvent& event) {
-    ActorLoadState old_state = ActorLoadState::Loaded;
+void GeometrySystem::on_unload_finished(const Events::ActorUnloadFinishedEvent& event) {
     {
         std::unique_lock lock(impl_->mtx);
         auto scene_it = impl_->scenes.find(event.scene);
@@ -605,15 +602,14 @@ void GeometrySystem::on_unload_completed(const Events::ActorUnloadCompletedEvent
         auto& state_map = scene_it->second.actor_load_states;
         auto actor_it = state_map.find(event.actor);
         if (actor_it != state_map.end() && actor_it->second == ActorLoadState::Unloading) {
-            old_state = actor_it->second;
             actor_it->second = ActorLoadState::Unloaded;
             impl_->offline_actors[event.actor] = true;
+            CFW_LOG_NOTICE("GeometrySystem: Actor {} (scene: {}) unload finished",
+                           event.actor, event.scene);
         }
     }
-    if (old_state == ActorLoadState::Unloading) {
-        CFW_LOG_NOTICE("GeometrySystem: Actor {} (scene: {}) unload completed", event.actor, event.scene);
-        impl_->ctx->event_bus()->publish(event);
-    }
+    // 不再重新发布事件 — ActorUnloadFinishedEvent 由 process_async_tasks()
+    // 在 GPU 资源释放完成后发布，外部系统直接订阅该事件即可。
 }
 
 // ============================================================================
@@ -623,7 +619,7 @@ void GeometrySystem::on_unload_completed(const Events::ActorUnloadCompletedEvent
 // ============================================================================
 // release_actor_gpu_resources
 // 功能：释放指定 actor 占用的全部 GPU 资源（显存中的顶点/索引缓冲和纹理）
-// 调用时机：process_async_tasks() 中处理 ActorUnloadCompletedEvent 时
+// 调用时机：process_async_tasks() 中处理 ActorUnloadFinishedEvent 时
 // 注意：只清理 GPU 端资源，不删除 SharedDataHub 中的存储槽位
 // ============================================================================
 void GeometrySystem::release_actor_gpu_resources(std::uintptr_t actor) {
@@ -1164,11 +1160,11 @@ void GeometrySystem::process_async_tasks() {
 
         if (task.rid != Resource::IResource::INVALID_UID) {
             // 重建 GPU 资源（mesh_handles + 纹理），恢复 model_resource_handle
-            // 必须在发布 ActorLoadCompletedEvent 之前完成，
+            // 必须在发布 ActorLoadFinishedEvent 之前完成，
             // 以保证事件订阅者（渲染线程等）能读到有效的 GPU 缓冲
             rebuild_actor_gpu_resources(task.actor, task.rid);
 
-            impl_->ctx->event_bus()->publish(Events::ActorLoadCompletedEvent{task.scene_handle,task.actor});
+            impl_->ctx->event_bus()->publish(Events::ActorLoadFinishedEvent{task.scene_handle,task.actor});
             CFW_LOG_DEBUG("[SceneSystem] Actor {} loaded (resource: {})", task.actor, task.rid);
         }else {
             CFW_LOG_ERROR("[SceneSystem] Failed to load actor {}", task.actor);
@@ -1180,7 +1176,7 @@ void GeometrySystem::process_async_tasks() {
                     scene_it->second.actor_load_states[task.actor] = ActorLoadState::Unloaded;
                 }
             }
-            impl_->ctx->event_bus()->publish(Events::ActorUnloadCompletedEvent{task.scene_handle, task.actor});
+            impl_->ctx->event_bus()->publish(Events::ActorUnloadFinishedEvent{task.scene_handle, task.actor});
         }
     }
 
@@ -1197,7 +1193,7 @@ void GeometrySystem::process_async_tasks() {
                     scene_it->second.unload_retry_counts.erase(task.actor);
                 }
             }
-            impl_->ctx->event_bus()->publish(Events::ActorUnloadCompletedEvent{task.scene_handle, task.actor});
+            impl_->ctx->event_bus()->publish(Events::ActorUnloadFinishedEvent{task.scene_handle, task.actor});
             CFW_LOG_DEBUG("[SceneSystem] Actor {} unloaded", task.actor);
         } else {
             // 卸载失败，保存到列表中后续处理重试
@@ -1207,7 +1203,7 @@ void GeometrySystem::process_async_tasks() {
 
     //卸载失败重试
     if (!failed_unloads.empty()) {
-        std::vector<Events::ActorUnloadCompletedEvent> deferred_events;
+        std::vector<Events::ActorUnloadFinishedEvent> deferred_events;
         {
             std::unique_lock lock(impl_->mtx);
             for (const auto& task : failed_unloads) {
@@ -1292,7 +1288,7 @@ void GeometrySystem::on_load_requested(const Events::ActorLoadRequestedEvent& e)
         CFW_LOG_ERROR("[GeometrySystem] Invalid actor or empty model path: {}", e.actor);
         scene_state.actor_load_states[e.actor] = ActorLoadState::Unloaded;
         lock.unlock();
-        impl_->ctx->event_bus()->publish(Events::ActorUnloadCompletedEvent{e.scene,e.actor});
+        impl_->ctx->event_bus()->publish(Events::ActorUnloadFinishedEvent{e.scene,e.actor});
         return;
     }
 
@@ -1328,7 +1324,7 @@ void GeometrySystem::on_unload_requested(const Events::ActorUnloadRequestedEvent
     if (!actor_read.valid() || actor_read->model_path.empty()) {
         scene_state.actor_load_states[e.actor] = ActorLoadState::Unloaded;
         lock.unlock();
-        impl_->ctx->event_bus()->publish(Events::ActorUnloadCompletedEvent{e.scene, e.actor});
+        impl_->ctx->event_bus()->publish(Events::ActorUnloadFinishedEvent{e.scene, e.actor});
         return;
     }
 
