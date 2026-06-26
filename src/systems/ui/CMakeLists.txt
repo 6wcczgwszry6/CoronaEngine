@@ -2,15 +2,16 @@
 # The frame loop is now ui_frame_runner.cpp (raw SDL + quad compositor); there is no
 # longer an imgui or imgui_backends (imgui_impl_sdl3) target. The imgui.vert/frag GLSL
 # shaders are still used by the quad compositor and remain compiled below.
-file(GLOB IMGUI_SYSTEM_SOURCES
+set(UI_SYSTEM_SOURCES
     ui_system.cpp
+    ui_frame_runner.cpp
+    camera_viewport_manager.cpp
+    panel_layout.cpp
+
     vulk/vulkan_backend.cpp
     vulk/quad_compositor.cpp
     vulk/browser_manager_vulkan.cpp
-    ui_frame_runner.cpp
 
-    camera_viewport_manager.cpp
-    panel_layout.cpp
     cef/browser_manager.cpp
     cef/browser_ui.cpp
     cef/cef_client.cpp
@@ -19,12 +20,19 @@ file(GLOB IMGUI_SYSTEM_SOURCES
     cef/cef_query_bridge.cpp
     cef/cef_realtime_bridge.cpp
     cef/cef_py_bind.cpp
+
     sdl/sdl_utils.cpp
     sdl/sdl_window_manager.cpp
     sdl/sdl_input_router.cpp
-)
 
-list(APPEND IMGUI_SYSTEM_SOURCES
+    # Internal headers (listed for IDE visibility, matching other systems).
+    cef/browser_manager.h
+    cef/browser_ui.h
+    cef/cef_bridge_helpers.h
+    cef/cef_client.h
+    cef/cef_native_rpc.h
+    sdl/sdl_utils.h
+
     ${PROJECT_SOURCE_DIR}/include/corona/systems/ui/vulkan_backend.h
     # quad_compositor.h owns the `#include GLSL(ui_quad.vert/frag)` macros.
     # Helicon's shader scan is textual over the target's SOURCES (it does not
@@ -36,7 +44,7 @@ list(APPEND IMGUI_SYSTEM_SOURCES
 
 
 corona_add_system(ui
-    SOURCES ${IMGUI_SYSTEM_SOURCES}
+    SOURCES ${UI_SYSTEM_SOURCES}
     DEPENDENCIES
         Horizon
         corona::system::network
