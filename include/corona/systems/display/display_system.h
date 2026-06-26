@@ -5,7 +5,7 @@
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/kernel/system/system_base.h>
-#include <corona/shader_include.h>
+#include "Codegen/ControlFlows.h"  // Horizon: GLSL()/HLSL() include macros
 // clang-format off
 #include GLSL(../../../assets/shaders/composite.comp.glsl)
 // clang-format on

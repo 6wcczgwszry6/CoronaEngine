@@ -149,7 +149,3 @@ endif()
 helicon_compile_shaders(corona_optics_system
     OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
 )
-
-target_include_directories(corona_optics_system BEFORE PUBLIC
-    "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
-)

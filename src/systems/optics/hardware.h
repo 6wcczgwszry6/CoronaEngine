@@ -1,7 +1,6 @@
 ﻿#pragma once
 
 #include "horizon.h"
-#include <corona/shader_include.h>
 
 #include "Codegen/BuiltinVariate.h"
 #include "Codegen/ControlFlows.h"
@@ -9,13 +8,6 @@
 #include "Codegen/TypeAlias.h"
 
 #include <optional>
-
-// Helicon codegen translates GLSL `uint` to C++ `uint` (not `unsigned int`)
-// in SSBO struct members. Provide the missing typedef.
-using uint = uint32_t;
-
-// Generated shader headers currently emit bare `Array` for SSBO pools.
-struct Array {};
 
 // clang-format off
 #include GLSL(../../../assets/shaders/visibility.vert.glsl)

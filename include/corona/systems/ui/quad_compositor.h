@@ -14,7 +14,7 @@
 // vulkan_backend.h includes THIS header (not the other way around) to avoid a circular
 // include — QuadCompositor must not depend on VulkanBackend's definition.
 #include "horizon.h"
-#include <corona/shader_include.h>
+#include "Codegen/ControlFlows.h"  // Horizon: GLSL()/HLSL() include macros
 // clang-format off
 #include GLSL(../../../assets/shaders/ui_quad.vert.glsl)
 #include GLSL(../../../assets/shaders/ui_quad.frag.glsl)
