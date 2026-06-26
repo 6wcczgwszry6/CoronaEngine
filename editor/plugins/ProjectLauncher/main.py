@@ -101,6 +101,41 @@ class ProjectLauncher(PluginBase):
         return {"name": display_name, "path": os.path.dirname(project_ini)}
 
     @staticmethod
+    def create_multiplayer_project(project_data: dict) -> dict:
+        """首页联机入口专用：自动创建一个 ASCII 路径的临时联机项目。"""
+        import configparser
+        from utils.settings import core_path
+
+        role = project_data.get("role", "guest")
+        role = "host" if role == "host" else "guest"
+        label = "联机房主" if role == "host" else "联机加入"
+        path_prefix = "multiplayer_host" if role == "host" else "multiplayer_guest"
+
+        base_dir = os.path.join(str(core_path.repo_root), "data")
+        os.makedirs(base_dir, exist_ok=True)
+
+        index = 1
+        while os.path.exists(os.path.join(base_dir, f"{path_prefix}_{index}")):
+            index += 1
+
+        display_name = f"{label}_{index}"
+        target_full_path = os.path.join(base_dir, f"{path_prefix}_{index}")
+        project_ini = ProjectCopy.create_from_template(target_full_path, display_name, "3d")
+
+        try:
+            cfg = configparser.ConfigParser()
+            cfg.read(project_ini, encoding='utf-8')
+            if 'Project' not in cfg:
+                cfg['Project'] = {}
+            cfg['Project']['multiplayer_role'] = role
+            with open(project_ini, 'w', encoding='utf-8') as f:
+                cfg.write(f)
+        except Exception as e:
+            logger.error(f"Failed to persist multiplayer metadata: {e}")
+
+        return {"name": display_name, "path": os.path.dirname(project_ini), "role": role}
+
+    @staticmethod
     def open_project(project_path: str) -> bool:
         """执行打开项目的逻辑（加载资源、初始化环境等）"""
         return ProjectCopy.open_and_update(project_path)

@@ -118,6 +118,7 @@ bool is_python_fallback_allowed(const std::string& module, const std::string& fu
             "get_recent_projects",
             "create_project",
             "create_world_project",
+            "create_multiplayer_project",
             "open_project",
             "open_project_file",
             "browse_folder",

@@ -406,6 +406,9 @@ export const projectLauncherService = {
   // worldData: { mode: 'story'|'creative', prompt: string } -> { name, path }
   createWorldProject: (worldData) =>
     Bridge.callCEF('ProjectLauncher', 'create_world_project', [worldData]),
+  // 创建首页联机入口使用的临时项目：{ role: 'host'|'guest' } -> { name, path, role }
+  createMultiplayerProject: (projectData) =>
+    Bridge.callCEF('ProjectLauncher', 'create_multiplayer_project', [projectData]),
   // 打开项目（执行加载逻辑）
   openProject: (projectPath) =>
     Bridge.callCEF('ProjectLauncher', 'open_project', [projectPath]).then((result) => {
