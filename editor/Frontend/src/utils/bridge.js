@@ -205,6 +205,11 @@ export const projectService = {
 export const appService = {
   createPanelTab: (panelId, routePath, width, height, dockingPos) =>
     Bridge.callDockCommand({ cmd: 'createPanelTab', panelId, routePath, width, height, dockingPos }),
+  // Create a panel that is born directly as its own borderless OS window (skips the
+  // main-window docked-rectangle stage, so no 1-frame flash). x/y/width/height are the
+  // desired initial geometry in logical px. Returns { tab_id, panel_id }.
+  createDetachedPanel: ({ panelId, routePath, width, height, x, y }) =>
+    Bridge.callDockCommand({ cmd: 'createDetachedPanel', panelId, routePath, width, height, x, y }),
   closeThisTab: (panelId) =>
     Bridge.callDockCommand({ cmd: 'closeThisTab', panelId }),
   closePanelTab: (tabId, panelId) =>

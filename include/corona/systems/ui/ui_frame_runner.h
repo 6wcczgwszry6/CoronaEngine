@@ -78,6 +78,16 @@ class UiFrameRunner {
 
     int url_input_active_tab_ = -1;
 
+    // Phase 10: title-bar drag of an in-main-window floating panel rectangle. While a drag is
+    // active, dragging_tab_id_ holds the tab being moved; its quad is drawn topmost and its
+    // mouse events are NOT forwarded to CEF. The panel's logical rect is updated each move by
+    // (start_rect + mouse delta), clamped to the work area. -1 = no drag.
+    int dragging_tab_id_ = -1;
+    float drag_mouse_start_x_ = 0.0f;
+    float drag_mouse_start_y_ = 0.0f;
+    float drag_rect_start_x_ = 0.0f;
+    float drag_rect_start_y_ = 0.0f;
+
     SdlInputRouter input_router_{};
     BrowserInputHandler input_handler_{};
     SDLEventHandler event_handler_{};

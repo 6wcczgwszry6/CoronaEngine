@@ -140,6 +140,7 @@ std::vector<PanelLayoutInput> collect_layout_inputs(void* host_filter) {
         in.dock_width = tab->dock_width;
         in.dock_height = tab->dock_height;
         in.camera_view = tab->camera_view;
+        in.floating = tab->floating;
         in.initial_x = tab->initial_x;
         in.initial_y = tab->initial_y;
         inputs.push_back(std::move(in));
@@ -195,6 +196,64 @@ void UiFrameRunner::route_mouse_to_panels(SDL_WindowID window_id,
     // closes a click that began inside it (mirrors the old was_down/is_active handling).
     std::vector<ButtonEvent> button_events = input_router_.drain_button_events(window_id);
     const float wheel = input_router_.consume_wheel(window_id);
+
+    // ---- Phase 10: title-bar drag of an in-main-window floating panel ----------------------
+    // Floating panels live only in the main window (host_surface == nullptr). A left-press on a
+    // floating panel's drag region (its DockTitleBar, reported via setDragRegions) starts a
+    // window-internal drag; moves update the tab's initial_x/y (clamped); release ends it. While
+    // dragging, the panel's mouse events are NOT forwarded to CEF.
+
+    // Begin drag on left-press inside a floating panel's drag region.
+    bool ended_drag_this_frame = false;
+    for (const ButtonEvent& be : button_events) {
+        if (be.button != MouseButton::Left) {
+            continue;
+        }
+        if (be.pressed && dragging_tab_id_ == -1 && hit.hit && !hit.is_main && hit.in_drag_region) {
+            auto* dtab = BrowserManager::instance().get_tab(hit.tab_id);
+            if (dtab && dtab->floating) {
+                dragging_tab_id_ = hit.tab_id;
+                drag_mouse_start_x_ = be.mouse_x;
+                drag_mouse_start_y_ = be.mouse_y;
+                drag_rect_start_x_ = static_cast<float>(dtab->initial_x);
+                drag_rect_start_y_ = static_cast<float>(dtab->initial_y);
+            }
+        } else if (!be.pressed && dragging_tab_id_ != -1) {
+            dragging_tab_id_ = -1;  // release ends the drag
+            ended_drag_this_frame = true;
+        }
+    }
+
+    // While dragging: move the panel and consume all input (no CEF forwarding this frame).
+    if (dragging_tab_id_ != -1) {
+        auto* dtab = BrowserManager::instance().get_tab(dragging_tab_id_);
+        if (!dtab || !dtab->floating) {
+            dragging_tab_id_ = -1;
+        } else {
+            int win_w = 0;
+            int win_h = 0;
+            if (SDL_Window* w = SdlWindowManager::instance().window_for_id(window_id)) {
+                SDL_GetWindowSize(w, &win_w, &win_h);
+            }
+            float nx = drag_rect_start_x_ + (st.mouse_x - drag_mouse_start_x_);
+            float ny = drag_rect_start_y_ + (st.mouse_y - drag_mouse_start_y_);
+            // Clamp so at least a strip of the panel stays on-screen (title bar grabbable).
+            if (win_w > 0 && win_h > 0) {
+                const float kMargin = 40.0f;
+                nx = std::clamp(nx, -static_cast<float>(dtab->width) + kMargin,
+                                static_cast<float>(win_w) - kMargin);
+                ny = std::clamp(ny, 0.0f, static_cast<float>(win_h) - kMargin);
+            }
+            dtab->initial_x = static_cast<int>(std::lround(nx));
+            dtab->initial_y = static_cast<int>(std::lround(ny));
+            return;  // do not forward to CEF while dragging
+        }
+    }
+    // The release that ended a drag must not also reach CEF as a stray click.
+    if (ended_drag_this_frame) {
+        return;
+    }
+    // ----------------------------------------------------------------------------------------
 
     // Determine which tab (if any) receives mouse events.
     auto* tab = (hit.hit && hit.tab_id != -1) ? BrowserManager::instance().get_tab(hit.tab_id) : nullptr;
@@ -317,8 +376,21 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         render_window(context, managed);
     }
 
-    // 6) Close tabs flagged closed.
+    // 6) Close tabs flagged closed. A closed tab that is currently detached owns an OS window
+    //    + a registered surface; those must be torn down (promise-synced, same order as redock)
+    //    BEFORE remove_tab destroys the tab, or we leak the window / present to a dead surface.
+    auto& close_window_manager = SdlWindowManager::instance();
     for (int tab_id : tabs_to_close) {
+        auto* tab = BrowserManager::instance().get_tab(tab_id);
+        if (tab != nullptr && tab->host_surface != nullptr) {
+            void* surface = tab->host_surface;
+            tab->host_surface = nullptr;
+            tab->platform_window_id = 0;
+            tab->platform_handle_raw = nullptr;
+            tab->detach_state = BrowserTab::DetachState::Docked;
+            context.vulkan_backend->unregister_surface(surface);
+            close_window_manager.destroy_secondary_window(surface);
+        }
         BrowserManager::instance().remove_tab(tab_id);
         if (tab_id == *context.active_tab_id) {
             *context.active_tab_id = -1;
@@ -520,17 +592,21 @@ void UiFrameRunner::render_window(UiFrameContext& context, const ManagedWindow& 
     route_mouse_to_panels(window_id, placements, *context.active_tab_id);
 
     // Build quad list (PIXEL dest rects) and render + present this window's surface.
+    // Draw order = z-order (compositor draws array order, no z-sort): the main panel is the
+    // full-screen bottom layer, floating panels stack on top, and the panel being dragged is
+    // topmost. Without this, the main full-screen quad (random unordered_map order) can paint
+    // over a floating panel and make it "disappear".
     std::vector<QuadDraw> quads;
     quads.reserve(placements.size());
-    for (const PanelPlacement& placement : placements) {
+    auto append_quad = [&](const PanelPlacement& placement) {
         auto* tab = BrowserManager::instance().get_tab(placement.tab_id);
         if (!tab || !is_valid_texture_id(tab->texture_id)) {
-            continue;
+            return;
         }
         const Horizon::HardwareImage* image =
             BrowserManager::instance().get_texture_image(tab->texture_id);
         if (image == nullptr) {
-            continue;
+            return;
         }
         QuadDraw quad;
         quad.texture = image;
@@ -538,6 +614,16 @@ void UiFrameRunner::render_window(UiFrameContext& context, const ManagedWindow& 
         quad.dest_max = ktm::fvec2((placement.rect.x + placement.rect.w) * scale_x,
                                    (placement.rect.y + placement.rect.h) * scale_y);
         quads.push_back(quad);
+    };
+    // 1) main (bottom), 2) non-main except the dragged one, 3) the dragged panel (topmost).
+    for (const PanelPlacement& placement : placements) {
+        if (placement.is_main) append_quad(placement);
+    }
+    for (const PanelPlacement& placement : placements) {
+        if (!placement.is_main && placement.tab_id != dragging_tab_id_) append_quad(placement);
+    }
+    for (const PanelPlacement& placement : placements) {
+        if (!placement.is_main && placement.tab_id == dragging_tab_id_) append_quad(placement);
     }
 
     context.vulkan_backend->render_quads(surface, quads, pixel_w, pixel_h);

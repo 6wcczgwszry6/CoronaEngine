@@ -53,6 +53,7 @@ export default {
     componentMissing: '组件未找到: {panelId}',
     popOut: '弹出为独立窗口',
     toggleFloat: '切换浮动/停靠',
+    dropHere: '拖放到此处',
   },
   start: {
     newGame: '新建游戏',

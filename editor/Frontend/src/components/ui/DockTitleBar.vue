@@ -51,10 +51,6 @@ const props = defineProps({
 const emit = defineEmits(['close', 'toggleFloat']);
 const { t } = useI18n();
 
-// 本地跟踪 detach 状态。detach/redock 不会重建 CEF Tab（只改变它渲染到哪个 OS 窗口），
-// 因此本页面及该 ref 在 detach 前后持续存活，可可靠反映当前是否已浮出为独立窗口。
-const floated = ref(false);
-
 // DOM 引用
 const titleBarRef = ref(null);
 
@@ -132,22 +128,37 @@ onUnmounted(() => {
 // 按钮事件处理
 // ============================================================================
 
+// routePath -> panelId（与 useDockPanel.getPanelIdFromRoute 保持一致）。redock 需要把
+// panelId 带进 panel-closed 广播，主窗口据此用 dockStore.popIn 恢复对应 DOM 面板。
+const ROUTE_TO_PANEL_ID = {
+  '/SceneBar': 'SceneTools',
+  '/Object': 'SceneDatas',
+  '/Pet': 'AITool',
+  '/LogView': 'LogTool',
+  '/FileManager': 'FileManager',
+  '/ProjectSettings': 'ProjectSettings',
+  '/ScratchTool': 'ScratchTool',
+  '/AITalkBar': 'AITalkBar',
+  '/Network': 'Network',
+  '/SetUp': 'EditorSettings',
+};
+
+function panelIdFromRoute() {
+  const path = (props.routePath || '').split('?')[0];
+  return ROUTE_TO_PANEL_ID[path] || null;
+}
+
 async function onToggleFloat() {
-  // detach（浮出独立窗口）/ redock（收回主窗口）由 C++ 从调用方 browser 解析 tabId，
-  // 因此无需显式传 tabId。先翻转本地状态再发命令，命令失败则回滚。
-  const goingFloat = !floated.value;
-  floated.value = goingFloat;
+  // DockTitleBar 仅在 standalone（已浮出为独立 OS 窗口）渲染，因此 ⤢ 永远表示「收回主窗口」。
+  // 收回 = closeThisTab：C++ 从调用方 browser 解析 tabId、置 open=false（帧循环按 promise
+  // 顺序拆掉副窗口），并广播 panel-closed → 主窗口 dockStore.popIn 恢复为 DOM 面板。
+  const panelId = panelIdFromRoute();
   try {
-    if (goingFloat) {
-      await appService.detachPanel();
-    } else {
-      await appService.redockPanel();
-    }
+    await appService.closeThisTab(panelId);
   } catch (e) {
-    floated.value = !goingFloat; // 回滚
-    console.error('[DockTitleBar] toggle float failed:', e);
+    console.error('[DockTitleBar] redock failed:', e);
   }
-  emit('toggleFloat', floated.value);
+  emit('toggleFloat', false);
 }
 
 function onClose() {

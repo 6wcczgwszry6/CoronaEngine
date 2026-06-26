@@ -63,6 +63,10 @@ struct BrowserTab {
     int dock_height = 0;            // 指定高度，0 表示自动
     bool dock_fixed = false;        // 是否固定位置
     bool dock_initialized = false;  // 是否已初始化 docking
+    // Phase 10: in-main-window floating panel (popped-out). Positioned by initial_x/y and
+    // draggable by its title bar within the main window. Distinct from host_surface detach
+    // (own OS window), which is disabled pending the multi-surface fix.
+    bool floating = false;
 
     bool open = true;
     bool minimized = false;  // 新增：是否最小化
