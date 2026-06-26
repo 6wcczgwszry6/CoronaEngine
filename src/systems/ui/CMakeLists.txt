@@ -3,7 +3,7 @@
 # longer an imgui or imgui_backends (imgui_impl_sdl3) target. The imgui.vert/frag GLSL
 # shaders are still used by the quad compositor and remain compiled below.
 file(GLOB IMGUI_SYSTEM_SOURCES
-    imgui_system.cpp
+    ui_system.cpp
     vulk/vulkan_backend.cpp
     vulk/quad_compositor.cpp
     vulk/browser_manager_vulkan.cpp
@@ -29,7 +29,7 @@ list(APPEND IMGUI_SYSTEM_SOURCES
 )
 
 
-corona_add_system(imgui
+corona_add_system(ui
     SOURCES ${IMGUI_SYSTEM_SOURCES}
     DEPENDENCIES
         Horizon
@@ -55,12 +55,12 @@ corona_add_system(imgui
         ${CEF_ROOT}
 )
 
-target_compile_definitions(corona_imgui_system PUBLIC VK_NO_PROTOTYPES)
+target_compile_definitions(corona_ui_system PUBLIC VK_NO_PROTOTYPES)
 
-helicon_compile_shaders(corona_imgui_system
+helicon_compile_shaders(corona_ui_system
     OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
 )
 
-target_include_directories(corona_imgui_system BEFORE PUBLIC
+target_include_directories(corona_ui_system BEFORE PUBLIC
     "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
 )

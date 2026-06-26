@@ -80,7 +80,7 @@ class VulkanBackend {
         uint64_t frame_index = 0;
     };
 
-    // Lazily create the shared quad pipeline (reuses the imgui.vert/frag GLSL).
+    // Lazily create the shared quad pipeline (reuses the ui_quad.vert/frag GLSL).
     bool ensure_pipeline();
 
     [[nodiscard]] PerSurfaceRender* find_surface(void* surface);
@@ -99,7 +99,7 @@ class VulkanBackend {
 
     // Shared across all surfaces (single-threaded UI rendering).
     QuadCompositor compositor_;
-    std::optional<Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>> pipeline_;
+    std::optional<Horizon::RasterizerPipeline<ui_quad_vert_glsl_t, ui_quad_frag_glsl_t>> pipeline_;
 };
 
 }  // namespace Corona::Systems

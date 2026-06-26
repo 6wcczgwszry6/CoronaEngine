@@ -76,7 +76,7 @@ target_link_libraries(CoronaEngine PUBLIC
         corona::system::display
         corona::system::network
         corona::system::script
-        corona::system::imgui
+        corona::system::ui
 )
 
 # 设置 C++ 标准

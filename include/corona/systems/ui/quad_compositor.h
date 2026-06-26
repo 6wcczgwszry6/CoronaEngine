@@ -1,7 +1,7 @@
 #pragma once
 
-// Phase 2 of the ImGui-removal plan: a minimal textured-quad compositor that will
-// replace the ImDrawData renderer. It reuses the existing imgui.vert/frag GLSL
+// Phase 2 of the ImGui-removal plan: a minimal textured-quad compositor that
+// replaced the ImDrawData renderer. It reuses the existing ui_quad.vert/frag GLSL
 // pipeline and ViewportRenderResources, but instead of merging ImGui draw lists it
 // renders an explicit list of QuadDraw entries (one CEF panel texture or one solid
 // chrome bar per quad) into a per-window UI render target.
@@ -16,8 +16,8 @@
 #include "horizon.h"
 #include <corona/shader_include.h>
 // clang-format off
-#include GLSL(../../../assets/shaders/imgui.vert.glsl)
-#include GLSL(../../../assets/shaders/imgui.frag.glsl)
+#include GLSL(../../../assets/shaders/ui_quad.vert.glsl)
+#include GLSL(../../../assets/shaders/ui_quad.frag.glsl)
 // clang-format on
 
 #include <cstddef>
@@ -46,7 +46,7 @@ struct ViewportRenderResources {
 //   - texture == nullptr  -> a solid quad tinted by `color` (1x1 white texture is used)
 //   - texture != nullptr  -> sample `texture` (e.g. a CEF panel); keep color = white for passthrough
 // Coordinates are in target pixels. The vertex color is gamma-corrected (pow 2.2) in
-// the fragment shader, matching the existing imgui.frag behaviour.
+// the fragment shader, matching the existing ui_quad.frag behaviour.
 struct QuadDraw {
     const Horizon::HardwareImage* texture = nullptr;
     ktm::fvec2 dest_min = ktm::fvec2(0.0f, 0.0f);
@@ -63,11 +63,11 @@ class QuadCompositor {
     QuadCompositor() = default;
 
     // Render `quads` into `res`'s render target (created/resized as needed) using the
-    // supplied imgui pipeline, then submit. Returns true if any draw was recorded.
-    // Mirrors VulkanBackend::render_draw_data's submit machinery.
+    // supplied UI quad pipeline, then submit. Returns true if any draw was recorded.
+    // Mirrors VulkanBackend's submit machinery.
     bool composite(std::span<const QuadDraw> quads,
                    ViewportRenderResources& res,
-                   Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>& pipeline,
+                   Horizon::RasterizerPipeline<ui_quad_vert_glsl_t, ui_quad_frag_glsl_t>& pipeline,
                    uint32_t target_width,
                    uint32_t target_height,
                    Horizon::ImageUsageFlags render_target_usage = Horizon::ImageUsageFlags::Sampled);

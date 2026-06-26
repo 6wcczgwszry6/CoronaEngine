@@ -226,7 +226,7 @@ bool VulkanBackend::ensure_pipeline() {
         return true;
     }
 
-    pipeline_.emplace(imgui_vert_glsl, imgui_frag_glsl, make_ui_pipeline_desc());
+    pipeline_.emplace(ui_quad_vert_glsl, ui_quad_frag_glsl, make_ui_pipeline_desc());
     pipeline_ready_ = pipeline_->getRasterizerPipelineID() != 0;
 
     if (pipeline_ready_) {

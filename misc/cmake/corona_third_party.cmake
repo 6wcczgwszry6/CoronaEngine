@@ -126,13 +126,6 @@ FetchContent_Declare(
 )
 
 FetchContent_Declare(
-        imgui
-        GIT_REPOSITORY https://github.com/ocornut/imgui.git
-        GIT_TAG v1.92.5-docking
-        EXCLUDE_FROM_ALL
-)
-
-FetchContent_Declare(
         enet
         GIT_REPOSITORY https://github.com/lsalzman/enet.git
         GIT_TAG v1.3.18
@@ -307,34 +300,6 @@ message(STATUS "[3rdparty] VulkanMemoryAllocator module enabled")
 
 FetchContent_MakeAvailable(SDL)
 message(STATUS "[3rdparty] SDL module enabled")
-
-FetchContent_MakeAvailable(imgui)
-message(STATUS "[3rdparty] imgui module enabled")
-
-# Manually define imgui target since it has no CMakeLists.txt
-if(NOT TARGET imgui)
-    add_library(imgui STATIC
-            "${imgui_SOURCE_DIR}/imgui.cpp"
-            "${imgui_SOURCE_DIR}/imgui_demo.cpp"
-            "${imgui_SOURCE_DIR}/imgui_draw.cpp"
-            "${imgui_SOURCE_DIR}/imgui_tables.cpp"
-            "${imgui_SOURCE_DIR}/imgui_widgets.cpp"
-    )
-    target_include_directories(imgui PUBLIC "${imgui_SOURCE_DIR}")
-
-    # imgui is created in the root directory scope BEFORE corona_compile_config
-    # is included, so it does NOT inherit the directory-level /utf-8 set by
-    # add_compile_options() there (directory COMPILE_OPTIONS are snapshotted
-    # into a target at the moment add_library() runs).
-    #
-    # Apply /utf-8 explicitly so imgui's own translation units are compiled
-    # under the same UTF-8 policy as the rest of CoronaEngine. PRIVATE is
-    # sufficient: imgui headers are pure ASCII; only its .cpp files need it.
-    if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-        target_compile_options(imgui PRIVATE
-            $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>)
-    endif()
-endif()
 
 # Manually define enet target — ENet v1.3.18's CMakeLists.txt only supports
 # Unix Makefiles, so we fetch the source and build the library ourselves.
