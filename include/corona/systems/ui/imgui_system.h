@@ -6,7 +6,6 @@
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/kernel/system/i_system.h>
 #include <corona/systems/ui/vulkan_backend.h>
-#include <imgui.h>
 
 #include <memory>
 
@@ -69,7 +68,6 @@ class ImguiSystem : public Kernel::ISystem {
     bool show_demo_window_ = false;
     bool running_ = false;
     SDL_Window* window_ = nullptr;
-    ImGuiIO* io_ = nullptr;
 
     bool window_size_changed_ = false;
     bool sdl_initialized_ = false;

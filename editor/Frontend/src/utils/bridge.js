@@ -205,10 +205,23 @@ export const projectService = {
 export const appService = {
   createPanelTab: (panelId, routePath, width, height, dockingPos) =>
     Bridge.callDockCommand({ cmd: 'createPanelTab', panelId, routePath, width, height, dockingPos }),
+  // Create a panel that is born directly as its own borderless OS window (skips the
+  // main-window docked-rectangle stage, so no 1-frame flash). x/y/width/height are the
+  // desired initial geometry in logical px. Returns { tab_id, panel_id }.
+  createDetachedPanel: ({ panelId, routePath, width, height, x, y }) =>
+    Bridge.callDockCommand({ cmd: 'createDetachedPanel', panelId, routePath, width, height, x, y }),
   closeThisTab: (panelId) =>
     Bridge.callDockCommand({ cmd: 'closeThisTab', panelId }),
   closePanelTab: (tabId, panelId) =>
     Bridge.callDockCommand({ cmd: 'closePanelTab', tabId, panelId }),
+  // Detach the calling panel into its own borderless OS window (tabId omitted ⇒ C++
+  // resolves it from the calling browser). x/y/width/height are optional desired geometry
+  // in logical px; width/height default to the panel's current size on the C++ side.
+  detachPanel: (opts = {}) =>
+    Bridge.callDockCommand({ cmd: 'detachPanel', ...opts }),
+  // Re-dock the calling panel back into the main window (destroys its secondary window).
+  redockPanel: (opts = {}) =>
+    Bridge.callDockCommand({ cmd: 'redockPanel', ...opts }),
   toggleMaximizeThisCameraView: (sceneId = '', cameraId = '') =>
     Bridge.callDockCommand({ cmd: 'toggleMaximizeThisCameraView', sceneId, cameraId }),
   cycleThisCameraViewWindowMode: (sceneId = '', cameraId = '') =>

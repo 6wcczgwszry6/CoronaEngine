@@ -2397,10 +2397,73 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
 
             int tab_id = bm.create_tab(source_base_url(browser), standalone_route,
                                        docking_pos, width, height, false);
+            // Phase 10: a popped-out panel is an in-main-window floating, draggable rectangle.
+            // Seed an initial position from its anchor so multiple pop-outs don't stack at 0,0;
+            // the user can then drag it by its title bar. Done on the UI thread.
+            bm.enqueue_main_thread_task([tab_id, docking_pos, width, height] {
+                auto* tab = BrowserManager::instance().get_tab(tab_id);
+                if (!tab) {
+                    return;
+                }
+                tab->floating = true;
+                // Spread anchors a bit so default panels are visible and not overlapping.
+                int ix = 80;
+                int iy = 80;
+                if (docking_pos == "right_top") { ix = 1100; iy = 80; }
+                else if (docking_pos == "right_bottom") { ix = 1100; iy = 560; }
+                else if (docking_pos == "left_bottom") { ix = 80; iy = 560; }
+                else if (docking_pos == "center") { ix = 600; iy = 300; }
+                tab->initial_x = ix;
+                tab->initial_y = iy;
+            });
             nlohmann::json result;
             result["tab_id"] = tab_id;
             result["panel_id"] = panel_id;
             send_dock_callback(frame, request_id, nullptr, result);
+            return true;
+        }
+
+        if (cmd == "createDetachedPanel") {
+            // Like createPanelTab, but the tab is born detached: created and immediately flagged
+            // Detaching in the SAME main-thread task, so the frame runner's reconcile turns it
+            // into its own borderless OS window THIS frame — it never renders as a main-window
+            // rectangle, so there is no 1-frame flash. The DockTitleBar it renders (standalone
+            // mode) reports drag regions, and reconcile registers the hit-test, so the window is
+            // draggable by its title bar and resizable at its edges.
+            std::string panel_id = command.value("panelId", "");
+            std::string route = command.value("routePath", "");
+            int width = command.value("width", 400);
+            int height = command.value("height", 600);
+            const int x = command.value("x", 120);
+            const int y = command.value("y", 120);
+
+            if (!route.empty() && route[0] == '#') {
+                route = route.substr(1);
+            }
+            std::string standalone_route = route;
+            standalone_route += (standalone_route.find('?') == std::string::npos) ? "?standalone=1" : "&standalone=1";
+
+            const std::string base_url = source_base_url(browser);
+            bm.enqueue_main_thread_task([base_url, standalone_route, panel_id, width, height, x, y,
+                                         frame, request_id] {
+                auto& bmgr = BrowserManager::instance();
+                // docking_pos "right_top" is only a placeholder; the tab is detached below before
+                // it can ever be laid out in the main window.
+                int tab_id = bmgr.create_tab(base_url, standalone_route, "right_top",
+                                             width, height, false);
+                auto* tab = bmgr.get_tab(tab_id);
+                if (tab) {
+                    tab->detach_x = x;
+                    tab->detach_y = y;
+                    tab->detach_w = (width > 0) ? width : std::max(1, tab->width);
+                    tab->detach_h = (height > 0) ? height : std::max(1, tab->height);
+                    tab->detach_state = BrowserTab::DetachState::Detaching;
+                }
+                nlohmann::json result;
+                result["tab_id"] = tab_id;
+                result["panel_id"] = panel_id;
+                send_dock_callback(frame, request_id, nullptr, result);
+            });
             return true;
         }
 
@@ -2416,8 +2479,13 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
 
             int tab_id = find_tab_id_for_browser(browser);
             if (tab_id >= 0) {
+                // Mark closed rather than removing directly: the frame loop's close path
+                // tears down a detached tab's secondary OS window (promise-synced) BEFORE
+                // destroying the tab. Direct remove_tab here would leak/credit-crash the window.
                 bm.enqueue_main_thread_task([tab_id] {
-                    BrowserManager::instance().remove_tab(tab_id);
+                    if (auto* tab = BrowserManager::instance().get_tab(tab_id)) {
+                        tab->open = false;
+                    }
                 });
             }
             return true;
@@ -2428,7 +2496,9 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
             std::string panel_id = command.value("panelId", "");
             if (tab_id >= 0) {
                 bm.enqueue_main_thread_task([tab_id] {
-                    BrowserManager::instance().remove_tab(tab_id);
+                    if (auto* tab = BrowserManager::instance().get_tab(tab_id)) {
+                        tab->open = false;
+                    }
                 });
             }
 
@@ -2466,6 +2536,60 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
             }
             nlohmann::json result;
             result["ok"] = tab_id >= 0;
+            send_dock_callback(frame, request_id, nullptr, result);
+            return true;
+        }
+
+        if (cmd == "detachPanel") {
+            int tab_id = find_tab_id_for_browser(browser);
+            if (command.contains("tabId") && command["tabId"].is_number_integer()) {
+                tab_id = command.value("tabId", -1);
+            }
+            // Optional desired secondary-window geometry (logical px).
+            const int x = command.value("x", 120);
+            const int y = command.value("y", 120);
+            const int w = command.value("width", 0);
+            const int h = command.value("height", 0);
+
+            // Desired-state only: flip Docked -> Detaching on the UI thread. The frame runner's
+            // reconcile step does the actual window create + surface register next frame. All
+            // mutation of detach_state goes through enqueue_main_thread_task so the field stays
+            // single-threaded (UI thread), needing no lock. See Phase 7d design notes.
+            bm.enqueue_main_thread_task([tab_id, x, y, w, h] {
+                auto* tab = BrowserManager::instance().get_tab(tab_id);
+                if (!tab || tab->detach_state != BrowserTab::DetachState::Docked) {
+                    return;  // unknown tab or mid-transition: reject (guards ABA / double-detach)
+                }
+                tab->detach_x = x;
+                tab->detach_y = y;
+                tab->detach_w = (w > 0) ? w : std::max(1, tab->width);
+                tab->detach_h = (h > 0) ? h : std::max(1, tab->height);
+                tab->detach_state = BrowserTab::DetachState::Detaching;
+            });
+
+            nlohmann::json result;
+            result["queued"] = tab_id >= 0;
+            send_dock_callback(frame, request_id, nullptr, result);
+            return true;
+        }
+
+        if (cmd == "redockPanel") {
+            int tab_id = find_tab_id_for_browser(browser);
+            if (command.contains("tabId") && command["tabId"].is_number_integer()) {
+                tab_id = command.value("tabId", -1);
+            }
+            // Desired-state only: flip Detached -> Redocking on the UI thread. The frame runner
+            // tears the window down (promise-synced) next frame.
+            bm.enqueue_main_thread_task([tab_id] {
+                auto* tab = BrowserManager::instance().get_tab(tab_id);
+                if (!tab || tab->detach_state != BrowserTab::DetachState::Detached) {
+                    return;  // only a fully Detached panel can be redocked (guards ABA)
+                }
+                tab->detach_state = BrowserTab::DetachState::Redocking;
+            });
+
+            nlohmann::json result;
+            result["queued"] = tab_id >= 0;
             send_dock_callback(frame, request_id, nullptr, result);
             return true;
         }

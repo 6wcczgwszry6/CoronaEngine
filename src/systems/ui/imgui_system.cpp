@@ -11,9 +11,10 @@
 #include <thread>
 #include <vector>
 
+#include <corona/systems/ui/ui_frame_runner.h>
+
 #include "cef/browser_manager.h"
 #include "cef/cef_client.h"
-#include "imgui/imgui_ui.h"
 
 namespace Corona::Systems {
 
@@ -69,10 +70,10 @@ bool ImguiSystem::initialize(Kernel::ISystemContext* ctx) {
         return false;
     }
 
-    // 2. 初始化 SDL 和 ImGui (必须在主线程)
-    CFW_LOG_NOTICE("ImguiSystem: Initializing SDL and ImGui in main thread...");
-    if (!UI::initialize_sdl_imgui(window_, io_, vulkan_backend_)) {
-        CFW_LOG_ERROR("SDL/ImGui initialization failed.");
+    // 2. 初始化 SDL 和 UI 后端 (必须在主线程，不再创建 ImGui 上下文)
+    CFW_LOG_NOTICE("ImguiSystem: Initializing SDL and UI backend in main thread...");
+    if (!UI::initialize_sdl_ui(window_, vulkan_backend_)) {
+        CFW_LOG_ERROR("SDL/UI initialization failed.");
         UI::shutdown_cef();
         return false;
     }
@@ -133,7 +134,8 @@ void ImguiSystem::stop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
-    ImGui::DestroyPlatformWindows();
+    // Phase 6: no ImGui platform windows to destroy (multi-viewport removed).
+    // Secondary windows (detach) are owned by the SDL window manager in Phase 7.
     running_ = false;
     state_ = Kernel::SystemState::stopped;
 }
@@ -146,7 +148,6 @@ void ImguiSystem::update() {
     static UI::UiFrameRunner frame_runner;
     UI::UiFrameContext context{
         window_,
-        io_,
         vulkan_backend_.get(),
         &active_tab_id_,
         &running_,
@@ -163,10 +164,10 @@ void ImguiSystem::shutdown() {
     CFW_LOG_INFO("ImGuiSystem: Closing all browser tabs...");
     UI::BrowserManager::instance().close_all_tabs();
 
-    // 清理 SDL 和 ImGui (必须在主线程)
+    // 清理 SDL 和 UI 后端 (必须在主线程)
     if (sdl_initialized_) {
-        CFW_LOG_INFO("ImGuiSystem: Shutting down SDL and ImGui...");
-        UI::shutdown_sdl_imgui(window_, io_, vulkan_backend_);
+        CFW_LOG_INFO("ImGuiSystem: Shutting down SDL and UI backend...");
+        UI::shutdown_sdl_ui(window_, vulkan_backend_);
         sdl_initialized_ = false;
     }
 

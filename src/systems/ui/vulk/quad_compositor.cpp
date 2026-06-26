@@ -1,5 +1,6 @@
 #include <corona/systems/ui/quad_compositor.h>
 
+#include <corona/systems/ui/vulkan_backend.h>  // VulkanBackend::ensure_render_target
 #include <corona/kernel/core/i_logger.h>
 
 #include <algorithm>

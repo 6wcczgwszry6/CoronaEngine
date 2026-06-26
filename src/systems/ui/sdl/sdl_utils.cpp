@@ -1,7 +1,5 @@
 #include "sdl_utils.h"
 
-#include <imgui_impl_sdl3.h>
-
 #include <cmath>
 
 namespace Corona::Systems::UI {
@@ -182,33 +180,6 @@ bool should_send_char_event(int key, int modifiers) {
 
 namespace MouseUtils {
 
-int MouseStateManager::handle_mouse_click(const ImVec2& current_pos, Uint32 current_time) {
-    float dx = current_pos.x - last_click_pos_.x;
-    float dy = current_pos.y - last_click_pos_.y;
-    float distance = std::sqrtf(dx * dx + dy * dy);
-
-    if ((current_time - last_click_time_) < kDoubleClickTime && distance < kDoubleClickDist) {
-        click_count_++;
-    } else {
-        click_count_ = 1;
-    }
-
-    if (click_count_ > 3) click_count_ = 1;
-
-    last_click_time_ = current_time;
-    last_click_pos_ = current_pos;
-
-    return click_count_;
-}
-
-void MouseStateManager::reset() {
-    last_click_time_ = 0;
-    last_click_pos_ = ImVec2(0, 0);
-    click_count_ = 0;
-    is_left_down_ = false;
-    is_dragging_ = false;
-}
-
 CefBrowserHost::MouseButtonType convert_mouse_button(Uint8 sdl_button) {
     switch (sdl_button) {
         case SDL_BUTTON_LEFT:
@@ -220,64 +191,6 @@ CefBrowserHost::MouseButtonType convert_mouse_button(Uint8 sdl_button) {
         default:
             return MBT_LEFT;
     }
-}
-
-CefMouseEvent create_mouse_event(const ImVec2& mouse_pos, const ImVec2& item_pos, uint32_t modifiers) {
-    CefMouseEvent mouse_event;
-    mouse_event.x = static_cast<int>(mouse_pos.x - item_pos.x);
-    mouse_event.y = static_cast<int>(mouse_pos.y - item_pos.y);
-    mouse_event.modifiers = modifiers;
-    return mouse_event;
-}
-
-uint32_t get_modifiers(bool is_left_down, bool is_right_down) {
-    ImGuiIO& io = ImGui::GetIO();
-    uint32_t modifiers = 0;
-
-    if (is_left_down) modifiers |= EVENTFLAG_LEFT_MOUSE_BUTTON;
-    if (is_right_down) modifiers |= EVENTFLAG_RIGHT_MOUSE_BUTTON;
-    if (io.KeyShift) modifiers |= EVENTFLAG_SHIFT_DOWN;
-    if (io.KeyCtrl) modifiers |= EVENTFLAG_CONTROL_DOWN;
-    if (io.KeyAlt) modifiers |= EVENTFLAG_ALT_DOWN;
-
-    return modifiers;
-}
-
-void send_mouse_click(CefRefPtr<CefBrowser> browser, const ImVec2& mouse_pos,
-                      const ImVec2& item_pos, CefBrowserHost::MouseButtonType button,
-                      bool mouse_up, int click_count) {
-    if (!browser) return;
-
-    bool is_left = (button == MBT_LEFT);
-    bool is_right = (button == MBT_RIGHT);
-    uint32_t modifiers = get_modifiers(!mouse_up && is_left, !mouse_up && is_right);
-
-    CefMouseEvent mouse_event = create_mouse_event(mouse_pos, item_pos, modifiers);
-    browser->GetHost()->SendMouseClickEvent(mouse_event, button, mouse_up, click_count);
-}
-
-void send_mouse_move(CefRefPtr<CefBrowser> browser, const ImVec2& mouse_pos,
-                     const ImVec2& item_pos, bool mouse_leave) {
-    if (!browser) return;
-
-    ImGuiIO& io = ImGui::GetIO();
-    bool is_left_down = ImGui::IsMouseDown(ImGuiMouseButton_Left);
-    bool is_right_down = ImGui::IsMouseDown(ImGuiMouseButton_Right);
-    uint32_t modifiers = get_modifiers(is_left_down, is_right_down);
-
-    CefMouseEvent mouse_event = create_mouse_event(mouse_pos, item_pos, modifiers);
-    browser->GetHost()->SendMouseMoveEvent(mouse_event, mouse_leave);
-}
-
-void send_mouse_wheel(CefRefPtr<CefBrowser> browser, const ImVec2& mouse_pos,
-                      const ImVec2& item_pos, float wheel_delta) {
-    if (!browser) return;
-
-    uint32_t modifiers = get_modifiers(ImGui::IsMouseDown(0), ImGui::IsMouseDown(1));
-    CefMouseEvent mouse_event = create_mouse_event(mouse_pos, item_pos, modifiers);
-
-    // Windows 标准滚轮增量通常是 120
-    browser->GetHost()->SendMouseWheelEvent(mouse_event, 0, static_cast<int>(wheel_delta * 120));
 }
 
 // ----------------------------------------------------------------------------
@@ -361,33 +274,23 @@ bool SDLEventHandler::is_input_method_switch(const SDL_Event& event) {
             (event.key.mod & SDL_KMOD_GUI && key == SDLK_SPACE));
 }
 
-bool SDLEventHandler::should_process_in_imgui(const SDL_Event& event, int url_input_active_tab) {
-    if (event.type == SDL_EVENT_KEY_DOWN ||
-        event.type == SDL_EVENT_KEY_UP ||
-        event.type == SDL_EVENT_TEXT_INPUT ||
-        event.type == SDL_EVENT_TEXT_EDITING) {
-        return url_input_active_tab != -1;
-    }
-    return true;
-}
-
 EventProcessResult SDLEventHandler::process_events(
     SDL_Window* window,
     int current_url_input_active_tab,
     KeyEventCallback on_key_event,
     KeyEventCallback on_text_event,
-    KeyEventCallback on_ime_event) {
+    KeyEventCallback on_ime_event,
+    KeyEventCallback on_mouse_event) {
     EventProcessResult result;
     result.url_input_active_tab = current_url_input_active_tab;
 
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        // Input-method switch shortcuts used to be fed to ImGui; with ImGui gone they are
+        // simply not treated as text-affecting key events here (SDL/OS handles IME switch).
         if (is_input_method_switch(event)) {
-            ImGui_ImplSDL3_ProcessEvent(&event);
             continue;
         }
-
-        bool should_pass_to_imgui = should_process_in_imgui(event, result.url_input_active_tab);
 
         if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
             if (on_key_event) on_key_event(event);
@@ -395,10 +298,11 @@ EventProcessResult SDLEventHandler::process_events(
             if (on_text_event) on_text_event(event);
         } else if (event.type == SDL_EVENT_TEXT_EDITING) {
             if (on_ime_event) on_ime_event(event);
-        }
-
-        if (should_pass_to_imgui) {
-            ImGui_ImplSDL3_ProcessEvent(&event);
+        } else if (event.type == SDL_EVENT_MOUSE_MOTION ||
+                   event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                   event.type == SDL_EVENT_MOUSE_BUTTON_UP ||
+                   event.type == SDL_EVENT_MOUSE_WHEEL) {
+            if (on_mouse_event) on_mouse_event(event);
         }
 
         switch (event.type) {
@@ -409,6 +313,11 @@ EventProcessResult SDLEventHandler::process_events(
             case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
                 if (event.window.windowID == SDL_GetWindowID(window)) {
                     result.should_quit = true;
+                } else {
+                    // A secondary (detached) window's close button: report its id so the frame
+                    // runner can redock that panel (promise-synced teardown). Never destroy the
+                    // window here — destruction is the UI thread's reconcile job.
+                    result.closed_window_ids.push_back(event.window.windowID);
                 }
                 break;
 

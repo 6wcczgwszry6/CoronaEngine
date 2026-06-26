@@ -1,37 +1,31 @@
-﻿#pragma once
+#pragma once
 
-#include "horizon.h"
-#include <corona/shader_include.h>
-// clang-format off
-#include GLSL(../../../assets/shaders/imgui.vert.glsl)
-#include GLSL(../../../assets/shaders/imgui.frag.glsl)
-// clang-format on
+// quad_compositor.h is the self-contained base: it owns the GLSL pipeline includes,
+// ViewportRenderResources, QuadDraw, and QuadCompositor. Include it (not the reverse) to
+// avoid a circular dependency.
+#include <corona/systems/ui/quad_compositor.h>
+
 #include <SDL3/SDL.h>
-#include <imgui.h>
 
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace Corona::Systems {
 
-// ============================================================================
-// Per-viewport rendering resources (render target, executor, geometry buffers).
-// Used by both the main viewport and secondary (dragged-out) viewports.
-// ============================================================================
-struct ViewportRenderResources {
-    Horizon::HardwareImage render_target;
-    Horizon::HardwareExecutor executor;
-    Horizon::HardwareBuffer vertex_buffer;
-    Horizon::HardwareBuffer index_buffer;
-    size_t vertex_buffer_capacity = 0;
-    size_t index_buffer_capacity = 0;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    bool frame_ready = false;
-};
-
+// VulkanBackend (post-ImGui, Phase 7): renders UI quads into one render target per surface
+// and publishes each to the DisplaySystem via UIFrameReadyEvent. The main window is the
+// surface registered at initialize(); secondary (detached) windows register/unregister at
+// runtime. UI geometry is built as textured quads by the UI frame runner — there is no
+// ImGui draw-data path, font atlas, or multi-viewport renderer callback.
+//
+// The QuadCompositor and the rasterizer pipeline are shared across all surfaces: UI
+// rendering for every window happens on the same (UI) thread, sequentially, so a single
+// pipeline + compositor instance is safe. Per-surface state (render target, geometry
+// buffers, executor, image_handle, frame counter) lives in PerSurfaceRender.
 class VulkanBackend {
    public:
     explicit VulkanBackend(SDL_Window* window);
@@ -40,73 +34,72 @@ class VulkanBackend {
     bool initialize();
     void shutdown();
 
-    // Must be called AFTER ImGui::CreateContext() + ImGui_ImplSDL3_InitForOther().
-    // Registers renderer viewport callbacks and enables RendererHasViewports.
-    void register_viewport_callbacks();
+    // Register/unregister a surface (HWND/NSWindow*). The main window's surface is registered
+    // automatically by initialize(). Secondary windows call register_surface() on detach and
+    // unregister_surface() on re-dock. register_surface() allocates the per-surface image
+    // handle; unregister_surface() releases it. Idempotent.
+    bool register_surface(void* surface, SDL_Window* window);
+    void unregister_surface(void* surface);
+    [[nodiscard]] bool has_surface(void* surface) const;
 
-    void new_frame();
-    void render_frame(ImDrawData* draw_data);
-    void present_frame();
+    // GPU back-pressure for one surface: wait for DisplaySystem to finish consuming the
+    // previous frame's image before rendering new UI content into it.
+    void new_frame(void* surface);
 
+    // Render the given quads into `surface`'s render target (via the shared QuadCompositor)
+    // and mark its frame ready for present_surface(). target_pixels_{w,h} is the window's
+    // physical client pixel size.
+    void render_quads(void* surface, std::span<const QuadDraw> quads,
+                      uint32_t target_pixels_w, uint32_t target_pixels_h);
+
+    // Publish `surface`'s render target to DisplaySystem (UIFrameReadyEvent).
+    void present_surface(void* surface);
+
+    // Recreate `surface`'s render target at the given pixel size (on window resize).
+    void rebuild(void* surface, uint32_t pixel_w, uint32_t pixel_h);
+
+    // Current render-target pixel size for a surface (0 if unknown / not yet created).
+    [[nodiscard]] uint32_t surface_width(void* surface) const;
+    [[nodiscard]] uint32_t surface_height(void* surface) const;
+
+    // --- Main-window convenience (the surface registered at initialize()). ---
+    [[nodiscard]] void* main_surface() const noexcept { return surface_; }
     [[nodiscard]] bool is_rebuild_needed() const noexcept { return rebuild_needed_; }
     void request_rebuild() noexcept { rebuild_needed_ = true; }
-    void rebuild(int width, int height);
-
-    // Render ImDrawData into arbitrary per-viewport resources.
-    // Shared pipeline and font atlas are provided externally.
-    // Returns true if draw commands were recorded and submitted.
-    static bool render_draw_data(
-        ImDrawData* draw_data,
-        ViewportRenderResources& resources,
-        Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>& pipeline,
-        const Horizon::HardwareImage& font_atlas,
-        uint32_t target_width,
-        uint32_t target_height,
-        Horizon::ImageUsageFlags render_target_usage = Horizon::ImageUsageFlags::Sampled);
 
     // Ensure `resources` holds a render target of the given size, (re)creating it on
-    // size change. Shared by the ImGui renderer and the Phase 2+ quad compositor.
+    // size change. Shared with the quad compositor.
     static bool ensure_render_target(ViewportRenderResources& resources, uint32_t width, uint32_t height,
                                      Horizon::ImageUsageFlags usage = Horizon::ImageUsageFlags::Sampled);
 
-    // Accessors for shared resources (used by viewport callbacks)
-    [[nodiscard]] Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>& pipeline() { return *imgui_pipeline_; }
-    [[nodiscard]] const Horizon::HardwareImage& font_atlas() const { return font_atlas_image_; }
-
    private:
-    bool ensure_imgui_pipeline();
-    bool ensure_font_texture();
+    // Per-surface rendering + presentation state.
+    struct PerSurfaceRender {
+        ViewportRenderResources resources;
+        std::uintptr_t image_handle = 0;
+        uint64_t frame_index = 0;
+    };
 
-    // --- Multi-Viewport renderer callbacks (static, access shared state via s_instance_) ---
-    static void renderer_create_window(ImGuiViewport* vp);
-    static void renderer_destroy_window(ImGuiViewport* vp);
-    static void renderer_set_window_size(ImGuiViewport* vp, ImVec2 size);
-    static void renderer_render_window(ImGuiViewport* vp, void* render_arg);
-    static void renderer_swap_buffers(ImGuiViewport* vp, void* render_arg);
+    // Lazily create the shared quad pipeline (reuses the imgui.vert/frag GLSL).
+    bool ensure_pipeline();
 
-   private:
-    static VulkanBackend* s_instance_;
+    [[nodiscard]] PerSurfaceRender* find_surface(void* surface);
 
     bool initialized_ = false;
     bool rebuild_needed_ = false;
-    bool imgui_pipeline_ready_ = false;
-    bool font_ready_ = false;
+    bool pipeline_ready_ = false;
 
     SDL_Window* window_ = nullptr;
-    void* surface_ = nullptr;
+    void* surface_ = nullptr;  // main window's surface
 
-    // Main viewport rendering resources
-    ViewportRenderResources main_resources_;
+    // Per-surface state (main + secondary windows), keyed by native surface handle.
+    // Held by unique_ptr: ViewportRenderResources owns move-only Horizon GPU resources, so
+    // storing it by value in the map (which may move on rehash) is not viable.
+    std::unordered_map<void*, std::unique_ptr<PerSurfaceRender>> surfaces_;
 
-    // Shared across all viewports
-    Horizon::HardwareImage font_atlas_image_;
-    Horizon::HardwareExecutor font_upload_executor_;
-    Horizon::SubmitReceipt font_upload_receipt_;
-    std::optional<Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>> imgui_pipeline_;
-
-    // Main viewport presentation (SharedDataHub path)
-    uint64_t frame_index_ = 0;
-    std::uintptr_t image_handle_ = 0;
+    // Shared across all surfaces (single-threaded UI rendering).
+    QuadCompositor compositor_;
+    std::optional<Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>> pipeline_;
 };
 
 }  // namespace Corona::Systems
