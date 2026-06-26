@@ -26,6 +26,12 @@ file(GLOB IMGUI_SYSTEM_SOURCES
 
 list(APPEND IMGUI_SYSTEM_SOURCES
     ${PROJECT_SOURCE_DIR}/include/corona/systems/ui/vulkan_backend.h
+    # quad_compositor.h owns the `#include GLSL(ui_quad.vert/frag)` macros.
+    # Helicon's shader scan is textual over the target's SOURCES (it does not
+    # follow #include chains), so this header must be listed explicitly or the
+    # ui_quad shader headers are never generated (C1083). Mirrors how the optics
+    # system lists hardware.h.
+    ${PROJECT_SOURCE_DIR}/include/corona/systems/ui/quad_compositor.h
 )
 
 
