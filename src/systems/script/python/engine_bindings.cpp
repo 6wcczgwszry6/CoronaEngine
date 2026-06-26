@@ -428,7 +428,17 @@ void BindAll(nanobind::module_& m) {
         .def("set_simulation_enabled", &Scene::set_simulation_enabled, nb::arg("enabled"),
              "Enable or disable physics simulation for this scene (does not affect rendering)")
         .def("is_simulation_enabled", &Scene::is_simulation_enabled,
-             "Return True if physics simulation is enabled for this scene");
+             "Return True if physics simulation is enabled for this scene")
+        // Scene streaming / visibility configuration
+        .def("set_visibility_config", &Scene::set_visibility_config,
+             nb::arg("invisible_frames_to_evict"),
+             "Set visibility eviction policy. invisible_frames_to_evict=0 disables eviction; "
+             ">0 triggers eviction after N consecutive invisible frames")
+        .def("set_distance_config", &Scene::set_distance_config,
+             nb::arg("unload_dist"), nb::arg("preload_dist"), nb::arg("enable") = true,
+             "Configure distance-based load/unload. unload_dist: distance beyond which invisible "
+             "actors are unloaded; preload_dist: distance within which actors are preloaded; "
+             "enable: toggle distance culling on/off");
 
     // ============================================================================
     // Scene I/O utilities

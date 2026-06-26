@@ -9,7 +9,9 @@ corona_add_system(geometry
         geometry_lod.cpp
         geometry_internal.h
         frustum.cpp
+        actor_cache.cpp
     DEPENDENCIES
         Horizon
         corona::resource::manager
+        nlohmann_json::nlohmann_json
 )

@@ -377,6 +377,7 @@ struct SceneDevice {
     bool simulation_enabled{false};
     std::uintptr_t environment{};
     std::vector<std::uintptr_t> actor_handles;
+    std::vector<std::uintptr_t> visible_actor_handles;
     std::vector<std::uintptr_t> camera_handles;
     std::uintptr_t active_camera_handle{};
     ktm::fvec3 min_world;
