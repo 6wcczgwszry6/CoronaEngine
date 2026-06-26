@@ -738,7 +738,10 @@ bool collect_actor_instances_for_visibility(
 
     bool has_instances = false;
     uint32_t object_id = 1;
-    for (auto actor_handle : scene.actor_handles) {
+    const auto& handles = scene.visible_actor_handles.empty()
+                              ? scene.actor_handles
+                              : scene.visible_actor_handles;
+    for (auto actor_handle : handles) {
         auto actor = actor_storage.try_acquire_read(actor_handle);
         if (!actor) {
             ++object_id;
@@ -2129,7 +2132,10 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     bool has_instances = false;
                     uint32_t recorded_draws = 0;
                     uint32_t object_id = 1;
-                    for (auto actor_handle : scene.actor_handles) {
+                    const auto& vis_handles = scene.visible_actor_handles.empty()
+                                                  ? scene.actor_handles
+                                                  : scene.visible_actor_handles;
+                    for (auto actor_handle : vis_handles) {
                         auto actor = actor_storage.try_acquire_read(actor_handle);
                         if (!actor) {
                             ++object_id;
@@ -2445,8 +2451,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 // 8. GPU sync & dispatch
                 // ================================================================
                 const bool is_debug_mode = camera->output_mode != CameraOutputMode::FinalColor;
-                const uint32_t dispatchX = hardware_->gbufferSize.x;
-                const uint32_t dispatchY = hardware_->gbufferSize.y;
+                const uint32_t dispatchX = (hardware_->gbufferSize.x + 7u) / 8u;
+                const uint32_t dispatchY = (hardware_->gbufferSize.y + 7u) / 8u;
                 const auto actor_pick_request = take_pending_actor_pick(cam_handle);
 
                 if (actor_pick_request) {

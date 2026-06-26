@@ -173,7 +173,6 @@ class BrowserManager {
     };
 
     std::unordered_map<int, std::unique_ptr<BrowserTab>> tabs_;
-    std::vector<int> tabs_to_close_;
     std::mutex pending_tasks_mutex_;
     std::vector<std::function<void()>> pending_tasks_;
     std::unordered_map<UiTextureId, OwnedImage> owned_images_;

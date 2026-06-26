@@ -240,7 +240,6 @@ void BrowserManager::update() {
 
     for (auto& [tab_id, tab] : tabs_) {
         if (!tab->open) {
-            tabs_to_close_.push_back(tab_id);
             continue;
         }
         update_texture(tab_id);

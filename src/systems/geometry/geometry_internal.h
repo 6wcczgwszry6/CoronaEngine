@@ -1,11 +1,15 @@
 #pragma once
 
+#include <corona/spatial/bvh.h>
 #include <corona/spatial/octree.h>
+#include <corona/systems/geometry/actor_cache.h>
 #include <corona/systems/geometry/geometry_system.h>
 
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -105,6 +109,10 @@ struct GeometrySystem::Impl {
     struct LODCacheEntry {
         std::vector<LODMeshBuffers> levels;
         std::uint64_t model_id = 0;  // 用于检测模型变更（比地址指针可靠，不受 slot 复用影响）
+
+        // 每个 LOD 级别一个 BVH（下标与 levels 一一对应）
+        // payload = 三角形下标（i/3），用于射线→三角形加速查询
+        std::vector<Spatial::BVH<uint32_t>> per_level_bvh;
     };
 
     MeshSimplificationConfig           simplification_cfg;
@@ -114,6 +122,27 @@ struct GeometrySystem::Impl {
     // 共享占位纹理：所有无纹理 mesh 共用，生命周期与 Impl 一致
     // 使用 unique_ptr 避免 static 局部变量在 GPU device 析构后才析构
     std::unique_ptr<Horizon::HardwareImage> shared_placeholder_texture;
+
+    // ========================================
+    // LRU ActorCache（M3 生产化）
+    // ========================================
+    // 两级 LRU 缓存（内存 + 磁盘），存储被 evict 的 actor 快照
+    // 默认：64MB 内存 + 256MB 磁盘，目录可配置
+    static constexpr size_t kDefaultMemCacheBytes  = 64 * 1024 * 1024;
+    static constexpr size_t kDefaultDiskCacheBytes = 256 * 1024 * 1024;
+
+    std::unique_ptr<Corona::Cache::ActorCache> actor_cache;
+    std::filesystem::path                       actor_cache_dir;
+
+    /// 初始化 ActorCache（延迟到首次 evict/restore 时）
+    void ensure_actor_cache();
+
+    /// actor_handle → 最后一次快照时间（用于防抖）
+    std::unordered_map<Payload, std::chrono::steady_clock::time_point> last_snapshot_time;
+
+    /// evict 后待释放 GPU 的 actor 集合（延迟到下一帧 update() 头部处理，
+    /// 避免与 OpticsSystem 渲染线程产生 data race）
+    std::unordered_set<Payload> pending_gpu_releases;
 
     [[nodiscard]] static uint64_t make_lod_key(std::uintptr_t geometry_handle,
                                                uint32_t       mesh_index) {
