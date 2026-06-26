@@ -49,9 +49,12 @@ struct ActorLoadRequestedEvent {
 };
 
 /**
- * @brief Actor 资源加载完成事件（由资源系统发布）
+ * @brief Actor 资源加载完成，GPU 资源已就绪（由 GeometrySystem 发布）
+ *
+ * 外部系统（Optics/Mechanics/Vision）应监听此事件以开始消费该 actor。
+ * 与 ActorLoadRequestedEvent 配对：request → 异步加载 → finished。
  */
-struct ActorLoadCompletedEvent {
+struct ActorLoadFinishedEvent {
     std::uintptr_t scene{};
     std::uintptr_t actor{};
 };
@@ -65,9 +68,12 @@ struct ActorUnloadRequestedEvent {
 };
 
 /**
- * @brief Actor 资源卸载完成事件（由资源系统发布）
+ * @brief Actor 资源卸载完成，GPU 资源已释放（由 GeometrySystem 发布）
+ *
+ * 外部系统应监听此事件以停止消费该 actor。
+ * 与 ActorUnloadRequestedEvent 配对：request → 异步卸载 → finished。
  */
-struct ActorUnloadCompletedEvent {
+struct ActorUnloadFinishedEvent {
     std::uintptr_t scene{};
     std::uintptr_t actor{};
 };

@@ -738,7 +738,10 @@ bool collect_actor_instances_for_visibility(
 
     bool has_instances = false;
     uint32_t object_id = 1;
-    for (auto actor_handle : scene.actor_handles) {
+    const auto& handles = scene.visible_actor_handles.empty()
+                              ? scene.actor_handles
+                              : scene.visible_actor_handles;
+    for (auto actor_handle : handles) {
         auto actor = actor_storage.try_acquire_read(actor_handle);
         if (!actor) {
             ++object_id;
@@ -2129,7 +2132,10 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     bool has_instances = false;
                     uint32_t recorded_draws = 0;
                     uint32_t object_id = 1;
-                    for (auto actor_handle : scene.actor_handles) {
+                    const auto& vis_handles = scene.visible_actor_handles.empty()
+                                                  ? scene.actor_handles
+                                                  : scene.visible_actor_handles;
+                    for (auto actor_handle : vis_handles) {
                         auto actor = actor_storage.try_acquire_read(actor_handle);
                         if (!actor) {
                             ++object_id;

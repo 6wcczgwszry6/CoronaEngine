@@ -1,7 +1,10 @@
 #include <corona/events/engine_events.h>
 #include <corona/kernel/core/i_logger.h>
-#include <corona/shared_data_hub.h>
 #include <corona/kernel/utils/storage.h>
+#include <corona/resource/resource.h>
+#include <corona/resource/resource_manager.h>
+#include <corona/resource/types/scene.h>
+#include <corona/shared_data_hub.h>
 #include <corona/spatial/octree.h>
 #include <corona/systems/geometry/geometry_system.h>
 #include <corona/utils/path_utils.h>
@@ -10,6 +13,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
+#include <future>
 #include <limits>
 #include <mutex>
 #include <shared_mutex>
@@ -17,13 +22,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <filesystem>
-#include <future>
 #include <utility>
-
-#include <corona/resource/resource.h>
-#include <corona/resource/resource_manager.h>
-#include <corona/resource/types/scene.h>
 
 #include "geometry_internal.h"
 
@@ -74,13 +73,13 @@ bool GeometrySystem::initialize(Kernel::ISystemContext* ctx) {
     CFW_LOG_NOTICE("GeometrySystem: Initializing (octree host)");
 
     if (ctx && ctx->event_bus()) {
-        auto id1 = ctx->event_bus()->subscribe<Events::ActorLoadCompletedEvent>(
-            [this](const Events::ActorLoadCompletedEvent& e) {
-                this->on_load_completed(e);
+        auto id1 = ctx->event_bus()->subscribe<Events::ActorLoadFinishedEvent>(
+            [this](const Events::ActorLoadFinishedEvent& e) {
+                this->on_load_finished(e);
             });
-        auto id2 = ctx->event_bus()->subscribe<Events::ActorUnloadCompletedEvent>(
-           [this](const Events::ActorUnloadCompletedEvent& e) {
-               this->on_unload_completed(e);
+        auto id2 = ctx->event_bus()->subscribe<Events::ActorUnloadFinishedEvent>(
+           [this](const Events::ActorUnloadFinishedEvent& e) {
+               this->on_unload_finished(e);
            });
         auto id3 = ctx->event_bus()->subscribe<Events::ActorLoadRequestedEvent>(
             [this](const Events::ActorLoadRequestedEvent& e) {
@@ -90,8 +89,17 @@ bool GeometrySystem::initialize(Kernel::ISystemContext* ctx) {
             [this](const Events::ActorUnloadRequestedEvent& e) {
                 this->on_unload_requested(e);
             });
+        // ---- M3 LRU：订阅 evict / restore 事件 ----
+        auto id5 = ctx->event_bus()->subscribe<Events::ActorEvictRequestedEvent>(
+            [this](const Events::ActorEvictRequestedEvent& e) {
+                this->on_evict_requested(e);
+            });
+        auto id6 = ctx->event_bus()->subscribe<Events::ActorRestoreRequestedEvent>(
+            [this](const Events::ActorRestoreRequestedEvent& e) {
+                this->on_restore_requested(e);
+            });
 
-        impl_->event_subscriptions = {id1,id2,id3,id4};
+        impl_->event_subscriptions = {id1, id2, id3, id4, id5, id6};
     }
 
     return true;
@@ -112,6 +120,21 @@ void GeometrySystem::update() {
     }
 
     process_async_tasks();
+
+    // ---- 延迟 GPU 释放（LRU evict 路径） ----
+    // on_evict_requested 将 actor 加入 pending_gpu_releases 集合，
+    // 延迟到此处（下一帧 update 头部）释放 GPU 资源，避免与
+    // OpticsSystem 渲染线程产生 data race。
+    if (!impl_->pending_gpu_releases.empty()) {
+        std::unordered_set<Impl::Payload> to_release;
+        {
+            std::unique_lock lock(impl_->mtx);
+            to_release.swap(impl_->pending_gpu_releases);
+        }
+        for (auto actor : to_release) {
+            release_actor_gpu_resources(actor);
+        }
+    }
 
     // ---- 动态减面管线 ----
     // 用 shared_lock 快照 simplification_cfg，与 set_simplification_config 的 unique_lock 互斥
@@ -262,6 +285,31 @@ void GeometrySystem::update() {
                                           std::chrono::steady_clock::now() - visible_query_begin)
                                           .count();
             visible_actors.insert(visible_for_camera.begin(),visible_for_camera.end());
+        }
+
+        // ---- M3 LRU 唤醒触发器 ----
+        // 遍历可见 actor，检查是否有被 evict 后 offline 的
+        std::vector<Events::ActorRestoreRequestedEvent> pending_restores;
+        {
+            std::shared_lock lock(impl_->mtx);
+            auto scene_it = impl_->scenes.find(scene_handle);
+            if (scene_it != impl_->scenes.end()) {
+                auto& scene_state = scene_it->second;
+                for (auto actor : visible_actors) {
+                    auto it = impl_->offline_actors.find(actor);
+                    if (it == impl_->offline_actors.end() || !it->second) continue;
+                    auto state_it = scene_state.actor_load_states.find(actor);
+                    if (state_it == scene_state.actor_load_states.end()) continue;
+                    if (state_it->second != ActorLoadState::Unloaded) continue;
+                    if (scene_state.loading_tasks.count(actor)) continue;
+                    if (scene_state.unloading_tasks.count(actor)) continue;
+                    pending_restores.push_back({scene_handle, actor});
+                }
+            }
+        }
+        for (const auto& evt : pending_restores) {
+            if (impl_->ctx && impl_->ctx->event_bus())
+                impl_->ctx->event_bus()->publish(evt);
         }
 
         std::vector<Events::ActorUnloadRequestedEvent> pending_unloads;
@@ -436,6 +484,8 @@ void GeometrySystem::update() {
             scene_dev_write.min_world = root_aabb.min;
             scene_dev_write.max_world = root_aabb.max;
             scene_dev_write.center_world = root_aabb.center();
+            scene_dev_write.visible_actor_handles.assign(visible_actors.begin(),
+                                                         visible_actors.end());
         }
     }
 }
@@ -486,6 +536,10 @@ void GeometrySystem::shutdown() {
 
     impl_->scenes.clear();
     impl_->offline_actors.clear();
+    impl_->pending_gpu_releases.clear();
+
+    // 释放 LRU ActorCache（确保在 shutdown 时清理磁盘/内存）
+    impl_->actor_cache.reset();
 
     // 显式释放共享占位纹理，确保在 GPU device 仍存活时析构 HardwareImage
     impl_->shared_placeholder_texture.reset();
@@ -509,12 +563,18 @@ void GeometrySystem::set_distance_config(std::uintptr_t scene, float unload_dist
     scene_state.cfg.preload_distance = preload_dist;
 }
 
+void GeometrySystem::set_cache_directory(std::filesystem::path dir) {
+    impl_->actor_cache_dir = std::move(dir);
+    // 如果 ActorCache 已创建，下次 evict 时会沿用旧目录；
+    // 如果尚未创建，ensure_actor_cache() 将使用新目录。
+    CFW_LOG_NOTICE("[GeometrySystem] Cache directory set to {}", impl_->actor_cache_dir.string());
+}
+
 // ============================================================================
 // 私有事件处理
 // ============================================================================
 
-void GeometrySystem::on_load_completed(const Events::ActorLoadCompletedEvent& event) {
-    ActorLoadState old_state = ActorLoadState::Unloaded;
+void GeometrySystem::on_load_finished(const Events::ActorLoadFinishedEvent& event) {
     {
         std::unique_lock lock(impl_->mtx);
         auto scene_it = impl_->scenes.find(event.scene);
@@ -522,20 +582,18 @@ void GeometrySystem::on_load_completed(const Events::ActorLoadCompletedEvent& ev
             auto& state_map = scene_it->second.actor_load_states;
             auto actor_it = state_map.find(event.actor);
             if (actor_it != state_map.end() && actor_it->second == ActorLoadState::Loading) {
-                old_state = actor_it->second;
                 actor_it->second = ActorLoadState::Loaded;
                 impl_->offline_actors[event.actor] = false;
+                CFW_LOG_NOTICE("GeometrySystem: Actor {} (scene: {}) load finished",
+                               event.actor, event.scene);
             }
         }
-    } // 释放锁后发布事件
-    if (old_state == ActorLoadState::Loading) {
-        CFW_LOG_NOTICE("GeometrySystem: Actor {} (scene: {}) load completed", event.actor, event.scene);
-        impl_->ctx->event_bus()->publish(event);
     }
+    // 不再重新发布事件 — ActorLoadFinishedEvent 由 process_async_tasks()
+    // 在 GPU 资源重建完成后发布，外部系统直接订阅该事件即可。
 }
 
-void GeometrySystem::on_unload_completed(const Events::ActorUnloadCompletedEvent& event) {
-    ActorLoadState old_state = ActorLoadState::Loaded;
+void GeometrySystem::on_unload_finished(const Events::ActorUnloadFinishedEvent& event) {
     {
         std::unique_lock lock(impl_->mtx);
         auto scene_it = impl_->scenes.find(event.scene);
@@ -544,15 +602,14 @@ void GeometrySystem::on_unload_completed(const Events::ActorUnloadCompletedEvent
         auto& state_map = scene_it->second.actor_load_states;
         auto actor_it = state_map.find(event.actor);
         if (actor_it != state_map.end() && actor_it->second == ActorLoadState::Unloading) {
-            old_state = actor_it->second;
             actor_it->second = ActorLoadState::Unloaded;
-            impl_->offline_actors[event.actor] = false;
+            impl_->offline_actors[event.actor] = true;
+            CFW_LOG_NOTICE("GeometrySystem: Actor {} (scene: {}) unload finished",
+                           event.actor, event.scene);
         }
     }
-    if (old_state == ActorLoadState::Unloading) {
-        CFW_LOG_NOTICE("GeometrySystem: Actor {} (scene: {}) unload completed", event.actor, event.scene);
-        impl_->ctx->event_bus()->publish(event);
-    }
+    // 不再重新发布事件 — ActorUnloadFinishedEvent 由 process_async_tasks()
+    // 在 GPU 资源释放完成后发布，外部系统直接订阅该事件即可。
 }
 
 // ============================================================================
@@ -562,7 +619,7 @@ void GeometrySystem::on_unload_completed(const Events::ActorUnloadCompletedEvent
 // ============================================================================
 // release_actor_gpu_resources
 // 功能：释放指定 actor 占用的全部 GPU 资源（显存中的顶点/索引缓冲和纹理）
-// 调用时机：process_async_tasks() 中处理 ActorUnloadCompletedEvent 时
+// 调用时机：process_async_tasks() 中处理 ActorUnloadFinishedEvent 时
 // 注意：只清理 GPU 端资源，不删除 SharedDataHub 中的存储槽位
 // ============================================================================
 void GeometrySystem::release_actor_gpu_resources(std::uintptr_t actor) {
@@ -1103,11 +1160,11 @@ void GeometrySystem::process_async_tasks() {
 
         if (task.rid != Resource::IResource::INVALID_UID) {
             // 重建 GPU 资源（mesh_handles + 纹理），恢复 model_resource_handle
-            // 必须在发布 ActorLoadCompletedEvent 之前完成，
+            // 必须在发布 ActorLoadFinishedEvent 之前完成，
             // 以保证事件订阅者（渲染线程等）能读到有效的 GPU 缓冲
             rebuild_actor_gpu_resources(task.actor, task.rid);
 
-            impl_->ctx->event_bus()->publish(Events::ActorLoadCompletedEvent{task.scene_handle,task.actor});
+            impl_->ctx->event_bus()->publish(Events::ActorLoadFinishedEvent{task.scene_handle,task.actor});
             CFW_LOG_DEBUG("[SceneSystem] Actor {} loaded (resource: {})", task.actor, task.rid);
         }else {
             CFW_LOG_ERROR("[SceneSystem] Failed to load actor {}", task.actor);
@@ -1119,7 +1176,7 @@ void GeometrySystem::process_async_tasks() {
                     scene_it->second.actor_load_states[task.actor] = ActorLoadState::Unloaded;
                 }
             }
-            impl_->ctx->event_bus()->publish(Events::ActorUnloadCompletedEvent{task.scene_handle, task.actor});
+            impl_->ctx->event_bus()->publish(Events::ActorUnloadFinishedEvent{task.scene_handle, task.actor});
         }
     }
 
@@ -1136,7 +1193,7 @@ void GeometrySystem::process_async_tasks() {
                     scene_it->second.unload_retry_counts.erase(task.actor);
                 }
             }
-            impl_->ctx->event_bus()->publish(Events::ActorUnloadCompletedEvent{task.scene_handle, task.actor});
+            impl_->ctx->event_bus()->publish(Events::ActorUnloadFinishedEvent{task.scene_handle, task.actor});
             CFW_LOG_DEBUG("[SceneSystem] Actor {} unloaded", task.actor);
         } else {
             // 卸载失败，保存到列表中后续处理重试
@@ -1146,7 +1203,7 @@ void GeometrySystem::process_async_tasks() {
 
     //卸载失败重试
     if (!failed_unloads.empty()) {
-        std::vector<Events::ActorUnloadCompletedEvent> deferred_events;
+        std::vector<Events::ActorUnloadFinishedEvent> deferred_events;
         {
             std::unique_lock lock(impl_->mtx);
             for (const auto& task : failed_unloads) {
@@ -1231,7 +1288,7 @@ void GeometrySystem::on_load_requested(const Events::ActorLoadRequestedEvent& e)
         CFW_LOG_ERROR("[GeometrySystem] Invalid actor or empty model path: {}", e.actor);
         scene_state.actor_load_states[e.actor] = ActorLoadState::Unloaded;
         lock.unlock();
-        impl_->ctx->event_bus()->publish(Events::ActorUnloadCompletedEvent{e.scene,e.actor});
+        impl_->ctx->event_bus()->publish(Events::ActorUnloadFinishedEvent{e.scene,e.actor});
         return;
     }
 
@@ -1267,7 +1324,7 @@ void GeometrySystem::on_unload_requested(const Events::ActorUnloadRequestedEvent
     if (!actor_read.valid() || actor_read->model_path.empty()) {
         scene_state.actor_load_states[e.actor] = ActorLoadState::Unloaded;
         lock.unlock();
-        impl_->ctx->event_bus()->publish(Events::ActorUnloadCompletedEvent{e.scene, e.actor});
+        impl_->ctx->event_bus()->publish(Events::ActorUnloadFinishedEvent{e.scene, e.actor});
         return;
     }
 
@@ -1283,6 +1340,159 @@ void GeometrySystem::on_unload_requested(const Events::ActorUnloadRequestedEvent
                   e.actor, Utils::path_to_utf8(actor_read->model_path));
     scene_state.unload_retry_counts[e.actor] = 0;
     scene_state.unloading_tasks[e.actor] = Resource::ResourceManager::get_instance().remove_cache_async(rid);
+}
+
+// ============================================================================
+// LRU ActorCache：ensure + evict/restore 事件处理
+// ============================================================================
+
+void GeometrySystem::Impl::ensure_actor_cache() {
+    if (actor_cache) return;
+    if (actor_cache_dir.empty()) {
+        // 默认目录：可执行文件同级的 cache/actors/
+        actor_cache_dir = std::filesystem::current_path() / "cache" / "actors";
+    }
+    actor_cache = std::make_unique<Corona::Cache::ActorCache>(
+        kDefaultMemCacheBytes,
+        kDefaultDiskCacheBytes,
+        actor_cache_dir);
+    CFW_LOG_NOTICE("[GeometrySystem] ActorCache initialized: mem={}MB disk={}MB dir={}",
+                   kDefaultMemCacheBytes / (1024 * 1024),
+                   kDefaultDiskCacheBytes / (1024 * 1024),
+                   actor_cache_dir.string());
+}
+
+void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& event) {
+    impl_->ensure_actor_cache();
+
+    auto& hub = SharedDataHub::instance();
+    const auto now = std::chrono::steady_clock::now();
+
+    // ---- 第 1 步：防抖检查（5 秒内不重复快照） ----
+    {
+        auto it = impl_->last_snapshot_time.find(event.actor);
+        if (it != impl_->last_snapshot_time.end()) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - it->second);
+            if (elapsed.count() < 5) return;
+        }
+    }
+
+    // ---- 第 2 步：读取 actor 和 transform 数据 ----
+    auto actor_read = hub.actor_storage().try_acquire_read(event.actor);
+    if (!actor_read) return;
+
+    Corona::Cache::ActorSnapshot snap;
+    snap.model_path    = actor_read->model_path;
+    snap.follow_camera = actor_read->follow_camera;
+    snap.profile_count = static_cast<int>(actor_read->profile_handles.size());
+
+    // 读取第一个 profile 关联的 transform: profile → mechanics → geometry → transform
+    for (auto profile_handle : actor_read->profile_handles) {
+        auto profile = hub.profile_storage().try_acquire_read(profile_handle);
+        if (!profile) continue;
+
+        std::uintptr_t mech_handle = profile->mechanics_handle;
+        if (!mech_handle) continue;
+        auto mech = hub.mechanics_storage().try_acquire_read(mech_handle);
+        if (!mech) continue;
+
+        auto geom = hub.geometry_storage().try_acquire_read(mech->geometry_handle);
+        if (!geom || !geom->transform_handle) continue;
+
+        auto transform = hub.model_transform_storage().try_acquire_read(geom->transform_handle);
+        if (!transform) continue;
+
+        snap.position[0] = transform->position.x;
+        snap.position[1] = transform->position.y;
+        snap.position[2] = transform->position.z;
+        snap.euler_rotation[0] = transform->euler_rotation.x;
+        snap.euler_rotation[1] = transform->euler_rotation.y;
+        snap.euler_rotation[2] = transform->euler_rotation.z;
+        snap.scale[0] = transform->scale.x;
+        snap.scale[1] = transform->scale.y;
+        snap.scale[2] = transform->scale.z;
+        break;
+    }
+
+    // ---- 第 3 步：存入 ActorCache ----
+    if (!impl_->actor_cache->put(event.actor, snap)) {
+        CFW_LOG_ERROR("[GeometrySystem] Failed to cache actor {} snapshot", event.actor);
+    }
+
+    // ---- 第 4 步：标记 offline + 延迟 GPU 释放 ----
+    // 不在事件处理中直接调用 release_actor_gpu_resources，
+    // 避免与 OpticsSystem 渲染线程产生 data race。
+    // 改为加入 pending_gpu_releases 集合，在下一帧 update() 头部释放。
+    {
+        std::unique_lock lock(impl_->mtx);
+        impl_->offline_actors[event.actor] = true;
+        impl_->pending_gpu_releases.insert(event.actor);
+        auto scene_it = impl_->scenes.find(event.scene);
+        if (scene_it != impl_->scenes.end()) {
+            scene_it->second.actor_load_states[event.actor] = ActorLoadState::Unloaded;
+        }
+    }
+
+    impl_->last_snapshot_time[event.actor] = now;
+
+    CFW_LOG_NOTICE("[GeometrySystem] Actor {} evicted: cached snapshot ({} profiles, path={})",
+                   event.actor, snap.profile_count, snap.model_path.string());
+}
+
+void GeometrySystem::on_restore_requested(const Events::ActorRestoreRequestedEvent& event) {
+    impl_->ensure_actor_cache();
+
+    auto& hub = SharedDataHub::instance();
+
+    // ---- 第 1 步：从 ActorCache 获取快照 ----
+    auto snap = impl_->actor_cache->get(event.actor);
+    std::filesystem::path model_path;
+
+    if (snap) {
+        model_path = snap->model_path;
+        CFW_LOG_NOTICE("[GeometrySystem] Restoring actor {} from cache (path={})",
+                       event.actor, model_path.string());
+    } else {
+        // 缓存未命中：回退到从 ActorDevice 读取 model_path
+        auto actor_read = hub.actor_storage().try_acquire_read(event.actor);
+        if (!actor_read) {
+            CFW_LOG_ERROR("[GeometrySystem] Restore failed: actor {} not in storage", event.actor);
+            return;
+        }
+        model_path = actor_read->model_path;
+        CFW_LOG_NOTICE("[GeometrySystem] Restoring actor {} from disk (cache miss, path={})",
+                       event.actor, model_path.string());
+    }
+
+    if (model_path.empty()) {
+        CFW_LOG_ERROR("[GeometrySystem] Restore failed: actor {} has empty model path", event.actor);
+        return;
+    }
+
+    // ---- 第 2 步：检查是否已在加载/卸载中，然后启动异步导入 ----
+    {
+        std::unique_lock lock(impl_->mtx);
+        auto scene_it = impl_->scenes.find(event.scene);
+        if (scene_it == impl_->scenes.end()) return;
+        auto& scene_state = scene_it->second;
+
+        if (scene_state.loading_tasks.count(event.actor) ||
+            scene_state.unloading_tasks.count(event.actor)) {
+            CFW_LOG_NOTICE("[GeometrySystem] Restore: actor {} already in transition, skip",
+                           event.actor);
+            return;
+        }
+
+        // 如果该 actor 还在待释放 GPU 队列中，移除（不需要释放了）
+        impl_->pending_gpu_releases.erase(event.actor);
+
+        scene_state.actor_load_states[event.actor] = ActorLoadState::Loading;
+        scene_state.loading_tasks[event.actor] =
+            Resource::ResourceManager::get_instance().import_async(model_path);
+    }
+
+    CFW_LOG_NOTICE("[GeometrySystem] Restore started for actor {} ({})", event.actor,
+                   model_path.string());
 }
 
 // ============================================================================
@@ -1393,8 +1603,87 @@ const LODMeshBuffers* GeometrySystem::resolve_lod_buffers(
 }
 
 // ============================================================================
+// BVH 射线查询
+// ============================================================================
+
+std::vector<uint32_t> GeometrySystem::query_mesh_ray(
+    std::uintptr_t   geometry_handle,
+    uint32_t         mesh_index,
+    int              lod_level,
+    const ktm::fvec3& origin,
+    const ktm::fvec3& inv_dir) const
+{
+    std::shared_lock lock(impl_->lod_cache_mutex);
+    auto key = Impl::make_lod_key(geometry_handle, mesh_index);
+    auto it  = impl_->lod_cache.find(key);
+    if (it == impl_->lod_cache.end()) return {};
+    if (lod_level < 0 || static_cast<size_t>(lod_level) >= it->second.per_level_bvh.size())
+        return {};
+
+    std::vector<uint32_t> hits;
+    it->second.per_level_bvh[lod_level].query_ray(origin, inv_dir, hits);
+    return hits;
+}
+
+std::optional<Spatial::BVH<uint32_t>::Hit> GeometrySystem::query_mesh_closest_hit(
+    std::uintptr_t   geometry_handle,
+    uint32_t         mesh_index,
+    int              lod_level,
+    const ktm::fvec3& origin,
+    const ktm::fvec3& inv_dir,
+    float            t_max) const
+{
+    std::shared_lock lock(impl_->lod_cache_mutex);
+    auto key = Impl::make_lod_key(geometry_handle, mesh_index);
+    auto it  = impl_->lod_cache.find(key);
+    if (it == impl_->lod_cache.end()) return std::nullopt;
+    if (lod_level < 0 || static_cast<size_t>(lod_level) >= it->second.per_level_bvh.size())
+        return std::nullopt;
+
+    return it->second.per_level_bvh[lod_level].closest_hit(origin, inv_dir, t_max);
+}
+
+// ============================================================================
 // 动态减面内部管线
 // ============================================================================
+
+namespace {
+
+/// 从 CPU 端顶点+索引构建 BVH（payload = 三角形下标）
+/// @param vertices 顶点数组
+/// @param indices  uint16 索引数组（每 3 个一组构成三角形）
+/// @return 构建好的 BVH，无数据时返回空 BVH
+
+[[nodiscard]] Spatial::BVH<uint32_t> build_triangle_bvh(
+    const std::vector<Resource::Vertex>&    vertices,
+    const std::vector<std::uint16_t>&       indices)
+{
+    Spatial::BVH<uint32_t> bvh;
+    if (indices.size() < 3) return bvh;
+
+    std::vector<Spatial::BVH<uint32_t>::Entry> entries;
+    entries.reserve(indices.size() / 3);
+
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        const auto& v0 = vertices[indices[i]];
+        const auto& v1 = vertices[indices[i + 1]];
+        const auto& v2 = vertices[indices[i + 2]];
+
+        Spatial::AABB aabb;
+        aabb.min.x = std::min({v0.position[0], v1.position[0], v2.position[0]});
+        aabb.min.y = std::min({v0.position[1], v1.position[1], v2.position[1]});
+        aabb.min.z = std::min({v0.position[2], v1.position[2], v2.position[2]});
+        aabb.max.x = std::max({v0.position[0], v1.position[0], v2.position[0]});
+        aabb.max.y = std::max({v0.position[1], v1.position[1], v2.position[1]});
+        aabb.max.z = std::max({v0.position[2], v1.position[2], v2.position[2]});
+        entries.push_back({static_cast<uint32_t>(i / 3), aabb});
+    }
+
+    bvh.build(entries);
+    return bvh;
+}
+
+}  // namespace
 
 void GeometrySystem::upload_lod_from_scene_data() {
     // 快照 simplification_cfg，与 set_simplification_config 同步
@@ -1461,39 +1750,28 @@ void GeometrySystem::upload_lod_from_scene_data() {
             lod0.ready            = true;
             entry.levels.push_back(std::move(lod0));
 
+            // 为 LOD 0 构建 BVH（三角形级空间索引）
+            entry.per_level_bvh.push_back(build_triangle_bvh(mesh.vertices, mesh.indices));
+
             // LOD 1..N：从导入时 meshoptimizer 生成的数据创建 GPU 缓冲
             for (size_t lod_idx = 0; lod_idx < mesh.lod_levels.size() && lod_idx < static_cast<size_t>(max_lod_levels - 1); ++lod_idx) {
                 auto& lod_data = mesh.lod_levels[lod_idx];
                 if (lod_data.vertices.empty() || lod_data.indices.empty()) continue;
 
                 LODMeshBuffers lod_buf;
-                // 转换为 uint32 索引（meshopt 输出 uint16，GPU 需要 uint32）
-                std::vector<uint32_t> indices32;
-                indices32.reserve(lod_data.indices.size());
-                for (auto idx : lod_data.indices) indices32.push_back(static_cast<uint32_t>(idx));
-
-                lod_buf.vertex_buffer = make_geometry_buffer(
-                    lod_data.vertices,
-                    Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Vertex,
-                    "geometry.lod_vertex");
-                lod_buf.index_buffer = make_geometry_buffer(
-                    indices32,
-                    Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Index,
-                    "geometry.lod_index");
-                lod_buf.vertex_storage = make_geometry_buffer(
-                    lod_data.vertices,
-                    Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst |
-                        Horizon::BufferUsageFlags::Storage,
-                    "geometry.lod_vertex_storage");
-                lod_buf.index_storage = make_geometry_buffer(
-                    indices32,
-                    Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst |
-                        Horizon::BufferUsageFlags::Storage,
-                    "geometry.lod_index_storage");
+                // LOD 索引保持 uint16（与 LOD0 一致），不转换为 uint32。
+                // 之前转为 uint32 导致 GPU 索引缓冲格式与 pipeline 预期不匹配→渲染缺口。
+                lod_buf.vertex_buffer    = make_geometry_buffer(lod_data.vertices, Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Vertex,     "geometry.lod_vertex");
+                lod_buf.index_buffer     = make_geometry_buffer(lod_data.indices,  Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Index,      "geometry.lod_index");
+                lod_buf.vertex_storage   = make_geometry_buffer(lod_data.vertices, Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_vertex_storage");
+                lod_buf.index_storage    = make_geometry_buffer(lod_data.indices,  Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_index_storage");
                 lod_buf.error            = lod_data.error;
                 lod_buf.screen_threshold = lod_data.screen_threshold;
                 lod_buf.ready            = true;
                 entry.levels.push_back(std::move(lod_buf));
+
+                // 为该 LOD 级别构建 BVH
+                entry.per_level_bvh.push_back(build_triangle_bvh(lod_data.vertices, lod_data.indices));
             }
 
             std::unique_lock lock(impl_->lod_cache_mutex);
