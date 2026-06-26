@@ -585,7 +585,7 @@ bool VulkanBackend::render_draw_data(
             const ImTextureID tex_id = pcmd.GetTexID();
             uint32_t texture_index = texture_id_to_descriptor(tex_id);
             if (const auto* browser_texture = UI::BrowserManager::instance().get_texture_image(tex_id)) {
-                UI::BrowserManager::instance().wait_for_texture_upload(tex_id);
+                UI::BrowserManager::instance().wait_for_texture_upload(tex_id, res.executor);
                 texture_index = browser_texture->storeSampledDescriptor();
             } else if (font_atlas) {
                 const uint32_t font_descriptor = font_atlas.storeSampledDescriptor();

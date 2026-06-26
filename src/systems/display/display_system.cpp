@@ -406,8 +406,8 @@ bool DisplaySystem::compose_and_present(Horizon::HardwareDisplayer& displayer,
     composite_pipeline.bind_storage_image(1, ui_image);
     composite_pipeline.bind_storage_image(2, resources.output);
 
-    const uint32_t dispatch_x = output_width;
-    const uint32_t dispatch_y = output_height;
+    const uint32_t dispatch_x = (output_width + 7u) / 8u;
+    const uint32_t dispatch_y = (output_height + 7u) / 8u;
 
     // GPU sync: wait for each producer's rendering to finish before reading their images
     if (optics_receipt != nullptr && !optics_receipt->empty()) {
@@ -417,13 +417,8 @@ bool DisplaySystem::compose_and_present(Horizon::HardwareDisplayer& displayer,
         resources.executor.wait(*ui_receipt);
     }
 
-    const Horizon::SubmitReceipt composite_receipt =
-        resources.executor.stream()
-        << composite_pipeline(dispatch_x, dispatch_y, 1)
-        << Horizon::commit();
-
-    resources.executor.wait(composite_receipt);
     (void)(resources.executor.stream()
+           << composite_pipeline(dispatch_x, dispatch_y, 1)
            << Horizon::present(displayer, resources.output)
            << Horizon::commit());
     return true;

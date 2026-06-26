@@ -139,12 +139,12 @@ const Horizon::HardwareImage* BrowserManager::get_texture_image(ImTextureID text
     return &image_it->second.image;
 }
 
-void BrowserManager::wait_for_texture_upload(ImTextureID texture_id) {
+void BrowserManager::wait_for_texture_upload(ImTextureID texture_id, Horizon::HardwareExecutor& consumer) {
     auto image_it = owned_images_.find(texture_id);
     if (image_it == owned_images_.end()) {
         return;
     }
-    browser_upload_executor_.wait_idle(image_it->second.upload_receipt);
+    consumer.wait(image_it->second.upload_receipt);
 }
 
 void BrowserManager::resize_tab(int tab_id, int width, int height) {
