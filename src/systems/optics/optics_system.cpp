@@ -3659,7 +3659,7 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
         const auto object_to_world = flatten_vision_matrix(resolved->o2w);
         bool logical_instance_changed = false;
         group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
-                            uint instance_index) {
+                            std::uint32_t instance_index) {
             if (!instance) {
                 return;
             }
@@ -3908,7 +3908,7 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
         group->aabb = ::vision::Box3f{};
         const auto object_to_world = flatten_vision_matrix(resolved->o2w);
         group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
-                            uint instance_index) {
+                            std::uint32_t instance_index) {
             if (!instance) {
                 return;
             }
