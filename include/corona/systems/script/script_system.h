@@ -62,9 +62,6 @@ class ScriptSystem : public Kernel::SystemBase {
 
    private:
     std::unique_ptr<Script::Python::PythonAPI> python_api_;
-
-    Kernel::EventId python_start_id_ = 0;
-    Kernel::EventId js_call_python_id_ = 0;
 };
 
 }  // namespace Corona::Systems

@@ -222,50 +222,6 @@ bool PythonAPI::ensureInitialized() {
     return true;
 }
 
-void PythonAPI::invokeStartFromEvent() {
-    if (shutting_down_.load()) {
-        return;
-    }
-    if (!ensureInitialized()) {
-        CFW_LOG_ERROR("PythonAPI: Python initialization failed before start event");
-        return;
-    }
-
-    std::shared_lock lk(queMtx);
-    if (!pStartFunc.is_valid()) {
-        return;
-    }
-
-    nanobind::gil_scoped_acquire gil;
-    try {
-        pStartFunc();
-    } catch (const nanobind::python_error& e) {
-        log_python_error(e);
-    }
-}
-
-void PythonAPI::invokeJsCallFromEvent(void* args) {
-    if (shutting_down_.load()) {
-        return;
-    }
-    if (!ensureInitialized()) {
-        CFW_LOG_ERROR("PythonAPI: Python initialization failed before JS event");
-        return;
-    }
-
-    std::shared_lock lk(queMtx);
-    if (!pJsCallFunc.is_valid()) {
-        return;
-    }
-
-    nanobind::gil_scoped_acquire gil;
-    try {
-        pJsCallFunc(args);
-    } catch (const nanobind::python_error& e) {
-        log_python_error(e);
-    }
-}
-
 bool PythonAPI::performHotReload() {
     int64_t currentTime = PythonHotfix::GetCurrentTimeMsec();  // ms
     constexpr int64_t kHotReloadIntervalMs = 100;              // 100ms
