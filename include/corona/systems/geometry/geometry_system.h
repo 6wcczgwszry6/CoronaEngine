@@ -12,6 +12,7 @@
 #include <corona/spatial/bvh.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -188,8 +189,24 @@ class GeometrySystem : public Kernel::SystemBase {
         std::uintptr_t scene, std::uintptr_t camera) const;
 
     // ========================================
-    // LRU 协作（M3 起启用，当前为占位）
+    // LRU 协作（M3 生产化）
     // ========================================
+    //
+    // ActorEvictRequestedEvent 发布后，GeometrySystem 自动：
+    //   1. 创建 ActorSnapshot（model_path + transform）
+    //   2. 存入 ActorCache（两级 LRU：内存 64MB + 磁盘 256MB）
+    //   3. 标记 actor 为 offline，状态置为 Unloaded
+    //
+    // ActorRestoreRequestedEvent 发布后，GeometrySystem 自动：
+    //   1. 从 ActorCache 获取快照（或回退到磁盘 model_path）
+    //   2. 调用 ResourceManager::import_async 重新导入
+    //   3. 导入完成后重建 GPU 资源，标记为 online
+    //
+    // 磁盘目录默认：{cwd}/cache/actors/，可通过 set_cache_directory() 修改
+
+    /// 设置 LRU ActorCache 磁盘目录（需在首次 evict 前调用）
+    void set_cache_directory(std::filesystem::path dir);
+
     [[nodiscard]] bool is_actor_offline(std::uintptr_t actor) const;
     void               mark_actor_restored(std::uintptr_t actor);
 
@@ -329,6 +346,8 @@ class GeometrySystem : public Kernel::SystemBase {
     void on_unload_completed(const Events::ActorUnloadCompletedEvent& event);
     void on_load_requested(const Events::ActorLoadRequestedEvent& event);
     void on_unload_requested(const Events::ActorUnloadRequestedEvent& event);
+    void on_evict_requested(const Events::ActorEvictRequestedEvent& event);
+    void on_restore_requested(const Events::ActorRestoreRequestedEvent& event);
     void process_async_tasks();  // 处理完成的异步资源任务
 
     /// 卸载完成时释放 actor 关联的 GPU 资源（HardwareBuffer / HardwareImage），

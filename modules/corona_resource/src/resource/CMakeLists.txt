@@ -7,6 +7,8 @@ set(CORONA_RESOURCE_MANAGER_SOURCE_FILES
     resource.cpp
     parser_registry.cpp
     resource_cache.cpp
+    ### cache ###
+    cache/lru_cache.cpp
     ### resource types ###
     # animation
     types/animation.cpp
