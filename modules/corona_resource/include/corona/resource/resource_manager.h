@@ -143,6 +143,41 @@ class ResourceManager final {
      */
     bool add_resource(TResourceID rid, std::shared_ptr<IResource> resource);
 
+    // ========================================
+    // 资源管理 (pin / touch / budget / evict)
+    // ========================================
+
+    /// 标记资源为不可淘汰
+    bool pin(TResourceID rid);
+
+    /// 取消不可淘汰标记
+    bool unpin(TResourceID rid);
+
+    /// 仅更新访问时间（比 acquire_read 更轻量）
+    bool touch(TResourceID rid);
+
+    /// 查询单个资源的只读信息
+    std::optional<ResourceEntryInfo> entry_info(TResourceID rid) const;
+
+    /// 列出所有资源的只读信息
+    std::vector<ResourceEntryInfo> list_entries() const;
+
+    /// 设置内存预算上限（字节），0 = 不限制
+    void set_memory_budget(std::size_t bytes);
+
+    /// 当前估算内存使用量（字节）
+    std::size_t used_memory_bytes() const;
+
+    /// 内存预算上限（字节）
+    std::size_t memory_budget() const;
+
+    /// 尝试淘汰一个指定资源（跳过 pinned 和 ref_count > 0 的项）
+    EvictResult try_evict(TResourceID rid);
+
+    /// 持续淘汰最旧的未 pin 资源，直到内存使用量低于预算
+    /// @return 最后一次淘汰操作的结果
+    EvictResult evict_until_under_budget();
+
    private:
     /**
      * @brief 私有构造函数

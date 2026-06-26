@@ -146,22 +146,10 @@ struct CpuMeshData {
     auto& geom_storage = hub.geometry_storage();
     auto& transform_storage = hub.model_transform_storage();
 
-    VisionBuildResult result;
-
-    // 用 cbegin/cend 显式取只读迭代器（共享读锁），避免非 const range-for 命中写迭代器。
-    for (auto scene_it = hub.scene_storage().cbegin(); scene_it != hub.scene_storage().cend(); ++scene_it) {
-        const auto& scene_dev = *scene_it;
-        if (!scene_dev.enabled) continue;
-
-        auto group = std::make_shared<::vision::ShapeGroup>();
-        bool group_has_instances = false;
-
-        const auto& handles = scene_dev.visible_actor_handles.empty()
-                                  ? scene_dev.actor_handles
-                                  : scene_dev.visible_actor_handles;
-        for (auto actor_handle : handles) {
-            auto actor = actor_storage.try_acquire_read(actor_handle);
-            if (!actor) continue;
+    auto actor = actor_storage.try_acquire_read(actor_handle);
+    if (!actor) {
+        return false;
+    }
 
     bool group_has_instances = false;
     for (auto profile_handle : actor->profile_handles) {
@@ -273,7 +261,11 @@ VisionBuildResult build_vision_geometry(::vision::Scene& scene) {
         auto group = std::make_shared<::vision::ShapeGroup>();
         bool group_has_instances = false;
 
-        for (auto actor_handle : scene_dev.actor_handles) {
+        // 优先消费可见集合（视锥剔除结果），为空时回退到全量 actor 列表
+        const auto& handles = scene_dev.visible_actor_handles.empty()
+                                  ? scene_dev.actor_handles
+                                  : scene_dev.visible_actor_handles;
+        for (auto actor_handle : handles) {
             group_has_instances |=
                 append_actor_geometry_to_group(scene, *group, actor_handle, result);
         }

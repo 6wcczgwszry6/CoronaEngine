@@ -101,13 +101,109 @@ std::future<bool> ResourceManager::remove_cache_async(TResourceID rid) {
     auto promise = std::make_shared<std::promise<bool>>();
     auto future = promise->get_future();
     async_tasks_.run([this, rid, promise]() {
-        promise->set_value(remove_cache(rid));
+        promise->set_value(try_evict(rid).success);
     });
     return future;
 }
 
 bool ResourceManager::add_resource(TResourceID const rid, std::shared_ptr<IResource> resource) {
     return resource_cache_.add_resource(rid, std::move(resource));
+}
+
+// ============================================================================
+// P1 扩展：pin / touch / budget / evict
+// ============================================================================
+
+bool ResourceManager::pin(TResourceID rid) {
+    return resource_cache_.pin(rid);
+}
+
+bool ResourceManager::unpin(TResourceID rid) {
+    return resource_cache_.unpin(rid);
+}
+
+bool ResourceManager::touch(TResourceID rid) {
+    return resource_cache_.touch(rid);
+}
+
+std::optional<ResourceEntryInfo> ResourceManager::entry_info(TResourceID rid) const {
+    return resource_cache_.entry_info(rid);
+}
+
+std::vector<ResourceEntryInfo> ResourceManager::list_entries() const {
+    return resource_cache_.list_entries();
+}
+
+void ResourceManager::set_memory_budget(std::size_t bytes) {
+    resource_cache_.set_memory_budget(bytes);
+}
+
+std::size_t ResourceManager::used_memory_bytes() const {
+    return resource_cache_.used_memory_bytes();
+}
+
+std::size_t ResourceManager::memory_budget() const {
+    return resource_cache_.memory_budget();
+}
+
+EvictResult ResourceManager::try_evict(TResourceID rid) {
+    auto info = resource_cache_.entry_info(rid);
+    if (!info) return {false, rid, 0};
+
+    EvictResult result;
+    result.rid = rid;
+
+    if (info->pinned) {
+        CFW_LOG_DEBUG("[ResourceManager] try_evict: resource {} is pinned", rid);
+        return result;
+    }
+    if (info->ref_count > 0) {
+        CFW_LOG_DEBUG("[ResourceManager] try_evict: resource {} has {} active references",
+                      rid, info->ref_count);
+        return result;
+    }
+
+    result.bytes_freed = info->estimated_bytes;
+    result.success = resource_cache_.remove_entry(rid);
+    if (result.success) {
+        CFW_LOG_DEBUG("[ResourceManager] Evicted resource {} ({} bytes freed)", rid, result.bytes_freed);
+    }
+    return result;
+}
+
+EvictResult ResourceManager::evict_until_under_budget() {
+    std::size_t budget = resource_cache_.memory_budget();
+    if (budget == 0) return {};  // 不限制
+
+    EvictResult last_result;
+    constexpr int kMaxIterations = 1000;
+
+    for (int i = 0; i < kMaxIterations; ++i) {
+        if (resource_cache_.used_memory_bytes() <= budget) break;
+
+        // 查找最旧的未 pin 且无引用的条目（LRU 策略：last_access 最早者）
+        auto entries = resource_cache_.list_entries();
+        TResourceID oldest_rid = 0;
+        auto oldest_time = std::chrono::system_clock::time_point::max();
+
+        for (const auto& e : entries) {
+            if (e.pinned || e.ref_count > 0) continue;
+            if (e.last_access < oldest_time) {
+                oldest_time = e.last_access;
+                oldest_rid = e.rid;
+            }
+        }
+
+        if (oldest_rid == 0) {
+            CFW_LOG_WARNING("[ResourceManager] evict_until_under_budget: all entries pinned or in use");
+            break;
+        }
+
+        last_result = try_evict(oldest_rid);
+        if (!last_result.success) break;
+    }
+
+    return last_result;
 }
 
 TResourceID ResourceManager::load_internal(const std::filesystem::path& path) {

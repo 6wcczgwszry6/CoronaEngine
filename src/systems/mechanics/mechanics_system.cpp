@@ -122,6 +122,16 @@ void MechanicsSystem::update_physics() {
             if (impl_->shutdown_requested.load(std::memory_order_acquire)) {
                 return;
             }
+            // 跳过未加载的 actor — 无 GPU 资源 / 无全量物理数据
+            // TODO: 后续实现 offline physics proxy —— Unloaded + physics_enabled
+            //       的 actor 用简化 AABB 碰撞体继续参与物理
+            if (impl_->geometry_sys) {
+                auto state = impl_->geometry_sys->get_actor_load_state(
+                    actor_handle,
+                    reinterpret_cast<std::uintptr_t>(
+                        const_cast<Corona::SceneDevice*>(&scene)));
+                if (state != ActorLoadState::Loaded) continue;
+            }
             if (auto actor = actor_storage.try_acquire_read(actor_handle)) {
                 for (auto profile_handle : actor->profile_handles) {
                     if (impl_->shutdown_requested.load(std::memory_order_acquire)) {

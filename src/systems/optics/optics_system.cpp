@@ -2142,6 +2142,18 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                             continue;
                         }
 
+                        // 跳过未加载的 actor（GPU 资源已释放，无法渲染）
+                        if (geometry_system_) {
+                            auto state = geometry_system_->get_actor_load_state(
+                                actor_handle,
+                                reinterpret_cast<std::uintptr_t>(
+                                    const_cast<Corona::SceneDevice*>(&scene)));
+                            if (state != ActorLoadState::Loaded) {
+                                ++object_id;
+                                continue;
+                            }
+                        }
+
                         if (actor->follow_camera != follow_camera_pass) {
                             ++object_id;
                             continue;
@@ -3478,6 +3490,14 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
             continue;
         }
         for (auto actor_handle : scene_dev.actor_handles) {
+            // 跳过未加载的 actor — 无 Vision shapes 可同步
+            if (geometry_system_) {
+                auto state = geometry_system_->get_actor_load_state(
+                    actor_handle,
+                    reinterpret_cast<std::uintptr_t>(
+                        const_cast<Corona::SceneDevice*>(&scene_dev)));
+                if (state != ActorLoadState::Loaded) continue;
+            }
             const auto binding = hub.external_vision_binding(actor_handle);
             if (!binding) {
                 continue;
@@ -3738,6 +3758,7 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
     // 1. Enumerate engine-native candidate actors: present in an enabled scene and
     //    WITHOUT an external_vision_binding (bound proxies are handled by
     //    sync_external_live_vision_transforms, which must have run first).
+    //    只收集 Loaded 状态的 actor — Unloaded 的 GPU 资源已释放，无 mesh 可构建。
     std::unordered_set<std::uintptr_t> active_native_actors;
     for (auto scene_it = hub.scene_storage().cbegin(); scene_it != hub.scene_storage().cend(); ++scene_it) {
         const auto& scene_dev = *scene_it;
@@ -3747,6 +3768,13 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
         for (auto actor_handle : scene_dev.actor_handles) {
             if (actor_handle == 0 || hub.has_external_vision_binding(actor_handle)) {
                 continue;
+            }
+            if (geometry_system_) {
+                auto state = geometry_system_->get_actor_load_state(
+                    actor_handle,
+                    reinterpret_cast<std::uintptr_t>(
+                        const_cast<Corona::SceneDevice*>(&scene_dev)));
+                if (state != ActorLoadState::Loaded) continue;
             }
             active_native_actors.insert(actor_handle);
         }
