@@ -1,5 +1,6 @@
 #include <corona/systems/ui/quad_compositor.h>
 
+#include <corona/systems/ui/vulkan_backend.h>  // VulkanBackend::ensure_render_target
 #include <corona/kernel/core/i_logger.h>
 
 #include <algorithm>
@@ -12,14 +13,14 @@ namespace Corona::Systems {
 
 namespace {
 
-// Vertex layout consumed by imgui.vert.glsl: location 0 vec2 pos, 1 vec2 uv, 2 vec4 color.
+// Vertex layout consumed by ui_quad.vert.glsl: location 0 vec2 pos, 1 vec2 uv, 2 vec4 color.
 struct QuadVertex {
     float pos[2]{};
     float uv[2]{};
     float color[4]{};
 };
 
-// Push-constant upload helpers (PushConsts is shared by imgui.vert/frag.glsl).
+// Push-constant upload helpers (PushConsts is shared by ui_quad.vert/frag.glsl).
 struct FVec2Upload {
     float x;
     float y;
@@ -70,7 +71,7 @@ bool QuadCompositor::ensure_white_texture() {
 bool QuadCompositor::composite(
     std::span<const QuadDraw> quads,
     ViewportRenderResources& res,
-    Horizon::RasterizerPipeline<imgui_vert_glsl_t, imgui_frag_glsl_t>& pipeline,
+    Horizon::RasterizerPipeline<ui_quad_vert_glsl_t, ui_quad_frag_glsl_t>& pipeline,
     uint32_t target_width,
     uint32_t target_height,
     Horizon::ImageUsageFlags render_target_usage) {
@@ -205,10 +206,10 @@ bool QuadCompositor::composite(
         const uint32_t texture_index =
             q.texture ? q.texture->storeSampledDescriptor() : white_image_.storeSampledDescriptor();
 
-        pipeline[imgui_vert_glsl_t::pushConsts::scale] = up2(scale);
-        pipeline[imgui_vert_glsl_t::pushConsts::translate] = up2(translate);
-        pipeline[imgui_frag_glsl_t::pushConsts::clip_rect] = up4(cx0, cy0, cx1, cy1);
-        pipeline[imgui_frag_glsl_t::pushConsts::texture_index] = texture_index;
+        pipeline[ui_quad_vert_glsl_t::pushConsts::scale] = up2(scale);
+        pipeline[ui_quad_vert_glsl_t::pushConsts::translate] = up2(translate);
+        pipeline[ui_quad_frag_glsl_t::pushConsts::clip_rect] = up4(cx0, cy0, cx1, cy1);
+        pipeline[ui_quad_frag_glsl_t::pushConsts::texture_index] = texture_index;
 
         Horizon::DrawIndexedParams draw_params;
         draw_params.index_count = 6;

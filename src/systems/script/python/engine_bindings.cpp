@@ -100,7 +100,9 @@ void BindAll(nanobind::module_& m) {
         .def("get_scale", &Geometry::get_scale,
              "Get local scale [x, y, z]")
         .def("get_aabb", &Geometry::get_aabb,
-             "Get model AABB [min_x, min_y, min_z, max_x, max_y, max_z]");
+             "Get model AABB [min_x, min_y, min_z, max_x, max_y, max_z]")
+        .def("is_valid", &Geometry::is_valid,
+             "Return whether the underlying geometry resource loaded successfully");
 
     // ============================================================================
     // Mechanics: 物理/力学组件
@@ -355,6 +357,14 @@ void BindAll(nanobind::module_& m) {
              "Set sun light direction [x, y, z]")
         .def("get_sun_direction", &Environment::get_sun_direction,
              "Get sun light direction [x, y, z]")
+        .def("set_sun_intensity", &Environment::set_sun_intensity, nb::arg("intensity"),
+             "Set sun light intensity")
+        .def("get_sun_intensity", &Environment::get_sun_intensity,
+             "Get sun light intensity")
+        .def("set_sky_intensity", &Environment::set_sky_intensity, nb::arg("intensity"),
+             "Set atmospheric sky intensity")
+        .def("get_sky_intensity", &Environment::get_sky_intensity,
+             "Get atmospheric sky intensity")
         .def("set_floor_grid", &Environment::set_floor_grid, nb::arg("enabled"),
              "Enable or disable floor grid rendering")
         .def("get_floor_grid", &Environment::get_floor_grid,
@@ -428,17 +438,7 @@ void BindAll(nanobind::module_& m) {
         .def("set_simulation_enabled", &Scene::set_simulation_enabled, nb::arg("enabled"),
              "Enable or disable physics simulation for this scene (does not affect rendering)")
         .def("is_simulation_enabled", &Scene::is_simulation_enabled,
-             "Return True if physics simulation is enabled for this scene")
-        // Scene streaming / visibility configuration
-        .def("set_visibility_config", &Scene::set_visibility_config,
-             nb::arg("invisible_frames_to_evict"),
-             "Set visibility eviction policy. invisible_frames_to_evict=0 disables eviction; "
-             ">0 triggers eviction after N consecutive invisible frames")
-        .def("set_distance_config", &Scene::set_distance_config,
-             nb::arg("unload_dist"), nb::arg("preload_dist"), nb::arg("enable") = true,
-             "Configure distance-based load/unload. unload_dist: distance beyond which invisible "
-             "actors are unloaded; preload_dist: distance within which actors are preloaded; "
-             "enable: toggle distance culling on/off");
+             "Return True if physics simulation is enabled for this scene");
 
     // ============================================================================
     // Scene I/O utilities

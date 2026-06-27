@@ -3,8 +3,14 @@ import os
 import datetime
 import logging
 from CoronaCore.core.corona_editor import CoronaEditor
+from CoronaCore.core.entities.scene import (
+    VISION_DOCUMENT_ENCODING,
+    VISION_DOCUMENT_VERSION,
+    _encode_vision_document,
+)
 from CoronaPlugin.core.corona_plugin_base import PluginBase
 from CoronaCore.utils.file_handler import FileHandler
+from plugins.SceneTools.main import _vision_document_for_embedded_storage
 from utils.settings import settings_manager
 from .utils.project_copy import ProjectCopy
 logger = logging.getLogger(__name__)
@@ -54,7 +60,8 @@ class ProjectLauncher(PluginBase):
 
         与 create_project 的区别：不接收 name/path，全部由后端决定：
         - 保存位置固定为引擎根目录下的 data/（core_path.repo_root/data）
-        - 名称按"模式 + 递增编号"自动生成并防重名（创造世界_1 / 剧情世界_1 ...）
+        - 展示名称按"模式 + 递增编号"自动生成（创造世界_1 / 剧情世界_1 ...）
+        - 磁盘目录使用 ASCII（creative_world_1 / story_world_1 ...），避免原生侧中文路径问题
         - 把 worldPrompt 写入 project.ini 的 [Project] world_prompt，供引擎/AI 后续读取
         返回 {name, path}，与打开普通项目的返回结构一致。
         """
@@ -68,16 +75,22 @@ class ProjectLauncher(PluginBase):
         base_dir = os.path.join(str(core_path.repo_root), "data")
         os.makedirs(base_dir, exist_ok=True)
 
-        # 模式 + 递增编号，防重名
+        # 模式 + 递增编号，防重名。磁盘目录使用 ASCII，避免原生/引擎侧处理中文路径时崩溃；
+        # project.ini 和返回 name 仍保留中文展示名。
         label = "剧情世界" if mode == "story" else "创造世界"
+        path_prefix = "story_world" if mode == "story" else "creative_world"
         index = 1
-        while os.path.exists(os.path.join(base_dir, f"{label}_{index}")):
+        while (
+            os.path.exists(os.path.join(base_dir, f"{path_prefix}_{index}"))
+            or os.path.exists(os.path.join(base_dir, f"{label}_{index}"))
+        ):
             index += 1
-        final_name = f"{label}_{index}"
-        target_full_path = os.path.join(base_dir, final_name)
+        display_name = f"{label}_{index}"
+        dir_name = f"{path_prefix}_{index}"
+        target_full_path = os.path.join(base_dir, dir_name)
 
         # 复制模板并初始化 project.ini
-        project_ini = ProjectCopy.create_from_template(target_full_path, final_name, mode)
+        project_ini = ProjectCopy.create_from_template(target_full_path, display_name, mode)
 
         # 把世界提示词持久化进 project.ini，供引擎/AI 后续读取
         try:
@@ -91,7 +104,42 @@ class ProjectLauncher(PluginBase):
         except Exception as e:
             logger.error(f"Failed to persist world_prompt: {e}")
 
-        return {"name": final_name, "path": os.path.dirname(project_ini)}
+        return {"name": display_name, "path": os.path.dirname(project_ini)}
+
+    @staticmethod
+    def create_multiplayer_project(project_data: dict) -> dict:
+        """首页联机入口专用：自动创建一个 ASCII 路径的临时联机项目。"""
+        import configparser
+        from utils.settings import core_path
+
+        role = project_data.get("role", "guest")
+        role = "host" if role == "host" else "guest"
+        label = "联机房主" if role == "host" else "联机加入"
+        path_prefix = "multiplayer_host" if role == "host" else "multiplayer_guest"
+
+        base_dir = os.path.join(str(core_path.repo_root), "data")
+        os.makedirs(base_dir, exist_ok=True)
+
+        index = 1
+        while os.path.exists(os.path.join(base_dir, f"{path_prefix}_{index}")):
+            index += 1
+
+        display_name = f"{label}_{index}"
+        target_full_path = os.path.join(base_dir, f"{path_prefix}_{index}")
+        project_ini = ProjectCopy.create_from_template(target_full_path, display_name, "3d")
+
+        try:
+            cfg = configparser.ConfigParser()
+            cfg.read(project_ini, encoding='utf-8')
+            if 'Project' not in cfg:
+                cfg['Project'] = {}
+            cfg['Project']['multiplayer_role'] = role
+            with open(project_ini, 'w', encoding='utf-8') as f:
+                cfg.write(f)
+        except Exception as e:
+            logger.error(f"Failed to persist multiplayer metadata: {e}")
+
+        return {"name": display_name, "path": os.path.dirname(project_ini), "role": role}
 
     @staticmethod
     def open_project(project_path: str) -> bool:
@@ -154,9 +202,8 @@ class ProjectLauncher(PluginBase):
     def _create_project_from_vision(json_path: str) -> dict:
         """为一个 Vision 场景 .json 新建轻量项目（纯文件 IO，不依赖引擎）。
 
-        复制项目模板，把 [vision] source_path + import_mode=external_live 写入模板
-        入口场景的 .scene 文件；真正的代理 actor / 相机 / 绑定导入延迟到引擎启动后，
-        由 MainView._apply_vision_source_for_scene 的 external_live 分支首次完成。
+        复制项目模板，把 Vision JSON 文档嵌入入口场景的 .scene 文件；
+        真正的代理 actor / 相机 / 绑定导入延迟到引擎启动后完成。
         返回 {name, path}，与打开普通项目的返回结构一致。
         """
         try:
@@ -196,13 +243,19 @@ class ProjectLauncher(PluginBase):
                 logger.error("Entrance scene file not found: %s", scene_file)
                 return {}
 
-            # 3. 往入口 .scene 注入 [vision] 元数据（格式同 Scene.save_data）
+            with open(abs_json, 'r', encoding='utf-8') as f:
+                vision_document = _vision_document_for_embedded_storage(json.load(f), abs_json)
+
+            # 3. 往入口 .scene 注入内嵌 Vision JSON 文档（格式同 Scene.save_data）
             scene_cfg = configparser.ConfigParser()
             scene_cfg.read(scene_file, encoding='utf-8')
-            if 'vision' not in scene_cfg:
-                scene_cfg['vision'] = {}
-            scene_cfg['vision']['source_path'] = abs_json
-            scene_cfg['vision']['import_mode'] = 'external_live'
+            if 'vision' in scene_cfg:
+                scene_cfg.remove_section('vision')
+            scene_cfg['vision_document'] = {
+                'encoding': VISION_DOCUMENT_ENCODING,
+                'version': VISION_DOCUMENT_VERSION,
+                'data': _encode_vision_document(vision_document),
+            }
             with open(scene_file, 'w', encoding='utf-8') as f:
                 scene_cfg.write(f)
 

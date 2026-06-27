@@ -87,8 +87,8 @@ export class Bridge {
 
 // 快捷访问
 export const sceneService = {
-  createActor: (sceneName, objPath) =>
-    Bridge.callCEF('SceneTools', 'create_actor', [sceneName, objPath]),
+  createActor: (sceneName, objPath, actorType = 'model') =>
+    Bridge.callCEF('SceneTools', 'create_actor', [sceneName, objPath, actorType]),
   removeActor: (sceneName, actorName) =>
     Bridge.callCEF('SceneTools', 'remove_actor', [sceneName, actorName]),
   renameActor: (sceneName, actorName, name) =>
@@ -140,6 +140,8 @@ export const sceneService = {
   deleteCamera: (sceneName, cameraId) =>
     Bridge.callCEF('SceneTools', 'delete_camera', [sceneName, cameraId]),
   loadVisionScene: (path) => Bridge.callCEF('SceneTools', 'load_vision_scene', [path]),
+  reloadScene: (sceneName, projectPath = '') =>
+    Bridge.callCEF('SceneTools', 'reload_scene', projectPath ? [sceneName, projectPath] : [sceneName]),
   listActorTree: (sceneName) => Bridge.callCEF('SceneTools', 'list_actor_tree', [sceneName]),
   listSceneTree: (sceneName) => Bridge.callCEF('SceneTools', 'list_scene_tree', [sceneName]),
   openSceneActor: (sceneName, actorName) =>
@@ -205,10 +207,23 @@ export const projectService = {
 export const appService = {
   createPanelTab: (panelId, routePath, width, height, dockingPos) =>
     Bridge.callDockCommand({ cmd: 'createPanelTab', panelId, routePath, width, height, dockingPos }),
+  // Create a panel that is born directly as its own borderless OS window (skips the
+  // main-window docked-rectangle stage, so no 1-frame flash). x/y/width/height are the
+  // desired initial geometry in logical px. Returns { tab_id, panel_id }.
+  createDetachedPanel: ({ panelId, routePath, width, height, x, y }) =>
+    Bridge.callDockCommand({ cmd: 'createDetachedPanel', panelId, routePath, width, height, x, y }),
   closeThisTab: (panelId) =>
     Bridge.callDockCommand({ cmd: 'closeThisTab', panelId }),
   closePanelTab: (tabId, panelId) =>
     Bridge.callDockCommand({ cmd: 'closePanelTab', tabId, panelId }),
+  // Detach the calling panel into its own borderless OS window (tabId omitted ⇒ C++
+  // resolves it from the calling browser). x/y/width/height are optional desired geometry
+  // in logical px; width/height default to the panel's current size on the C++ side.
+  detachPanel: (opts = {}) =>
+    Bridge.callDockCommand({ cmd: 'detachPanel', ...opts }),
+  // Re-dock the calling panel back into the main window (destroys its secondary window).
+  redockPanel: (opts = {}) =>
+    Bridge.callDockCommand({ cmd: 'redockPanel', ...opts }),
   toggleMaximizeThisCameraView: (sceneId = '', cameraId = '') =>
     Bridge.callDockCommand({ cmd: 'toggleMaximizeThisCameraView', sceneId, cameraId }),
   cycleThisCameraViewWindowMode: (sceneId = '', cameraId = '') =>
@@ -393,6 +408,9 @@ export const projectLauncherService = {
   // worldData: { mode: 'story'|'creative', prompt: string } -> { name, path }
   createWorldProject: (worldData) =>
     Bridge.callCEF('ProjectLauncher', 'create_world_project', [worldData]),
+  // 创建首页联机入口使用的临时项目：{ role: 'host'|'guest' } -> { name, path, role }
+  createMultiplayerProject: (projectData) =>
+    Bridge.callCEF('ProjectLauncher', 'create_multiplayer_project', [projectData]),
   // 打开项目（执行加载逻辑）
   openProject: (projectPath) =>
     Bridge.callCEF('ProjectLauncher', 'open_project', [projectPath]).then((result) => {

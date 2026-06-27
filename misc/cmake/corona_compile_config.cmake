@@ -19,6 +19,7 @@ set(CMAKE_C_EXTENSIONS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ------------------------------------------------------------------------------
@@ -110,8 +111,7 @@ endif()
 #       consumers, while Helicon's own TU compilation keeps the long form).
 #     - SDL, glfw, volk, assimp, Vulkan-Headers, VMA, etc. — these manage
 #       their own encoding policy via upstream CMake.
-#     - imgui — manually defined in corona_third_party.cmake; /utf-8 is
-#       applied there directly via target_compile_options(imgui PRIVATE ...).
+#     - imgui — removed (no longer a dependency); Vision bundles its own copy
 #
 # We deliberately use the shortcut /utf-8 (== /source-charset:utf-8 +
 # /execution-charset:utf-8) because OpenUSD also injects /utf-8 on every pxr

@@ -1,24 +1,17 @@
-﻿# Create a library target for ImGui backend files
-add_library(imgui_backends STATIC
-        "${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp"
-)
-target_include_directories(imgui_backends PUBLIC
-        "${imgui_SOURCE_DIR}"
-        "${imgui_SOURCE_DIR}/backends"
-)
-target_link_libraries(imgui_backends PUBLIC imgui SDL3::SDL3-static)
+﻿# UI System 配置 (ImGui removed — Phase 6 of the ImGui-removal plan).
+# The frame loop is now ui_frame_runner.cpp (raw SDL + quad compositor); there is no
+# longer an imgui or imgui_backends (imgui_impl_sdl3) target. The imgui.vert/frag GLSL
+# shaders are still used by the quad compositor and remain compiled below.
+set(UI_SYSTEM_SOURCES
+    ui_system.cpp
+    ui_frame_runner.cpp
+    camera_viewport_manager.cpp
+    panel_layout.cpp
 
-
-# ImGui System 配置
-file(GLOB IMGUI_SYSTEM_SOURCES
-    imgui_system.cpp
     vulk/vulkan_backend.cpp
     vulk/quad_compositor.cpp
     vulk/browser_manager_vulkan.cpp
-    imgui/imgui_ui.cpp
 
-    camera_viewport_manager.cpp
-    panel_layout.cpp
     cef/browser_manager.cpp
     cef/browser_ui.cpp
     cef/cef_client.cpp
@@ -27,18 +20,31 @@ file(GLOB IMGUI_SYSTEM_SOURCES
     cef/cef_query_bridge.cpp
     cef/cef_realtime_bridge.cpp
     cef/cef_py_bind.cpp
+
     sdl/sdl_utils.cpp
     sdl/sdl_window_manager.cpp
     sdl/sdl_input_router.cpp
-)
 
-list(APPEND IMGUI_SYSTEM_SOURCES
+    # Internal headers (listed for IDE visibility, matching other systems).
+    cef/browser_manager.h
+    cef/browser_ui.h
+    cef/cef_bridge_helpers.h
+    cef/cef_client.h
+    cef/cef_native_rpc.h
+    sdl/sdl_utils.h
+
     ${PROJECT_SOURCE_DIR}/include/corona/systems/ui/vulkan_backend.h
+    # quad_compositor.h owns the `#include GLSL(ui_quad.vert/frag)` macros.
+    # Helicon's shader scan is textual over the target's SOURCES (it does not
+    # follow #include chains), so this header must be listed explicitly or the
+    # ui_quad shader headers are never generated (C1083). Mirrors how the optics
+    # system lists hardware.h.
+    ${PROJECT_SOURCE_DIR}/include/corona/systems/ui/quad_compositor.h
 )
 
 
-corona_add_system(imgui
-    SOURCES ${IMGUI_SYSTEM_SOURCES}
+corona_add_system(ui
+    SOURCES ${UI_SYSTEM_SOURCES}
     DEPENDENCIES
         Horizon
         corona::system::network
@@ -46,8 +52,6 @@ corona_add_system(imgui
         debug "${CEF_LIBCEF_DEBUG}"
         optimized "${CEF_LIBCEF_RELEASE}"
         SDL3::SDL3-static
-        imgui
-        imgui_backends
         ws2_32
         shlwapi
         dbghelp
@@ -61,17 +65,12 @@ corona_add_system(imgui
     INCLUDE_DIRS
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/cef
-        ${CMAKE_SOURCE_DIR}/build_deps/imgui-src
         ${CEF_INCLUDE_DIR}
         ${CEF_ROOT}
 )
 
-target_compile_definitions(corona_imgui_system PUBLIC VK_NO_PROTOTYPES)
+target_compile_definitions(corona_ui_system PUBLIC VK_NO_PROTOTYPES)
 
-helicon_compile_shaders(corona_imgui_system
+helicon_compile_shaders(corona_ui_system
     OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
-)
-
-target_include_directories(corona_imgui_system BEFORE PUBLIC
-    "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
 )

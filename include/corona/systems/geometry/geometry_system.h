@@ -93,18 +93,10 @@ struct LODMeshBuffers {
     bool   ready            = false; // GPU 缓冲是否已创建完毕（创建前不能用于渲染）
 };
 
-/**
- * @brief 动态减面全局配置
- *
- * 控制 LOD 系统的行为。通过 set_simplification_config() 设置。
- * 注意：具体的简化参数（target_ratios、max_errors 等）由导入时的
- * LODGenerationOptions 控制（参见 corona/resource/types/scene.h）。
- */
-struct MeshSimplificationConfig {
-    bool enabled      = false;  // 总开关：false 时整个 LOD 系统不工作
-    int  max_lod_levels = 4;    // 最大 LOD 级别数（含 LOD 0 原始精度）
-    bool auto_on_load = false;  // 模型加载后是否自动将导入时的 LOD 数据上传 GPU
-};
+// LOD（动态减面）现由 GeometrySystem 内部自行决策，无外部配置面：
+// - 是否生成：由导入层 LODGenerationOptions 决定（见 corona/resource/types/scene.h）
+// - 是否上传 GPU / 选哪一级：每帧在 update() 中自动完成
+// 最大级别数等内部参数见 geometry_system.cpp 中的 kMaxLodLevels 常量。
 
 /**
  * @brief 几何系统 (Geometry System)
@@ -230,26 +222,47 @@ class GeometrySystem : public Kernel::SystemBase {
     // 动态减面 (Mesh Simplification) API
     // ========================================
     //
-    // 以下方法构成了 LOD 系统的对外接口。使用流程：
-    //
-    //   【初始化阶段】
-    //   set_simplification_config(cfg)  ← 配置 LOD 开关和最大级别数
+    // LOD 由 GeometrySystem 内部自动管理，无对外配置开关：
     //
     //   【自动上传】
     //   模型导入时 meshoptimizer 已生成了 LOD 数据（存在 MeshData::lod_levels）。
-    //   引擎会在 update() 中自动调用 upload_lod_from_scene_data() 将其上传 GPU。
-    //   无需手动调用任何方法。
+    //   引擎在 update() 中每帧调用 upload_lod_from_scene_data() 将其上传 GPU，
+    //   无 LOD 数据的 mesh 自动跳过。无需任何外部调用。
     //
     //   【渲染时查询】
-    //   get_lod_buffers(geom, mesh_idx, lod) ← 获取指定级别的 GPU 缓冲句柄
-    //   resolve_lod_level(geom, mesh_idx, ...) ← 根据屏幕占比自动选择 LOD 级别
+    //   渲染线程调用 select_render_buffers()，由 GeometrySystem 内部完成
+    //   屏幕占比计算 + LOD 选级 + 降级兜底，直接返回可用的渲染缓冲。
 
-    /// 设置减面全局配置
-    /// 修改会立即生效（已有缓存不受影响）
-    void set_simplification_config(const MeshSimplificationConfig& cfg);
+    /// 渲染用的一组 GPU 缓冲（顶点/索引 + 对应 StorageBuffer）
+    /// select_render_buffers 的入参（fallback）与返回值均为此类型。
+    struct RenderMeshBuffers {
+        Horizon::HardwareBuffer vertex;
+        Horizon::HardwareBuffer index;
+        Horizon::HardwareBuffer vertex_storage;
+        Horizon::HardwareBuffer index_storage;
+    };
 
-    /// 获取当前减面配置（只读）
-    [[nodiscard]] const MeshSimplificationConfig& get_simplification_config() const;
+    /// 一站式渲染缓冲选择（渲染线程调用，线程安全）。
+    ///
+    /// 内部流程：compute_screen_ratio() → 选 LOD 级别 → 降级到已就绪级别，
+    /// 命中则返回该级 LOD 缓冲；无 LOD 数据 / 未就绪 / 缓冲无效时，原样返回
+    /// fallback。**保证返回值始终可直接用于渲染**，调用方无需判空或降级。
+    ///
+    /// @param geometry_handle GeometryDevice 句柄
+    /// @param mesh_index      子网格索引
+    /// @param camera_pos      相机世界坐标
+    /// @param camera_fov_deg  相机垂直 FOV（度）
+    /// @param world_center    物体包围球世界中心
+    /// @param bounding_radius 物体包围球半径
+    /// @param fallback        无 LOD 时使用的原始缓冲（通常为 mesh 的 LOD0）
+    [[nodiscard]] RenderMeshBuffers select_render_buffers(
+        std::uintptr_t          geometry_handle,
+        uint32_t                mesh_index,
+        const ktm::fvec3&       camera_pos,
+        float                   camera_fov_deg,
+        const ktm::fvec3&       world_center,
+        float                   bounding_radius,
+        const RenderMeshBuffers& fallback) const;
 
     /// 查询指定 LOD 级别的 GPU 缓冲（渲染线程调用，线程安全）
     ///
@@ -349,6 +362,20 @@ class GeometrySystem : public Kernel::SystemBase {
     void on_evict_requested(const Events::ActorEvictRequestedEvent& event);
     void on_restore_requested(const Events::ActorRestoreRequestedEvent& event);
     void process_async_tasks();  // 处理完成的异步资源任务
+
+    /// 扫描 PendingImport 的 GeometryDevice，发起异步 import；轮询已完成的 import
+    /// 任务，将解析出的 model_id 写入其 ModelResource 槽并转入 PendingBuild。
+    /// import 完成后回填引用该 geometry 的 MechanicsDevice 的 AABB（八叉树每帧自愈）。
+    /// 这是"导入异步化"的承接点：Python ctor 仅记录 model_path 并标记 PendingImport，
+    /// 磁盘 IO / assimp 解析全部移到 GeometrySystem 线程，不阻塞前端（CEF UI 线程）。
+    void process_pending_geometry_imports();
+
+    /// 扫描所有 GeometryDevice，为标记 PendingBuild 且 model_id 已就绪者构建 GPU
+    /// 资源（mesh_handles），构建后置回 Ready 并失效其 LOD 缓存。
+    /// 这是"初始加载异步化"的承接点：Python ctor 仅记录 model_id 并标记 PendingBuild，
+    /// 实际 GPU 构建延迟到此处（GeometrySystem 线程）完成，不阻塞前端。
+    /// 当前默认无人产出 PendingBuild（所有路径仍同步构建为 Ready），本扫描为空跑。
+    void process_pending_geometry_builds();
 
     /// 卸载完成时释放 actor 关联的 GPU 资源（HardwareBuffer / HardwareImage），
     /// 并清理对应的 LOD 缓存条目。不释放 SharedDataHub 存储槽位本身——

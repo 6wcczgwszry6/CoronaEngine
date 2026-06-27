@@ -52,6 +52,7 @@ class Geometry {
 
     /// 获取构造时传入的模型文件路径，用于 Actor 身份标识和资源加载/卸载
     [[nodiscard]] const std::filesystem::path& get_model_path() const;
+    [[nodiscard]] bool is_valid() const;
 
    private:
     friend class Mechanics;
@@ -317,6 +318,10 @@ class Environment {
 
     void set_sun_direction(const std::array<float, 3>& direction);
     [[nodiscard]] std::array<float, 3> get_sun_direction() const;
+    void set_sun_intensity(float intensity);
+    [[nodiscard]] float get_sun_intensity() const;
+    void set_sky_intensity(float intensity);
+    [[nodiscard]] float get_sky_intensity() const;
     void set_floor_grid(bool enabled) const;
     [[nodiscard]] bool get_floor_grid() const;
 
@@ -381,17 +386,6 @@ class Scene {
     /// 启用或禁用该场景的物理模拟（不影响渲染）
     void set_simulation_enabled(bool enabled);
     [[nodiscard]] bool is_simulation_enabled() const;
-
-    // ========== Streaming / 可见性配置 ==========
-    /// 配置可见性驱逐策略
-    /// @param invisible_frames_to_evict 连续不可见帧数阈值（0=关闭驱逐）
-    void set_visibility_config(int invisible_frames_to_evict);
-
-    /// 配置距离驱动的加载/卸载策略
-    /// @param unload_dist  超过此距离且不可见时触发卸载
-    /// @param preload_dist 进入此距离时触发预加载
-    /// @param enable       是否启用距离剔除
-    void set_distance_config(float unload_dist, float preload_dist, bool enable = true);
 
    private:
     std::uintptr_t handle_{};

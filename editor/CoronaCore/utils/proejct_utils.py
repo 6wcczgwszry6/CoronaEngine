@@ -31,12 +31,41 @@ def create_project_from_template(target_path, project_name, mode):
 
         # 3. 修改新项目内的 project.ini
         project_ini = os.path.join(target_path, "project.ini")
+        normalize_project_runtime_paths(target_path)
         update_project_config(project_ini, project_name, mode, False)
 
         return project_ini
     except Exception as e:
         logger.error(f"ProjectCopy Error: {e}")
         raise e
+
+
+def normalize_project_runtime_paths(project_path: str) -> None:
+    """Migrate demo-template runtime paths to ASCII filenames for native C++ loading."""
+    scene_dir = os.path.join(project_path, "Scene")
+    old_scene = os.path.join(scene_dir, "场景1.scene")
+    new_scene = os.path.join(scene_dir, "default.scene")
+
+    if os.path.exists(old_scene) and not os.path.exists(new_scene):
+        os.replace(old_scene, new_scene)
+
+    project_ini = os.path.join(project_path, "project.ini")
+    if os.path.exists(project_ini):
+        config = configparser.ConfigParser()
+        config.read(project_ini, encoding='utf-8')
+        if 'Project' in config:
+            for key in ('entrance_scene', 'active_scene'):
+                if config['Project'].get(key) == 'Scene/场景1.scene':
+                    config['Project'][key] = 'Scene/default.scene'
+            if config['Project'].get('scenes', ''):
+                scenes = [
+                    'Scene/default.scene' if item.strip() == 'Scene/场景1.scene' else item.strip()
+                    for item in config['Project']['scenes'].split(',')
+                    if item.strip()
+                ]
+                config['Project']['scenes'] = ','.join(scenes)
+            with open(project_ini, 'w', encoding='utf-8') as f:
+                config.write(f)
 
 
 def update_project_config(ini_path, name=None, mode='3d', update_only_time=False):

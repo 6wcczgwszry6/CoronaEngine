@@ -24,20 +24,6 @@ struct ScriptToEngineDemoEvent {
 };
 
 /**
- * @brief Imgui初始化完成事件（使用 EventStream）
- */
-struct ImguiToPythonEvent {
-    float delta_time;
-};
-
-/**
- * @brief 脚本系统到引擎的跨线程事件（使用 EventStream）
- */
-struct ImguiCallPythonEvent {
-    void* args;
-};
-
-/**
  * @brief Python 初始化完成事件：脚本系统发布，UI 系统订阅后显示窗口（使用 EventStream）
  */
 struct ScriptFinishStartEvent {

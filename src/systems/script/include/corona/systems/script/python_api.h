@@ -30,8 +30,6 @@ struct PythonAPI {
 
     bool initializeInterpreter();
     void runPythonScript();
-    void invokeStartFromEvent();
-    void invokeJsCallFromEvent(void* args);
     static void checkPythonScriptChange();
     void checkReleaseScriptChange();
     void sendMessage(const std::string& message) const;

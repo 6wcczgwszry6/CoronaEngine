@@ -33,7 +33,7 @@ namespace Corona::Systems {
  *   PeerManager — ENet host + full-mesh peer 管理
  *   SyncEngine  — SharedDataHub 脏轮询 + LWW 合并
  *
- * 优先级 55：在 ScriptSystem(60) 之后、ImguiSystem(40) 之前。
+ * 优先级 55：在 ScriptSystem(60) 之后、UiSystem(40) 之前。
  */
 class NetworkSystem : public Kernel::SystemBase {
 public:

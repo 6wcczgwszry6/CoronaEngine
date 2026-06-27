@@ -2,7 +2,7 @@
 #include <corona/shared_data_hub.h>
 #include <corona/systems/script/script_system.h>
 #include <corona/systems/ui/camera_viewport_manager.h>
-#include <corona/systems/ui/imgui_system.h>
+#include <corona/systems/ui/ui_system.h>
 
 #include <algorithm>
 #include <chrono>
@@ -11,9 +11,10 @@
 #include <thread>
 #include <vector>
 
+#include <corona/systems/ui/ui_frame_runner.h>
+
 #include "cef/browser_manager.h"
 #include "cef/cef_client.h"
-#include "imgui/imgui_ui.h"
 
 namespace Corona::Systems {
 
@@ -23,7 +24,7 @@ std::filesystem::path find_frontend_index_path() {
     std::error_code ec;
     const auto cwd = std::filesystem::current_path(ec);
     if (ec) {
-        CFW_LOG_WARNING("ImguiSystem: Unable to resolve current path: {}", ec.message());
+        CFW_LOG_WARNING("UiSystem: Unable to resolve current path: {}", ec.message());
         return {};
     }
 
@@ -44,24 +45,24 @@ std::filesystem::path find_frontend_index_path() {
 void create_initial_frontend_tab() {
     const auto frontend_index = find_frontend_index_path();
     if (frontend_index.empty()) {
-        CFW_LOG_WARNING("ImguiSystem: Initial frontend tab skipped; frontend path is empty");
+        CFW_LOG_WARNING("UiSystem: Initial frontend tab skipped; frontend path is empty");
         return;
     }
 
     if (!std::filesystem::exists(frontend_index)) {
-        CFW_LOG_WARNING("ImguiSystem: Initial frontend file not found: {}",
+        CFW_LOG_WARNING("UiSystem: Initial frontend file not found: {}",
                         frontend_index.string());
     }
 
     const int tab_id = UI::BrowserManager::instance().create_tab(
         frontend_index.string(), "/StartScreen", "main", 1920, 1080, true);
-    CFW_LOG_INFO("ImguiSystem: Initial Vue/CEF tab created: ID={}", tab_id);
+    CFW_LOG_INFO("UiSystem: Initial Vue/CEF tab created: ID={}", tab_id);
 }
 
 }  // namespace
 
-bool ImguiSystem::initialize(Kernel::ISystemContext* ctx) {
-    CFW_LOG_NOTICE("ImguiSystem: Initializing...");
+bool UiSystem::initialize(Kernel::ISystemContext* ctx) {
+    CFW_LOG_NOTICE("UiSystem: Initializing...");
 
     // 1. 初始化 CEF (必须在主线程)
     if (!UI::initialize_cef()) {
@@ -69,10 +70,10 @@ bool ImguiSystem::initialize(Kernel::ISystemContext* ctx) {
         return false;
     }
 
-    // 2. 初始化 SDL 和 ImGui (必须在主线程)
-    CFW_LOG_NOTICE("ImguiSystem: Initializing SDL and ImGui in main thread...");
-    if (!UI::initialize_sdl_imgui(window_, io_, vulkan_backend_)) {
-        CFW_LOG_ERROR("SDL/ImGui initialization failed.");
+    // 2. 初始化 SDL 和 UI 后端 (必须在主线程，不再创建 ImGui 上下文)
+    CFW_LOG_NOTICE("UiSystem: Initializing SDL and UI backend in main thread...");
+    if (!UI::initialize_sdl_ui(window_, vulkan_backend_)) {
+        CFW_LOG_ERROR("SDL/UI initialization failed.");
         UI::shutdown_cef();
         return false;
     }
@@ -84,7 +85,7 @@ bool ImguiSystem::initialize(Kernel::ISystemContext* ctx) {
     SDL_ShowWindow(window_);
     create_initial_frontend_tab();
 
-    CFW_LOG_NOTICE("ImguiSystem: Initialized successfully (main thread mode)");
+    CFW_LOG_NOTICE("UiSystem: Initialized successfully (main thread mode)");
     state_ = Kernel::SystemState::running;
 
     // 【订阅系统内部事件】使用 EventBus
@@ -96,21 +97,21 @@ bool ImguiSystem::initialize(Kernel::ISystemContext* ctx) {
                 SDL_ShowWindow(window_);
             });
     } else {
-        CFW_LOG_WARNING("ImguiSystem: No event bus available");
+        CFW_LOG_WARNING("UiSystem: No event bus available");
     }
 
     return true;
 }
 
-void ImguiSystem::start() {
+void UiSystem::start() {
     // 主线程系统不需要启动独立线程
-    // ImguiSystem 由 Engine::tick() 在主线程中调用 update()
+    // UiSystem 由 Engine::tick() 在主线程中调用 update()
     state_ = Kernel::SystemState::running;
 }
 
-void ImguiSystem::stop() {
+void UiSystem::stop() {
     // 主线程系统不需要停止线程
-    CFW_LOG_INFO("ImguiSystem: Stop called (main thread mode)");
+    CFW_LOG_INFO("UiSystem: Stop called (main thread mode)");
     auto& browser_manager = UI::BrowserManager::instance();
     std::vector<std::uintptr_t> camera_handles;
     for (const auto& [tab_id, tab] : browser_manager.get_tabs()) {
@@ -133,12 +134,13 @@ void ImguiSystem::stop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
-    ImGui::DestroyPlatformWindows();
+    // Phase 6: no ImGui platform windows to destroy (multi-viewport removed).
+    // Secondary windows (detach) are owned by the SDL window manager in Phase 7.
     running_ = false;
     state_ = Kernel::SystemState::stopped;
 }
 
-void ImguiSystem::update() {
+void UiSystem::update() {
     if (!running_ || !sdl_initialized_) {
         return;
     }
@@ -146,7 +148,6 @@ void ImguiSystem::update() {
     static UI::UiFrameRunner frame_runner;
     UI::UiFrameContext context{
         window_,
-        io_,
         vulkan_backend_.get(),
         &active_tab_id_,
         &running_,
@@ -155,25 +156,25 @@ void ImguiSystem::update() {
     frame_runner.run_frame(context);
 }
 
-void ImguiSystem::shutdown() {
-    CFW_LOG_NOTICE("ImGuiSystem: Shutting down...");
+void UiSystem::shutdown() {
+    CFW_LOG_NOTICE("UiSystem: Shutting down...");
     running_ = false;
 
     // 关闭所有浏览器标签页
-    CFW_LOG_INFO("ImGuiSystem: Closing all browser tabs...");
+    CFW_LOG_INFO("UiSystem: Closing all browser tabs...");
     UI::BrowserManager::instance().close_all_tabs();
 
-    // 清理 SDL 和 ImGui (必须在主线程)
+    // 清理 SDL 和 UI 后端 (必须在主线程)
     if (sdl_initialized_) {
-        CFW_LOG_INFO("ImGuiSystem: Shutting down SDL and ImGui...");
-        UI::shutdown_sdl_imgui(window_, io_, vulkan_backend_);
+        CFW_LOG_INFO("UiSystem: Shutting down SDL and UI backend...");
+        UI::shutdown_sdl_ui(window_, vulkan_backend_);
         sdl_initialized_ = false;
     }
 
     // 清理 CEF
-    CFW_LOG_INFO("ImGuiSystem: Shutting down CEF...");
+    CFW_LOG_INFO("UiSystem: Shutting down CEF...");
     UI::shutdown_cef();
-    CFW_LOG_INFO("ImGuiSystem: Shutdown complete");
+    CFW_LOG_INFO("UiSystem: Shutdown complete");
 }
 
 }  // namespace Corona::Systems

@@ -66,17 +66,20 @@ class MainView(PluginBase):
         try:
             if not CoronaEditor.CoronaEngine.is_vision_available():
                 return
+            if getattr(scene, "vision_document", None):
+                if not getattr(scene, "vision_bindings", []) and hasattr(scene, "get_actors"):
+                    result = SceneTools.import_embedded_vision_scene_into_current_scene(scene.route)
+                    if isinstance(result, dict) and result.get("status") == "success":
+                        return
+                CoronaEditor.CoronaEngine.load_vision_scene(
+                    SceneTools.prepare_external_live_vision_scene(scene))
+                return
             source_path = getattr(scene, "vision_source_path", "") or ""
             import_mode = getattr(scene, "vision_import_mode", "") or ""
             if source_path and import_mode == "external_live":
-                # 首次打开（如"打开 Vision 场景为项目"新建的场景）尚无 bindings：
-                # 跑一次完整外部导入，建立代理 actor / 相机 / 绑定并切到 vision 后端。
-                # 之后的启动 bindings 已持久化，走轻量加载即可。
-                if not getattr(scene, "vision_bindings", []):
-                    SceneTools.import_vision_scene_into_current_scene(scene.route, source_path)
-                else:
-                    CoronaEditor.CoronaEngine.load_vision_scene(
-                        SceneTools.prepare_external_live_vision_scene(scene) or source_path)
+                # Legacy .scene files persisted only a Vision file path. Import once
+                # so the CoronaEngine scene owns the embedded Vision document.
+                SceneTools.import_vision_scene_into_current_scene(scene.route, source_path)
             elif source_path and import_mode == "external":
                 CoronaEditor.CoronaEngine.load_vision_scene(source_path)
             else:
@@ -88,6 +91,19 @@ class MainView(PluginBase):
     def _save_project_field(key: str, value: str) -> None:
         MainView._sync_project_field(key, value)
         settings_manager.save_active_project_info()
+
+    @staticmethod
+    def _discard_python_runtime_scene(scene_name: str) -> None:
+        scene = scene_manager.get(scene_name)
+        if scene is not None:
+            try:
+                scene.set_enabled(False)
+            except Exception:
+                logger.debug("Failed to disable Python runtime scene %s", scene_name, exc_info=True)
+        try:
+            scene_manager.remove(scene_name)
+        except Exception:
+            logger.debug("Failed to discard Python runtime scene %s", scene_name, exc_info=True)
 
     @staticmethod
     def on_init():
@@ -245,15 +261,23 @@ class MainView(PluginBase):
     def scene_save(scene_name: str) -> str:
         try:
             scene = scene_manager.get(scene_name)
-            snap = scene.to_dict()
-
-            content = json.dumps(snap, indent=2)
-            save_path = FileHandler.save_file(
-                content, "保存场景文件", "场景文件 (*.json)", default_filename=scene_name
-            )
-            if save_path:
-                return json.dumps({"status": "success", "filepath": save_path})
-            return json.dumps({"status": "canceled"})
+            if scene is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Scene '{scene_name}' not found",
+                })
+            scene.save_data()
+            route = getattr(scene, "route", scene_name)
+            if route and os.path.isabs(route):
+                save_path = route
+            else:
+                project_path = settings_manager.active_project_path or ""
+                save_path = os.path.abspath(os.path.join(project_path, route or scene_name))
+            return json.dumps({
+                "status": "success",
+                "filepath": save_path,
+                "format": "corona_scene",
+            })
         except Exception as exc:
             return json.dumps({"status": "error", "message": str(exc)})
 
@@ -285,15 +309,21 @@ class MainView(PluginBase):
             if not scene_name:
                 return {"status": "error", "message": "scene_name is required", "code": "scene_name_missing"}
 
-            # 场景文件通过路径解析
-            if file_type == "scene":
-                payload = MainView.import_scene_file(scene_name, file_path)
-            elif file_type == "multimedia":
+            if file_type in ("model", "ui_image", "actor", "scene"):
+                MainView._discard_python_runtime_scene(scene_name)
+                return {
+                    "status": "success",
+                    "scene": scene_name,
+                    "path": file_path,
+                    "file_path": file_path,
+                    "actor_type": file_type,
+                }
+
+            if file_type == "multimedia":
                 # 音视频是独立资源，不创建 Actor（不走 Geometry/Scene 模型加载路径）
                 payload = MainView.import_media(scene_name, file_path)
             else:
-                # model 使用 import_model
-                payload = MainView.import_model(scene_name, file_path, file_type)
+                payload = {"path": file_path, "file_path": file_path, "file_type": file_type}
             if payload is None:
                 return {"status": "canceled", "message": "导入已取消"}
             if isinstance(payload, dict) and payload.get("status") == "error":
@@ -306,15 +336,13 @@ class MainView(PluginBase):
 
     @staticmethod
     def import_model(scene_name: str, model_path: str, file_type: str) -> dict:
-        try:
-            payload = SceneTools.create_actor(scene_name, model_path, file_type)
-        except Exception as exc:
-            logger.exception("import_model 失败 (scene=%s, path=%s)", scene_name, model_path)
-            return {"status": "error", "message": str(exc), "code": "create_actor_failed"}
-        # 透传 create_actor 的 status/error 状态
-        if isinstance(payload, dict) and payload.get("status") == "error":
-            return payload
-        return payload
+        MainView._discard_python_runtime_scene(scene_name)
+        return {
+            "scene": scene_name,
+            "path": model_path,
+            "file_path": model_path,
+            "actor_type": file_type,
+        }
 
     @staticmethod
     def import_media(scene_name: str, file_path: str) -> dict:

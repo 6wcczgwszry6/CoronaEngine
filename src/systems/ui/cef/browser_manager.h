@@ -2,7 +2,6 @@
 
 #include "horizon.h"
 #include <SDL3/SDL.h>
-#include <imgui.h>
 #include <include/internal/cef_types.h>
 
 #include <atomic>
@@ -21,11 +20,23 @@ class VulkanBackend;
 namespace Corona::Systems::UI {
 class OffscreenCefClient;
 
-inline constexpr ImTextureID k_invalid_texture_id = static_cast<ImTextureID>(0);
+// ImGui-free texture identifier (Phase 6 of the ImGui-removal plan). This carries the
+// same value the ImGui path used to store in ImTextureID: a bindless sampled-image
+// descriptor index biased by +1 (so 0 means "no texture"). The encode/decode lives in
+// browser_manager_vulkan.cpp; nothing here depends on ImGui anymore.
+using UiTextureId = std::uint64_t;
 
-inline bool is_valid_texture_id(const ImTextureID texture_id) {
+inline constexpr UiTextureId k_invalid_texture_id = 0;
+
+inline bool is_valid_texture_id(const UiTextureId texture_id) {
     return texture_id != k_invalid_texture_id;
 }
+
+// Plain 2D point (replaces ImVec2 for drag bookkeeping).
+struct PointF {
+    float x = 0.0f;
+    float y = 0.0f;
+};
 
 struct DragRegion {
     float x, y, width, height;
@@ -41,7 +52,7 @@ struct BrowserTab {
 
     OffscreenCefClient* client = nullptr;
     // VkDescriptorSet texture_id = VK_NULL_HANDLE;
-    ImTextureID texture_id = k_invalid_texture_id;
+    UiTextureId texture_id = k_invalid_texture_id;
 
     int width = 800;
     int height = 600;
@@ -52,6 +63,10 @@ struct BrowserTab {
     int dock_height = 0;            // 指定高度，0 表示自动
     bool dock_fixed = false;        // 是否固定位置
     bool dock_initialized = false;  // 是否已初始化 docking
+    // Phase 10: in-main-window floating panel (popped-out). Positioned by initial_x/y and
+    // draggable by its title bar within the main window. Distinct from host_surface detach
+    // (own OS window), which is disabled pending the multi-surface fix.
+    bool floating = false;
 
     bool open = true;
     bool minimized = false;  // 新增：是否最小化
@@ -69,13 +84,30 @@ struct BrowserTab {
     int initial_x = 120;
     int initial_y = 120;
 
+    // Phase 7 (detach / re-dock): the surface this tab is rendered into.
+    //   nullptr  ⇒ docked in the main window (composed into the main layout)
+    //   non-null ⇒ detached, rendered full-bleed into its own secondary OS window (this is
+    //             that window's native surface handle / DisplaySystem key).
+    // host_surface is owned/driven by the UI thread only (frame runner + DockCommand tasks).
+    void* host_surface = nullptr;
+    // Detach lifecycle state. Only the UI thread mutates it; guards against double-detach and
+    // detach-during-teardown (ABA). Docked is the initial/redocked state.
+    enum class DetachState { Docked, Detaching, Detached, Redocking };
+    DetachState detach_state = DetachState::Docked;
+    // Desired secondary-window geometry (logical px), filled by detachPanel and consumed by
+    // the frame runner's reconcile step when it creates the OS window.
+    int detach_x = 120;
+    int detach_y = 120;
+    int detach_w = 640;
+    int detach_h = 480;
+
     char url_buffer[1024] = "";
     std::vector<uint8_t> pixel_buffer;
     std::mutex mutex;  // 保护 pixel_buffer 和 buffer_dirty
 
     std::vector<DragRegion> drag_regions;
     bool drag_pending = false;
-    ImVec2 drag_pending_start_pos;
+    PointF drag_pending_start_pos;
     bool dragging_window = false;
     std::mutex drag_mutex;  // 确保线程安全
 };
@@ -99,8 +131,8 @@ class BrowserManager {
     void remove_tab(int tab_id);
     void update_texture(int tab_id);
     void resize_tab(int tab_id, int width, int height);
-    [[nodiscard]] const Horizon::HardwareImage* get_texture_image(ImTextureID texture_id) const;
-    void wait_for_texture_upload(ImTextureID texture_id);
+    [[nodiscard]] const Horizon::HardwareImage* get_texture_image(UiTextureId texture_id) const;
+    void wait_for_texture_upload(UiTextureId texture_id);
 
     // 隐藏标签页（最小化）
     bool hide_tab(int tab_id, bool if_close = false);
@@ -124,7 +156,7 @@ class BrowserManager {
    private:
     BrowserManager() = default;
     SDL_Window* main_window_ = nullptr;
-    ImTextureID create_browser_texture(int width, int height);
+    UiTextureId create_browser_texture(int width, int height);
     void destroy_tab_texture(BrowserTab* tab);
     void retire_deferred_tab_textures(bool force = false);
 
@@ -141,10 +173,9 @@ class BrowserManager {
     };
 
     std::unordered_map<int, std::unique_ptr<BrowserTab>> tabs_;
-    std::vector<int> tabs_to_close_;
     std::mutex pending_tasks_mutex_;
     std::vector<std::function<void()>> pending_tasks_;
-    std::unordered_map<ImTextureID, OwnedImage> owned_images_;
+    std::unordered_map<UiTextureId, OwnedImage> owned_images_;
     Horizon::HardwareExecutor browser_upload_executor_;
     std::vector<DeferredTextureDestroy> deferred_texture_destroys_;
     uint64_t frame_index_ = 0;

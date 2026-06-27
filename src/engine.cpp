@@ -15,7 +15,7 @@
 #include <corona/systems/network/network_system.h>
 #include <corona/systems/optics/optics_system.h>
 #include <corona/systems/script/script_system.h>
-#include <corona/systems/ui/imgui_system.h>
+#include <corona/systems/ui/ui_system.h>
 
 #include <chrono>
 #include <memory>
@@ -23,8 +23,8 @@
 
 namespace Corona {
 
-// 保存 ImguiSystem 指针，用于主循环中直接调用
-static Systems::ImguiSystem* g_imgui_system_ = nullptr;
+// 保存 UiSystem 指针，用于主循环中直接调用
+static Systems::UiSystem* g_ui_system_ = nullptr;
 
 // ============================================================================
 // 构造与析构
@@ -73,7 +73,16 @@ bool Engine::initialize() {
     auto& resource_manager = Resource::ResourceManager::get_instance();
     resource_manager.register_parser<Resource::TextParser>();
     resource_manager.register_parser<Resource::ImageParser>();
-    resource_manager.register_parser<Resource::SceneParser>();
+    // SceneParser：开启导入期 LOD 生成（meshoptimizer 在导入时生成多级简化网格，
+    // 存入 MeshData::lod_levels）。运行时由 GeometrySystem 内部自动上传/选级，无需上层配置。
+    {
+        auto scene_parser = std::make_shared<Resource::SceneParser>();
+        scene_parser->assimp_options.lod_options.enabled     = true;
+        scene_parser->assimp_options.lod_options.level_count = 3;
+        // target_ratios / max_errors / max_triangles 沿用 LODGenerationOptions 默认值
+        // （{0.5, 0.25, 0.05} / {0.05, 0.2, 1.0} / {0,0,200}），常规质量减面。
+        resource_manager.register_parser(scene_parser);
+    }
     resource_manager.register_parser<Resource::VideoParser>();
     resource_manager.register_parser<Resource::AudioParser>();
 
@@ -133,7 +142,7 @@ void Engine::run() {
         tick();
 
         // 检查 UI 系统是否请求退出（用户关闭窗口）
-        if (g_imgui_system_ && !g_imgui_system_->is_ui_running()) {
+        if (g_ui_system_ && !g_ui_system_->is_ui_running()) {
             CFW_LOG_INFO("UI window closed, requesting engine exit...");
             request_exit();
         }
@@ -258,10 +267,10 @@ bool Engine::register_systems() {
     // Network System (ENet LAN collaborative editing)
     sys_mgr->register_system(std::make_shared<Systems::NetworkSystem>());
 
-    // ImguiSystem - 运行在主线程
-    auto imgui_system = std::make_shared<Systems::ImguiSystem>();
-    g_imgui_system_ = imgui_system.get();  // 保存指针用于主循环
-    sys_mgr->register_system(imgui_system);
+    // UiSystem - 运行在主线程
+    auto ui_system = std::make_shared<Systems::UiSystem>();
+    g_ui_system_ = ui_system.get();  // 保存指针用于主循环
+    sys_mgr->register_system(ui_system);
 
     CFW_LOG_NOTICE("All core systems registered successfully");
 
@@ -269,10 +278,10 @@ bool Engine::register_systems() {
 }
 
 void Engine::tick() {
-    // 在主线程中更新 ImguiSystem
-    // SDL/ImGui 必须在主线程中运行
-    if (g_imgui_system_) {
-        g_imgui_system_->update();
+    // 在主线程中更新 UiSystem
+    // SDL/CEF 必须在主线程中运行
+    if (g_ui_system_) {
+        g_ui_system_->update();
     }
 
     // 系统通过 SystemBase 的 delta_time() 和 frame_number() 访问帧信息

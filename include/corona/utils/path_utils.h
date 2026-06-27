@@ -27,19 +27,28 @@ inline std::filesystem::path utf8_to_path(const std::string& utf8_str) {
         return {};
     }
 
-    // 计算所需的宽字符缓冲区大小
-    int size = MultiByteToWideChar(CP_UTF8, 0, utf8_str.c_str(),
+    // 先严格按 UTF-8 解码。没有 MB_ERR_INVALID_CHARS 时，Windows 会把非法字节
+    // 静默替换成 U+FFFD，最终路径显示为 "����" 且不会进入本地编码回退。
+    int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8_str.c_str(),
                                    static_cast<int>(utf8_str.size()), nullptr, 0);
+    if (size > 0) {
+        std::wstring wstr(static_cast<size_t>(size), L'\0');
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8_str.c_str(),
+                            static_cast<int>(utf8_str.size()), wstr.data(), size);
+        return std::filesystem::path(wstr);
+    }
+
+    // 某些边界（旧插件/第三方库/本地代码页路径）可能传入 CP_ACP 窄字节。
+    // 严格 UTF-8 失败后再按本地代码页解码，可以兼容中文 Windows 上的 GBK/CP936。
+    size = MultiByteToWideChar(CP_ACP, 0, utf8_str.c_str(),
+                               static_cast<int>(utf8_str.size()), nullptr, 0);
     if (size <= 0) {
-        // 转换失败，返回原始路径（可能会有问题，但至少不会崩溃）
         return std::filesystem::path(utf8_str);
     }
 
-    // 分配缓冲区并执行转换
     std::wstring wstr(static_cast<size_t>(size), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, utf8_str.c_str(),
+    MultiByteToWideChar(CP_ACP, 0, utf8_str.c_str(),
                         static_cast<int>(utf8_str.size()), wstr.data(), size);
-
     return std::filesystem::path(wstr);
 #else
     // Linux/macOS: 默认使用 UTF-8，直接构造即可

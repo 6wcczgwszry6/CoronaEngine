@@ -26,6 +26,10 @@ struct ManagedWindow {
     SDL_WindowID window_id = 0;
     void* surface = nullptr;  // native handle (HWND/NSWindow*); DisplaySystem surface key
     bool is_main = false;
+    // Phase 7: secondary windows are created HIDDEN and revealed only after their first
+    // frame has been published to the DisplaySystem, to avoid a 1-frame white/black flash
+    // on detach (mirrors the old ImGui deferred_platform_show_window trick).
+    bool pending_show = false;
 };
 
 // Client-area pixel rectangle of a window (origin at client top-left = 0,0).
@@ -45,6 +49,11 @@ struct WindowClientRect {
 
 class SdlWindowManager {
    public:
+    // Process-wide instance. The UI runs single-threaded on the main thread, so the window
+    // set is shared (frame runner reads it; detach/redock commands mutate it) via this
+    // singleton, mirroring BrowserManager / CameraViewportManager.
+    static SdlWindowManager& instance();
+
     SdlWindowManager() = default;
 
     // Adopt the already-created main window (today: imgui_ui.cpp's SDL_CreateWindow). The
@@ -57,6 +66,7 @@ class SdlWindowManager {
     [[nodiscard]] void* main_surface() const;
     [[nodiscard]] SDL_Window* window_for_id(SDL_WindowID window_id) const;
     [[nodiscard]] const ManagedWindow* find_by_id(SDL_WindowID window_id) const;
+    [[nodiscard]] const ManagedWindow* find_by_surface(void* surface) const;
 
     // Client-area pixel size of a window (SDL_GetWindowSizeInPixels with a logical-size
     // fallback), matching window_pixel_extent() in vulkan_backend.cpp.
@@ -72,6 +82,17 @@ class SdlWindowManager {
     void* create_secondary_window(int x, int y, int width, int height);
     void destroy_secondary_window(void* surface);
     void destroy_all_secondary();
+
+    // Deferred show: if `surface`'s window is still hidden awaiting its first frame, show it
+    // now (called after that surface's first UIFrameReadyEvent is published, eliminating the
+    // 1-frame white flash on detach). No-op if already shown or unknown surface.
+    void reveal_pending_window(void* surface);
+
+    // Phase 8: install the OS hit-test on a (borderless) secondary window so its Vue title-bar
+    // drag regions move the window (SDL_HITTEST_DRAGGABLE) and its edges resize it (8-way
+    // RESIZE_*), while the panel body stays interactive (SDL_HITTEST_NORMAL). tab_id lets the
+    // callback look up that window's drag_regions. No-op for an unknown surface.
+    void enable_drag_hit_test(void* surface, int tab_id);
 
    private:
     SDL_Window* main_window_ = nullptr;

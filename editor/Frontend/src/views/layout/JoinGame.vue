@@ -50,6 +50,12 @@
           />
         </div>
       </div>
+      <div v-if="errorMsg" class="w-full max-w-3xl mb-4 text-sm text-red-400 shrink-0">
+        {{ errorMsg }}
+      </div>
+      <div v-if="busy" class="w-full max-w-3xl mb-4 text-sm text-[#b9d39a] shrink-0">
+        {{ busyText }}
+      </div>
 
       <!-- ============ 加入房间 ============ -->
       <div v-show="activeTab === 'join'" class="w-full max-w-3xl flex-1 flex flex-col min-h-0">
@@ -113,7 +119,7 @@
                        bg-[#84a65b] text-white hover:bg-[#95b86c]
                        opacity-0 group-hover:opacity-100"
                 :class="{ '!opacity-100': selectedRoom === room.id }"
-                :disabled="room.players >= room.maxPlayers"
+                :disabled="room.players >= room.maxPlayers || busy"
                 @click.stop="handleJoinRoom(room)"
               >
                 加入
@@ -155,7 +161,7 @@
             />
             <button
               class="px-6 py-2.5 rounded-lg text-sm font-bold bg-[#3d3d3d] hover:bg-[#4d4d4d] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              :disabled="!manual.ip.trim()"
+              :disabled="!manual.ip.trim() || busy"
               @click="handleManualJoin"
             >
               连接
@@ -240,7 +246,7 @@
           v-if="activeTab === 'join'"
           class="px-14 py-3 bg-[#84a65b] hover:bg-[#95b86c] disabled:bg-gray-700 disabled:cursor-not-allowed
                  rounded-lg font-bold text-base transition-all shadow-lg inline-flex items-center gap-2"
-          :disabled="!selectedRoom"
+          :disabled="!selectedRoom || busy"
           @click="handleJoinSelected"
         >
           <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
@@ -250,7 +256,7 @@
           v-else
           class="px-14 py-3 bg-[#84a65b] hover:bg-[#95b86c] disabled:bg-gray-700 disabled:cursor-not-allowed
                  rounded-lg font-bold text-base transition-all shadow-lg inline-flex items-center gap-2"
-          :disabled="!host.roomName.trim()"
+          :disabled="!host.roomName.trim() || busy"
           @click="handleCreateRoom"
         >
           <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
@@ -264,6 +270,7 @@
 <script setup>
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
+import { networkService, projectLauncherService } from '@/utils/bridge';
 
 const router = useRouter();
 
@@ -274,33 +281,108 @@ const tabs = [
 
 const activeTab = ref('join');
 const nickname = ref('玩家1');
-const localIp = ref('192.168.1.100'); // TODO(后端): lanChatService.getLocalIp()
+const localIp = ref('--');
 const scanning = ref(false);
 const selectedRoom = ref(null);
+const busy = ref(false);
+const busyText = ref('');
+const errorMsg = ref('');
 
-// TODO(后端): 房间列表应由局域网广播扫描得到，这里为静态 mock 仅用于 UI 设计
-const rooms = ref([
-  { id: 'r1', name: '一起搭城市', host: '192.168.1.42', port: 27960, hostName: '阿强', players: 2, maxPlayers: 4, locked: false, ping: 12 },
-  { id: 'r2', name: '赛博朋克夜景测试', host: '192.168.1.57', port: 27960, hostName: 'Neo', players: 1, maxPlayers: 8, locked: true, ping: 28 },
-  { id: 'r3', name: '剧情联机·第一章', host: '192.168.1.13', port: 27961, hostName: '小雨', players: 4, maxPlayers: 4, locked: false, ping: 9 },
-]);
+const rooms = ref([]);
 
 const manual = ref({ ip: '', port: '27960', password: '' });
 
 const maxPlayerOptions = [2, 4, 8, 16];
 const host = ref({ roomName: '', password: '', port: '27960', maxPlayers: 4 });
 
-// ===== 以下 handler 仅占位，不接后端 =====
+const parsePort = (value) => {
+  const port = Number(value);
+  return Number.isFinite(port) && port > 0 ? port : 27960;
+};
+
+const playerName = () => nickname.value.trim() || '玩家';
+
+const runBusy = async (message, work) => {
+  if (busy.value) return;
+  busy.value = true;
+  busyText.value = message;
+  errorMsg.value = '';
+  try {
+    await work();
+  } catch (error) {
+    errorMsg.value = error?.message || String(error);
+  } finally {
+    busy.value = false;
+    busyText.value = '';
+  }
+};
+
+const stopExistingSession = async () => {
+  try {
+    const info = await networkService.getSessionInfo();
+    if (info?.active) {
+      await networkService.stopSession();
+    }
+  } catch (_) {
+    // 没有会话或读取失败时，后续 startSession 会给出明确错误。
+  }
+};
+
+const prepareMultiplayerProject = async (role) => {
+  busyText.value = '正在准备联机存档…';
+  const result = await projectLauncherService.createMultiplayerProject({ role });
+  const project = result?.data ?? result;
+  if (!project?.path) {
+    throw new Error('创建联机存档失败');
+  }
+
+  await projectLauncherService.setProjectMode('3d', { multiplayer: true, role });
+  const opened = await projectLauncherService.openProject(project.path);
+  const openedOk = opened?.data ?? opened?.success ?? opened;
+  if (!openedOk) {
+    throw new Error('打开联机存档失败');
+  }
+
+  const rootResult = await networkService.setProjectRoot(project.path);
+  if (rootResult?.ok === false) {
+    throw new Error(rootResult.error || '设置联机项目目录失败');
+  }
+  return project;
+};
+
+const startSession = async (role, port, instanceName = playerName()) => {
+  busyText.value = role === 'host' ? '正在创建房间…' : '正在启动本地客户端…';
+  const result = await networkService.startSession(instanceName, 0, port, role);
+  if (!result?.ok) {
+    throw new Error(result?.error || '启动联机会话失败');
+  }
+  localIp.value = result.local_ip || localIp.value;
+  return result;
+};
 
 const handleRefresh = () => {
-  // TODO(后端): 触发局域网房间扫描
   scanning.value = true;
   setTimeout(() => { scanning.value = false; }, 800);
 };
 
+const joinHost = async ({ ip, port }) => {
+  await runBusy('正在加入房间…', async () => {
+    await stopExistingSession();
+    await prepareMultiplayerProject('guest');
+    await startSession('client', port);
+
+    busyText.value = '正在连接房主…';
+    const result = await networkService.connectToPeer(ip, port, playerName());
+    if (!result?.ok) {
+      throw new Error(result?.error || '连接房主失败');
+    }
+    router.push('/');
+  });
+};
+
 const handleJoinRoom = (room) => {
-  // TODO(后端): lanChatService.joinRoom({ ip, port, room, password, nickname })
-  console.log('[UI] join room', room, 'as', nickname.value);
+  if (!room) return;
+  joinHost({ ip: room.host, port: parsePort(room.port) });
 };
 
 const handleJoinSelected = () => {
@@ -309,13 +391,18 @@ const handleJoinSelected = () => {
 };
 
 const handleManualJoin = () => {
-  // TODO(后端): 用 manual.ip/port/password 加入
-  console.log('[UI] manual join', manual.value, 'as', nickname.value);
+  const ip = manual.value.ip.trim();
+  if (!ip) return;
+  joinHost({ ip, port: parsePort(manual.value.port) });
 };
 
 const handleCreateRoom = () => {
-  // TODO(后端): lanChatService.startRoom({ room, password, port }) + 开始联机
-  console.log('[UI] create room', host.value, 'as', nickname.value);
+  runBusy('正在创建房间…', async () => {
+    await stopExistingSession();
+    await prepareMultiplayerProject('host');
+    await startSession('host', parsePort(host.value.port), host.value.roomName.trim() || playerName());
+    router.push('/');
+  });
 };
 
 const goHome = () => {

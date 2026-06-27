@@ -8,7 +8,6 @@
 #include <corona/spatial/octree.h>
 #include <corona/systems/geometry/geometry_system.h>
 #include <corona/utils/path_utils.h>
-#include "geometry_builder.h"
 #include <ktm/ktm.h>
 
 #include <algorithm>
@@ -27,6 +26,8 @@
 
 #include "geometry_internal.h"
 
+#include <corona/systems/geometry/geometry_mesh_builder.h>
+
 namespace Corona::Systems {
 
 using namespace GeometryInternal;
@@ -43,18 +44,6 @@ Horizon::HardwareBuffer make_geometry_buffer(const std::vector<T>& data,
     desc.usage = usage;
     desc.debug_name = std::move(name);
     return Horizon::HardwareBuffer(desc, std::as_bytes(std::span<const T>(data.data(), data.size())));
-}
-
-Horizon::HardwareImage make_geometry_texture(uint32_t width,
-                                             uint32_t height,
-                                             Horizon::Format format,
-                                             std::string name = {}) {
-    return Horizon::HardwareImage(Horizon::HardwareImageDesc::texture_2d(
-        width,
-        height,
-        format,
-        Horizon::ImageUsageFlags::Sampled | Horizon::ImageUsageFlags::TransferDst,
-        std::move(name)));
 }
 
 }  // namespace
@@ -137,16 +126,22 @@ void GeometrySystem::update() {
         }
     }
 
+    // ---- 异步导入（方案 A 承接点）----
+    // 扫描 PendingImport 的 GeometryDevice，发起 import_async / 轮询完成，
+    // 填 model_id 后转 PendingBuild，并回填 MechanicsDevice AABB。
+    // 磁盘 IO / assimp 解析全部在本（引擎）线程之外的 ResourceManager 线程池完成，
+    // 不阻塞前端 CEF UI 线程。
+    process_pending_geometry_imports();
+
+    // ---- 初始构建（异步加载承接点）----
+    // 为标记 PendingBuild 的 GeometryDevice 构建 GPU 资源（mesh_handles）。
+    // 放在 LOD 上传之前，使本帧新建的 mesh 同帧即可上传其 LOD 数据。
+    process_pending_geometry_builds();
+
     // ---- 动态减面管线 ----
-    // 用 shared_lock 快照 simplification_cfg，与 set_simplification_config 的 unique_lock 互斥
-    bool run_simplification = false;
-    {
-        std::shared_lock lock(impl_->mtx);
-        run_simplification = impl_->simplification_cfg.enabled;
-    }
-    if (run_simplification) {
-        upload_lod_from_scene_data();
-    }
+    // LOD 由 GeometrySystem 内部自动管理，无外部开关：每帧上传导入时生成的 LOD 数据。
+    // 已缓存的 mesh 仅做一次 find + model_id 比较，无 LOD 数据的 mesh 自动跳过。
+    upload_lod_from_scene_data();
 
     for (std::uintptr_t scene_handle : scene_handles) {
         const auto scene_begin = std::chrono::steady_clock::now();
@@ -539,11 +534,18 @@ void GeometrySystem::shutdown() {
     impl_->offline_actors.clear();
     impl_->pending_gpu_releases.clear();
 
+    // 等待并清理在途的异步 import 任务，避免 future 析构阻塞或悬挂回调。
+    for (auto& [geom_handle, task] : impl_->pending_import_tasks) {
+        if (task.future.valid()) task.future.wait();
+    }
+    impl_->pending_import_tasks.clear();
+
     // 释放 LRU ActorCache（确保在 shutdown 时清理磁盘/内存）
     impl_->actor_cache.reset();
 
-    // 显式释放共享占位纹理，确保在 GPU device 仍存活时析构 HardwareImage
-    impl_->shared_placeholder_texture.reset();
+    // 显式释放共享占位纹理，确保在 GPU device 仍存活时析构 HardwareImage。
+    // 占位纹理现由 geometry_mesh_builder 模块持有（进程级单例，唯一所有者）。
+    release_geometry_placeholder_texture();
 }
 
 // ============================================================================
@@ -837,20 +839,13 @@ void GeometrySystem::rebuild_actor_gpu_resources(std::uintptr_t actor, std::uint
             }
             auto& scene = *scene_read;  // 解引用读锁守卫，获得 Scene 数据引用
 
-            // ---- 创建共享的 1x1 白色占位纹理 ----
-            // 生命周期由 Impl::shared_placeholder_texture 管理，shutdown() 中显式释放
-            if (!impl_->shared_placeholder_texture) {
-                static const unsigned char white_pixel[4] = {255, 255, 255, 255};
-                impl_->shared_placeholder_texture = std::make_unique<Horizon::HardwareImage>(
-                    make_geometry_texture(1, 1, Horizon::Format::SRGBA8_UNORM,
-                                          "geometry.placeholder_texture"));
-                impl_->shared_placeholder_texture->write_bytes(
-                    std::as_bytes(std::span<const unsigned char>(white_pixel, sizeof(white_pixel))));
-            }
-
-            // ---- 调用共享 GPU 构建器（阶段 A + B）----
-            auto build_result = build_geometry_gpu_resources(scene, *impl_->shared_placeholder_texture);
-            auto& mesh_devices = build_result.mesh_devices;
+            // ================================================================
+            // 阶段 A：创建 MeshDevice 数组（GPU 缓冲 + 纹理）
+            // 构建逻辑收敛到 build_mesh_devices_from_scene（单一来源），
+            // 与 Python API 层 Geometry 构造函数共用同一份实现。
+            // 占位纹理由 builder 模块持有（进程级单例），无需在此创建。
+            // ================================================================
+            std::vector<MeshDevice> mesh_devices = build_mesh_devices_from_scene(scene);
 
             // ================================================================
             // 阶段 C：写回 GeometryDevice
@@ -1305,14 +1300,34 @@ void GeometrySystem::on_restore_requested(const Events::ActorRestoreRequestedEve
 // 动态减面 (Mesh Simplification) 公共 API
 // ============================================================================
 
-void GeometrySystem::set_simplification_config(const MeshSimplificationConfig& cfg) {
-    std::unique_lock lock(impl_->mtx);
-    impl_->simplification_cfg = cfg;
-}
+GeometrySystem::RenderMeshBuffers GeometrySystem::select_render_buffers(
+    std::uintptr_t          geometry_handle,
+    uint32_t                mesh_index,
+    const ktm::fvec3&       camera_pos,
+    float                   camera_fov_deg,
+    const ktm::fvec3&       world_center,
+    float                   bounding_radius,
+    const RenderMeshBuffers& fallback) const {
 
-const MeshSimplificationConfig& GeometrySystem::get_simplification_config() const {
-    std::shared_lock lock(impl_->mtx);
-    return impl_->simplification_cfg;
+    // 屏幕占比由 GeometrySystem 内部计算，optics 无需关心
+    const float screen_ratio = compute_screen_ratio(
+        camera_pos, camera_fov_deg, world_center, bounding_radius);
+
+    // 复用 resolve_lod_buffers 的选级 + 降级逻辑（单次加锁）
+    const LODMeshBuffers* lod = resolve_lod_buffers(geometry_handle, mesh_index, screen_ratio);
+
+    // 无 LOD / 未就绪 / 缓冲无效 → 原样返回 fallback，保证始终可渲染
+    if (lod == nullptr || !lod->vertex_buffer || !lod->index_buffer) {
+        return fallback;
+    }
+
+    RenderMeshBuffers out;
+    out.vertex         = lod->vertex_buffer;
+    out.index          = lod->index_buffer;
+    // StorageBuffer 可能缺失：缺失时沿用 fallback 的，避免 compute 路径拿到空句柄
+    out.vertex_storage = lod->vertex_storage ? lod->vertex_storage : fallback.vertex_storage;
+    out.index_storage  = lod->index_storage  ? lod->index_storage  : fallback.index_storage;
+    return out;
 }
 
 const LODMeshBuffers* GeometrySystem::get_lod_buffers(
@@ -1489,18 +1504,270 @@ namespace {
     return bvh;
 }
 
+// 收集所有场景所有相机的世界位置（用于流式加载的距离排序）。
+[[nodiscard]] std::vector<ktm::fvec3> collect_camera_positions() {
+    auto& hub = SharedDataHub::instance();
+    auto& camera_storage = hub.camera_storage();
+    std::vector<ktm::fvec3> positions;
+    for (auto sit = hub.scene_storage().cbegin(); sit != hub.scene_storage().cend(); ++sit) {
+        for (std::uintptr_t cam_handle : sit->camera_handles) {
+            if (auto cam = camera_storage.try_acquire_read_nowait(cam_handle)) {
+                positions.push_back(cam->position);
+            }
+        }
+    }
+    return positions;
+}
+
+// 点 p 到最近相机的距离平方；无相机时返回 0（不影响排序稳定性）。
+[[nodiscard]] float nearest_camera_dist2(const ktm::fvec3& p,
+                                         const std::vector<ktm::fvec3>& cameras) {
+    if (cameras.empty()) return 0.0f;
+    float best = std::numeric_limits<float>::max();
+    for (const auto& c : cameras) {
+        const float dx = p.x - c.x, dy = p.y - c.y, dz = p.z - c.z;
+        best = std::min(best, dx * dx + dy * dy + dz * dz);
+    }
+    return best;
+}
+
 }  // namespace
 
-void GeometrySystem::upload_lod_from_scene_data() {
-    // 快照 simplification_cfg，与 set_simplification_config 同步
-    bool auto_on_load;
-    int max_lod_levels;
+void GeometrySystem::process_pending_geometry_imports() {
+    auto& hub = SharedDataHub::instance();
+    auto& resource_manager = Resource::ResourceManager::get_instance();
+    auto& geom_storage = hub.geometry_storage();
+
+    // ---- 阶段 1：轮询已完成的 import 任务 ----
+    // future 就绪 → 取 model_id → 写入 ModelResource 槽 → 转 PendingBuild。
+    // 失败（rid==0）→ 转 Failed，不再重试。
     {
-        std::shared_lock lock(impl_->mtx);
-        auto_on_load = impl_->simplification_cfg.auto_on_load;
-        max_lod_levels = impl_->simplification_cfg.max_lod_levels;
+        std::vector<Impl::Payload> done_handles;
+        for (auto& [geom_handle, task] : impl_->pending_import_tasks) {
+            if (task.future.valid() &&
+                task.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                done_handles.push_back(geom_handle);
+            }
+        }
+        for (auto geom_handle : done_handles) {
+            const std::uint64_t task_epoch = impl_->pending_import_tasks[geom_handle].epoch;
+            std::uint64_t rid = impl_->pending_import_tasks[geom_handle].future.get();
+            impl_->pending_import_tasks.erase(geom_handle);
+
+            // 第 1 步：更新 geometry 状态 / model_id（geom_write 作用域内完成并尽早释放，
+            // 避免与下方 mechanics 槽锁同时持有 → 杜绝跨槽锁序倒置）。
+            bool import_ok = false;
+            {
+                auto geom_write = geom_storage.try_acquire_write(geom_handle);
+                if (!geom_write.valid()) continue;  // geometry 已销毁
+
+                // 防 slot 复用 ABA：本槽可能在 import 在途期间被 deallocate→复用为新对象
+                // （allocate 时 T{} 把 import_epoch 重置为 0 或新对象有自己的 epoch）。
+                // epoch 不符说明这已不是当初发起 import 的那个对象，丢弃本次结果。
+                if (geom_write->import_epoch != task_epoch) {
+                    CFW_LOG_NOTICE("[GeometrySystem] Stale async import discarded for geometry {} "
+                                   "(epoch {} != {}, slot reused)",
+                                   geom_handle, task_epoch, geom_write->import_epoch);
+                    continue;
+                }
+
+                if (rid == Resource::IResource::INVALID_UID || rid == 0) {
+                    CFW_LOG_ERROR("[GeometrySystem] Async import failed for geometry {} (path={})",
+                                  geom_handle, geom_write->model_path_utf8);
+                    geom_write->gpu_build_state = GeometryDevice::GpuBuildState::Failed;
+                    geom_write->import_epoch = 0;  // 任务结束
+                    continue;
+                }
+
+                if (geom_write->model_resource_handle) {
+                    if (auto mr = hub.model_resource_storage().try_acquire_write(geom_write->model_resource_handle)) {
+                        mr->model_id = rid;
+                    }
+                }
+                geom_write->gpu_build_state = GeometryDevice::GpuBuildState::PendingBuild;
+                geom_write->import_epoch = 0;  // import 阶段完成，清零
+                import_ok = true;
+            }  // geom_write 释放
+            if (!import_ok) continue;
+
+            // 第 2 步：回填 MechanicsDevice AABB（geometry 槽锁已释放）。
+            // Mechanics 在 Python 同步构造时读到 model_id=0 → AABB 为 0；
+            // 这里用 Scene 的 AABB 回填，八叉树下帧重建即自愈。
+            // 注意：Storage 迭代器在当前槽持有锁，不能在迭代中对同槽再 acquire_write
+            // （会重入死锁）。故先 const 遍历收集句柄，迭代结束后再写。
+            if (auto scene = resource_manager.acquire_read<Resource::Scene>(rid)) {
+                const auto aabb_min = scene->get_scene_aabb().min;  // std::array<float,3>
+                const auto aabb_max = scene->get_scene_aabb().max;
+                auto& mech_storage = hub.mechanics_storage();
+
+                std::vector<std::uintptr_t> mech_handles;
+                for (auto mit = mech_storage.cbegin(); mit != mech_storage.cend(); ++mit) {
+                    if (mit->geometry_handle == geom_handle) {
+                        mech_handles.push_back(reinterpret_cast<std::uintptr_t>(&(*mit)));
+                    }
+                }
+                for (std::uintptr_t mh : mech_handles) {
+                    if (auto mw = mech_storage.try_acquire_write(mh)) {
+                        mw->min_xyz = make_fvec3(aabb_min[0], aabb_min[1], aabb_min[2]);
+                        mw->max_xyz = make_fvec3(aabb_max[0], aabb_max[1], aabb_max[2]);
+                    }
+                }
+            }
+
+            CFW_LOG_NOTICE("[GeometrySystem] Async import finished for geometry {} (rid={})",
+                           geom_handle, rid);
+        }
     }
-    if (!auto_on_load) return;
+
+    // ---- 阶段 2：为新的 PendingImport 发起 import_async（距离排序 + 每帧预算）----
+    // 仅对尚无在途任务的 PendingImport geometry 发起，避免重复 import。
+    // 近处对象先 import（流式体验），且每帧最多发起 kMaxImportsPerFrame 个，
+    // 避免一次性把大量模型全压进 TBB 线程池造成内存/解析突发。
+    struct ToImport {
+        std::uintptr_t geom_handle;
+        std::string    path;
+        ktm::fvec3     world_pos;
+    };
+    std::vector<ToImport> to_import;
+    for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
+        const GeometryDevice& geom_dev = *it;
+        if (geom_dev.gpu_build_state != GeometryDevice::GpuBuildState::PendingImport) continue;
+        auto geom_handle = reinterpret_cast<std::uintptr_t>(&geom_dev);
+        if (impl_->pending_import_tasks.count(geom_handle)) continue;  // 已在途
+        if (geom_dev.model_path_utf8.empty()) continue;
+
+        ktm::fvec3 world_pos = make_fvec3(0.0f, 0.0f, 0.0f);
+        if (geom_dev.transform_handle != 0) {
+            if (auto tr = hub.model_transform_storage().try_acquire_read(geom_dev.transform_handle)) {
+                world_pos = tr->position;
+            }
+        }
+        to_import.push_back({geom_handle, geom_dev.model_path_utf8, world_pos});
+    }
+    if (to_import.empty()) return;
+
+    // 按到最近相机的距离排序：近处先 import
+    const std::vector<ktm::fvec3> cameras = collect_camera_positions();
+    if (!cameras.empty()) {
+        std::sort(to_import.begin(), to_import.end(),
+                  [&](const ToImport& a, const ToImport& b) {
+                      return nearest_camera_dist2(a.world_pos, cameras)
+                           < nearest_camera_dist2(b.world_pos, cameras);
+                  });
+    }
+
+    // 每帧发起预算：剩余的下帧继续（仍为 PendingImport，不丢失）
+    constexpr size_t kMaxImportsPerFrame = 4;
+    size_t launched = 0;
+    for (auto& item : to_import) {
+        if (launched >= kMaxImportsPerFrame) break;
+
+        // 分配 epoch 并写入 GeometryDevice（防 slot 复用 ABA）。
+        // 写锁内再校验仍为 PendingImport 且无 epoch，避免与并发状态变更竞争。
+        const std::uint64_t epoch = impl_->next_import_epoch++;
+        {
+            auto geom_write = geom_storage.try_acquire_write(item.geom_handle);
+            if (!geom_write.valid()) continue;  // 已销毁
+            if (geom_write->gpu_build_state != GeometryDevice::GpuBuildState::PendingImport ||
+                geom_write->import_epoch != 0) {
+                continue;  // 状态已变 / 已有在途任务，跳过
+            }
+            geom_write->import_epoch = epoch;
+        }
+
+        impl_->pending_import_tasks[item.geom_handle] =
+            Impl::PendingImportTask{epoch,
+                                    resource_manager.import_async(Utils::utf8_to_path(item.path))};
+        ++launched;
+    }
+}
+
+void GeometrySystem::process_pending_geometry_builds() {
+    auto& hub = SharedDataHub::instance();
+    auto& resource_manager = Resource::ResourceManager::get_instance();
+    auto& geom_storage = hub.geometry_storage();
+
+    // ---- 阶段 1：只读收集待构建项 ----
+    // 收集 gpu_build_state==PendingBuild 且 model_id 已就绪的 geometry。
+    // 仅记录 (geom_handle, model_id, world_pos)，不在持有遍历期间做重活。
+    struct PendingBuild {
+        std::uintptr_t geom_handle;
+        std::uint64_t  model_id;
+        ktm::fvec3     world_pos;  // 用于按相机距离排序（近处先建）
+    };
+    std::vector<PendingBuild> pending;
+    for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
+        const GeometryDevice& geom_dev = *it;
+        if (geom_dev.gpu_build_state != GeometryDevice::GpuBuildState::PendingBuild) continue;
+        if (!geom_dev.model_resource_handle) continue;
+
+        std::uint64_t model_id = 0;
+        if (auto model_res = hub.model_resource_storage().try_acquire_read(geom_dev.model_resource_handle)) {
+            model_id = model_res->model_id;
+        }
+        if (model_id == 0) continue;  // import 尚未完成，下帧再试
+
+        // 读取世界位置（transform 缺失时退化为原点，仍可构建、只是排序权重为 0）
+        ktm::fvec3 world_pos = make_fvec3(0.0f, 0.0f, 0.0f);
+        if (geom_dev.transform_handle != 0) {
+            if (auto tr = hub.model_transform_storage().try_acquire_read(geom_dev.transform_handle)) {
+                world_pos = tr->position;
+            }
+        }
+
+        pending.push_back({reinterpret_cast<std::uintptr_t>(&geom_dev), model_id, world_pos});
+    }
+    if (pending.empty()) return;
+
+    // ---- 按相机距离排序：近处对象先构建（流式加载体验）----
+    const std::vector<ktm::fvec3> cameras = collect_camera_positions();
+    if (!cameras.empty()) {
+        std::sort(pending.begin(), pending.end(),
+                  [&](const PendingBuild& a, const PendingBuild& b) {
+                      return nearest_camera_dist2(a.world_pos, cameras)
+                           < nearest_camera_dist2(b.world_pos, cameras);
+                  });
+    }
+
+    // ---- 阶段 2：构建 GPU 资源（不持 storage 锁，仅写回时短暂加锁）----
+    // 每帧预算：最多构建 kMaxBuildsPerFrame 个，剩余保持 PendingBuild 下帧继续。
+    // 目的：一次性创建大量对象时，把 GPU buffer 创建的帧突刺摊平到多帧，
+    // 避免单帧卡顿。预算为内部常量（"由底层自行决定"），无外部开关。
+    constexpr size_t kMaxBuildsPerFrame = 4;
+    size_t built = 0;
+    for (const auto& item : pending) {
+        if (built >= kMaxBuildsPerFrame) break;  // 本帧预算用尽，剩余下帧处理
+
+        auto scene_read = resource_manager.acquire_read<Resource::Scene>(item.model_id);
+        if (!scene_read.valid()) continue;  // 资源无效，下帧再试
+
+        std::vector<MeshDevice> mesh_devices = build_mesh_devices_from_scene(*scene_read);
+
+        // 先失效旧 LOD 缓存（新 mesh_handles 即将替换，旧条目指向已变更的缓冲）
+        {
+            std::unique_lock lod_lock(impl_->lod_cache_mutex);
+            for (uint32_t i = 0; i < static_cast<uint32_t>(mesh_devices.size()); ++i) {
+                impl_->lod_cache.erase(Impl::make_lod_key(item.geom_handle, i));
+            }
+        }
+
+        // 写回 + TOCTOU 重校验：仅当仍为 PendingBuild 才接管（防止期间被其它路径改写）
+        if (auto geom_write = hub.geometry_storage().try_acquire_write(item.geom_handle)) {
+            if (geom_write->gpu_build_state == GeometryDevice::GpuBuildState::PendingBuild) {
+                geom_write->mesh_handles = std::move(mesh_devices);
+                geom_write->gpu_build_state = GeometryDevice::GpuBuildState::Ready;
+                ++built;
+                CFW_LOG_NOTICE("[GeometrySystem] Built pending GPU resources for geometry {}, {} mesh(es)",
+                               item.geom_handle, geom_write->mesh_handles.size());
+            }
+        }
+    }
+}
+
+void GeometrySystem::upload_lod_from_scene_data() {
+    // LOD 由本系统内部决策，无外部配置开关。
+    // 最大 LOD 级别数（含 LOD0 原始精度）为内部常量。
+    constexpr int max_lod_levels = 4;
 
     auto& resource_manager = Resource::ResourceManager::get_instance();
     auto& hub = SharedDataHub::instance();
@@ -1572,7 +1839,18 @@ void GeometrySystem::upload_lod_from_scene_data() {
                 lod_buf.vertex_storage   = make_geometry_buffer(lod_data.vertices, Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_vertex_storage");
                 lod_buf.index_storage    = make_geometry_buffer(lod_data.indices,  Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_index_storage");
                 lod_buf.error            = lod_data.error;
-                lod_buf.screen_threshold = lod_data.screen_threshold;
+                // 切换阈值采用按 LOD 序号的固定表，不用 error 反推值（1/(1+error*80)）：
+                // 后者在 error 较大时阈值极小，只在物体缩得很小时才切入；且 error==0
+                // 时阈值为 0 → 该级永不选中（死级）。固定表保证单调递减、行为可预测：
+                //   LOD1 @ screen_ratio<=0.3, LOD2 @ <=0.12, LOD3 @ <=0.04
+                // 即物体在屏幕上越小，使用越简化的网格。
+                {
+                    static constexpr float kFixedThresholds[] = {0.30f, 0.12f, 0.04f};
+                    const size_t ti = entry.levels.size() - 1;  // 当前是第 (levels.size()) 级，下标从 LOD1=0 起
+                    lod_buf.screen_threshold = (ti < std::size(kFixedThresholds))
+                                                   ? kFixedThresholds[ti]
+                                                   : 0.02f;
+                }
                 lod_buf.ready            = true;
                 entry.levels.push_back(std::move(lod_buf));
 

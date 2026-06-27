@@ -35,6 +35,7 @@ _PYTHON_ROUTE_METHOD_ALLOWLIST = {
         "get_recent_projects",
         "create_project",
         "create_world_project",
+        "create_multiplayer_project",
         "open_project",
         "open_project_file",
         "browse_folder",

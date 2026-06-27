@@ -4,7 +4,11 @@ import configparser
 import datetime
 import logging
 
-from CoronaCore.utils.proejct_utils import update_project_config,create_project_from_template
+from CoronaCore.utils.proejct_utils import (
+    create_project_from_template,
+    normalize_project_runtime_paths,
+    update_project_config,
+)
 from utils.settings import settings_manager
 
 logger = logging.getLogger(__name__)
@@ -17,6 +21,7 @@ class ProjectCopy:
         try:
 
             project_ini = create_project_from_template(target_path, project_name, mode)
+            normalize_project_runtime_paths(os.path.dirname(project_ini))
             # 记录到全局历史
             settings_manager.add_recent_project(os.path.dirname(project_ini))
 
@@ -32,6 +37,7 @@ class ProjectCopy:
             return False
 
         try:
+            normalize_project_runtime_paths(project_path)
             project_ini = os.path.join(project_path, "project.ini")
             update_project_config(project_ini, update_only_time=True)
             settings_manager.set_active_project(project_path)

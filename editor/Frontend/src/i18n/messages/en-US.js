@@ -53,6 +53,7 @@ export default {
     componentMissing: 'Component not found: {panelId}',
     popOut: 'Pop out to separate window',
     toggleFloat: 'Toggle floating/docked',
+    dropHere: 'Drop here',
   },
   start: {
     newGame: 'New Game',

@@ -254,17 +254,6 @@
         </div>
         <button
           class="p-1.5 hover:bg-[#545454] rounded text-[#e0e0e0]"
-          title="添加灯光"
-          @click.stop="ImportLightSource"
-        >
-          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-            <path
-              d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7M9 21v-1h6v1a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1m3-17a5 5 0 0 0-5 5c0 2.05 1.23 3.81 3 4.58V16h4v-2.42c1.77-.77 3-2.53 3-4.58a5 5 0 0 0-5-5z"
-            />
-          </svg>
-        </button>
-        <button
-          class="p-1.5 hover:bg-[#545454] rounded text-[#e0e0e0]"
           title="添加摄像头"
           @click.stop="ImportCamera"
         >
@@ -1223,6 +1212,11 @@ const SelectActor = (scene) => {
   if (isMediaItem(scene)) return;
   // 通知积木编辑器当前选中的物体
   setActorContext(currentSceneName.value, scene.name);
+  if (typeof window !== 'undefined' && typeof window.__coronaEmit === 'function') {
+    window.__coronaEmit('actor-change', scene.type || 'actor', currentSceneName.value, scene.name);
+  } else {
+    coronaEventBus.emit('actor-change', scene.type || 'actor', currentSceneName.value, scene.name);
+  }
 };
 
 const SelectCamera = (cam) => {
@@ -1688,28 +1682,6 @@ const CloseModelDropdown = () => {
   ShowModelDropdown.value = false;
 };
 
-const generateUniqueName = (baseName) => {
-  let name = baseName;
-  let counter = 1;
-  while (sceneImages.value.find((item) => item.name === name)) {
-    name = `${baseName}_${counter}`;
-    counter++;
-  }
-  return name;
-};
-
-const LIGHT_MODEL_PATH = 'assets/editor/Ball.obj';
-
-const ImportLightSource = async () => {
-  ShowModelDropdown.value = false;
-  const lightName = generateUniqueName('Light');
-  await addActorToList({
-    name: lightName,
-    path: LIGHT_MODEL_PATH,
-    type: 'light',
-  });
-};
-
 const ImportCamera = async () => {
   ShowModelDropdown.value = false;
   try {
@@ -1733,15 +1705,36 @@ const ImportCamera = async () => {
   }
 };
 
-const addActorToList = async (actor) => {
-  if (!actor || !actor.name) return;
-  sceneImages.value.push({
-    name: actor.name,
-    path: actor.path,
-    type: actor.type || 'obj',
-    visible: actor.visible !== false,
-    handle: normalizeHandle(actor.handle),
-  });
+const unwrapBridgePayload = (result) => result?.data ?? result;
+
+const selectedPathFromImportPayload = (payload) =>
+  payload?.path || payload?.file_path || payload?.selected_path || payload?.source_path || '';
+
+const createActorFromSelectedFile = async (payload, actorType, logLabel) => {
+  const status = payload?.status;
+  if (status === 'canceled') {
+    return null;
+  }
+  const selectedPath = selectedPathFromImportPayload(payload);
+  if (!selectedPath) {
+    logWarn(`${logLabel} returned without selected file path`, payload);
+    return null;
+  }
+
+  updateLoading('创建对象', 55);
+  const createResult = await sceneService.createActor(currentSceneName.value, selectedPath, actorType);
+  const createPayload = unwrapBridgePayload(createResult);
+  if (createResult?.success === false || createPayload?.status === 'error') {
+    throw new Error(createPayload?.message || createResult?.error || `${logLabel} native create failed`);
+  }
+
+  await OnInitObjTree();
+  const actor = createPayload?.actor;
+  if (actor?.name) {
+    selectedItem.value = actor.name;
+  }
+  updateLoading('导入完成', 100);
+  return actor || null;
 };
 
 const HandleFileImport = async () => {
@@ -1759,10 +1752,7 @@ const HandleFileImport = async () => {
   showLoading('加载中', '请稍候...', 0);
   try {
     const result = await projectService.importResourceFileByDialog(currentSceneName.value, 'model');
-    // 兼容两种返回形态:
-    //   1) 包装型 { success, data: { status, actor, ... } }
-    //   2) 直返型 { status, actor, ... }
-    const payload = result?.data ?? result;
+    const payload = unwrapBridgePayload(result);
     const status = payload?.status;
     if (result?.success === false || status === 'error') {
       logError('File import failed', payload?.message || result?.error || 'unknown error');
@@ -1772,13 +1762,7 @@ const HandleFileImport = async () => {
       // 用户主动取消,无需弹错
       return;
     }
-    const actor = payload?.actor;
-    if (actor && actor.name) {
-      await addActorToList(actor);
-      updateLoading('导入完成', 100);
-    } else {
-      logWarn('File import returned without actor payload', payload);
-    }
+    await createActorFromSelectedFile(payload, 'model', 'File import');
   } catch (e) {
     logError('File import failed', e);
   } finally {
@@ -1801,7 +1785,7 @@ const HandleUiImageImport = async () => {
   showLoading('加载中', '请稍候...', 0);
   try {
     const result = await projectService.importResourceFileByDialog(currentSceneName.value, 'ui_image');
-    const payload = result?.data ?? result;
+    const payload = unwrapBridgePayload(result);
     const status = payload?.status;
     if (result?.success === false || status === 'error') {
       logError('UI image import failed', payload?.message || result?.error || 'unknown error');
@@ -1810,13 +1794,7 @@ const HandleUiImageImport = async () => {
     if (status === 'canceled') {
       return;
     }
-    const actor = payload?.actor;
-    if (actor && actor.name) {
-      await addActorToList(actor);
-      updateLoading('导入完成', 100);
-    } else {
-      logWarn('UI image import returned without actor payload', payload);
-    }
+    await createActorFromSelectedFile(payload, 'ui_image', 'UI image import');
   } catch (e) {
     logError('UI image import failed', e);
   } finally {
@@ -1826,17 +1804,28 @@ const HandleUiImageImport = async () => {
 
 const HandleActorImport = async () => {
   ShowModelDropdown.value = false;
+  if (!currentSceneName.value) {
+    logWarn('Actor import aborted: no active scene');
+    return;
+  }
   showLoading('加载中', '请稍候...', 0);
   try {
     const result = await projectService.importResourceFileByDialog(currentSceneName.value, 'actor');
-    if (result.success && result.data.actor) {
-      await addActorToList(result.data.actor);
-      updateLoading('导入完成', 100);
+    const payload = unwrapBridgePayload(result);
+    const status = payload?.status;
+    if (result?.success === false || status === 'error') {
+      logError('Actor import failed', payload?.message || result?.error || 'unknown error');
+      return;
     }
+    if (status === 'canceled') {
+      return;
+    }
+    await createActorFromSelectedFile(payload, 'actor', 'Actor import');
   } catch (e) {
     logError('Actor import failed', e);
+  } finally {
+    hideLoading();
   }
-  hideLoading();
 };
 
 const HandleMultimediaImport = async () => {
@@ -1893,7 +1882,7 @@ const HandleSceneImport = async () => {
   showLoading('加载中', '请稍候...', 0);
   try {
     const result = await projectService.importResourceFileByDialog(currentSceneName.value, 'scene');
-    const payload = result?.data ?? result;
+    const payload = unwrapBridgePayload(result);
     const status = payload?.status;
     if (result?.success === false || status === 'error') {
       logError('Scene import failed', payload?.message || result?.error || 'unknown error');
@@ -1903,9 +1892,9 @@ const HandleSceneImport = async () => {
       return;
     }
 
-    updateLoading('导入中', 40);
-    await OnInitObjTree();
+    logWarn('Scene JSON import is selected but native scene import is not implemented yet', payload);
     updateLoading('导入完成', 100);
+    await OnInitObjTree();
   } catch (e) {
     logError('Scene import failed', e);
   } finally {
@@ -1919,8 +1908,10 @@ const DeleteActor = async (scene) => {
 
   try {
     await sceneService.removeActor(currentSceneName.value, scene.name);
-  } catch {
-    // 忽略
+    await OnInitObjTree();
+  } catch (error) {
+    logError('Delete actor failed', error);
+    await OnInitObjTree();
   }
 };
 
@@ -1990,11 +1981,10 @@ onMounted(async () => {
   coronaEventBus.on('focus-pose-result', handleFocusPoseResult);
 });
 
-// 场景切换或 actor 变化时刷新当前场景树
+// 场景切换时刷新当前场景树；actor 选择只更新详情面板，不重建树，避免点击闪烁。
 const onActorChangeEvent = (type, sceneId /*, actorId, oldPath */) => {
-  if (type === 'scene' && sceneId) {
-    currentSceneName.value = sceneId;
-  }
+  if (type !== 'scene' || !sceneId) return;
+  currentSceneName.value = sceneId;
   OnInitObjTree();
 };
 

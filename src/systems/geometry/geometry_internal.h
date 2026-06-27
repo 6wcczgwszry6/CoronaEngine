@@ -115,13 +115,8 @@ struct GeometrySystem::Impl {
         std::vector<Spatial::BVH<uint32_t>> per_level_bvh;
     };
 
-    MeshSimplificationConfig           simplification_cfg;
     mutable std::shared_mutex          lod_cache_mutex;
     std::unordered_map<uint64_t, LODCacheEntry> lod_cache;
-
-    // 共享占位纹理：所有无纹理 mesh 共用，生命周期与 Impl 一致
-    // 使用 unique_ptr 避免 static 局部变量在 GPU device 析构后才析构
-    std::unique_ptr<Horizon::HardwareImage> shared_placeholder_texture;
 
     // ========================================
     // LRU ActorCache（M3 生产化）
@@ -143,6 +138,18 @@ struct GeometrySystem::Impl {
     /// evict 后待释放 GPU 的 actor 集合（延迟到下一帧 update() 头部处理，
     /// 避免与 OpticsSystem 渲染线程产生 data race）
     std::unordered_set<Payload> pending_gpu_releases;
+
+    /// 初始加载异步 import 任务：geometry_handle → (epoch, import future)。
+    /// GeometrySystem 扫描 PendingImport 的 GeometryDevice，发起 import_async
+    /// 并在此追踪；future 就绪后比对 epoch（防 slot 复用 ABA）、填 model_id、转 PendingBuild。
+    struct PendingImportTask {
+        std::uint64_t              epoch = 0;  // 与 GeometryDevice::import_epoch 比对
+        std::future<std::uint64_t> future;
+    };
+    std::unordered_map<Payload, PendingImportTask> pending_import_tasks;
+
+    /// import 任务 epoch 分配器（进程级单调递增，0 保留为"无任务"）。
+    std::uint64_t next_import_epoch = 1;
 
     [[nodiscard]] static uint64_t make_lod_key(std::uintptr_t geometry_handle,
                                                uint32_t       mesh_index) {

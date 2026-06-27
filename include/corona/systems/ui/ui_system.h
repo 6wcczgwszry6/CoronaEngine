@@ -6,7 +6,6 @@
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/kernel/system/i_system.h>
 #include <corona/systems/ui/vulkan_backend.h>
-#include <imgui.h>
 
 #include <memory>
 
@@ -17,22 +16,23 @@ class VulkanBackend;
 /**
  * @brief UI系统
  *
- * 负责启动和管理 ImGui 界面。
- * 运行在主线程（不使用独立线程），因为 SDL/ImGui/CEF 都要求在主线程中运行。
+ * 负责启动和管理基于 SDL3 + CEF + Vulkan quad compositor 的 UI 界面。
+ * （ImGui 已移除；类名沿用历史，实现已无 ImGui 依赖。）
+ * 运行在主线程（不使用独立线程），因为 SDL/CEF 都要求在主线程中运行。
  *
  * 注意：此系统直接实现 ISystem 接口，而不是继承 SystemBase，
  * 因为它不需要独立线程和 SystemBase 提供的线程管理功能。
  */
-class ImguiSystem : public Kernel::ISystem {
+class UiSystem : public Kernel::ISystem {
    public:
-    ImguiSystem() = default;
-    ~ImguiSystem() override = default;
+    UiSystem() = default;
+    ~UiSystem() override = default;
 
     // ========================================
     // ISystem 接口实现
     // ========================================
 
-    [[nodiscard]] std::string_view get_name() const override { return "Imgui"; }
+    [[nodiscard]] std::string_view get_name() const override { return "UI"; }
     [[nodiscard]] int get_priority() const override { return 40; }
 
     bool initialize(Kernel::ISystemContext* ctx) override;
@@ -69,7 +69,6 @@ class ImguiSystem : public Kernel::ISystem {
     bool show_demo_window_ = false;
     bool running_ = false;
     SDL_Window* window_ = nullptr;
-    ImGuiIO* io_ = nullptr;
 
     bool window_size_changed_ = false;
     bool sdl_initialized_ = false;

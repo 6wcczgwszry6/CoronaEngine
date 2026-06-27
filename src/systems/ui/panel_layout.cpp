@@ -106,9 +106,9 @@ std::vector<PanelPlacement> compute_panel_layout(const WorkArea& work,
         if (panel.docking_pos == "main") {
             placement.is_main = true;
             placement.rect = LayoutRect{work.x, work.y, work.width, work.height};
-        } else if (panel.camera_view) {
-            // Camera viewports keep their explicit initial rect (FirstUseEver in the
-            // ImGui path); subsequent moves are owned by the input/detach layer.
+        } else if (panel.camera_view || panel.floating) {
+            // Camera viewports and floating (popped-out) panels use an explicit rect from
+            // initial_x/y + dock_width/height; the input/drag layer owns subsequent moves.
             placement.rect = LayoutRect{
                 static_cast<float>(panel.initial_x),
                 static_cast<float>(panel.initial_y),

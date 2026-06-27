@@ -149,20 +149,30 @@ class UnicodeIOSystem : public Assimp::IOSystem {
     static std::filesystem::path path_from_utf8(const char* utf8_str) {
 #ifdef _WIN32
         if (utf8_str == nullptr) return {};
-        // Windows 上明确使用 WideCharToMultiByte 进行 UTF-8 到 UTF-16 的转换
-        // 这样可以避免 MSVC std::filesystem::u8path 在某些系统区域设置下的潜在问题
-        int wchars_num = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, nullptr, 0);
+        // 严格按 UTF-8 解码，避免非法字节被静默替换成 U+FFFD 后变成 "����" 路径。
+        int wchars_num = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8_str, -1, nullptr, 0);
         if (wchars_num > 0) {
             std::vector<wchar_t> wstr(wchars_num);
-            MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, wstr.data(), wchars_num);
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8_str, -1, wstr.data(), wchars_num);
             // 移除可能包含的 null 终止符
             if (!wstr.empty() && wstr.back() == L'\0') {
                 wstr.pop_back();
             }
             return std::filesystem::path(wstr.begin(), wstr.end());
         }
-        // 如果 CP_UTF8 转换失败，尝试直接使用 ANSI 转换
-        CFW_LOG_WARNING("Path conversion from UTF-8 failed (Win32), trying local encoding");
+
+        // 如果 CP_UTF8 转换失败，尝试按系统本地代码页（中文 Windows 通常为 CP936）转换。
+        wchars_num = MultiByteToWideChar(CP_ACP, 0, utf8_str, -1, nullptr, 0);
+        if (wchars_num > 0) {
+            std::vector<wchar_t> wstr(wchars_num);
+            MultiByteToWideChar(CP_ACP, 0, utf8_str, -1, wstr.data(), wchars_num);
+            if (!wstr.empty() && wstr.back() == L'\0') {
+                wstr.pop_back();
+            }
+            return std::filesystem::path(wstr.begin(), wstr.end());
+        }
+
+        CFW_LOG_WARNING("Path conversion from UTF-8 and local encoding failed (Win32)");
         return std::filesystem::path(utf8_str);
 #else
         try {

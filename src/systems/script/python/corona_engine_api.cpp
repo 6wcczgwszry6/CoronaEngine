@@ -9,7 +9,6 @@
 #include <corona/shared_data_hub.h>
 #include <corona/systems/script/corona_engine_api.h>
 #include <corona/systems/geometry/geometry_system.h>
-#include "../../geometry/geometry_builder.h"
 #include <corona/systems/optics/optics_system.h>
 #include <corona/utils/path_utils.h>
 
@@ -544,47 +543,6 @@ bool Corona::API::Scene::is_simulation_enabled() const {
     return false;
 }
 
-void Corona::API::Scene::set_visibility_config(int invisible_frames_to_evict) {
-    if (handle_ == 0) {
-        CFW_LOG_WARNING("[Scene::set_visibility_config] Invalid scene handle");
-        return;
-    }
-    auto* sys_mgr = Kernel::KernelContext::instance().system_manager();
-    if (!sys_mgr) {
-        CFW_LOG_ERROR("[Scene::set_visibility_config] SystemManager not available");
-        return;
-    }
-    auto geom_sys = std::dynamic_pointer_cast<Corona::Systems::GeometrySystem>(
-        sys_mgr->get_system("Geometry"));
-    if (!geom_sys) {
-        CFW_LOG_ERROR("[Scene::set_visibility_config] GeometrySystem not found");
-        return;
-    }
-    Corona::Systems::SceneVisibilityConfig cfg;
-    cfg.invisible_frames_to_evict = invisible_frames_to_evict;
-    cfg.collect_stats = true;
-    geom_sys->set_visibility_config(handle_, cfg);
-}
-
-void Corona::API::Scene::set_distance_config(float unload_dist, float preload_dist, bool enable) {
-    if (handle_ == 0) {
-        CFW_LOG_WARNING("[Scene::set_distance_config] Invalid scene handle");
-        return;
-    }
-    auto* sys_mgr = Kernel::KernelContext::instance().system_manager();
-    if (!sys_mgr) {
-        CFW_LOG_ERROR("[Scene::set_distance_config] SystemManager not available");
-        return;
-    }
-    auto geom_sys = std::dynamic_pointer_cast<Corona::Systems::GeometrySystem>(
-        sys_mgr->get_system("Geometry"));
-    if (!geom_sys) {
-        CFW_LOG_ERROR("[Scene::set_distance_config] GeometrySystem not found");
-        return;
-    }
-    geom_sys->set_distance_config(handle_, unload_dist, preload_dist, enable);
-}
-
 // ########################
 //      Environment
 // ########################
@@ -629,6 +587,48 @@ std::array<float, 3> Corona::API::Environment::get_sun_direction() const {
         return {accessor->sun_position.x, accessor->sun_position.y, accessor->sun_position.z};
     }
     return {1.0f, 1.0f, 1.0f};
+}
+
+void Corona::API::Environment::set_sun_intensity(float intensity) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Environment::set_sun_intensity] Invalid environment handle");
+        return;
+    }
+
+    if (auto accessor = SharedDataHub::instance().environment_storage().acquire_write(handle_)) {
+        accessor->sun_intensity = intensity;
+    } else {
+        CFW_LOG_ERROR("[Environment::set_sun_intensity] Failed to acquire write access to environment storage");
+    }
+}
+
+float Corona::API::Environment::get_sun_intensity() const {
+    if (handle_ == 0) return 10.0f;
+    if (auto accessor = SharedDataHub::instance().environment_storage().try_acquire_read(handle_)) {
+        return accessor->sun_intensity;
+    }
+    return 10.0f;
+}
+
+void Corona::API::Environment::set_sky_intensity(float intensity) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Environment::set_sky_intensity] Invalid environment handle");
+        return;
+    }
+
+    if (auto accessor = SharedDataHub::instance().environment_storage().acquire_write(handle_)) {
+        accessor->sky_intensity = intensity;
+    } else {
+        CFW_LOG_ERROR("[Environment::set_sky_intensity] Failed to acquire write access to environment storage");
+    }
+}
+
+float Corona::API::Environment::get_sky_intensity() const {
+    if (handle_ == 0) return 20.0f;
+    if (auto accessor = SharedDataHub::instance().environment_storage().try_acquire_read(handle_)) {
+        return accessor->sky_intensity;
+    }
+    return 20.0f;
 }
 
 void Corona::API::Environment::set_floor_grid(bool enabled) const {
@@ -737,16 +737,21 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
     // 保存路径供 Actor 标识和 GeometrySystem 资源加载/卸载使用
     model_path_ = Utils::utf8_to_path(model_path);
 
-    // 使用 utf8_to_path 确保 UTF-8 编码的路径在 Windows 上正确转换
-    auto model_id = Resource::ResourceManager::get_instance().import_sync(model_path_);
-    if (model_id == 0) {
-        CFW_LOG_CRITICAL("[Geometry::Geometry] Failed to load model: {}", model_path);
-        return;
-    }
-
+    // ---- 全异步加载（方案 A）：构造函数不做任何磁盘 IO / 解析 ----
+    // 此前这里同步 import_sync（磁盘 + assimp 解析，数百 ms~数秒），由于 Python
+    // Geometry() 通常在 CEF UI 线程（OnQuery 持 GIL）同步执行，会独占该线程，
+    // 导致"加载一个模型时无法打开页面加载其他模型"。
+    //
+    // 现改为：仅分配三个 SharedDataHub 槽（微秒级），记录 model_path 并标记
+    // PendingImport，立即返回。实际 import + GPU 构建由 GeometrySystem::update()
+    // 在引擎线程承接（PendingImport → import_async → PendingBuild → 构建 → Ready）。
+    //
+    // 契约变化：构造后 model_id / AABB **尚未就绪**（get_aabb() 暂返回 0，
+    // Mechanics AABB 暂为 0）。GeometrySystem 在 import 完成后回填 MechanicsDevice
+    // 的 AABB，八叉树每帧重读自然自愈；前端读 AABB 的逻辑需容忍"最终一致"。
     model_resource_handle_ = SharedDataHub::instance().model_resource_storage().allocate();
     if (auto handle = SharedDataHub::instance().model_resource_storage().acquire_write(model_resource_handle_)) {
-        handle->model_id = model_id;
+        handle->model_id = 0;  // 待 import 完成后由 GeometrySystem 填入
     } else {
         CFW_LOG_ERROR("[Geometry::Geometry] Failed to acquire write access to model resource storage");
         SharedDataHub::instance().model_resource_storage().deallocate(model_resource_handle_);
@@ -756,39 +761,13 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
 
     transform_handle_ = SharedDataHub::instance().model_transform_storage().allocate();
 
-    auto scene = Resource::ResourceManager::get_instance().acquire_read<Resource::Scene>(model_id);
-    if (!scene) {
-        CFW_LOG_ERROR("[Geometry::Geometry] Failed to acquire read access to scene resource");
-        SharedDataHub::instance().model_resource_storage().deallocate(model_resource_handle_);
-        SharedDataHub::instance().model_transform_storage().deallocate(transform_handle_);
-        model_resource_handle_ = 0;
-        transform_handle_ = 0;
-        return;
-    }
-
-    if (scene->data.meshes.empty()) {
-        CFW_LOG_WARNING("[Geometry::Geometry] Scene has no meshes, checking nodes for mesh references...");
-        for (std::uint32_t i = 0; i < scene->data.nodes.size(); ++i) {
-            const auto& node = scene->data.nodes[i];
-        }
-    }
-
-    // ---- 创建占位纹理（不再使用 static，避免生命周期超过 GPU device）----
-    static const unsigned char white_pixel[4] = {255, 255, 255, 255};
-    H::HardwareImage placeholder(make_sampled_texture_desc(
-        1, 1, H::Format::SRGBA8_UNORM, "script.placeholder_texture"));
-    placeholder.write_bytes(
-        std::as_bytes(std::span<const unsigned char>(white_pixel, 4)));
-
-    // ---- 调用共享 GPU 构建器（阶段 A + B）----
-    auto build_result = Corona::Systems::build_geometry_gpu_resources(*scene, placeholder);
-    auto& mesh_devices = build_result.mesh_devices;
-
     handle_ = SharedDataHub::instance().geometry_storage().allocate();
     if (auto handle = SharedDataHub::instance().geometry_storage().acquire_write(handle_)) {
         handle->transform_handle = transform_handle_;
         handle->model_resource_handle = model_resource_handle_;
-        handle->mesh_handles = std::move(mesh_devices);
+        handle->mesh_handles.clear();  // 留空，待 GeometrySystem 异步构建
+        handle->model_path_utf8 = model_path;  // 供 GeometrySystem 异步 import
+        handle->gpu_build_state = GeometryDevice::GpuBuildState::PendingImport;
     } else {
         CFW_LOG_CRITICAL("[Geometry::Geometry] Failed to acquire write access to geometry storage");
         // 清理已分配的资源
@@ -1062,6 +1041,10 @@ const std::filesystem::path& Corona::API::Geometry::get_model_path() const {
     return model_path_;
 }
 
+bool Corona::API::Geometry::is_valid() const {
+    return handle_ != 0 && transform_handle_ != 0;
+}
+
 std::array<float, 6> Corona::API::Geometry::get_aabb() const {
     if (auto geom = SharedDataHub::instance().geometry_storage().try_acquire_read(handle_)) {
         if (auto res = SharedDataHub::instance().model_resource_storage().try_acquire_read(geom->model_resource_handle)) {
@@ -1090,6 +1073,11 @@ std::uintptr_t Corona::API::Geometry::get_model_resource_handle() const {
 // ########################
 Corona::API::Optics::Optics(Geometry& geo)
     : geometry_(&geo), handle_(0) {
+    if (!geo.is_valid()) {
+        CFW_LOG_WARNING("[Optics::Optics] Invalid geometry; optics component not created");
+        return;
+    }
+
     handle_ = SharedDataHub::instance().optics_storage().allocate();
     if (auto accessor = SharedDataHub::instance().optics_storage().acquire_write(handle_)) {
         accessor->geometry_handle = geo.get_handle();
@@ -1234,6 +1222,11 @@ float Corona::API::Optics::get_shininess() const {
 // ########################
 Corona::API::Mechanics::Mechanics(Geometry& geo)
     : geometry_(&geo), handle_(0) {
+    if (!geo.is_valid()) {
+        CFW_LOG_WARNING("[Mechanics::Mechanics] Invalid geometry; mechanics component not created");
+        return;
+    }
+
     // 获取模型的包围盒信息
     ktm::fvec3 max_xyz;
     max_xyz.x = 0.0f;
@@ -1470,6 +1463,11 @@ void Corona::API::Mechanics::set_on_move_callback(
 // ########################
 Corona::API::Acoustics::Acoustics(Geometry& geo)
     : geometry_(&geo), handle_(0) {
+    if (!geo.is_valid()) {
+        CFW_LOG_WARNING("[Acoustics::Acoustics] Invalid geometry; acoustics component not created");
+        return;
+    }
+
     handle_ = SharedDataHub::instance().acoustics_storage().allocate();
     if (auto accessor = SharedDataHub::instance().acoustics_storage().acquire_write(handle_)) {
         accessor->geometry_handle = geo.get_handle();
@@ -1568,6 +1566,10 @@ Corona::API::Actor::~Actor() {
 Corona::API::Actor::Profile* Corona::API::Actor::add_profile(const Profile& profile) {
     if (!profile.geometry) {
         CFW_LOG_CRITICAL("[Actor::add_profile] Profile must have a valid Geometry");
+        return nullptr;
+    }
+    if (!profile.geometry->is_valid()) {
+        CFW_LOG_CRITICAL("[Actor::add_profile] Profile Geometry failed to load");
         return nullptr;
     }
 

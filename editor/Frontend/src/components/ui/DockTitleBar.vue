@@ -35,13 +35,15 @@
 <script setup>
 import { onMounted, onUnmounted, ref, defineProps, defineEmits } from 'vue';
 import { useI18n } from 'vue-i18n';
-// 引入 projectService
-import { projectService } from '@/utils/bridge.js';
+// 引入 projectService / appService
+import { projectService, appService } from '@/utils/bridge.js';
 
 const props = defineProps({
   title: { type: String, default: '' },
   extraClass: { type: String, default: '' },
-  showFloatToggle: { type: Boolean, default: false },
+  // 默认显示浮动切换按钮：DockTitleBar 仅在 standalone 模式渲染（独立 CEF Tab），
+  // 此时点击可把面板 detach 成独立无边框 OS 窗口、或从独立窗口收回主窗口。
+  showFloatToggle: { type: Boolean, default: true },
   // 必须传入当前页面的 routePath，以便后端 Python 查找对应的 tab-Id
   routePath: { type: String, required: true },
 });
@@ -126,8 +128,37 @@ onUnmounted(() => {
 // 按钮事件处理
 // ============================================================================
 
-function onToggleFloat() {
-  emit('toggleFloat');
+// routePath -> panelId（与 useDockPanel.getPanelIdFromRoute 保持一致）。redock 需要把
+// panelId 带进 panel-closed 广播，主窗口据此用 dockStore.popIn 恢复对应 DOM 面板。
+const ROUTE_TO_PANEL_ID = {
+  '/SceneBar': 'SceneTools',
+  '/Object': 'SceneDatas',
+  '/Pet': 'AITool',
+  '/LogView': 'LogTool',
+  '/FileManager': 'FileManager',
+  '/ProjectSettings': 'ProjectSettings',
+  '/ScratchTool': 'ScratchTool',
+  '/AITalkBar': 'AITalkBar',
+  '/Network': 'Network',
+  '/SetUp': 'EditorSettings',
+};
+
+function panelIdFromRoute() {
+  const path = (props.routePath || '').split('?')[0];
+  return ROUTE_TO_PANEL_ID[path] || null;
+}
+
+async function onToggleFloat() {
+  // DockTitleBar 仅在 standalone（已浮出为独立 OS 窗口）渲染，因此 ⤢ 永远表示「收回主窗口」。
+  // 收回 = closeThisTab：C++ 从调用方 browser 解析 tabId、置 open=false（帧循环按 promise
+  // 顺序拆掉副窗口），并广播 panel-closed → 主窗口 dockStore.popIn 恢复为 DOM 面板。
+  const panelId = panelIdFromRoute();
+  try {
+    await appService.closeThisTab(panelId);
+  } catch (e) {
+    console.error('[DockTitleBar] redock failed:', e);
+  }
+  emit('toggleFloat', false);
 }
 
 function onClose() {

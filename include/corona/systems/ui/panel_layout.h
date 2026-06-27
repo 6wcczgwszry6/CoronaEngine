@@ -39,7 +39,11 @@ struct PanelLayoutInput {
     int dock_width = 0;
     int dock_height = 0;
     bool camera_view = false;
-    int initial_x = 0;  // camera_view: explicit position
+    // floating: an in-main-window draggable rectangle positioned by initial_x/y (like a
+    // camera viewport) rather than a fixed docking_pos anchor. Set for popped-out panels so
+    // they can be dragged around the main window. camera_view implies floating placement too.
+    bool floating = false;
+    int initial_x = 0;  // explicit position for camera_view / floating panels
     int initial_y = 0;
 };
 

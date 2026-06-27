@@ -738,10 +738,7 @@ bool collect_actor_instances_for_visibility(
 
     bool has_instances = false;
     uint32_t object_id = 1;
-    const auto& handles = scene.visible_actor_handles.empty()
-                              ? scene.actor_handles
-                              : scene.visible_actor_handles;
-    for (auto actor_handle : handles) {
+    for (auto actor_handle : scene.actor_handles) {
         auto actor = actor_storage.try_acquire_read(actor_handle);
         if (!actor) {
             ++object_id;
@@ -2132,10 +2129,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     bool has_instances = false;
                     uint32_t recorded_draws = 0;
                     uint32_t object_id = 1;
-                    const auto& vis_handles = scene.visible_actor_handles.empty()
-                                                  ? scene.actor_handles
-                                                  : scene.visible_actor_handles;
-                    for (auto actor_handle : vis_handles) {
+                    for (auto actor_handle : scene.actor_handles) {
                         auto actor = actor_storage.try_acquire_read(actor_handle);
                         if (!actor) {
                             ++object_id;
@@ -2206,28 +2200,22 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                 for (uint32_t mesh_index = 0; mesh_index < static_cast<uint32_t>(geom->mesh_handles.size()); ++mesh_index) {
                                     auto& m = geom->mesh_handles[mesh_index];
 
-                                    // ---- LOD 缓冲替换 ----
-                                    Horizon::HardwareBuffer render_vb = m.vertexBuffer;
-                                    Horizon::HardwareBuffer render_ib = m.indexBuffer;
-                                    Horizon::HardwareBuffer render_vs = m.vertexStorageBuffer;
-                                    Horizon::HardwareBuffer render_is = m.indexStorageBuffer;
-
+                                    // ---- LOD 缓冲选择 ----
+                                    // 屏幕占比计算 + 选级 + 降级兜底全部由 GeometrySystem 内部完成，
+                                    // 返回值保证可直接渲染，无需判空或逐 buffer 覆写。
+                                    GeometrySystem::RenderMeshBuffers bufs{
+                                        m.vertexBuffer, m.indexBuffer,
+                                        m.vertexStorageBuffer, m.indexStorageBuffer};
                                     if (use_lod && geometry_system_) {
-                                        float screen_ratio = GeometrySystem::compute_screen_ratio(
+                                        bufs = geometry_system_->select_render_buffers(
+                                            optics.geometry_handle, mesh_index,
                                             camera->position, camera->fov,
-                                            world_center, bounding_radius);
-
-                                        if (auto* lod_buf = geometry_system_->resolve_lod_buffers(
-                                                optics.geometry_handle, mesh_index,
-                                                screen_ratio)) {
-                                            if (lod_buf->vertex_buffer && lod_buf->index_buffer) {
-                                                render_vb = lod_buf->vertex_buffer;
-                                                render_ib = lod_buf->index_buffer;
-                                                if (lod_buf->vertex_storage) render_vs = lod_buf->vertex_storage;
-                                                if (lod_buf->index_storage)  render_is = lod_buf->index_storage;
-                                            }
-                                        }
+                                            world_center, bounding_radius, bufs);
                                     }
+                                    Horizon::HardwareBuffer render_vb = bufs.vertex;
+                                    Horizon::HardwareBuffer render_ib = bufs.index;
+                                    Horizon::HardwareBuffer render_vs = bufs.vertex_storage;
+                                    Horizon::HardwareBuffer render_is = bufs.index_storage;
                                     // --- Collect material info ---
                                     auto materialID = static_cast<uint32_t>(batch.materials.size());
                                     {
@@ -3679,7 +3667,7 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
         const auto object_to_world = flatten_vision_matrix(resolved->o2w);
         bool logical_instance_changed = false;
         group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
-                            uint instance_index) {
+                            std::uint32_t instance_index) {
             if (!instance) {
                 return;
             }
@@ -3936,7 +3924,7 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
         group->aabb = ::vision::Box3f{};
         const auto object_to_world = flatten_vision_matrix(resolved->o2w);
         group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
-                            uint instance_index) {
+                            std::uint32_t instance_index) {
             if (!instance) {
                 return;
             }

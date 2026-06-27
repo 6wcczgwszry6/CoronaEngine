@@ -63,11 +63,24 @@ NativeResult native_unhandled() {
 }
 
 NativeRequest parse_native_request(const std::string& request_json) {
-    const auto root = nlohmann::json::parse(request_json);
+    const auto root = nlohmann::json::parse(request_json, nullptr, false);
+    if (root.is_discarded() || !root.is_object()) {
+        throw std::runtime_error("Invalid native request JSON");
+    }
+
     NativeRequest request;
-    request.module = root.value("module", "");
-    request.function = root.value("function", "");
-    request.args = root.value("args", nlohmann::json::array());
+
+    if (auto it = root.find("module"); it != root.end() && it->is_string()) {
+        request.module = it->get<std::string>();
+    }
+    if (auto it = root.find("function"); it != root.end() && it->is_string()) {
+        request.function = it->get<std::string>();
+    }
+    if (auto it = root.find("args"); it != root.end()) {
+        request.args = *it;
+    } else {
+        request.args = nlohmann::json::array();
+    }
     if (!request.args.is_array()) {
         request.args = nlohmann::json::array({request.args});
     }
@@ -105,7 +118,6 @@ bool is_python_fallback_allowed(const std::string& module, const std::string& fu
 
     static const std::unordered_map<std::string, std::unordered_set<std::string>> method_allowlist = {
         {"MainView", {
-            "scene_save",
             "import_resource_file",
             "import_model",
             "import_media",
@@ -118,6 +130,7 @@ bool is_python_fallback_allowed(const std::string& module, const std::string& fu
             "get_recent_projects",
             "create_project",
             "create_world_project",
+            "create_multiplayer_project",
             "open_project",
             "open_project_file",
             "browse_folder",
@@ -131,7 +144,6 @@ bool is_python_fallback_allowed(const std::string& module, const std::string& fu
             "browse_scene_file",
         }},
         {"SceneDatas", {
-            "save_actor",
             "select_model_file",
         }},
         {"SceneTools", {
@@ -139,6 +151,8 @@ bool is_python_fallback_allowed(const std::string& module, const std::string& fu
             "select_screenshot_path",
             "select_vision_scene_path",
             "import_vision_scene_into_current_scene",
+            "sun_direction",
+            "floor_grid",
         }},
     };
 

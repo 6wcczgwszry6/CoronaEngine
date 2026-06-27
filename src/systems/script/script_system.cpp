@@ -20,31 +20,8 @@ ScriptSystem::~ScriptSystem() = default;
 bool ScriptSystem::initialize(Kernel::ISystemContext* ctx) {
     CFW_LOG_NOTICE("ScriptSystem: Initializing...");
 
-    // 【订阅系统内部事件】使用 EventBus
-    auto* event_bus = ctx->event_bus();
-    if (event_bus) {
-        python_start_id_ = event_bus->subscribe<Events::ImguiToPythonEvent>(
-            [this](const Events::ImguiToPythonEvent& event) {
-                // 检查是否正在关闭
-                if (python_api_->is_shutting_down()) {
-                    return;
-                }
-                CFW_LOG_INFO("ScriptSystem: Received ImguiToPythonEvent start");
-                python_api_->invokeStartFromEvent();
-            });
-
-        js_call_python_id_ = event_bus->subscribe<Events::ImguiCallPythonEvent>(
-            [this](const Events::ImguiCallPythonEvent& event) {
-                // 检查是否正在关闭
-                if (python_api_->is_shutting_down()) {
-                    return;
-                }
-                CFW_LOG_INFO("ScriptSystem: Received ImguiCallPythonEvent js_call");
-                python_api_->invokeJsCallFromEvent(event.args);
-            });
-
-        CFW_LOG_DEBUG("ScriptSystem: EventBus subscriptions ready");
-    } else {
+    // JS→Python 走 CEF query bridge (deal_func_from_js)，ScriptSystem 不再订阅 UI 事件。
+    if (ctx->event_bus() == nullptr) {
         CFW_LOG_WARNING("ScriptSystem: No event bus available");
     }
 
@@ -74,17 +51,6 @@ void ScriptSystem::update() {
 
 void ScriptSystem::shutdown() {
     CFW_LOG_NOTICE("ScriptSystem: Shutting down...");
-
-    // 取消 EventBus 订阅
-    if (auto* event_bus = context()->event_bus()) {
-        if (python_start_id_ != 0) {
-            event_bus->unsubscribe(python_start_id_);
-        }
-        if (js_call_python_id_ != 0) {
-            event_bus->unsubscribe(js_call_python_id_);
-        }
-        CFW_LOG_DEBUG("ScriptSystem: Unsubscribed from events");
-    }
 
     // 主动关闭 Python 解释器，避免在析构时阻塞
     python_api_->shutdown();

@@ -19,6 +19,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_VISION_PRIMITIVES = {"quad", "cube", "sphere"}
+_VISION_RESOURCE_PATH_KEYS = {
+    "fn",
+    "path",
+    "file",
+    "filename",
+    "texture",
+    "image",
+}
 
 
 def _active_project_path():
@@ -38,6 +46,29 @@ def _as_float3(value):
         return [float(value[0]), float(value[1]), float(value[2])]
     except (TypeError, ValueError):
         return None
+
+
+def _vision_document_for_embedded_storage(document: dict, source_path: str) -> dict:
+    base_dir = os.path.dirname(os.path.abspath(source_path)) if source_path else os.getcwd()
+    embedded = copy.deepcopy(document)
+
+    def absolutize(value):
+        if isinstance(value, dict):
+            for key, child in list(value.items()):
+                if (key or "").lower() in _VISION_RESOURCE_PATH_KEYS and isinstance(child, str):
+                    text = child.strip()
+                    if text and not os.path.isabs(text) and "://" not in text and not text.startswith("data:"):
+                        value[key] = os.path.abspath(os.path.join(base_dir, text))
+                    else:
+                        value[key] = child
+                else:
+                    absolutize(child)
+        elif isinstance(value, list):
+            for item in value:
+                absolutize(item)
+
+    absolutize(embedded)
+    return embedded
 
 
 def _normalize_vec3(value):
@@ -708,8 +739,22 @@ def _derived_vision_scene_path(source_path: str, scene) -> str:
     return os.path.join(source_dir, f"{source_stem}.corona_{scene_stem}_{suffix}{source_ext or '.json'}")
 
 
+def _runtime_vision_scene_path(scene) -> str:
+    route = getattr(scene, "route", "") or ""
+    project_path = _active_project_path()
+    if os.path.isabs(route):
+        project_path = project_path or os.path.dirname(os.path.abspath(route))
+    base_dir = os.path.abspath(project_path or os.getcwd())
+    scene_stem = _safe_filename_stem(getattr(scene, "name", "") or "scene")
+    key = f"{os.path.abspath(route) if route else scene_stem}|embedded_vision"
+    suffix = uuid.uuid5(uuid.NAMESPACE_URL, key).hex[:12]
+    return os.path.join(base_dir, ".corona", "vision_runtime",
+                        f"{scene_stem}_{suffix}.json")
+
+
 def _atomic_write_json(path: str, document: dict) -> None:
     directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
     temp_path = os.path.join(directory, f".{os.path.basename(path)}.{uuid.uuid4().hex}.tmp")
     try:
         with open(temp_path, "w", encoding="utf-8") as file:
@@ -728,11 +773,16 @@ def _atomic_write_json(path: str, document: dict) -> None:
 
 
 def _write_derived_external_live_scene(scene, source_path: str) -> str:
-    if not source_path or not os.path.isfile(source_path):
-        return source_path
-
-    with open(source_path, "r", encoding="utf-8") as file:
-        document = json.load(file)
+    embedded_document = getattr(scene, "vision_document", None)
+    if isinstance(embedded_document, dict):
+        document = embedded_document
+        output_path = _runtime_vision_scene_path(scene)
+    else:
+        if not source_path or not os.path.isfile(source_path):
+            return source_path
+        with open(source_path, "r", encoding="utf-8") as file:
+            document = json.load(file)
+        output_path = _derived_vision_scene_path(source_path, scene)
 
     derived = copy.deepcopy(document)
     bindings = list(getattr(scene, "vision_bindings", []))
@@ -763,9 +813,8 @@ def _write_derived_external_live_scene(scene, source_path: str) -> str:
         }
 
     _compact_removed_shapes(derived)
-    path = _derived_vision_scene_path(source_path, scene)
-    _atomic_write_json(path, derived)
-    return path
+    _atomic_write_json(output_path, derived)
+    return output_path
 
 
 def _sync_external_live_binding_source_path(scene, runtime_path: str) -> None:
@@ -781,6 +830,15 @@ def _sync_external_live_binding_source_path(scene, runtime_path: str) -> None:
 
 
 def prepare_external_live_vision_scene(scene) -> str:
+    if isinstance(getattr(scene, "vision_document", None), dict):
+        try:
+            runtime_path = _write_derived_external_live_scene(scene, "")
+        except Exception as exc:
+            logger.exception("Failed to write embedded Vision runtime scene: %s", exc)
+            return ""
+        _sync_external_live_binding_source_path(scene, runtime_path)
+        return runtime_path
+
     source_path = getattr(scene, "vision_source_path", "") or ""
     if not source_path or getattr(scene, "vision_import_mode", "") != "external_live":
         return source_path
@@ -855,7 +913,7 @@ def _find_previous_binding(bindings, used_binding_indices: set, shape: dict, sha
     return None
 
 
-def _vision_import_summary(import_mode: str, source_path: str, bindings, unsupported_shapes) -> dict:
+def _vision_import_summary(storage: str, bindings, unsupported_shapes) -> dict:
     unsupported_by_reason = {}
     unsupported_by_type = {}
     for shape in unsupported_shapes or []:
@@ -864,8 +922,8 @@ def _vision_import_summary(import_mode: str, source_path: str, bindings, unsuppo
         unsupported_by_reason[reason] = unsupported_by_reason.get(reason, 0) + 1
         unsupported_by_type[shape_type] = unsupported_by_type.get(shape_type, 0) + 1
     return {
-        "import_mode": import_mode,
-        "source_path": source_path,
+        "storage": storage,
+        "embedded": storage == "embedded",
         "binding_count": len(bindings or []),
         "unsupported_count": len(unsupported_shapes or []),
         "unsupported_by_reason": unsupported_by_reason,
@@ -897,6 +955,14 @@ def _remove_stale_vision_proxy_actors(scene, previous_bindings, active_actor_gui
 
 @PluginBase.register_web("SceneTools")
 class SceneTools(PluginBase):
+    @staticmethod
+    def _native_scene_tree_only(method_name: str) -> dict:
+        return {
+            "status": "error",
+            "message": f"SceneTools.{method_name} is native-only; use the C++ native scene tree",
+            "code": "native_scene_tree_only",
+        }
+
     @staticmethod
     def _find_actor_by_guid(scene, actor_guid: str):
         if scene is None or not actor_guid:
@@ -1000,379 +1066,56 @@ class SceneTools(PluginBase):
 
     @staticmethod
     def create_actor(scene_name: str, asset_path: str, actor_type: str = 'model', actor_data=None) -> dict:
-        # B-1 + 模型导入修复:场景不存在时不再崩溃,
-        # 改为通过 get_or_create 自动补建并返回明确错误信息,避免前端静默失败
-        return SceneTools._create_actor_impl(scene_name, asset_path, actor_type, actor_data)
+        return SceneTools._native_scene_tree_only("create_actor")
 
     @staticmethod
     def create_actor_internal(scene_name: str, asset_path: str, actor_type: str = 'model', actor_data=None) -> dict:
-        """纯后端 Actor 创建（不发 JS 回调，避免远程同步时触发前端死循环）。
-        文件传输完成后由 C++ CEF bridge 调用此方法。"""
-        return SceneTools._create_actor_impl(scene_name, asset_path, actor_type, actor_data,
-                                             notify_frontend=False)
+        return SceneTools._native_scene_tree_only("create_actor_internal")
 
     @staticmethod
     def get_actor_sync_snapshot(scene_name: str) -> dict:
-        try:
-            scene = scene_manager.get(scene_name)
-            if scene is None:
-                return {"status": "error",
-                        "message": f"Scene '{scene_name}' not found",
-                        "code": "scene_not_found"}
-            actors = []
-            for actor in scene.get_actors():
-                actor_state = SceneTools._actor_sync_state(actor)
-                actor_state["scene"] = actor_state.get("scene") or scene_name
-                if not actor_state.get("actor_guid"):
-                    continue
-                if SceneTools._actor_snapshot_block_reason(actor_state) is not None:
-                    continue
-                actors.append(actor_state)
-            return {"status": "success", "scene": scene_name, "actors": actors}
-        except Exception as exc:
-            logger.exception("get_actor_sync_snapshot failed")
-            return {"status": "error", "message": str(exc), "code": "internal_error"}
+        return SceneTools._native_scene_tree_only("get_actor_sync_snapshot")
 
     @staticmethod
     def apply_actor_state_internal(scene_name: str, actor_guid: str, actor_data=None) -> dict:
-        """Apply remote actor metadata and transform by actor_guid without rebroadcasting."""
-        try:
-            scene = scene_manager.get(scene_name)
-            if scene is None:
-                return {"status": "error",
-                        "message": f"Scene '{scene_name}' not found",
-                        "code": "scene_not_found"}
-            actor = SceneTools._find_actor_by_guid(scene, actor_guid)
-            if actor is None:
-                return {"status": "warning",
-                        "message": f"Actor guid '{actor_guid}' not found",
-                        "code": "actor_not_found",
-                        "actor_guid": actor_guid}
-
-            actor_data = actor_data or {}
-            previous_network_remote = getattr(actor, "network_remote", False)
-            previous_suppress = getattr(actor, "_suppress_network_broadcast", False)
-            actor.network_remote = True
-            actor._suppress_network_broadcast = True
-            try:
-                if actor_data.get("name"):
-                    actor.name = str(actor_data["name"])
-                geometry = actor_data.get("geometry") or {}
-                if "position" in geometry and hasattr(actor, "set_position"):
-                    actor.set_position(geometry["position"], if_init=True)
-                if "rotation" in geometry and hasattr(actor, "set_rotation"):
-                    actor.set_rotation(geometry["rotation"], if_init=True)
-                if "scale" in geometry and hasattr(actor, "set_scale"):
-                    actor.set_scale(geometry["scale"], if_init=True)
-                if "visible" in actor_data and hasattr(actor, "set_visible"):
-                    actor.set_visible(actor_data["visible"])
-                if "follow_camera" in actor_data and hasattr(actor, "set_follow_camera"):
-                    actor.set_follow_camera(actor_data["follow_camera"], if_init=True)
-            finally:
-                actor.network_remote = previous_network_remote
-                actor._suppress_network_broadcast = previous_suppress
-            try:
-                scene.save_data()
-                if hasattr(scene, "_notify_scene_tree_changed"):
-                    scene._notify_scene_tree_changed()
-            except Exception:
-                logger.debug("apply_actor_state_internal: save/notify failed", exc_info=True)
-            return {"status": "success", "scene": scene_name, "actor": actor.to_dict()}
-        except Exception as exc:
-            logger.exception("apply_actor_state_internal failed")
-            return {"status": "error", "message": str(exc), "code": "internal_error"}
+        return SceneTools._native_scene_tree_only("apply_actor_state_internal")
 
     @staticmethod
     def apply_actor_sync_snapshot_internal(scene_name: str, snapshot=None) -> dict:
-        """Apply a host actor snapshot. Missing local actors are created; absent host actors are never deleted."""
-        try:
-            scene = scene_manager.get(scene_name)
-            if scene is None:
-                return {"status": "error",
-                        "message": f"Scene '{scene_name}' not found",
-                        "code": "scene_not_found"}
-            actors = snapshot.get("actors") if isinstance(snapshot, dict) else snapshot
-            if not isinstance(actors, list):
-                actors = []
-            created = []
-            updated = []
-            unchanged = []
-            warnings = []
-            for actor_data in actors:
-                if not isinstance(actor_data, dict):
-                    continue
-                actor_guid = actor_data.get("actor_guid", "")
-                if not actor_guid:
-                    continue
-                block_reason = SceneTools._actor_snapshot_block_reason(actor_data)
-                if block_reason is not None:
-                    warnings.append({"status": "warning",
-                                     "code": block_reason,
-                                     "actor_guid": actor_guid,
-                                     "actor": actor_data.get("name", "")})
-                    continue
-                existing = SceneTools._find_actor_by_guid(scene, actor_guid)
-                if existing is not None:
-                    if SceneTools._actor_sync_states_equal(existing, actor_data):
-                        unchanged.append(SceneTools._actor_sync_state(existing))
-                        continue
-                    result = SceneTools.apply_actor_state_internal(
-                        scene_name, actor_guid, actor_data)
-                    if result.get("status") == "success":
-                        updated.append(result.get("actor", {}))
-                    else:
-                        warnings.append(result)
-                    continue
-
-                asset_path = actor_data.get("path") or actor_data.get("model") or ""
-                if not asset_path:
-                    warnings.append({"status": "warning",
-                                     "code": "missing_model_path",
-                                     "actor_guid": actor_guid})
-                    continue
-                create_data = dict(actor_data)
-                create_data["_suppress_network_broadcast"] = True
-                try:
-                    result = SceneTools.create_actor_internal(
-                        scene_name,
-                        asset_path,
-                        create_data.get("actor_type", "model"),
-                        create_data,
-                    )
-                except FileNotFoundError as exc:
-                    logger.info(
-                        "apply_actor_sync_snapshot_internal: skip actor with missing asset "
-                        "scene=%s actor=%s guid=%s path=%s error=%s",
-                        scene_name,
-                        actor_data.get("name", ""),
-                        actor_guid,
-                        asset_path,
-                        exc,
-                    )
-                    warnings.append({
-                        "status": "warning",
-                        "code": "missing_asset",
-                        "actor_guid": actor_guid,
-                        "actor": actor_data.get("name", ""),
-                        "path": asset_path,
-                        "message": str(exc),
-                    })
-                    continue
-                actor_result = result.get("actor") if isinstance(result, dict) else None
-                if actor_result:
-                    created.append(actor_result)
-                else:
-                    warnings.append(result)
-            return {
-                "status": "success",
-                "scene": scene_name,
-                "created": created,
-                "updated": updated,
-                "unchanged": unchanged,
-                "warnings": warnings,
-            }
-        except Exception as exc:
-            logger.exception("apply_actor_sync_snapshot_internal failed")
-            return {"status": "error", "message": str(exc), "code": "internal_error"}
+        return SceneTools._native_scene_tree_only("apply_actor_sync_snapshot_internal")
 
     @staticmethod
     def apply_actor_transform_internal(scene_name: str, actor_guid: str, actor_data=None) -> dict:
-        """Apply a remote actor transform without re-broadcasting it."""
-        try:
-            scene = scene_manager.get(scene_name)
-            if scene is None:
-                return {"status": "error",
-                        "message": f"Scene '{scene_name}' not found",
-                        "code": "scene_not_found"}
-
-            actor = SceneTools._find_actor_by_guid(scene, actor_guid)
-            if actor is None:
-                return {"status": "error",
-                        "message": f"Actor guid '{actor_guid}' not found",
-                        "code": "actor_not_found"}
-
-            geometry = (actor_data or {}).get("geometry") or {}
-            if "position" in geometry:
-                actor.set_position(geometry["position"], if_init=True)
-            if "rotation" in geometry:
-                actor.set_rotation(geometry["rotation"], if_init=True)
-            if "scale" in geometry:
-                actor.set_scale(geometry["scale"], if_init=True)
-            try:
-                scene.save_data()
-            except Exception:
-                logger.debug("apply_actor_transform_internal: save_data failed", exc_info=True)
-            return {"status": "success", "scene": scene_name, "actor": actor.to_dict()}
-        except Exception as exc:
-            logger.exception("apply_actor_transform_internal failed")
-            return {"status": "error", "message": str(exc), "code": "internal_error"}
+        return SceneTools._native_scene_tree_only("apply_actor_transform_internal")
 
     @staticmethod
     def _create_actor_impl(scene_name: str, asset_path: str, actor_type: str = 'model',
                            actor_data=None, notify_frontend: bool = True) -> dict:
-        scene = scene_manager.get(scene_name)
-        if scene is None:
-            try:
-                scene = scene_manager.get_or_create(scene_name)
-            except Exception as exc:
-                logger.error("create_actor: 场景 '%s' 不存在且无法创建: %s", scene_name, exc)
-                return {"status": "error",
-                        "message": f"Scene '{scene_name}' not found",
-                        "code": "scene_not_found"}
-        if scene is None:
-            logger.error("create_actor: scene '%s' still None after get_or_create", scene_name)
-            return {"status": "error",
-                    "message": f"Scene '{scene_name}' not found",
-                    "code": "scene_not_found"}
-
-        existing_count = 0
-        try:
-            existing_count = sum(1 for a in scene._actors if a.route == asset_path)
-        except Exception as exc:
-            logger.warning("create_actor: 统计同路径 actor 失败 (%s),按 0 处理: %s", scene_name, exc)
-            existing_count = 0
-
-        actor_data = actor_data or {}
-        actor_guid = actor_data.get("actor_guid", "") if isinstance(actor_data, dict) else ""
-        existing_actor = SceneTools._find_actor_by_guid(scene, actor_guid)
-        if existing_actor is not None:
-            applied = SceneTools.apply_actor_state_internal(scene_name, actor_guid, actor_data)
-            if applied.get("status") == "success":
-                return {"scene": scene_name, "actor": applied.get("actor")}
-            return applied
-
-        actor = Actor(route=asset_path,
-                      source_index=existing_count,
-                      actor_type=actor_type,
-                      parent_scene=scene,
-                      actor_data=actor_data)
-        scene.add_actor(actor)
-        if actor_data.get("_suppress_network_broadcast"):
-            actor.network_remote = False
-            actor._suppress_network_broadcast = False
-        logger.info("Actor %s added to %s type %s", actor.name, scene_name, actor_type)
-        if notify_frontend:
-            CoronaEditor.emit_editor_event("import-asset-complete", actor.to_dict())
-        return {"scene": scene_name, "actor": actor.to_dict()}
+        return SceneTools._native_scene_tree_only("_create_actor_impl")
 
     @staticmethod
     def create_scene(scene_name: str) -> dict:
-        if not scene_name:
-            raise ValueError("sceneName is required")
-        scene = scene_manager.create(scene_name)
-        scene.ensure_default_camera()
-        actors = scene.get_actors()
-        for actor in actors:
-            actor._optics = Optics(actor._geometry)
-            scene.add_actor(actor, True)
-        return scene.to_dict()
+        return SceneTools._native_scene_tree_only("create_scene")
 
     @staticmethod
     def remove_actor(scene_name: str, actor_name: str) -> dict:
-        """从场景移除 Actor
-
-        B-1 修复:不再 raise ValueError,改为返回 error dict
-        与同模块其他方法(focus_actor / camera_move 等)保持一致,
-        前端可统一通过 success===false / status==='error' 判定失败。
-        """
-        try:
-            scene = scene_manager.get(scene_name)
-            if scene is None:
-                return {"status": "error",
-                        "message": f"Scene '{scene_name}' not found",
-                        "code": "scene_not_found"}
-            actor = scene.find_actor(actor_name)
-            if actor is None:
-                return {"status": "error",
-                        "message": f"Actor '{actor_name}' not found",
-                        "code": "actor_not_found"}
-            scene.remove_actor(actor)
-            logger.info("Actor %s removed from %s", actor_name, scene_name)
-            return {"status": "success", "scene": scene_name, "actor": actor_name}
-        except Exception as exc:
-            logger.exception("remove_actor 失败")
-            return {"status": "error", "message": str(exc), "code": "internal_error"}
+        return SceneTools._native_scene_tree_only("remove_actor")
 
     @staticmethod
     def rename_actor(scene_name: str, actor_name: str, new_name: str) -> dict:
-        try:
-            scene = scene_manager.get(scene_name)
-            if scene is None:
-                raise ValueError(f"Scene '{scene_name}' not found")
-            actor = scene.find_actor(actor_name)
-            if actor is None:
-                raise ValueError(f"Actor '{actor_name}' not found")
-            normalized_name = str(new_name or "").strip()
-            if not normalized_name:
-                raise ValueError("Actor name cannot be empty")
-            if any(other is not actor and other.name == normalized_name
-                   for other in scene.get_actors()):
-                raise ValueError(f"Actor name '{normalized_name}' already exists")
-
-            old_name = actor.name
-            actor.name = normalized_name
-            scene.save_data()
-            scene._notify_scene_tree_changed()
-            try:
-                if not getattr(actor, "_suppress_network_broadcast", False) and not getattr(actor, "network_remote", False):
-                    CoronaEditor.emit_editor_event("actor-state-sync-broadcast", [actor.to_dict()])
-            except Exception:
-                logger.debug("rename_actor: state broadcast failed", exc_info=True)
-            return {
-                "status": "success",
-                "scene": scene_name,
-                "actor": actor.to_dict(),
-                "old_name": old_name,
-                "new_name": normalized_name,
-            }
-        except Exception as exc:
-            return {"status": "error", "message": str(exc)}
+        return SceneTools._native_scene_tree_only("rename_actor")
 
     @staticmethod
     def remove_actor_internal(scene_name: str, actor_guid: str = "", actor_name: str = "") -> dict:
-        """Apply a remote actor deletion without re-broadcasting it."""
-        try:
-            scene = scene_manager.get(scene_name)
-            if scene is None:
-                return {"status": "error",
-                        "message": f"Scene '{scene_name}' not found",
-                        "code": "scene_not_found"}
-
-            actor = None
-            if actor_guid:
-                for candidate in scene.get_actors():
-                    if getattr(candidate, "actor_guid", "") == actor_guid:
-                        actor = candidate
-                        break
-            if actor is None and actor_name:
-                actor = scene.find_actor(actor_name)
-            if actor is None and actor_guid:
-                actor = scene.find_actor(actor_guid)
-            if actor is None:
-                return {"status": "warning",
-                        "message": f"Actor '{actor_guid or actor_name}' not found",
-                        "code": "actor_not_found",
-                        "actor_guid": actor_guid,
-                        "actor": actor_name}
-
-            actor.network_remote = True
-            actor._suppress_network_broadcast = True
-            scene.remove_actor(actor)
-            logger.info("Remote actor %s/%s removed from %s",
-                        actor_guid, actor_name, scene_name)
-            return {"status": "success",
-                    "scene": scene_name,
-                    "actor_guid": actor_guid,
-                    "actor": actor_name or getattr(actor, "name", "")}
-        except Exception as exc:
-            logger.exception("remove_actor_internal failed")
-            return {"status": "error", "message": str(exc), "code": "internal_error"}
+        return SceneTools._native_scene_tree_only("remove_actor_internal")
 
     @staticmethod
     def sun_direction(scene_name: str, if_enable: bool, direction: list[float]) -> dict:
         try:
             scene = scene_manager.get(scene_name)
             scene.set_sun_direction(direction)
+            if hasattr(scene, "set_sun_enabled"):
+                scene.set_sun_enabled(bool(if_enable))
             logger.info("Sun direction set for %s", scene_name)
             return {"status": "success"}
         except Exception as exc:
@@ -1763,12 +1506,11 @@ class SceneTools(PluginBase):
             if active_camera is not None and hasattr(active_camera, "set_vision_render_mode"):
                 active_camera.set_vision_render_mode(imported_vision_render_mode)
 
-            if "vision" not in scene.file_data:
-                scene.file_data["vision"] = {}
-            scene.vision_source_path = abs_path
-            scene.vision_import_mode = "external_live"
-            scene.file_data["vision"]["source_path"] = abs_path
-            scene.file_data["vision"]["import_mode"] = "external_live"
+            scene.vision_document = _vision_document_for_embedded_storage(document, abs_path)
+            scene.vision_source_path = ""
+            scene.vision_import_mode = ""
+            if "vision" in scene.file_data:
+                scene.file_data.remove_section("vision")
 
             previous_bindings = list(getattr(scene, "vision_bindings", []))
             new_bindings = []
@@ -1879,7 +1621,6 @@ class SceneTools(PluginBase):
                     "shape_type": shape_type,
                     "shape_identity_key": _vision_shape_identity_key(abs_path, shape, json_path),
                     "model_path": model_path,
-                    "source_path": abs_path,
                 }
                 if shape_type == "model":
                     native_correction = _vision_model_native_local_correction(model_path)
@@ -1909,13 +1650,13 @@ class SceneTools(PluginBase):
                 scene_name, abs_path, created_proxy_count, reused_proxy_count,
                 removed_proxy_count, len(unsupported_shapes))
             vision_summary = _vision_import_summary(
-                "external_live", abs_path, new_bindings, unsupported_shapes)
+                "embedded", new_bindings, unsupported_shapes)
             return {
                 "status": "success",
                 "scene": scene_name,
                 "path": abs_path,
                 "runtime_path": runtime_path or abs_path,
-                "import_mode": "external_live",
+                "storage": "embedded",
                 "vision_render_mode": imported_vision_render_mode,
                 "camera_imported": camera_imported,
                 "camera": active_camera.to_dict() if active_camera is not None else None,
@@ -1930,6 +1671,22 @@ class SceneTools(PluginBase):
             return {"status": "error", "message": f"Invalid Vision JSON: {exc}"}
         except Exception as exc:
             logger.exception("import_vision_scene_into_current_scene failed")
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def import_embedded_vision_scene_into_current_scene(scene_name: str) -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                return {"status": "error", "message": f"Scene '{scene_name}' not found"}
+            if not isinstance(getattr(scene, "vision_document", None), dict):
+                return {"status": "error", "message": "Scene has no embedded Vision document"}
+            runtime_path = prepare_external_live_vision_scene(scene)
+            if not runtime_path:
+                return {"status": "error", "message": "Failed to prepare embedded Vision runtime scene"}
+            return SceneTools.import_vision_scene_into_current_scene(scene_name, runtime_path)
+        except Exception as exc:
+            logger.exception("import_embedded_vision_scene_into_current_scene failed")
             return {"status": "error", "message": str(exc)}
 
     @staticmethod
@@ -1972,225 +1729,21 @@ class SceneTools(PluginBase):
 
     @staticmethod
     def list_actor_tree(scene_name) -> list:
-        scene = scene_manager.get(scene_name)
-        final_list = []
-        for actor in scene.get_actors():
-            final_list.append({
-                "name": actor.name,
-                "path": actor.route,
-                "type": actor.actor_type,
-            })
-        return final_list
+        return SceneTools._native_scene_tree_only("list_actor_tree")
 
     @staticmethod
     def list_scene_tree(scene_name: str) -> dict:
-        scene = scene_manager.get(scene_name)
-        if scene is None:
-            raise ValueError(f"Scene '{scene_name}' not found")
-
-        bindings = list(getattr(scene, "vision_bindings", []))
-        unsupported_shapes = list(getattr(scene, "vision_unsupported_shapes", []))
-        binding_by_actor_guid = {
-            binding.get("actor_guid"): binding
-            for binding in bindings
-            if binding.get("actor_guid")
-        }
-        actors = []
-        for actor in scene.get_actors():
-            actor_guid = getattr(actor, "actor_guid", "")
-            actor_info = {
-                "name": actor.name,
-                "path": actor.route,
-                "type": actor.actor_type,
-                "visible": actor.get_visible(),
-                "handle": int(getattr(actor, "handle", 0) or 0),
-                "actor_guid": actor_guid,
-                "vision_proxy": actor_guid in binding_by_actor_guid,
-            }
-            if actor_guid in binding_by_actor_guid:
-                actor_info["vision_binding"] = binding_by_actor_guid[actor_guid]
-            actors.append(actor_info)
-
-        cameras = []
-        for cam in scene.get_cameras():
-            camera_info = None
-            if cam is not None and hasattr(cam, 'to_dict'):
-                camera_info = cam.to_dict()
-            elif cam is not None:
-                camera_info = {"name": getattr(cam, 'name', 'Unknown')}
-            cameras.append(camera_info)
-
-        return {
-            "actors": actors,
-            "cameras": cameras,
-            "vision": _vision_import_summary(
-                getattr(scene, "vision_import_mode", ""),
-                getattr(scene, "vision_source_path", ""),
-                bindings,
-                unsupported_shapes,
-            ),
-        }
+        return SceneTools._native_scene_tree_only("list_scene_tree")
 
     @staticmethod
     def focus_actor(scene_name: str, actor_name: str, camera_name: str = None) -> dict:
-        """将摄像头聚焦到指定 Actor 上（基于 AABB 中心和尺寸）"""
-        try:
-            scene = scene_manager.get(scene_name)
-            if scene is None:
-                raise ValueError(f"Scene '{scene_name}' not found")
-
-            actor = scene.find_actor(actor_name)
-            if actor is None:
-                raise ValueError(f"Actor '{actor_name}' not found in scene '{scene_name}'")
-
-            camera = scene.find_camera(camera_name)
-            if camera is None:
-                raise ValueError(f"No camera available in scene '{scene_name}'")
-
-            # 获取 actor AABB
-            if not hasattr(actor, '_geometry') or actor._geometry is None:
-                raise ValueError(f"Actor '{actor_name}' has no geometry")
-
-            aabb = actor._geometry.get_aabb()  # [min_x, min_y, min_z, max_x, max_y, max_z] (模型空间)
-
-            # 获取 Actor 世界变换
-            actor_pos = actor.get_position()   # 世界位置
-            actor_scale = actor.get_scale()    # 缩放
-
-            # 将模型空间 AABB 中心转换到世界空间（忽略旋转的近似值）
-            model_center = [
-                (aabb[0] + aabb[3]) / 2.0,
-                (aabb[1] + aabb[4]) / 2.0,
-                (aabb[2] + aabb[5]) / 2.0,
-            ]
-            center = [
-                actor_pos[0] + model_center[0] * actor_scale[0],
-                actor_pos[1] + model_center[1] * actor_scale[1],
-                actor_pos[2] + model_center[2] * actor_scale[2],
-            ]
-
-            # 计算世界空间 AABB 对角线长度
-            dx = (aabb[3] - aabb[0]) * actor_scale[0]
-            dy = (aabb[4] - aabb[1]) * actor_scale[1]
-            dz = (aabb[5] - aabb[2]) * actor_scale[2]
-            diagonal = math.sqrt(dx * dx + dy * dy + dz * dz)
-
-            # 摄像头距离：对角线的 2 倍，最小为 1.0
-            distance = max(diagonal * 2.0, 1.0)
-
-
-            # 摄像头放在物体中心的 -Z 方向，朝向 +Z（看向物体中心）
-            forward = [0.0, 0.0, 1.0]
-
-            # 新摄像头位置 = 中心 - forward * 距离（即 center_z - distance）
-            position = [
-                center[0],
-                center[1],
-                center[2] - distance,
-            ]
-
-            up = [0.0, 1.0, 0.0]
-            fov = camera.get_fov()
-
-            camera.set(position, forward, up, fov)
-
-            logger.info(
-                "Camera focused on actor '%s': aabb=%s center=%s distance=%.2f pos=%s fwd=%s up=%s",
-                actor_name, aabb, center, distance, position, forward, up,
-            )
-            return {"status": "success", "center": center, "distance": distance}
-        except Exception as exc:
-            return {"status": "error", "message": str(exc)}
+        return SceneTools._native_scene_tree_only("focus_actor")
 
     @staticmethod
     def open_actor(scene_name: str, actor_name: str):
-        try:
-            scene = scene_manager.get(scene_name)
-            if scene is None:
-                logger.error(f"open_actor: scene '{scene_name}' not found")
-                return False
-            actor = scene.get_actor(actor_name)
-            if actor is None:
-                logger.error(f"open_actor: actor '{actor_name}' not found in scene '{scene_name}'")
-                return False
-            CoronaEditor.emit_editor_event("actor-change", [actor.actor_type, scene_name, actor_name])
-            return True
-        except Exception as e:
-            logger.error(f"open actor error: {e}")
-            return False
+        return SceneTools._native_scene_tree_only("open_actor")
 
     @staticmethod
     def pick_actor_at_pixel(scene_name: str, x: float, y: float,
                             vp_width: float, vp_height: float) -> dict:
-        """
-        鼠标在3D视口中拾取物体。
-
-        引擎的 pick_actor_at_pixel 是异步的：第一次调用设置GPU拾取请求并返回0，
-        需要等待一帧（约16ms）后再次调用才能获取拾取结果。
-        前端应在第一次调用后等待约50ms再重试。
-
-        Args:
-            scene_name: 场景名称
-            x, y: 浏览器视口中的鼠标坐标 (event.clientX, event.clientY)
-            vp_width, vp_height: 浏览器视口尺寸 (window.innerWidth, innerHeight)
-        Returns:
-            {"status": "success", "actor": {...}}  拾取成功
-            {"status": "miss"}                      该位置没有物体
-            {"status": "pending"}                   结果尚未就绪，需重试
-            {"status": "error", "message": "..."}   出错
-        """
-        try:
-            # 获取当前场景和活动摄像机
-            scene = scene_manager.get(scene_name)
-            if scene is None:
-                return {"status": "error", "message": f"场景 '{scene_name}' 未找到"}
-
-            camera = scene.get_active_camera()
-            if camera is None:
-                return {"status": "error", "message": "没有可用的摄像机"}
-
-            # 坐标缩放：浏览器视口坐标 -> 摄像机渲染分辨率坐标
-            cam_w = camera.width
-            cam_h = camera.height
-            if vp_width <= 0 or vp_height <= 0:
-                return {"status": "error", "message": "无效的视口尺寸"}
-            pick_x = int(x * cam_w / vp_width)
-            pick_y = int(y * cam_h / vp_height)
-
-            # 边界检查
-            if pick_x < 0 or pick_x >= cam_w or pick_y < 0 or pick_y >= cam_h:
-                return {"status": "miss"}
-
-            # 调用引擎拾取API（第一次调用设置拾取请求，返回0或缓存的命中结果）
-            handle = camera.pick_actor_at_pixel(pick_x, pick_y)
-
-            if handle != 0:
-                # 命中物体：通过handle查找对应的Python Actor对象
-                from CoronaCore.core.entities.actor import _handle_to_actor
-                actor = _handle_to_actor.get(handle)
-                if actor is not None:
-                    # 设置选中状态并通知前端更新属性面板
-                    CoronaEditor._selected_scene = scene_name
-                    CoronaEditor._selected_actor = actor.name
-                    CoronaEditor.emit_editor_event(
-                        "actor-change",
-                        [actor.actor_type, scene_name, actor.name]
-                    )
-                    logger.info(
-                        "Viewport pick hit: actor='%s' at pixel (%d, %d)",
-                        actor.name, pick_x, pick_y
-                    )
-                    return {"status": "success", "actor": actor.to_dict()}
-                else:
-                    # handle存在但Python对象已被GC回收
-                    logger.warning(
-                        "Viewport pick: handle %d 未找到对应的 Python Actor", handle
-                    )
-                    return {"status": "miss"}
-
-            # handle == 0：无缓存结果，拾取请求已提交，需等待下一帧
-            return {"status": "pending"}
-
-        except Exception as e:
-            logger.error("pick_actor_at_pixel error: %s", e)
-            return {"status": "error", "message": str(e)}
+        return SceneTools._native_scene_tree_only("pick_actor_at_pixel")
