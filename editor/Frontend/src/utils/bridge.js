@@ -87,8 +87,8 @@ export class Bridge {
 
 // 快捷访问
 export const sceneService = {
-  createActor: (sceneName, objPath) =>
-    Bridge.callCEF('SceneTools', 'create_actor', [sceneName, objPath]),
+  createActor: (sceneName, objPath, actorType = 'model') =>
+    Bridge.callCEF('SceneTools', 'create_actor', [sceneName, objPath, actorType]),
   removeActor: (sceneName, actorName) =>
     Bridge.callCEF('SceneTools', 'remove_actor', [sceneName, actorName]),
   renameActor: (sceneName, actorName, name) =>
@@ -140,6 +140,8 @@ export const sceneService = {
   deleteCamera: (sceneName, cameraId) =>
     Bridge.callCEF('SceneTools', 'delete_camera', [sceneName, cameraId]),
   loadVisionScene: (path) => Bridge.callCEF('SceneTools', 'load_vision_scene', [path]),
+  reloadScene: (sceneName, projectPath = '') =>
+    Bridge.callCEF('SceneTools', 'reload_scene', projectPath ? [sceneName, projectPath] : [sceneName]),
   listActorTree: (sceneName) => Bridge.callCEF('SceneTools', 'list_actor_tree', [sceneName]),
   listSceneTree: (sceneName) => Bridge.callCEF('SceneTools', 'list_scene_tree', [sceneName]),
   openSceneActor: (sceneName, actorName) =>

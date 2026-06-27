@@ -29,6 +29,7 @@
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -340,6 +341,56 @@ std::string actor_file_extension(const std::string& route) {
     return ext;
 }
 
+bool path_is_inside_project(const std::filesystem::path& relative_path) {
+    if (relative_path.empty()) {
+        return false;
+    }
+    for (const auto& part : relative_path) {
+        if (part == "..") {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string route_for_project_storage(const std::filesystem::path& project_root,
+                                      const std::string& raw_path) {
+    const auto normalized = normalize_route(raw_path);
+    if (normalized.empty()) {
+        return {};
+    }
+    const auto source_path = path_from_utf8(normalized);
+    if (!source_path.is_absolute()) {
+        return normalized;
+    }
+
+    std::error_code ec;
+    const auto relative = std::filesystem::relative(source_path, project_root, ec);
+    if (!ec && path_is_inside_project(relative)) {
+        return normalize_route(path_to_utf8(relative));
+    }
+    return normalize_route(path_to_utf8(source_path));
+}
+
+std::string unique_actor_name(const NativeEditorScene& scene, const std::string& preferred_name) {
+    const std::string base = trim_ascii(preferred_name).empty() ? "Actor" : trim_ascii(preferred_name);
+    auto exists = [&](const std::string& candidate) {
+        return std::any_of(scene.actors.begin(), scene.actors.end(), [&](const NativeEditorActor& actor) {
+            return actor.name == candidate;
+        });
+    };
+    if (!exists(base)) {
+        return base;
+    }
+    for (int index = 1; index < 10000; ++index) {
+        const auto candidate = base + "_" + std::to_string(index);
+        if (!exists(candidate)) {
+            return candidate;
+        }
+    }
+    return base + "_" + std::to_string(scene.actors.size() + 1);
+}
+
 std::string make_actor_guid(const std::string& scene_route,
                             const std::string& actor_name,
                             size_t index) {
@@ -460,6 +511,67 @@ void persist_native_scene_actors(const NativeEditorScene& scene) {
     replace_ini_section(scene_file, "actors", build_actors_section_lines(scene));
 }
 
+std::filesystem::path resolve_native_actor_asset_path(const NativeEditorScene& scene,
+                                                      NativeEditorActor& item) {
+    if (item.actor_type != "actor" || to_lower_ascii(actor_file_extension(item.route)) != "actor") {
+        return resolve_project_path(scene.project_root, item.route);
+    }
+
+    const auto actor_file = resolve_project_path(scene.project_root, item.route);
+    const auto actor_ini = read_ini_file(actor_file);
+    const auto model_route = normalize_route(ini_value(actor_ini, "base", "path"));
+    if (item.name.empty()) {
+        item.name = ini_value(actor_ini, "base", "name", stem_utf8(item.route));
+    }
+    if (item.actor_guid.empty()) {
+        item.actor_guid = ini_value(actor_ini, "base", "actor_guid");
+    }
+    if (!item.follow_camera) {
+        item.follow_camera = parse_bool(ini_value(actor_ini, "base", "follow_camera", "false"));
+    }
+    if (model_route.empty()) {
+        throw std::runtime_error("Actor file missing [base].path: " + item.route);
+    }
+    return resolve_project_path(scene.project_root, model_route);
+}
+
+NativeEditorActor& add_native_actor_to_scene(NativeEditorScene& scene,
+                                             NativeEditorActor item,
+                                             const std::filesystem::path& asset_path) {
+    if (item.actor_type == "ui_image") {
+        auto image_geometry = Corona::API::Geometry::from_image(path_to_utf8(asset_path));
+        item.geometry = std::make_unique<Corona::API::Geometry>(std::move(image_geometry));
+    } else {
+        item.geometry = std::make_unique<Corona::API::Geometry>(path_to_utf8(asset_path));
+    }
+    item.geometry->set_position(item.position);
+    item.geometry->set_rotation(item.rotation);
+    item.geometry->set_scale(item.scale);
+
+    item.optics = std::make_unique<Corona::API::Optics>(*item.geometry);
+    item.mechanics = std::make_unique<Corona::API::Mechanics>(*item.geometry);
+    item.acoustics = std::make_unique<Corona::API::Acoustics>(*item.geometry);
+    if (item.actor_type == "ui_image") {
+        item.optics->set_lighting_enabled(false);
+        item.mechanics->set_physics_enabled(false);
+        item.follow_camera = true;
+    }
+
+    item.engine_actor = std::make_unique<Corona::API::Actor>();
+    Corona::API::Actor::Profile profile{};
+    profile.geometry = item.geometry.get();
+    profile.optics = item.optics.get();
+    profile.mechanics = item.mechanics.get();
+    profile.acoustics = item.acoustics.get();
+    auto* profile_ref = item.engine_actor->add_profile(profile);
+    item.engine_actor->set_active_profile(profile_ref);
+    item.engine_actor->set_actor_guid(item.actor_guid);
+    item.engine_actor->set_follow_camera(item.follow_camera);
+    scene.engine_scene->add_actor(item.engine_actor.get());
+    scene.actors.push_back(std::move(item));
+    return scene.actors.back();
+}
+
 void load_native_actor(NativeEditorScene& scene,
                        const IniSection& actors_section,
                        const std::string& actor_key,
@@ -476,7 +588,7 @@ void load_native_actor(NativeEditorScene& scene,
                                      : "");
     item.actor_guid = actors_section.contains(actor_key + ".actor_guid")
                           ? actors_section.at(actor_key + ".actor_guid")
-                          : make_actor_guid(scene.route, item.name, index);
+                          : "";
     item.follow_camera = actors_section.contains(actor_key + ".follow_camera") &&
                          parse_bool(actors_section.at(actor_key + ".follow_camera"));
     item.position = parse_float3(
@@ -499,41 +611,15 @@ void load_native_actor(NativeEditorScene& scene,
         return;
     }
 
-    const auto asset_path = resolve_project_path(scene.project_root, item.route);
-    if (item.actor_type == "ui_image") {
-        auto image_geometry = Corona::API::Geometry::from_image(path_to_utf8(asset_path));
-        item.geometry = std::make_unique<Corona::API::Geometry>(std::move(image_geometry));
-    } else {
-        item.geometry = std::make_unique<Corona::API::Geometry>(path_to_utf8(asset_path));
+    const auto asset_path = resolve_native_actor_asset_path(scene, item);
+    if (item.actor_guid.empty()) {
+        item.actor_guid = make_actor_guid(scene.route, item.name, index);
     }
-    item.geometry->set_position(item.position);
-    item.geometry->set_rotation(item.rotation);
-    item.geometry->set_scale(item.scale);
-
-    item.optics = std::make_unique<Corona::API::Optics>(*item.geometry);
-    item.mechanics = std::make_unique<Corona::API::Mechanics>(*item.geometry);
-    item.acoustics = std::make_unique<Corona::API::Acoustics>(*item.geometry);
-    if (item.actor_type == "ui_image") {
-        item.optics->set_lighting_enabled(false);
-        item.mechanics->set_physics_enabled(false);
-        item.follow_camera = true;
-    } else if (actors_section.contains(actor_key + ".mechanics.physics_enabled")) {
-        item.mechanics->set_physics_enabled(
+    auto& actor = add_native_actor_to_scene(scene, std::move(item), asset_path);
+    if (actor.actor_type != "ui_image" && actors_section.contains(actor_key + ".mechanics.physics_enabled")) {
+        actor.mechanics->set_physics_enabled(
             parse_bool(actors_section.at(actor_key + ".mechanics.physics_enabled"), true));
     }
-
-    item.engine_actor = std::make_unique<Corona::API::Actor>();
-    Corona::API::Actor::Profile profile{};
-    profile.geometry = item.geometry.get();
-    profile.optics = item.optics.get();
-    profile.mechanics = item.mechanics.get();
-    profile.acoustics = item.acoustics.get();
-    auto* profile_ref = item.engine_actor->add_profile(profile);
-    item.engine_actor->set_active_profile(profile_ref);
-    item.engine_actor->set_actor_guid(item.actor_guid);
-    item.engine_actor->set_follow_camera(item.follow_camera);
-    scene.engine_scene->add_actor(item.engine_actor.get());
-    scene.actors.push_back(std::move(item));
 }
 
 NativeEditorCamera make_native_camera(NativeEditorScene& scene,
@@ -684,6 +770,31 @@ NativeEditorScene* ensure_native_editor_scene(const std::string& project_path_ar
         state.scene = load_native_scene(project_root, scene_route);
         state.project_path = project_path;
     }
+    return state.scene.get();
+}
+
+NativeEditorScene* reload_native_editor_scene(const std::string& project_path_arg,
+                                              const std::string& scene_route_arg) {
+    auto& state = native_editor_state();
+    const auto project_path = normalize_route(project_path_arg.empty()
+                                                  ? resolve_active_project_path(nlohmann::json::array())
+                                                  : project_path_arg);
+    if (project_path.empty()) {
+        throw std::runtime_error("No active project path for native editor reload");
+    }
+
+    const auto project_root = path_from_utf8(project_path);
+    const auto project_ini = read_ini_file(project_root / "project.ini");
+    auto scene_route = normalize_route(scene_route_arg);
+    if (scene_route.empty()) {
+        scene_route = state.scene ? state.scene->route : choose_single_scene_route(project_root, project_ini);
+    }
+    if (scene_route.empty()) {
+        throw std::runtime_error("No scene route for native editor reload");
+    }
+
+    state.scene = load_native_scene(project_root, scene_route);
+    state.project_path = project_path;
     return state.scene.get();
 }
 
@@ -1268,6 +1379,19 @@ void register_main_view_rpc_handlers(NativeRpcRegistry& registry) {
             auto* scene = ensure_native_editor_scene(project_path);
             return native_success(make_on_init_payload(*scene));
         }},
+        {"scene_save", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto scene_route = normalize_route(arg_string(request.args, 0));
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+            persist_native_scene_actors(*scene);
+            return native_success({
+                {"status", "success"},
+                {"filepath", path_to_utf8(resolve_project_path(scene->project_root, scene->route))},
+                {"format", "corona_scene"},
+            });
+        }},
     };
 
     registry.register_module("MainView", [](const NativeRequest& request,
@@ -1385,6 +1509,75 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
                     {"binding_count", 0},
                     {"unsupported_count", 0},
                 }},
+            });
+        }},
+        {"reload_scene", [](const NativeRequest& request, const NativeContext&) {
+            const auto scene_route = arg_string(request.args, 0);
+            const auto project_path = arg_string(request.args, 1);
+            auto* scene = reload_native_editor_scene(project_path, scene_route);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"actor_count", scene->actors.size()},
+                {"camera_count", scene->cameras.size()},
+            });
+        }},
+        {"create_actor", [](const NativeRequest& request, const NativeContext&) {
+            const auto scene_route = normalize_route(arg_string(request.args, 0));
+            const auto source_path = arg_string(request.args, 1);
+            auto actor_type = normalize_route(arg_string(request.args, 2, "model"));
+            if (actor_type.empty()) {
+                actor_type = "model";
+            }
+            if (source_path.empty()) {
+                return native_failure("create_actor source path is empty", 2);
+            }
+
+            auto* scene = ensure_native_editor_scene();
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+
+            NativeEditorActor item;
+            item.actor_type = actor_type;
+            item.route = route_for_project_storage(scene->project_root, source_path);
+            item.name = unique_actor_name(*scene, stem_utf8(item.route));
+            item.actor_guid = make_actor_guid(scene->route, item.name, scene->actors.size());
+            item.follow_camera = item.actor_type == "ui_image";
+            item.position = {0.0f, 0.0f, 0.0f};
+            item.rotation = {0.0f, 0.0f, 0.0f};
+            item.scale = {1.0f, 1.0f, 1.0f};
+
+            if (item.actor_type == "actor" && to_lower_ascii(actor_file_extension(item.route)) == "actor") {
+                const auto actor_file = resolve_project_path(scene->project_root, item.route);
+                const auto actor_ini = read_ini_file(actor_file);
+                const auto configured_name = ini_value(actor_ini, "base", "name");
+                if (!configured_name.empty()) {
+                    item.name = unique_actor_name(*scene, configured_name);
+                    item.actor_guid = make_actor_guid(scene->route, item.name, scene->actors.size());
+                }
+                item.follow_camera = parse_bool(ini_value(actor_ini, "base", "follow_camera", "false"));
+                item.position = parse_float3(
+                    ini_value(actor_ini, "geometry", "position", "0.0, 0.0, 0.0"),
+                    {0.0f, 0.0f, 0.0f});
+                item.rotation = parse_float3(
+                    ini_value(actor_ini, "geometry", "rotation", "0.0, 0.0, 0.0"),
+                    {0.0f, 0.0f, 0.0f});
+                item.scale = parse_float3(
+                    ini_value(actor_ini, "geometry", "scale", "1.0, 1.0, 1.0"),
+                    {1.0f, 1.0f, 1.0f});
+            }
+
+            auto asset_path = resolve_native_actor_asset_path(*scene, item);
+            if (item.actor_guid.empty()) {
+                item.actor_guid = make_actor_guid(scene->route, item.name, scene->actors.size());
+            }
+            auto& actor = add_native_actor_to_scene(*scene, std::move(item), asset_path);
+            persist_native_scene_actors(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"actor", actor_to_json(*scene, actor)},
             });
         }},
         {"list_camera_views", [](const NativeRequest&, const NativeContext&) {
