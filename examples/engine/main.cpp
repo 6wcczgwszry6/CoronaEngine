@@ -2,6 +2,7 @@
 #include <corona/kernel/core/i_logger.h>
 
 #include <csignal>
+#include <cstdint>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -9,6 +10,19 @@
 
 // 全局引擎实例指针，用于信号处理
 static Corona::Engine* g_engine = nullptr;
+
+#ifdef _WIN32
+void log_signal_stack_trace() {
+    void* frames[64] = {};
+    const USHORT frame_count = CaptureStackBackTrace(0, 64, frames, nullptr);
+    CFW_LOG_WARNING("[Signal] Captured {} stack frame(s)", static_cast<unsigned>(frame_count));
+    for (USHORT i = 0; i < frame_count; ++i) {
+        CFW_LOG_WARNING("[Signal] stack[{}]=0x{:x}",
+                        static_cast<unsigned>(i),
+                        reinterpret_cast<std::uintptr_t>(frames[i]));
+    }
+}
+#endif
 
 /**
  * @brief 信号处理函数
@@ -46,6 +60,9 @@ void signal_handler(int signal) {
     }
 
     CFW_LOG_WARNING("[Signal] Received signal {}: {}, requesting engine shutdown...", signal, signal_name);
+#ifdef _WIN32
+    log_signal_stack_trace();
+#endif
     CFW_LOG_FLUSH();
 
     if (g_engine) {

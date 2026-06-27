@@ -19,6 +19,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_VISION_PRIMITIVES = {"quad", "cube", "sphere"}
+_VISION_RESOURCE_PATH_KEYS = {
+    "fn",
+    "path",
+    "file",
+    "filename",
+    "texture",
+    "image",
+}
 
 
 def _active_project_path():
@@ -38,6 +46,29 @@ def _as_float3(value):
         return [float(value[0]), float(value[1]), float(value[2])]
     except (TypeError, ValueError):
         return None
+
+
+def _vision_document_for_embedded_storage(document: dict, source_path: str) -> dict:
+    base_dir = os.path.dirname(os.path.abspath(source_path)) if source_path else os.getcwd()
+    embedded = copy.deepcopy(document)
+
+    def absolutize(value):
+        if isinstance(value, dict):
+            for key, child in list(value.items()):
+                if (key or "").lower() in _VISION_RESOURCE_PATH_KEYS and isinstance(child, str):
+                    text = child.strip()
+                    if text and not os.path.isabs(text) and "://" not in text and not text.startswith("data:"):
+                        value[key] = os.path.abspath(os.path.join(base_dir, text))
+                    else:
+                        value[key] = child
+                else:
+                    absolutize(child)
+        elif isinstance(value, list):
+            for item in value:
+                absolutize(item)
+
+    absolutize(embedded)
+    return embedded
 
 
 def _normalize_vec3(value):
@@ -708,8 +739,22 @@ def _derived_vision_scene_path(source_path: str, scene) -> str:
     return os.path.join(source_dir, f"{source_stem}.corona_{scene_stem}_{suffix}{source_ext or '.json'}")
 
 
+def _runtime_vision_scene_path(scene) -> str:
+    route = getattr(scene, "route", "") or ""
+    project_path = _active_project_path()
+    if os.path.isabs(route):
+        project_path = project_path or os.path.dirname(os.path.abspath(route))
+    base_dir = os.path.abspath(project_path or os.getcwd())
+    scene_stem = _safe_filename_stem(getattr(scene, "name", "") or "scene")
+    key = f"{os.path.abspath(route) if route else scene_stem}|embedded_vision"
+    suffix = uuid.uuid5(uuid.NAMESPACE_URL, key).hex[:12]
+    return os.path.join(base_dir, ".corona", "vision_runtime",
+                        f"{scene_stem}_{suffix}.json")
+
+
 def _atomic_write_json(path: str, document: dict) -> None:
     directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
     temp_path = os.path.join(directory, f".{os.path.basename(path)}.{uuid.uuid4().hex}.tmp")
     try:
         with open(temp_path, "w", encoding="utf-8") as file:
@@ -728,11 +773,16 @@ def _atomic_write_json(path: str, document: dict) -> None:
 
 
 def _write_derived_external_live_scene(scene, source_path: str) -> str:
-    if not source_path or not os.path.isfile(source_path):
-        return source_path
-
-    with open(source_path, "r", encoding="utf-8") as file:
-        document = json.load(file)
+    embedded_document = getattr(scene, "vision_document", None)
+    if isinstance(embedded_document, dict):
+        document = embedded_document
+        output_path = _runtime_vision_scene_path(scene)
+    else:
+        if not source_path or not os.path.isfile(source_path):
+            return source_path
+        with open(source_path, "r", encoding="utf-8") as file:
+            document = json.load(file)
+        output_path = _derived_vision_scene_path(source_path, scene)
 
     derived = copy.deepcopy(document)
     bindings = list(getattr(scene, "vision_bindings", []))
@@ -763,9 +813,8 @@ def _write_derived_external_live_scene(scene, source_path: str) -> str:
         }
 
     _compact_removed_shapes(derived)
-    path = _derived_vision_scene_path(source_path, scene)
-    _atomic_write_json(path, derived)
-    return path
+    _atomic_write_json(output_path, derived)
+    return output_path
 
 
 def _sync_external_live_binding_source_path(scene, runtime_path: str) -> None:
@@ -781,6 +830,15 @@ def _sync_external_live_binding_source_path(scene, runtime_path: str) -> None:
 
 
 def prepare_external_live_vision_scene(scene) -> str:
+    if isinstance(getattr(scene, "vision_document", None), dict):
+        try:
+            runtime_path = _write_derived_external_live_scene(scene, "")
+        except Exception as exc:
+            logger.exception("Failed to write embedded Vision runtime scene: %s", exc)
+            return ""
+        _sync_external_live_binding_source_path(scene, runtime_path)
+        return runtime_path
+
     source_path = getattr(scene, "vision_source_path", "") or ""
     if not source_path or getattr(scene, "vision_import_mode", "") != "external_live":
         return source_path
@@ -855,7 +913,7 @@ def _find_previous_binding(bindings, used_binding_indices: set, shape: dict, sha
     return None
 
 
-def _vision_import_summary(import_mode: str, source_path: str, bindings, unsupported_shapes) -> dict:
+def _vision_import_summary(storage: str, bindings, unsupported_shapes) -> dict:
     unsupported_by_reason = {}
     unsupported_by_type = {}
     for shape in unsupported_shapes or []:
@@ -864,8 +922,8 @@ def _vision_import_summary(import_mode: str, source_path: str, bindings, unsuppo
         unsupported_by_reason[reason] = unsupported_by_reason.get(reason, 0) + 1
         unsupported_by_type[shape_type] = unsupported_by_type.get(shape_type, 0) + 1
     return {
-        "import_mode": import_mode,
-        "source_path": source_path,
+        "storage": storage,
+        "embedded": storage == "embedded",
         "binding_count": len(bindings or []),
         "unsupported_count": len(unsupported_shapes or []),
         "unsupported_by_reason": unsupported_by_reason,
@@ -1763,12 +1821,11 @@ class SceneTools(PluginBase):
             if active_camera is not None and hasattr(active_camera, "set_vision_render_mode"):
                 active_camera.set_vision_render_mode(imported_vision_render_mode)
 
-            if "vision" not in scene.file_data:
-                scene.file_data["vision"] = {}
-            scene.vision_source_path = abs_path
-            scene.vision_import_mode = "external_live"
-            scene.file_data["vision"]["source_path"] = abs_path
-            scene.file_data["vision"]["import_mode"] = "external_live"
+            scene.vision_document = _vision_document_for_embedded_storage(document, abs_path)
+            scene.vision_source_path = ""
+            scene.vision_import_mode = ""
+            if "vision" in scene.file_data:
+                scene.file_data.remove_section("vision")
 
             previous_bindings = list(getattr(scene, "vision_bindings", []))
             new_bindings = []
@@ -1879,7 +1936,6 @@ class SceneTools(PluginBase):
                     "shape_type": shape_type,
                     "shape_identity_key": _vision_shape_identity_key(abs_path, shape, json_path),
                     "model_path": model_path,
-                    "source_path": abs_path,
                 }
                 if shape_type == "model":
                     native_correction = _vision_model_native_local_correction(model_path)
@@ -1909,13 +1965,13 @@ class SceneTools(PluginBase):
                 scene_name, abs_path, created_proxy_count, reused_proxy_count,
                 removed_proxy_count, len(unsupported_shapes))
             vision_summary = _vision_import_summary(
-                "external_live", abs_path, new_bindings, unsupported_shapes)
+                "embedded", new_bindings, unsupported_shapes)
             return {
                 "status": "success",
                 "scene": scene_name,
                 "path": abs_path,
                 "runtime_path": runtime_path or abs_path,
-                "import_mode": "external_live",
+                "storage": "embedded",
                 "vision_render_mode": imported_vision_render_mode,
                 "camera_imported": camera_imported,
                 "camera": active_camera.to_dict() if active_camera is not None else None,
@@ -1930,6 +1986,22 @@ class SceneTools(PluginBase):
             return {"status": "error", "message": f"Invalid Vision JSON: {exc}"}
         except Exception as exc:
             logger.exception("import_vision_scene_into_current_scene failed")
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def import_embedded_vision_scene_into_current_scene(scene_name: str) -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                return {"status": "error", "message": f"Scene '{scene_name}' not found"}
+            if not isinstance(getattr(scene, "vision_document", None), dict):
+                return {"status": "error", "message": "Scene has no embedded Vision document"}
+            runtime_path = prepare_external_live_vision_scene(scene)
+            if not runtime_path:
+                return {"status": "error", "message": "Failed to prepare embedded Vision runtime scene"}
+            return SceneTools.import_vision_scene_into_current_scene(scene_name, runtime_path)
+        except Exception as exc:
+            logger.exception("import_embedded_vision_scene_into_current_scene failed")
             return {"status": "error", "message": str(exc)}
 
     @staticmethod
@@ -2024,8 +2096,7 @@ class SceneTools(PluginBase):
             "actors": actors,
             "cameras": cameras,
             "vision": _vision_import_summary(
-                getattr(scene, "vision_import_mode", ""),
-                getattr(scene, "vision_source_path", ""),
+                "embedded" if getattr(scene, "vision_document", None) else "",
                 bindings,
                 unsupported_shapes,
             ),

@@ -3,8 +3,14 @@ import os
 import datetime
 import logging
 from CoronaCore.core.corona_editor import CoronaEditor
+from CoronaCore.core.entities.scene import (
+    VISION_DOCUMENT_ENCODING,
+    VISION_DOCUMENT_VERSION,
+    _encode_vision_document,
+)
 from CoronaPlugin.core.corona_plugin_base import PluginBase
 from CoronaCore.utils.file_handler import FileHandler
+from plugins.SceneTools.main import _vision_document_for_embedded_storage
 from utils.settings import settings_manager
 from .utils.project_copy import ProjectCopy
 logger = logging.getLogger(__name__)
@@ -196,9 +202,8 @@ class ProjectLauncher(PluginBase):
     def _create_project_from_vision(json_path: str) -> dict:
         """为一个 Vision 场景 .json 新建轻量项目（纯文件 IO，不依赖引擎）。
 
-        复制项目模板，把 [vision] source_path + import_mode=external_live 写入模板
-        入口场景的 .scene 文件；真正的代理 actor / 相机 / 绑定导入延迟到引擎启动后，
-        由 MainView._apply_vision_source_for_scene 的 external_live 分支首次完成。
+        复制项目模板，把 Vision JSON 文档嵌入入口场景的 .scene 文件；
+        真正的代理 actor / 相机 / 绑定导入延迟到引擎启动后完成。
         返回 {name, path}，与打开普通项目的返回结构一致。
         """
         try:
@@ -238,13 +243,19 @@ class ProjectLauncher(PluginBase):
                 logger.error("Entrance scene file not found: %s", scene_file)
                 return {}
 
-            # 3. 往入口 .scene 注入 [vision] 元数据（格式同 Scene.save_data）
+            with open(abs_json, 'r', encoding='utf-8') as f:
+                vision_document = _vision_document_for_embedded_storage(json.load(f), abs_json)
+
+            # 3. 往入口 .scene 注入内嵌 Vision JSON 文档（格式同 Scene.save_data）
             scene_cfg = configparser.ConfigParser()
             scene_cfg.read(scene_file, encoding='utf-8')
-            if 'vision' not in scene_cfg:
-                scene_cfg['vision'] = {}
-            scene_cfg['vision']['source_path'] = abs_json
-            scene_cfg['vision']['import_mode'] = 'external_live'
+            if 'vision' in scene_cfg:
+                scene_cfg.remove_section('vision')
+            scene_cfg['vision_document'] = {
+                'encoding': VISION_DOCUMENT_ENCODING,
+                'version': VISION_DOCUMENT_VERSION,
+                'data': _encode_vision_document(vision_document),
+            }
             with open(scene_file, 'w', encoding='utf-8') as f:
                 scene_cfg.write(f)
 

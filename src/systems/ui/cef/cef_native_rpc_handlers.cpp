@@ -23,6 +23,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -346,6 +347,117 @@ std::string make_actor_guid(const std::string& scene_route,
     out << "native-" << std::hex << std::hash<std::string>{}(scene_route + ":" + actor_name)
         << "-" << index;
     return out.str();
+}
+
+std::string format_float3(const std::array<float, 3>& value) {
+    std::ostringstream out;
+    out << std::setprecision(9)
+        << value[0] << ", " << value[1] << ", " << value[2];
+    return out.str();
+}
+
+std::string unique_actor_key(const NativeEditorScene& scene,
+                             const NativeEditorActor& actor,
+                             std::unordered_map<std::string, int>& used_keys,
+                             size_t index) {
+    std::string base = actor.name.empty() ? "actor" + std::to_string(index + 1) : actor.name;
+    auto used = used_keys.find(base);
+    if (used == used_keys.end()) {
+        used_keys.emplace(base, 0);
+        return base;
+    }
+    used->second += 1;
+    return base + "_" + std::to_string(used->second);
+}
+
+std::vector<std::string> build_actors_section_lines(const NativeEditorScene& scene) {
+    std::vector<std::string> lines;
+    lines.emplace_back("[actors]");
+    std::unordered_map<std::string, int> used_keys;
+    for (size_t index = 0; index < scene.actors.size(); ++index) {
+        const auto& actor = scene.actors[index];
+        const auto key = unique_actor_key(scene, actor, used_keys, index);
+        lines.push_back(key + ".actor_type = " + actor.actor_type);
+        lines.push_back(key + ".name = " + actor.name);
+        lines.push_back(key + ".route = " + actor.route);
+        if (!actor.actor_guid.empty()) {
+            lines.push_back(key + ".actor_guid = " + actor.actor_guid);
+        }
+        lines.push_back(key + ".follow_camera = " + std::string(actor.follow_camera ? "true" : "false"));
+        if (actor.mechanics) {
+            lines.push_back(key + ".mechanics.physics_enabled = " +
+                            std::string(actor.mechanics->get_physics_enabled() ? "true" : "false"));
+        }
+        lines.push_back(key + ".geometry.position = " + format_float3(actor.geometry ? actor.geometry->get_position() : actor.position));
+        lines.push_back(key + ".geometry.rotation = " + format_float3(actor.geometry ? actor.geometry->get_rotation() : actor.rotation));
+        lines.push_back(key + ".geometry.scale = " + format_float3(actor.geometry ? actor.geometry->get_scale() : actor.scale));
+    }
+    return lines;
+}
+
+void replace_ini_section(const std::filesystem::path& file_path,
+                         const std::string& section_name,
+                         const std::vector<std::string>& replacement_lines) {
+    std::vector<std::string> lines;
+    {
+        std::ifstream input(file_path);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            lines.push_back(line);
+        }
+    }
+
+    const auto target = to_lower_ascii(section_name);
+    auto is_target_section = [&](const std::string& line) {
+        const auto trimmed = trim_ascii(line);
+        if (trimmed.size() < 3 || trimmed.front() != '[' || trimmed.back() != ']') {
+            return false;
+        }
+        return to_lower_ascii(trim_ascii(trimmed.substr(1, trimmed.size() - 2))) == target;
+    };
+    auto is_any_section = [](const std::string& line) {
+        const auto trimmed = trim_ascii(line);
+        return trimmed.size() >= 3 && trimmed.front() == '[' && trimmed.back() == ']';
+    };
+
+    auto begin = lines.end();
+    for (auto it = lines.begin(); it != lines.end(); ++it) {
+        if (is_target_section(*it)) {
+            begin = it;
+            break;
+        }
+    }
+
+    if (begin == lines.end()) {
+        if (!lines.empty() && !lines.back().empty()) {
+            lines.emplace_back();
+        }
+        lines.insert(lines.end(), replacement_lines.begin(), replacement_lines.end());
+    } else {
+        auto end = std::next(begin);
+        while (end != lines.end() && !is_any_section(*end)) {
+            ++end;
+        }
+        auto insert_pos = lines.erase(begin, end);
+        insert_pos = lines.insert(insert_pos, replacement_lines.begin(), replacement_lines.end());
+        auto after_insert = std::next(insert_pos, static_cast<std::ptrdiff_t>(replacement_lines.size()));
+        if (after_insert != lines.end() && (after_insert == lines.begin() || !std::prev(after_insert)->empty())) {
+            lines.insert(after_insert, "");
+        }
+    }
+
+    std::ofstream output(file_path, std::ios::trunc);
+    for (const auto& line : lines) {
+        output << line << '\n';
+    }
+}
+
+void persist_native_scene_actors(const NativeEditorScene& scene) {
+    const auto scene_file = resolve_project_path(scene.project_root, scene.route);
+    replace_ini_section(scene_file, "actors", build_actors_section_lines(scene));
 }
 
 void load_native_actor(NativeEditorScene& scene,
@@ -1319,6 +1431,34 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             }
             emit_actor_change(context, *scene, *actor);
             return native_success({{"status", "success"}, {"actor", actor_to_json(*scene, *actor)}});
+        }},
+        {"remove_actor", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto actor_name = arg_string(request.args, 1);
+            auto it = std::find_if(scene->actors.begin(), scene->actors.end(), [&](const NativeEditorActor& actor) {
+                if (actor.name == actor_name || actor.actor_guid == actor_name) {
+                    return true;
+                }
+                return actor.engine_actor && std::to_string(actor.engine_actor->get_handle()) == actor_name;
+            });
+            if (it == scene->actors.end()) {
+                return native_failure("Actor not found: " + actor_name, 2);
+            }
+
+            const auto removed_name = it->name;
+            const auto removed_guid = it->actor_guid;
+            if (scene->engine_scene && it->engine_actor) {
+                scene->engine_scene->remove_actor(it->engine_actor.get());
+            }
+            scene->actors.erase(it);
+            persist_native_scene_actors(*scene);
+
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"actor", removed_name},
+                {"actor_guid", removed_guid},
+            });
         }},
         {"play_audio", [](const NativeRequest& request, const NativeContext&) {
             auto* event_bus = Corona::Kernel::KernelContext::instance().event_bus();

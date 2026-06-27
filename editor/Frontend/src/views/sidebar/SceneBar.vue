@@ -1223,6 +1223,11 @@ const SelectActor = (scene) => {
   if (isMediaItem(scene)) return;
   // 通知积木编辑器当前选中的物体
   setActorContext(currentSceneName.value, scene.name);
+  if (typeof window !== 'undefined' && typeof window.__coronaEmit === 'function') {
+    window.__coronaEmit('actor-change', scene.type || 'actor', currentSceneName.value, scene.name);
+  } else {
+    coronaEventBus.emit('actor-change', scene.type || 'actor', currentSceneName.value, scene.name);
+  }
 };
 
 const SelectCamera = (cam) => {
@@ -1990,11 +1995,10 @@ onMounted(async () => {
   coronaEventBus.on('focus-pose-result', handleFocusPoseResult);
 });
 
-// 场景切换或 actor 变化时刷新当前场景树
+// 场景切换时刷新当前场景树；actor 选择只更新详情面板，不重建树，避免点击闪烁。
 const onActorChangeEvent = (type, sceneId /*, actorId, oldPath */) => {
-  if (type === 'scene' && sceneId) {
-    currentSceneName.value = sceneId;
-  }
+  if (type !== 'scene' || !sceneId) return;
+  currentSceneName.value = sceneId;
   OnInitObjTree();
 };
 

@@ -63,11 +63,24 @@ NativeResult native_unhandled() {
 }
 
 NativeRequest parse_native_request(const std::string& request_json) {
-    const auto root = nlohmann::json::parse(request_json);
+    const auto root = nlohmann::json::parse(request_json, nullptr, false);
+    if (root.is_discarded() || !root.is_object()) {
+        throw std::runtime_error("Invalid native request JSON");
+    }
+
     NativeRequest request;
-    request.module = root.value("module", "");
-    request.function = root.value("function", "");
-    request.args = root.value("args", nlohmann::json::array());
+
+    if (auto it = root.find("module"); it != root.end() && it->is_string()) {
+        request.module = it->get<std::string>();
+    }
+    if (auto it = root.find("function"); it != root.end() && it->is_string()) {
+        request.function = it->get<std::string>();
+    }
+    if (auto it = root.find("args"); it != root.end()) {
+        request.args = *it;
+    } else {
+        request.args = nlohmann::json::array();
+    }
     if (!request.args.is_array()) {
         request.args = nlohmann::json::array({request.args});
     }

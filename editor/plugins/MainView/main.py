@@ -66,17 +66,20 @@ class MainView(PluginBase):
         try:
             if not CoronaEditor.CoronaEngine.is_vision_available():
                 return
+            if getattr(scene, "vision_document", None):
+                if not getattr(scene, "vision_bindings", []) and hasattr(scene, "get_actors"):
+                    result = SceneTools.import_embedded_vision_scene_into_current_scene(scene.route)
+                    if isinstance(result, dict) and result.get("status") == "success":
+                        return
+                CoronaEditor.CoronaEngine.load_vision_scene(
+                    SceneTools.prepare_external_live_vision_scene(scene))
+                return
             source_path = getattr(scene, "vision_source_path", "") or ""
             import_mode = getattr(scene, "vision_import_mode", "") or ""
             if source_path and import_mode == "external_live":
-                # 首次打开（如"打开 Vision 场景为项目"新建的场景）尚无 bindings：
-                # 跑一次完整外部导入，建立代理 actor / 相机 / 绑定并切到 vision 后端。
-                # 之后的启动 bindings 已持久化，走轻量加载即可。
-                if not getattr(scene, "vision_bindings", []):
-                    SceneTools.import_vision_scene_into_current_scene(scene.route, source_path)
-                else:
-                    CoronaEditor.CoronaEngine.load_vision_scene(
-                        SceneTools.prepare_external_live_vision_scene(scene) or source_path)
+                # Legacy .scene files persisted only a Vision file path. Import once
+                # so the CoronaEngine scene owns the embedded Vision document.
+                SceneTools.import_vision_scene_into_current_scene(scene.route, source_path)
             elif source_path and import_mode == "external":
                 CoronaEditor.CoronaEngine.load_vision_scene(source_path)
             else:
@@ -245,15 +248,23 @@ class MainView(PluginBase):
     def scene_save(scene_name: str) -> str:
         try:
             scene = scene_manager.get(scene_name)
-            snap = scene.to_dict()
-
-            content = json.dumps(snap, indent=2)
-            save_path = FileHandler.save_file(
-                content, "保存场景文件", "场景文件 (*.json)", default_filename=scene_name
-            )
-            if save_path:
-                return json.dumps({"status": "success", "filepath": save_path})
-            return json.dumps({"status": "canceled"})
+            if scene is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Scene '{scene_name}' not found",
+                })
+            scene.save_data()
+            route = getattr(scene, "route", scene_name)
+            if route and os.path.isabs(route):
+                save_path = route
+            else:
+                project_path = settings_manager.active_project_path or ""
+                save_path = os.path.abspath(os.path.join(project_path, route or scene_name))
+            return json.dumps({
+                "status": "success",
+                "filepath": save_path,
+                "format": "corona_scene",
+            })
         except Exception as exc:
             return json.dumps({"status": "error", "message": str(exc)})
 
