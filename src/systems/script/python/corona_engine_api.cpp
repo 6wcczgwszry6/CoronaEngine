@@ -1259,6 +1259,10 @@ const std::filesystem::path& Corona::API::Geometry::get_model_path() const {
     return model_path_;
 }
 
+bool Corona::API::Geometry::is_valid() const {
+    return handle_ != 0 && transform_handle_ != 0;
+}
+
 std::array<float, 6> Corona::API::Geometry::get_aabb() const {
     if (auto geom = SharedDataHub::instance().geometry_storage().try_acquire_read(handle_)) {
         if (auto res = SharedDataHub::instance().model_resource_storage().try_acquire_read(geom->model_resource_handle)) {
@@ -1287,6 +1291,11 @@ std::uintptr_t Corona::API::Geometry::get_model_resource_handle() const {
 // ########################
 Corona::API::Optics::Optics(Geometry& geo)
     : geometry_(&geo), handle_(0) {
+    if (!geo.is_valid()) {
+        CFW_LOG_WARNING("[Optics::Optics] Invalid geometry; optics component not created");
+        return;
+    }
+
     handle_ = SharedDataHub::instance().optics_storage().allocate();
     if (auto accessor = SharedDataHub::instance().optics_storage().acquire_write(handle_)) {
         accessor->geometry_handle = geo.get_handle();
@@ -1431,6 +1440,11 @@ float Corona::API::Optics::get_shininess() const {
 // ########################
 Corona::API::Mechanics::Mechanics(Geometry& geo)
     : geometry_(&geo), handle_(0) {
+    if (!geo.is_valid()) {
+        CFW_LOG_WARNING("[Mechanics::Mechanics] Invalid geometry; mechanics component not created");
+        return;
+    }
+
     // 获取模型的包围盒信息
     ktm::fvec3 max_xyz;
     max_xyz.x = 0.0f;
@@ -1667,6 +1681,11 @@ void Corona::API::Mechanics::set_on_move_callback(
 // ########################
 Corona::API::Acoustics::Acoustics(Geometry& geo)
     : geometry_(&geo), handle_(0) {
+    if (!geo.is_valid()) {
+        CFW_LOG_WARNING("[Acoustics::Acoustics] Invalid geometry; acoustics component not created");
+        return;
+    }
+
     handle_ = SharedDataHub::instance().acoustics_storage().allocate();
     if (auto accessor = SharedDataHub::instance().acoustics_storage().acquire_write(handle_)) {
         accessor->geometry_handle = geo.get_handle();
@@ -1765,6 +1784,10 @@ Corona::API::Actor::~Actor() {
 Corona::API::Actor::Profile* Corona::API::Actor::add_profile(const Profile& profile) {
     if (!profile.geometry) {
         CFW_LOG_CRITICAL("[Actor::add_profile] Profile must have a valid Geometry");
+        return nullptr;
+    }
+    if (!profile.geometry->is_valid()) {
+        CFW_LOG_CRITICAL("[Actor::add_profile] Profile Geometry failed to load");
         return nullptr;
     }
 

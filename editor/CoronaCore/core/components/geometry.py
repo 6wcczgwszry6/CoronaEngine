@@ -32,6 +32,8 @@ class Geometry:
             raise RuntimeError("CoronaEngine 未提供 Geometry 构造器")
 
         self.engine_obj = GeometryCtor(model_path)
+        if hasattr(self.engine_obj, "is_valid") and not self.engine_obj.is_valid():
+            raise RuntimeError(f"Geometry failed to load model: {model_path}")
         self.name = name
         self.model_path = model_path
         self.is_ui_image = False
@@ -57,6 +59,8 @@ class Geometry:
 
         obj = cls.__new__(cls)
         obj.engine_obj = GeometryCtor.from_image(image_path)
+        if hasattr(obj.engine_obj, "is_valid") and not obj.engine_obj.is_valid():
+            raise RuntimeError(f"Geometry failed to load image: {image_path}")
         obj.name = name
         obj.model_path = image_path
         obj.is_ui_image = True
