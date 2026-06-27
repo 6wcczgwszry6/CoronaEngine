@@ -46,18 +46,6 @@ Horizon::HardwareBuffer make_geometry_buffer(const std::vector<T>& data,
     return Horizon::HardwareBuffer(desc, std::as_bytes(std::span<const T>(data.data(), data.size())));
 }
 
-Horizon::HardwareImage make_geometry_texture(uint32_t width,
-                                             uint32_t height,
-                                             Horizon::Format format,
-                                             std::string name = {}) {
-    return Horizon::HardwareImage(Horizon::HardwareImageDesc::texture_2d(
-        width,
-        height,
-        format,
-        Horizon::ImageUsageFlags::Sampled | Horizon::ImageUsageFlags::TransferDst,
-        std::move(name)));
-}
-
 }  // namespace
 
 // ============================================================================
@@ -537,8 +525,9 @@ void GeometrySystem::shutdown() {
     // 释放 LRU ActorCache（确保在 shutdown 时清理磁盘/内存）
     impl_->actor_cache.reset();
 
-    // 显式释放共享占位纹理，确保在 GPU device 仍存活时析构 HardwareImage
-    impl_->shared_placeholder_texture.reset();
+    // 显式释放共享占位纹理，确保在 GPU device 仍存活时析构 HardwareImage。
+    // 占位纹理现由 geometry_mesh_builder 模块持有（进程级单例，唯一所有者）。
+    release_geometry_placeholder_texture();
 }
 
 // ============================================================================
@@ -836,23 +825,9 @@ void GeometrySystem::rebuild_actor_gpu_resources(std::uintptr_t actor, std::uint
             // 阶段 A：创建 MeshDevice 数组（GPU 缓冲 + 纹理）
             // 构建逻辑收敛到 build_mesh_devices_from_scene（单一来源），
             // 与 Python API 层 Geometry 构造函数共用同一份实现。
+            // 占位纹理由 builder 模块持有（进程级单例），无需在此创建。
             // ================================================================
-
-            // ---- 创建共享的 1x1 白色占位纹理 ----
-            // 用于无纹理的 mesh，确保渲染管线始终有纹理可采样
-            // 生命周期由 Impl::shared_placeholder_texture 管理，shutdown() 中显式释放
-            // 避免 static 局部变量在 GPU device 析构后才析构导致 crash
-            if (!impl_->shared_placeholder_texture) {
-                static const unsigned char white_pixel[4] = {255, 255, 255, 255};  // 不透明白色
-                impl_->shared_placeholder_texture = std::make_unique<Horizon::HardwareImage>(
-                    make_geometry_texture(1, 1, Horizon::Format::SRGBA8_UNORM,
-                                          "geometry.placeholder_texture"));
-                impl_->shared_placeholder_texture->write_bytes(
-                    std::as_bytes(std::span<const unsigned char>(white_pixel, sizeof(white_pixel))));
-            }
-
-            std::vector<MeshDevice> mesh_devices =
-                build_mesh_devices_from_scene(scene, *impl_->shared_placeholder_texture);
+            std::vector<MeshDevice> mesh_devices = build_mesh_devices_from_scene(scene);
 
             // ================================================================
             // 阶段 C：写回 GeometryDevice

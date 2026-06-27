@@ -118,10 +118,6 @@ struct GeometrySystem::Impl {
     mutable std::shared_mutex          lod_cache_mutex;
     std::unordered_map<uint64_t, LODCacheEntry> lod_cache;
 
-    // 共享占位纹理：所有无纹理 mesh 共用，生命周期与 Impl 一致
-    // 使用 unique_ptr 避免 static 局部变量在 GPU device 析构后才析构
-    std::unique_ptr<Horizon::HardwareImage> shared_placeholder_texture;
-
     // ========================================
     // LRU ActorCache（M3 生产化）
     // ========================================

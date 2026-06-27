@@ -13,6 +13,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 
@@ -44,11 +46,40 @@ Horizon::HardwareImage make_geometry_texture(uint32_t width,
         std::move(name)));
 }
 
+// ----------------------------------------------------------------------------
+// 进程级共享占位纹理（1x1 白）——占位纹理的唯一所有者
+// ----------------------------------------------------------------------------
+// 用 unique_ptr + mutex 而非函数局部 static：后者无法在 GPU device 析构前显式释放，
+// 会导致 device 销毁后才析构 HardwareImage → crash。本模块由 GeometrySystem 在
+// shutdown() 中调用 release_geometry_placeholder_texture() 显式释放。
+std::mutex                              g_placeholder_mutex;
+std::unique_ptr<Horizon::HardwareImage> g_placeholder_texture;
+
+// 返回共享占位纹理的引用，首次调用时惰性创建。线程安全。
+Horizon::HardwareImage& get_placeholder_texture() {
+    std::lock_guard lock(g_placeholder_mutex);
+    if (!g_placeholder_texture) {
+        static const unsigned char white_pixel[4] = {255, 255, 255, 255};  // 不透明白色
+        g_placeholder_texture = std::make_unique<Horizon::HardwareImage>(
+            make_geometry_texture(1, 1, Horizon::Format::SRGBA8_UNORM,
+                                  "geometry.placeholder_texture"));
+        g_placeholder_texture->write_bytes(
+            std::as_bytes(std::span<const unsigned char>(white_pixel, sizeof(white_pixel))));
+    }
+    return *g_placeholder_texture;
+}
+
 }  // namespace
 
+void release_geometry_placeholder_texture() {
+    std::lock_guard lock(g_placeholder_mutex);
+    g_placeholder_texture.reset();
+}
+
 std::vector<MeshDevice> build_mesh_devices_from_scene(
-    const Resource::Scene&   scene,
-    Horizon::HardwareImage&  placeholder_texture) {
+    const Resource::Scene& scene) {
+
+    Horizon::HardwareImage& placeholder_texture = get_placeholder_texture();
 
     auto& resource_manager = Resource::ResourceManager::get_instance();
 

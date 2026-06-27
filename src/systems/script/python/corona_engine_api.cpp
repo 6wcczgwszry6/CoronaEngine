@@ -777,17 +777,9 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
     // ---- GPU MeshDevice 构建 ----
     // 从 Scene 构建 GPU 缓冲的逻辑已统一到 GeometrySystem 的共享构建器
     // （build_mesh_devices_from_scene），与 GeometrySystem 的重载/恢复路径共用同一份实现。
-    // 占位纹理：进程级单例，生命周期长于任何单个 Geometry，避免 static GPU 资源
-    // 在 device 析构后才析构。
-    static H::HardwareImage shared_placeholder_texture = []() {
-        static const unsigned char white_pixel[4] = {255, 255, 255, 255};
-        H::HardwareImage texture(make_sampled_texture_desc(1, 1, H::Format::SRGBA8_UNORM, "script.placeholder_texture"));
-        (void)texture.write_bytes(std::as_bytes(std::span<const unsigned char>(white_pixel, 4)));
-        return texture;
-    }();
-
+    // 占位纹理由 builder 模块内部持有（进程级单例），无需在此维护 static 副本。
     std::vector<MeshDevice> mesh_devices =
-        Corona::Systems::build_mesh_devices_from_scene(*scene, shared_placeholder_texture);
+        Corona::Systems::build_mesh_devices_from_scene(*scene);
 
     handle_ = SharedDataHub::instance().geometry_storage().allocate();
     if (auto handle = SharedDataHub::instance().geometry_storage().acquire_write(handle_)) {
