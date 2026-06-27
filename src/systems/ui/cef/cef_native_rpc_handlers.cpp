@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -995,6 +996,23 @@ bool json_bool_at(const nlohmann::json& value, size_t index, bool fallback = fal
     return fallback;
 }
 
+float arg_float_value(const nlohmann::json& args, size_t index, float fallback = 0.0f) {
+    if (!args.is_array() || index >= args.size()) {
+        return fallback;
+    }
+    const auto& value = args[index];
+    try {
+        if (value.is_number()) {
+            return value.get<float>();
+        }
+        if (value.is_string()) {
+            return std::stof(value.get<std::string>());
+        }
+    } catch (...) {
+    }
+    return fallback;
+}
+
 std::string json_string_at(const nlohmann::json& value,
                            size_t index,
                            std::string fallback = {}) {
@@ -1492,7 +1510,28 @@ void register_scene_datas_rpc_handlers(NativeRpcRegistry& registry) {
             if (!actor) {
                 return native_failure("Actor not found: " + actor_name, 2);
             }
-            return apply_actor_operation(*scene, *actor, operation, vector);
+            auto result = apply_actor_operation(*scene, *actor, operation, vector);
+            if (result.handled && result.success) {
+                persist_native_scene_actors(*scene);
+            }
+            return result;
+        }},
+        {"save_actor", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto scene_route = normalize_route(arg_string(request.args, 0));
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+            const auto actor_name = arg_string(request.args, 1);
+            if (!actor_name.empty() && !find_native_actor(*scene, actor_name)) {
+                return native_failure("Actor not found: " + actor_name, 2);
+            }
+            persist_native_scene_actors(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"actor", actor_name},
+            });
         }},
     };
 
@@ -1543,6 +1582,14 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
                     {"unsupported_count", 0},
                 }},
             });
+        }},
+        {"list_actor_tree", [](const NativeRequest&, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            nlohmann::json actors = nlohmann::json::array();
+            for (const auto& actor : scene->actors) {
+                actors.push_back(actor_to_json(*scene, actor));
+            }
+            return native_success(actors);
         }},
         {"reload_scene", [](const NativeRequest& request, const NativeContext&) {
             const auto scene_route = arg_string(request.args, 0);
@@ -1662,6 +1709,35 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
                 {"actor", actor_to_json(*scene, actor)},
             });
         }},
+        {"rename_actor", [](const NativeRequest& request, const NativeContext& context) {
+            auto* scene = ensure_native_editor_scene();
+            const auto actor_name = arg_string(request.args, 1);
+            const auto new_name = trim_ascii(arg_string(request.args, 2));
+            if (new_name.empty()) {
+                return native_failure("Actor name cannot be empty", 2);
+            }
+            auto* actor = find_native_actor(*scene, actor_name);
+            if (!actor) {
+                return native_failure("Actor not found: " + actor_name, 2);
+            }
+            const auto duplicate = std::any_of(scene->actors.begin(), scene->actors.end(), [&](const NativeEditorActor& other) {
+                return &other != actor && other.name == new_name;
+            });
+            if (duplicate) {
+                return native_failure("Actor name already exists: " + new_name, 2);
+            }
+            const auto old_name = actor->name;
+            actor->name = new_name;
+            persist_native_scene_actors(*scene);
+            emit_actor_change(context, *scene, *actor);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"old_name", old_name},
+                {"new_name", actor->name},
+                {"actor", actor_to_json(*scene, *actor)},
+            });
+        }},
         {"list_camera_views", [](const NativeRequest&, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             nlohmann::json cameras = nlohmann::json::array();
@@ -1707,6 +1783,43 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             emit_actor_change(context, *scene, *actor);
             return native_success({{"status", "success"}, {"actor", actor_to_json(*scene, *actor)}});
         }},
+        {"focus_actor", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto actor_name = arg_string(request.args, 1);
+            const auto camera_name = arg_string(request.args, 2);
+            auto* actor = find_native_actor(*scene, actor_name);
+            if (!actor || !actor->geometry) {
+                return native_failure("Actor not found or has no geometry: " + actor_name, 2);
+            }
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+
+            const auto aabb = actor->geometry->get_aabb();
+            const auto pos = actor->geometry->get_position();
+            const auto scale = actor->geometry->get_scale();
+            const std::array<float, 3> center{
+                pos[0] + ((aabb[0] + aabb[3]) * 0.5f) * scale[0],
+                pos[1] + ((aabb[1] + aabb[4]) * 0.5f) * scale[1],
+                pos[2] + ((aabb[2] + aabb[5]) * 0.5f) * scale[2],
+            };
+            const float dx = std::abs((aabb[3] - aabb[0]) * scale[0]);
+            const float dy = std::abs((aabb[4] - aabb[1]) * scale[1]);
+            const float dz = std::abs((aabb[5] - aabb[2]) * scale[2]);
+            const float diagonal = std::sqrt(dx * dx + dy * dy + dz * dz);
+            const float distance = std::max(diagonal * 2.0f, 1.0f);
+            const std::array<float, 3> camera_position{center[0], center[1], center[2] - distance};
+            const std::array<float, 3> forward{0.0f, 0.0f, 1.0f};
+            const std::array<float, 3> up{0.0f, 1.0f, 0.0f};
+            camera->engine_camera->set(camera_position, forward, up, camera->engine_camera->get_fov());
+            return native_success({
+                {"status", "success"},
+                {"center", center},
+                {"distance", distance},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
         {"remove_actor", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto actor_name = arg_string(request.args, 1);
@@ -1733,6 +1846,38 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
                 {"scene", scene->route},
                 {"actor", removed_name},
                 {"actor_guid", removed_guid},
+            });
+        }},
+        {"pick_actor_at_pixel", [](const NativeRequest& request, const NativeContext& context) {
+            auto* scene = ensure_native_editor_scene();
+            auto* camera = find_native_camera(*scene, {});
+            if (!camera || !camera->engine_camera) {
+                return native_failure("No active camera available", 2);
+            }
+            const float x = arg_float_value(request.args, 1);
+            const float y = arg_float_value(request.args, 2);
+            const float viewport_width = arg_float_value(request.args, 3, static_cast<float>(camera->width));
+            const float viewport_height = arg_float_value(request.args, 4, static_cast<float>(camera->height));
+            if (viewport_width <= 0.0f || viewport_height <= 0.0f) {
+                return native_failure("Invalid viewport size", 2);
+            }
+            const int pick_x = static_cast<int>(x * static_cast<float>(camera->width) / viewport_width);
+            const int pick_y = static_cast<int>(y * static_cast<float>(camera->height) / viewport_height);
+            if (pick_x < 0 || pick_x >= camera->width || pick_y < 0 || pick_y >= camera->height) {
+                return native_success({{"status", "miss"}});
+            }
+            const auto handle = camera->engine_camera->pick_actor_at_pixel(pick_x, pick_y);
+            if (handle == 0) {
+                return native_success({{"status", "pending"}});
+            }
+            auto* actor = find_native_actor(*scene, std::to_string(handle));
+            if (!actor) {
+                return native_success({{"status", "miss"}, {"handle", handle}});
+            }
+            emit_actor_change(context, *scene, *actor);
+            return native_success({
+                {"status", "success"},
+                {"actor", actor_to_json(*scene, *actor)},
             });
         }},
         {"play_audio", [](const NativeRequest& request, const NativeContext&) {

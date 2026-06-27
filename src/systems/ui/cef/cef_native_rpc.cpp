@@ -118,7 +118,6 @@ bool is_python_fallback_allowed(const std::string& module, const std::string& fu
 
     static const std::unordered_map<std::string, std::unordered_set<std::string>> method_allowlist = {
         {"MainView", {
-            "scene_save",
             "import_resource_file",
             "import_model",
             "import_media",
@@ -145,7 +144,6 @@ bool is_python_fallback_allowed(const std::string& module, const std::string& fu
             "browse_scene_file",
         }},
         {"SceneDatas", {
-            "save_actor",
             "select_model_file",
         }},
         {"SceneTools", {
