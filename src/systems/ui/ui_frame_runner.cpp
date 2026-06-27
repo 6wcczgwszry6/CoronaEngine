@@ -7,6 +7,7 @@
 #include <corona/systems/ui/vulkan_backend.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <memory>
 #include <string>
@@ -148,6 +149,170 @@ std::vector<PanelLayoutInput> collect_layout_inputs(void* host_filter) {
     return inputs;
 }
 
+enum FloatingResizeEdge {
+    kResizeLeft = 1 << 0,
+    kResizeRight = 1 << 1,
+    kResizeTop = 1 << 2,
+    kResizeBottom = 1 << 3,
+};
+
+int floating_resize_edges(const BrowserTab& tab, const HitResult& hit) {
+    if (!tab.floating || hit.is_main) {
+        return 0;
+    }
+
+    constexpr float kResizeHandle = 8.0f;
+    constexpr float kTopResizeHandle = 6.0f;
+    constexpr float kTitlebarHeight = 32.0f;
+    constexpr float kTitlebarActionReserve = 80.0f;
+    const float width = static_cast<float>(std::max(tab.width, tab.dock_width));
+    const float height = static_cast<float>(std::max(tab.height, tab.dock_height));
+    const bool over_titlebar_actions =
+        hit.local_y >= 0.0f && hit.local_y <= kTitlebarHeight &&
+        hit.local_x >= width - kTitlebarActionReserve && hit.local_x <= width;
+    int edges = 0;
+
+    if (over_titlebar_actions) {
+        return 0;
+    }
+
+    if (hit.local_x >= 0.0f && hit.local_x <= kResizeHandle) {
+        edges |= kResizeLeft;
+    } else if (hit.local_x >= width - kResizeHandle && hit.local_x <= width) {
+        edges |= kResizeRight;
+    }
+
+    if (hit.local_y >= 0.0f && hit.local_y <= kTopResizeHandle) {
+        edges |= kResizeTop;
+    } else if (hit.local_y >= height - kResizeHandle && hit.local_y <= height) {
+        edges |= kResizeBottom;
+    }
+
+    return edges;
+}
+
+SDL_SystemCursor cursor_for_resize_edges(int edges) {
+    const bool left = (edges & kResizeLeft) != 0;
+    const bool right = (edges & kResizeRight) != 0;
+    const bool top = (edges & kResizeTop) != 0;
+    const bool bottom = (edges & kResizeBottom) != 0;
+
+    if (left && top) {
+        return SDL_SYSTEM_CURSOR_NW_RESIZE;
+    }
+    if (right && top) {
+        return SDL_SYSTEM_CURSOR_NE_RESIZE;
+    }
+    if (right && bottom) {
+        return SDL_SYSTEM_CURSOR_SE_RESIZE;
+    }
+    if (left && bottom) {
+        return SDL_SYSTEM_CURSOR_SW_RESIZE;
+    }
+    if (left) {
+        return SDL_SYSTEM_CURSOR_W_RESIZE;
+    }
+    if (right) {
+        return SDL_SYSTEM_CURSOR_E_RESIZE;
+    }
+    if (top) {
+        return SDL_SYSTEM_CURSOR_N_RESIZE;
+    }
+    if (bottom) {
+        return SDL_SYSTEM_CURSOR_S_RESIZE;
+    }
+    return SDL_SYSTEM_CURSOR_DEFAULT;
+}
+
+SDL_Cursor* cached_system_cursor(SDL_SystemCursor cursor) {
+    static std::array<SDL_Cursor*, SDL_SYSTEM_CURSOR_COUNT> cursors{};
+    if (cursor == SDL_SYSTEM_CURSOR_DEFAULT) {
+        return SDL_GetDefaultCursor();
+    }
+
+    const auto index = static_cast<std::size_t>(cursor);
+    if (index >= cursors.size()) {
+        return SDL_GetDefaultCursor();
+    }
+    if (cursors[index] == nullptr) {
+        cursors[index] = SDL_CreateSystemCursor(cursor);
+    }
+    return cursors[index] ? cursors[index] : SDL_GetDefaultCursor();
+}
+
+void apply_floating_resize(BrowserTab& tab,
+                           int tab_id,
+                           int edges,
+                           float start_x,
+                           float start_y,
+                           float start_w,
+                           float start_h,
+                           float dx,
+                           float dy,
+                           SDL_WindowID window_id) {
+    constexpr float kMinWidth = 320.0f;
+    constexpr float kMinHeight = 300.0f;
+
+    float x = start_x;
+    float y = start_y;
+    float w = start_w;
+    float h = start_h;
+
+    if ((edges & kResizeLeft) != 0) {
+        x = start_x + dx;
+        w = start_w - dx;
+        if (w < kMinWidth) {
+            w = kMinWidth;
+            x = start_x + start_w - kMinWidth;
+        }
+    } else if ((edges & kResizeRight) != 0) {
+        w = std::max(kMinWidth, start_w + dx);
+    }
+
+    if ((edges & kResizeTop) != 0) {
+        y = start_y + dy;
+        h = start_h - dy;
+        if (h < kMinHeight) {
+            h = kMinHeight;
+            y = start_y + start_h - kMinHeight;
+        }
+    } else if ((edges & kResizeBottom) != 0) {
+        h = std::max(kMinHeight, start_h + dy);
+    }
+
+    int win_w = 0;
+    int win_h = 0;
+    if (SDL_Window* window = SdlWindowManager::instance().window_for_id(window_id)) {
+        SDL_GetWindowSize(window, &win_w, &win_h);
+    }
+    if (win_w > 0) {
+        if (x < 0.0f) {
+            w += x;
+            x = 0.0f;
+        }
+        if (x + w > static_cast<float>(win_w)) {
+            w = std::max(kMinWidth, static_cast<float>(win_w) - x);
+        }
+    }
+    if (win_h > 0) {
+        if (y < 0.0f) {
+            h += y;
+            y = 0.0f;
+        }
+        if (y + h > static_cast<float>(win_h)) {
+            h = std::max(kMinHeight, static_cast<float>(win_h) - y);
+        }
+    }
+
+    tab.initial_x = static_cast<int>(std::lround(x));
+    tab.initial_y = static_cast<int>(std::lround(y));
+    tab.dock_width = static_cast<int>(std::lround(std::max(kMinWidth, w)));
+    tab.dock_height = static_cast<int>(std::lround(std::max(kMinHeight, h)));
+    tab.needs_reposition = true;
+    tab.needs_resize = true;
+    BrowserManager::instance().resize_tab(tab_id, tab.dock_width, tab.dock_height);
+}
+
 }  // namespace
 
 void UiFrameRunner::dispatch_keyboard_to_active_tab(int active_tab_id) {
@@ -160,6 +325,17 @@ void UiFrameRunner::dispatch_keyboard_to_active_tab(int active_tab_id) {
         }
     }
     input_handler_.clear_pending_events();
+}
+
+void UiFrameRunner::set_system_cursor(SDL_SystemCursor cursor) {
+    if (active_system_cursor_ == cursor) {
+        return;
+    }
+
+    SDL_Cursor* next = cached_system_cursor(cursor);
+    if (next != nullptr && SDL_SetCursor(next)) {
+        active_system_cursor_ = cursor;
+    }
 }
 
 void UiFrameRunner::route_mouse_to_panels(SDL_WindowID window_id,
@@ -197,20 +373,63 @@ void UiFrameRunner::route_mouse_to_panels(SDL_WindowID window_id,
     std::vector<ButtonEvent> button_events = input_router_.drain_button_events(window_id);
     const float wheel = input_router_.consume_wheel(window_id);
 
-    // ---- Phase 10: title-bar drag of an in-main-window floating panel ----------------------
+    // ---- Phase 10: move/resize of an in-main-window floating panel -------------------------
     // Floating panels live only in the main window (host_surface == nullptr). A left-press on a
-    // floating panel's drag region (its DockTitleBar, reported via setDragRegions) starts a
-    // window-internal drag; moves update the tab's initial_x/y (clamped); release ends it. While
-    // dragging, the panel's mouse events are NOT forwarded to CEF.
+    // floating panel's edge/corner starts native resize. A left-press on its drag region starts
+    // native move. In both modes, mouse events are consumed here so the operation keeps working
+    // even after the cursor leaves the panel's previous CEF rectangle.
 
-    // Begin drag on left-press inside a floating panel's drag region.
+    bool ended_resize_this_frame = false;
     bool ended_drag_this_frame = false;
     for (const ButtonEvent& be : button_events) {
         if (be.button != MouseButton::Left) {
             continue;
         }
-        if (be.pressed && dragging_tab_id_ == -1 && hit.hit && !hit.is_main && hit.in_drag_region) {
-            auto* dtab = BrowserManager::instance().get_tab(hit.tab_id);
+
+        if (!be.pressed) {
+            if (resizing_tab_id_ != -1) {
+                resizing_tab_id_ = -1;
+                resize_edges_ = 0;
+                ended_resize_this_frame = true;
+                continue;
+            }
+            if (dragging_tab_id_ != -1) {
+                dragging_tab_id_ = -1;
+                ended_drag_this_frame = true;
+                continue;
+            }
+        }
+
+        if (!be.pressed || resizing_tab_id_ != -1 || dragging_tab_id_ != -1 ||
+            !hit.hit || hit.is_main) {
+            continue;
+        }
+
+        auto* dtab = BrowserManager::instance().get_tab(hit.tab_id);
+        if (!dtab || !dtab->floating) {
+            continue;
+        }
+
+        const int resize_edges = floating_resize_edges(*dtab, hit);
+        if (resize_edges != 0) {
+            active_tab_id = hit.tab_id;
+            url_input_active_tab_ = -1;
+            focus_browser_tab_exclusively(hit.tab_id);
+            resizing_tab_id_ = hit.tab_id;
+            resize_edges_ = resize_edges;
+            resize_mouse_start_x_ = be.mouse_x;
+            resize_mouse_start_y_ = be.mouse_y;
+            resize_rect_start_x_ = static_cast<float>(dtab->initial_x);
+            resize_rect_start_y_ = static_cast<float>(dtab->initial_y);
+            resize_rect_start_w_ = static_cast<float>(std::max(dtab->dock_width, dtab->width));
+            resize_rect_start_h_ = static_cast<float>(std::max(dtab->dock_height, dtab->height));
+            continue;
+        }
+
+        if (hit.in_drag_region) {
+            active_tab_id = hit.tab_id;
+            url_input_active_tab_ = -1;
+            focus_browser_tab_exclusively(hit.tab_id);
             if (dtab && dtab->floating) {
                 dragging_tab_id_ = hit.tab_id;
                 drag_mouse_start_x_ = be.mouse_x;
@@ -218,10 +437,41 @@ void UiFrameRunner::route_mouse_to_panels(SDL_WindowID window_id,
                 drag_rect_start_x_ = static_cast<float>(dtab->initial_x);
                 drag_rect_start_y_ = static_cast<float>(dtab->initial_y);
             }
-        } else if (!be.pressed && dragging_tab_id_ != -1) {
-            dragging_tab_id_ = -1;  // release ends the drag
-            ended_drag_this_frame = true;
         }
+    }
+
+    int cursor_edges = 0;
+    if (resizing_tab_id_ != -1) {
+        cursor_edges = resize_edges_;
+    } else if (dragging_tab_id_ == -1 && hit.hit && !hit.is_main) {
+        auto* hover_tab = BrowserManager::instance().get_tab(hit.tab_id);
+        if (hover_tab && hover_tab->floating) {
+            cursor_edges = floating_resize_edges(*hover_tab, hit);
+        }
+    }
+    set_system_cursor(cursor_for_resize_edges(cursor_edges));
+
+    if (resizing_tab_id_ != -1) {
+        auto* dtab = BrowserManager::instance().get_tab(resizing_tab_id_);
+        if (!dtab || !dtab->floating) {
+            resizing_tab_id_ = -1;
+            resize_edges_ = 0;
+        } else {
+            apply_floating_resize(*dtab,
+                                  resizing_tab_id_,
+                                  resize_edges_,
+                                  resize_rect_start_x_,
+                                  resize_rect_start_y_,
+                                  resize_rect_start_w_,
+                                  resize_rect_start_h_,
+                                  st.mouse_x - resize_mouse_start_x_,
+                                  st.mouse_y - resize_mouse_start_y_,
+                                  window_id);
+            return;
+        }
+    }
+    if (ended_resize_this_frame) {
+        return;
     }
 
     // While dragging: move the panel and consume all input (no CEF forwarding this frame).
@@ -615,15 +865,17 @@ void UiFrameRunner::render_window(UiFrameContext& context, const ManagedWindow& 
                                    (placement.rect.y + placement.rect.h) * scale_y);
         quads.push_back(quad);
     };
-    // 1) main (bottom), 2) non-main except the dragged one, 3) the dragged panel (topmost).
+    // 1) main (bottom), 2) non-main except active move/resize panel, 3) active panel (topmost).
+    const int active_floating_tab_id =
+        resizing_tab_id_ != -1 ? resizing_tab_id_ : dragging_tab_id_;
     for (const PanelPlacement& placement : placements) {
         if (placement.is_main) append_quad(placement);
     }
     for (const PanelPlacement& placement : placements) {
-        if (!placement.is_main && placement.tab_id != dragging_tab_id_) append_quad(placement);
+        if (!placement.is_main && placement.tab_id != active_floating_tab_id) append_quad(placement);
     }
     for (const PanelPlacement& placement : placements) {
-        if (!placement.is_main && placement.tab_id == dragging_tab_id_) append_quad(placement);
+        if (!placement.is_main && placement.tab_id == active_floating_tab_id) append_quad(placement);
     }
 
     context.vulkan_backend->render_quads(surface, quads, pixel_w, pixel_h);
