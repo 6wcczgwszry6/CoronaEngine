@@ -6,11 +6,6 @@ sun_direction = 1.0, 1.0, 1.0
 enabled = true
 
 [actors]
-Ball.actor_type = actor
-Ball.route = Resource/axis.obj
-Ball.geometry.position = 0.0, 0.0, 0.0
-Ball.geometry.rotation = 0.0, 0.0, 0.0
-Ball.geometry.scale = 1.0, 1.0, 1.0
 
 [scripts]
 path = Scripts/scene_script.py

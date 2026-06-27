@@ -42,15 +42,10 @@ def create_project_from_template(target_path, project_name, mode):
 
 def normalize_project_runtime_paths(project_path: str) -> None:
     """Migrate demo-template runtime paths to ASCII filenames for native C++ loading."""
-    resource_dir = os.path.join(project_path, "Resource")
     scene_dir = os.path.join(project_path, "Scene")
-    old_resource = os.path.join(resource_dir, "三轴.obj")
-    new_resource = os.path.join(resource_dir, "axis.obj")
     old_scene = os.path.join(scene_dir, "场景1.scene")
     new_scene = os.path.join(scene_dir, "default.scene")
 
-    if os.path.exists(old_resource) and not os.path.exists(new_resource):
-        os.replace(old_resource, new_resource)
     if os.path.exists(old_scene) and not os.path.exists(new_scene):
         os.replace(old_scene, new_scene)
 
@@ -71,14 +66,6 @@ def normalize_project_runtime_paths(project_path: str) -> None:
                 config['Project']['scenes'] = ','.join(scenes)
             with open(project_ini, 'w', encoding='utf-8') as f:
                 config.write(f)
-
-    if os.path.exists(new_scene):
-        scene_config = configparser.ConfigParser()
-        scene_config.read(new_scene, encoding='utf-8')
-        if 'actors' in scene_config and scene_config['actors'].get('Ball.route') == 'Resource/三轴.obj':
-            scene_config['actors']['Ball.route'] = 'Resource/axis.obj'
-            with open(new_scene, 'w', encoding='utf-8') as f:
-                scene_config.write(f)
 
 
 def update_project_config(ini_path, name=None, mode='3d', update_only_time=False):

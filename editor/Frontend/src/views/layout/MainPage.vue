@@ -328,13 +328,7 @@
       @pointerleave="handleViewportPointerLeave"
       @mousedown.left="handleViewportPick"
       @wheel.prevent="handleWheel"
-    >
-      <ViewportGizmoOverlay
-        :state="gizmoState"
-        :mode="gizmoMode"
-        @mode-change="handleGizmoModeChange"
-      />
-    </div>
+    ></div>
 
     <!-- 自定义弹窗 -->
     <div
@@ -475,7 +469,6 @@ import {
   isNativeViewportCursorEnabled,
 } from '@/utils/viewportUiMode.js';
 import AIHintBubble from '@/components/ui/AIHintBubble.vue';
-import ViewportGizmoOverlay from '@/components/viewport/ViewportGizmoOverlay.vue';
 import { startStageHints, stopStageHints, setHintShowMs } from '@/services/aiHintGenerator.js';
 
 const { error: logError } = useErrorHandler('MainPage');
@@ -509,9 +502,6 @@ const cameraBindingState = ref({
 });
 let actorPickIndex = new Map();
 const viewportPickSurfaceRef = ref(null);
-const selectedGizmoActor = ref(null);
-const gizmoState = ref(null);
-const gizmoMode = ref('move');
 const viewportLayoutVersion = ref(0);
 const viewportUiMode = ref('flat2d');
 const viewportUiModeStore = createViewportUiModeStore();
@@ -590,9 +580,6 @@ const viewportPickController = createViewportPickController({
   getHitRect: getViewportHitRect,
   getRenderRect: getViewportRenderRect,
   getActorIndex: () => actorPickIndex,
-  onPickStart: () => {
-    clearGizmoSelection();
-  },
   emitActorChange: (type, sceneId, actorName) => emitActorChangeFast(type, sceneId, actorName),
 });
 
@@ -604,14 +591,6 @@ const viewportUiPointerController = createViewportUiPointerController({
   getHitRect: getViewportHitRect,
   getRenderRect: getViewportRenderRect,
 });
-
-const emitTransformUpdateFast = (sceneId, actorName, position, rotation, scale, type) => {
-  if (typeof window.__coronaEmit === 'function') {
-    window.__coronaEmit('transform-update', sceneId, actorName, position, rotation, scale, type);
-  } else {
-    coronaEventBus.emit('transform-update', sceneId, actorName, position, rotation, scale, type);
-  }
-};
 
 let cameraViewportSyncRafId = null;
 let cameraViewportResizeObserver = null;
@@ -648,35 +627,6 @@ const scheduleCameraViewportSync = () => {
     cameraViewportSyncRafId = null;
     syncCameraViewportRect();
   });
-};
-
-const syncNativeGizmoMode = () => {
-  try {
-    window.coronaBridge?.setViewportGizmoMode?.(gizmoMode.value);
-  } catch (_) {}
-};
-
-const syncNativeGizmoSelection = () => {
-  const actor = selectedGizmoActor.value;
-  const bridge = window.coronaBridge;
-  const cameraHandle = Number(cameraBindingState.value.cameraHandle || 0);
-  const actorHandle = Number(actor?.handle || 0);
-  const sceneId = actor?.sceneId || cameraBindingState.value.sceneId || '';
-  if (!bridge || typeof bridge.setViewportGizmoSelection !== 'function' ||
-      cameraHandle <= 0 || actorHandle <= 0 || !sceneId) {
-    return;
-  }
-  try {
-    bridge.setViewportGizmoSelection(sceneId, cameraHandle, actorHandle);
-  } catch (_) {}
-};
-
-const clearGizmoSelection = () => {
-  selectedGizmoActor.value = null;
-  gizmoState.value = null;
-  try {
-    window.coronaBridge?.clearViewportGizmoSelection?.();
-  } catch (_) {}
 };
 
 const handleViewportLayoutChange = () => {
@@ -939,19 +889,6 @@ const applySceneSnapshot = (sceneId, payload) => {
     snapshot.scene_id ?? snapshot.sceneId ?? snapshot.id ?? sceneId ?? DEFAULT_SCENE_NAME;
   const cameras = Array.isArray(snapshot.cameras) ? snapshot.cameras : [];
   actorPickIndex = indexActorsByHandle(Array.isArray(snapshot.actors) ? snapshot.actors : []);
-  if (selectedGizmoActor.value) {
-    const selectedHandle = Number(selectedGizmoActor.value.handle || 0);
-    const indexedActor = actorPickIndex.get(selectedHandle);
-    if (selectedGizmoActor.value.sceneId !== normalizedSceneId || !indexedActor?.name) {
-      clearGizmoSelection();
-    } else {
-      selectedGizmoActor.value = {
-        ...selectedGizmoActor.value,
-        name: indexedActor.name,
-        type: indexedActor.type || selectedGizmoActor.value.type || 'actor',
-      };
-    }
-  }
   const activeCameraName =
     snapshot.active_camera_name ?? snapshot.activeCameraName ?? cameras[0]?.name ?? null;
   const activeCamera =
@@ -1464,15 +1401,8 @@ const applyActorPickResult = (result, payload = result?.payload) => {
     return;
   }
 
-  clearGizmoSelection();
-  selectedGizmoActor.value = {
-    handle: result.actor.handle,
-    name: result.actor.name,
-    type: result.actor.type || 'actor',
-    sceneId: result.payload.sceneId,
-  };
-  gizmoState.value = { native: true };
-  syncNativeGizmoSelection();
+  // 选中结果已由 viewportPickController 内部 emitActorChange 驱动属性面板，
+  // 此处无需额外处理。
 };
 
 const handleActorPickResult = (payload) => {
@@ -1488,49 +1418,7 @@ const handleActorPickResult = (payload) => {
     })
     .catch((error) => {
       logError('Actor pick index refresh failed', error);
-      clearGizmoSelection();
     });
-};
-
-const handleNativeGizmoSelection = (payload) => {
-  const actorHandle = Number(payload?.actorHandle || 0);
-  const sceneId = payload?.sceneId || cameraBindingState.value.sceneId || DEFAULT_SCENE_NAME;
-  if (actorHandle <= 0) {
-    clearGizmoSelection();
-    return;
-  }
-
-  const indexedActor = actorPickIndex.get(actorHandle);
-  if (!indexedActor?.name) return;
-
-  selectedGizmoActor.value = {
-    handle: actorHandle,
-    name: indexedActor.name,
-    type: indexedActor.type || 'actor',
-    sceneId,
-  };
-  gizmoState.value = { native: true };
-  emitActorChangeFast(selectedGizmoActor.value.type, sceneId, indexedActor.name);
-};
-
-const handleNativeGizmoTransform = (payload) => {
-  const actorHandle = Number(payload?.actorHandle || 0);
-  const transform = payload?.transform || {};
-  const actor =
-    Number(selectedGizmoActor.value?.handle || 0) === actorHandle
-      ? selectedGizmoActor.value
-      : actorPickIndex.get(actorHandle);
-  if (!actor?.name) return;
-  const sceneId = payload?.sceneId || actor.sceneId || cameraBindingState.value.sceneId || DEFAULT_SCENE_NAME;
-  const position = Array.isArray(transform.position) ? transform.position : [0, 0, 0];
-  const rotation = Array.isArray(transform.rotation) ? transform.rotation : [0, 0, 0];
-  const scale = Array.isArray(transform.scale) ? transform.scale : [1, 1, 1];
-  emitTransformUpdateFast(sceneId, actor.name, position, rotation, scale, actor.type || 'actor');
-};
-
-const handleGizmoModeChange = (mode) => {
-  gizmoMode.value = mode === 'scale' || mode === 'rotate' ? mode : 'move';
-  syncNativeGizmoMode();
 };
 
 const sendCameraUpdateFast = () => {
@@ -2159,7 +2047,6 @@ onMounted(async () => {
     cameraViewportResizeObserver = new ResizeObserver(handleViewportLayoutChange);
     cameraViewportResizeObserver.observe(viewportPickSurfaceRef.value);
   }
-  syncNativeGizmoMode();
   await restoreCameraViews(initialSceneId);
 
   document.addEventListener('keydown', handleKeyDown);
@@ -2183,8 +2070,6 @@ onMounted(async () => {
   coronaEventBus.on('viewport-controls-request', handleViewportControlsRequest);
   coronaEventBus.on('vision-scene-imported', handleVisionSceneImported);
   coronaEventBus.on('actor-pick-result', handleActorPickResult);
-  coronaEventBus.on('native-gizmo-selection', handleNativeGizmoSelection);
-  coronaEventBus.on('native-gizmo-transform', handleNativeGizmoTransform);
   coronaEventBus.on('viewport-ui-calibration-changed', applyViewportUiCalibration);
 
   await openDefaultFloatingToolPanels();
@@ -2220,8 +2105,6 @@ onUnmounted(() => {
   coronaEventBus.off('viewport-controls-request', handleViewportControlsRequest);
   coronaEventBus.off('vision-scene-imported', handleVisionSceneImported);
   coronaEventBus.off('actor-pick-result', handleActorPickResult);
-  coronaEventBus.off('native-gizmo-selection', handleNativeGizmoSelection);
-  coronaEventBus.off('native-gizmo-transform', handleNativeGizmoTransform);
   window.removeEventListener('storage', onStorageChange);
   window.removeEventListener('resize', handleViewportLayoutChange);
   stopMoveLoop();
