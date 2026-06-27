@@ -137,15 +137,9 @@ void GeometrySystem::update() {
     }
 
     // ---- 动态减面管线 ----
-    // 用 shared_lock 快照 simplification_cfg，与 set_simplification_config 的 unique_lock 互斥
-    bool run_simplification = false;
-    {
-        std::shared_lock lock(impl_->mtx);
-        run_simplification = impl_->simplification_cfg.enabled;
-    }
-    if (run_simplification) {
-        upload_lod_from_scene_data();
-    }
+    // LOD 由 GeometrySystem 内部自动管理，无外部开关：每帧上传导入时生成的 LOD 数据。
+    // 已缓存的 mesh 仅做一次 find + model_id 比较，无 LOD 数据的 mesh 自动跳过。
+    upload_lod_from_scene_data();
 
     for (std::uintptr_t scene_handle : scene_handles) {
         const auto scene_begin = std::chrono::steady_clock::now();
@@ -1499,14 +1493,34 @@ void GeometrySystem::on_restore_requested(const Events::ActorRestoreRequestedEve
 // 动态减面 (Mesh Simplification) 公共 API
 // ============================================================================
 
-void GeometrySystem::set_simplification_config(const MeshSimplificationConfig& cfg) {
-    std::unique_lock lock(impl_->mtx);
-    impl_->simplification_cfg = cfg;
-}
+GeometrySystem::RenderMeshBuffers GeometrySystem::select_render_buffers(
+    std::uintptr_t          geometry_handle,
+    uint32_t                mesh_index,
+    const ktm::fvec3&       camera_pos,
+    float                   camera_fov_deg,
+    const ktm::fvec3&       world_center,
+    float                   bounding_radius,
+    const RenderMeshBuffers& fallback) const {
 
-const MeshSimplificationConfig& GeometrySystem::get_simplification_config() const {
-    std::shared_lock lock(impl_->mtx);
-    return impl_->simplification_cfg;
+    // 屏幕占比由 GeometrySystem 内部计算，optics 无需关心
+    const float screen_ratio = compute_screen_ratio(
+        camera_pos, camera_fov_deg, world_center, bounding_radius);
+
+    // 复用 resolve_lod_buffers 的选级 + 降级逻辑（单次加锁）
+    const LODMeshBuffers* lod = resolve_lod_buffers(geometry_handle, mesh_index, screen_ratio);
+
+    // 无 LOD / 未就绪 / 缓冲无效 → 原样返回 fallback，保证始终可渲染
+    if (lod == nullptr || !lod->vertex_buffer || !lod->index_buffer) {
+        return fallback;
+    }
+
+    RenderMeshBuffers out;
+    out.vertex         = lod->vertex_buffer;
+    out.index          = lod->index_buffer;
+    // StorageBuffer 可能缺失：缺失时沿用 fallback 的，避免 compute 路径拿到空句柄
+    out.vertex_storage = lod->vertex_storage ? lod->vertex_storage : fallback.vertex_storage;
+    out.index_storage  = lod->index_storage  ? lod->index_storage  : fallback.index_storage;
+    return out;
 }
 
 const LODMeshBuffers* GeometrySystem::get_lod_buffers(
@@ -1686,15 +1700,9 @@ namespace {
 }  // namespace
 
 void GeometrySystem::upload_lod_from_scene_data() {
-    // 快照 simplification_cfg，与 set_simplification_config 同步
-    bool auto_on_load;
-    int max_lod_levels;
-    {
-        std::shared_lock lock(impl_->mtx);
-        auto_on_load = impl_->simplification_cfg.auto_on_load;
-        max_lod_levels = impl_->simplification_cfg.max_lod_levels;
-    }
-    if (!auto_on_load) return;
+    // LOD 由本系统内部决策，无外部配置开关。
+    // 最大 LOD 级别数（含 LOD0 原始精度）为内部常量。
+    constexpr int max_lod_levels = 4;
 
     auto& resource_manager = Resource::ResourceManager::get_instance();
     auto& hub = SharedDataHub::instance();

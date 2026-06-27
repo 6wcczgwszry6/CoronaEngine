@@ -73,7 +73,14 @@ bool Engine::initialize() {
     auto& resource_manager = Resource::ResourceManager::get_instance();
     resource_manager.register_parser<Resource::TextParser>();
     resource_manager.register_parser<Resource::ImageParser>();
-    resource_manager.register_parser<Resource::SceneParser>();
+    // SceneParser：开启导入期 LOD 生成（meshoptimizer 在导入时生成多级简化网格，
+    // 存入 MeshData::lod_levels）。运行时由 GeometrySystem 内部自动上传/选级，无需上层配置。
+    {
+        auto scene_parser = std::make_shared<Resource::SceneParser>();
+        scene_parser->assimp_options.lod_options.enabled     = true;
+        scene_parser->assimp_options.lod_options.level_count = 3;
+        resource_manager.register_parser(scene_parser);
+    }
     resource_manager.register_parser<Resource::VideoParser>();
     resource_manager.register_parser<Resource::AudioParser>();
 

@@ -115,7 +115,6 @@ struct GeometrySystem::Impl {
         std::vector<Spatial::BVH<uint32_t>> per_level_bvh;
     };
 
-    MeshSimplificationConfig           simplification_cfg;
     mutable std::shared_mutex          lod_cache_mutex;
     std::unordered_map<uint64_t, LODCacheEntry> lod_cache;
 
