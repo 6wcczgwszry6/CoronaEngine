@@ -424,6 +424,8 @@ class Environment:
     def __init__(self):
         _log("[Fallback][Environment.__init__]")
         self._sun_dir = [0.0, -1.0, 0.0]
+        self._sun_intensity = 10.0
+        self._sky_intensity = 20.0
         self._floor_grid = False
         self._gravity = [0.0, -9.8, 0.0]
         self._floor_y = 0.0
@@ -436,6 +438,20 @@ class Environment:
 
     def get_sun_direction(self):
         return list(self._sun_dir)
+
+    def set_sun_intensity(self, intensity: float):
+        _log(f"[Fallback][Environment.set_sun_intensity] intensity={intensity}")
+        self._sun_intensity = float(intensity)
+
+    def get_sun_intensity(self):
+        return self._sun_intensity
+
+    def set_sky_intensity(self, intensity: float):
+        _log(f"[Fallback][Environment.set_sky_intensity] intensity={intensity}")
+        self._sky_intensity = float(intensity)
+
+    def get_sky_intensity(self):
+        return self._sky_intensity
 
     def set_floor_grid(self, enabled: bool):
         _log(f"[Fallback][Environment.set_floor_grid] enabled={enabled}")

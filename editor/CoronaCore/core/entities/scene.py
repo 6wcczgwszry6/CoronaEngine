@@ -171,7 +171,11 @@ class Scene:
                 self.set_sun_direction(sun_direction, True)
 
                 sun_enabled = self.file_data['sun'].getboolean('enabled', True)
-                self.set_floor_grid(sun_enabled, True)
+                self.set_sun_enabled(sun_enabled, True)
+
+            if 'grid' in self.file_data:
+                grid_enabled = self.file_data['grid'].getboolean('enabled', True)
+                self.set_floor_grid(grid_enabled, True)
 
             # 读取演员数据 - 构建JSON数据
             if 'actors' in self.file_data:
@@ -319,7 +323,7 @@ class Scene:
             data_path = os.path.join(_active_project_path() or '', self.route)
 
         # 确保必要的 section 存在
-        for section in ('base', 'sun', 'actors', 'scripts', 'terrain'):
+        for section in ('base', 'sun', 'grid', 'actors', 'scripts', 'terrain'):
             if section not in self.file_data:
                 self.file_data[section] = {}
 
@@ -331,6 +335,10 @@ class Scene:
         if env and hasattr(env, 'get_sun_direction'):
             sun_direction = env.get_sun_direction()
             self.file_data['sun']['sun_direction'] = f"{sun_direction[0]: .2f}, {sun_direction[1]: .2f}, {sun_direction[2]: .2f}"
+        if env and hasattr(env, 'get_sun_intensity'):
+            self.file_data['sun']['enabled'] = 'true' if env.get_sun_intensity() > 0.0 else 'false'
+        if env and hasattr(env, 'get_floor_grid'):
+            self.file_data['grid']['enabled'] = 'true' if env.get_floor_grid() else 'false'
 
         # 演员数据
         self.file_data['actors'] = {}
@@ -601,6 +609,17 @@ class Scene:
         return True
 
     @auto_save
+    def set_sun_enabled(self, enabled: bool, if_init: bool = False) -> bool:
+        if self._environment:
+            if hasattr(self._environment, 'set_sun_intensity'):
+                self._environment.set_sun_intensity(10.0 if enabled else 0.0)
+            if hasattr(self._environment, 'set_sky_intensity'):
+                self._environment.set_sky_intensity(20.0 if enabled else 0.0)
+        if if_init:
+            return False
+        return True
+
+    @auto_save
     def set_floor_grid(self, enabled: bool, if_init: bool = False) -> bool:
         """设置地面网格显示开关 - 委托给 Environment"""
         if self._environment and hasattr(self._environment, 'set_floor_grid'):
@@ -762,10 +781,13 @@ class Scene:
         self.ensure_default_camera()
 
         sun_direction = [0.0, -1.0, 0.0]
+        sun_enabled = True
         floor_grid_enabled = True
         env = self.get_environment()
         if env and hasattr(env, 'get_sun_direction'):
             sun_direction = env.get_sun_direction()
+        if env and hasattr(env, 'get_sun_intensity'):
+            sun_enabled = env.get_sun_intensity() > 0.0
         if env and hasattr(env, 'get_floor_grid'):
             floor_grid_enabled = env.get_floor_grid()
 
@@ -781,7 +803,7 @@ class Scene:
             "camera": active_camera.to_dict() if hasattr(active_camera, 'to_dict') else None,
             "cameras": camera_payloads,
             "sun": {
-                "enabled": floor_grid_enabled,
+                "enabled": sun_enabled,
                 "direction": sun_direction,
             },
             "grid": {

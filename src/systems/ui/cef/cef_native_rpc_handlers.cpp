@@ -269,6 +269,7 @@ struct NativeEditorScene {
     std::string vision_source_path;
     std::string vision_import_mode;
     std::array<float, 3> sun_direction{1.0f, 1.0f, 1.0f};
+    bool sun_enabled{true};
     bool floor_grid_enabled{true};
     std::vector<NativeEditorActor> actors;
     std::vector<NativeEditorCamera> cameras;
@@ -446,6 +447,21 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
     return lines;
 }
 
+std::vector<std::string> build_sun_section_lines(const NativeEditorScene& scene) {
+    return {
+        "[sun]",
+        "enabled = " + std::string(scene.sun_enabled ? "true" : "false"),
+        "sun_direction = " + format_float3(scene.sun_direction),
+    };
+}
+
+std::vector<std::string> build_grid_section_lines(const NativeEditorScene& scene) {
+    return {
+        "[grid]",
+        "enabled = " + std::string(scene.floor_grid_enabled ? "true" : "false"),
+    };
+}
+
 void replace_ini_section(const std::filesystem::path& file_path,
                          const std::string& section_name,
                          const std::vector<std::string>& replacement_lines) {
@@ -509,6 +525,23 @@ void replace_ini_section(const std::filesystem::path& file_path,
 void persist_native_scene_actors(const NativeEditorScene& scene) {
     const auto scene_file = resolve_project_path(scene.project_root, scene.route);
     replace_ini_section(scene_file, "actors", build_actors_section_lines(scene));
+}
+
+void persist_native_scene_environment(const NativeEditorScene& scene) {
+    const auto scene_file = resolve_project_path(scene.project_root, scene.route);
+    replace_ini_section(scene_file, "sun", build_sun_section_lines(scene));
+    replace_ini_section(scene_file, "grid", build_grid_section_lines(scene));
+}
+
+void apply_native_scene_environment(NativeEditorScene& scene) {
+    if (!scene.environment) {
+        return;
+    }
+
+    scene.environment->set_sun_direction(scene.sun_direction);
+    scene.environment->set_floor_grid(scene.floor_grid_enabled);
+    scene.environment->set_sun_intensity(scene.sun_enabled ? 10.0f : 0.0f);
+    scene.environment->set_sky_intensity(scene.sun_enabled ? 20.0f : 0.0f);
 }
 
 std::filesystem::path resolve_native_actor_asset_path(const NativeEditorScene& scene,
@@ -681,12 +714,12 @@ std::unique_ptr<NativeEditorScene> load_native_scene(const std::filesystem::path
     scene->sun_direction = parse_float3(
         ini_value(scene_ini, "sun", "sun_direction", "1.0, 1.0, 1.0"),
         {1.0f, 1.0f, 1.0f});
-    scene->floor_grid_enabled = parse_bool(ini_value(scene_ini, "sun", "enabled", "true"), true);
+    scene->sun_enabled = parse_bool(ini_value(scene_ini, "sun", "enabled", "true"), true);
+    scene->floor_grid_enabled = parse_bool(ini_value(scene_ini, "grid", "enabled", "true"), true);
 
     scene->engine_scene = std::make_unique<Corona::API::Scene>();
     scene->environment = std::make_unique<Corona::API::Environment>();
-    scene->environment->set_sun_direction(scene->sun_direction);
-    scene->environment->set_floor_grid(scene->floor_grid_enabled);
+    apply_native_scene_environment(*scene);
     scene->engine_scene->set_environment(scene->environment.get());
 
     const auto actors_it = scene_ini.find("actors");
@@ -900,7 +933,7 @@ nlohmann::json scene_to_json(const NativeEditorScene& scene) {
         {"active_camera_name", active_camera.is_null() ? "" : active_camera.value("name", "")},
         {"camera", active_camera},
         {"cameras", cameras},
-        {"sun", {{"enabled", scene.floor_grid_enabled}, {"direction", scene.sun_direction}}},
+        {"sun", {{"enabled", scene.sun_enabled}, {"direction", scene.sun_direction}}},
         {"grid", {{"enabled", scene.floor_grid_enabled}}},
         {"terrain", {{"path", scene.terrain_path}, {"type", scene.terrain_type}}},
         {"vision", {
@@ -1520,6 +1553,55 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
                 {"scene", scene->route},
                 {"actor_count", scene->actors.size()},
                 {"camera_count", scene->cameras.size()},
+            });
+        }},
+        {"sun_direction", [](const NativeRequest& request, const NativeContext&) {
+            const auto scene_route = normalize_route(arg_string(request.args, 0));
+            auto* scene = ensure_native_editor_scene();
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+
+            scene->sun_enabled = arg_bool(request.args, 1, true);
+            const auto direction_arg = request.args.is_array() && request.args.size() > 2
+                                           ? request.args[2]
+                                           : nlohmann::json::array();
+            std::array<float, 3> direction{
+                json_float_at(direction_arg, 0, scene->sun_direction[0]),
+                json_float_at(direction_arg, 1, scene->sun_direction[1]),
+                json_float_at(direction_arg, 2, scene->sun_direction[2]),
+            };
+            const float length_sq =
+                direction[0] * direction[0] +
+                direction[1] * direction[1] +
+                direction[2] * direction[2];
+            if (scene->sun_enabled && length_sq < 1.0e-8f) {
+                direction = {1.0f, 1.0f, 1.0f};
+            }
+            scene->sun_direction = direction;
+
+            apply_native_scene_environment(*scene);
+            persist_native_scene_environment(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"sun", {{"enabled", scene->sun_enabled}, {"direction", scene->sun_direction}}},
+            });
+        }},
+        {"floor_grid", [](const NativeRequest& request, const NativeContext&) {
+            const auto scene_route = normalize_route(arg_string(request.args, 0));
+            auto* scene = ensure_native_editor_scene();
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+
+            scene->floor_grid_enabled = arg_bool(request.args, 1, true);
+            apply_native_scene_environment(*scene);
+            persist_native_scene_environment(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"grid", {{"enabled", scene->floor_grid_enabled}}},
             });
         }},
         {"create_actor", [](const NativeRequest& request, const NativeContext&) {
