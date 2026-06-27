@@ -139,10 +139,17 @@ struct GeometrySystem::Impl {
     /// 避免与 OpticsSystem 渲染线程产生 data race）
     std::unordered_set<Payload> pending_gpu_releases;
 
-    /// 初始加载异步 import 任务：geometry_handle → import future。
+    /// 初始加载异步 import 任务：geometry_handle → (epoch, import future)。
     /// GeometrySystem 扫描 PendingImport 的 GeometryDevice，发起 import_async
-    /// 并在此追踪；future 就绪后填 model_id、转 PendingBuild。
-    std::unordered_map<Payload, std::future<std::uint64_t>> pending_import_tasks;
+    /// 并在此追踪；future 就绪后比对 epoch（防 slot 复用 ABA）、填 model_id、转 PendingBuild。
+    struct PendingImportTask {
+        std::uint64_t              epoch = 0;  // 与 GeometryDevice::import_epoch 比对
+        std::future<std::uint64_t> future;
+    };
+    std::unordered_map<Payload, PendingImportTask> pending_import_tasks;
+
+    /// import 任务 epoch 分配器（进程级单调递增，0 保留为"无任务"）。
+    std::uint64_t next_import_epoch = 1;
 
     [[nodiscard]] static uint64_t make_lod_key(std::uintptr_t geometry_handle,
                                                uint32_t       mesh_index) {

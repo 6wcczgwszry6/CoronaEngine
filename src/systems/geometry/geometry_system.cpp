@@ -535,8 +535,8 @@ void GeometrySystem::shutdown() {
     impl_->pending_gpu_releases.clear();
 
     // 等待并清理在途的异步 import 任务，避免 future 析构阻塞或悬挂回调。
-    for (auto& [geom_handle, fut] : impl_->pending_import_tasks) {
-        if (fut.valid()) fut.wait();
+    for (auto& [geom_handle, task] : impl_->pending_import_tasks) {
+        if (task.future.valid()) task.future.wait();
     }
     impl_->pending_import_tasks.clear();
 
@@ -1543,14 +1543,15 @@ void GeometrySystem::process_pending_geometry_imports() {
     // 失败（rid==0）→ 转 Failed，不再重试。
     {
         std::vector<Impl::Payload> done_handles;
-        for (auto& [geom_handle, fut] : impl_->pending_import_tasks) {
-            if (fut.valid() &&
-                fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        for (auto& [geom_handle, task] : impl_->pending_import_tasks) {
+            if (task.future.valid() &&
+                task.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
                 done_handles.push_back(geom_handle);
             }
         }
         for (auto geom_handle : done_handles) {
-            std::uint64_t rid = impl_->pending_import_tasks[geom_handle].get();
+            const std::uint64_t task_epoch = impl_->pending_import_tasks[geom_handle].epoch;
+            std::uint64_t rid = impl_->pending_import_tasks[geom_handle].future.get();
             impl_->pending_import_tasks.erase(geom_handle);
 
             // 第 1 步：更新 geometry 状态 / model_id（geom_write 作用域内完成并尽早释放，
@@ -1560,10 +1561,21 @@ void GeometrySystem::process_pending_geometry_imports() {
                 auto geom_write = geom_storage.try_acquire_write(geom_handle);
                 if (!geom_write.valid()) continue;  // geometry 已销毁
 
+                // 防 slot 复用 ABA：本槽可能在 import 在途期间被 deallocate→复用为新对象
+                // （allocate 时 T{} 把 import_epoch 重置为 0 或新对象有自己的 epoch）。
+                // epoch 不符说明这已不是当初发起 import 的那个对象，丢弃本次结果。
+                if (geom_write->import_epoch != task_epoch) {
+                    CFW_LOG_NOTICE("[GeometrySystem] Stale async import discarded for geometry {} "
+                                   "(epoch {} != {}, slot reused)",
+                                   geom_handle, task_epoch, geom_write->import_epoch);
+                    continue;
+                }
+
                 if (rid == Resource::IResource::INVALID_UID || rid == 0) {
                     CFW_LOG_ERROR("[GeometrySystem] Async import failed for geometry {} (path={})",
                                   geom_handle, geom_write->model_path_utf8);
                     geom_write->gpu_build_state = GeometryDevice::GpuBuildState::Failed;
+                    geom_write->import_epoch = 0;  // 任务结束
                     continue;
                 }
 
@@ -1573,6 +1585,7 @@ void GeometrySystem::process_pending_geometry_imports() {
                     }
                 }
                 geom_write->gpu_build_state = GeometryDevice::GpuBuildState::PendingBuild;
+                geom_write->import_epoch = 0;  // import 阶段完成，清零
                 import_ok = true;
             }  // geom_write 释放
             if (!import_ok) continue;
@@ -1648,8 +1661,23 @@ void GeometrySystem::process_pending_geometry_imports() {
     size_t launched = 0;
     for (auto& item : to_import) {
         if (launched >= kMaxImportsPerFrame) break;
+
+        // 分配 epoch 并写入 GeometryDevice（防 slot 复用 ABA）。
+        // 写锁内再校验仍为 PendingImport 且无 epoch，避免与并发状态变更竞争。
+        const std::uint64_t epoch = impl_->next_import_epoch++;
+        {
+            auto geom_write = geom_storage.try_acquire_write(item.geom_handle);
+            if (!geom_write.valid()) continue;  // 已销毁
+            if (geom_write->gpu_build_state != GeometryDevice::GpuBuildState::PendingImport ||
+                geom_write->import_epoch != 0) {
+                continue;  // 状态已变 / 已有在途任务，跳过
+            }
+            geom_write->import_epoch = epoch;
+        }
+
         impl_->pending_import_tasks[item.geom_handle] =
-            resource_manager.import_async(Utils::utf8_to_path(item.path));
+            Impl::PendingImportTask{epoch,
+                                    resource_manager.import_async(Utils::utf8_to_path(item.path))};
         ++launched;
     }
 }

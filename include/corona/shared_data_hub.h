@@ -87,6 +87,11 @@ struct GeometryDevice {
     // 待异步导入的模型路径（UTF-8）。仅 PendingImport 阶段有意义；
     // GeometrySystem import 完成后将解析出的 model_id 写入 model_resource 槽。
     std::string model_path_utf8;
+    // 异步 import 任务的 epoch（防 slot 复用的 ABA）。GeometrySystem 发起 import 时
+    // 写入一个进程级单调递增值，并在 import 完成回写前比对：若不符说明本槽已被
+    // deallocate→复用为新对象（allocate 时 T{} 会把本字段重置为 0），丢弃本次结果。
+    // 0 = 无在途 import 任务。
+    std::uint64_t import_epoch{0};
 };
 
 struct MechanicsDevice {
