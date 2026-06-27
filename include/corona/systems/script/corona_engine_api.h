@@ -52,6 +52,7 @@ class Geometry {
 
     /// 获取构造时传入的模型文件路径，用于 Actor 身份标识和资源加载/卸载
     [[nodiscard]] const std::filesystem::path& get_model_path() const;
+    [[nodiscard]] bool is_valid() const;
 
    private:
     friend class Mechanics;

@@ -100,7 +100,9 @@ void BindAll(nanobind::module_& m) {
         .def("get_scale", &Geometry::get_scale,
              "Get local scale [x, y, z]")
         .def("get_aabb", &Geometry::get_aabb,
-             "Get model AABB [min_x, min_y, min_z, max_x, max_y, max_z]");
+             "Get model AABB [min_x, min_y, min_z, max_x, max_y, max_z]")
+        .def("is_valid", &Geometry::is_valid,
+             "Return whether the underlying geometry resource loaded successfully");
 
     // ============================================================================
     // Mechanics: 物理/力学组件
