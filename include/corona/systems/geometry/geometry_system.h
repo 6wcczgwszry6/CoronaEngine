@@ -363,6 +363,13 @@ class GeometrySystem : public Kernel::SystemBase {
     void on_restore_requested(const Events::ActorRestoreRequestedEvent& event);
     void process_async_tasks();  // 处理完成的异步资源任务
 
+    /// 扫描所有 GeometryDevice，为标记 PendingBuild 且 model_id 已就绪者构建 GPU
+    /// 资源（mesh_handles），构建后置回 Ready 并失效其 LOD 缓存。
+    /// 这是"初始加载异步化"的承接点：Python ctor 仅记录 model_id 并标记 PendingBuild，
+    /// 实际 GPU 构建延迟到此处（GeometrySystem 线程）完成，不阻塞前端。
+    /// 当前默认无人产出 PendingBuild（所有路径仍同步构建为 Ready），本扫描为空跑。
+    void process_pending_geometry_builds();
+
     /// 卸载完成时释放 actor 关联的 GPU 资源（HardwareBuffer / HardwareImage），
     /// 并清理对应的 LOD 缓存条目。不释放 SharedDataHub 存储槽位本身——
     /// 槽位归 Python API 层 Geometry 对象所有，由其析构函数回收。

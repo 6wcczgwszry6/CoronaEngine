@@ -67,11 +67,21 @@ struct ModelResource {
 };
 
 struct GeometryDevice {
+    // GPU 资源（mesh_handles）的构建状态。
+    // - Ready：mesh_handles 已就绪（默认）。所有同步构造路径（Python ctor、
+    //   from_image、网络重建、距离重载）产出的都是 Ready，行为不变。
+    // - PendingBuild：model_resource_handle 已设、mesh_handles 待 GeometrySystem
+    //   在 update() 中异步构建（初始加载异步化路径使用）。
+    // 注意：LRU evict / 距离卸载只清空 mesh_handles、不改此字段——其恢复走
+    //   actor_load_states 状态机 + rebuild_actor_gpu_resources，与本字段无关。
+    enum class GpuBuildState : std::uint8_t { Ready, PendingBuild };
+
     std::uintptr_t transform_handle{};
     std::uintptr_t model_resource_handle{};
     std::vector<MeshDevice> mesh_handles;
     ktm::fvec3 native_local_correction_offset{0.0f, 0.0f, 0.0f};
     float native_local_correction_scale{1.0f};
+    GpuBuildState gpu_build_state{GpuBuildState::Ready};
 };
 
 struct MechanicsDevice {

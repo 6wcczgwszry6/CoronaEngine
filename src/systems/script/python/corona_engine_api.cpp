@@ -9,7 +9,6 @@
 #include <corona/shared_data_hub.h>
 #include <corona/systems/script/corona_engine_api.h>
 #include <corona/systems/geometry/geometry_system.h>
-#include <corona/systems/geometry/geometry_mesh_builder.h>
 #include <corona/systems/optics/optics_system.h>
 #include <corona/utils/path_utils.h>
 
@@ -774,18 +773,21 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
         }
     }
 
-    // ---- GPU MeshDevice 构建 ----
-    // 从 Scene 构建 GPU 缓冲的逻辑已统一到 GeometrySystem 的共享构建器
-    // （build_mesh_devices_from_scene），与 GeometrySystem 的重载/恢复路径共用同一份实现。
-    // 占位纹理由 builder 模块内部持有（进程级单例），无需在此维护 static 副本。
-    std::vector<MeshDevice> mesh_devices =
-        Corona::Systems::build_mesh_devices_from_scene(*scene);
-
+    // ---- GPU MeshDevice 构建：异步化（不阻塞前端）----
+    // 此前在此同步构建全部 GPU 缓冲（磁盘已解析，但 GPU buffer/纹理创建耗时）。
+    // 现改为：仅分配 geometry 槽、写入 model_resource_handle 并标记 PendingBuild，
+    // mesh_handles 留空；实际 GPU 构建由 GeometrySystem::update() 在引擎线程承接
+    // （process_pending_geometry_builds → build_mesh_devices_from_scene）。
+    //
+    // 契约：import 仍同步完成（上方已 import_sync 并 acquire Scene），因此 model_id /
+    // AABB 立即可用——Mechanics/Optics/Acoustics 构造、get_aabb()、CEF 框选等读 Scene
+    // 的路径不受影响。唯一可见变化：几何体的 GPU 网格延迟若干帧出现（首帧不可见）。
     handle_ = SharedDataHub::instance().geometry_storage().allocate();
     if (auto handle = SharedDataHub::instance().geometry_storage().acquire_write(handle_)) {
         handle->transform_handle = transform_handle_;
         handle->model_resource_handle = model_resource_handle_;
-        handle->mesh_handles = std::move(mesh_devices);
+        handle->mesh_handles.clear();  // 留空，待 GeometrySystem 异步构建
+        handle->gpu_build_state = GeometryDevice::GpuBuildState::PendingBuild;
     } else {
         CFW_LOG_CRITICAL("[Geometry::Geometry] Failed to acquire write access to geometry storage");
         // 清理已分配的资源

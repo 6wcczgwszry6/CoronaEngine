@@ -126,6 +126,12 @@ void GeometrySystem::update() {
         }
     }
 
+    // ---- 初始构建（异步加载承接点）----
+    // 为标记 PendingBuild 的 GeometryDevice 构建 GPU 资源（mesh_handles）。
+    // 放在 LOD 上传之前，使本帧新建的 mesh 同帧即可上传其 LOD 数据。
+    // 当前默认无人产出 PendingBuild（各构造路径仍同步构建为 Ready），本调用空跑。
+    process_pending_geometry_builds();
+
     // ---- 动态减面管线 ----
     // LOD 由 GeometrySystem 内部自动管理，无外部开关：每帧上传导入时生成的 LOD 数据。
     // 已缓存的 mesh 仅做一次 find + model_id 比较，无 LOD 数据的 mesh 自动跳过。
@@ -1487,6 +1493,61 @@ namespace {
 }
 
 }  // namespace
+
+void GeometrySystem::process_pending_geometry_builds() {
+    auto& hub = SharedDataHub::instance();
+    auto& resource_manager = Resource::ResourceManager::get_instance();
+    auto& geom_storage = hub.geometry_storage();
+
+    // ---- 阶段 1：只读收集待构建项 ----
+    // 收集 gpu_build_state==PendingBuild 且 model_id 已就绪的 geometry。
+    // 仅记录 (geom_handle, model_id)，不在持有遍历期间做重活。
+    struct PendingBuild {
+        std::uintptr_t geom_handle;
+        std::uint64_t  model_id;
+    };
+    std::vector<PendingBuild> pending;
+    for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
+        const GeometryDevice& geom_dev = *it;
+        if (geom_dev.gpu_build_state != GeometryDevice::GpuBuildState::PendingBuild) continue;
+        if (!geom_dev.model_resource_handle) continue;
+
+        std::uint64_t model_id = 0;
+        if (auto model_res = hub.model_resource_storage().try_acquire_read(geom_dev.model_resource_handle)) {
+            model_id = model_res->model_id;
+        }
+        if (model_id == 0) continue;  // import 尚未完成，下帧再试
+
+        pending.push_back({reinterpret_cast<std::uintptr_t>(&geom_dev), model_id});
+    }
+    if (pending.empty()) return;
+
+    // ---- 阶段 2：构建 GPU 资源（不持 storage 锁，仅写回时短暂加锁）----
+    for (const auto& item : pending) {
+        auto scene_read = resource_manager.acquire_read<Resource::Scene>(item.model_id);
+        if (!scene_read.valid()) continue;  // 资源无效，下帧再试
+
+        std::vector<MeshDevice> mesh_devices = build_mesh_devices_from_scene(*scene_read);
+
+        // 先失效旧 LOD 缓存（新 mesh_handles 即将替换，旧条目指向已变更的缓冲）
+        {
+            std::unique_lock lod_lock(impl_->lod_cache_mutex);
+            for (uint32_t i = 0; i < static_cast<uint32_t>(mesh_devices.size()); ++i) {
+                impl_->lod_cache.erase(Impl::make_lod_key(item.geom_handle, i));
+            }
+        }
+
+        // 写回 + TOCTOU 重校验：仅当仍为 PendingBuild 才接管（防止期间被其它路径改写）
+        if (auto geom_write = hub.geometry_storage().try_acquire_write(item.geom_handle)) {
+            if (geom_write->gpu_build_state == GeometryDevice::GpuBuildState::PendingBuild) {
+                geom_write->mesh_handles = std::move(mesh_devices);
+                geom_write->gpu_build_state = GeometryDevice::GpuBuildState::Ready;
+                CFW_LOG_NOTICE("[GeometrySystem] Built pending GPU resources for geometry {}, {} mesh(es)",
+                               item.geom_handle, geom_write->mesh_handles.size());
+            }
+        }
+    }
+}
 
 void GeometrySystem::upload_lod_from_scene_data() {
     // LOD 由本系统内部决策，无外部配置开关。
