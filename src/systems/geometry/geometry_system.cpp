@@ -1504,6 +1504,33 @@ namespace {
     return bvh;
 }
 
+// 收集所有场景所有相机的世界位置（用于流式加载的距离排序）。
+[[nodiscard]] std::vector<ktm::fvec3> collect_camera_positions() {
+    auto& hub = SharedDataHub::instance();
+    auto& camera_storage = hub.camera_storage();
+    std::vector<ktm::fvec3> positions;
+    for (auto sit = hub.scene_storage().cbegin(); sit != hub.scene_storage().cend(); ++sit) {
+        for (std::uintptr_t cam_handle : sit->camera_handles) {
+            if (auto cam = camera_storage.try_acquire_read_nowait(cam_handle)) {
+                positions.push_back(cam->position);
+            }
+        }
+    }
+    return positions;
+}
+
+// 点 p 到最近相机的距离平方；无相机时返回 0（不影响排序稳定性）。
+[[nodiscard]] float nearest_camera_dist2(const ktm::fvec3& p,
+                                         const std::vector<ktm::fvec3>& cameras) {
+    if (cameras.empty()) return 0.0f;
+    float best = std::numeric_limits<float>::max();
+    for (const auto& c : cameras) {
+        const float dx = p.x - c.x, dy = p.y - c.y, dz = p.z - c.z;
+        best = std::min(best, dx * dx + dy * dy + dz * dz);
+    }
+    return best;
+}
+
 }  // namespace
 
 void GeometrySystem::process_pending_geometry_imports() {
@@ -1579,11 +1606,14 @@ void GeometrySystem::process_pending_geometry_imports() {
         }
     }
 
-    // ---- 阶段 2：为新的 PendingImport 发起 import_async ----
+    // ---- 阶段 2：为新的 PendingImport 发起 import_async（距离排序 + 每帧预算）----
     // 仅对尚无在途任务的 PendingImport geometry 发起，避免重复 import。
+    // 近处对象先 import（流式体验），且每帧最多发起 kMaxImportsPerFrame 个，
+    // 避免一次性把大量模型全压进 TBB 线程池造成内存/解析突发。
     struct ToImport {
         std::uintptr_t geom_handle;
         std::string    path;
+        ktm::fvec3     world_pos;
     };
     std::vector<ToImport> to_import;
     for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
@@ -1592,11 +1622,35 @@ void GeometrySystem::process_pending_geometry_imports() {
         auto geom_handle = reinterpret_cast<std::uintptr_t>(&geom_dev);
         if (impl_->pending_import_tasks.count(geom_handle)) continue;  // 已在途
         if (geom_dev.model_path_utf8.empty()) continue;
-        to_import.push_back({geom_handle, geom_dev.model_path_utf8});
+
+        ktm::fvec3 world_pos = make_fvec3(0.0f, 0.0f, 0.0f);
+        if (geom_dev.transform_handle != 0) {
+            if (auto tr = hub.model_transform_storage().try_acquire_read(geom_dev.transform_handle)) {
+                world_pos = tr->position;
+            }
+        }
+        to_import.push_back({geom_handle, geom_dev.model_path_utf8, world_pos});
     }
+    if (to_import.empty()) return;
+
+    // 按到最近相机的距离排序：近处先 import
+    const std::vector<ktm::fvec3> cameras = collect_camera_positions();
+    if (!cameras.empty()) {
+        std::sort(to_import.begin(), to_import.end(),
+                  [&](const ToImport& a, const ToImport& b) {
+                      return nearest_camera_dist2(a.world_pos, cameras)
+                           < nearest_camera_dist2(b.world_pos, cameras);
+                  });
+    }
+
+    // 每帧发起预算：剩余的下帧继续（仍为 PendingImport，不丢失）
+    constexpr size_t kMaxImportsPerFrame = 4;
+    size_t launched = 0;
     for (auto& item : to_import) {
+        if (launched >= kMaxImportsPerFrame) break;
         impl_->pending_import_tasks[item.geom_handle] =
             resource_manager.import_async(Utils::utf8_to_path(item.path));
+        ++launched;
     }
 }
 
@@ -1638,30 +1692,12 @@ void GeometrySystem::process_pending_geometry_builds() {
     if (pending.empty()) return;
 
     // ---- 按相机距离排序：近处对象先构建（流式加载体验）----
-    // 收集所有场景所有相机的世界位置，对每个 pending 取到最近相机的距离平方。
-    std::vector<ktm::fvec3> camera_positions;
-    {
-        auto& camera_storage = hub.camera_storage();
-        for (auto sit = hub.scene_storage().cbegin(); sit != hub.scene_storage().cend(); ++sit) {
-            for (std::uintptr_t cam_handle : sit->camera_handles) {
-                if (auto cam = camera_storage.try_acquire_read_nowait(cam_handle)) {
-                    camera_positions.push_back(cam->position);
-                }
-            }
-        }
-    }
-    if (!camera_positions.empty()) {
-        auto nearest_dist2 = [&](const ktm::fvec3& p) {
-            float best = std::numeric_limits<float>::max();
-            for (const auto& c : camera_positions) {
-                const float dx = p.x - c.x, dy = p.y - c.y, dz = p.z - c.z;
-                best = std::min(best, dx * dx + dy * dy + dz * dz);
-            }
-            return best;
-        };
+    const std::vector<ktm::fvec3> cameras = collect_camera_positions();
+    if (!cameras.empty()) {
         std::sort(pending.begin(), pending.end(),
                   [&](const PendingBuild& a, const PendingBuild& b) {
-                      return nearest_dist2(a.world_pos) < nearest_dist2(b.world_pos);
+                      return nearest_camera_dist2(a.world_pos, cameras)
+                           < nearest_camera_dist2(b.world_pos, cameras);
                   });
     }
 
