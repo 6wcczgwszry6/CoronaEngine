@@ -9,6 +9,7 @@
 #include <corona/shared_data_hub.h>
 #include <corona/systems/script/corona_engine_api.h>
 #include <corona/systems/geometry/geometry_system.h>
+#include <corona/systems/geometry/geometry_mesh_builder.h>
 #include <corona/systems/optics/optics_system.h>
 #include <corona/utils/path_utils.h>
 
@@ -773,20 +774,11 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
         }
     }
 
-    std::vector<MeshDevice> mesh_devices;
-    mesh_devices.reserve(scene->data.meshes.size());
-
-    // 用于批量纹理上传的数据结构
-    struct PendingTextureUpload {
-        std::uint32_t mesh_idx;
-        H::HardwareImage* texture;
-        std::vector<unsigned char> rgba_data;  // 保持数据存活直到上传完成
-        unsigned char* data_ptr;
-    };
-    std::vector<PendingTextureUpload> pending_uploads;
-    pending_uploads.reserve(scene->data.meshes.size());
-
-    // 获取或创建共享的占位纹理（只创建一次）
+    // ---- GPU MeshDevice 构建 ----
+    // 从 Scene 构建 GPU 缓冲的逻辑已统一到 GeometrySystem 的共享构建器
+    // （build_mesh_devices_from_scene），与 GeometrySystem 的重载/恢复路径共用同一份实现。
+    // 占位纹理：进程级单例，生命周期长于任何单个 Geometry，避免 static GPU 资源
+    // 在 device 析构后才析构。
     static H::HardwareImage shared_placeholder_texture = []() {
         static const unsigned char white_pixel[4] = {255, 255, 255, 255};
         H::HardwareImage texture(make_sampled_texture_desc(1, 1, H::Format::SRGBA8_UNORM, "script.placeholder_texture"));
@@ -794,193 +786,8 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
         return texture;
     }();
 
-    // 第一阶段：创建所有mesh设备和纹理对象（不提交GPU命令）
-    for (std::uint32_t mesh_idx = 0; mesh_idx < scene->data.meshes.size(); ++mesh_idx) {
-        const auto& mesh = scene->data.meshes[mesh_idx];
-        MeshDevice dev{};
-
-        dev.vertexBuffer = make_horizon_buffer(
-            scene->get_mesh_vertices(mesh_idx),
-            H::BufferUsageFlags::TransferDst | H::BufferUsageFlags::Vertex,
-            "script.mesh.vertex");
-        dev.indexBuffer = make_horizon_buffer(
-            scene->get_mesh_indices(mesh_idx),
-            H::BufferUsageFlags::TransferDst | H::BufferUsageFlags::Index,
-            "script.mesh.index");
-
-        // StorageBuffer mirrors for VBuffer material resolve compute shader access
-        dev.vertexStorageBuffer = make_horizon_buffer(
-            scene->get_mesh_vertices(mesh_idx),
-            H::BufferUsageFlags::TransferSrc | H::BufferUsageFlags::TransferDst | H::BufferUsageFlags::Storage,
-            "script.mesh.vertex_storage");
-        dev.indexStorageBuffer = make_horizon_buffer(
-            scene->get_mesh_indices(mesh_idx),
-            H::BufferUsageFlags::TransferSrc | H::BufferUsageFlags::TransferDst | H::BufferUsageFlags::Storage,
-            "script.mesh.index_storage");
-
-        dev.materialIndex = (mesh.material_index != Resource::InvalidIndex)
-                                ? mesh.material_index
-                                : 0;
-
-        // 读取材质颜色
-        if (mesh.material_index != Resource::InvalidIndex &&
-            mesh.material_index < scene->data.materials.size()) {
-            const auto& material = scene->data.materials[mesh.material_index];
-            dev.materialColor = material.base_color;
-        }
-
-        bool texture_created = false;
-        H::HardwareImageDesc create_info{};
-
-        if (mesh.material_index != Resource::InvalidIndex &&
-            mesh.material_index < scene->data.materials.size()) {
-            auto texture_id = scene->data.materials[mesh.material_index].albedo_texture;
-
-            if (texture_id != Resource::InvalidTextureId) {
-                auto texture_data = Resource::ResourceManager::get_instance().acquire_read<Resource::Image>(texture_id);
-                if (!texture_data) {
-                    CFW_LOG_WARNING("[Geometry::Geometry] Mesh {} material {}: acquire_read<Image> failed for texture_id={} "
-                                    "(resource not found or type mismatch)",
-                                    mesh_idx, mesh.material_index, texture_id);
-                } else if (texture_data->get_data() == nullptr) {
-                    CFW_LOG_WARNING("[Geometry::Geometry] Mesh {} material {}: texture_id={} Image resource exists but "
-                                    "get_data() is null ({}x{}, channels={})",
-                                    mesh_idx, mesh.material_index, texture_id,
-                                    texture_data->get_width(), texture_data->get_height(), texture_data->get_channels());
-                }
-                if (texture_data && texture_data->get_data() != nullptr) {
-                    const int tex_width = texture_data->get_width();
-                    const int tex_height = texture_data->get_height();
-                    const int tex_channels = texture_data->get_channels();
-
-                    if (tex_width > 0 && tex_height > 0 && tex_channels > 0) {
-                        constexpr bool use_compressed = false;  // TODO: 测试模型兼容性  先不走压缩纹理
-
-                        if (texture_data->is_compressed()) {
-                            // 获取压缩数据和格式信息
-                            const auto& compressed = texture_data->get_compressed_data();
-
-                            // 根据实际压缩格式选择正确的 ImageFormat
-                            create_info = make_sampled_texture_desc(
-                                static_cast<uint32_t>(tex_width),
-                                static_cast<uint32_t>(tex_height),
-                                H::Format::SRGBA8_UNORM,
-                                "script.mesh.texture_compressed");
-
-                            // 根据压缩格式类型选择对应的 GPU 格式
-                            if (compressed.format == Resource::CompressedData::Format::BC1) {
-                                create_info.format = H::Format::BC1_UNORM_SRGB;
-                            } else if (compressed.format == Resource::CompressedData::Format::BC3) {
-                                create_info.format = H::Format::BC3_UNORM_SRGB;
-                            } else if (compressed.format == Resource::CompressedData::Format::ASTC_4x4) {
-                                CFW_LOG_WARNING("[Geometry::Geometry] ASTC_4x4 texture is not supported by current Horizon main format enum; using placeholder texture");
-                                create_info.format = H::Format::UNKNOWN;
-                            } else {
-                                CFW_LOG_WARNING("[Geometry::Geometry] Unsupported compressed format; using placeholder texture");
-                                create_info.format = H::Format::UNKNOWN;
-                                // 如果遇到未知格式，应该使用非压缩路径而非猜测
-                            }
-
-                            // 复制压缩数据以避免悬空指针（texture_data 可能在上传前失效）
-                            if (create_info.format != H::Format::UNKNOWN) {
-                                PendingTextureUpload upload{mesh_idx, nullptr, {}, nullptr};
-                            upload.rgba_data.assign(compressed.data.begin(), compressed.data.end());
-                            upload.data_ptr = upload.rgba_data.data();
-
-                            dev.textureBuffer = H::HardwareImage(create_info);
-                            upload.texture = &dev.textureBuffer;
-                            pending_uploads.push_back(std::move(upload));
-                                texture_created = true;
-                            }
-                        } else {
-                            // 使用非压缩 RGBA8 格式，需要确保数据通道匹配
-                            create_info = make_sampled_texture_desc(
-                                static_cast<uint32_t>(tex_width),
-                                static_cast<uint32_t>(tex_height),
-                                H::Format::SRGBA8_UNORM,
-                                "script.mesh.texture");
-
-                            unsigned char* src_data = texture_data->get_data();
-                            PendingTextureUpload upload{mesh_idx, nullptr, {}, nullptr};
-
-                            if (tex_channels == 4) {
-                                // 已经是 RGBA，需要复制数据（因为texture_data可能在之后失效）
-                                upload.rgba_data.assign(src_data, src_data + static_cast<size_t>(tex_width) * tex_height * 4);
-                                upload.data_ptr = upload.rgba_data.data();
-                            } else if (tex_channels == 3) {
-                                // RGB -> RGBA 转换
-                                upload.rgba_data.resize(static_cast<size_t>(tex_width) * tex_height * 4);
-                                for (int i = 0; i < tex_width * tex_height; ++i) {
-                                    upload.rgba_data[i * 4 + 0] = src_data[i * 3 + 0];  // R
-                                    upload.rgba_data[i * 4 + 1] = src_data[i * 3 + 1];  // G
-                                    upload.rgba_data[i * 4 + 2] = src_data[i * 3 + 2];  // B
-                                    upload.rgba_data[i * 4 + 3] = 255;                  // A
-                                }
-                                upload.data_ptr = upload.rgba_data.data();
-                            } else if (tex_channels == 1) {
-                                // Grayscale -> RGBA 转换
-                                upload.rgba_data.resize(static_cast<size_t>(tex_width) * tex_height * 4);
-                                for (int i = 0; i < tex_width * tex_height; ++i) {
-                                    upload.rgba_data[i * 4 + 0] = src_data[i];  // R
-                                    upload.rgba_data[i * 4 + 1] = src_data[i];  // G
-                                    upload.rgba_data[i * 4 + 2] = src_data[i];  // B
-                                    upload.rgba_data[i * 4 + 3] = 255;          // A
-                                }
-                                upload.data_ptr = upload.rgba_data.data();
-                            } else {
-                                CFW_LOG_WARNING("[Geometry::Geometry] Unsupported texture channel count: {}", tex_channels);
-                            }
-
-                            if (upload.data_ptr != nullptr) {
-                                dev.textureBuffer = H::HardwareImage(create_info);
-                                upload.texture = &dev.textureBuffer;
-                                pending_uploads.push_back(std::move(upload));
-                                texture_created = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 为没有纹理的网格使用全局共享的默认 1x1 白色占位纹理
-        if (!texture_created) {
-            dev.textureBuffer = shared_placeholder_texture;
-            if (mesh.material_index != Resource::InvalidIndex &&
-                mesh.material_index < scene->data.materials.size()) {
-                auto tid = scene->data.materials[mesh.material_index].albedo_texture;
-                CFW_LOG_WARNING("[Geometry::Geometry] Mesh {} using placeholder texture "
-                                "(material='{}', albedo_texture_id={}, InvalidTextureId={})",
-                                mesh_idx,
-                                scene->data.materials[mesh.material_index].name,
-                                tid, Resource::InvalidTextureId);
-            } else {
-                CFW_LOG_WARNING("[Geometry::Geometry] Mesh {} using placeholder texture (no valid material index)",
-                                mesh_idx);
-            }
-        }
-
-        mesh_devices.emplace_back(std::move(dev));
-    }
-
-    // 第二阶段：批量上传所有纹理（减少GPU命令提交次数）
-    if (!pending_uploads.empty()) {
-        constexpr size_t kBatchSize = 32;
-        for (size_t batch_start = 0; batch_start < pending_uploads.size(); batch_start += kBatchSize) {
-            size_t batch_end = std::min(batch_start + kBatchSize, pending_uploads.size());
-
-            for (size_t i = batch_start; i < batch_end; ++i) {
-                auto& upload = pending_uploads[i];
-                // 更新texture指针（因为mesh_devices可能已经移动）
-                H::HardwareImage& tex = mesh_devices[upload.mesh_idx].textureBuffer;
-                (void)tex.write_bytes(std::as_bytes(std::span<const unsigned char>(
-                    upload.data_ptr,
-                    upload.rgba_data.size())));
-            }
-
-            // 强制等待每一批上传完成，防止短时间内提交过多 CommandBuffer 导致 Device Lost (TDR) 或内存问题
-        }
-    }
+    std::vector<MeshDevice> mesh_devices =
+        Corona::Systems::build_mesh_devices_from_scene(*scene, shared_placeholder_texture);
 
     handle_ = SharedDataHub::instance().geometry_storage().allocate();
     if (auto handle = SharedDataHub::instance().geometry_storage().acquire_write(handle_)) {
