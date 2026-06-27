@@ -126,10 +126,16 @@ void GeometrySystem::update() {
         }
     }
 
+    // ---- 异步导入（方案 A 承接点）----
+    // 扫描 PendingImport 的 GeometryDevice，发起 import_async / 轮询完成，
+    // 填 model_id 后转 PendingBuild，并回填 MechanicsDevice AABB。
+    // 磁盘 IO / assimp 解析全部在本（引擎）线程之外的 ResourceManager 线程池完成，
+    // 不阻塞前端 CEF UI 线程。
+    process_pending_geometry_imports();
+
     // ---- 初始构建（异步加载承接点）----
     // 为标记 PendingBuild 的 GeometryDevice 构建 GPU 资源（mesh_handles）。
     // 放在 LOD 上传之前，使本帧新建的 mesh 同帧即可上传其 LOD 数据。
-    // 当前默认无人产出 PendingBuild（各构造路径仍同步构建为 Ready），本调用空跑。
     process_pending_geometry_builds();
 
     // ---- 动态减面管线 ----
@@ -527,6 +533,12 @@ void GeometrySystem::shutdown() {
     impl_->scenes.clear();
     impl_->offline_actors.clear();
     impl_->pending_gpu_releases.clear();
+
+    // 等待并清理在途的异步 import 任务，避免 future 析构阻塞或悬挂回调。
+    for (auto& [geom_handle, fut] : impl_->pending_import_tasks) {
+        if (fut.valid()) fut.wait();
+    }
+    impl_->pending_import_tasks.clear();
 
     // 释放 LRU ActorCache（确保在 shutdown 时清理磁盘/内存）
     impl_->actor_cache.reset();
@@ -1493,6 +1505,100 @@ namespace {
 }
 
 }  // namespace
+
+void GeometrySystem::process_pending_geometry_imports() {
+    auto& hub = SharedDataHub::instance();
+    auto& resource_manager = Resource::ResourceManager::get_instance();
+    auto& geom_storage = hub.geometry_storage();
+
+    // ---- 阶段 1：轮询已完成的 import 任务 ----
+    // future 就绪 → 取 model_id → 写入 ModelResource 槽 → 转 PendingBuild。
+    // 失败（rid==0）→ 转 Failed，不再重试。
+    {
+        std::vector<Impl::Payload> done_handles;
+        for (auto& [geom_handle, fut] : impl_->pending_import_tasks) {
+            if (fut.valid() &&
+                fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                done_handles.push_back(geom_handle);
+            }
+        }
+        for (auto geom_handle : done_handles) {
+            std::uint64_t rid = impl_->pending_import_tasks[geom_handle].get();
+            impl_->pending_import_tasks.erase(geom_handle);
+
+            // 第 1 步：更新 geometry 状态 / model_id（geom_write 作用域内完成并尽早释放，
+            // 避免与下方 mechanics 槽锁同时持有 → 杜绝跨槽锁序倒置）。
+            bool import_ok = false;
+            {
+                auto geom_write = geom_storage.try_acquire_write(geom_handle);
+                if (!geom_write.valid()) continue;  // geometry 已销毁
+
+                if (rid == Resource::IResource::INVALID_UID || rid == 0) {
+                    CFW_LOG_ERROR("[GeometrySystem] Async import failed for geometry {} (path={})",
+                                  geom_handle, geom_write->model_path_utf8);
+                    geom_write->gpu_build_state = GeometryDevice::GpuBuildState::Failed;
+                    continue;
+                }
+
+                if (geom_write->model_resource_handle) {
+                    if (auto mr = hub.model_resource_storage().try_acquire_write(geom_write->model_resource_handle)) {
+                        mr->model_id = rid;
+                    }
+                }
+                geom_write->gpu_build_state = GeometryDevice::GpuBuildState::PendingBuild;
+                import_ok = true;
+            }  // geom_write 释放
+            if (!import_ok) continue;
+
+            // 第 2 步：回填 MechanicsDevice AABB（geometry 槽锁已释放）。
+            // Mechanics 在 Python 同步构造时读到 model_id=0 → AABB 为 0；
+            // 这里用 Scene 的 AABB 回填，八叉树下帧重建即自愈。
+            // 注意：Storage 迭代器在当前槽持有锁，不能在迭代中对同槽再 acquire_write
+            // （会重入死锁）。故先 const 遍历收集句柄，迭代结束后再写。
+            if (auto scene = resource_manager.acquire_read<Resource::Scene>(rid)) {
+                const auto aabb_min = scene->get_scene_aabb().min;  // std::array<float,3>
+                const auto aabb_max = scene->get_scene_aabb().max;
+                auto& mech_storage = hub.mechanics_storage();
+
+                std::vector<std::uintptr_t> mech_handles;
+                for (auto mit = mech_storage.cbegin(); mit != mech_storage.cend(); ++mit) {
+                    if (mit->geometry_handle == geom_handle) {
+                        mech_handles.push_back(reinterpret_cast<std::uintptr_t>(&(*mit)));
+                    }
+                }
+                for (std::uintptr_t mh : mech_handles) {
+                    if (auto mw = mech_storage.try_acquire_write(mh)) {
+                        mw->min_xyz = make_fvec3(aabb_min[0], aabb_min[1], aabb_min[2]);
+                        mw->max_xyz = make_fvec3(aabb_max[0], aabb_max[1], aabb_max[2]);
+                    }
+                }
+            }
+
+            CFW_LOG_NOTICE("[GeometrySystem] Async import finished for geometry {} (rid={})",
+                           geom_handle, rid);
+        }
+    }
+
+    // ---- 阶段 2：为新的 PendingImport 发起 import_async ----
+    // 仅对尚无在途任务的 PendingImport geometry 发起，避免重复 import。
+    struct ToImport {
+        std::uintptr_t geom_handle;
+        std::string    path;
+    };
+    std::vector<ToImport> to_import;
+    for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
+        const GeometryDevice& geom_dev = *it;
+        if (geom_dev.gpu_build_state != GeometryDevice::GpuBuildState::PendingImport) continue;
+        auto geom_handle = reinterpret_cast<std::uintptr_t>(&geom_dev);
+        if (impl_->pending_import_tasks.count(geom_handle)) continue;  // 已在途
+        if (geom_dev.model_path_utf8.empty()) continue;
+        to_import.push_back({geom_handle, geom_dev.model_path_utf8});
+    }
+    for (auto& item : to_import) {
+        impl_->pending_import_tasks[item.geom_handle] =
+            resource_manager.import_async(Utils::utf8_to_path(item.path));
+    }
+}
 
 void GeometrySystem::process_pending_geometry_builds() {
     auto& hub = SharedDataHub::instance();

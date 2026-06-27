@@ -363,6 +363,13 @@ class GeometrySystem : public Kernel::SystemBase {
     void on_restore_requested(const Events::ActorRestoreRequestedEvent& event);
     void process_async_tasks();  // 处理完成的异步资源任务
 
+    /// 扫描 PendingImport 的 GeometryDevice，发起异步 import；轮询已完成的 import
+    /// 任务，将解析出的 model_id 写入其 ModelResource 槽并转入 PendingBuild。
+    /// import 完成后回填引用该 geometry 的 MechanicsDevice 的 AABB（八叉树每帧自愈）。
+    /// 这是"导入异步化"的承接点：Python ctor 仅记录 model_path 并标记 PendingImport，
+    /// 磁盘 IO / assimp 解析全部移到 GeometrySystem 线程，不阻塞前端（CEF UI 线程）。
+    void process_pending_geometry_imports();
+
     /// 扫描所有 GeometryDevice，为标记 PendingBuild 且 model_id 已就绪者构建 GPU
     /// 资源（mesh_handles），构建后置回 Ready 并失效其 LOD 缓存。
     /// 这是"初始加载异步化"的承接点：Python ctor 仅记录 model_id 并标记 PendingBuild，

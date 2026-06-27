@@ -67,14 +67,16 @@ struct ModelResource {
 };
 
 struct GeometryDevice {
-    // GPU 资源（mesh_handles）的构建状态。
-    // - Ready：mesh_handles 已就绪（默认）。所有同步构造路径（Python ctor、
-    //   from_image、网络重建、距离重载）产出的都是 Ready，行为不变。
-    // - PendingBuild：model_resource_handle 已设、mesh_handles 待 GeometrySystem
-    //   在 update() 中异步构建（初始加载异步化路径使用）。
+    // GPU 资源（mesh_handles）的生命周期状态。
+    // - Ready：mesh_handles 已就绪（默认）。from_image、网络重建、距离重载等
+    //   同步路径产出的都是 Ready，行为不变。
+    // - PendingImport：仅记录了 model_path，磁盘资源尚未导入（model_id=0）。
+    //   GeometrySystem 在 update() 中异步 import，完成后转 PendingBuild。
+    // - PendingBuild：model_id 已就绪、mesh_handles 待 GeometrySystem 异步构建。
+    // - Failed：import 失败（路径无效等），不再重试。
     // 注意：LRU evict / 距离卸载只清空 mesh_handles、不改此字段——其恢复走
     //   actor_load_states 状态机 + rebuild_actor_gpu_resources，与本字段无关。
-    enum class GpuBuildState : std::uint8_t { Ready, PendingBuild };
+    enum class GpuBuildState : std::uint8_t { Ready, PendingImport, PendingBuild, Failed };
 
     std::uintptr_t transform_handle{};
     std::uintptr_t model_resource_handle{};
@@ -82,6 +84,9 @@ struct GeometryDevice {
     ktm::fvec3 native_local_correction_offset{0.0f, 0.0f, 0.0f};
     float native_local_correction_scale{1.0f};
     GpuBuildState gpu_build_state{GpuBuildState::Ready};
+    // 待异步导入的模型路径（UTF-8）。仅 PendingImport 阶段有意义；
+    // GeometrySystem import 完成后将解析出的 model_id 写入 model_resource 槽。
+    std::string model_path_utf8;
 };
 
 struct MechanicsDevice {

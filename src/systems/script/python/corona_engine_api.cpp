@@ -737,16 +737,21 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
     // 保存路径供 Actor 标识和 GeometrySystem 资源加载/卸载使用
     model_path_ = Utils::utf8_to_path(model_path);
 
-    // 使用 utf8_to_path 确保 UTF-8 编码的路径在 Windows 上正确转换
-    auto model_id = Resource::ResourceManager::get_instance().import_sync(model_path_);
-    if (model_id == 0) {
-        CFW_LOG_CRITICAL("[Geometry::Geometry] Failed to load model: {}", model_path);
-        return;
-    }
-
+    // ---- 全异步加载（方案 A）：构造函数不做任何磁盘 IO / 解析 ----
+    // 此前这里同步 import_sync（磁盘 + assimp 解析，数百 ms~数秒），由于 Python
+    // Geometry() 通常在 CEF UI 线程（OnQuery 持 GIL）同步执行，会独占该线程，
+    // 导致"加载一个模型时无法打开页面加载其他模型"。
+    //
+    // 现改为：仅分配三个 SharedDataHub 槽（微秒级），记录 model_path 并标记
+    // PendingImport，立即返回。实际 import + GPU 构建由 GeometrySystem::update()
+    // 在引擎线程承接（PendingImport → import_async → PendingBuild → 构建 → Ready）。
+    //
+    // 契约变化：构造后 model_id / AABB **尚未就绪**（get_aabb() 暂返回 0，
+    // Mechanics AABB 暂为 0）。GeometrySystem 在 import 完成后回填 MechanicsDevice
+    // 的 AABB，八叉树每帧重读自然自愈；前端读 AABB 的逻辑需容忍"最终一致"。
     model_resource_handle_ = SharedDataHub::instance().model_resource_storage().allocate();
     if (auto handle = SharedDataHub::instance().model_resource_storage().acquire_write(model_resource_handle_)) {
-        handle->model_id = model_id;
+        handle->model_id = 0;  // 待 import 完成后由 GeometrySystem 填入
     } else {
         CFW_LOG_ERROR("[Geometry::Geometry] Failed to acquire write access to model resource storage");
         SharedDataHub::instance().model_resource_storage().deallocate(model_resource_handle_);
@@ -756,38 +761,13 @@ Corona::API::Geometry::Geometry(const std::string& model_path) {
 
     transform_handle_ = SharedDataHub::instance().model_transform_storage().allocate();
 
-    auto scene = Resource::ResourceManager::get_instance().acquire_read<Resource::Scene>(model_id);
-    if (!scene) {
-        CFW_LOG_ERROR("[Geometry::Geometry] Failed to acquire read access to scene resource");
-        SharedDataHub::instance().model_resource_storage().deallocate(model_resource_handle_);
-        SharedDataHub::instance().model_transform_storage().deallocate(transform_handle_);
-        model_resource_handle_ = 0;
-        transform_handle_ = 0;
-        return;
-    }
-
-    if (scene->data.meshes.empty()) {
-        CFW_LOG_WARNING("[Geometry::Geometry] Scene has no meshes, checking nodes for mesh references...");
-        for (std::uint32_t i = 0; i < scene->data.nodes.size(); ++i) {
-            const auto& node = scene->data.nodes[i];
-        }
-    }
-
-    // ---- GPU MeshDevice 构建：异步化（不阻塞前端）----
-    // 此前在此同步构建全部 GPU 缓冲（磁盘已解析，但 GPU buffer/纹理创建耗时）。
-    // 现改为：仅分配 geometry 槽、写入 model_resource_handle 并标记 PendingBuild，
-    // mesh_handles 留空；实际 GPU 构建由 GeometrySystem::update() 在引擎线程承接
-    // （process_pending_geometry_builds → build_mesh_devices_from_scene）。
-    //
-    // 契约：import 仍同步完成（上方已 import_sync 并 acquire Scene），因此 model_id /
-    // AABB 立即可用——Mechanics/Optics/Acoustics 构造、get_aabb()、CEF 框选等读 Scene
-    // 的路径不受影响。唯一可见变化：几何体的 GPU 网格延迟若干帧出现（首帧不可见）。
     handle_ = SharedDataHub::instance().geometry_storage().allocate();
     if (auto handle = SharedDataHub::instance().geometry_storage().acquire_write(handle_)) {
         handle->transform_handle = transform_handle_;
         handle->model_resource_handle = model_resource_handle_;
         handle->mesh_handles.clear();  // 留空，待 GeometrySystem 异步构建
-        handle->gpu_build_state = GeometryDevice::GpuBuildState::PendingBuild;
+        handle->model_path_utf8 = model_path;  // 供 GeometrySystem 异步 import
+        handle->gpu_build_state = GeometryDevice::GpuBuildState::PendingImport;
     } else {
         CFW_LOG_CRITICAL("[Geometry::Geometry] Failed to acquire write access to geometry storage");
         // 清理已分配的资源
