@@ -79,6 +79,8 @@ bool Engine::initialize() {
         auto scene_parser = std::make_shared<Resource::SceneParser>();
         scene_parser->assimp_options.lod_options.enabled     = true;
         scene_parser->assimp_options.lod_options.level_count = 3;
+        // target_ratios / max_errors / max_triangles 沿用 LODGenerationOptions 默认值
+        // （{0.5, 0.25, 0.05} / {0.05, 0.2, 1.0} / {0,0,200}），常规质量减面。
         resource_manager.register_parser(scene_parser);
     }
     resource_manager.register_parser<Resource::VideoParser>();

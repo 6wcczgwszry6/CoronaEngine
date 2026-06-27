@@ -1774,7 +1774,18 @@ void GeometrySystem::upload_lod_from_scene_data() {
                 lod_buf.vertex_storage   = make_geometry_buffer(lod_data.vertices, Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_vertex_storage");
                 lod_buf.index_storage    = make_geometry_buffer(lod_data.indices,  Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_index_storage");
                 lod_buf.error            = lod_data.error;
-                lod_buf.screen_threshold = lod_data.screen_threshold;
+                // 切换阈值采用按 LOD 序号的固定表，不用 error 反推值（1/(1+error*80)）：
+                // 后者在 error 较大时阈值极小，只在物体缩得很小时才切入；且 error==0
+                // 时阈值为 0 → 该级永不选中（死级）。固定表保证单调递减、行为可预测：
+                //   LOD1 @ screen_ratio<=0.3, LOD2 @ <=0.12, LOD3 @ <=0.04
+                // 即物体在屏幕上越小，使用越简化的网格。
+                {
+                    static constexpr float kFixedThresholds[] = {0.30f, 0.12f, 0.04f};
+                    const size_t ti = entry.levels.size() - 1;  // 当前是第 (levels.size()) 级，下标从 LOD1=0 起
+                    lod_buf.screen_threshold = (ti < std::size(kFixedThresholds))
+                                                   ? kFixedThresholds[ti]
+                                                   : 0.02f;
+                }
                 lod_buf.ready            = true;
                 entry.levels.push_back(std::move(lod_buf));
 
