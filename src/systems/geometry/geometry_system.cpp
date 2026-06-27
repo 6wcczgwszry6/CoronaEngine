@@ -26,6 +26,8 @@
 
 #include "geometry_internal.h"
 
+#include <corona/systems/geometry/geometry_mesh_builder.h>
+
 namespace Corona::Systems {
 
 using namespace GeometryInternal;
@@ -831,22 +833,10 @@ void GeometrySystem::rebuild_actor_gpu_resources(std::uintptr_t actor, std::uint
             auto& scene = *scene_read;  // 解引用读锁守卫，获得 Scene 数据引用
 
             // ================================================================
-            // 阶段 A：创建 MeshDevice 数组
-            // 为 Scene 中的每个 mesh 创建 GPU 缓冲（顶点/索引/纹理）
-            // 分两步：先创建所有 HardwareBuffer/HardwareImage，再批量上传纹理数据
+            // 阶段 A：创建 MeshDevice 数组（GPU 缓冲 + 纹理）
+            // 构建逻辑收敛到 build_mesh_devices_from_scene（单一来源），
+            // 与 Python API 层 Geometry 构造函数共用同一份实现。
             // ================================================================
-            std::vector<MeshDevice> mesh_devices;                     // 输出：新的 mesh 设备数组
-            mesh_devices.reserve(scene.data.meshes.size());            // 预分配内存，避免 realloc
-
-            // ---- 待上传纹理列表（第一阶段收集，第二阶段批量执行）----
-            // 纹理上传涉及 GPU 传输，批量处理比逐个处理效率高
-            struct PendingTextureUpload {
-                std::uint32_t mesh_idx;               // 对应 mesh_devices 中的索引
-                std::vector<unsigned char> rgba_data; // 纹理像素数据（RGBA 格式）
-                unsigned char* data_ptr;              // 指向 rgba_data 中数据的指针
-            };
-            std::vector<PendingTextureUpload> pending_uploads;
-            pending_uploads.reserve(scene.data.meshes.size());
 
             // ---- 创建共享的 1x1 白色占位纹理 ----
             // 用于无纹理的 mesh，确保渲染管线始终有纹理可采样
@@ -861,184 +851,8 @@ void GeometrySystem::rebuild_actor_gpu_resources(std::uintptr_t actor, std::uint
                     std::as_bytes(std::span<const unsigned char>(white_pixel, sizeof(white_pixel))));
             }
 
-            // ---- 第一阶段：遍历所有 mesh，创建 GPU 缓冲 ----
-            for (std::uint32_t mesh_idx = 0; mesh_idx < scene.data.meshes.size(); ++mesh_idx) {
-                const auto& mesh = scene.data.meshes[mesh_idx];  // 当前 mesh 的 CPU 端数据
-                MeshDevice dev{};  // 零初始化 MeshDevice（所有句柄为 0/null）
-
-                // ---- 创建顶点/索引缓冲（4 个）----
-                // vertexBuffer / indexBuffer：渲染管线使用（Vertex Shader 读取）
-                // vertexStorageBuffer / indexStorageBuffer：Compute Shader 使用（可读写）
-                // get_mesh_vertices() 返回 meshopt 优化后的顶点数组
-                // get_mesh_indices() 返回 meshopt 优化后的索引数组
-                dev.vertexBuffer = make_geometry_buffer(
-                    scene.get_mesh_vertices(mesh_idx),
-                    Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Vertex,
-                    "geometry.vertex");
-                dev.indexBuffer = make_geometry_buffer(
-                    scene.get_mesh_indices(mesh_idx),
-                    Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Index,
-                    "geometry.index");
-                dev.vertexStorageBuffer = make_geometry_buffer(
-                    scene.get_mesh_vertices(mesh_idx),
-                    Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst |
-                        Horizon::BufferUsageFlags::Storage,
-                    "geometry.vertex_storage");
-                dev.indexStorageBuffer = make_geometry_buffer(
-                    scene.get_mesh_indices(mesh_idx),
-                    Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst |
-                        Horizon::BufferUsageFlags::Storage,
-                    "geometry.index_storage");
-
-                // ---- 材质索引 ----
-                // material_index 指向 scene.data.materials 数组
-                // InvalidIndex（最大值）表示无材质 → 降级为 0（使用默认材质）
-                dev.materialIndex = (mesh.material_index != Resource::InvalidIndex)
-                                        ? mesh.material_index                    // 有效材质索引
-                                        : 0;                                    // 降级为默认材质
-
-                // ---- 读取材质颜色（base_color：RGBA 漫反射颜色）----
-                if (mesh.material_index != Resource::InvalidIndex &&
-                    mesh.material_index < scene.data.materials.size()) {
-                    dev.materialColor = scene.data.materials[mesh.material_index].base_color;
-                }
-
-                // ---- 纹理处理 ----
-                bool texture_created = false;               // 标记：是否已创建纹理
-                uint32_t texture_width = 0;
-                uint32_t texture_height = 0;
-                Horizon::Format texture_format = Horizon::Format::SRGBA8_UNORM;
-
-                // 检查是否有有效材质和纹理
-                if (mesh.material_index != Resource::InvalidIndex &&
-                    mesh.material_index < scene.data.materials.size()) {
-                    // 从材质中获取 albedo（漫反射）纹理 ID
-                    auto texture_id = scene.data.materials[mesh.material_index].albedo_texture;
-
-                    if (texture_id != Resource::InvalidTextureId) {
-                        // 尝试从资源管理器获取纹理图像数据
-                        auto texture_data = resource_manager.acquire_read<Resource::Image>(texture_id);
-                        if (texture_data && texture_data->get_data() != nullptr) {
-                            const int tex_width    = texture_data->get_width();     // 纹理宽度（像素）
-                            const int tex_height   = texture_data->get_height();    // 纹理高度（像素）
-                            const int tex_channels = texture_data->get_channels();  // 颜色通道数（1/3/4）
-
-                            if (tex_width > 0 && tex_height > 0 && tex_channels > 0) {
-                                // ========================================
-                                // 分支 A：压缩纹理（BC1/BC3/ASTC）
-                                // ========================================
-                                if (texture_data->is_compressed()) {
-                                    // 获取压缩后的数据（GPU 可直接使用的格式）
-                                    const auto& compressed = texture_data->get_compressed_data();
-                                    texture_width = static_cast<uint32_t>(tex_width);
-                                    texture_height = static_cast<uint32_t>(tex_height);
-                                    bool supported_format = true;
-
-                                    // 根据压缩格式设置对应的 GPU 图像格式
-                                    if (compressed.format == Resource::CompressedData::Format::BC1) {
-                                        texture_format = Horizon::Format::BC1_UNORM_SRGB;     // DXT1，无 alpha
-                                    } else if (compressed.format == Resource::CompressedData::Format::BC3) {
-                                        texture_format = Horizon::Format::BC3_UNORM_SRGB;    // DXT5，含 alpha
-                                    } else if (compressed.format == Resource::CompressedData::Format::ASTC_4x4) {
-                                        CFW_LOG_WARNING("[GeometrySystem] ASTC_4x4 texture is not supported by current Horizon format enum; using placeholder texture");
-                                        supported_format = false;
-                                    }
-
-                                    // 将压缩数据加入待上传队列
-                                    if (supported_format) {
-                                        PendingTextureUpload upload{mesh_idx, {}, nullptr};
-                                        upload.rgba_data.assign(compressed.data.begin(), compressed.data.end());
-                                        upload.data_ptr = upload.rgba_data.data();
-
-                                        // 创建 GPU 纹理对象（此时尚未上传像素数据）
-                                        dev.textureBuffer = make_geometry_texture(
-                                            texture_width, texture_height, texture_format,
-                                            "geometry.material_texture");
-                                        pending_uploads.push_back(std::move(upload));
-                                        texture_created = true;
-                                    }
-                                }
-                                // ========================================
-                                // 分支 B：未压缩纹理（RGBA 像素数据）
-                                // ========================================
-                                else {
-                                    texture_width = static_cast<uint32_t>(tex_width);
-                                    texture_height = static_cast<uint32_t>(tex_height);
-                                    texture_format = Horizon::Format::SRGBA8_UNORM;   // 统一转为 RGBA8
-
-                                    unsigned char* src_data = texture_data->get_data();  // 原始像素数据指针
-                                    PendingTextureUpload upload{mesh_idx, {}, nullptr};
-
-                                    // ---- 根据通道数转换为 RGBA ----
-                                    if (tex_channels == 4) {
-                                        // RGBA：直接拷贝，无需转换
-                                        upload.rgba_data.assign(src_data,
-                                            src_data + static_cast<size_t>(tex_width) * tex_height * 4);
-                                        upload.data_ptr = upload.rgba_data.data();
-                                    } else if (tex_channels == 3) {
-                                        // RGB → RGBA：补充 alpha=255（完全不透明）
-                                        upload.rgba_data.resize(static_cast<size_t>(tex_width) * tex_height * 4);
-                                        for (int i = 0; i < tex_width * tex_height; ++i) {
-                                            upload.rgba_data[i * 4 + 0] = src_data[i * 3 + 0];  // R
-                                            upload.rgba_data[i * 4 + 1] = src_data[i * 3 + 1];  // G
-                                            upload.rgba_data[i * 4 + 2] = src_data[i * 3 + 2];  // B
-                                            upload.rgba_data[i * 4 + 3] = 255;                  // A=不透明
-                                        }
-                                        upload.data_ptr = upload.rgba_data.data();
-                                    } else if (tex_channels == 1) {
-                                        // 灰度 → RGBA：R=G=B=灰度值, A=255
-                                        upload.rgba_data.resize(static_cast<size_t>(tex_width) * tex_height * 4);
-                                        for (int i = 0; i < tex_width * tex_height; ++i) {
-                                            upload.rgba_data[i * 4 + 0] = src_data[i];  // R=灰度
-                                            upload.rgba_data[i * 4 + 1] = src_data[i];  // G=灰度
-                                            upload.rgba_data[i * 4 + 2] = src_data[i];  // B=灰度
-                                            upload.rgba_data[i * 4 + 3] = 255;          // A=不透明
-                                        }
-                                        upload.data_ptr = upload.rgba_data.data();
-                                    }
-
-                                    // 如果有有效数据，创建 GPU 纹理并加入上传队列
-                                    if (upload.data_ptr != nullptr) {
-                                        dev.textureBuffer = make_geometry_texture(
-                                            texture_width, texture_height, texture_format,
-                                            "geometry.material_texture");   // 创建 GPU 纹理对象
-                                        pending_uploads.push_back(std::move(upload));    // 入队等待批量上传
-                                        texture_created = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // ---- 无纹理的兜底：使用共享白色占位纹理 ----
-                // 确保每个 mesh 都有纹理句柄，避免渲染时空指针
-                if (!texture_created) {
-                    dev.textureBuffer = *impl_->shared_placeholder_texture;  // 拷贝共享纹理句柄
-                }
-
-                // ---- 将构建好的 MeshDevice 加入数组 ----
-                mesh_devices.emplace_back(std::move(dev));
-            }  // 第一阶段结束：所有 mesh 的 GPU 缓冲已创建，纹理像素尚未上传
-
-            // ================================================================
-            // 阶段 B：批量上传纹理像素到 GPU
-            // 使用 Horizon 图像同步写入执行 GPU 传输
-            // 每 32 个纹理一批，平衡内存占用和批次开销
-            // ================================================================
-            if (!pending_uploads.empty()) {
-                constexpr size_t kBatchSize = 32;  // 每批最多 32 个纹理
-                for (size_t batch_start = 0; batch_start < pending_uploads.size(); batch_start += kBatchSize) {
-                    size_t batch_end = std::min(batch_start + kBatchSize, pending_uploads.size());
-
-                    for (size_t i = batch_start; i < batch_end; ++i) {
-                        auto& upload = pending_uploads[i];
-                        Horizon::HardwareImage& tex = mesh_devices[upload.mesh_idx].textureBuffer;
-                        tex.write_bytes(std::as_bytes(
-                            std::span<const unsigned char>(upload.data_ptr, upload.rgba_data.size())));
-                    }
-                }
-            }
+            std::vector<MeshDevice> mesh_devices =
+                build_mesh_devices_from_scene(scene, *impl_->shared_placeholder_texture);
 
             // ================================================================
             // 阶段 C：写回 GeometryDevice

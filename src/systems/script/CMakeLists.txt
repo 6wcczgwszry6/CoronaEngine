@@ -28,6 +28,9 @@ corona_add_system(script
         corona::resource::manager
         Horizon
         SDL3::SDL3-static
+        # geometry：复用 build_mesh_devices_from_scene（GPU MeshDevice 构建单一来源）。
+        # geometry 不依赖 script，此依赖无环。
+        corona::system::geometry
 )
 
 # Add Python-specific include directories
