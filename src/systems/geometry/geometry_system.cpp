@@ -1501,10 +1501,11 @@ void GeometrySystem::process_pending_geometry_builds() {
 
     // ---- 阶段 1：只读收集待构建项 ----
     // 收集 gpu_build_state==PendingBuild 且 model_id 已就绪的 geometry。
-    // 仅记录 (geom_handle, model_id)，不在持有遍历期间做重活。
+    // 仅记录 (geom_handle, model_id, world_pos)，不在持有遍历期间做重活。
     struct PendingBuild {
         std::uintptr_t geom_handle;
         std::uint64_t  model_id;
+        ktm::fvec3     world_pos;  // 用于按相机距离排序（近处先建）
     };
     std::vector<PendingBuild> pending;
     for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
@@ -1518,12 +1519,55 @@ void GeometrySystem::process_pending_geometry_builds() {
         }
         if (model_id == 0) continue;  // import 尚未完成，下帧再试
 
-        pending.push_back({reinterpret_cast<std::uintptr_t>(&geom_dev), model_id});
+        // 读取世界位置（transform 缺失时退化为原点，仍可构建、只是排序权重为 0）
+        ktm::fvec3 world_pos = make_fvec3(0.0f, 0.0f, 0.0f);
+        if (geom_dev.transform_handle != 0) {
+            if (auto tr = hub.model_transform_storage().try_acquire_read(geom_dev.transform_handle)) {
+                world_pos = tr->position;
+            }
+        }
+
+        pending.push_back({reinterpret_cast<std::uintptr_t>(&geom_dev), model_id, world_pos});
     }
     if (pending.empty()) return;
 
+    // ---- 按相机距离排序：近处对象先构建（流式加载体验）----
+    // 收集所有场景所有相机的世界位置，对每个 pending 取到最近相机的距离平方。
+    std::vector<ktm::fvec3> camera_positions;
+    {
+        auto& camera_storage = hub.camera_storage();
+        for (auto sit = hub.scene_storage().cbegin(); sit != hub.scene_storage().cend(); ++sit) {
+            for (std::uintptr_t cam_handle : sit->camera_handles) {
+                if (auto cam = camera_storage.try_acquire_read_nowait(cam_handle)) {
+                    camera_positions.push_back(cam->position);
+                }
+            }
+        }
+    }
+    if (!camera_positions.empty()) {
+        auto nearest_dist2 = [&](const ktm::fvec3& p) {
+            float best = std::numeric_limits<float>::max();
+            for (const auto& c : camera_positions) {
+                const float dx = p.x - c.x, dy = p.y - c.y, dz = p.z - c.z;
+                best = std::min(best, dx * dx + dy * dy + dz * dz);
+            }
+            return best;
+        };
+        std::sort(pending.begin(), pending.end(),
+                  [&](const PendingBuild& a, const PendingBuild& b) {
+                      return nearest_dist2(a.world_pos) < nearest_dist2(b.world_pos);
+                  });
+    }
+
     // ---- 阶段 2：构建 GPU 资源（不持 storage 锁，仅写回时短暂加锁）----
+    // 每帧预算：最多构建 kMaxBuildsPerFrame 个，剩余保持 PendingBuild 下帧继续。
+    // 目的：一次性创建大量对象时，把 GPU buffer 创建的帧突刺摊平到多帧，
+    // 避免单帧卡顿。预算为内部常量（"由底层自行决定"），无外部开关。
+    constexpr size_t kMaxBuildsPerFrame = 4;
+    size_t built = 0;
     for (const auto& item : pending) {
+        if (built >= kMaxBuildsPerFrame) break;  // 本帧预算用尽，剩余下帧处理
+
         auto scene_read = resource_manager.acquire_read<Resource::Scene>(item.model_id);
         if (!scene_read.valid()) continue;  // 资源无效，下帧再试
 
@@ -1542,6 +1586,7 @@ void GeometrySystem::process_pending_geometry_builds() {
             if (geom_write->gpu_build_state == GeometryDevice::GpuBuildState::PendingBuild) {
                 geom_write->mesh_handles = std::move(mesh_devices);
                 geom_write->gpu_build_state = GeometryDevice::GpuBuildState::Ready;
+                ++built;
                 CFW_LOG_NOTICE("[GeometrySystem] Built pending GPU resources for geometry {}, {} mesh(es)",
                                item.geom_handle, geom_write->mesh_handles.size());
             }
