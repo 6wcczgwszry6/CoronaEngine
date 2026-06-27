@@ -29,6 +29,14 @@ set(CORONA_RESOURCE_FFMPEG_DOWNLOAD_DIR "${_CORONA_RESOURCE_FFMPEG_DEFAULT_DOWNL
 set(CORONA_RESOURCE_FFMPEG_SOURCE_DIR "${_CORONA_RESOURCE_FFMPEG_DEFAULT_SOURCE_DIR}" CACHE PATH
     "Directory used to cache the extracted FFmpeg package.")
 
+set(_CORONA_RESOURCE_FFMPEG_TAG "autobuild-2026-05-31-13-22")
+set(_CORONA_RESOURCE_FFMPEG_ARCHIVE_NAME "ffmpeg-N-124714-g49a77d37be-win64-lgpl-shared.zip")
+set(_CORONA_RESOURCE_FFMPEG_ARCHIVE_STEM "ffmpeg-N-124714-g49a77d37be-win64-lgpl-shared")
+set(_CORONA_RESOURCE_FFMPEG_ARCHIVE_SIZE 88569449)
+set(_CORONA_RESOURCE_FFMPEG_SHA256 "56f4a1d367e9537f63849e5cf9103824f6d87f4fc39a6a22b717b4df186da054")
+set(_CORONA_RESOURCE_FFMPEG_URL_HASH
+    "SHA256=${_CORONA_RESOURCE_FFMPEG_SHA256}")
+
 set(_CORONA_RESOURCE_FFMPEG_LEGACY_DOWNLOAD_DIR "${PROJECT_SOURCE_DIR}/third_party/ffmpeg/download")
 set(_CORONA_RESOURCE_FFMPEG_LEGACY_SOURCE_DIR "${PROJECT_SOURCE_DIR}/third_party/ffmpeg/src")
 if(NOT _CORONA_RESOURCE_FFMPEG_LEGACY_SOURCE_DIR STREQUAL _CORONA_RESOURCE_FFMPEG_DEFAULT_SOURCE_DIR
@@ -40,10 +48,9 @@ if(NOT _CORONA_RESOURCE_FFMPEG_LEGACY_SOURCE_DIR STREQUAL _CORONA_RESOURCE_FFMPE
         "Directory used to cache the extracted FFmpeg package." FORCE)
 endif()
 
-# BtbN rolling LGPL shared build. Pin to a different asset/URL if reproducibility
-# across machines matters more than tracking upstream.
+# BtbN LGPL shared build pinned for reproducible Windows auto-fetches.
 set(CORONA_RESOURCE_FFMPEG_URL
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip"
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/${_CORONA_RESOURCE_FFMPEG_TAG}/${_CORONA_RESOURCE_FFMPEG_ARCHIVE_NAME}"
     CACHE STRING "URL of the prebuilt FFmpeg package to download on Windows")
 
 # The five libraries we actually link against.
@@ -58,9 +65,14 @@ if(CORONA_RESOURCE_FFMPEG_ROOT)
     set(_corona_ffmpeg_root "${CORONA_RESOURCE_FFMPEG_ROOT}")
     message(STATUS "[FFmpeg] Using user-provided root: ${_corona_ffmpeg_root}")
 elseif(WIN32)
+    set(_corona_ffmpeg_package_source_dir
+        "${CORONA_RESOURCE_FFMPEG_SOURCE_DIR}/${_CORONA_RESOURCE_FFMPEG_ARCHIVE_STEM}")
+    set(_corona_ffmpeg_archive_path
+        "${CORONA_RESOURCE_FFMPEG_DOWNLOAD_DIR}/${_CORONA_RESOURCE_FFMPEG_ARCHIVE_NAME}")
+
     file(GLOB_RECURSE _corona_ffmpeg_cached_avcodec_hdr
-        "${CORONA_RESOURCE_FFMPEG_SOURCE_DIR}/*/include/libavcodec/avcodec.h"
-        "${CORONA_RESOURCE_FFMPEG_SOURCE_DIR}/include/libavcodec/avcodec.h")
+        "${_corona_ffmpeg_package_source_dir}/*/include/libavcodec/avcodec.h"
+        "${_corona_ffmpeg_package_source_dir}/include/libavcodec/avcodec.h")
 
     if(_corona_ffmpeg_cached_avcodec_hdr)
         list(GET _corona_ffmpeg_cached_avcodec_hdr 0 _corona_ffmpeg_hdr)
@@ -69,21 +81,47 @@ elseif(WIN32)
         get_filename_component(_corona_ffmpeg_root "${_corona_ffmpeg_inc}" DIRECTORY)
         message(STATUS "[FFmpeg] Using cached prebuilt root: ${_corona_ffmpeg_root}")
     else()
-        message(STATUS "[FFmpeg] Fetching prebuilt package: ${CORONA_RESOURCE_FFMPEG_URL}")
+        if(EXISTS "${_corona_ffmpeg_archive_path}")
+            file(SIZE "${_corona_ffmpeg_archive_path}" _corona_ffmpeg_archive_size)
+            if(NOT _corona_ffmpeg_archive_size EQUAL _CORONA_RESOURCE_FFMPEG_ARCHIVE_SIZE)
+                message(FATAL_ERROR
+                    "[FFmpeg] Cached archive exists but file size does not match:\n"
+                    "  ${_corona_ffmpeg_archive_path}\n"
+                    "Expected size: ${_CORONA_RESOURCE_FFMPEG_ARCHIVE_SIZE} bytes\n"
+                    "Actual size:   ${_corona_ffmpeg_archive_size} bytes\n"
+                    "Replace it with ${_CORONA_RESOURCE_FFMPEG_ARCHIVE_NAME}, or delete it to let CMake download again.")
+            endif()
+            file(SHA256 "${_corona_ffmpeg_archive_path}" _corona_ffmpeg_archive_sha256)
+            if(NOT _corona_ffmpeg_archive_sha256 STREQUAL _CORONA_RESOURCE_FFMPEG_SHA256)
+                message(FATAL_ERROR
+                    "[FFmpeg] Cached archive exists but checksum does not match:\n"
+                    "  ${_corona_ffmpeg_archive_path}\n"
+                    "Expected SHA256: ${_CORONA_RESOURCE_FFMPEG_SHA256}\n"
+                    "Actual SHA256:   ${_corona_ffmpeg_archive_sha256}\n"
+                    "Replace it with ${_CORONA_RESOURCE_FFMPEG_ARCHIVE_NAME}, or delete it to let CMake download again.")
+            endif()
+            set(_corona_ffmpeg_package_url "${_corona_ffmpeg_archive_path}")
+            message(STATUS "[FFmpeg] Using cached prebuilt archive: ${_corona_ffmpeg_archive_path}")
+        else()
+            set(_corona_ffmpeg_package_url "${CORONA_RESOURCE_FFMPEG_URL}")
+            message(STATUS "[FFmpeg] Downloading prebuilt package: ${CORONA_RESOURCE_FFMPEG_URL}")
+        endif()
+
         FetchContent_Declare(
-            ffmpeg_prebuilt
-            URL "${CORONA_RESOURCE_FFMPEG_URL}"
+            ffmpeg_prebuilt_pinned
+            URL "${_corona_ffmpeg_package_url}"
+            URL_HASH "${_CORONA_RESOURCE_FFMPEG_URL_HASH}"
             DOWNLOAD_DIR "${CORONA_RESOURCE_FFMPEG_DOWNLOAD_DIR}"
-            SOURCE_DIR "${CORONA_RESOURCE_FFMPEG_SOURCE_DIR}"
+            SOURCE_DIR "${_corona_ffmpeg_package_source_dir}"
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         )
-        FetchContent_MakeAvailable(ffmpeg_prebuilt)
+        FetchContent_MakeAvailable(ffmpeg_prebuilt_pinned)
 
         # BtbN archives wrap everything in a single top-level directory; locate the
         # actual root by searching for a known header.
         file(GLOB_RECURSE _corona_ffmpeg_avcodec_hdr
-            "${ffmpeg_prebuilt_SOURCE_DIR}/*/include/libavcodec/avcodec.h"
-            "${ffmpeg_prebuilt_SOURCE_DIR}/include/libavcodec/avcodec.h")
+            "${ffmpeg_prebuilt_pinned_SOURCE_DIR}/*/include/libavcodec/avcodec.h"
+            "${ffmpeg_prebuilt_pinned_SOURCE_DIR}/include/libavcodec/avcodec.h")
         if(_corona_ffmpeg_avcodec_hdr)
             list(GET _corona_ffmpeg_avcodec_hdr 0 _corona_ffmpeg_hdr)
             # .../<root>/include/libavcodec/avcodec.h -> <root>
