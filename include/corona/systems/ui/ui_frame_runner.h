@@ -76,6 +76,8 @@ class UiFrameRunner {
                                const std::vector<PanelPlacement>& placements,
                                int& active_tab_id);
 
+    void set_system_cursor(SDL_SystemCursor cursor);
+
     int url_input_active_tab_ = -1;
 
     // Phase 10: title-bar drag of an in-main-window floating panel rectangle. While a drag is
@@ -87,6 +89,19 @@ class UiFrameRunner {
     float drag_mouse_start_y_ = 0.0f;
     float drag_rect_start_x_ = 0.0f;
     float drag_rect_start_y_ = 0.0f;
+
+    // Edge/corner resize for in-main-window floating panels. This mirrors the title-bar
+    // drag path above: while active, mouse input is consumed by native so resizing continues
+    // even after the cursor leaves the panel's previous CEF rectangle.
+    int resizing_tab_id_ = -1;
+    int resize_edges_ = 0;
+    float resize_mouse_start_x_ = 0.0f;
+    float resize_mouse_start_y_ = 0.0f;
+    float resize_rect_start_x_ = 0.0f;
+    float resize_rect_start_y_ = 0.0f;
+    float resize_rect_start_w_ = 0.0f;
+    float resize_rect_start_h_ = 0.0f;
+    SDL_SystemCursor active_system_cursor_ = SDL_SYSTEM_CURSOR_DEFAULT;
 
     SdlInputRouter input_router_{};
     BrowserInputHandler input_handler_{};
