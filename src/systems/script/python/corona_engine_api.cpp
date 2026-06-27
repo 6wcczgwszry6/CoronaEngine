@@ -589,6 +589,48 @@ std::array<float, 3> Corona::API::Environment::get_sun_direction() const {
     return {1.0f, 1.0f, 1.0f};
 }
 
+void Corona::API::Environment::set_sun_intensity(float intensity) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Environment::set_sun_intensity] Invalid environment handle");
+        return;
+    }
+
+    if (auto accessor = SharedDataHub::instance().environment_storage().acquire_write(handle_)) {
+        accessor->sun_intensity = intensity;
+    } else {
+        CFW_LOG_ERROR("[Environment::set_sun_intensity] Failed to acquire write access to environment storage");
+    }
+}
+
+float Corona::API::Environment::get_sun_intensity() const {
+    if (handle_ == 0) return 10.0f;
+    if (auto accessor = SharedDataHub::instance().environment_storage().try_acquire_read(handle_)) {
+        return accessor->sun_intensity;
+    }
+    return 10.0f;
+}
+
+void Corona::API::Environment::set_sky_intensity(float intensity) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Environment::set_sky_intensity] Invalid environment handle");
+        return;
+    }
+
+    if (auto accessor = SharedDataHub::instance().environment_storage().acquire_write(handle_)) {
+        accessor->sky_intensity = intensity;
+    } else {
+        CFW_LOG_ERROR("[Environment::set_sky_intensity] Failed to acquire write access to environment storage");
+    }
+}
+
+float Corona::API::Environment::get_sky_intensity() const {
+    if (handle_ == 0) return 20.0f;
+    if (auto accessor = SharedDataHub::instance().environment_storage().try_acquire_read(handle_)) {
+        return accessor->sky_intensity;
+    }
+    return 20.0f;
+}
+
 void Corona::API::Environment::set_floor_grid(bool enabled) const {
     if (handle_ == 0) {
         CFW_LOG_WARNING("[Environment::set_floor_grid] Invalid environment handle");

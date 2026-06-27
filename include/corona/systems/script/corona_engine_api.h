@@ -318,6 +318,10 @@ class Environment {
 
     void set_sun_direction(const std::array<float, 3>& direction);
     [[nodiscard]] std::array<float, 3> get_sun_direction() const;
+    void set_sun_intensity(float intensity);
+    [[nodiscard]] float get_sun_intensity() const;
+    void set_sky_intensity(float intensity);
+    [[nodiscard]] float get_sky_intensity() const;
     void set_floor_grid(bool enabled) const;
     [[nodiscard]] bool get_floor_grid() const;
 

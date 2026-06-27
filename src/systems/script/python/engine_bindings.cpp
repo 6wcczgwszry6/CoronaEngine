@@ -357,6 +357,14 @@ void BindAll(nanobind::module_& m) {
              "Set sun light direction [x, y, z]")
         .def("get_sun_direction", &Environment::get_sun_direction,
              "Get sun light direction [x, y, z]")
+        .def("set_sun_intensity", &Environment::set_sun_intensity, nb::arg("intensity"),
+             "Set sun light intensity")
+        .def("get_sun_intensity", &Environment::get_sun_intensity,
+             "Get sun light intensity")
+        .def("set_sky_intensity", &Environment::set_sky_intensity, nb::arg("intensity"),
+             "Set atmospheric sky intensity")
+        .def("get_sky_intensity", &Environment::get_sky_intensity,
+             "Get atmospheric sky intensity")
         .def("set_floor_grid", &Environment::set_floor_grid, nb::arg("enabled"),
              "Enable or disable floor grid rendering")
         .def("get_floor_grid", &Environment::get_floor_grid,

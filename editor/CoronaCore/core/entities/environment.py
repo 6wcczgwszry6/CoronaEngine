@@ -29,6 +29,24 @@ class Environment:
         return list(self.engine_obj.get_sun_direction())
 
     # ---- 地面网格 ----
+    def set_sun_intensity(self, intensity: float):
+        if hasattr(self.engine_obj, 'set_sun_intensity'):
+            self.engine_obj.set_sun_intensity(float(intensity))
+
+    def get_sun_intensity(self) -> float:
+        if hasattr(self.engine_obj, 'get_sun_intensity'):
+            return float(self.engine_obj.get_sun_intensity())
+        return 10.0
+
+    def set_sky_intensity(self, intensity: float):
+        if hasattr(self.engine_obj, 'set_sky_intensity'):
+            self.engine_obj.set_sky_intensity(float(intensity))
+
+    def get_sky_intensity(self) -> float:
+        if hasattr(self.engine_obj, 'get_sky_intensity'):
+            return float(self.engine_obj.get_sky_intensity())
+        return 20.0
+
     def set_floor_grid(self, enabled: bool):
         self.engine_obj.set_floor_grid(enabled)
 
@@ -67,6 +85,8 @@ class Environment:
         return {
             'name': self.name,
             'sun_direction': list(self.engine_obj.get_sun_direction()),
+            'sun_intensity': self.get_sun_intensity(),
+            'sky_intensity': self.get_sky_intensity(),
             'floor_grid_enabled': self.engine_obj.get_floor_grid(),
             'gravity': list(self.engine_obj.get_gravity()),
             'floor_y': self.engine_obj.get_floor_y(),

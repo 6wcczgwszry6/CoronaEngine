@@ -1431,6 +1431,8 @@ class SceneTools(PluginBase):
         try:
             scene = scene_manager.get(scene_name)
             scene.set_sun_direction(direction)
+            if hasattr(scene, "set_sun_enabled"):
+                scene.set_sun_enabled(bool(if_enable))
             logger.info("Sun direction set for %s", scene_name)
             return {"status": "success"}
         except Exception as exc:
