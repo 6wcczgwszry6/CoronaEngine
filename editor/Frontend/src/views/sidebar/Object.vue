@@ -53,7 +53,7 @@
     </div>
 
     <!-- 主内容区域 -->
-    <div class="flex flex-col flex-1 bg-[#282828]/70">
+    <div class="flex flex-col flex-1 min-h-0 bg-[#282828]/70">
       <!-- 当前文件信息 -->
       <div class="flex items-center gap-2 px-2 py-1.5 bg-[#3c3c3c]/60 border-b border-[#1a1a1a]/30">
         <div class="text-[10px] text-[#909090] truncate flex-1">
@@ -111,7 +111,7 @@
         </div>
 
         <!-- ========== 内容区域 ========== -->
-        <div class="flex-1 overflow-auto bg-[#282828]/50 p-2">
+        <div class="flex-1 min-h-0 overflow-auto bg-[#282828]/50 p-2">
           <!-- ===== 场景内容 ===== -->
           <template v-if="mainActiveTab === 'scene'">
             <!-- 场景 - 基础信息 -->
@@ -550,7 +550,7 @@
                 >
                   <div class="flex items-center justify-between">
                     <label class="text-[#e0e0e0] font-medium">碰撞</label>
-                    <div class="flex items-center space-x-4">
+                    <div class="flex flex-wrap items-center gap-2">
                       <label class="text-[#909090] text-[10px] flex items-center space-x-1">
                         <input
                           v-model="actorData.collision.type"
@@ -1138,7 +1138,7 @@
               <div class="bg-[#3c3c3c]/50 p-2 rounded border-l-2 border-orange-600">
                 <div class="flex items-center justify-between">
                   <label class="text-[#e0e0e0] font-medium">碰撞</label>
-                  <div class="flex items-center space-x-4">
+                  <div class="flex flex-wrap items-center gap-2">
                     <label class="text-[#909090] text-[10px] flex items-center space-x-1">
                       <input
                         v-model="modelData.collision.type"
@@ -1644,6 +1644,7 @@ const currentModelFile = ref('');
 const actorAliasDraft = ref('');
 const actorAliasSaving = ref(false);
 const actorAliasError = ref('');
+let actorLoadSeq = 0;
 const modelAliasDraft = ref('');
 const modelAliasSaving = ref(false);
 const modelAliasError = ref('');
@@ -1773,6 +1774,7 @@ const readFollowCameraState = (data) =>
   data?.follow_camera === '1';
 
 const unwrapBridgeResult = (result) => result?.data ?? result;
+const readActorModelPath = (data) => data?.model || data?.path || data?.file || '';
 
 const resetActorAliasDraft = () => {
   actorAliasDraft.value = actorData.value.name || '';
@@ -1913,19 +1915,31 @@ const loadSceneData = async (sceneId) => {
 const loadActorData = async (sceneId, actorId) => {
   if (!actorId) return;
 
+  const loadSeq = ++actorLoadSeq;
+  actorData.value.name = actorId;
+  actorAliasDraft.value = actorId;
+  actorAliasError.value = '';
+  actorData.value.parentScene = sceneId || '';
+  actorData.value.file = actorId;
+
   try {
     // 调用后端接口获取对象数据，传入场景ID和对象ID
     const result = await sceneService.getActor(sceneId, actorId);
+    if (loadSeq !== actorLoadSeq || currentActorFile.value !== actorId) return;
     if (result) {
-      const data = result.data;
+      const data = unwrapBridgeResult(result);
+      if (!data || data.status === 'error') {
+        throw new Error(data?.message || `Actor '${actorId}' not found`);
+      }
       const displayName = data.name || actorId;
       actorData.value.name = displayName;
       actorAliasDraft.value = displayName;
       actorAliasError.value = '';
       actorData.value.handle = Number(data.handle || 0);
       actorData.value.parentScene = sceneId || '';
-      actorData.value.file = data.path;
-      actorData.value.model.path = data.model || '';
+      const modelPath = readActorModelPath(data);
+      actorData.value.file = data.path || data.file || modelPath || actorId;
+      actorData.value.model.path = modelPath;
       const followCamera = readFollowCameraState(data);
       actorData.value.follow_camera = followCamera;
       actorData.value.render_space = followCamera ? 'ui' : 'scene';
@@ -1989,6 +2003,7 @@ const loadActorData = async (sceneId, actorId) => {
       }
     }
   } catch (e) {
+    if (loadSeq !== actorLoadSeq || currentActorFile.value !== actorId) return;
     logError('加载对象数据失败', e);
   }
 };
