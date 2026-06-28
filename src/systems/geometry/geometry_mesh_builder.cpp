@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -46,6 +47,28 @@ Horizon::HardwareImage make_geometry_texture(uint32_t width,
         std::move(name)));
 }
 
+bool upload_geometry_texture(Horizon::HardwareImage& texture,
+                             std::span<const std::byte> bytes,
+                             const char* label) {
+    if (!texture || bytes.empty()) {
+        CFW_LOG_WARNING("[GeometryMeshBuilder] Texture upload skipped (label={}, valid={}, bytes={})",
+                        label, static_cast<bool>(texture), bytes.size_bytes());
+        return false;
+    }
+    try {
+        Horizon::HardwareExecutor executor;
+        const auto receipt = executor.stream()
+            << texture.upload(bytes)
+            << Horizon::commit();
+        executor.wait_idle(receipt);
+        return true;
+    } catch (const std::exception& exc) {
+        CFW_LOG_WARNING("[GeometryMeshBuilder] Texture upload failed (label={}, error={})",
+                        label, exc.what());
+        return false;
+    }
+}
+
 // ----------------------------------------------------------------------------
 // 进程级共享占位纹理（1x1 白）——占位纹理的唯一所有者
 // ----------------------------------------------------------------------------
@@ -63,8 +86,13 @@ Horizon::HardwareImage& get_placeholder_texture() {
         g_placeholder_texture = std::make_unique<Horizon::HardwareImage>(
             make_geometry_texture(1, 1, Horizon::Format::SRGBA8_UNORM,
                                   "geometry.placeholder_texture"));
-        g_placeholder_texture->write_bytes(
-            std::as_bytes(std::span<const unsigned char>(white_pixel, sizeof(white_pixel))));
+        const bool placeholder_upload_ok = upload_geometry_texture(
+            *g_placeholder_texture,
+            std::as_bytes(std::span<const unsigned char>(white_pixel, sizeof(white_pixel))),
+            "placeholder");
+        if (!placeholder_upload_ok) {
+            CFW_LOG_WARNING("[GeometryMeshBuilder] Failed to upload placeholder texture");
+        }
     }
     return *g_placeholder_texture;
 }
@@ -266,8 +294,17 @@ std::vector<MeshDevice> build_mesh_devices_from_scene(
             for (size_t i = batch_start; i < batch_end; ++i) {
                 auto& upload = pending_uploads[i];
                 Horizon::HardwareImage& tex = mesh_devices[upload.mesh_idx].textureBuffer;
-                tex.write_bytes(std::as_bytes(
-                    std::span<const unsigned char>(upload.data_ptr, upload.rgba_data.size())));
+                const bool texture_upload_ok = upload_geometry_texture(
+                    tex,
+                    std::as_bytes(std::span<const unsigned char>(upload.data_ptr, upload.rgba_data.size())),
+                    "material");
+                if (!texture_upload_ok) {
+                    const auto extent = tex.extent();
+                    CFW_LOG_WARNING("[GeometryMeshBuilder] Failed to upload material texture "
+                                    "(mesh={}, bytes={}, extent={}x{}x{})",
+                                    upload.mesh_idx, upload.rgba_data.size(),
+                                    extent.width, extent.height, extent.depth);
+                }
             }
         }
     }
