@@ -2,8 +2,10 @@
 #include <oneapi/tbb/concurrent_hash_map.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <memory>
+#include <optional>
 #include <shared_mutex>
 
 namespace Corona::Resource {
@@ -32,7 +34,31 @@ struct ResourceEntry {
     std::shared_mutex mutex;
     std::atomic<LoadState> state{LoadState::Unloaded};
     std::condition_variable_any cv;
-    std::atomic<int> ref_count{0};  // 资源引用计数，防止共享资源提前释放
+    std::atomic<int> ref_count{0};              // 资源引用计数，防止共享资源提前释放
+    std::atomic<bool> pinned{false};            // 标记为不可淘汰（LRU evict 时跳过）
+    std::atomic<std::size_t> estimated_bytes{0}; // 该资源占用的估算内存字节数
+    std::chrono::system_clock::time_point last_access;  // touch() 时更新，用于淘汰优先级
+};
+
+/**
+ * @brief 资源条目只读信息（供查询接口返回）
+ */
+struct ResourceEntryInfo {
+    TResourceID rid{};
+    std::size_t  estimated_bytes = 0;
+    int          ref_count       = 0;
+    bool         pinned          = false;
+    LoadState    state           = LoadState::Unloaded;
+    std::chrono::system_clock::time_point last_access{};
+};
+
+/**
+ * @brief 资源淘汰操作的结构化结果
+ */
+struct EvictResult {
+    bool        success      = false;
+    TResourceID rid          = 0;
+    std::size_t bytes_freed  = 0;
 };
 
 /**
@@ -191,9 +217,11 @@ class ResourceCache {
     /**
      * @brief 移除资源条目
      *
+     * 仅当资源未被引用（ref_count == 0）且未被 pin 时才移除。
+     *
      * @param rid 资源ID
      * @return true 移除成功
-     * @return false 资源不存在
+     * @return false 资源不存在 / 被引用 / 被 pin
      */
     bool remove_entry(TResourceID rid);
 
@@ -212,7 +240,8 @@ class ResourceCache {
      * @return true 添加成功
      * @return false 资源已存在
      */
-    bool add_resource(TResourceID rid, std::shared_ptr<IResource> resource);
+    bool add_resource(TResourceID rid, std::shared_ptr<IResource> resource,
+                      std::size_t estimated_bytes = 0);
 
     /**
      * @brief 获取资源的读取句柄
@@ -232,6 +261,7 @@ class ResourceCache {
             return {};
         }
         entry->ref_count++;
+        entry->last_access = std::chrono::system_clock::now();
         return ReadHandle<T>(std::move(entry), std::move(lock));
     }
 
@@ -253,11 +283,44 @@ class ResourceCache {
             return {};
         }
         entry->ref_count++;
+        entry->last_access = std::chrono::system_clock::now();
         return WriteHandle<T>(std::move(entry), std::move(lock));
     }
 
+    // ========================================
+    // 资源管理 (pin / touch / budget)
+    // ========================================
+
+    /// 标记资源为不可淘汰（LRU evict 时跳过）
+    /// @return false 资源不存在
+    bool pin(TResourceID rid);
+
+    /// 取消不可淘汰标记
+    /// @return false 资源不存在
+    bool unpin(TResourceID rid);
+
+    /// 仅更新访问时间，不返回数据（比 acquire_read 更轻量）
+    /// @return false 资源不存在
+    bool touch(TResourceID rid);
+
+    /// 查询单个资源的只读信息
+    std::optional<ResourceEntryInfo> entry_info(TResourceID rid) const;
+
+    /// 列出所有资源的只读信息（快照，非原子）
+    std::vector<ResourceEntryInfo> list_entries() const;
+
+    /// 设置内存预算上限（字节）
+    void set_memory_budget(std::size_t bytes);
+
+    /// 当前估算内存使用量（字节）
+    std::size_t used_memory_bytes() const;
+
+    /// 内存预算上限（字节）
+    std::size_t memory_budget() const;
+
    private:
     tbb::concurrent_hash_map<TResourceID, std::shared_ptr<ResourceEntry>> resources_{};
+    std::atomic<std::size_t> memory_budget_{0};  // 0 = 不限制
 };
 
 }  // namespace Corona::Resource

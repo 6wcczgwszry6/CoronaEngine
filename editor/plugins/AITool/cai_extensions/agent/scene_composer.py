@@ -2072,7 +2072,7 @@ class SceneComposer:
             logger.debug("[SceneComposer] 清单补全 LLM 跳过: %s", exc)
             expanded = []
         if not expanded:
-            expanded = self._fallback_expand_inventory(items, target_min)
+            expanded = self._fallback_expand_inventory(items, target_min, text=text)
 
         out: List[Dict[str, Any]] = []
         seen = set()
@@ -2176,15 +2176,35 @@ class SceneComposer:
         return out
 
     @staticmethod
-    def _fallback_expand_inventory(items: List[Dict[str, Any]], target_min: int) -> List[Dict[str, Any]]:
-        generic = [
-            ("功能支撑物件", "scene support object", "support"),
-            ("导视牌", "wayfinding sign prop", "support"),
-            ("灯光装饰", "decorative light prop", "decoration"),
-            ("储物道具", "storage crate prop", "decoration"),
-            ("活动区装饰", "activity area decoration prop", "decoration"),
-            ("小型展示物", "small display prop", "decoration"),
-        ]
+    def _fallback_expand_inventory(
+        items: List[Dict[str, Any]],
+        target_min: int,
+        *,
+        text: str = "",
+    ) -> List[Dict[str, Any]]:
+        prompt_text = str(text or "")
+        prompt_lower = prompt_text.lower()
+        is_bedroom = any(term in prompt_text for term in ("卧室", "睡房", "寝室", "卧房")) or "bedroom" in prompt_lower
+        if is_bedroom:
+            style_prefix = "欧式" if any(term in prompt_text for term in ("欧式", "欧洲", "古典")) or "european" in prompt_lower else ""
+            bed_name = f"{style_prefix}双人床" if style_prefix else "双人床"
+            generic = [
+                (bed_name, "european bedroom double bed furniture, standalone bed, no human, no person", "furniture"),
+                ("床头柜", "bedside table nightstand furniture, no human, no person", "support"),
+                ("衣柜", "wardrobe closet bedroom furniture, no human, no person", "furniture"),
+                ("梳妆台", "vanity dressing table bedroom furniture, no human, no person", "furniture"),
+                ("台灯", "bedside table lamp bedroom prop, no human, no person", "decoration"),
+                ("地毯", "bedroom floor rug carpet, flat ground decor, no human, no person", "ground_cover"),
+            ]
+        else:
+            generic = [
+                ("功能支撑物件", "scene support object, non-human prop, no person", "support"),
+                ("导视牌", "wayfinding sign prop, non-human sign, no person", "support"),
+                ("灯光装饰", "decorative light prop, non-human lamp, no person", "decoration"),
+                ("储物道具", "storage crate prop, non-human container, no person", "decoration"),
+                ("活动区装饰", "activity area decoration prop, non-human decor, no person", "decoration"),
+                ("小型展示物", "small display prop, non-human object, no person", "decoration"),
+            ]
         existing = {str(it.get("name") or "").strip() for it in items}
         out: List[Dict[str, Any]] = []
         for name, keywords, role in generic:

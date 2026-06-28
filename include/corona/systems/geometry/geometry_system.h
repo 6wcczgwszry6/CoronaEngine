@@ -36,12 +36,12 @@ enum class ActorLoadState : uint8_t {
 struct SceneVisibilityConfig {
     /// 连续不可见超过该帧数时，触发 ActorEvictRequestedEvent。
     /// 0 表示永不 evict（默认，避免在 LRU 接入前误触）。
-    int  invisible_frames_to_evict = 0;
+    int  invisible_frames_to_evict = 60;  // 连续不可见1秒(60帧)触发淘汰，0=永不
     bool collect_stats             = true;
 
-    bool enable_distance_culling  = false; // 是否启用距离卸载
-    float unload_distance         = 0.0f; // 超过此距离且不可见时触发卸载
-    float preload_distance        = 0.0f; // 进入此距离时触发预加载
+    bool enable_distance_culling  = true;   // 是否启用距离剔除
+    float unload_distance         = 10.0f;  // 超过此距离且不可见时触发淘汰
+    float preload_distance        = 25.0f;  // 进入此距离时触发预加载
 };
 
 /**
@@ -185,12 +185,12 @@ class GeometrySystem : public Kernel::SystemBase {
     // ========================================
     //
     // ActorEvictRequestedEvent 发布后，GeometrySystem 自动：
-    //   1. 创建 ActorSnapshot（model_path + transform）
+    //   1. 创建 ActorStreamingRecord（scene/actor + model_path + transform + handles + flags）
     //   2. 存入 ActorCache（两级 LRU：内存 64MB + 磁盘 256MB）
     //   3. 标记 actor 为 offline，状态置为 Unloaded
     //
     // ActorRestoreRequestedEvent 发布后，GeometrySystem 自动：
-    //   1. 从 ActorCache 获取快照（或回退到磁盘 model_path）
+    //   1. 从 ActorCache 获取 ActorStreamingRecord（或回退到磁盘 model_path）
     //   2. 调用 ResourceManager::import_async 重新导入
     //   3. 导入完成后重建 GPU 资源，标记为 online
     //
@@ -198,6 +198,11 @@ class GeometrySystem : public Kernel::SystemBase {
 
     /// 设置 LRU ActorCache 磁盘目录（需在首次 evict 前调用）
     void set_cache_directory(std::filesystem::path dir);
+
+    /// 设置资源内存预算（MB），0 = 不限制。
+    /// 当 ResourceManager 估算内存用量超过预算时，GeometrySystem 每帧末尾
+    /// 触发 evict_until_under_budget，优先淘汰最久未访问（cold）的资源。
+    void set_resource_memory_budget_mb(std::size_t mb);
 
     [[nodiscard]] bool is_actor_offline(std::uintptr_t actor) const;
     void               mark_actor_restored(std::uintptr_t actor);

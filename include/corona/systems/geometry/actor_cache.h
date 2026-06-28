@@ -1,41 +1,53 @@
 #pragma once
 
 /// @file actor_cache.h
-/// @brief ActorCache — 类型化 Actor 快照缓存，封装两级 LRU CacheManager
+/// @brief ActorCache — 类型化 Actor 流式缓存，封装两级 LRU CacheManager
 ///
-/// ActorSnapshot 包含重建 actor 所需的最小信息集：
+/// ActorStreamingRecord 包含重建 actor 所需的完整信息集：
+/// - 身份：scene / actor handle
 /// - model_path（资源文件路径，也是 ResourceManager 的 key）
-/// - transform（position / euler_rotation / scale）
-/// - follow_camera flag
+/// - transform（position / euler_rotation / scale，ModelTransform 值类型）
+/// - profile_handles / geometry_handles（用于恢复时校验和诊断）
+/// - resource_ids（geometry → model_resource → model_id 链，用于恢复时匹配）
+/// - 运行时标志：physics_enabled / optics_visible / follow_camera / pinned
+/// - priority（流式调度优先级，预留）
 ///
 /// 注意：mesh / texture 等重资源由 ResourceManager 自行管理；
-///       ActorSnapshot 只存资源路径，不重复序列化几何数据。
+///       ActorStreamingRecord 只存资源路径和句柄引用，不重复序列化几何数据。
 
 #include <corona/resource/cache/lru_cache.h>
+#include <corona/shared_data_hub.h>  // ModelTransform
 
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace Corona::Cache {
 
 // ============================================================================
-// ActorSnapshot — 重建 actor 所需的最小数据
+// ActorStreamingRecord — 重建 actor 所需的完整状态
 // ============================================================================
 
-struct ActorSnapshot {
-    std::filesystem::path model_path;          // 模型文件路径（ResourceManager key）
-    float position[3]        = {0, 0, 0};      // world position
-    float euler_rotation[3]  = {0, 0, 0};      // euler angles (radians)
-    float scale[3]           = {1, 1, 1};      // world scale
-    bool  follow_camera      = false;           // camera-local 渲染模式
-    int   profile_count      = 0;               // profile 数量（仅用于验证）
+struct ActorStreamingRecord {
+    std::uintptr_t              scene{};             // 所属 scene handle
+    std::uintptr_t              actor{};             // actor handle（与 ActorCache key 一致）
+    std::filesystem::path       model_path;          // 模型文件路径（ResourceManager key）
+    std::vector<std::uintptr_t> profile_handles;     // ActorDevice::profile_handles 全量拷贝
+    std::vector<std::uintptr_t> geometry_handles;    // 每个 profile 的 geometry_handle
+    std::vector<std::uint64_t>  resource_ids;        // geometry → model_resource → model_id
+    ModelTransform              transform;           // world position / euler rotation / scale
+    bool                        physics_enabled{false};
+    bool                        optics_visible{true};
+    bool                        follow_camera{false};
+    bool                        pinned{false};
+    float                       priority{0.0f};
 
     /// JSON 序列化
     [[nodiscard]] std::string to_json() const;
-    [[nodiscard]] static std::optional<ActorSnapshot> from_json(const std::string& json);
+    [[nodiscard]] static std::optional<ActorStreamingRecord> from_json(const std::string& json);
 };
 
 // ============================================================================
@@ -57,11 +69,11 @@ public:
 
     // ---- 核心 API ----
 
-    /// 存入 actor 快照
-    bool put(std::uintptr_t actor_handle, const ActorSnapshot& snapshot);
+    /// 存入 actor 流式记录
+    bool put(std::uintptr_t actor_handle, const ActorStreamingRecord& record);
 
-    /// 获取 actor 快照
-    std::optional<ActorSnapshot> get(std::uintptr_t actor_handle);
+    /// 获取 actor 流式记录
+    std::optional<ActorStreamingRecord> get(std::uintptr_t actor_handle);
 
     /// 移除 actor 缓存项
     void remove(std::uintptr_t actor_handle);
@@ -76,7 +88,7 @@ public:
     [[nodiscard]] size_t disk_capacity() const;
 
     // ---- 淘汰回调 ----
-    /// 设置淘汰回调：当 actor 快照被从 LRU 中淘汰时调用
+    /// 设置淘汰回调：当 actor 流式记录被从 LRU 中淘汰时调用
     void set_evict_callback(std::function<void(std::uintptr_t, const std::string&)> cb);
 
 private:

@@ -746,9 +746,28 @@ class SceneSession:
                     transform["scale"] = [max(0.05, round(value * 0.85, 6)) for value in scale]
                     actions.append("scale_down")
                 if any(word in content for word in ("贴地", "接地", "地面", "悬空", "穿模")):
-                    pos = self._vector3(transform.get("pos"), default=0.0)
-                    pos[1] = max(0.0, pos[1])
-                    transform["pos"] = pos
+                    corrected_pos = None
+                    try:
+                        from ..mcp.tools.native_scene_state import find_native_actor
+                        from ..mcp.tools.transform_grounding import snap_actor_to_ground
+
+                        actor = find_native_actor(
+                            self.scene_name,
+                            actor_id,
+                            wait_for_bounds=True,
+                            timeout_s=3.0,
+                            interval_s=0.05,
+                        )
+                        if actor is not None and actor.bounds_ready:
+                            corrected_pos = snap_actor_to_ground(actor, ground_y=0.0, clearance=0.02)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("[SceneSession] native ground_fit skipped for %s: %s", actor_id, exc)
+                    if corrected_pos is not None:
+                        transform["pos"] = [round(float(value), 6) for value in corrected_pos[:3]]
+                    else:
+                        pos = self._vector3(transform.get("pos"), default=0.0)
+                        pos[1] = max(0.0, pos[1])
+                        transform["pos"] = pos
                     actions.append("ground_fit")
             if any(word in content for word in ("移除", "删除", "不要")):
                 inst.layout_status = "stale"

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <corona/events/scene_system_events.h>
 #include <corona/resource/resource_manager.h>
 #include <corona/systems/geometry/geometry_system.h>
 #include <corona/systems/mechanics/mechanics_system.h>
@@ -14,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -201,6 +203,7 @@ struct MechanicsWorldAABB {
     ktm::fmat3x3 rot_body_to_world{};    // 由预测四元数得到的旋转矩阵
     ktm::fvec3 inertia_inv_body{};       // 体坐标 (1/Ix,1/Iy,1/Iz)
     std::uint64_t model_id = 0;          // 对应的模型资源ID（用于碰撞网格查找）
+    bool is_skinned = false;             // 蒙皮物体：跳过三角网格，只用动态 AABB 碰撞（P4）
 };
 
 // entry：读写 OBB 字段；t：用于把局部点变到世界
@@ -764,6 +767,11 @@ namespace Corona::Systems {
 struct MechanicsSystem::Impl {
     Kernel::ISystemContext* ctx = nullptr;
     GeometrySystem* geometry_sys = nullptr;
+
+    // ActorResidencyChangedEvent 驱动的驻留集合
+    Kernel::EventId residency_sub_id_ = 0;
+    mutable std::shared_mutex residency_mtx_;
+    std::unordered_set<std::uintptr_t> resident_actors_;
     float time_accumulator = 0.0f;
     std::chrono::steady_clock::time_point last_update_time{};
     bool first_update = true;

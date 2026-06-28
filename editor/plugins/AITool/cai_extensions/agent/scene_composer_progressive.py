@@ -1617,11 +1617,9 @@ def _capture_viewport_snapshot(composer: Any) -> Dict[str, Any]:
     """采集当前视口的 transform 快照（喂给 SceneDiffTracker）。"""
     try:
         from .scene_diff import make_transform
-        scene = _get_current_scene()
-        if scene is None:
-            return {}
+        from ..mcp.tools.native_scene_state import native_actor_views
         snapshot = {}
-        for actor in scene.get_actors():
+        for actor in native_actor_views(""):
             aid = _actor_name(actor)
             if not aid:
                 continue
@@ -1706,8 +1704,10 @@ def _repair_recent_imports(
     except Exception as exc:  # noqa: BLE001
         logger.debug("[ProgressiveWorkflow] AABB repair unavailable: %s", exc)
         return 0
-    scene = _get_current_scene()
-    if scene is None:
+    try:
+        from ..mcp.tools.native_scene_state import native_actor_views, wait_for_actor_bounds
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[ProgressiveWorkflow] native scene state unavailable: %s", exc)
         return 0
 
     try:
@@ -1717,8 +1717,10 @@ def _repair_recent_imports(
 
     repaired = 0
     for actor_id in imported_ids:
-        actor = _scene_actor(scene, actor_id)
-        if actor is None:
+        actor = wait_for_actor_bounds("", actor_id, timeout_s=6.0, interval_s=0.01)
+        if actor is None or not actor.bounds_ready:
+            if issue_sink is not None:
+                issue_sink.append({"actor_id": actor_id, "type": "bounds_not_ready"})
             continue
         try:
             inst = scene_layout.get(actor_id)
@@ -1730,13 +1732,7 @@ def _repair_recent_imports(
         def _apply() -> Dict[str, Any]:
             before = list(actor.get_position())
             snapped = snap_actor_to_ground(actor, ground_y=0.0, clearance=0.02)
-            obstacles = []
-            for other_id in active_ids:
-                if other_id == actor_id:
-                    continue
-                other = _scene_actor(scene, other_id)
-                if other is not None:
-                    obstacles.append(other)
+            obstacles = [other for other in native_actor_views("") if other.name != actor.name]
             overlap = resolve_actor_overlaps(
                 actor,
                 obstacles,

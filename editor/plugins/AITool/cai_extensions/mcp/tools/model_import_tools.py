@@ -19,6 +19,7 @@ from Quasar.ai_tools.response_adapter import (
     build_success_result,
     build_error_result,
 )
+from .native_scene_state import wait_for_actor_bounds
 
 DEFAULT_SCENE_NAME = ""
 SUPPORTED_EXTS = {".obj", ".dae", ".glb", ".gltf", ".fbx"}
@@ -212,11 +213,16 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
                 ).to_envelope(interface_type="scene")
 
             actor = native_result.get("actor") if isinstance(native_result.get("actor"), dict) else {}
+            actor_name_out = actor.get("name", preferred_name)
+            scene_out = native_result.get("scene") or scene_name or ""
+            ready_actor = wait_for_actor_bounds(scene_out, actor_name_out, timeout_s=1.0)
+            if ready_actor is not None:
+                actor = ready_actor.data
             geometry = actor.get("geometry") if isinstance(actor.get("geometry"), dict) else {}
             try:
                 CoronaEditor.emit_editor_event(
                     "scene-tree-changed",
-                    [native_result.get("scene") or scene_name or ""],
+                    [scene_out],
                 )
             except Exception:
                 pass
@@ -227,7 +233,9 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
                 "position": geometry.get("position", position or [0, 0, 0]),
                 "rotation": geometry.get("rotation", rotation or [0, 0, 0]),
                 "scale": geometry.get("scale", scale or [1, 1, 1]),
-                "scene": native_result.get("scene", scene_name),
+                "scene": scene_out,
+                "bounds_ready": bool(actor.get("bounds_ready")),
+                "world_aabb": actor.get("world_aabb"),
                 "actor": actor,
             }
             part = build_part(

@@ -97,7 +97,24 @@ struct MeshData {
 
 /// LOD 生成配置
 struct LODGenerationOptions {
-    bool enabled = false;                                    // 是否生成 LOD
+    bool enabled = false;  // 是否生成 LOD
+
+    // --- 自适应模式（默认开）---
+    // auto_levels=true 时按原始三角形数几何衰减自动推导层数与每级目标，
+    // 直到触及相对比例下限或简化收益耗尽；下方 legacy 数组被忽略。
+    bool auto_levels = true;         // true=自适应推导；false=用 legacy 数组
+    float decay = 0.5f;              // 每级目标三角形数 ≈ decay × 上一级
+    float min_ratio = 0.01f;        // 相对比例下限：最低级不低于 min_ratio × T0
+    std::uint32_t min_triangles = 0;  // 可选绝对三角形下限（0=仅用 min_ratio）
+    std::uint32_t max_levels = 8;    // 自动推导层数的安全上限（约束 GPU 显存）
+    float pixel_error_budget = 1.0f;     // 投影误差预算（像素 @参考视口高度）
+    float ref_viewport_height = 1080.0f; // 阈值换算的参考视口高度
+
+    // 蒙皮网格专用（更保守；缺省回退到通用值）。Phase C 使用。
+    float skinned_min_ratio = 0.05f;
+    std::uint32_t skinned_max_levels = 4;
+
+    // --- legacy 显式模式（auto_levels=false 时使用，保持旧行为）---
     std::uint32_t level_count = 3;                            // LOD 级数（不含 LOD 0）
     std::vector<float> target_ratios = {0.5f, 0.25f, 0.05f};  // 各级三角形保留比例
     std::vector<float> max_errors = {0.05f, 0.2f, 1.0f};      // 各级最大允许误差（越大简化越激进）

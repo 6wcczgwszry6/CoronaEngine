@@ -157,6 +157,11 @@ struct GeometrySystem::Impl {
     /// 未初始化时（首帧）取 dt=0。
     std::optional<std::chrono::steady_clock::time_point> last_skin_update_time;
 
+    // ========================================
+    // 资源内存预算（MB），0 = 不限制（默认）
+    // ========================================
+    std::size_t resource_memory_budget_mb = 512;  // 默认 512MB，0 表示不限制
+
     [[nodiscard]] static uint64_t make_lod_key(std::uintptr_t geometry_handle,
                                                uint32_t       mesh_index) {
         return (static_cast<uint64_t>(geometry_handle) << 32) | mesh_index;
