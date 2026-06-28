@@ -199,6 +199,11 @@ class GeometrySystem : public Kernel::SystemBase {
     /// 设置 LRU ActorCache 磁盘目录（需在首次 evict 前调用）
     void set_cache_directory(std::filesystem::path dir);
 
+    /// 设置资源内存预算（MB），0 = 不限制。
+    /// 当 ResourceManager 估算内存用量超过预算时，GeometrySystem 每帧末尾
+    /// 触发 evict_until_under_budget，优先淘汰最久未访问（cold）的资源。
+    void set_resource_memory_budget_mb(std::size_t mb);
+
     [[nodiscard]] bool is_actor_offline(std::uintptr_t actor) const;
     void               mark_actor_restored(std::uintptr_t actor);
 

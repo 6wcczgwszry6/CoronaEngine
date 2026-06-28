@@ -2,6 +2,7 @@
 
 #include "horizon.h"
 #include <corona/events/optics_system_events.h>
+#include <corona/events/scene_system_events.h>
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/kernel/system/system_base.h>
@@ -15,8 +16,10 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // 前向声明 Hardware 结构体
@@ -336,6 +339,11 @@ class OpticsSystem : public Kernel::SystemBase {
     Kernel::EventId screenshot_request_sub_id_ = 0;
     Kernel::EventId backend_switch_sub_id_ = 0;
     Kernel::EventId vision_scene_load_sub_id_ = 0;
+    Kernel::EventId residency_sub_id_ = 0;
+
+    // ActorResidencyChangedEvent 驱动的驻留集合（Loaded actor 在此）
+    mutable std::shared_mutex residency_mtx_;
+    std::unordered_set<std::uintptr_t> resident_actors_;
 };
 
 }  // namespace Corona::Systems

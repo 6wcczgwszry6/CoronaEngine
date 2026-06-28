@@ -151,6 +151,11 @@ struct GeometrySystem::Impl {
     /// import 任务 epoch 分配器（进程级单调递增，0 保留为"无任务"）。
     std::uint64_t next_import_epoch = 1;
 
+    // ========================================
+    // 资源内存预算（MB），0 = 不限制（默认）
+    // ========================================
+    std::size_t resource_memory_budget_mb = 0;  // 0 表示不触发主动淘汰
+
     [[nodiscard]] static uint64_t make_lod_key(std::uintptr_t geometry_handle,
                                                uint32_t       mesh_index) {
         return (static_cast<uint64_t>(geometry_handle) << 32) | mesh_index;

@@ -26,6 +26,19 @@ bool MechanicsSystem::initialize(Kernel::ISystemContext* ctx) {
     // 因为 initialize() 在 SystemManager::initialize_all() 的锁内调用，
     // 此时 get_system() 会尝试重入同一把非递归 mutex，导致未定义行为/崩溃。
 
+    if (ctx && ctx->event_bus()) {
+        impl_->residency_sub_id_ =
+            ctx->event_bus()->subscribe<Events::ActorResidencyChangedEvent>(
+                [this](const Events::ActorResidencyChangedEvent& e) {
+                    std::unique_lock lock(impl_->residency_mtx_);
+                    if (e.loaded) {
+                        impl_->resident_actors_.insert(e.actor);
+                    } else {
+                        impl_->resident_actors_.erase(e.actor);
+                    }
+                });
+    }
+
     CFW_LOG_INFO("MechanicsSystem initialized");
     return true;
 }
@@ -70,6 +83,11 @@ void MechanicsSystem::stop() {
 void MechanicsSystem::shutdown() {
     // 标记关闭请求，不再接受新的回调任务
     impl_->shutdown_requested.store(true, std::memory_order_release);
+
+    if (impl_->residency_sub_id_ != 0 && impl_->ctx && impl_->ctx->event_bus()) {
+        impl_->ctx->event_bus()->unsubscribe(impl_->residency_sub_id_);
+    }
+
     impl_->clear_runtime_state();
     CFW_LOG_INFO("MechanicsSystem shutdown, all caches cleared");
 }

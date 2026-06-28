@@ -193,6 +193,9 @@ void GeometrySystem::update() {
         }
         // 批量初始化 Actor 加载状态（单次加锁替代逐 Actor 加锁）
         // 当距离剔除关闭时，actor 视为始终已加载；否则从 Unloaded 开始由距离剔除系统管理
+        // 对于初始即为 Loaded 的 actor，需要手动发布 ActorResidencyChangedEvent
+        // 因为不经过 load 流程，on_load_finished 不会触发
+        std::vector<Events::ActorResidencyChangedEvent> initial_resident;
         {
             std::unique_lock lock(impl_->mtx);
             auto& scene_state = impl_->get_or_create(scene_handle);
@@ -200,8 +203,17 @@ void GeometrySystem::update() {
                                                      ? ActorLoadState::Unloaded
                                                      : ActorLoadState::Loaded;
             for (auto actor_handle : added_actors) {
-                scene_state.actor_load_states.try_emplace(actor_handle, initial_state);
+                auto [it, inserted] = scene_state.actor_load_states.try_emplace(
+                    actor_handle, initial_state);
+                if (inserted && initial_state == ActorLoadState::Loaded) {
+                    initial_resident.push_back(
+                        {scene_handle, actor_handle, /*loaded=*/true});
+                }
             }
+        }
+        for (const auto& evt : initial_resident) {
+            if (impl_->ctx && impl_->ctx->event_bus())
+                impl_->ctx->event_bus()->publish(evt);
         }
 
         Spatial::AABB root_aabb;
@@ -484,6 +496,31 @@ void GeometrySystem::update() {
                                                          visible_actors.end());
         }
     }
+
+    // ========================================
+    // 每帧资源预算检查：超过预算时主动淘汰最久未访问的冷资源
+    // ========================================
+    if (impl_->resource_memory_budget_mb > 0) {
+        auto& rm = Resource::ResourceManager::get_instance();
+        auto used = rm.used_memory_bytes();
+        auto budget = rm.memory_budget();
+        if (budget > 0 && used > budget) {
+            CFW_LOG_NOTICE("[GeometrySystem] Resource memory {} MB over budget {} MB, evicting...",
+                           used / (1024 * 1024), budget / (1024 * 1024));
+            auto result = rm.evict_until_under_budget();
+            if (result.success) {
+                CFW_LOG_NOTICE("[GeometrySystem] Evicted resource {}, freed {} bytes "
+                               "({} MB used after eviction)",
+                               result.rid, result.bytes_freed,
+                               rm.used_memory_bytes() / (1024 * 1024));
+            } else {
+                CFW_LOG_WARNING("[GeometrySystem] Eviction stalled: all resources pinned or in use "
+                                "({} MB still over {} MB budget)",
+                                rm.used_memory_bytes() / (1024 * 1024),
+                                budget / (1024 * 1024));
+            }
+        }
+    }
 }
 
 void GeometrySystem::shutdown() {
@@ -571,6 +608,17 @@ void GeometrySystem::set_cache_directory(std::filesystem::path dir) {
     // 如果 ActorCache 已创建，下次 evict 时会沿用旧目录；
     // 如果尚未创建，ensure_actor_cache() 将使用新目录。
     CFW_LOG_NOTICE("[GeometrySystem] Cache directory set to {}", impl_->actor_cache_dir.string());
+}
+
+void GeometrySystem::set_resource_memory_budget_mb(std::size_t mb) {
+    impl_->resource_memory_budget_mb = mb;
+    if (mb > 0) {
+        Resource::ResourceManager::get_instance().set_memory_budget(mb * 1024 * 1024);
+        CFW_LOG_NOTICE("[GeometrySystem] Resource memory budget set to {} MB", mb);
+    } else {
+        Resource::ResourceManager::get_instance().set_memory_budget(0);
+        CFW_LOG_NOTICE("[GeometrySystem] Resource memory budget disabled (unlimited)");
+    }
 }
 
 // ============================================================================
@@ -1013,6 +1061,7 @@ void GeometrySystem::process_async_tasks() {
     //卸载失败重试
     if (!failed_unloads.empty()) {
         std::vector<Events::ActorUnloadFinishedEvent> deferred_events;
+        std::vector<Events::ActorResidencyChangedEvent> deferred_residency;
         {
             std::unique_lock lock(impl_->mtx);
             for (const auto& task : failed_unloads) {
@@ -1036,6 +1085,8 @@ void GeometrySystem::process_async_tasks() {
                                  (unsigned long)task.actor);
                     scene_state.unload_retry_counts.erase(task.actor);
                     scene_state.actor_load_states[task.actor] = ActorLoadState::Loaded;
+                    deferred_residency.push_back(
+                        {task.scene_handle, task.actor, /*loaded=*/true});
                 } else {
                     auto actor_read = actor_storage.try_acquire_read(task.actor);
                     if (actor_read.valid()) {
@@ -1055,6 +1106,10 @@ void GeometrySystem::process_async_tasks() {
                             scene_state.unload_retry_counts.erase(task.actor);
                             scene_state.actor_load_states[task.actor] = ActorLoadState::Unloaded;
                             deferred_events.push_back({task.scene_handle, task.actor});
+                            // on_unload_finished 检查 Unloading 状态，此处已是 Unloaded 不会通过
+                            // 所以直接在此 push residency 事件
+                            deferred_residency.push_back(
+                                {task.scene_handle, task.actor, /*loaded=*/false});
                         }
                     } else {
                         CFW_LOG_WARNING("[SceneSystem] Actor 0x%lx handle invalid, clean up all states",
@@ -1062,11 +1117,16 @@ void GeometrySystem::process_async_tasks() {
                         scene_state.unload_retry_counts.erase(task.actor);
                         scene_state.actor_load_states.erase(task.actor);
                         impl_->offline_actors.erase(task.actor);
+                        deferred_residency.push_back(
+                            {task.scene_handle, task.actor, /*loaded=*/false});
                     }
                 }
             }
         }
         for (const auto& evt : deferred_events) {
+            impl_->ctx->event_bus()->publish(evt);
+        }
+        for (const auto& evt : deferred_residency) {
             impl_->ctx->event_bus()->publish(evt);
         }
     }
@@ -1114,16 +1174,26 @@ void GeometrySystem::on_unload_requested(const Events::ActorUnloadRequestedEvent
 
     auto& scene_state = scene_it->second;
     if (scene_state.loading_tasks.count(e.actor) || scene_state.unloading_tasks.count(e.actor)) {
+        Events::ActorResidencyChangedEvent deferred;
+        bool has_deferred = false;
         if (scene_state.unloading_tasks.count(e.actor)) {
             scene_state.unloading_tasks.erase(e.actor);
             scene_state.unload_retry_counts.erase(e.actor);
             scene_state.actor_load_states[e.actor] = ActorLoadState::Loaded;
+            deferred = {e.scene, e.actor, /*loaded=*/true};
+            has_deferred = true;
             CFW_LOG_NOTICE("[GeometrySystem] Cancelled pending unload for actor {}", e.actor);
         }
         if (scene_state.loading_tasks.count(e.actor)) {
             // 加载进行中 — 将状态设为 Unloaded，加载完成时 process_async_tasks 检测到非 Loading 状态会跳过
             scene_state.actor_load_states[e.actor] = ActorLoadState::Unloaded;
+            deferred = {e.scene, e.actor, /*loaded=*/false};
+            has_deferred = true;
             CFW_LOG_NOTICE("[GeometrySystem] Unload requested during load for actor {} — cancelling load", e.actor);
+        }
+        if (has_deferred) {
+            lock.unlock();
+            impl_->ctx->event_bus()->publish(deferred);
         }
         return;
     }
@@ -1318,6 +1388,57 @@ void GeometrySystem::on_restore_requested(const Events::ActorRestoreRequestedEve
     if (model_path.empty()) {
         CFW_LOG_ERROR("[GeometrySystem] Restore failed: actor {} has empty model path", event.actor);
         return;
+    }
+
+    // ---- 第 1.5 步：恢复运行时状态到 SharedDataHub ----
+    // evict 时存入 ActorStreamingRecord 的 transform / physics_enabled /
+    // optics_visible 在 restore 时写回对应的存储槽位，保证 actor 恢复后
+    // 渲染/物理看到的是 evict 前的状态而非默认值。
+    if (rec) {
+        auto actor_read = hub.actor_storage().try_acquire_read(event.actor);
+        if (actor_read) {
+            for (auto ph : actor_read->profile_handles) {
+                auto profile = hub.profile_storage().try_acquire_read(ph);
+                if (!profile) continue;
+
+                // 恢复 transform（通过 geometry → transform_handle）
+                if (profile->geometry_handle) {
+                    auto geom = hub.geometry_storage().try_acquire_read(
+                        profile->geometry_handle);
+                    if (geom && geom->transform_handle) {
+                        auto xform = hub.model_transform_storage().try_acquire_write(
+                            geom->transform_handle);
+                        if (xform) {
+                            *xform = rec->transform;
+                        }
+                    }
+                }
+
+                // 恢复 physics_enabled
+                if (profile->mechanics_handle) {
+                    auto mech = hub.mechanics_storage().try_acquire_write(
+                        profile->mechanics_handle);
+                    if (mech) {
+                        mech->physics_enabled = rec->physics_enabled;
+                    }
+                }
+
+                // 恢复 optics_visible
+                if (profile->optics_handle) {
+                    auto optics = hub.optics_storage().try_acquire_write(
+                        profile->optics_handle);
+                    if (optics) {
+                        optics->visible = rec->optics_visible;
+                    }
+                }
+            }
+        }
+        CFW_LOG_NOTICE("[GeometrySystem] Restored actor {} state: pos=({:.1f},{:.1f},{:.1f}) "
+                       "physics={} optics_visible={}",
+                       event.actor,
+                       rec->transform.position.x, rec->transform.position.y,
+                       rec->transform.position.z,
+                       rec->physics_enabled, rec->optics_visible);
     }
 
     // ---- 第 2 步：检查是否已在加载/卸载中，然后启动异步导入 ----
