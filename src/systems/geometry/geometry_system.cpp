@@ -2354,6 +2354,24 @@ void GeometrySystem::update_skinned_geometry() {
         }
         if (mesh_count == 0) continue;
 
+        // ---- 第 4b 步：拷出各 mesh 的 LOD1..N GPU 缓冲句柄（蒙皮需写入所有级别）----
+        // 否则拉远切到低 LOD 会读到未蒙皮的绑定姿态顶点 → 冻住不动。
+        // levels[0] 即 LOD0（= mesh_dev 缓冲，已在 vbufs/vstoragebufs 中），此处只取 levels[1..]。
+        std::vector<std::vector<std::pair<Horizon::HardwareBuffer, Horizon::HardwareBuffer>>>
+            lod_targets(mesh_count);
+        {
+            std::shared_lock lod_lock(impl_->lod_cache_mutex);
+            for (std::size_t mi = 0; mi < mesh_count; ++mi) {
+                auto key = Impl::make_lod_key(geom_handle, static_cast<uint32_t>(mi));
+                auto it = impl_->lod_cache.find(key);
+                if (it == impl_->lod_cache.end()) continue;
+                for (std::size_t l = 1; l < it->second.levels.size(); ++l) {
+                    auto& lvl = it->second.levels[l];
+                    lod_targets[mi].emplace_back(lvl.vertex_buffer, lvl.vertex_storage);
+                }
+            }
+        }
+
         // ---- 第 5 步：锁外计算骨骼最终矩阵（每 geom 一次）----
         std::vector<std::array<float, 16>> finals;
         Resource::compute_pose(skeleton, clip, anim_time, finals);
@@ -2402,6 +2420,42 @@ void GeometrySystem::update_skinned_geometry() {
             }
             if (mesh_idx < vstoragebufs.size() && vstoragebufs[mesh_idx]) {
                 (void)vstoragebufs[mesh_idx].write_bytes(std::span<const std::byte>(blob.data(), blob.size()));
+            }
+
+            // ---- 同法蒙皮所有 LOD 级别 ----
+            // 每个 LODLevel 携带与其顶点等长的 bone_weights（导入时随顶点同步 remap），
+            // 故按 LOD0 同样的方式 skin_one_vertex 后写入对应 LOD GPU 缓冲。
+            // 顺序与 upload_lod_from_scene_data 一致：跳过空 LOD、按非空顺序与 levels[1..] 对齐，
+            // 受 lod_targets 实际数量自然限制（含 upload 的层数上限）。
+            const auto& targets = lod_targets[mesh_idx];
+            if (!targets.empty()) {
+                std::size_t ti = 0;
+                for (std::size_t li = 0;
+                     li < mesh.lod_levels.size() && ti < targets.size(); ++li) {
+                    const Resource::LODLevel& lod = mesh.lod_levels[li];
+                    if (lod.vertices.empty() || lod.indices.empty()) continue;  // 与 upload 跳过逻辑一致
+
+                    // 该 LOD 有等长骨骼权重才能蒙皮；否则保持其绑定姿态（仍推进 ti 保持对齐）
+                    if (!lod.bone_weights.empty() &&
+                        lod.bone_weights.size() == lod.vertices.size()) {
+                        std::vector<Resource::Vertex> sk(lod.vertices.size());
+                        for (std::size_t v = 0; v < lod.vertices.size(); ++v) {
+                            sk[v] = skin_one_vertex(lod.vertices[v], lod.bone_weights[v], finals);
+                        }
+                        auto lsrc = std::as_bytes(
+                            std::span<const Resource::Vertex>(sk.data(), sk.size()));
+                        std::vector<std::byte> lblob(lsrc.begin(), lsrc.end());
+                        if (targets[ti].first) {
+                            (void)targets[ti].first.write_bytes(
+                                std::span<const std::byte>(lblob.data(), lblob.size()));
+                        }
+                        if (targets[ti].second) {
+                            (void)targets[ti].second.write_bytes(
+                                std::span<const std::byte>(lblob.data(), lblob.size()));
+                        }
+                    }
+                    ++ti;
+                }
             }
         }
 

@@ -593,6 +593,31 @@ struct SimplifyPhase1Result {
     bool success = false;  // true 表示顶点数在限制以下
 };
 
+/// 生成顶点 remap 表（骨骼感知）。返回唯一顶点数。
+/// 蒙皮网格（bone_weights 与 vertices 等长且非空）用双流 {Vertex, BoneWeights} 判等：
+/// 只有位置/法线/UV 与骨骼权重都二进制相同的顶点才合并，避免把"几何重合但绑不同骨骼"
+/// 的顶点错误合并（rig-mixing）→ 错绑。否则退回 Vertex-only 单流（静态网格行为不变）。
+/// 注意：所有按值合并顶点的地方必须统一用本函数，否则计数与压缩口径不一致会破坏 uint16 上限判断。
+inline size_t generate_vertex_remap_rig_aware(
+    std::vector<unsigned int>& remap,
+    const std::vector<std::uint32_t>& indices,
+    const std::vector<Vertex>& vertices,
+    const std::vector<BoneWeights>* bone_weights) {
+    if (bone_weights != nullptr && !bone_weights->empty()
+        && bone_weights->size() == vertices.size()) {
+        const meshopt_Stream streams[2] = {
+            {vertices.data(), sizeof(Vertex), sizeof(Vertex)},
+            {bone_weights->data(), sizeof(BoneWeights), sizeof(BoneWeights)},
+        };
+        return meshopt_generateVertexRemapMulti(
+            remap.data(), indices.data(), indices.size(),
+            vertices.size(), streams, 2);
+    }
+    return meshopt_generateVertexRemap(
+        remap.data(), indices.data(), indices.size(),
+        vertices.data(), vertices.size(), sizeof(Vertex));
+}
+
 /// Phase 1: 迭代简化尝试将顶点数降至 uint16 限制以下
 /// - target_index_count 始终为 0
 /// - error 从 0.001 开始，步进 0.001，直到 0.01
@@ -600,20 +625,16 @@ struct SimplifyPhase1Result {
 inline SimplifyPhase1Result simplify_phase1(
     const std::vector<Vertex>& vertices,
     const std::vector<std::uint32_t>& original_indices,
-    const std::string& mesh_name) {
+    const std::string& mesh_name,
+    const std::vector<BoneWeights>* bone_weights = nullptr) {
     SimplifyPhase1Result result;
     result.indices = original_indices;
 
     std::vector<unsigned int> remap(vertices.size());
 
-    // 先检查原始网格是否已经满足条件
-    result.unique_vertex_count = meshopt_generateVertexRemap(
-        remap.data(),
-        original_indices.data(),
-        original_indices.size(),
-        vertices.data(),
-        vertices.size(),
-        sizeof(Vertex));
+    // 先检查原始网格是否已经满足条件（计数须与最终压缩同口径：蒙皮走双流）
+    result.unique_vertex_count = generate_vertex_remap_rig_aware(
+        remap, original_indices, vertices, bone_weights);
 
     CFW_LOG_TRACE("[MeshOpt] Mesh '{}': starting phase1 simplification, {} unique vertices",
                   mesh_name, result.unique_vertex_count);
@@ -653,14 +674,9 @@ inline SimplifyPhase1Result simplify_phase1(
             simplified_indices.resize(simplified_count);
             result.indices = std::move(simplified_indices);
 
-            // 重新计算唯一顶点数
-            result.unique_vertex_count = meshopt_generateVertexRemap(
-                remap.data(),
-                result.indices.data(),
-                result.indices.size(),
-                vertices.data(),
-                vertices.size(),
-                sizeof(Vertex));
+            // 重新计算唯一顶点数（同口径：蒙皮走双流）
+            result.unique_vertex_count = generate_vertex_remap_rig_aware(
+                remap, result.indices, vertices, bone_weights);
 
             CFW_LOG_TRACE("[MeshOpt] Mesh '{}' phase1: error {:.4f}, unique vertices {}",
                           mesh_name, current_error, result.unique_vertex_count);
@@ -788,13 +804,8 @@ inline std::vector<SingleMeshResult> split_mesh_uniformly(
 
         // 生成顶点重映射，压缩顶点缓冲区
         std::vector<unsigned int> remap(vertices.size());
-        size_t unique_count = meshopt_generateVertexRemap(
-            remap.data(),
-            split_indices.data(),
-            split_indices.size(),
-            vertices.data(),
-            vertices.size(),
-            sizeof(Vertex));
+        size_t unique_count = generate_vertex_remap_rig_aware(
+            remap, split_indices, vertices, bone_weights);
 
         // 如果这个分片的顶点数仍然超过限制，需要进一步拆分
         if (unique_count > kMaxVerticesUint16) {
@@ -945,19 +956,14 @@ inline MeshOptimizeResult optimize_mesh_pipeline(
         return result;
     }
 
-    // Phase 1: 尝试迭代简化
-    auto phase1_result = simplify_phase1(unindexed_vertices, indices, mesh_name);
+    // Phase 1: 尝试迭代简化（蒙皮网格下传 bone_weights，使顶点计数与压缩同口径）
+    auto phase1_result = simplify_phase1(unindexed_vertices, indices, mesh_name, bone_weights);
 
     if (phase1_result.success) {
-        // Phase 1 成功，生成顶点重映射
+        // Phase 1 成功，生成顶点重映射（骨骼感知）
         std::vector<unsigned int> remap(unindexed_vertices.size());
-        size_t unique_vertex_count = meshopt_generateVertexRemap(
-            remap.data(),
-            phase1_result.indices.data(),
-            phase1_result.indices.size(),
-            unindexed_vertices.data(),
-            unindexed_vertices.size(),
-            sizeof(Vertex));
+        size_t unique_vertex_count = generate_vertex_remap_rig_aware(
+            remap, phase1_result.indices, unindexed_vertices, bone_weights);
 
         // 重映射索引缓冲区
         result.indices.resize(phase1_result.indices.size());
@@ -1083,15 +1089,10 @@ inline LODLevel build_lod_level_from_simplified(
     const std::string& lod_label) {
     const bool geometry_changed = simplified_indices.size() < original_index_count;
 
-    // 生成紧凑的独立顶点缓冲区
+    // 生成紧凑的独立顶点缓冲区（骨骼感知：避免合并绑不同骨骼的重合顶点）
     std::vector<unsigned int> remap(vertices.size());
-    size_t unique_vertex_count = meshopt_generateVertexRemap(
-        remap.data(),
-        simplified_indices.data(),
-        simplified_indices.size(),
-        vertices.data(),
-        vertices.size(),
-        sizeof(Vertex));
+    size_t unique_vertex_count = generate_vertex_remap_rig_aware(
+        remap, simplified_indices, vertices, has_bones ? bone_weights : nullptr);
 
     std::vector<std::uint32_t> remapped_indices(simplified_indices.size());
     meshopt_remapIndexBuffer(remapped_indices.data(), simplified_indices.data(),
@@ -1160,6 +1161,102 @@ inline void enforce_strictly_decreasing_thresholds(std::vector<LODLevel>& levels
     }
 }
 
+// ============================================================================
+// 蒙皮网格骨骼感知减面（Phase C）
+// ============================================================================
+
+/// 每顶点主导骨骼 = 权重最大的那根（并列取较小 id）；无任何影响 → -1。
+/// 用于检测骨骼缝：相邻顶点主导骨骼不同处即关节边界。
+inline std::vector<std::int32_t> compute_dominant_bones(
+    const std::vector<BoneWeights>& bone_weights) {
+    std::vector<std::int32_t> dominant(bone_weights.size(), -1);
+    for (size_t i = 0; i < bone_weights.size(); ++i) {
+        const auto& bw = bone_weights[i];
+        float best_w = 0.0f;
+        std::int32_t best_id = -1;
+        for (int k = 0; k < MAX_BONE_INFLUENCE; ++k) {
+            if (bw.ids[k] < 0) continue;
+            // 严格大于才更新 → 权重并列时保留先出现（id 较小）的那根
+            if (bw.weights[k] > best_w) {
+                best_w = bw.weights[k];
+                best_id = bw.ids[k];
+            }
+        }
+        dominant[i] = best_id;
+    }
+    return dominant;
+}
+
+/// 构建骨骼缝顶点锁定表（meshopt_SimplifyVertex_Lock）。
+/// 任一三角形的三个顶点主导骨骼不全相同 → 该三角形跨骨骼缝 → 三顶点全部硬锁。
+/// 硬锁顶点在简化中不移动，从而保住关节边界，避免跨骨塌边导致动画撕裂。
+inline std::vector<unsigned char> build_bone_seam_locks(
+    const std::vector<std::uint32_t>& indices,
+    size_t vertex_count,
+    const std::vector<std::int32_t>& dominant) {
+    std::vector<unsigned char> lock(vertex_count, 0);
+    const size_t tri_count = indices.size() / 3;
+    for (size_t t = 0; t < tri_count; ++t) {
+        std::uint32_t i0 = indices[t * 3 + 0];
+        std::uint32_t i1 = indices[t * 3 + 1];
+        std::uint32_t i2 = indices[t * 3 + 2];
+        if (i0 >= vertex_count || i1 >= vertex_count || i2 >= vertex_count) continue;
+        std::int32_t d0 = dominant[i0], d1 = dominant[i1], d2 = dominant[i2];
+        if (d0 != d1 || d1 != d2) {
+            lock[i0] = meshopt_SimplifyVertex_Lock;
+            lock[i1] = meshopt_SimplifyVertex_Lock;
+            lock[i2] = meshopt_SimplifyVertex_Lock;
+        }
+    }
+    return lock;
+}
+
+/// 简化一步（骨骼感知 dispatch）：
+/// - 蒙皮网格：meshopt_simplifyWithAttributes，属性取紧邻的 normal(3)+uv(2)=5 floats
+///   （#pragma pack(1) 保证连续，无需额外缓冲），并传骨骼缝锁定表。
+/// - 静态网格：原 meshopt_simplify（position-only）。
+/// vertex_lock 为空时退回静态路径。
+inline size_t simplify_lod_step(
+    std::uint32_t* destination,
+    const std::vector<std::uint32_t>& indices_u32,
+    const std::vector<Vertex>& vertices,
+    bool has_bones,
+    const std::vector<unsigned char>* vertex_lock,
+    size_t target_index_count,
+    float target_error,
+    float* result_error) {
+    if (has_bones && vertex_lock != nullptr && vertex_lock->size() == vertices.size()) {
+        static const float kAttrWeights[5] = {1.0f, 1.0f, 1.0f, 0.5f, 0.5f};  // normal.xyz, uv.xy
+        return meshopt_simplifyWithAttributes(
+            destination,
+            indices_u32.data(),
+            indices_u32.size(),
+            &vertices[0].position[0],
+            vertices.size(),
+            sizeof(Vertex),
+            &vertices[0].normal[0],  // 属性起点：normal 后紧跟 uv（连续 5 floats）
+            sizeof(Vertex),
+            kAttrWeights,
+            5,
+            vertex_lock->data(),
+            target_index_count,
+            target_error,
+            0,
+            result_error);
+    }
+    return meshopt_simplify(
+        destination,
+        indices_u32.data(),
+        indices_u32.size(),
+        &vertices[0].position[0],
+        vertices.size(),
+        sizeof(Vertex),
+        target_index_count,
+        target_error,
+        0,
+        result_error);
+}
+
 /// 自适应分支：按三角形数几何衰减自动推导层数，带相对比例下限。
 /// 见 LODGenerationOptions（auto_levels/decay/min_ratio/min_triangles/max_levels/pixel_error_budget）。
 inline std::vector<LODLevel> generate_lod_levels_adaptive(
@@ -1177,8 +1274,9 @@ inline std::vector<LODLevel> generate_lod_levels_adaptive(
 
     const size_t T0 = indices_u32.size() / 3;
 
-    // 相对比例下限（+ 可选绝对下限）
-    const float ratio = std::max(0.0f, std::min(options.min_ratio, 1.0f));
+    // 相对比例下限（+ 可选绝对下限）。蒙皮网格更保守（静止误差对动画偏乐观）。
+    const float min_ratio_eff = has_bones ? options.skinned_min_ratio : options.min_ratio;
+    const float ratio = std::max(0.0f, std::min(min_ratio_eff, 1.0f));
     size_t min_tris = static_cast<size_t>(std::ceil(static_cast<float>(T0) * ratio));
     min_tris = std::max(min_tris, static_cast<size_t>(options.min_triangles));
     min_tris = std::max(min_tris, static_cast<size_t>(1));
@@ -1205,8 +1303,18 @@ inline std::vector<LODLevel> generate_lod_levels_adaptive(
                     std::max(1.0f, options.ref_viewport_height * 0.5f);
     const float C = (mesh_scale > 1e-8f) ? (r_norm / mesh_scale) * B : (r_norm * B);
 
-    const std::uint32_t max_levels = std::max<std::uint32_t>(options.max_levels, 1);
+    const std::uint32_t max_levels = std::max<std::uint32_t>(
+        has_bones ? options.skinned_max_levels : options.max_levels, 1);
     const float decay = std::min(std::max(options.decay, 0.05f), 0.95f);
+
+    // 蒙皮网格：预算一次主导骨骼 + 骨骼缝硬锁（各级简化基于同一 LOD0 indices，复用）。
+    std::vector<unsigned char> seam_locks;
+    const std::vector<unsigned char>* lock_ptr = nullptr;
+    if (has_bones && bone_weights != nullptr && bone_weights->size() == vertices.size()) {
+        seam_locks = build_bone_seam_locks(
+            indices_u32, vertices.size(), compute_dominant_bones(*bone_weights));
+        lock_ptr = &seam_locks;
+    }
 
     size_t target_tris = T0;
     size_t prev_emitted_tris = T0;
@@ -1220,16 +1328,15 @@ inline std::vector<LODLevel> generate_lod_levels_adaptive(
         std::vector<std::uint32_t> simplified_indices(indices_u32.size());
         float result_error = 0.0f;
         // 自适应模式让三角形数当驱动：传一个很大的 target_error，使 simplify 不被误差提前截停。
-        size_t simplified_count = meshopt_simplify(
+        // 蒙皮网格走属性感知 + 骨骼缝硬锁（simplify_lod_step 内部 dispatch）。
+        size_t simplified_count = simplify_lod_step(
             simplified_indices.data(),
-            indices_u32.data(),
-            indices_u32.size(),
-            &vertices[0].position[0],
-            vertices.size(),
-            sizeof(Vertex),
+            indices_u32,
+            vertices,
+            has_bones,
+            lock_ptr,
             target_index_count,
             1e3f,
-            0,  // 不锁定边界（静态网格）
             &result_error);
 
         if (simplified_count == 0) {
@@ -1325,6 +1432,15 @@ inline std::vector<LODLevel> generate_lod_levels(
                                             static_cast<std::uint32_t>(options.max_errors.size()),
                                             options.max_triangles.empty() ? options.level_count : static_cast<std::uint32_t>(options.max_triangles.size())});
 
+    // 蒙皮网格：骨骼缝硬锁（与自适应分支一致），各级复用。
+    std::vector<unsigned char> seam_locks;
+    const std::vector<unsigned char>* lock_ptr = nullptr;
+    if (has_bones && bone_weights != nullptr && bone_weights->size() == vertices.size()) {
+        seam_locks = build_bone_seam_locks(
+            indices_u32, vertices.size(), compute_dominant_bones(*bone_weights));
+        lock_ptr = &seam_locks;
+    }
+
     for (std::uint32_t i = 0; i < actual_levels; ++i) {
         float ratio = options.target_ratios[i];
         float level_max_error = options.max_errors[i];
@@ -1347,16 +1463,15 @@ inline std::vector<LODLevel> generate_lod_levels(
         std::vector<std::uint32_t> simplified_indices(indices_u32.size());
         float result_error = 0.0f;
 
-        size_t simplified_count = meshopt_simplify(
+        // 蒙皮网格走属性感知 + 骨骼缝硬锁（simplify_lod_step 内部 dispatch）。
+        size_t simplified_count = simplify_lod_step(
             simplified_indices.data(),
-            indices_u32.data(),
-            indices_u32.size(),
-            &vertices[0].position[0],
-            vertices.size(),
-            sizeof(Vertex),
+            indices_u32,
+            vertices,
+            has_bones,
+            lock_ptr,
             target_index_count,
             level_max_error,
-            0,  // 不锁定边界，LOD 允许更自由地简化
             &result_error);
 
         // simplify 未达目标时保持结果（不引入 sloppy，避免破坏拓扑）。
