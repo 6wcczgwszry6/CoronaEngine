@@ -1,5 +1,6 @@
 #include "corona/resource/types/scene.h"
 
+#include <algorithm>
 #include <array>
 #include <assimp/IOStream.hpp>
 #include <assimp/IOSystem.hpp>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include "corona/resource/types/image.h"
+#include "corona/resource/types/animation_pose.h"
 #include "parse_assimp.h"
 
 #ifdef _WIN32
@@ -417,6 +419,95 @@ std::shared_ptr<IResource> SceneParser::parse_assimp(const std::filesystem::path
             CFW_LOG_NOTICE("[Assimp]   mesh[{}] skin check: {} verts, weight_sum=[{:.4f},{:.4f}], "
                            "{} off-by->1e-3, {} unweighted",
                            mi, mesh.bone_weights.size(), min_sum, max_sum, bad, unweighted);
+        }
+
+        // ====================================================================
+        // 首帧归一化：把蒙皮模型规整到 1×1×1 单位立方体
+        // --------------------------------------------------------------------
+        // 静态模型在导入期把顶点烘进单位立方体；蒙皮模型不能这么做（会破坏 offset
+        // 矩阵）。改为：用首帧（绑定姿态 t=0）蒙皮顶点求 AABB → 得 center/scale →
+        // 构造归一化矩阵 N(p)=scale·(p-center)，左乘进 global_inverse。
+        // 因 final = global_inverse·global·offset 是蒙皮的最左因子，左乘 N 后
+        // 每帧蒙皮输出都自动落在单位立方体；绑定顶点与 offset 矩阵完全不动，
+        // 蒙皮数学不变。固定一次（基于首帧），不随动画忽大忽小。
+        // ====================================================================
+        {
+            const auto& skel = *scene->data.skeleton;
+            // 1. 首帧骨骼矩阵（无动画则 animations 为空，用单位 clip 退化为绑定姿态）
+            std::vector<std::array<float, 16>> finals;
+            if (!scene->data.animations.empty()) {
+                compute_pose(skel, scene->data.animations[0], 0.0f, finals);
+            } else {
+                // 无动画但有骨骼：用空 clip 取绑定姿态（compute_pose 对无通道节点用 local）
+                AnimationClip empty_clip;
+                compute_pose(skel, empty_clip, 0.0f, finals);
+            }
+
+            // 2. 遍历所有蒙皮 mesh 的绑定顶点，做首帧蒙皮，累积 AABB
+            auto skin_pos = [&finals](const Vertex& v, const BoneWeights& bw,
+                                      float& ox, float& oy, float& oz) -> bool {
+                float px = 0, py = 0, pz = 0, tw = 0;
+                for (int i = 0; i < MAX_BONE_INFLUENCE; ++i) {
+                    std::int32_t id = bw.ids[i];
+                    float w = bw.weights[i];
+                    if (id < 0 || w <= 0.0f) continue;
+                    if (id >= static_cast<std::int32_t>(finals.size())) continue;
+                    const auto& m = finals[static_cast<std::size_t>(id)];
+                    float bx = v.position[0], by = v.position[1], bz = v.position[2];
+                    px += w * (m[0] * bx + m[4] * by + m[8] * bz + m[12]);
+                    py += w * (m[1] * bx + m[5] * by + m[9] * bz + m[13]);
+                    pz += w * (m[2] * bx + m[6] * by + m[10] * bz + m[14]);
+                    tw += w;
+                }
+                if (tw <= 0.0f) { ox = v.position[0]; oy = v.position[1]; oz = v.position[2]; return false; }
+                ox = px; oy = py; oz = pz; return true;
+            };
+
+            float min_x = FLT_MAX, min_y = FLT_MAX, min_z = FLT_MAX;
+            float max_x = -FLT_MAX, max_y = -FLT_MAX, max_z = -FLT_MAX;
+            bool any = false;
+            for (const auto& mesh : scene->data.meshes) {
+                if (mesh.bone_weights.size() != mesh.vertices.size()) continue;
+                for (std::size_t v = 0; v < mesh.vertices.size(); ++v) {
+                    float x, y, z;
+                    skin_pos(mesh.vertices[v], mesh.bone_weights[v], x, y, z);
+                    min_x = std::min(min_x, x); min_y = std::min(min_y, y); min_z = std::min(min_z, z);
+                    max_x = std::max(max_x, x); max_y = std::max(max_y, y); max_z = std::max(max_z, z);
+                    any = true;
+                }
+            }
+
+            if (any && max_x >= min_x) {
+                float cx = (min_x + max_x) * 0.5f;
+                float cy = (min_y + max_y) * 0.5f;
+                float cz = (min_z + max_z) * 0.5f;
+                float ext = std::max({max_x - min_x, max_y - min_y, max_z - min_z});
+                float s = (ext > 1e-6f) ? (1.0f / ext) : 1.0f;
+
+                // N = scale(s) · translate(-c)，列主序：N·p = s·(p - c)
+                // N[col*4+row]：对角 s，第 3 列平移 -s·c
+                std::array<float, 16> N{
+                    s, 0, 0, 0,
+                    0, s, 0, 0,
+                    0, 0, s, 0,
+                    -s * cx, -s * cy, -s * cz, 1};
+
+                // 左乘进 global_inverse：global_inverse' = N · global_inverse
+                scene->data.skeleton->global_inverse =
+                    mat4_mul(N, skel.global_inverse);
+
+                // 同步更新每个蒙皮 mesh 的静态 AABB 到归一化后空间（首帧近似，用于剔除）。
+                // 注意（细节1）：动画运行中 AABB 会变，这里只存首帧值作为保守初值。
+                for (auto& mesh : scene->data.meshes) {
+                    if (mesh.bone_weights.empty()) continue;
+                    mesh.aabb_min = {(min_x - cx) * s, (min_y - cy) * s, (min_z - cz) * s};
+                    mesh.aabb_max = {(max_x - cx) * s, (max_y - cy) * s, (max_z - cz) * s};
+                }
+
+                CFW_LOG_NOTICE("[Assimp] Skinned model '{}': normalized to unit cube "
+                               "(center=[{:.3f},{:.3f},{:.3f}], extent={:.3f}, scale={:.4f})",
+                               path_to_utf8(path), cx, cy, cz, ext, s);
+            }
         }
     }
 
