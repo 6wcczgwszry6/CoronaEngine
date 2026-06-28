@@ -24,25 +24,25 @@
 namespace Corona::Cache {
 
 // ============================================================================
-// CacheItem — 单个缓存项
+// CacheRecord — 单个缓存项
 // ============================================================================
 
-struct CacheItem {
+struct CacheRecord {
     std::string                            key;
     std::vector<char>                      data;
     size_t                                 data_size = 0;
     std::chrono::system_clock::time_point  last_access;
     bool                                   pinned = false;
 
-    CacheItem();
-    CacheItem(std::string k, const char* d, size_t sz);
-    ~CacheItem() = default;
+    CacheRecord();
+    CacheRecord(std::string k, const char* d, size_t sz);
+    ~CacheRecord() = default;
 
     // 只允许移动（避免意外拷贝大数据）
-    CacheItem(const CacheItem&) = delete;
-    CacheItem& operator=(const CacheItem&) = delete;
-    CacheItem(CacheItem&&) noexcept = default;
-    CacheItem& operator=(CacheItem&&) noexcept = default;
+    CacheRecord(const CacheRecord&) = delete;
+    CacheRecord& operator=(const CacheRecord&) = delete;
+    CacheRecord(CacheRecord&&) noexcept = default;
+    CacheRecord& operator=(CacheRecord&&) noexcept = default;
 };
 
 // ============================================================================
@@ -61,7 +61,7 @@ struct EvictResult {
     EvictStatus status = EvictStatus::Success;
     std::string key;                           // 被淘汰项的 key（Success 时有效）
     size_t      bytes_freed = 0;               // 释放的字节数
-    std::optional<CacheItem> item;             // 被淘汰的数据（仅 MemoryCache::evict_lru 填充）
+    std::optional<CacheRecord> item;             // 被淘汰的数据（仅 MemoryCache::evict_lru 填充）
 
     [[nodiscard]] bool ok() const { return status == EvictStatus::Success; }
 };
@@ -84,7 +84,7 @@ public:
     bool put(const std::string& key, const char* data, size_t size);
 
     /// 获取项（提升到 LRU 头部）。返回拷贝，避免引用在后续 evict 中悬空。
-    std::optional<CacheItem> get(const std::string& key);
+    std::optional<CacheRecord> get(const std::string& key);
 
     /// 仅更新访问时间并提升到 LRU 头部，不返回数据。
     /// 比 get() 更轻量，适合调用方每帧"续期"活跃资源。
@@ -111,8 +111,8 @@ public:
 private:
     size_t capacity_;
     size_t used_ = 0;
-    std::list<CacheItem> list_;
-    std::unordered_map<std::string, std::list<CacheItem>::iterator> map_;
+    std::list<CacheRecord> list_;
+    std::unordered_map<std::string, std::list<CacheRecord>::iterator> map_;
 };
 
 // ============================================================================
@@ -130,10 +130,10 @@ public:
     DiskCache& operator=(const DiskCache&) = delete;
 
     /// 插入/更新项
-    bool put(CacheItem item);
+    bool put(CacheRecord item);
 
     /// 获取项（从磁盘读回并提升到 LRU 头部）
-    std::optional<CacheItem> get(const std::string& key);
+    std::optional<CacheRecord> get(const std::string& key);
 
     /// 仅更新访问时间并提升到 LRU 头部（不读磁盘）
     bool touch(const std::string& key);
@@ -157,17 +157,17 @@ private:
     std::filesystem::path dir_;
     mutable std::mutex mtx_;  // 仅保护 list_ + map_ + 单次文件操作；CacheManager 的锁独立
     std::list<std::string> list_;
-    // 映射中的 CacheItem 只存元数据（不含实际 data），磁盘是真实数据源
-    std::unordered_map<std::string, std::pair<CacheItem, std::list<std::string>::iterator>> map_;
+    // 映射中的 CacheRecord 只存元数据（不含实际 data），磁盘是真实数据源
+    std::unordered_map<std::string, std::pair<CacheRecord, std::list<std::string>::iterator>> map_;
 
     /// 将 key 转为安全的文件路径
     [[nodiscard]] std::filesystem::path safe_path(const std::string& key) const;
 
     /// 从磁盘读取文件
-    std::optional<CacheItem> read_file(const std::string& key) const;
+    std::optional<CacheRecord> read_file(const std::string& key) const;
 
     /// 写入文件到磁盘
-    bool write_file(const CacheItem& item) const;
+    bool write_file(const CacheRecord& item) const;
 
     /// 淘汰最旧的文件以腾出空间。调用方需持有 mtx_。
     /// @param skip_key 跳过此 key（避免刚插入的项被立即淘汰）
@@ -202,7 +202,7 @@ public:
     bool put(const std::string& key, const char* data, size_t size);
 
     /// 获取一项。先查内存后查磁盘；命中磁盘后提升到内存。
-    std::optional<CacheItem> get(const std::string& key);
+    std::optional<CacheRecord> get(const std::string& key);
 
     /// 删除一项（内存 + 磁盘）
     void erase(const std::string& key);

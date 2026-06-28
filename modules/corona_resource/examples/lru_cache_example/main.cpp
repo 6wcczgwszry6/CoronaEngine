@@ -6,7 +6,7 @@
 ///   Corona::Cache::MemoryCache   — 纯内存 LRU
 ///   Corona::Cache::DiskCache     — 磁盘 LRU
 ///
-/// 此前此处包含独立实现的 CacheItem / MemoryCache / DiskCache / CacheManager，
+/// 此前此处包含独立实现的 CacheRecord / MemoryCache / DiskCache / CacheManager，
 /// 现已全部替换为生产 API 调用。
 
 #include <atomic>
