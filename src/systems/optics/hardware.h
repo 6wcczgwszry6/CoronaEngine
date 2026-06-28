@@ -102,7 +102,7 @@ struct Hardware {
         std::array<ktm::fmat4x4, 4> lightViewProj;
         ktm::fvec4 cascadeSplits;
         std::array<uint32_t, 4> shadowMapDescriptors{};
-        float shadowMapSize = 2048.0f;
+        float shadowMapSize = 1024.0f;
         float shadowBias = 0.0015f;
         uint32_t shadowEnabled = 0;
         uint32_t padding0 = 0;

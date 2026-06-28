@@ -58,9 +58,9 @@
 namespace {
 
 constexpr uint32_t kShadowCascadeCount = 4;
-constexpr uint32_t kShadowMapSize = 2048;
+constexpr uint32_t kShadowMapSize = 1024;
 constexpr float kShadowMaxDistance = 100.0f;
-constexpr float kShadowSplitLambda = 0.5f;
+constexpr float kShadowSplitLambda = 0.7f;
 constexpr float kShadowBias = 0.0015f;
 
 struct RenderInstanceBatch {
@@ -811,28 +811,9 @@ void include_shadow_bounds(
     }
 }
 
-[[nodiscard]] float compute_shadow_far_plane(
-    const Corona::CameraDevice& camera,
-    const ktm::fvec3& scene_min_world,
-    const ktm::fvec3& scene_max_world) {
+[[nodiscard]] float compute_shadow_far_plane(const Corona::CameraDevice& camera) {
     const float near_plane = std::max(camera.near_plane, 0.01f);
-    const float fallback_far =
-        std::max(std::min(camera.far_plane, kShadowMaxDistance), near_plane + 0.01f);
-    if (!scene_bounds_valid(scene_min_world, scene_max_world)) {
-        return fallback_far;
-    }
-
-    const ktm::fvec3 forward = ktm::normalize(camera.forward);
-    float farthest_scene_depth = near_plane;
-    for (const auto& corner : bounds_corners(scene_min_world, scene_max_world)) {
-        const float camera_depth = ktm::dot(sub_vec3(corner, camera.position), forward);
-        farthest_scene_depth = std::max(farthest_scene_depth, camera_depth);
-    }
-
-    const ktm::fvec3 scene_extent = sub_vec3(scene_max_world, scene_min_world);
-    const float scene_padding = std::max(ktm::length(scene_extent) * 0.05f, 0.01f);
-    return std::max(std::min(farthest_scene_depth + scene_padding, fallback_far),
-                    near_plane + 0.01f);
+    return std::max(std::min(camera.far_plane, kShadowMaxDistance), near_plane + 0.01f);
 }
 
 [[nodiscard]] std::array<float, kShadowCascadeCount> compute_shadow_splits(
@@ -2774,8 +2755,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     shadow_scene_bounds.valid ? shadow_scene_bounds.min_world : scene.min_world;
                 const ktm::fvec3 shadow_max_world =
                     shadow_scene_bounds.valid ? shadow_scene_bounds.max_world : scene.max_world;
-                const float shadow_far_plane =
-                    compute_shadow_far_plane(*camera, shadow_min_world, shadow_max_world);
+                const float shadow_far_plane = compute_shadow_far_plane(*camera);
                 const auto shadow_splits = compute_shadow_splits(*camera, shadow_far_plane);
                 float cascade_near = std::max(camera->near_plane, 0.01f);
                 for (uint32_t cascade = 0; cascade < kShadowCascadeCount; ++cascade) {
