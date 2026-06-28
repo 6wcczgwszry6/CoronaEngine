@@ -15,6 +15,8 @@
 #include GLSL(../../../assets/shaders/visibility.frag.glsl)
 #include GLSL(../../../assets/shaders/shadow.vert.glsl)
 #include GLSL(../../../assets/shaders/shadow.frag.glsl)
+#include GLSL(../../../assets/shaders/ssao.comp.glsl)
+#include GLSL(../../../assets/shaders/ssao_blur.comp.glsl)
 #include GLSL(../../../assets/shaders/lighting.comp.glsl)
 #include GLSL(../../../assets/shaders/sky.comp.glsl)
 #include GLSL(../../../assets/shaders/sky_sh_project.comp.glsl)
@@ -65,6 +67,8 @@ struct Hardware {
     std::optional<Corona::Horizon::RasterizerPipeline<visibility_vert_glsl_t, visibility_frag_glsl_t>> visibilityPipeline;
     std::optional<Corona::Horizon::RasterizerPipeline<visibility_vert_glsl_t, visibility_frag_glsl_t>> uiVisibilityPipeline;
     std::optional<Corona::Horizon::RasterizerPipeline<shadow_vert_glsl_t, shadow_frag_glsl_t>> shadowPipeline;
+    std::optional<Corona::Horizon::ComputePipeline<ssao_comp_glsl_t>> ssaoPipeline;
+    std::optional<Corona::Horizon::ComputePipeline<ssao_blur_comp_glsl_t>> ssaoBlurPipeline;
     std::optional<Corona::Horizon::ComputePipeline<lighting_comp_glsl_t>> lightingPipeline;
     std::optional<Corona::Horizon::ComputePipeline<sky_comp_glsl_t>> skyPipeline;
     std::optional<Corona::Horizon::ComputePipeline<sky_sh_project_comp_glsl_t>> skySHProjectPipeline;
@@ -92,6 +96,7 @@ struct Hardware {
         ktm::fvec4 eyeDir;
         ktm::fmat4x4 eyeViewMatrix;
         ktm::fmat4x4 eyeProjMatrix;
+        ktm::fmat4x4 eyeInvProjMatrix;
     } uniformBufferObjects{};
 
     struct VPUniformBufferObject {

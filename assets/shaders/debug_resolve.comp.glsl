@@ -18,10 +18,11 @@ layout(push_constant) uniform PushConsts
     uint materialTableBufferIndex;
     uint vpBufferIndex;
     uint outputImageIndex;
-    uint debugMode;         // 0=BaseColor, 1=Normal, 2=WorldPosition, 3=ObjectID, 4=VisibilityBuffer
+    uint debugMode;         // 0=BaseColor, 1=Normal, 2=WorldPosition, 3=ObjectID, 4=VisibilityBuffer, 5=SSAO
     uint uniformBufferIndex;
     uint shadowInfoBufferIndex;
     uint shadowCascadeDebug;
+    uint ssaoImageIndex;
 } pushConsts;
 
 // ============================================================================
@@ -147,6 +148,7 @@ struct MaterialInfo
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
+    float lightingEnabled;
     vec4  materialColor;
 };
 
@@ -165,7 +167,7 @@ MaterialInfo loadMaterialInfo(uint materialID)
     mat.sheenTint         = readFloat(pushConsts.materialTableBufferIndex, base + 8u);
     mat.clearcoat         = readFloat(pushConsts.materialTableBufferIndex, base + 9u);
     mat.clearcoatGloss    = readFloat(pushConsts.materialTableBufferIndex, base + 10u);
-    // [11] padding
+    mat.lightingEnabled   = readFloat(pushConsts.materialTableBufferIndex, base + 11u);
     mat.materialColor     = readVec4(pushConsts.materialTableBufferIndex, base + 12u);
     return mat;
 }
@@ -235,6 +237,15 @@ void main()
     }
 
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+
+    if (pushConsts.debugMode == 5u)
+    {
+        float ao = pushConsts.ssaoImageIndex == 0u
+            ? 1.0
+            : texelFetch(textures[nonuniformEXT(pushConsts.ssaoImageIndex)], pixel, 0).r;
+        imageStore(imagesRGBA16[pushConsts.outputImageIndex], pixel, vec4(vec3(ao), 1.0));
+        return;
+    }
 
     // --- Read visibility buffer (raw) for VisibilityBuffer debug mode ---
     uvec4 vis = texelFetch(uintTextures[nonuniformEXT(pushConsts.visibilityImageIndex)], pixel, 0);

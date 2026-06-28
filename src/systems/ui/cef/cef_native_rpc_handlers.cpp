@@ -691,6 +691,7 @@ NativeEditorCamera make_native_camera(NativeEditorScene& scene,
     item.engine_camera->set_output_mode(section_value("output_mode", "final_color"));
     item.engine_camera->set_render_backend(section_value("render_backend", "native"));
     item.engine_camera->set_vision_render_mode(section_value("vision_render_mode", "path_tracing"));
+    item.engine_camera->set_ssao_enabled(parse_bool(section_value("ssao_enabled", "true"), true));
     item.engine_camera->set_view_state(item.view_open, item.view_x, item.view_y,
                                        item.view_width, item.view_height, item.move_speed);
     if (index > 0) {
@@ -862,6 +863,7 @@ nlohmann::json camera_to_json(const NativeEditorCamera& camera) {
     item["render_backend"] = camera.engine_camera ? camera.engine_camera->get_render_backend() : "native";
     item["vision_render_mode"] = camera.engine_camera ? camera.engine_camera->get_vision_render_mode() : "path_tracing";
     item["shadow_cascade_debug"] = camera.engine_camera ? camera.engine_camera->get_shadow_cascade_debug() : false;
+    item["ssao_enabled"] = camera.engine_camera ? camera.engine_camera->get_ssao_enabled() : true;
     item["move_speed"] = camera.move_speed;
     item["view_open"] = camera.view_open;
     item["view_x"] = camera.view_x;
@@ -1192,6 +1194,26 @@ float json_float_value(const nlohmann::json& object, const char* key, float fall
     return fallback;
 }
 
+bool json_bool_value(const nlohmann::json& object, const char* key, bool fallback) {
+    if (!object.is_object()) {
+        return fallback;
+    }
+    const auto it = object.find(key);
+    if (it == object.end()) {
+        return fallback;
+    }
+    if (it->is_boolean()) {
+        return it->get<bool>();
+    }
+    if (it->is_number_integer()) {
+        return it->get<int>() != 0;
+    }
+    if (it->is_string()) {
+        return parse_bool(it->get<std::string>(), fallback);
+    }
+    return fallback;
+}
+
 NativeEditorCamera* ensure_native_editor_camera(NativeEditorScene& scene,
                                                 const std::string& requested_name,
                                                 const nlohmann::json& camera_data) {
@@ -1240,6 +1262,7 @@ NativeEditorCamera* ensure_native_editor_camera(NativeEditorScene& scene,
     item.engine_camera->set_vision_render_mode(json_string_value(camera_data, {"vision_render_mode"}).empty()
                                                    ? "path_tracing"
                                                    : json_string_value(camera_data, {"vision_render_mode"}));
+    item.engine_camera->set_ssao_enabled(json_bool_value(camera_data, "ssao_enabled", true));
     item.engine_camera->set_view_state(false, item.view_x, item.view_y,
                                        item.view_width, item.view_height, item.move_speed);
     item.engine_camera->set_offscreen_capture_mode(true);
@@ -2246,6 +2269,8 @@ std::string capture_editor_camera_view_from_python(const std::string& scene_name
         camera->engine_camera->set_size(camera->width, camera->height);
         const auto output_mode = json_string_value(camera_data, {"output_mode"});
         camera->engine_camera->set_output_mode(output_mode.empty() ? "base_color" : output_mode);
+        camera->engine_camera->set_ssao_enabled(
+            json_bool_value(camera_data, "ssao_enabled", camera->engine_camera->get_ssao_enabled()));
         camera->engine_camera->set_offscreen_capture_mode(true);
         camera->engine_camera->set_surface(0);
 
@@ -2598,6 +2623,32 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             return native_success({
                 {"status", "success"},
                 {"enabled", camera->engine_camera->get_shadow_cascade_debug()},
+            });
+        }},
+        {"set_ssao_enabled", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto camera_name = arg_string(request.args, 1);
+            const bool enabled = arg_bool(request.args, 2, true);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+            camera->engine_camera->set_ssao_enabled(enabled);
+            return native_success({
+                {"status", "success"},
+                {"enabled", camera->engine_camera->get_ssao_enabled()},
+            });
+        }},
+        {"get_ssao_enabled", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto camera_name = arg_string(request.args, 1);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+            return native_success({
+                {"status", "success"},
+                {"enabled", camera->engine_camera->get_ssao_enabled()},
             });
         }},
         {"open_actor", [](const NativeRequest& request, const NativeContext& context) {

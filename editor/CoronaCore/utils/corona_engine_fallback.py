@@ -360,6 +360,14 @@ class Camera:
         _log("[Fallback][Camera.get_output_mode]")
         return getattr(self, '_output_mode', 'final_color')
 
+    def set_ssao_enabled(self, enabled: bool):
+        _log(f"[Fallback][Camera.set_ssao_enabled] enabled={enabled}")
+        self._ssao_enabled = bool(enabled)
+
+    def get_ssao_enabled(self) -> bool:
+        _log("[Fallback][Camera.get_ssao_enabled]")
+        return bool(getattr(self, '_ssao_enabled', True))
+
     def set_render_backend(self, mode: str):
         self._render_backend = 'vision' if mode == 'vision' else 'native'
 

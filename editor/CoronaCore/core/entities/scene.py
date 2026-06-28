@@ -449,6 +449,8 @@ class Scene:
             height = int(data.get(f'{prefix}.height', cam.height))
             cam.set_size(width, height)
             cam.set_output_mode(data.get(f'{prefix}.output_mode', 'final_color'))
+            cam.set_ssao_enabled(
+                data.get(f'{prefix}.ssao_enabled', 'true').lower() in ('1', 'true', 'yes', 'on'))
             cam.set_render_backend(data.get(f'{prefix}.render_backend', 'native'))
             try:
                 cam.set_vision_render_mode(data.get(f'{prefix}.vision_render_mode'))
@@ -569,6 +571,7 @@ class Scene:
                     self.file_data['camera'][f'{prefix}.width'] = str(cam.width)
                     self.file_data['camera'][f'{prefix}.height'] = str(cam.height)
                     self.file_data['camera'][f'{prefix}.output_mode'] = cam.get_output_mode()
+                    self.file_data['camera'][f'{prefix}.ssao_enabled'] = str(cam.get_ssao_enabled()).lower()
                     self.file_data['camera'][f'{prefix}.render_backend'] = cam.get_render_backend()
                     self.file_data['camera'][f'{prefix}.vision_render_mode'] = cam.get_vision_render_mode()
                     self.file_data['camera'][f'{prefix}.move_speed'] = str(cam.move_speed)
