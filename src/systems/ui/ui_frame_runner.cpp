@@ -45,25 +45,23 @@ bool initialize_sdl_ui(SDL_Window*& window, std::unique_ptr<VulkanBackend>& vulk
     }
 
     if (desktop_mode) {
-        float display_scale = SDL_GetDisplayContentScale(primary_display);
-        if (display_scale <= 0.0f) {
-            display_scale = 1.0f;
-        }
-
-        float desktop_width = static_cast<float>(desktop_mode->w) / display_scale;
-        float desktop_height = static_cast<float>(desktop_mode->h) / display_scale;
-
         SDL_Rect usable_bounds{};
         if (SDL_GetDisplayUsableBounds(primary_display, &usable_bounds) &&
             usable_bounds.w > 0 && usable_bounds.h > 0) {
-            desktop_width = std::min(desktop_width, static_cast<float>(usable_bounds.w));
-            desktop_height = std::min(desktop_height, static_cast<float>(usable_bounds.h));
+            initial_width = static_cast<int>(static_cast<float>(usable_bounds.w) * 0.8f);
+            initial_height = static_cast<int>(static_cast<float>(usable_bounds.h) * 0.8f);
+            initial_x = usable_bounds.x + static_cast<int>(
+                                              (static_cast<float>(usable_bounds.w) -
+                                               static_cast<float>(initial_width)) *
+                                              0.5f);
+            initial_y = usable_bounds.y + static_cast<int>(
+                                              (static_cast<float>(usable_bounds.h) -
+                                               static_cast<float>(initial_height)) *
+                                              0.5f);
+        } else {
+            initial_width = static_cast<int>(static_cast<float>(desktop_mode->w) * 0.8f);
+            initial_height = static_cast<int>(static_cast<float>(desktop_mode->h) * 0.8f);
         }
-
-        initial_width = static_cast<int>(desktop_width * 0.8f);
-        initial_height = static_cast<int>(desktop_height * 0.8f);
-        initial_x = static_cast<int>((desktop_width - static_cast<float>(initial_width)) * 0.5f);
-        initial_y = static_cast<int>((desktop_height - static_cast<float>(initial_height)) * 0.5f);
     }
 
     window = SDL_CreateWindow("Corona Engine (Horizon)", initial_width, initial_height,
