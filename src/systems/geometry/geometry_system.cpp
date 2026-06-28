@@ -244,6 +244,10 @@ void GeometrySystem::update() {
                 auto geometry_read = geometry_storage.acquire_read(mechanics_read->geometry_handle);
                 if (!geometry_read.valid() || geometry_read->transform_handle == 0) continue;
 
+                // 无网格的 actor（如音频物体，空 model_path）不参与几何加载/距离剔除，
+                // 否则距离剔除每帧反复请求加载空路径并报 "empty model path" 错误。
+                if (geometry_read->model_path_utf8.empty()) continue;
+
                 auto transform_read = transform_storage.acquire_read(geometry_read->transform_handle);
                 if (!transform_read.valid()) continue;
 
