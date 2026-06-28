@@ -65,7 +65,6 @@ def register_engine_loaders(registry: ToolRegistry) -> None:
             loader=load_placement_tools,
             category=ToolCategory.SCENE,
             dependencies=[
-                # ToolDependency(DependencyType.CONFIG_PROVIDER, provider="rodin"),
             ],
             requires_config=True,
             source="cai_extensions.scene_placement",

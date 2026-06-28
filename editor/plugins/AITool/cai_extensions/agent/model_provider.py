@@ -206,12 +206,12 @@ class ModelProvider:
 
     def _generate_3d(self, name: str, image_url: str = "",
                      prompt_text: str = "", object_id: str = "") -> AcquireResult:
-        """调用 3D 生成工具 (Hunyuan3D / Rodin) 并等待模型下载完成。"""
+        """调用 3D 生成工具 (Hunyuan3D) 并等待模型下载完成。"""
         tool = self._get_3d_generate_tool()
         if not tool:
             logger.warning("[ModelProvider][generate] 3D 生成工具不可用")
             return AcquireResult(success=False, source="generation",
-                                 error="3D 生成工具 (Hunyuan3D/Rodin) 不可用")
+                                 error="3D 生成工具 (Hunyuan3D) 不可用")
 
         # 选择生成模式
         if image_url and image_url.startswith("__text_to_3d__:"):
@@ -312,10 +312,10 @@ class ModelProvider:
                 tool = self._get_tool("hunyuan_generate_3d")
                 if tool:
                     return tool
-            logger.warning("混元 3D 服务不可用，本次模型生成无法继续；Rodin fallback 已关闭")
+            logger.warning("混元 3D 服务不可用，本次模型生成无法继续")
             return None
         except Exception as e:
-            logger.warning("混元 3D 配置读取失败，本次模型生成无法继续；Rodin fallback 已关闭: %s", e)
+            logger.warning("混元 3D 配置读取失败，本次模型生成无法继续: %s", e)
             return None
 
     # ── 解析 ──────────────────────────────────────────────────────────
