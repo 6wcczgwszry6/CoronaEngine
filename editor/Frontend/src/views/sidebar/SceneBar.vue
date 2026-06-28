@@ -242,7 +242,7 @@
               class="block w-full px-3 py-1.5 text-xs text-[#e0e0e0] hover:bg-[#545454] text-left"
               @click.stop="HandleMultimediaImport"
             >
-              🎵 多媒体
+              🎵 音频
             </button>
             <button
               class="block w-full px-3 py-1.5 text-xs text-[#e0e0e0] hover:bg-[#545454] text-left"

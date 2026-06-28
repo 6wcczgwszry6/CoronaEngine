@@ -349,7 +349,7 @@ export const DOM_TEXT_TRANSLATIONS = {
   '📦 模型': 'Model',
   '👤 单位': 'Actor',
   '🎬 场景': 'Scene',
-  '🎵 多媒体': 'Media',
+  '🎵 音频': 'Audio',
   '🖼 UI图片': 'UI Image',
   '📷 快速截图': 'Quick Screenshot',
   '📦 全部保存': 'Save All',
