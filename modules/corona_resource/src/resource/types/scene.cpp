@@ -322,6 +322,7 @@ std::shared_ptr<IResource> SceneParser::parse_assimp(const std::filesystem::path
             aiProcess_SortByPType |
             aiProcess_FlipUVs |
             aiProcess_GenBoundingBoxes |
+            aiProcess_LimitBoneWeights |  // 限制每顶点最多 4 骨骼权重并归一化（蒙皮）
             aiProcess_MakeLeftHanded |    // 转换为左手坐标系
             aiProcess_FlipWindingOrder);  // 翻转三角形绕序以匹配左手坐标系
 
@@ -356,7 +357,68 @@ std::shared_ptr<IResource> SceneParser::parse_assimp(const std::filesystem::path
 
     // 计算全局归一化参数，确保所有子网格使用相同的变换
     GlobalNormalizationParams global_params = compute_global_normalization_params(ai_scene, initial_transform);
-    process_assimp_node(ai_scene->mRootNode, ai_scene, *scene, InvalidIndex, material_map, global_params, initial_transform, assimp_options);
+
+    // ---- 蒙皮检测 ----
+    // 模型带动画或任一 mesh 带骨骼即视为蒙皮场景。蒙皮分支在 process_assimp_mesh
+    // 内保留绑定姿态空间（不烘焙节点变换、不单位化），并抽取每顶点骨骼权重。
+    bool has_skinning = ai_scene->mNumAnimations > 0;
+    for (unsigned int m = 0; !has_skinning && m < ai_scene->mNumMeshes; ++m) {
+        if (ai_scene->mMeshes[m]->HasBones()) has_skinning = true;
+    }
+
+    // 蒙皮模型：先构建骨架层级 + 全局逆变换，bone_map/bone_counter 在所有 mesh 间共享。
+    std::unordered_map<std::string, BoneInfo> bone_map;
+    int bone_counter = 0;
+    if (has_skinning) {
+        SkeletonData skeleton;
+        skeleton.root = read_skeleton_hierarchy(ai_scene->mRootNode, skeleton);
+        // global_inverse = inverse(root 节点变换)，用于把世界空间结果拉回模型空间
+        aiMatrix4x4 root_inv = ai_scene->mRootNode->mTransformation;
+        root_inv.Inverse();
+        skeleton.global_inverse = ai_to_mat4_colmajor(root_inv);
+        // skeleton 暂存入 scene；bone_map / bone_count 在节点遍历后回填
+        scene->data.skeleton = std::move(skeleton);
+    }
+
+    process_assimp_node(ai_scene->mRootNode, ai_scene, *scene, InvalidIndex, material_map,
+                        global_params, initial_transform, assimp_options,
+                        has_skinning ? &bone_map : nullptr,
+                        has_skinning ? &bone_counter : nullptr);
+
+    // 回填 bone_map / bone_count（节点遍历期间由 extract_bone_weights 填充）
+    if (has_skinning && scene->data.skeleton.has_value()) {
+        scene->data.skeleton->bone_map = std::move(bone_map);
+        scene->data.skeleton->bone_count = bone_counter;
+        read_animations(ai_scene, scene->data.animations);
+
+        CFW_LOG_NOTICE("[Assimp] Skinned model '{}': {} bones, {} animation(s)",
+                       path_to_utf8(path), bone_counter, scene->data.animations.size());
+        for (const auto& clip : scene->data.animations) {
+            CFW_LOG_NOTICE("[Assimp]   clip '{}': duration={} ticks, tps={}, {} channels",
+                           clip.name, clip.duration, clip.ticks_per_second, clip.channels.size());
+        }
+
+        // 权重健全性抽检：统计每个蒙皮 mesh 的权重和分布，确认 ≈ 1.0
+        // （aiProcess_LimitBoneWeights 已归一化；偏离 1 说明抽取/remap 出错）。
+        for (std::uint32_t mi = 0; mi < scene->data.meshes.size(); ++mi) {
+            const auto& mesh = scene->data.meshes[mi];
+            if (mesh.bone_weights.empty()) continue;
+
+            std::size_t bad = 0;        // 权重和偏离 1.0 超过 1e-3 的顶点数
+            std::size_t unweighted = 0;  // 完全无骨骼影响的顶点数
+            float min_sum = 2.0f, max_sum = 0.0f;
+            for (const auto& bw : mesh.bone_weights) {
+                float sum = bw.weights[0] + bw.weights[1] + bw.weights[2] + bw.weights[3];
+                if (sum <= 0.0f) { ++unweighted; continue; }
+                min_sum = std::min(min_sum, sum);
+                max_sum = std::max(max_sum, sum);
+                if (std::abs(sum - 1.0f) > 1e-3f) ++bad;
+            }
+            CFW_LOG_NOTICE("[Assimp]   mesh[{}] skin check: {} verts, weight_sum=[{:.4f},{:.4f}], "
+                           "{} off-by->1e-3, {} unweighted",
+                           mi, mesh.bone_weights.size(), min_sum, max_sum, bad, unweighted);
+        }
+    }
 
     std::unordered_map<std::string, std::uint32_t> node_name_map;
 

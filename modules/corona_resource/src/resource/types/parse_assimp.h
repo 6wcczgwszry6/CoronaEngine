@@ -424,11 +424,129 @@ inline void process_assimp_materials(const aiScene* ai_scene, Scene& scene,
     }
 }
 
+// ============================================================================
+// 骨骼动画抽取（绑定期）
+// ============================================================================
+
+/// 将 assimp aiMatrix4x4（行主序）转为列主序 std::array<float,16>（ktm/glsl 约定，
+/// 下标 = col*4 + row）。即对 assimp 矩阵做转置存储。
+inline std::array<float, 16> ai_to_mat4_colmajor(const aiMatrix4x4& m) {
+    return {
+        m.a1, m.b1, m.c1, m.d1,   // 列 0
+        m.a2, m.b2, m.c2, m.d2,   // 列 1
+        m.a3, m.b3, m.c3, m.d3,   // 列 2
+        m.a4, m.b4, m.c4, m.d4};  // 列 3
+}
+
+/// 抽取一个 aiMesh 的骨骼权重，填入与该 mesh 顶点等长的 out_weights。
+/// bone_map / bone_counter 在多个 mesh 间共享（同名骨骼复用同一 id，
+/// 处理「骨骼影响超出自身 mesh 范围」的情形——见 LearnOpenGL）。
+/// @param vertex_count 该 mesh 的顶点数（out_weights 会被 resize 到此长度）
+inline void extract_bone_weights(const aiMesh* ai_mesh,
+                                 std::unordered_map<std::string, BoneInfo>& bone_map,
+                                 int& bone_counter,
+                                 std::vector<BoneWeights>& out_weights,
+                                 unsigned int vertex_count) {
+    out_weights.assign(vertex_count, BoneWeights{});
+
+    for (unsigned int b = 0; b < ai_mesh->mNumBones; ++b) {
+        const aiBone* ai_bone = ai_mesh->mBones[b];
+        std::string bone_name = ai_bone->mName.C_Str();
+
+        std::int32_t bone_id;
+        auto it = bone_map.find(bone_name);
+        if (it == bone_map.end()) {
+            BoneInfo info;
+            info.id = bone_counter;
+            info.offset = ai_to_mat4_colmajor(ai_bone->mOffsetMatrix);
+            bone_map[bone_name] = info;
+            bone_id = bone_counter;
+            ++bone_counter;
+        } else {
+            bone_id = it->second.id;
+        }
+
+        for (unsigned int w = 0; w < ai_bone->mNumWeights; ++w) {
+            const aiVertexWeight& vw = ai_bone->mWeights[w];
+            if (vw.mVertexId < vertex_count) {
+                out_weights[vw.mVertexId].add_influence(bone_id, vw.mWeight);
+            }
+        }
+    }
+}
+
+/// 递归复刻 aiNode 树到扁平 BoneNode 数组，返回新建节点的下标。
+inline int read_skeleton_hierarchy(const aiNode* ai_node, SkeletonData& skeleton) {
+    int index = static_cast<int>(skeleton.nodes.size());
+    skeleton.nodes.emplace_back();
+    // 注意：先 emplace 再递归子节点，递归会让 vector 重新分配，
+    // 故子节点下标先收集到局部变量，最后统一赋值（避免悬挂引用）。
+    {
+        BoneNode& node = skeleton.nodes[index];
+        node.name = ai_node->mName.C_Str();
+        node.local = ai_to_mat4_colmajor(ai_node->mTransformation);
+    }
+
+    std::vector<int> child_indices;
+    child_indices.reserve(ai_node->mNumChildren);
+    for (unsigned int i = 0; i < ai_node->mNumChildren; ++i) {
+        child_indices.push_back(read_skeleton_hierarchy(ai_node->mChildren[i], skeleton));
+    }
+    skeleton.nodes[index].children = std::move(child_indices);
+    return index;
+}
+
+/// 抽取所有动画片段（aiAnimation → AnimationClip）。
+inline void read_animations(const aiScene* ai_scene, std::vector<AnimationClip>& clips) {
+    for (unsigned int a = 0; a < ai_scene->mNumAnimations; ++a) {
+        const aiAnimation* ai_anim = ai_scene->mAnimations[a];
+        AnimationClip clip;
+        clip.name = ai_anim->mName.C_Str();
+        clip.duration = static_cast<float>(ai_anim->mDuration);
+        clip.ticks_per_second = ai_anim->mTicksPerSecond != 0.0
+                                    ? static_cast<float>(ai_anim->mTicksPerSecond)
+                                    : 25.0f;
+
+        for (unsigned int c = 0; c < ai_anim->mNumChannels; ++c) {
+            const aiNodeAnim* ch = ai_anim->mChannels[c];
+            AnimChannel channel;
+            channel.bone_name = ch->mNodeName.C_Str();
+
+            channel.positions.reserve(ch->mNumPositionKeys);
+            for (unsigned int k = 0; k < ch->mNumPositionKeys; ++k) {
+                const auto& key = ch->mPositionKeys[k];
+                channel.positions.emplace_back(
+                    static_cast<float>(key.mTime),
+                    std::array<float, 3>{key.mValue.x, key.mValue.y, key.mValue.z});
+            }
+            channel.rotations.reserve(ch->mNumRotationKeys);
+            for (unsigned int k = 0; k < ch->mNumRotationKeys; ++k) {
+                const auto& key = ch->mRotationKeys[k];
+                // assimp 四元数为 (w, x, y, z)；存为 (x, y, z, w)
+                channel.rotations.emplace_back(
+                    static_cast<float>(key.mTime),
+                    std::array<float, 4>{key.mValue.x, key.mValue.y, key.mValue.z, key.mValue.w});
+            }
+            channel.scales.reserve(ch->mNumScalingKeys);
+            for (unsigned int k = 0; k < ch->mNumScalingKeys; ++k) {
+                const auto& key = ch->mScalingKeys[k];
+                channel.scales.emplace_back(
+                    static_cast<float>(key.mTime),
+                    std::array<float, 3>{key.mValue.x, key.mValue.y, key.mValue.z});
+            }
+            clip.channels.push_back(std::move(channel));
+        }
+        clips.push_back(std::move(clip));
+    }
+}
+
 inline void process_assimp_mesh(aiMesh* ai_mesh, Scene& scene, std::uint32_t node_index,
                                 const std::vector<std::uint32_t>& material_map,
                                 const GlobalNormalizationParams& global_params,
                                 const aiMatrix4x4& accumulated_transform,
-                                const AssimpImportOptions& options = AssimpImportOptions{}) {
+                                const AssimpImportOptions& options = AssimpImportOptions{},
+                                std::unordered_map<std::string, BoneInfo>* bone_map = nullptr,
+                                int* bone_counter = nullptr) {
     if (ai_mesh->mNumVertices == 0 || ai_mesh->mNumFaces == 0) {
         CFW_LOG_WARNING("[Assimp] Mesh '{}' is empty, skipping", ai_mesh->mName.C_Str());
         return;
@@ -436,19 +554,26 @@ inline void process_assimp_mesh(aiMesh* ai_mesh, Scene& scene, std::uint32_t nod
 
     std::string mesh_name = ai_mesh->mName.C_Str();
 
-    // 提取法线变换矩阵（累积变换的逆转置的 3x3 部分）
-    aiMatrix3x3 normal_matrix(accumulated_transform);
+    // 蒙皮网格判定：模型带骨架（bone_map 非空指针）且该 mesh 带骨骼。
+    // 蒙皮分支保留「绑定姿态空间」——不烘焙节点累积变换、不做单位化归一化，
+    // 因为 offset 矩阵假设顶点在 mesh 原始绑定空间；烘焙/归一化会让 offset 失配。
+    const bool is_skinned_mesh =
+        bone_map != nullptr && bone_counter != nullptr && ai_mesh->HasBones();
+
+    // 提取法线变换矩阵（累积变换的逆转置的 3x3 部分）。
+    // 蒙皮网格用单位变换（保持绑定空间），故法线矩阵也是单位。
+    aiMatrix4x4 vertex_transform = is_skinned_mesh ? aiMatrix4x4() : accumulated_transform;
+    aiMatrix3x3 normal_matrix(vertex_transform);
     normal_matrix.Inverse().Transpose();
 
     // 提取顶点数据
     std::vector<Vertex> unindexed_vertices(ai_mesh->mNumVertices);
     for (unsigned int i = 0; i < ai_mesh->mNumVertices; ++i) {
-        // 将顶点位置变换到世界空间
-        aiVector3D world_pos = accumulated_transform * ai_mesh->mVertices[i];
+        // 静态网格变换到世界空间；蒙皮网格保持绑定空间（vertex_transform=单位）
+        aiVector3D world_pos = vertex_transform * ai_mesh->mVertices[i];
         unindexed_vertices[i].position = {world_pos.x, world_pos.y, world_pos.z};
 
         if (ai_mesh->HasNormals()) {
-            // 将法线变换到世界空间（使用逆转置矩阵）
             aiVector3D world_normal = normal_matrix * ai_mesh->mNormals[i];
             world_normal.Normalize();
             unindexed_vertices[i].normal = {world_normal.x, world_normal.y, world_normal.z};
@@ -457,6 +582,14 @@ inline void process_assimp_mesh(aiMesh* ai_mesh, Scene& scene, std::uint32_t nod
             unindexed_vertices[i].tex_coords = {ai_mesh->mTextureCoords[0][i].x, ai_mesh->mTextureCoords[0][i].y};
         }
     }
+
+    // 抽取骨骼权重（与 unindexed_vertices 等长并行）。仅蒙皮网格非空。
+    std::vector<BoneWeights> unindexed_weights;
+    if (is_skinned_mesh) {
+        extract_bone_weights(ai_mesh, *bone_map, *bone_counter, unindexed_weights,
+                             ai_mesh->mNumVertices);
+    }
+    const bool has_bones = !unindexed_weights.empty();
 
     // 提取索引数据
     std::vector<std::uint32_t> indices;
@@ -473,7 +606,8 @@ inline void process_assimp_mesh(aiMesh* ai_mesh, Scene& scene, std::uint32_t nod
         indices,
         options.simplify_mesh,
         options.simplification_error,
-        mesh_name);
+        mesh_name,
+        has_bones ? &unindexed_weights : nullptr);
 
     if (!opt_result.success) {
         CFW_LOG_WARNING("[Assimp] Mesh '{}' optimization failed, skipping", mesh_name);
@@ -490,42 +624,54 @@ inline void process_assimp_mesh(aiMesh* ai_mesh, Scene& scene, std::uint32_t nod
     const std::array<float, 3>& center = global_params.center;
     float scale_factor = global_params.scale_factor;
 
-    // 处理拆分或非拆分的情况
+    // 处理拆分或非拆分的情况。
+    // sub_weights：与 vertices 等长并行的骨骼权重（蒙皮网格非空，已随 opt 同步 remap）。
     auto process_single_mesh = [&](std::vector<Vertex>& vertices,
                                    std::vector<std::uint32_t>& mesh_indices,
-                                   const std::string& sub_mesh_name) {
+                                   const std::string& sub_mesh_name,
+                                   std::vector<BoneWeights>& sub_weights) {
         if (vertices.empty()) return;
+        const bool mesh_has_bones = !sub_weights.empty();
 
         // 计算 AABB
         std::array<float, 3> aabb_min, aabb_max;
         compute_aabb(vertices, aabb_min, aabb_max);
 
-        // 归一化
-        normalize_vertices_with_global_params(vertices, center, scale_factor);
-        normalize_aabb(aabb_min, aabb_max, center, scale_factor);
+        // 归一化：仅静态网格。蒙皮网格保留绑定空间（offset 矩阵的前提），
+        // 原始尺寸/位置改由 model transform 还原，故跳过单位化。
+        if (!mesh_has_bones) {
+            normalize_vertices_with_global_params(vertices, center, scale_factor);
+            normalize_aabb(aabb_min, aabb_max, center, scale_factor);
+        }
 
         // 转换索引为 uint16
         std::vector<std::uint16_t> final_indices = convert_indices_to_uint16(mesh_indices);
 
         (void)sub_mesh_name;
 
-        // 构建 MeshData
+        // 构建 MeshData（蒙皮网格 original_scale_factor=1，center=0）
         MeshData mesh_data = build_mesh_data(
             std::move(vertices),
             std::move(final_indices),
             material_index,
             aabb_min,
             aabb_max,
-            center,
-            scale_factor);
+            mesh_has_bones ? std::array<float, 3>{0.0f, 0.0f, 0.0f} : center,
+            mesh_has_bones ? 1.0f : scale_factor);
 
-        // 生成 LOD
+        // 写入骨骼权重（蒙皮网格）
+        if (mesh_has_bones) {
+            mesh_data.bone_weights = std::move(sub_weights);
+        }
+
+        // 生成 LOD（蒙皮网格同步携带 bone_weights）
         if (options.lod_options.enabled) {
             mesh_data.lod_levels = generate_lod_levels(
                 mesh_data.vertices,
                 mesh_data.indices,
                 options.lod_options,
-                sub_mesh_name);
+                sub_mesh_name,
+                mesh_has_bones ? &mesh_data.bone_weights : nullptr);
         }
 
         std::uint32_t mesh_idx = scene.add_mesh(std::move(mesh_data));
@@ -547,7 +693,8 @@ inline void process_assimp_mesh(aiMesh* ai_mesh, Scene& scene, std::uint32_t nod
         for (size_t i = 0; i < opt_result.sub_meshes.size(); ++i) {
             auto& sub_mesh = opt_result.sub_meshes[i];
             std::string sub_mesh_name = mesh_name + "_split" + std::to_string(i);
-            process_single_mesh(sub_mesh.vertices, sub_mesh.indices, sub_mesh_name);
+            process_single_mesh(sub_mesh.vertices, sub_mesh.indices, sub_mesh_name,
+                                sub_mesh.bone_weights);
         }
     } else {
         // 处理单个网格（检查顶点数量）
@@ -556,7 +703,8 @@ inline void process_assimp_mesh(aiMesh* ai_mesh, Scene& scene, std::uint32_t nod
                           mesh_name, opt_result.vertices.size());
             return;
         }
-        process_single_mesh(opt_result.vertices, opt_result.indices, mesh_name);
+        process_single_mesh(opt_result.vertices, opt_result.indices, mesh_name,
+                            opt_result.bone_weights);
     }
 }
 
@@ -590,7 +738,9 @@ inline void process_assimp_node(aiNode* ai_node, const aiScene* ai_scene, Scene&
                                 const std::vector<std::uint32_t>& material_map,
                                 const GlobalNormalizationParams& global_params,
                                 const aiMatrix4x4& parent_accumulated_transform = aiMatrix4x4(),
-                                const AssimpImportOptions& options = AssimpImportOptions{}) {
+                                const AssimpImportOptions& options = AssimpImportOptions{},
+                                std::unordered_map<std::string, BoneInfo>* bone_map = nullptr,
+                                int* bone_counter = nullptr) {
     std::uint32_t node_index = scene.add_node(ai_node->mName.C_Str(), parent_index);
     scene.data.nodes[node_index].transform = extract_assimp_transform(ai_node->mTransformation);
 
@@ -602,17 +752,17 @@ inline void process_assimp_node(aiNode* ai_node, const aiScene* ai_scene, Scene&
         aiMesh* ai_mesh = ai_scene->mMeshes[mesh_index];
 
         if (i == 0) {
-            process_assimp_mesh(ai_mesh, scene, node_index, material_map, global_params, current_accumulated, options);
+            process_assimp_mesh(ai_mesh, scene, node_index, material_map, global_params, current_accumulated, options, bone_map, bone_counter);
         } else {
             std::string child_name = std::string(ai_node->mName.C_Str()) + "_mesh_" + std::to_string(i);
             std::uint32_t child_index = scene.add_node(child_name, node_index);
             scene.data.nodes[child_index].transform = scene.data.nodes[node_index].transform;
-            process_assimp_mesh(ai_mesh, scene, child_index, material_map, global_params, current_accumulated, options);
+            process_assimp_mesh(ai_mesh, scene, child_index, material_map, global_params, current_accumulated, options, bone_map, bone_counter);
         }
     }
 
     for (unsigned int i = 0; i < ai_node->mNumChildren; ++i) {
-        process_assimp_node(ai_node->mChildren[i], ai_scene, scene, node_index, material_map, global_params, current_accumulated, options);
+        process_assimp_node(ai_node->mChildren[i], ai_scene, scene, node_index, material_map, global_params, current_accumulated, options, bone_map, bone_counter);
     }
 }
 
