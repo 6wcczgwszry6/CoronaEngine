@@ -693,6 +693,10 @@ void apply_pending_camera_releases() {
     return ktm::fvec3{x, y, z};
 }
 
+[[nodiscard]] ktm::fvec4 make_vec4(const ktm::fvec3& v, float w) {
+    return ktm::fvec4{v.x, v.y, v.z, w};
+}
+
 [[nodiscard]] ktm::fvec3 add_vec3(const ktm::fvec3& a, const ktm::fvec3& b) {
     return make_vec3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
@@ -2399,8 +2403,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 // ================================================================
                 // 1. Update camera uniform buffers
                 // ================================================================
-                hardware_->uniformBufferObjects.eyePosition = camera->position;
-                hardware_->uniformBufferObjects.eyeDir = camera->forward;
+                hardware_->uniformBufferObjects.eyePosition = make_vec4(camera->position, 1.0f);
+                hardware_->uniformBufferObjects.eyeDir = make_vec4(camera->forward, 0.0f);
                 hardware_->uniformBufferObjects.eyeViewMatrix = camera->compute_view_matrix();
                 hardware_->uniformBufferObjects.eyeProjMatrix = camera->compute_projection_matrix();
                 hardware_->vpUniformBufferObjects.viewProjMatrix = camera->compute_view_proj_matrix();
