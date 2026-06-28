@@ -68,6 +68,15 @@
       >
         CSM
       </button>
+      <button
+        v-if="backend === 'native'"
+        class="cascade-toggle no-drag"
+        :class="{ active: ssaoEnabled }"
+        title="Toggle screen-space ambient occlusion"
+        @click="toggleSsaoEnabled"
+      >
+        SSAO
+      </button>
       <label class="speed no-drag">
         Speed
         <input v-model.number="moveSpeed" type="number" min="0.01" step="0.1" @change="saveSettings" />
@@ -133,6 +142,7 @@ const backend = ref('native');
 const visionRenderMode = ref('path_tracing');
 const outputMode = ref('final_color');
 const shadowCascadeDebug = ref(false);
+const ssaoEnabled = ref(true);
 const moveSpeed = ref(1);
 const renderWidth = ref(960);
 const renderHeight = ref(540);
@@ -154,6 +164,7 @@ const outputModes = [
   { value: 'position', label: 'Position' },
   { value: 'object_id', label: 'Object ID' },
   { value: 'visibility_buffer', label: 'Visibility' },
+  { value: 'ssao', label: 'SSAO' },
 ];
 const visionRenderModes = [
   { value: 'path_tracing', label: 'Vision Path Tracing' },
@@ -190,6 +201,7 @@ const loadCamera = async () => {
     ? 'final_color'
     : camera.value.output_mode || 'final_color';
   shadowCascadeDebug.value = !!camera.value.shadow_cascade_debug;
+  ssaoEnabled.value = camera.value.ssao_enabled !== false;
   moveSpeed.value = camera.value.move_speed || 1;
   renderWidth.value = camera.value.width || 960;
   renderHeight.value = camera.value.height || 540;
@@ -300,6 +312,22 @@ const toggleShadowCascadeDebug = async () => {
     }
   } catch (error) {
     shadowCascadeDebug.value = !next;
+    errorText.value = error.message;
+  }
+};
+
+const toggleSsaoEnabled = async () => {
+  if (backend.value === 'vision') return;
+  const next = !ssaoEnabled.value;
+  ssaoEnabled.value = next;
+  try {
+    const result = unwrap(await sceneService.setSsaoEnabled(sceneId, cameraId, next));
+    ssaoEnabled.value = result.enabled !== false;
+    if (camera.value) {
+      camera.value.ssao_enabled = ssaoEnabled.value;
+    }
+  } catch (error) {
+    ssaoEnabled.value = !next;
     errorText.value = error.message;
   }
 };

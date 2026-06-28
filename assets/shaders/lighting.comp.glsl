@@ -26,6 +26,9 @@ layout(push_constant) uniform PushConsts
     uint shadowEnabled;
     uint shadowInfoBufferIndex;
     uint shadowCascadeDebug;
+    uint ssaoImageIndex;
+    uint ssaoEnabled;
+    float ssaoStrength;
 } pushConsts;
 
 // ============================================================================
@@ -121,6 +124,7 @@ struct MaterialInfo
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
+    float lightingEnabled;
     vec4  materialColor;
 };
 
@@ -139,7 +143,7 @@ MaterialInfo loadMaterialInfo(uint materialID)
     mat.sheenTint         = readFloat(pushConsts.materialTableBufferIndex, base + 8u);
     mat.clearcoat         = readFloat(pushConsts.materialTableBufferIndex, base + 9u);
     mat.clearcoatGloss    = readFloat(pushConsts.materialTableBufferIndex, base + 10u);
-    // [11] padding
+    mat.lightingEnabled   = readFloat(pushConsts.materialTableBufferIndex, base + 11u);
     mat.materialColor     = readVec4(pushConsts.materialTableBufferIndex, base + 12u);
     return mat;
 }
@@ -242,6 +246,7 @@ float AnisotropicSmithGGX(float ndots, float sdotx, float sdoty, float ax, float
 //   [43]     padding
 //   [44..59] eyeViewMatrix (mat4)
 //   [60..75] eyeProjMatrix (mat4)
+//   [76..91] eyeInvProjMatrix (mat4)
 
 // Evaluate sky-driven irradiance from 9 SH coefficients in the SSBO pool.
 // Uses the Ramamoorthi-Hanrahan analytic form which already folds in the
@@ -371,8 +376,18 @@ vec3 shadowCascadeDebugColor(uint cascadeIndex)
     return vec3(0.08, 0.08, 0.08);
 }
 
+float sampleAmbientOcclusion(ivec2 pixel)
+{
+    if (pushConsts.ssaoEnabled == 0u || pushConsts.ssaoImageIndex == 0u) {
+        return 1.0;
+    }
+    float ao = texelFetch(textures[nonuniformEXT(pushConsts.ssaoImageIndex)], pixel, 0).r;
+    float strength = max(pushConsts.ssaoStrength, 0.0);
+    return clamp(1.0 - (1.0 - ao) * strength, 0.0, 1.0);
+}
+
 vec3 DisneyBRDF(vec3 WorldPos, vec3 Normal, vec3 Tangent, vec3 Bitangent,
-    vec3 lightColor, vec3 albedo, MaterialInfo matl, float shadowFactor)
+    vec3 lightColor, vec3 albedo, MaterialInfo matl, float shadowFactor, float ambientOcclusion)
 {
     vec3 N = normalize(Normal);
     vec3 X = normalize(Tangent);
@@ -400,6 +415,7 @@ vec3 DisneyBRDF(vec3 WorldPos, vec3 Normal, vec3 Tangent, vec3 Bitangent,
     vec3 skyDC = vec3(0.886227) * readVec3(pushConsts.skyIrradianceSHBufferIndex, 0u);
     vec3 irradiance = max(skyE, skyDC * 0.5);
     vec3 ambient = albedo * irradiance * (1.0 / PI);
+    ambient *= clamp(ambientOcclusion, 0.0, 1.0);
 
     if (ndotl <= 0.0) return ambient;
 
@@ -584,10 +600,17 @@ void main()
         baseColor.rgb *= texSample.rgb;
     }
 
+    if (matl.lightingEnabled <= 0.5)
+    {
+        imageStore(imagesRGBA16[pushConsts.finalOutputImage], pixel, vec4(baseColor.rgb, baseColor.a));
+        return;
+    }
+
     // --- Disney Principled BRDF lighting ---
     float shadowFactor = computeSunShadow(interpPos, interpNormal);
+    float ambientOcclusion = sampleAmbientOcclusion(pixel);
     vec3 renderResult = DisneyBRDF(interpPos, interpNormal, T, B,
-        pushConsts.lightColor, baseColor.rgb, matl, shadowFactor);
+        pushConsts.lightColor, baseColor.rgb, matl, shadowFactor, ambientOcclusion);
     if (pushConsts.shadowCascadeDebug != 0u) {
         renderResult = shadowCascadeDebugColor(computeShadowCascadeIndex(interpPos));
     }

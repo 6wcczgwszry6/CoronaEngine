@@ -1249,6 +1249,45 @@ class SceneTools(PluginBase):
             return {"status": "error", "message": str(exc)}
 
     @staticmethod
+    def set_ssao_enabled(scene_name: str, camera_name: str = None, enabled: bool = True) -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                raise ValueError(f"Scene '{scene_name}' not found")
+            camera = scene.find_camera(camera_name)
+            if camera is None:
+                raise ValueError(f"Camera '{camera_name}' not found in scene '{scene_name}'")
+            setter = getattr(camera, "set_ssao_enabled", None)
+            if not callable(setter):
+                engine_setter = getattr(getattr(camera, "engine_obj", None), "set_ssao_enabled", None)
+                if callable(engine_setter):
+                    engine_setter(bool(enabled))
+            else:
+                setter(bool(enabled))
+            return {"status": "success", "enabled": bool(enabled)}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def get_ssao_enabled(scene_name: str, camera_name: str = None) -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                raise ValueError(f"Scene '{scene_name}' not found")
+            camera = scene.find_camera(camera_name)
+            if camera is None:
+                raise ValueError(f"Camera '{camera_name}' not found in scene '{scene_name}'")
+            getter = getattr(camera, "get_ssao_enabled", None)
+            if callable(getter):
+                enabled = getter()
+            else:
+                engine_getter = getattr(getattr(camera, "engine_obj", None), "get_ssao_enabled", None)
+                enabled = bool(engine_getter()) if callable(engine_getter) else True
+            return {"status": "success", "enabled": bool(enabled)}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
     def is_vision_available() -> dict:
         try:
             available = bool(CoronaEditor.CoronaEngine.is_vision_available())

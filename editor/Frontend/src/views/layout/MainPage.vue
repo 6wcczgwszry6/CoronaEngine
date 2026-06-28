@@ -542,6 +542,23 @@ const mouseRotate = reactive({
   lastY: 0,
 });
 
+const MAX_CAMERA_VIEWPORT_RENDER_PIXELS = 1920 * 1080;
+
+const computeCameraViewportRenderSize = (width, height, scale) => {
+  const physicalWidth = Math.max(Math.round(width * scale), 1);
+  const physicalHeight = Math.max(Math.round(height * scale), 1);
+  const pixels = physicalWidth * physicalHeight;
+  if (pixels <= MAX_CAMERA_VIEWPORT_RENDER_PIXELS) {
+    return { width: physicalWidth, height: physicalHeight };
+  }
+
+  const ratio = Math.sqrt(MAX_CAMERA_VIEWPORT_RENDER_PIXELS / pixels);
+  return {
+    width: Math.max(Math.floor(physicalWidth * ratio), 1),
+    height: Math.max(Math.floor(physicalHeight * ratio), 1),
+  };
+};
+
 const getViewportHitRect = () => viewportPickSurfaceRef.value?.getBoundingClientRect?.() ?? null;
 
 const getViewportRenderRect = () => {
@@ -549,13 +566,14 @@ const getViewportRenderRect = () => {
   const width = Math.max(Number(rect?.width || 0), 0);
   const height = Math.max(Number(rect?.height || 0), 0);
   const scale = Math.max(Number(window.devicePixelRatio || 1), 0.01);
+  const renderSize = computeCameraViewportRenderSize(width, height, scale);
   return {
     left: Number(rect?.left || 0),
     top: Number(rect?.top || 0),
     width,
     height,
-    renderWidth: Math.max(Math.round(width * scale), 1),
-    renderHeight: Math.max(Math.round(height * scale), 1),
+    renderWidth: renderSize.width,
+    renderHeight: renderSize.height,
   };
 };
 
@@ -609,12 +627,25 @@ const syncCameraViewportRect = () => {
   const y = Math.max(Math.round(Number(rect.top || 0) * scale), 0);
   const width = Math.max(Math.round(Number(rect.width || 0) * scale), 1);
   const height = Math.max(Math.round(Number(rect.height || 0) * scale), 1);
-  const signature = `${cameraHandle}:${x}:${y}:${width}:${height}`;
+  const renderSize = computeCameraViewportRenderSize(
+    Math.max(Number(rect.width || 0), 0),
+    Math.max(Number(rect.height || 0), 0),
+    scale,
+  );
+  const signature = `${cameraHandle}:${x}:${y}:${width}:${height}:${renderSize.width}:${renderSize.height}`;
   if (signature === lastCameraViewportSignature) {
     return true;
   }
 
-  if (bridge.setCameraViewport(cameraHandle, x, y, width, height, width, height)) {
+  if (bridge.setCameraViewport(
+    cameraHandle,
+    x,
+    y,
+    width,
+    height,
+    renderSize.width,
+    renderSize.height,
+  )) {
     lastCameraViewportSignature = signature;
     return true;
   }

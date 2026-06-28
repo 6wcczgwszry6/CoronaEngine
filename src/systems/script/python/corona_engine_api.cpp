@@ -2148,6 +2148,8 @@ void Corona::API::Camera::set_output_mode(const std::string& mode) {
         output_mode = CameraOutputMode::ObjectID;
     } else if (mode == "visibility_buffer") {
         output_mode = CameraOutputMode::VisibilityBuffer;
+    } else if (mode == "ssao") {
+        output_mode = CameraOutputMode::SSAO;
     } else if (mode != "final_color") {
         CFW_LOG_WARNING("[Camera::set_output_mode] Unknown mode '{}', defaulting to final_color", mode);
     }
@@ -2176,6 +2178,8 @@ std::string Corona::API::Camera::get_output_mode() const {
                 return "object_id";
             case CameraOutputMode::VisibilityBuffer:
                 return "visibility_buffer";
+            case CameraOutputMode::SSAO:
+                return "ssao";
             case CameraOutputMode::FinalColor:
                 [[fallthrough]];
             default:
@@ -2223,6 +2227,30 @@ bool Corona::API::Camera::get_shadow_cascade_debug() const {
         return accessor->shadow_cascade_debug;
     }
     return false;
+}
+
+void Corona::API::Camera::set_ssao_enabled(bool enabled) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Camera::set_ssao_enabled] Invalid camera handle");
+        return;
+    }
+
+    CameraStateUpdateCommand command{};
+    command.camera_handle = handle_;
+    command.fields = CameraStateUpdateField::SsaoEnabled;
+    command.ssao_enabled = enabled;
+    SharedDataHub::instance().enqueue_camera_state_update(command);
+}
+
+bool Corona::API::Camera::get_ssao_enabled() const {
+    if (handle_ == 0) {
+        return true;
+    }
+
+    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_read(handle_)) {
+        return accessor->ssao_enabled;
+    }
+    return true;
 }
 
 void Corona::API::Camera::set_view_state(bool open, int x, int y, int width, int height, float move_speed) {

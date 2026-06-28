@@ -153,6 +153,8 @@ bool is_python_fallback_allowed(const std::string& module, const std::string& fu
             "import_vision_scene_into_current_scene",
             "sun_direction",
             "floor_grid",
+            "set_ssao_enabled",
+            "get_ssao_enabled",
         }},
     };
 

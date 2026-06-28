@@ -394,6 +394,18 @@
         >
           CSM
         </button>
+        <button
+          class="px-1.5 py-0.5 text-[10px] rounded border"
+          :class="
+            ssaoEnabled
+              ? 'border-[#22c55e] text-[#dcfce7] bg-[#12351f]'
+              : 'border-[#555] text-[#999] hover:text-[#ccc] hover:border-[#777]'
+          "
+          title="Toggle Native SSAO"
+          @click="ToggleSsaoEnabled"
+        >
+          SSAO
+        </button>
         <div class="w-px h-4 bg-[#444] mx-0.5"></div>
         <button
           class="px-1.5 py-0.5 text-[10px] rounded border border-[#555] text-[#4ec9b0] hover:bg-[#3a3a3a]"
@@ -1238,6 +1250,9 @@ const SelectActor = (scene) => {
 const SelectCamera = (cam) => {
   selectedItem.value = 'cam:' + cam.name;
   selectedCameraName.value = cam.name;
+  activeOutputMode.value = cam.output_mode || 'final_color';
+  shadowCascadeDebug.value = !!cam.shadow_cascade_debug;
+  ssaoEnabled.value = cam.ssao_enabled !== false;
   RefreshRenderBackendState();
 };
 
@@ -1555,10 +1570,13 @@ const outputModes = [
   { type: 'normal', label: 'Normal', color: '#34d399' },
   { type: 'position', label: 'Position', color: '#fbbf24' },
   { type: 'object_id', label: 'Object ID', color: '#c084fc' },
+  { type: 'visibility_buffer', label: 'Visibility', color: '#f472b6' },
+  { type: 'ssao', label: 'SSAO', color: '#22c55e' },
 ];
 const ShowGBufferDropdown = ref(false);
 const activeOutputMode = ref('final_color');
 const shadowCascadeDebug = ref(false);
+const ssaoEnabled = ref(true);
 
 // Vision / Native 渲染后端切换状态
 const visionAvailable = ref(false);
@@ -1616,6 +1634,10 @@ const SetOutputMode = async (mode) => {
       logError(`Set output mode failed`, payload?.message || result?.error || 'unknown error');
     } else {
       activeOutputMode.value = mode;
+      const target = getTargetCamera();
+      if (target) {
+        target.output_mode = mode;
+      }
     }
   } catch (e) {
     logError('Failed to set output mode', e);
@@ -1642,6 +1664,29 @@ const ToggleShadowCascadeDebug = async () => {
   } catch (e) {
     shadowCascadeDebug.value = !next;
     logError('Failed to set CSM cascade debug', e);
+  }
+};
+
+const ToggleSsaoEnabled = async () => {
+  const next = !ssaoEnabled.value;
+  ssaoEnabled.value = next;
+  try {
+    const cameraName = getTargetCameraName();
+    const result = await sceneService.setSsaoEnabled(currentSceneName.value, cameraName, next);
+    const payload = result?.data ?? result;
+    if (result?.success === false || payload?.status === 'error') {
+      ssaoEnabled.value = !next;
+      logError('Set SSAO failed', payload?.message || result?.error || 'unknown error');
+    } else {
+      ssaoEnabled.value = payload?.enabled !== false;
+      const target = getTargetCamera();
+      if (target) {
+        target.ssao_enabled = ssaoEnabled.value;
+      }
+    }
+  } catch (e) {
+    ssaoEnabled.value = !next;
+    logError('Failed to set SSAO', e);
   }
 };
 
@@ -2077,6 +2122,7 @@ const normalizeCameraPayload = (cam) => ({
   render_backend: cam.render_backend || 'native',
   output_mode: cam.output_mode || 'final_color',
   shadow_cascade_debug: !!cam.shadow_cascade_debug,
+  ssao_enabled: cam.ssao_enabled !== false,
   deletable: cam.deletable !== false,
   move_speed: cam.move_speed || 1,
   view_open: !!cam.view_open,
@@ -2092,7 +2138,9 @@ const applyCameraList = (cameras) => {
     selectedCameraName.value = sceneCameras.value[0]?.name || null;
   }
   const target = getTargetCamera();
+  activeOutputMode.value = target?.output_mode || 'final_color';
   shadowCascadeDebug.value = !!target?.shadow_cascade_debug;
+  ssaoEnabled.value = target?.ssao_enabled !== false;
 };
 
 const RefreshCameraListOnly = async () => {

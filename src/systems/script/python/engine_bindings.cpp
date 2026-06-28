@@ -341,7 +341,7 @@ void BindAll(nanobind::module_& m) {
         .def("save_screenshot_sync", &Camera::save_screenshot_sync, nb::arg("path"),
              "Save a screenshot and block until it completes. Returns True on success.")
         .def("set_output_mode", &Camera::set_output_mode, nb::arg("mode"),
-             "Set camera output mode. mode: 'final_color', 'base_color', 'normal', 'position', 'object_id'")
+             "Set camera output mode. mode: 'final_color', 'base_color', 'normal', 'position', 'object_id', 'visibility_buffer', 'ssao'")
         .def("get_output_mode", &Camera::get_output_mode,
              "Get current camera output mode as string")
         .def("set_render_backend", &Camera::set_render_backend, nb::arg("mode"))
@@ -350,6 +350,8 @@ void BindAll(nanobind::module_& m) {
         .def("get_vision_render_mode", &Camera::get_vision_render_mode)
         .def("set_shadow_cascade_debug", &Camera::set_shadow_cascade_debug, nb::arg("enabled"))
         .def("get_shadow_cascade_debug", &Camera::get_shadow_cascade_debug)
+        .def("set_ssao_enabled", &Camera::set_ssao_enabled, nb::arg("enabled"))
+        .def("get_ssao_enabled", &Camera::get_ssao_enabled)
         .def("set_view_state", &Camera::set_view_state, nb::arg("open"), nb::arg("x"),
              nb::arg("y"), nb::arg("width"), nb::arg("height"), nb::arg("move_speed"))
         .def("get_view_state", &Camera::get_view_state)

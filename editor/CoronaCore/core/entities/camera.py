@@ -45,6 +45,7 @@ class Camera:
                  move_speed: float = 1.0, view_open: bool = False,
                  view_x: int = 120, view_y: int = 120,
                  view_width: int = 960, view_height: int = 540,
+                 ssao_enabled: bool = True,
                  deletable: bool = True):
         if CoronaEngine is None:
             raise RuntimeError("CoronaEngine 未初始化")
@@ -74,6 +75,7 @@ class Camera:
         self.output_mode = output_mode
         self.vision_render_mode = normalize_vision_render_mode(vision_render_mode)
         self.shadow_cascade_debug = False
+        self.ssao_enabled = bool(ssao_enabled)
         self.move_speed = float(move_speed)
         self.view_open = bool(view_open)
         self.view_x = int(view_x)
@@ -83,6 +85,8 @@ class Camera:
         self.deletable = bool(deletable)
         self.engine_obj.set_size(width, height)
         self.engine_obj.set_output_mode(output_mode)
+        if hasattr(self.engine_obj, 'set_ssao_enabled'):
+            self.engine_obj.set_ssao_enabled(self.ssao_enabled)
         self.engine_obj.set_render_backend(render_backend)
         if hasattr(self.engine_obj, 'set_vision_render_mode'):
             self.engine_obj.set_vision_render_mode(self.vision_render_mode)
@@ -165,6 +169,18 @@ class Camera:
         if callable(getter):
             self.shadow_cascade_debug = bool(getter())
         return bool(getattr(self, 'shadow_cascade_debug', False))
+
+    def set_ssao_enabled(self, enabled: bool):
+        self.ssao_enabled = bool(enabled)
+        setter = getattr(self.engine_obj, 'set_ssao_enabled', None)
+        if callable(setter):
+            setter(self.ssao_enabled)
+
+    def get_ssao_enabled(self) -> bool:
+        getter = getattr(self.engine_obj, 'get_ssao_enabled', None)
+        if callable(getter):
+            self.ssao_enabled = bool(getter())
+        return bool(getattr(self, 'ssao_enabled', True))
 
     def set_render_backend(self, mode: str):
         actual = mode
@@ -276,6 +292,7 @@ class Camera:
             'render_backend': self.get_render_backend(),
             'vision_render_mode': self.get_vision_render_mode(),
             'shadow_cascade_debug': self.get_shadow_cascade_debug(),
+            'ssao_enabled': self.get_ssao_enabled(),
             'move_speed': self.move_speed,
             'view_open': self.view_open,
             'view_x': self.view_x,

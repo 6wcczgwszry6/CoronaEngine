@@ -124,6 +124,10 @@ export const sceneService = {
     Bridge.callCEF('SceneTools', 'set_shadow_cascade_debug', [sceneName, cameraName, !!enabled]),
   getShadowCascadeDebug: (sceneName, cameraName) =>
     Bridge.callCEF('SceneTools', 'get_shadow_cascade_debug', [sceneName, cameraName]),
+  setSsaoEnabled: (sceneName, cameraName, enabled) =>
+    Bridge.callCEF('SceneTools', 'set_ssao_enabled', [sceneName, cameraName, !!enabled]),
+  getSsaoEnabled: (sceneName, cameraName) =>
+    Bridge.callCEF('SceneTools', 'get_ssao_enabled', [sceneName, cameraName]),
   isVisionAvailable: () => Bridge.callCEF('SceneTools', 'is_vision_available', []),
   setRenderBackend: (mode, sceneName = null, cameraId = null) =>
     Bridge.callCEF('SceneTools', 'set_render_backend', [mode, sceneName, cameraId]),
