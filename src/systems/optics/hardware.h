@@ -7,11 +7,14 @@
 #include "Codegen/CustomLibrary.h"
 #include "Codegen/TypeAlias.h"
 
+#include <array>
 #include <optional>
 
 // clang-format off
 #include GLSL(../../../assets/shaders/visibility.vert.glsl)
 #include GLSL(../../../assets/shaders/visibility.frag.glsl)
+#include GLSL(../../../assets/shaders/shadow.vert.glsl)
+#include GLSL(../../../assets/shaders/shadow.frag.glsl)
 #include GLSL(../../../assets/shaders/lighting.comp.glsl)
 #include GLSL(../../../assets/shaders/sky.comp.glsl)
 #include GLSL(../../../assets/shaders/sky_sh_project.comp.glsl)
@@ -34,6 +37,8 @@ struct Hardware {
     Corona::Horizon::HardwareImage depthImage;       // D32_FLOAT: depth (kept from GBuffer)
     Corona::Horizon::HardwareImage uiVisibilityImage;  // Pass 2 visibility, isolated from scene pass
     Corona::Horizon::HardwareImage uiDepthImage;        // Pass 2 depth, isolated from scene pass
+    Corona::Horizon::HardwareImage shadowColorImage;
+    std::array<Corona::Horizon::HardwareImage, 4> shadowCascadeImages;
 
     // === Final composited output ===
     Corona::Horizon::HardwareImage finalOutputImage;
@@ -53,11 +58,13 @@ struct Hardware {
     Corona::Horizon::HardwareBuffer uiMaterialTableBuffer;
     Corona::Horizon::HardwareBuffer actorPickBuffer;
     Corona::Horizon::HardwareBuffer skyIrradianceSHBuffer;  // 9 vec3 SH coeffs (sky-driven ambient)
+    Corona::Horizon::HardwareBuffer shadowInfoBuffer;
 
     // === Shader pipelines ===
     bool shaderHasInit = false;
     std::optional<Corona::Horizon::RasterizerPipeline<visibility_vert_glsl_t, visibility_frag_glsl_t>> visibilityPipeline;
     std::optional<Corona::Horizon::RasterizerPipeline<visibility_vert_glsl_t, visibility_frag_glsl_t>> uiVisibilityPipeline;
+    std::optional<Corona::Horizon::RasterizerPipeline<shadow_vert_glsl_t, shadow_frag_glsl_t>> shadowPipeline;
     std::optional<Corona::Horizon::ComputePipeline<lighting_comp_glsl_t>> lightingPipeline;
     std::optional<Corona::Horizon::ComputePipeline<sky_comp_glsl_t>> skyPipeline;
     std::optional<Corona::Horizon::ComputePipeline<sky_sh_project_comp_glsl_t>> skySHProjectPipeline;
@@ -93,6 +100,16 @@ struct Hardware {
     struct VPUniformBufferObject {
         ktm::fmat4x4 viewProjMatrix;
     } vpUniformBufferObjects{};
+
+    struct ShadowInfoBufferObject {
+        std::array<ktm::fmat4x4, 4> lightViewProj;
+        ktm::fvec4 cascadeSplits;
+        std::array<uint32_t, 4> shadowMapDescriptors{};
+        float shadowMapSize = 2048.0f;
+        float shadowBias = 0.0015f;
+        uint32_t shadowEnabled = 0;
+        uint32_t padding0 = 0;
+    } shadowInfoBufferObjects{};
 
     // === GPU-side instance info table (matches GLSL InstanceInfo layout) ===
     // 80 bytes = 20 uints per entry:

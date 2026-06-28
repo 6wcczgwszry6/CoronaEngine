@@ -57,6 +57,12 @@
 
 namespace {
 
+constexpr uint32_t kShadowCascadeCount = 4;
+constexpr uint32_t kShadowMapSize = 2048;
+constexpr float kShadowMaxDistance = 100.0f;
+constexpr float kShadowSplitLambda = 0.5f;
+constexpr float kShadowBias = 0.0015f;
+
 struct RenderInstanceBatch {
     std::vector<Hardware::InstanceInfo> instances;
     std::vector<Hardware::MaterialInfo> materials;
@@ -160,6 +166,24 @@ struct OpticsEventViewport {
     desc.depth_stencil.depth_compare_op = Corona::Horizon::CompareOp::LessOrEqual;
     desc.rasterizer.cull_mode = Corona::Horizon::CullMode::None;
     desc.blend.attachments = {Corona::Horizon::BlendStateDesc::opaque_attachment()};
+    desc.depth_attachment =
+        Corona::Horizon::DepthAttachmentDesc::with_format(Corona::Horizon::Format::D32);
+    return desc;
+}
+
+[[nodiscard]] Corona::Horizon::RasterizerPipelineDesc make_shadow_pipeline_desc() {
+    Corona::Horizon::RasterizerPipelineDesc desc;
+    auto vertex_shader = Corona::Horizon::PipelineShaderDesc::from_slang_module(
+        Corona::Horizon::PipelineShaderStage::Vertex,
+        shadow_vert_glsl_t::slangModule);
+    auto fragment_shader = Corona::Horizon::PipelineShaderDesc::from_slang_module(
+        Corona::Horizon::PipelineShaderStage::Fragment,
+        shadow_frag_glsl_t::slangModule);
+    desc.set_shaders(std::move(vertex_shader), std::move(fragment_shader));
+    desc.depth_stencil.depth_test_enabled = true;
+    desc.depth_stencil.depth_write_enabled = true;
+    desc.depth_stencil.depth_compare_op = Corona::Horizon::CompareOp::LessOrEqual;
+    desc.rasterizer.cull_mode = Corona::Horizon::CullMode::None;
     desc.depth_attachment =
         Corona::Horizon::DepthAttachmentDesc::with_format(Corona::Horizon::Format::D32);
     return desc;
@@ -595,6 +619,26 @@ void apply_pending_camera_releases() {
     return proj;
 }
 
+[[nodiscard]] ktm::fmat4x4 make_orthographic_off_center_lh(float left,
+                                                           float right,
+                                                           float bottom,
+                                                           float top,
+                                                           float near_plane,
+                                                           float far_plane) {
+    ktm::fmat4x4 proj = ktm::fmat4x4::from_eye();
+    const float width = std::max(right - left, 1e-4f);
+    const float height = std::max(top - bottom, 1e-4f);
+    const float depth = std::max(far_plane - near_plane, 1e-4f);
+
+    proj[0][0] = 2.0f / width;
+    proj[1][1] = -2.0f / height;
+    proj[2][2] = 1.0f / depth;
+    proj[3][0] = -(right + left) / width;
+    proj[3][1] = (top + bottom) / height;
+    proj[3][2] = -near_plane / depth;
+    return proj;
+}
+
 [[nodiscard]] ktm::fmat4x4 make_camera_basis_matrix(const Corona::CameraDevice& camera) {
     const ktm::fvec3 forward = ktm::normalize(camera.forward);
     ktm::fvec3 right = ktm::cross(camera.world_up, forward);
@@ -633,6 +677,144 @@ void apply_pending_camera_releases() {
         }
     }
     return out;
+}
+
+[[nodiscard]] ktm::fvec3 make_vec3(float x, float y, float z) {
+    return ktm::fvec3{x, y, z};
+}
+
+[[nodiscard]] ktm::fvec3 add_vec3(const ktm::fvec3& a, const ktm::fvec3& b) {
+    return make_vec3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+
+[[nodiscard]] ktm::fvec3 sub_vec3(const ktm::fvec3& a, const ktm::fvec3& b) {
+    return make_vec3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+[[nodiscard]] ktm::fvec3 mul_vec3(const ktm::fvec3& v, float s) {
+    return make_vec3(v.x * s, v.y * s, v.z * s);
+}
+
+[[nodiscard]] ktm::fvec3 transform_point(const ktm::fmat4x4& matrix,
+                                         const ktm::fvec3& point) {
+    const float x = matrix[0][0] * point.x + matrix[1][0] * point.y +
+                    matrix[2][0] * point.z + matrix[3][0];
+    const float y = matrix[0][1] * point.x + matrix[1][1] * point.y +
+                    matrix[2][1] * point.z + matrix[3][1];
+    const float z = matrix[0][2] * point.x + matrix[1][2] * point.y +
+                    matrix[2][2] * point.z + matrix[3][2];
+    const float w = matrix[0][3] * point.x + matrix[1][3] * point.y +
+                    matrix[2][3] * point.z + matrix[3][3];
+    if (std::abs(w) > 1e-5f) {
+        return make_vec3(x / w, y / w, z / w);
+    }
+    return make_vec3(x, y, z);
+}
+
+[[nodiscard]] float lerp_float(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
+[[nodiscard]] std::array<ktm::fvec3, 8> camera_frustum_corners(
+    const Corona::CameraDevice& camera,
+    float near_distance,
+    float far_distance) {
+    const ktm::fvec3 forward = ktm::normalize(camera.forward);
+    ktm::fvec3 right = ktm::cross(camera.world_up, forward);
+    if (ktm::length(right) < 1e-5f) {
+        right = make_vec3(1.0f, 0.0f, 0.0f);
+    } else {
+        right = ktm::normalize(right);
+    }
+    const ktm::fvec3 up = ktm::normalize(ktm::cross(forward, right));
+
+    const float tan_half_fov = std::tan(ktm::radians(camera.fov) * 0.5f);
+    const float near_half_h = tan_half_fov * near_distance;
+    const float near_half_w = near_half_h * camera.aspect;
+    const float far_half_h = tan_half_fov * far_distance;
+    const float far_half_w = far_half_h * camera.aspect;
+    const ktm::fvec3 near_center = add_vec3(camera.position, mul_vec3(forward, near_distance));
+    const ktm::fvec3 far_center = add_vec3(camera.position, mul_vec3(forward, far_distance));
+
+    return {
+        add_vec3(add_vec3(near_center, mul_vec3(right, -near_half_w)), mul_vec3(up, -near_half_h)),
+        add_vec3(add_vec3(near_center, mul_vec3(right, near_half_w)), mul_vec3(up, -near_half_h)),
+        add_vec3(add_vec3(near_center, mul_vec3(right, -near_half_w)), mul_vec3(up, near_half_h)),
+        add_vec3(add_vec3(near_center, mul_vec3(right, near_half_w)), mul_vec3(up, near_half_h)),
+        add_vec3(add_vec3(far_center, mul_vec3(right, -far_half_w)), mul_vec3(up, -far_half_h)),
+        add_vec3(add_vec3(far_center, mul_vec3(right, far_half_w)), mul_vec3(up, -far_half_h)),
+        add_vec3(add_vec3(far_center, mul_vec3(right, -far_half_w)), mul_vec3(up, far_half_h)),
+        add_vec3(add_vec3(far_center, mul_vec3(right, far_half_w)), mul_vec3(up, far_half_h)),
+    };
+}
+
+[[nodiscard]] std::array<float, kShadowCascadeCount> compute_shadow_splits(
+    const Corona::CameraDevice& camera) {
+    std::array<float, kShadowCascadeCount> splits{};
+    const float near_plane = std::max(camera.near_plane, 0.01f);
+    const float far_plane = std::max(std::min(camera.far_plane, kShadowMaxDistance), near_plane + 0.01f);
+    for (uint32_t i = 0; i < kShadowCascadeCount; ++i) {
+        const float p = static_cast<float>(i + 1u) / static_cast<float>(kShadowCascadeCount);
+        const float logarithmic = near_plane * std::pow(far_plane / near_plane, p);
+        const float uniform = near_plane + (far_plane - near_plane) * p;
+        splits[i] = lerp_float(uniform, logarithmic, kShadowSplitLambda);
+    }
+    return splits;
+}
+
+[[nodiscard]] ktm::fmat4x4 compute_shadow_light_view_proj(
+    const Corona::CameraDevice& camera,
+    const ktm::fvec3& sun_dir,
+    float cascade_near,
+    float cascade_far) {
+    const auto corners = camera_frustum_corners(camera, cascade_near, cascade_far);
+    ktm::fvec3 center = make_vec3(0.0f, 0.0f, 0.0f);
+    for (const auto& corner : corners) {
+        center = add_vec3(center, corner);
+    }
+    center = mul_vec3(center, 1.0f / static_cast<float>(corners.size()));
+
+    float radius = 0.0f;
+    for (const auto& corner : corners) {
+        radius = std::max(radius, ktm::length(sub_vec3(corner, center)));
+    }
+    radius = std::max(radius, 1.0f);
+
+    ktm::fvec3 light_forward = mul_vec3(ktm::normalize(sun_dir), -1.0f);
+    ktm::fvec3 light_up = make_vec3(0.0f, 1.0f, 0.0f);
+    if (std::abs(ktm::dot(light_forward, light_up)) > 0.95f) {
+        light_up = make_vec3(0.0f, 0.0f, 1.0f);
+    }
+    const ktm::fvec3 light_position = sub_vec3(center, mul_vec3(light_forward, radius * 2.0f));
+    const ktm::fmat4x4 light_view = ktm::look_to_lh(light_position, light_forward, light_up);
+
+    ktm::fvec3 first = transform_point(light_view, corners[0]);
+    float min_x = first.x;
+    float max_x = first.x;
+    float min_y = first.y;
+    float max_y = first.y;
+    float min_z = first.z;
+    float max_z = first.z;
+    for (const auto& corner : corners) {
+        const ktm::fvec3 light_corner = transform_point(light_view, corner);
+        min_x = std::min(min_x, light_corner.x);
+        max_x = std::max(max_x, light_corner.x);
+        min_y = std::min(min_y, light_corner.y);
+        max_y = std::max(max_y, light_corner.y);
+        min_z = std::min(min_z, light_corner.z);
+        max_z = std::max(max_z, light_corner.z);
+    }
+
+    const float xy_padding = std::max(radius * 0.10f, 1.0f);
+    const float z_padding = std::max(radius * 4.0f, 20.0f);
+    const ktm::fmat4x4 light_proj = make_orthographic_off_center_lh(
+        min_x - xy_padding,
+        max_x + xy_padding,
+        min_y - xy_padding,
+        max_y + xy_padding,
+        std::max(min_z - z_padding, 0.01f),
+        max_z + z_padding);
+    return multiply_ktm_mat4(light_proj, light_view);
 }
 
 [[nodiscard]] Corona::Horizon::ImageUsageFlags optics_storage_image_usage() {
@@ -1607,6 +1789,14 @@ bool OpticsSystem::initialize_hardware_resources() {
         hardware_->uiVisibilityImage =
             make_storage_image(w, h, Horizon::Format::RGBA32_UINT, "optics.ui_visibility");
         hardware_->uiDepthImage = make_depth_image(w, h, "optics.ui_depth");
+        hardware_->shadowColorImage =
+            make_storage_image(kShadowMapSize, kShadowMapSize,
+                               Horizon::Format::RGBA32_UINT, "optics.shadow_dummy_color");
+        for (uint32_t i = 0; i < kShadowCascadeCount; ++i) {
+            hardware_->shadowCascadeImages[i] =
+                make_depth_image(kShadowMapSize, kShadowMapSize,
+                                 "optics.shadow_cascade_" + std::to_string(i));
+        }
 
         // --- Uniform buffers ---
         hardware_->uniformBuffer =
@@ -1629,6 +1819,8 @@ bool OpticsSystem::initialize_hardware_resources() {
             make_storage_buffer<Hardware::MaterialInfo>(kMaxMaterials, "optics.ui_materials");
         hardware_->actorPickBuffer =
             make_storage_buffer<std::uint32_t>(1, "optics.actor_pick");
+        hardware_->shadowInfoBuffer =
+            make_storage_buffer<Hardware::ShadowInfoBufferObject>(1, "optics.shadow_info");
 
         // Sky-driven ambient: 9 SH coefficients × vec3 = 27 floats. Written by
         // sky_sh_project.comp each environment change, read by lighting.comp.
@@ -1649,6 +1841,7 @@ bool OpticsSystem::initialize_render_pipelines() {
     try {
         hardware_->visibilityPipeline.emplace(make_visibility_pipeline_desc());
         hardware_->uiVisibilityPipeline.emplace(make_visibility_pipeline_desc());
+        hardware_->shadowPipeline.emplace(make_shadow_pipeline_desc());
         hardware_->lightingPipeline.emplace(lighting_comp_glsl, ktm::uvec3(8, 8, 1));
         hardware_->skyPipeline.emplace(sky_comp_glsl, ktm::uvec3(8, 8, 1));
         hardware_->skySHProjectPipeline.emplace(sky_sh_project_comp_glsl, ktm::uvec3(64, 1, 1));
@@ -2030,6 +2223,7 @@ void OpticsSystem::update() {
 #endif
 
     if (!hardware_->shaderHasInit || !hardware_->lightingPipeline ||
+        !hardware_->shadowPipeline ||
         !hardware_->skyPipeline || !hardware_->tonemapPipeline ||
         !hardware_->skySHProjectPipeline ||
         !hardware_->debugResolvePipeline || !hardware_->opticsOverlayPipeline ||
@@ -2052,6 +2246,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
     drain_viewport_ui_pointer_commands();
 
     auto& lighting = *hardware_->lightingPipeline;
+    auto& shadow = *hardware_->shadowPipeline;
     auto& sky = *hardware_->skyPipeline;
     auto& tonemap = *hardware_->tonemapPipeline;
     // UI overlay/warp/composite 管线现由 compose_surface_ui_overlay() 内部使用。
@@ -2322,7 +2517,75 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     }
                 };
 
+                auto record_shadow_cascade =
+                    [&](const ktm::fmat4x4& light_view_proj,
+                        Horizon::HardwareImage& shadow_depth) {
+                    shadow.clear_records();
+                    shadow.bind_render_target(0, hardware_->shadowColorImage);
+                    shadow.bind_depth_target(shadow_depth);
+
+                    for (auto actor_handle : scene.actor_handles) {
+                        auto actor = actor_storage.try_acquire_read(actor_handle);
+                        if (!actor || actor->follow_camera) {
+                            continue;
+                        }
+
+                        for (auto profile_handle : actor->profile_handles) {
+                            auto profile = profile_storage.try_acquire_read(profile_handle);
+                            if (!profile || profile->optics_handle == 0) continue;
+
+                            auto optics_acc = optics_storage.try_acquire_read(profile->optics_handle);
+                            if (!optics_acc || !optics_acc->visible) continue;
+
+                            if (auto geom = geom_storage.try_acquire_write(optics_acc->geometry_handle)) {
+                                ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
+                                ktm::fvec3 world_center{0.0f, 0.0f, 0.0f};
+                                if (auto transform = transform_storage.try_acquire_read(geom->transform_handle)) {
+                                    model_matrix = transform->compute_matrix();
+                                    world_center = transform->position;
+                                    model_matrix = apply_native_local_correction(model_matrix, *geom);
+                                }
+
+                                float bounding_radius = 1.0f;
+                                bool use_lod = false;
+                                if (geometry_system_) {
+                                    auto& ms = SharedDataHub::instance().mechanics_storage();
+                                    if (auto mech = ms.try_acquire_read(profile->mechanics_handle)) {
+                                        const float dx = mech->max_xyz.x - mech->min_xyz.x;
+                                        const float dy = mech->max_xyz.y - mech->min_xyz.y;
+                                        const float dz = mech->max_xyz.z - mech->min_xyz.z;
+                                        bounding_radius = std::sqrt(dx * dx + dy * dy + dz * dz) * 0.5f;
+                                        use_lod = true;
+                                    }
+                                }
+
+                                for (uint32_t mesh_index = 0;
+                                     mesh_index < static_cast<uint32_t>(geom->mesh_handles.size());
+                                     ++mesh_index) {
+                                    auto& m = geom->mesh_handles[mesh_index];
+                                    GeometrySystem::RenderMeshBuffers bufs{
+                                        m.vertexBuffer, m.indexBuffer,
+                                        m.vertexStorageBuffer, m.indexStorageBuffer};
+                                    if (use_lod && geometry_system_) {
+                                        bufs = geometry_system_->select_render_buffers(
+                                            optics_acc->geometry_handle, mesh_index,
+                                            camera->position, camera->fov,
+                                            world_center, bounding_radius, bufs);
+                                    }
+
+                                    const ktm::fmat4x4 clip_matrix =
+                                        multiply_ktm_mat4(light_view_proj, model_matrix);
+                                    shadow[shadow_vert_glsl_t::pushConsts::lightViewProjModel] =
+                                        upload_value(clip_matrix);
+                                    shadow.record(bufs.index, bufs.vertex);
+                                }
+                            }
+                        }
+                    }
+                };
+
                 const uint32_t sceneVpDescriptor = hardware_->vpUniformBuffer.storeDescriptor();
+                (void)sceneVpDescriptor;
                 visibility.clear_records();
                 collect_actor_instances_for_pass(visibility,
                                                  hardware_->vpUniformBufferObjects.viewProjMatrix,
@@ -2356,7 +2619,30 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                         exposure = env->exposure;
                     }
                 }
+                if (ktm::length(sun_dir) < 1e-5f) {
+                    sun_dir = make_vec3(1.0f, 1.0f, 1.0f);
+                }
                 sun_dir = ktm::normalize(sun_dir);
+
+                const auto shadow_splits = compute_shadow_splits(*camera);
+                float cascade_near = std::max(camera->near_plane, 0.01f);
+                for (uint32_t cascade = 0; cascade < kShadowCascadeCount; ++cascade) {
+                    const float cascade_far = shadow_splits[cascade];
+                    hardware_->shadowInfoBufferObjects.lightViewProj[cascade] =
+                        compute_shadow_light_view_proj(*camera, sun_dir, cascade_near, cascade_far);
+                    hardware_->shadowInfoBufferObjects.shadowMapDescriptors[cascade] =
+                        hardware_->shadowCascadeImages[cascade].storeSampledDescriptor();
+                    cascade_near = cascade_far;
+                }
+                hardware_->shadowInfoBufferObjects.cascadeSplits = ktm::fvec4{
+                    shadow_splits[0], shadow_splits[1], shadow_splits[2], shadow_splits[3]};
+                hardware_->shadowInfoBufferObjects.shadowMapSize =
+                    static_cast<float>(kShadowMapSize);
+                hardware_->shadowInfoBufferObjects.shadowBias = kShadowBias;
+                hardware_->shadowInfoBufferObjects.shadowEnabled =
+                    sun_intensity > 0.0f ? 1u : 0u;
+                (void)write_object_bytes(hardware_->shadowInfoBuffer,
+                                         hardware_->shadowInfoBufferObjects);
 
                 (void)write_object_bytes(hardware_->uniformBuffer,
                                          hardware_->uniformBufferObjects);
@@ -2392,6 +2678,10 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     hardware_->skyIrradianceSHBuffer.storeDescriptor();
                 lighting.pushConsts.ambientIntensity = 0.0f;
                 lighting.pushConsts.sun_dir = upload_value(sun_dir);
+                lighting.pushConsts.shadowEnabled =
+                    hardware_->shadowInfoBufferObjects.shadowEnabled;
+                lighting.pushConsts.shadowInfoBufferIndex =
+                    hardware_->shadowInfoBuffer.storeDescriptor();
                 {
                     ktm::fvec3 lightColor;
                     lightColor.x = sun_color.x * sun_intensity;
@@ -2531,6 +2821,14 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                         // Normal rendering path: full pipeline
                         // ============================================================
                         stream << visibility(hardware_->gbufferSize.x, hardware_->gbufferSize.y);
+                        if (hardware_->shadowInfoBufferObjects.shadowEnabled != 0u) {
+                            for (uint32_t cascade = 0; cascade < kShadowCascadeCount; ++cascade) {
+                                record_shadow_cascade(
+                                    hardware_->shadowInfoBufferObjects.lightViewProj[cascade],
+                                    hardware_->shadowCascadeImages[cascade]);
+                                stream << shadow(kShadowMapSize, kShadowMapSize);
+                            }
+                        }
                         if (sky_sh_needs_update) {
                             stream << (*hardware_->skySHProjectPipeline)(1, 1, 1);
                         }

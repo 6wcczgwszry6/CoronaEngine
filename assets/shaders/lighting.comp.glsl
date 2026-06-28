@@ -23,6 +23,8 @@ layout(push_constant) uniform PushConsts
     vec3 lightColor;
     float ambientIntensity;
     vec3 sun_dir;
+    uint shadowEnabled;
+    uint shadowInfoBufferIndex;
 } pushConsts;
 
 // ============================================================================
@@ -275,8 +277,70 @@ vec3 evalSkySH(vec3 n, uint shBuf)
     return max(irradiance, vec3(0.0));
 }
 
+float sampleShadowMap(uint shadowMap, vec2 uv, float receiverDepth, float bias)
+{
+    float shadowMapSize = readFloat(pushConsts.shadowInfoBufferIndex, 72u);
+    vec2 texelSize = vec2(1.0 / max(shadowMapSize, 1.0));
+    float lit = 0.0;
+    for (int y = -1; y <= 1; ++y)
+    {
+        for (int x = -1; x <= 1; ++x)
+        {
+            float casterDepth = texture(
+                textures[nonuniformEXT(shadowMap)],
+                uv + vec2(float(x), float(y)) * texelSize).r;
+            lit += (receiverDepth - bias) <= casterDepth ? 1.0 : 0.0;
+        }
+    }
+    return lit / 9.0;
+}
+
+float computeSunShadow(vec3 worldPos, vec3 normal)
+{
+    if (pushConsts.shadowEnabled == 0u) {
+        return 1.0;
+    }
+
+    vec4 cascadeSplits = readVec4(pushConsts.shadowInfoBufferIndex, 64u);
+    mat4 eyeView = readMat4(pushConsts.uniformBufferIndex, 44u);
+    float viewDepth = (eyeView * vec4(worldPos, 1.0)).z;
+    if (viewDepth < 0.0 || viewDepth > cascadeSplits.w) {
+        return 1.0;
+    }
+
+    uint cascadeIndex = 3u;
+    if (viewDepth <= cascadeSplits.x) {
+        cascadeIndex = 0u;
+    } else if (viewDepth <= cascadeSplits.y) {
+        cascadeIndex = 1u;
+    } else if (viewDepth <= cascadeSplits.z) {
+        cascadeIndex = 2u;
+    }
+
+    mat4 lightViewProj = readMat4(pushConsts.shadowInfoBufferIndex, cascadeIndex * 16u);
+    uint shadowMap = readUint(pushConsts.shadowInfoBufferIndex, 68u + cascadeIndex);
+
+    vec4 lightClip = lightViewProj * vec4(worldPos, 1.0);
+    if (abs(lightClip.w) < 1e-5) {
+        return 1.0;
+    }
+
+    vec3 ndc = lightClip.xyz / lightClip.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 ||
+        ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+
+    vec3 L = normalize(pushConsts.sun_dir);
+    float slope = 1.0 - max(dot(normalize(normal), L), 0.0);
+    float shadowBias = readFloat(pushConsts.shadowInfoBufferIndex, 73u);
+    float bias = max(shadowBias, shadowBias * (1.0 + slope * 2.0));
+    return sampleShadowMap(shadowMap, uv, ndc.z, bias);
+}
+
 vec3 DisneyBRDF(vec3 WorldPos, vec3 Normal, vec3 Tangent, vec3 Bitangent,
-    vec3 lightColor, vec3 albedo, MaterialInfo matl)
+    vec3 lightColor, vec3 albedo, MaterialInfo matl, float shadowFactor)
 {
     vec3 N = normalize(Normal);
     vec3 X = normalize(Tangent);
@@ -355,7 +419,7 @@ vec3 DisneyBRDF(vec3 WorldPos, vec3 Normal, vec3 Tangent, vec3 Bitangent,
     vec3 specular = Ds * F * G;
     vec3 clearcoat = vec3(0.25 * matl.clearcoat * Gr * Fr * Dr);
 
-    return ambient + (diffuse + specular + clearcoat) * lightColor * ndotl;
+    return ambient + (diffuse + specular + clearcoat) * lightColor * ndotl * shadowFactor;
 }
 
 // ============================================================================
@@ -489,8 +553,9 @@ void main()
     }
 
     // --- Disney Principled BRDF lighting ---
+    float shadowFactor = computeSunShadow(interpPos, interpNormal);
     vec3 renderResult = DisneyBRDF(interpPos, interpNormal, T, B,
-        pushConsts.lightColor, baseColor.rgb, matl);
+        pushConsts.lightColor, baseColor.rgb, matl, shadowFactor);
     renderResult = max(renderResult, vec3(0.01, 0.01, 0.01));
 
     imageStore(imagesRGBA16[pushConsts.finalOutputImage], pixel, vec4(renderResult, 1.0));
