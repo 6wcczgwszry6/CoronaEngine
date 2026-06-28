@@ -168,6 +168,12 @@ struct CpuMeshData {
             continue;
         }
 
+        // 跳过 GPU 资源已释放的 actor（被 LRU evict / 距离卸载后 mesh_handles 为空）
+        if (geom->mesh_handles.empty()) {
+            ++result.skipped_no_data;
+            continue;
+        }
+
         ++result.candidate_count;
 
         ::vision::float4x4 o2w = ::vision::make_float4x4(1.f);

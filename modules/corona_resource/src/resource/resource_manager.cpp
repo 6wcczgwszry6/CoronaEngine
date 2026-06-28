@@ -289,6 +289,16 @@ TResourceID ResourceManager::load_internal(const std::filesystem::path& path) {
         if (success) {
             entry->resource = resource;
             entry->state = LoadState::Ready;
+            // 用文件大小作为内存占用的初始估算值
+            // 实际内存占用通常接近文件大小（纹理/模型等压缩资源加载后会膨胀，
+            // 但作为 LRU 淘汰优先级排序的依据，文件大小是一个合理的一阶近似）
+            {
+                std::error_code ec;
+                auto fsize = std::filesystem::file_size(normalized_path, ec);
+                if (!ec && fsize > 0) {
+                    entry->estimated_bytes = static_cast<std::size_t>(fsize);
+                }
+            }
             lock.unlock();
             entry->cv.notify_all();  // 通知等待的线程加载完成
             return rid;

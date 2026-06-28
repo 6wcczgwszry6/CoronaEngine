@@ -4,7 +4,7 @@
 
 corona_add_example(
     NAME LRUCacheExample
-    LIBRARIES corona::kernel
+    LIBRARIES corona::resource::manager
     SOURCES
         main.cpp
         lru_cache_example.cpp
