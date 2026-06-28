@@ -498,6 +498,7 @@ class LANChatAgentWorker:
         target_agent_id = str(metadata.get("target_agent_id") or "").strip()
         target_agent_name = str(metadata.get("target_agent_name") or "").strip()
         target_plan_id = str(metadata.get("target_plan_id") or "").strip()
+        source = str(metadata.get("source") or "").strip()
         if not any((draft_action, target_scope, target_agent_id, target_agent_name, target_plan_id)):
             return ""
         if not self._can_execute_agent_locally():
@@ -522,6 +523,17 @@ class LANChatAgentWorker:
                 self._process_trigger(trigger)
             return "group_chat"
         if draft_action == "chat" and (target_agent_id or target_agent_name or target_scope == "agent"):
+            if source == "lanchat_native_queue":
+                self._logger.info(
+                    "[LANChatAgentTrace] phase=defer_structured_agent_route source=%s message_id=%s room=%s target_agent=%s/%s text=%s",
+                    source,
+                    message.get("message_id") or "",
+                    message.get("room_id") or "",
+                    target_agent_id,
+                    target_agent_name,
+                    _trace_preview(text),
+                )
+                return "agent_chat"
             agent_id = target_agent_id or target_agent_name or "agent"
             agent_name = target_agent_name or target_agent_id or "Agent"
             trigger = self._structured_trigger(message, metadata, agent_id=agent_id, agent_name=agent_name)

@@ -1470,7 +1470,7 @@ class MasterAgent:
             user_text = self._enhance_tidying(user_text, messages)
 
         scene_state = {
-            "metadata": {"room_size": [5, 3, 3], "scene_name": "lanchat_scene", "style_bible": style_bible},
+            "metadata": {"room_size": [5, 3, 3], "scene_name": "Scene/default.scene", "style_bible": style_bible},
             "intermediate": {"style_bible": style_bible},
         }
         lanchat_context = self._extract_lanchat_context(messages)
@@ -1515,7 +1515,7 @@ class MasterAgent:
             compose_text = f"{compose_text}\n\n## RoleAgent 软偏好\n{role_context}"
         image_url = self._extract_image_url(messages)
 
-        composer = SceneComposer(room_size=[5.0, 3.0, 3.0], scene_name="lanchat_scene",
+        composer = SceneComposer(room_size=[5.0, 3.0, 3.0], scene_name="Scene/default.scene",
                                  max_items=self._scene_max_items)
         agent_name = self._extract_current_agent_name(messages) or specialist.name
         runtime.start_compose(agent_name, compose_text)

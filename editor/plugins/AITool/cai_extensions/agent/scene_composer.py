@@ -1359,7 +1359,7 @@ class SceneComposer:
         "not a card, not a billboard, visible thickness and depth"
     )
 
-    def __init__(self, room_size: List[float] = None, scene_name: str = "lanchat_scene",
+    def __init__(self, room_size: List[float] = None, scene_name: str = "Scene/default.scene",
                  max_items: int = DEFAULT_MAX_ITEMS, zone_tree=None) -> None:
         self.room_size = room_size or [5.0, 3.0, 3.0]
         self.scene_name = scene_name
@@ -1399,6 +1399,55 @@ class SceneComposer:
         self._generated_asset_abs_dir = abs_dir
         self._generated_asset_rel_dir = rel_dir
         return abs_dir, rel_dir
+
+    def _create_native_scene_actor(
+        self,
+        name: str,
+        route: str,
+        *,
+        actor_type: str = "mesh",
+        position: List[float] = None,
+        rotation: List[float] = None,
+        scale: List[float] = None,
+        physics_enabled: bool = False,
+        skip_if_exists: bool = True,
+        ground_align: bool = False,
+        ground_y: float = 0.0,
+    ) -> Dict[str, Any]:
+        try:
+            from CoronaCore.core.corona_editor import CoronaEditor
+        except Exception as exc:
+            raise RuntimeError(f"CoronaEngine native bridge unavailable: {exc}") from exc
+
+        actor_data = {
+            "actor_name": name,
+            "name": name,
+            "position": list(position or [0.0, 0.0, 0.0]),
+            "rotation": list(rotation or [0.0, 0.0, 0.0]),
+            "scale": list(scale or [1.0, 1.0, 1.0]),
+            "physics_enabled": bool(physics_enabled),
+            "skip_if_exists": bool(skip_if_exists),
+        }
+        if ground_align:
+            actor_data["ground_align"] = True
+            actor_data["ground_y"] = float(ground_y)
+
+        raw = CoronaEditor.CoronaEngine.create_editor_actor(
+            self.scene_name or "",
+            route,
+            actor_type,
+            json.dumps(actor_data, ensure_ascii=False),
+        )
+        try:
+            result = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception as exc:
+            raise RuntimeError(f"native create_editor_actor returned invalid JSON: {raw!r}") from exc
+        if not isinstance(result, dict):
+            raise RuntimeError(f"native create_editor_actor returned non-object: {result!r}")
+        if result.get("status") not in ("success", "ok"):
+            raise RuntimeError(str(result.get("message") or result.get("error") or result))
+        actor = result.get("actor")
+        return actor if isinstance(actor, dict) else result
 
     def _get_room_zone(self):
         """返回用于"物体布局"的 Zone（物体摆进它的体积里）。
@@ -2891,39 +2940,15 @@ class SceneComposer:
         with open(obj_path, "w", encoding="ascii") as f:
             f.write(obj_text)
 
-        # 2. 场景 + Actor
+        # 2. 单个盒子 Actor（主编辑器 scene 只通过 C++ native 创建/持久化）
         try:
-            from CoronaCore.core.managers import scene_manager as _sm
-            from CoronaCore.core.entities.actor import Actor
-        except ImportError:
-            return
-
-        scene = _sm.get("")
-        if scene is None:
-            routes = _sm.list_all()
-            scene = _sm.get(routes[0]) if routes else None
-        if scene is None:
-            return
-
-        existing = {a.name for a in scene.get_actors()}
-        if "__room_box" in existing:
-            return
-
-        # 3. 单个盒子 Actor
-        try:
-            actor = Actor(name="__room_box", route=box_route, actor_type="mesh",
-                          parent_scene=scene)
-            # 盒子中心在房间中心，底部 Y=0
-            actor.set_position([0.0, height / 2.0, 0.0], True)
-            actor.set_scale([width, height, depth], True)
-            # 盒子作为静态碰撞体：不参与物理运动，只挡住内部物体
-            mech = getattr(actor, "_mechanics", None)
-            if mech is not None:
-                try:
-                    mech.set_physics_enabled(False)
-                except Exception:
-                    pass
-            scene.add_actor(actor)
+            self._create_native_scene_actor(
+                "__room_box",
+                box_route,
+                position=[0.0, height / 2.0, 0.0],
+                scale=[width, height, depth],
+                physics_enabled=False,
+            )
             _t.sleep(0.3)
             logger.info("[SceneComposer] 整体房间盒子已创建: %.1f×%.1f×%.1f m (floor=%s wall=%s ceiling=%s)",
                         width, depth, height, floor_mat, wall_mat, ceiling_mat)
@@ -3005,50 +3030,19 @@ class SceneComposer:
             ))
 
         try:
-            from CoronaCore.core.managers import scene_manager as _sm
-            from CoronaCore.core.entities.actor import Actor
-        except ImportError:
-            return
-
-        scene = _sm.get("")
-        if scene is None:
-            routes = _sm.list_all()
-            scene = _sm.get(routes[0]) if routes else None
-        if scene is None:
-            return
-
-        existing = {a.name for a in scene.get_actors()}
-        if "__room_terrain" in existing:
-            return
-
-        try:
-            actor = Actor(name="__room_terrain", route=terrain_route, actor_type="mesh",
-                          parent_scene=scene)
             # 引擎把 mesh 归一化成单位盒（max_extent→1）→ 世界大小只认 scale，mesh 真实坐标无效。
             # 均匀 scale = mesh 真实最大边（width，因 width≫height）→ 还原真实尺寸 + 保持坡度比例。
             s = max(width, depth)
-            actor.set_scale([s, s, s], True)
-            # 缩放后读 local AABB（仍是 ±0.5 归一化）→ 世界最低点 = aabb_min_y × s，抬到 y=0
-            # （平台是高度场最低点 h=0，抬平台到地面，坡在其上）。自动吸收引擎的居中偏移。
-            min_y = 0.0
-            try:
-                geo = getattr(actor, "_geometry", None)
-                aabb = geo.get_aabb() if geo is not None else None
-                if aabb and len(aabb) >= 6:
-                    min_y = float(aabb[1]) * s
-            except Exception:
-                pass
-            actor.set_position([0.0, -min_y, 0.0], True)
-            mech = getattr(actor, "_mechanics", None)
-            if mech is not None:
-                try:
-                    mech.set_physics_enabled(False)
-                except Exception:
-                    pass
-            scene.add_actor(actor)
+            self._create_native_scene_actor(
+                "__room_terrain",
+                terrain_route,
+                scale=[s, s, s],
+                physics_enabled=False,
+                ground_align=True,
+            )
             _t.sleep(0.3)
-            logger.info("[SceneComposer] 地形(terrain)已创建: %.1f×%.1f m, type=%s, material=%s, scatter=%s, scale=%.1f, 抬高=%.2f",
-                        width, depth, getattr(profile, "type", "?"), material, scatter, s, -min_y)
+            logger.info("[SceneComposer] 地形(terrain)已创建: %.1f×%.1f m, type=%s, material=%s, scatter=%s, scale=%.1f",
+                        width, depth, getattr(profile, "type", "?"), material, scatter, s)
         except Exception as e:
             logger.warning("[SceneComposer] 地形创建失败: %s", e)
 
@@ -3056,7 +3050,7 @@ class SceneComposer:
         # flat 地形也可有覆盖物，是否覆盖由 aspect 决定，不由场景关键词兜底。
         # actor 名用 __terrain_ 前缀（非 __room_，否则 _generate_room_box 的 __room_ 守卫
         # 会在 terrain+box 混合场景误挡盒子）。
-        if _has_aspect(zone, "ground_cover") and scatter != "none" and "__terrain_grass" not in existing:
+        if _has_aspect(zone, "ground_cover") and scatter != "none":
             try:
                 grass_mtl_path = asset_dir / "grass_blade.mtl"
                 grass_obj_path = asset_dir / "grass_blade.obj"
@@ -3070,28 +3064,16 @@ class SceneComposer:
                         width, depth, profile, platform_radius,
                         count=scatter_count, scatter=scatter,
                     ))
-                gactor = Actor(name="__terrain_grass", route=grass_route,
-                               actor_type="mesh", parent_scene=scene)
                 # 同 terrain：引擎归一化 mesh 成单位盒 → 世界大小只认 scale。
                 # 均匀 scale = max(width,depth) 还原草簇散布的真实范围（否则压成 1m）。
                 gs = max(width, depth)
-                gactor.set_scale([gs, gs, gs], True)
-                gmin_y = 0.0
-                try:
-                    ggeo = getattr(gactor, "_geometry", None)
-                    gaabb = ggeo.get_aabb() if ggeo is not None else None
-                    if gaabb and len(gaabb) >= 6:
-                        gmin_y = float(gaabb[1]) * gs
-                except Exception:
-                    pass
-                gactor.set_position([0.0, -gmin_y, 0.0], True)
-                gmech = getattr(gactor, "_mechanics", None)
-                if gmech is not None:
-                    try:
-                        gmech.set_physics_enabled(False)
-                    except Exception:
-                        pass
-                scene.add_actor(gactor)
+                self._create_native_scene_actor(
+                    "__terrain_grass",
+                    grass_route,
+                    scale=[gs, gs, gs],
+                    physics_enabled=False,
+                    ground_align=True,
+                )
                 _t.sleep(0.2)
                 logger.info("[SceneComposer] terrain scatter layer created: %s, %d clusters",
                             scatter, scatter_count)
@@ -3127,21 +3109,6 @@ class SceneComposer:
         if ring_r < 1e-6:
             return
 
-        try:
-            from CoronaCore.core.managers import scene_manager as _sm
-            from CoronaCore.core.entities.actor import Actor
-        except ImportError:
-            return
-        scene = _sm.get("")
-        if scene is None:
-            routes = _sm.list_all()
-            scene = _sm.get(routes[0]) if routes else None
-        if scene is None:
-            return
-        existing = {a.name for a in scene.get_actors()}
-        if "__terrain_boundary" in existing or "__terrain_fence" in existing:
-            return
-
         asset_dir, asset_rel_dir = self._generated_asset_dir()
         fence_mtl_path = asset_dir / "boundary.mtl"
         fence_obj_path = asset_dir / "boundary.obj"
@@ -3157,29 +3124,17 @@ class SceneComposer:
                                          mtl_lib="boundary.mtl",
                                          kind=kind,
                                          height=height))
-            factor = Actor(name="__terrain_boundary", route=boundary_route,
-                           actor_type="mesh", parent_scene=scene)
             # 归一化后环径=单位盒 max 边=1 → scale=2*ring_r 让世界环半径=ring_r。
             s = 2.0 * ring_r
-            factor.set_scale([s, s, s], True)
-            # 缩放后读 local AABB（±0.5）→ 世界最低点=aabb_min_y×s，抬到 y=0 贴地。
-            fmin_y = 0.0
-            try:
-                fgeo = getattr(factor, "_geometry", None)
-                faabb = fgeo.get_aabb() if fgeo is not None else None
-                if faabb and len(faabb) >= 6:
-                    fmin_y = float(faabb[1]) * s
-            except Exception:
-                pass
             center = anchor.get("center") or [0.0, 0.0, 0.0]
-            factor.set_position([float(center[0]), -fmin_y, float(center[2])], True)
-            fmech = getattr(factor, "_mechanics", None)
-            if fmech is not None:
-                try:
-                    fmech.set_physics_enabled(False)
-                except Exception:
-                    pass
-            scene.add_actor(factor)
+            self._create_native_scene_actor(
+                "__terrain_boundary",
+                boundary_route,
+                position=[float(center[0]), 0.0, float(center[2])],
+                scale=[s, s, s],
+                physics_enabled=False,
+                ground_align=True,
+            )
             _t.sleep(0.2)
             logger.info("[SceneComposer] 边界已铺设: kind=%s material=%s height=%.2f ring_r=%.2f scale=%.1f anchor=%s",
                         kind, material, height, ring_r, s, anchor.get("anchor_type", "?"))
@@ -3230,35 +3185,14 @@ class SceneComposer:
                 f.write(_build_disc_obj(mtl_lib="carpet.mtl", mtl_name=floor_mat))
 
         try:
-            from CoronaCore.core.managers import scene_manager as _sm
-            from CoronaCore.core.entities.actor import Actor
-        except ImportError:
-            return
-
-        scene = _sm.get("")
-        if scene is None:
-            routes = _sm.list_all()
-            scene = _sm.get(routes[0]) if routes else None
-        if scene is None:
-            return
-
-        existing = {a.name for a in scene.get_actors()}
-        if "__interior_floor" in existing:
-            return
-
-        try:
-            actor = Actor(name="__interior_floor", route=carpet_route,
-                          actor_type="mesh", parent_scene=scene)
             # 略抬 1cm 压在 terrain 之上，避免与地面 z-fighting
-            actor.set_position([0.0, 0.01, 0.0], True)
-            actor.set_scale([width * INSCRIBE, 1.0, depth * INSCRIBE], True)
-            mech = getattr(actor, "_mechanics", None)
-            if mech is not None:
-                try:
-                    mech.set_physics_enabled(False)
-                except Exception:
-                    pass
-            scene.add_actor(actor)
+            self._create_native_scene_actor(
+                "__interior_floor",
+                carpet_route,
+                position=[0.0, 0.01, 0.0],
+                scale=[width * INSCRIBE, 1.0, depth * INSCRIBE],
+                physics_enabled=False,
+            )
             _t.sleep(0.3)
             logger.info("[SceneComposer] 内皮地面已铺设: %.1f×%.1f m (材质=%s shape=%s)",
                         width * INSCRIBE, depth * INSCRIBE, floor_mat, floor_shape)
@@ -3308,36 +3242,16 @@ class SceneComposer:
             else:
                 f.write(_build_disc_obj(mtl_lib="foundation_surface.mtl", mtl_name=material))
 
-        try:
-            from CoronaCore.core.managers import scene_manager as _sm
-            from CoronaCore.core.entities.actor import Actor
-        except ImportError:
-            return
-
-        scene = _sm.get("")
-        if scene is None:
-            routes = _sm.list_all()
-            scene = _sm.get(routes[0]) if routes else None
-        if scene is None:
-            return
-
-        existing = {a.name for a in scene.get_actors()}
         actor_name = "__foundation_surface"
-        if actor_name in existing:
-            return
 
         try:
-            actor = Actor(name=actor_name, route=foundation_route, actor_type="mesh",
-                          parent_scene=scene)
-            actor.set_position([center_x, height_offset, center_z], True)
-            actor.set_scale([foundation_w, 1.0, foundation_d], True)
-            mech = getattr(actor, "_mechanics", None)
-            if mech is not None:
-                try:
-                    mech.set_physics_enabled(False)
-                except Exception:
-                    pass
-            scene.add_actor(actor)
+            self._create_native_scene_actor(
+                actor_name,
+                foundation_route,
+                position=[center_x, height_offset, center_z],
+                scale=[foundation_w, 1.0, foundation_d],
+                physics_enabled=False,
+            )
             _t.sleep(0.2)
             self._foundation_extent = {
                 "width": foundation_w,
@@ -3413,12 +3327,6 @@ class SceneComposer:
         if not shell_models or self.zone_tree is None:
             return report
         import time as _t
-        try:
-            from CoronaCore.core.managers import scene_manager as _sm
-            from CoronaCore.core.entities.actor import Actor
-        except ImportError:
-            report["failed"] = [f"{(m.get('name') or '?')}: 引擎不可用" for m in shell_models]
-            return report
 
         # shell zone 按 asset 名索引（取各自 volume 算缩放）
         shell_zones = {}
@@ -3436,14 +3344,6 @@ class SceneComposer:
             asset_meta = build_asset_metadata_batch(paths)
         except Exception as e:
             logger.warning("[SceneComposer] shell AABB 读取失败（用缺省缩放）: %s", e)
-
-        scene = _sm.get("")
-        if scene is None:
-            routes = _sm.list_all()
-            scene = _sm.get(routes[0]) if routes else None
-        if scene is None:
-            report["failed"] = [f"{(m.get('name') or '?')}: 无可用场景" for m in shell_models]
-            return report
 
         import os as _os
         WRAP = 1.25  # 外壳比 volume 略大，内部舒适包住（墙厚占比 + 留白）
@@ -3476,79 +3376,38 @@ class SceneComposer:
                 logger.warning("[SceneComposer] 外壳 %s 未取到 AABB（key=%s），用缺省缩放 1.0",
                                name, meta_key)
             try:
-                actor = Actor(name=f"__shell_{name}", route=path, actor_type="mesh",
-                              parent_scene=scene)
-                actor.set_position([0.0, 0.0, 0.0], True)
-                actor.set_scale(scale, True)
-                # bug 修复(b)：模型 pivot 可能在几何中心 → 放 y=0 会半埋地下。
-                # 缩放后读真实 AABB，把最低点抬到 y=0（pivot 无关，底部贴地）。
-                # 关键：get_aabb() 返回的可能是【未缩放的局部 AABB】（min_y≈-0.38），
-                # 蒙古包放大 ~6 倍后真实底部在 -2.3 → 只抬 0.38 仍穿地 ~1.9m。
-                # 自适应判断：若 AABB 的 y 跨度 ≈ 局部 size_y（远小于缩放后），说明不含
-                # scale，世界底部需乘 scale_y。
-                try:
-                    geo = getattr(actor, "_geometry", None)
-                    aabb = geo.get_aabb() if geo is not None else None
-                    if aabb and len(aabb) >= 6:
-                        min_y = float(aabb[1])
-                        span_y = float(aabb[4]) - min_y
-                        sy = float(scale[1])
-                        local_sy = (float(size[1]) if (size and len(size) >= 2
-                                    and float(size[1]) > 1e-6) else 0.0)
-                        # AABB 不含 scale 的判据：缩放 >1 且实测跨度远小于"局部尺寸×scale"
-                        aabb_has_scale = not (local_sy > 1e-6 and sy > 1.05
-                                              and span_y < local_sy * sy * 0.6)
-                        if not aabb_has_scale:
-                            min_y *= sy
-                            logger.info("[SceneComposer] 外壳 %s AABB 未含 scale，min_y×%.2f", name, sy)
-                        if abs(min_y) > 1e-4:
-                            actor.set_position([0.0, -min_y, 0.0], True)
-                            logger.info("[SceneComposer] 外壳 %s 贴地修正: 世界底=%.3f → 抬高 %.3f",
-                                        name, min_y, -min_y)
-                        # 锚定链-1：存真实世界 footprint（half_x/half_z），供地毯/壁挂/家具派生。
-                        # x/z 与 y 同源：AABB 不含 scale 时乘 scale[0]/scale[2]。
-                        sx_fac = 1.0 if aabb_has_scale else float(scale[0])
-                        sz_fac = 1.0 if aabb_has_scale else float(scale[2])
-                        half_x = abs(float(aabb[3]) - float(aabb[0])) / 2.0 * sx_fac
-                        half_z = abs(float(aabb[5]) - float(aabb[2])) / 2.0 * sz_fac
-                        # 锚定链-2（B 方案）：脚印超出给足平台则夹回——按比例缩小整体 scale，
-                        # 让 shell 真实半径落在平台内（平台外是坡，shell 探出去会一边陷土一边悬空）。
-                        plat_r = getattr(self, "_platform_radius", 0.0) or 0.0
-                        shell_r = max(half_x, half_z)
-                        if plat_r > 1e-6 and shell_r > plat_r:
-                            shrink = (plat_r * 0.95) / shell_r   # 留 5% 余量，不贴平台边缘
-                            scale = [s * shrink for s in scale]
-                            actor.set_scale(scale, True)
-                            # 缩放变了 → 重新贴地（最低点抬回 y=0）
-                            try:
-                                aabb2 = geo.get_aabb()
-                                if aabb2 and len(aabb2) >= 6:
-                                    my = float(aabb2[1])
-                                    if not aabb_has_scale:
-                                        my *= float(scale[1])
-                                    if abs(my) > 1e-4:
-                                        actor.set_position([0.0, -my, 0.0], True)
-                            except Exception:
-                                pass
-                            half_x *= shrink
-                            half_z *= shrink
-                            logger.info("[SceneComposer] 外壳 %s 脚印 %.2f 超平台 %.2f → 夹回 ×%.2f",
-                                        name, shell_r, plat_r, shrink)
-                        self._shell_aabb[zone.zone_id] = {
-                            "half_x": half_x, "half_z": half_z,
-                            "asset": name,
-                        }
-                        logger.info("[SceneComposer] 外壳 %s 真实足迹: half_x=%.2f half_z=%.2f",
-                                    name, half_x, half_z)
-                except Exception as e:
-                    logger.warning("[SceneComposer] 外壳 %s 贴地/足迹测量失败（忽略）: %s", name, e)
-                mech = getattr(actor, "_mechanics", None)
-                if mech is not None:
-                    try:
-                        mech.set_physics_enabled(False)
-                    except Exception:
-                        pass
-                scene.add_actor(actor)
+                # bug 修复(b)：模型 pivot 可能在几何中心 → 由 C++ native 创建后按 AABB 自动贴地。
+                # footprint 从 asset metadata × 最终 scale 派生，供地毯/壁挂/家具使用。
+                if size and len(size) >= 3 and all(float(s) > 1e-6 for s in size[:3]):
+                    half_x = abs(float(size[0]) * float(scale[0])) / 2.0
+                    half_z = abs(float(size[2]) * float(scale[2])) / 2.0
+                else:
+                    half_x = abs(float(vw) * WRAP) / 2.0
+                    half_z = abs(float(vd) * WRAP) / 2.0
+                plat_r = getattr(self, "_platform_radius", 0.0) or 0.0
+                shell_r = max(half_x, half_z)
+                if plat_r > 1e-6 and shell_r > plat_r:
+                    shrink = (plat_r * 0.95) / shell_r   # 留 5% 余量，不贴平台边缘
+                    scale = [s * shrink for s in scale]
+                    half_x *= shrink
+                    half_z *= shrink
+                    logger.info("[SceneComposer] 外壳 %s 脚印 %.2f 超平台 %.2f → 夹回 ×%.2f",
+                                name, shell_r, plat_r, shrink)
+                self._create_native_scene_actor(
+                    f"__shell_{name}",
+                    path,
+                    position=[0.0, 0.0, 0.0],
+                    scale=scale,
+                    physics_enabled=False,
+                    ground_align=True,
+                )
+                self._shell_aabb[zone.zone_id] = {
+                    "half_x": half_x,
+                    "half_z": half_z,
+                    "asset": name,
+                }
+                logger.info("[SceneComposer] 外壳 %s 真实足迹: half_x=%.2f half_z=%.2f",
+                            name, half_x, half_z)
                 _t.sleep(0.3)
                 report["placed"].append(name)
                 logger.info("[SceneComposer] 外壳(shell)已放置: %s scale=%s",
