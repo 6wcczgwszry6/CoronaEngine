@@ -45,13 +45,40 @@ struct CpuMeshData {
         return false;
     }
 
-    const auto& vertices = scene->get_mesh_vertices(static_cast<uint32_t>(mesh_index));
     const auto& indices = scene->get_mesh_indices(static_cast<uint32_t>(mesh_index));
-    if (vertices.empty() || indices.empty()) {
+    if (indices.empty()) {
         return false;
     }
 
-    out_mesh.vertices.assign(vertices.begin(), vertices.end());
+    // ---- 蒙皮几何（P3）：顶点改用 GeometryDevice 每帧 CPU 蒙皮的输出 ----
+    // skinned_cpu_vertices 是 GeometrySystem::update_skinned_geometry 每帧写入的
+    // 单一数据源（per-mesh 原始字节，布局严格等同 Resource::Vertex 数组）。
+    // 蒙皮只改顶点位置/法线、不改拓扑，故索引仍来自 Scene。
+    // 若该 mesh 有蒙皮字节且数量与绑定顶点一致 → reinterpret 直接用；
+    // 否则回退到 Scene 的绑定姿态顶点（静态网格 / 蒙皮数据尚未就绪）。
+    const auto& bind_vertices = scene->get_mesh_vertices(static_cast<uint32_t>(mesh_index));
+    if (geometry.is_skinned &&
+        mesh_index < geometry.skinned_cpu_vertices.size() &&
+        !geometry.skinned_cpu_vertices[mesh_index].empty()) {
+        const auto& blob = geometry.skinned_cpu_vertices[mesh_index];
+        constexpr std::size_t kVertexSize = sizeof(Corona::Resource::Vertex);
+        if (blob.size() % kVertexSize == 0) {
+            const std::size_t skinned_count = blob.size() / kVertexSize;
+            // 与绑定顶点数一致才采用，防 P2 mesh 错位 / 拓扑不符
+            if (skinned_count == bind_vertices.size()) {
+                out_mesh.vertices.resize(skinned_count);
+                std::memcpy(out_mesh.vertices.data(), blob.data(), blob.size());
+                out_mesh.indices.assign(indices.begin(), indices.end());
+                return true;
+            }
+        }
+    }
+
+    // 回退：绑定姿态顶点（静态网格，或蒙皮输出尚未就绪的首帧）
+    if (bind_vertices.empty()) {
+        return false;
+    }
+    out_mesh.vertices.assign(bind_vertices.begin(), bind_vertices.end());
     out_mesh.indices.assign(indices.begin(), indices.end());
     return true;
 }
