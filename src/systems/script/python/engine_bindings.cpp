@@ -40,6 +40,10 @@ std::string remove_editor_actor_from_python(const std::string& scene_name,
 std::string get_editor_actor_bounds_from_python(const std::string& scene_name,
                                                 const std::string& actor_name);
 std::string get_editor_scene_bounds_from_python(const std::string& scene_name);
+std::string get_editor_scene_snapshot_from_python(const std::string& scene_name);
+std::string set_editor_actor_transform_from_python(const std::string& scene_name,
+                                                   const std::string& actor_name,
+                                                   const std::string& transform_json);
 std::string capture_editor_camera_view_from_python(const std::string& scene_name,
                                                    const std::string& camera_name,
                                                    const std::string& camera_data_json,
@@ -865,6 +869,25 @@ void BindAll(nanobind::module_& m) {
             },
             nb::arg("scene_name"),
             "Return native editor scene aggregate actor bounds as JSON.");
+
+    m.def("get_editor_scene_snapshot",
+            [](const std::string& scene_name) {
+               return Corona::Systems::UI::get_editor_scene_snapshot_from_python(scene_name);
+            },
+            nb::arg("scene_name"),
+            "Return native editor scene actors, transforms, and bounds as JSON.");
+
+    m.def("set_editor_actor_transform",
+            [](const std::string& scene_name,
+               const std::string& actor_name,
+               const std::string& transform_json) {
+               return Corona::Systems::UI::set_editor_actor_transform_from_python(
+                   scene_name, actor_name, transform_json);
+            },
+            nb::arg("scene_name"),
+            nb::arg("actor_name"),
+            nb::arg("transform_json"),
+            "Set a native editor actor transform, persist it, and return actor JSON.");
 
     m.def("capture_editor_camera_view",
             [](const std::string& scene_name,
