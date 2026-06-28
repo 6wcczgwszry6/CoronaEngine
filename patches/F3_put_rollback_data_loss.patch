@@ -1,0 +1,39 @@
+=== F3 [致命] CacheManager::put() 刷盘失败回滚路径丢失数据 ===
+文件: modules/corona_resource/src/resource/cache/lru_cache.cpp
+引入: commit 446c7e9f
+
+问题: victim->data 被 std::move 到 item.data 后，如果 disk_->put() 失败，
+     回滚路径用空的 victim->data 放回内存，原始数据永久丢失。
+
+修复: 刷盘前保留一份数据副本用于回滚。
+
+--- a/modules/corona_resource/src/resource/cache/lru_cache.cpp
++++ b/modules/corona_resource/src/resource/cache/lru_cache.cpp
+@@ -445,20 +445,22 @@ bool CacheManager::put(const std::string& key, const char* data, size_t size) {
+
+     // Phase 2: Unlocked — 将 victim 刷盘（DiskCache 用自己的内部锁）
+     auto& victim = evict_res.item;
++    // 保留回滚副本：刷盘失败时放回内存
++    const std::string rollback_key = victim->key;
++    const std::vector<char> rollback_data = victim->data;  // 拷贝，用于回滚
++    const size_t rollback_size = victim->data_size;
++
+     if (disk_) {
+         CacheItem item;
+-        item.key        = victim->key;
++        item.key        = rollback_key;
+         item.data       = std::move(victim->data);
+-        item.data_size  = victim->data_size;
++        item.data_size  = rollback_size;
+         item.last_access = victim->last_access;
+
+         if (!disk_->put(std::move(item))) {
+             // 刷盘失败 → 回滚：用保留的副本放回内存
+             std::lock_guard lock(mtx_);
+-            if (!mem_.put(victim->key, victim->data.data(), victim->data.size())) {
+-                if (evict_cb_) evict_cb_(victim->key, victim->data);
++            if (!mem_.put(rollback_key, rollback_data.data(), rollback_size)) {
++                if (evict_cb_) evict_cb_(rollback_key, rollback_data);
+             }
+             return false;
+         }

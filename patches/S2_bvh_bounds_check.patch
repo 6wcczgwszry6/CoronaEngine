@@ -1,0 +1,22 @@
+=== S2 [严重] build_triangle_bvh 索引越界 ===
+文件: src/systems/geometry/geometry_system.cpp
+引入: commit 1c7d7a13
+
+问题: indices[i] 未做 < vertices.size() 边界检查，损坏的网格数据导致越界读取。
+
+修复: 跳过越界索引的三角形。
+
+--- a/src/systems/geometry/geometry_system.cpp
++++ b/src/systems/geometry/geometry_system.cpp
+@@ -1665,6 +1665,12 @@ namespace {
+
+     for (size_t i = 0; i + 2 < indices.size(); i += 3) {
++        // 防御性检查：跳过索引越界的退化三角形
++        if (indices[i] >= vertices.size() ||
++            indices[i + 1] >= vertices.size() ||
++            indices[i + 2] >= vertices.size()) {
++            continue;
++        }
+         const auto& v0 = vertices[indices[i]];
+         const auto& v1 = vertices[indices[i + 1]];
+         const auto& v2 = vertices[indices[i + 2]];

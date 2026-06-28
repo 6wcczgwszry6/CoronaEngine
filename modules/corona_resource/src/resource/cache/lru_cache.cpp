@@ -217,7 +217,12 @@ std::filesystem::path DiskCache::safe_path(const std::string& key) const {
 }
 
 std::optional<CacheRecord> DiskCache::read_file(const std::string& key) const {
-    auto path = safe_path(key);
+    std::filesystem::path path;
+    try {
+        path = safe_path(key);
+    } catch (const std::invalid_argument&) {
+        return std::nullopt;
+    }
     std::error_code ec;
 
     // 拒绝符号链接（防止通过 symlink 读取缓存目录外文件）
@@ -241,7 +246,12 @@ std::optional<CacheRecord> DiskCache::read_file(const std::string& key) const {
 }
 
 bool DiskCache::write_file(const CacheRecord& item) const {
-    auto path = safe_path(item.key);
+    std::filesystem::path path;
+    try {
+        path = safe_path(item.key);
+    } catch (const std::invalid_argument&) {
+        return false;
+    }
     // 确保父目录存在（无符号链接）
     auto parent = path.parent_path();
     std::error_code ec;
@@ -284,6 +294,8 @@ bool DiskCache::put(CacheRecord item) {
         auto it = map_.find(key);
         if (it != map_.end()) {
             // ——— UPDATE 路径 ———
+            // 如果已 pin，拒绝覆盖
+            if (it->second.first.pinned) return false;
             // 删除旧文件（unlink 很快，远快于 write，安全在锁内执行）
             std::error_code ec;
             std::filesystem::remove(safe_path(key), ec);
@@ -413,6 +425,13 @@ bool DiskCache::unpin(const std::string& key) {
     return true;
 }
 
+bool DiskCache::is_pinned(const std::string& key) const {
+    std::lock_guard lock(mtx_);
+    auto it = map_.find(key);
+    if (it == map_.end()) return false;
+    return it->second.first.pinned;
+}
+
 size_t DiskCache::used_bytes() {
     std::lock_guard lock(mtx_);
     return calc_directory_size();
@@ -491,18 +510,23 @@ bool CacheManager::put(const std::string& key, const char* data, size_t size) {
 
         // Phase 3: Unlocked — 将 victim 刷盘（DiskCache 用自己的内部锁）
         auto& victim = evict_res.item;
+        // 刷盘前保留回滚副本：std::move 后 victim->data 为空，无法用于回滚
+        const std::string rollback_key   = victim->key;
+        const std::vector<char> rollback_data = victim->data;
+        const size_t rollback_size       = victim->data_size;
+
         if (disk_) {
             CacheRecord item;
-            item.key         = victim->key;
+            item.key         = rollback_key;
             item.data        = std::move(victim->data);
-            item.data_size   = victim->data_size;
+            item.data_size   = rollback_size;
             item.last_access = victim->last_access;
 
             if (!disk_->put(std::move(item))) {
-                // 刷盘失败 → 回滚：尝试放回内存
+                // 刷盘失败 → 回滚：用保留的副本放回内存
                 std::lock_guard lock(mtx_);
-                if (!mem_.put(victim->key, victim->data.data(), victim->data.size())) {
-                    if (evict_cb_) evict_cb_(victim->key, victim->data);
+                if (!mem_.put(rollback_key, rollback_data.data(), rollback_size)) {
+                    if (evict_cb_) evict_cb_(rollback_key, rollback_data);
                 }
                 return false;
             }
@@ -536,6 +560,10 @@ std::optional<CacheRecord> CacheManager::get(const std::string& key) {
             std::lock_guard lock(mtx_);
             if (mem_.used_bytes() + d.size() <= mem_.capacity_bytes()) {
                 mem_.put(key, d.data(), d.size());
+                // 磁盘上的 pin 标记同步到内存
+                if (disk_ && disk_->is_pinned(key)) {
+                    mem_.pin(key);
+                }
                 return disk_result;
             }
             evict_res = mem_.evict_lru();

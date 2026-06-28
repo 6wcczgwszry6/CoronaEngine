@@ -254,6 +254,18 @@ void GeometrySystem::update() {
                     scene_state.unloading_tasks.erase(it->first);
                     scene_state.unload_retry_counts.erase(it->first);
                     scene_state.invisible_frames.erase(it->first);
+                    // 检查 actor 是否还存在于其他场景，若否，清理全局状态
+                    bool exists_elsewhere = false;
+                    for (auto& [other_scene, other_state] : impl_->scenes) {
+                        if (&other_state != &scene_state &&
+                            other_state.actor_load_states.count(it->first)) {
+                            exists_elsewhere = true; break;
+                        }
+                    }
+                    if (!exists_elsewhere) {
+                        impl_->offline_actors.erase(it->first);
+                        impl_->pending_gpu_releases.erase(it->first);
+                    }
                     it = scene_state.actor_load_states.erase(it);
                 }else {
                     ++it;
@@ -466,7 +478,7 @@ void GeometrySystem::update() {
             std::shared_lock lock(impl_->mtx);
             auto& scene_state = impl_->get_or_create(scene_handle);
 
-            std::size_t loaded = 0, loading = 0, unloading = 0, unloaded = 0;
+            std::size_t loaded = 0, loading = 0, unloading = 0, unloaded = 0, offline_count = 0;
             for (const auto& [actor_handle, state] : scene_state.actor_load_states) {
                 switch (state) {
                     case ActorLoadState::Loaded:    loaded++; break;
@@ -474,11 +486,14 @@ void GeometrySystem::update() {
                     case ActorLoadState::Unloading: unloading++; break;
                     case ActorLoadState::Unloaded:  unloaded++; break;
                 }
+                if (impl_->offline_actors.count(actor_handle) && impl_->offline_actors[actor_handle])
+                    offline_count++;
             }
 
             std::lock_guard stats_lock(scene_state.stats_mutex);
             scene_state.stats.actor_total    = actor_handles.size();
             scene_state.stats.actor_visible  = visible_actors.size();
+            scene_state.stats.actor_offline  = offline_count;
             scene_state.stats.octree_entries = octree_entries.size();
             scene_state.stats.last_query_ms = visible_query_ms_total;
             scene_state.stats.actor_loaded    = loaded;
@@ -640,6 +655,23 @@ void GeometrySystem::on_load_finished(const Events::ActorLoadFinishedEvent& even
             }
         }
     }
+
+    // 加载完成，解除 pin（后续由 Optics/Mechanics 的 touch 续期维持热度）
+    {
+        auto actor_read = SharedDataHub::instance().actor_storage().try_acquire_read(event.actor);
+        if (actor_read && !actor_read->model_path.empty()) {
+            auto normalized = actor_read->model_path.is_relative()
+                ? std::filesystem::absolute(actor_read->model_path)
+                : actor_read->model_path;
+            std::error_code ec;
+            normalized = std::filesystem::weakly_canonical(normalized, ec);
+            if (!ec) {
+                auto rid = Resource::IResource::generate_uid(normalized);
+                Resource::ResourceManager::get_instance().unpin(rid);
+            }
+        }
+    }
+
     // 不再重新发布 ActorLoadFinishedEvent（由 process_async_tasks 发布）。
     // 对外发布统一的驻留变更事件，外部系统只需订阅 ActorResidencyChangedEvent。
     if (impl_->ctx && impl_->ctx->event_bus()) {
@@ -1081,12 +1113,13 @@ void GeometrySystem::process_async_tasks() {
                                (unsigned long)task.actor, retry_count + 1);
 
                 if (++retry_count >= 10) {
-                    CFW_LOG_ERROR("[SceneSystem] Actor 0x%lx unload failed after 10 retries, resource is permanently in use — reverting to Loaded",
+                    CFW_LOG_ERROR("[SceneSystem] Actor 0x%lx unload failed after 10 retries, forcing GPU release",
                                  (unsigned long)task.actor);
                     scene_state.unload_retry_counts.erase(task.actor);
-                    scene_state.actor_load_states[task.actor] = ActorLoadState::Loaded;
+                    scene_state.actor_load_states[task.actor] = ActorLoadState::Unloaded;
+                    impl_->pending_gpu_releases.insert(task.actor);  // 下一帧强制释放
                     deferred_residency.push_back(
-                        {task.scene_handle, task.actor, /*loaded=*/true});
+                        {task.scene_handle, task.actor, /*loaded=*/false});
                 } else {
                     auto actor_read = actor_storage.try_acquire_read(task.actor);
                     if (actor_read.valid()) {
@@ -1163,6 +1196,19 @@ void GeometrySystem::on_load_requested(const Events::ActorLoadRequestedEvent& e)
 
     CFW_LOG_NOTICE("[GeometrySystem] Start loading actor {} (path: {})",
                   e.actor, Utils::path_to_utf8(actor_read->model_path));
+
+    // pin 住资源防止加载过程中被预算淘汰踢掉
+    // 加载完成后由 on_load_finished 解除 pin，后续由 touch 续期维持热度
+    auto normalized = actor_read->model_path.is_relative()
+        ? std::filesystem::absolute(actor_read->model_path)
+        : actor_read->model_path;
+    std::error_code ec;
+    normalized = std::filesystem::weakly_canonical(normalized, ec);
+    if (!ec) {
+        auto rid = Resource::IResource::generate_uid(normalized);
+        Resource::ResourceManager::get_instance().pin(rid);
+    }
+
     scene_state.loading_tasks[e.actor] = Resource::ResourceManager::get_instance().import_async(actor_read->model_path);
 }
 
@@ -1173,28 +1219,27 @@ void GeometrySystem::on_unload_requested(const Events::ActorUnloadRequestedEvent
     if (scene_it == impl_->scenes.end()) return;
 
     auto& scene_state = scene_it->second;
-    if (scene_state.loading_tasks.count(e.actor) || scene_state.unloading_tasks.count(e.actor)) {
-        Events::ActorResidencyChangedEvent deferred;
-        bool has_deferred = false;
-        if (scene_state.unloading_tasks.count(e.actor)) {
-            scene_state.unloading_tasks.erase(e.actor);
-            scene_state.unload_retry_counts.erase(e.actor);
-            scene_state.actor_load_states[e.actor] = ActorLoadState::Loaded;
-            deferred = {e.scene, e.actor, /*loaded=*/true};
-            has_deferred = true;
-            CFW_LOG_NOTICE("[GeometrySystem] Cancelled pending unload for actor {}", e.actor);
-        }
-        if (scene_state.loading_tasks.count(e.actor)) {
-            // 加载进行中 — 将状态设为 Unloaded，加载完成时 process_async_tasks 检测到非 Loading 状态会跳过
-            scene_state.actor_load_states[e.actor] = ActorLoadState::Unloaded;
-            deferred = {e.scene, e.actor, /*loaded=*/false};
-            has_deferred = true;
-            CFW_LOG_NOTICE("[GeometrySystem] Unload requested during load for actor {} — cancelling load", e.actor);
-        }
-        if (has_deferred) {
-            lock.unlock();
-            impl_->ctx->event_bus()->publish(deferred);
-        }
+
+    // 已经在卸载中 → 取消卸载，恢复 Loaded
+    if (scene_state.unloading_tasks.count(e.actor)) {
+        scene_state.unloading_tasks.erase(e.actor);
+        scene_state.unload_retry_counts.erase(e.actor);
+        scene_state.actor_load_states[e.actor] = ActorLoadState::Loaded;
+        lock.unlock();
+        impl_->ctx->event_bus()->publish(
+            Events::ActorResidencyChangedEvent{e.scene, e.actor, /*loaded=*/true});
+        CFW_LOG_NOTICE("[GeometrySystem] Cancelled pending unload for actor {}", e.actor);
+        return;
+    }
+
+    // 正在加载中 → 取消加载，必须清除 loading_tasks 避免 future 阻塞后续加载
+    if (scene_state.loading_tasks.count(e.actor)) {
+        scene_state.loading_tasks.erase(e.actor);
+        scene_state.actor_load_states[e.actor] = ActorLoadState::Unloaded;
+        lock.unlock();
+        impl_->ctx->event_bus()->publish(
+            Events::ActorResidencyChangedEvent{e.scene, e.actor, /*loaded=*/false});
+        CFW_LOG_NOTICE("[GeometrySystem] Unload requested during load for actor {} — cancelling load", e.actor);
         return;
     }
 
@@ -1245,6 +1290,10 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
     impl_->ensure_actor_cache();
 
     auto& hub = SharedDataHub::instance();
+
+    // 锁顺序：impl_->mtx → Storage，必须在读 Storage 之前获取
+    std::unique_lock lock(impl_->mtx);
+
     const auto now = std::chrono::steady_clock::now();
 
     // ---- 第 1 步：防抖检查（5 秒内不重复快照） ----
@@ -1334,17 +1383,30 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
     // 不在事件处理中直接调用 release_actor_gpu_resources，
     // 避免与 OpticsSystem 渲染线程产生 data race。
     // 改为加入 pending_gpu_releases 集合，在下一帧 update() 头部释放。
-    {
-        std::unique_lock lock(impl_->mtx);
-        impl_->offline_actors[event.actor] = true;
-        impl_->pending_gpu_releases.insert(event.actor);
-        auto scene_it = impl_->scenes.find(event.scene);
-        if (scene_it != impl_->scenes.end()) {
-            scene_it->second.actor_load_states[event.actor] = ActorLoadState::Unloaded;
-        }
+    // 锁已在函数开头获取，此处无需再加锁。
+    impl_->offline_actors[event.actor] = true;
+    impl_->pending_gpu_releases.insert(event.actor);
+    auto scene_it = impl_->scenes.find(event.scene);
+    if (scene_it != impl_->scenes.end()) {
+        scene_it->second.actor_load_states[event.actor] = ActorLoadState::Unloaded;
     }
 
     impl_->last_snapshot_time[event.actor] = now;
+
+    // ---- 第 5 步：cascade 淘汰底层资源 ----
+    // actor 被踢出后，顺手把它的模型资源也标记为可淘汰。
+    // try_evict 内部有 ref_count 保护，被其他 actor 共享的资源不会误删。
+    if (!rec.resource_ids.empty()) {
+        auto& rm = Resource::ResourceManager::get_instance();
+        for (auto rid : rec.resource_ids) {
+            auto result = rm.try_evict(rid);
+            if (result.success) {
+                CFW_LOG_NOTICE("[GeometrySystem] Cascade evicted resource {} ({} bytes) "
+                               "for evicted actor {}",
+                               rid, result.bytes_freed, event.actor);
+            }
+        }
+    }
 
     CFW_LOG_NOTICE("[GeometrySystem] Actor {} evicted: cached stream record "
                    "({} profiles, {} geometries, {} resource_ids, path={}, "
@@ -1657,6 +1719,12 @@ namespace {
     entries.reserve(indices.size() / 3);
 
     for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        // 防御性检查：跳过索引越界的退化三角形
+        if (indices[i] >= vertices.size() ||
+            indices[i + 1] >= vertices.size() ||
+            indices[i + 2] >= vertices.size()) {
+            continue;
+        }
         const auto& v0 = vertices[indices[i]];
         const auto& v1 = vertices[indices[i + 1]];
         const auto& v2 = vertices[indices[i + 2]];

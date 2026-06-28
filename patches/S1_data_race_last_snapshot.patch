@@ -1,0 +1,9 @@
+=== S1 [严重] last_snapshot_time 数据竞争 ===
+文件: src/systems/geometry/geometry_system.cpp
+引入: commit 446c7e9f
+
+问题: on_evict_requested() 在 impl_->mtx 外部读写 last_snapshot_time，
+     事件总线同步发布时多线程并发访问 → 未定义行为。
+
+修复: 已合并到 F1 的 patch 中（读和写都移入 impl_->mtx 内部）。
+     参见 patches/F1_lock_order_violation.patch

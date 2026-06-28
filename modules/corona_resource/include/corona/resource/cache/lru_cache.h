@@ -144,6 +144,9 @@ public:
     /// 取消不可淘汰标记
     bool unpin(const std::string& key);
 
+    /// 查询是否被 pin
+    [[nodiscard]] bool is_pinned(const std::string& key) const;
+
     /// 删除项（从磁盘删除文件 + 从 LRU 链表移除）
     void erase(const std::string& key);
 

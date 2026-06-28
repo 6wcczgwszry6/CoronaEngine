@@ -1,0 +1,19 @@
+=== S5 [严重] DiskCache::put() UPDATE 路径绕过 pin 检查 ===
+文件: modules/corona_resource/src/resource/cache/lru_cache.cpp
+引入: commit 446c7e9f
+
+问题: UPDATE 路径无条件覆盖磁盘条目，不检查 pinned 标志。
+
+修复: 如果现有条目被 pin，拒绝覆盖。
+
+--- a/modules/corona_resource/src/resource/cache/lru_cache.cpp
++++ b/modules/corona_resource/src/resource/cache/lru_cache.cpp
+@@ -279,6 +279,8 @@ bool DiskCache::put(CacheItem item) {
+     auto it = map_.find(key);
+     if (it != map_.end()) {
+         // ——— UPDATE 路径 ———
++        // 如果已 pin，拒绝覆盖
++        if (it->second.first.pinned) return false;
+         std::error_code ec;
+         std::filesystem::remove(safe_path(key), ec);
+         it->second.first = std::move(item);
