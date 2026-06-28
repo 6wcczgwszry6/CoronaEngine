@@ -59,6 +59,15 @@
           </button>
         </div>
       </div>
+      <button
+        v-if="backend === 'native'"
+        class="cascade-toggle no-drag"
+        :class="{ active: shadowCascadeDebug }"
+        title="Show shadow cascade levels"
+        @click="toggleShadowCascadeDebug"
+      >
+        CSM
+      </button>
       <label class="speed no-drag">
         Speed
         <input v-model.number="moveSpeed" type="number" min="0.01" step="0.1" @change="saveSettings" />
@@ -123,6 +132,7 @@ const cameraName = ref('Camera');
 const backend = ref('native');
 const visionRenderMode = ref('path_tracing');
 const outputMode = ref('final_color');
+const shadowCascadeDebug = ref(false);
 const moveSpeed = ref(1);
 const renderWidth = ref(960);
 const renderHeight = ref(540);
@@ -179,6 +189,7 @@ const loadCamera = async () => {
   outputMode.value = backend.value === 'vision'
     ? 'final_color'
     : camera.value.output_mode || 'final_color';
+  shadowCascadeDebug.value = !!camera.value.shadow_cascade_debug;
   moveSpeed.value = camera.value.move_speed || 1;
   renderWidth.value = camera.value.width || 960;
   renderHeight.value = camera.value.height || 540;
@@ -275,6 +286,22 @@ const selectOutput = async (mode) => {
   if (outputMode.value === mode) return;
   outputMode.value = mode;
   await changeOutput();
+};
+
+const toggleShadowCascadeDebug = async () => {
+  if (backend.value === 'vision') return;
+  const next = !shadowCascadeDebug.value;
+  shadowCascadeDebug.value = next;
+  try {
+    const result = unwrap(await sceneService.setShadowCascadeDebug(sceneId, cameraId, next));
+    shadowCascadeDebug.value = !!result.enabled;
+    if (camera.value) {
+      camera.value.shadow_cascade_debug = shadowCascadeDebug.value;
+    }
+  } catch (error) {
+    shadowCascadeDebug.value = !next;
+    errorText.value = error.message;
+  }
 };
 
 const viewportUiDescriptor = () => ({
@@ -770,7 +797,7 @@ onBeforeUnmount(() => {
   color: #aaa;
   cursor: move;
 }
-.name-input, .control, .speed input, .resolution input, .button, .window-action {
+.name-input, .control, .speed input, .resolution input, .button, .window-action, .cascade-toggle {
   height: 24px;
   border: 1px solid #555;
   border-radius: 4px;
@@ -821,6 +848,16 @@ onBeforeUnmount(() => {
 .speed input { width: 54px; padding: 0 4px; }
 .resolution input { width: 58px; padding: 0 4px; }
 .button { padding: 0 8px; cursor: pointer; }
+.cascade-toggle {
+  width: 38px;
+  padding: 0;
+  cursor: pointer;
+}
+.cascade-toggle.active {
+  border-color: #f59e0b;
+  color: #fff7c2;
+  background: rgba(120, 80, 12, 0.78);
+}
 .window-action { width: 24px; cursor: pointer; }
 .maximize { margin-left: auto; }
 .close { color: #ffb4b4; }

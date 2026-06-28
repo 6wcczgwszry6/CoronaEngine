@@ -75,6 +75,12 @@ struct RenderInstanceBatch {
     }
 };
 
+struct ShadowSceneBounds {
+    bool valid = false;
+    ktm::fvec3 min_world{0.0f, 0.0f, 0.0f};
+    ktm::fvec3 max_world{0.0f, 0.0f, 0.0f};
+};
+
 struct UVec2Upload {
     uint32_t x;
     uint32_t y;
@@ -583,6 +589,10 @@ void apply_pending_camera_state_updates() {
                 camera->vision_render_mode = update.vision_render_mode;
             }
             if (Corona::has_camera_state_field(
+                    update.fields, Corona::CameraStateUpdateField::ShadowCascadeDebug)) {
+                camera->shadow_cascade_debug = update.shadow_cascade_debug;
+            }
+            if (Corona::has_camera_state_field(
                     update.fields, Corona::CameraStateUpdateField::ViewState)) {
                 camera->view_open = update.view_open;
                 camera->view_x = update.view_x;
@@ -748,11 +758,85 @@ void apply_pending_camera_releases() {
     };
 }
 
+[[nodiscard]] bool scene_bounds_valid(
+    const ktm::fvec3& scene_min_world,
+    const ktm::fvec3& scene_max_world) {
+    return scene_min_world.x <= scene_max_world.x &&
+           scene_min_world.y <= scene_max_world.y &&
+           scene_min_world.z <= scene_max_world.z;
+}
+
+[[nodiscard]] std::array<ktm::fvec3, 8> bounds_corners(
+    const ktm::fvec3& min_world,
+    const ktm::fvec3& max_world) {
+    return {
+        make_vec3(min_world.x, min_world.y, min_world.z),
+        make_vec3(max_world.x, min_world.y, min_world.z),
+        make_vec3(min_world.x, max_world.y, min_world.z),
+        make_vec3(max_world.x, max_world.y, min_world.z),
+        make_vec3(min_world.x, min_world.y, max_world.z),
+        make_vec3(max_world.x, min_world.y, max_world.z),
+        make_vec3(min_world.x, max_world.y, max_world.z),
+        make_vec3(max_world.x, max_world.y, max_world.z),
+    };
+}
+
+void include_shadow_bounds_point(ShadowSceneBounds& bounds, const ktm::fvec3& point) {
+    if (!bounds.valid) {
+        bounds.min_world = point;
+        bounds.max_world = point;
+        bounds.valid = true;
+        return;
+    }
+
+    bounds.min_world.x = std::min(bounds.min_world.x, point.x);
+    bounds.min_world.y = std::min(bounds.min_world.y, point.y);
+    bounds.min_world.z = std::min(bounds.min_world.z, point.z);
+    bounds.max_world.x = std::max(bounds.max_world.x, point.x);
+    bounds.max_world.y = std::max(bounds.max_world.y, point.y);
+    bounds.max_world.z = std::max(bounds.max_world.z, point.z);
+}
+
+void include_shadow_bounds(
+    ShadowSceneBounds& bounds,
+    const ktm::fmat4x4& model_matrix,
+    const ktm::fvec3& local_min,
+    const ktm::fvec3& local_max) {
+    for (const auto& corner : bounds_corners(local_min, local_max)) {
+        include_shadow_bounds_point(bounds, transform_point(model_matrix, corner));
+    }
+}
+
+[[nodiscard]] float compute_shadow_far_plane(
+    const Corona::CameraDevice& camera,
+    const ktm::fvec3& scene_min_world,
+    const ktm::fvec3& scene_max_world) {
+    const float near_plane = std::max(camera.near_plane, 0.01f);
+    const float fallback_far =
+        std::max(std::min(camera.far_plane, kShadowMaxDistance), near_plane + 0.01f);
+    if (!scene_bounds_valid(scene_min_world, scene_max_world)) {
+        return fallback_far;
+    }
+
+    const ktm::fvec3 forward = ktm::normalize(camera.forward);
+    float farthest_scene_depth = near_plane;
+    for (const auto& corner : bounds_corners(scene_min_world, scene_max_world)) {
+        const float camera_depth = ktm::dot(sub_vec3(corner, camera.position), forward);
+        farthest_scene_depth = std::max(farthest_scene_depth, camera_depth);
+    }
+
+    const ktm::fvec3 scene_extent = sub_vec3(scene_max_world, scene_min_world);
+    const float scene_padding = std::max(ktm::length(scene_extent) * 0.05f, 0.01f);
+    return std::max(std::min(farthest_scene_depth + scene_padding, fallback_far),
+                    near_plane + 0.01f);
+}
+
 [[nodiscard]] std::array<float, kShadowCascadeCount> compute_shadow_splits(
-    const Corona::CameraDevice& camera) {
+    const Corona::CameraDevice& camera,
+    float shadow_far_plane) {
     std::array<float, kShadowCascadeCount> splits{};
     const float near_plane = std::max(camera.near_plane, 0.01f);
-    const float far_plane = std::max(std::min(camera.far_plane, kShadowMaxDistance), near_plane + 0.01f);
+    const float far_plane = std::max(shadow_far_plane, near_plane + 0.01f);
     for (uint32_t i = 0; i < kShadowCascadeCount; ++i) {
         const float p = static_cast<float>(i + 1u) / static_cast<float>(kShadowCascadeCount);
         const float logarithmic = near_plane * std::pow(far_plane / near_plane, p);
@@ -766,7 +850,9 @@ void apply_pending_camera_releases() {
     const Corona::CameraDevice& camera,
     const ktm::fvec3& sun_dir,
     float cascade_near,
-    float cascade_far) {
+    float cascade_far,
+    const ktm::fvec3& scene_min_world,
+    const ktm::fvec3& scene_max_world) {
     const auto corners = camera_frustum_corners(camera, cascade_near, cascade_far);
     ktm::fvec3 center = make_vec3(0.0f, 0.0f, 0.0f);
     for (const auto& corner : corners) {
@@ -805,14 +891,22 @@ void apply_pending_camera_releases() {
         max_z = std::max(max_z, light_corner.z);
     }
 
-    const float xy_padding = std::max(radius * 0.10f, 1.0f);
-    const float z_padding = std::max(radius * 4.0f, 20.0f);
+    if (scene_bounds_valid(scene_min_world, scene_max_world)) {
+        for (const auto& scene_corner : bounds_corners(scene_min_world, scene_max_world)) {
+            const ktm::fvec3 light_corner = transform_point(light_view, scene_corner);
+            min_z = std::min(min_z, light_corner.z);
+            max_z = std::max(max_z, light_corner.z);
+        }
+    }
+
+    const float xy_padding = std::max(radius * 0.02f, 0.01f);
+    const float z_padding = std::max(radius * 0.25f, 0.01f);
     const ktm::fmat4x4 light_proj = make_orthographic_off_center_lh(
         min_x - xy_padding,
         max_x + xy_padding,
         min_y - xy_padding,
         max_y + xy_padding,
-        std::max(min_z - z_padding, 0.01f),
+        min_z - z_padding,
         max_z + z_padding);
     return multiply_ktm_mat4(light_proj, light_view);
 }
@@ -2517,6 +2611,53 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     }
                 };
 
+                auto compute_shadow_scene_bounds = [&]() {
+                    ShadowSceneBounds bounds;
+                    for (auto actor_handle : scene.actor_handles) {
+                        auto actor = actor_storage.try_acquire_read(actor_handle);
+                        if (!actor || actor->follow_camera) {
+                            continue;
+                        }
+
+                        for (auto profile_handle : actor->profile_handles) {
+                            auto profile = profile_storage.try_acquire_read(profile_handle);
+                            if (!profile || profile->optics_handle == 0 ||
+                                profile->mechanics_handle == 0) {
+                                continue;
+                            }
+
+                            auto optics_acc = optics_storage.try_acquire_read(profile->optics_handle);
+                            if (!optics_acc || !optics_acc->visible) {
+                                continue;
+                            }
+
+                            auto geom = geom_storage.try_acquire_read(optics_acc->geometry_handle);
+                            if (!geom || geom->transform_handle == 0) {
+                                continue;
+                            }
+
+                            auto transform =
+                                transform_storage.try_acquire_read(geom->transform_handle);
+                            if (!transform) {
+                                continue;
+                            }
+
+                            auto mech =
+                                SharedDataHub::instance().mechanics_storage().try_acquire_read(
+                                    profile->mechanics_handle);
+                            if (!mech) {
+                                continue;
+                            }
+
+                            ktm::fmat4x4 model_matrix = transform->compute_matrix();
+                            model_matrix = apply_native_local_correction(model_matrix, *geom);
+                            include_shadow_bounds(
+                                bounds, model_matrix, mech->min_xyz, mech->max_xyz);
+                        }
+                    }
+                    return bounds;
+                };
+
                 auto record_shadow_cascade =
                     [&](const ktm::fmat4x4& light_view_proj,
                         Horizon::HardwareImage& shadow_depth) {
@@ -2624,12 +2765,24 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 }
                 sun_dir = ktm::normalize(sun_dir);
 
-                const auto shadow_splits = compute_shadow_splits(*camera);
+                const ShadowSceneBounds shadow_scene_bounds = compute_shadow_scene_bounds();
+                const ktm::fvec3 shadow_min_world =
+                    shadow_scene_bounds.valid ? shadow_scene_bounds.min_world : scene.min_world;
+                const ktm::fvec3 shadow_max_world =
+                    shadow_scene_bounds.valid ? shadow_scene_bounds.max_world : scene.max_world;
+                const float shadow_far_plane =
+                    compute_shadow_far_plane(*camera, shadow_min_world, shadow_max_world);
+                const auto shadow_splits = compute_shadow_splits(*camera, shadow_far_plane);
                 float cascade_near = std::max(camera->near_plane, 0.01f);
                 for (uint32_t cascade = 0; cascade < kShadowCascadeCount; ++cascade) {
                     const float cascade_far = shadow_splits[cascade];
                     hardware_->shadowInfoBufferObjects.lightViewProj[cascade] =
-                        compute_shadow_light_view_proj(*camera, sun_dir, cascade_near, cascade_far);
+                        compute_shadow_light_view_proj(*camera,
+                                                       sun_dir,
+                                                       cascade_near,
+                                                       cascade_far,
+                                                       shadow_min_world,
+                                                       shadow_max_world);
                     hardware_->shadowInfoBufferObjects.shadowMapDescriptors[cascade] =
                         hardware_->shadowCascadeImages[cascade].storeSampledDescriptor();
                     cascade_near = cascade_far;
@@ -2682,6 +2835,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     hardware_->shadowInfoBufferObjects.shadowEnabled;
                 lighting.pushConsts.shadowInfoBufferIndex =
                     hardware_->shadowInfoBuffer.storeDescriptor();
+                lighting.pushConsts.shadowCascadeDebug =
+                    camera->shadow_cascade_debug ? 1u : 0u;
                 {
                     ktm::fvec3 lightColor;
                     lightColor.x = sun_color.x * sun_intensity;
@@ -2812,6 +2967,11 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                 hardware_->vpUniformBuffer.storeDescriptor();
                             debugResolve.pushConsts.outputImageIndex = finalOutputDescriptor;
                             debugResolve.pushConsts.debugMode = debugMode;
+                            debugResolve.pushConsts.uniformBufferIndex = uboDescriptor;
+                            debugResolve.pushConsts.shadowInfoBufferIndex =
+                                hardware_->shadowInfoBuffer.storeDescriptor();
+                            debugResolve.pushConsts.shadowCascadeDebug =
+                                camera->shadow_cascade_debug ? 1u : 0u;
                             debugResolve.bind_storage_image(0, render_target);
 
                             stream << debugResolve(dispatchX, dispatchY, 1);

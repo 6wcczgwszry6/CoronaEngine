@@ -861,6 +861,7 @@ nlohmann::json camera_to_json(const NativeEditorCamera& camera) {
     item["output_mode"] = camera.engine_camera ? camera.engine_camera->get_output_mode() : "final_color";
     item["render_backend"] = camera.engine_camera ? camera.engine_camera->get_render_backend() : "native";
     item["vision_render_mode"] = camera.engine_camera ? camera.engine_camera->get_vision_render_mode() : "path_tracing";
+    item["shadow_cascade_debug"] = camera.engine_camera ? camera.engine_camera->get_shadow_cascade_debug() : false;
     item["move_speed"] = camera.move_speed;
     item["view_open"] = camera.view_open;
     item["view_x"] = camera.view_x;
@@ -2367,6 +2368,32 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
                 return native_failure("Camera not found: " + camera_name, 2);
             }
             return native_success({{"status", "success"}, {"mode", camera->engine_camera->get_output_mode()}});
+        }},
+        {"set_shadow_cascade_debug", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto camera_name = arg_string(request.args, 1);
+            const bool enabled = arg_bool(request.args, 2, false);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+            camera->engine_camera->set_shadow_cascade_debug(enabled);
+            return native_success({
+                {"status", "success"},
+                {"enabled", camera->engine_camera->get_shadow_cascade_debug()},
+            });
+        }},
+        {"get_shadow_cascade_debug", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto camera_name = arg_string(request.args, 1);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+            return native_success({
+                {"status", "success"},
+                {"enabled", camera->engine_camera->get_shadow_cascade_debug()},
+            });
         }},
         {"open_actor", [](const NativeRequest& request, const NativeContext& context) {
             auto* scene = ensure_native_editor_scene();

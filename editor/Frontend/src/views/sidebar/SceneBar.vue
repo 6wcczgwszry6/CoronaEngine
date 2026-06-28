@@ -383,6 +383,19 @@
         </button>
         <div class="w-px h-4 bg-[#444] mx-0.5"></div>
         <button
+          class="px-1.5 py-0.5 text-[10px] rounded border"
+          :class="
+            shadowCascadeDebug
+              ? 'border-[#f59e0b] text-[#fff7c2] bg-[#4a3512]'
+              : 'border-[#555] text-[#999] hover:text-[#ccc] hover:border-[#777]'
+          "
+          title="显示 CSM cascade 分级颜色"
+          @click="ToggleShadowCascadeDebug"
+        >
+          CSM
+        </button>
+        <div class="w-px h-4 bg-[#444] mx-0.5"></div>
+        <button
           class="px-1.5 py-0.5 text-[10px] rounded border border-[#555] text-[#4ec9b0] hover:bg-[#3a3a3a]"
           title="快速截图（保存当前输出模式到桌面）"
           @click="QuickScreenshot"
@@ -1531,6 +1544,7 @@ const outputModes = [
 ];
 const ShowGBufferDropdown = ref(false);
 const activeOutputMode = ref('final_color');
+const shadowCascadeDebug = ref(false);
 
 // Vision / Native 渲染后端切换状态
 const visionAvailable = ref(false);
@@ -1591,6 +1605,29 @@ const SetOutputMode = async (mode) => {
     }
   } catch (e) {
     logError('Failed to set output mode', e);
+  }
+};
+
+const ToggleShadowCascadeDebug = async () => {
+  const next = !shadowCascadeDebug.value;
+  shadowCascadeDebug.value = next;
+  try {
+    const cameraName = getTargetCameraName();
+    const result = await sceneService.setShadowCascadeDebug(currentSceneName.value, cameraName, next);
+    const payload = result?.data ?? result;
+    if (result?.success === false || payload?.status === 'error') {
+      shadowCascadeDebug.value = !next;
+      logError('Set CSM cascade debug failed', payload?.message || result?.error || 'unknown error');
+    } else {
+      shadowCascadeDebug.value = !!payload?.enabled;
+      const target = getTargetCamera();
+      if (target) {
+        target.shadow_cascade_debug = shadowCascadeDebug.value;
+      }
+    }
+  } catch (e) {
+    shadowCascadeDebug.value = !next;
+    logError('Failed to set CSM cascade debug', e);
   }
 };
 
@@ -2004,6 +2041,7 @@ const normalizeCameraPayload = (cam) => ({
   handle: normalizeHandle(cam.handle ?? cam.camera_handle),
   render_backend: cam.render_backend || 'native',
   output_mode: cam.output_mode || 'final_color',
+  shadow_cascade_debug: !!cam.shadow_cascade_debug,
   deletable: cam.deletable !== false,
   move_speed: cam.move_speed || 1,
   view_open: !!cam.view_open,
@@ -2018,6 +2056,8 @@ const applyCameraList = (cameras) => {
   if (!sceneCameras.value.some((cam) => cam.name === selectedCameraName.value)) {
     selectedCameraName.value = sceneCameras.value[0]?.name || null;
   }
+  const target = getTargetCamera();
+  shadowCascadeDebug.value = !!target?.shadow_cascade_debug;
 };
 
 const RefreshCameraListOnly = async () => {

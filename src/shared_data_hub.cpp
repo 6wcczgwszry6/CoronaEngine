@@ -200,6 +200,9 @@ void SharedDataHub::enqueue_camera_state_update(CameraStateUpdateCommand command
     if (has_camera_state_field(command.fields, CameraStateUpdateField::VisionRenderMode)) {
         pending.vision_render_mode = command.vision_render_mode;
     }
+    if (has_camera_state_field(command.fields, CameraStateUpdateField::ShadowCascadeDebug)) {
+        pending.shadow_cascade_debug = command.shadow_cascade_debug;
+    }
     if (has_camera_state_field(command.fields, CameraStateUpdateField::ViewState)) {
         pending.view_open = command.view_open;
         pending.view_x = command.view_x;

@@ -25,6 +25,7 @@ layout(push_constant) uniform PushConsts
     vec3 sun_dir;
     uint shadowEnabled;
     uint shadowInfoBufferIndex;
+    uint shadowCascadeDebug;
 } pushConsts;
 
 // ============================================================================
@@ -340,6 +341,36 @@ float computeSunShadow(vec3 worldPos, vec3 normal)
     return sampleShadowMap(shadowMap, uv, ndc.z, bias);
 }
 
+uint computeShadowCascadeIndex(vec3 worldPos)
+{
+    vec4 cascadeSplits = readVec4(pushConsts.shadowInfoBufferIndex, 64u);
+    vec3 eyePosition = readVec3(pushConsts.uniformBufferIndex, 36u);
+    vec3 eyeDir = normalize(readVec3(pushConsts.uniformBufferIndex, 40u));
+    float viewDepth = dot(worldPos - eyePosition, eyeDir);
+    if (viewDepth < 0.0 || viewDepth > cascadeSplits.w) {
+        return 4u;
+    }
+    if (viewDepth <= cascadeSplits.x) {
+        return 0u;
+    }
+    if (viewDepth <= cascadeSplits.y) {
+        return 1u;
+    }
+    if (viewDepth <= cascadeSplits.z) {
+        return 2u;
+    }
+    return 3u;
+}
+
+vec3 shadowCascadeDebugColor(uint cascadeIndex)
+{
+    if (cascadeIndex == 0u) return vec3(1.0, 0.18, 0.12);
+    if (cascadeIndex == 1u) return vec3(0.15, 0.85, 0.22);
+    if (cascadeIndex == 2u) return vec3(0.16, 0.45, 1.0);
+    if (cascadeIndex == 3u) return vec3(1.0, 0.82, 0.12);
+    return vec3(0.08, 0.08, 0.08);
+}
+
 vec3 DisneyBRDF(vec3 WorldPos, vec3 Normal, vec3 Tangent, vec3 Bitangent,
     vec3 lightColor, vec3 albedo, MaterialInfo matl, float shadowFactor)
 {
@@ -557,6 +588,9 @@ void main()
     float shadowFactor = computeSunShadow(interpPos, interpNormal);
     vec3 renderResult = DisneyBRDF(interpPos, interpNormal, T, B,
         pushConsts.lightColor, baseColor.rgb, matl, shadowFactor);
+    if (pushConsts.shadowCascadeDebug != 0u) {
+        renderResult = shadowCascadeDebugColor(computeShadowCascadeIndex(interpPos));
+    }
     renderResult = max(renderResult, vec3(0.01, 0.01, 0.01));
 
     imageStore(imagesRGBA16[pushConsts.finalOutputImage], pixel, vec4(renderResult, 1.0));

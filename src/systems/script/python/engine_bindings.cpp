@@ -336,6 +336,8 @@ void BindAll(nanobind::module_& m) {
         .def("get_render_backend", &Camera::get_render_backend)
         .def("set_vision_render_mode", &Camera::set_vision_render_mode, nb::arg("mode"))
         .def("get_vision_render_mode", &Camera::get_vision_render_mode)
+        .def("set_shadow_cascade_debug", &Camera::set_shadow_cascade_debug, nb::arg("enabled"))
+        .def("get_shadow_cascade_debug", &Camera::get_shadow_cascade_debug)
         .def("set_view_state", &Camera::set_view_state, nb::arg("open"), nb::arg("x"),
              nb::arg("y"), nb::arg("width"), nb::arg("height"), nb::arg("move_speed"))
         .def("get_view_state", &Camera::get_view_state)

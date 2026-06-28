@@ -2149,6 +2149,30 @@ std::string Corona::API::Camera::get_vision_render_mode() const {
     return Corona::API::get_vision_render_mode(handle_);
 }
 
+void Corona::API::Camera::set_shadow_cascade_debug(bool enabled) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Camera::set_shadow_cascade_debug] Invalid camera handle");
+        return;
+    }
+
+    CameraStateUpdateCommand command{};
+    command.camera_handle = handle_;
+    command.fields = CameraStateUpdateField::ShadowCascadeDebug;
+    command.shadow_cascade_debug = enabled;
+    SharedDataHub::instance().enqueue_camera_state_update(command);
+}
+
+bool Corona::API::Camera::get_shadow_cascade_debug() const {
+    if (handle_ == 0) {
+        return false;
+    }
+
+    if (auto accessor = SharedDataHub::instance().camera_storage().acquire_read(handle_)) {
+        return accessor->shadow_cascade_debug;
+    }
+    return false;
+}
+
 void Corona::API::Camera::set_view_state(bool open, int x, int y, int width, int height, float move_speed) {
     if (handle_ == 0) {
         CFW_LOG_WARNING("[Camera::set_view_state] Invalid camera handle");

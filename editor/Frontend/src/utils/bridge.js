@@ -120,6 +120,10 @@ export const sceneService = {
     Bridge.callCEF('SceneTools', 'set_output_mode', [sceneName, cameraName, mode]),
   getOutputMode: (sceneName, cameraName) =>
     Bridge.callCEF('SceneTools', 'get_output_mode', [sceneName, cameraName]),
+  setShadowCascadeDebug: (sceneName, cameraName, enabled) =>
+    Bridge.callCEF('SceneTools', 'set_shadow_cascade_debug', [sceneName, cameraName, !!enabled]),
+  getShadowCascadeDebug: (sceneName, cameraName) =>
+    Bridge.callCEF('SceneTools', 'get_shadow_cascade_debug', [sceneName, cameraName]),
   isVisionAvailable: () => Bridge.callCEF('SceneTools', 'is_vision_available', []),
   setRenderBackend: (mode, sceneName = null, cameraId = null) =>
     Bridge.callCEF('SceneTools', 'set_render_backend', [mode, sceneName, cameraId]),
