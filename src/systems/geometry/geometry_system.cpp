@@ -2171,8 +2171,10 @@ void GeometrySystem::process_pending_geometry_builds() {
 
 void GeometrySystem::upload_lod_from_scene_data() {
     // LOD 由本系统内部决策，无外部配置开关。
-    // 最大 LOD 级别数（含 LOD0 原始精度）为内部常量。
-    constexpr int max_lod_levels = 4;
+    // 最大 LOD 级别数（含 LOD0 原始精度）为内部常量；作为显存安全上限，
+    // 应 >= LODGenerationOptions::max_levels + 1（默认 max_levels=8 → 9）。
+    // 生成端已按 max_levels/skinned_max_levels 限制实际级数，此处仅兜底防失控。
+    constexpr int max_lod_levels = 9;
 
     auto& resource_manager = Resource::ResourceManager::get_instance();
     auto& hub = SharedDataHub::instance();
@@ -2226,6 +2228,8 @@ void GeometrySystem::upload_lod_from_scene_data() {
             lod0.error            = 0.0f;
             lod0.screen_threshold = 1.0f;
             lod0.ready            = true;
+            lod0.vertex_count     = static_cast<std::uint32_t>(mesh.vertices.size());
+            lod0.index_count      = static_cast<std::uint32_t>(mesh.indices.size());
             entry.levels.push_back(std::move(lod0));
 
             // 为 LOD 0 构建 BVH（三角形级空间索引）
@@ -2244,19 +2248,20 @@ void GeometrySystem::upload_lod_from_scene_data() {
                 lod_buf.vertex_storage   = make_geometry_buffer(lod_data.vertices, Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_vertex_storage");
                 lod_buf.index_storage    = make_geometry_buffer(lod_data.indices,  Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_index_storage");
                 lod_buf.error            = lod_data.error;
-                // 切换阈值采用按 LOD 序号的固定表，不用 error 反推值（1/(1+error*80)）：
-                // 后者在 error 较大时阈值极小，只在物体缩得很小时才切入；且 error==0
-                // 时阈值为 0 → 该级永不选中（死级）。固定表保证单调递减、行为可预测：
-                //   LOD1 @ screen_ratio<=0.3, LOD2 @ <=0.12, LOD3 @ <=0.04
-                // 即物体在屏幕上越小，使用越简化的网格。
+                // 切换阈值直接采用生成端按几何误差/像素预算算出的 screen_threshold
+                // （generate_lod_levels 已保证严格单调递减、且 emit 的级 error>0 无死级）。
+                // 这样导入层的 pixel_error_budget / decay / min_ratio 等参数才真正生效；
+                // 物体在屏幕上越小（screen_ratio 越小）选用越简化的网格。
+                // 防御性 clamp：异常值（<=0 或 >=1）夹回开区间，避免死级/恒选。
                 {
-                    static constexpr float kFixedThresholds[] = {0.30f, 0.12f, 0.04f};
-                    const size_t ti = entry.levels.size() - 1;  // 当前是第 (levels.size()) 级，下标从 LOD1=0 起
-                    lod_buf.screen_threshold = (ti < std::size(kFixedThresholds))
-                                                   ? kFixedThresholds[ti]
-                                                   : 0.02f;
+                    float thr = lod_data.screen_threshold;
+                    if (!(thr > 0.0f)) thr = 0.01f;
+                    if (thr >= 1.0f)   thr = 0.99f;
+                    lod_buf.screen_threshold = thr;
                 }
                 lod_buf.ready            = true;
+                lod_buf.vertex_count     = static_cast<std::uint32_t>(lod_data.vertices.size());
+                lod_buf.index_count      = static_cast<std::uint32_t>(lod_data.indices.size());
                 entry.levels.push_back(std::move(lod_buf));
 
                 // 为该 LOD 级别构建 BVH

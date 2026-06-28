@@ -91,6 +91,8 @@ struct LODMeshBuffers {
     float  error            = 0.0f;  // 该级别的几何误差（QEM 计算得出，用于调试）
     float  screen_threshold = 1.0f;  // 屏幕占比阈值：低于此值时切换到此级别
     bool   ready            = false; // GPU 缓冲是否已创建完毕（创建前不能用于渲染）
+    std::uint32_t vertex_count = 0;  // 该级别顶点数（调试/诊断用）
+    std::uint32_t index_count  = 0;  // 该级别索引数（调试/诊断用）
 };
 
 // LOD（动态减面）现由 GeometrySystem 内部自行决策，无外部配置面：
