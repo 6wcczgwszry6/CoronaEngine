@@ -16,6 +16,8 @@ set(CORONA_RESOURCE_MANAGER_SOURCE_FILES
     types/animation_pose.cpp
     # audio
     types/audio.cpp
+    # miniaudio implementation TU (single MA_IMPLEMENTATION site)
+    types/miniaudio_impl.cpp
     # image
     types/image.cpp
     # binary
@@ -90,6 +92,7 @@ target_include_directories(CoronaResourceManager
 target_link_libraries(CoronaResourceManager
     PRIVATE
     stb_headers
+    miniaudio_headers
     assimp::assimp
     meshoptimizer
     astcenc-native-static
@@ -106,3 +109,7 @@ if(CORONA_RESOURCE_HAVE_FFMPEG)
 else()
     message(STATUS "[CoronaResource] FFmpeg video/audio support: DISABLED")
 endif()
+
+# miniaudio-backed audio decoding/import (header-only, always available)
+target_compile_definitions(CoronaResourceManager PRIVATE CORONA_RESOURCE_HAVE_MINIAUDIO=1)
+message(STATUS "[CoronaResource] miniaudio audio import: ENABLED")

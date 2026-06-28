@@ -6,27 +6,20 @@
 #include <corona/resource/types/audio.h>
 #include <corona/systems/acoustics/acoustics_system.h>
 
-#include <SDL3/SDL.h>
-
 namespace Corona::Systems {
 
 bool AcousticsSystem::initialize(Kernel::ISystemContext* ctx) {
     CFW_LOG_NOTICE("AcousticsSystem: Initializing...");
 
-    // --- SDL3 音频初始化 ---
-    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
-        CFW_LOG_ERROR("AcousticsSystem: SDL_InitSubSystem(SDL_INIT_AUDIO) failed: {}", SDL_GetError());
+    // --- miniaudio engine 初始化（自带默认设备 + 混音） ---
+    ma_result res = ma_engine_init(nullptr, &engine_);
+    if (res != MA_SUCCESS) {
+        CFW_LOG_ERROR("AcousticsSystem: ma_engine_init failed: {}", static_cast<int>(res));
         return false;
     }
+    engine_ready_ = true;
 
-    device_id_ = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
-    if (device_id_ == 0) {
-        CFW_LOG_ERROR("AcousticsSystem: SDL_OpenAudioDevice failed: {}", SDL_GetError());
-        SDL_QuitSubSystem(SDL_INIT_AUDIO);
-        return false;
-    }
-
-    CFW_LOG_NOTICE("AcousticsSystem: SDL3 audio device opened successfully");
+    CFW_LOG_NOTICE("AcousticsSystem: miniaudio engine initialized successfully");
 
     // --- 订阅播放事件 ---
     if (auto* event_bus = ctx->event_bus()) {
@@ -48,54 +41,80 @@ bool AcousticsSystem::initialize(Kernel::ISystemContext* ctx) {
     return true;
 }
 
+void AcousticsSystem::destroy_playback(ActivePlayback& ap) {
+    // 顺序关键：先停 sound（解除对 buffer 的引用），再放 buffer，最后 handle 析构。
+    if (ap.sound_ready) {
+        ma_sound_uninit(&ap.sound);
+        ap.sound_ready = false;
+    }
+    if (ap.buffer_ready) {
+        ma_audio_buffer_uninit(&ap.buffer);
+        ap.buffer_ready = false;
+    }
+    // ap.handle 在 ActivePlayback 析构时自动释放（unref + 解锁）。
+}
+
 void AcousticsSystem::process_play_request(std::uint64_t resource_id, bool loop) {
+    if (!engine_ready_) {
+        return;
+    }
+
     // 如果已在播放，先停掉旧实例
     process_stop_request(resource_id);
 
-    // 从资源管理器取 Audio
-    auto handle = Resource::ResourceManager::get_instance().acquire_read<Resource::IResource>(resource_id);
+    // 从资源管理器取 Audio（持有 handle 保活 + 防淘汰，整段播放期间有效）
+    auto handle = Resource::ResourceManager::get_instance().acquire_read<Resource::Audio>(resource_id);
     if (!handle) {
-        CFW_LOG_ERROR("[AcousticsSystem] play: resource {} not found or not ready", resource_id);
-        return;
-    }
-    const auto* audio = dynamic_cast<const Resource::Audio*>(&(*handle));
-    if (!audio) {
-        CFW_LOG_ERROR("[AcousticsSystem] play: resource {} is not an Audio resource", resource_id);
+        CFW_LOG_ERROR("[AcousticsSystem] play: resource {} not found or not Audio/ready", resource_id);
         return;
     }
 
-    const auto& meta = audio->metadata();
-    const auto& pcm = audio->samples();
-    if (pcm.empty()) {
-        CFW_LOG_WARNING("[AcousticsSystem] play: resource {} has no PCM data", resource_id);
+    const auto& meta = handle->metadata();
+    const auto& pcm = handle->samples();
+    if (pcm.empty() || meta.channels <= 0) {
+        CFW_LOG_WARNING("[AcousticsSystem] play: resource {} has no/invalid PCM data", resource_id);
         return;
     }
 
-    // 创建匹配 PCM 实际格式的 SDL AudioStream
-    SDL_AudioSpec src_spec{};
-    src_spec.format = SDL_AUDIO_F32LE;
-    src_spec.channels = meta.channels;
-    src_spec.freq = meta.sample_rate;
+    auto ap = std::make_unique<ActivePlayback>();
+    ap->resource_id = resource_id;
+    ap->loop = loop;
+    ap->handle = std::move(handle);
 
-    SDL_AudioStream* stream = SDL_CreateAudioStream(&src_spec, nullptr);
-    if (!stream) {
-        CFW_LOG_ERROR("[AcousticsSystem] play: SDL_CreateAudioStream failed: {}", SDL_GetError());
+    const auto& ap_pcm = ap->handle->samples();
+    const ma_uint64 frame_count = static_cast<ma_uint64>(ap_pcm.size() / meta.channels);
+
+    // ma_audio_buffer 直接引用资源 PCM（零拷贝）。
+    ma_audio_buffer_config cfg = ma_audio_buffer_config_init(
+        ma_format_f32,
+        static_cast<ma_uint32>(meta.channels),
+        frame_count,
+        ap_pcm.data(),
+        nullptr);
+
+    ma_result res = ma_audio_buffer_init(&cfg, &ap->buffer);
+    if (res != MA_SUCCESS) {
+        CFW_LOG_ERROR("[AcousticsSystem] play: ma_audio_buffer_init failed: {}", static_cast<int>(res));
         return;
     }
-    if (!SDL_BindAudioStream(device_id_, stream)) {
-        CFW_LOG_ERROR("[AcousticsSystem] play: SDL_BindAudioStream failed: {}", SDL_GetError());
-        SDL_DestroyAudioStream(stream);
+    ap->buffer_ready = true;
+
+    res = ma_sound_init_from_data_source(&engine_, &ap->buffer, 0, nullptr, &ap->sound);
+    if (res != MA_SUCCESS) {
+        CFW_LOG_ERROR("[AcousticsSystem] play: ma_sound_init_from_data_source failed: {}", static_cast<int>(res));
+        destroy_playback(*ap);
         return;
     }
+    ap->sound_ready = true;
 
-    ActivePlayback ap;
-    ap.resource_id = resource_id;
-    ap.pcm = pcm;
-    ap.loop = loop;
-    ap.stream = stream;
+    ma_sound_set_looping(&ap->sound, loop ? MA_TRUE : MA_FALSE);
 
-    const int total_bytes = static_cast<int>(ap.pcm.size() * sizeof(float));
-    SDL_PutAudioStreamData(ap.stream, ap.pcm.data(), total_bytes);
+    res = ma_sound_start(&ap->sound);
+    if (res != MA_SUCCESS) {
+        CFW_LOG_ERROR("[AcousticsSystem] play: ma_sound_start failed: {}", static_cast<int>(res));
+        destroy_playback(*ap);
+        return;
+    }
 
     std::lock_guard lock(playback_mutex_);
     active_playbacks_.push_back(std::move(ap));
@@ -105,12 +124,9 @@ void AcousticsSystem::process_play_request(std::uint64_t resource_id, bool loop)
 
 void AcousticsSystem::process_stop_request(std::uint64_t resource_id) {
     std::lock_guard lock(playback_mutex_);
-    for (auto it = active_playbacks_.begin(); it != active_playbacks_.end(); ) {
-        if (it->resource_id == resource_id) {
-            if (it->stream) {
-                SDL_UnbindAudioStream(it->stream);
-                SDL_DestroyAudioStream(it->stream);
-            }
+    for (auto it = active_playbacks_.begin(); it != active_playbacks_.end();) {
+        if (*it && (*it)->resource_id == resource_id) {
+            destroy_playback(**it);
             it = active_playbacks_.erase(it);
         } else {
             ++it;
@@ -132,35 +148,25 @@ void AcousticsSystem::update() {
         pending_stops_.clear();
     }
 
-    // --- 监控各音频流：数据已一次性灌入，这里只处理"播完"和"循环重灌" ---
+    // --- 监控各播放：loop 由 miniaudio 自动循环；非 loop 播完则清理 ---
     {
         std::lock_guard lock(playback_mutex_);
 
         auto it = active_playbacks_.begin();
         while (it != active_playbacks_.end()) {
-            auto& ap = *it;
-            if (!ap.stream) {
+            auto& ap = **it;
+            if (!ap.sound_ready) {
                 ++it;
                 continue;
             }
 
-            // SDL 队列里还有未播完的数据 → 继续等
-            const int queued_bytes = SDL_GetAudioStreamQueued(ap.stream);
-            if (queued_bytes > 0) {
-                ++it;
-                continue;
-            }
-
-            // 队列已排空：循环则重新灌入，否则结束
-            if (ap.loop) {
-                const int total_bytes = static_cast<int>(ap.pcm.size() * sizeof(float));
-                SDL_PutAudioStreamData(ap.stream, ap.pcm.data(), total_bytes);
-                ++it;
-            } else {
+            // 循环播放永不"结束"，交给 miniaudio。
+            if (!ap.loop && ma_sound_at_end(&ap.sound) == MA_TRUE) {
                 CFW_LOG_INFO("[AcousticsSystem] playback finished: rid={}", ap.resource_id);
-                SDL_UnbindAudioStream(ap.stream);
-                SDL_DestroyAudioStream(ap.stream);
+                destroy_playback(ap);
                 it = active_playbacks_.erase(it);
+            } else {
+                ++it;
             }
         }
     }
@@ -172,20 +178,17 @@ void AcousticsSystem::shutdown() {
     {
         std::lock_guard lock(playback_mutex_);
         for (auto& ap : active_playbacks_) {
-            if (ap.stream) {
-                SDL_UnbindAudioStream(ap.stream);
-                SDL_DestroyAudioStream(ap.stream);
-                ap.stream = nullptr;
+            if (ap) {
+                destroy_playback(*ap);
             }
         }
         active_playbacks_.clear();
     }
 
-    if (device_id_ != 0) {
-        SDL_CloseAudioDevice(device_id_);
-        device_id_ = 0;
+    if (engine_ready_) {
+        ma_engine_uninit(&engine_);
+        engine_ready_ = false;
     }
-    SDL_QuitSubSystem(SDL_INIT_AUDIO);
 
     CFW_LOG_NOTICE("AcousticsSystem: Shutdown complete");
 }

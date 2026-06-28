@@ -65,7 +65,10 @@ class AudioParser : public IParser {
     ~AudioParser() override = default;
 
    protected:
+    /// 通过 miniaudio 解码 wav/mp3/flac/ogg
     std::shared_ptr<IResource> parse_audio(const std::filesystem::path& path);
+    /// 通过 FFmpeg 解码 miniaudio 不支持的格式（aac/m4a 等）
+    std::shared_ptr<IResource> parse_audio_ffmpeg(const std::filesystem::path& path);
     bool export_audio(const IResource& resource, const std::filesystem::path& path);
 };
 

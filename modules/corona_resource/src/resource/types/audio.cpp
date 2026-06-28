@@ -4,6 +4,10 @@
 
 #include "corona/kernel/core/i_logger.h"
 
+#ifdef CORONA_RESOURCE_HAVE_MINIAUDIO
+#include <miniaudio.h>
+#endif
+
 #ifdef CORONA_RESOURCE_HAVE_FFMPEG
 #include "ffmpeg_common.h"
 #endif
@@ -30,10 +34,22 @@ void Audio::set_samples(std::vector<float> samples, int sample_rate, int channel
 // AudioParser
 // =============================================================================
 AudioParser::AudioParser() {
-#ifdef CORONA_RESOURCE_HAVE_FFMPEG
-    const char* import_exts[] = {".wav", ".mp3", ".ogg", ".flac", ".aac", ".m4a"};
+    // Import is backed by miniaudio (built-in wav/mp3/flac/ogg decoders).
+#ifdef CORONA_RESOURCE_HAVE_MINIAUDIO
+    const char* import_exts[] = {".wav", ".mp3", ".ogg", ".flac"};
     for (const auto* ext : import_exts) {
         register_extension(ext, [this](const auto& path, ResourceCache&) { return parse_audio(path); });
+    }
+#else
+    CFW_LOG_WARNING("[AudioParser] Built without miniaudio; audio import disabled");
+#endif
+
+    // Export is still backed by FFmpeg (miniaudio only encodes WAV).
+#ifdef CORONA_RESOURCE_HAVE_FFMPEG
+    // Import formats miniaudio has no built-in decoder for, routed through FFmpeg.
+    const char* ffmpeg_import_exts[] = {".aac", ".m4a"};
+    for (const auto* ext : ffmpeg_import_exts) {
+        register_extension(ext, [this](const auto& path, ResourceCache&) { return parse_audio_ffmpeg(path); });
     }
 
     const char* export_exts[] = {".wav", ".flac", ".ogg", ".aac", ".mp3"};
@@ -41,13 +57,91 @@ AudioParser::AudioParser() {
         register_exporter(ext, [this](const IResource& r, const std::filesystem::path& p) { return export_audio(r, p); });
     }
 #else
-    CFW_LOG_WARNING("[AudioParser] Built without FFmpeg; audio import/export disabled");
+    CFW_LOG_WARNING("[AudioParser] Built without FFmpeg; audio export disabled");
 #endif
 }
 
-#ifdef CORONA_RESOURCE_HAVE_FFMPEG
+#ifdef CORONA_RESOURCE_HAVE_MINIAUDIO
 
 std::shared_ptr<IResource> AudioParser::parse_audio(const std::filesystem::path& path) {
+    // Decode the whole file to interleaved float32 PCM, preserving the source
+    // channel count / sample rate (pass 0 to let miniaudio keep the native values).
+    ma_decoder_config config = ma_decoder_config_init(ma_format_f32, 0, 0);
+
+    ma_decoder decoder;
+    ma_result res = ma_decoder_init_file(path.string().c_str(), &config, &decoder);
+    if (res != MA_SUCCESS) {
+        CFW_LOG_ERROR("[AudioParser] Cannot open '{}': miniaudio error {}", path.string(), static_cast<int>(res));
+        return nullptr;
+    }
+
+    const int out_channels = static_cast<int>(decoder.outputChannels);
+    const int out_rate = static_cast<int>(decoder.outputSampleRate);
+
+    ma_uint64 total_frames = 0;
+    res = ma_decoder_get_length_in_pcm_frames(&decoder, &total_frames);
+    if (res != MA_SUCCESS || total_frames == 0) {
+        // Length may be unknown for some streams; fall back to chunked reads.
+        std::vector<float> pcm;
+        const ma_uint64 chunk_frames = 4096;
+        std::vector<float> chunk(static_cast<size_t>(chunk_frames) * out_channels);
+        for (;;) {
+            ma_uint64 read = 0;
+            ma_result rr = ma_decoder_read_pcm_frames(&decoder, chunk.data(), chunk_frames, &read);
+            if (read > 0) {
+                pcm.insert(pcm.end(), chunk.begin(),
+                           chunk.begin() + static_cast<size_t>(read) * out_channels);
+            }
+            if (rr != MA_SUCCESS || read < chunk_frames) {
+                break;
+            }
+        }
+        ma_decoder_uninit(&decoder);
+
+        if (pcm.empty()) {
+            CFW_LOG_ERROR("[AudioParser] Decoded no PCM from '{}'", path.string());
+            return nullptr;
+        }
+        auto audio = std::make_shared<Audio>(path);
+        audio->set_samples(std::move(pcm), out_rate, out_channels);
+
+        const auto& m = audio->metadata();
+        CFW_LOG_DEBUG("[AudioParser] Loaded '{}' | {}Hz | {}ch | {:.2f}s (streamed)",
+                      path.string(), m.sample_rate, m.channels, m.duration_seconds);
+        return audio;
+    }
+
+    std::vector<float> pcm(static_cast<size_t>(total_frames) * out_channels);
+    ma_uint64 frames_read = 0;
+    res = ma_decoder_read_pcm_frames(&decoder, pcm.data(), total_frames, &frames_read);
+    ma_decoder_uninit(&decoder);
+
+    if (res != MA_SUCCESS && frames_read == 0) {
+        CFW_LOG_ERROR("[AudioParser] Failed to read PCM from '{}': miniaudio error {}",
+                      path.string(), static_cast<int>(res));
+        return nullptr;
+    }
+    // Shrink to what was actually decoded.
+    pcm.resize(static_cast<size_t>(frames_read) * out_channels);
+
+    auto audio = std::make_shared<Audio>(path);
+    audio->set_samples(std::move(pcm), out_rate, out_channels);
+
+    const auto& m = audio->metadata();
+    CFW_LOG_DEBUG("[AudioParser] Loaded '{}' | {}Hz | {}ch | {:.2f}s",
+                  path.string(), m.sample_rate, m.channels, m.duration_seconds);
+    return audio;
+}
+
+#else  // !CORONA_RESOURCE_HAVE_MINIAUDIO
+
+std::shared_ptr<IResource> AudioParser::parse_audio(const std::filesystem::path&) { return nullptr; }
+
+#endif  // CORONA_RESOURCE_HAVE_MINIAUDIO
+
+#ifdef CORONA_RESOURCE_HAVE_FFMPEG
+
+std::shared_ptr<IResource> AudioParser::parse_audio_ffmpeg(const std::filesystem::path& path) {
     // ---- Open container + find audio stream ----------------------------------
     InputFormatContext fmt;
     {
@@ -147,7 +241,6 @@ std::shared_ptr<IResource> AudioParser::parse_audio(const std::filesystem::path&
         }
     };
 
-    bool ok = true;
     while (av_read_frame(fmt.get(), packet.get()) >= 0) {
         if (packet->stream_index == stream_idx) {
             int ret = avcodec_send_packet(dec.get(), packet.get());
@@ -168,7 +261,8 @@ std::shared_ptr<IResource> AudioParser::parse_audio(const std::filesystem::path&
 
     av_channel_layout_uninit(&out_layout);
 
-    if (!ok) {
+    if (pcm.empty()) {
+        CFW_LOG_ERROR("[AudioParser] Decoded no PCM from '{}'", path.string());
         return nullptr;
     }
 
@@ -177,14 +271,10 @@ std::shared_ptr<IResource> AudioParser::parse_audio(const std::filesystem::path&
     audio->meta_.codec_name = codec->name ? codec->name : "";
 
     const auto& m = audio->metadata();
-    CFW_LOG_DEBUG("[AudioParser] Loaded '{}' | {}Hz | {}ch | {:.2f}s | {}",
+    CFW_LOG_DEBUG("[AudioParser] Loaded '{}' | {}Hz | {}ch | {:.2f}s | {} (ffmpeg)",
                   path.string(), m.sample_rate, m.channels, m.duration_seconds, m.codec_name);
     return audio;
 }
-
-#endif  // CORONA_RESOURCE_HAVE_FFMPEG
-
-#ifdef CORONA_RESOURCE_HAVE_FFMPEG
 
 bool AudioParser::export_audio(const IResource& resource, const std::filesystem::path& path) {
     const auto* audio = dynamic_cast<const Audio*>(&resource);
@@ -401,7 +491,7 @@ bool AudioParser::export_audio(const IResource& resource, const std::filesystem:
 
 #else   // !CORONA_RESOURCE_HAVE_FFMPEG
 
-std::shared_ptr<IResource> AudioParser::parse_audio(const std::filesystem::path&) { return nullptr; }
+std::shared_ptr<IResource> AudioParser::parse_audio_ffmpeg(const std::filesystem::path&) { return nullptr; }
 bool AudioParser::export_audio(const IResource&, const std::filesystem::path&) { return false; }
 
 #endif  // CORONA_RESOURCE_HAVE_FFMPEG

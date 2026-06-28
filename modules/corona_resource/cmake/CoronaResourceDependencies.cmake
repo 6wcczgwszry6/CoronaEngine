@@ -33,6 +33,16 @@ FetchContent_Declare(
     EXCLUDE_FROM_ALL
 )
 
+# Fetch miniaudio single-header audio decode/playback library
+message(STATUS "Fetching miniaudio library...")
+FetchContent_Declare(
+    miniaudio
+    GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+    GIT_TAG 0.11.21
+    GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL
+)
+
 # Fetch nlohmann/json single-header JSON library
 message(STATUS "Fetching nlohmann/json library...")
 FetchContent_Declare(
@@ -89,6 +99,7 @@ set(_CORONA_RESOURCE_FETCH_DEPS
     ktm
     assimp
     stb
+    miniaudio
     nlohmann_json
     tinyexr
     meshoptimizer
@@ -110,3 +121,13 @@ endif ()
 
 add_library(stb_headers INTERFACE)
 target_include_directories(stb_headers INTERFACE ${stb_SOURCE_DIR})
+
+# Create interface library for miniaudio (header-only)
+FetchContent_GetProperties(miniaudio)
+
+if (NOT miniaudio_POPULATED)
+    FetchContent_Populate(miniaudio)
+endif ()
+
+add_library(miniaudio_headers INTERFACE)
+target_include_directories(miniaudio_headers INTERFACE ${miniaudio_SOURCE_DIR})
