@@ -185,12 +185,12 @@ class GeometrySystem : public Kernel::SystemBase {
     // ========================================
     //
     // ActorEvictRequestedEvent 发布后，GeometrySystem 自动：
-    //   1. 创建 ActorSnapshot（model_path + transform）
+    //   1. 创建 ActorStreamingRecord（scene/actor + model_path + transform + handles + flags）
     //   2. 存入 ActorCache（两级 LRU：内存 64MB + 磁盘 256MB）
     //   3. 标记 actor 为 offline，状态置为 Unloaded
     //
     // ActorRestoreRequestedEvent 发布后，GeometrySystem 自动：
-    //   1. 从 ActorCache 获取快照（或回退到磁盘 model_path）
+    //   1. 从 ActorCache 获取 ActorStreamingRecord（或回退到磁盘 model_path）
     //   2. 调用 ResourceManager::import_async 重新导入
     //   3. 导入完成后重建 GPU 资源，标记为 online
     //

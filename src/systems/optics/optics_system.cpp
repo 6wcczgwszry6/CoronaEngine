@@ -726,7 +726,8 @@ bool collect_actor_instances_for_visibility(
     uint32_t target_vp_descriptor,
     bool follow_camera_pass,
     const ktm::fmat4x4* camera_basis,
-    RenderInstanceBatch& batch) {
+    RenderInstanceBatch& batch,
+    GeometrySystem* geometry_system = nullptr) {
     batch.clear();
 
     auto& hub = Corona::SharedDataHub::instance();
@@ -743,6 +744,18 @@ bool collect_actor_instances_for_visibility(
         if (!actor) {
             ++object_id;
             continue;
+        }
+
+        // 跳过未加载的 actor — GPU 资源已释放，不可渲染
+        if (geometry_system) {
+            auto state = geometry_system->get_actor_load_state(
+                actor_handle,
+                reinterpret_cast<std::uintptr_t>(
+                    const_cast<Corona::SceneDevice*>(&scene)));
+            if (state != ActorLoadState::Loaded) {
+                ++object_id;
+                continue;
+            }
         }
 
         if (actor->follow_camera != follow_camera_pass) {
@@ -2696,7 +2709,8 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
     const bool has_follow_camera_instances =
         collect_actor_instances_for_visibility(scene, uiVisibility, uiVpDescriptor,
                                                /*follow_camera_pass=*/true,
-                                               &camera_basis, uiBatch);
+                                               &camera_basis, uiBatch,
+                                               geometry_system_);
 
     const bool stereo_ui = mode == ViewportUiMode::Stereo3D;
     const bool cursor_icon_ready = stereo_ui && ensure_cursor_icon_texture();
@@ -2952,7 +2966,8 @@ void OpticsSystem::process_vision_actor_pick(std::uintptr_t camera_handle,
                                            scene_vp_descriptor,
                                            false,
                                            nullptr,
-                                           scene_batch);
+                                           scene_batch,
+                                           geometry_system_);
     upload_instance_tables(scene_batch,
                            hardware_->instanceInfoBuffer,
                            hardware_->materialTableBuffer);

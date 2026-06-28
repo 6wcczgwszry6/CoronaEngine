@@ -1178,46 +1178,78 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
         }
     }
 
-    // ---- 第 2 步：读取 actor 和 transform 数据 ----
+    // ---- 第 2 步：读取 actor 完整状态，构建 ActorStreamingRecord ----
     auto actor_read = hub.actor_storage().try_acquire_read(event.actor);
     if (!actor_read) return;
 
-    Corona::Cache::ActorSnapshot snap;
-    snap.model_path    = actor_read->model_path;
-    snap.follow_camera = actor_read->follow_camera;
-    snap.profile_count = static_cast<int>(actor_read->profile_handles.size());
+    Corona::Cache::ActorStreamingRecord rec;
 
-    // 读取第一个 profile 关联的 transform: profile → mechanics → geometry → transform
+    // 身份
+    rec.scene = event.scene;
+    rec.actor = event.actor;
+
+    // 核心字段
+    rec.model_path    = actor_read->model_path;
+    rec.follow_camera = actor_read->follow_camera;
+    rec.profile_handles = actor_read->profile_handles;  // 全量拷贝
+
+    // 遍历 profiles 收集 geometry_handles / resource_ids / transform / 运行时标志
+    bool transform_captured = false;
+    bool optics_captured   = false;
+    bool physics_captured  = false;
     for (auto profile_handle : actor_read->profile_handles) {
         auto profile = hub.profile_storage().try_acquire_read(profile_handle);
         if (!profile) continue;
 
-        std::uintptr_t mech_handle = profile->mechanics_handle;
-        if (!mech_handle) continue;
-        auto mech = hub.mechanics_storage().try_acquire_read(mech_handle);
-        if (!mech) continue;
+        // 收集 geometry_handle
+        if (profile->geometry_handle) {
+            rec.geometry_handles.push_back(profile->geometry_handle);
 
-        auto geom = hub.geometry_storage().try_acquire_read(mech->geometry_handle);
-        if (!geom || !geom->transform_handle) continue;
+            // 收集 resource_id: geometry → model_resource → model_id
+            auto geom = hub.geometry_storage().try_acquire_read(profile->geometry_handle);
+            if (geom && geom->model_resource_handle) {
+                auto model_res = hub.model_resource_storage().try_acquire_read(geom->model_resource_handle);
+                if (model_res && model_res->model_id != 0) {
+                    rec.resource_ids.push_back(model_res->model_id);
+                }
+            }
+        }
 
-        auto transform = hub.model_transform_storage().try_acquire_read(geom->transform_handle);
-        if (!transform) continue;
+        // 从首个有效 profile 收集 transform + physics_enabled
+        if (!transform_captured && profile->mechanics_handle) {
+            auto mech = hub.mechanics_storage().try_acquire_read(profile->mechanics_handle);
+            if (mech) {
+                if (!physics_captured) {
+                    rec.physics_enabled = mech->physics_enabled;
+                    physics_captured = true;
+                }
 
-        snap.position[0] = transform->position.x;
-        snap.position[1] = transform->position.y;
-        snap.position[2] = transform->position.z;
-        snap.euler_rotation[0] = transform->euler_rotation.x;
-        snap.euler_rotation[1] = transform->euler_rotation.y;
-        snap.euler_rotation[2] = transform->euler_rotation.z;
-        snap.scale[0] = transform->scale.x;
-        snap.scale[1] = transform->scale.y;
-        snap.scale[2] = transform->scale.z;
-        break;
+                if (mech->geometry_handle) {
+                    auto geom = hub.geometry_storage().try_acquire_read(mech->geometry_handle);
+                    if (geom && geom->transform_handle) {
+                        auto xform = hub.model_transform_storage().try_acquire_read(geom->transform_handle);
+                        if (xform) {
+                            rec.transform = *xform;  // ModelTransform 值拷贝
+                            transform_captured = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 从首个有效 profile 收集 optics_visible（独立于 transform）
+        if (!optics_captured && profile->optics_handle) {
+            auto optics = hub.optics_storage().try_acquire_read(profile->optics_handle);
+            if (optics) {
+                rec.optics_visible = optics->visible;
+                optics_captured = true;
+            }
+        }
     }
 
     // ---- 第 3 步：存入 ActorCache ----
-    if (!impl_->actor_cache->put(event.actor, snap)) {
-        CFW_LOG_ERROR("[GeometrySystem] Failed to cache actor {} snapshot", event.actor);
+    if (!impl_->actor_cache->put(event.actor, rec)) {
+        CFW_LOG_ERROR("[GeometrySystem] Failed to cache actor {} stream record", event.actor);
     }
 
     // ---- 第 4 步：标记 offline + 延迟 GPU 释放 ----
@@ -1236,8 +1268,13 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
 
     impl_->last_snapshot_time[event.actor] = now;
 
-    CFW_LOG_NOTICE("[GeometrySystem] Actor {} evicted: cached snapshot ({} profiles, path={})",
-                   event.actor, snap.profile_count, snap.model_path.string());
+    CFW_LOG_NOTICE("[GeometrySystem] Actor {} evicted: cached stream record "
+                   "({} profiles, {} geometries, {} resource_ids, path={}, "
+                   "physics={}, optics_visible={}, follow_camera={})",
+                   event.actor,
+                   rec.profile_handles.size(), rec.geometry_handles.size(),
+                   rec.resource_ids.size(), rec.model_path.string(),
+                   rec.physics_enabled, rec.optics_visible, rec.follow_camera);
 }
 
 void GeometrySystem::on_restore_requested(const Events::ActorRestoreRequestedEvent& event) {
@@ -1245,14 +1282,19 @@ void GeometrySystem::on_restore_requested(const Events::ActorRestoreRequestedEve
 
     auto& hub = SharedDataHub::instance();
 
-    // ---- 第 1 步：从 ActorCache 获取快照 ----
-    auto snap = impl_->actor_cache->get(event.actor);
+    // ---- 第 1 步：从 ActorCache 获取流式记录 ----
+    auto rec = impl_->actor_cache->get(event.actor);
     std::filesystem::path model_path;
 
-    if (snap) {
-        model_path = snap->model_path;
-        CFW_LOG_NOTICE("[GeometrySystem] Restoring actor {} from cache (path={})",
-                       event.actor, model_path.string());
+    if (rec) {
+        model_path = rec->model_path;
+        CFW_LOG_NOTICE("[GeometrySystem] Restoring actor {} from cache: "
+                       "path={}, profiles={}, geometries={}, resource_ids={}, "
+                       "follow_camera={}, physics_enabled={}, optics_visible={}, priority={}",
+                       event.actor, model_path.string(),
+                       rec->profile_handles.size(), rec->geometry_handles.size(),
+                       rec->resource_ids.size(), rec->follow_camera,
+                       rec->physics_enabled, rec->optics_visible, rec->priority);
     } else {
         // 缓存未命中：回退到从 ActorDevice 读取 model_path
         auto actor_read = hub.actor_storage().try_acquire_read(event.actor);
