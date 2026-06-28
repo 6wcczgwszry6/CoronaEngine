@@ -332,8 +332,10 @@ void GeometrySystem::update() {
                 impl_->ctx->event_bus()->publish(evt);
         }
 
-        std::vector<Events::ActorUnloadRequestedEvent> pending_unloads;
-        std::vector<Events::ActorLoadRequestedEvent> pending_loads;
+        struct PendingUnload { Events::ActorUnloadRequestedEvent evt; float distance; };
+        struct PendingLoad   { Events::ActorLoadRequestedEvent evt;   float distance; };
+        std::vector<PendingUnload> pending_unloads;
+        std::vector<PendingLoad>   pending_loads;
         {
             // Phase 1: shared_lock — 收集候选、计算距离、决定转换（只读不写）
             std::shared_lock lock(impl_->mtx);
@@ -341,7 +343,6 @@ void GeometrySystem::update() {
             if (scene_state.cfg.enable_distance_culling && !cameras.empty()) {
                 std::unordered_set<Impl::Payload> candidates;
 
-                //仅收集预加载范围内的物体
                 for (const auto& [cam_pos, _] : cameras) {
                     std::vector<Impl::Payload> sphere_results;
                     scene_state.tree.query_sphere(cam_pos, scene_state.cfg.preload_distance, sphere_results);
@@ -350,14 +351,12 @@ void GeometrySystem::update() {
                     }
                 }
 
-                //保留所有非Unloaded状态的物体
                 for (const auto& [actor,state] : scene_state.actor_load_states) {
                     if (state != ActorLoadState::Unloaded) {
                         candidates.insert(actor);
                     }
                 }
 
-                //仅处理候选物体
                 for (auto actor : candidates) {
                     auto entry_it = scene_state.actor_to_entry.find(actor);
                     if (entry_it == scene_state.actor_to_entry.end()) continue;
@@ -365,36 +364,54 @@ void GeometrySystem::update() {
                     const auto& aabb = entry_it->second;
                     auto state_it = scene_state.actor_load_states.find(actor);
                     if (state_it == scene_state.actor_load_states.end()) continue;
-                    ActorLoadState state = state_it->second;  // 值拷贝，只读
+                    ActorLoadState state = state_it->second;
 
-                    // 计算物体到最近相机的欧氏距离
                     ktm::fvec3 center = aabb.center();
                     float min_distance = std::numeric_limits<float>::max();
                     for (const auto& [cam_pos,_] : cameras) {
                         min_distance = std::min(min_distance,ktm::distance(center,cam_pos));
                     }
 
-                    // 状态机转换（只记录决策，不修改状态 — 由 Phase 2 统一应用）
                     switch (state) {
                         case ActorLoadState::Loaded:
                             if (min_distance > scene_state.cfg.unload_distance &&
                                 !visible_actors.count(actor)) {
-                                pending_unloads.push_back({scene_handle, actor});
+                                if (auto a = hub.actor_storage().try_acquire_read(actor)) {
+                                    if (a->pinned) break;
+                                }
+                                pending_unloads.push_back({{scene_handle, actor}, min_distance});
                                 }
                             break;
 
                         case ActorLoadState::Unloaded:
                             if (min_distance < scene_state.cfg.preload_distance) {
-                                pending_loads.push_back({scene_handle, actor});
+                                pending_loads.push_back({{scene_handle, actor}, min_distance});
                             }
                             break;
 
                         default:
-                            // 过渡状态不做任何操作，等待资源系统的完成事件
                             break;
                     }
                 }
             }
+        }
+
+        // 按距离排序：加载近者优先，卸载远者优先。限制每帧数量防止线程池过载。
+        constexpr size_t kMaxLoadsPerFrame   = 4;
+        constexpr size_t kMaxUnloadsPerFrame = 8;
+        if (pending_loads.size() > kMaxLoadsPerFrame) {
+            std::sort(pending_loads.begin(), pending_loads.end(),
+                [](const PendingLoad& a, const PendingLoad& b) {
+                    return a.distance < b.distance;  // 近的优先
+                });
+            pending_loads.resize(kMaxLoadsPerFrame);
+        }
+        if (pending_unloads.size() > kMaxUnloadsPerFrame) {
+            std::sort(pending_unloads.begin(), pending_unloads.end(),
+                [](const PendingUnload& a, const PendingUnload& b) {
+                    return a.distance > b.distance;  // 远的优先
+                });
+            pending_unloads.resize(kMaxUnloadsPerFrame);
         }
         // Phase 2: unique_lock — 应用状态转换（带 TOCTOU 重校验）
         if (!pending_unloads.empty() || !pending_loads.empty()) {
@@ -402,38 +419,34 @@ void GeometrySystem::update() {
             auto& scene_state = impl_->get_or_create(scene_handle);
 
             for (auto it = pending_unloads.begin(); it != pending_unloads.end(); ) {
-                auto state_it = scene_state.actor_load_states.find(it->actor);
+                auto state_it = scene_state.actor_load_states.find(it->evt.actor);
                 if (state_it != scene_state.actor_load_states.end() &&
                     state_it->second == ActorLoadState::Loaded) {
                     state_it->second = ActorLoadState::Unloading;
-                    CFW_LOG_NOTICE("[SceneSystem] Published unload request for actor {} (distance culling)",
-                                  it->actor);
                     ++it;
                     } else {
-                        it = pending_unloads.erase(it);  // 状态已被异步事件改变，取消此事件
+                        it = pending_unloads.erase(it);
                     }
             }
 
             for (auto it = pending_loads.begin(); it != pending_loads.end(); ) {
-                auto state_it = scene_state.actor_load_states.find(it->actor);
+                auto state_it = scene_state.actor_load_states.find(it->evt.actor);
                 if (state_it != scene_state.actor_load_states.end() &&
                     state_it->second == ActorLoadState::Unloaded) {
                     state_it->second = ActorLoadState::Loading;
-                    CFW_LOG_NOTICE("[SceneSystem] Published preload request for actor {} (distance culling)",
-                                  it->actor);
                     ++it;
                     } else {
                         it = pending_loads.erase(it);
                     }
             }
         }
-        for (const auto& evt : pending_unloads) {
+        for (const auto& p : pending_unloads) {
             if (impl_->ctx && impl_->ctx->event_bus())
-                impl_->ctx->event_bus()->publish(evt);
+                impl_->ctx->event_bus()->publish(p.evt);
         }
-        for (const auto& evt : pending_loads) {
+        for (const auto& p : pending_loads) {
             if (impl_->ctx && impl_->ctx->event_bus())
-                impl_->ctx->event_bus()->publish(evt);
+                impl_->ctx->event_bus()->publish(p.evt);
         }
 
         // 不可见帧计数与淘汰
@@ -451,6 +464,11 @@ void GeometrySystem::update() {
                 if (!scene_state.actor_to_entry.count(actor_handle)) {
                     scene_state.invisible_frames.erase(actor_handle);
                     continue;
+                }
+
+                // pinned 的 actor 不计不可见帧，不触发淘汰
+                if (auto a = hub.actor_storage().try_acquire_read(actor_handle)) {
+                    if (a->pinned) continue;
                 }
 
                 if ( visible_actors.count(actor_handle) ) {
@@ -534,6 +552,28 @@ void GeometrySystem::update() {
                                 rm.used_memory_bytes() / (1024 * 1024),
                                 budget / (1024 * 1024));
             }
+        }
+    }
+
+    // 每秒输出一次流式加载统计
+    {
+        static int frame_counter = 0;
+        if (++frame_counter >= 60) {
+            frame_counter = 0;
+            std::shared_lock lock(impl_->mtx);
+            for (auto& [scene_handle, scene_state] : impl_->scenes) {
+                std::lock_guard stats_lock(scene_state.stats_mutex);
+                auto& s = scene_state.stats;
+                CFW_LOG_NOTICE("[GeometrySystem] Scene stats: total={} visible={} "
+                               "loaded={} loading={} unloading={} unloaded={} offline={}",
+                               s.actor_total, s.actor_visible,
+                               s.actor_loaded, s.actor_loading, s.actor_unloading,
+                               s.actor_unloaded, s.actor_offline);
+            }
+            auto& rm = Resource::ResourceManager::get_instance();
+            CFW_LOG_NOTICE("[GeometrySystem] Resource memory: {} MB / {} MB budget",
+                           rm.used_memory_bytes() / (1024 * 1024),
+                           rm.memory_budget() / (1024 * 1024));
         }
     }
 }
@@ -1309,7 +1349,11 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
     auto actor_read = hub.actor_storage().try_acquire_read(event.actor);
     if (!actor_read) return;
 
+    // pinned 的 actor 不淘汰
+    if (actor_read->pinned) return;
+
     Corona::Cache::ActorStreamingRecord rec;
+    rec.pinned = actor_read->pinned;  // 写入快照，restore 时保留
 
     // 身份
     rec.scene = event.scene;
@@ -1419,6 +1463,16 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
 
 void GeometrySystem::on_restore_requested(const Events::ActorRestoreRequestedEvent& event) {
     impl_->ensure_actor_cache();
+
+    // 防抖：2 秒内刚被 evict 的不 restore，避免 preload/unload 边界反复横跳
+    {
+        auto it = impl_->last_snapshot_time.find(event.actor);
+        if (it != impl_->last_snapshot_time.end()) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - it->second);
+            if (elapsed.count() < 2) return;
+        }
+    }
 
     auto& hub = SharedDataHub::instance();
 

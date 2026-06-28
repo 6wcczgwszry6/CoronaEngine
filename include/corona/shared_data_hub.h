@@ -174,8 +174,9 @@ struct ExternalVisionBindingDevice {
 
 struct ActorDevice {
     std::vector<std::uintptr_t> profile_handles;
-    std::filesystem::path model_path;  //Actor文件路径，同时作为Actor的唯一标识
-    bool follow_camera{false};         // true: render in Optics pass 2 using camera-local orthographic space
+    std::filesystem::path model_path;
+    bool follow_camera{false};
+    bool pinned{false};  // 标记后不会被距离剔除卸载，也不会被不可见帧淘汰
 };
 
 enum class CameraOutputMode : uint8_t {
