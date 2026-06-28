@@ -1210,6 +1210,45 @@ class SceneTools(PluginBase):
             return {"status": "error", "message": str(exc)}
 
     @staticmethod
+    def set_shadow_cascade_debug(scene_name: str, camera_name: str = None, enabled: bool = False) -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                raise ValueError(f"Scene '{scene_name}' not found")
+            camera = scene.find_camera(camera_name)
+            if camera is None:
+                raise ValueError(f"Camera '{camera_name}' not found in scene '{scene_name}'")
+            setter = getattr(camera, "set_shadow_cascade_debug", None)
+            if not callable(setter):
+                engine_setter = getattr(getattr(camera, "engine_obj", None), "set_shadow_cascade_debug", None)
+                if callable(engine_setter):
+                    engine_setter(bool(enabled))
+            else:
+                setter(bool(enabled))
+            return {"status": "success", "enabled": bool(enabled)}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def get_shadow_cascade_debug(scene_name: str, camera_name: str = None) -> dict:
+        try:
+            scene = scene_manager.get(scene_name)
+            if scene is None:
+                raise ValueError(f"Scene '{scene_name}' not found")
+            camera = scene.find_camera(camera_name)
+            if camera is None:
+                raise ValueError(f"Camera '{camera_name}' not found in scene '{scene_name}'")
+            getter = getattr(camera, "get_shadow_cascade_debug", None)
+            if callable(getter):
+                enabled = getter()
+            else:
+                engine_getter = getattr(getattr(camera, "engine_obj", None), "get_shadow_cascade_debug", None)
+                enabled = bool(engine_getter()) if callable(engine_getter) else False
+            return {"status": "success", "enabled": bool(enabled)}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
     def is_vision_available() -> dict:
         try:
             available = bool(CoronaEditor.CoronaEngine.is_vision_available())

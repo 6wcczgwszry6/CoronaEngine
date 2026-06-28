@@ -861,6 +861,7 @@ nlohmann::json camera_to_json(const NativeEditorCamera& camera) {
     item["output_mode"] = camera.engine_camera ? camera.engine_camera->get_output_mode() : "final_color";
     item["render_backend"] = camera.engine_camera ? camera.engine_camera->get_render_backend() : "native";
     item["vision_render_mode"] = camera.engine_camera ? camera.engine_camera->get_vision_render_mode() : "path_tracing";
+    item["shadow_cascade_debug"] = camera.engine_camera ? camera.engine_camera->get_shadow_cascade_debug() : false;
     item["move_speed"] = camera.move_speed;
     item["view_open"] = camera.view_open;
     item["view_x"] = camera.view_x;
@@ -871,12 +872,17 @@ nlohmann::json camera_to_json(const NativeEditorCamera& camera) {
     return item;
 }
 
+std::optional<std::array<float, 6>> native_actor_local_aabb(const NativeEditorActor& actor);
+std::optional<std::array<float, 6>> native_actor_world_aabb(const NativeEditorActor& actor);
+nlohmann::json aabb_to_json(const std::array<float, 6>& aabb);
+
 nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorActor& actor) {
     nlohmann::json item;
     item["name"] = actor.name;
     item["actor_guid"] = actor.actor_guid;
     item["handle"] = actor.engine_actor ? actor.engine_actor->get_handle() : 0;
     item["path"] = actor.route;
+    item["route"] = actor.route;
     item["scene"] = scene.route;
     item["type"] = actor_file_extension(actor.route);
     item["model"] = actor.route;
@@ -892,6 +898,19 @@ nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorA
         {"rotation", actor.geometry ? actor.geometry->get_rotation() : actor.rotation},
         {"scale", actor.geometry ? actor.geometry->get_scale() : actor.scale},
     };
+    const auto local_aabb = native_actor_local_aabb(actor);
+    const auto world_aabb = native_actor_world_aabb(actor);
+    item["local_aabb"] = local_aabb ? aabb_to_json(*local_aabb) : nlohmann::json(nullptr);
+    item["world_aabb"] = world_aabb ? aabb_to_json(*world_aabb) : nlohmann::json(nullptr);
+    item["aabb"] = item["world_aabb"];
+    item["bounds_ready"] = static_cast<bool>(world_aabb);
+    item["size"] = world_aabb
+        ? nlohmann::json::array({
+            (*world_aabb)[3] - (*world_aabb)[0],
+            (*world_aabb)[4] - (*world_aabb)[1],
+            (*world_aabb)[5] - (*world_aabb)[2],
+        })
+        : nlohmann::json::array({0.0f, 0.0f, 0.0f});
     if (actor.mechanics) {
         const auto [linear_x, linear_y, linear_z] = actor.mechanics->get_linear_lock();
         const auto [angular_x, angular_y, angular_z] = actor.mechanics->get_angular_lock();
@@ -974,7 +993,22 @@ NativeEditorCamera* find_native_camera(NativeEditorScene& scene, const std::stri
     return nullptr;
 }
 
-std::optional<std::array<float, 6>> native_actor_world_aabb(const NativeEditorActor& actor) {
+bool aabb_has_usable_extent(const std::array<float, 6>& aabb) {
+    bool has_extent = false;
+    for (size_t axis = 0; axis < 3; ++axis) {
+        const float min_v = aabb[axis];
+        const float max_v = aabb[axis + 3];
+        if (!std::isfinite(min_v) || !std::isfinite(max_v) || max_v < min_v) {
+            return false;
+        }
+        if (std::abs(max_v - min_v) > 1e-5f) {
+            has_extent = true;
+        }
+    }
+    return has_extent;
+}
+
+std::optional<std::array<float, 6>> native_actor_local_aabb(const NativeEditorActor& actor) {
     if (!actor.geometry) {
         return std::nullopt;
     }
@@ -982,14 +1016,32 @@ std::optional<std::array<float, 6>> native_actor_world_aabb(const NativeEditorAc
     if (local.size() < 6) {
         return std::nullopt;
     }
+    std::array<float, 6> result{};
+    for (size_t index = 0; index < 6; ++index) {
+        result[index] = local[index];
+    }
+    if (!aabb_has_usable_extent(result)) {
+        return std::nullopt;
+    }
+    return result;
+}
+
+std::optional<std::array<float, 6>> native_actor_world_aabb(const NativeEditorActor& actor) {
+    const auto local = native_actor_local_aabb(actor);
+    if (!local || !actor.geometry) {
+        return std::nullopt;
+    }
     const auto position = actor.geometry->get_position();
     const auto scale = actor.geometry->get_scale();
     std::array<float, 6> result{};
     for (size_t axis = 0; axis < 3; ++axis) {
-        const auto a = position[axis] + local[axis] * scale[axis];
-        const auto b = position[axis] + local[axis + 3] * scale[axis];
+        const auto a = position[axis] + (*local)[axis] * scale[axis];
+        const auto b = position[axis] + (*local)[axis + 3] * scale[axis];
         result[axis] = std::min(a, b);
         result[axis + 3] = std::max(a, b);
+    }
+    if (!aabb_has_usable_extent(result)) {
+        return std::nullopt;
     }
     return result;
 }
@@ -1424,6 +1476,38 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
     });
 }
 
+std::optional<std::array<float, 3>> transform_float3_value(const nlohmann::json& data,
+                                                           const std::string& key,
+                                                           const std::string& alias = {}) {
+    if (!data.is_object()) {
+        return std::nullopt;
+    }
+    if (data.contains(key)) {
+        if (auto value = json_float3_value(data[key])) {
+            return value;
+        }
+    }
+    if (!alias.empty() && data.contains(alias)) {
+        if (auto value = json_float3_value(data[alias])) {
+            return value;
+        }
+    }
+    const auto geo = data.find("geometry");
+    if (geo != data.end() && geo->is_object()) {
+        if (geo->contains(key)) {
+            if (auto value = json_float3_value((*geo)[key])) {
+                return value;
+            }
+        }
+        if (!alias.empty() && geo->contains(alias)) {
+            if (auto value = json_float3_value((*geo)[alias])) {
+                return value;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 NativeResult remove_native_editor_actor(const std::string& scene_route_arg,
                                         const std::string& actor_name) {
     if (trim_ascii(actor_name).empty()) {
@@ -1459,6 +1543,59 @@ NativeResult remove_native_editor_actor(const std::string& scene_route_arg,
         {"scene", scene->route},
         {"actor", removed_name},
         {"actor_guid", removed_guid},
+    });
+}
+
+NativeResult set_native_editor_actor_transform(const std::string& scene_route_arg,
+                                               const std::string& actor_name,
+                                               const nlohmann::json& transform_data) {
+    if (trim_ascii(actor_name).empty()) {
+        return native_failure("Actor name cannot be empty", 2);
+    }
+    auto* scene = ensure_native_editor_scene();
+    const auto scene_route = normalize_route(scene_route_arg);
+    if (!scene_route.empty() && scene_route != scene->route) {
+        scene = reload_native_editor_scene("", scene_route);
+    }
+
+    auto* actor = find_native_actor(*scene, actor_name);
+    if (!actor && actor_name.rfind("__shell_", 0) != 0) {
+        actor = find_native_actor(*scene, "__shell_" + actor_name);
+    }
+    if (!actor) {
+        return native_failure("Actor not found: " + actor_name, 2);
+    }
+
+    const auto position = transform_float3_value(transform_data, "position", "pos");
+    const auto rotation = transform_float3_value(transform_data, "rotation", "rot");
+    const auto scale = transform_float3_value(transform_data, "scale", "scl");
+    if (!position && !rotation && !scale) {
+        return native_failure("Transform must include position, rotation, or scale", 2);
+    }
+
+    if (position) {
+        actor->position = *position;
+        if (actor->geometry) {
+            actor->geometry->set_position(*position);
+        }
+    }
+    if (rotation) {
+        actor->rotation = *rotation;
+        if (actor->geometry) {
+            actor->geometry->set_rotation(*rotation);
+        }
+    }
+    if (scale) {
+        actor->scale = *scale;
+        if (actor->geometry) {
+            actor->geometry->set_scale(*scale);
+        }
+    }
+    persist_native_scene_actors(*scene);
+    return native_success({
+        {"status", "success"},
+        {"scene", scene->route},
+        {"actor", actor_to_json(*scene, *actor)},
     });
 }
 
@@ -1965,6 +2102,75 @@ std::string get_editor_actor_bounds_from_python(const std::string& scene_name,
     }
 }
 
+std::string get_editor_scene_snapshot_from_python(const std::string& scene_name) {
+    try {
+        auto* scene = ensure_native_editor_scene();
+        const auto scene_route = normalize_route(scene_name);
+        if (!scene_route.empty() && scene_route != scene->route) {
+            scene = reload_native_editor_scene("", scene_route);
+        }
+        nlohmann::json actors = nlohmann::json::array();
+        for (const auto& actor : scene->actors) {
+            actors.push_back(actor_to_json(*scene, actor));
+        }
+        const auto scene_aabb = native_scene_world_aabb(*scene);
+        return nlohmann::json{
+            {"status", "success"},
+            {"scene", scene->route},
+            {"scene_name", scene->name},
+            {"actor_count", scene->actors.size()},
+            {"actors", actors},
+            {"scene_aabb", scene_aabb ? aabb_to_json(*scene_aabb) : nlohmann::json(nullptr)},
+            {"bounds_ready", static_cast<bool>(scene_aabb)},
+        }.dump();
+    } catch (const std::exception& e) {
+        return nlohmann::json{
+            {"status", "error"},
+            {"message", e.what()},
+        }.dump();
+    } catch (...) {
+        return nlohmann::json{
+            {"status", "error"},
+            {"message", "get_editor_scene_snapshot native handler error"},
+        }.dump();
+    }
+}
+
+std::string set_editor_actor_transform_from_python(const std::string& scene_name,
+                                                   const std::string& actor_name,
+                                                   const std::string& transform_json) {
+    try {
+        nlohmann::json transform_data = nlohmann::json::object();
+        if (!transform_json.empty()) {
+            transform_data = nlohmann::json::parse(transform_json);
+            if (!transform_data.is_object()) {
+                transform_data = nlohmann::json::object();
+            }
+        }
+        const auto result = set_native_editor_actor_transform(scene_name, actor_name, transform_data);
+        if (!result.success) {
+            return nlohmann::json{
+                {"status", "error"},
+                {"message", result.error},
+                {"error", result.error},
+            }.dump();
+        }
+        return result.data.dump();
+    } catch (const std::exception& e) {
+        return nlohmann::json{
+            {"status", "error"},
+            {"message", e.what()},
+            {"error", e.what()},
+        }.dump();
+    } catch (...) {
+        return nlohmann::json{
+            {"status", "error"},
+            {"message", "set_editor_actor_transform native handler error"},
+            {"error", "set_editor_actor_transform native handler error"},
+        }.dump();
+    }
+}
+
 std::string get_editor_scene_bounds_from_python(const std::string& scene_name) {
     try {
         auto* scene = ensure_native_editor_scene();
@@ -2367,6 +2573,32 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
                 return native_failure("Camera not found: " + camera_name, 2);
             }
             return native_success({{"status", "success"}, {"mode", camera->engine_camera->get_output_mode()}});
+        }},
+        {"set_shadow_cascade_debug", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto camera_name = arg_string(request.args, 1);
+            const bool enabled = arg_bool(request.args, 2, false);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+            camera->engine_camera->set_shadow_cascade_debug(enabled);
+            return native_success({
+                {"status", "success"},
+                {"enabled", camera->engine_camera->get_shadow_cascade_debug()},
+            });
+        }},
+        {"get_shadow_cascade_debug", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto camera_name = arg_string(request.args, 1);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+            return native_success({
+                {"status", "success"},
+                {"enabled", camera->engine_camera->get_shadow_cascade_debug()},
+            });
         }},
         {"open_actor", [](const NativeRequest& request, const NativeContext& context) {
             auto* scene = ensure_native_editor_scene();

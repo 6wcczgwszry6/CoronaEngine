@@ -19,6 +19,9 @@ layout(push_constant) uniform PushConsts
     uint vpBufferIndex;
     uint outputImageIndex;
     uint debugMode;         // 0=BaseColor, 1=Normal, 2=WorldPosition, 3=ObjectID, 4=VisibilityBuffer
+    uint uniformBufferIndex;
+    uint shadowInfoBufferIndex;
+    uint shadowCascadeDebug;
 } pushConsts;
 
 // ============================================================================
@@ -70,6 +73,36 @@ mat4 readMat4(uint bufIdx, uint offset)
         for (int r = 0; r < 4; r++)
             m[c][r] = readFloat(bufIdx, offset + c * 4 + r);
     return m;
+}
+
+uint computeShadowCascadeIndex(vec3 worldPos)
+{
+    vec4 cascadeSplits = readVec4(pushConsts.shadowInfoBufferIndex, 64u);
+    vec3 eyePosition = readVec3(pushConsts.uniformBufferIndex, 36u);
+    vec3 eyeDir = normalize(readVec3(pushConsts.uniformBufferIndex, 40u));
+    float viewDepth = dot(worldPos - eyePosition, eyeDir);
+    if (viewDepth < 0.0 || viewDepth > cascadeSplits.w) {
+        return 4u;
+    }
+    if (viewDepth <= cascadeSplits.x) {
+        return 0u;
+    }
+    if (viewDepth <= cascadeSplits.y) {
+        return 1u;
+    }
+    if (viewDepth <= cascadeSplits.z) {
+        return 2u;
+    }
+    return 3u;
+}
+
+vec3 shadowCascadeDebugColor(uint cascadeIndex)
+{
+    if (cascadeIndex == 0u) return vec3(1.0, 0.18, 0.12);
+    if (cascadeIndex == 1u) return vec3(0.15, 0.85, 0.22);
+    if (cascadeIndex == 2u) return vec3(0.16, 0.45, 1.0);
+    if (cascadeIndex == 3u) return vec3(1.0, 0.82, 0.12);
+    return vec3(0.08, 0.08, 0.08);
 }
 
 // ============================================================================
@@ -238,7 +271,7 @@ void main()
     MaterialInfo matl = loadMaterialInfo(inst.materialID);
 
     // --- ObjectID mode: skip expensive vertex decode ---
-    if (pushConsts.debugMode == 3u)
+    if (pushConsts.debugMode == 3u && pushConsts.shadowCascadeDebug == 0u)
     {
         imageStore(imagesRGBA16[pushConsts.outputImageIndex], pixel,
                    vec4(pseudoColor(inst.objectID), 1.0));
@@ -306,7 +339,11 @@ void main()
 
     // --- Output based on debug mode ---
     vec4 result = vec4(0.0);
-    switch (pushConsts.debugMode)
+    if (pushConsts.shadowCascadeDebug != 0u)
+    {
+        result = vec4(shadowCascadeDebugColor(computeShadowCascadeIndex(interpPos)), 1.0);
+    }
+    else switch (pushConsts.debugMode)
     {
         case 0u: // BaseColor
             result = baseColor;

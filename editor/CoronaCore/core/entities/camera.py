@@ -73,6 +73,7 @@ class Camera:
         self.render_backend = render_backend
         self.output_mode = output_mode
         self.vision_render_mode = normalize_vision_render_mode(vision_render_mode)
+        self.shadow_cascade_debug = False
         self.move_speed = float(move_speed)
         self.view_open = bool(view_open)
         self.view_x = int(view_x)
@@ -152,6 +153,18 @@ class Camera:
 
     def get_output_mode(self) -> str:
         return self.output_mode
+
+    def set_shadow_cascade_debug(self, enabled: bool):
+        self.shadow_cascade_debug = bool(enabled)
+        setter = getattr(self.engine_obj, 'set_shadow_cascade_debug', None)
+        if callable(setter):
+            setter(self.shadow_cascade_debug)
+
+    def get_shadow_cascade_debug(self) -> bool:
+        getter = getattr(self.engine_obj, 'get_shadow_cascade_debug', None)
+        if callable(getter):
+            self.shadow_cascade_debug = bool(getter())
+        return bool(getattr(self, 'shadow_cascade_debug', False))
 
     def set_render_backend(self, mode: str):
         actual = mode
@@ -262,6 +275,7 @@ class Camera:
             'output_mode': self.get_output_mode(),
             'render_backend': self.get_render_backend(),
             'vision_render_mode': self.get_vision_render_mode(),
+            'shadow_cascade_debug': self.get_shadow_cascade_debug(),
             'move_speed': self.move_speed,
             'view_open': self.view_open,
             'view_x': self.view_x,

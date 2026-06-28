@@ -235,6 +235,7 @@ struct CameraDevice {
     CameraOutputMode output_mode{CameraOutputMode::FinalColor};
     CameraRenderBackend render_backend{CameraRenderBackend::Native};
     CameraVisionRenderMode vision_render_mode{CameraVisionRenderMode::PathTracing};
+    bool shadow_cascade_debug{false};
     bool view_open{false};
     bool viewport_rect_active{false};
     int view_x{120};
@@ -317,6 +318,7 @@ enum class CameraStateUpdateField : std::uint32_t {
     RenderBackend = 1u << 3,
     ViewState = 1u << 4,
     VisionRenderMode = 1u << 5,
+    ShadowCascadeDebug = 1u << 6,
 };
 
 constexpr CameraStateUpdateField operator|(CameraStateUpdateField lhs,
@@ -340,6 +342,7 @@ struct CameraStateUpdateCommand {
     CameraOutputMode output_mode{CameraOutputMode::FinalColor};
     CameraRenderBackend render_backend{CameraRenderBackend::Native};
     CameraVisionRenderMode vision_render_mode{CameraVisionRenderMode::PathTracing};
+    bool shadow_cascade_debug{false};
     bool view_open{false};
     int view_x{120};
     int view_y{120};

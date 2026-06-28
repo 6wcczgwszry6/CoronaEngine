@@ -280,6 +280,8 @@ class Camera {
     [[nodiscard]] std::string get_render_backend() const;
     void set_vision_render_mode(const std::string& mode);
     [[nodiscard]] std::string get_vision_render_mode() const;
+    void set_shadow_cascade_debug(bool enabled);
+    [[nodiscard]] bool get_shadow_cascade_debug() const;
     void set_view_state(bool open, int x, int y, int width, int height, float move_speed);
     [[nodiscard]] std::array<float, 6> get_view_state() const;
 

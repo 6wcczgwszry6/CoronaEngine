@@ -1566,25 +1566,18 @@ class LANChatAgentWorker:
         return None
 
     def _current_scene_actors(self) -> list[Any]:
-        getter = getattr(self._corona_engine, "get_scene_actors", None)
-        if callable(getter):
-            try:
-                actors = getter()
-                return list(actors or [])
-            except Exception as exc:  # noqa: BLE001
-                self._logger.debug("Failed to read scene actors from engine helper: %s", exc)
         try:
-            from CoronaCore.core.managers import scene_manager
-            scene = scene_manager.get("")
-            if scene is None:
-                routes = scene_manager.list_all()
-                scene = scene_manager.get(routes[0]) if routes else None
-            if scene is None:
+            from plugins.AITool.cai_extensions.mcp.tools.native_scene_state import native_actor_views
+        except Exception:  # noqa: BLE001
+            try:
+                from ..cai_extensions.mcp.tools.native_scene_state import native_actor_views  # type: ignore
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("Failed to import native scene actor helper: %s", exc)
                 return []
-            get_actors = getattr(scene, "get_actors", None)
-            return list(get_actors() or []) if callable(get_actors) else []
+        try:
+            return list(native_actor_views(""))
         except Exception as exc:  # noqa: BLE001
-            self._logger.debug("Failed to read scene actors for completed adjustment: %s", exc)
+            self._logger.debug("Failed to read native scene actors: %s", exc)
             return []
 
     def _execute_layout_reflow_confirmation(self, payload: dict[str, Any]) -> str:
