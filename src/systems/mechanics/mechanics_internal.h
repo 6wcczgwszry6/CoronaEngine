@@ -201,6 +201,7 @@ struct MechanicsWorldAABB {
     ktm::fmat3x3 rot_body_to_world{};    // 由预测四元数得到的旋转矩阵
     ktm::fvec3 inertia_inv_body{};       // 体坐标 (1/Ix,1/Iy,1/Iz)
     std::uint64_t model_id = 0;          // 对应的模型资源ID（用于碰撞网格查找）
+    bool is_skinned = false;             // 蒙皮物体：跳过三角网格，只用动态 AABB 碰撞（P4）
 };
 
 // entry：读写 OBB 字段；t：用于把局部点变到世界
