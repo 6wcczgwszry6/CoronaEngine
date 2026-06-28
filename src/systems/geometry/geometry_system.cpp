@@ -92,6 +92,12 @@ bool GeometrySystem::initialize(Kernel::ISystemContext* ctx) {
         impl_->event_subscriptions = {id1, id2, id3, id4, id5, id6};
     }
 
+    // 同步默认资源预算到 ResourceManager
+    if (impl_->resource_memory_budget_mb > 0) {
+        Resource::ResourceManager::get_instance().set_memory_budget(
+            impl_->resource_memory_budget_mb * 1024 * 1024);
+    }
+
     return true;
 }
 
@@ -1149,12 +1155,12 @@ void GeometrySystem::process_async_tasks() {
                 }
 
                 int& retry_count = scene_state.unload_retry_counts[task.actor];
-                CFW_LOG_WARNING("[SceneSystem] Actor 0x%lx unload delayed (resource in use), retry %d/10",
-                               (unsigned long)task.actor, retry_count + 1);
+                CFW_LOG_WARNING("[SceneSystem] Actor {} unload delayed (resource in use), retry {}/10",
+                               reinterpret_cast<void*>(task.actor), retry_count + 1);
 
                 if (++retry_count >= 10) {
-                    CFW_LOG_ERROR("[SceneSystem] Actor 0x%lx unload failed after 10 retries, forcing GPU release",
-                                 (unsigned long)task.actor);
+                    CFW_LOG_ERROR("[SceneSystem] Actor {} unload failed after 10 retries, forcing GPU release",
+                                 reinterpret_cast<void*>(task.actor));
                     scene_state.unload_retry_counts.erase(task.actor);
                     scene_state.actor_load_states[task.actor] = ActorLoadState::Unloaded;
                     impl_->pending_gpu_releases.insert(task.actor);  // 下一帧强制释放
@@ -1174,8 +1180,8 @@ void GeometrySystem::process_async_tasks() {
                             scene_state.unloading_tasks[task.actor] =
                                 Resource::ResourceManager::get_instance().remove_cache_async(rid);
                         } else {
-                            CFW_LOG_WARNING("[SceneSystem] Actor 0x%lx model path empty, mark as unloaded",
-                                           (unsigned long)task.actor);
+                            CFW_LOG_WARNING("[SceneSystem] Actor {} model path empty, mark as unloaded",
+                                           reinterpret_cast<void*>(task.actor));
                             scene_state.unload_retry_counts.erase(task.actor);
                             scene_state.actor_load_states[task.actor] = ActorLoadState::Unloaded;
                             deferred_events.push_back({task.scene_handle, task.actor});
@@ -1185,8 +1191,8 @@ void GeometrySystem::process_async_tasks() {
                                 {task.scene_handle, task.actor, /*loaded=*/false});
                         }
                     } else {
-                        CFW_LOG_WARNING("[SceneSystem] Actor 0x%lx handle invalid, clean up all states",
-                                       (unsigned long)task.actor);
+                        CFW_LOG_WARNING("[SceneSystem] Actor {} handle invalid, clean up all states",
+                                       reinterpret_cast<void*>(task.actor));
                         scene_state.unload_retry_counts.erase(task.actor);
                         scene_state.actor_load_states.erase(task.actor);
                         impl_->offline_actors.erase(task.actor);
