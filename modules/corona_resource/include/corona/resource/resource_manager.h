@@ -141,7 +141,8 @@ class ResourceManager final {
      * @return true 添加成功
      * @return false 资源已存在
      */
-    bool add_resource(TResourceID rid, std::shared_ptr<IResource> resource);
+    bool add_resource(TResourceID rid, std::shared_ptr<IResource> resource,
+                      std::size_t estimated_bytes = 0);
 
     // ========================================
     // 资源管理 (pin / touch / budget / evict)

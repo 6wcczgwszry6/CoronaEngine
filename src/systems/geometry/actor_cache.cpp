@@ -60,7 +60,7 @@ std::string ActorStreamingRecord::to_json() const {
     j["actor"] = handle_to_hex(actor);
 
     // model_path
-    j["model_path"] = model_path.string();
+    j["model_path"] = model_path.u8string();
 
     // profile_handles → hex 字符串数组
     auto& j_profiles = (j["profile_handles"] = nlohmann::json::array());

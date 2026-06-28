@@ -106,8 +106,9 @@ std::future<bool> ResourceManager::remove_cache_async(TResourceID rid) {
     return future;
 }
 
-bool ResourceManager::add_resource(TResourceID const rid, std::shared_ptr<IResource> resource) {
-    return resource_cache_.add_resource(rid, std::move(resource));
+bool ResourceManager::add_resource(TResourceID const rid, std::shared_ptr<IResource> resource,
+                                    std::size_t estimated_bytes) {
+    return resource_cache_.add_resource(rid, std::move(resource), estimated_bytes);
 }
 
 // ============================================================================
@@ -189,6 +190,7 @@ EvictResult ResourceManager::evict_until_under_budget() {
 
         for (const auto& e : entries) {
             if (e.pinned || e.ref_count > 0) continue;
+            if (e.state != LoadState::Ready) continue;  // 只淘汰已就绪的资源
             if (e.last_access < oldest_time) {
                 oldest_time = e.last_access;
                 oldest_rid = e.rid;
@@ -311,9 +313,9 @@ TResourceID ResourceManager::load_internal(const std::filesystem::path& path) {
             return rid;
         } else {
             entry->state = LoadState::Failed;
+            resource_cache_.remove_entry(rid);  // 先移除再 notify，防止 pin 竞争
             lock.unlock();
             entry->cv.notify_all();
-            resource_cache_.remove_entry(rid);  // 加载失败，移除缓存
             return IResource::INVALID_UID;
         }
     } else {

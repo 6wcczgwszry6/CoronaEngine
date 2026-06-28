@@ -581,7 +581,7 @@ void GeometrySystem::update() {
             if (scene_it != impl_->scenes.end()) {
                 auto& scene_state = scene_it->second;
 
-                std::size_t loaded = 0, loading = 0, unloading = 0, unloaded = 0;
+                std::size_t loaded = 0, loading = 0, unloading = 0, unloaded = 0, offline_count = 0;
                 for (const auto& [actor_handle, state] : scene_state.actor_load_states) {
                     switch (state) {
                         case ActorLoadState::Loaded:    loaded++; break;
@@ -589,11 +589,15 @@ void GeometrySystem::update() {
                         case ActorLoadState::Unloading: unloading++; break;
                         case ActorLoadState::Unloaded:  unloaded++; break;
                     }
+                    auto off_it = impl_->offline_actors.find(actor_handle);
+                    if (off_it != impl_->offline_actors.end() && off_it->second)
+                        offline_count++;
                 }
 
                 std::lock_guard stats_lock(scene_state.stats_mutex);
                 scene_state.stats.actor_total    = actor_handles.size();
                 scene_state.stats.actor_visible  = visible_actors.size();
+                scene_state.stats.actor_offline  = offline_count;
                 scene_state.stats.octree_entries = octree_entries.size();
                 scene_state.stats.last_query_ms = visible_query_ms_total;
                 scene_state.stats.actor_loaded    = loaded;
@@ -798,10 +802,9 @@ void GeometrySystem::on_load_finished(const Events::ActorLoadFinishedEvent& even
                 : actor_read->model_path;
             std::error_code ec;
             normalized = std::filesystem::weakly_canonical(normalized, ec);
-            if (!ec) {
-                auto rid = Resource::IResource::generate_uid(normalized);
-                Resource::ResourceManager::get_instance().unpin(rid);
-            }
+            if (ec) normalized = actor_read->model_path;  // 回退，防止 pin 泄漏
+            auto rid = Resource::IResource::generate_uid(normalized);
+            Resource::ResourceManager::get_instance().unpin(rid);
         }
     }
 
@@ -1379,6 +1382,8 @@ void GeometrySystem::on_unload_requested(const Events::ActorUnloadRequestedEvent
         scene_state.actor_load_states[e.actor] = ActorLoadState::Unloaded;
         lock.unlock();
         impl_->ctx->event_bus()->publish(Events::ActorUnloadFinishedEvent{e.scene, e.actor});
+        impl_->ctx->event_bus()->publish(
+            Events::ActorResidencyChangedEvent{e.scene, e.actor, /*loaded=*/false});
         return;
     }
 
@@ -1410,6 +1415,11 @@ void GeometrySystem::Impl::ensure_actor_cache() {
         kDefaultMemCacheBytes,
         kDefaultDiskCacheBytes,
         actor_cache_dir);
+    actor_cache->set_evict_callback(
+        [](std::uintptr_t actor, const std::string&) {
+            CFW_LOG_WARNING("[GeometrySystem] Actor {} snapshot evicted from ActorCache, "
+                           "next restore will fall back to disk reimport", actor);
+        });
     CFW_LOG_NOTICE("[GeometrySystem] ActorCache initialized: mem={}MB disk={}MB dir={}",
                    kDefaultMemCacheBytes / (1024 * 1024),
                    kDefaultDiskCacheBytes / (1024 * 1024),
@@ -1438,40 +1448,25 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
     // ---- 第 2 步：读取 actor 完整状态，构建 ActorStreamingRecord ----
     auto actor_read = hub.actor_storage().try_acquire_read(event.actor);
     if (!actor_read) return;
-    // ---- 第 2 步：读取 actor 和 transform 数据 ----
-    // 锁序约束：所有 Storage 读锁必须在获取 impl_->mtx（第 4 步）之前释放，
-    // 否则与 update()（impl_->mtx → Storage）形成 AB-BA 死锁环。
-    // 故将 actor_read 及其下游读锁全部限定在本作用域内，离开即释放。
-    Corona::Cache::ActorSnapshot snap;
-    {
-        auto actor_read = hub.actor_storage().try_acquire_read(event.actor);
-        if (!actor_read) return;
 
     // pinned 的 actor 不淘汰
     if (actor_read->pinned) return;
 
     Corona::Cache::ActorStreamingRecord rec;
-    rec.pinned = actor_read->pinned;  // 写入快照，restore 时保留
-        snap.model_path    = actor_read->model_path;
-        snap.follow_camera = actor_read->follow_camera;
-        snap.profile_count = static_cast<int>(actor_read->profile_handles.size());
-
-    // 身份
-    rec.scene = event.scene;
-    rec.actor = event.actor;
-
-    // 核心字段
+    rec.pinned    = actor_read->pinned;
+    rec.scene     = event.scene;
+    rec.actor     = event.actor;
     rec.model_path    = actor_read->model_path;
     rec.follow_camera = actor_read->follow_camera;
-    rec.profile_handles = actor_read->profile_handles;  // 全量拷贝
+    rec.profile_handles = actor_read->profile_handles;
 
     // 遍历 profiles 收集 geometry_handles / resource_ids / transform / 运行时标志
     bool transform_captured = false;
     bool optics_captured   = false;
     bool physics_captured  = false;
-    std::unordered_set<std::uint64_t> seen_rids;
-    auto collect_rid_from_geometry = [&](std::uintptr_t geom_handle) {
-        if (!seen_rids.insert(geom_handle).second) return;
+    std::unordered_set<std::uintptr_t> seen_geoms;
+    auto collect_rid = [&](std::uintptr_t geom_handle) {
+        if (!seen_geoms.insert(geom_handle).second) return;  // 已处理
         auto geom = hub.geometry_storage().try_acquire_read(geom_handle);
         if (geom && geom->model_resource_handle) {
             auto mr = hub.model_resource_storage().try_acquire_read(geom->model_resource_handle);
@@ -1480,23 +1475,16 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
             }
         }
     };
+
     for (auto profile_handle : actor_read->profile_handles) {
         auto profile = hub.profile_storage().try_acquire_read(profile_handle);
         if (!profile) continue;
-        // 读取第一个 profile 关联的 transform: profile → mechanics → geometry → transform
-        for (auto profile_handle : actor_read->profile_handles) {
-            auto profile = hub.profile_storage().try_acquire_read(profile_handle);
-            if (!profile) continue;
 
         // 从 profile.geometry_handle 收集
-        if (profile->geometry_handle) {
+        if (profile->geometry_handle && !seen_geoms.count(profile->geometry_handle)) {
             rec.geometry_handles.push_back(profile->geometry_handle);
-            collect_rid_from_geometry(profile->geometry_handle);
+            collect_rid(profile->geometry_handle);
         }
-            std::uintptr_t mech_handle = profile->mechanics_handle;
-            if (!mech_handle) continue;
-            auto mech = hub.mechanics_storage().try_acquire_read(mech_handle);
-            if (!mech) continue;
 
         // 从 profile.mechanics_handle → geometry 收集
         if (profile->mechanics_handle) {
@@ -1506,9 +1494,9 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
                     rec.physics_enabled = mech->physics_enabled;
                     physics_captured = true;
                 }
-                if (mech->geometry_handle) {
+                if (mech->geometry_handle && !seen_geoms.count(mech->geometry_handle)) {
                     rec.geometry_handles.push_back(mech->geometry_handle);
-                    collect_rid_from_geometry(mech->geometry_handle);
+                    collect_rid(mech->geometry_handle);
                     if (!transform_captured) {
                         auto geom = hub.geometry_storage().try_acquire_read(mech->geometry_handle);
                         if (geom && geom->transform_handle) {
@@ -1522,10 +1510,8 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
                 }
             }
         }
-            auto geom = hub.geometry_storage().try_acquire_read(mech->geometry_handle);
-            if (!geom || !geom->transform_handle) continue;
 
-        // 从首个有效 profile 收集 optics_visible（独立于 transform）
+        // 从首个有效 profile 收集 optics_visible
         if (!optics_captured && profile->optics_handle) {
             auto optics = hub.optics_storage().try_acquire_read(profile->optics_handle);
             if (optics) {
@@ -1534,21 +1520,6 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
             }
         }
     }
-            auto transform = hub.model_transform_storage().try_acquire_read(geom->transform_handle);
-            if (!transform) continue;
-
-            snap.position[0] = transform->position.x;
-            snap.position[1] = transform->position.y;
-            snap.position[2] = transform->position.z;
-            snap.euler_rotation[0] = transform->euler_rotation.x;
-            snap.euler_rotation[1] = transform->euler_rotation.y;
-            snap.euler_rotation[2] = transform->euler_rotation.z;
-            snap.scale[0] = transform->scale.x;
-            snap.scale[1] = transform->scale.y;
-            snap.scale[2] = transform->scale.z;
-            break;
-        }
-    }  // actor_read 及所有下游 Storage 读锁在此释放
 
     // ---- 第 3 步：存入 ActorCache ----
     if (!impl_->actor_cache->put(event.actor, rec)) {
@@ -1556,30 +1527,22 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
     }
 
     // ---- 第 4 步：标记 offline + 延迟 GPU 释放 ----
-    // 不在事件处理中直接调用 release_actor_gpu_resources，
-    // 避免与 OpticsSystem 渲染线程产生 data race。
-    // 改为加入 pending_gpu_releases 集合，在下一帧 update() 头部释放。
-    // 锁已在函数开头获取，此处无需再加锁。
     impl_->offline_actors[event.actor] = true;
     impl_->pending_gpu_releases.insert(event.actor);
     auto scene_it = impl_->scenes.find(event.scene);
     if (scene_it != impl_->scenes.end()) {
         scene_it->second.actor_load_states[event.actor] = ActorLoadState::Unloaded;
     }
-
     impl_->last_snapshot_time[event.actor] = now;
 
     // ---- 第 5 步：cascade 淘汰底层资源 ----
-    // actor 被踢出后，顺手把它的模型资源也标记为可淘汰。
-    // try_evict 内部有 ref_count 保护，被其他 actor 共享的资源不会误删。
     if (!rec.resource_ids.empty()) {
         auto& rm = Resource::ResourceManager::get_instance();
         for (auto rid : rec.resource_ids) {
             auto result = rm.try_evict(rid);
             if (result.success) {
                 CFW_LOG_NOTICE("[GeometrySystem] Cascade evicted resource {} ({} bytes) "
-                               "for evicted actor {}",
-                               rid, result.bytes_freed, event.actor);
+                               "for evicted actor {}", rid, result.bytes_freed, event.actor);
             }
         }
     }
@@ -1591,6 +1554,12 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
                    rec.profile_handles.size(), rec.geometry_handles.size(),
                    rec.resource_ids.size(), rec.model_path.string(),
                    rec.physics_enabled, rec.optics_visible, rec.follow_camera);
+
+    lock.unlock();
+    if (impl_->ctx && impl_->ctx->event_bus()) {
+        impl_->ctx->event_bus()->publish(Events::ActorResidencyChangedEvent{
+            event.scene, event.actor, /*loaded=*/false});
+    }
 }
 
 void GeometrySystem::on_restore_requested(const Events::ActorRestoreRequestedEvent& event) {
@@ -1707,6 +1676,17 @@ void GeometrySystem::on_restore_requested(const Events::ActorRestoreRequestedEve
         impl_->pending_gpu_releases.erase(event.actor);
 
         scene_state.actor_load_states[event.actor] = ActorLoadState::Loading;
+        // pin 住资源防止加载中被预算淘汰踢掉，on_load_finished 会 unpin
+        {
+            auto norm = model_path.is_relative()
+                ? std::filesystem::absolute(model_path) : model_path;
+            std::error_code ec;
+            norm = std::filesystem::weakly_canonical(norm, ec);
+            if (!ec) {
+                auto rid = Resource::IResource::generate_uid(norm);
+                Resource::ResourceManager::get_instance().pin(rid);
+            }
+        }
         scene_state.loading_tasks[event.actor] =
             Resource::ResourceManager::get_instance().import_async(model_path);
     }

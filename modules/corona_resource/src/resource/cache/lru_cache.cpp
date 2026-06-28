@@ -302,8 +302,11 @@ bool DiskCache::put(CacheRecord item) {
             // 删除旧文件（unlink 很快，远快于 write，安全在锁内执行）
             std::error_code ec;
             std::filesystem::remove(safe_path(key), ec);
+            // 保存数据副本用于 Phase 2 写盘，move 后 item.data 为空
+            auto data_for_write = std::move(item.data);
             it->second.first = std::move(item);
             it->second.first.data.clear();  // 磁盘不保留 data
+            item.data = std::move(data_for_write);
             // 提升到 LRU 头部
             list_.splice(list_.begin(), list_, it->second.second);
         } else {
@@ -574,12 +577,17 @@ std::optional<CacheRecord> CacheManager::get(const std::string& key) {
         // 将 victim 刷盘（DiskCache 锁独立，不阻塞 mem_）
         auto& victim = evict_res.item;
         if (disk_) {
+            const std::string rollback_key = victim->key;
+            const std::vector<char> rollback_data = victim->data;
             CacheRecord item;
-            item.key        = victim->key;
+            item.key        = rollback_key;
             item.data       = std::move(victim->data);
             item.data_size  = victim->data_size;
             item.last_access = victim->last_access;
-            disk_->put(std::move(item));
+            if (!disk_->put(std::move(item))) {
+                CFW_LOG_ERROR("[LRU CacheMgr] promotion: failed to flush {} to disk, data lost",
+                             rollback_key);
+            }
         } else if (evict_cb_) {
             evict_cb_(victim->key, victim->data);
         }

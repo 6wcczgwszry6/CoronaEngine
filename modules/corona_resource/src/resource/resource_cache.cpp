@@ -49,7 +49,8 @@ void ResourceCache::clear() {
     resources_.clear();
 }
 
-bool ResourceCache::add_resource(TResourceID rid, std::shared_ptr<IResource> resource) {
+bool ResourceCache::add_resource(TResourceID rid, std::shared_ptr<IResource> resource,
+                                  std::size_t estimated_bytes) {
     if (!resource) return false;
 
     typename decltype(resources_)::accessor accessor;
@@ -57,6 +58,7 @@ bool ResourceCache::add_resource(TResourceID rid, std::shared_ptr<IResource> res
         auto entry = std::make_shared<ResourceEntry>();
         entry->resource = std::move(resource);
         entry->state = LoadState::Ready;
+        entry->estimated_bytes = estimated_bytes;
         entry->last_access = std::chrono::system_clock::now();
         accessor->second = entry;
         return true;

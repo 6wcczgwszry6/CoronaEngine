@@ -240,7 +240,8 @@ class ResourceCache {
      * @return true 添加成功
      * @return false 资源已存在
      */
-    bool add_resource(TResourceID rid, std::shared_ptr<IResource> resource);
+    bool add_resource(TResourceID rid, std::shared_ptr<IResource> resource,
+                      std::size_t estimated_bytes = 0);
 
     /**
      * @brief 获取资源的读取句柄
