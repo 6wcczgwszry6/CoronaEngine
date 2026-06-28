@@ -6,11 +6,13 @@
 #include <corona/systems/geometry/geometry_system.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
@@ -150,6 +152,10 @@ struct GeometrySystem::Impl {
 
     /// import 任务 epoch 分配器（进程级单调递增，0 保留为"无任务"）。
     std::uint64_t next_import_epoch = 1;
+
+    /// 骨骼动画上一帧时间戳（用于 update_skinned_geometry 计算 dt）。
+    /// 未初始化时（首帧）取 dt=0。
+    std::optional<std::chrono::steady_clock::time_point> last_skin_update_time;
 
     [[nodiscard]] static uint64_t make_lod_key(std::uintptr_t geometry_handle,
                                                uint32_t       mesh_index) {

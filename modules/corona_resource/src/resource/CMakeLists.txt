@@ -12,6 +12,8 @@ set(CORONA_RESOURCE_MANAGER_SOURCE_FILES
     ### resource types ###
     # animation
     types/animation.cpp
+    # skeletal animation runtime pose evaluation (P1)
+    types/animation_pose.cpp
     # audio
     types/audio.cpp
     # image
@@ -42,6 +44,8 @@ set(CORONA_RESOURCE_MANAGER_HEADER_FILES
     ### resource types ###
     # animation
     ${PROJECT_SOURCE_DIR}/include/corona/resource/types/animation.h
+    # skeletal animation runtime pose evaluation (P1)
+    ${PROJECT_SOURCE_DIR}/include/corona/resource/types/animation_pose.h
     # audio
     ${PROJECT_SOURCE_DIR}/include/corona/resource/types/audio.h
     # binary

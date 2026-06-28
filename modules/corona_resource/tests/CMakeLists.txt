@@ -23,3 +23,24 @@ corona_copy_runtime_files(assimp::assimp corona_resource_tests)
 # Add test
 add_test(NAME ResourceManagerTests COMMAND corona_resource_tests)
 
+# ----------------------------------------------------------------------------
+# 骨骼动画运行时求值单测（P1）：纯 CPU 数学自洽性，无需 GPU / 资源文件
+# ----------------------------------------------------------------------------
+add_executable(corona_animation_pose_tests
+    test_animation_pose.cpp
+)
+
+target_link_libraries(corona_animation_pose_tests
+    PRIVATE
+        corona::resource::manager
+)
+
+target_include_directories(corona_animation_pose_tests
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+corona_copy_tbb_runtime_artifacts(corona_animation_pose_tests)
+
+add_test(NAME AnimationPoseTests COMMAND corona_animation_pose_tests)
+

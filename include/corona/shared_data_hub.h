@@ -92,6 +92,18 @@ struct GeometryDevice {
     // deallocate→复用为新对象（allocate 时 T{} 会把本字段重置为 0），丢弃本次结果。
     // 0 = 无在途 import 任务。
     std::uint64_t import_epoch{0};
+
+    // ---- 骨骼动画（per-instance，P2）----
+    // is_skinned：对应 Scene 带骨架（model_id 解析的 Scene::data.skeleton 有值）。
+    //   GeometrySystem 在 mesh 构建/上传时探测并置位；非蒙皮几何此字段恒 false，零开销。
+    // anim_time：当前播放时间（tick）。每帧由 advance_anim_time 推进并 fmod 自动循环。
+    // skinned_cpu_vertices：每帧 CPU 蒙皮的输出，每个 mesh 一份原始字节，
+    //   布局严格等同 Resource::Vertex 数组（pos[3]+normal[3]+uv[2]，32B）。
+    //   这是「单一数据源」：Native 每帧 write_bytes 到 GPU 缓冲；P3 Vision / P4 物理
+    //   后续直接 reinterpret 读取，无需各自重新蒙皮。非蒙皮几何此容器为空。
+    bool is_skinned{false};
+    float anim_time{0.0f};
+    std::vector<std::vector<std::byte>> skinned_cpu_vertices;
 };
 
 struct MechanicsDevice {
