@@ -302,8 +302,9 @@ float computeSunShadow(vec3 worldPos, vec3 normal)
     }
 
     vec4 cascadeSplits = readVec4(pushConsts.shadowInfoBufferIndex, 64u);
-    mat4 eyeView = readMat4(pushConsts.uniformBufferIndex, 44u);
-    float viewDepth = (eyeView * vec4(worldPos, 1.0)).z;
+    vec3 eyePosition = readVec3(pushConsts.uniformBufferIndex, 36u);
+    vec3 eyeDir = normalize(readVec3(pushConsts.uniformBufferIndex, 40u));
+    float viewDepth = dot(worldPos - eyePosition, eyeDir);
     if (viewDepth < 0.0 || viewDepth > cascadeSplits.w) {
         return 1.0;
     }

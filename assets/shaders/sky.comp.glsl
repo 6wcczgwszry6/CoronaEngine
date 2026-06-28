@@ -209,8 +209,8 @@ void main()
 
     vec3 fwd = normalize(uniformBufferObjects[pushConsts.uniformBufferIndex].eyeDir);
     vec3 up = vec3(0, 1, 0);
-    vec3 right = cross(up, fwd);
-    up = cross(fwd, right);
+    vec3 right = normalize(cross(up, fwd));
+    up = normalize(cross(fwd, right));
 
     vec3 rayOrigin = cam_origin;
     vec3 rayDir = normalize(fwd + up * cam_local_point.y + right * cam_local_point.x);
