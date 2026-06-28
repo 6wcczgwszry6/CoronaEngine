@@ -3,7 +3,6 @@
 # Test executable
 add_executable(corona_resource_tests
     test_resource_manager.cpp
-        ../examples/lru_cache_example/lru_cache_example.h
 )
 
 target_link_libraries(corona_resource_tests

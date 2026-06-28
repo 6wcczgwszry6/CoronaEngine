@@ -271,46 +271,61 @@ bool DiskCache::write_file(const CacheItem& item) const {
 }
 
 bool DiskCache::put(CacheItem item) {
-    std::lock_guard lock(mtx_);
     auto key = item.key;
     size_t item_size = item.data.size();
-
     bool is_new_entry = false;
-    auto it = map_.find(key);
-    if (it != map_.end()) {
-        // ——— UPDATE 路径 ———
-        std::error_code ec;
-        std::filesystem::remove(safe_path(key), ec);
-        it->second.first = std::move(item);
-        it->second.first.data.clear();  // 磁盘不保留 data
-        // 提升到 LRU 头部
-        list_.splice(list_.begin(), list_, it->second.second);
-    } else {
-        // ——— INSERT 路径 ———
-        size_t current = calc_directory_size();
-        while (current + item_size > capacity_) {
-            if (!evict_one(key).ok()) break;
-            current = calc_directory_size();
-        }
-        if (current + item_size > capacity_) {
-            return false;
-        }
 
-        CacheItem meta;
-        meta.key = key;
-        meta.data_size = item_size;
-        meta.last_access = std::chrono::system_clock::now();
-        list_.push_front(key);
-        map_[key] = {std::move(meta), list_.begin()};
-        is_new_entry = true;
-    }
+    // ====================================================================
+    // Phase 1: Lock — 索引操作（无磁盘 IO）
+    // ====================================================================
+    {
+        std::lock_guard lock(mtx_);
 
-    // 写入磁盘
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            // ——— UPDATE 路径 ———
+            // 删除旧文件（unlink 很快，远快于 write，安全在锁内执行）
+            std::error_code ec;
+            std::filesystem::remove(safe_path(key), ec);
+            it->second.first = std::move(item);
+            it->second.first.data.clear();  // 磁盘不保留 data
+            // 提升到 LRU 头部
+            list_.splice(list_.begin(), list_, it->second.second);
+        } else {
+            // ——— INSERT 路径 ———
+            // 确保磁盘容量（evict_one 做文件删除，相对轻量）
+            size_t current = calc_directory_size();
+            while (current + item_size > capacity_) {
+                if (!evict_one(key).ok()) break;
+                current = calc_directory_size();
+            }
+            if (current + item_size > capacity_) {
+                return false;
+            }
+
+            CacheItem meta;
+            meta.key = key;
+            meta.data_size = item_size;
+            meta.last_access = std::chrono::system_clock::now();
+            list_.push_front(key);
+            map_[key] = {std::move(meta), list_.begin()};
+            is_new_entry = true;
+        }
+    }  // ——— 锁释放 ———
+
+    // ====================================================================
+    // Phase 2: Unlocked — 磁盘 write（重量级 IO，不阻塞其他索引操作）
+    // ====================================================================
     if (!write_file(item)) {
-        // 回滚：仅清理 INSERT 路径创建的条目；UPDATE 路径的旧文件已删除无法恢复
+        // 回滚：仅清理 INSERT 路径创建的索引条目
+        // UPDATE 路径的旧文件已删除无法恢复，但元数据已更新
         if (is_new_entry) {
-            map_.erase(key);
-            if (!list_.empty() && list_.front() == key) list_.pop_front();
+            std::lock_guard lock(mtx_);
+            auto it = map_.find(key);
+            if (it != map_.end()) {
+                list_.erase(it->second.second);
+                map_.erase(it);
+            }
         }
         return false;
     }
@@ -319,21 +334,41 @@ bool DiskCache::put(CacheItem item) {
 }
 
 std::optional<CacheItem> DiskCache::get(const std::string& key) {
-    std::lock_guard lock(mtx_);
-    auto it = map_.find(key);
-    if (it == map_.end()) return std::nullopt;
+    // ====================================================================
+    // Phase 1: Lock — 检查 key 是否存在（无磁盘 IO）
+    // ====================================================================
+    {
+        std::lock_guard lock(mtx_);
+        if (map_.find(key) == map_.end()) return std::nullopt;
+    }
 
+    // ====================================================================
+    // Phase 2: Unlocked — 磁盘 read（重量级 IO）
+    // ====================================================================
     auto data = read_file(key);
     if (!data) {
-        // 文件丢失，清理映射
-        list_.erase(it->second.second);
-        map_.erase(it);
+        // 文件丢失（可能被外部删除），清理过时索引条目
+        std::lock_guard lock(mtx_);
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            list_.erase(it->second.second);
+            map_.erase(it);
+        }
         return std::nullopt;
     }
 
-    // 提升到 LRU 头部
-    list_.splice(list_.begin(), list_, it->second.second);
-    it->second.first.last_access = std::chrono::system_clock::now();
+    // ====================================================================
+    // Phase 3: Lock — 提升到 LRU 头部 + 更新访问时间（无磁盘 IO）
+    // ====================================================================
+    {
+        std::lock_guard lock(mtx_);
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            list_.splice(list_.begin(), list_, it->second.second);
+            it->second.first.last_access = std::chrono::system_clock::now();
+        }
+    }
+
     return data;
 }
 
