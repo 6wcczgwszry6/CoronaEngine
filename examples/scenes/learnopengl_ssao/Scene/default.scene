@@ -3,27 +3,27 @@ name = LearnOpenGL SSAO
 
 [sun]
 enabled = true
-sun_direction = 1, 1, 1
+sun_direction = 1, 10, 1
 
 [actors]
-floor.actor_type = model
-floor.name = Floor
-floor.route = Resource/floor.obj
-floor.actor_guid = learnopengl-ssao-floor
-floor.follow_camera = false
-floor.mechanics.physics_enabled = false
-floor.geometry.position = 0, -1, 0
-floor.geometry.rotation = 0, 0, 0
-floor.geometry.scale = 7.5, 1, 7.5
-nanosuit.actor_type = model
-nanosuit.name = Nanosuit
-nanosuit.route = Resource/nanosuit/nanosuit.obj
-nanosuit.actor_guid = learnopengl-ssao-nanosuit
-nanosuit.follow_camera = false
-nanosuit.mechanics.physics_enabled = false
-nanosuit.geometry.position = 0, -1, 0
-nanosuit.geometry.rotation = 0, 0, 0
-nanosuit.geometry.scale = 0.2, 0.2, 0.2
+Floor.actor_type = model
+Floor.name = Floor
+Floor.route = Resource/floor.obj
+Floor.actor_guid = learnopengl-ssao-floor
+Floor.follow_camera = false
+Floor.mechanics.physics_enabled = false
+Floor.geometry.position = 0, -1, 0
+Floor.geometry.rotation = 0, 0, 0
+Floor.geometry.scale = 7.5, 1, 7.5
+Nanosuit.actor_type = model
+Nanosuit.name = Nanosuit
+Nanosuit.route = Resource/nanosuit/nanosuit.obj
+Nanosuit.actor_guid = learnopengl-ssao-nanosuit
+Nanosuit.follow_camera = false
+Nanosuit.mechanics.physics_enabled = false
+Nanosuit.geometry.position = 0, -0.5, 0
+Nanosuit.geometry.rotation = 1.60000002, 0, 0
+Nanosuit.geometry.scale = 7, 7, 7
 
 [scripts]
 path = Scripts/scene_script.py
