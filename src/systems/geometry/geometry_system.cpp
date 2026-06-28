@@ -592,8 +592,12 @@ void GeometrySystem::on_load_finished(const Events::ActorLoadFinishedEvent& even
             }
         }
     }
-    // 不再重新发布事件 — ActorLoadFinishedEvent 由 process_async_tasks()
-    // 在 GPU 资源重建完成后发布，外部系统直接订阅该事件即可。
+    // 不再重新发布 ActorLoadFinishedEvent（由 process_async_tasks 发布）。
+    // 对外发布统一的驻留变更事件，外部系统只需订阅 ActorResidencyChangedEvent。
+    if (impl_->ctx && impl_->ctx->event_bus()) {
+        impl_->ctx->event_bus()->publish(Events::ActorResidencyChangedEvent{
+            event.scene, event.actor, /*loaded=*/true});
+    }
 }
 
 void GeometrySystem::on_unload_finished(const Events::ActorUnloadFinishedEvent& event) {
@@ -611,8 +615,12 @@ void GeometrySystem::on_unload_finished(const Events::ActorUnloadFinishedEvent& 
                            event.actor, event.scene);
         }
     }
-    // 不再重新发布事件 — ActorUnloadFinishedEvent 由 process_async_tasks()
-    // 在 GPU 资源释放完成后发布，外部系统直接订阅该事件即可。
+    // 不再重新发布 ActorUnloadFinishedEvent（由 process_async_tasks 发布）。
+    // 对外发布统一的驻留变更事件，外部系统只需订阅 ActorResidencyChangedEvent。
+    if (impl_->ctx && impl_->ctx->event_bus()) {
+        impl_->ctx->event_bus()->publish(Events::ActorResidencyChangedEvent{
+            event.scene, event.actor, /*loaded=*/false});
+    }
 }
 
 // ============================================================================

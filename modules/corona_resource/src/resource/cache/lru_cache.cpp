@@ -12,14 +12,14 @@
 namespace Corona::Cache {
 
 // ============================================================================
-// CacheItem
+// CacheRecord
 // ============================================================================
 
-CacheItem::CacheItem()
+CacheRecord::CacheRecord()
     : data_size(0)
     , last_access(std::chrono::system_clock::now()) {}
 
-CacheItem::CacheItem(std::string k, const char* d, size_t sz)
+CacheRecord::CacheRecord(std::string k, const char* d, size_t sz)
     : key(std::move(k))
     , data(d, d + sz)
     , data_size(sz)
@@ -55,14 +55,14 @@ bool MemoryCache::put(const std::string& key, const char* data, size_t size) {
     }
 
     // 插入到头部
-    CacheItem item(key, data, size);
+    CacheRecord item(key, data, size);
     used_ += size;
     list_.push_front(std::move(item));
     map_[key] = list_.begin();
     return true;
 }
 
-std::optional<CacheItem> MemoryCache::get(const std::string& key) {
+std::optional<CacheRecord> MemoryCache::get(const std::string& key) {
     auto it = map_.find(key);
     if (it == map_.end()) return std::nullopt;
 
@@ -70,9 +70,9 @@ std::optional<CacheItem> MemoryCache::get(const std::string& key) {
     item.last_access = std::chrono::system_clock::now();
     // 提升到头部
     list_.splice(list_.begin(), list_, it->second);
-    // 显式构造返回值（CacheItem 为 move-only，不可隐式拷贝），
+    // 显式构造返回值（CacheRecord 为 move-only，不可隐式拷贝），
     // 避免引用包装在后续 evict 中悬空。
-    CacheItem result(item.key, item.data.data(), item.data.size());
+    CacheRecord result(item.key, item.data.data(), item.data.size());
     result.last_access = item.last_access;
     return result;
 }
@@ -99,7 +99,7 @@ EvictResult MemoryCache::evict_lru() {
         result.key         = it->key;
         result.bytes_freed = it->data_size;
 
-        CacheItem evicted = std::move(*it);
+        CacheRecord evicted = std::move(*it);
         map_.erase(evicted.key);
         used_ -= evicted.data_size;
         list_.erase(it);
@@ -168,7 +168,7 @@ DiskCache::DiskCache(size_t capacity_bytes, std::filesystem::path directory)
         if (ec) { ec.clear(); continue; }
         total += fsize;
 
-        CacheItem meta;
+        CacheRecord meta;
         meta.key = stored_key;
         meta.data_size = fsize;
         meta.last_access = std::chrono::system_clock::now();
@@ -216,7 +216,7 @@ std::filesystem::path DiskCache::safe_path(const std::string& key) const {
     return dir_ / (safe + ".cache");
 }
 
-std::optional<CacheItem> DiskCache::read_file(const std::string& key) const {
+std::optional<CacheRecord> DiskCache::read_file(const std::string& key) const {
     auto path = safe_path(key);
     std::error_code ec;
 
@@ -231,7 +231,7 @@ std::optional<CacheItem> DiskCache::read_file(const std::string& key) const {
     std::ifstream file(path, std::ios::binary);
     if (!file) return std::nullopt;
 
-    CacheItem item;
+    CacheRecord item;
     item.key = key;
     item.data.resize(fsize);
     file.read(item.data.data(), static_cast<std::streamsize>(fsize));
@@ -240,7 +240,7 @@ std::optional<CacheItem> DiskCache::read_file(const std::string& key) const {
     return item;
 }
 
-bool DiskCache::write_file(const CacheItem& item) const {
+bool DiskCache::write_file(const CacheRecord& item) const {
     auto path = safe_path(item.key);
     // 确保父目录存在（无符号链接）
     auto parent = path.parent_path();
@@ -270,7 +270,7 @@ bool DiskCache::write_file(const CacheItem& item) const {
     return file.good();
 }
 
-bool DiskCache::put(CacheItem item) {
+bool DiskCache::put(CacheRecord item) {
     auto key = item.key;
     size_t item_size = item.data.size();
     bool is_new_entry = false;
@@ -303,7 +303,7 @@ bool DiskCache::put(CacheItem item) {
                 return false;
             }
 
-            CacheItem meta;
+            CacheRecord meta;
             meta.key = key;
             meta.data_size = item_size;
             meta.last_access = std::chrono::system_clock::now();
@@ -333,7 +333,7 @@ bool DiskCache::put(CacheItem item) {
     return true;
 }
 
-std::optional<CacheItem> DiskCache::get(const std::string& key) {
+std::optional<CacheRecord> DiskCache::get(const std::string& key) {
     // ====================================================================
     // Phase 1: Lock — 检查 key 是否存在（无磁盘 IO）
     // ====================================================================
@@ -468,45 +468,54 @@ CacheManager::CacheManager(size_t mem_capacity, size_t disk_capacity,
 }
 
 bool CacheManager::put(const std::string& key, const char* data, size_t size) {
-    // Phase 1: Lock — 尝试内存插入，失败则 evict 一个 victim
-    EvictResult evict_res;
-    {
-        std::lock_guard lock(mtx_);
-        if (mem_.put(key, data, size)) return true;
-        evict_res = mem_.evict_lru();
-    }
+    // 如果单条数据超过内存总容量，直接拒绝（永不驱逐命中率判死刑的数据）
+    if (size > mem_.capacity_bytes()) return false;
 
-    if (!evict_res.ok()) return false;  // 全部 pinned 或缓存空
+    constexpr int kMaxFlushIterations = 1000;
 
-    // Phase 2: Unlocked — 将 victim 刷盘（DiskCache 用自己的内部锁）
-    auto& victim = evict_res.item;
-    if (disk_) {
-        CacheItem item;
-        item.key        = victim->key;
-        item.data       = std::move(victim->data);
-        item.data_size  = victim->data_size;
-        item.last_access = victim->last_access;
-
-        if (!disk_->put(std::move(item))) {
-            // 刷盘失败 → 回滚：尝试放回内存
+    for (int attempt = 0; attempt < kMaxFlushIterations; ++attempt) {
+        // Phase 1: Lock — 尝试内存插入
+        {
             std::lock_guard lock(mtx_);
-            if (!mem_.put(victim->key, victim->data.data(), victim->data.size())) {
-                if (evict_cb_) evict_cb_(victim->key, victim->data);
-            }
-            return false;
+            if (mem_.put(key, data, size)) return true;
         }
-    } else if (evict_cb_) {
-        evict_cb_(victim->key, victim->data);
+
+        // Phase 2: Lock — 淘汰一个 victim
+        EvictResult evict_res;
+        {
+            std::lock_guard lock(mtx_);
+            evict_res = mem_.evict_lru();
+        }
+
+        if (!evict_res.ok()) return false;  // 全部 pinned 或缓存空
+
+        // Phase 3: Unlocked — 将 victim 刷盘（DiskCache 用自己的内部锁）
+        auto& victim = evict_res.item;
+        if (disk_) {
+            CacheRecord item;
+            item.key         = victim->key;
+            item.data        = std::move(victim->data);
+            item.data_size   = victim->data_size;
+            item.last_access = victim->last_access;
+
+            if (!disk_->put(std::move(item))) {
+                // 刷盘失败 → 回滚：尝试放回内存
+                std::lock_guard lock(mtx_);
+                if (!mem_.put(victim->key, victim->data.data(), victim->data.size())) {
+                    if (evict_cb_) evict_cb_(victim->key, victim->data);
+                }
+                return false;
+            }
+        } else if (evict_cb_) {
+            evict_cb_(victim->key, victim->data);
+        }
+        // 循环继续：尝试再次插入（可能还需淘汰更多项）
     }
 
-    // Phase 3: Lock — 插入新项
-    {
-        std::lock_guard lock(mtx_);
-        return mem_.put(key, data, size);
-    }
+    return false;  // 超出最大迭代次数
 }
 
-std::optional<CacheItem> CacheManager::get(const std::string& key) {
+std::optional<CacheRecord> CacheManager::get(const std::string& key) {
     // Phase 1: Lock — 查内存
     {
         std::lock_guard lock(mtx_);
@@ -537,7 +546,7 @@ std::optional<CacheItem> CacheManager::get(const std::string& key) {
         // 将 victim 刷盘（DiskCache 锁独立，不阻塞 mem_）
         auto& victim = evict_res.item;
         if (disk_) {
-            CacheItem item;
+            CacheRecord item;
             item.key        = victim->key;
             item.data       = std::move(victim->data);
             item.data_size  = victim->data_size;
