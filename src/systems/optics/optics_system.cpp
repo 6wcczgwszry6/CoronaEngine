@@ -13,6 +13,7 @@
 #include <array>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstddef>
@@ -1256,6 +1257,10 @@ constexpr const char* kVisionDemoScenePath =
 
 namespace Corona::Systems {
 
+namespace {
+constexpr auto kScreenshotRequestTimeout = std::chrono::seconds(10);
+}
+
 struct OpticsSystem::NativeViewResources {
     Horizon::HardwareImage visibility;
     Horizon::HardwareImage depth;
@@ -1929,8 +1934,14 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
                     }
                     return;
                 }
+                const auto expires_at =
+                    std::chrono::steady_clock::now() + kScreenshotRequestTimeout;
                 std::lock_guard<std::mutex> lock(screenshot_mutex_);
-                pending_screenshots_.push_back({event.camera_handle, event.file_path, event.completion_promise});
+                pending_screenshots_.push_back(
+                    {event.camera_handle,
+                     event.file_path,
+                     event.completion_promise,
+                     expires_at});
             });
 
         backend_switch_sub_id_ = event_bus->subscribe<Events::RenderBackendSwitchEvent>(
@@ -2045,6 +2056,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
     auto& tonemap = *hardware_->tonemapPipeline;
     // UI overlay/warp/composite 管线现由 compose_surface_ui_overlay() 内部使用。
 
+    fail_expired_pending_screenshots();
     fail_unrenderable_pending_screenshots();
 
     for (auto scene_it = SharedDataHub::instance().scene_storage().cbegin();
@@ -2985,6 +2997,32 @@ void OpticsSystem::fail_pending_screenshots(std::uintptr_t camera_handle) {
     }
 
     for (auto& req : matched) {
+        if (req.completion_promise) {
+            req.completion_promise->set_value(false);
+        }
+    }
+}
+
+void OpticsSystem::fail_expired_pending_screenshots() {
+    std::vector<PendingScreenshot> expired;
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(screenshot_mutex_);
+        auto it = std::remove_if(pending_screenshots_.begin(), pending_screenshots_.end(),
+                                 [now, &expired](PendingScreenshot& req) {
+                                     if (req.expires_at == std::chrono::steady_clock::time_point{} ||
+                                         req.expires_at > now) {
+                                         return false;
+                                     }
+                                     expired.push_back(std::move(req));
+                                     return true;
+                                 });
+        pending_screenshots_.erase(it, pending_screenshots_.end());
+    }
+
+    for (auto& req : expired) {
+        CFW_LOG_WARNING("OpticsSystem: dropping expired screenshot request for camera {}: {}",
+                        req.camera_handle, req.file_path);
         if (req.completion_promise) {
             req.completion_promise->set_value(false);
         }

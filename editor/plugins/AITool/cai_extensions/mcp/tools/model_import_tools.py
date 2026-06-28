@@ -73,6 +73,18 @@ class ImportModelInput(BaseModel):
         default=None,
         description="导入后在场景中的名称，为空则使用文件名",
     )
+    model_name: Optional[str] = Field(
+        default=None,
+        description="兼容字段：模型语义名称，可作为导入后的场景别名",
+    )
+    object_id: Optional[str] = Field(
+        default=None,
+        description="兼容字段：规划物体 ID，可作为导入后的场景别名",
+    )
+    target: Optional[str] = Field(
+        default=None,
+        description="兼容字段：AI 规划目标名称，可作为导入后的场景别名",
+    )
     position: Optional[List[float]] = Field(
         default=None,
         description="初始位置 [x, y, z]，为空默认 [0, 0, 0]",
@@ -114,6 +126,9 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
         *,
         model_path: str,
         actor_name: str | None = None,
+        model_name: str | None = None,
+        object_id: str | None = None,
+        target: str | None = None,
         position: List[float] | None = None,
         rotation: List[float] | None = None,
         scale: List[float] | None = None,
@@ -123,14 +138,7 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
             from CoronaCore.core.corona_editor import CoronaEditor
             CoronaEngine = CoronaEditor.CoronaEngine
 
-            # 1. 解析场景
-            scene = _resolve_scene(scene_manager, scene_name)
-            if scene is None:
-                return build_error_result(
-                    error_message="没有已加载的场景，请先打开或创建一个场景"
-                ).to_envelope(interface_type="scene")
-
-            # 2. 解析模型路径（支持绝对路径和项目相对路径）
+            # 1. 解析模型路径（支持绝对路径和项目相对路径）
             if os.path.isabs(model_path):
                 resolved_path = model_path
             else:
@@ -141,7 +149,7 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
                     ).to_envelope(interface_type="scene")
                 resolved_path = os.path.join(project_path, model_path)
 
-            # 3. 如果是目录，尝试挑选模型文件
+            # 2. 如果是目录，尝试挑选模型文件
             final_path = _pick_model_file(resolved_path)
             if final_path is None:
                 return build_error_result(
@@ -154,56 +162,73 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
                     error_message=f"模型文件不存在: {final_path}"
                 ).to_envelope(interface_type="scene")
 
-            # 4. 确定 actor 名称（自动处理同名冲突）
-            base_name = actor_name or Path(final_path).stem
-            existing_names = {a.name for a in scene.get_actors()}
-            name = base_name
-            suffix = 1
-            while name in existing_names:
-                name = f"{base_name}_{suffix}"
-                suffix += 1
-
-            # 5. 创建 Actor 并加载模型
-            from CoronaCore.core.entities.actor import Actor
-
-            actor = Actor(
-                name=name,
-                route=final_path,
-                actor_type="mesh",
-                parent_scene=scene,
+            # 3. 交给 C++ native editor scene 创建 actor；Python 不再维护普通 actor runtime。
+            preferred_name = next(
+                (
+                    str(value).strip()
+                    for value in (actor_name, model_name, object_id, target)
+                    if value and str(value).strip()
+                ),
+                Path(final_path).stem,
             )
+            actor_data = {
+                "actor_name": preferred_name,
+                "model_name": model_name or preferred_name,
+                "object_id": object_id or preferred_name,
+                "target": target or preferred_name,
+                "geometry": {},
+                "mechanics": {"physics_enabled": False},
+            }
+            if position is not None:
+                actor_data["geometry"]["position"] = position
+            if rotation is not None:
+                actor_data["geometry"]["rotation"] = rotation
+            if scale is not None:
+                actor_data["geometry"]["scale"] = scale
 
-            # 6. 设置变换
-            if position:
-                actor.set_position(position)
-            if rotation:
-                actor.set_rotation(rotation)
-            if scale:
-                actor.set_scale(scale)
+            if not hasattr(CoronaEngine, "create_editor_actor"):
+                return build_error_result(
+                    error_message="当前引擎缺少 create_editor_actor native 接口"
+                ).to_envelope(interface_type="scene")
 
-            # 6.5 关闭物理模拟：AI 摆放的物体落点由布局算法决定，开物理会让它们互相
-            # 碰撞、被求解器永久推挤——落点不完美→穿插→求解器永不收敛→主线程纯 CPU
-            # 死循环→永久假死无报错（杀进程重进会看到东歪西斜的场景）。与基础设施
-            # actor（terrain/shell/floor/fence，scene_composer 里已关）保持一致。
-            mech = getattr(actor, "_mechanics", None)
-            if mech is not None:
-                try:
-                    mech.set_physics_enabled(False)
-                except Exception:
-                    pass
+            native_result_raw = CoronaEngine.create_editor_actor(
+                scene_name,
+                final_path,
+                "model",
+                json.dumps(actor_data, ensure_ascii=False),
+            )
+            native_result = (
+                json.loads(native_result_raw)
+                if isinstance(native_result_raw, str)
+                else native_result_raw
+            )
+            if not isinstance(native_result, dict):
+                return build_error_result(
+                    error_message=f"native actor 创建返回无效: {native_result_raw!r}"
+                ).to_envelope(interface_type="scene")
+            if native_result.get("status") == "error":
+                return build_error_result(
+                    error_message=native_result.get("message") or native_result.get("error") or "native actor 创建失败"
+                ).to_envelope(interface_type="scene")
 
-            # 7. 添加到场景
-            scene.add_actor(actor)
-
-            # 8. 构建返回结果
+            actor = native_result.get("actor") if isinstance(native_result.get("actor"), dict) else {}
+            geometry = actor.get("geometry") if isinstance(actor.get("geometry"), dict) else {}
+            try:
+                CoronaEditor.emit_editor_event(
+                    "scene-tree-changed",
+                    [native_result.get("scene") or scene_name or ""],
+                )
+            except Exception:
+                pass
             result_data = {
                 "status": "success",
-                "actor_name": actor.name,
+                "actor_name": actor.get("name", preferred_name),
                 "model_path": final_path,
-                "position": actor.get_position(),
-                "rotation": actor.get_rotation(),
-                "scale": actor.get_scale(),
-                "scene": getattr(scene, "name", scene_name),
+                "position": geometry.get("position", position or [0, 0, 0]),
+                "rotation": geometry.get("rotation", rotation or [0, 0, 0]),
+                "scale": geometry.get("scale", scale or [1, 1, 1]),
+                "scene": native_result.get("scene", scene_name),
+                "actor": actor,
             }
             part = build_part(
                 content_type="text",
@@ -242,27 +267,35 @@ def _build_remove_model_tool(scene_manager) -> StructuredTool:
         scene_name: str = DEFAULT_SCENE_NAME,
     ) -> str:
         try:
-            scene = _resolve_scene(scene_manager, scene_name)
-            if scene is None:
+            from CoronaCore.core.corona_editor import CoronaEditor
+            CoronaEngine = CoronaEditor.CoronaEngine
+
+            remove_editor_actor = getattr(CoronaEngine, "remove_editor_actor", None)
+            if not callable(remove_editor_actor):
                 return build_error_result(
-                    error_message="没有已加载的场景，请先打开或创建一个场景"
+                    error_message="当前引擎缺少 remove_editor_actor native 接口"
                 ).to_envelope(interface_type="scene")
 
-            actor = scene.find_actor(actor_name)
-            if actor is None:
-                available = [a.name for a in scene.get_actors()]
+            native_result_raw = remove_editor_actor(scene_name, actor_name)
+            native_result = (
+                json.loads(native_result_raw)
+                if isinstance(native_result_raw, str)
+                else native_result_raw
+            )
+            if not isinstance(native_result, dict):
                 return build_error_result(
-                    error_message=f"未找到名为 '{actor_name}' 的模型。"
-                                  f"当前场景中的模型: {available}"
+                    error_message=f"native actor 删除返回无效: {native_result_raw!r}"
                 ).to_envelope(interface_type="scene")
-
-            scene.remove_actor(actor)
+            if native_result.get("status") == "error":
+                return build_error_result(
+                    error_message=native_result.get("message") or native_result.get("error") or "native actor 删除失败"
+                ).to_envelope(interface_type="scene")
 
             result_data = {
                 "status": "success",
-                "removed_actor": actor_name,
-                "scene": getattr(scene, "name", scene_name),
-                "remaining_actors": [a.name for a in scene.get_actors()],
+                "removed_actor": native_result.get("actor", actor_name),
+                "actor_guid": native_result.get("actor_guid", ""),
+                "scene": native_result.get("scene", scene_name),
             }
             part = build_part(
                 content_type="text",

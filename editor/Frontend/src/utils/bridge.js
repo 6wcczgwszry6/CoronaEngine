@@ -87,8 +87,12 @@ export class Bridge {
 
 // 快捷访问
 export const sceneService = {
-  createActor: (sceneName, objPath, actorType = 'model') =>
-    Bridge.callCEF('SceneTools', 'create_actor', [sceneName, objPath, actorType]),
+  createActor: (sceneName, objPath, actorType = 'model', actorData = null) =>
+    Bridge.callCEF(
+      'SceneTools',
+      'create_actor',
+      actorData ? [sceneName, objPath, actorType, actorData] : [sceneName, objPath, actorType],
+    ),
   removeActor: (sceneName, actorName) =>
     Bridge.callCEF('SceneTools', 'remove_actor', [sceneName, actorName]),
   renameActor: (sceneName, actorName, name) =>

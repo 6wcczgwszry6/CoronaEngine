@@ -9,18 +9,15 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import threading
-import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 # 全局互斥锁: 同一时刻只允许一个审查会话, 防止截图竞态死锁
 _review_lock = threading.Lock()
-
-VLM_REVIEW_CAMERA_NAME = "vlm_review_camera"
 
 # 审查 VLM prompt
 _REVIEW_SYSTEM_PROMPT = """你是 3D 模型质量检查员。检查单个模型的:
@@ -48,301 +45,9 @@ def _get_current_scene() -> Optional[Any]:
         return None
 
 
-def _mark_vlm_camera_internal(camera: Any) -> None:
-    """Mark the review camera as internal/transient for Python-side filters."""
-    for key, value in (
-        ("internal", True),
-        ("transient", True),
-        ("syncable", False),
-        ("show_in_ui", False),
-    ):
-        try:
-            setattr(camera, key, value)
-        except Exception:
-            pass
-
-
-def _force_review_camera_offscreen(camera: Any) -> bool:
-    """Keep VLM screenshots away from the default/main viewport surface."""
-    try:
-        set_view_state = getattr(camera, "set_view_state", None)
-        if callable(set_view_state):
-            logger.info(
-                "[ModelReviewer][VLMCamera] set_view_state hidden begin handle=%s",
-                _camera_handle(camera),
-            )
-            set_view_state(False, 0, 0, 1, 1, 1.0)
-            logger.info(
-                "[ModelReviewer][VLMCamera] set_view_state hidden done handle=%s",
-                _camera_handle(camera),
-            )
-    except Exception as exc:
-        logger.warning("[ModelReviewer] VLM 相机关闭 viewport 失败: %s", exc)
-        return False
-
-    set_surface = getattr(camera, "set_surface", None)
-    if not callable(set_surface):
-        logger.warning("[ModelReviewer] VLM 相机缺少离屏 surface 接口, 跳过截图")
-        return False
-
-    try:
-        logger.info(
-            "[ModelReviewer][VLMCamera] set_surface offscreen begin handle=%s",
-            _camera_handle(camera),
-        )
-        set_surface(0)
-        logger.info(
-            "[ModelReviewer][VLMCamera] set_surface offscreen done handle=%s",
-            _camera_handle(camera),
-        )
-    except Exception as exc:
-        logger.warning("[ModelReviewer] VLM 相机设置离屏 surface 失败: %s", exc)
-        return False
-    return True
-
-
-def _snapshot_camera_state(camera: Any) -> Optional[Dict[str, Any]]:
-    if camera is None:
-        return None
-    try:
-        get_output_mode = getattr(camera, "get_output_mode", None)
-        get_surface = getattr(camera, "get_surface", None)
-        return {
-            "handle": camera.get_handle() if hasattr(camera, "get_handle") else None,
-            "position": list(camera.get_position()),
-            "forward": list(camera.get_forward()),
-            "up": list(camera.get_world_up()),
-            "fov": float(camera.get_fov()),
-            "output_mode": get_output_mode() if callable(get_output_mode) else getattr(camera, "output_mode", None),
-            "surface": get_surface() if callable(get_surface) else None,
-        }
-    except Exception as exc:
-        logger.warning("[ModelReviewer] 主相机状态快照失败: %s", exc)
-        return None
-
-
-def _restore_camera_state(camera: Any, state: Optional[Dict[str, Any]]) -> bool:
-    if camera is None or not state:
-        return False
-    restored = False
-    try:
-        camera.set(state["position"], state["forward"], state["up"], state["fov"])
-        restored = True
-    except Exception as exc:
-        logger.warning("[ModelReviewer] 主相机 pose 恢复失败: %s", exc)
-    try:
-        if state.get("output_mode") and hasattr(camera, "set_output_mode"):
-            camera.set_output_mode(state["output_mode"])
-            restored = True
-    except Exception as exc:
-        logger.warning("[ModelReviewer] 主相机 output_mode 恢复失败: %s", exc)
-    try:
-        if state.get("surface") is not None and hasattr(camera, "set_surface"):
-            camera.set_surface(state["surface"])
-            restored = True
-    except Exception as exc:
-        logger.warning("[ModelReviewer] 主相机 surface 恢复失败: %s", exc)
-    return restored
-
-
-def _camera_state_changed(camera: Any, state: Optional[Dict[str, Any]]) -> bool:
-    current = _snapshot_camera_state(camera)
-    if not current or not state:
-        return False
-    for key in ("handle", "position", "forward", "up", "fov", "output_mode", "surface"):
-        if current.get(key) != state.get(key):
-            return True
-    return False
-
-
-def get_or_create_vlm_review_camera(scene: Any, camera_factory: Optional[Any] = None) -> Optional[Any]:
-    """Return a hidden VLM review camera without switching the active viewport camera."""
-    if scene is None:
-        return None
-    scene_name = str(getattr(scene, "name", "") or getattr(scene, "route", "") or "<unknown>")
-    try:
-        ensure_default = getattr(scene, "ensure_default_camera", None)
-        if callable(ensure_default):
-            logger.info("[ModelReviewer][VLMCamera] ensure_default_camera begin scene=%s", scene_name)
-            ensure_default()
-            logger.info("[ModelReviewer][VLMCamera] ensure_default_camera done scene=%s", scene_name)
-    except Exception:
-        pass
-    try:
-        logger.info(
-            "[ModelReviewer][VLMCamera] find existing begin scene=%s name=%s",
-            scene_name,
-            VLM_REVIEW_CAMERA_NAME,
-        )
-        existing = scene.find_camera(VLM_REVIEW_CAMERA_NAME)
-        if existing is not None:
-            logger.info(
-                "[ModelReviewer][VLMCamera] find existing hit scene=%s handle=%s",
-                scene_name,
-                _camera_handle(existing),
-            )
-            _mark_vlm_camera_internal(existing)
-            return existing if _force_review_camera_offscreen(existing) else None
-        logger.info("[ModelReviewer][VLMCamera] find existing miss scene=%s", scene_name)
-    except Exception:
-        pass
-
-    try:
-        if camera_factory is None:
-            from CoronaCore.core.entities.camera import Camera
-            camera_factory = Camera
-        logger.info("[ModelReviewer][VLMCamera] create begin scene=%s", scene_name)
-        camera = camera_factory(
-            name=VLM_REVIEW_CAMERA_NAME,
-            width=512,
-            height=512,
-            view_open=False,
-            deletable=False,
-            render_backend="native",
-            output_mode="base_color",
-        )
-        logger.info(
-            "[ModelReviewer][VLMCamera] create done scene=%s handle=%s",
-            scene_name,
-            _camera_handle(camera),
-        )
-        _mark_vlm_camera_internal(camera)
-        logger.info(
-            "[ModelReviewer][VLMCamera] add_camera_to_scene begin scene=%s handle=%s",
-            scene_name,
-            _camera_handle(camera),
-        )
-        scene.add_camera_to_scene(camera)
-        logger.info(
-            "[ModelReviewer][VLMCamera] add_camera_to_scene done scene=%s handle=%s",
-            scene_name,
-            _camera_handle(camera),
-        )
-        logger.info(
-            "[ModelReviewer][VLMCamera] force_offscreen begin scene=%s handle=%s",
-            scene_name,
-            _camera_handle(camera),
-        )
-        if not _force_review_camera_offscreen(camera):
-            logger.warning("[ModelReviewer] VLM 独立截图摄像头无法隔离, 跳过截图")
-            return None
-        logger.info(
-            "[ModelReviewer][VLMCamera] force_offscreen done scene=%s handle=%s",
-            scene_name,
-            _camera_handle(camera),
-        )
-        logger.info("[ModelReviewer] 已创建 VLM 独立截图摄像头: %s", VLM_REVIEW_CAMERA_NAME)
-        return camera
-    except Exception as exc:
-        logger.warning("[ModelReviewer] 创建 VLM 独立截图摄像头失败: %s", exc)
-        return None
-
-
-def _wait_for_file_ready(filepath: str, timeout: float = 1.5, interval: float = 0.05) -> bool:
-    """Wait until the screenshot file exists and its size has settled briefly."""
-    deadline = time.time() + timeout
-    last_size = -1
-    stable_count = 0
-    while time.time() < deadline:
-        try:
-            size = os.path.getsize(filepath)
-        except OSError:
-            size = 0
-        if size > 0 and size == last_size:
-            stable_count += 1
-            if stable_count >= 2:
-                return True
-        else:
-            stable_count = 0
-            last_size = size
-        time.sleep(interval)
-    return False
-
-
-def _camera_handle(camera: Any) -> str:
-    getter = getattr(camera, "get_handle", None)
-    if callable(getter):
-        try:
-            return str(getter())
-        except Exception:
-            return "<handle-error>"
-    return str(getattr(camera, "handle", "") or getattr(camera, "camera_id", "") or "<no-handle>")
-
-
-def _camera_surface(camera: Any) -> str:
-    getter = getattr(camera, "get_surface", None)
-    if callable(getter):
-        try:
-            return str(getter())
-        except Exception:
-            return "<surface-error>"
-    return str(getattr(camera, "surface", "<no-surface>"))
-
-
-def _save_camera_screenshot_with_timeout(camera: Any, filepath: str, timeout: float = 5.0) -> bool:
-    def _save() -> Any:
-        save_sync = getattr(camera, "save_screenshot_sync", None)
-        if callable(save_sync):
-            logger.info(
-                "[ModelReviewer][VLMCapture] save_screenshot_sync enter handle=%s path=%s",
-                _camera_handle(camera),
-                filepath,
-            )
-            return save_sync(filepath)
-        logger.info(
-            "[ModelReviewer][VLMCapture] save_screenshot enter handle=%s path=%s",
-            _camera_handle(camera),
-            filepath,
-        )
-        return camera.save_screenshot(filepath)
-
-    executor = ThreadPoolExecutor(max_workers=1)
-    started_at = time.time()
-    logger.info(
-        "[ModelReviewer][VLMCapture] submit screenshot begin handle=%s path=%s timeout=%.1f",
-        _camera_handle(camera),
-        filepath,
-        timeout,
-    )
-    future = executor.submit(_save)
-    try:
-        result = future.result(timeout=timeout)
-        elapsed = time.time() - started_at
-        logger.info(
-            "[ModelReviewer][VLMCapture] screenshot call returned handle=%s path=%s result=%s elapsed=%.2fs",
-            _camera_handle(camera),
-            filepath,
-            result,
-            elapsed,
-        )
-        if result is False:
-            return False
-        ready = _wait_for_file_ready(filepath)
-        logger.info(
-            "[ModelReviewer][VLMCapture] file ready=%s path=%s elapsed=%.2fs",
-            ready,
-            filepath,
-            time.time() - started_at,
-        )
-        return ready
-    except FuturesTimeoutError:
-        logger.warning("[ModelReviewer] VLM 独立摄像头截图超时: %s", filepath)
-        executor.shutdown(wait=False, cancel_futures=True)
-        return False
-    except Exception as exc:
-        logger.warning("[ModelReviewer] VLM 独立摄像头截图异常: %s", exc)
-        return False
-    finally:
-        if future.done():
-            executor.shutdown(wait=False)
-
-
 def _capture_single_model(output_dir: str, model_name: str, tier: int = 99) -> Optional[str]:
     """Capture one model through the unified VLM review camera path."""
     scene = _get_current_scene()
-    if scene is None:
-        logger.warning("[ModelReviewer] 无可用场景, 跳过 VLM 截图: %s", model_name)
-        return None
     try:
         from .vlm_capture import capture_vlm_views
     except ImportError:
@@ -434,41 +139,35 @@ def review_single_model(
 
         # 1. 导入引擎
         actor_name = None
+        scene_name = ""
         try:
             from CoronaCore.core.managers import scene_manager
             routes = scene_manager.list_all()
             scene = scene_manager.get(routes[0]) if routes else None
-            if scene is None:
-                logger.warning("[ModelReviewer] 无可用场景, 跳过 %s", model_name)
-                return _empty_review()
-
-            # 先清理场景中可能残留的物体
-            existing = scene.find_actor(model_name)
-            if existing:
-                scene.remove_actor(model_name)
-
-            actor = scene.import_model(model_path, model_name)
-            if actor is None:
-                logger.warning("[ModelReviewer] 导入失败: %s", model_name)
-                return _empty_review()
-            actor_name = model_name
-            logger.info("[ModelReviewer] %s 导入成功", model_name)
         except Exception as e:
-            logger.warning("[ModelReviewer] 导入异常 %s: %s", model_name, e)
+            logger.debug("[ModelReviewer] Python scene unavailable for %s, using native current scene: %s", model_name, e)
+            scene = None
+
+        if scene is not None:
+            scene_name = str(getattr(scene, "route", "") or getattr(scene, "name", "") or "")
+        if not _create_review_actor(scene_name, model_path, model_name):
+            logger.warning("[ModelReviewer] native 导入失败: %s", model_name)
             return _empty_review()
+        actor_name = model_name
+        logger.info("[ModelReviewer] %s 导入成功", model_name)
 
         # 2. 截图
         tmp_dir = _os.path.join(_tf.gettempdir(), f"corona_review_{model_name}")
         screenshot_dir = _capture_single_model(tmp_dir, model_name)
         if not screenshot_dir:
-            _remove_actor_safe(scene, model_name)
+            _remove_actor_safe(scene_name, model_name)
             return _empty_review()
 
         # 3. VLM 审查
         review = _vlm_review_model(screenshot_dir, model_name, model_type or model_name)
 
         # 4. 清理
-        _remove_actor_safe(scene, model_name)
+        _remove_actor_safe(scene_name, model_name)
         # 清理截图临时文件
         try:
             import shutil
@@ -489,11 +188,45 @@ def _empty_review() -> Dict[str, Any]:
             "model_name": ""}
 
 
-def _remove_actor_safe(scene: Any, name: str) -> None:
+def _create_review_actor(scene_name: str, model_path: str, model_name: str) -> bool:
     try:
-        scene.remove_actor(name)
-    except Exception:
-        pass
+        from CoronaCore.core.corona_editor import CoronaEditor
+
+        create_editor_actor = getattr(CoronaEditor.CoronaEngine, "create_editor_actor", None)
+        if not callable(create_editor_actor):
+            logger.warning("[ModelReviewer] 缺少 native create_editor_actor")
+            return False
+        actor_data = {
+            "actor_name": model_name,
+            "model_name": model_name,
+            "object_id": model_name,
+            "target": model_name,
+            "skip_if_exists": True,
+            "update_if_exists": True,
+            "physics_enabled": False,
+        }
+        raw = create_editor_actor(
+            scene_name,
+            model_path,
+            "model",
+            json.dumps(actor_data, ensure_ascii=False),
+        )
+        result = json.loads(raw) if isinstance(raw, str) else raw
+        return isinstance(result, dict) and result.get("status") != "error"
+    except Exception as exc:
+        logger.warning("[ModelReviewer] native 创建审查 actor 失败 %s: %s", model_name, exc)
+        return False
+
+
+def _remove_actor_safe(scene_name: str, name: str) -> None:
+    try:
+        from CoronaCore.core.corona_editor import CoronaEditor
+
+        remove_editor_actor = getattr(CoronaEditor.CoronaEngine, "remove_editor_actor", None)
+        if callable(remove_editor_actor):
+            remove_editor_actor(scene_name, name)
+    except Exception as exc:
+        logger.debug("[ModelReviewer] native 清理审查 actor 失败 %s: %s", name, exc)
 
 
 def build_review_context(reviews: List[Dict[str, Any]]) -> str:

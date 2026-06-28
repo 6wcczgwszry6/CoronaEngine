@@ -239,7 +239,7 @@ class AgentCoordinator:
             from ..flows.scene_composition_workflow.helpers import get_tool
             tool = get_tool("import_model")
             if tool:
-                tool.invoke({"model_name":target, "object_id":target,
+                tool.invoke({"actor_name":target, "model_name":target, "object_id":target,
                              "scene_name":sn, "position":pos,
                              "rotation":rot, "scale":scl,
                              "model_path":model_path})

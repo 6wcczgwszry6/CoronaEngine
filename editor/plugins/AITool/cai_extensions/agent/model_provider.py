@@ -33,13 +33,43 @@ def _resolve_model_file(path: str) -> str:
     path_text = str(path or "").strip()
     if not path_text:
         return ""
-    p = Path(path_text)
-    if p.is_file() and p.suffix.lower() in _SUPPORTED_EXTENSIONS:
-        return str(p)
-    if p.is_dir():
-        for entry in sorted(p.iterdir()):
+
+    candidates: List[Path] = []
+    raw_path = Path(path_text)
+    if raw_path.is_absolute():
+        candidates.append(raw_path)
+    else:
+        try:
+            from Quasar.ai_config.paths_config import _get_active_project_path
+            project_path = Path(_get_active_project_path())
+            candidates.append(project_path / raw_path)
+        except Exception:
+            pass
+        candidates.append(raw_path)
+
+    def _scan_dir(dir_path: Path) -> str:
+        runtime_dir = dir_path / "runtime"
+        if runtime_dir.is_dir():
+            runtime_result = _scan_dir(runtime_dir)
+            if runtime_result:
+                return runtime_result
+        for entry in sorted(dir_path.iterdir()):
             if entry.is_file() and entry.suffix.lower() in _SUPPORTED_EXTENSIONS:
                 return str(entry)
+        return ""
+
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.is_file() and candidate.suffix.lower() in _SUPPORTED_EXTENSIONS:
+            return str(candidate)
+        if candidate.is_dir():
+            result = _scan_dir(candidate)
+            if result:
+                return result
     return ""
 
 
@@ -221,11 +251,18 @@ class ModelProvider:
             param = model_info.get("parameter", {})
             if param.get("has_mesh_pending"):
                 logger.info("[ModelProvider][generate] waiting for mesh download...")
-                self._wait_for_mesh(object_id)
+                wait_object_id = str(param.get("object_id") or object_id or "").strip()
+                self._wait_for_mesh(wait_object_id)
 
             # 解析最终模型文件路径
             raw_path = model_info.get("model_path", "")
-            local_path = _resolve_model_file(raw_path)
+            local_path = ""
+            for attempt in range(5):
+                local_path = _resolve_model_file(raw_path)
+                if local_path and os.path.exists(local_path):
+                    break
+                if attempt < 4:
+                    time.sleep(0.2)
             elapsed = time.perf_counter() - started
 
             if local_path and os.path.exists(local_path):
@@ -353,7 +390,7 @@ class ModelProvider:
                 "model_folder": model_folder,
                 "geometry_file_format": geo_fmt,
                 "has_mesh_pending": has_mesh_pending,
-                "object_id": metadata.get("folder_object_id", ""),
+                "object_id": metadata.get("object_id") or metadata.get("folder_object_id", ""),
             },
         }
 
