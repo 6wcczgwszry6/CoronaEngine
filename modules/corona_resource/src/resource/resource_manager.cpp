@@ -177,6 +177,7 @@ EvictResult ResourceManager::evict_until_under_budget() {
 
     EvictResult last_result;
     constexpr int kMaxIterations = 1000;
+    int evicted_count = 0;
 
     for (int i = 0; i < kMaxIterations; ++i) {
         if (resource_cache_.used_memory_bytes() <= budget) break;
@@ -195,14 +196,20 @@ EvictResult ResourceManager::evict_until_under_budget() {
         }
 
         if (oldest_rid == 0) {
-            CFW_LOG_WARNING("[ResourceManager] evict_until_under_budget: all entries pinned or in use");
+            CFW_LOG_WARNING("[ResourceManager] all {} entries pinned or in use, budget eviction stalled", entries.size());
             break;
         }
 
         last_result = try_evict(oldest_rid);
         if (!last_result.success) break;
+        evicted_count++;
     }
 
+    if (evicted_count > 0) {
+        CFW_LOG_NOTICE("[ResourceManager] budget eviction freed {} resources, {}MB used / {}MB budget",
+                       evicted_count, resource_cache_.used_memory_bytes() / (1024*1024),
+                       budget / (1024*1024));
+    }
     return last_result;
 }
 

@@ -104,6 +104,9 @@ EvictResult MemoryCache::evict_lru() {
         used_ -= evicted.data_size;
         list_.erase(it);
         result.item = std::move(evicted);
+        CFW_LOG_DEBUG("[LRU Memory] evicted key={} size={}KB used={}/{}KB",
+                      result.key, result.bytes_freed / 1024,
+                      used_ / 1024, capacity_ / 1024);
         return result;
     }
     return {EvictStatus::AllPinned};
@@ -329,8 +332,7 @@ bool DiskCache::put(CacheRecord item) {
     // Phase 2: Unlocked — 磁盘 write（重量级 IO，不阻塞其他索引操作）
     // ====================================================================
     if (!write_file(item)) {
-        // 回滚：仅清理 INSERT 路径创建的索引条目
-        // UPDATE 路径的旧文件已删除无法恢复，但元数据已更新
+        CFW_LOG_ERROR("[LRU Disk] write failed key={} size={}KB", key, item_size / 1024);
         if (is_new_entry) {
             std::lock_guard lock(mtx_);
             auto it = map_.find(key);
@@ -342,6 +344,7 @@ bool DiskCache::put(CacheRecord item) {
         return false;
     }
 
+    CFW_LOG_DEBUG("[LRU Disk] stored key={} size={}KB files={}", key, item_size / 1024, map_.size());
     return true;
 }
 
@@ -359,7 +362,6 @@ std::optional<CacheRecord> DiskCache::get(const std::string& key) {
     // ====================================================================
     auto data = read_file(key);
     if (!data) {
-        // 文件丢失（可能被外部删除），清理过时索引条目
         std::lock_guard lock(mtx_);
         auto it = map_.find(key);
         if (it != map_.end()) {
@@ -523,7 +525,6 @@ bool CacheManager::put(const std::string& key, const char* data, size_t size) {
             item.last_access = victim->last_access;
 
             if (!disk_->put(std::move(item))) {
-                // 刷盘失败 → 回滚：用保留的副本放回内存
                 std::lock_guard lock(mtx_);
                 if (!mem_.put(rollback_key, rollback_data.data(), rollback_size)) {
                     if (evict_cb_) evict_cb_(rollback_key, rollback_data);
@@ -560,7 +561,6 @@ std::optional<CacheRecord> CacheManager::get(const std::string& key) {
             std::lock_guard lock(mtx_);
             if (mem_.used_bytes() + d.size() <= mem_.capacity_bytes()) {
                 mem_.put(key, d.data(), d.size());
-                // 磁盘上的 pin 标记同步到内存
                 if (disk_ && disk_->is_pinned(key)) {
                     mem_.pin(key);
                 }

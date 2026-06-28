@@ -154,7 +154,7 @@ struct GeometrySystem::Impl {
     // ========================================
     // 资源内存预算（MB），0 = 不限制（默认）
     // ========================================
-    std::size_t resource_memory_budget_mb = 0;  // 0 表示不触发主动淘汰
+    std::size_t resource_memory_budget_mb = 512;  // 默认 512MB，0 表示不限制
 
     [[nodiscard]] static uint64_t make_lod_key(std::uintptr_t geometry_handle,
                                                uint32_t       mesh_index) {

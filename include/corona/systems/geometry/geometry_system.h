@@ -36,12 +36,12 @@ enum class ActorLoadState : uint8_t {
 struct SceneVisibilityConfig {
     /// 连续不可见超过该帧数时，触发 ActorEvictRequestedEvent。
     /// 0 表示永不 evict（默认，避免在 LRU 接入前误触）。
-    int  invisible_frames_to_evict = 0;
+    int  invisible_frames_to_evict = 60;  // 连续不可见1秒(60帧)触发淘汰，0=永不
     bool collect_stats             = true;
 
-    bool enable_distance_culling  = false; // 是否启用距离卸载
-    float unload_distance         = 0.0f; // 超过此距离且不可见时触发卸载
-    float preload_distance        = 0.0f; // 进入此距离时触发预加载
+    bool enable_distance_culling  = true;   // 是否启用距离剔除
+    float unload_distance         = 10.0f;  // 超过此距离且不可见时触发淘汰
+    float preload_distance        = 25.0f;  // 进入此距离时触发预加载
 };
 
 /**

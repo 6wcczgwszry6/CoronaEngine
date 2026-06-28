@@ -380,13 +380,8 @@ void GeometrySystem::update() {
 
                     switch (state) {
                         case ActorLoadState::Loaded:
-                            if (min_distance > scene_state.cfg.unload_distance &&
-                                !visible_actors.count(actor)) {
-                                if (auto a = hub.actor_storage().try_acquire_read(actor)) {
-                                    if (a->pinned) break;
-                                }
-                                pending_unloads.push_back({{scene_handle, actor}, min_distance});
-                                }
+                            // 卸载不再由距离剔除直接触发，交给不可见帧淘汰
+                            // 淘汰时才做快照存 ActorCache，保证磁盘/内存里有数据
                             break;
 
                         case ActorLoadState::Unloaded:
@@ -467,15 +462,14 @@ void GeometrySystem::update() {
                     continue;
                 }
 
-                if (!scene_state.actor_to_entry.count(actor_handle)) {
-                    scene_state.invisible_frames.erase(actor_handle);
-                    continue;
-                }
-
                 // pinned 的 actor 不计不可见帧，不触发淘汰
                 if (auto a = hub.actor_storage().try_acquire_read(actor_handle)) {
                     if (a->pinned) continue;
                 }
+
+                // 没有 AABB 的 actor（无 mechanics）无法计算距离，但不可见帧依然计数
+                // 能进这里说明 actor 已在渲染（Loaded 状态），应该被淘汰机制覆盖
+                bool has_aabb = scene_state.actor_to_entry.count(actor_handle);
 
                 if ( visible_actors.count(actor_handle) ) {
                     scene_state.invisible_frames[actor_handle] = 0;
@@ -484,6 +478,16 @@ void GeometrySystem::update() {
 
                     if ( scene_state.cfg.invisible_frames_to_evict > 0 &&
                         cnt >= static_cast<uint32_t>(scene_state.cfg.invisible_frames_to_evict) ) {
+                        // 有 AABB 的 actor 检查距离，近处不可见的保留（玩家可能转身看到）
+                        if (has_aabb && !cameras.empty()) {
+                            auto entry_it = scene_state.actor_to_entry.find(actor_handle);
+                            ktm::fvec3 center = entry_it->second.center();
+                            float min_dist = std::numeric_limits<float>::max();
+                            for (const auto& [cam_pos, _] : cameras) {
+                                min_dist = std::min(min_dist, ktm::distance(center, cam_pos));
+                            }
+                            if (min_dist <= scene_state.cfg.unload_distance) continue;
+                        }
                         pending_evictions.push_back({scene_handle, actor_handle});
                         CFW_LOG_NOTICE("GeometrySystem: Evict requested for actor {} (invisible {} frames)",
                                actor_handle, cnt);
@@ -577,9 +581,19 @@ void GeometrySystem::update() {
                                s.actor_unloaded, s.actor_offline);
             }
             auto& rm = Resource::ResourceManager::get_instance();
-            CFW_LOG_NOTICE("[GeometrySystem] Resource memory: {} MB / {} MB budget",
-                           rm.used_memory_bytes() / (1024 * 1024),
-                           rm.memory_budget() / (1024 * 1024));
+            auto entries = rm.list_entries();
+            auto res_used = rm.used_memory_bytes();
+            CFW_LOG_NOTICE("[GeometrySystem] Resource: {}KB used / {}MB budget, {} entries",
+                           res_used / 1024,
+                           rm.memory_budget() / (1024 * 1024),
+                           entries.size());
+            if (impl_->actor_cache) {
+                auto mem_bytes = impl_->actor_cache->memory_used();
+                CFW_LOG_NOTICE("[GeometrySystem] ActorCache: {}B mem / {}B disk",
+                               mem_bytes, impl_->actor_cache->disk_used() );
+            } else {
+                CFW_LOG_NOTICE("[GeometrySystem] ActorCache: not created yet (no eviction has occurred)");
+            }
         }
     }
 }
@@ -1087,8 +1101,7 @@ void GeometrySystem::process_async_tasks() {
                 auto state_it = scene_it->second.actor_load_states.find(task.actor);
                 if (state_it == scene_it->second.actor_load_states.end() ||
                     state_it->second != ActorLoadState::Loading) {
-                    CFW_LOG_DEBUG("[SceneSystem] Actor {} load completed but was cancelled — skipping", task.actor);
-                    continue;
+                            continue;
                 }
             }
         }
@@ -1100,7 +1113,6 @@ void GeometrySystem::process_async_tasks() {
             rebuild_actor_gpu_resources(task.actor, task.rid);
 
             impl_->ctx->event_bus()->publish(Events::ActorLoadFinishedEvent{task.scene_handle,task.actor});
-            CFW_LOG_DEBUG("[SceneSystem] Actor {} loaded (resource: {})", task.actor, task.rid);
         }else {
             CFW_LOG_ERROR("[SceneSystem] Failed to load actor {}", task.actor);
             // 加载失败，回滚到Unloaded状态
@@ -1129,7 +1141,6 @@ void GeometrySystem::process_async_tasks() {
                 }
             }
             impl_->ctx->event_bus()->publish(Events::ActorUnloadFinishedEvent{task.scene_handle, task.actor});
-            CFW_LOG_DEBUG("[SceneSystem] Actor {} unloaded", task.actor);
         } else {
             // 卸载失败，保存到列表中后续处理重试
             failed_unloads.push_back(task);
@@ -1374,40 +1385,46 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
     bool transform_captured = false;
     bool optics_captured   = false;
     bool physics_captured  = false;
+    std::unordered_set<std::uint64_t> seen_rids;
+    auto collect_rid_from_geometry = [&](std::uintptr_t geom_handle) {
+        if (!seen_rids.insert(geom_handle).second) return;
+        auto geom = hub.geometry_storage().try_acquire_read(geom_handle);
+        if (geom && geom->model_resource_handle) {
+            auto mr = hub.model_resource_storage().try_acquire_read(geom->model_resource_handle);
+            if (mr && mr->model_id != 0) {
+                rec.resource_ids.push_back(mr->model_id);
+            }
+        }
+    };
     for (auto profile_handle : actor_read->profile_handles) {
         auto profile = hub.profile_storage().try_acquire_read(profile_handle);
         if (!profile) continue;
 
-        // 收集 geometry_handle
+        // 从 profile.geometry_handle 收集
         if (profile->geometry_handle) {
             rec.geometry_handles.push_back(profile->geometry_handle);
-
-            // 收集 resource_id: geometry → model_resource → model_id
-            auto geom = hub.geometry_storage().try_acquire_read(profile->geometry_handle);
-            if (geom && geom->model_resource_handle) {
-                auto model_res = hub.model_resource_storage().try_acquire_read(geom->model_resource_handle);
-                if (model_res && model_res->model_id != 0) {
-                    rec.resource_ids.push_back(model_res->model_id);
-                }
-            }
+            collect_rid_from_geometry(profile->geometry_handle);
         }
 
-        // 从首个有效 profile 收集 transform + physics_enabled
-        if (!transform_captured && profile->mechanics_handle) {
+        // 从 profile.mechanics_handle → geometry 收集
+        if (profile->mechanics_handle) {
             auto mech = hub.mechanics_storage().try_acquire_read(profile->mechanics_handle);
             if (mech) {
                 if (!physics_captured) {
                     rec.physics_enabled = mech->physics_enabled;
                     physics_captured = true;
                 }
-
                 if (mech->geometry_handle) {
-                    auto geom = hub.geometry_storage().try_acquire_read(mech->geometry_handle);
-                    if (geom && geom->transform_handle) {
-                        auto xform = hub.model_transform_storage().try_acquire_read(geom->transform_handle);
-                        if (xform) {
-                            rec.transform = *xform;  // ModelTransform 值拷贝
-                            transform_captured = true;
+                    rec.geometry_handles.push_back(mech->geometry_handle);
+                    collect_rid_from_geometry(mech->geometry_handle);
+                    if (!transform_captured) {
+                        auto geom = hub.geometry_storage().try_acquire_read(mech->geometry_handle);
+                        if (geom && geom->transform_handle) {
+                            auto xform = hub.model_transform_storage().try_acquire_read(geom->transform_handle);
+                            if (xform) {
+                                rec.transform = *xform;
+                                transform_captured = true;
+                            }
                         }
                     }
                 }
