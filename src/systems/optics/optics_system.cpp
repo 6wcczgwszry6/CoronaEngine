@@ -60,7 +60,7 @@ namespace {
 constexpr uint32_t kShadowCascadeCount = 4;
 constexpr uint32_t kShadowMapSize = 1024;
 constexpr float kShadowMaxDistance = 100.0f;
-constexpr float kShadowSplitLambda = 0.7f;
+constexpr float kShadowSplitLambda = 0.95f;
 constexpr float kShadowBias = 0.0015f;
 
 struct RenderInstanceBatch {
