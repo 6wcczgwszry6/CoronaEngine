@@ -275,7 +275,15 @@ void BindAll(nanobind::module_& m) {
         .def("set_audio_enabled", &Acoustics::set_audio_enabled, nb::arg("enabled"),
              "Enable or disable audio for this object")
         .def("get_audio_enabled", &Acoustics::get_audio_enabled,
-             "Get whether audio is enabled for this object");
+             "Get whether audio is enabled for this object")
+        .def("set_audio_resource", &Acoustics::set_audio_resource, nb::arg("resource_id"),
+             "Bind the audio resource id to play at this object's position")
+        .def("get_audio_resource", &Acoustics::get_audio_resource,
+             "Get the bound audio resource id")
+        .def("play", &Acoustics::play, nb::arg("loop") = false,
+             "Play the bound audio at this object's world position (spatial)")
+        .def("stop", &Acoustics::stop,
+             "Stop this object's spatial playback");
 
     // ============================================================================
     // Actor: OOP 风格的实体类，支持多套组件配置（Profile）

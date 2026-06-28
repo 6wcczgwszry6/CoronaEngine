@@ -143,6 +143,7 @@ struct MechanicsDevice {
 
 struct AcousticsDevice {
     std::uintptr_t geometry_handle{};
+    std::uint64_t resource_id{0};  // 绑定的音频资源（空间音频物体）；0 表示未绑定
     float volume{1.0f};
     bool audio_enabled{true};
 };

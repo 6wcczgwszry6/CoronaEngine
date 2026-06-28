@@ -165,6 +165,12 @@ export const sceneService = {
   /** 停止播放音频资源 */
   stopAudio: (resourceId) =>
     Bridge.callCEF('SceneTools', 'stop_audio', [resourceId]),
+  /** 在 audio Actor 的世界位置播放其绑定音频（空间音频） */
+  actorPlayAudio: (actorName, loop = false) =>
+    Bridge.callCEF('SceneTools', 'actor_play_audio', [actorName, loop]),
+  /** 停止 audio Actor 的空间音频播放 */
+  actorStopAudio: (actorName) =>
+    Bridge.callCEF('SceneTools', 'actor_stop_audio', [actorName]),
 
   getScene: (sceneId) => Bridge.callCEF('SceneDatas', 'get_scene', [sceneId]),
   getActor: (sceneId, actorId) => Bridge.callCEF('SceneDatas', 'get_actor', [sceneId, actorId]),

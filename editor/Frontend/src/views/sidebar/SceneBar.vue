@@ -1122,6 +1122,9 @@ const OnLocateSearchItem = async (item) => {
 };
 
 const isMediaItem = (scene) => scene && (scene.type === 'video' || scene.type === 'audio');
+// audio Actor：type 为 audio 且有真实 handle（来自场景树），按 Actor 处理（可选中、可编辑变换）。
+// 区别于扁平音频媒体资源（仅 resourceId，无 handle）。
+const isAudioActor = (scene) => scene && scene.type === 'audio' && normalizeHandle(scene.handle) > 0;
 
 const normalizeHandle = (value) => {
   const handle = Number(value);
@@ -1210,8 +1213,8 @@ const computeActorFocusPose = (actorHandle) => {
 };
 
 const ControlObject = async (scene) => {
-  // 音视频是独立资源，没有可操作的 Actor
-  if (isMediaItem(scene)) return;
+  // 音视频是独立资源，没有可操作的 Actor；但 audio Actor 是真实 Actor。
+  if (isMediaItem(scene) && !isAudioActor(scene)) return;
   try {
     await sceneService.openSceneActor(currentSceneName.value, scene.name);
   } catch (e) {
@@ -1221,8 +1224,8 @@ const ControlObject = async (scene) => {
 
 const SelectActor = (scene) => {
   selectedItem.value = scene.name;
-  // 音视频是独立资源，仅作选中，不触发积木上下文
-  if (isMediaItem(scene)) return;
+  // 扁平音视频资源仅作选中；audio Actor 走正常 Actor 选中（打开物体栏变换编辑器）。
+  if (isMediaItem(scene) && !isAudioActor(scene)) return;
   // 通知积木编辑器当前选中的物体
   setActorContext(currentSceneName.value, scene.name);
   if (typeof window !== 'undefined' && typeof window.__coronaEmit === 'function') {
@@ -1407,7 +1410,8 @@ const onActorRowClick = (scene, event) => {
   clearActorSingleClickTimer();
   SelectActor(scene);
 
-  if (isActorRowActionEvent(event) || Number(event?.detail) > 1 || isMediaItem(scene)) {
+  if (isActorRowActionEvent(event) || Number(event?.detail) > 1 ||
+      (isMediaItem(scene) && !isAudioActor(scene))) {
     return;
   }
 
@@ -1439,8 +1443,10 @@ const onActorRowDoubleClick = (scene, event) => {
 
 /// 切换音频播放/停止
 const handlePlayToggle = async (scene) => {
+  // audio Actor（来自场景树、有 handle）走空间音频；扁平媒体资源走全局播放。
+  const isAudioActor = scene.type === 'audio' && scene.handle != null && !scene.resourceId;
   const rid = scene.resourceId;
-  if (!rid) {
+  if (!isAudioActor && !rid) {
     logWarn('[audio] No resource_id for', scene.name);
     return;
   }
@@ -1449,7 +1455,11 @@ const handlePlayToggle = async (scene) => {
   if (playing) {
     // 停止
     try {
-      await sceneService.stopAudio(rid);
+      if (isAudioActor) {
+        await sceneService.actorStopAudio(scene.name);
+      } else {
+        await sceneService.stopAudio(rid);
+      }
     } catch (e) {
       logError('[audio] stop failed', e);
     }
@@ -1458,7 +1468,11 @@ const handlePlayToggle = async (scene) => {
   } else {
     // 播放（单次，不循环）
     try {
-      await sceneService.playAudio(rid, false);
+      if (isAudioActor) {
+        await sceneService.actorPlayAudio(scene.name, false);
+      } else {
+        await sceneService.playAudio(rid, false);
+      }
     } catch (e) {
       logError('[audio] play failed', e);
     }
@@ -1883,10 +1897,30 @@ const HandleMultimediaImport = async () => {
     if (status === 'canceled') {
       return;
     }
-    // 音视频是独立资源（非 Actor），加入资源列表
+    // 音视频是独立资源；音频额外创建一个可定位的 audio Actor（复用物体栏控制 3D 位置）。
     const media = payload?.media;
     if (media && media.name) {
-      await addMediaToList(media);
+      if (media.type === 'audio' && media.resource_id) {
+        // 创建 audio Actor：复用 create_actor，把 resource_id 作为 actor_data 传入。
+        const createResult = await sceneService.createActor(
+          currentSceneName.value,
+          media.path,
+          'audio',
+          { audio_resource_id: String(media.resource_id), actor_name: media.name }
+        );
+        const createPayload = unwrapBridgePayload(createResult);
+        if (createResult?.success === false || createPayload?.status === 'error') {
+          logError('Audio actor create failed', createPayload?.message || createResult?.error);
+        } else {
+          await OnInitObjTree();
+          const actor = createPayload?.actor;
+          if (actor?.name) {
+            selectedItem.value = actor.name;
+          }
+        }
+      } else {
+        await addMediaToList(media);
+      }
       updateLoading('导入完成', 100);
     }
   } catch (e) {
@@ -1976,6 +2010,7 @@ const OnInitObjTree = async () => {
             type: item.type || 'obj',
             visible: item.visible !== false,
             handle: normalizeHandle(item.handle),
+            audioResourceId: item.audio_resource_id || '',
             vision_proxy: item.vision_proxy === true,
             vision_binding: item.vision_binding || null,
           });

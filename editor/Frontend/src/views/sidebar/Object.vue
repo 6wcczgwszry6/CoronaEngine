@@ -365,8 +365,8 @@
                 </div>
               </div>
 
-              <!-- 变换 - 只有选择了模型才显示 -->
-              <template v-if="actorData.model.path">
+              <!-- 变换 - 选择了模型，或音频物体（无网格但可定位）时显示 -->
+              <template v-if="actorData.model.path || actorData.type === 'audio'">
                 <div class="bg-[#3c3c3c]/50 p-2 rounded border-l-2 border-blue-600">
                   <!-- 相机锁定开关 -->
                   <div class="flex items-center justify-between mb-2 pb-2 border-b border-[#1a1a1a]/50">
@@ -1676,6 +1676,7 @@ const sceneData = ref({
 const actorData = ref({
   name: '',
   handle: 0,
+  type: '',
   parentScene: '',
   file: '',
   follow_camera: false,
@@ -1937,6 +1938,7 @@ const loadActorData = async (sceneId, actorId) => {
       actorAliasError.value = '';
       actorData.value.handle = Number(data.handle || 0);
       actorData.value.parentScene = sceneId || '';
+      actorData.value.type = data.actor_type || data.type || '';
       const modelPath = readActorModelPath(data);
       actorData.value.file = data.path || data.file || modelPath || actorId;
       actorData.value.model.path = modelPath;

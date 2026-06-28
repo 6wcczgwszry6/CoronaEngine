@@ -48,7 +48,7 @@ class Actor:
     """
 
     def __init__(self, name='', route: Optional[str] = None, source_index: int = 0, actor_type: str = "actor",
-                 parent_scene=None, actor_data=None):
+                 parent_scene=None, actor_data=None, audio_resource_id: int = 0):
         self.route = route
         if name:
             self.name = name
@@ -63,6 +63,13 @@ class Actor:
         self.model_dependencies = []
         self.script_path = ""
         self.actor_guid = ""
+        # 音频物体：绑定的音频资源 id（actor_type == "audio" 时有效）
+        self.audio_resource_id = int(audio_resource_id) if audio_resource_id else 0
+        if actor_data and actor_data.get("audio_resource_id"):
+            try:
+                self.audio_resource_id = int(actor_data.get("audio_resource_id"))
+            except (TypeError, ValueError):
+                pass
         self._follow_camera = False
         self._suppress_network_broadcast = bool(
             actor_data and actor_data.get("_suppress_network_broadcast")
@@ -98,6 +105,8 @@ class Actor:
             self._create_and_add_profile()
             if self.actor_type == "ui_image":
                 self._apply_ui_image_defaults()
+            if self.actor_type == "audio":
+                self._apply_audio_defaults()
 
         if not self.actor_guid:
             self.actor_guid = f"actor-{uuid.uuid4().hex}"
@@ -181,6 +190,9 @@ class Actor:
 
         if self.final_model_path:
             self._create_components_from_actor_data(actor_data)
+        elif self.actor_type == "audio":
+            # 音频物体无模型文件，但仍需几何 + acoustics 组件来承载位置与播放。
+            self._create_components_from_actor_data(actor_data)
 
     def _create_components_from_config(self):
         """从配置文件创建几何体和组件"""
@@ -211,6 +223,21 @@ class Actor:
 
     def _create_components_from_actor_data(self, actor_data: dict):
         """从actor_data字典创建几何体和组件"""
+        if self.actor_type == "audio":
+            # 音频物体无网格：纯 transform 几何 + acoustics 绑定资源。
+            self._geometry = self._build_geometry("")
+            geo = actor_data.get("geometry") or {}
+            self.set_position(geo.get("position", [0.0, 0.0, 0.0]), True)
+            self.set_rotation(geo.get("rotation", [0.0, 0.0, 0.0]), True)
+            self.set_scale(geo.get("scale", [1.0, 1.0, 1.0]), True)
+            self._create_and_add_profile()
+            if self.audio_resource_id and hasattr(self, "_acoustics") and self._acoustics is not None:
+                try:
+                    self._acoustics.set_audio_resource(self.audio_resource_id)
+                except Exception:
+                    pass
+            return
+
         if not os.path.exists(self.final_model_path):
             raise FileNotFoundError(f"模型文件不存在: {self.final_model_path}")
 
@@ -227,10 +254,37 @@ class Actor:
 
     def _build_geometry(self, path: str):
         """根据 actor_type 选择几何构造方式：
-        ui_image → 程序化贴图 quad（Geometry.from_image）；其余 → 普通模型 Geometry。"""
+        ui_image → 程序化贴图 quad（Geometry.from_image）；
+        audio → 纯 transform 几何（无网格，仅提供可编辑的位置）；其余 → 普通模型 Geometry。"""
         if self.actor_type == "ui_image" and hasattr(Geometry, "from_image"):
             return Geometry.from_image(path)
+        if self.actor_type == "audio":
+            # 音频物体无网格：用空路径构造纯 transform 几何，复用位置编辑。
+            return Geometry("")
         return Geometry(path)
+
+    def _apply_audio_defaults(self):
+        """音频物体：把导入的音频资源绑定到 acoustics 组件，放在场景原点。
+        无网格、不参与渲染/物理，仅靠 transform 提供 3D 位置。"""
+        if self.audio_resource_id and hasattr(self, "_acoustics") and self._acoustics is not None:
+            try:
+                self._acoustics.set_audio_resource(self.audio_resource_id)
+            except Exception:
+                pass
+        try:
+            self.set_position([0.0, 0.0, 0.0], True)
+        except Exception:
+            pass
+
+    def play_audio(self, loop: bool = False):
+        """在本物体的世界位置播放绑定的音频（空间音频）。"""
+        if hasattr(self, "_acoustics") and self._acoustics is not None:
+            self._acoustics.play(loop)
+
+    def stop_audio(self):
+        """停止本物体的空间音频播放。"""
+        if hasattr(self, "_acoustics") and self._acoustics is not None:
+            self._acoustics.stop()
 
     def _apply_ui_image_defaults(self):
         """UI 图片平面的默认表现：作为 UI（跟随相机、屏幕正中、大小适中），
@@ -1289,6 +1343,10 @@ class Actor:
                 "rotation": self.get_rotation(),
                 "scale": self.get_scale(),
             }
+
+        # 音频物体：持久化绑定的音频资源 id，冷重载后恢复。
+        if self.actor_type == "audio" and self.audio_resource_id:
+            result_dict["audio_resource_id"] = str(self.audio_resource_id)
 
         if hasattr(self, '_mechanics') and self._mechanics is not None:
             try:

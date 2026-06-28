@@ -187,6 +187,14 @@ class Acoustics {
     void set_audio_enabled(bool enabled);
     [[nodiscard]] bool get_audio_enabled() const;
 
+    /// 绑定要播放的音频资源 id（空间音频物体）
+    void set_audio_resource(std::uint64_t resource_id);
+    [[nodiscard]] std::uint64_t get_audio_resource() const;
+    /// 在本组件（actor）的世界位置处播放绑定的音频
+    void play(bool loop);
+    /// 停止本组件的播放
+    void stop();
+
    private:
     friend class Actor;
 

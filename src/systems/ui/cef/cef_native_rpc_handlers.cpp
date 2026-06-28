@@ -251,6 +251,7 @@ struct NativeEditorActor {
     std::string route;
     std::string actor_type{"actor"};
     bool follow_camera{false};
+    std::uint64_t audio_resource_id{0};  // 音频物体绑定的音频资源 id（actor_type=="audio"）
     std::array<float, 3> position{0.0f, 0.0f, 0.0f};
     std::array<float, 3> rotation{0.0f, 0.0f, 0.0f};
     std::array<float, 3> scale{1.0f, 1.0f, 1.0f};
@@ -576,6 +577,9 @@ NativeEditorActor& add_native_actor_to_scene(NativeEditorScene& scene,
     if (item.actor_type == "ui_image") {
         auto image_geometry = Corona::API::Geometry::from_image(path_to_utf8(asset_path));
         item.geometry = std::make_unique<Corona::API::Geometry>(std::move(image_geometry));
+    } else if (item.actor_type == "audio") {
+        // 音频物体：无网格，纯 transform 几何（空路径）。
+        item.geometry = std::make_unique<Corona::API::Geometry>(std::string{});
     } else {
         item.geometry = std::make_unique<Corona::API::Geometry>(path_to_utf8(asset_path));
     }
@@ -590,6 +594,13 @@ NativeEditorActor& add_native_actor_to_scene(NativeEditorScene& scene,
         item.optics->set_lighting_enabled(false);
         item.mechanics->set_physics_enabled(false);
         item.follow_camera = true;
+    } else if (item.actor_type == "audio") {
+        // 音频物体不渲染、不参与物理；绑定音频资源。
+        item.optics->set_visible(false);
+        item.mechanics->set_physics_enabled(false);
+        if (item.audio_resource_id != 0) {
+            item.acoustics->set_audio_resource(item.audio_resource_id);
+        }
     }
 
     item.engine_actor = std::make_unique<Corona::API::Actor>();
@@ -888,6 +899,9 @@ nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorA
     item["model"] = actor.route;
     item["model_dependencies"] = nlohmann::json::array();
     item["actor_type"] = actor.actor_type;
+    if (actor.actor_type == "audio") {
+        item["audio_resource_id"] = std::to_string(actor.audio_resource_id);
+    }
     item["collision"] = actor.mechanics ? actor.mechanics->get_collision_enabled() : true;
     item["visible"] = actor.optics ? actor.optics->get_visible() : true;
     item["script"] = "";
@@ -1442,6 +1456,18 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
     }
     if (auto follow_camera = actor_data_bool(actor_data, {"follow_camera"})) {
         item.follow_camera = *follow_camera;
+    }
+
+    // 音频物体：从 actor_data 解析绑定的音频资源 id（JS 以字符串传递，避免精度丢失）。
+    {
+        const auto rid_str = json_string_value(actor_data, {"audio_resource_id", "resource_id"});
+        if (!rid_str.empty()) {
+            try {
+                item.audio_resource_id = std::stoull(rid_str);
+            } catch (const std::exception&) {
+                item.audio_resource_id = 0;
+            }
+        }
     }
 
     auto asset_path = resolve_native_actor_asset_path(*scene, item);
@@ -2417,6 +2443,9 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
                     {"handle", actor.engine_actor ? actor.engine_actor->get_handle() : 0},
                     {"actor_guid", actor.actor_guid},
                     {"vision_proxy", false},
+                    {"audio_resource_id", actor.actor_type == "audio"
+                                              ? std::to_string(actor.audio_resource_id)
+                                              : std::string{}},
                 });
             }
             nlohmann::json cameras = nlohmann::json::array();
@@ -2710,6 +2739,34 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
                 return native_failure("invalid resource_id", 2);
             }
             event_bus->publish<::Corona::Events::StopAudioEvent>({rid});
+
+            nlohmann::json payload;
+            payload["ok"] = true;
+            return native_success(payload);
+        }},
+        {"actor_play_audio", [](const NativeRequest& request, const NativeContext&) {
+            // 在指定 actor 的世界位置播放其绑定的音频（空间音频）。
+            auto* scene = ensure_native_editor_scene();
+            const auto actor_name = arg_string(request.args, 0);
+            const bool loop = arg_bool(request.args, 1, false);
+            auto* actor = find_native_actor(*scene, actor_name);
+            if (!actor || !actor->acoustics) {
+                return native_failure("actor not found or has no acoustics component", 2);
+            }
+            actor->acoustics->play(loop);
+
+            nlohmann::json payload;
+            payload["ok"] = true;
+            return native_success(payload);
+        }},
+        {"actor_stop_audio", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto actor_name = arg_string(request.args, 0);
+            auto* actor = find_native_actor(*scene, actor_name);
+            if (!actor || !actor->acoustics) {
+                return native_failure("actor not found or has no acoustics component", 2);
+            }
+            actor->acoustics->stop();
 
             nlohmann::json payload;
             payload["ok"] = true;

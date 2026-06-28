@@ -1533,6 +1533,58 @@ bool Corona::API::Acoustics::get_audio_enabled() const {
     return true;
 }
 
+void Corona::API::Acoustics::set_audio_resource(std::uint64_t resource_id) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Acoustics::set_audio_resource] Invalid acoustics handle");
+        return;
+    }
+    if (auto accessor = SharedDataHub::instance().acoustics_storage().acquire_write(handle_)) {
+        accessor->resource_id = resource_id;
+    } else {
+        CFW_LOG_ERROR("[Acoustics::set_audio_resource] Failed to acquire write access to acoustics storage");
+    }
+}
+
+std::uint64_t Corona::API::Acoustics::get_audio_resource() const {
+    if (handle_ == 0) return 0;
+    if (auto accessor = SharedDataHub::instance().acoustics_storage().try_acquire_read(handle_)) {
+        return accessor->resource_id;
+    }
+    return 0;
+}
+
+void Corona::API::Acoustics::play(bool loop) {
+    if (handle_ == 0) {
+        CFW_LOG_WARNING("[Acoustics::play] Invalid acoustics handle");
+        return;
+    }
+    std::uint64_t rid = get_audio_resource();
+    if (rid == 0) {
+        CFW_LOG_WARNING("[Acoustics::play] No audio resource bound to this component");
+        return;
+    }
+    auto* event_bus = Kernel::KernelContext::instance().event_bus();
+    if (!event_bus) {
+        CFW_LOG_ERROR("[Acoustics::play] event_bus not available");
+        return;
+    }
+    // 传自身 handle_ 作 acoustics_handle → 空间播放，声学线程按它解析位置。
+    event_bus->publish<Events::PlayAudioEvent>({rid, loop, handle_});
+}
+
+void Corona::API::Acoustics::stop() {
+    if (handle_ == 0) {
+        return;
+    }
+    std::uint64_t rid = get_audio_resource();
+    auto* event_bus = Kernel::KernelContext::instance().event_bus();
+    if (!event_bus) {
+        CFW_LOG_ERROR("[Acoustics::stop] event_bus not available");
+        return;
+    }
+    event_bus->publish<Events::StopAudioEvent>({rid, handle_});
+}
+
 std::uintptr_t Corona::API::Acoustics::get_handle() const {
     return handle_;
 }

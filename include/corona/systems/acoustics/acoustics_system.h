@@ -47,6 +47,8 @@ class AcousticsSystem : public Kernel::SystemBase {
     /// 用 unique_ptr 持有并存入 vector，保证元素不随容器扩容而搬移。
     struct ActivePlayback {
         std::uint64_t resource_id{0};
+        std::uintptr_t acoustics_handle{0};  // 空间音频主键（AcousticsStorage handle）；0=全局非空间
+        bool spatial{false};                 // acoustics_handle != 0
         Resource::ReadHandle<Resource::Audio> handle;  // 保活 + 防淘汰，PCM 零拷贝来源
         ma_audio_buffer buffer{};                      // 指向 handle->samples()
         ma_sound sound{};                              // 由 buffer 供数据
@@ -56,11 +58,13 @@ class AcousticsSystem : public Kernel::SystemBase {
     };
 
     /// 处理播放命令（在 update 线程中调用）
-    void process_play_request(std::uint64_t resource_id, bool loop);
-    /// 处理停止命令
-    void process_stop_request(std::uint64_t resource_id);
+    void process_play_request(std::uint64_t resource_id, bool loop, std::uintptr_t acoustics_handle);
+    /// 处理停止命令：acoustics_handle != 0 时按句柄停止，否则按 resource_id 停止
+    void process_stop_request(std::uint64_t resource_id, std::uintptr_t acoustics_handle);
     /// 释放单个播放占用的 miniaudio 资源（不从容器移除）
     static void destroy_playback(ActivePlayback& ap);
+    /// 每帧更新 listener（活动相机）与各空间声音的位置
+    void update_spatial();
 
     // miniaudio 音频后端
     ma_engine engine_{};
