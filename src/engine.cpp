@@ -77,10 +77,16 @@ bool Engine::initialize() {
     // 存入 MeshData::lod_levels）。运行时由 GeometrySystem 内部自动上传/选级，无需上层配置。
     {
         auto scene_parser = std::make_shared<Resource::SceneParser>();
-        scene_parser->assimp_options.lod_options.enabled     = true;
-        scene_parser->assimp_options.lod_options.level_count = 3;
-        // target_ratios / max_errors / max_triangles 沿用 LODGenerationOptions 默认值
-        // （{0.5, 0.25, 0.05} / {0.05, 0.2, 1.0} / {0,0,200}），常规质量减面。
+        auto& lod = scene_parser->assimp_options.lod_options;
+        lod.enabled     = true;
+        lod.auto_levels = true;
+        // 常规 LOD 参数：逐级减半，最低保留比例 静态 ~2% / 蒙皮 ~5%（更保守）。
+        // 切换阈值由生成端按"实际三角形保留比例"自适应推导（sqrt(r)*kAggr），跨网格稳定。
+        lod.decay              = 0.5f;   // 每级目标 ≈ 上一级的一半（平滑过渡）
+        lod.min_ratio          = 0.02f;  // 静态最低 ~2% 面
+        lod.max_levels         = 4;
+        lod.skinned_min_ratio  = 0.05f;  // 蒙皮最低 ~5% 面（关节缝硬锁，保守）
+        lod.skinned_max_levels = 3;
         resource_manager.register_parser(scene_parser);
     }
     resource_manager.register_parser<Resource::VideoParser>();

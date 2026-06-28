@@ -1152,6 +1152,8 @@ inline LODLevel build_lod_level_from_simplified(
 /// 强制阈值序列严格单调递减（select_lod_level 反向扫描的前提）。
 /// 任一阈值若 >= 前一级，则压到前一级的一半，保证递减且为正。
 inline void enforce_strictly_decreasing_thresholds(std::vector<LODLevel>& levels) {
+    // 安全网：阈值已由比例公式 sqrt(r)*kAggr 给出、本就随级递减；
+    // 万一某两级比例接近导致非严格递减，则把后者压到前者的一半，保证 select_lod_level 正确。
     float prev = 1.0f;  // LOD0 的隐含阈值
     for (auto& lv : levels) {
         if (!(lv.screen_threshold < prev)) {
@@ -1257,8 +1259,10 @@ inline size_t simplify_lod_step(
         result_error);
 }
 
-/// 自适应分支：按三角形数几何衰减自动推导层数，带相对比例下限。
-/// 见 LODGenerationOptions（auto_levels/decay/min_ratio/min_triangles/max_levels/pixel_error_budget）。
+/// 自适应分支：按三角形数几何衰减自动推导层数，带相对比例下限；
+/// 切换阈值按各级实际三角形保留比例推导（sqrt(r)*kAggr，跨网格稳定）。
+/// 见 LODGenerationOptions（auto_levels/decay/min_ratio/min_triangles/max_levels）。
+/// 注：pixel_error_budget/ref_viewport_height 当前未参与阈值（保留字段，留作后用）。
 inline std::vector<LODLevel> generate_lod_levels_adaptive(
     const std::vector<Vertex>& vertices,
     const std::vector<std::uint32_t>& indices_u32,
@@ -1287,21 +1291,11 @@ inline std::vector<LODLevel> generate_lod_levels_adaptive(
         return levels;
     }
 
-    // 阈值常数 C（尺度无关）：screen_threshold = C / relative_error。
-    //   R_norm     = LOD0 归一化空间包围半径
-    //   mesh_scale = meshopt_simplifyScale（相对误差 → 同空间绝对长度的换算）
-    //   B          = 像素预算占参考视口半高的比例
-    //   C          = (R_norm / mesh_scale) * B
-    // R 与 world_error 同随 original_scale_factor 缩放、在 C 中抵消，故 C 尺度无关。
-    float dx = aabb_max[0] - aabb_min[0];
-    float dy = aabb_max[1] - aabb_min[1];
-    float dz = aabb_max[2] - aabb_min[2];
-    const float r_norm = 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz);
-    const float mesh_scale = meshopt_simplifyScale(
-        &vertices[0].position[0], vertices.size(), sizeof(Vertex));
-    const float B = options.pixel_error_budget /
-                    std::max(1.0f, options.ref_viewport_height * 0.5f);
-    const float C = (mesh_scale > 1e-8f) ? (r_norm / mesh_scale) * B : (r_norm * B);
+    // 切换阈值改为按"实际三角形保留比例"推导（见下方循环内）。
+    // 不再用 误差反推（C/relerr）：该公式跨网格极不稳定（同参数下有的网格算出 0.068、
+    // 有的钳到 1.0），导致部分网格的 LOD 只在物体缩成点时才切换。aabb 参数暂保留以兼容签名。
+    (void)aabb_min;
+    (void)aabb_max;
 
     const std::uint32_t max_levels = std::max<std::uint32_t>(
         has_bones ? options.skinned_max_levels : options.max_levels, 1);
@@ -1363,9 +1357,14 @@ inline std::vector<LODLevel> generate_lod_levels_adaptive(
             indices_u32.size(), lod_label);
 
         level.error = result_error;
-        // screen_threshold = clamp(C / relerr)：relerr 越大 → 阈值越小 → 越远才用。
-        float thr = (result_error > 1e-8f) ? (C / result_error) : 1.0f;
-        level.screen_threshold = std::min(std::max(thr, 0.0f), 1.0f);
+        // 切换阈值按"实际三角形保留比例 r = 该级三角形 / LOD0"推导：
+        //   screen_threshold = clamp(sqrt(r) * kAggr)
+        // r 恒在 (0,1]，跨网格稳定；保留比例越低（越粗）→ 阈值越小 → 物体越小才用，
+        // 而几乎没简化的级在物体较大时即可启用。kAggr 越大切换越早（越激进）。
+        const float r = static_cast<float>(got_tris) / static_cast<float>(T0);
+        constexpr float kAggr = 0.75f;
+        level.screen_threshold =
+            std::min(std::max(std::sqrt(r) * kAggr, 0.02f), 0.95f);
 
         CFW_LOG_TRACE("[LOD] Mesh '{}' adaptive LOD {}: {} -> {} tris, error {:.5f}, threshold {:.4f}",
                       mesh_name, lvl + 1, T0, got_tris, result_error, level.screen_threshold);
