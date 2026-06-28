@@ -746,6 +746,22 @@ bool collect_actor_instances_for_visibility(
             continue;
         }
 
+        // 续期资源访问时间（驱动 ResourceManager LRU）
+        {
+            auto& model_res_storage = hub.model_resource_storage();
+            for (auto ph : actor->profile_handles) {
+                auto prof = profile_storage.try_acquire_read(ph);
+                if (!prof || !prof->geometry_handle) continue;
+                auto g = geom_storage.try_acquire_read(prof->geometry_handle);
+                if (!g || !g->model_resource_handle) continue;
+                auto mr = model_res_storage.try_acquire_read(g->model_resource_handle);
+                if (mr && mr->model_id) {
+                    Corona::Resource::ResourceManager::get_instance().touch(mr->model_id);
+                }
+                break;
+            }
+        }
+
         if (actor->follow_camera != follow_camera_pass) {
             ++object_id;
             continue;
@@ -1973,6 +1989,16 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
                 pending_vision_scene_load_ = event.scene_path;
             });
 #endif
+
+        residency_sub_id_ = event_bus->subscribe<Events::ActorResidencyChangedEvent>(
+            [this](const Events::ActorResidencyChangedEvent& e) {
+                std::unique_lock lock(residency_mtx_);
+                if (e.loaded) {
+                    resident_actors_.insert(e.actor);
+                } else {
+                    resident_actors_.erase(e.actor);
+                }
+            });
     }
 
     return true;
@@ -2146,6 +2172,32 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                         if (!actor) {
                             ++object_id;
                             continue;
+                        }
+
+                        // 跳过未加载的 actor（GPU 资源已释放，无法渲染）
+                        {
+                            std::shared_lock lock(residency_mtx_);
+                            if (!resident_actors_.count(actor_handle)) {
+                                ++object_id;
+                                continue;
+                            }
+                        }
+
+                        // 续期资源访问时间（驱动 ResourceManager LRU）
+                        {
+                            auto& model_res_storage =
+                                SharedDataHub::instance().model_resource_storage();
+                            for (auto ph : actor->profile_handles) {
+                                auto prof = profile_storage.try_acquire_read(ph);
+                                if (!prof || !prof->geometry_handle) continue;
+                                auto g = geom_storage.try_acquire_read(prof->geometry_handle);
+                                if (!g || !g->model_resource_handle) continue;
+                                auto mr = model_res_storage.try_acquire_read(g->model_resource_handle);
+                                if (mr && mr->model_id) {
+                                    Corona::Resource::ResourceManager::get_instance().touch(mr->model_id);
+                                }
+                                break;  // 一个 actor 只续期一次
+                            }
                         }
 
                         if (actor->follow_camera != follow_camera_pass) {
@@ -3216,6 +3268,9 @@ void OpticsSystem::shutdown() {
             event_bus->unsubscribe(vision_scene_load_sub_id_);
         }
 #endif
+        if (residency_sub_id_ != 0) {
+            event_bus->unsubscribe(residency_sub_id_);
+        }
     }
 
     // 释放所有 per-surface 渲染目标的存储句柄与 GPU 图（改造1）。
@@ -3504,6 +3559,11 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
             continue;
         }
         for (auto actor_handle : scene_dev.actor_handles) {
+            // 跳过未加载的 actor — 无 Vision shapes 可同步
+            {
+                std::shared_lock lock(residency_mtx_);
+                if (!resident_actors_.count(actor_handle)) continue;
+            }
             const auto binding = hub.external_vision_binding(actor_handle);
             if (!binding) {
                 continue;
@@ -3764,6 +3824,7 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
     // 1. Enumerate engine-native candidate actors: present in an enabled scene and
     //    WITHOUT an external_vision_binding (bound proxies are handled by
     //    sync_external_live_vision_transforms, which must have run first).
+    //    只收集 Loaded 状态的 actor — Unloaded 的 GPU 资源已释放，无 mesh 可构建。
     std::unordered_set<std::uintptr_t> active_native_actors;
     for (auto scene_it = hub.scene_storage().cbegin(); scene_it != hub.scene_storage().cend(); ++scene_it) {
         const auto& scene_dev = *scene_it;
@@ -3773,6 +3834,10 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
         for (auto actor_handle : scene_dev.actor_handles) {
             if (actor_handle == 0 || hub.has_external_vision_binding(actor_handle)) {
                 continue;
+            }
+            {
+                std::shared_lock lock(residency_mtx_);
+                if (!resident_actors_.count(actor_handle)) continue;
             }
             active_native_actors.insert(actor_handle);
         }

@@ -1,5 +1,5 @@
 /// @file actor_cache.cpp
-/// @brief ActorCache 实现 + ActorSnapshot JSON 序列化
+/// @brief ActorCache 实现 + ActorStreamingRecord JSON 序列化
 
 #include <corona/systems/geometry/actor_cache.h>
 
@@ -8,49 +8,141 @@
 #include <nlohmann/json.hpp>
 
 #include <sstream>
+#include <cstdlib>
 
 namespace Corona::Cache {
 
+namespace {
+
+/// 将 std::uintptr_t 格式化为 "0x" + 十六进制
+[[nodiscard]] std::string handle_to_hex(std::uintptr_t h) {
+    std::ostringstream oss;
+    oss << "0x" << std::hex << h;
+    return oss.str();
+}
+
+/// 将 std::uint64_t 格式化为 "0x" + 十六进制
+[[nodiscard]] std::string rid_to_hex(std::uint64_t rid) {
+    std::ostringstream oss;
+    oss << "0x" << std::hex << rid;
+    return oss.str();
+}
+
+/// 从十六进制字符串解析 std::uintptr_t（可选 "0x" 前缀）
+[[nodiscard]] std::uintptr_t parse_hex_ptr(const std::string& s) {
+    if (s.empty()) return 0;
+    const char* start = s.c_str();
+    if (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+        start = s.c_str() + 2;
+    return static_cast<std::uintptr_t>(std::strtoull(start, nullptr, 16));
+}
+
+/// 从十六进制字符串解析 std::uint64_t（可选 "0x" 前缀）
+[[nodiscard]] std::uint64_t parse_hex_u64(const std::string& s) {
+    if (s.empty()) return 0;
+    const char* start = s.c_str();
+    if (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+        start = s.c_str() + 2;
+    return std::strtoull(start, nullptr, 16);
+}
+
+}  // namespace
+
 // ============================================================================
-// ActorSnapshot JSON 序列化
+// ActorStreamingRecord JSON 序列化
 // ============================================================================
 
-std::string ActorSnapshot::to_json() const {
+std::string ActorStreamingRecord::to_json() const {
     nlohmann::json j;
-    j["model_path"]     = model_path.string();
-    j["pos_x"]          = position[0];
-    j["pos_y"]          = position[1];
-    j["pos_z"]          = position[2];
-    j["rot_x"]          = euler_rotation[0];
-    j["rot_y"]          = euler_rotation[1];
-    j["rot_z"]          = euler_rotation[2];
-    j["scl_x"]          = scale[0];
-    j["scl_y"]          = scale[1];
-    j["scl_z"]          = scale[2];
-    j["follow_camera"]  = follow_camera;
-    j["profile_count"]  = profile_count;
+
+    // 身份句柄（hex，仅用于诊断）
+    j["scene"] = handle_to_hex(scene);
+    j["actor"] = handle_to_hex(actor);
+
+    // model_path
+    j["model_path"] = model_path.u8string();
+
+    // profile_handles → hex 字符串数组
+    auto& j_profiles = (j["profile_handles"] = nlohmann::json::array());
+    for (auto h : profile_handles)
+        j_profiles.push_back(handle_to_hex(h));
+
+    // geometry_handles → hex 字符串数组
+    auto& j_geoms = (j["geometry_handles"] = nlohmann::json::array());
+    for (auto h : geometry_handles)
+        j_geoms.push_back(handle_to_hex(h));
+
+    // resource_ids → hex 字符串数组
+    auto& j_rids = (j["resource_ids"] = nlohmann::json::array());
+    for (auto rid : resource_ids)
+        j_rids.push_back(rid_to_hex(rid));
+
+    // ModelTransform（沿用现有扁平键名，与 v1 兼容）
+    j["pos_x"] = transform.position.x;
+    j["pos_y"] = transform.position.y;
+    j["pos_z"] = transform.position.z;
+    j["rot_x"] = transform.euler_rotation.x;
+    j["rot_y"] = transform.euler_rotation.y;
+    j["rot_z"] = transform.euler_rotation.z;
+    j["scl_x"] = transform.scale.x;
+    j["scl_y"] = transform.scale.y;
+    j["scl_z"] = transform.scale.z;
+
+    // 布尔标志
+    j["physics_enabled"] = physics_enabled;
+    j["optics_visible"]  = optics_visible;
+    j["follow_camera"]   = follow_camera;
+    j["pinned"]          = pinned;
+
+    // 优先级
+    j["priority"] = priority;
+
     return j.dump();
 }
 
-std::optional<ActorSnapshot> ActorSnapshot::from_json(const std::string& json) {
+std::optional<ActorStreamingRecord> ActorStreamingRecord::from_json(const std::string& json) {
     try {
         nlohmann::json j = nlohmann::json::parse(json);
-        ActorSnapshot snap;
-        snap.model_path       = j.value("model_path", "");
-        snap.position[0]      = j.value("pos_x", 0.0f);
-        snap.position[1]      = j.value("pos_y", 0.0f);
-        snap.position[2]      = j.value("pos_z", 0.0f);
-        snap.euler_rotation[0] = j.value("rot_x", 0.0f);
-        snap.euler_rotation[1] = j.value("rot_y", 0.0f);
-        snap.euler_rotation[2] = j.value("rot_z", 0.0f);
-        snap.scale[0]         = j.value("scl_x", 1.0f);
-        snap.scale[1]         = j.value("scl_y", 1.0f);
-        snap.scale[2]         = j.value("scl_z", 1.0f);
-        snap.follow_camera    = j.value("follow_camera", false);
-        snap.profile_count    = j.value("profile_count", 0);
-        return snap;
+        ActorStreamingRecord rec;
+
+        rec.scene = parse_hex_ptr(j.value("scene", "0x0"));
+        rec.actor = parse_hex_ptr(j.value("actor", "0x0"));
+
+        rec.model_path = j.value("model_path", "");
+
+        if (j.contains("profile_handles") && j["profile_handles"].is_array()) {
+            for (const auto& v : j["profile_handles"])
+                rec.profile_handles.push_back(parse_hex_ptr(v.get<std::string>()));
+        }
+        if (j.contains("geometry_handles") && j["geometry_handles"].is_array()) {
+            for (const auto& v : j["geometry_handles"])
+                rec.geometry_handles.push_back(parse_hex_ptr(v.get<std::string>()));
+        }
+        if (j.contains("resource_ids") && j["resource_ids"].is_array()) {
+            for (const auto& v : j["resource_ids"])
+                rec.resource_ids.push_back(parse_hex_u64(v.get<std::string>()));
+        }
+
+        // Transform
+        rec.transform.position.x        = j.value("pos_x", 0.0f);
+        rec.transform.position.y        = j.value("pos_y", 0.0f);
+        rec.transform.position.z        = j.value("pos_z", 0.0f);
+        rec.transform.euler_rotation.x  = j.value("rot_x", 0.0f);
+        rec.transform.euler_rotation.y  = j.value("rot_y", 0.0f);
+        rec.transform.euler_rotation.z  = j.value("rot_z", 0.0f);
+        rec.transform.scale.x           = j.value("scl_x", 1.0f);
+        rec.transform.scale.y           = j.value("scl_y", 1.0f);
+        rec.transform.scale.z           = j.value("scl_z", 1.0f);
+
+        rec.physics_enabled = j.value("physics_enabled", false);
+        rec.optics_visible  = j.value("optics_visible", true);
+        rec.follow_camera   = j.value("follow_camera", false);
+        rec.pinned          = j.value("pinned", false);
+        rec.priority        = j.value("priority", 0.0f);
+
+        return rec;
     } catch (const nlohmann::json::exception& e) {
-        CFW_LOG_ERROR("[ActorCache] Failed to parse ActorSnapshot JSON: {}", e.what());
+        CFW_LOG_ERROR("[ActorCache] Failed to parse ActorStreamingRecord JSON: {}", e.what());
         return std::nullopt;
     }
 }
@@ -82,24 +174,24 @@ std::uintptr_t ActorCache::parse_key(const std::string& key) {
     }
 }
 
-bool ActorCache::put(std::uintptr_t actor_handle, const ActorSnapshot& snapshot) {
+bool ActorCache::put(std::uintptr_t actor_handle, const ActorStreamingRecord& record) {
     std::string key = make_key(actor_handle);
-    std::string json = snapshot.to_json();
+    std::string json = record.to_json();
     CFW_LOG_NOTICE("[ActorCache] Storing actor 0x{:x} ({} bytes)", actor_handle, json.size());
     return cache_.put(key, json.data(), json.size());
 }
 
-std::optional<ActorSnapshot> ActorCache::get(std::uintptr_t actor_handle) {
+std::optional<ActorStreamingRecord> ActorCache::get(std::uintptr_t actor_handle) {
     std::string key = make_key(actor_handle);
     auto item = cache_.get(key);
     if (!item) return std::nullopt;
 
     std::string json(item->data.data(), item->data.size());
-    auto snap = ActorSnapshot::from_json(json);
-    if (snap) {
+    auto rec = ActorStreamingRecord::from_json(json);
+    if (rec) {
         CFW_LOG_NOTICE("[ActorCache] Cache hit for actor 0x{:x}", actor_handle);
     }
-    return snap;
+    return rec;
 }
 
 void ActorCache::remove(std::uintptr_t actor_handle) {

@@ -3,6 +3,7 @@
 #include <corona/kernel/core/i_logger.h>
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
+#include <corona/resource/resource_manager.h>
 #include <corona/systems/mechanics/mechanics_system.h>
 #include <corona/systems/geometry/geometry_system.h>
 
@@ -122,7 +123,32 @@ void MechanicsSystem::update_physics() {
             if (impl_->shutdown_requested.load(std::memory_order_acquire)) {
                 return;
             }
+            // 跳过未加载的 actor — 无 GPU 资源 / 无全量物理数据
+            // TODO: 后续实现 offline physics proxy —— Unloaded + physics_enabled
+            //       的 actor 用简化 AABB 碰撞体继续参与物理
+            {
+                std::shared_lock lock(impl_->residency_mtx_);
+                if (!impl_->resident_actors_.count(actor_handle)) continue;
+            }
             if (auto actor = actor_storage.try_acquire_read(actor_handle)) {
+                // 续期资源访问时间（驱动 ResourceManager LRU）
+                {
+                    auto& mrs = SharedDataHub::instance().model_resource_storage();
+                    auto& ps = SharedDataHub::instance().profile_storage();
+                    auto& gs = SharedDataHub::instance().geometry_storage();
+                    for (auto ph : actor->profile_handles) {
+                        auto prof = ps.try_acquire_read(ph);
+                        if (!prof || !prof->geometry_handle) continue;
+                        auto g = gs.try_acquire_read(prof->geometry_handle);
+                        if (!g || !g->model_resource_handle) continue;
+                        auto mr = mrs.try_acquire_read(g->model_resource_handle);
+                        if (mr && mr->model_id) {
+                            Corona::Resource::ResourceManager::get_instance().touch(mr->model_id);
+                        }
+                        break;
+                    }
+                }
+
                 for (auto profile_handle : actor->profile_handles) {
                     if (impl_->shutdown_requested.load(std::memory_order_acquire)) {
                         return;

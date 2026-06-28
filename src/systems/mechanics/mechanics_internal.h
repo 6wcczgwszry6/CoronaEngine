@@ -1,5 +1,6 @@
 #pragma once
 
+#include <corona/events/scene_system_events.h>
 #include <corona/resource/resource_manager.h>
 #include <corona/systems/geometry/geometry_system.h>
 #include <corona/systems/mechanics/mechanics_system.h>
@@ -14,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -765,6 +767,11 @@ namespace Corona::Systems {
 struct MechanicsSystem::Impl {
     Kernel::ISystemContext* ctx = nullptr;
     GeometrySystem* geometry_sys = nullptr;
+
+    // ActorResidencyChangedEvent 驱动的驻留集合
+    Kernel::EventId residency_sub_id_ = 0;
+    mutable std::shared_mutex residency_mtx_;
+    std::unordered_set<std::uintptr_t> resident_actors_;
     float time_accumulator = 0.0f;
     std::chrono::steady_clock::time_point last_update_time{};
     bool first_update = true;

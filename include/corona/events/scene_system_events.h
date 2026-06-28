@@ -77,6 +77,25 @@ struct ActorUnloadFinishedEvent {
     std::uintptr_t scene{};
     std::uintptr_t actor{};
 };
+
+/**
+ * @brief Actor 驻留状态变更通知（Loaded ↔ Unloaded）
+ *
+ * 每当 actor 的驻留状态发生确定性的变化时发布：
+ * - loaded=true  → 资源已加载，GPU 数据就绪，外部系统可以消费
+ * - loaded=false → 资源已卸载，GPU 数据已释放，外部系统应停止消费
+ *
+ * 外部系统（Optics / Mechanics / Vision）应统一监听此事件，
+ * 而不是分别监听 ActorLoadFinishedEvent / ActorUnloadFinishedEvent。
+ *
+ * 发布方：GeometrySystem（on_load_finished / on_unload_finished）
+ */
+struct ActorResidencyChangedEvent {
+    std::uintptr_t scene{};
+    std::uintptr_t actor{};
+    bool           loaded{};   // true=已加载(Loaded), false=已卸载(Unloaded)
+};
+
 /**
  * @brief 八叉树粗筛碰撞候选对事件（SceneSystem → MechanicsSystem）
  *

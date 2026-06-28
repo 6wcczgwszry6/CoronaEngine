@@ -195,6 +195,12 @@ struct CpuMeshData {
             continue;
         }
 
+        // 跳过 GPU 资源已释放的 actor（被 LRU evict / 距离卸载后 mesh_handles 为空）
+        if (geom->mesh_handles.empty()) {
+            ++result.skipped_no_data;
+            continue;
+        }
+
         ++result.candidate_count;
 
         ::vision::float4x4 o2w = ::vision::make_float4x4(1.f);
@@ -288,7 +294,11 @@ VisionBuildResult build_vision_geometry(::vision::Scene& scene) {
         auto group = std::make_shared<::vision::ShapeGroup>();
         bool group_has_instances = false;
 
-        for (auto actor_handle : scene_dev.actor_handles) {
+        // 优先消费可见集合（视锥剔除结果），为空时回退到全量 actor 列表
+        const auto& handles = scene_dev.visible_actor_handles.empty()
+                                  ? scene_dev.actor_handles
+                                  : scene_dev.visible_actor_handles;
+        for (auto actor_handle : handles) {
             group_has_instances |=
                 append_actor_geometry_to_group(scene, *group, actor_handle, result);
         }
