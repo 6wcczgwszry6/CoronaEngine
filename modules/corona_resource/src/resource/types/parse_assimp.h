@@ -671,6 +671,8 @@ inline void process_assimp_mesh(aiMesh* ai_mesh, Scene& scene, std::uint32_t nod
                 mesh_data.indices,
                 options.lod_options,
                 sub_mesh_name,
+                mesh_data.aabb_min,
+                mesh_data.aabb_max,
                 mesh_has_bones ? &mesh_data.bone_weights : nullptr);
         }
 

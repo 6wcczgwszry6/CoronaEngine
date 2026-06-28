@@ -1068,11 +1068,219 @@ inline MeshData build_mesh_data(
 // LOD 生成
 // ============================================================================
 
+/// 把"已简化好的索引（仍引用原始 vertices）"压缩为独立的 LODLevel。
+/// 封装 remap 压缩 / 退化剔除 / 法线重算 / GPU 优化 / uint16 转换这套后处理，
+/// 供自适应与 legacy 两条生成路径共用（也是 Phase C 接入蒙皮感知 remap 的唯一落点）。
+/// @param simplified_indices  meshopt_simplify 的输出（已 resize 到实际数量），引用 vertices。
+/// @param original_index_count LOD0 索引数；用于判断几何是否真的被简化（决定是否重算法线）。
+/// 返回的 level 仅填 vertices/indices/bone_weights；error 与 screen_threshold 由调用方设置。
+inline LODLevel build_lod_level_from_simplified(
+    const std::vector<Vertex>& vertices,
+    std::vector<std::uint32_t>& simplified_indices,
+    bool has_bones,
+    const std::vector<BoneWeights>* bone_weights,
+    size_t original_index_count,
+    const std::string& lod_label) {
+    const bool geometry_changed = simplified_indices.size() < original_index_count;
+
+    // 生成紧凑的独立顶点缓冲区
+    std::vector<unsigned int> remap(vertices.size());
+    size_t unique_vertex_count = meshopt_generateVertexRemap(
+        remap.data(),
+        simplified_indices.data(),
+        simplified_indices.size(),
+        vertices.data(),
+        vertices.size(),
+        sizeof(Vertex));
+
+    std::vector<std::uint32_t> remapped_indices(simplified_indices.size());
+    meshopt_remapIndexBuffer(remapped_indices.data(), simplified_indices.data(),
+                             simplified_indices.size(), remap.data());
+
+    std::vector<Vertex> compact_vertices(unique_vertex_count);
+    meshopt_remapVertexBuffer(
+        compact_vertices.data(),
+        vertices.data(),
+        vertices.size(),
+        sizeof(Vertex),
+        remap.data());
+
+    // 骨骼权重用同一 remap 表同步重排（蒙皮网格）
+    std::vector<BoneWeights> compact_weights;
+    if (has_bones && bone_weights != nullptr) {
+        compact_weights.resize(unique_vertex_count);
+        meshopt_remapVertexBuffer(
+            compact_weights.data(),
+            bone_weights->data(),
+            bone_weights->size(),
+            sizeof(BoneWeights),
+            remap.data());
+    }
+
+    // 移除退化三角形（可能产生零面积/退化三角形，导致渲染缺口）
+    remove_degenerate_triangles(compact_vertices, remapped_indices, 1e-12f, lod_label);
+
+    // 重新计算法线：仅当几何真的被简化了才需要。
+    // 对于 split 子网格（有大面积切口边界），简化可能完全无法进行 → 几何未变。
+    // 此时若重算法线，边界处缺少相邻 split 的三角形贡献 → 法线偏斜 → 黑色缺口。
+    // 几何未变时保留 LOD0 原法线即可。
+    if (geometry_changed) {
+        generate_smooth_normals(compact_vertices, remapped_indices, lod_label);
+    }
+
+    // GPU 优化（蒙皮网格同步重排权重）
+    optimize_mesh_for_gpu(compact_vertices, remapped_indices, lod_label,
+                          has_bones ? &compact_weights : nullptr);
+
+    // 转换索引为 uint16
+    std::vector<std::uint16_t> final_indices;
+    final_indices.reserve(remapped_indices.size());
+    for (auto idx : remapped_indices) {
+        final_indices.push_back(static_cast<std::uint16_t>(idx));
+    }
+
+    LODLevel level;
+    level.vertices = std::move(compact_vertices);
+    level.indices = std::move(final_indices);
+    if (has_bones) {
+        level.bone_weights = std::move(compact_weights);
+    }
+    return level;
+}
+
+/// 强制阈值序列严格单调递减（select_lod_level 反向扫描的前提）。
+/// 任一阈值若 >= 前一级，则压到前一级的一半，保证递减且为正。
+inline void enforce_strictly_decreasing_thresholds(std::vector<LODLevel>& levels) {
+    float prev = 1.0f;  // LOD0 的隐含阈值
+    for (auto& lv : levels) {
+        if (!(lv.screen_threshold < prev)) {
+            lv.screen_threshold = prev * 0.5f;
+        }
+        prev = lv.screen_threshold;
+    }
+}
+
+/// 自适应分支：按三角形数几何衰减自动推导层数，带相对比例下限。
+/// 见 LODGenerationOptions（auto_levels/decay/min_ratio/min_triangles/max_levels/pixel_error_budget）。
+inline std::vector<LODLevel> generate_lod_levels_adaptive(
+    const std::vector<Vertex>& vertices,
+    const std::vector<std::uint32_t>& indices_u32,
+    const LODGenerationOptions& options,
+    const std::string& mesh_name,
+    const std::array<float, 3>& aabb_min,
+    const std::array<float, 3>& aabb_max,
+    bool has_bones,
+    const std::vector<BoneWeights>* bone_weights) {
+    std::vector<LODLevel> levels;
+
+    constexpr size_t kSmallMeshTris = 256;  // 太小的网格不值得生成 LOD
+
+    const size_t T0 = indices_u32.size() / 3;
+
+    // 相对比例下限（+ 可选绝对下限）
+    const float ratio = std::max(0.0f, std::min(options.min_ratio, 1.0f));
+    size_t min_tris = static_cast<size_t>(std::ceil(static_cast<float>(T0) * ratio));
+    min_tris = std::max(min_tris, static_cast<size_t>(options.min_triangles));
+    min_tris = std::max(min_tris, static_cast<size_t>(1));
+
+    if (T0 <= std::max(min_tris, kSmallMeshTris)) {
+        CFW_LOG_TRACE("[LOD] Mesh '{}': {} tris too small / at floor ({}), no LOD generated",
+                      mesh_name, T0, min_tris);
+        return levels;
+    }
+
+    // 阈值常数 C（尺度无关）：screen_threshold = C / relative_error。
+    //   R_norm     = LOD0 归一化空间包围半径
+    //   mesh_scale = meshopt_simplifyScale（相对误差 → 同空间绝对长度的换算）
+    //   B          = 像素预算占参考视口半高的比例
+    //   C          = (R_norm / mesh_scale) * B
+    // R 与 world_error 同随 original_scale_factor 缩放、在 C 中抵消，故 C 尺度无关。
+    float dx = aabb_max[0] - aabb_min[0];
+    float dy = aabb_max[1] - aabb_min[1];
+    float dz = aabb_max[2] - aabb_min[2];
+    const float r_norm = 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz);
+    const float mesh_scale = meshopt_simplifyScale(
+        &vertices[0].position[0], vertices.size(), sizeof(Vertex));
+    const float B = options.pixel_error_budget /
+                    std::max(1.0f, options.ref_viewport_height * 0.5f);
+    const float C = (mesh_scale > 1e-8f) ? (r_norm / mesh_scale) * B : (r_norm * B);
+
+    const std::uint32_t max_levels = std::max<std::uint32_t>(options.max_levels, 1);
+    const float decay = std::min(std::max(options.decay, 0.05f), 0.95f);
+
+    size_t target_tris = T0;
+    size_t prev_emitted_tris = T0;
+
+    for (std::uint32_t lvl = 0; lvl < max_levels; ++lvl) {
+        target_tris = static_cast<size_t>(std::floor(static_cast<float>(target_tris) * decay));
+        target_tris = std::max(target_tris, min_tris);
+        size_t target_index_count = (target_tris * 3 / 3) * 3;  // 已是 3 倍数；保持显式对齐
+        target_index_count = std::max(target_index_count, static_cast<size_t>(3));
+
+        std::vector<std::uint32_t> simplified_indices(indices_u32.size());
+        float result_error = 0.0f;
+        // 自适应模式让三角形数当驱动：传一个很大的 target_error，使 simplify 不被误差提前截停。
+        size_t simplified_count = meshopt_simplify(
+            simplified_indices.data(),
+            indices_u32.data(),
+            indices_u32.size(),
+            &vertices[0].position[0],
+            vertices.size(),
+            sizeof(Vertex),
+            target_index_count,
+            1e3f,
+            0,  // 不锁定边界（静态网格）
+            &result_error);
+
+        if (simplified_count == 0) {
+            CFW_LOG_WARNING("[LOD] Mesh '{}': adaptive LOD {} produced 0 indices, stopping",
+                            mesh_name, lvl + 1);
+            break;
+        }
+
+        const size_t got_tris = simplified_count / 3;
+
+        // 收益护栏：若几乎砍不动（如 split 锁边界子网格 / 已最简），停止，
+        // 绝不 emit 与上一级重复或未真正简化的级别（避免死级）。
+        if (got_tris >= static_cast<size_t>(static_cast<float>(prev_emitted_tris) * 0.95f)) {
+            CFW_LOG_TRACE("[LOD] Mesh '{}': adaptive stop at level {} (got {} tris vs prev {} — diminishing returns)",
+                          mesh_name, lvl + 1, got_tris, prev_emitted_tris);
+            break;
+        }
+
+        simplified_indices.resize(simplified_count);
+
+        const std::string lod_label = mesh_name + "_lod" + std::to_string(lvl + 1);
+        LODLevel level = build_lod_level_from_simplified(
+            vertices, simplified_indices, has_bones, bone_weights,
+            indices_u32.size(), lod_label);
+
+        level.error = result_error;
+        // screen_threshold = clamp(C / relerr)：relerr 越大 → 阈值越小 → 越远才用。
+        float thr = (result_error > 1e-8f) ? (C / result_error) : 1.0f;
+        level.screen_threshold = std::min(std::max(thr, 0.0f), 1.0f);
+
+        CFW_LOG_TRACE("[LOD] Mesh '{}' adaptive LOD {}: {} -> {} tris, error {:.5f}, threshold {:.4f}",
+                      mesh_name, lvl + 1, T0, got_tris, result_error, level.screen_threshold);
+
+        levels.push_back(std::move(level));
+        prev_emitted_tris = got_tris;
+
+        if (target_tris <= min_tris) {
+            break;  // 触及下限，最后一级满足 floor（可作碰撞网格）
+        }
+    }
+
+    enforce_strictly_decreasing_thresholds(levels);
+    return levels;
+}
+
 /// 为已优化的网格生成多级 LOD（独立顶点缓冲区）
 /// @param vertices LOD 0 的顶点数据
 /// @param indices LOD 0 的索引数据（uint16）
 /// @param options LOD 生成配置
 /// @param mesh_name 网格名称（用于日志）
+/// @param aabb_min/aabb_max LOD0 包围盒（自适应阈值常数 C 用）
 /// @return LOD 级别列表（LOD 1..N）
 /// @param bone_weights 可选；非空时为与 vertices 等长并行的骨骼权重，
 ///   每级 LOD 随顶点同步 remap 后写入对应 LODLevel::bone_weights（蒙皮网格）。
@@ -1081,11 +1289,13 @@ inline std::vector<LODLevel> generate_lod_levels(
     const std::vector<std::uint16_t>& indices,
     const LODGenerationOptions& options,
     const std::string& mesh_name,
+    const std::array<float, 3>& aabb_min,
+    const std::array<float, 3>& aabb_max,
     const std::vector<BoneWeights>* bone_weights = nullptr) {
     std::vector<LODLevel> levels;
     const bool has_bones = bone_weights != nullptr && !bone_weights->empty();
 
-    if (!options.enabled || options.level_count == 0 || vertices.empty() || indices.empty()) {
+    if (!options.enabled || vertices.empty() || indices.empty()) {
         return levels;
     }
 
@@ -1098,6 +1308,17 @@ inline std::vector<LODLevel> generate_lod_levels(
 
     // 将 uint16 索引升级为 uint32 供 meshopt 使用
     std::vector<std::uint32_t> indices_u32(indices.begin(), indices.end());
+
+    // 自适应路径：按三角形数推导层数 + 相对比例下限 + 阈值来自像素预算。
+    if (options.auto_levels) {
+        return generate_lod_levels_adaptive(vertices, indices_u32, options, mesh_name,
+                                            aabb_min, aabb_max, has_bones, bone_weights);
+    }
+
+    // ---- legacy 显式模式（auto_levels=false）：保持旧行为 ----
+    if (options.level_count == 0) {
+        return levels;
+    }
 
     std::uint32_t actual_levels = std::min({options.level_count,
                                             static_cast<std::uint32_t>(options.target_ratios.size()),
@@ -1138,10 +1359,7 @@ inline std::vector<LODLevel> generate_lod_levels(
             0,  // 不锁定边界，LOD 允许更自由地简化
             &result_error);
 
-        // 如果 meshopt_simplify 未能达到目标（实际 > 目标的 2 倍），
-        // 之前使用 meshopt_simplifySloppy 强制达到目标面数，
-        // 但 sloppy 不保拓扑，会产生裂缝/破洞/翻转三角形，导致渲染缺口。
-        // 现在改为：保持 simplify 的结果，宁可面数多一点也不牺牲拓扑正确性。
+        // simplify 未达目标时保持结果（不引入 sloppy，避免破坏拓扑）。
         if (simplified_count > target_index_count * 2) {
             CFW_LOG_WARNING("[LOD] Mesh '{}' LOD {}: simplify could not reach target (got {} indices, target was {}). "
                             "Sloppy fallback disabled to preserve topology. Keeping simplify result.",
@@ -1156,81 +1374,16 @@ inline std::vector<LODLevel> generate_lod_levels(
 
         simplified_indices.resize(simplified_count);
 
-        // 生成紧凑的独立顶点缓冲区
-        std::vector<unsigned int> remap(vertices.size());
-        size_t unique_vertex_count = meshopt_generateVertexRemap(
-            remap.data(),
-            simplified_indices.data(),
-            simplified_indices.size(),
-            vertices.data(),
-            vertices.size(),
-            sizeof(Vertex));
+        const std::string lod_label = mesh_name + "_lod" + std::to_string(i + 1);
+        LODLevel level = build_lod_level_from_simplified(
+            vertices, simplified_indices, has_bones, bone_weights,
+            indices_u32.size(), lod_label);
 
-        std::vector<std::uint32_t> remapped_indices(simplified_indices.size());
-        meshopt_remapIndexBuffer(remapped_indices.data(), simplified_indices.data(),
-                                 simplified_indices.size(), remap.data());
-
-        std::vector<Vertex> compact_vertices(unique_vertex_count);
-        meshopt_remapVertexBuffer(
-            compact_vertices.data(),
-            vertices.data(),
-            vertices.size(),
-            sizeof(Vertex),
-            remap.data());
-
-        // 骨骼权重用同一 remap 表同步重排（蒙皮网格）
-        std::vector<BoneWeights> compact_weights;
-        if (has_bones) {
-            compact_weights.resize(unique_vertex_count);
-            meshopt_remapVertexBuffer(
-                compact_weights.data(),
-                bone_weights->data(),
-                bone_weights->size(),
-                sizeof(BoneWeights),
-                remap.data());
-        }
-
-        // 移除退化三角形（meshopt_simplifySloppy 可能产生零面积/退化三角形，导致渲染缺口）
-        remove_degenerate_triangles(compact_vertices, remapped_indices,
-                                    1e-12f, mesh_name + "_lod" + std::to_string(i + 1));
-
-        // 重新计算法线：仅当几何真的被简化了才需要。
-        // 对于 split 子网格（有大面积切口边界），SimplifyLockBorder 可能导致
-        // 简化完全无法进行 → simplified_count == original_count → 几何未变。
-        // 此时若重算法线，边界处缺少相邻 split 的三角形贡献 → 法线偏斜 → 黑色缺口。
-        // 几何未变时保留 LOD0 原法线即可。
-        if (simplified_count < indices_u32.size()) {
-            generate_smooth_normals(compact_vertices, remapped_indices,
-                                    mesh_name + "_lod" + std::to_string(i + 1));
-        }
-
-        // GPU 优化（蒙皮网格同步重排权重）
-        optimize_mesh_for_gpu(compact_vertices, remapped_indices,
-                              mesh_name + "_lod" + std::to_string(i + 1),
-                              has_bones ? &compact_weights : nullptr);
-
-        // 转换索引为 uint16
-        std::vector<std::uint16_t> final_indices;
-        final_indices.reserve(remapped_indices.size());
-        for (auto idx : remapped_indices) {
-            final_indices.push_back(static_cast<std::uint16_t>(idx));
-        }
-
-        LODLevel level;
-        level.vertices = std::move(compact_vertices);
-        level.indices = std::move(final_indices);
-        if (has_bones) {
-            level.bone_weights = std::move(compact_weights);
-        }
         level.error = result_error;
-        // 屏幕阈值：误差越大，阈值越小（越远才使用）
-        // 使用反比公式：error 越大 → threshold 越小 → 只在屏幕占比更小时选中此 LOD
+        // 旧反比公式（保持 legacy 行为）
         level.screen_threshold = (result_error > 0.0f) ? std::max(0.01f, 1.0f / (1.0f + result_error * 80.0f)) : 0.0f;
 
-        (void)mesh_name;
         (void)ratio;
-        (void)result_error;
-
         levels.push_back(std::move(level));
     }
 
