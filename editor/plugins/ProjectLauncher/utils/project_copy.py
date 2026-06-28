@@ -9,9 +9,16 @@ from CoronaCore.utils.proejct_utils import (
     normalize_project_runtime_paths,
     update_project_config,
 )
-from utils.settings import settings_manager
+from utils.settings import core_path, settings_manager
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_project_dir_name(name, fallback):
+    raw_name = (name or fallback or "project").strip()
+    safe_name = "".join("_" if c in '<>:"/\\|?*' else c for c in raw_name)
+    safe_name = safe_name.strip(" .")
+    return safe_name or "project"
 
 
 class ProjectCopy:
@@ -29,6 +36,47 @@ class ProjectCopy:
         except Exception as e:
             logger.error(f"ProjectCopy Error: {e}")
             raise e
+
+    @staticmethod
+    def copy_existing_to_data(project_ini_path):
+        """Copy an existing project save into the runtime data directory."""
+        source_ini = os.path.abspath(project_ini_path)
+        if not os.path.isfile(source_ini):
+            raise FileNotFoundError(f"project.ini not found: {source_ini}")
+
+        source_dir = os.path.dirname(source_ini)
+        project_name = os.path.basename(source_dir)
+
+        config = configparser.ConfigParser()
+        config.read(source_ini, encoding='utf-8')
+        if 'Project' in config:
+            project_name = config['Project'].get('name', project_name)
+
+        data_dir = os.path.join(str(core_path.repo_root), "data")
+        os.makedirs(data_dir, exist_ok=True)
+
+        base_name = _safe_project_dir_name(project_name, os.path.basename(source_dir))
+        target_path = os.path.join(data_dir, base_name)
+        counter = 1
+        while os.path.exists(target_path):
+            target_path = os.path.join(data_dir, f"{base_name}_{counter}")
+            counter += 1
+
+        shutil.copytree(source_dir, target_path)
+        normalize_project_runtime_paths(target_path)
+
+        target_ini = os.path.join(target_path, "project.ini")
+        target_config = configparser.ConfigParser()
+        target_config.read(target_ini, encoding='utf-8')
+        if 'Project' not in target_config:
+            target_config['Project'] = {}
+        final_name = os.path.basename(target_path)
+        target_config['Project']['name'] = final_name
+        with open(target_ini, 'w', encoding='utf-8') as f:
+            target_config.write(f)
+
+        logger.info("Copied existing project save: %s -> %s", source_dir, target_path)
+        return {"name": final_name, "path": target_path}
 
     @staticmethod
     def open_and_update(project_path):
