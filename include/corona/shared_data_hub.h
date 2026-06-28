@@ -104,6 +104,14 @@ struct GeometryDevice {
     bool is_skinned{false};
     float anim_time{0.0f};
     std::vector<std::vector<std::byte>> skinned_cpu_vertices;
+
+    // 蒙皮动态 local AABB（P4）：每帧由 update_skinned_geometry 在蒙皮循环中
+    // 顺手累积所有 mesh 蒙皮顶点的包围盒（模型空间，已含首帧归一化）。
+    // 物理系统每帧读取它覆盖静态 min_xyz/max_xyz，使碰撞 AABB 跟随当前动画姿态。
+    // skinned_aabb_valid=false 表示尚未蒙皮过（首帧前），物理回退静态 AABB。
+    bool skinned_aabb_valid{false};
+    ktm::fvec3 skinned_aabb_min{0.0f, 0.0f, 0.0f};
+    ktm::fvec3 skinned_aabb_max{0.0f, 0.0f, 0.0f};
 };
 
 struct MechanicsDevice {

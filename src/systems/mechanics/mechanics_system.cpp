@@ -289,6 +289,16 @@ void MechanicsSystem::update_physics() {
         entry.model_id = entry_model_id;
         entry.local_min = m.min_xyz;
         entry.local_max = m.max_xyz;
+
+        // 蒙皮物体（P4）：用每帧蒙皮顶点算出的动态 local AABB 覆盖静态 min/max，
+        // 使碰撞包围盒跟随当前动画姿态（如挥臂时 AABB 变大）。AABB 由 GeometrySystem
+        // 的 update_skinned_geometry 每帧在蒙皮循环中顺手累积（模型空间，已含首帧归一化），
+        // 与静态 min_xyz 同空间，后续 world_aabb_from_local_bounds 逻辑完全复用。
+        if (geom_acc->is_skinned && geom_acc->skinned_aabb_valid) {
+            entry.local_min = geom_acc->skinned_aabb_min;
+            entry.local_max = geom_acc->skinned_aabb_max;
+            entry.is_skinned = true;
+        }
         // 无记录则从当前欧拉初始化四元数
         auto& body = impl_->body(h);
         if (!body.orientation_initialized) {
@@ -348,6 +358,9 @@ void MechanicsSystem::update_physics() {
         if (impl_->shutdown_requested.load(std::memory_order_acquire)) {
             return;
         }
+        // 蒙皮物体跳过三角网格：其网格随动画每帧变形，静态绑定姿态三角网格已失真，
+        // 且窄相一旦双方都有网格就走三角 SAT，会绕开我们要的动态 AABB 碰撞（P4）。
+        if (entry.is_skinned) continue;
         if (entry.model_id != 0) {
             ensure_collision_mesh(entry.model_id, impl_->collision_mesh_cache);
         }

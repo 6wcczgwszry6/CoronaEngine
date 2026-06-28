@@ -2361,7 +2361,15 @@ void GeometrySystem::update_skinned_geometry() {
         // ---- 第 6 步：锁外 CPU 蒙皮每个 mesh + 重传 GPU ----
         // skinned_cpu_vertices：每 mesh 一份原始字节（布局即 Resource::Vertex 数组），
         // P3(Vision)/P4(物理) 复用同一数据源。
+        // 同时累积所有蒙皮顶点的动态 local AABB（P4 物理用，跟随当前姿态）。
         std::vector<std::vector<std::byte>> skinned_blobs(mesh_count);
+        float aabb_min_x = std::numeric_limits<float>::max();
+        float aabb_min_y = std::numeric_limits<float>::max();
+        float aabb_min_z = std::numeric_limits<float>::max();
+        float aabb_max_x = std::numeric_limits<float>::lowest();
+        float aabb_max_y = std::numeric_limits<float>::lowest();
+        float aabb_max_z = std::numeric_limits<float>::lowest();
+        bool aabb_any = false;
         for (std::size_t mesh_idx = 0;
              mesh_idx < mesh_count && mesh_idx < scene.data.meshes.size(); ++mesh_idx) {
             const Resource::MeshData& mesh = scene.data.meshes[mesh_idx];
@@ -2374,6 +2382,14 @@ void GeometrySystem::update_skinned_geometry() {
             std::vector<Resource::Vertex> skinned(mesh.vertices.size());
             for (std::size_t v = 0; v < mesh.vertices.size(); ++v) {
                 skinned[v] = skin_one_vertex(mesh.vertices[v], mesh.bone_weights[v], finals);
+                const auto& p = skinned[v].position;
+                aabb_min_x = std::min(aabb_min_x, p[0]);
+                aabb_min_y = std::min(aabb_min_y, p[1]);
+                aabb_min_z = std::min(aabb_min_z, p[2]);
+                aabb_max_x = std::max(aabb_max_x, p[0]);
+                aabb_max_y = std::max(aabb_max_y, p[1]);
+                aabb_max_z = std::max(aabb_max_z, p[2]);
+                aabb_any = true;
             }
 
             // 转字节并重传（vertexBuffer 供光栅，vertexStorageBuffer 供 material_resolve compute）
@@ -2389,10 +2405,17 @@ void GeometrySystem::update_skinned_geometry() {
             }
         }
 
-        // ---- 第 7 步：brief 写锁存回蒙皮结果（供 P3/P4 消费）----
+        // ---- 第 7 步：brief 写锁存回蒙皮结果 + 动态 AABB（供 P3/P4 消费）----
         {
             auto geom_write = geom_storage.try_acquire_write(geom_handle);
-            if (geom_write) geom_write->skinned_cpu_vertices = std::move(skinned_blobs);
+            if (geom_write) {
+                geom_write->skinned_cpu_vertices = std::move(skinned_blobs);
+                if (aabb_any) {
+                    geom_write->skinned_aabb_min = ktm::fvec3{aabb_min_x, aabb_min_y, aabb_min_z};
+                    geom_write->skinned_aabb_max = ktm::fvec3{aabb_max_x, aabb_max_y, aabb_max_z};
+                    geom_write->skinned_aabb_valid = true;
+                }
+            }
         }
     }
 }
