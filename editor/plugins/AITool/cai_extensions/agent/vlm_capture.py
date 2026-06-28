@@ -6,6 +6,7 @@ views, hidden review camera, base_color only.
 from __future__ import annotations
 
 import logging
+import json
 import math
 import os
 import hashlib
@@ -23,6 +24,12 @@ VLM_REVIEW_CAMERA_NAME = "vlm_review_camera"
 
 _DEFAULT_CENTER = [0.0, 0.75, 0.0]
 _DEFAULT_RADIUS = 2.0
+
+
+@dataclass
+class NativeSceneRef:
+    route: str = ""
+    name: str = ""
 
 
 def get_project_screenshots_root() -> Path:
@@ -203,10 +210,13 @@ def _resolve_scene(scene_name: str, scene: Any = None) -> Any:
             if found is not None:
                 return found
         routes = scene_manager.list_all()
-        return scene_manager.get(routes[0]) if routes else None
+        found = scene_manager.get(routes[0]) if routes else None
+        if found is not None:
+            return found
     except Exception as exc:
         logger.warning("[VlmCapture] resolve scene failed: %s", exc)
-        return None
+    route = str(scene_name or "").strip()
+    return NativeSceneRef(route=route, name=route)
 
 
 def _coerce_aabb(value: Any) -> Optional[List[float]]:
@@ -238,61 +248,59 @@ def _bounds_from_aabb(aabb: List[float], source: str) -> TargetBounds:
     return TargetBounds(source=source, min=min_pt, max=max_pt, center=center, radius=radius)
 
 
-def _actor_world_aabb(actor: Any) -> Optional[List[float]]:
-    geometry = getattr(actor, "_geometry", None)
-    get_aabb = getattr(geometry, "get_aabb", None)
-    aabb = _coerce_aabb(get_aabb() if callable(get_aabb) else None)
-    if aabb is None:
-        return None
-    get_position = getattr(actor, "get_position", None)
-    get_scale = getattr(actor, "get_scale", None)
-    pos = list(get_position() if callable(get_position) else [0.0, 0.0, 0.0])
-    scale = list(get_scale() if callable(get_scale) else [1.0, 1.0, 1.0])
-    while len(pos) < 3:
-        pos.append(0.0)
-    while len(scale) < 3:
-        scale.append(1.0)
-    mins = []
-    maxs = []
-    for axis in range(3):
-        a = pos[axis] + aabb[axis] * scale[axis]
-        b = pos[axis] + aabb[axis + 3] * scale[axis]
-        mins.append(min(a, b))
-        maxs.append(max(a, b))
-    return [mins[0], mins[1], mins[2], maxs[0], maxs[1], maxs[2]]
+def _native_scene_route(scene: Any) -> str:
+    return str(getattr(scene, "route", "") or getattr(scene, "name", "") or "")
 
 
-def _find_actor(scene: Any, actor_name: Optional[str]) -> Any:
-    if not scene or not actor_name:
+def _native_bounds_json(method_name: str, *args: str) -> Optional[dict]:
+    try:
+        from CoronaCore.core.corona_editor import CoronaEditor
+    except Exception as exc:
+        logger.debug("[VlmCapture] native bounds bridge unavailable: %s", exc)
         return None
-    find_actor = getattr(scene, "find_actor", None)
-    if callable(find_actor):
-        actor = find_actor(actor_name)
-        if actor is not None:
-            return actor
-    get_actors = getattr(scene, "get_actors", None)
-    if callable(get_actors):
-        try:
-            for actor in get_actors() or []:
-                if getattr(actor, "name", None) == actor_name or getattr(actor, "actor_id", None) == actor_name:
-                    return actor
-        except Exception:
-            return None
-    return None
+    method = getattr(CoronaEditor.CoronaEngine, method_name, None)
+    if not callable(method):
+        return None
+    try:
+        raw = method(*args)
+        result = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception as exc:
+        logger.debug("[VlmCapture] native bounds call failed %s args=%s error=%s",
+                     method_name, args, exc)
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def _native_actor_aabb(scene: Any, actor_name: Optional[str]) -> Optional[List[float]]:
+    if not actor_name:
+        return None
+    result = _native_bounds_json(
+        "get_editor_actor_bounds",
+        _native_scene_route(scene),
+        str(actor_name),
+    )
+    if not result or result.get("status") not in ("success", "ok"):
+        return None
+    return _coerce_aabb(result.get("aabb"))
+
+
+def _native_scene_aabb(scene: Any) -> Optional[List[float]]:
+    result = _native_bounds_json("get_editor_scene_bounds", _native_scene_route(scene))
+    if not result or result.get("status") not in ("success", "ok"):
+        return None
+    return _coerce_aabb(result.get("aabb"))
 
 
 def resolve_vlm_target_bounds(scene: Any, actor_name: Optional[str] = None, scope: str = "actor") -> TargetBounds:
     if scene is not None and scope == "actor":
-        actor = _find_actor(scene, actor_name)
-        actor_aabb = _actor_world_aabb(actor) if actor is not None else None
+        actor_aabb = _native_actor_aabb(scene, actor_name)
         if actor_aabb is not None:
-            return _bounds_from_aabb(actor_aabb, f"actor:{actor_name or getattr(actor, 'name', '')}")
+            return _bounds_from_aabb(actor_aabb, f"native_actor:{actor_name or ''}")
 
     if scene is not None:
-        get_aabb = getattr(scene, "get_aabb", None)
-        scene_aabb = _coerce_aabb(get_aabb() if callable(get_aabb) else None)
+        scene_aabb = _native_scene_aabb(scene)
         if scene_aabb is not None:
-            return _bounds_from_aabb(scene_aabb, "scene")
+            return _bounds_from_aabb(scene_aabb, "native_scene")
 
     return TargetBounds(
         source="default",
@@ -347,82 +355,55 @@ def build_vlm_view_poses(bounds: TargetBounds) -> List[ViewPose]:
     return poses
 
 
-def _snapshot_camera_state(camera: Any) -> Optional[dict]:
-    if camera is None:
-        return None
+def _native_camera_capture_available() -> bool:
     try:
-        return {
-            "position": list(camera.get_position()),
-            "forward": list(camera.get_forward()),
-            "up": list(camera.get_world_up()),
-            "fov": camera.get_fov(),
-            "output_mode": camera.get_output_mode() if hasattr(camera, "get_output_mode") else None,
-        }
+        from CoronaCore.core.corona_editor import CoronaEditor
     except Exception:
-        return None
-
-
-def _restore_camera_state(camera: Any, state: Optional[dict]) -> None:
-    if camera is None or not state:
-        return
-    try:
-        camera.set(state["position"], state["forward"], state["up"], state["fov"])
-        if state.get("output_mode") is not None and hasattr(camera, "set_output_mode"):
-            camera.set_output_mode(state["output_mode"])
-    except Exception:
-        pass
-
-
-def _camera_state_changed(camera: Any, state: Optional[dict]) -> bool:
-    if camera is None or not state:
         return False
-    return _snapshot_camera_state(camera) != state
+    return callable(getattr(CoronaEditor.CoronaEngine, "capture_editor_camera_view", None))
 
 
-def _get_active_camera(scene: Any) -> Any:
-    get_active = getattr(scene, "get_active_camera", None)
-    if callable(get_active):
-        return get_active()
-    find_camera = getattr(scene, "find_camera", None)
-    return find_camera(None) if callable(find_camera) else None
-
-
-def _get_review_camera(scene: Any, review_camera: Any = None, camera_factory: Any = None) -> Any:
-    if review_camera is not None:
-        return review_camera
-    try:
-        from .model_reviewer import get_or_create_vlm_review_camera
-    except ImportError:
-        from model_reviewer import get_or_create_vlm_review_camera
-    if camera_factory is None:
-        active = _get_active_camera(scene)
-        camera_factory = type(active) if active is not None else None
-    return get_or_create_vlm_review_camera(scene, camera_factory=camera_factory)
-
-
-def capture_pose_with_review_camera(
+def capture_pose_with_native_camera(
     scene: Any,
-    camera: Any,
     pose: ViewPose,
     output_path: str,
     timeout_sec: float,
     view_index: int = 0,
 ) -> bool:
     try:
-        camera.set(pose.position, pose.forward, pose.up, pose.fov)
-        if hasattr(camera, "set_output_mode") and getattr(camera, "get_output_mode", lambda: VLM_OUTPUT_MODE)() != VLM_OUTPUT_MODE:
-            camera.set_output_mode(VLM_OUTPUT_MODE)
-        try:
-            from .model_reviewer import _save_camera_screenshot_with_timeout
-        except ImportError:
-            from model_reviewer import _save_camera_screenshot_with_timeout
+        from CoronaCore.core.corona_editor import CoronaEditor
+
+        capture_editor_camera_view = getattr(CoronaEditor.CoronaEngine, "capture_editor_camera_view", None)
+        if not callable(capture_editor_camera_view):
+            logger.warning("[VlmCapture] native camera capture bridge unavailable")
+            return False
+
         engine_path, needs_copy = _engine_safe_screenshot_path(output_path, view_index)
-        saved = bool(_save_camera_screenshot_with_timeout(camera, engine_path, timeout=timeout_sec))
+        camera_data = {
+            "position": pose.position,
+            "forward": pose.forward,
+            "world_up": pose.up,
+            "fov": pose.fov,
+            "width": 512,
+            "height": 512,
+            "output_mode": VLM_OUTPUT_MODE,
+            "render_backend": "native",
+        }
+        raw = capture_editor_camera_view(
+            _native_scene_route(scene),
+            VLM_REVIEW_CAMERA_NAME,
+            json.dumps(camera_data, ensure_ascii=False),
+            engine_path,
+        )
+        result = json.loads(raw) if isinstance(raw, str) else raw
+        saved = isinstance(result, dict) and result.get("status") in ("success", "ok")
         if not saved:
+            logger.warning("[VlmCapture] native camera capture failed result=%s", result)
             return False
         return _copy_engine_screenshot_to_final(engine_path, output_path) if needs_copy else True
     except Exception as exc:
-        logger.warning("[VlmCapture] capture pose failed name=%s path=%s error=%s", pose.name, output_path, exc)
+        logger.warning("[VlmCapture] native capture pose failed name=%s path=%s error=%s",
+                       pose.name, output_path, exc)
         return False
 
 
@@ -433,8 +414,6 @@ def capture_vlm_views(
     scope: str = "actor",
     timeout_sec: float = 5.0,
     scene: Any = None,
-    review_camera: Any = None,
-    camera_factory: Any = None,
 ) -> VlmCaptureResult:
     output_dir = resolve_vlm_output_dir(output_dir)
     resolved_scene = _resolve_scene(scene_name, scene)
@@ -445,63 +424,48 @@ def capture_vlm_views(
             skipped_reason="scene_not_found",
         )
 
-    camera = _get_review_camera(resolved_scene, review_camera=review_camera, camera_factory=camera_factory)
-    if camera is None:
+    if not _native_camera_capture_available():
         return VlmCaptureResult(
             status="skipped",
             output_dir=output_dir,
-            skipped_reason="review_camera_unavailable",
+            skipped_reason="native_camera_capture_unavailable",
         )
-
-    main_camera = _get_active_camera(resolved_scene)
-    main_state = _snapshot_camera_state(main_camera)
-    if main_camera is camera:
-        return VlmCaptureResult(
-            status="skipped",
-            output_dir=output_dir,
-            skipped_reason="review_camera_is_active_camera",
-        )
-
-    old_review_mode = None
-    try:
-        old_review_mode = camera.get_output_mode() if hasattr(camera, "get_output_mode") else None
-        if hasattr(camera, "set_output_mode") and old_review_mode != VLM_OUTPUT_MODE:
-            camera.set_output_mode(VLM_OUTPUT_MODE)
-    except Exception:
-        old_review_mode = None
 
     bounds = resolve_vlm_target_bounds(resolved_scene, actor_name=actor_name, scope=scope)
+    if scope == "actor" and actor_name and bounds.source != f"native_actor:{actor_name}":
+        return VlmCaptureResult(
+            status="skipped",
+            output_dir=output_dir,
+            target_bounds=bounds,
+            center=list(bounds.center),
+            radius=bounds.radius,
+            poses=[],
+            camera_name=VLM_REVIEW_CAMERA_NAME,
+            skipped_reason=f"native_actor_not_found:{actor_name}",
+        )
     poses = build_vlm_view_poses(bounds)
     files: List[str] = []
-    try:
-        for index, pose in enumerate(poses):
-            safe_target = (actor_name or scope or "scene").replace(os.sep, "_")
-            output_path = os.path.join(output_dir, f"{safe_target}_{index:02d}_{pose.name}_{VLM_OUTPUT_MODE}.png")
-            if capture_pose_with_review_camera(resolved_scene, camera, pose, output_path, timeout_sec, index):
-                files.append(output_path)
-    finally:
-        if old_review_mode and old_review_mode != VLM_OUTPUT_MODE:
-            try:
-                camera.set_output_mode(old_review_mode)
-            except Exception:
-                pass
-        if _camera_state_changed(main_camera, main_state):
-            _restore_camera_state(main_camera, main_state)
-            logger.warning("[VlmCapture] main camera changed during capture; restored and skipped result")
-            return VlmCaptureResult(
-                status="skipped",
-                output_dir=output_dir,
-                files=[],
-                target_bounds=bounds,
-                center=list(bounds.center),
-                radius=bounds.radius,
-                poses=poses,
-                camera_name=getattr(camera, "name", VLM_REVIEW_CAMERA_NAME),
-                skipped_reason="main_camera_leak",
-            )
+    capture_failure_reason = ""
+    for index, pose in enumerate(poses):
+        safe_target = (actor_name or scope or "scene").replace(os.sep, "_")
+        output_path = os.path.join(output_dir, f"{safe_target}_{index:02d}_{pose.name}_{VLM_OUTPUT_MODE}.png")
+        if capture_pose_with_native_camera(resolved_scene, pose, output_path, timeout_sec, index):
+            files.append(output_path)
+            continue
+        capture_failure_reason = (
+            "native_capture_failed:first_view"
+            if not files else f"native_capture_failed:view_{index}"
+        )
+        logger.warning(
+            "[VlmCapture] stopping VLM capture after native failure target=%s view=%s reason=%s",
+            actor_name or "",
+            pose.name,
+            capture_failure_reason,
+        )
+        break
 
     status = "success" if files else "skipped"
-    skipped_reason = "" if files else "no_screenshots_saved"
+    skipped_reason = "" if files else (capture_failure_reason or "no_screenshots_saved")
     logger.info(
         "[VlmCapture] scope=%s target=%s source=%s center=%s radius=%.3f output_mode=%s view_count=%d success=%d",
         scope,
@@ -521,6 +485,6 @@ def capture_vlm_views(
         center=list(bounds.center),
         radius=bounds.radius,
         poses=poses,
-        camera_name=getattr(camera, "name", VLM_REVIEW_CAMERA_NAME),
+        camera_name=VLM_REVIEW_CAMERA_NAME,
         skipped_reason=skipped_reason,
     )

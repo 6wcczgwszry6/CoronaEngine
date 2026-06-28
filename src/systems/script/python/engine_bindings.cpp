@@ -31,6 +31,19 @@ struct InputEvent {
     double arg4;
 };
 std::vector<InputEvent> drain_input_events();
+std::string create_editor_actor_from_python(const std::string& scene_name,
+                                            const std::string& asset_path,
+                                            const std::string& actor_type,
+                                            const std::string& actor_data_json);
+std::string remove_editor_actor_from_python(const std::string& scene_name,
+                                            const std::string& actor_name);
+std::string get_editor_actor_bounds_from_python(const std::string& scene_name,
+                                                const std::string& actor_name);
+std::string get_editor_scene_bounds_from_python(const std::string& scene_name);
+std::string capture_editor_camera_view_from_python(const std::string& scene_name,
+                                                   const std::string& camera_name,
+                                                   const std::string& camera_data_json,
+                                                   const std::string& output_path);
 }  // namespace Corona::Systems::UI
 
 namespace nb = nanobind;
@@ -811,6 +824,61 @@ void BindAll(nanobind::module_& m) {
     m.def("import_media", &import_media, nb::arg("path"),
           "Import an audio or video file as a standalone resource. "
           "Returns a MediaInfo (resource_id is 0 / media_type is '' on failure).");
+
+    m.def("create_editor_actor",
+          [](const std::string& scene_name,
+             const std::string& asset_path,
+             const std::string& actor_type,
+             const std::string& actor_data_json) {
+              return Corona::Systems::UI::create_editor_actor_from_python(
+                  scene_name, asset_path, actor_type, actor_data_json);
+          },
+          nb::arg("scene_name"),
+          nb::arg("asset_path"),
+          nb::arg("actor_type") = "model",
+          nb::arg("actor_data_json") = "{}",
+          "Create an editor actor in the native C++ scene and return its actor JSON.");
+
+    m.def("remove_editor_actor",
+          [](const std::string& scene_name,
+             const std::string& actor_name) {
+              return Corona::Systems::UI::remove_editor_actor_from_python(
+                  scene_name, actor_name);
+          },
+          nb::arg("scene_name"),
+          nb::arg("actor_name"),
+          "Remove an editor actor from the native C++ scene and persist the scene.");
+
+    m.def("get_editor_actor_bounds",
+          [](const std::string& scene_name,
+             const std::string& actor_name) {
+              return Corona::Systems::UI::get_editor_actor_bounds_from_python(
+                  scene_name, actor_name);
+          },
+          nb::arg("scene_name"),
+          nb::arg("actor_name"),
+          "Return native editor actor bounds as JSON.");
+
+    m.def("get_editor_scene_bounds",
+            [](const std::string& scene_name) {
+               return Corona::Systems::UI::get_editor_scene_bounds_from_python(scene_name);
+            },
+            nb::arg("scene_name"),
+            "Return native editor scene aggregate actor bounds as JSON.");
+
+    m.def("capture_editor_camera_view",
+            [](const std::string& scene_name,
+               const std::string& camera_name,
+               const std::string& camera_data_json,
+               const std::string& output_path) {
+               return Corona::Systems::UI::capture_editor_camera_view_from_python(
+                   scene_name, camera_name, camera_data_json, output_path);
+            },
+            nb::arg("scene_name"),
+            nb::arg("camera_name"),
+            nb::arg("camera_data_json"),
+            nb::arg("output_path"),
+            "Set an offscreen native editor camera and save a screenshot, returning JSON.");
 
     m.def("play_audio", &play_audio, nb::arg("resource_id"), nb::arg("loop") = false,
           "Play an imported audio resource. Pass the resource_id from MediaInfo.");

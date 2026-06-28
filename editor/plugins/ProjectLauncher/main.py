@@ -178,22 +178,9 @@ class ProjectLauncher(PluginBase):
         if file_path.lower().endswith('.json'):
             return ProjectLauncher._create_project_from_vision(file_path)
 
-        # 2b. 普通 .ini 项目：原有逻辑
-        project_dir = os.path.dirname(file_path)
+        # 2b. Existing .ini save: copy it into runtime data before opening.
         try:
-            import configparser
-            proj_cfg = configparser.ConfigParser()
-            proj_cfg.read(file_path, encoding='utf-8')
-            project_name = proj_cfg.get('Project', 'name', fallback="default_project")
-
-            # 3. 更新全局最近项目记录 (存储的是目录路径)
-            settings_manager.add_recent_project(project_dir)
-
-            # 4. 返回前端 handleSideAction 所需的结构
-            return {
-                "name": project_name,
-                "path": project_dir
-            }
+            return ProjectCopy.copy_existing_to_data(file_path)
         except Exception as e:
             logger.error(f"Failed to open project file: {e}")
             return {}

@@ -573,12 +573,14 @@ inline void flip_triangle_winding_order(std::vector<std::uint32_t>& indices,
 struct SingleMeshResult {
     std::vector<Vertex> vertices;
     std::vector<std::uint32_t> indices;
+    std::vector<BoneWeights> bone_weights;  // 蒙皮网格非空，与 vertices 同步 remap
 };
 
 /// 网格优化结果结构体（支持拆分为多个子网格）
 struct MeshOptimizeResult {
     std::vector<Vertex> vertices;              // 主网格顶点（向后兼容）
     std::vector<std::uint32_t> indices;        // 主网格索引（向后兼容）
+    std::vector<BoneWeights> bone_weights;     // 主网格骨骼权重（蒙皮时非空）
     std::vector<SingleMeshResult> sub_meshes;  // 拆分产生的子网格
     bool success = false;
     bool was_split = false;  // 是否进行了拆分
@@ -693,7 +695,8 @@ inline std::vector<SingleMeshResult> split_mesh_uniformly(
     const std::vector<Vertex>& vertices,
     const std::vector<std::uint32_t>& indices,
     size_t unique_vertex_count,
-    const std::string& mesh_name) {
+    const std::string& mesh_name,
+    const std::vector<BoneWeights>* bone_weights = nullptr) {
     std::vector<SingleMeshResult> results;
 
     if (indices.size() % 3 != 0) {
@@ -800,7 +803,8 @@ inline std::vector<SingleMeshResult> split_mesh_uniformly(
 
             // 收集这个分片的索引
             auto sub_splits = split_mesh_uniformly(vertices, split_indices, unique_count,
-                                                   mesh_name + "_sub" + std::to_string(split_idx));
+                                                   mesh_name + "_sub" + std::to_string(split_idx),
+                                                   bone_weights);
             results.insert(results.end(), sub_splits.begin(), sub_splits.end());
             continue;
         }
@@ -818,6 +822,17 @@ inline std::vector<SingleMeshResult> split_mesh_uniformly(
             vertices.size(),
             sizeof(Vertex),
             remap.data());
+
+        // 蒙皮网格：用同一张 remap 表同步重排 bone_weights（BoneWeights 为 POD，可整体重排）
+        if (bone_weights != nullptr && bone_weights->size() == vertices.size()) {
+            split_result.bone_weights.resize(unique_count);
+            meshopt_remapVertexBuffer(
+                split_result.bone_weights.data(),
+                bone_weights->data(),
+                bone_weights->size(),
+                sizeof(BoneWeights),
+                remap.data());
+        }
 
         CFW_LOG_TRACE("[MeshOpt] Mesh '{}' split {}: {} vertices, {} indices (spatial axis={})",
                       mesh_name, split_idx, split_result.vertices.size(), split_result.indices.size(),
@@ -844,9 +859,11 @@ inline std::vector<std::uint32_t> iterative_simplify_for_uint16(
 }
 
 /// 执行顶点缓存、过度绘制和获取优化
+/// @param bone_weights 可选；非空时与 vertices 用同一 remap 表同步重排（蒙皮网格）
 inline void optimize_mesh_for_gpu(std::vector<Vertex>& vertices,
                                   std::vector<std::uint32_t>& indices,
-                                  const std::string& mesh_name) {
+                                  const std::string& mesh_name,
+                                  std::vector<BoneWeights>* bone_weights = nullptr) {
     if (vertices.empty() || indices.empty()) return;
 
     // 顶点缓存优化
@@ -868,18 +885,38 @@ inline void optimize_mesh_for_gpu(std::vector<Vertex>& vertices,
             1.05f);
     }
 
-    // 顶点获取优化
-    std::vector<Vertex> optimized_vertices(vertices.size());
-    size_t final_count = meshopt_optimizeVertexFetch(
-        optimized_vertices.data(),
+    // 顶点获取优化：用 Remap 变体拿到重排表，使 vertices 与 bone_weights 同步重排。
+    std::vector<unsigned int> remap(vertices.size());
+    size_t final_count = meshopt_optimizeVertexFetchRemap(
+        remap.data(),
         indices.data(),
         indices.size(),
+        vertices.size());
+
+    // 索引按 remap 重写
+    meshopt_remapIndexBuffer(indices.data(), indices.data(), indices.size(), remap.data());
+
+    // 顶点按 remap 重排
+    std::vector<Vertex> optimized_vertices(final_count);
+    meshopt_remapVertexBuffer(
+        optimized_vertices.data(),
         vertices.data(),
         vertices.size(),
-        sizeof(Vertex));
-
-    optimized_vertices.resize(final_count);
+        sizeof(Vertex),
+        remap.data());
     vertices = std::move(optimized_vertices);
+
+    // 骨骼权重用同一 remap 表同步重排（BoneWeights 为 POD，按字节 remap）
+    if (bone_weights != nullptr && !bone_weights->empty()) {
+        std::vector<BoneWeights> optimized_weights(final_count);
+        meshopt_remapVertexBuffer(
+            optimized_weights.data(),
+            bone_weights->data(),
+            bone_weights->size(),
+            sizeof(BoneWeights),
+            remap.data());
+        *bone_weights = std::move(optimized_weights);
+    }
 }
 
 /// 完整的网格优化流水线
@@ -887,13 +924,17 @@ inline void optimize_mesh_for_gpu(std::vector<Vertex>& vertices,
 /// - Phase 1：error 从 0.001 开始，步进 0.001，直到 0.01
 /// - Phase 2：如果 Phase 1 失败，对网格进行均匀拆分
 /// @note 如果发生拆分，was_split=true 且 sub_meshes 包含拆分后的网格
+/// @param bone_weights 可选；非空时为与 unindexed_vertices 等长并行的骨骼权重，
+///   随顶点同步 remap 后写入 result.bone_weights（未拆分）或各 sub_meshes[i].bone_weights（拆分）。
 inline MeshOptimizeResult optimize_mesh_pipeline(
     std::vector<Vertex>& unindexed_vertices,
     std::vector<std::uint32_t>& indices,
     bool /*simplify_mesh*/,          // 忽略：始终简化
     float /*simplification_error*/,  // 忽略：使用渐进式误差
-    const std::string& mesh_name) {
+    const std::string& mesh_name,
+    const std::vector<BoneWeights>* bone_weights = nullptr) {
     MeshOptimizeResult result;
+    const bool has_bones = bone_weights != nullptr && !bone_weights->empty();
 
     // 只有非空且索引数为3的倍数的三角形网格才能被简化
     bool can_simplify = (indices.size() % 3 == 0) && !indices.empty();
@@ -932,21 +973,34 @@ inline MeshOptimizeResult optimize_mesh_pipeline(
             sizeof(Vertex),
             remap.data());
 
+        // 骨骼权重用同一 remap 表同步重排（蒙皮网格）
+        if (has_bones) {
+            result.bone_weights.resize(unique_vertex_count);
+            meshopt_remapVertexBuffer(
+                result.bone_weights.data(),
+                bone_weights->data(),
+                bone_weights->size(),
+                sizeof(BoneWeights),
+                remap.data());
+        }
+
         CFW_LOG_TRACE("[MeshOpt] Mesh '{}' indexed: {} -> {} unique vertices",
                       mesh_name, unindexed_vertices.size(), unique_vertex_count);
 
-        // GPU 优化
+        // GPU 优化（bone_weights 随 vertices 同步重排）
         if (!result.vertices.empty()) {
-            optimize_mesh_for_gpu(result.vertices, result.indices, mesh_name);
+            optimize_mesh_for_gpu(result.vertices, result.indices, mesh_name,
+                                  has_bones ? &result.bone_weights : nullptr);
         }
 
         result.was_split = false;
         result.success = true;
     } else {
-        // Phase 2: 对网格进行均匀拆分
+        // Phase 2: 对网格进行均匀拆分（bone_weights 随每个子网格同步重排）
 
         auto split_results = split_mesh_uniformly(unindexed_vertices, indices,
-                                                  phase1_result.unique_vertex_count, mesh_name);
+                                                  phase1_result.unique_vertex_count, mesh_name,
+                                                  has_bones ? bone_weights : nullptr);
 
         if (split_results.empty()) {
             CFW_LOG_ERROR("[MeshOpt] Mesh '{}': failed to split mesh", mesh_name);
@@ -956,7 +1010,9 @@ inline MeshOptimizeResult optimize_mesh_pipeline(
         // 对每个子网格进行 GPU 优化
         for (auto& sub_mesh : split_results) {
             if (!sub_mesh.vertices.empty()) {
-                optimize_mesh_for_gpu(sub_mesh.vertices, sub_mesh.indices, mesh_name);
+                const bool sub_has_bones = !sub_mesh.bone_weights.empty();
+                optimize_mesh_for_gpu(sub_mesh.vertices, sub_mesh.indices, mesh_name,
+                                      sub_has_bones ? &sub_mesh.bone_weights : nullptr);
             }
         }
 
@@ -1018,12 +1074,16 @@ inline MeshData build_mesh_data(
 /// @param options LOD 生成配置
 /// @param mesh_name 网格名称（用于日志）
 /// @return LOD 级别列表（LOD 1..N）
+/// @param bone_weights 可选；非空时为与 vertices 等长并行的骨骼权重，
+///   每级 LOD 随顶点同步 remap 后写入对应 LODLevel::bone_weights（蒙皮网格）。
 inline std::vector<LODLevel> generate_lod_levels(
     const std::vector<Vertex>& vertices,
     const std::vector<std::uint16_t>& indices,
     const LODGenerationOptions& options,
-    const std::string& mesh_name) {
+    const std::string& mesh_name,
+    const std::vector<BoneWeights>* bone_weights = nullptr) {
     std::vector<LODLevel> levels;
+    const bool has_bones = bone_weights != nullptr && !bone_weights->empty();
 
     if (!options.enabled || options.level_count == 0 || vertices.empty() || indices.empty()) {
         return levels;
@@ -1118,6 +1178,18 @@ inline std::vector<LODLevel> generate_lod_levels(
             sizeof(Vertex),
             remap.data());
 
+        // 骨骼权重用同一 remap 表同步重排（蒙皮网格）
+        std::vector<BoneWeights> compact_weights;
+        if (has_bones) {
+            compact_weights.resize(unique_vertex_count);
+            meshopt_remapVertexBuffer(
+                compact_weights.data(),
+                bone_weights->data(),
+                bone_weights->size(),
+                sizeof(BoneWeights),
+                remap.data());
+        }
+
         // 移除退化三角形（meshopt_simplifySloppy 可能产生零面积/退化三角形，导致渲染缺口）
         remove_degenerate_triangles(compact_vertices, remapped_indices,
                                     1e-12f, mesh_name + "_lod" + std::to_string(i + 1));
@@ -1132,9 +1204,10 @@ inline std::vector<LODLevel> generate_lod_levels(
                                     mesh_name + "_lod" + std::to_string(i + 1));
         }
 
-        // GPU 优化
+        // GPU 优化（蒙皮网格同步重排权重）
         optimize_mesh_for_gpu(compact_vertices, remapped_indices,
-                              mesh_name + "_lod" + std::to_string(i + 1));
+                              mesh_name + "_lod" + std::to_string(i + 1),
+                              has_bones ? &compact_weights : nullptr);
 
         // 转换索引为 uint16
         std::vector<std::uint16_t> final_indices;
@@ -1146,6 +1219,9 @@ inline std::vector<LODLevel> generate_lod_levels(
         LODLevel level;
         level.vertices = std::move(compact_vertices);
         level.indices = std::move(final_indices);
+        if (has_bones) {
+            level.bone_weights = std::move(compact_weights);
+        }
         level.error = result_error;
         // 屏幕阈值：误差越大，阈值越小（越远才使用）
         // 使用反比公式：error 越大 → threshold 越小 → 只在屏幕占比更小时选中此 LOD

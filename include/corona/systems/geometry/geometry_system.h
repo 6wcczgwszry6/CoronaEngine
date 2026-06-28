@@ -404,6 +404,15 @@ class GeometrySystem : public Kernel::SystemBase {
     /// 每帧调用但只对新模型生效（已有缓存的跳过）。
     void upload_lod_from_scene_data();
 
+    /// 骨骼动画 CPU 蒙皮（P2）。每帧遍历所有 GeometryDevice，对蒙皮模型
+    /// （Scene::skeleton 有值）：推进 anim_time → compute_pose 算 final 骨骼矩阵
+    /// → 对每个 mesh 做 CPU 蒙皮（skinned[v] = Σ wᵢ·(finalᵢ·bind[v])）→ 把蒙皮后
+    /// 顶点 write_bytes 重传到 MeshDevice 的 vertexBuffer + vertexStorageBuffer。
+    /// 蒙皮输出仍是标准 32B Vertex，故 Native 光栅 / material_resolve 着色器零改动。
+    /// 蒙皮后顶点同时缓存到 GeometryDevice::skinned_cpu_vertices，供 P3 Vision /
+    /// P4 物理作为单一数据源消费。
+    void update_skinned_geometry();
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

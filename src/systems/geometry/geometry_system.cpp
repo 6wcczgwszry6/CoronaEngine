@@ -4,6 +4,7 @@
 #include <corona/resource/resource.h>
 #include <corona/resource/resource_manager.h>
 #include <corona/resource/types/scene.h>
+#include <corona/resource/types/animation_pose.h>
 #include <corona/shared_data_hub.h>
 #include <corona/spatial/octree.h>
 #include <corona/systems/geometry/geometry_system.h>
@@ -44,6 +45,58 @@ Horizon::HardwareBuffer make_geometry_buffer(const std::vector<T>& data,
     desc.usage = usage;
     desc.debug_name = std::move(name);
     return Horizon::HardwareBuffer(desc, std::as_bytes(std::span<const T>(data.data(), data.size())));
+}
+
+// ----------------------------------------------------------------------------
+// CPU 蒙皮（P2）
+// ----------------------------------------------------------------------------
+// 对单个 mesh 的绑定姿态顶点做线性混合蒙皮（LBS），输出标准 Resource::Vertex。
+//   skinned.pos = Σ wᵢ · (final[idᵢ] · bind.pos)
+//   skinned.nrm = normalize(Σ wᵢ · (mat3(final[idᵢ]) · bind.nrm))
+// final[] 为 compute_pose 的输出（列主序 mat4，下标 col*4+row）。
+// bind 顶点已在导入期保留绑定姿态空间（未烘世界变换、未单位化），
+// 故蒙皮结果在模型空间，运行时由 model transform (o2w) 放到世界空间。
+// uv 原样保留。无骨骼影响（ids 全 -1）的顶点回退为原始绑定位置。
+inline Resource::Vertex skin_one_vertex(
+    const Resource::Vertex& bind,
+    const Resource::BoneWeights& bw,
+    const std::vector<std::array<float, 16>>& finals) {
+    // 累加权重>0 的骨骼贡献
+    float px = 0.0f, py = 0.0f, pz = 0.0f;
+    float nx = 0.0f, ny = 0.0f, nz = 0.0f;
+    float total_w = 0.0f;
+
+    for (int i = 0; i < Resource::MAX_BONE_INFLUENCE; ++i) {
+        const std::int32_t id = bw.ids[i];
+        const float w = bw.weights[i];
+        if (id < 0 || w <= 0.0f) continue;
+        if (id >= static_cast<std::int32_t>(finals.size())) continue;
+
+        const std::array<float, 16>& m = finals[static_cast<std::size_t>(id)];
+        const float bx = bind.position[0], by = bind.position[1], bz = bind.position[2];
+        // 位置：齐次点变换（含平移，第 3 列）—— 列主序 m[col*4+row]
+        px += w * (m[0] * bx + m[4] * by + m[8] * bz + m[12]);
+        py += w * (m[1] * bx + m[5] * by + m[9] * bz + m[13]);
+        pz += w * (m[2] * bx + m[6] * by + m[10] * bz + m[14]);
+        // 法线：仅 3x3 线性部分（不含平移）
+        const float bnx = bind.normal[0], bny = bind.normal[1], bnz = bind.normal[2];
+        nx += w * (m[0] * bnx + m[4] * bny + m[8] * bnz);
+        ny += w * (m[1] * bnx + m[5] * bny + m[9] * bnz);
+        nz += w * (m[2] * bnx + m[6] * bny + m[10] * bnz);
+        total_w += w;
+    }
+
+    Resource::Vertex out = bind;  // 复制 uv；无影响时保留绑定位置/法线
+    if (total_w > 0.0f) {
+        out.position = {px, py, pz};
+        // 归一化法线（避免缩放骨骼导致非单位法线 → shader 错误）
+        float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (len > 1e-8f) {
+            float inv = 1.0f / len;
+            out.normal = {nx * inv, ny * inv, nz * inv};
+        }
+    }
+    return out;
 }
 
 }  // namespace
@@ -148,6 +201,11 @@ void GeometrySystem::update() {
     // LOD 由 GeometrySystem 内部自动管理，无外部开关：每帧上传导入时生成的 LOD 数据。
     // 已缓存的 mesh 仅做一次 find + model_id 比较，无 LOD 数据的 mesh 自动跳过。
     upload_lod_from_scene_data();
+
+    // ---- 骨骼动画 CPU 蒙皮（P2）----
+    // 对带骨架的 Scene：每帧推进动画时间 → compute_pose → CPU 蒙皮 →
+    // write_bytes 重传到 vertexBuffer / vertexStorageBuffer。静态网格自动跳过。
+    update_skinned_geometry();
 
     for (std::uintptr_t scene_handle : scene_handles) {
         const auto scene_begin = std::chrono::steady_clock::now();
@@ -344,11 +402,18 @@ void GeometrySystem::update() {
         std::vector<PendingLoad>   pending_loads;
         {
             // Phase 1: shared_lock — 收集候选、计算距离、决定转换（只读不写）
+            // 持读锁时必须只读：用 find() 而非 get_or_create()，后者会 try_emplace
+            // 改写 scenes map，在 shared_lock 下与并发读者构成 data race（UB）。
+            // scene 已在本帧前面的 unique_lock 段（L197/L228）创建，find 必命中；
+            // 万一不存在则跳过本阶段（无可剔除对象）。
             std::shared_lock lock(impl_->mtx);
-            auto& scene_state = impl_->get_or_create(scene_handle);
-            if (scene_state.cfg.enable_distance_culling && !cameras.empty()) {
+            auto scene_state_it = impl_->scenes.find(scene_handle);
+            if (scene_state_it != impl_->scenes.end()
+                && scene_state_it->second.cfg.enable_distance_culling && !cameras.empty()) {
+                auto& scene_state = scene_state_it->second;
                 std::unordered_set<Impl::Payload> candidates;
 
+                //仅收集预加载范围内的物体
                 for (const auto& [cam_pos, _] : cameras) {
                     std::vector<Impl::Payload> sphere_results;
                     scene_state.tree.query_sphere(cam_pos, scene_state.cfg.preload_distance, sphere_results);
@@ -357,12 +422,14 @@ void GeometrySystem::update() {
                     }
                 }
 
+                //保留所有非Unloaded状态的物体
                 for (const auto& [actor,state] : scene_state.actor_load_states) {
                     if (state != ActorLoadState::Unloaded) {
                         candidates.insert(actor);
                     }
                 }
 
+                //仅处理候选物体
                 for (auto actor : candidates) {
                     auto entry_it = scene_state.actor_to_entry.find(actor);
                     if (entry_it == scene_state.actor_to_entry.end()) continue;
@@ -370,14 +437,16 @@ void GeometrySystem::update() {
                     const auto& aabb = entry_it->second;
                     auto state_it = scene_state.actor_load_states.find(actor);
                     if (state_it == scene_state.actor_load_states.end()) continue;
-                    ActorLoadState state = state_it->second;
+                    ActorLoadState state = state_it->second;  // 值拷贝，只读
 
+                    // 计算物体到最近相机的欧氏距离
                     ktm::fvec3 center = aabb.center();
                     float min_distance = std::numeric_limits<float>::max();
                     for (const auto& [cam_pos,_] : cameras) {
                         min_distance = std::min(min_distance,ktm::distance(center,cam_pos));
                     }
 
+                    // 状态机转换（只记录决策，不修改状态 — 由 Phase 2 统一应用）
                     switch (state) {
                         case ActorLoadState::Loaded:
                             // 卸载不再由距离剔除直接触发，交给不可见帧淘汰
@@ -391,6 +460,7 @@ void GeometrySystem::update() {
                             break;
 
                         default:
+                            // 过渡状态不做任何操作，等待资源系统的完成事件
                             break;
                     }
                 }
@@ -426,7 +496,7 @@ void GeometrySystem::update() {
                     state_it->second = ActorLoadState::Unloading;
                     ++it;
                     } else {
-                        it = pending_unloads.erase(it);
+                        it = pending_unloads.erase(it);  // 状态已被异步事件改变，取消此事件
                     }
             }
 
@@ -504,30 +574,33 @@ void GeometrySystem::update() {
         // 统计信息：使用读锁遍历，独立 stats_mutex 写入，减少主锁竞争
         {
             std::shared_lock lock(impl_->mtx);
-            auto& scene_state = impl_->get_or_create(scene_handle);
+            // 只读查找：scene 必然已在本帧早先的 unique_lock 段（八叉树重建）创建。
+            // 不调用 get_or_create()——它会 try_emplace 改写 map，在 shared_lock 下是
+            // 数据竞争（与其他读者并发 rehash → UB）。
+            auto scene_it = impl_->scenes.find(scene_handle);
+            if (scene_it != impl_->scenes.end()) {
+                auto& scene_state = scene_it->second;
 
-            std::size_t loaded = 0, loading = 0, unloading = 0, unloaded = 0, offline_count = 0;
-            for (const auto& [actor_handle, state] : scene_state.actor_load_states) {
-                switch (state) {
-                    case ActorLoadState::Loaded:    loaded++; break;
-                    case ActorLoadState::Loading:   loading++; break;
-                    case ActorLoadState::Unloading: unloading++; break;
-                    case ActorLoadState::Unloaded:  unloaded++; break;
+                std::size_t loaded = 0, loading = 0, unloading = 0, unloaded = 0;
+                for (const auto& [actor_handle, state] : scene_state.actor_load_states) {
+                    switch (state) {
+                        case ActorLoadState::Loaded:    loaded++; break;
+                        case ActorLoadState::Loading:   loading++; break;
+                        case ActorLoadState::Unloading: unloading++; break;
+                        case ActorLoadState::Unloaded:  unloaded++; break;
+                    }
                 }
-                if (impl_->offline_actors.count(actor_handle) && impl_->offline_actors[actor_handle])
-                    offline_count++;
-            }
 
-            std::lock_guard stats_lock(scene_state.stats_mutex);
-            scene_state.stats.actor_total    = actor_handles.size();
-            scene_state.stats.actor_visible  = visible_actors.size();
-            scene_state.stats.actor_offline  = offline_count;
-            scene_state.stats.octree_entries = octree_entries.size();
-            scene_state.stats.last_query_ms = visible_query_ms_total;
-            scene_state.stats.actor_loaded    = loaded;
-            scene_state.stats.actor_loading   = loading;
-            scene_state.stats.actor_unloading = unloading;
-            scene_state.stats.actor_unloaded  = unloaded;
+                std::lock_guard stats_lock(scene_state.stats_mutex);
+                scene_state.stats.actor_total    = actor_handles.size();
+                scene_state.stats.actor_visible  = visible_actors.size();
+                scene_state.stats.octree_entries = octree_entries.size();
+                scene_state.stats.last_query_ms = visible_query_ms_total;
+                scene_state.stats.actor_loaded    = loaded;
+                scene_state.stats.actor_loading   = loading;
+                scene_state.stats.actor_unloading = unloading;
+                scene_state.stats.actor_unloaded  = unloaded;
+            }
         }
         auto scene_write = scene_storage.try_acquire_write(scene_handle);
         if (scene_write.valid()) {
@@ -1365,12 +1438,23 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
     // ---- 第 2 步：读取 actor 完整状态，构建 ActorStreamingRecord ----
     auto actor_read = hub.actor_storage().try_acquire_read(event.actor);
     if (!actor_read) return;
+    // ---- 第 2 步：读取 actor 和 transform 数据 ----
+    // 锁序约束：所有 Storage 读锁必须在获取 impl_->mtx（第 4 步）之前释放，
+    // 否则与 update()（impl_->mtx → Storage）形成 AB-BA 死锁环。
+    // 故将 actor_read 及其下游读锁全部限定在本作用域内，离开即释放。
+    Corona::Cache::ActorSnapshot snap;
+    {
+        auto actor_read = hub.actor_storage().try_acquire_read(event.actor);
+        if (!actor_read) return;
 
     // pinned 的 actor 不淘汰
     if (actor_read->pinned) return;
 
     Corona::Cache::ActorStreamingRecord rec;
     rec.pinned = actor_read->pinned;  // 写入快照，restore 时保留
+        snap.model_path    = actor_read->model_path;
+        snap.follow_camera = actor_read->follow_camera;
+        snap.profile_count = static_cast<int>(actor_read->profile_handles.size());
 
     // 身份
     rec.scene = event.scene;
@@ -1399,12 +1483,20 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
     for (auto profile_handle : actor_read->profile_handles) {
         auto profile = hub.profile_storage().try_acquire_read(profile_handle);
         if (!profile) continue;
+        // 读取第一个 profile 关联的 transform: profile → mechanics → geometry → transform
+        for (auto profile_handle : actor_read->profile_handles) {
+            auto profile = hub.profile_storage().try_acquire_read(profile_handle);
+            if (!profile) continue;
 
         // 从 profile.geometry_handle 收集
         if (profile->geometry_handle) {
             rec.geometry_handles.push_back(profile->geometry_handle);
             collect_rid_from_geometry(profile->geometry_handle);
         }
+            std::uintptr_t mech_handle = profile->mechanics_handle;
+            if (!mech_handle) continue;
+            auto mech = hub.mechanics_storage().try_acquire_read(mech_handle);
+            if (!mech) continue;
 
         // 从 profile.mechanics_handle → geometry 收集
         if (profile->mechanics_handle) {
@@ -1430,6 +1522,8 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
                 }
             }
         }
+            auto geom = hub.geometry_storage().try_acquire_read(mech->geometry_handle);
+            if (!geom || !geom->transform_handle) continue;
 
         // 从首个有效 profile 收集 optics_visible（独立于 transform）
         if (!optics_captured && profile->optics_handle) {
@@ -1440,6 +1534,21 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
             }
         }
     }
+            auto transform = hub.model_transform_storage().try_acquire_read(geom->transform_handle);
+            if (!transform) continue;
+
+            snap.position[0] = transform->position.x;
+            snap.position[1] = transform->position.y;
+            snap.position[2] = transform->position.z;
+            snap.euler_rotation[0] = transform->euler_rotation.x;
+            snap.euler_rotation[1] = transform->euler_rotation.y;
+            snap.euler_rotation[2] = transform->euler_rotation.z;
+            snap.scale[0] = transform->scale.x;
+            snap.scale[1] = transform->scale.y;
+            snap.scale[2] = transform->scale.z;
+            break;
+        }
+    }  // actor_read 及所有下游 Storage 读锁在此释放
 
     // ---- 第 3 步：存入 ActorCache ----
     if (!impl_->actor_cache->put(event.actor, rec)) {
@@ -2176,6 +2285,134 @@ void GeometrySystem::upload_lod_from_scene_data() {
 
             std::unique_lock lock(impl_->lod_cache_mutex);
             impl_->lod_cache.insert_or_assign(lod_key, std::move(entry));
+        }
+    }
+}
+
+// ============================================================================
+// update_skinned_geometry（P2）
+// 功能：每帧对蒙皮 actor 做 CPU 线性混合蒙皮（LBS），把结果重传到 GPU 顶点缓冲。
+// 调用时机：update() 中 upload_lod_from_scene_data() 之后。
+//
+// 数据流：Scene(绑定顶点+骨骼权重+骨架+动画) → compute_pose 算 final[] →
+//         skin_one_vertex 蒙皮 → write_bytes 重传 vertexBuffer/vertexStorageBuffer。
+//         蒙皮结果同时存入 GeometryDevice.skinned_cpu_vertices，供 P3(Vision)/P4(物理) 复用。
+//
+// 锁序：全程对 Scene 仅加共享读锁（播放期无人写 Scene），故"持 Scene 读 + 取
+//       geom 写"不会与 rebuild_actor_gpu_resources 的"持 geom 读 + 取 Scene 读"
+//       形成 ABBA 死锁（共享读锁可并存）。重 CPU 蒙皮在所有 storage 锁之外执行，
+//       仅以 brief 写锁推进 anim_time / 拷出 buffer 句柄 / 写回结果，最小化持锁时间。
+//
+// 自动循环：始终播放 animations[0]，anim_time 由 advance_anim_time 推进并 fmod 回绕。
+// ============================================================================
+void GeometrySystem::update_skinned_geometry() {
+    auto& resource_manager = Resource::ResourceManager::get_instance();
+    auto& hub = SharedDataHub::instance();
+    auto& geom_storage = hub.geometry_storage();
+
+    // ---- 计算 dt（首帧为 0）----
+    const auto now = std::chrono::steady_clock::now();
+    float dt = 0.0f;
+    if (impl_->last_skin_update_time.has_value()) {
+        dt = std::chrono::duration<float>(now - *impl_->last_skin_update_time).count();
+    }
+    impl_->last_skin_update_time = now;
+    if (dt > 0.1f) dt = 0.1f;  // 容错：断点/卡顿导致的大 dt 夹住，避免动画跳跃
+
+    // 先收集所有 geometry handle，避免在迭代 storage 期间持锁做重计算
+    std::vector<std::uintptr_t> geom_handles;
+    for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
+        const GeometryDevice& geom_dev = *it;
+        geom_handles.push_back(reinterpret_cast<std::uintptr_t>(&geom_dev));
+    }
+
+    for (auto geom_handle : geom_handles) {
+        // ---- 第 1 步：读取 model_resource_handle（brief 读锁）----
+        std::uintptr_t model_resource_handle = 0;
+        {
+            auto geom_read = geom_storage.try_acquire_read(geom_handle);
+            if (!geom_read) continue;
+            model_resource_handle = geom_read->model_resource_handle;
+        }
+        if (model_resource_handle == 0) continue;
+
+        // ---- 第 2 步：解析 model_id ----
+        std::uint64_t model_id = 0;
+        if (auto model_res = hub.model_resource_storage().try_acquire_read(model_resource_handle)) {
+            model_id = model_res->model_id;
+        }
+        if (model_id == 0) continue;
+
+        // ---- 第 3 步：取 Scene，判断是否蒙皮（非蒙皮直接跳过）----
+        auto scene_read = resource_manager.acquire_read<Resource::Scene>(model_id);
+        if (!scene_read.valid()) continue;
+        const Resource::Scene& scene = *scene_read;
+        if (!scene.data.skeleton.has_value() || scene.data.animations.empty()) continue;
+
+        const Resource::SkeletonData& skeleton = *scene.data.skeleton;
+        const Resource::AnimationClip& clip = scene.data.animations[0];  // 自动循环第 0 个
+
+        // ---- 第 4 步：brief 写锁推进 anim_time + 拷出 buffer 句柄 ----
+        // HardwareBuffer 为引用计数句柄，可拷贝；拷出后锁外做蒙皮+write_bytes。
+        float anim_time = 0.0f;
+        std::vector<Horizon::HardwareBuffer> vbufs;
+        std::vector<Horizon::HardwareBuffer> vstoragebufs;
+        std::size_t mesh_count = 0;
+        {
+            auto geom_write = geom_storage.try_acquire_write(geom_handle);
+            if (!geom_write) continue;
+            geom_write->is_skinned = true;
+            geom_write->anim_time = Resource::advance_anim_time(geom_write->anim_time, dt, clip);
+            anim_time = geom_write->anim_time;
+            mesh_count = geom_write->mesh_handles.size();
+            vbufs.reserve(mesh_count);
+            vstoragebufs.reserve(mesh_count);
+            for (auto& md : geom_write->mesh_handles) {
+                vbufs.push_back(md.vertexBuffer);
+                vstoragebufs.push_back(md.vertexStorageBuffer);
+            }
+        }
+        if (mesh_count == 0) continue;
+
+        // ---- 第 5 步：锁外计算骨骼最终矩阵（每 geom 一次）----
+        std::vector<std::array<float, 16>> finals;
+        Resource::compute_pose(skeleton, clip, anim_time, finals);
+
+        // ---- 第 6 步：锁外 CPU 蒙皮每个 mesh + 重传 GPU ----
+        // skinned_cpu_vertices：每 mesh 一份原始字节（布局即 Resource::Vertex 数组），
+        // P3(Vision)/P4(物理) 复用同一数据源。
+        std::vector<std::vector<std::byte>> skinned_blobs(mesh_count);
+        for (std::size_t mesh_idx = 0;
+             mesh_idx < mesh_count && mesh_idx < scene.data.meshes.size(); ++mesh_idx) {
+            const Resource::MeshData& mesh = scene.data.meshes[mesh_idx];
+            // 该 mesh 非蒙皮（混合场景）或数据不一致 → 跳过（保留其原顶点缓冲不动）
+            if (mesh.bone_weights.empty() ||
+                mesh.bone_weights.size() != mesh.vertices.size()) {
+                continue;
+            }
+
+            std::vector<Resource::Vertex> skinned(mesh.vertices.size());
+            for (std::size_t v = 0; v < mesh.vertices.size(); ++v) {
+                skinned[v] = skin_one_vertex(mesh.vertices[v], mesh.bone_weights[v], finals);
+            }
+
+            // 转字节并重传（vertexBuffer 供光栅，vertexStorageBuffer 供 material_resolve compute）
+            auto src = std::as_bytes(std::span<const Resource::Vertex>(skinned.data(), skinned.size()));
+            auto& blob = skinned_blobs[mesh_idx];
+            blob.assign(src.begin(), src.end());
+
+            if (mesh_idx < vbufs.size() && vbufs[mesh_idx]) {
+                (void)vbufs[mesh_idx].write_bytes(std::span<const std::byte>(blob.data(), blob.size()));
+            }
+            if (mesh_idx < vstoragebufs.size() && vstoragebufs[mesh_idx]) {
+                (void)vstoragebufs[mesh_idx].write_bytes(std::span<const std::byte>(blob.data(), blob.size()));
+            }
+        }
+
+        // ---- 第 7 步：brief 写锁存回蒙皮结果（供 P3/P4 消费）----
+        {
+            auto geom_write = geom_storage.try_acquire_write(geom_handle);
+            if (geom_write) geom_write->skinned_cpu_vertices = std::move(skinned_blobs);
         }
     }
 }
