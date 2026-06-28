@@ -42,7 +42,7 @@ except Exception:
 def _create_lanchat_scene_composer():
     from .cai_extensions.agent.scene_composer import SceneComposer
 
-    return SceneComposer(scene_name="lanchat_scene")
+    return SceneComposer(scene_name="Scene/default.scene")
 
 
 @PluginBase.register_web("AITool")

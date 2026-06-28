@@ -9,8 +9,6 @@ from CoronaCore.core.components import Optics
 from CoronaCore.core import network_sync_policy
 from CoronaCore.core.corona_editor import CoronaEditor
 from CoronaPlugin.core.corona_plugin_base import PluginBase
-from CoronaCore.core.entities import Actor
-from CoronaCore.core.entities.camera import Camera
 from CoronaCore.core.managers import scene_manager
 from CoronaCore.utils.file_handler import FileHandler
 
@@ -1296,55 +1294,6 @@ class SceneTools(PluginBase):
         return prepare_external_live_vision_scene(scene)
 
     @staticmethod
-    def create_camera_view(scene_name: str, name: str = None) -> dict:
-        try:
-            scene = scene_manager.get(scene_name)
-            if scene is None:
-                raise ValueError(f"Scene '{scene_name}' not found")
-            source = scene.get_active_camera()
-            if source is None:
-                raise ValueError("No source camera is available")
-
-            existing_names = {camera.name for camera in scene.get_cameras()}
-            base_name = name or "Camera"
-            candidate = base_name
-            suffix = 1
-            while candidate in existing_names:
-                candidate = f"{base_name}_{suffix}"
-                suffix += 1
-
-            index = len(scene.get_cameras())
-            camera = Camera(
-                position=list(source.get_position()),
-                forward=list(source.get_forward()),
-                world_up=list(source.get_world_up()),
-                fov=float(source.get_fov()),
-                name=candidate,
-                width=source.width,
-                height=source.height,
-                render_backend=source.get_render_backend(),
-                output_mode=source.get_output_mode(),
-                vision_render_mode=(
-                    source.get_vision_render_mode()
-                    if hasattr(source, "get_vision_render_mode")
-                    else getattr(source, "vision_render_mode", "path_tracing")
-                ),
-                move_speed=source.move_speed,
-                view_open=True,
-                view_x=120 + index * 36,
-                view_y=120 + index * 36,
-                view_width=960,
-                view_height=540,
-            )
-            camera.set_surface(0)
-            scene.add_camera_to_scene(camera)
-            scene._notify_scene_tree_changed()
-            return {"status": "success", "camera": SceneTools._camera_view_payload(scene, camera)}
-        except Exception as exc:
-            logger.exception("create_camera_view failed")
-            return {"status": "error", "message": str(exc)}
-
-    @staticmethod
     def open_camera_view(scene_name: str, camera_name: str) -> dict:
         try:
             scene = scene_manager.get(scene_name)
@@ -1564,57 +1513,53 @@ class SceneTools(PluginBase):
                     abs_path,
                     model_path,
                 )
-                actor = _find_actor_by_guid(
-                    scene, previous_binding.get("actor_guid", "") if previous_binding else "")
                 transform = (
                     _extract_vision_primitive_proxy_transform(shape)
                     if shape_type in _SUPPORTED_VISION_PRIMITIVES
                     else _extract_vision_shape_transform(shape)
                 )
-                if actor is None:
-                    actor_guid = (
-                        previous_binding.get("actor_guid", "") if previous_binding else ""
-                    ) or f"actor-{uuid.uuid4().hex}"
-                    actor_data = {
-                        "actor_guid": actor_guid,
-                        "_suppress_network_broadcast": True,
-                        "geometry": transform,
-                    }
-                    actor = Actor(
-                        name=(_vision_proxy_name(shape, shape_type, shape_index)
-                              if shape_type in _SUPPORTED_VISION_PRIMITIVES
-                              else _vision_shape_name(shape, model_path, shape_index)),
-                        route=actor_route,
-                        actor_type="model",
-                        parent_scene=scene,
-                        actor_data=actor_data,
+                actor_guid = (
+                    previous_binding.get("actor_guid", "") if previous_binding else ""
+                ) or f"actor-{uuid.uuid4().hex}"
+                actor_name = (
+                    _vision_proxy_name(shape, shape_type, shape_index)
+                    if shape_type in _SUPPORTED_VISION_PRIMITIVES
+                    else _vision_shape_name(shape, model_path, shape_index)
+                )
+                actor_data = {
+                    "actor_guid": actor_guid,
+                    "actor_name": actor_name,
+                    "name": actor_name,
+                    "geometry": transform,
+                    "physics_enabled": False,
+                    "skip_if_exists": True,
+                    "update_if_exists": True,
+                }
+                raw = CoronaEditor.CoronaEngine.create_editor_actor(
+                    getattr(scene, "route", scene_name),
+                    actor_route,
+                    "model",
+                    json.dumps(actor_data, ensure_ascii=False),
+                )
+                try:
+                    native_result = json.loads(raw) if isinstance(raw, str) else raw
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"native Vision proxy create returned invalid JSON: {raw!r}"
+                    ) from exc
+                if not isinstance(native_result, dict) or native_result.get("status") not in ("success", "ok"):
+                    raise RuntimeError(
+                        str(native_result.get("message") if isinstance(native_result, dict) else native_result)
                     )
-                    scene.add_actor(actor)
-                    if hasattr(actor, "set_physics_enabled"):
-                        try:
-                            actor.set_physics_enabled(False)
-                        except Exception as exc:
-                            logger.warning("Failed to disable physics for Vision proxy %s: %s",
-                                           getattr(actor, "name", actor_guid), exc)
-                    created_proxy_count += 1
-                else:
-                    if hasattr(actor, "set_position"):
-                        actor.set_position(transform["position"], True)
-                    if hasattr(actor, "set_rotation"):
-                        actor.set_rotation(transform["rotation"], True)
-                    if hasattr(actor, "set_scale"):
-                        actor.set_scale(transform["scale"], True)
-                    if hasattr(actor, "set_physics_enabled"):
-                        try:
-                            actor.set_physics_enabled(False)
-                        except Exception as exc:
-                            logger.warning("Failed to disable physics for Vision proxy %s: %s",
-                                           getattr(actor, "name", ""), exc)
+                native_actor = native_result.get("actor") or {}
+                if native_result.get("existed"):
                     reused_proxy_count += 1
+                else:
+                    created_proxy_count += 1
 
                 binding = {
-                    "actor_guid": getattr(actor, "actor_guid", ""),
-                    "actor_name": getattr(actor, "name", ""),
+                    "actor_guid": native_actor.get("actor_guid", actor_guid),
+                    "actor_name": native_actor.get("name", actor_name),
                     "shape_guid": _vision_shape_guid(shape, json_path),
                     "shape_index": shape_index,
                     "json_path": json_path,
@@ -1626,8 +1571,6 @@ class SceneTools(PluginBase):
                     native_correction = _vision_model_native_local_correction(model_path)
                     if native_correction:
                         binding.update(native_correction)
-                if hasattr(actor, "set_external_vision_binding"):
-                    actor.set_external_vision_binding(binding)
                 new_bindings.append(binding)
 
             active_actor_guids = {binding.get("actor_guid", "") for binding in new_bindings}
@@ -1641,8 +1584,6 @@ class SceneTools(PluginBase):
             CoronaEditor.CoronaEngine.load_vision_scene(runtime_path or abs_path)
             if active_camera is not None:
                 active_camera.set_render_backend("vision")
-                if hasattr(scene.engine_scene, "set_active_camera"):
-                    scene.engine_scene.set_active_camera(getattr(active_camera, "engine_obj", active_camera))
                 scene.save_data()
             scene._notify_scene_tree_changed()
             logger.info(

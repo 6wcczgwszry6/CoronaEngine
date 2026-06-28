@@ -370,7 +370,7 @@ class SceneSession:
         *,
         diff_tracker: Any = None,
         engine_gate: Any = None,
-        scene_name: str = "lanchat_scene",
+        scene_name: str = "Scene/default.scene",
     ) -> None:
         self.scene_layout = scene_layout
         self.diff_tracker = diff_tracker

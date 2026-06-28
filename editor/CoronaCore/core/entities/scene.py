@@ -8,7 +8,6 @@ from typing import List, Optional, Dict, Any
 import zlib
 from .actor import Actor
 from .environment import Environment
-from .camera import Camera
 
 from ..corona_editor import CoronaEditor
 from ...utils.proejct_utils import auto_save
@@ -50,10 +49,200 @@ def _decode_vision_document(data: str) -> Dict[str, Any]:
     return document
 
 
+class NativeSceneRecord:
+    """Python metadata proxy for the C++ native editor scene."""
+
+    def __init__(self, route: str):
+        self.route = route
+        self._enabled = True
+        self._simulation_enabled = True
+
+    def set_environment(self, environment):
+        return None
+
+    def set_sun_direction(self, direction):
+        return None
+
+    def set_enabled(self, enabled: bool):
+        self._enabled = bool(enabled)
+
+    def is_enabled(self) -> bool:
+        return self._enabled
+
+    def set_simulation_enabled(self, enabled: bool):
+        self._simulation_enabled = bool(enabled)
+
+    def is_simulation_enabled(self) -> bool:
+        return self._simulation_enabled
+
+    def get_aabb(self):
+        get_bounds = getattr(CoronaEngine, "get_editor_scene_bounds", None)
+        if callable(get_bounds):
+            try:
+                raw = get_bounds(self.route)
+                result = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(result, dict) and result.get("status") in ("success", "ok"):
+                    aabb = result.get("aabb")
+                    if isinstance(aabb, list) and len(aabb) >= 6:
+                        return aabb[:6]
+            except Exception as exc:
+                logger.debug("NativeSceneRecord get_aabb failed scene=%s: %s", self.route, exc)
+        return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+
+class NativeCameraRecord:
+    """Python metadata view for a C++ native editor camera."""
+
+    def __init__(self, scene_route: str, name: str, camera_id: str = "",
+                 position=None, forward=None, world_up=None, fov: float = 45.0,
+                 width: int = 1920, height: int = 1080,
+                 render_backend: str = "native", output_mode: str = "final_color",
+                 vision_render_mode: str = "path_tracing", move_speed: float = 1.0,
+                 view_open: bool = False, view_x: int = 120, view_y: int = 120,
+                 view_width: int = 960, view_height: int = 540,
+                 deletable: bool = True):
+        self.scene_route = scene_route
+        self.name = name
+        self.camera_id = camera_id or f"{scene_route}#{name}"
+        self._pos = list(position or [0.0, 0.0, -5.0])
+        self._fwd = list(forward or [0.0, 0.0, 1.0])
+        self._up = list(world_up or [0.0, 1.0, 0.0])
+        self._fov = float(fov)
+        self.width = int(width)
+        self.height = int(height)
+        self.render_backend = render_backend or "native"
+        self.output_mode = output_mode or "final_color"
+        self.vision_render_mode = vision_render_mode or "path_tracing"
+        self.move_speed = float(move_speed)
+        self.view_open = bool(view_open)
+        self.view_x = int(view_x)
+        self.view_y = int(view_y)
+        self.view_width = int(view_width)
+        self.view_height = int(view_height)
+        self.deletable = bool(deletable)
+
+    def set(self, position, forward, world_up, fov: float):
+        self._pos = list(position)
+        self._fwd = list(forward)
+        self._up = list(world_up)
+        self._fov = float(fov)
+
+    def get_position(self):
+        return list(self._pos)
+
+    def get_forward(self):
+        return list(self._fwd)
+
+    def get_world_up(self):
+        return list(self._up)
+
+    def get_fov(self):
+        return self._fov
+
+    def set_output_mode(self, mode: str):
+        self.output_mode = mode or self.output_mode
+
+    def get_output_mode(self) -> str:
+        return self.output_mode
+
+    def set_render_backend(self, mode: str):
+        self.render_backend = mode or self.render_backend
+
+    def get_render_backend(self) -> str:
+        return self.render_backend
+
+    def set_vision_render_mode(self, mode: str):
+        if mode:
+            self.vision_render_mode = mode
+
+    def get_vision_render_mode(self) -> str:
+        return self.vision_render_mode
+
+    def set_size(self, width: int, height: int):
+        self.width = max(int(width), 1)
+        self.height = max(int(height), 1)
+
+    def refresh_size(self):
+        return {"width": self.width, "height": self.height}
+
+    def set_view_state(self, open_: bool, x: int, y: int,
+                       width: int, height: int, move_speed: Optional[float] = None):
+        self.view_open = bool(open_)
+        self.view_x = int(x)
+        self.view_y = int(y)
+        self.view_width = max(int(width), 1)
+        self.view_height = max(int(height), 1)
+        if move_speed is not None:
+            self.move_speed = max(float(move_speed), 0.01)
+
+    def refresh_view_state(self):
+        return {
+            "open": self.view_open,
+            "x": self.view_x,
+            "y": self.view_y,
+            "width": self.view_width,
+            "height": self.view_height,
+            "move_speed": self.move_speed,
+        }
+
+    def set_surface(self, surface: int):
+        return None
+
+    def save_screenshot_sync(self, path: str):
+        capture = getattr(CoronaEngine, "capture_editor_camera_view", None)
+        if not callable(capture):
+            return False
+        payload = {
+            "position": self._pos,
+            "forward": self._fwd,
+            "world_up": self._up,
+            "fov": self._fov,
+            "width": self.width,
+            "height": self.height,
+            "output_mode": self.output_mode,
+            "render_backend": self.render_backend,
+            "vision_render_mode": self.vision_render_mode,
+        }
+        try:
+            raw = capture(self.scene_route, self.name, json.dumps(payload, ensure_ascii=False), path)
+            result = json.loads(raw) if isinstance(raw, str) else raw
+            return isinstance(result, dict) and result.get("status") in ("success", "ok")
+        except Exception as exc:
+            logger.warning("NativeCameraRecord screenshot failed scene=%s camera=%s: %s",
+                           self.scene_route, self.name, exc)
+            return False
+
+    def save_screenshot(self, path: str):
+        return self.save_screenshot_sync(path)
+
+    def to_dict(self):
+        return {
+            "id": self.camera_id,
+            "camera_id": self.camera_id,
+            "name": self.name,
+            "position": self.get_position(),
+            "forward": self.get_forward(),
+            "world_up": self.get_world_up(),
+            "fov": self.get_fov(),
+            "width": self.width,
+            "height": self.height,
+            "output_mode": self.output_mode,
+            "render_backend": self.render_backend,
+            "vision_render_mode": self.vision_render_mode,
+            "move_speed": self.move_speed,
+            "view_open": self.view_open,
+            "view_x": self.view_x,
+            "view_y": self.view_y,
+            "view_width": self.view_width,
+            "view_height": self.view_height,
+            "deletable": self.deletable,
+        }
+
+
 class Scene:
     """
     场景包装类：仅管理对象引用，生命周期由外部管理。
-    采用 OOP API：引擎 Scene 仅支持 Environment/Actor/Camera 管理。
+    Python 层只保留 .scene 持久化与兼容查询，运行态由 C++ native scene 管理。
     """
 
     def __init__(self, route):
@@ -62,18 +251,14 @@ class Scene:
         self.name = Path(route).stem
         self.file_data = configparser.ConfigParser()
 
-        # 创建引擎场景对象（OOP API）
         if CoronaEngine is None:
             raise RuntimeError("CoronaEngine 未初始化")
-        SceneCtor = getattr(CoronaEngine, 'Scene', None)
-        if SceneCtor is None:
-            raise RuntimeError("CoronaEngine 未提供 Scene 构造器")
-        self.engine_scene = SceneCtor()
+        self.engine_scene = NativeSceneRecord(self.route)
 
         # 引用列表（Python 层）
         self._actors: List[Actor] = []
-        self._cameras: List[Camera] = []
-        self._main_camera: Optional[Camera] = None
+        self._cameras: List[NativeCameraRecord] = []
+        self._main_camera: Optional[NativeCameraRecord] = None
 
         # 环境对象（Python 层）- 自动创建默认环境
         self._environment: Optional[Environment] = None
@@ -96,8 +281,6 @@ class Scene:
         self.vision_unsupported_shapes: List[Dict[str, Any]] = []
 
         self.read_data()
-        # 场景创建后补齐默认相机（幂等）
-        self.ensure_default_camera()
         # 应用保存的相机数据
         self._apply_pending_camera_data()
 
@@ -177,31 +360,10 @@ class Scene:
                 grid_enabled = self.file_data['grid'].getboolean('enabled', True)
                 self.set_floor_grid(grid_enabled, True)
 
-            # 读取演员数据 - 构建JSON数据
-            if 'actors' in self.file_data:
-                actors_section = self.file_data['actors']
-                # 收集所有演员的键
-                actor_keys = set()
-                for key in actors_section:
-                    if '.' in key:
-                        actor_name = key.split('.')[0]
-                        actor_keys.add(actor_name)
-
-                # 为每个演员构建JSON数据
-                for actor_name in actor_keys:
-                    try:
-                        actor_data = self._build_actor_json(actors_section, actor_name)
-                        source_index = sum(1 for a in self._actors if a.name == actor_data['name'])
-                        # 创建 Actor 对象（传递JSON字符串）
-                        actor = Actor(actor_name, actor_data['route'], source_index, actor_data['actor_type'],
-                                      parent_scene=self, actor_data=actor_data)
-                        if actor:
-                            self._actors.append(actor)
-                            # 同步注册到 C++ 引擎的 SceneDevice，否则 MechanicsSystem 等无法遍历到
-                            if hasattr(self.engine_scene, 'add_actor') and hasattr(actor, 'engine_obj'):
-                                self.engine_scene.add_actor(actor.engine_obj)
-                    except Exception as e:
-                        logger.warning("Scene '%s': 加载 actor '%s' 失败，已跳过：%s", self.name, actor_name, e)
+            # Actor runtime/state is owned by the C++ native editor scene.
+            # Keep the INI section available for compatibility, but never
+            # instantiate Python Actor objects from it here. Otherwise stale
+            # Python _actors can overwrite native deletes/imports on save.
 
             # 读取脚本数据
             if 'scripts' in self.file_data:
@@ -256,12 +418,11 @@ class Scene:
 
         while len(self._cameras) < camera_count:
             camera_index = len(self._cameras)
-            camera = Camera(
+            camera = NativeCameraRecord(
+                scene_route=self.route,
                 name=f"{self.name}_Camera{camera_index}",
                 deletable=camera_index != 0)
-            camera.set_surface(0)
             self._cameras.append(camera)
-            self.engine_scene.add_camera(camera.engine_obj)
 
         for i, cam in enumerate(self._cameras[:camera_count]):
             prefix = f'camera{i}'
@@ -312,8 +473,24 @@ class Scene:
             self._cameras[0] if self._cameras else None)
         if active is not None:
             self._main_camera = active
-            self.engine_scene.set_active_camera(active.engine_obj)
         self._pending_camera_data = {}
+
+    def _preserve_native_actors_section(self, data_path: str) -> None:
+        """Keep the C++ native scene as the owner of [actors]."""
+        disk_data = configparser.ConfigParser()
+        if os.path.exists(data_path):
+            try:
+                disk_data.read(data_path, encoding='utf-8')
+            except Exception as exc:
+                logger.warning("Scene '%s': failed to preserve native actors section: %s",
+                               self.name, exc)
+
+        if 'actors' in self.file_data:
+            self.file_data.remove_section('actors')
+        if 'actors' in disk_data:
+            self.file_data.add_section('actors')
+            for key, value in disk_data['actors'].items():
+                self.file_data.set('actors', key, value)
 
     def save_data(self):
         # 保存文件数据
@@ -322,8 +499,9 @@ class Scene:
         else:
             data_path = os.path.join(_active_project_path() or '', self.route)
 
-        # 确保必要的 section 存在
-        for section in ('base', 'sun', 'grid', 'actors', 'scripts', 'terrain'):
+        # 确保必要的 section 存在。actors 由 C++ native scene 持久化，
+        # Python save_data 只保留磁盘上的当前 actors section，不重新生成。
+        for section in ('base', 'sun', 'grid', 'scripts', 'terrain'):
             if section not in self.file_data:
                 self.file_data[section] = {}
 
@@ -340,63 +518,7 @@ class Scene:
         if env and hasattr(env, 'get_floor_grid'):
             self.file_data['grid']['enabled'] = 'true' if env.get_floor_grid() else 'false'
 
-        # 演员数据
-        self.file_data['actors'] = {}
-        used_keys = {}  # 记录已使用的 key，处理同名 actor
-        for i, actor in enumerate(self._actors):
-            # 使用 actor 的 name 属性或生成一个默认名称
-            actor_name = getattr(actor, 'name', f'actor{i + 1}')
-
-            # 确保序列化 key 唯一：同名时追加序号
-            if actor_name in used_keys:
-                used_keys[actor_name] += 1
-                actor_key = f"{actor_name}_{used_keys[actor_name]}"
-            else:
-                used_keys[actor_name] = 0
-                actor_key = actor_name
-
-            self.file_data['actors'][f'{actor_key}.actor_type'] = getattr(actor, 'actor_type', 'actor')
-            self.file_data['actors'][f'{actor_key}.name'] = actor_name
-            self.file_data['actors'][f'{actor_key}.route'] = getattr(actor, 'route', '')
-            actor_guid = getattr(actor, 'actor_guid', '')
-            if actor_guid:
-                self.file_data['actors'][f'{actor_key}.actor_guid'] = actor_guid
-            if hasattr(actor, 'get_follow_camera'):
-                self.file_data['actors'][f'{actor_key}.follow_camera'] = (
-                    'true' if actor.get_follow_camera() else 'false'
-                )
-            if hasattr(actor, 'get_physics_enabled'):
-                try:
-                    self.file_data['actors'][f'{actor_key}.mechanics.physics_enabled'] = (
-                        'true' if actor.get_physics_enabled() else 'false'
-                    )
-                except Exception:
-                    pass
-
-            # 获取几何体属性
-            if hasattr(actor, '_geometry'):
-                position = actor.get_position()
-                rotation = actor.get_rotation()
-                scale = actor.get_scale()
-
-                self.file_data['actors'][
-                    f'{actor_key}.geometry.position'] = _format_float3(position)
-                self.file_data['actors'][
-                    f'{actor_key}.geometry.rotation'] = _format_float3(rotation)
-                self.file_data['actors'][
-                    f'{actor_key}.geometry.scale'] = _format_float3(scale)
-
-                # 持久化物理开关，使运行时关掉的物理能存进 .scene、F5 冷重载时读回。
-                # 否则 INI 不带此字段 → 重载默认物理开启 → AI 摆放的物体互相穿插被
-                # 求解器推得东歪西斜（甚至死循环）。只写显式取得到的值，取不到则不写
-                # （保持向后兼容：老场景/无 mechanics 的 actor 行为不变）。
-                if hasattr(actor, 'get_physics_enabled'):
-                    try:
-                        self.file_data['actors'][
-                            f'{actor_key}.mechanics.physics_enabled'] = str(
-                                bool(actor.get_physics_enabled())).lower()
-                    except Exception:
-                        pass
+        self._preserve_native_actors_section(data_path)
 
         # 脚本数据
         self.file_data['scripts']["path"] = getattr(self, 'script_path', '')
@@ -498,80 +620,82 @@ class Scene:
 
     @auto_save
     def add_actor(self, actor: Actor, rescene: bool = False) -> bool:
-        if actor in self._actors and not rescene:
+        if actor is None:
             return False
-        # 自动处理同名冲突：追加后缀 _1, _2, ...
-        if not rescene:
-            existing_names = {a.name for a in self._actors}
-            base_name = actor.name
-            suffix = 1
-            while actor.name in existing_names:
-                actor.name = f"{base_name}_{suffix}"
-                suffix += 1
-            self._actors.append(actor)
-        if hasattr(self.engine_scene, 'add_actor'):
-            self.engine_scene.add_actor(actor.engine_obj)
+        create_editor_actor = getattr(CoronaEngine, 'create_editor_actor', None)
+        if not callable(create_editor_actor):
+            logger.warning("Scene.add_actor ignored: native create_editor_actor unavailable")
+            return False
+
+        actor_data = {
+            "actor_name": getattr(actor, 'name', ''),
+            "name": getattr(actor, 'name', ''),
+            "actor_guid": getattr(actor, 'actor_guid', ''),
+            "skip_if_exists": True,
+        }
+        for key, getter_name in (
+            ("position", "get_position"),
+            ("rotation", "get_rotation"),
+            ("scale", "get_scale"),
+        ):
+            getter = getattr(actor, getter_name, None)
+            if callable(getter):
+                try:
+                    actor_data[key] = list(getter())
+                except Exception:
+                    pass
+        physics_getter = getattr(actor, 'get_physics_enabled', None)
+        if callable(physics_getter):
+            try:
+                actor_data["physics_enabled"] = bool(physics_getter())
+            except Exception:
+                pass
+
+        raw = create_editor_actor(
+            self.route,
+            getattr(actor, 'route', ''),
+            getattr(actor, 'actor_type', 'model'),
+            json.dumps(actor_data, ensure_ascii=False),
+        )
+        try:
+            result = json.loads(raw) if isinstance(raw, str) else raw
+            native_actor = result.get("actor") if isinstance(result, dict) else None
+            if isinstance(native_actor, dict):
+                actor.name = native_actor.get("name", getattr(actor, 'name', ''))
+                actor.actor_guid = native_actor.get("actor_guid", getattr(actor, 'actor_guid', ''))
+        except Exception:
+            logger.debug("Scene.add_actor native result could not be parsed: %r", raw)
         self._notify_scene_tree_changed()
         return True
 
     @auto_save
     def remove_actor(self, actor: Actor, rescene: bool = False) -> bool:
-        if actor not in self._actors:
-            return False
-        should_broadcast_delete = not (
-            getattr(actor, "network_remote", False) or
-            getattr(actor, "_suppress_network_broadcast", False) or
-            rescene
-        )
-        delete_payload = {
-            "scene": self.route,
-            "actor_guid": getattr(actor, "actor_guid", ""),
-            "actor_name": getattr(actor, "name", ""),
-        }
-        del actor._optics
-        if not rescene:
-            self._actors.remove(actor)
-        if hasattr(self.engine_scene, 'remove_actor'):
-            self.engine_scene.remove_actor(actor.engine_obj)
-        self._notify_scene_tree_changed()
-        if should_broadcast_delete and (delete_payload["actor_guid"] or delete_payload["actor_name"]):
-            try:
-                CoronaEditor.emit_editor_event("actor-delete-sync-broadcast", [delete_payload])
-            except Exception as exc:
-                logger.warning("Actor delete network broadcast failed for %s: %s",
-                               delete_payload["actor_guid"] or delete_payload["actor_name"], exc)
-        return True  # 返回True触发auto_save
+        logger.warning("Scene.remove_actor ignored: actor deletion is owned by C++ native scene")
+        return False
 
     @auto_save
     def clear_actors(self, rescene: bool = False) -> bool:
-        for actor in self._actors.copy():
-            self.remove_actor(actor, rescene)
-        return True
+        logger.warning("Scene.clear_actors ignored: actor deletion is owned by C++ native scene")
+        return False
 
     # 相机管理
     @auto_save
-    def add_camera_to_scene(self, camera: Camera) -> bool:
+    def add_camera_to_scene(self, camera: NativeCameraRecord) -> bool:
         if camera in self._cameras:
             return False
         self._cameras.append(camera)
-        self.engine_scene.add_camera(getattr(camera, 'engine_obj', camera))
         if self._main_camera is None:
             camera.deletable = False
             self._main_camera = camera
-            if hasattr(self.engine_scene, 'set_active_camera'):
-                self.engine_scene.set_active_camera(getattr(camera, 'engine_obj', camera))
         return True
 
     @auto_save
-    def remove_camera_from_scene(self, camera: Camera) -> bool:
+    def remove_camera_from_scene(self, camera: NativeCameraRecord) -> bool:
         if camera not in self._cameras:
             return False
         self._cameras.remove(camera)
-        self.engine_scene.remove_camera(getattr(camera, 'engine_obj', camera))
         if self._main_camera is camera:
             self._main_camera = self._cameras[0] if self._cameras else None
-            if self._main_camera is not None and hasattr(self.engine_scene, 'set_active_camera'):
-                self.engine_scene.set_active_camera(getattr(self._main_camera, 'engine_obj', self._main_camera))
         return True
 
     @auto_save
@@ -581,7 +705,7 @@ class Scene:
         self._main_camera = None
         return True
 
-    def get_cameras(self) -> List[Camera]:
+    def get_cameras(self) -> List[NativeCameraRecord]:
         return self._cameras.copy()
 
     # 查询
@@ -707,23 +831,21 @@ class Scene:
         created = False
 
         if not self._cameras:
-            camera = Camera(name=f"{self.name}_MainCamera", deletable=False)
+            camera = NativeCameraRecord(
+                scene_route=self.route,
+                name=f"{self.name}_MainCamera",
+                deletable=False)
             self._cameras.append(camera)
-            self.engine_scene.add_camera(getattr(camera, 'engine_obj', camera))
             self._main_camera = camera
-            if hasattr(self.engine_scene, 'set_active_camera'):
-                self.engine_scene.set_active_camera(getattr(camera, 'engine_obj', camera))
             created = True
 
         if self._main_camera is None:
             self._main_camera = self._cameras[0]
             self._main_camera.deletable = False
-            if hasattr(self.engine_scene, 'set_active_camera'):
-                self.engine_scene.set_active_camera(getattr(self._main_camera, 'engine_obj', self._main_camera))
 
         return created
 
-    def get_active_camera(self) -> Optional[Camera]:
+    def get_active_camera(self) -> Optional[NativeCameraRecord]:
         self.ensure_default_camera()
         if not self._cameras:
             return None
@@ -731,7 +853,7 @@ class Scene:
             return self._main_camera
         return self._cameras[0]
 
-    def find_camera(self, camera_name: Optional[str]) -> Optional[Camera]:
+    def find_camera(self, camera_name: Optional[str]) -> Optional[NativeCameraRecord]:
         if not camera_name:
             return self.get_active_camera()
 
@@ -753,9 +875,7 @@ class Scene:
         camera = self.find_camera(camera_name)
 
         if camera is not None:
-            self._main_camera = camera if isinstance(camera, Camera) else self._main_camera
-            if hasattr(self.engine_scene, 'set_active_camera'):
-                self.engine_scene.set_active_camera(getattr(camera, 'engine_obj', camera))
+            self._main_camera = camera
 
             logger.info("Scene.set_camera scene=%s camera=%s camera_type=%s",
                         self.name,

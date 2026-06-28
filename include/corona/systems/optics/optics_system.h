@@ -11,6 +11,7 @@
 #include <corona/systems/optics/vision_scene_resource.h>
 #endif
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -327,11 +328,13 @@ class OpticsSystem : public Kernel::SystemBase {
         std::uintptr_t camera_handle = 0;
         std::string file_path;
         std::shared_ptr<std::promise<bool>> completion_promise;
+        std::chrono::steady_clock::time_point expires_at{};
     };
     std::vector<PendingScreenshot> pending_screenshots_;
     std::mutex screenshot_mutex_;
     bool has_pending_screenshot(std::uintptr_t camera_handle);
     void fail_pending_screenshots(std::uintptr_t camera_handle);
+    void fail_expired_pending_screenshots();
     void fail_unrenderable_pending_screenshots();
     Kernel::EventId screenshot_request_sub_id_ = 0;
     Kernel::EventId backend_switch_sub_id_ = 0;

@@ -3,8 +3,6 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import os
-import queue
-import threading
 import time
 from typing import Any, Dict, List
 
@@ -281,57 +279,6 @@ def generate_single_item(
     return result
 
 
-def _drain_queue(q: "queue.Queue[Any]") -> None:
-    """排空队列直到收到 None 终止标记。"""
-    while True:
-        if q.get() is None:
-            break
-
-
-def _capture_worker(
-    capture_queue: "queue.Queue[Dict[str, Any] | None]",
-    six_view_images: Dict[str, Any],
-) -> None:
-    """串行消费六视图拍摄队列——生成完一个、拍摄一个。"""
-    try:
-        from .six_view_capture_tool import capture_single_result, _resolve_active_scene
-        from .helpers import get_tool
-        from .temp_capture_storage import (
-            build_temp_capture_root,
-            cleanup_temp_capture_dir,
-        )
-    except ImportError:
-        logger.warning("[Workflow][capture_worker] 六视图模块不可用，跳过拍摄")
-        _drain_queue(capture_queue)
-        return
-
-    multiview_tool = get_tool("camera_multiview_capture")
-    if not multiview_tool:
-        logger.warning("[Workflow][capture_worker] camera_multiview_capture 工具不可用")
-        _drain_queue(capture_queue)
-        return
-
-    active_scene = _resolve_active_scene()
-    if active_scene is None:
-        logger.warning("[Workflow][capture_worker] 未加载场景，跳过拍摄")
-        _drain_queue(capture_queue)
-        return
-
-    temp_capture_root = build_temp_capture_root()
-    try:
-        while True:
-            result = capture_queue.get()
-            if result is None:
-                break
-            view_dict = capture_single_result(result, active_scene, temp_capture_root)
-            if view_dict:
-                actor_name = result.get("object_id") or result.get("item_name")
-                six_view_images[actor_name] = view_dict
-                result["six_views_dict"] = view_dict
-    finally:
-        cleanup_temp_capture_dir(temp_capture_root)
-
-
 @stream_output_node(
     "integrated",
     NO_OUTPUT,
@@ -409,21 +356,7 @@ def generate_node(state: ModelRetrievalWorkflowState) -> Dict[str, Any]:
     completed_count = 0
     session_id = str(state.get("session_id", "default") or "default")
 
-    # 六视图拍摄队列：生成完成一个就排队拍摄一个（串行）
-    # 并行工作流中 Hunyuan3D 已返回预览图，跳过以节省 GPU
-    skip_capture = state.get("metadata", {}).get("skip_six_view_capture", False)
-    capture_queue: queue.Queue = queue.Queue()
     six_view_images: Dict[str, Any] = {}
-    if not skip_capture:
-        capture_thread = threading.Thread(
-            target=_capture_worker,
-            args=(capture_queue, six_view_images),
-            daemon=True,
-        )
-        capture_thread.start()
-        _capture_finalizer = lambda: capture_queue.put(None)
-    else:
-        _capture_finalizer = lambda: None
 
     generation_batches = _split_generation_batches(pending_generation)
     max_workers = min(
@@ -516,8 +449,6 @@ def generate_node(state: ModelRetrievalWorkflowState) -> Dict[str, Any]:
                         done_count=completed_count,
                         total_count=len(pending_generation),
                     )
-                    # 排入六视图拍摄队列（跳过时为 None，捕获线程不启动）
-                    capture_queue.put(result)
         logger.info(
             "[Workflow][generate] 3D generation batch %s/%s done: completed=%s/%s",
             batch_index,
@@ -532,11 +463,6 @@ def generate_node(state: ModelRetrievalWorkflowState) -> Dict[str, Any]:
             progress=58 + int(batch_index / max(1, len(generation_batches)) * 18),
             force=True,
         )
-
-    # 通知拍摄线程所有生成已完成
-    _capture_finalizer()
-    if not skip_capture:
-        capture_thread.join()
 
     results = sorted(
         retained_results + generated_results,

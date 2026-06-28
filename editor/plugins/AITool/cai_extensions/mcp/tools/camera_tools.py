@@ -19,20 +19,6 @@ from Quasar.ai_tools.response_adapter import (
 DEFAULT_SCENE_NAME = ""
 
 
-def _import_model_reviewer_helpers():
-    try:
-        from plugins.AITool.cai_extensions.agent.model_reviewer import (
-            _save_camera_screenshot_with_timeout,
-            get_or_create_vlm_review_camera,
-        )
-    except ModuleNotFoundError:
-        from cai_extensions.agent.model_reviewer import (
-            _save_camera_screenshot_with_timeout,
-            get_or_create_vlm_review_camera,
-        )
-    return get_or_create_vlm_review_camera, _save_camera_screenshot_with_timeout
-
-
 def _import_vlm_capture():
     try:
         from plugins.AITool.cai_extensions.agent.vlm_capture import capture_vlm_views
@@ -42,12 +28,7 @@ def _import_vlm_capture():
 
 
 def _get_default_capture_camera(scene):
-    get_or_create_vlm_review_camera, _ = _import_model_reviewer_helpers()
-    camera_factory = None
-    active_camera = getattr(scene, "get_active_camera", lambda: None)()
-    if active_camera is not None:
-        camera_factory = type(active_camera)
-    return get_or_create_vlm_review_camera(scene, camera_factory=camera_factory)
+    return getattr(scene, "find_camera", lambda _name=None: None)(None)
 
 
 def _resolve_scene(scene_manager, scene_name: str):
@@ -425,8 +406,8 @@ def _build_camera_screenshot_tool(scene_manager) -> StructuredTool:
                     )
             os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-            _, _save_camera_screenshot_with_timeout = _import_model_reviewer_helpers()
-            if not _save_camera_screenshot_with_timeout(camera, output_path, timeout=3.0):
+            save_sync = getattr(camera, "save_screenshot_sync", None)
+            if not callable(save_sync) or not save_sync(output_path):
                 return build_error_result(
                     error_message=f"Screenshot timed out or failed: {output_path}"
                 ).to_envelope(interface_type="scene")
@@ -470,12 +451,6 @@ def _build_camera_multiview_tool(scene_manager) -> StructuredTool:
             if scene is None:
                 return build_error_result(
                     error_message="No scene loaded"
-                ).to_envelope(interface_type="scene")
-
-            actor = scene.find_actor(actor_name)
-            if actor is None:
-                return build_error_result(
-                    error_message=f"Actor '{actor_name}' not found"
                 ).to_envelope(interface_type="scene")
 
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
