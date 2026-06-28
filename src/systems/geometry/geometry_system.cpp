@@ -312,9 +312,15 @@ void GeometrySystem::update() {
         std::vector<Events::ActorLoadRequestedEvent> pending_loads;
         {
             // Phase 1: shared_lock — 收集候选、计算距离、决定转换（只读不写）
+            // 持读锁时必须只读：用 find() 而非 get_or_create()，后者会 try_emplace
+            // 改写 scenes map，在 shared_lock 下与并发读者构成 data race（UB）。
+            // scene 已在本帧前面的 unique_lock 段（L197/L228）创建，find 必命中；
+            // 万一不存在则跳过本阶段（无可剔除对象）。
             std::shared_lock lock(impl_->mtx);
-            auto& scene_state = impl_->get_or_create(scene_handle);
-            if (scene_state.cfg.enable_distance_culling && !cameras.empty()) {
+            auto scene_state_it = impl_->scenes.find(scene_handle);
+            if (scene_state_it != impl_->scenes.end()
+                && scene_state_it->second.cfg.enable_distance_culling && !cameras.empty()) {
+                auto& scene_state = scene_state_it->second;
                 std::unordered_set<Impl::Payload> candidates;
 
                 //仅收集预加载范围内的物体
@@ -452,27 +458,33 @@ void GeometrySystem::update() {
         // 统计信息：使用读锁遍历，独立 stats_mutex 写入，减少主锁竞争
         {
             std::shared_lock lock(impl_->mtx);
-            auto& scene_state = impl_->get_or_create(scene_handle);
+            // 只读查找：scene 必然已在本帧早先的 unique_lock 段（八叉树重建）创建。
+            // 不调用 get_or_create()——它会 try_emplace 改写 map，在 shared_lock 下是
+            // 数据竞争（与其他读者并发 rehash → UB）。
+            auto scene_it = impl_->scenes.find(scene_handle);
+            if (scene_it != impl_->scenes.end()) {
+                auto& scene_state = scene_it->second;
 
-            std::size_t loaded = 0, loading = 0, unloading = 0, unloaded = 0;
-            for (const auto& [actor_handle, state] : scene_state.actor_load_states) {
-                switch (state) {
-                    case ActorLoadState::Loaded:    loaded++; break;
-                    case ActorLoadState::Loading:   loading++; break;
-                    case ActorLoadState::Unloading: unloading++; break;
-                    case ActorLoadState::Unloaded:  unloaded++; break;
+                std::size_t loaded = 0, loading = 0, unloading = 0, unloaded = 0;
+                for (const auto& [actor_handle, state] : scene_state.actor_load_states) {
+                    switch (state) {
+                        case ActorLoadState::Loaded:    loaded++; break;
+                        case ActorLoadState::Loading:   loading++; break;
+                        case ActorLoadState::Unloading: unloading++; break;
+                        case ActorLoadState::Unloaded:  unloaded++; break;
+                    }
                 }
-            }
 
-            std::lock_guard stats_lock(scene_state.stats_mutex);
-            scene_state.stats.actor_total    = actor_handles.size();
-            scene_state.stats.actor_visible  = visible_actors.size();
-            scene_state.stats.octree_entries = octree_entries.size();
-            scene_state.stats.last_query_ms = visible_query_ms_total;
-            scene_state.stats.actor_loaded    = loaded;
-            scene_state.stats.actor_loading   = loading;
-            scene_state.stats.actor_unloading = unloading;
-            scene_state.stats.actor_unloaded  = unloaded;
+                std::lock_guard stats_lock(scene_state.stats_mutex);
+                scene_state.stats.actor_total    = actor_handles.size();
+                scene_state.stats.actor_visible  = visible_actors.size();
+                scene_state.stats.octree_entries = octree_entries.size();
+                scene_state.stats.last_query_ms = visible_query_ms_total;
+                scene_state.stats.actor_loaded    = loaded;
+                scene_state.stats.actor_loading   = loading;
+                scene_state.stats.actor_unloading = unloading;
+                scene_state.stats.actor_unloaded  = unloaded;
+            }
         }
         auto scene_write = scene_storage.try_acquire_write(scene_handle);
         if (scene_write.valid()) {
@@ -1179,41 +1191,46 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
     }
 
     // ---- 第 2 步：读取 actor 和 transform 数据 ----
-    auto actor_read = hub.actor_storage().try_acquire_read(event.actor);
-    if (!actor_read) return;
-
+    // 锁序约束：所有 Storage 读锁必须在获取 impl_->mtx（第 4 步）之前释放，
+    // 否则与 update()（impl_->mtx → Storage）形成 AB-BA 死锁环。
+    // 故将 actor_read 及其下游读锁全部限定在本作用域内，离开即释放。
     Corona::Cache::ActorSnapshot snap;
-    snap.model_path    = actor_read->model_path;
-    snap.follow_camera = actor_read->follow_camera;
-    snap.profile_count = static_cast<int>(actor_read->profile_handles.size());
+    {
+        auto actor_read = hub.actor_storage().try_acquire_read(event.actor);
+        if (!actor_read) return;
 
-    // 读取第一个 profile 关联的 transform: profile → mechanics → geometry → transform
-    for (auto profile_handle : actor_read->profile_handles) {
-        auto profile = hub.profile_storage().try_acquire_read(profile_handle);
-        if (!profile) continue;
+        snap.model_path    = actor_read->model_path;
+        snap.follow_camera = actor_read->follow_camera;
+        snap.profile_count = static_cast<int>(actor_read->profile_handles.size());
 
-        std::uintptr_t mech_handle = profile->mechanics_handle;
-        if (!mech_handle) continue;
-        auto mech = hub.mechanics_storage().try_acquire_read(mech_handle);
-        if (!mech) continue;
+        // 读取第一个 profile 关联的 transform: profile → mechanics → geometry → transform
+        for (auto profile_handle : actor_read->profile_handles) {
+            auto profile = hub.profile_storage().try_acquire_read(profile_handle);
+            if (!profile) continue;
 
-        auto geom = hub.geometry_storage().try_acquire_read(mech->geometry_handle);
-        if (!geom || !geom->transform_handle) continue;
+            std::uintptr_t mech_handle = profile->mechanics_handle;
+            if (!mech_handle) continue;
+            auto mech = hub.mechanics_storage().try_acquire_read(mech_handle);
+            if (!mech) continue;
 
-        auto transform = hub.model_transform_storage().try_acquire_read(geom->transform_handle);
-        if (!transform) continue;
+            auto geom = hub.geometry_storage().try_acquire_read(mech->geometry_handle);
+            if (!geom || !geom->transform_handle) continue;
 
-        snap.position[0] = transform->position.x;
-        snap.position[1] = transform->position.y;
-        snap.position[2] = transform->position.z;
-        snap.euler_rotation[0] = transform->euler_rotation.x;
-        snap.euler_rotation[1] = transform->euler_rotation.y;
-        snap.euler_rotation[2] = transform->euler_rotation.z;
-        snap.scale[0] = transform->scale.x;
-        snap.scale[1] = transform->scale.y;
-        snap.scale[2] = transform->scale.z;
-        break;
-    }
+            auto transform = hub.model_transform_storage().try_acquire_read(geom->transform_handle);
+            if (!transform) continue;
+
+            snap.position[0] = transform->position.x;
+            snap.position[1] = transform->position.y;
+            snap.position[2] = transform->position.z;
+            snap.euler_rotation[0] = transform->euler_rotation.x;
+            snap.euler_rotation[1] = transform->euler_rotation.y;
+            snap.euler_rotation[2] = transform->euler_rotation.z;
+            snap.scale[0] = transform->scale.x;
+            snap.scale[1] = transform->scale.y;
+            snap.scale[2] = transform->scale.z;
+            break;
+        }
+    }  // actor_read 及所有下游 Storage 读锁在此释放
 
     // ---- 第 3 步：存入 ActorCache ----
     if (!impl_->actor_cache->put(event.actor, snap)) {
