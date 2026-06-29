@@ -1590,8 +1590,11 @@ void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& 
     }
     impl_->last_snapshot_time[event.actor] = now;
 
-    // ---- 第 5 步：cascade 淘汰底层资源 ----
-    if (!rec.resource_ids.empty()) {
+    // ---- 第 5 步：cascade 淘汰底层资源（仅非 gpu_only）----
+    // gpu_only=true（VRAM 压力路径）：跳过 cascade，保留 Scene/Image 的 CPU 内存。
+    //   GPU 压力绝不清 CPU；且保留 CPU 使后续可快速从 CPU 重建 GPU（无需磁盘重导）。
+    // gpu_only=false（不可见帧 / RAM 压力路径）：级联 try_evict 释放底层 CPU。
+    if (!event.gpu_only && !rec.resource_ids.empty()) {
         auto& rm = Resource::ResourceManager::get_instance();
         for (auto rid : rec.resource_ids) {
             auto result = rm.try_evict(rid);
@@ -3084,6 +3087,11 @@ void GeometrySystem::evict_under_memory_pressure() {
         return a.dist > b.dist;
     });
 
+    // CPU 级联（清 Scene/Image）只允许在 RAM 真正承压时发生。
+    // 仅 VRAM 承压 → gpu_only=true：释放 GPU、保留 Scene CPU（恢复时从 CPU 快速重建，
+    // 不必磁盘重导）。这是"GPU 压力绝不误伤 CPU"的核心保证。
+    const bool gpu_only = !rep.ram.pressured;
+
     constexpr std::size_t kMaxEvictionsPerPass = 64;
     std::vector<Events::ActorEvictRequestedEvent> to_evict;
     for (const auto& c : cands) {
@@ -3092,15 +3100,16 @@ void GeometrySystem::evict_under_memory_pressure() {
         std::size_t g = 0, cpu = 0;
         estimate_actor_memory(c.actor, g, cpu);
         if (g == 0 && cpu == 0) continue;  // 无可释放，跳过
-        to_evict.push_back({c.scene, c.actor});
+        to_evict.push_back({c.scene, c.actor, gpu_only});
         vram_need -= std::min(vram_need, g);
-        ram_need  -= std::min(ram_need, cpu);
+        // gpu_only 不清 CPU，故不计入 ram_need 的削减（避免误判已满足 RAM 目标）
+        if (!gpu_only) ram_need -= std::min(ram_need, cpu);
     }
     if (to_evict.empty()) return;
 
-    CFW_LOG_NOTICE("[GeometrySystem] Memory pressure: evicting {} cold actor(s) "
+    CFW_LOG_NOTICE("[GeometrySystem] Memory pressure: evicting {} cold actor(s), gpu_only={} "
                    "(VRAM {}MB/{}MB, RAM {}MB/{}MB)",
-                   to_evict.size(),
+                   to_evict.size(), gpu_only,
                    rep.vram.used_bytes / (1024 * 1024), rep.vram.budget_bytes / (1024 * 1024),
                    rep.ram.used_bytes / (1024 * 1024), rep.ram.budget_bytes / (1024 * 1024));
     for (const auto& evt : to_evict) {
