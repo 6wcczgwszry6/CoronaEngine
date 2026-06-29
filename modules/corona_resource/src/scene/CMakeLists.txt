@@ -16,21 +16,21 @@ set(CORONA_RESOURCE_SCENE_IMPORT_SOURCE_FILES
 )
 
 set(CORONA_RESOURCE_SCENE_IMPORT_HEADER_FILES
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/importer/i_importer.hpp
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/importer/json_importer.hpp
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/desc/json_helper.hpp
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/desc/common.h
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/desc/node_desc.h
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/desc/transform_desc.h
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/desc/graph_desc.h
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/desc/shader_desc_s.h
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/desc/integrator_desc.h
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/desc/material_desc.h
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/desc/output_desc.h
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/desc/pipeline_desc.h
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/desc/sampler_desc.h
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/desc/scene_desc.h
-    ${PROJECT_SOURCE_DIR}/include/corona/scene/desc/scene_element_desc.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/importer/i_importer.hpp
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/importer/json_importer.hpp
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/desc/json_helper.hpp
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/desc/common.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/desc/node_desc.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/desc/transform_desc.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/desc/graph_desc.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/desc/shader_desc_s.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/desc/integrator_desc.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/desc/material_desc.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/desc/output_desc.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/desc/pipeline_desc.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/desc/sampler_desc.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/desc/scene_desc.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/scene/desc/scene_element_desc.h
 )
 
 # Create static library
@@ -46,10 +46,9 @@ target_compile_features(CoronaResourceScene PUBLIC cxx_std_20)
 # Configure include directories
 target_include_directories(CoronaResourceScene
     PUBLIC
+    $<BUILD_INTERFACE:${CORONA_RESOURCE_ROOT}/include>
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include/corona_resource/scene>
-    PRIVATE
-    ${ktm_SOURCE_DIR}
 
 )
 
@@ -60,5 +59,5 @@ target_link_libraries(CoronaResourceScene
     assimp::assimp
     corona::kernel
     nlohmann_json::nlohmann_json
-    gf
+    ktm::ktm
 )

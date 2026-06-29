@@ -39,31 +39,31 @@ set(CORONA_RESOURCE_MANAGER_SOURCE_FILES
 
 set(CORONA_RESOURCE_MANAGER_HEADER_FILES
     ### top-level header files ###
-    ${PROJECT_SOURCE_DIR}/include/corona/resource/resource.h
-    ${PROJECT_SOURCE_DIR}/include/corona/resource/resource_manager.h
-    ${PROJECT_SOURCE_DIR}/include/corona/resource/parser_registry.h
-    ${PROJECT_SOURCE_DIR}/include/corona/resource/resource_cache.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/resource/resource.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/resource/resource_manager.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/resource/parser_registry.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/resource/resource_cache.h
     ### resource types ###
     # animation
-    ${PROJECT_SOURCE_DIR}/include/corona/resource/types/animation.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/resource/types/animation.h
     # skeletal animation runtime pose evaluation (P1)
-    ${PROJECT_SOURCE_DIR}/include/corona/resource/types/animation_pose.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/resource/types/animation_pose.h
     # audio
-    ${PROJECT_SOURCE_DIR}/include/corona/resource/types/audio.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/resource/types/audio.h
     # binary
-    ${PROJECT_SOURCE_DIR}/include/corona/resource/types/binary.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/resource/types/binary.h
     # image
-    ${PROJECT_SOURCE_DIR}/include/corona/resource/types/image.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/resource/types/image.h
     # json
-    ${PROJECT_SOURCE_DIR}/include/corona/resource/types/json.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/resource/types/json.h
     # scene
-    ${PROJECT_SOURCE_DIR}/include/corona/resource/types/scene.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/resource/types/scene.h
     # video
-    ${PROJECT_SOURCE_DIR}/include/corona/resource/types/video.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/resource/types/video.h
     # text
-    ${PROJECT_SOURCE_DIR}/include/corona/resource/types/text.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/resource/types/text.h
     # model
-    ${PROJECT_SOURCE_DIR}/include/corona/resource/types/model.h
+    ${CORONA_RESOURCE_ROOT}/include/corona/resource/types/model.h
 )
 
 # Create static library
@@ -79,13 +79,9 @@ target_compile_features(CoronaResourceManager PUBLIC cxx_std_20)
 # Configure include directories
 target_include_directories(CoronaResourceManager
     PUBLIC
+    $<BUILD_INTERFACE:${CORONA_RESOURCE_ROOT}/include>
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include/corona_resource/resource_manager>
-
-    ${ktm_SOURCE_DIR}
-    PRIVATE
-    ${tinyexr_SOURCE_DIR}
-    ${astc-encoder_SOURCE_DIR}/Source
 )
 
 # Link dependencies
@@ -96,9 +92,11 @@ target_link_libraries(CoronaResourceManager
     assimp::assimp
     meshoptimizer
     astcenc-native-static
+    tinyexr_headers
     PUBLIC
     corona::kernel
     TBB::tbb
+    ktm::ktm
 )
 
 # Optional FFmpeg-backed video/audio import/export

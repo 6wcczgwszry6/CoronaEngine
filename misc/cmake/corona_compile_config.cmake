@@ -99,7 +99,7 @@ endif()
 # add_subdirectory time):
 #
 #   COVERED (created in or under the root scope AFTER this file is included):
-#     - modules/corona_resource and its FetchContent children (e.g. OpenUSD)
+#     - modules/corona_resource
 #     - src/  (engine library + systems)
 #     - vision/  (when CORONA_BUILD_VISION=ON)
 #     - examples/
