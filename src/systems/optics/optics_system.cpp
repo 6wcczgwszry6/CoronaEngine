@@ -2592,6 +2592,22 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                         RenderInstanceBatch& batch) -> bool {
                     batch.clear();
 
+                    // ---- Native 视锥剔除（Step 5）----
+                    // 消费几何线程算好的 visible_actor_handles（多相机视锥并集）。
+                    // 仅用于场景 pass（!follow_camera_pass）：UI/跟随相机 actor 不在世界
+                    // 视锥可见集内，不可据此剔除。空集 → 回退全量（与 Vision 一致），
+                    // 避免可见集尚未算出时整屏消失。
+                    // 注意：object_id 是 actor_handles 的 1-based 全量下标，作为 V-buffer
+                    // objectID 用。剔除采用"跳过绘制但仍 ++object_id"，保证每个被渲染
+                    // 物体的 objectID 与剔除前完全一致（纯减少 draw call，不改编号语义）。
+                    std::unordered_set<std::uintptr_t> visible_set;
+                    const bool use_visible_cull =
+                        !follow_camera_pass && !scene.visible_actor_handles.empty();
+                    if (use_visible_cull) {
+                        visible_set.reserve(scene.visible_actor_handles.size());
+                        for (auto h : scene.visible_actor_handles) visible_set.insert(h);
+                    }
+
                     bool has_instances = false;
                     uint32_t recorded_draws = 0;
                     uint32_t object_id = 1;
@@ -2629,6 +2645,12 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                         }
 
                         if (actor->follow_camera != follow_camera_pass) {
+                            ++object_id;
+                            continue;
+                        }
+
+                        // ---- 视锥剔除：不在可见集内 → 跳过绘制（仍 ++object_id 保编号）----
+                        if (use_visible_cull && !visible_set.count(actor_handle)) {
                             ++object_id;
                             continue;
                         }
