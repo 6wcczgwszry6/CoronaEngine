@@ -35,6 +35,8 @@ using namespace GeometryInternal;
 
 namespace {
 
+constexpr auto kLoadedActorEvictGrace = std::chrono::seconds(8);
+
 template <typename T>
 Horizon::HardwareBuffer make_geometry_buffer(const std::vector<T>& data,
                                              Horizon::BufferUsageFlags usage,
@@ -322,6 +324,7 @@ void GeometrySystem::update() {
                     scene_state.unloading_tasks.erase(it->first);
                     scene_state.unload_retry_counts.erase(it->first);
                     scene_state.invisible_frames.erase(it->first);
+                    impl_->last_load_finished_time.erase(it->first);
                     // 检查 actor 是否还存在于其他场景，若否，清理全局状态
                     bool exists_elsewhere = false;
                     for (auto& [other_scene, other_state] : impl_->scenes) {
@@ -527,6 +530,7 @@ void GeometrySystem::update() {
         // 不可见帧计数与淘汰
         std::vector<Events::ActorEvictRequestedEvent> pending_evictions;
         {
+            const auto now = std::chrono::steady_clock::now();
             std::unique_lock lock(impl_->mtx);
             Impl::SceneState& scene_state = impl_->get_or_create(scene_handle);
             for (std::uintptr_t actor_handle : actor_handles) {
@@ -539,6 +543,13 @@ void GeometrySystem::update() {
                 // pinned 的 actor 不计不可见帧，不触发淘汰
                 if (auto a = hub.actor_storage().try_acquire_read(actor_handle)) {
                     if (a->pinned) continue;
+                }
+
+                auto loaded_it = impl_->last_load_finished_time.find(actor_handle);
+                if (loaded_it != impl_->last_load_finished_time.end() &&
+                    now - loaded_it->second < kLoadedActorEvictGrace) {
+                    scene_state.invisible_frames[actor_handle] = 0;
+                    continue;
                 }
 
                 // 没有 AABB 的 actor（无 mechanics）无法计算距离，但不可见帧依然计数
@@ -791,6 +802,7 @@ void GeometrySystem::on_load_finished(const Events::ActorLoadFinishedEvent& even
             if (actor_it != state_map.end() && actor_it->second == ActorLoadState::Loading) {
                 actor_it->second = ActorLoadState::Loaded;
                 impl_->offline_actors[event.actor] = false;
+                impl_->last_load_finished_time[event.actor] = std::chrono::steady_clock::now();
                 CFW_LOG_NOTICE("GeometrySystem: Actor {} (scene: {}) load finished",
                                event.actor, event.scene);
             }
