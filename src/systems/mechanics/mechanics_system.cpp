@@ -18,6 +18,7 @@
 #include <functional>     // std::function（回调）
 #include <limits>         // numeric_limits（SAT）
 #include <memory>         // unique_ptr,make_unique
+#include <span>           // std::span（蒙皮 write_bytes）
 #include <unordered_map>  // 各 handle→数据 映射
 #include <unordered_set>  // alive_handles
 #include <utility>        // pair, move
@@ -29,6 +30,7 @@
 // Resource layer — 用于加载 LOD 碰撞网格
 #include <corona/resource/resource_manager.h>
 #include <corona/resource/types/scene.h>
+#include <corona/resource/types/animation_pose.h>  // 骨骼动画求值（compute_pose / advance_anim_time）
 // Note: do not depend on nanobind in the mechanics system. Callbacks provided
 // from the scripting layer are expected to manage GIL acquisition themselves.
 
@@ -45,6 +47,62 @@
 namespace Corona::Systems {
 
 using namespace MechanicsInternal;
+
+namespace {
+
+// ----------------------------------------------------------------------------
+// CPU 蒙皮（P2，自 GeometrySystem 迁入）
+// ----------------------------------------------------------------------------
+// 对单个 mesh 的绑定姿态顶点做线性混合蒙皮（LBS），输出标准 Resource::Vertex。
+//   skinned.pos = Σ wᵢ · (final[idᵢ] · bind.pos)
+//   skinned.nrm = normalize(Σ wᵢ · (mat3(final[idᵢ]) · bind.nrm))
+// final[] 为 compute_pose 的输出（列主序 mat4，下标 col*4+row）。
+// bind 顶点已在导入期保留绑定姿态空间（未烘世界变换、未单位化），
+// 故蒙皮结果在模型空间，运行时由 model transform (o2w) 放到世界空间。
+// uv 原样保留。无骨骼影响（ids 全 -1）的顶点回退为原始绑定位置。
+inline Corona::Resource::Vertex skin_one_vertex(
+    const Corona::Resource::Vertex& bind,
+    const Corona::Resource::BoneWeights& bw,
+    const std::vector<std::array<float, 16>>& finals) {
+    // 累加权重>0 的骨骼贡献
+    float px = 0.0f, py = 0.0f, pz = 0.0f;
+    float nx = 0.0f, ny = 0.0f, nz = 0.0f;
+    float total_w = 0.0f;
+
+    for (int i = 0; i < Corona::Resource::MAX_BONE_INFLUENCE; ++i) {
+        const std::int32_t id = bw.ids[i];
+        const float w = bw.weights[i];
+        if (id < 0 || w <= 0.0f) continue;
+        if (id >= static_cast<std::int32_t>(finals.size())) continue;
+
+        const std::array<float, 16>& m = finals[static_cast<std::size_t>(id)];
+        const float bx = bind.position[0], by = bind.position[1], bz = bind.position[2];
+        // 位置：齐次点变换（含平移，第 3 列）—— 列主序 m[col*4+row]
+        px += w * (m[0] * bx + m[4] * by + m[8] * bz + m[12]);
+        py += w * (m[1] * bx + m[5] * by + m[9] * bz + m[13]);
+        pz += w * (m[2] * bx + m[6] * by + m[10] * bz + m[14]);
+        // 法线：仅 3x3 线性部分（不含平移）
+        const float bnx = bind.normal[0], bny = bind.normal[1], bnz = bind.normal[2];
+        nx += w * (m[0] * bnx + m[4] * bny + m[8] * bnz);
+        ny += w * (m[1] * bnx + m[5] * bny + m[9] * bnz);
+        nz += w * (m[2] * bnx + m[6] * bny + m[10] * bnz);
+        total_w += w;
+    }
+
+    Corona::Resource::Vertex out = bind;  // 复制 uv；无影响时保留绑定位置/法线
+    if (total_w > 0.0f) {
+        out.position = {px, py, pz};
+        // 归一化法线（避免缩放骨骼导致非单位法线 → shader 错误）
+        float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (len > 1e-8f) {
+            float inv = 1.0f / len;
+            out.normal = {nx * inv, ny * inv, nz * inv};
+        }
+    }
+    return out;
+}
+
+}  // namespace
 
 void MechanicsSystem::update_physics() {
     // 如果正在关闭，不再处理新的物理更新
@@ -1150,6 +1208,222 @@ void MechanicsSystem::update_physics() {
         }
     }
 
+}
+
+// ============================================================================
+// update_skinned_geometry（P2，自 GeometrySystem 迁入）
+// 功能：每真实帧对蒙皮 actor 做 CPU 线性混合蒙皮（LBS），把结果重传到 GPU 顶点缓冲。
+// 调用时机：MechanicsSystem::update() 的固定步进循环之后（每真实帧一次，独立于
+//           物理 fixed_dt 的步进次数，也不受 simulation_enabled 影响——蒙皮模型
+//           即使未开物理也应自动循环播放）。
+//
+// 数据流：Scene(绑定顶点+骨骼权重+骨架+动画) → compute_pose 算 final[] →
+//         skin_one_vertex 蒙皮 → write_bytes 重传 vertexBuffer/vertexStorageBuffer。
+//         蒙皮结果同时存入 GeometryDevice.skinned_cpu_vertices（结果槽，所有 buffer/CPU
+//         数据仍归 GeometrySystem 持有，便于流式加载 LRU 管理），供 Vision / 物理消费。
+//
+// 与原 GeometrySystem 版本的唯一差异：LOD1..N 的 GPU 缓冲句柄不再直接读 Geometry 的
+// 私有 lod_cache，而是通过公有接口 GeometrySystem::get_skinning_targets() 借出（引用
+// 计数句柄，锁外 write_bytes）。LOD0 仍从 GeometryDevice.mesh_handles 取（无 LOD 的
+// 蒙皮模型唯一可写路径）。
+//
+// 锁序：对 Scene 仅加共享读锁（播放期无人写 Scene）；重 CPU 蒙皮在所有 storage 锁外执行；
+//       get_skinning_targets 内部锁 lod_cache_mutex，必须在释放 geom 写锁之后调用，
+//       避免新锁嵌套。
+//
+// 自动循环：始终播放 animations[0]，anim_time 由 advance_anim_time 推进并 fmod 回绕。
+// ============================================================================
+void MechanicsSystem::update_skinned_geometry() {
+    // 懒缓存 GeometrySystem 指针（first_update 路径可能未经过 update_physics）
+    if (!impl_->geometry_sys && impl_->ctx) {
+        impl_->geometry_sys = dynamic_cast<GeometrySystem*>(impl_->ctx->get_system("Geometry"));
+    }
+    if (!impl_->geometry_sys) return;  // LOD1..N 句柄借不到，且无意义
+
+    auto& resource_manager = Resource::ResourceManager::get_instance();
+    auto& hub = SharedDataHub::instance();
+    auto& geom_storage = hub.geometry_storage();
+
+    // ---- 计算 dt（首帧为 0）----
+    const auto now = std::chrono::steady_clock::now();
+    float dt = 0.0f;
+    if (impl_->last_skin_update_time.has_value()) {
+        dt = std::chrono::duration<float>(now - *impl_->last_skin_update_time).count();
+    }
+    impl_->last_skin_update_time = now;
+    if (dt > 0.1f) dt = 0.1f;  // 容错：断点/卡顿导致的大 dt 夹住，避免动画跳跃
+
+    // 先收集所有 geometry handle，避免在迭代 storage 期间持锁做重计算
+    std::vector<std::uintptr_t> geom_handles;
+    for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
+        const GeometryDevice& geom_dev = *it;
+        geom_handles.push_back(reinterpret_cast<std::uintptr_t>(&geom_dev));
+    }
+
+    for (auto geom_handle : geom_handles) {
+        // ---- 第 1 步：读取 model_resource_handle（brief 读锁）----
+        std::uintptr_t model_resource_handle = 0;
+        {
+            auto geom_read = geom_storage.try_acquire_read(geom_handle);
+            if (!geom_read) continue;
+            model_resource_handle = geom_read->model_resource_handle;
+        }
+        if (model_resource_handle == 0) continue;
+
+        // ---- 第 2 步：解析 model_id ----
+        std::uint64_t model_id = 0;
+        if (auto model_res = hub.model_resource_storage().try_acquire_read(model_resource_handle)) {
+            model_id = model_res->model_id;
+        }
+        if (model_id == 0) continue;
+
+        // ---- 第 3 步：取 Scene，判断是否蒙皮（非蒙皮直接跳过）----
+        auto scene_read = resource_manager.acquire_read<Resource::Scene>(model_id);
+        if (!scene_read.valid()) continue;
+        const Resource::Scene& scene = *scene_read;
+        if (!scene.data.skeleton.has_value() || scene.data.animations.empty()) continue;
+
+        const Resource::SkeletonData& skeleton = *scene.data.skeleton;
+        const Resource::AnimationClip& clip = scene.data.animations[0];  // 自动循环第 0 个
+
+        // ---- 第 4 步：brief 写锁推进 anim_time + 拷出 buffer 句柄 ----
+        // HardwareBuffer 为引用计数句柄，可拷贝；拷出后锁外做蒙皮+write_bytes。
+        float anim_time = 0.0f;
+        std::vector<Horizon::HardwareBuffer> vbufs;
+        std::vector<Horizon::HardwareBuffer> vstoragebufs;
+        std::size_t mesh_count = 0;
+        {
+            auto geom_write = geom_storage.try_acquire_write(geom_handle);
+            if (!geom_write) continue;
+            geom_write->is_skinned = true;
+            geom_write->anim_time = Resource::advance_anim_time(geom_write->anim_time, dt, clip);
+            anim_time = geom_write->anim_time;
+            mesh_count = geom_write->mesh_handles.size();
+            vbufs.reserve(mesh_count);
+            vstoragebufs.reserve(mesh_count);
+            for (auto& md : geom_write->mesh_handles) {
+                vbufs.push_back(md.vertexBuffer);
+                vstoragebufs.push_back(md.vertexStorageBuffer);
+            }
+        }
+        if (mesh_count == 0) continue;
+
+        // ---- 第 4b 步：借出各 mesh 的 LOD1..N GPU 缓冲句柄（蒙皮需写入所有已驻留级别）----
+        // 否则拉远切到低 LOD 会读到未蒙皮的绑定姿态顶点 → 冻住不动。
+        // get_skinning_targets 返回 levels[0..N]，[0] 即 LOD0（已在 vbufs/vstoragebufs 中），
+        // 此处只取 [1..]。LOD1..N 中未驻留的级别其句柄为空，下方写入时由空句柄判断跳过。
+        // 注意：必须在释放 geom 写锁之后调用（内部锁 lod_cache_mutex），避免锁嵌套。
+        std::vector<std::vector<std::pair<Horizon::HardwareBuffer, Horizon::HardwareBuffer>>>
+            lod_targets(mesh_count);
+        for (std::size_t mi = 0; mi < mesh_count; ++mi) {
+            auto all_levels = impl_->geometry_sys->get_skinning_targets(
+                geom_handle, static_cast<uint32_t>(mi));
+            // [0] 是 LOD0（= mesh_dev 缓冲），跳过；[1..] 为简化级
+            for (std::size_t l = 1; l < all_levels.size(); ++l) {
+                lod_targets[mi].push_back(all_levels[l]);
+            }
+        }
+
+        // ---- 第 5 步：锁外计算骨骼最终矩阵（每 geom 一次）----
+        std::vector<std::array<float, 16>> finals;
+        Resource::compute_pose(skeleton, clip, anim_time, finals);
+
+        // ---- 第 6 步：锁外 CPU 蒙皮每个 mesh + 重传 GPU ----
+        // skinned_cpu_vertices：每 mesh 一份原始字节（布局即 Resource::Vertex 数组），
+        // Vision / 物理复用同一数据源。
+        // 同时累积所有蒙皮顶点的动态 local AABB（物理用，跟随当前姿态）。
+        std::vector<std::vector<std::byte>> skinned_blobs(mesh_count);
+        float aabb_min_x = std::numeric_limits<float>::max();
+        float aabb_min_y = std::numeric_limits<float>::max();
+        float aabb_min_z = std::numeric_limits<float>::max();
+        float aabb_max_x = std::numeric_limits<float>::lowest();
+        float aabb_max_y = std::numeric_limits<float>::lowest();
+        float aabb_max_z = std::numeric_limits<float>::lowest();
+        bool aabb_any = false;
+        for (std::size_t mesh_idx = 0;
+             mesh_idx < mesh_count && mesh_idx < scene.data.meshes.size(); ++mesh_idx) {
+            const Resource::MeshData& mesh = scene.data.meshes[mesh_idx];
+            // 该 mesh 非蒙皮（混合场景）或数据不一致 → 跳过（保留其原顶点缓冲不动）
+            if (mesh.bone_weights.empty() ||
+                mesh.bone_weights.size() != mesh.vertices.size()) {
+                continue;
+            }
+
+            std::vector<Resource::Vertex> skinned(mesh.vertices.size());
+            for (std::size_t v = 0; v < mesh.vertices.size(); ++v) {
+                skinned[v] = skin_one_vertex(mesh.vertices[v], mesh.bone_weights[v], finals);
+                const auto& p = skinned[v].position;
+                aabb_min_x = std::min(aabb_min_x, p[0]);
+                aabb_min_y = std::min(aabb_min_y, p[1]);
+                aabb_min_z = std::min(aabb_min_z, p[2]);
+                aabb_max_x = std::max(aabb_max_x, p[0]);
+                aabb_max_y = std::max(aabb_max_y, p[1]);
+                aabb_max_z = std::max(aabb_max_z, p[2]);
+                aabb_any = true;
+            }
+
+            // 转字节并重传（vertexBuffer 供光栅，vertexStorageBuffer 供 material_resolve compute）
+            auto src = std::as_bytes(std::span<const Resource::Vertex>(skinned.data(), skinned.size()));
+            auto& blob = skinned_blobs[mesh_idx];
+            blob.assign(src.begin(), src.end());
+
+            if (mesh_idx < vbufs.size() && vbufs[mesh_idx]) {
+                (void)vbufs[mesh_idx].write_bytes(std::span<const std::byte>(blob.data(), blob.size()));
+            }
+            if (mesh_idx < vstoragebufs.size() && vstoragebufs[mesh_idx]) {
+                (void)vstoragebufs[mesh_idx].write_bytes(std::span<const std::byte>(blob.data(), blob.size()));
+            }
+
+            // ---- 同法蒙皮所有已驻留 LOD 级别 ----
+            // 每个 LODLevel 携带与其顶点等长的 bone_weights（导入时随顶点同步 remap），
+            // 故按 LOD0 同样的方式 skin_one_vertex 后写入对应 LOD GPU 缓冲。
+            // 顺序与 upload_lod_from_scene_data / get_skinning_targets 一致：跳过空 LOD、
+            // 按非空顺序与 levels[1..] 对齐；未驻留级别其句柄为空，write 由空句柄跳过。
+            const auto& targets = lod_targets[mesh_idx];
+            if (!targets.empty()) {
+                std::size_t ti = 0;
+                for (std::size_t li = 0;
+                     li < mesh.lod_levels.size() && ti < targets.size(); ++li) {
+                    const Resource::LODLevel& lod = mesh.lod_levels[li];
+                    if (lod.vertices.empty() || lod.indices.empty()) continue;  // 与 upload 跳过逻辑一致
+
+                    // 该 LOD 有等长骨骼权重才能蒙皮；否则保持其绑定姿态（仍推进 ti 保持对齐）
+                    if (!lod.bone_weights.empty() &&
+                        lod.bone_weights.size() == lod.vertices.size()) {
+                        std::vector<Resource::Vertex> sk(lod.vertices.size());
+                        for (std::size_t v = 0; v < lod.vertices.size(); ++v) {
+                            sk[v] = skin_one_vertex(lod.vertices[v], lod.bone_weights[v], finals);
+                        }
+                        auto lsrc = std::as_bytes(
+                            std::span<const Resource::Vertex>(sk.data(), sk.size()));
+                        std::vector<std::byte> lblob(lsrc.begin(), lsrc.end());
+                        if (targets[ti].first) {
+                            (void)targets[ti].first.write_bytes(
+                                std::span<const std::byte>(lblob.data(), lblob.size()));
+                        }
+                        if (targets[ti].second) {
+                            (void)targets[ti].second.write_bytes(
+                                std::span<const std::byte>(lblob.data(), lblob.size()));
+                        }
+                    }
+                    ++ti;
+                }
+            }
+        }
+
+        // ---- 第 7 步：brief 写锁存回蒙皮结果 + 动态 AABB（供 Vision / 物理消费）----
+        {
+            auto geom_write = geom_storage.try_acquire_write(geom_handle);
+            if (geom_write) {
+                geom_write->skinned_cpu_vertices = std::move(skinned_blobs);
+                if (aabb_any) {
+                    geom_write->skinned_aabb_min = ktm::fvec3{aabb_min_x, aabb_min_y, aabb_min_z};
+                    geom_write->skinned_aabb_max = ktm::fvec3{aabb_max_x, aabb_max_y, aabb_max_z};
+                    geom_write->skinned_aabb_valid = true;
+                }
+            }
+        }
+    }
 }
 
 }  // namespace Corona::Systems

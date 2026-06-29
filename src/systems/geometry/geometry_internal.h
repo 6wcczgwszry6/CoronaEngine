@@ -156,10 +156,6 @@ struct GeometrySystem::Impl {
     /// import 任务 epoch 分配器（进程级单调递增，0 保留为"无任务"）。
     std::uint64_t next_import_epoch = 1;
 
-    /// 骨骼动画上一帧时间戳（用于 update_skinned_geometry 计算 dt）。
-    /// 未初始化时（首帧）取 dt=0。
-    std::optional<std::chrono::steady_clock::time_point> last_skin_update_time;
-
     // ========================================
     // 资源内存预算（MB），0 = 不限制（默认）
     // ========================================

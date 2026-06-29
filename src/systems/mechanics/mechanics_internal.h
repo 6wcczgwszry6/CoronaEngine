@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -775,6 +776,10 @@ struct MechanicsSystem::Impl {
     float time_accumulator = 0.0f;
     std::chrono::steady_clock::time_point last_update_time{};
     bool first_update = true;
+
+    /// 骨骼动画上一帧时间戳（用于 update_skinned_geometry 计算 dt）。
+    /// 未初始化时（首帧）取 dt=0。自 GeometrySystem 迁入。
+    std::optional<std::chrono::steady_clock::time_point> last_skin_update_time;
 
     std::atomic<bool> shutdown_requested{false};
     float global_simulation_time = 0.0f;
