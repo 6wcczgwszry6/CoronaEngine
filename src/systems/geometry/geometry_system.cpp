@@ -655,26 +655,26 @@ void GeometrySystem::update() {
             for (auto& [scene_handle, scene_state] : impl_->scenes) {
                 std::lock_guard stats_lock(scene_state.stats_mutex);
                 auto& s = scene_state.stats;
-                CFW_LOG_NOTICE("[GeometrySystem] Scene stats: total={} visible={} "
-                               "loaded={} loading={} unloading={} unloaded={} offline={}",
-                               s.actor_total, s.actor_visible,
-                               s.actor_loaded, s.actor_loading, s.actor_unloading,
-                               s.actor_unloaded, s.actor_offline);
+                // CFW_LOG_NOTICE("[GeometrySystem] Scene stats: total={} visible={} "
+                //                "loaded={} loading={} unloading={} unloaded={} offline={}",
+                //                s.actor_total, s.actor_visible,
+                //                s.actor_loaded, s.actor_loading, s.actor_unloading,
+                //                s.actor_unloaded, s.actor_offline);
             }
-            auto& rm = Resource::ResourceManager::get_instance();
-            auto entries = rm.list_entries();
-            auto res_used = rm.used_memory_bytes();
-            CFW_LOG_NOTICE("[GeometrySystem] Resource: {}KB used / {}MB budget, {} entries",
-                           res_used / 1024,
-                           rm.memory_budget() / (1024 * 1024),
-                           entries.size());
-            if (impl_->actor_cache) {
-                auto mem_bytes = impl_->actor_cache->memory_used();
-                CFW_LOG_NOTICE("[GeometrySystem] ActorCache: {}B mem / {}B disk",
-                               mem_bytes, impl_->actor_cache->disk_used() );
-            } else {
-                CFW_LOG_NOTICE("[GeometrySystem] ActorCache: not created yet (no eviction has occurred)");
-            }
+            // auto& rm = Resource::ResourceManager::get_instance();
+            // auto entries = rm.list_entries();
+            // auto res_used = rm.used_memory_bytes();
+            // CFW_LOG_NOTICE("[GeometrySystem] Resource: {}KB used / {}MB budget, {} entries",
+            //                res_used / 1024,
+            //                rm.memory_budget() / (1024 * 1024),
+            //                entries.size());
+            // if (impl_->actor_cache) {
+            //     auto mem_bytes = impl_->actor_cache->memory_used();
+            //     CFW_LOG_NOTICE("[GeometrySystem] ActorCache: {}B mem / {}B disk",
+            //                    mem_bytes, impl_->actor_cache->disk_used() );
+            // } else {
+            //     CFW_LOG_NOTICE("[GeometrySystem] ActorCache: not created yet (no eviction has occurred)");
+            // }
         }
     }
 }
@@ -1654,12 +1654,12 @@ void GeometrySystem::on_restore_requested(const Events::ActorRestoreRequestedEve
                 }
             }
         }
-        CFW_LOG_NOTICE("[GeometrySystem] Restored actor {} state: pos=({:.1f},{:.1f},{:.1f}) "
-                       "physics={} optics_visible={}",
-                       event.actor,
-                       rec->transform.position.x, rec->transform.position.y,
-                       rec->transform.position.z,
-                       rec->physics_enabled, rec->optics_visible);
+        // CFW_LOG_NOTICE("[GeometrySystem] Restored actor {} state: pos=({:.1f},{:.1f},{:.1f}) "
+        //                "physics={} optics_visible={}",
+        //                event.actor,
+        //                rec->transform.position.x, rec->transform.position.y,
+        //                rec->transform.position.z,
+        //                rec->physics_enabled, rec->optics_visible);
     }
 
     // ---- 第 2 步：检查是否已在加载/卸载中，然后启动异步导入 ----
