@@ -480,6 +480,17 @@ class GeometrySystem : public Kernel::SystemBase {
     /// 计算 mesh/texture 的 VRAM/RAM 用量 + 预算视图（线程安全，内部加锁）。
     [[nodiscard]] MemoryReport compute_memory_report() const;
 
+    /// 估算单个 actor 占用的可淘汰 GPU 字节（mesh+texture 缓冲 + 其 LOD 缓存）与
+    /// CPU 字节（其 Scene mesh 资源，按 model_id 查 cpu_ledger）。用于按需淘汰定额。
+    void estimate_actor_memory(std::uintptr_t actor,
+                               std::size_t& out_gpu_bytes,
+                               std::size_t& out_cpu_bytes) const;
+
+    /// 满载淘汰：当 VRAM/RAM 用量达到高水位（默认 90%）时，按"最冷"（不可见帧多、
+    /// 距相机远）顺序淘汰 Loaded actor，发 ActorEvictRequestedEvent（复用快照+释放+级联
+    /// 通路），按 need_free 定额停止，降到低水位（默认 80%）。每隔若干帧评估一次。
+    void evict_under_memory_pressure();
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

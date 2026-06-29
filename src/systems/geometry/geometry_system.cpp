@@ -710,6 +710,13 @@ void GeometrySystem::update() {
                            mr.ram.pressured ? " OVER-RAM-BUDGET" : "");
         }
     }
+
+    // ---- 满载淘汰（VRAM/RAM 达 90% 时启用）----
+    // 每隔 pressure_eval_interval 帧评估一次；不持 impl_->mtx（内部自管锁 + 锁外发事件）。
+    if (++impl_->pressure_eval_counter >= impl_->pressure_eval_interval) {
+        impl_->pressure_eval_counter = 0;
+        evict_under_memory_pressure();
+    }
 }
 
 void GeometrySystem::shutdown() {
@@ -2643,7 +2650,8 @@ void GeometrySystem::update_cpu_resource_ledger() {
 MemoryReport GeometrySystem::compute_memory_report() const {
     MemoryReport r;
 
-    // VRAM：来自 RAII 令牌喂养的进程级账本（精确，按实例计数）
+    // ---- VRAM ----
+    // mesh/texture 与 used 全部来自我们自己的 RAII 令牌账本（自行统计用量，不依赖 Horizon）。
     auto& led = Corona::Memory::gpu_ledger();
     r.vram.mesh_bytes    = led.mesh_bytes();
     r.vram.texture_bytes = led.texture_bytes();
@@ -2651,7 +2659,14 @@ MemoryReport GeometrySystem::compute_memory_report() const {
     r.vram_mesh_peak     = led.mesh_peak();
     r.vram_texture_peak  = led.texture_peak();
 
-    // RAM：来自 CPU 账本（按 rid 去重，对账存活）
+    // 容量（仅大小）来自 Horizon：DEVICE_LOCAL 显存总量；可被手动 vram_budget 下调。
+    std::size_t vram_cap = static_cast<std::size_t>(Horizon::query_device_memory_size());
+    if (impl_->vram_budget_bytes > 0)
+        vram_cap = (vram_cap == 0) ? impl_->vram_budget_bytes
+                                   : std::min(vram_cap, impl_->vram_budget_bytes);
+
+    // ---- RAM ----
+    // used = 我们追踪的 mesh+texture CPU（按 rid 去重）；容量 = SDL 系统物理内存总量。
     {
         std::lock_guard lk(impl_->cpu_ledger_mutex);
         for (const auto& [rid, e] : impl_->cpu_ledger) {
@@ -2662,13 +2677,17 @@ MemoryReport GeometrySystem::compute_memory_report() const {
         }
     }
     r.ram.used_bytes = r.ram.mesh_bytes + r.ram.texture_bytes;
+    const std::size_t ram_cap =
+        static_cast<std::size_t>(Corona::Memory::system_ram_bytes().load(std::memory_order_relaxed));
 
-    // 预算 + 水位（high=budget，low=90%）+ over/need_free
-    auto fill = [](MemoryPoolReport& p, std::size_t budget) {
-        p.budget_bytes = budget;
-        if (budget > 0) {
-            p.high_bytes = budget;
-            p.low_bytes  = budget - budget / 10;  // 低水位 = 90% 预算
+    // ---- 水位 + over/need_free（high=90%、low=80% 容量）----
+    const double hi = static_cast<double>(impl_->evict_high_ratio);
+    const double lo = static_cast<double>(impl_->evict_low_ratio);
+    auto fill = [hi, lo](MemoryPoolReport& p, std::size_t cap) {
+        p.budget_bytes = cap;
+        if (cap > 0) {
+            p.high_bytes = static_cast<std::size_t>(static_cast<double>(cap) * hi);
+            p.low_bytes  = static_cast<std::size_t>(static_cast<double>(cap) * lo);
             if (p.used_bytes > p.high_bytes) {
                 p.over_bytes      = p.used_bytes - p.high_bytes;
                 p.need_free_bytes = p.used_bytes - p.low_bytes;
@@ -2676,13 +2695,162 @@ MemoryReport GeometrySystem::compute_memory_report() const {
             }
         }
     };
-    fill(r.vram, impl_->vram_budget_bytes);
-    fill(r.ram, impl_->resource_memory_budget_mb * 1024ull * 1024ull);
+    fill(r.vram, vram_cap);
+    fill(r.ram, ram_cap);
     return r;
 }
 
 MemoryReport GeometrySystem::memory_report() const {
     return compute_memory_report();
+}
+
+void GeometrySystem::estimate_actor_memory(std::uintptr_t actor,
+                                           std::size_t& out_gpu_bytes,
+                                           std::size_t& out_cpu_bytes) const {
+    out_gpu_bytes = 0;
+    out_cpu_bytes = 0;
+    auto& hub = SharedDataHub::instance();
+
+    auto actor_read = hub.actor_storage().try_acquire_read(actor);
+    if (!actor_read.valid()) return;
+
+    std::unordered_set<std::uintptr_t> visited_geoms;
+    std::unordered_set<std::uint64_t>  visited_models;
+
+    for (auto profile_handle : actor_read->profile_handles) {
+        auto profile = hub.profile_storage().try_acquire_read(profile_handle);
+        if (!profile) continue;
+
+        std::vector<std::uintptr_t> geom_handles;
+        if (profile->geometry_handle) geom_handles.push_back(profile->geometry_handle);
+        if (profile->optics_handle) {
+            if (auto o = hub.optics_storage().try_acquire_read(profile->optics_handle))
+                if (o->geometry_handle) geom_handles.push_back(o->geometry_handle);
+        }
+        if (profile->mechanics_handle) {
+            if (auto m = hub.mechanics_storage().try_acquire_read(profile->mechanics_handle))
+                if (m->geometry_handle) geom_handles.push_back(m->geometry_handle);
+        }
+        if (profile->acoustics_handle) {
+            if (auto a = hub.acoustics_storage().try_acquire_read(profile->acoustics_handle))
+                if (a->geometry_handle) geom_handles.push_back(a->geometry_handle);
+        }
+
+        for (auto geom_handle : geom_handles) {
+            if (!visited_geoms.insert(geom_handle).second) continue;
+
+            uint32_t      mesh_count = 0;
+            std::uint64_t model_id   = 0;
+            {
+                auto geom = hub.geometry_storage().try_acquire_read(geom_handle);
+                if (!geom) continue;
+                mesh_count = static_cast<uint32_t>(geom->mesh_handles.size());
+                for (const auto& md : geom->mesh_handles)
+                    out_gpu_bytes += md.mesh_mem.bytes() + md.tex_mem.bytes();
+                if (geom->model_resource_handle) {
+                    if (auto mr = hub.model_resource_storage().try_acquire_read(geom->model_resource_handle))
+                        model_id = mr->model_id;
+                }
+            }
+            // LOD 缓存的 GPU 字节（LOD0 计 0，LOD1..N 各级令牌）
+            {
+                std::shared_lock lod_lock(impl_->lod_cache_mutex);
+                for (uint32_t mi = 0; mi < mesh_count; ++mi) {
+                    auto it = impl_->lod_cache.find(Impl::make_lod_key(geom_handle, mi));
+                    if (it == impl_->lod_cache.end()) continue;
+                    for (const auto& lvl : it->second.levels)
+                        out_gpu_bytes += lvl.mesh_mem.bytes();
+                }
+            }
+            // CPU 字节：该 model_id 的 mesh CPU（cpu_ledger，按 model_id 去重）
+            if (model_id != 0 && visited_models.insert(model_id).second) {
+                std::lock_guard lk(impl_->cpu_ledger_mutex);
+                auto it = impl_->cpu_ledger.find(model_id);
+                if (it != impl_->cpu_ledger.end()) out_cpu_bytes += it->second.bytes;
+            }
+        }
+    }
+}
+
+void GeometrySystem::evict_under_memory_pressure() {
+    const MemoryReport rep = compute_memory_report();
+    if (!rep.vram.pressured && !rep.ram.pressured) return;
+
+    // 目标释放量：不超过我们追踪的可淘汰总量（VRAM 实测压力可能含我们无法释放的
+    // 渲染目标等，封顶到 mesh+tex 账本，避免空转过度淘汰）。
+    std::size_t vram_need = std::min(rep.vram.need_free_bytes,
+                                     rep.vram.mesh_bytes + rep.vram.texture_bytes);
+    std::size_t ram_need  = std::min(rep.ram.need_free_bytes,
+                                     rep.ram.mesh_bytes + rep.ram.texture_bytes);
+    if (vram_need == 0 && ram_need == 0) return;
+
+    auto& hub = SharedDataHub::instance();
+    const std::vector<ktm::fvec3> cameras = collect_camera_positions();
+
+    struct Cand {
+        std::uintptr_t scene;
+        std::uintptr_t actor;
+        std::uint32_t  invisible_frames;
+        float          dist;
+    };
+    std::vector<Cand> cands;
+    {
+        std::shared_lock lock(impl_->mtx);
+        for (auto& [scene_handle, st] : impl_->scenes) {
+            for (const auto& [actor, state] : st.actor_load_states) {
+                if (state != ActorLoadState::Loaded) continue;
+                if (st.loading_tasks.count(actor) || st.unloading_tasks.count(actor)) continue;
+                if (auto a = hub.actor_storage().try_acquire_read(actor)) {
+                    if (a->pinned) continue;
+                } else {
+                    continue;
+                }
+                std::uint32_t invis = 0;
+                if (auto fit = st.invisible_frames.find(actor); fit != st.invisible_frames.end())
+                    invis = fit->second;
+                float dist = 0.0f;
+                if (auto eit = st.actor_to_entry.find(actor);
+                    eit != st.actor_to_entry.end() && !cameras.empty()) {
+                    const ktm::fvec3 c = eit->second.center();
+                    dist = std::numeric_limits<float>::max();
+                    for (const auto& cam : cameras)
+                        dist = std::min(dist, ktm::distance(c, cam));
+                }
+                cands.push_back({scene_handle, actor, invis, dist});
+            }
+        }
+    }
+    if (cands.empty()) return;
+
+    // 最冷优先：不可见帧多 → 距相机远
+    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+        if (a.invisible_frames != b.invisible_frames) return a.invisible_frames > b.invisible_frames;
+        return a.dist > b.dist;
+    });
+
+    constexpr std::size_t kMaxEvictionsPerPass = 64;
+    std::vector<Events::ActorEvictRequestedEvent> to_evict;
+    for (const auto& c : cands) {
+        if (to_evict.size() >= kMaxEvictionsPerPass) break;
+        if (vram_need == 0 && ram_need == 0) break;
+        std::size_t g = 0, cpu = 0;
+        estimate_actor_memory(c.actor, g, cpu);
+        if (g == 0 && cpu == 0) continue;  // 无可释放，跳过
+        to_evict.push_back({c.scene, c.actor});
+        vram_need -= std::min(vram_need, g);
+        ram_need  -= std::min(ram_need, cpu);
+    }
+    if (to_evict.empty()) return;
+
+    CFW_LOG_NOTICE("[GeometrySystem] Memory pressure: evicting {} cold actor(s) "
+                   "(VRAM {}MB/{}MB, RAM {}MB/{}MB)",
+                   to_evict.size(),
+                   rep.vram.used_bytes / (1024 * 1024), rep.vram.budget_bytes / (1024 * 1024),
+                   rep.ram.used_bytes / (1024 * 1024), rep.ram.budget_bytes / (1024 * 1024));
+    for (const auto& evt : to_evict) {
+        if (impl_->ctx && impl_->ctx->event_bus())
+            impl_->ctx->event_bus()->publish(evt);
+    }
 }
 
 }  // namespace Corona::Systems

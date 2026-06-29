@@ -1,6 +1,7 @@
 #include <corona/systems/ui/ui_frame_runner.h>
 
 #include <corona/kernel/core/i_logger.h>
+#include <corona/memory/gpu_mem_ledger.h>
 #include <corona/systems/ui/camera_viewport_manager.h>
 #include <corona/systems/ui/quad_compositor.h>
 #include <corona/systems/ui/sdl_window_manager.h>
@@ -76,6 +77,12 @@ bool initialize_sdl_ui(SDL_Window*& window, std::unique_ptr<VulkanBackend>& vulk
     SDL_StartTextInput(window);
     SDL_SetHint(SDL_HINT_IME_IMPLEMENTED_UI, "1");
     BrowserManager::instance().set_main_window(window);
+
+    // 记录系统物理内存总量（MiB→字节），供 GeometrySystem 作为 RAM 预算分母。
+    // 在此处获取：UI 本就链接 SDL，避免让 geometry 依赖 SDL，且保持跨平台。
+    Corona::Memory::system_ram_bytes().store(
+        static_cast<std::uint64_t>(SDL_GetSystemRAM()) * 1024ull * 1024ull,
+        std::memory_order_relaxed);
 
     // Adopt the main window into the window manager singleton so the frame runner can iterate
     // all windows (main + detached) and detach/redock commands can mutate the set.

@@ -181,6 +181,14 @@ struct GeometrySystem::Impl {
     /// VRAM 预算（字节），0 = 不限制（默认）。P0 仅用于 over/need_free 计算，不淘汰。
     std::size_t vram_budget_bytes = 0;
 
+    // ========================================
+    // 满载淘汰水位（容量取自 SDL 系统内存 / Horizon 显存，非固定 MB）
+    // ========================================
+    float    evict_high_ratio = 0.90f;  // used ≥ high*capacity 时触发淘汰
+    float    evict_low_ratio  = 0.80f;  // 淘汰目标：降到 low*capacity
+    int      pressure_eval_interval = 15;  // 每隔多少帧评估一次压力（避免每帧查 VMA/系统）
+    int      pressure_eval_counter  = 0;
+
     [[nodiscard]] static uint64_t make_lod_key(std::uintptr_t geometry_handle,
                                                uint32_t       mesh_index) {
         return (static_cast<uint64_t>(geometry_handle) << 32) | mesh_index;

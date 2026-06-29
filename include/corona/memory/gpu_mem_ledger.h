@@ -78,6 +78,14 @@ inline GpuLedger& gpu_ledger() noexcept {
     return *instance;
 }
 
+/// 进程级系统物理内存总量（字节）。由 UI 在创建窗口时用 SDL_GetSystemRAM() 写入
+/// （UI 已链接 SDL，保持跨平台且不让 geometry 依赖 SDL）；GeometrySystem 读取它作为
+/// RAM 预算的分母。0 = 尚未设置（此时 RAM 预算视为不限制）。泄漏单例，避免析构顺序问题。
+inline std::atomic<std::uint64_t>& system_ram_bytes() noexcept {
+    static std::atomic<std::uint64_t>* value = new std::atomic<std::uint64_t>(0);
+    return *value;
+}
+
 /// move-only RAII 字节令牌：构造即计入、析构即扣减、移动转移所有权、拷贝禁止。
 /// 拷贝禁止使编译器替我们标出任何对宿主结构体（MeshDevice 等）的意外拷贝。
 class GpuMemToken {
