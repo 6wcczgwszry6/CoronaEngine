@@ -178,7 +178,7 @@ async function handlePopOut() {
   flex: 1;
   min-height: 0;
   border-bottom: 1px solid #3c3c3c;
-  background: #1e1e1e;
+  background: rgba(30, 30, 30, 0.52);
   contain: layout style;
 }
 .dock-panel-header {
@@ -186,7 +186,7 @@ async function handlePopOut() {
   align-items: center;
   justify-content: space-between;
   padding: 2px 6px;
-  background: #2d2d2d;
+  background: rgba(45, 45, 45, 0.62);
   border-bottom: 1px solid #3c3c3c;
   flex-shrink: 0;
   user-select: none;
@@ -215,7 +215,7 @@ async function handlePopOut() {
   line-height: 1;
 }
 .dock-action-btn:hover {
-  background: #3c3c3c;
+  background: rgba(60, 60, 60, 0.72);
   color: #e0e0e0;
 }
 .dock-action-close:hover {

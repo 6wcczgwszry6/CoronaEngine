@@ -27,6 +27,22 @@ logger = logging.getLogger(__name__)
 
 _SUPPORTED_EXTENSIONS = {".obj", ".dae", ".glb", ".gltf", ".fbx", ".stl", ".usdz"}
 
+_GENERATION_PROMPT_GUARDRAIL = (
+    "isolated product-style 3D asset; only the requested object; "
+    "centered complete object geometry; clean neutral studio presentation"
+)
+
+
+def _with_generation_prompt_guardrail(prompt: str, name: str = "") -> str:
+    base = str(prompt or name or "").strip()
+    if not base:
+        base = "high quality 3D model"
+    lower = base.lower()
+    required = ("isolated product-style 3d asset", "only the requested object")
+    if all(token in lower for token in required):
+        return base
+    return f"{base}. {_GENERATION_PROMPT_GUARDRAIL}."
+
 
 def _resolve_model_file(path: str) -> str:
     """从目录或文件路径中提取第一个支持的 3D 模型文件。"""
@@ -206,30 +222,31 @@ class ModelProvider:
 
     def _generate_3d(self, name: str, image_url: str = "",
                      prompt_text: str = "", object_id: str = "") -> AcquireResult:
-        """调用 3D 生成工具 (Hunyuan3D / Rodin) 并等待模型下载完成。"""
+        """调用 3D 生成工具 (Hunyuan3D) 并等待模型下载完成。"""
         tool = self._get_3d_generate_tool()
         if not tool:
             logger.warning("[ModelProvider][generate] 3D 生成工具不可用")
             return AcquireResult(success=False, source="generation",
-                                 error="3D 生成工具 (Hunyuan3D/Rodin) 不可用")
+                                 error="3D 生成工具 (Hunyuan3D) 不可用")
 
         # 选择生成模式
         if image_url and image_url.startswith("__text_to_3d__:"):
             mode = "text_to_3d"
-            prompt = image_url[len("__text_to_3d__:"):] or prompt_text or name
-            tool_input = {"mode": mode, "prompt": prompt, "object_id": object_id}
+            prompt = _with_generation_prompt_guardrail(image_url[len("__text_to_3d__:"):] or prompt_text or name, name)
+            tool_input = {"mode": mode, "prompt": prompt, "object_id": object_id, "object_name": name}
             logger.info("[ModelProvider][generate] mode=text_to_3d prompt=%r...",
                         prompt[:80])
         elif image_url:
             mode = "image_to_3d"
+            prompt = _with_generation_prompt_guardrail(prompt_text or name, name)
             tool_input = {"mode": mode, "images": [image_url],
-                          "object_id": object_id, "prompt": name}
+                          "object_id": object_id, "object_name": name, "prompt": prompt}
             logger.info("[ModelProvider][generate] mode=image_to_3d image=%r...",
                         image_url[:80])
         else:
             mode = "text_to_3d"
-            prompt = prompt_text or f"high quality 3D model of {name}"
-            tool_input = {"mode": mode, "prompt": prompt, "object_id": object_id}
+            prompt = _with_generation_prompt_guardrail(prompt_text or f"high quality 3D model of {name}", name)
+            tool_input = {"mode": mode, "prompt": prompt, "object_id": object_id, "object_name": name}
             logger.info("[ModelProvider][generate] mode=text_to_3d (no image) "
                         "prompt=%r...", prompt[:80])
 
@@ -312,10 +329,10 @@ class ModelProvider:
                 tool = self._get_tool("hunyuan_generate_3d")
                 if tool:
                     return tool
-            logger.warning("混元 3D 服务不可用，本次模型生成无法继续；Rodin fallback 已关闭")
+            logger.warning("混元 3D 服务不可用，本次模型生成无法继续")
             return None
         except Exception as e:
-            logger.warning("混元 3D 配置读取失败，本次模型生成无法继续；Rodin fallback 已关闭: %s", e)
+            logger.warning("混元 3D 配置读取失败，本次模型生成无法继续: %s", e)
             return None
 
     # ── 解析 ──────────────────────────────────────────────────────────

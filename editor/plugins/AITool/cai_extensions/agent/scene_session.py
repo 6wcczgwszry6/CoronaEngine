@@ -774,6 +774,8 @@ class SceneSession:
                 actions.append("mark_stale")
             if not actions:
                 continue
+            if isinstance(transform, dict):
+                self._persist_final_adjustment_native(actor_id, transform, actions)
             after = {
                 "transform": self._copy_transform(getattr(inst, "transform", {})),
                 "layout_status": getattr(inst, "layout_status", None),
@@ -798,6 +800,32 @@ class SceneSession:
         if applied:
             logger.info("[SceneSession] FinalAdjustment applied: %s", applied)
         return applied
+
+    def _persist_final_adjustment_native(
+        self,
+        actor_id: str,
+        transform: Dict[str, Any],
+        actions: List[str],
+    ) -> None:
+        persist_actions = {
+            "apply_position_correction",
+            "apply_rotation_correction",
+            "apply_scale_correction",
+            "scale_down",
+        }
+        if not any(action in persist_actions for action in actions):
+            return
+        position = self._optional_vector3(transform.get("pos"))
+        rotation = self._optional_vector3(transform.get("rot"))
+        scale = self._optional_vector3(transform.get("scale"))
+        if position is None and rotation is None and scale is None:
+            return
+        try:
+            from ..mcp.tools.native_scene_state import set_native_actor_transform
+
+            set_native_actor_transform(self.scene_name, actor_id, position=position, rotation=rotation, scale=scale)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[SceneSession] native final adjustment persist skipped for %s: %s", actor_id, exc)
 
     @staticmethod
     def _final_adjustment_target_keys(item: Dict[str, Any]) -> set[str]:
@@ -904,6 +932,7 @@ class SceneSession:
         self.current_round += 1
         round_id = self.current_round
         imported_all: List[str] = []
+        failed_all: List[Dict[str, Any]] = []
         phases_run: List[str] = []
         progress_timeline: List[Dict[str, Any]] = []
         ordered_phases = list(phase_sequence) if phase_sequence else list(PHASE_ORDER)
@@ -1006,12 +1035,23 @@ class SceneSession:
 
             # 2. 导入（只 add 不 clear，经 EngineWriteGate）
             imported_this_phase: List[str] = []
+            failed_this_phase: List[Dict[str, Any]] = []
             post_import_snapshot = None
             if assets and importer is not None:
                 try:
                     res = importer(assets, batch_id)
                     imported_this_phase = list(res.get("imported", []) or [])
+                    failed_this_phase = list(res.get("failed", []) or [])
                     imported_all.extend(imported_this_phase)
+                    failed_all.extend(failed_this_phase)
+                    if failed_this_phase:
+                        logger.warning(
+                            "[SceneSession] phase %s import failed %d/%d: %s",
+                            phase,
+                            len(failed_this_phase),
+                            len(assets),
+                            failed_this_phase,
+                        )
                 except Exception as exc:  # noqa: BLE001
                     logger.error("[SceneSession] phase %s 导入失败（跳过）: %s", phase, exc)
 
@@ -1043,9 +1083,11 @@ class SceneSession:
                 **meta,
                 "asset_count": len(assets),
                 "imported_count": len(imported_this_phase),
+                "failed_count": len(failed_this_phase),
                 "cumulative_imported": cumulative_imported,
                 "total_assets": total_assets,
                 "imported_asset_names": asset_names[:len(imported_this_phase) or len(asset_names)],
+                "failed_assets": failed_this_phase,
                 "absorbed_notes": absorbed_tasks,
                 "deferred_notes": deferred_tasks,
                 "resource_plans": resource_plan_tasks,
@@ -1100,6 +1142,7 @@ class SceneSession:
         return {
             "phases_run": phases_run,
             "imported": imported_all,
+            "failed": failed_all,
             "round": round_id,
             "final_report": report,
             "final_adjustment_plan": final_adjustment_plan,
@@ -1170,7 +1213,22 @@ class SceneSession:
         for task in self.pending_tasks:
             if not isinstance(task, dict):
                 continue
-            if str(task.get("kind") or "") != "batch_resource_plan":
+            kind = str(task.get("kind") or "")
+            if kind == "aabb_repair":
+                status = str(task.get("status") or "")
+                if status not in {"pending_geometry", "needs_confirm"}:
+                    continue
+                text = FinalReviewReport._safe_user_text(
+                    task.get("content") or task.get("text") or task.get("reason"),
+                    fallback="仍有 AABB 摆放冲突需要处理",
+                )
+                out.append({
+                    "content": text,
+                    "status": status,
+                    "reason": FinalReviewReport._safe_user_text(task.get("reason"), fallback=status),
+                })
+                continue
+            if kind != "batch_resource_plan":
                 continue
             status = str(task.get("status") or "")
             if status not in {"model_provider_unavailable", "model_generation_failed", "empty_request"}:

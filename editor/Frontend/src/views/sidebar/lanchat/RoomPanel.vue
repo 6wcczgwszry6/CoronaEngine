@@ -124,7 +124,7 @@
 
       <div
         v-if="showAllHistory"
-        class="absolute inset-0 z-20 overflow-y-auto bg-[#282828] p-4 space-y-3"
+        class="absolute inset-0 z-20 overflow-y-auto bg-[#282828]/85 p-4 space-y-3"
       >
         <div class="flex items-center justify-between gap-2">
           <button
@@ -173,7 +173,7 @@
     <!-- 已进房：聊天界面 -->
     <div v-else class="flex flex-col h-full">
       <!-- 房间信息条 -->
-      <div class="flex items-center justify-between gap-3 px-3 py-2.5 bg-[#343434] text-sm">
+      <div class="flex items-center justify-between gap-3 px-3 py-2.5 bg-[#343434]/60 text-sm">
         <div class="min-w-0">
           <div class="text-[13px] text-gray-400">{{ s.mode === 'single' ? '本地单人协作' : '局域网协作' }}</div>
           <div class="truncate text-base font-semibold text-gray-100">
@@ -206,7 +206,7 @@
 
       <div
         v-if="currentDisclosure"
-        class="px-3 py-3 border-b border-gray-700 bg-[#222722] text-sm"
+        class="px-3 py-3 border-b border-gray-700 bg-[#222722]/60 text-sm"
       >
         <div class="flex items-center justify-between gap-2">
           <div class="min-w-0">
@@ -295,7 +295,13 @@
               class="flex min-w-0 max-w-full flex-col"
               :class="m.self ? 'items-end' : 'items-start'"
             >
-              <template v-if="m.kind === 'pending_reply'">
+              <template v-if="m.kind === 'room_entry_guide'">
+                <div class="max-w-[88%] rounded border border-[#84A65B]/35 bg-[#222722]/65 px-3.5 py-2.5 text-[13px] leading-relaxed text-gray-300 shadow-sm">
+                  <div class="mb-1 font-medium text-[#B8D58D]">{{ m.displayFrom }}</div>
+                  <div>{{ m.displayText }}</div>
+                </div>
+              </template>
+              <template v-else-if="m.kind === 'pending_reply'">
                 <span class="max-w-[88%] truncate text-base leading-relaxed text-gray-400 mb-1">{{ m.targetLabel }}</span>
                 <div class="lanchat-message-bubble rounded-lg bg-[#E8E8E8]/90 px-3.5 py-2.5 text-gray-800 shadow-sm">
                   <div class="flex items-center gap-2 text-[15px] leading-relaxed">
@@ -340,7 +346,7 @@
           <!-- 输入区 -->
           <div
             v-if="isWaitingDisclosure"
-            class="px-3 py-2 border-t border-gray-700 bg-[#242424] text-[13px] text-gray-400"
+            class="px-3 py-2 border-t border-gray-700 bg-[#242424]/55 text-[13px] text-gray-400"
           >
             {{ inputAssistText }}
           </div>
@@ -477,8 +483,6 @@ import {
 } from '../../../stores/lanchatDisclosure.js';
 import MemberList from './MemberList.vue';
 import {
-  aiReplyDisplayText,
-  displaySenderName,
   effectiveDraftAction,
   pendingReplyMatchesMessage,
   resolveSelectedTargetKey,
@@ -486,6 +490,7 @@ import {
   targetKeyFromMentionText,
   targetPayloadForKey,
 } from './routeSelection.js';
+import { buildDisplayMessages } from './roomEntryGuide.js';
 import {
   createExpertGroupConfig,
   selectedExpertPayloads as buildSelectedExpertPayloads,
@@ -724,34 +729,11 @@ const pendingReplyHint = computed(() => {
   return '复杂方案或工具调用可能需要更久，你可以继续补充要求。';
 });
 const displayMessages = computed(() => {
-  const messages = (s.messages || []).map((message, index) => ({
-    ...message,
-    displayFrom: displaySenderName(message),
-    displayText: aiReplyDisplayText(message, s.messages || [], s.memberDetails || []),
-    renderKey: message.message_id || `message-${index}`,
-    kind: 'message',
-  }));
-  const pending = currentPendingReply.value;
-  if (!pending) return messages;
-  const pendingMessage = {
-    ...pending,
-    renderKey: `pending-${pending.correlationId}`,
-    kind: 'pending_reply',
-    self: false,
-  };
-  const anchorIndex = messages.findIndex((message) => (
-    message.self &&
-    pending.correlationId &&
-    message.correlation_id === pending.correlationId
-  ));
-  if (anchorIndex >= 0) {
-    return [
-      ...messages.slice(0, anchorIndex + 1),
-      pendingMessage,
-      ...messages.slice(anchorIndex + 1),
-    ];
-  }
-  return [...messages, pendingMessage];
+  return buildDisplayMessages({
+    messages: s.messages || [],
+    memberDetails: s.memberDetails || [],
+    pendingReply: currentPendingReply.value,
+  });
 });
 const resourceDiagnosisText = computed(() => {
   if (!currentDisclosure.value || currentDisclosure.value.stage !== '资源调度') return '';
@@ -1634,6 +1616,15 @@ watch(
   async () => {
     const latest = s.messages[s.messages.length - 1];
     if (isPendingReplyMessage(latest)) clearPendingReply(latest?.correlation_id);
+    await nextTick();
+    if (msgRef.value) msgRef.value.scrollTop = msgRef.value.scrollHeight;
+  }
+);
+
+watch(
+  () => s.inRoom,
+  async (inRoom) => {
+    if (!inRoom) return;
     await nextTick();
     if (msgRef.value) msgRef.value.scrollTop = msgRef.value.scrollHeight;
   }

@@ -155,7 +155,7 @@ def get_store_tool():
 
 
 def get_3d_generate_tool():
-    """获取 3D 模型生成工具。正式试验只使用混元3D，不回退 Rodin。"""
+    """获取 3D 模型生成工具。当前只使用混元3D。"""
     from Quasar.ai_config.ai_config import get_ai_config
     config = get_ai_config()
     hunyuan_cfg = getattr(config, 'hunyuan3d', None)
@@ -163,7 +163,7 @@ def get_3d_generate_tool():
         tool = get_tool("hunyuan_generate_3d")
         if tool is not None:
             return tool
-    logger.warning("混元 3D 服务不可用，本次模型生成无法继续；Rodin fallback 已关闭")
+    logger.warning("混元 3D 服务不可用，本次模型生成无法继续")
     return None
 
 
@@ -268,7 +268,7 @@ def parse_store_result(raw_result: Any) -> Dict[str, Any]:
 
 
 def parse_3d_result(raw_result: Any) -> Dict[str, Any]:
-    """解析 rodin_generate_3d 返回值，提取模型文件路径与元数据。"""
+    """解析 3D 生成工具返回值，提取模型文件路径与元数据。"""
     try:
         parsed = parse_tool_result(raw_result)
         error_message = extract_tool_error(parsed)

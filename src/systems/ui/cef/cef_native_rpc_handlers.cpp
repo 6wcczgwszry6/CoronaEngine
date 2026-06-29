@@ -17,6 +17,7 @@
 #include <corona/kernel/core/kernel_context.h>
 #include <corona/systems/network/network_system.h>
 #include <corona/systems/script/corona_engine_api.h>
+#include <corona/utils/path_utils.h>
 
 #include <algorithm>
 #include <cctype>
@@ -99,15 +100,17 @@ std::string trim_ascii(std::string value) {
 }
 
 std::filesystem::path path_from_utf8(const std::string& value) {
-    return std::filesystem::u8path(value);
+    return Corona::Utils::utf8_to_path(value);
 }
 
 std::string path_to_utf8(const std::filesystem::path& value) {
-    return value.generic_string();
+    auto text = Corona::Utils::path_to_utf8(value);
+    std::replace(text.begin(), text.end(), '\\', '/');
+    return text;
 }
 
 std::string stem_utf8(const std::string& route) {
-    return path_from_utf8(route).stem().string();
+    return path_to_utf8(path_from_utf8(route).stem());
 }
 
 std::string normalize_route(std::string route) {
@@ -1361,6 +1364,8 @@ std::string json_string_at(const nlohmann::json& value,
     return value[index].dump();
 }
 
+void emit_scene_tree_changed(const std::string& scene_route);
+
 NativeResult create_native_editor_actor(const std::string& scene_route_arg,
                                         const std::string& source_path,
                                         std::string actor_type,
@@ -1427,6 +1432,7 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
                 if (actor_data_bool(actor_data, {"update_if_exists"}).value_or(false)) {
                     apply_actor_data_to_existing(*existing);
                     persist_native_scene_actors(*scene);
+                    emit_scene_tree_changed(scene->route);
                 }
                 return native_success({
                     {"status", "success"},
@@ -1518,6 +1524,7 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
         }
     }
     persist_native_scene_actors(*scene);
+    emit_scene_tree_changed(scene->route);
     return native_success({
         {"status", "success"},
         {"scene", scene->route},
@@ -1586,6 +1593,7 @@ NativeResult remove_native_editor_actor(const std::string& scene_route_arg,
     }
     scene->actors.erase(it);
     persist_native_scene_actors(*scene);
+    emit_scene_tree_changed(scene->route);
 
     return native_success({
         {"status", "success"},
@@ -1711,6 +1719,31 @@ void emit_actor_change(const NativeContext& context,
         nlohmann::json(scene.route).dump() + "," +
         nlohmann::json(actor.name).dump() + ");";
     context.frame->ExecuteJavaScript(script, context.frame->GetURL(), 0);
+}
+
+void emit_editor_event_to_all_tabs(const std::string& event_name,
+                                   const nlohmann::json& args = nlohmann::json::array()) {
+    if (event_name.empty()) {
+        return;
+    }
+    const nlohmann::json event_args = args.is_array() ? args : nlohmann::json::array({args});
+    std::string script = "if(window.__coronaEmit)window.__coronaEmit(" +
+                         nlohmann::json(event_name).dump();
+    for (const auto& arg : event_args) {
+        script += "," + arg.dump();
+    }
+    script += ",{\"_fromCross\":1});";
+    for (auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+        if (tab && !tab->minimized && tab->client && tab->client->GetBrowser()) {
+            tab->client->GetBrowser()->GetMainFrame()->ExecuteJavaScript(script, "", 0);
+        }
+    }
+}
+
+void emit_scene_tree_changed(const std::string& scene_route) {
+    emit_editor_event_to_all_tabs(
+        "scene-tree-changed",
+        nlohmann::json::array({scene_route}));
 }
 
 nlohmann::json active_project_info_json() {
@@ -2147,6 +2180,51 @@ std::string get_editor_actor_bounds_from_python(const std::string& scene_name,
         return nlohmann::json{
             {"status", "error"},
             {"message", "get_editor_actor_bounds native handler error"},
+        }.dump();
+    }
+}
+
+std::string get_editor_actor_geometry_status_from_python(const std::string& scene_name,
+                                                         const std::string& actor_name) {
+    try {
+        auto* scene = ensure_native_editor_scene();
+        const auto scene_route = normalize_route(scene_name);
+        if (!scene_route.empty() && scene_route != scene->route) {
+            scene = reload_native_editor_scene("", scene_route);
+        }
+        auto* actor = find_native_actor(*scene, actor_name);
+        if (!actor) {
+            return nlohmann::json{
+                {"status", "error"},
+                {"message", "Actor not found: " + actor_name},
+            }.dump();
+        }
+        const bool valid = actor->geometry && actor->geometry->is_valid();
+        const auto gpu_state = valid ? actor->geometry->get_gpu_build_state() : std::string("Invalid");
+        const auto mesh_count = valid ? actor->geometry->get_mesh_count() : 0;
+        const auto model_id = valid ? actor->geometry->get_model_id() : 0;
+        const bool render_ready = valid && gpu_state == "Ready" &&
+            (mesh_count > 0 || actor->actor_type == "audio");
+        return nlohmann::json{
+            {"status", "success"},
+            {"scene", scene->route},
+            {"actor", actor->name},
+            {"actor_type", actor->actor_type},
+            {"ready", render_ready},
+            {"failed", gpu_state == "Failed"},
+            {"gpu_build_state", gpu_state},
+            {"mesh_count", mesh_count},
+            {"model_id", model_id},
+        }.dump();
+    } catch (const std::exception& e) {
+        return nlohmann::json{
+            {"status", "error"},
+            {"message", e.what()},
+        }.dump();
+    } catch (...) {
+        return nlohmann::json{
+            {"status", "error"},
+            {"message", "get_editor_actor_geometry_status native handler error"},
         }.dump();
     }
 }

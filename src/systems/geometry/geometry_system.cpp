@@ -36,6 +36,8 @@ using namespace GeometryInternal;
 
 namespace {
 
+constexpr auto kLoadedActorEvictGrace = std::chrono::seconds(8);
+
 template <typename T>
 Horizon::HardwareBuffer make_geometry_buffer(const std::vector<T>& data,
                                              Horizon::BufferUsageFlags usage,
@@ -323,6 +325,7 @@ void GeometrySystem::update() {
                     scene_state.unloading_tasks.erase(it->first);
                     scene_state.unload_retry_counts.erase(it->first);
                     scene_state.invisible_frames.erase(it->first);
+                    impl_->last_load_finished_time.erase(it->first);
                     // 检查 actor 是否还存在于其他场景，若否，清理全局状态
                     bool exists_elsewhere = false;
                     for (auto& [other_scene, other_state] : impl_->scenes) {
@@ -528,6 +531,7 @@ void GeometrySystem::update() {
         // 不可见帧计数与淘汰
         std::vector<Events::ActorEvictRequestedEvent> pending_evictions;
         {
+            const auto now = std::chrono::steady_clock::now();
             std::unique_lock lock(impl_->mtx);
             Impl::SceneState& scene_state = impl_->get_or_create(scene_handle);
             for (std::uintptr_t actor_handle : actor_handles) {
@@ -540,6 +544,13 @@ void GeometrySystem::update() {
                 // pinned 的 actor 不计不可见帧，不触发淘汰
                 if (auto a = hub.actor_storage().try_acquire_read(actor_handle)) {
                     if (a->pinned) continue;
+                }
+
+                auto loaded_it = impl_->last_load_finished_time.find(actor_handle);
+                if (loaded_it != impl_->last_load_finished_time.end() &&
+                    now - loaded_it->second < kLoadedActorEvictGrace) {
+                    scene_state.invisible_frames[actor_handle] = 0;
+                    continue;
                 }
 
                 // 没有 AABB 的 actor（无 mechanics）无法计算距离，但不可见帧依然计数
@@ -656,26 +667,26 @@ void GeometrySystem::update() {
             for (auto& [scene_handle, scene_state] : impl_->scenes) {
                 std::lock_guard stats_lock(scene_state.stats_mutex);
                 auto& s = scene_state.stats;
-                CFW_LOG_NOTICE("[GeometrySystem] Scene stats: total={} visible={} "
-                               "loaded={} loading={} unloading={} unloaded={} offline={}",
-                               s.actor_total, s.actor_visible,
-                               s.actor_loaded, s.actor_loading, s.actor_unloading,
-                               s.actor_unloaded, s.actor_offline);
+                // CFW_LOG_NOTICE("[GeometrySystem] Scene stats: total={} visible={} "
+                //                "loaded={} loading={} unloading={} unloaded={} offline={}",
+                //                s.actor_total, s.actor_visible,
+                //                s.actor_loaded, s.actor_loading, s.actor_unloading,
+                //                s.actor_unloaded, s.actor_offline);
             }
-            auto& rm = Resource::ResourceManager::get_instance();
-            auto entries = rm.list_entries();
-            auto res_used = rm.used_memory_bytes();
-            CFW_LOG_NOTICE("[GeometrySystem] Resource: {}KB used / {}MB budget, {} entries",
-                           res_used / 1024,
-                           rm.memory_budget() / (1024 * 1024),
-                           entries.size());
-            if (impl_->actor_cache) {
-                auto mem_bytes = impl_->actor_cache->memory_used();
-                CFW_LOG_NOTICE("[GeometrySystem] ActorCache: {}B mem / {}B disk",
-                               mem_bytes, impl_->actor_cache->disk_used() );
-            } else {
-                CFW_LOG_NOTICE("[GeometrySystem] ActorCache: not created yet (no eviction has occurred)");
-            }
+            // auto& rm = Resource::ResourceManager::get_instance();
+            // auto entries = rm.list_entries();
+            // auto res_used = rm.used_memory_bytes();
+            // CFW_LOG_NOTICE("[GeometrySystem] Resource: {}KB used / {}MB budget, {} entries",
+            //                res_used / 1024,
+            //                rm.memory_budget() / (1024 * 1024),
+            //                entries.size());
+            // if (impl_->actor_cache) {
+            //     auto mem_bytes = impl_->actor_cache->memory_used();
+            //     CFW_LOG_NOTICE("[GeometrySystem] ActorCache: {}B mem / {}B disk",
+            //                    mem_bytes, impl_->actor_cache->disk_used() );
+            // } else {
+            //     CFW_LOG_NOTICE("[GeometrySystem] ActorCache: not created yet (no eviction has occurred)");
+            // }
         }
     }
 
@@ -819,6 +830,7 @@ void GeometrySystem::on_load_finished(const Events::ActorLoadFinishedEvent& even
             if (actor_it != state_map.end() && actor_it->second == ActorLoadState::Loading) {
                 actor_it->second = ActorLoadState::Loaded;
                 impl_->offline_actors[event.actor] = false;
+                impl_->last_load_finished_time[event.actor] = std::chrono::steady_clock::now();
                 CFW_LOG_NOTICE("GeometrySystem: Actor {} (scene: {}) load finished",
                                event.actor, event.scene);
             }
@@ -1682,12 +1694,12 @@ void GeometrySystem::on_restore_requested(const Events::ActorRestoreRequestedEve
                 }
             }
         }
-        CFW_LOG_NOTICE("[GeometrySystem] Restored actor {} state: pos=({:.1f},{:.1f},{:.1f}) "
-                       "physics={} optics_visible={}",
-                       event.actor,
-                       rec->transform.position.x, rec->transform.position.y,
-                       rec->transform.position.z,
-                       rec->physics_enabled, rec->optics_visible);
+        // CFW_LOG_NOTICE("[GeometrySystem] Restored actor {} state: pos=({:.1f},{:.1f},{:.1f}) "
+        //                "physics={} optics_visible={}",
+        //                event.actor,
+        //                rec->transform.position.x, rec->transform.position.y,
+        //                rec->transform.position.z,
+        //                rec->physics_enabled, rec->optics_visible);
     }
 
     // ---- 第 2 步：检查是否已在加载/卸载中，然后启动异步导入 ----

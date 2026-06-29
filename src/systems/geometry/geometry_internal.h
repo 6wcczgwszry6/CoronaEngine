@@ -137,6 +137,9 @@ struct GeometrySystem::Impl {
     /// actor_handle → 最后一次快照时间（用于防抖）
     std::unordered_map<Payload, std::chrono::steady_clock::time_point> last_snapshot_time;
 
+    /// actor_handle → 最近一次加载完成时间（避免新加载模型立即被不可见淘汰）
+    std::unordered_map<Payload, std::chrono::steady_clock::time_point> last_load_finished_time;
+
     /// evict 后待释放 GPU 的 actor 集合（延迟到下一帧 update() 头部处理，
     /// 避免与 OpticsSystem 渲染线程产生 data race）
     std::unordered_set<Payload> pending_gpu_releases;

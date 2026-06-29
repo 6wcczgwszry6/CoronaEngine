@@ -161,7 +161,7 @@ onUnmounted(() => {
   flex-direction: column;
   overflow: hidden;
   flex-shrink: 0;
-  background: #1a1a2e;
+  background: rgba(26, 26, 46, 0.36);
   contain: layout style;
 }
 
@@ -177,7 +177,7 @@ onUnmounted(() => {
 .dock-zone-bottom {
   overflow: hidden;
   flex-shrink: 0;
-  background: #1a1a2e;
+  background: rgba(26, 26, 46, 0.36);
   contain: layout style;
 }
 
@@ -191,7 +191,7 @@ onUnmounted(() => {
 .dock-zone-dragover {
   outline: 2px solid #8aa66a;
   outline-offset: -2px;
-  background: #20243a;
+  background: rgba(32, 36, 58, 0.58);
 }
 
 .dock-zone-empty {
@@ -216,7 +216,7 @@ onUnmounted(() => {
 .dock-sep-v {
   width: 4px;
   flex-shrink: 0;
-  background: #3c3c3c;
+  background: rgba(60, 60, 60, 0.72);
   cursor: col-resize;
   z-index: 10;
 }
@@ -227,7 +227,7 @@ onUnmounted(() => {
 .dock-sep-h {
   height: 4px;
   flex-shrink: 0;
-  background: #3c3c3c;
+  background: rgba(60, 60, 60, 0.72);
   cursor: row-resize;
   z-index: 10;
 }

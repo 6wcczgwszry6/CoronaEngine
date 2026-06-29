@@ -168,7 +168,13 @@ int BrowserManager::create_tab(const std::string& url, const std::string& path,
     browser_settings.javascript = STATE_ENABLED;
     browser_settings.local_storage = STATE_ENABLED;
     browser_settings.webgl = STATE_ENABLED;
-    const bool transparent_overlay = camera_view || docking_pos == "main";
+    const bool transparent_overlay =
+        camera_view ||
+        docking_pos == "main" ||
+        docking_pos == "right_top" ||
+        docking_pos == "right_bottom" ||
+        docking_pos == "left_bottom" ||
+        docking_pos == "center";
     tab->transparent_overlay = transparent_overlay;
     browser_settings.background_color =
         CefColorSetARGB(transparent_overlay ? 0 : 255, 16, 19, 16);

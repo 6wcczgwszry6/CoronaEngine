@@ -1,5 +1,5 @@
 <template>
-  <div class="rounded-lg overflow-hidden relative bg-[#282828]/70 flex-1 min-h-0 h-full w-full flex flex-col">
+  <div class="object-panel-shell rounded-lg overflow-hidden relative flex-1 min-h-0 h-full w-full flex flex-col">
     <DockTitleBar
       v-if="!isDocked"
       title="详情"
@@ -53,7 +53,7 @@
     </div>
 
     <!-- 主内容区域 -->
-    <div class="flex flex-col flex-1 min-h-0 bg-[#282828]/70">
+    <div class="flex flex-col flex-1 min-h-0 bg-[#282828]/35">
       <!-- 当前文件信息 -->
       <div class="flex items-center gap-2 px-2 py-1.5 bg-[#3c3c3c]/60 border-b border-[#1a1a1a]/30">
         <div class="text-[10px] text-[#909090] truncate flex-1">
@@ -111,7 +111,7 @@
         </div>
 
         <!-- ========== 内容区域 ========== -->
-        <div class="flex-1 min-h-0 overflow-auto bg-[#282828]/50 p-2">
+        <div class="flex-1 min-h-0 overflow-auto bg-[#282828]/25 p-2">
           <!-- ===== 场景内容 ===== -->
           <template v-if="mainActiveTab === 'scene'">
             <!-- 场景 - 基础信息 -->
@@ -828,7 +828,7 @@
                 <div class="w-32 shrink-0 bg-[#2d2d2d] border-r border-[#444] px-2 py-1">
                   <div class="h-5"></div>
                 </div>
-                <div class="flex-1 relative bg-[#2a2a2a] h-5 overflow-hidden" ref="timelineRulerRef"
+                <div class="flex-1 relative bg-[#2a2a2a]/55 h-5 overflow-hidden" ref="timelineRulerRef"
                   @click="onRulerClick">
                   <div class="absolute inset-0 flex items-end pointer-events-none">
                     <div v-for="tick in timelineTicks" :key="tick.time"
@@ -2788,3 +2788,9 @@ onUnmounted(() => {
   coronaEventBus.off('transform-update');
 });
 </script>
+
+<style scoped>
+.object-panel-shell {
+  background: rgba(40, 40, 40, 0.42);
+}
+</style>

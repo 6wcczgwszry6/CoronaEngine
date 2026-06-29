@@ -104,7 +104,7 @@ class GenerationJob:
 class GenerationScheduler:
     """Single-thread asyncio scheduler for AI generation stages.
 
-    It is intentionally provider-agnostic: concrete Hunyuan/Rodin/image calls can
+    It is intentionally provider-agnostic: concrete Hunyuan/image calls can
     be migrated behind stage handlers without changing LANChat / SeedPlan flow.
     """
 

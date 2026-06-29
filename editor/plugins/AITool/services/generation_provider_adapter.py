@@ -19,7 +19,7 @@ PROVIDER_STAGE_METHODS = {
 class ProviderStageRunner:
     """Adapter from provider-style generation APIs to GenerationScheduler stages.
 
-    This lets Hunyuan/Rodin/image providers migrate away from one large blocking
+    This lets Hunyuan/image providers migrate away from one large blocking
     call and background daemon threads. A provider can implement any subset of
     prepare/submit/poll/download/postprocess/import_result; missing stages are
     recorded as skipped so the scheduler remains observable.

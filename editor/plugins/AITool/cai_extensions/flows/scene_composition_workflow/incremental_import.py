@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -44,6 +45,7 @@ def incremental_import(
     import_tool: Any,
     scene_layout: Any,
     engine_gate: Any,
+    scene_name: str = "",
     asset_pool: Any = None,
     current_round: int = 0,
     parse_result: Optional[Callable[[Any], Dict[str, Any]]] = None,
@@ -83,6 +85,7 @@ def incremental_import(
         path = asset.get("path") or asset.get("model_path") or asset.get("local_path") or ""
         if not path:
             failed.append({"name": name, "error": "无模型路径"})
+            logger.warning("[IncrementalImport] skip %s: missing model path", name)
             continue
         payload = {
             "model_path": path,
@@ -91,12 +94,22 @@ def incremental_import(
             "rotation": asset.get("rot", [0.0, 0.0, 0.0]),
             "scale": asset.get("scale", [1.0, 1.0, 1.0]),
         }
+        if scene_name:
+            payload["scene_name"] = scene_name
         try:
             # ★ 经 EngineWriteGate 串行收口（绝不绕过）
             raw = engine_gate.invoke_tool(import_tool, payload)
             parsed = parse_result(raw) if parse_result else raw
             if isinstance(parsed, dict) and parsed.get("error"):
-                failed.append({"name": name, "error": str(parsed["error"])})
+                error = str(parsed["error"])
+                failed.append({"name": name, "error": error, "model_path": str(path)})
+                logger.warning(
+                    "[IncrementalImport] import %s failed: %s path=%s exists=%s",
+                    name,
+                    error,
+                    path,
+                    os.path.exists(str(path)),
+                )
                 continue
             actor_id = _parse_actor_id(parsed, name)
 
@@ -120,8 +133,13 @@ def incremental_import(
             logger.info("[IncrementalImport] 导入 %s (batch=%s, zone=%s)",
                         actor_id, batch_id, inst.zone_id)
         except Exception as exc:  # noqa: BLE001
-            logger.error("[IncrementalImport] 导入 %s 失败: %s", name, exc)
-            failed.append({"name": name, "error": str(exc)})
+            logger.exception(
+                "[IncrementalImport] import %s raised path=%s exists=%s",
+                name,
+                path,
+                os.path.exists(str(path)),
+            )
+            failed.append({"name": name, "error": str(exc), "model_path": str(path)})
 
     logger.info("[IncrementalImport] 批 %s 完成 — 成功 %d, 失败 %d (不清场)",
                 batch_id, len(imported), len(failed))
