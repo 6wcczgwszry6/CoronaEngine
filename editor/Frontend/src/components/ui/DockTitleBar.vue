@@ -175,7 +175,7 @@ function onClose() {
   min-height: 32px;
   padding: 0 6px 0 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  background: linear-gradient(180deg, #252925 0%, #1d211e 100%);
+  background: linear-gradient(180deg, rgba(37, 41, 37, 0.72) 0%, rgba(29, 33, 30, 0.64) 100%);
   color: #e7ece3;
   cursor: default;
   user-select: none;

@@ -1,5 +1,5 @@
 <template>
-  <div class="flex flex-col flex-1 min-h-0 h-full w-full rounded-lg overflow-hidden relative bg-[#282828]/90">
+  <div class="ai-talk-shell flex flex-col flex-1 min-h-0 h-full w-full rounded-lg overflow-hidden relative">
     <DockTitleBar
       v-if="!isDocked"
       :title="t('plugins.AITalkBar')"
@@ -9,9 +9,7 @@
     />
 
     <!-- 局域网聊天（单一模式） -->
-    <div
-      class="w-full flex-1 min-h-0 bg-[#282828]/90"
-    >
+    <div class="ai-talk-content w-full flex-1 min-h-0">
       <RoomPanel />
     </div>
   </div>
@@ -47,3 +45,13 @@ function closeFloat() {
   closeDockPanel();
 }
 </script>
+
+<style scoped>
+.ai-talk-shell {
+  background: rgba(40, 40, 40, 0.42);
+}
+
+.ai-talk-content {
+  background: rgba(40, 40, 40, 0.24);
+}
+</style>

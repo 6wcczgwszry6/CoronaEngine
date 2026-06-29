@@ -1,5 +1,5 @@
 <template>
-  <div class="scene-tools-panel rounded-lg overflow-hidden flex flex-col flex-1 min-h-0 h-full w-full relative bg-[#282828]/70">
+  <div class="scene-tools-panel rounded-lg overflow-hidden flex flex-col flex-1 min-h-0 h-full w-full relative">
     <DockTitleBar
       v-if="!isDocked"
       title="场景管理"
@@ -64,7 +64,7 @@
       <!-- 资源搜索栏(B-2 竞态保护 + 防抖 + 错误兜底) -->
       <div
         v-if="RESOURCE_SEARCH_ENABLED"
-        class="flex items-center gap-1 px-2 py-1.5 bg-[#2a2a2a] border-b border-[#1a1a1a]"
+        class="flex items-center gap-1 px-2 py-1.5 bg-[#2a2a2a]/55 border-b border-[#1a1a1a]"
       >
         <div class="relative flex-1">
           <input
@@ -123,7 +123,7 @@
       <!-- 搜索结果区(可切换) -->
       <div
         v-if="RESOURCE_SEARCH_ENABLED && searchActive"
-        class="flex-1 overflow-y-auto bg-[#282828]/50"
+        class="scene-list-surface flex-1 overflow-y-auto"
         data-testid="resource-search-results"
       >
         <!-- 错误提示 -->
@@ -364,7 +364,7 @@
 
       <!-- 输出模式快捷切换 & 截图测试 -->
       <div
-        class="flex flex-wrap items-center gap-1 px-2 py-1.5 bg-[#2a2a2a] border-b border-[#1a1a1a]"
+        class="flex flex-wrap items-center gap-1 px-2 py-1.5 bg-[#2a2a2a]/55 border-b border-[#1a1a1a]"
       >
         <button
           v-for="buf in outputModes"
@@ -424,7 +424,7 @@
       </div>
 
       <!-- 场景树 -->
-      <div class="flex-1 overflow-y-auto bg-[#282828]/50">
+      <div class="scene-list-surface flex-1 overflow-y-auto">
         <div class="select-none">
           <!-- Cameras 分组 -->
           <div
@@ -2207,9 +2207,13 @@ onUnmounted(() => {
 
 <style scoped>
 .scene-tools-panel {
-  background: linear-gradient(180deg, rgba(38, 42, 38, 0.96), rgba(28, 31, 29, 0.98));
+  background: linear-gradient(180deg, rgba(38, 42, 38, 0.54), rgba(28, 31, 29, 0.48));
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
+}
+
+.scene-list-surface {
+  background: rgba(40, 40, 40, 0.24);
 }
 
 .viewport-control-strip {
@@ -2220,8 +2224,8 @@ onUnmounted(() => {
   padding: 8px 10px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.34);
   background:
-    linear-gradient(180deg, rgba(31, 35, 31, 0.96), rgba(24, 27, 24, 0.96)),
-    #1b1f1b;
+    linear-gradient(180deg, rgba(31, 35, 31, 0.58), rgba(24, 27, 24, 0.52)),
+    rgba(27, 31, 27, 0.5);
 }
 
 .viewport-control-group {
