@@ -19,6 +19,17 @@
 #include <utility>
 #include <vector>
 
+// ============================================================================
+// 三角形级 BVH 编译开关（物体内精确射线查询的 CPU 加速结构）
+// ----------------------------------------------------------------------------
+// 现状：per_level_bvh + query_mesh_ray/closest_hit + build_triangle_bvh 全套已实现，
+// 但无任何消费端——actor 拾取走 OpticsSystem 的 GPU compute 路径，不经过本 BVH。
+// 为消除"每次模型加载同步建 BVH"的帧尖峰，以及一份与 index 同量级、未计入账本的
+// CPU 内存，暂以此开关编译屏蔽全部三角形 BVH 代码。
+// 将来若需 CPU raycast（物理射线 / 贴花 / 非渲染线程拾取），改回 1 即可复活全部代码。
+// ============================================================================
+#define CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH 0
+
 namespace Corona::Systems {
 
 /**
@@ -134,6 +145,13 @@ struct LODMeshBuffers {
     // GPU 显存记账令牌（P0）：LOD1..N 各自的顶点/索引缓冲字节。
     // LOD0 复用 mesh_dev 的缓冲（非新分配）→ 该令牌留空计 0，避免重复计量。
     Corona::Memory::GpuMemToken mesh_mem;
+
+    // 释放冷却（方案 A）：本级最后一次被 reconcile 判定为"需求级 D"的帧号。
+    // reconcile 每帧给当前 D 级刷新此值；其余已就绪级仅在连续 idle 帧数超过
+    // kLodReleaseCooldownFrames 后才释放。这样物体停在 LOD 阈值边界微动时，
+    // D 在相邻级反复横跳不会每帧重建/释放 GPU 缓冲（消除 GPU churn）。
+    // 0 = 从未被需求（LOD0 恒驻，不参与冷却释放）。
+    std::uint64_t last_demand_frame = 0;
 };
 
 // LOD（动态减面）现由 GeometrySystem 内部自行决策，无外部配置面：
@@ -417,6 +435,7 @@ class GeometrySystem : public Kernel::SystemBase {
     //
     // 命中基于三角形 AABB，调用方拿到候选三角形后需自行做精确
     // ray-tri 相交检测（Möller-Trumbore）以确认最终命中。
+#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
 
     /// 穿透查询：返回射线命中的所有三角形下标（AABB 级，无序）
     /// @param geometry_handle GeometryDevice 句柄
@@ -447,6 +466,7 @@ class GeometrySystem : public Kernel::SystemBase {
         const ktm::fvec3& origin,
         const ktm::fvec3& inv_dir,
         float            t_max) const;
+#endif  // CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
 
     // ========================================
     // 统计
@@ -507,6 +527,12 @@ class GeometrySystem : public Kernel::SystemBase {
     /// 渲染线程 select_render_buffers 用同一屏占比公式 → 与本决策一致；
     /// 偶发不一致时渲染自动降级到 LOD0，不致黑屏。
     void reconcile_lod_residency();
+
+    /// 轮询已完成的异步 LOD 构建任务（方案 C），将 GPU 缓冲回写进 lod_cache。
+    /// 在 update() 中 reconcile_lod_residency() 之前调用：让本帧完成的级即刻可见。
+    /// 回写前做 ABA 重校验（model_id + residency_epoch + 级存在 + 未就绪），
+    /// 失败则丢弃（结果 RAII 自动释放 GPU）。仅几何线程访问在途表，无需加锁。
+    void process_pending_lod_builds();
 
     /// 维护 mesh/texture 的 CPU 资源账本（P0）：登记新出现 model_id 的 Scene
     /// (mesh CPU) 与其 Image 纹理 (texture CPU)，按 rid 去重；并对 ResourceManager

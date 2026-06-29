@@ -152,6 +152,9 @@ void GeometrySystem::update() {
     // LOD 由 GeometrySystem 内部自动管理，无外部开关。
     // upload：为新模型登记 LOD 缓存条目（LOD0 就绪 + LOD1..N 仅元数据，不建 GPU 缓冲）。
     upload_lod_from_scene_data();
+    // 轮询回写已完成的异步 LOD 构建（方案 C）：放在 reconcile 之前，让本帧完成的级
+    // 即刻参与本帧的驻留决策（计入 ready，避免对同级重复发起任务）。
+    process_pending_lod_builds();
     // reconcile（Step 3a 按需驻留）：每帧把每个 mesh 的 GPU 驻留集收敛到 {LOD0, 需求级 D}，
     // 只构建当前需要的那一级、释放其余已构建的简化级，消除"上传所有 LOD ≈2×显存"的浪费。
     // 必须在 upload 之后（缓存条目已建）、skin 之前（蒙皮需写本帧新建级）。
@@ -616,6 +619,26 @@ void GeometrySystem::update() {
         static int frame_counter = 0;
         if (++frame_counter >= 60) {
             frame_counter = 0;
+            // ===== 临时诊断：reconcile 一秒行为画像（定位卡顿/LOD切换根因）=====
+            // 解读：
+            //  - mesh_visits ≈ 可见 mesh 数 × 60（每帧每 mesh 一次）→ 正常
+            //  - scene_acquires 同量级 → 每帧每 geom 取 Scene（merge 引入，疑似开销源）
+            //  - builds/frees 若每秒成百上千 → reconcile 在 GPU churn（卡顿+LOD切换坐实）
+            //  - demand_changes 高 → 选级在抖动；低但 builds 高 → 别处反复失效缓存
+            CFW_LOG_NOTICE("[GeoDiag/1s] mesh_visits={} scene_acquires={} builds={} frees={} demand_changes={} launches={} discards={} inflight={}",
+                           impl_->diag_reconcile_mesh_visits, impl_->diag_scene_acquires,
+                           impl_->diag_lod_builds, impl_->diag_lod_frees,
+                           impl_->diag_demand_changes,
+                           impl_->diag_lod_build_launches, impl_->diag_lod_build_discards,
+                           impl_->pending_lod_builds.size());
+            impl_->diag_reconcile_mesh_visits = 0;
+            impl_->diag_scene_acquires = 0;
+            impl_->diag_lod_builds = 0;
+            impl_->diag_lod_frees = 0;
+            impl_->diag_demand_changes = 0;
+            impl_->diag_lod_build_launches = 0;
+            impl_->diag_lod_build_discards = 0;
+
             std::shared_lock lock(impl_->mtx);
             for (auto& [scene_handle, scene_state] : impl_->scenes) {
                 std::lock_guard stats_lock(scene_state.stats_mutex);
@@ -725,6 +748,11 @@ void GeometrySystem::shutdown() {
         if (task.future.valid()) task.future.wait();
     }
     impl_->pending_import_tasks.clear();
+
+    // 等待在途的异步 LOD 构建任务（方案 C）：task_group::wait() 阻塞至全部完成，
+    // 避免 task_group 析构时仍有任务运行 / promise 悬挂。结果丢弃（缓冲 RAII 释放）。
+    impl_->lod_build_tasks.wait();
+    impl_->pending_lod_builds.clear();
 
     // 释放 LRU ActorCache（确保在 shutdown 时清理磁盘/内存）
     impl_->actor_cache.reset();
@@ -1715,9 +1743,11 @@ GeometrySystem::RenderMeshBuffers GeometrySystem::select_render_buffers(
     float                   bounding_radius,
     const RenderMeshBuffers& fallback) const {
 
-    // 屏幕占比由 GeometrySystem 内部计算，optics 无需关心
-    const float screen_ratio = compute_screen_ratio(
-        camera_pos, camera_fov_deg, world_center, bounding_radius);
+    // 选级权已完全交给 reconcile_lod_residency（方案 B 滞回）：本路径直接读
+    // committed_demand，不再按屏占比选级，故无需在此 compute_screen_ratio。
+    // camera_pos / camera_fov_deg / world_center / bounding_radius 保留在签名中
+    // 以兼容调用方与 resident 路径对称，本实现不再使用。
+    (void)camera_pos; (void)camera_fov_deg; (void)world_center; (void)bounding_radius;
 
     // ------------------------------------------------------------------
     // 选级 + 降级 + 句柄拷贝全部在同一个 shared_lock 作用域内完成。
@@ -1739,20 +1769,29 @@ GeometrySystem::RenderMeshBuffers GeometrySystem::select_render_buffers(
     }
     const auto& levels = it->second.levels;
 
-    // 1) 按屏幕占比选级（阈值表 = levels[1..N] 的 screen_threshold）
-    std::vector<float> thresholds;
-    thresholds.reserve(levels.size());
-    for (size_t i = 1; i < levels.size(); ++i) {
-        thresholds.push_back(levels[i].screen_threshold);
-    }
-    int selected = select_lod_level(screen_ratio, thresholds);
+    // 1) 直接读 reconcile 已提交的滞回级（方案 B）。
+    //    不再独立调用 select_lod_level —— 那会让 render 选到 reconcile 未驻留的级、
+    //    被迫降级到 LOD0（与 reconcile 决策脱钩，反而放大视觉 pop）。
+    //    committed_demand 由 reconcile_lod_residency 用滞回死区每帧维护，
+    //    并保证 {LOD0, committed_demand} 两级 GPU 缓冲已建好。
+    int selected = it->second.committed_demand;
+    if (selected < 0) selected = 0;
+    if (static_cast<size_t>(selected) >= levels.size())
+        selected = static_cast<int>(levels.size()) - 1;
 
-    // 2) 降级到最近的已就绪级别（向 LOD0 方向回退）
-    while (selected > 0) {
-        if (static_cast<size_t>(selected) < levels.size() && levels[selected].ready) {
-            break;
+    // 2) committed 级未就绪时，单调回退到"不比 committed 更粗的最近已就绪级"（Fix 2）。
+    //    旧实现做双向就近搜索：committed 未就绪时可能选到更粗的已驻级，而目标（更细）级
+    //    一旦异步 build 完成又跳回——构建窗口内渲染级在粗/细之间逐帧来回 = 闪烁。
+    //    改为只向更细方向（更小级号）搜索：LOD0 恒驻，必然命中一个 ready 级，且渲染级
+    //    "永不比 committed 更粗"。构建期间显示的细级只会随目标 build 完成单调变粗、绝不反弹，
+    //    彻底消除回退抖动。代价：粗级 build 完成前短暂多画几帧更细网格（视觉无 pop，仅微小带宽）。
+    //    committed 级本身 ready 时此分支零开销跳过。
+    if (static_cast<size_t>(selected) < levels.size() && !levels[selected].ready) {
+        int best = -1;
+        for (int lo = selected - 1; lo >= 0; --lo) {
+            if (levels[lo].ready) { best = lo; break; }
         }
-        --selected;
+        selected = best;  // 全部更细级皆不就绪 → -1，下方回退 fallback
     }
     if (selected < 0 || static_cast<size_t>(selected) >= levels.size()) {
         return fallback;
@@ -1928,6 +1967,7 @@ GeometrySystem::get_skinning_targets(std::uintptr_t geometry_handle, uint32_t me
 // ============================================================================
 // BVH 射线查询
 // ============================================================================
+#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
 
 std::vector<uint32_t> GeometrySystem::query_mesh_ray(
     std::uintptr_t   geometry_handle,
@@ -1965,6 +2005,7 @@ std::optional<Spatial::BVH<uint32_t>::Hit> GeometrySystem::query_mesh_closest_hi
 
     return it->second.per_level_bvh[lod_level].closest_hit(origin, inv_dir, t_max);
 }
+#endif  // CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
 
 // ============================================================================
 // 动态减面内部管线
@@ -1976,6 +2017,7 @@ namespace {
 /// @param vertices 顶点数组
 /// @param indices  uint16 索引数组（每 3 个一组构成三角形）
 /// @return 构建好的 BVH，无数据时返回空 BVH
+#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
 
 [[nodiscard]] Spatial::BVH<uint32_t> build_triangle_bvh(
     const std::vector<Resource::Vertex>&    vertices,
@@ -2011,6 +2053,7 @@ namespace {
     bvh.build(entries);
     return bvh;
 }
+#endif  // CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
 
 // 收集所有场景所有相机的世界位置（用于流式加载的距离排序）。
 [[nodiscard]] std::vector<ktm::fvec3> collect_camera_positions() {
@@ -2037,6 +2080,41 @@ namespace {
         best = std::min(best, dx * dx + dy * dy + dz * dz);
     }
     return best;
+}
+
+// 带滞回的 LOD 选级（方案 B）。
+//
+// 入参：
+//   current      当前已提交级（committed_demand）
+//   raw_target   本帧按 max 屏占比算出的原始目标级（select_lod_level 结果）
+//   screen_ratio 本帧 max 屏占比（多相机取最高精度 = 最大屏占比）
+//   thresholds   各级阈值表（thresholds[i] = levels[i+1].screen_threshold，单调递减）
+//   h            滞回死区比例
+//
+// 策略：用死区"门控"是否离开 current；一旦越过死区，直接跳到 raw_target（支持大跳变，
+// 不受每帧一级限制）。死区内保持 current，吸收阈值边界的微小抖动。
+//   - raw_target 更高精度(< current)：仅当 screen_ratio > thresholds[current-1]*(1+h) 才切。
+//   - raw_target 更低精度(> current)：仅当 screen_ratio < thresholds[current]  *(1-h) 才切。
+[[nodiscard]] int select_lod_with_hysteresis(int                       current,
+                                             int                       raw_target,
+                                             float                     screen_ratio,
+                                             const std::vector<float>& thresholds,
+                                             float                     h) {
+    const int max_level = static_cast<int>(thresholds.size());  // 级号上界（含）
+    if (current < 0) current = 0;
+    if (current > max_level) current = max_level;
+    if (raw_target == current) return current;  // 目标即当前级，无切换
+
+    if (raw_target < current) {
+        // 升精度方向：要求屏占比显著高于"升回 current-1 级"的边界
+        const float up_bound = thresholds[current - 1] * (1.0f + h);
+        if (screen_ratio > up_bound) return raw_target;
+    } else {
+        // 降精度方向：要求屏占比显著低于"降到 current+1 级"的边界
+        const float down_bound = thresholds[current] * (1.0f - h);
+        if (screen_ratio < down_bound) return raw_target;
+    }
+    return current;  // 死区内：保持当前级
 }
 
 }  // namespace
@@ -2320,6 +2398,20 @@ void GeometrySystem::upload_lod_from_scene_data() {
             // 创建缓存条目
             Impl::LODCacheEntry entry;
             entry.model_id = model_id;
+            entry.residency_epoch = impl_->next_residency_epoch++;  // 身份版本（方案 C ABA 守卫）
+
+            // 包围半径（Fix 1）：与 reconcile 旧逻辑同源（0.5·diag(Scene 局部 AABB)），在此
+            // 算一次缓存，使 reconcile 选级无需每帧重新 acquire_read<Scene>。
+            {
+                const auto aabb_min = scene.get_scene_aabb().min;
+                const auto aabb_max = scene.get_scene_aabb().max;
+                const float ex = aabb_max[0] - aabb_min[0];
+                const float ey = aabb_max[1] - aabb_min[1];
+                const float ez = aabb_max[2] - aabb_min[2];
+                float r = 0.5f * std::sqrt(ex * ex + ey * ey + ez * ez);
+                if (!(r > 0.0f)) r = 1.0f;
+                entry.bounding_radius = r;
+            }
             auto& mesh_dev = geom_dev.mesh_handles[mesh_idx];
 
             // LOD 0：复用现有的 GPU 缓冲
@@ -2336,7 +2428,9 @@ void GeometrySystem::upload_lod_from_scene_data() {
             entry.levels.push_back(std::move(lod0));
 
             // 为 LOD 0 构建 BVH（三角形级空间索引）
+#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
             entry.per_level_bvh.push_back(build_triangle_bvh(mesh.vertices, mesh.indices));
+#endif
 
             // LOD 1..N：仅登记元数据，**不**在此创建 GPU 缓冲 / BVH（Step 3a 按需驻留）。
             // 每级记录 source_lod_index（映射回 mesh.lod_levels，因为空级被跳过导致下标不连续），
@@ -2363,7 +2457,9 @@ void GeometrySystem::upload_lod_from_scene_data() {
                 entry.levels.push_back(std::move(lod_buf));
 
                 // BVH 占位（空）：该级被 reconcile 构建时一并建 BVH，释放时一并清。
+#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
                 entry.per_level_bvh.push_back(Spatial::BVH<uint32_t>{});
+#endif
             }
 
             std::unique_lock lock(impl_->lod_cache_mutex);
@@ -2412,6 +2508,10 @@ void GeometrySystem::reconcile_lod_residency() {
     }
     if (cams.empty()) return;
 
+    // 释放冷却（方案 A）：每帧推进一次帧计数器，作为各级 last_demand_frame 的基准。
+    // 仅在确有相机（会真正评估需求级）时推进，避免无相机帧空转计数。
+    const std::uint64_t this_frame = ++impl_->lod_frame_counter;
+
     for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
         const GeometryDevice& geom_dev = *it;
         auto geom_handle = reinterpret_cast<std::uintptr_t>(&geom_dev);
@@ -2431,46 +2531,74 @@ void GeometrySystem::reconcile_lod_residency() {
             }
         }
 
-        // Scene CPU 数据（用于半径计算 + 按需构建该级缓冲）
-        auto scene_read = resource_manager.acquire_read<Resource::Scene>(model_id);
-        if (!scene_read.valid()) continue;
-        const auto& scene = *scene_read;
-
-        // 包围半径 = 0.5·diag(Scene 局部 AABB)，与渲染端 bounding_radius 同源
-        const auto aabb_min = scene.get_scene_aabb().min;
-        const auto aabb_max = scene.get_scene_aabb().max;
-        const float ex = aabb_max[0] - aabb_min[0];
-        const float ey = aabb_max[1] - aabb_min[1];
-        const float ez = aabb_max[2] - aabb_min[2];
-        float bounding_radius = 0.5f * std::sqrt(ex * ex + ey * ey + ez * ez);
-        if (!(bounding_radius > 0.0f)) bounding_radius = 1.0f;
-
+        // Fix 1：不再每帧每 geom acquire_read<Scene>。半径从 lod_cache 条目读取（upload 已缓存），
+        // Scene CPU 数据仅在确需构建某级时（need_build）才惰性取用。
         for (uint32_t mesh_idx = 0;
              mesh_idx < static_cast<uint32_t>(geom_dev.mesh_handles.size()); ++mesh_idx) {
             const uint64_t lod_key = Impl::make_lod_key(geom_handle, mesh_idx);
+            ++impl_->diag_reconcile_mesh_visits;  // 诊断：处理的 (geom,mesh) 次数
 
-            // ---- 快照：级数 + 各级阈值（levels[1..N]）----
+            // ---- 快照：级数 + 各级阈值（levels[1..N]）+ 包围半径 ----
             std::vector<float> thresholds;
             size_t level_count = 0;
+            float  bounding_radius = 1.0f;
             {
                 std::shared_lock lock(impl_->lod_cache_mutex);
                 auto cit = impl_->lod_cache.find(lod_key);
                 if (cit == impl_->lod_cache.end() || cit->second.model_id != model_id) continue;
                 level_count = cit->second.levels.size();
+                bounding_radius = cit->second.bounding_radius;
                 thresholds.reserve(level_count);
                 for (size_t i = 1; i < level_count; ++i)
                     thresholds.push_back(cit->second.levels[i].screen_threshold);
             }
             if (level_count <= 1) continue;  // 无简化级，无需 reconcile
 
-            // ---- 需求级 D：所有相机取最高精度（最小级号）----
-            int demand = static_cast<int>(level_count) - 1;
+            // ---- 需求级 D：所有相机取最高精度（最小级号）+ 滞回门控 ----
+            // raw_demand = 各相机原始选级取最小（最高精度）；同时记录最大屏占比，
+            // 供滞回判定使用（多相机最高精度对应最大屏占比）。
+            int   raw_demand = static_cast<int>(level_count) - 1;
+            float max_sr     = 0.0f;
             for (const auto& cam : cams) {
                 const float sr = compute_screen_ratio(cam.pos, cam.fov, world_center, bounding_radius);
-                demand = std::min(demand, select_lod_level(sr, thresholds));
+                max_sr = std::max(max_sr, sr);
+                raw_demand = std::min(raw_demand, select_lod_level(sr, thresholds));
             }
+            if (raw_demand < 0) raw_demand = 0;
+            if (static_cast<size_t>(raw_demand) >= level_count) raw_demand = static_cast<int>(level_count) - 1;
+
+            // 读当前已提交级，应用滞回死区门控；落在死区内则维持原级（吸收边界抖动）。
+            int prev_committed = 0;
+            {
+                std::shared_lock lock(impl_->lod_cache_mutex);
+                auto cit = impl_->lod_cache.find(lod_key);
+                if (cit == impl_->lod_cache.end() || cit->second.model_id != model_id) continue;
+                prev_committed = cit->second.committed_demand;
+            }
+            int demand = select_lod_with_hysteresis(prev_committed, raw_demand, max_sr,
+                                                    thresholds, Impl::kLodHysteresis);
             if (demand < 0) demand = 0;
             if (static_cast<size_t>(demand) >= level_count) demand = static_cast<int>(level_count) - 1;
+
+            // 限速反向（方案 D）：committed 直接跳到滞回目标，不再强制逐级移动。
+            // 旧的"单帧最多移动一级"会逼着 committed 扫过每个中间级 → 每个中间级都被
+            // 当成 demand 各 build 一次（哪怕只显示一帧）→ 相机平移时 GPU 上传抖动。
+            // 直跳后只有"目标那一级"会触发 build，跳过所有中间级：
+            //   - 接近（demand→0）：目标趋向恒驻的 LOD0，根本不 build；
+            //   - 远离（demand→粗级）：仅目标粗级 build 一次，build 完成前渲染端
+            //     select_render_buffers 的双向就近搜索临时显示更细的已驻级（无降级 pop、
+            //     几何绝不比需要更粗），故跳级安全。
+            // 代价：远离方向会从细级一次性 snap 到粗级（单次 pop），换取消除逐级 build 抖动。
+
+            // 写回已提交级：render（select_render_buffers）将直接读取此值选级，
+            // 与本驻留决策严格一致，故 render 选中的级必然已建好 GPU 缓冲。
+            if (demand != prev_committed) {
+                ++impl_->diag_demand_changes;  // 诊断：committed_demand 实际变更
+                std::unique_lock lock(impl_->lod_cache_mutex);
+                auto cit = impl_->lod_cache.find(lod_key);
+                if (cit != impl_->lod_cache.end() && cit->second.model_id == model_id)
+                    cit->second.committed_demand = demand;
+            }
 
             // ---- 快照：demand 是否需构建、哪些已就绪级需释放 ----
             bool need_build = false;
@@ -2488,48 +2616,104 @@ void GeometrySystem::reconcile_lod_residency() {
                             demand_src_idx = levels[i].source_lod_index;
                         }
                     } else if (levels[i].ready) {
-                        to_free.push_back(static_cast<int>(i));
+                        // 释放冷却（方案 A）：仅当该级连续 idle 帧数超过冷却窗口才释放。
+                        // 冷却期内保留 ready=true 驻留显存——D 短期内弹回即可零成本复用，
+                        // 消除阈值边界横跳导致的每帧重建/释放 GPU churn。
+                        const std::uint64_t idle = this_frame - levels[i].last_demand_frame;
+                        if (idle >= Impl::kLodReleaseCooldownFrames)
+                            to_free.push_back(static_cast<int>(i));
                     }
                 }
             }
 
-            // ---- 锁外构建 demand 级（demand>0 且未就绪）----
-            if (need_build && demand > 0 && mesh_idx < scene.data.meshes.size()) {
-                const auto& mesh = scene.data.meshes[mesh_idx];
-                if (demand_src_idx < mesh.lod_levels.size()) {
+            // ---- 刷新需求级时间戳（方案 A）----
+            // 每帧给当前 demand 级打上 this_frame：无论它已就绪还是即将构建。
+            // to_free 只考虑 ready 且非 demand 的级，故对未就绪级打戳无副作用；
+            // 这样 D 在相邻级横跳时，刚离开的级 last_demand_frame 仍很新 → 冷却窗口内不释放。
+            if (demand > 0) {
+                std::unique_lock lock(impl_->lod_cache_mutex);
+                auto cit = impl_->lod_cache.find(lod_key);
+                if (cit != impl_->lod_cache.end() && cit->second.model_id == model_id
+                    && static_cast<size_t>(demand) < cit->second.levels.size()) {
+                    cit->second.levels[demand].last_demand_frame = this_frame;
+                }
+            }
+
+            // ---- 发起异步构建 demand 级（方案 C；demand>0 且未就绪）----
+            // 几何线程不再同帧 make_geometry_buffer（消除帧内卡顿）；发起 TBB 任务，
+            // 完成后由 process_pending_lod_builds() 回写。构建期间渲染端就近回退。
+            // Fix 1：仅此处（确需构建时）才惰性 acquire_read<Scene>，常态无 build 帧零 Scene 读取。
+            // 注意不用 continue（其后还有 to_free 释放块，必须照常执行）。
+            if (need_build && demand > 0) {
+                auto scene_read = resource_manager.acquire_read<Resource::Scene>(model_id);
+                ++impl_->diag_scene_acquires;  // 诊断：仅 build 路径取用 Scene
+                const Resource::Scene* scene_ptr = scene_read.valid() ? &(*scene_read) : nullptr;
+                if (scene_ptr && mesh_idx < scene_ptr->data.meshes.size()) {
+                    const auto& mesh = scene_ptr->data.meshes[mesh_idx];
+                    if (demand_src_idx < mesh.lod_levels.size()) {
                     const auto& lod_data = mesh.lod_levels[demand_src_idx];
                     if (!lod_data.vertices.empty() && !lod_data.indices.empty()) {
-                        Horizon::HardwareBuffer vb = make_geometry_buffer(
-                            lod_data.vertices, Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Vertex, "geometry.lod_vertex");
-                        Horizon::HardwareBuffer ib = make_geometry_buffer(
-                            lod_data.indices, Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Index, "geometry.lod_index");
-                        Horizon::HardwareBuffer vs = make_geometry_buffer(
-                            lod_data.vertices, Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_vertex_storage");
-                        Horizon::HardwareBuffer is = make_geometry_buffer(
-                            lod_data.indices, Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_index_storage");
-                        const std::size_t gpu_bytes =
-                            2u * lod_data.vertices.size() * sizeof(Resource::Vertex) +
-                            2u * lod_data.indices.size() * sizeof(std::uint16_t);
-                        Corona::Memory::GpuMemToken tok(Corona::Memory::ResKind::Mesh, gpu_bytes);
-                        Spatial::BVH<uint32_t> bvh = build_triangle_bvh(lod_data.vertices, lod_data.indices);
+                        // 取本条目当前身份版本（ABA 守卫）
+                        std::uint64_t entry_epoch = 0;
+                        {
+                            std::shared_lock lk(impl_->lod_cache_mutex);
+                            auto cit = impl_->lod_cache.find(lod_key);
+                            if (cit != impl_->lod_cache.end() && cit->second.model_id == model_id)
+                                entry_epoch = cit->second.residency_epoch;
+                        }
 
-                        // 写回 + TOCTOU 重校验；未命中则局部变量析构自动释放 GPU+token
-                        std::unique_lock lock(impl_->lod_cache_mutex);
-                        auto cit = impl_->lod_cache.find(lod_key);
-                        if (cit != impl_->lod_cache.end() && cit->second.model_id == model_id
-                            && static_cast<size_t>(demand) < cit->second.levels.size()
-                            && !cit->second.levels[demand].ready) {
-                            auto& lvl = cit->second.levels[demand];
-                            lvl.vertex_buffer  = std::move(vb);
-                            lvl.index_buffer   = std::move(ib);
-                            lvl.vertex_storage = std::move(vs);
-                            lvl.index_storage  = std::move(is);
-                            lvl.mesh_mem       = std::move(tok);
-                            lvl.ready          = true;
-                            if (static_cast<size_t>(demand) < cit->second.per_level_bvh.size())
-                                cit->second.per_level_bvh[demand] = std::move(bvh);
+                        // 是否已有一致的在途任务（目标级 + 身份均一致）；否则作废旧任务。
+                        // 注：future 来自 promise（非 std::async），析构不阻塞，erase 安全。
+                        bool already = false;
+                        auto pit = impl_->pending_lod_builds.find(lod_key);
+                        if (pit != impl_->pending_lod_builds.end()) {
+                            already = (pit->second.level == demand
+                                       && pit->second.model_id == model_id
+                                       && pit->second.residency_epoch == entry_epoch
+                                       && pit->second.future.valid());
+                            if (!already) impl_->pending_lod_builds.erase(pit);
+                        }
+
+                        if (!already && impl_->pending_lod_builds.size() < Impl::kMaxInflightLodBuilds) {
+                            // 自包含拷贝顶点/索引：任务不跨帧持 Scene 读锁，规避 evict 期锁交互。
+                            // 粗级（0.5×/0.25×…）数据量小，拷贝开销可忽略。
+                            auto verts = lod_data.vertices;
+                            auto inds  = lod_data.indices;
+                            const std::size_t gpu_bytes =
+                                2u * verts.size() * sizeof(Resource::Vertex) +
+                                2u * inds.size() * sizeof(std::uint16_t);
+
+                            auto promise = std::make_shared<std::promise<Impl::LODBuildResult>>();
+                            impl_->pending_lod_builds[lod_key] =
+                                Impl::PendingLodBuild{model_id, entry_epoch, demand, promise->get_future()};
+
+                            impl_->lod_build_tasks.run(
+                                [verts = std::move(verts), inds = std::move(inds), gpu_bytes, promise]() {
+                                    Impl::LODBuildResult r;
+                                    try {
+                                        r.vertex_buffer = make_geometry_buffer(
+                                            verts, Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Vertex, "geometry.lod_vertex");
+                                        r.index_buffer = make_geometry_buffer(
+                                            inds, Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Index, "geometry.lod_index");
+                                        r.vertex_storage = make_geometry_buffer(
+                                            verts, Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_vertex_storage");
+                                        r.index_storage = make_geometry_buffer(
+                                            inds, Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_index_storage");
+                                        r.gpu_bytes = gpu_bytes;
+#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
+                                        r.bvh = build_triangle_bvh(verts, inds);
+#endif
+                                        r.ok = static_cast<bool>(r.vertex_buffer)
+                                               && static_cast<bool>(r.index_buffer);
+                                    } catch (...) {
+                                        r.ok = false;
+                                    }
+                                    promise->set_value(std::move(r));
+                                });
+                            ++impl_->diag_lod_build_launches;  // 诊断：发起一次异步构建
                         }
                     }
+                }
                 }
             }
 
@@ -2543,17 +2727,77 @@ void GeometrySystem::reconcile_lod_residency() {
                         if (lvl_idx == demand) continue;  // 期间 demand 可能已变
                         auto& lvl = cit->second.levels[lvl_idx];
                         lvl.ready          = false;
+                        ++impl_->diag_lod_frees;  // 诊断：实际释放一级 GPU 缓冲
                         lvl.vertex_buffer  = Horizon::HardwareBuffer{};
                         lvl.index_buffer   = Horizon::HardwareBuffer{};
                         lvl.vertex_storage = Horizon::HardwareBuffer{};
                         lvl.index_storage  = Horizon::HardwareBuffer{};
                         lvl.mesh_mem       = Corona::Memory::GpuMemToken{};  // 析构扣减账本
+#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
                         if (static_cast<size_t>(lvl_idx) < cit->second.per_level_bvh.size())
                             cit->second.per_level_bvh[lvl_idx] = Spatial::BVH<uint32_t>{};
+#endif
                     }
                 }
             }
         }
+    }
+}
+
+
+// ============================================================================
+// process_pending_lod_builds（方案 C：轮询回写异步构建结果）
+// ----------------------------------------------------------------------------
+// 在 update() 中 reconcile 之前调用。遍历在途任务，对已就绪的 future 取结果并回写
+// 进 lod_cache。回写前做 ABA 重校验（条目在 + model_id + residency_epoch + 级存在 +
+// 仍未就绪），任一不符即丢弃——结果 RAII 自动释放 worker 已建的 GPU 缓冲，零泄漏。
+// GpuMemToken 在此（几何线程）构建，回避 worker 侧 ledger 线程安全问题。
+// 仅几何线程访问 pending_lod_builds，无需加锁。
+// ============================================================================
+void GeometrySystem::process_pending_lod_builds() {
+    if (impl_->pending_lod_builds.empty()) return;
+
+    std::vector<uint64_t> done;
+    for (auto& [key, task] : impl_->pending_lod_builds) {
+        if (task.future.valid() &&
+            task.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            done.push_back(key);
+        }
+    }
+
+    for (uint64_t key : done) {
+        Impl::PendingLodBuild task = std::move(impl_->pending_lod_builds[key]);
+        impl_->pending_lod_builds.erase(key);
+
+        Impl::LODBuildResult r = task.future.get();
+        if (!r.ok) { ++impl_->diag_lod_build_discards; continue; }
+
+        // 令牌在几何线程构建（worker 只产出缓冲 + 字节数）
+        Corona::Memory::GpuMemToken tok(Corona::Memory::ResKind::Mesh, r.gpu_bytes);
+
+        std::unique_lock lock(impl_->lod_cache_mutex);
+        auto cit = impl_->lod_cache.find(key);
+        if (cit == impl_->lod_cache.end()
+            || cit->second.model_id != task.model_id
+            || cit->second.residency_epoch != task.residency_epoch
+            || static_cast<size_t>(task.level) >= cit->second.levels.size()
+            || cit->second.levels[task.level].ready) {
+            ++impl_->diag_lod_build_discards;  // 条目已变/已就绪 → 丢弃（r 析构释放 GPU）
+            continue;
+        }
+        auto& lvl = cit->second.levels[task.level];
+        lvl.vertex_buffer  = std::move(r.vertex_buffer);
+        lvl.index_buffer   = std::move(r.index_buffer);
+        lvl.vertex_storage = std::move(r.vertex_storage);
+        lvl.index_storage  = std::move(r.index_storage);
+        lvl.mesh_mem       = std::move(tok);
+        lvl.ready          = true;
+        lvl.last_demand_frame = impl_->lod_frame_counter;  // 防刚建好即被冷却判过期
+        ++impl_->diag_lod_builds;  // 诊断：实际完成一级 GPU 缓冲
+#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
+        if (static_cast<size_t>(task.level) < cit->second.per_level_bvh.size())
+            cit->second.per_level_bvh[task.level] = std::move(r.bvh);
+#endif
     }
 }
 
