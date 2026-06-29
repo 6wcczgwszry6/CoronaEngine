@@ -892,6 +892,19 @@ Corona::API::Geometry Corona::API::Geometry::from_image(const std::string& image
                         image_path);
     }
 
+    // ---- GPU 显存记账（P0：mesh + texture）----
+    // mesh：顶点/索引各两份缓冲；texture：按 extent 估算 RGBA8（占位 1x1 可忽略）。
+    dev.mesh_mem = Corona::Memory::GpuMemToken(
+        Corona::Memory::ResKind::Mesh,
+        2u * vertices.size() * sizeof(Resource::Vertex) +
+        2u * indices.size()  * sizeof(std::uint16_t));
+    if (dev.textureBuffer) {
+        const auto ext = dev.textureBuffer.extent();
+        dev.tex_mem = Corona::Memory::GpuMemToken(
+            Corona::Memory::ResKind::Texture,
+            static_cast<std::size_t>(ext.width) * ext.height * 4);
+    }
+
     std::vector<MeshDevice> mesh_devices;
     mesh_devices.emplace_back(std::move(dev));
 

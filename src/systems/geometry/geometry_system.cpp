@@ -5,6 +5,7 @@
 #include <corona/resource/resource_manager.h>
 #include <corona/resource/types/scene.h>
 #include <corona/resource/types/animation_pose.h>
+#include <corona/resource/types/image.h>
 #include <corona/shared_data_hub.h>
 #include <corona/spatial/octree.h>
 #include <corona/systems/geometry/geometry_system.h>
@@ -677,6 +678,27 @@ void GeometrySystem::update() {
             }
         }
     }
+
+    // ---- P0：mesh/texture 内存账本维护（登记 + 对账）+ 预算报告（~1Hz）----
+    // 刻意不持 impl_->mtx：内部仅用 storage 锁 / ResourceManager / cpu_ledger_mutex，
+    // 避免与 update() 其它锁段构成锁序纠缠。
+    {
+        static int ledger_counter = 0;
+        if (++ledger_counter >= 60) {
+            ledger_counter = 0;
+            update_cpu_resource_ledger();
+            const MemoryReport mr = compute_memory_report();
+            CFW_LOG_NOTICE("[GeometrySystem] Mem mesh: VRAM={}KB RAM={}KB | tex: VRAM={}KB RAM={}KB "
+                           "| VRAM total={}KB (peak {}KB){} | RAM total={}KB{}",
+                           mr.vram.mesh_bytes / 1024, mr.ram.mesh_bytes / 1024,
+                           mr.vram.texture_bytes / 1024, mr.ram.texture_bytes / 1024,
+                           mr.vram.used_bytes / 1024,
+                           (mr.vram_mesh_peak + mr.vram_texture_peak) / 1024,
+                           mr.vram.pressured ? " OVER-VRAM-BUDGET" : "",
+                           mr.ram.used_bytes / 1024,
+                           mr.ram.pressured ? " OVER-RAM-BUDGET" : "");
+        }
+    }
 }
 
 void GeometrySystem::shutdown() {
@@ -775,6 +797,12 @@ void GeometrySystem::set_resource_memory_budget_mb(std::size_t mb) {
         Resource::ResourceManager::get_instance().set_memory_budget(0);
         CFW_LOG_NOTICE("[GeometrySystem] Resource memory budget disabled (unlimited)");
     }
+}
+
+void GeometrySystem::set_vram_budget_mb(std::size_t mb) {
+    impl_->vram_budget_bytes = mb * 1024ull * 1024ull;
+    CFW_LOG_NOTICE("[GeometrySystem] VRAM budget set to {} MB ({})", mb,
+                   mb ? "report-only, no eviction yet" : "unlimited");
 }
 
 // ============================================================================
@@ -1826,6 +1854,21 @@ const LODMeshBuffers* GeometrySystem::resolve_lod_buffers(
     return level.ready ? &level : nullptr;
 }
 
+std::vector<std::pair<Horizon::HardwareBuffer, Horizon::HardwareBuffer>>
+GeometrySystem::get_skinning_targets(std::uintptr_t geometry_handle, uint32_t mesh_index) const {
+    // 单次 shared_lock 拷出该 mesh 所有 LOD 级别的 (vertex, vertex_storage) 句柄对。
+    // 句柄为引用计数拷贝，拷出后保活底层 buffer，供 MechanicsSystem 锁外 write_bytes。
+    std::vector<std::pair<Horizon::HardwareBuffer, Horizon::HardwareBuffer>> out;
+    std::shared_lock lock(impl_->lod_cache_mutex);
+    auto it = impl_->lod_cache.find(Impl::make_lod_key(geometry_handle, mesh_index));
+    if (it == impl_->lod_cache.end()) return out;
+    out.reserve(it->second.levels.size());
+    for (auto& lvl : it->second.levels) {
+        out.emplace_back(lvl.vertex_buffer, lvl.vertex_storage);
+    }
+    return out;
+}
+
 // ============================================================================
 // BVH 射线查询
 // ============================================================================
@@ -2266,6 +2309,15 @@ void GeometrySystem::upload_lod_from_scene_data() {
                 lod_buf.ready            = true;
                 lod_buf.vertex_count     = static_cast<std::uint32_t>(lod_data.vertices.size());
                 lod_buf.index_count      = static_cast<std::uint32_t>(lod_data.indices.size());
+                // GPU mesh 显存记账（P0）：LOD1..N 各自的顶点/索引缓冲（各两份）。
+                // LOD0 复用 mesh_dev 缓冲、不在此循环内，故不重复计量。
+                {
+                    const std::size_t lod_gpu_bytes =
+                        2u * lod_data.vertices.size() * sizeof(Resource::Vertex) +
+                        2u * lod_data.indices.size()  * sizeof(std::uint16_t);
+                    lod_buf.mesh_mem = Corona::Memory::GpuMemToken(
+                        Corona::Memory::ResKind::Mesh, lod_gpu_bytes);
+                }
                 entry.levels.push_back(std::move(lod_buf));
 
                 // 为该 LOD 级别构建 BVH
@@ -2481,6 +2533,144 @@ void GeometrySystem::update_skinned_geometry() {
             }
         }
     }
+}
+
+}  // namespace Corona::Systems
+
+namespace Corona::Systems {
+
+// ============================================================================
+// P0：mesh/texture 资源内存账本（CPU 侧登记 + 对账）与预算报告
+// ============================================================================
+
+void GeometrySystem::update_cpu_resource_ledger() {
+    auto& hub = SharedDataHub::instance();
+    auto& rm  = Resource::ResourceManager::get_instance();
+    auto& geom_storage = hub.geometry_storage();
+
+    // ---- 阶段 1：收集当前驻留的 model_id（Scene rid）----
+    std::unordered_set<std::uint64_t> live_model_ids;
+    for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
+        if (!it->model_resource_handle) continue;
+        std::uint64_t model_id = 0;
+        if (auto mr = hub.model_resource_storage().try_acquire_read(it->model_resource_handle))
+            model_id = mr->model_id;
+        if (model_id != 0) live_model_ids.insert(model_id);
+    }
+
+    // ---- 阶段 2：登记新出现 model_id 的 mesh CPU + 其纹理 texture CPU ----
+    // 字节计算在 ledger 锁外完成（持 Scene/Image 读锁），算完再短暂加锁写入。
+    for (std::uint64_t model_id : live_model_ids) {
+        {
+            std::lock_guard lk(impl_->cpu_ledger_mutex);
+            if (impl_->cpu_ledger.count(model_id)) continue;  // 已登记
+        }
+        auto scene = rm.acquire_read<Resource::Scene>(model_id);
+        if (!scene.valid()) continue;
+
+        // mesh CPU：所有 mesh 的顶点/索引 + 各级 LOD
+        std::size_t mesh_bytes = 0;
+        for (const auto& mesh : scene->data.meshes) {
+            mesh_bytes += mesh.vertices.size() * sizeof(Resource::Vertex);
+            mesh_bytes += mesh.indices.size()  * sizeof(std::uint16_t);
+            for (const auto& lod : mesh.lod_levels) {
+                mesh_bytes += lod.vertices.size() * sizeof(Resource::Vertex);
+                mesh_bytes += lod.indices.size()  * sizeof(std::uint16_t);
+            }
+        }
+
+        // texture CPU：收集材质引用的全部纹理 rid（去重），按解码/压缩态算字节
+        std::vector<std::pair<std::uint64_t, std::size_t>> tex_entries;
+        auto collect_tex = [&](std::uint64_t tid) {
+            if (tid == Resource::InvalidTextureId || tid == 0) return;
+            for (const auto& te : tex_entries) if (te.first == tid) return;  // 本 Scene 内去重
+            std::size_t tbytes = 0;
+            if (auto img = rm.acquire_read<Resource::Image>(tid)) {
+                if (img->is_compressed())
+                    tbytes = img->get_compressed_data().data.size();
+                else
+                    tbytes = static_cast<std::size_t>(img->get_width()) *
+                             static_cast<std::size_t>(img->get_height()) *
+                             static_cast<std::size_t>(img->get_channels());
+            }
+            if (tbytes > 0) tex_entries.emplace_back(tid, tbytes);
+        };
+        for (const auto& mat : scene->data.materials) {
+            collect_tex(mat.albedo_texture);
+            collect_tex(mat.normal_texture);
+            collect_tex(mat.metallic_texture);
+            collect_tex(mat.roughness_texture);
+            collect_tex(mat.opacity_texture);
+        }
+
+        std::lock_guard lk(impl_->cpu_ledger_mutex);
+        impl_->cpu_ledger.try_emplace(
+            model_id, Impl::CpuResEntry{Corona::Memory::ResKind::Mesh, mesh_bytes});
+        for (const auto& [tid, tbytes] : tex_entries)
+            impl_->cpu_ledger.try_emplace(
+                tid, Impl::CpuResEntry{Corona::Memory::ResKind::Texture, tbytes});
+    }
+
+    // ---- 阶段 3：对账 —— 删除已被 ResourceManager 驱逐的 rid（liveness 减计）----
+    {
+        auto entries = rm.list_entries();
+        std::unordered_set<std::uint64_t> live_rids;
+        live_rids.reserve(entries.size());
+        for (const auto& e : entries) live_rids.insert(e.rid);
+
+        std::lock_guard lk(impl_->cpu_ledger_mutex);
+        for (auto it = impl_->cpu_ledger.begin(); it != impl_->cpu_ledger.end();) {
+            if (!live_rids.count(it->first))
+                it = impl_->cpu_ledger.erase(it);
+            else
+                ++it;
+        }
+    }
+}
+
+MemoryReport GeometrySystem::compute_memory_report() const {
+    MemoryReport r;
+
+    // VRAM：来自 RAII 令牌喂养的进程级账本（精确，按实例计数）
+    auto& led = Corona::Memory::gpu_ledger();
+    r.vram.mesh_bytes    = led.mesh_bytes();
+    r.vram.texture_bytes = led.texture_bytes();
+    r.vram.used_bytes    = r.vram.mesh_bytes + r.vram.texture_bytes;
+    r.vram_mesh_peak     = led.mesh_peak();
+    r.vram_texture_peak  = led.texture_peak();
+
+    // RAM：来自 CPU 账本（按 rid 去重，对账存活）
+    {
+        std::lock_guard lk(impl_->cpu_ledger_mutex);
+        for (const auto& [rid, e] : impl_->cpu_ledger) {
+            if (e.kind == Corona::Memory::ResKind::Mesh)
+                r.ram.mesh_bytes += e.bytes;
+            else
+                r.ram.texture_bytes += e.bytes;
+        }
+    }
+    r.ram.used_bytes = r.ram.mesh_bytes + r.ram.texture_bytes;
+
+    // 预算 + 水位（high=budget，low=90%）+ over/need_free
+    auto fill = [](MemoryPoolReport& p, std::size_t budget) {
+        p.budget_bytes = budget;
+        if (budget > 0) {
+            p.high_bytes = budget;
+            p.low_bytes  = budget - budget / 10;  // 低水位 = 90% 预算
+            if (p.used_bytes > p.high_bytes) {
+                p.over_bytes      = p.used_bytes - p.high_bytes;
+                p.need_free_bytes = p.used_bytes - p.low_bytes;
+                p.pressured       = true;
+            }
+        }
+    };
+    fill(r.vram, impl_->vram_budget_bytes);
+    fill(r.ram, impl_->resource_memory_budget_mb * 1024ull * 1024ull);
+    return r;
+}
+
+MemoryReport GeometrySystem::memory_report() const {
+    return compute_memory_report();
 }
 
 }  // namespace Corona::Systems

@@ -47,6 +47,18 @@ Horizon::HardwareImage make_geometry_texture(uint32_t width,
         std::move(name)));
 }
 
+// GPU 纹理显存字节估算（P0 记账用）。BC 块压缩按 4x4 块计，其余按 RGBA8。
+[[nodiscard]] std::size_t gpu_texture_bytes(Horizon::Format format,
+                                            uint32_t width, uint32_t height) {
+    const std::size_t blocks_w = (static_cast<std::size_t>(width) + 3) / 4;
+    const std::size_t blocks_h = (static_cast<std::size_t>(height) + 3) / 4;
+    switch (format) {
+        case Horizon::Format::BC1_UNORM_SRGB: return blocks_w * blocks_h * 8;   // 8B / 4x4 块
+        case Horizon::Format::BC3_UNORM_SRGB: return blocks_w * blocks_h * 16;  // 16B / 4x4 块
+        default:                              return static_cast<std::size_t>(width) * height * 4;  // RGBA8
+    }
+}
+
 bool upload_geometry_texture(Horizon::HardwareImage& texture,
                              std::span<const std::byte> bytes,
                              const char* label) {
@@ -150,6 +162,15 @@ std::vector<MeshDevice> build_mesh_devices_from_scene(
             Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst |
                 Horizon::BufferUsageFlags::Storage,
             "geometry.index_storage");
+
+        // ---- GPU mesh 显存记账（P0）----
+        // 顶点/索引各上传两份（普通 + storage），故 ×2。
+        {
+            const std::size_t mesh_gpu_bytes =
+                2u * scene.get_mesh_vertices(mesh_idx).size() * sizeof(Resource::Vertex) +
+                2u * scene.get_mesh_indices(mesh_idx).size()  * sizeof(std::uint16_t);
+            dev.mesh_mem = Corona::Memory::GpuMemToken(Corona::Memory::ResKind::Mesh, mesh_gpu_bytes);
+        }
 
         // ---- 材质索引 ----
         // material_index 指向 scene.data.materials 数组
@@ -276,6 +297,12 @@ std::vector<MeshDevice> build_mesh_devices_from_scene(
         // 确保每个 mesh 都有纹理句柄，避免渲染时空指针
         if (!texture_created) {
             dev.textureBuffer = placeholder_texture;  // 拷贝共享纹理句柄
+        } else {
+            // ---- GPU texture 显存记账（P0）----
+            // 仅真实纹理计入；占位/共享纹理不计（句柄复制，非新分配）。
+            dev.tex_mem = Corona::Memory::GpuMemToken(
+                Corona::Memory::ResKind::Texture,
+                gpu_texture_bytes(texture_format, texture_width, texture_height));
         }
 
         // ---- 将构建好的 MeshDevice 加入数组 ----

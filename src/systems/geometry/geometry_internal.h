@@ -162,6 +162,22 @@ struct GeometrySystem::Impl {
     // ========================================
     std::size_t resource_memory_budget_mb = 512;  // 默认 512MB，0 表示不限制
 
+    // ========================================
+    // mesh/texture CPU 资源账本（P0：与 GPU 账本配对）
+    // ========================================
+    // 键 = ResourceManager rid（Scene 的 model_id 或 Image 的 texture_id），
+    // 按 rid 去重（共享资源只记一次）。GPU 侧由 gpu_ledger() 单例 + RAII 令牌统计，
+    // CPU 侧由本表登记 + 对 ResourceManager 存活集合对账维护。
+    struct CpuResEntry {
+        Corona::Memory::ResKind kind = Corona::Memory::ResKind::Mesh;
+        std::size_t             bytes = 0;
+    };
+    mutable std::mutex                              cpu_ledger_mutex;
+    std::unordered_map<std::uint64_t, CpuResEntry>  cpu_ledger;
+
+    /// VRAM 预算（字节），0 = 不限制（默认）。P0 仅用于 over/need_free 计算，不淘汰。
+    std::size_t vram_budget_bytes = 0;
+
     [[nodiscard]] static uint64_t make_lod_key(std::uintptr_t geometry_handle,
                                                uint32_t       mesh_index) {
         return (static_cast<uint64_t>(geometry_handle) << 32) | mesh_index;

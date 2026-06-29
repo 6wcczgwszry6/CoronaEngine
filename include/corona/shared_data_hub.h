@@ -1,5 +1,6 @@
 #pragma once
 #include <corona/kernel/utils/storage.h>
+#include <corona/memory/gpu_mem_ledger.h>
 #include <ktm/ktm.h>
 
 #include <array>
@@ -34,6 +35,13 @@ struct MeshDevice {
 
     // 材质颜色 (RGBA)
     std::array<float, 4> materialColor{1.0f, 1.0f, 1.0f, 1.0f};
+
+    // ---- GPU 显存记账令牌（P0：mesh/texture 计量）----
+    // mesh_mem 覆盖本 MeshDevice 的 4 个 GPU 缓冲（vertex/index/storage）；
+    // tex_mem 覆盖 textureBuffer（仅真实纹理时非空，占位/共享纹理计 0）。
+    // move-only：随 MeshDevice 析构/移动自动扣减/转移，与真实 HardwareBuffer 同寿。
+    Corona::Memory::GpuMemToken mesh_mem;
+    Corona::Memory::GpuMemToken tex_mem;
 };
 
 struct ModelTransform {

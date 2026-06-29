@@ -8,6 +8,7 @@
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/kernel/system/system_base.h>
 #include <corona/math/frustum.h>
+#include <corona/memory/gpu_mem_ledger.h>
 #include <corona/spatial/aabb.h>
 #include <corona/spatial/bvh.h>
 
@@ -63,6 +64,37 @@ struct SceneStats {
 };
 
 // ========================================
+// 资源内存账本（P0：mesh / texture 的 CPU + GPU 计量）
+// ========================================
+
+/**
+ * @brief 单个内存池（VRAM 或 RAM）的用量 + 预算视图
+ *
+ * 只"计量与计算预算"，不触发淘汰。need_free_bytes 供后续淘汰步骤消费。
+ */
+struct MemoryPoolReport {
+    std::size_t mesh_bytes      = 0;  ///< mesh 占用
+    std::size_t texture_bytes   = 0;  ///< texture 占用
+    std::size_t used_bytes      = 0;  ///< mesh + texture
+    std::size_t budget_bytes    = 0;  ///< 预算上限，0 = 不限制
+    std::size_t high_bytes      = 0;  ///< 高水位（触发淘汰阈值）
+    std::size_t low_bytes       = 0;  ///< 低水位（淘汰目标）
+    std::size_t over_bytes      = 0;  ///< max(0, used - high)
+    std::size_t need_free_bytes = 0;  ///< used > high ? used - low : 0（降到低水位需释放量）
+    bool        pressured       = false;  ///< over_bytes > 0
+};
+
+/**
+ * @brief mesh/texture 的 CPU(RAM) 与 GPU(VRAM) 内存账本快照
+ */
+struct MemoryReport {
+    MemoryPoolReport vram;  ///< GPU：mesh/texture 缓冲（geometry 自有，精确）
+    MemoryPoolReport ram;   ///< CPU：Scene/Image 资源（按 rid 去重，对账存活）
+    std::size_t      vram_mesh_peak    = 0;
+    std::size_t      vram_texture_peak = 0;
+};
+
+// ========================================
 // 动态减面 (Mesh Simplification) 相关类型
 // ========================================
 //
@@ -93,6 +125,10 @@ struct LODMeshBuffers {
     bool   ready            = false; // GPU 缓冲是否已创建完毕（创建前不能用于渲染）
     std::uint32_t vertex_count = 0;  // 该级别顶点数（调试/诊断用）
     std::uint32_t index_count  = 0;  // 该级别索引数（调试/诊断用）
+
+    // GPU 显存记账令牌（P0）：LOD1..N 各自的顶点/索引缓冲字节。
+    // LOD0 复用 mesh_dev 的缓冲（非新分配）→ 该令牌留空计 0，避免重复计量。
+    Corona::Memory::GpuMemToken mesh_mem;
 };
 
 // LOD（动态减面）现由 GeometrySystem 内部自行决策，无外部配置面：
@@ -206,6 +242,13 @@ class GeometrySystem : public Kernel::SystemBase {
     /// 触发 evict_until_under_budget，优先淘汰最久未访问（cold）的资源。
     void set_resource_memory_budget_mb(std::size_t mb);
 
+    /// 设置 GPU 显存（VRAM）预算（MB），0 = 不限制（默认）。
+    /// P0 仅用于计算 over/need_free 报告，不触发淘汰。
+    void set_vram_budget_mb(std::size_t mb);
+
+    /// mesh/texture 的 CPU(RAM) + GPU(VRAM) 内存账本快照（线程安全）。
+    [[nodiscard]] MemoryReport memory_report() const;
+
     [[nodiscard]] bool is_actor_offline(std::uintptr_t actor) const;
     void               mark_actor_restored(std::uintptr_t actor);
 
@@ -316,6 +359,20 @@ class GeometrySystem : public Kernel::SystemBase {
         uint32_t       mesh_index,
         float          screen_ratio) const;
 
+    /// 蒙皮专用：一次性拷出某 mesh 所有 LOD 级别的 (vertex, vertex_storage) 句柄对。
+    ///
+    /// 供 MechanicsSystem 在物理线程把蒙皮后顶点 write_bytes 回所有 LOD 级别的 GPU
+    /// 缓冲。下标 0 = LOD0（= MeshDevice 缓冲），1..N = 各级简化。单次 shared_lock
+    /// 拷贝；HardwareBuffer 为引用计数句柄，拷出后即便 Geometry 线程后续 evict 缓存，
+    /// 调用方持有的拷贝仍保活底层 buffer。无 LOD 缓存条目时返回空 vector（调用方回退
+    /// 到只写 LOD0，即 GeometryDevice.mesh_handles 里的缓冲）。
+    ///
+    /// @param geometry_handle GeometryDevice 句柄
+    /// @param mesh_index      子网格索引
+    /// @return 各 LOD 级别的 (vertexBuffer, vertexStorageBuffer) 句柄对，含 LOD0
+    [[nodiscard]] std::vector<std::pair<Horizon::HardwareBuffer, Horizon::HardwareBuffer>>
+    get_skinning_targets(std::uintptr_t geometry_handle, uint32_t mesh_index) const;
+
     // ========================================
     // BVH 射线查询（三角形级加速）
     // ========================================
@@ -414,6 +471,14 @@ class GeometrySystem : public Kernel::SystemBase {
     /// 蒙皮后顶点同时缓存到 GeometryDevice::skinned_cpu_vertices，供 P3 Vision /
     /// P4 物理作为单一数据源消费。
     void update_skinned_geometry();
+
+    /// 维护 mesh/texture 的 CPU 资源账本（P0）：登记新出现 model_id 的 Scene
+    /// (mesh CPU) 与其 Image 纹理 (texture CPU)，按 rid 去重；并对 ResourceManager
+    /// 的存活集合做对账，删除已被驱逐的 rid。低频调用（~1Hz）即可，CPU 用量变化缓慢。
+    void update_cpu_resource_ledger();
+
+    /// 计算 mesh/texture 的 VRAM/RAM 用量 + 预算视图（线程安全，内部加锁）。
+    [[nodiscard]] MemoryReport compute_memory_report() const;
 
     struct Impl;
     std::unique_ptr<Impl> impl_;
