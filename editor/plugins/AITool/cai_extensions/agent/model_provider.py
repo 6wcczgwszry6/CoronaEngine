@@ -27,6 +27,22 @@ logger = logging.getLogger(__name__)
 
 _SUPPORTED_EXTENSIONS = {".obj", ".dae", ".glb", ".gltf", ".fbx", ".stl", ".usdz"}
 
+_GENERATION_PROMPT_GUARDRAIL = (
+    "isolated product-style 3D asset; only the requested object; "
+    "centered complete object geometry; clean neutral studio presentation"
+)
+
+
+def _with_generation_prompt_guardrail(prompt: str, name: str = "") -> str:
+    base = str(prompt or name or "").strip()
+    if not base:
+        base = "high quality 3D model"
+    lower = base.lower()
+    required = ("isolated product-style 3d asset", "only the requested object")
+    if all(token in lower for token in required):
+        return base
+    return f"{base}. {_GENERATION_PROMPT_GUARDRAIL}."
+
 
 def _resolve_model_file(path: str) -> str:
     """从目录或文件路径中提取第一个支持的 3D 模型文件。"""
@@ -216,19 +232,20 @@ class ModelProvider:
         # 选择生成模式
         if image_url and image_url.startswith("__text_to_3d__:"):
             mode = "text_to_3d"
-            prompt = image_url[len("__text_to_3d__:"):] or prompt_text or name
+            prompt = _with_generation_prompt_guardrail(image_url[len("__text_to_3d__:"):] or prompt_text or name, name)
             tool_input = {"mode": mode, "prompt": prompt, "object_id": object_id}
             logger.info("[ModelProvider][generate] mode=text_to_3d prompt=%r...",
                         prompt[:80])
         elif image_url:
             mode = "image_to_3d"
+            prompt = _with_generation_prompt_guardrail(prompt_text or name, name)
             tool_input = {"mode": mode, "images": [image_url],
-                          "object_id": object_id, "prompt": name}
+                          "object_id": object_id, "prompt": prompt}
             logger.info("[ModelProvider][generate] mode=image_to_3d image=%r...",
                         image_url[:80])
         else:
             mode = "text_to_3d"
-            prompt = prompt_text or f"high quality 3D model of {name}"
+            prompt = _with_generation_prompt_guardrail(prompt_text or f"high quality 3D model of {name}", name)
             tool_input = {"mode": mode, "prompt": prompt, "object_id": object_id}
             logger.info("[ModelProvider][generate] mode=text_to_3d (no image) "
                         "prompt=%r...", prompt[:80])

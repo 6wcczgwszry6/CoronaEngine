@@ -17,6 +17,7 @@
 #include <corona/kernel/core/kernel_context.h>
 #include <corona/systems/network/network_system.h>
 #include <corona/systems/script/corona_engine_api.h>
+#include <corona/utils/path_utils.h>
 
 #include <algorithm>
 #include <cctype>
@@ -99,15 +100,17 @@ std::string trim_ascii(std::string value) {
 }
 
 std::filesystem::path path_from_utf8(const std::string& value) {
-    return std::filesystem::u8path(value);
+    return Corona::Utils::utf8_to_path(value);
 }
 
 std::string path_to_utf8(const std::filesystem::path& value) {
-    return value.generic_string();
+    auto text = Corona::Utils::path_to_utf8(value);
+    std::replace(text.begin(), text.end(), '\\', '/');
+    return text;
 }
 
 std::string stem_utf8(const std::string& route) {
-    return path_from_utf8(route).stem().string();
+    return path_to_utf8(path_from_utf8(route).stem());
 }
 
 std::string normalize_route(std::string route) {

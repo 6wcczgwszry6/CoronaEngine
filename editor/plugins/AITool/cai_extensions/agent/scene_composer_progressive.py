@@ -340,6 +340,7 @@ def run_progressive_workflow(
             import_tool=import_tool,
             scene_layout=scene_layout,
             engine_gate=engine_gate,
+            scene_name=session.scene_name,
             current_round=session.current_round,
             parse_result=parse_import_result,
         )
@@ -384,7 +385,21 @@ def run_progressive_workflow(
 
     # 8. 返回（格式与 _run_original_workflow 一致）
     imported = prog_result.get("imported", [])
-    failed = [it["name"] for it in resolved if it["name"] not in imported]
+    import_errors = list(prog_result.get("failed", []) or [])
+    failed = [
+        str(item.get("name") or item.get("actor_name") or item.get("asset_id") or "?")
+        for item in import_errors
+        if isinstance(item, dict)
+    ]
+    if not failed:
+        failed = [it["name"] for it in resolved if it["name"] not in imported]
+    import_error_text = ""
+    if do_import and resolved and not imported and failed:
+        preview = []
+        for item in import_errors[:3]:
+            if isinstance(item, dict):
+                preview.append(f"{item.get('name', '?')}: {item.get('error', '')}")
+        import_error_text = "模型导入失败: " + ("; ".join(preview) if preview else "全部模型未导入")
     final_report = prog_result.get("final_report")
     final_report_text = (
         final_report.to_user_text()
@@ -417,7 +432,8 @@ def run_progressive_workflow(
         "extracted_count": len(all_items),
         "model_count": len(resolved),
         "scene_path": None,  # 渐进式不用 scene.json
-        "error": None,
+        "error": import_error_text or None,
+        "import_errors": import_errors,
         "progressive": True,
         "final_report": final_report,
         "final_report_text": final_report_text,
@@ -1315,7 +1331,7 @@ def _run_vlm_advisory_review(
     """Run the optional VLM outer loop; failures are advisory-only."""
     try:
         from .model_reviewer import _capture_single_model, _vlm_review_model
-        from .vlm_review_loop import VlmReviewReport, review_models_async
+        from .vlm_review_loop import VlmReviewReport, review_models_async, review_scene_scale_async
     except Exception as exc:  # noqa: BLE001
         logger.debug("[ProgressiveWorkflow] VLM 外回路不可用，跳过: %s", exc)
         return _vlm_skip_report("unavailable", f"VLM 外回路依赖不可用：{exc}")
@@ -1329,6 +1345,13 @@ def _run_vlm_advisory_review(
         )
         logger.info("[ProgressiveWorkflow] VLM 外回路未执行: %s", reason)
         return VlmReviewReport(status="disabled", reason=reason)
+    if checkpoint_type == "final_consistency_review":
+        scene_name = str(getattr(composer, "scene_name", "") or "") if composer is not None else ""
+        return review_scene_scale_async(
+            scene_name=scene_name,
+            engine_gate=engine_gate,
+            checkpoint_type=checkpoint_type,
+        )
     target_provider = getattr(composer, "vlm_target_provider", None) if composer is not None else None
     if callable(target_provider):
         try:
@@ -2182,15 +2205,21 @@ def _assign_default_progressive_positions(phase_map: Dict[str, List[Dict[str, An
     indoor_states: Dict[str, Dict[str, Any]] = {}
     for phase, assets in phase_map.items():
         for asset in assets:
-            if asset.get("pos") is not None:
-                continue
             zone_id = str(asset.get("zone_id") or "")
             idx = counters.get(zone_id or phase, 0)
-            counters[zone_id or phase] = idx + 1
             zone = zones.get(zone_id)
             if _is_outdoor_zone(zone):
+                if asset.get("scale") is None:
+                    asset["scale"] = _outdoor_default_scale(asset, zone, composer)
+            else:
+                scale = _indoor_default_scale(asset)
+                if scale is not None:
+                    asset["scale"] = scale
+            if asset.get("pos") is not None:
+                continue
+            counters[zone_id or phase] = idx + 1
+            if _is_outdoor_zone(zone):
                 asset["pos"] = _outdoor_default_pos(asset, idx, zone, composer)
-                asset.setdefault("scale", _outdoor_default_scale(asset, zone, composer))
             else:
                 state_key = zone_id or "__default_indoor__"
                 state = indoor_states.setdefault(state_key, {})
@@ -2380,6 +2409,19 @@ def _scene_scale_context(composer: Any, zone: Any) -> Dict[str, float]:
         "terrain_extent": terrain_extent,
         "foundation_extent": foundation_extent,
     }
+
+
+def _indoor_default_scale(asset: Dict[str, Any]) -> Optional[List[float]]:
+    scale = asset.get("scale")
+    if not isinstance(scale, (list, tuple)) or len(scale) < 3:
+        return None
+    try:
+        values = [float(scale[0]), float(scale[1]), float(scale[2])]
+    except Exception:
+        return None
+    if all(abs(v - 1.0) <= 1e-4 for v in values):
+        return None
+    return values
 
 
 def _scale_triplet(value: float) -> List[float]:

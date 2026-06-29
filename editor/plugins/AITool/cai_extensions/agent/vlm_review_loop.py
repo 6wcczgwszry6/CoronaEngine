@@ -266,4 +266,298 @@ def review_models_async(
     return report
 
 
-__all__ = ["VlmAdvice", "VlmReviewReport", "review_models_async"]
+
+def _default_scene_snapshot(scene_name: str) -> Dict[str, Any]:
+    from ..mcp.tools.native_scene_state import get_native_scene_snapshot
+
+    return get_native_scene_snapshot(
+        scene_name,
+        wait_for_bounds=True,
+        timeout_s=2.0,
+        interval_s=0.05,
+    )
+
+
+def _default_scene_capture(scene_name: str, output_dir: str, *, actor_name: Optional[str] = None, scope: str = "scene") -> Any:
+    from .vlm_capture import capture_vlm_views
+
+    return capture_vlm_views(
+        scene_name,
+        output_dir,
+        actor_name=actor_name,
+        scope=scope,
+    )
+
+
+def _default_scene_scale_review(*, output_dir: str, scene_description: str, max_images: int) -> Dict[str, Any]:
+    from ..flows.scene_composition_workflow.helpers import get_tool, parse_review_result
+
+    review_tool = get_tool("scene_rationality_review")
+    if review_tool is None:
+        return {"error": "scene_rationality_review tool is unavailable"}
+    raw = review_tool.invoke({
+        "output_dir": output_dir,
+        "scene_description": scene_description,
+        "max_images": max_images,
+    })
+    return parse_review_result(raw)
+
+
+def _format_vec(value: Any, *, ndigits: int = 3) -> List[float]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: List[float] = []
+    for item in value[:3]:
+        try:
+            out.append(round(float(item), ndigits))
+        except Exception:
+            return []
+    return out
+
+
+def _build_scene_scale_description(snapshot: Dict[str, Any]) -> str:
+    scene = str(snapshot.get("scene") or snapshot.get("scene_name") or "")
+    scene_aabb = snapshot.get("scene_aabb") if isinstance(snapshot.get("scene_aabb"), list) else []
+    actors = snapshot.get("actors") if isinstance(snapshot.get("actors"), list) else []
+    lines = [
+        "全场景相对尺度审查：请重点比较场景中所有可见物体之间的相对大小是否符合常识。",
+        "不要只评价单个模型外观；需要比较床、桌椅、柜子、灯具、人物、装饰物等之间的比例。",
+        "如果某个物体相对其他物体明显过大或过小，请在 corrections 中给出该物体修正后的 scale。",
+        f"scene={scene}",
+    ]
+    if scene_aabb:
+        lines.append(f"scene_aabb={scene_aabb}")
+    lines.append("actors with native world bounds:")
+    for actor in actors[:80]:
+        if not isinstance(actor, dict):
+            continue
+        name = str(actor.get("name") or actor.get("actor_guid") or "").strip()
+        if not name:
+            continue
+        geometry = actor.get("geometry") if isinstance(actor.get("geometry"), dict) else {}
+        position = _format_vec(geometry.get("position"), ndigits=3)
+        rotation = _format_vec(geometry.get("rotation"), ndigits=3)
+        scale = _format_vec(geometry.get("scale"), ndigits=3)
+        size = _format_vec(actor.get("size"), ndigits=3)
+        world_aabb = actor.get("world_aabb") if isinstance(actor.get("world_aabb"), list) else []
+        bounds_ready = bool(actor.get("bounds_ready"))
+        lines.append(
+            f"- {name}: type={actor.get('actor_type') or actor.get('type') or 'unknown'} "
+            f"pos={position} rot={rotation} scale={scale} size={size} "
+            f"world_aabb={world_aabb} bounds_ready={bounds_ready}"
+        )
+    return "\n".join(lines)
+
+
+def _coerce_scene_review(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        review = raw.get("review") if isinstance(raw.get("review"), dict) else None
+        return review if review is not None else raw
+    return {"error": f"unsupported scene scale review result: {type(raw).__name__}"}
+
+
+def _correction_actor_name(correction: Dict[str, Any]) -> str:
+    return str(
+        correction.get("object_id")
+        or correction.get("actor")
+        or correction.get("actor_id")
+        or correction.get("name")
+        or ""
+    ).strip()
+
+
+def _issue_actor_name(issue: Dict[str, Any]) -> str:
+    return str(
+        issue.get("actor")
+        or issue.get("object_id")
+        or issue.get("actor_id")
+        or issue.get("name")
+        or ""
+    ).strip()
+
+
+def _scene_scale_review_report(review: Dict[str, Any], *, snapshot: Dict[str, Any], checkpoint_type: str) -> VlmReviewReport:
+    report = VlmReviewReport(checkpoint_type=checkpoint_type)
+    actors = snapshot.get("actors") if isinstance(snapshot.get("actors"), list) else []
+    for actor in actors:
+        if not isinstance(actor, dict):
+            continue
+        name = str(actor.get("name") or actor.get("actor_guid") or "").strip()
+        if name:
+            report.reviewed_targets.append({
+                "actor_id": name,
+                "model_name": name,
+                "model_type": str(actor.get("actor_type") or actor.get("type") or "model"),
+                "checkpoint_type": checkpoint_type,
+            })
+
+    if review.get("error"):
+        report.status = "unavailable"
+        report.reason = str(review.get("error") or "scene scale review failed")
+        return report
+
+    issues_by_actor: Dict[str, List[str]] = {}
+    for item in review.get("problem_actors") or []:
+        if not isinstance(item, dict):
+            continue
+        actor = _issue_actor_name(item)
+        if not actor:
+            continue
+        issue = str(item.get("issue") or item.get("reason") or "wrong_scale")
+        reason = str(item.get("reason") or issue)
+        issues_by_actor.setdefault(actor, []).append(reason)
+
+    confidence_default = 0.75 if review.get("corrections") else 0.0
+    for correction in review.get("corrections") or []:
+        if not isinstance(correction, dict):
+            continue
+        actor = _correction_actor_name(correction)
+        if not actor:
+            continue
+        scale = correction.get("scale")
+        try:
+            scale_values = [float(v) for v in list(scale or [])[:3]]
+        except Exception:
+            scale_values = []
+        if len(scale_values) < 3:
+            scale_values = [1.0, 1.0, 1.0]
+        rotation = correction.get("rotation")
+        try:
+            rotation_values = [float(v) for v in list(rotation or [])[:3]]
+        except Exception:
+            rotation_values = [0.0, 0.0, 0.0]
+        while len(rotation_values) < 3:
+            rotation_values.append(0.0)
+        position = correction.get("position")
+        try:
+            position_values = [float(v) for v in list(position or [])[:3]]
+        except Exception:
+            position_values = []
+        reason = str(correction.get("reason") or "").strip()
+        issues = list(issues_by_actor.get(actor, []))
+        if reason and reason not in issues:
+            issues.append(reason)
+        advice = VlmAdvice(
+            actor_id=actor,
+            overall=str(review.get("overall") or "WARN"),
+            position_correction=position_values,
+            rotation_correction=rotation_values[:3],
+            scale_correction=scale_values[:3],
+            issues=issues,
+            fix_suggestion=reason or "; ".join(issues[:2]),
+            confidence=_coerce_confidence(correction.get("confidence", review.get("confidence", confidence_default))),
+        )
+        report.advices.append(advice)
+
+    actionable = set(id(item) for item in report.actionable())
+    for advice in report.advices:
+        item = _advice_item(
+            advice,
+            checkpoint_type=checkpoint_type,
+            proposal=id(advice) in actionable,
+        )
+        if item["proposal"]:
+            report.proposal_items.append(item)
+        elif advice.overall != "PASS" or advice.issues or advice.fix_suggestion:
+            report.advisory_items.append(item)
+
+    if not report.advices:
+        for actor, issues in issues_by_actor.items():
+            advice = VlmAdvice(
+                actor_id=actor,
+                overall=str(review.get("overall") or "WARN"),
+                issues=list(issues),
+                fix_suggestion="; ".join(issues[:2]),
+                confidence=_coerce_confidence(review.get("confidence")),
+            )
+            report.advices.append(advice)
+            report.advisory_items.append(_advice_item(advice, checkpoint_type=checkpoint_type, proposal=False))
+    return report
+
+
+def review_scene_scale_async(
+    *,
+    scene_name: str = "",
+    capture_fn: Optional[Callable[..., Any]] = None,
+    review_fn: Optional[Callable[..., Any]] = None,
+    snapshot_fn: Optional[Callable[..., Dict[str, Any]]] = None,
+    engine_gate: Any = None,
+    output_dir: str = "_vlm_review/final_scene_scale",
+    max_images: int = 8,
+    checkpoint_type: str = "final_consistency_review",
+) -> VlmReviewReport:
+    """Run final whole-scene VLM review focused on relative object scale."""
+    capture_fn = capture_fn or _default_scene_capture
+    review_fn = review_fn or _default_scene_scale_review
+    snapshot_fn = snapshot_fn or _default_scene_snapshot
+
+    try:
+        try:
+            snapshot = snapshot_fn(scene_name)
+        except TypeError:
+            snapshot = snapshot_fn()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[VlmReviewLoop] scene scale snapshot failed: %s", exc)
+        return VlmReviewReport(
+            status="skipped",
+            reason=f"native scene snapshot unavailable: {exc}",
+            checkpoint_type=checkpoint_type,
+        )
+
+    try:
+        if engine_gate is not None:
+            capture = engine_gate.screenshot(
+                capture_fn,
+                scene_name,
+                output_dir,
+                actor_name=None,
+                scope="scene",
+            )
+        else:
+            capture = capture_fn(scene_name, output_dir, actor_name=None, scope="scene")
+    except TimeoutError:
+        report = VlmReviewReport(status="skipped", reason="scene VLM capture timed out", checkpoint_type=checkpoint_type)
+        report.timed_out.append("__scene__")
+        return report
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[VlmReviewLoop] scene scale capture failed: %s", exc)
+        report = VlmReviewReport(status="skipped", reason=f"scene VLM capture failed: {exc}", checkpoint_type=checkpoint_type)
+        report.skipped.append("__scene__")
+        return report
+
+    if not capture or str(getattr(capture, "status", "") or "") != "success":
+        reason = str(getattr(capture, "skipped_reason", "") or "scene VLM capture produced no screenshots")
+        report = VlmReviewReport(status="skipped", reason=reason, checkpoint_type=checkpoint_type)
+        report.skipped.append("__scene__")
+        return report
+
+    description = _build_scene_scale_description(snapshot)
+    try:
+        raw_review = review_fn(
+            output_dir=str(getattr(capture, "output_dir", output_dir) or output_dir),
+            scene_description=description,
+            max_images=max_images,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[VlmReviewLoop] scene scale VLM review failed: %s", exc)
+        return VlmReviewReport(
+            status="unavailable",
+            reason=f"scene scale VLM review failed: {exc}",
+            checkpoint_type=checkpoint_type,
+        )
+
+    report = _scene_scale_review_report(
+        _coerce_scene_review(raw_review),
+        snapshot=snapshot,
+        checkpoint_type=checkpoint_type,
+    )
+    logger.info(
+        "[VlmReviewLoop] scene scale review completed actors=%d advices=%d proposals=%d",
+        len(report.reviewed_targets),
+        len(report.advices),
+        len(report.proposal_items),
+    )
+    return report
+
+
+__all__ = ["VlmAdvice", "VlmReviewReport", "review_models_async", "review_scene_scale_async"]
