@@ -172,22 +172,22 @@ void record_optics_native_perf(const OpticsNativePerfSample& sample) {
         return;
     }
 
-    const double inv_samples = aggregate.samples > 0 ? 1.0 / aggregate.samples : 0.0;
-    CFW_LOG_INFO(
-        "OpticsNativePerf samples={} avg_total_ms={:.2f} max_total_ms={:.2f} "
-        "avg_collect_ms={:.2f} avg_submit_ms={:.2f} max_submit_ms={:.2f} "
-        "max_output={}x{} max_instances={} shadows={} debug={}",
-        aggregate.samples,
-        aggregate.total_ms * inv_samples,
-        aggregate.max_total_ms,
-        aggregate.collect_ms * inv_samples,
-        aggregate.submit_ms * inv_samples,
-        aggregate.max_submit_ms,
-        aggregate.max_output_width,
-        aggregate.max_output_height,
-        aggregate.max_instance_count,
-        aggregate.shadow_samples,
-        aggregate.debug_samples);
+    // const double inv_samples = aggregate.samples > 0 ? 1.0 / aggregate.samples : 0.0;
+    // CFW_LOG_INFO(
+    //     "OpticsNativePerf samples={} avg_total_ms={:.2f} max_total_ms={:.2f} "
+    //     "avg_collect_ms={:.2f} avg_submit_ms={:.2f} max_submit_ms={:.2f} "
+    //     "max_output={}x{} max_instances={} shadows={} debug={}",
+    //     aggregate.samples,
+    //     aggregate.total_ms * inv_samples,
+    //     aggregate.max_total_ms,
+    //     aggregate.collect_ms * inv_samples,
+    //     aggregate.submit_ms * inv_samples,
+    //     aggregate.max_submit_ms,
+    //     aggregate.max_output_width,
+    //     aggregate.max_output_height,
+    //     aggregate.max_instance_count,
+    //     aggregate.shadow_samples,
+    //     aggregate.debug_samples);
 
     aggregate = Aggregate{};
     aggregate.window_start = now;
