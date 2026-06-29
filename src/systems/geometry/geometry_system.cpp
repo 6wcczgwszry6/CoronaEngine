@@ -1763,21 +1763,102 @@ GeometrySystem::RenderMeshBuffers GeometrySystem::select_render_buffers(
     const float screen_ratio = compute_screen_ratio(
         camera_pos, camera_fov_deg, world_center, bounding_radius);
 
-    // 复用 resolve_lod_buffers 的选级 + 降级逻辑（单次加锁）
-    const LODMeshBuffers* lod = resolve_lod_buffers(geometry_handle, mesh_index, screen_ratio);
+    // ------------------------------------------------------------------
+    // 选级 + 降级 + 句柄拷贝全部在同一个 shared_lock 作用域内完成。
+    //
+    // 不再调用 resolve_lod_buffers()（其返回裸 const LODMeshBuffers*，调用方在锁
+    // 释放后解引用——逐级 LOD 淘汰使缓存频繁增删后会触发悬垂访问）。这里改为持锁
+    // 期间把选中级的 HardwareBuffer 句柄（引用计数，可拷贝）拷入返回值，锁外仅持有
+    // 句柄副本：即便下一帧该级被释放，本帧拷走的副本仍经 refcount 存活到用完。
+    //
+    // fallback 语义：调用方持 geom 槽锁时从 MeshDevice 读出的 LOD0 候选缓冲。
+    // - 无 LOD 缓存条目（如 from_image 程序化几何）→ 原样返回 fallback。
+    // - LOD0 候选被释放（Tier2 降级）→ fallback 缓冲为空句柄，由各级常驻判断接管。
+    // ------------------------------------------------------------------
+    std::shared_lock lock(impl_->lod_cache_mutex);
+    auto key = Impl::make_lod_key(geometry_handle, mesh_index);
+    auto it  = impl_->lod_cache.find(key);
+    if (it == impl_->lod_cache.end()) {
+        return fallback;  // 无 LOD 数据：原样返回（保证始终可渲染）
+    }
+    const auto& levels = it->second.levels;
 
-    // 无 LOD / 未就绪 / 缓冲无效 → 原样返回 fallback，保证始终可渲染
-    if (lod == nullptr || !lod->vertex_buffer || !lod->index_buffer) {
+    // 1) 按屏幕占比选级（阈值表 = levels[1..N] 的 screen_threshold）
+    std::vector<float> thresholds;
+    thresholds.reserve(levels.size());
+    for (size_t i = 1; i < levels.size(); ++i) {
+        thresholds.push_back(levels[i].screen_threshold);
+    }
+    int selected = select_lod_level(screen_ratio, thresholds);
+
+    // 2) 降级到最近的已就绪级别（向 LOD0 方向回退）
+    while (selected > 0) {
+        if (static_cast<size_t>(selected) < levels.size() && levels[selected].ready) {
+            break;
+        }
+        --selected;
+    }
+    if (selected < 0 || static_cast<size_t>(selected) >= levels.size()) {
         return fallback;
     }
 
+    // 3) 选中级仍未就绪（含 selected==0 但 LOD0 未常驻的情形）→ 回退 fallback
+    const LODMeshBuffers& level = levels[selected];
+    if (!level.ready || !level.vertex_buffer || !level.index_buffer) {
+        return fallback;
+    }
+
+    // 4) 持锁拷出句柄（值语义）。StorageBuffer 缺失时沿用 fallback，避免 compute 拿空句柄。
     RenderMeshBuffers out;
-    out.vertex         = lod->vertex_buffer;
-    out.index          = lod->index_buffer;
-    // StorageBuffer 可能缺失：缺失时沿用 fallback 的，避免 compute 路径拿到空句柄
-    out.vertex_storage = lod->vertex_storage ? lod->vertex_storage : fallback.vertex_storage;
-    out.index_storage  = lod->index_storage  ? lod->index_storage  : fallback.index_storage;
+    out.vertex         = level.vertex_buffer;
+    out.index          = level.index_buffer;
+    out.vertex_storage = level.vertex_storage ? level.vertex_storage : fallback.vertex_storage;
+    out.index_storage  = level.index_storage  ? level.index_storage  : fallback.index_storage;
     return out;
+}
+
+GeometrySystem::RenderMeshBuffers GeometrySystem::resident_render_buffers(
+    std::uintptr_t           geometry_handle,
+    uint32_t                 mesh_index,
+    const RenderMeshBuffers& fallback) const {
+
+    // ------------------------------------------------------------------
+    // 仅做"常驻路由"，不做屏幕占比选级（无相机入参）。
+    // 用途：无相机上下文的渲染路径（如 V-buffer 可见性主路径 / actor 拾取），
+    // 这些路径需要"读到当前实际常驻的几何缓冲"，而非按距离选 LOD。
+    //
+    // 策略：从 LOD0 向高精度方向扫描，返回**最高精度的已就绪级**的句柄拷贝。
+    //   - 今天 LOD0 恒常驻 → 返回 LOD0（= fallback 同一批句柄），行为零变化。
+    //   - Tier2 降级释放 LOD0 后 → 自动路由到下一个已就绪级，主路径不至于读到空缓冲。
+    //   - 无 LOD 缓存条目（from_image 程序化几何）→ 原样返回 fallback。
+    //
+    // 与 select_render_buffers 同样：选级 + 句柄拷贝全部在单个 shared_lock 内完成，
+    // 锁外仅持有引用计数句柄副本，无悬垂、无对 geom 槽锁的再入。
+    // ------------------------------------------------------------------
+    std::shared_lock lock(impl_->lod_cache_mutex);
+    auto key = Impl::make_lod_key(geometry_handle, mesh_index);
+    auto it  = impl_->lod_cache.find(key);
+    if (it == impl_->lod_cache.end()) {
+        return fallback;  // 无 LOD 数据：原样返回
+    }
+    const auto& levels = it->second.levels;
+
+    // 从 LOD0 向后扫，取第一个 ready 且缓冲有效的级（= 最高精度常驻级）
+    for (size_t i = 0; i < levels.size(); ++i) {
+        const LODMeshBuffers& level = levels[i];
+        if (!level.ready || !level.vertex_buffer || !level.index_buffer) {
+            continue;
+        }
+        RenderMeshBuffers out;
+        out.vertex         = level.vertex_buffer;
+        out.index          = level.index_buffer;
+        out.vertex_storage = level.vertex_storage ? level.vertex_storage : fallback.vertex_storage;
+        out.index_storage  = level.index_storage  ? level.index_storage  : fallback.index_storage;
+        return out;
+    }
+
+    // 全级皆不常驻：返回 fallback（其几何缓冲可能为空 → 调用方据此跳过该 mesh）
+    return fallback;
 }
 
 const LODMeshBuffers* GeometrySystem::get_lod_buffers(

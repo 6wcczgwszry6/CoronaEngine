@@ -314,6 +314,33 @@ class GeometrySystem : public Kernel::SystemBase {
         float                   bounding_radius,
         const RenderMeshBuffers& fallback) const;
 
+    /// 驻留路由（渲染线程调用，线程安全，**不做屏幕占比选级**）。
+    ///
+    /// 与 select_render_buffers 的区别：本方法不需要相机参数，不按屏幕占比选级，
+    /// 只负责"返回当前最高精度的**已常驻**级缓冲"。用于无相机上下文的渲染路径
+    /// （如 V-buffer 可见性收集 collect_actor_instances_for_visibility、actor 拾取），
+    /// 这些路径此前直接读 MeshDevice 缓冲、不接 LOD。
+    ///
+    /// 设计目的：让"几何缓冲读取统一经 GeometrySystem 路由"，从而支持后续逐级
+    /// LOD 淘汰——当 LOD0 被显存压力释放后，本方法自动改返回次高的已常驻级，
+    /// 渲染路径无需感知。
+    ///
+    /// 行为：
+    ///   - 无 LOD 缓存条目（如 from_image 程序化几何）→ 原样返回 fallback。
+    ///   - 有缓存：从 LOD0 向高级别扫描，返回首个 ready 且缓冲有效的级别。
+    ///     （今天 LOD0 恒常驻 → 返回 LOD0 = fallback，行为与改造前完全一致。）
+    ///   - 全级皆不常驻 → 返回 fallback（其缓冲可能为空，调用方据空判断跳过）。
+    ///
+    /// StorageBuffer 缺失时沿用 fallback 的，避免 compute 路径拿到空句柄。
+    ///
+    /// @param geometry_handle GeometryDevice 句柄
+    /// @param mesh_index      子网格索引
+    /// @param fallback        调用方持 geom 槽锁时从 MeshDevice 读出的 LOD0 候选缓冲
+    [[nodiscard]] RenderMeshBuffers resident_render_buffers(
+        std::uintptr_t           geometry_handle,
+        uint32_t                 mesh_index,
+        const RenderMeshBuffers& fallback) const;
+
     /// 查询指定 LOD 级别的 GPU 缓冲（渲染线程调用，线程安全）
     ///
     /// @param geometry_handle GeometryDevice 句柄
@@ -348,10 +375,13 @@ class GeometrySystem : public Kernel::SystemBase {
                                         uint32_t       mesh_index,
                                         float          screen_ratio) const;
 
-    /// 一站式 LOD 缓冲获取：自动选级 + 返回 GPU 缓冲（渲染线程调用，单次加锁）
+    /// 一站式 LOD 缓冲获取：自动选级 + 返回 GPU 缓冲（单次加锁）
     ///
-    /// 等价于 resolve_lod_level() + get_lod_buffers()，但只获取一次锁。
-    /// 渲染热路径上应优先使用此方法。
+    /// @deprecated 渲染热路径请改用 select_render_buffers()。本方法返回裸
+    /// const LODMeshBuffers*（指向 lod_cache 内部），调用方在 shared_lock 释放后
+    /// 解引用；一旦逐级 LOD 淘汰使缓存频繁增删，该指针会悬垂。select_render_buffers
+    /// 在持锁期间即拷出 HardwareBuffer 句柄（值语义、refcount 安全），无此问题。
+    /// 保留此接口仅为兼容潜在外部调用，渲染路径已不再使用。
     ///
     /// @return 指向 LODMeshBuffers 的指针，或 nullptr 表示该 mesh 无 LOD 数据
     [[nodiscard]] const LODMeshBuffers* resolve_lod_buffers(

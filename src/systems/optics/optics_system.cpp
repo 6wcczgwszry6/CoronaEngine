@@ -1098,7 +1098,8 @@ bool collect_actor_instances_for_visibility(
     uint32_t target_vp_descriptor,
     bool follow_camera_pass,
     const ktm::fmat4x4* camera_basis,
-    RenderInstanceBatch& batch) {
+    RenderInstanceBatch& batch,
+    const Corona::Systems::GeometrySystem* geometry_system) {
     batch.clear();
 
     auto& hub = Corona::SharedDataHub::instance();
@@ -1162,7 +1163,29 @@ bool collect_actor_instances_for_visibility(
                     }
                 }
 
-                for (auto& m : geom->mesh_handles) {
+                for (uint32_t mesh_index = 0;
+                     mesh_index < static_cast<uint32_t>(geom->mesh_handles.size());
+                     ++mesh_index) {
+                    auto& m = geom->mesh_handles[mesh_index];
+
+                    // ---- 几何缓冲常驻路由 ----
+                    // 渲染统一经 GeometrySystem 取当前常驻的几何缓冲，而非直接读
+                    // MeshDevice：Tier2 降级释放 LOD0 后仍能路由到已就绪的低 LOD 级，
+                    // 不至于读到空缓冲。本路径无相机上下文，故用 resident_render_buffers
+                    // （常驻路由，不做屏幕占比选级）。texture/materialColor 不属几何缓冲，
+                    // 仍从 m 读取。返回值为句柄拷贝（refcount 安全）。
+                    Corona::Systems::GeometrySystem::RenderMeshBuffers geo_bufs{
+                        m.vertexBuffer, m.indexBuffer,
+                        m.vertexStorageBuffer, m.indexStorageBuffer};
+                    if (geometry_system) {
+                        geo_bufs = geometry_system->resident_render_buffers(
+                            optics.geometry_handle, mesh_index, geo_bufs);
+                    }
+                    // 几何缓冲全不常驻（Tier2/3 已释放且无低级可用）→ 跳过该 mesh
+                    if (!geo_bufs.vertex || !geo_bufs.index) {
+                        continue;
+                    }
+
                     auto material_id = static_cast<uint32_t>(batch.materials.size());
                     {
                         Hardware::MaterialInfo mat_info{};
@@ -1206,9 +1229,9 @@ bool collect_actor_instances_for_visibility(
                         Hardware::InstanceInfo inst{};
                         inst.modelMatrix = model_matrix;
                         inst.vertexBufferIndex =
-                            m.vertexStorageBuffer ? m.vertexStorageBuffer.storeDescriptor() : 0;
+                            geo_bufs.vertex_storage ? geo_bufs.vertex_storage.storeDescriptor() : 0;
                         inst.indexBufferIndex =
-                            m.indexStorageBuffer ? m.indexStorageBuffer.storeDescriptor() : 0;
+                            geo_bufs.index_storage ? geo_bufs.index_storage.storeDescriptor() : 0;
                         inst.materialID = material_id;
                         inst.objectID = object_id;
                         batch.instances.push_back(inst);
@@ -1224,7 +1247,7 @@ bool collect_actor_instances_for_visibility(
                         instance_id + 1;
                     target_visibility[visibility_frag_glsl_t::pushConsts::textureIndex] =
                         m.textureBuffer ? m.textureBuffer.storeSampledDescriptor() : static_cast<uint32_t>(0);
-                    target_visibility.record(m.indexBuffer, m.vertexBuffer);
+                    target_visibility.record(geo_bufs.index, geo_bufs.vertex);
                 }
             }
             ++object_id;
@@ -2673,6 +2696,12 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                     Horizon::HardwareBuffer render_ib = bufs.index;
                                     Horizon::HardwareBuffer render_vs = bufs.vertex_storage;
                                     Horizon::HardwareBuffer render_is = bufs.index_storage;
+                                    // Step 2：若无任何常驻几何缓冲（后续 Tier2 降级释放 LOD0
+                                    // 且无低级常驻时），跳过该 mesh，避免录入空缓冲绘制。
+                                    // 当前 LOD0 恒常驻，此分支不触发（零行为变化）。
+                                    if (!render_vb || !render_ib) {
+                                        continue;
+                                    }
                                     // --- Collect material info ---
                                     auto materialID = static_cast<uint32_t>(batch.materials.size());
                                     {
@@ -2880,6 +2909,12 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                             optics_acc->geometry_handle, mesh_index,
                                             camera->position, camera->fov,
                                             world_center, bounding_radius, bufs);
+                                    }
+
+                                    // Step 2：无常驻几何缓冲（后续 Tier2 降级释放 LOD0
+                                    // 且无其它常驻级）→ 跳过该 mesh 的阴影绘制，不录入空缓冲。
+                                    if (!bufs.vertex || !bufs.index) {
+                                        continue;
                                     }
 
                                     const ktm::fmat4x4 clip_matrix =
@@ -3394,7 +3429,7 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
     const bool has_follow_camera_instances =
         collect_actor_instances_for_visibility(scene, uiVisibility, uiVpDescriptor,
                                                /*follow_camera_pass=*/true,
-                                               &camera_basis, uiBatch);
+                                               &camera_basis, uiBatch, geometry_system_);
 
     const bool stereo_ui = mode == ViewportUiMode::Stereo3D;
     const bool cursor_icon_ready = stereo_ui && ensure_cursor_icon_texture();
@@ -3650,7 +3685,8 @@ void OpticsSystem::process_vision_actor_pick(std::uintptr_t camera_handle,
                                            scene_vp_descriptor,
                                            false,
                                            nullptr,
-                                           scene_batch);
+                                           scene_batch,
+                                           geometry_system_);
     upload_instance_tables(scene_batch,
                            hardware_->instanceInfoBuffer,
                            hardware_->materialTableBuffer);
