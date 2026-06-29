@@ -233,20 +233,20 @@ class ModelProvider:
         if image_url and image_url.startswith("__text_to_3d__:"):
             mode = "text_to_3d"
             prompt = _with_generation_prompt_guardrail(image_url[len("__text_to_3d__:"):] or prompt_text or name, name)
-            tool_input = {"mode": mode, "prompt": prompt, "object_id": object_id}
+            tool_input = {"mode": mode, "prompt": prompt, "object_id": object_id, "object_name": name}
             logger.info("[ModelProvider][generate] mode=text_to_3d prompt=%r...",
                         prompt[:80])
         elif image_url:
             mode = "image_to_3d"
             prompt = _with_generation_prompt_guardrail(prompt_text or name, name)
             tool_input = {"mode": mode, "images": [image_url],
-                          "object_id": object_id, "prompt": prompt}
+                          "object_id": object_id, "object_name": name, "prompt": prompt}
             logger.info("[ModelProvider][generate] mode=image_to_3d image=%r...",
                         image_url[:80])
         else:
             mode = "text_to_3d"
             prompt = _with_generation_prompt_guardrail(prompt_text or f"high quality 3D model of {name}", name)
-            tool_input = {"mode": mode, "prompt": prompt, "object_id": object_id}
+            tool_input = {"mode": mode, "prompt": prompt, "object_id": object_id, "object_name": name}
             logger.info("[ModelProvider][generate] mode=text_to_3d (no image) "
                         "prompt=%r...", prompt[:80])
 
