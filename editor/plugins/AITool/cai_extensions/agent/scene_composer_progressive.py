@@ -18,6 +18,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+_AABB_ACTOR_READY_TIMEOUT_SEC = float(os.getenv("CORONA_AABB_ACTOR_READY_TIMEOUT_SEC", "120.0") or "120.0")
+_AABB_ACTOR_READY_POLL_INTERVAL_SEC = float(os.getenv("CORONA_AABB_ACTOR_READY_POLL_INTERVAL_SEC", "0.05") or "0.05")
+
 
 @dataclass
 class BatchResourcePlan:
@@ -322,6 +325,22 @@ def run_progressive_workflow(
         run_vlm_checkpoint(imported_ids, batch_id, phase=phase)
 
     def pre_final_vlm_checkpoint() -> None:
+        before_aabb_tasks = len(session.pending_tasks)
+        _final_global_aabb_repair(
+            scene_layout,
+            engine_gate,
+            zone_aabbs=_collect_zone_aabbs(getattr(composer, "zone_tree", None)),
+            door_aabbs=_collect_door_clearance_aabbs(getattr(composer, "zone_tree", None)),
+            issue_sink=session.pending_tasks,
+        )
+        _emit_aabb_review_results(
+            list(session.pending_tasks[before_aabb_tasks:]),
+            batch_id=f"r{getattr(session, 'current_round', 0)}_FINAL",
+            interaction_coordinator=interaction_coordinator,
+            room_id=coordinator_room_id,
+            plan_id=plan_id,
+            session_id=session_id,
+        )
         run_vlm_checkpoint(
             [],
             f"r{getattr(session, 'current_round', 0)}_FINAL",
@@ -1717,6 +1736,7 @@ def _repair_recent_imports(
     zone_aabbs: Dict[str, List[float]],
     door_aabbs: Dict[str, List[float]],
     issue_sink: Optional[List[Dict[str, Any]]] = None,
+    ready_timeout_s: Optional[float] = None,
 ) -> int:
     """AABB hard loop after each imported batch: snap bottom and resolve overlaps."""
 
@@ -1739,11 +1759,29 @@ def _repair_recent_imports(
         active_ids = set()
 
     repaired = 0
+    timeout_s = _AABB_ACTOR_READY_TIMEOUT_SEC if ready_timeout_s is None else max(0.0, float(ready_timeout_s))
     for actor_id in imported_ids:
-        actor = wait_for_actor_bounds("", actor_id, timeout_s=6.0, interval_s=0.01)
+        actor = wait_for_actor_bounds(
+            "",
+            actor_id,
+            timeout_s=timeout_s,
+            interval_s=_AABB_ACTOR_READY_POLL_INTERVAL_SEC,
+        )
         if actor is None or not actor.bounds_ready:
+            logger.warning(
+                "[ProgressiveWorkflow] AABB wait timeout actor=%s timeout=%.2fs",
+                actor_id,
+                timeout_s,
+            )
             if issue_sink is not None:
-                issue_sink.append({"actor_id": actor_id, "type": "bounds_not_ready"})
+                issue_sink.append({
+                    "actor_id": actor_id,
+                    "type": "bounds_not_ready",
+                    "kind": "aabb_repair",
+                    "source": "AABB",
+                    "status": "pending_geometry",
+                    "text": f"{actor_id} 模型几何仍在加载，暂不能完成 AABB 修复",
+                })
             continue
         try:
             inst = scene_layout.get(actor_id)
@@ -1802,6 +1840,52 @@ def _repair_recent_imports(
                     })
         except Exception as exc:  # noqa: BLE001
             logger.debug("[ProgressiveWorkflow] AABB repair skipped for %s: %s", actor_id, exc)
+    return repaired
+
+
+def _final_global_aabb_repair(
+    scene_layout: Any,
+    engine_gate: Any,
+    *,
+    zone_aabbs: Dict[str, List[float]],
+    door_aabbs: Dict[str, List[float]],
+    issue_sink: Optional[List[Dict[str, Any]]] = None,
+) -> int:
+    """Final hard AABB pass for all active AGENT actors before visual review."""
+
+    try:
+        active = list(scene_layout.list_active())
+    except Exception:
+        active = []
+    actor_ids = [
+        str(getattr(inst, "instance_id", "") or "").strip()
+        for inst in active
+        if str(getattr(inst, "provenance", "") or "").upper() != "USER"
+    ]
+    actor_ids = [actor_id for actor_id in actor_ids if actor_id and not actor_id.startswith("__")]
+    if not actor_ids:
+        return 0
+
+    logger.info("[ProgressiveWorkflow] Final AABB repair start actors=%s", actor_ids)
+    before = len(issue_sink or [])
+    repaired = _repair_recent_imports(
+        actor_ids,
+        scene_layout,
+        engine_gate,
+        zone_aabbs=zone_aabbs,
+        door_aabbs=door_aabbs,
+        issue_sink=issue_sink,
+    )
+    new_issues = list((issue_sink or [])[before:])
+    unresolved = [
+        issue for issue in new_issues
+        if isinstance(issue, dict) and str(issue.get("status") or "") in {"needs_confirm", "pending_geometry"}
+    ]
+    logger.info(
+        "[ProgressiveWorkflow] Final AABB repair done repaired=%d unresolved=%d",
+        repaired,
+        len(unresolved),
+    )
     return repaired
 
 

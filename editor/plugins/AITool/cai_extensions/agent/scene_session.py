@@ -1213,7 +1213,22 @@ class SceneSession:
         for task in self.pending_tasks:
             if not isinstance(task, dict):
                 continue
-            if str(task.get("kind") or "") != "batch_resource_plan":
+            kind = str(task.get("kind") or "")
+            if kind == "aabb_repair":
+                status = str(task.get("status") or "")
+                if status not in {"pending_geometry", "needs_confirm"}:
+                    continue
+                text = FinalReviewReport._safe_user_text(
+                    task.get("content") or task.get("text") or task.get("reason"),
+                    fallback="仍有 AABB 摆放冲突需要处理",
+                )
+                out.append({
+                    "content": text,
+                    "status": status,
+                    "reason": FinalReviewReport._safe_user_text(task.get("reason"), fallback=status),
+                })
+                continue
+            if kind != "batch_resource_plan":
                 continue
             status = str(task.get("status") or "")
             if status not in {"model_provider_unavailable", "model_generation_failed", "empty_request"}:

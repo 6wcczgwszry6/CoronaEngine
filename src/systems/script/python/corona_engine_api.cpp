@@ -1045,6 +1045,49 @@ bool Corona::API::Geometry::is_valid() const {
     return handle_ != 0 && transform_handle_ != 0;
 }
 
+std::string Corona::API::Geometry::get_gpu_build_state() const {
+    if (handle_ == 0) {
+        return "Invalid";
+    }
+    if (auto geom = SharedDataHub::instance().geometry_storage().try_acquire_read(handle_)) {
+        switch (geom->gpu_build_state) {
+            case GeometryDevice::GpuBuildState::Ready:
+                return "Ready";
+            case GeometryDevice::GpuBuildState::PendingImport:
+                return "PendingImport";
+            case GeometryDevice::GpuBuildState::PendingBuild:
+                return "PendingBuild";
+            case GeometryDevice::GpuBuildState::Failed:
+                return "Failed";
+        }
+    }
+    return "Unavailable";
+}
+
+std::size_t Corona::API::Geometry::get_mesh_count() const {
+    if (handle_ == 0) {
+        return 0;
+    }
+    if (auto geom = SharedDataHub::instance().geometry_storage().try_acquire_read(handle_)) {
+        return geom->mesh_handles.size();
+    }
+    return 0;
+}
+
+std::uint64_t Corona::API::Geometry::get_model_id() const {
+    if (handle_ == 0) {
+        return 0;
+    }
+    if (auto geom = SharedDataHub::instance().geometry_storage().try_acquire_read(handle_)) {
+        if (geom->model_resource_handle != 0) {
+            if (auto res = SharedDataHub::instance().model_resource_storage().try_acquire_read(geom->model_resource_handle)) {
+                return res->model_id;
+            }
+        }
+    }
+    return 0;
+}
+
 std::array<float, 6> Corona::API::Geometry::get_aabb() const {
     if (auto geom = SharedDataHub::instance().geometry_storage().try_acquire_read(handle_)) {
         if (auto res = SharedDataHub::instance().model_resource_storage().try_acquire_read(geom->model_resource_handle)) {

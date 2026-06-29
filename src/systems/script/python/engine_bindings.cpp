@@ -39,6 +39,8 @@ std::string remove_editor_actor_from_python(const std::string& scene_name,
                                             const std::string& actor_name);
 std::string get_editor_actor_bounds_from_python(const std::string& scene_name,
                                                 const std::string& actor_name);
+std::string get_editor_actor_geometry_status_from_python(const std::string& scene_name,
+                                                         const std::string& actor_name);
 std::string get_editor_scene_bounds_from_python(const std::string& scene_name);
 std::string get_editor_scene_snapshot_from_python(const std::string& scene_name);
 std::string set_editor_actor_transform_from_python(const std::string& scene_name,
@@ -874,6 +876,16 @@ void BindAll(nanobind::module_& m) {
           nb::arg("scene_name"),
           nb::arg("actor_name"),
           "Return native editor actor bounds as JSON.");
+
+    m.def("get_editor_actor_geometry_status",
+          [](const std::string& scene_name,
+             const std::string& actor_name) {
+              return Corona::Systems::UI::get_editor_actor_geometry_status_from_python(
+                  scene_name, actor_name);
+          },
+          nb::arg("scene_name"),
+          nb::arg("actor_name"),
+          "Return native editor actor async geometry/GPU build status as JSON.");
 
     m.def("get_editor_scene_bounds",
             [](const std::string& scene_name) {

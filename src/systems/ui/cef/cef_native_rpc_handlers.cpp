@@ -2184,6 +2184,51 @@ std::string get_editor_actor_bounds_from_python(const std::string& scene_name,
     }
 }
 
+std::string get_editor_actor_geometry_status_from_python(const std::string& scene_name,
+                                                         const std::string& actor_name) {
+    try {
+        auto* scene = ensure_native_editor_scene();
+        const auto scene_route = normalize_route(scene_name);
+        if (!scene_route.empty() && scene_route != scene->route) {
+            scene = reload_native_editor_scene("", scene_route);
+        }
+        auto* actor = find_native_actor(*scene, actor_name);
+        if (!actor) {
+            return nlohmann::json{
+                {"status", "error"},
+                {"message", "Actor not found: " + actor_name},
+            }.dump();
+        }
+        const bool valid = actor->geometry && actor->geometry->is_valid();
+        const auto gpu_state = valid ? actor->geometry->get_gpu_build_state() : std::string("Invalid");
+        const auto mesh_count = valid ? actor->geometry->get_mesh_count() : 0;
+        const auto model_id = valid ? actor->geometry->get_model_id() : 0;
+        const bool render_ready = valid && gpu_state == "Ready" &&
+            (mesh_count > 0 || actor->actor_type == "audio");
+        return nlohmann::json{
+            {"status", "success"},
+            {"scene", scene->route},
+            {"actor", actor->name},
+            {"actor_type", actor->actor_type},
+            {"ready", render_ready},
+            {"failed", gpu_state == "Failed"},
+            {"gpu_build_state", gpu_state},
+            {"mesh_count", mesh_count},
+            {"model_id", model_id},
+        }.dump();
+    } catch (const std::exception& e) {
+        return nlohmann::json{
+            {"status", "error"},
+            {"message", e.what()},
+        }.dump();
+    } catch (...) {
+        return nlohmann::json{
+            {"status", "error"},
+            {"message", "get_editor_actor_geometry_status native handler error"},
+        }.dump();
+    }
+}
+
 std::string get_editor_scene_snapshot_from_python(const std::string& scene_name) {
     try {
         auto* scene = ensure_native_editor_scene();

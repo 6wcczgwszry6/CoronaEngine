@@ -12,6 +12,7 @@ import os
 import hashlib
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Optional
@@ -24,6 +25,8 @@ VLM_REVIEW_CAMERA_NAME = "vlm_review_camera"
 
 _DEFAULT_CENTER = [0.0, 0.75, 0.0]
 _DEFAULT_RADIUS = 2.0
+_READY_POLL_INTERVAL = 0.1
+_CAPTURE_FILE_GRACE_SEC = float(os.getenv("CORONA_VLM_CAPTURE_FILE_GRACE_SEC", "45.0") or "45.0")
 
 
 @dataclass
@@ -126,6 +129,31 @@ def _copy_engine_screenshot_to_final(engine_path: str, final_path: str) -> bool:
             exc,
         )
         return False
+
+
+def _screenshot_file_ready(path: str) -> bool:
+    try:
+        return os.path.exists(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+def _wait_for_engine_screenshot_file(
+    engine_path: str,
+    final_path: str,
+    *,
+    needs_copy: bool,
+    grace_sec: Optional[float] = None,
+) -> bool:
+    deadline = time.monotonic() + max(0.0, _CAPTURE_FILE_GRACE_SEC if grace_sec is None else float(grace_sec))
+    while True:
+        if _screenshot_file_ready(engine_path):
+            return _copy_engine_screenshot_to_final(engine_path, final_path) if needs_copy else True
+        if _screenshot_file_ready(final_path):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_READY_POLL_INTERVAL)
 
 
 @dataclass
@@ -284,6 +312,89 @@ def _native_actor_aabb(scene: Any, actor_name: Optional[str]) -> Optional[List[f
     return _coerce_aabb(result.get("aabb"))
 
 
+def _native_actor_geometry_status(scene: Any, actor_name: Optional[str]) -> Optional[dict]:
+    if not actor_name:
+        return None
+    result = _native_bounds_json(
+        "get_editor_actor_geometry_status",
+        _native_scene_route(scene),
+        str(actor_name),
+    )
+    return result if isinstance(result, dict) else None
+
+
+def _wait_for_native_actor_geometry_ready(
+    scene: Any,
+    actor_name: Optional[str],
+    timeout_sec: float,
+) -> tuple[bool, str]:
+    if not actor_name:
+        return True, ""
+    status = _native_actor_geometry_status(scene, actor_name)
+    if status is None:
+        return True, "geometry_status_unavailable"
+
+    deadline = time.monotonic() + max(0.0, float(timeout_sec or 0.0))
+    last_reason = ""
+    while True:
+        state = str(status.get("gpu_build_state") or "").strip()
+        if status.get("ready"):
+            return True, state or "ready"
+        if status.get("failed") or state.lower() == "failed":
+            return False, f"geometry_failed:{state or status.get('message') or actor_name}"
+        if status.get("status") == "error":
+            last_reason = str(status.get("message") or "geometry_status_error")
+        else:
+            last_reason = state or "geometry_not_ready"
+        if time.monotonic() >= deadline:
+            return False, f"geometry_not_ready:{last_reason}"
+        time.sleep(_READY_POLL_INTERVAL)
+        next_status = _native_actor_geometry_status(scene, actor_name)
+        if next_status is None:
+            return True, "geometry_status_unavailable"
+        status = next_status
+
+
+def _scene_snapshot_bounds_ready(snapshot: Optional[dict]) -> tuple[bool, str]:
+    if not isinstance(snapshot, dict):
+        return True, "scene_snapshot_unavailable"
+    if snapshot.get("status") == "error":
+        return False, str(snapshot.get("message") or "scene_snapshot_error")
+    actors = snapshot.get("actors") if isinstance(snapshot.get("actors"), list) else []
+    if actors:
+        pending: list[str] = []
+        for actor in actors:
+            if not isinstance(actor, dict):
+                continue
+            aabb = _coerce_aabb(actor.get("world_aabb"))
+            if not actor.get("bounds_ready") or aabb is None:
+                pending.append(str(actor.get("name") or actor.get("actor_guid") or "actor"))
+        if not pending:
+            return True, "ready"
+        return False, "pending_bounds:" + ",".join(pending[:5])
+    if snapshot.get("bounds_ready") or _coerce_aabb(snapshot.get("scene_aabb")) is not None:
+        return True, "ready"
+    return True, "scene_empty_or_unavailable"
+
+
+def _wait_for_native_scene_geometry_ready(scene: Any, timeout_sec: float) -> tuple[bool, str]:
+    status = _native_bounds_json("get_editor_scene_snapshot", _native_scene_route(scene))
+    ready, reason = _scene_snapshot_bounds_ready(status)
+    if ready:
+        return True, reason
+
+    deadline = time.monotonic() + max(0.0, float(timeout_sec or 0.0))
+    last_reason = reason
+    while True:
+        if time.monotonic() >= deadline:
+            return False, f"scene_geometry_not_ready:{last_reason}"
+        time.sleep(_READY_POLL_INTERVAL)
+        status = _native_bounds_json("get_editor_scene_snapshot", _native_scene_route(scene))
+        ready, last_reason = _scene_snapshot_bounds_ready(status)
+        if ready:
+            return True, last_reason
+
+
 def _native_scene_aabb(scene: Any) -> Optional[List[float]]:
     result = _native_bounds_json("get_editor_scene_bounds", _native_scene_route(scene))
     if not result or result.get("status") not in ("success", "ok"):
@@ -397,10 +508,20 @@ def capture_pose_with_native_camera(
         )
         result = json.loads(raw) if isinstance(raw, str) else raw
         saved = isinstance(result, dict) and result.get("status") in ("success", "ok")
-        if not saved:
-            logger.warning("[VlmCapture] native camera capture failed result=%s", result)
+        if saved:
+            if not needs_copy:
+                return True
+            if _copy_engine_screenshot_to_final(engine_path, output_path):
+                return True
+            if _wait_for_engine_screenshot_file(engine_path, output_path, needs_copy=True):
+                return True
+            logger.warning("[VlmCapture] native camera reported success but screenshot file was not ready result=%s", result)
             return False
-        return _copy_engine_screenshot_to_final(engine_path, output_path) if needs_copy else True
+        if _wait_for_engine_screenshot_file(engine_path, output_path, needs_copy=needs_copy):
+            logger.info("[VlmCapture] accepted late native screenshot after error path=%s result=%s", output_path, result)
+            return True
+        logger.warning("[VlmCapture] native camera capture failed result=%s", result)
+        return False
     except Exception as exc:
         logger.warning("[VlmCapture] native capture pose failed name=%s path=%s error=%s",
                        pose.name, output_path, exc)
@@ -430,6 +551,40 @@ def capture_vlm_views(
             output_dir=output_dir,
             skipped_reason="native_camera_capture_unavailable",
         )
+
+    if scope == "actor" and actor_name:
+        ready, ready_reason = _wait_for_native_actor_geometry_ready(
+            resolved_scene,
+            actor_name,
+            timeout_sec=timeout_sec,
+        )
+        if not ready:
+            logger.info(
+                "[VlmCapture] skip target=%s before screenshot: %s",
+                actor_name,
+                ready_reason,
+            )
+            return VlmCaptureResult(
+                status="skipped",
+                output_dir=output_dir,
+                skipped_reason=f"native_actor_not_ready:{ready_reason}",
+            )
+
+    if scope != "actor":
+        ready, ready_reason = _wait_for_native_scene_geometry_ready(
+            resolved_scene,
+            timeout_sec=timeout_sec,
+        )
+        if not ready:
+            logger.info(
+                "[VlmCapture] skip scene before screenshot: %s",
+                ready_reason,
+            )
+            return VlmCaptureResult(
+                status="skipped",
+                output_dir=output_dir,
+                skipped_reason=f"native_scene_not_ready:{ready_reason}",
+            )
 
     bounds = resolve_vlm_target_bounds(resolved_scene, actor_name=actor_name, scope=scope)
     if scope == "actor" and actor_name and bounds.source != f"native_actor:{actor_name}":
