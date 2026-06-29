@@ -126,6 +126,11 @@ struct LODMeshBuffers {
     std::uint32_t vertex_count = 0;  // 该级别顶点数（调试/诊断用）
     std::uint32_t index_count  = 0;  // 该级别索引数（调试/诊断用）
 
+    // 按需驻留（Step 3a）：本级在 Scene::data.meshes[mesh].lod_levels 中的源下标。
+    // upload 会跳过空 LOD 级，故缓存级序与源级序不一一对应；reconcile 重建某级时
+    // 用此下标回到 Scene CPU 取对应顶点/索引数据。LOD0 恒为 -1（其源是 mesh 本体）。
+    int source_lod_index = -1;
+
     // GPU 显存记账令牌（P0）：LOD1..N 各自的顶点/索引缓冲字节。
     // LOD0 复用 mesh_dev 的缓冲（非新分配）→ 该令牌留空计 0，避免重复计量。
     Corona::Memory::GpuMemToken mesh_mem;
@@ -488,10 +493,20 @@ class GeometrySystem : public Kernel::SystemBase {
     // 模型导入时 meshoptimizer 已生成 LOD 数据（MeshData::lod_levels），
     // 这里只负责将其上传为 GPU 缓冲。
 
-    /// 遍历所有已加载的 Scene 资源，
-    /// 将其 MeshData::lod_levels（导入时 meshoptimizer 生成的LOD数据）上传到 GPU。
-    /// 每帧调用但只对新模型生效（已有缓存的跳过）。
+    /// 遍历所有已加载的 Scene 资源，建立 LOD 缓存条目（元数据）。
+    /// LOD0 立即就绪（复用 mesh_dev 缓冲）；LOD1..N 仅登记元数据
+    /// （screen_threshold / 计数 / source_lod_index），ready=false、不建 GPU 缓冲、不建 BVH。
+    /// 实际 GPU 缓冲由 reconcile_lod_residency() 按需构建（Step 3a：按需驻留）。
+    /// 每帧调用但只对新模型建条目（已有缓存的跳过）。
     void upload_lod_from_scene_data();
+
+    /// 按需 LOD 驻留协调（Step 3a，每帧 update 调用）。
+    /// 遍历所有有 LOD 缓存的 geometry，按相机屏占比算出"需求级 D"（多相机取最高精度），
+    /// 确保 D 已构建 GPU 缓冲（缺则从 Scene CPU 即时建），并释放其余 LOD1..N 级（回收显存）。
+    /// LOD0 始终保留作降级兜底（其释放属 Step 3b，本步不做）。
+    /// 渲染线程 select_render_buffers 用同一屏占比公式 → 与本决策一致；
+    /// 偶发不一致时渲染自动降级到 LOD0，不致黑屏。
+    void reconcile_lod_residency();
 
     /// 骨骼动画 CPU 蒙皮（P2）。每帧遍历所有 GeometryDevice，对蒙皮模型
     /// （Scene::skeleton 有值）：推进 anim_time → compute_pose 算 final 骨骼矩阵
