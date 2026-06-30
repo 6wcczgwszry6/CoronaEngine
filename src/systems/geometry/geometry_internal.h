@@ -1,6 +1,5 @@
 #pragma once
 
-#include <corona/spatial/bvh.h>
 #include <corona/spatial/octree.h>
 #include <corona/systems/geometry/actor_cache.h>
 #include <corona/systems/geometry/geometry_system.h>
@@ -90,7 +89,6 @@ struct GeometrySystem::Impl {
     struct SceneState {
         Spatial::Octree<Payload>                            tree;
         std::unordered_map<Payload,Spatial::AABB> actor_to_entry; //Actor到AABB映射
-        std::unordered_map<Payload, std::uint32_t>          invisible_frames;
         SceneVisibilityConfig                               cfg;
         SceneStats                                          stats;
         mutable std::mutex                                  stats_mutex;
@@ -113,12 +111,6 @@ struct GeometrySystem::Impl {
     struct LODCacheEntry {
         std::vector<LODMeshBuffers> levels;
         std::uint64_t model_id = 0;  // 用于检测模型变更（比地址指针可靠，不受 slot 复用影响）
-
-        // 每个 LOD 级别一个 BVH（下标与 levels 一一对应）
-        // payload = 三角形下标（i/3），用于射线→三角形加速查询
-#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
-        std::vector<Spatial::BVH<uint32_t>> per_level_bvh;
-#endif
 
         // 滞回状态（方案 B）：reconcile 每帧用滞回死区更新本值；render 直接读取，
         // 不再独立按屏占比选级。两者共用同一决策，保证 render 选中的级必然已驻留
@@ -156,9 +148,6 @@ struct GeometrySystem::Impl {
         Horizon::HardwareBuffer vertex_storage;
         Horizon::HardwareBuffer index_storage;
         std::size_t             gpu_bytes = 0;
-#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
-        Spatial::BVH<uint32_t>  bvh;
-#endif
         bool ok = false;
     };
 

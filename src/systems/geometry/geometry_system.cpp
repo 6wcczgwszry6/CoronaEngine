@@ -36,8 +36,6 @@ using namespace GeometryInternal;
 
 namespace {
 
-constexpr auto kLoadedActorEvictGrace = std::chrono::seconds(8);
-
 template <typename T>
 Horizon::HardwareBuffer make_geometry_buffer(const std::vector<T>& data,
                                              Horizon::BufferUsageFlags usage,
@@ -280,7 +278,6 @@ void GeometrySystem::update() {
                     scene_state.loading_tasks.erase(it->first);
                     scene_state.unloading_tasks.erase(it->first);
                     scene_state.unload_retry_counts.erase(it->first);
-                    scene_state.invisible_frames.erase(it->first);
                     impl_->last_load_finished_time.erase(it->first);
                     // 检查 actor 是否还存在于其他场景，若否，清理全局状态
                     bool exists_elsewhere = false;
@@ -360,9 +357,7 @@ void GeometrySystem::update() {
                 impl_->ctx->event_bus()->publish(evt);
         }
 
-        struct PendingUnload { Events::ActorUnloadRequestedEvent evt; float distance; };
         struct PendingLoad   { Events::ActorLoadRequestedEvent evt;   float distance; };
-        std::vector<PendingUnload> pending_unloads;
         std::vector<PendingLoad>   pending_loads;
         {
             // Phase 1: shared_lock — 收集候选、计算距离、决定转换（只读不写）
@@ -412,11 +407,6 @@ void GeometrySystem::update() {
 
                     // 状态机转换（只记录决策，不修改状态 — 由 Phase 2 统一应用）
                     switch (state) {
-                        case ActorLoadState::Loaded:
-                            // 卸载不再由距离剔除直接触发，交给不可见帧淘汰
-                            // 淘汰时才做快照存 ActorCache，保证磁盘/内存里有数据
-                            break;
-
                         case ActorLoadState::Unloaded:
                             if (min_distance < scene_state.cfg.preload_distance) {
                                 pending_loads.push_back({{scene_handle, actor}, min_distance});
@@ -431,9 +421,8 @@ void GeometrySystem::update() {
             }
         }
 
-        // 按距离排序：加载近者优先，卸载远者优先。限制每帧数量防止线程池过载。
+        // 按距离排序：加载近者优先。限制每帧数量防止线程池过载。
         constexpr size_t kMaxLoadsPerFrame   = 4;
-        constexpr size_t kMaxUnloadsPerFrame = 8;
         if (pending_loads.size() > kMaxLoadsPerFrame) {
             std::sort(pending_loads.begin(), pending_loads.end(),
                 [](const PendingLoad& a, const PendingLoad& b) {
@@ -441,28 +430,10 @@ void GeometrySystem::update() {
                 });
             pending_loads.resize(kMaxLoadsPerFrame);
         }
-        if (pending_unloads.size() > kMaxUnloadsPerFrame) {
-            std::sort(pending_unloads.begin(), pending_unloads.end(),
-                [](const PendingUnload& a, const PendingUnload& b) {
-                    return a.distance > b.distance;  // 远的优先
-                });
-            pending_unloads.resize(kMaxUnloadsPerFrame);
-        }
         // Phase 2: unique_lock — 应用状态转换（带 TOCTOU 重校验）
-        if (!pending_unloads.empty() || !pending_loads.empty()) {
+        if (!pending_loads.empty()) {
             std::unique_lock lock(impl_->mtx);
             auto& scene_state = impl_->get_or_create(scene_handle);
-
-            for (auto it = pending_unloads.begin(); it != pending_unloads.end(); ) {
-                auto state_it = scene_state.actor_load_states.find(it->evt.actor);
-                if (state_it != scene_state.actor_load_states.end() &&
-                    state_it->second == ActorLoadState::Loaded) {
-                    state_it->second = ActorLoadState::Unloading;
-                    ++it;
-                    } else {
-                        it = pending_unloads.erase(it);  // 状态已被异步事件改变，取消此事件
-                    }
-            }
 
             for (auto it = pending_loads.begin(); it != pending_loads.end(); ) {
                 auto state_it = scene_state.actor_load_states.find(it->evt.actor);
@@ -475,72 +446,9 @@ void GeometrySystem::update() {
                     }
             }
         }
-        for (const auto& p : pending_unloads) {
-            if (impl_->ctx && impl_->ctx->event_bus())
-                impl_->ctx->event_bus()->publish(p.evt);
-        }
         for (const auto& p : pending_loads) {
             if (impl_->ctx && impl_->ctx->event_bus())
                 impl_->ctx->event_bus()->publish(p.evt);
-        }
-
-        // 不可见帧计数与淘汰
-        std::vector<Events::ActorEvictRequestedEvent> pending_evictions;
-        {
-            const auto now = std::chrono::steady_clock::now();
-            std::unique_lock lock(impl_->mtx);
-            Impl::SceneState& scene_state = impl_->get_or_create(scene_handle);
-            for (std::uintptr_t actor_handle : actor_handles) {
-                auto state_it = scene_state.actor_load_states.find(actor_handle);
-                if (state_it == scene_state.actor_load_states.end() ||
-                    state_it->second != ActorLoadState::Loaded) {
-                    continue;
-                }
-
-                // pinned 的 actor 不计不可见帧，不触发淘汰
-                if (auto a = hub.actor_storage().try_acquire_read(actor_handle)) {
-                    if (a->pinned) continue;
-                }
-
-                auto loaded_it = impl_->last_load_finished_time.find(actor_handle);
-                if (loaded_it != impl_->last_load_finished_time.end() &&
-                    now - loaded_it->second < kLoadedActorEvictGrace) {
-                    scene_state.invisible_frames[actor_handle] = 0;
-                    continue;
-                }
-
-                // 没有 AABB 的 actor（无 mechanics）无法计算距离，但不可见帧依然计数
-                // 能进这里说明 actor 已在渲染（Loaded 状态），应该被淘汰机制覆盖
-                bool has_aabb = scene_state.actor_to_entry.count(actor_handle);
-
-                if ( visible_actors.count(actor_handle) ) {
-                    scene_state.invisible_frames[actor_handle] = 0;
-                } else {
-                    uint32_t cnt = ++scene_state.invisible_frames[actor_handle];
-
-                    if ( scene_state.cfg.invisible_frames_to_evict > 0 &&
-                        cnt >= static_cast<uint32_t>(scene_state.cfg.invisible_frames_to_evict) ) {
-                        // 有 AABB 的 actor 检查距离，近处不可见的保留（玩家可能转身看到）
-                        if (has_aabb && !cameras.empty()) {
-                            auto entry_it = scene_state.actor_to_entry.find(actor_handle);
-                            ktm::fvec3 center = entry_it->second.center();
-                            float min_dist = std::numeric_limits<float>::max();
-                            for (const auto& [cam_pos, _] : cameras) {
-                                min_dist = std::min(min_dist, ktm::distance(center, cam_pos));
-                            }
-                            if (min_dist <= scene_state.cfg.unload_distance) continue;
-                        }
-                        pending_evictions.push_back({scene_handle, actor_handle});
-                        CFW_LOG_NOTICE("GeometrySystem: Evict requested for actor {} (invisible {} frames)",
-                               actor_handle, cnt);
-                        scene_state.invisible_frames[actor_handle] = 0;
-                    }
-                }
-            }
-        }
-        for (const auto& evt : pending_evictions) {
-            if (impl_->ctx && impl_->ctx->event_bus())
-                impl_->ctx->event_bus()->publish(evt);
         }
 
         // 统计信息：使用读锁遍历，独立 stats_mutex 写入，减少主锁竞争
@@ -1965,95 +1873,10 @@ GeometrySystem::get_skinning_targets(std::uintptr_t geometry_handle, uint32_t me
 }
 
 // ============================================================================
-// BVH 射线查询
-// ============================================================================
-#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
-
-std::vector<uint32_t> GeometrySystem::query_mesh_ray(
-    std::uintptr_t   geometry_handle,
-    uint32_t         mesh_index,
-    int              lod_level,
-    const ktm::fvec3& origin,
-    const ktm::fvec3& inv_dir) const
-{
-    std::shared_lock lock(impl_->lod_cache_mutex);
-    auto key = Impl::make_lod_key(geometry_handle, mesh_index);
-    auto it  = impl_->lod_cache.find(key);
-    if (it == impl_->lod_cache.end()) return {};
-    if (lod_level < 0 || static_cast<size_t>(lod_level) >= it->second.per_level_bvh.size())
-        return {};
-
-    std::vector<uint32_t> hits;
-    it->second.per_level_bvh[lod_level].query_ray(origin, inv_dir, hits);
-    return hits;
-}
-
-std::optional<Spatial::BVH<uint32_t>::Hit> GeometrySystem::query_mesh_closest_hit(
-    std::uintptr_t   geometry_handle,
-    uint32_t         mesh_index,
-    int              lod_level,
-    const ktm::fvec3& origin,
-    const ktm::fvec3& inv_dir,
-    float            t_max) const
-{
-    std::shared_lock lock(impl_->lod_cache_mutex);
-    auto key = Impl::make_lod_key(geometry_handle, mesh_index);
-    auto it  = impl_->lod_cache.find(key);
-    if (it == impl_->lod_cache.end()) return std::nullopt;
-    if (lod_level < 0 || static_cast<size_t>(lod_level) >= it->second.per_level_bvh.size())
-        return std::nullopt;
-
-    return it->second.per_level_bvh[lod_level].closest_hit(origin, inv_dir, t_max);
-}
-#endif  // CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
-
-// ============================================================================
 // 动态减面内部管线
 // ============================================================================
 
 namespace {
-
-/// 从 CPU 端顶点+索引构建 BVH（payload = 三角形下标）
-/// @param vertices 顶点数组
-/// @param indices  uint16 索引数组（每 3 个一组构成三角形）
-/// @return 构建好的 BVH，无数据时返回空 BVH
-#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
-
-[[nodiscard]] Spatial::BVH<uint32_t> build_triangle_bvh(
-    const std::vector<Resource::Vertex>&    vertices,
-    const std::vector<std::uint16_t>&       indices)
-{
-    Spatial::BVH<uint32_t> bvh;
-    if (indices.size() < 3) return bvh;
-
-    std::vector<Spatial::BVH<uint32_t>::Entry> entries;
-    entries.reserve(indices.size() / 3);
-
-    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
-        // 防御性检查：跳过索引越界的退化三角形
-        if (indices[i] >= vertices.size() ||
-            indices[i + 1] >= vertices.size() ||
-            indices[i + 2] >= vertices.size()) {
-            continue;
-        }
-        const auto& v0 = vertices[indices[i]];
-        const auto& v1 = vertices[indices[i + 1]];
-        const auto& v2 = vertices[indices[i + 2]];
-
-        Spatial::AABB aabb;
-        aabb.min.x = std::min({v0.position[0], v1.position[0], v2.position[0]});
-        aabb.min.y = std::min({v0.position[1], v1.position[1], v2.position[1]});
-        aabb.min.z = std::min({v0.position[2], v1.position[2], v2.position[2]});
-        aabb.max.x = std::max({v0.position[0], v1.position[0], v2.position[0]});
-        aabb.max.y = std::max({v0.position[1], v1.position[1], v2.position[1]});
-        aabb.max.z = std::max({v0.position[2], v1.position[2], v2.position[2]});
-        entries.push_back({static_cast<uint32_t>(i / 3), aabb});
-    }
-
-    bvh.build(entries);
-    return bvh;
-}
-#endif  // CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
 
 // 收集所有场景所有相机的世界位置（用于流式加载的距离排序）。
 [[nodiscard]] std::vector<ktm::fvec3> collect_camera_positions() {
@@ -2427,11 +2250,6 @@ void GeometrySystem::upload_lod_from_scene_data() {
             lod0.index_count      = static_cast<std::uint32_t>(mesh.indices.size());
             entry.levels.push_back(std::move(lod0));
 
-            // 为 LOD 0 构建 BVH（三角形级空间索引）
-#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
-            entry.per_level_bvh.push_back(build_triangle_bvh(mesh.vertices, mesh.indices));
-#endif
-
             // LOD 1..N：仅登记元数据，**不**在此创建 GPU 缓冲 / BVH（Step 3a 按需驻留）。
             // 每级记录 source_lod_index（映射回 mesh.lod_levels，因为空级被跳过导致下标不连续），
             // 供 reconcile_lod_residency() 按需从 Scene CPU 即时构建该级 GPU 缓冲。
@@ -2455,11 +2273,6 @@ void GeometrySystem::upload_lod_from_scene_data() {
                 lod_buf.index_count      = static_cast<std::uint32_t>(lod_data.indices.size());
                 lod_buf.source_lod_index = static_cast<std::uint32_t>(lod_idx);
                 entry.levels.push_back(std::move(lod_buf));
-
-                // BVH 占位（空）：该级被 reconcile 构建时一并建 BVH，释放时一并清。
-#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
-                entry.per_level_bvh.push_back(Spatial::BVH<uint32_t>{});
-#endif
             }
 
             std::unique_lock lock(impl_->lod_cache_mutex);
@@ -2700,9 +2513,6 @@ void GeometrySystem::reconcile_lod_residency() {
                                         r.index_storage = make_geometry_buffer(
                                             inds, Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Storage, "geometry.lod_index_storage");
                                         r.gpu_bytes = gpu_bytes;
-#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
-                                        r.bvh = build_triangle_bvh(verts, inds);
-#endif
                                         r.ok = static_cast<bool>(r.vertex_buffer)
                                                && static_cast<bool>(r.index_buffer);
                                     } catch (...) {
@@ -2733,10 +2543,6 @@ void GeometrySystem::reconcile_lod_residency() {
                         lvl.vertex_storage = Horizon::HardwareBuffer{};
                         lvl.index_storage  = Horizon::HardwareBuffer{};
                         lvl.mesh_mem       = Corona::Memory::GpuMemToken{};  // 析构扣减账本
-#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
-                        if (static_cast<size_t>(lvl_idx) < cit->second.per_level_bvh.size())
-                            cit->second.per_level_bvh[lvl_idx] = Spatial::BVH<uint32_t>{};
-#endif
                     }
                 }
             }
@@ -2794,10 +2600,6 @@ void GeometrySystem::process_pending_lod_builds() {
         lvl.ready          = true;
         lvl.last_demand_frame = impl_->lod_frame_counter;  // 防刚建好即被冷却判过期
         ++impl_->diag_lod_builds;  // 诊断：实际完成一级 GPU 缓冲
-#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
-        if (static_cast<size_t>(task.level) < cit->second.per_level_bvh.size())
-            cit->second.per_level_bvh[task.level] = std::move(r.bvh);
-#endif
     }
 }
 
@@ -3038,7 +2840,6 @@ void GeometrySystem::evict_under_memory_pressure() {
     struct Cand {
         std::uintptr_t scene;
         std::uintptr_t actor;
-        std::uint32_t  invisible_frames;
         float          dist;
     };
     std::vector<Cand> cands;
@@ -3053,9 +2854,6 @@ void GeometrySystem::evict_under_memory_pressure() {
                 } else {
                     continue;
                 }
-                std::uint32_t invis = 0;
-                if (auto fit = st.invisible_frames.find(actor); fit != st.invisible_frames.end())
-                    invis = fit->second;
                 float dist = 0.0f;
                 if (auto eit = st.actor_to_entry.find(actor);
                     eit != st.actor_to_entry.end() && !cameras.empty()) {
@@ -3064,15 +2862,14 @@ void GeometrySystem::evict_under_memory_pressure() {
                     for (const auto& cam : cameras)
                         dist = std::min(dist, ktm::distance(c, cam));
                 }
-                cands.push_back({scene_handle, actor, invis, dist});
+                cands.push_back({scene_handle, actor, dist});
             }
         }
     }
     if (cands.empty()) return;
 
-    // 最冷优先：不可见帧多 → 距相机远
+    // 最冷优先：距相机远者先淘汰
     std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
-        if (a.invisible_frames != b.invisible_frames) return a.invisible_frames > b.invisible_frames;
         return a.dist > b.dist;
     });
 

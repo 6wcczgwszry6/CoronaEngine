@@ -10,7 +10,6 @@
 #include <corona/math/frustum.h>
 #include <corona/memory/gpu_mem_ledger.h>
 #include <corona/spatial/aabb.h>
-#include <corona/spatial/bvh.h>
 
 #include <cstdint>
 #include <filesystem>
@@ -18,17 +17,6 @@
 #include <optional>
 #include <utility>
 #include <vector>
-
-// ============================================================================
-// 三角形级 BVH 编译开关（物体内精确射线查询的 CPU 加速结构）
-// ----------------------------------------------------------------------------
-// 现状：per_level_bvh + query_mesh_ray/closest_hit + build_triangle_bvh 全套已实现，
-// 但无任何消费端——actor 拾取走 OpticsSystem 的 GPU compute 路径，不经过本 BVH。
-// 为消除"每次模型加载同步建 BVH"的帧尖峰，以及一份与 index 同量级、未计入账本的
-// CPU 内存，暂以此开关编译屏蔽全部三角形 BVH 代码。
-// 将来若需 CPU raycast（物理射线 / 贴花 / 非渲染线程拾取），改回 1 即可复活全部代码。
-// ============================================================================
-#define CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH 0
 
 namespace Corona::Systems {
 
@@ -46,9 +34,6 @@ enum class ActorLoadState : uint8_t {
  * @brief 单场景的可见性策略
  */
 struct SceneVisibilityConfig {
-    /// 连续不可见超过该帧数时，触发 ActorEvictRequestedEvent。
-    /// 0 表示永不 evict（默认，避免在 LRU 接入前误触）。
-    int  invisible_frames_to_evict = 60;  // 连续不可见1秒(60帧)触发淘汰，0=永不
     bool collect_stats             = true;
 
     bool enable_distance_culling  = true;   // 是否启用距离剔除
@@ -272,9 +257,6 @@ class GeometrySystem : public Kernel::SystemBase {
     /// mesh/texture 的 CPU(RAM) + GPU(VRAM) 内存账本快照（线程安全）。
     [[nodiscard]] MemoryReport memory_report() const;
 
-    [[nodiscard]] bool is_actor_offline(std::uintptr_t actor) const;
-    void               mark_actor_restored(std::uintptr_t actor);
-
     /// 加载状态查询接口
     [[nodiscard]] ActorLoadState get_actor_load_state(std::uintptr_t actor, std::uintptr_t scene) const;
 
@@ -425,48 +407,6 @@ class GeometrySystem : public Kernel::SystemBase {
     /// @return 各 LOD 级别的 (vertexBuffer, vertexStorageBuffer) 句柄对，含 LOD0
     [[nodiscard]] std::vector<std::pair<Horizon::HardwareBuffer, Horizon::HardwareBuffer>>
     get_skinning_targets(std::uintptr_t geometry_handle, uint32_t mesh_index) const;
-
-    // ========================================
-    // BVH 射线查询（三角形级加速）
-    // ========================================
-    //
-    // 使用场景：拿到 Octree 粗筛的 actor 列表后，对每个 mesh 调用以下方法
-    // 获取射线命中的三角形下标。payload = 三角形序号（i/3）。
-    //
-    // 命中基于三角形 AABB，调用方拿到候选三角形后需自行做精确
-    // ray-tri 相交检测（Möller-Trumbore）以确认最终命中。
-#if CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
-
-    /// 穿透查询：返回射线命中的所有三角形下标（AABB 级，无序）
-    /// @param geometry_handle GeometryDevice 句柄
-    /// @param mesh_index      子网格索引
-    /// @param lod_level       LOD 级别（0=原始精度）
-    /// @param origin          射线起点（mesh 局部空间）
-    /// @param inv_dir         射线方向倒数（1/dir.x, 1/dir.y, 1/dir.z）
-    /// @return 命中的三角形下标列表，未命中或无 BVH 时返回空 vector
-    [[nodiscard]] std::vector<uint32_t> query_mesh_ray(
-        std::uintptr_t   geometry_handle,
-        uint32_t         mesh_index,
-        int              lod_level,
-        const ktm::fvec3& origin,
-        const ktm::fvec3& inv_dir) const;
-
-    /// 最近命中查询：返回离射线起点最近的三角形及其距离
-    /// @param geometry_handle GeometryDevice 句柄
-    /// @param mesh_index      子网格索引
-    /// @param lod_level       LOD 级别
-    /// @param origin          射线起点（mesh 局部空间）
-    /// @param inv_dir         射线方向倒数
-    /// @param t_max           最大搜索距离
-    /// @return 命中返回 Hit{payload=三角形下标, t=距离}，未命中返回 std::nullopt
-    [[nodiscard]] std::optional<Spatial::BVH<uint32_t>::Hit> query_mesh_closest_hit(
-        std::uintptr_t   geometry_handle,
-        uint32_t         mesh_index,
-        int              lod_level,
-        const ktm::fvec3& origin,
-        const ktm::fvec3& inv_dir,
-        float            t_max) const;
-#endif  // CORONA_GEOMETRY_ENABLE_TRIANGLE_BVH
 
     // ========================================
     // 统计
