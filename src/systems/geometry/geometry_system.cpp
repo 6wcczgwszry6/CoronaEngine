@@ -2336,11 +2336,20 @@ void GeometrySystem::reconcile_lod_residency() {
         }
         if (model_id == 0) continue;
 
-        // 世界中心（transform.position，与渲染端一致）
+        // 世界中心（transform.position，与渲染端一致）+ 缩放因子。
+        // 缓存的 bounding_radius 是模型局部空间半径（0.5·diag(局部 AABB)），不含 actor 缩放。
+        // 屏占比 = r/(d·tan(fov/2))，若不乘 scale：放大的物体半径被低估 → 屏占比偏小 →
+        // 选到偏粗的 LOD；缩小的物体反之选过细。这里取缩放各分量绝对值最大者作为包围球的
+        // 等比上界（非均匀缩放下仍是有效外接半径），下方乘入 bounding_radius 后再选级。
         ktm::fvec3 world_center{0.0f, 0.0f, 0.0f};
+        float      scale_factor = 1.0f;
         if (geom_dev.transform_handle) {
             if (auto tr = hub.model_transform_storage().try_acquire_read(geom_dev.transform_handle)) {
                 world_center = tr->position;
+                scale_factor = std::max({std::abs(tr->scale.x),
+                                         std::abs(tr->scale.y),
+                                         std::abs(tr->scale.z)});
+                if (!(scale_factor > 0.0f)) scale_factor = 1.0f;
             }
         }
 
@@ -2366,6 +2375,10 @@ void GeometrySystem::reconcile_lod_residency() {
                     thresholds.push_back(cit->second.levels[i].screen_threshold);
             }
             if (level_count <= 1) continue;  // 无简化级，无需 reconcile
+
+            // 计入 actor 缩放：缓存半径是局部空间，乘缩放上界得世界空间外接半径，
+            // 屏占比与选级才与物体在屏幕上的实际大小一致。
+            bounding_radius *= scale_factor;
 
             // ---- 需求级 D：所有相机取最高精度（最小级号）+ 滞回门控 ----
             // raw_demand = 各相机原始选级取最小（最高精度）；同时记录最大屏占比，
