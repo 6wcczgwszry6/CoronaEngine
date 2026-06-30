@@ -83,6 +83,11 @@ bool QuadCompositor::composite(
         return false;
     }
     res.executor.wait(white_upload_receipt_);
+    for (const QuadDraw& q : quads) {
+        if (q.texture != nullptr && !q.texture_ready.empty()) {
+            res.executor.wait(q.texture_ready);
+        }
+    }
 
     if (!VulkanBackend::ensure_render_target(res, target_width, target_height, render_target_usage)) {
         return false;

@@ -45,10 +45,12 @@ struct ViewportRenderResources {
 // One textured (or solid) quad to draw into the UI render target.
 //   - texture == nullptr  -> a solid quad tinted by `color` (1x1 white texture is used)
 //   - texture != nullptr  -> sample `texture` (e.g. a CEF panel); keep color = white for passthrough
+//   - texture_ready carries the most recent upload receipt for sampled textures.
 // Coordinates are in target pixels. The vertex color is gamma-corrected (pow 2.2) in
 // the fragment shader, matching the existing ui_quad.frag behaviour.
 struct QuadDraw {
     const Horizon::HardwareImage* texture = nullptr;
+    Horizon::SubmitReceipt texture_ready;
     ktm::fvec2 dest_min = ktm::fvec2(0.0f, 0.0f);
     ktm::fvec2 dest_max = ktm::fvec2(0.0f, 0.0f);
     ktm::fvec2 uv_min = ktm::fvec2(0.0f, 0.0f);

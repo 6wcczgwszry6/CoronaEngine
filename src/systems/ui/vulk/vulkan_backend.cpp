@@ -279,8 +279,19 @@ void VulkanBackend::present_surface(void* surface) {
 
     if (auto image_device =
             SharedDataHub::instance().image_storage().acquire_write(render->image_handle)) {
+        const auto submit_receipt = render->resources.executor.last_receipt();
+        if (submit_receipt.empty()) {
+            CFW_LOG_WARNING(
+                "VulkanBackend: publishing UI frame with empty submit receipt "
+                "(surface={}, image_handle={}, frame={}, extent={}x{})",
+                surface,
+                render->image_handle,
+                render->frame_index,
+                render->resources.width,
+                render->resources.height);
+        }
         image_device->image = render->resources.render_target;
-        image_device->submit_receipt = render->resources.executor.last_receipt();
+        image_device->submit_receipt = submit_receipt;
     } else {
         return;
     }

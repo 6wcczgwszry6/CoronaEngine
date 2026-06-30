@@ -8,6 +8,7 @@
 #include "Codegen/TypeAlias.h"
 
 #include <array>
+#include <cstdint>
 #include <optional>
 
 // clang-format off
@@ -58,6 +59,10 @@ struct Hardware {
     Corona::Horizon::HardwareBuffer materialTableBuffer;
     Corona::Horizon::HardwareBuffer uiInstanceInfoBuffer;
     Corona::Horizon::HardwareBuffer uiMaterialTableBuffer;
+    std::uint64_t instanceInfoCapacity = 0;
+    std::uint64_t materialTableCapacity = 0;
+    std::uint64_t uiInstanceInfoCapacity = 0;
+    std::uint64_t uiMaterialTableCapacity = 0;
     Corona::Horizon::HardwareBuffer actorPickBuffer;
     Corona::Horizon::HardwareBuffer skyIrradianceSHBuffer;  // 9 vec3 SH coeffs (sky-driven ambient)
     Corona::Horizon::HardwareBuffer shadowInfoBuffer;
