@@ -9,13 +9,15 @@
         .\tools\dev.ps1 configure
         .\tools\dev.ps1 build
         .\tools\dev.ps1 build CoronaEngine
+        .\tools\dev.ps1 build-fast corona_engine
+        .\tools\dev.ps1 rebuild corona_engine
         .\tools\dev.ps1 build corona_engine -Configuration Release
         .\tools\dev.ps1 update
 #>
 [CmdletBinding()]
 Param(
     [Parameter(Position = 0)]
-    [ValidateSet("status", "install", "configure", "build", "update")]
+    [ValidateSet("status", "install", "configure", "build", "build-fast", "rebuild", "update")]
     [string]$Command = "status",
 
     [Parameter()]
@@ -68,12 +70,87 @@ function Invoke-NativeCommand {
     }
 }
 
-function Get-MsvcBuildPreset {
-    switch ($Configuration) {
-        "Debug" { return "conan-debug" }
-        "Release" { return "conan-release" }
-        "RelWithDebInfo" { return "conan-relwithdebinfo" }
-        "MinSizeRel" { return "conan-minsizerel" }
+function Remove-RepoPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RelativePath
+    )
+
+    $target = Join-Path $RepoRoot $RelativePath
+    if (-not (Test-Path -LiteralPath $target)) {
+        Write-Host "[INFO] Not found: $RelativePath"
+        return
+    }
+
+    $resolvedTarget = (Resolve-Path -LiteralPath $target).Path
+    $resolvedRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
+    $rootPrefix = $resolvedRoot.TrimEnd("\") + "\"
+    if (($resolvedTarget -eq $resolvedRoot) -or (-not $resolvedTarget.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase))) {
+        throw "Refusing to remove path outside repository root: $resolvedTarget"
+    }
+
+    Write-Host "[INFO] Removing $resolvedTarget"
+    Remove-Item -LiteralPath $resolvedTarget -Recurse -Force
+}
+
+function Invoke-CleanBuildTree {
+    Remove-RepoPath -RelativePath "build"
+    Remove-RepoPath -RelativePath "install"
+}
+
+function Get-ConanBuildDir {
+    return (Join-Path $RepoRoot "build\conan")
+}
+
+function Convert-ToComparablePath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return $Path.Replace("\", "/").TrimEnd("/").ToLowerInvariant()
+}
+
+function Get-CMakeCacheValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CacheFile,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    foreach ($line in (Get-Content -LiteralPath $CacheFile)) {
+        if ($line -match "^$([regex]::Escape($Name)):[^=]*=(.*)$") {
+            return $Matches[1]
+        }
+    }
+
+    return $null
+}
+
+function Assert-CMakeCacheMatchesRepo {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CacheFile
+    )
+
+    $sourceDir = Get-CMakeCacheValue -CacheFile $CacheFile -Name "CMAKE_HOME_DIRECTORY"
+    if ($sourceDir) {
+        $expectedSource = Convert-ToComparablePath -Path $RepoRoot
+        $actualSource = Convert-ToComparablePath -Path $sourceDir
+        if ($actualSource -ne $expectedSource) {
+            throw "CMake cache belongs to '$sourceDir', not '$RepoRoot'. Run '.\tools\dev.ps1 rebuild $($Target[0])'."
+        }
+    }
+
+    $cacheDir = Get-CMakeCacheValue -CacheFile $CacheFile -Name "CMAKE_CACHEFILE_DIR"
+    if ($cacheDir) {
+        $expectedCacheDir = Convert-ToComparablePath -Path (Get-ConanBuildDir)
+        $actualCacheDir = Convert-ToComparablePath -Path $cacheDir
+        if ($actualCacheDir -ne $expectedCacheDir) {
+            throw "CMake cache directory is '$cacheDir', not '$(Get-ConanBuildDir)'. Run '.\tools\dev.ps1 rebuild $($Target[0])'."
+        }
     }
 }
 
@@ -145,6 +222,37 @@ function Clear-UpdatablePackageCache {
     }
 }
 
+function Get-ConanInstallOptions {
+    $targetValues = @($Target)
+    $options = @()
+
+    foreach ($targetValue in $targetValues) {
+        $lowerTarget = $targetValue.ToLowerInvariant()
+        if ($lowerTarget.Contains("test")) {
+            $options += "&:with_tests=True"
+            break
+        }
+    }
+
+    foreach ($targetValue in $targetValues) {
+        $lowerTarget = $targetValue.ToLowerInvariant()
+        if ($lowerTarget.Contains("vision") -or $lowerTarget.Contains("oidn")) {
+            $options += "&:with_vision=True"
+            break
+        }
+    }
+
+    foreach ($targetValue in $targetValues) {
+        $lowerTarget = $targetValue.ToLowerInvariant()
+        if ($lowerTarget.Contains("oidn")) {
+            $options += "&:with_oidn=True"
+            break
+        }
+    }
+
+    return $options
+}
+
 function Invoke-ConanInstall {
     param([bool]$Update = $false)
 
@@ -155,19 +263,39 @@ function Invoke-ConanInstall {
     Export-LocalRecipes
 
     $profile = Get-ConanProfile
+    $installOptions = @(Get-ConanInstallOptions)
     $installArguments = @(
         "install",
         ".",
         "-pr:a", $profile,
-        "-pr:b", $profile,
-        "--build=missing"
+        "-pr:b", $profile
     )
+    foreach ($option in $installOptions) {
+        $installArguments += @("-o", $option)
+    }
+    $installArguments += "--build=missing"
 
     if ($Update) {
         $installArguments += "--update"
     }
 
     Invoke-NativeCommand -FilePath "conan" -Arguments $installArguments
+}
+
+function Invoke-CMakeConfigure {
+    Import-ConanBuildEnvironment
+    Invoke-NativeCommand -FilePath "cmake" -Arguments @("--preset", "conan-default")
+}
+
+function Invoke-CMakeBuild {
+    $buildDir = Get-ConanBuildDir
+    $cacheFile = Join-Path $buildDir "CMakeCache.txt"
+    if (-not (Test-Path -LiteralPath $cacheFile)) {
+        throw "CMake cache was not found. Run '.\tools\dev.ps1 configure' or '.\tools\dev.ps1 build' first."
+    }
+    Assert-CMakeCacheMatchesRepo -CacheFile $cacheFile
+
+    Invoke-NativeCommand -FilePath "cmake" -Arguments @("--build", $buildDir, "--config", $Configuration, "--target", $Target[0])
 }
 
 Push-Location -LiteralPath $RepoRoot
@@ -185,19 +313,26 @@ try {
         }
         "configure" {
             Invoke-ConanInstall
-            Import-ConanBuildEnvironment
-            Invoke-NativeCommand -FilePath "cmake" -Arguments @("--preset", "conan-default")
+            Invoke-CMakeConfigure
         }
         "build" {
             Invoke-ConanInstall
+            Invoke-CMakeConfigure
+            Invoke-CMakeBuild
+        }
+        "build-fast" {
             Import-ConanBuildEnvironment
-            Invoke-NativeCommand -FilePath "cmake" -Arguments @("--preset", "conan-default")
-            Invoke-NativeCommand -FilePath "cmake" -Arguments @("--build", "--preset", (Get-MsvcBuildPreset), "--target", $Target[0])
+            Invoke-CMakeBuild
+        }
+        "rebuild" {
+            Invoke-CleanBuildTree
+            Invoke-ConanInstall
+            Invoke-CMakeConfigure
+            Invoke-CMakeBuild
         }
         "update" {
             Invoke-ConanInstall -Update $true
-            Import-ConanBuildEnvironment
-            Invoke-NativeCommand -FilePath "cmake" -Arguments @("--preset", "conan-default")
+            Invoke-CMakeConfigure
         }
     }
 }
