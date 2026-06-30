@@ -2,8 +2,8 @@
 
 本文说明 `tools/` 目录下两个 PowerShell 辅助脚本的用途和用法：
 
-- `tools/dev.ps1`：日常开发入口，用于安装依赖、配置 CMake、构建目标。
-- `tools/conan-cache.ps1`：本地 Conan 缓存维护工具，用于查看、更新、删除缓存条目。
+- `tools/dev.ps1`：日常开发入口，用于安装依赖、配置 CMake、构建目标、清理项目本地生成物。
+- `tools/conan-cache.ps1`：本地 Conan 缓存维护工具，用于查看、更新、删除或清空全局 Conan cache。
 
 建议在仓库根目录下用 PowerShell 运行这些脚本。脚本默认假设 `git`、`conan`、`cmake` 已经在 `PATH` 中，并使用 `conan/profiles/` 下的 Windows MSVC profile。
 
@@ -36,6 +36,7 @@
 | `build-fast` | 只导入现有 Conan 构建环境并构建目标，不执行 install/configure。 | 依赖和 CMake cache 已经有效时的快速重编译。 |
 | `rebuild` | 删除 `build/` 和 `install/`，再执行 `install`、`configure`、`build`。 | 处理陈旧 CMake cache、生成器变化、构建树损坏等问题。 |
 | `update` | 清理可更新的本地包缓存，执行带 `--update` 的 Conan install，然后重新配置 CMake。 | 拉取依赖的新修订版本，但不立即构建。 |
+| `clean` | 直接删除仓库内被 Git ignore 的本地构建、缓存、生成物。 | 将项目本地状态重置到接近干净 checkout 的状态。 |
 
 常用示例：
 
@@ -49,6 +50,30 @@
 .\tools\dev.ps1 build-fast corona_engine
 .\tools\dev.ps1 rebuild corona_engine
 .\tools\dev.ps1 update
+.\tools\dev.ps1 clean
+```
+
+### `clean` 的清理范围
+
+`clean` 会在仓库根目录执行：
+
+```powershell
+git clean -fdX
+```
+
+这表示只删除 Git ignore 规则覆盖的本地文件和目录，不删除已跟踪文件，也不删除未被 ignore 的未跟踪源码或工作文件。它通常会清理：
+
+- `build/`、`build-*`、`install/`、`out/`、`dist/`
+- `cmake-build-*`
+- `CMakeUserPresets.json`、`CMakeCache.txt`、`CMakeFiles/`
+- `.vs/`、`.cache/`、`.pytest_cache/`
+- `.codegraph/` 中未跟踪的本地索引内容
+- 日志、临时文件、Python cache、工具运行缓存
+
+`clean` 不清理全局 Conan cache。需要清空全局 Conan cache 时，使用：
+
+```powershell
+.\tools\conan-cache.ps1 clear
 ```
 
 ### Target 与 Configuration
@@ -107,14 +132,16 @@ CoronaEngine 会根据 target 名称自动开启部分根包选项：
 
 脚本启动时会创建 `build/conan/tool-shims` 并将其加入 `PATH` 前部。如果系统中没有 `python` 命令，但存在 `python3.14` 或 `python3`，脚本会写入一个很小的 `python.cmd` shim。这样可以兼容某些 Conan recipe 或工具对 `python` 命令名的依赖。
 
+`clean` 命令不会创建这个 shim。
+
 ## `tools/conan-cache.ps1`
 
-`conan-cache.ps1` 用于直接维护本地 Conan cache。它不会配置或构建 CMake。它操作的是当前用户账号的全局 Conan cache，因此删除操作需要谨慎。
+`conan-cache.ps1` 用于直接维护本地 Conan cache。它不会配置或构建 CMake。它操作的是当前用户账号的全局 Conan cache，因此删除和清空操作需要谨慎。
 
 基本形式：
 
 ```powershell
-.\tools\conan-cache.ps1 <list|update|remove> [package-or-reference] [options]
+.\tools\conan-cache.ps1 <list|update|remove|clear> [package-or-reference] [options]
 ```
 
 默认值：
@@ -140,6 +167,9 @@ CoronaEngine 会根据 target 名称自动开启部分根包选项：
 .\tools\conan-cache.ps1 remove slang/2026.10 -DryRun
 .\tools\conan-cache.ps1 remove slang/2026.10
 .\tools\conan-cache.ps1 remove slang -Version 2026.10 -Force
+
+.\tools\conan-cache.ps1 clear -DryRun
+.\tools\conan-cache.ps1 clear
 ```
 
 ### Reference 与匹配规则
@@ -164,6 +194,7 @@ CoronaEngine 会根据 target 名称自动开启部分根包选项：
 - `-User` 和 `-Channel` 必须成对提供。
 - `-PackageId` 必须搭配 package 或 `-Reference`。
 - `-PackageId` 和 `-PackageQuery` 只支持 `list` 和 `remove`，不支持 `update`。
+- `clear` 不接受 package/reference 过滤参数；需要过滤删除时使用 `remove`。
 
 ### `list`
 
@@ -174,14 +205,6 @@ conan list <pattern> --cache
 ```
 
 如果提供了 `-PackageQuery`，脚本会继续传递为 `--package-query`。
-
-示例：
-
-```powershell
-.\tools\conan-cache.ps1 list
-.\tools\conan-cache.ps1 list ffmpeg
-.\tools\conan-cache.ps1 list ffmpeg -Version 8.1.1 -PackageId "*"
-```
 
 ### `update`
 
@@ -217,6 +240,30 @@ conan remove <pattern> --confirm
 
 当 pattern 中包含 `*`，或你不确定会匹配多少条目时，建议先使用 `-DryRun`。
 
+### `clear`
+
+`clear` 是一键清空全局 Conan cache 的显式命令。它不需要确认，也不接受 package/reference 过滤参数。
+
+预览清空效果：
+
+```powershell
+.\tools\conan-cache.ps1 clear -DryRun
+```
+
+直接清空：
+
+```powershell
+.\tools\conan-cache.ps1 clear
+```
+
+它实际执行的是：
+
+```powershell
+conan remove "*" --confirm
+```
+
+这会影响当前用户账号的全局 Conan cache，不只影响当前仓库。清空后，下次 install/build 会重新下载或重新构建依赖。
+
 ### 应该使用哪个脚本
 
 | 需求 | 推荐命令 |
@@ -226,7 +273,9 @@ conan remove <pattern> --confirm
 | 常规构建 | `.\tools\dev.ps1 build <target>` |
 | 快速本地重编译 | `.\tools\dev.ps1 build-fast <target>` |
 | 清理构建树后重建 | `.\tools\dev.ps1 rebuild <target>` |
+| 重置项目本地构建/缓存生成物 | `.\tools\dev.ps1 clean` |
 | 更新完整依赖图并重新配置 | `.\tools\dev.ps1 update` |
 | 查看本地 Conan cache | `.\tools\conan-cache.ps1 list ...` |
 | 更新某个包或 reference | `.\tools\conan-cache.ps1 update ...` |
 | 删除陈旧 cache 条目 | `.\tools\conan-cache.ps1 remove ...` |
+| 清空全局 Conan cache | `.\tools\conan-cache.ps1 clear` |

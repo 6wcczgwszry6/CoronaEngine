@@ -13,11 +13,12 @@
         .\tools\dev.ps1 rebuild corona_engine
         .\tools\dev.ps1 build corona_engine -Configuration Release
         .\tools\dev.ps1 update
+        .\tools\dev.ps1 clean
 #>
 [CmdletBinding()]
 Param(
     [Parameter(Position = 0)]
-    [ValidateSet("status", "install", "configure", "build", "build-fast", "rebuild", "update")]
+    [ValidateSet("status", "install", "configure", "build", "build-fast", "rebuild", "update", "clean")]
     [string]$Command = "status",
 
     [Parameter()]
@@ -96,6 +97,11 @@ function Remove-RepoPath {
 function Invoke-CleanBuildTree {
     Remove-RepoPath -RelativePath "build"
     Remove-RepoPath -RelativePath "install"
+}
+
+function Invoke-CleanProject {
+    Write-Host "[INFO] Removing ignored local build/cache files"
+    Invoke-NativeCommand -FilePath "git" -Arguments @("clean", "-fdX")
 }
 
 function Get-ConanBuildDir {
@@ -300,7 +306,9 @@ function Invoke-CMakeBuild {
 
 Push-Location -LiteralPath $RepoRoot
 try {
-    Initialize-ToolShims
+    if ($Command -ne "clean") {
+        Initialize-ToolShims
+    }
 
     switch ($Command) {
         "status" {
@@ -333,6 +341,9 @@ try {
         "update" {
             Invoke-ConanInstall -Update $true
             Invoke-CMakeConfigure
+        }
+        "clean" {
+            Invoke-CleanProject
         }
     }
 }
