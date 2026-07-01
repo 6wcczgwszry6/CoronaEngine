@@ -62,7 +62,7 @@
 
 - `corona_options.cmake`: 定义了主要的构建选项（见上一节）。
 - `corona_python.cmake`: 管理嵌入式 Python 解释器及其依赖项的发现。
-- `corona_third_party.cmake`: 使用 `FetchContent` 管理所有外部第三方库（如 spdlog、glfw）。这确保了依赖项能够被自动下载和配置。
+- `corona_third_party.cmake`: 消费 Conan 生成的 package config，并暴露现有构建图需要的兼容 target。
 - `corona_compile_config.cmake`: 设置项目范围的编译器标志、C++ 标准和预处理器定义。
 - `corona_collect_module.cmake`: 提供 `corona_collect_module()` 函数，该函数可自动发现并添加给定模块目录中的源文件和头文件，从而简化了目标定义。
 - `corona_runtime_deps.cmake`: 提供 `corona_runtime_deps()` 函数，该函数负责将必要的运行时依赖项（如第三方库的 DLL）复制到目标输出目录。
@@ -71,10 +71,10 @@
 ## 5. 依赖管理
 
 ### 第三方库
-所有外部依赖都通过 `misc/cmake/corona_third_party.cmake` 中的 `FetchContent` 进行管理。这种方法避免了手动安装库的需要。关键依赖项包括：
-- **核心**: ktm, nlohmann_json, spdlog
-- **窗口与渲染**: glfw, volk, VulkanMemoryAllocator, glslang, SPIRV-Cross
-- **资产加载**: assimp, stb
+所有外部依赖都先由 Conan 解析，再进入 CMake configure。`misc/cmake/corona_third_party.cmake` 会对 Conan 生成的 package 执行 `find_package(... CONFIG REQUIRED)`，缺少必要 target 时直接失败。关键依赖项包括：
+- **核心**: Horizon, ktm, nlohmann_json, TBB
+- **窗口与渲染**: SDL3, volk, VulkanMemoryAllocator, SPIRV-Cross
+- **资产加载**: assimp, stb, tinyexr, meshoptimizer, astc-encoder
 
 ### 内部依赖
 引擎本身被构建为一个静态库（`CoronaEngine`）。主运行时可执行文件和示例程序都链接到此库。根目录 `CMakeLists.txt` 中的 `add_subdirectory(src)` 命令负责构建核心引擎模块。

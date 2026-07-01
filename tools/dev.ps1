@@ -193,15 +193,20 @@ function Get-ConanProfile {
     }
 }
 
-function Export-LocalRecipes {
+function Assert-NoEditableReference {
+    param([Parameter(Mandatory = $true)][string]$Reference)
+
     $editableList = & conan editable list
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
-    if ($editableList -match "^horizon/0\.5\.0\b") {
-        Invoke-NativeCommand -FilePath "conan" -Arguments @("editable", "remove", "-r", "horizon/0.5.0")
-    }
 
+    if ($editableList -match "^$([regex]::Escape($Reference))\b") {
+        throw "Editable Conan reference '$Reference' is not allowed for CoronaEngine builds. Remove it with 'conan editable remove $Reference' or consume a package from cache/remote."
+    }
+}
+
+function Export-LocalRecipes {
     $recipes = @(
         "conan\recipes\ktm",
         "conan\recipes\pfr",
@@ -209,22 +214,11 @@ function Export-LocalRecipes {
         "conan\recipes\vulkan-memory-allocator",
         "conan\recipes\astc-encoder",
         "conan\recipes\cef-binary",
-        "conan\recipes\ffmpeg",
-        "conan\recipes\horizon"
+        "conan\recipes\ffmpeg"
     )
 
     foreach ($recipe in $recipes) {
         Invoke-NativeCommand -FilePath "conan" -Arguments @("export", $recipe)
-    }
-}
-
-function Clear-UpdatablePackageCache {
-    $refs = @(
-        "horizon/0.5.0"
-    )
-
-    foreach ($ref in $refs) {
-        Invoke-NativeCommand -FilePath "conan" -Arguments @("remove", $ref, "-c")
     }
 }
 
@@ -262,10 +256,7 @@ function Get-ConanInstallOptions {
 function Invoke-ConanInstall {
     param([bool]$Update = $false)
 
-    if ($Update) {
-        Clear-UpdatablePackageCache
-    }
-
+    Assert-NoEditableReference -Reference "horizon/0.5.0"
     Export-LocalRecipes
 
     $profile = Get-ConanProfile
