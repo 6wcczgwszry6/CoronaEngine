@@ -1571,7 +1571,10 @@ const outputModes = [
   { type: 'position', label: 'Position', color: '#fbbf24' },
   { type: 'object_id', label: 'Object ID', color: '#c084fc' },
   { type: 'visibility_buffer', label: 'Visibility', color: '#f472b6' },
+  { type: 'ssao_raw', label: 'SSAO Raw', color: '#84cc16' },
   { type: 'ssao', label: 'SSAO', color: '#22c55e' },
+  { type: 'shadow_mask_raw', label: 'Shadow Raw', color: '#f97316' },
+  { type: 'shadow_mask', label: 'Shadow Mask', color: '#fb7185' },
 ];
 const ShowGBufferDropdown = ref(false);
 const activeOutputMode = ref('final_color');

@@ -164,7 +164,10 @@ const outputModes = [
   { value: 'position', label: 'Position' },
   { value: 'object_id', label: 'Object ID' },
   { value: 'visibility_buffer', label: 'Visibility' },
+  { value: 'ssao_raw', label: 'SSAO Raw' },
   { value: 'ssao', label: 'SSAO' },
+  { value: 'shadow_mask_raw', label: 'Shadow Raw' },
+  { value: 'shadow_mask', label: 'Shadow Mask' },
 ];
 const visionRenderModes = [
   { value: 'path_tracing', label: 'Vision Path Tracing' },

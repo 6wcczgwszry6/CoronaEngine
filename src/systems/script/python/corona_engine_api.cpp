@@ -2206,6 +2206,12 @@ void Corona::API::Camera::set_output_mode(const std::string& mode) {
         output_mode = CameraOutputMode::VisibilityBuffer;
     } else if (mode == "ssao") {
         output_mode = CameraOutputMode::SSAO;
+    } else if (mode == "ssao_raw") {
+        output_mode = CameraOutputMode::SSAORaw;
+    } else if (mode == "shadow_mask_raw") {
+        output_mode = CameraOutputMode::ShadowMaskRaw;
+    } else if (mode == "shadow_mask") {
+        output_mode = CameraOutputMode::ShadowMask;
     } else if (mode != "final_color") {
         CFW_LOG_WARNING("[Camera::set_output_mode] Unknown mode '{}', defaulting to final_color", mode);
     }
@@ -2236,6 +2242,12 @@ std::string Corona::API::Camera::get_output_mode() const {
                 return "visibility_buffer";
             case CameraOutputMode::SSAO:
                 return "ssao";
+            case CameraOutputMode::SSAORaw:
+                return "ssao_raw";
+            case CameraOutputMode::ShadowMaskRaw:
+                return "shadow_mask_raw";
+            case CameraOutputMode::ShadowMask:
+                return "shadow_mask";
             case CameraOutputMode::FinalColor:
                 [[fallthrough]];
             default:

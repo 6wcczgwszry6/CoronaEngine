@@ -16,31 +16,10 @@ layout(push_constant) uniform PushConsts
     uint instanceInfoBufferIndex;
     uint vpBufferIndex;
     uint uniformBufferIndex;
+    uint shadowInfoBufferIndex;
     uint outputImageIndex;
-    float radius;
-    float bias;
-    float power;
-    uint sampleCount;
+    vec3 sun_dir;
 } pushConsts;
-
-const vec3 kSamples[16] = vec3[](
-    vec3( 0.5381,  0.1856,  0.4319),
-    vec3( 0.1379,  0.2486,  0.4430),
-    vec3( 0.3371,  0.5679,  0.0057),
-    vec3(-0.6999, -0.0451,  0.0019),
-    vec3( 0.0689, -0.1598,  0.8547),
-    vec3( 0.0560,  0.0069,  0.1843),
-    vec3(-0.0147,  0.1402,  0.0762),
-    vec3( 0.0100, -0.1924,  0.0344),
-    vec3(-0.3577, -0.5301,  0.4358),
-    vec3(-0.3169,  0.1063,  0.0158),
-    vec3( 0.0104, -0.5869,  0.0046),
-    vec3(-0.0897, -0.4940,  0.3287),
-    vec3( 0.7119, -0.0154,  0.0918),
-    vec3(-0.0533,  0.0596,  0.5411),
-    vec3( 0.0352, -0.0631,  0.5460),
-    vec3(-0.4776,  0.2847,  0.0271)
-);
 
 float readFloat(uint bufIdx, uint offset)
 {
@@ -70,6 +49,14 @@ vec2 readVec2(uint bufIdx, uint offset)
 {
     return vec2(readFloat(bufIdx, offset),
                 readFloat(bufIdx, offset + 1u));
+}
+
+vec4 readVec4(uint bufIdx, uint offset)
+{
+    return vec4(readFloat(bufIdx, offset),
+                readFloat(bufIdx, offset + 1u),
+                readFloat(bufIdx, offset + 2u),
+                readFloat(bufIdx, offset + 3u));
 }
 
 mat4 readMat4(uint bufIdx, uint offset)
@@ -134,6 +121,9 @@ vec2 worldToScreen(vec3 worldPos, mat4 viewProjMatrix, vec2 resolution, out floa
 
 bool decodeWorldPositionNormal(ivec2 pixel, out vec3 worldPos, out vec3 worldNormal)
 {
+    worldPos = vec3(0.0);
+    worldNormal = vec3(0.0);
+
     uvec4 vis = imageLoad(imagesRGBA32UI[nonuniformEXT(pushConsts.visibilityImageIndex)], pixel);
     uint instanceID_1based = vis.r;
     uint primitiveID = vis.g;
@@ -196,19 +186,67 @@ bool decodeWorldPositionNormal(ivec2 pixel, out vec3 worldPos, out vec3 worldNor
     return dot(worldNormal, worldNormal) > 0.0;
 }
 
-vec3 reconstructViewPos(vec2 uv, float depth)
+float sampleShadowMap(uint shadowMap, vec2 uv, float receiverDepth, float bias)
 {
-    mat4 eyeInvProj = readMat4(pushConsts.uniformBufferIndex, 76u);
-    vec4 clip = vec4(uv * 2.0 - 1.0, depth, 1.0);
-    vec4 view = eyeInvProj * clip;
-    return view.xyz / max(abs(view.w), 1e-6);
+    float shadowMapSize = readFloat(pushConsts.shadowInfoBufferIndex, 72u);
+    vec2 texelSize = vec2(1.0 / max(shadowMapSize, 1.0));
+    float lit = 0.0;
+    for (int y = -1; y <= 1; ++y)
+    {
+        for (int x = -1; x <= 1; ++x)
+        {
+            float casterDepth = texture(
+                textures[nonuniformEXT(shadowMap)],
+                uv + vec2(float(x), float(y)) * texelSize).r;
+            lit += (receiverDepth - bias) <= casterDepth ? 1.0 : 0.0;
+        }
+    }
+    return lit / 9.0;
 }
 
-float hash12(vec2 p)
+float computeSunShadow(vec3 worldPos, vec3 normal)
 {
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
+    if (readUint(pushConsts.shadowInfoBufferIndex, 74u) == 0u) {
+        return 1.0;
+    }
+
+    vec4 cascadeSplits = readVec4(pushConsts.shadowInfoBufferIndex, 64u);
+    vec3 eyePosition = readVec3(pushConsts.uniformBufferIndex, 36u);
+    vec3 eyeDir = normalize(readVec3(pushConsts.uniformBufferIndex, 40u));
+    float viewDepth = dot(worldPos - eyePosition, eyeDir);
+    if (viewDepth < 0.0 || viewDepth > cascadeSplits.w) {
+        return 1.0;
+    }
+
+    uint cascadeIndex = 3u;
+    if (viewDepth <= cascadeSplits.x) {
+        cascadeIndex = 0u;
+    } else if (viewDepth <= cascadeSplits.y) {
+        cascadeIndex = 1u;
+    } else if (viewDepth <= cascadeSplits.z) {
+        cascadeIndex = 2u;
+    }
+
+    mat4 lightViewProj = readMat4(pushConsts.shadowInfoBufferIndex, cascadeIndex * 16u);
+    uint shadowMap = readUint(pushConsts.shadowInfoBufferIndex, 68u + cascadeIndex);
+
+    vec4 lightClip = lightViewProj * vec4(worldPos, 1.0);
+    if (abs(lightClip.w) < 1e-5) {
+        return 1.0;
+    }
+
+    vec3 ndc = lightClip.xyz / lightClip.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 ||
+        ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+
+    vec3 L = normalize(pushConsts.sun_dir);
+    float slope = 1.0 - max(dot(normalize(normal), L), 0.0);
+    float shadowBias = readFloat(pushConsts.shadowInfoBufferIndex, 73u);
+    float bias = max(shadowBias, shadowBias * (1.0 + slope * 2.0));
+    return sampleShadowMap(shadowMap, uv, ndc.z, bias);
 }
 
 void main()
@@ -221,64 +259,11 @@ void main()
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     vec3 worldPos;
     vec3 worldNormal;
-    if (!decodeWorldPositionNormal(pixel, worldPos, worldNormal)) {
-        imageStore(imagesR16[nonuniformEXT(pushConsts.outputImageIndex)], pixel,
-                   vec4(1.0, 0.0, 0.0, 1.0));
-        return;
+    float lit = 1.0;
+    if (decodeWorldPositionNormal(pixel, worldPos, worldNormal)) {
+        lit = computeSunShadow(worldPos, worldNormal);
     }
 
-    vec2 uv = (vec2(pixel) + vec2(0.5)) / vec2(pushConsts.gbufferSize);
-    float depth = texelFetch(textures[nonuniformEXT(pushConsts.depthImageIndex)], pixel, 0).r;
-    vec3 fragView = reconstructViewPos(uv, depth);
-
-    mat4 eyeView = readMat4(pushConsts.uniformBufferIndex, 44u);
-    vec3 viewNormal = normalize(mat3(eyeView) * worldNormal);
-
-    float angle = hash12(vec2(pixel)) * 6.28318530718;
-    vec3 randomVec = normalize(vec3(cos(angle), sin(angle), 0.0));
-    vec3 tangent = randomVec - viewNormal * dot(randomVec, viewNormal);
-    if (dot(tangent, tangent) < 1e-5) {
-        tangent = abs(viewNormal.z) < 0.999
-            ? normalize(cross(vec3(0.0, 0.0, 1.0), viewNormal))
-            : normalize(cross(vec3(0.0, 1.0, 0.0), viewNormal));
-    } else {
-        tangent = normalize(tangent);
-    }
-    vec3 bitangent = normalize(cross(viewNormal, tangent));
-    mat3 tbn = mat3(tangent, bitangent, viewNormal);
-
-    mat4 eyeProj = readMat4(pushConsts.uniformBufferIndex, 60u);
-    uint samples = clamp(pushConsts.sampleCount, 1u, 16u);
-    float occlusion = 0.0;
-
-    for (uint i = 0u; i < samples; ++i) {
-        vec3 sampleView = fragView + (tbn * kSamples[i]) * pushConsts.radius;
-        vec4 sampleClip = eyeProj * vec4(sampleView, 1.0);
-        if (abs(sampleClip.w) < 1e-5) {
-            continue;
-        }
-
-        vec3 sampleNdc = sampleClip.xyz / sampleClip.w;
-        vec2 sampleUV = sampleNdc.xy * 0.5 + 0.5;
-        if (sampleUV.x < 0.0 || sampleUV.x > 1.0 ||
-            sampleUV.y < 0.0 || sampleUV.y > 1.0 ||
-            sampleNdc.z < 0.0 || sampleNdc.z > 1.0) {
-            continue;
-        }
-
-        float sampleDepth = texture(textures[nonuniformEXT(pushConsts.depthImageIndex)], sampleUV).r;
-        if (sampleDepth >= (1.0 - 1e-3)) {
-            continue;
-        }
-
-        vec3 sampleDepthView = reconstructViewPos(sampleUV, sampleDepth);
-        float rangeCheck = smoothstep(0.0, 1.0,
-            pushConsts.radius / max(abs(fragView.z - sampleDepthView.z), 1e-4));
-        occlusion += (sampleDepthView.z <= sampleView.z - pushConsts.bias) ? rangeCheck : 0.0;
-    }
-
-    float ao = 1.0 - occlusion / float(samples);
-    ao = pow(clamp(ao, 0.0, 1.0), max(pushConsts.power, 0.001));
     imageStore(imagesR16[nonuniformEXT(pushConsts.outputImageIndex)], pixel,
-               vec4(ao, 0.0, 0.0, 1.0));
+               vec4(clamp(lit, 0.0, 1.0), 0.0, 0.0, 1.0));
 }
