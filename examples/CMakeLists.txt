@@ -38,13 +38,25 @@ function(corona_examples_copy_assets target_name)
     )
 
     if(CORONA_BUILD_VISION)
-        add_custom_command(
-            TARGET ${target_name}
-            POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E echo "[${target_name}] Copy vision runtime deps from $<TARGET_FILE_DIR:ocarina>/. to $<TARGET_FILE_DIR:${target_name}>/"
-            COMMAND ${CMAKE_COMMAND} -E copy_directory $<TARGET_FILE_DIR:ocarina>/. $<TARGET_FILE_DIR:${target_name}>/.
-            VERBATIM
-        )
+        set(_corona_horizon_package_folder "")
+        foreach(_corona_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+            if(DEFINED horizon_PACKAGE_FOLDER_${_corona_config})
+                set(_corona_horizon_package_folder "${horizon_PACKAGE_FOLDER_${_corona_config}}")
+                break()
+            endif()
+        endforeach()
+
+        if(_corona_horizon_package_folder AND EXISTS "${_corona_horizon_package_folder}/bin")
+            add_custom_command(
+                TARGET ${target_name}
+                POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E echo "[${target_name}] Copy vision runtime deps from ${_corona_horizon_package_folder}/bin/. to $<TARGET_FILE_DIR:${target_name}>/"
+                COMMAND ${CMAKE_COMMAND} -E copy_directory "${_corona_horizon_package_folder}/bin" $<TARGET_FILE_DIR:${target_name}>/.
+                VERBATIM
+            )
+        else()
+            message(WARNING "[Corona:Examples] CORONA_BUILD_VISION=ON but Horizon package bin directory was not found")
+        endif()
     endif()
 endfunction()
 

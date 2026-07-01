@@ -26,15 +26,16 @@ class CoronaEngineConan(ConanFile):
         "with_editor": True,
         "with_examples": True,
         "with_tests": False,
-        "with_vision": False,
+        "with_vision": True,
         "with_oidn": False,
         "with_cef": True,
         "horizon/*:shared": False,
         "horizon/*:with_tools": True,
         "horizon/*:with_examples": False,
         "horizon/*:with_tests": False,
-        "horizon/*:with_ocarina": False,
-        "horizon/*:with_vision_hotfix": False,
+        "horizon/*:with_ocarina": True,
+        "horizon/*:with_cuda": True,
+        "horizon/*:with_vision_hotfix": True,
         "sdl/*:shared": False,
         "glfw/*:shared": False,
         "volk/*:shared": False,
@@ -73,7 +74,7 @@ class CoronaEngineConan(ConanFile):
                           transitive_headers=True, transitive_libs=True)
 
         if bool(self.options.with_vision):
-            self.requires("cxxopts/3.2.1", transitive_headers=True)
+            self.requires("cxxopts/3.2.0", transitive_headers=True)
             self.requires("glfw/3.4", transitive_headers=True, transitive_libs=True)
             if bool(self.options.with_oidn):
                 self.requires("openimagedenoise/2.3.3", transitive_headers=True, transitive_libs=True)

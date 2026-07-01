@@ -24,6 +24,7 @@
 - 配置：`Debug`
 - 构建目录：`build/conan`
 - CMake configure preset：`conan-default`
+- 默认开启：CoronaEngine Vision、Horizon Ocarina/CUDA、Horizon Vision hotfix、Horizon shader tools
 
 ### 命令
 
@@ -97,15 +98,15 @@ git clean -fdX
 
 ### 根据 Target 自动推导的 Conan Options
 
-CoronaEngine 会根据 target 名称自动开启部分根包选项：
+CoronaEngine 默认开启 Vision 相关构建路径，并会根据 target 名称自动开启部分额外根包选项：
 
 | target 名称包含 | 自动添加的 Conan option |
 | --- | --- |
 | `test` | `-o &:with_tests=True` |
-| `vision` 或 `oidn` | `-o &:with_vision=True` |
+| `vision` 或 `oidn` | `-o &:with_vision=True`（默认已开启，保留为显式兜底） |
 | `oidn` | `-o &:with_oidn=True` |
 
-例如，target 名称中包含 `vision` 时，脚本会在 install 阶段先启用 Vision 相关依赖路径，再进入 CMake configure。
+例如，target 名称中包含 `oidn` 时，脚本会在 install 阶段额外启用 OIDN 相关依赖路径，再进入 CMake configure。
 
 ### 本地 Recipes
 
@@ -120,7 +121,7 @@ CoronaEngine 会根据 target 名称自动开启部分根包选项：
 - `conan/recipes/ffmpeg`
 - `conan/recipes/horizon`
 
-`horizon/0.5.0` 会通过 CoronaEngine 仓库内的 bootstrap recipe 导出。开发者电脑上不需要存在 sibling Horizon checkout；当本地 Conan cache 中没有 Horizon 包时，Conan 会根据该 recipe 从 Horizon Git 远端拉取源码并构建包。
+`horizon/0.5.0` 会通过 CoronaEngine 仓库内的 bootstrap recipe 导出。开发者电脑上不需要存在 sibling Horizon checkout；当本地 Conan cache 中没有 Horizon 包时，Conan 会根据该 recipe 从 Horizon Git 远端拉取源码并构建包。默认的 `corona_engine` 构建会启用 Horizon Ocarina/CUDA、Vision hotfix 和 shader tools。
 
 ```powershell
 $env:HORIZON_CONAN_GIT_REF = "conan-migration"

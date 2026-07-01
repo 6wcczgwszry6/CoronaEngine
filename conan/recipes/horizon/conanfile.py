@@ -3,7 +3,7 @@ import os
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
-from conan.tools.files import copy, rmdir
+from conan.tools.files import copy, replace_in_file, rmdir
 
 
 class HorizonConan(ConanFile):
@@ -25,9 +25,9 @@ class HorizonConan(ConanFile):
 
     default_options = {
         "shared": False,
-        "with_ocarina": False,
-        "with_vision_hotfix": False,
-        "with_cuda": False,
+        "with_ocarina": True,
+        "with_vision_hotfix": True,
+        "with_cuda": True,
         "with_tools": False,
         "with_examples": False,
         "with_tests": False,
@@ -55,6 +55,28 @@ class HorizonConan(ConanFile):
         git_url = os.environ.get("HORIZON_CONAN_GIT_URL", self.homepage)
         git_ref = os.environ.get("HORIZON_CONAN_GIT_REF", "conan-migration")
         self.run(f'git clone --depth 1 --branch "{git_ref}" "{git_url}" "."')
+        self._patch_sources()
+
+    def _patch_sources(self):
+        cuda_compiler = os.path.join(
+            self.source_folder,
+            "modules",
+            "ocarina",
+            "backends",
+            "cuda",
+            "cuda_compiler.cpp",
+        )
+        if os.path.isfile(cuda_compiler):
+            with open(cuda_compiler, encoding="utf-8") as source_file:
+                source = source_file.read()
+            if "_access" in source and "#include <io.h>" not in source:
+                replace_in_file(
+                    self,
+                    cuda_compiler,
+                    '#include "dsl/dsl.h"\n',
+                    '#include "dsl/dsl.h"\n\n#ifdef _WIN32\n#include <io.h>\n#endif\n',
+                    strict=False,
+                )
 
     def requirements(self):
         self.requires("ktm/0.2.14", transitive_headers=True)
@@ -128,6 +150,10 @@ class HorizonConan(ConanFile):
             os.path.join(source_root, "include"),
             os.path.join(source_root, "src", "Helicon"),
             os.path.join(source_root, "modules", "corona", "include"),
+            os.path.join(source_root, "modules", "ocarina"),
+            os.path.join(source_root, "modules", "ocarina", "ext", "EASTL", "include"),
+            os.path.join(source_root, "modules", "ocarina", "ext", "EASTL", "packages", "EABase", "include", "Common"),
+            os.path.join(source_root, "modules", "ocarina", "ext", "stblib", "stb"),
         ]
 
         deps_root = self._fetchcontent_source_root()
@@ -151,6 +177,10 @@ class HorizonConan(ConanFile):
             os.path.join(build_root, "src", "Helicon", config),
             os.path.join(build_root, "modules", "corona", "src", "kernel", config),
             os.path.join(build_root, "modules", "corona", "src", "pal", config),
+            os.path.join(build_root, "bin", config),
+            os.path.join(build_root, "lib", config),
+            os.path.join(build_root, "bin"),
+            os.path.join(build_root, "lib"),
         ]
         for deps_dir_name in ("deps", "_deps"):
             deps_root = os.path.join(build_root, deps_dir_name)
@@ -241,6 +271,10 @@ class HorizonConan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build(target="Horizon")
+        if bool(self.options.with_ocarina) and bool(self.options.with_cuda):
+            cmake.build(target="ocarina")
+        if bool(self.options.with_vision_hotfix):
+            cmake.build(target="vision-hotfix-all")
         if bool(self.options.with_tools):
             cmake.build(target="ShaderCompileScripts")
 
@@ -249,6 +283,18 @@ class HorizonConan(ConanFile):
         self._copy_headers(self, os.path.join(self.source_folder, "include"), package_include)
         self._copy_headers(self, os.path.join(self.source_folder, "src", "Helicon"), package_include)
         self._copy_headers(self, os.path.join(self.source_folder, "modules", "corona", "include"), package_include)
+        if bool(self.options.with_ocarina) and bool(self.options.with_cuda):
+            ocarina_root = os.path.join(self.source_folder, "modules", "ocarina")
+            self._copy_headers(self, ocarina_root, package_include)
+            self._copy_headers(self, os.path.join(ocarina_root, "ext", "EASTL", "include"), package_include)
+            self._copy_headers(
+                self,
+                os.path.join(ocarina_root, "ext", "EASTL", "packages", "EABase", "include", "Common"),
+                package_include,
+            )
+            self._copy_headers(self, os.path.join(ocarina_root, "ext", "stblib", "stb"), package_include)
+        if bool(self.options.with_vision_hotfix):
+            self._copy_headers(self, os.path.join(self.source_folder, "src"), package_include)
 
         deps_root = self._build_deps_root()
         if deps_root:
@@ -269,12 +315,32 @@ class HorizonConan(ConanFile):
         copy(self, "HorizonPackageAliases.cmake", src=os.path.join(self.source_folder, "cmake"), dst=package_cmake)
         copy(self, "*.lib", src=self.build_folder, dst=os.path.join(self.package_folder, "lib"), keep_path=False)
         copy(self, "*.a", src=self.build_folder, dst=os.path.join(self.package_folder, "lib"), keep_path=False)
+        if bool(self.options.with_ocarina) and bool(self.options.with_cuda):
+            copy(self, "*.dll", src=self.build_folder, dst=os.path.join(self.package_folder, "bin"), keep_path=False)
+            copy(self, "*.so*", src=self.build_folder, dst=os.path.join(self.package_folder, "lib"), keep_path=False)
+            copy(self, "*.dylib", src=self.build_folder, dst=os.path.join(self.package_folder, "lib"), keep_path=False)
+            cuda_headers_dir = os.path.join(self.build_folder, "bin", str(self.settings.build_type), "cuda")
+            if os.path.isdir(cuda_headers_dir):
+                copy(self, "*", src=cuda_headers_dir, dst=os.path.join(self.package_folder, "bin", "cuda"), keep_path=True)
         if bool(self.options.with_tools):
             tool_output_dir = os.path.join(self.build_folder, "tools", str(self.settings.build_type))
             copy(self, "ShaderCompileScripts*", src=tool_output_dir, dst=os.path.join(self.package_folder, "bin"), keep_path=False)
             copy(self, "*.dll", src=tool_output_dir, dst=os.path.join(self.package_folder, "bin"), keep_path=False)
 
     def package_info(self):
+        def add_component(name, cmake_target_name, libs=None, requires=None, system_libs=None, defines=None):
+            component = self.cpp_info.components[name]
+            component.set_property("cmake_target_name", cmake_target_name)
+            if libs:
+                component.libs = libs
+            if requires:
+                component.requires = requires
+            if system_libs:
+                component.system_libs = system_libs
+            if defines:
+                component.defines = defines
+            return component
+
         self.cpp_info.set_property("cmake_file_name", "Horizon")
         self.cpp_info.set_property("cmake_target_name", "Horizon::Horizon")
         self.cpp_info.set_property(
@@ -324,6 +390,139 @@ class HorizonConan(ConanFile):
         self.cpp_info.components["corona_kernel"].requires = ["quill::quill"]
 
         self.cpp_info.components["corona_pal"].set_property("cmake_target_name", "corona_pal")
+
+        if bool(self.options.with_ocarina) and bool(self.options.with_cuda):
+            add_component("eabase", "EABase")
+            add_component(
+                "eastl",
+                "EASTL",
+                libs=["EASTL"],
+                requires=["eabase"],
+                defines=[
+                    "EA_HAVE_CPP11_CONTAINERS=1",
+                    "EA_HAVE_CPP11_ATOMIC=1",
+                    "EA_HAVE_CPP11_CONDITION_VARIABLE=1",
+                    "EA_HAVE_CPP11_MUTEX=1",
+                    "EA_HAVE_CPP11_THREAD=1",
+                    "EA_HAVE_CPP11_FUTURE=1",
+                    "EA_HAVE_CPP11_TYPE_TRAITS=1",
+                    "EA_HAVE_CPP11_TUPLES=1",
+                    "EA_HAVE_CPP11_REGEX=1",
+                    "EA_HAVE_CPP11_RANDOM=1",
+                    "EA_HAVE_CPP11_CHRONO=1",
+                    "EA_HAVE_CPP11_SCOPED_ALLOCATOR=1",
+                    "EA_HAVE_CPP11_INITIALIZER_LIST=1",
+                    "EA_HAVE_CPP11_SYSTEM_ERROR=1",
+                    "EA_HAVE_CPP11_TYPEINDEX=1",
+                    "EASTL_USER_LITERALS_ENABLED=0",
+                    "EASTL_STD_ITERATOR_CATEGORY_ENABLED=1",
+                    "EASTL_STD_TYPE_TRAITS_AVAILABLE=1",
+                    "EASTL_MOVE_SEMANTICS_ENABLED=1",
+                    "EASTL_VARIADIC_TEMPLATES_ENABLED=1",
+                    "EASTL_VARIABLE_TEMPLATES_ENABLED=1",
+                    "EASTL_INLINE_VARIABLE_ENABLED=1",
+                    "EASTL_HAVE_CPP11_TYPE_TRAITS=1",
+                    "EASTL_INLINE_NAMESPACES_ENABLED=1",
+                    "EASTL_ALLOCATOR_EXPLICIT_ENABLED=1",
+                    "EA_DLL=1",
+                    "EASTL_USER_DEFINED_ALLOCATOR=1",
+                ],
+            )
+            add_component("ocarina_ext_stb", "ocarina-ext-stb", libs=["ocarina-ext-stb"])
+            add_component("ocarina_ext_tinyexr", "ocarina-ext-tinyexr", libs=["ocarina-ext-tinyexr"])
+            add_component(
+                "ocarina_ext",
+                "ocarina-ext",
+                libs=["ocarina-ext"],
+                requires=[
+                    "eastl",
+                    "ocarina_ext_stb",
+                    "ocarina_ext_tinyexr",
+                    "fmt::fmt",
+                    "spdlog::spdlog",
+                    "xxhash::libxxhash",
+                ],
+            )
+            ocarina_core = add_component(
+                "ocarina_core",
+                "ocarina-core",
+                libs=["ocarina-core"],
+                requires=["ocarina_ext"],
+            )
+            if self.settings.os == "Windows":
+                ocarina_core.system_libs = ["dbghelp"]
+            add_component("ocarina_math", "ocarina-math", libs=["ocarina-math"], requires=["ocarina_core"])
+            add_component(
+                "ocarina_ast",
+                "ocarina-ast",
+                libs=["ocarina-ast"],
+                requires=["ocarina_ext", "ocarina_core"],
+            )
+            add_component(
+                "ocarina_generator",
+                "ocarina-generator",
+                libs=["ocarina-generator"],
+                requires=["ocarina_ast", "ocarina_math"],
+            )
+            add_component(
+                "ocarina_rhi",
+                "ocarina-rhi",
+                libs=["ocarina-rhi"],
+                requires=["ocarina_generator"],
+            )
+            add_component(
+                "ocarina_dsl",
+                "ocarina-dsl",
+                libs=["ocarina-dsl"],
+                requires=["ocarina_rhi", "ocarina_ast"],
+            )
+            add_component("ocarina_backend", "ocarina-backend")
+            add_component(
+                "ocarina_native",
+                "ocarina-native",
+                requires=[
+                    "ocarina_ext",
+                    "ocarina_math",
+                    "ocarina_dsl",
+                    "ocarina_ast",
+                    "ocarina_generator",
+                    "ocarina_backend",
+                    "ocarina_rhi",
+                    "ocarina_core",
+                ],
+            )
+            add_component("ocarina_include", "ocarina-include")
+            add_component("ocarina", "ocarina", libs=["ocarina"], requires=["ocarina_native"])
+            if bool(self.options.with_vision_hotfix):
+                add_component("vision_hotfix", "vision-hotfix", libs=["vision-hotfix"], requires=["ocarina"])
+                add_component(
+                    "vision_hotfix_compiler",
+                    "vision-hotfix-compiler",
+                    requires=["vision_hotfix"],
+                )
+                add_component(
+                    "vision_hotfix_rules_parser",
+                    "vision-hotfix-rules_parser",
+                    requires=["vision_hotfix"],
+                )
+                add_component(
+                    "vision_hotfix_test",
+                    "vision-hotfix-test",
+                    libs=["vision-hotfix-test"],
+                    requires=["ocarina", "vision_hotfix", "ocarina_include"],
+                )
+                add_component(
+                    "vision_hotfix_all",
+                    "vision-hotfix-all",
+                    libs=["vision-hotfix-all"],
+                    requires=[
+                        "vision_hotfix",
+                        "vision_hotfix_compiler",
+                        "vision_hotfix_test",
+                        "vision_hotfix_rules_parser",
+                    ],
+                )
+                self.cpp_info.components["ocarina_include"].requires = ["vision_hotfix"]
 
         editable = self._is_editable()
         editable_includedirs = self._editable_includedirs() if editable else None
