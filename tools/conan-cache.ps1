@@ -106,7 +106,8 @@ function Invoke-LocalRecipeExports {
         "conan\recipes\vulkan-memory-allocator",
         "conan\recipes\astc-encoder",
         "conan\recipes\cef-binary",
-        "conan\recipes\ffmpeg"
+        "conan\recipes\ffmpeg",
+        "conan\recipes\horizon"
     )
 
     foreach ($recipe in $recipes) {

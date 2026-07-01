@@ -118,14 +118,16 @@ CoronaEngine 会根据 target 名称自动开启部分根包选项：
 - `conan/recipes/astc-encoder`
 - `conan/recipes/cef-binary`
 - `conan/recipes/ffmpeg`
+- `conan/recipes/horizon`
 
-`horizon/0.5.0` 不再由 CoronaEngine 仓库内的 bridge recipe 导出，也不再通过 editable checkout 解析。它必须已经存在于 Conan cache 或可访问的 Conan remote 中。需要在本机准备 Horizon 包时，请在 Horizon 仓库运行：
+`horizon/0.5.0` 会通过 CoronaEngine 仓库内的 bootstrap recipe 导出。开发者电脑上不需要存在 sibling Horizon checkout；当本地 Conan cache 中没有 Horizon 包时，Conan 会根据该 recipe 从 Horizon Git 远端拉取源码并构建包。
 
 ```powershell
-.\tools\dev.ps1 package ShaderCompileScripts
+$env:HORIZON_CONAN_GIT_REF = "conan-migration"
+$env:HORIZON_CONAN_GIT_URL = "https://github.com/CoronaEngine/Horizon.git"
 ```
 
-这样 CoronaEngine 构建只消费 Conan 包，不依赖开发者电脑上存在 sibling Horizon checkout。
+以上两个环境变量都是可选项。默认 Git URL 是 `https://github.com/CoronaEngine/Horizon.git`，默认 ref 是 `conan-migration`。
 
 如果当前 Conan 全局状态中注册了 `horizon/0.5.0` editable，`dev.ps1` 和 `conan-cache.ps1 update` 会直接失败并提示先运行 `conan editable remove horizon/0.5.0`，避免构建意外指向本地源码 checkout。
 

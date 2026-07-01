@@ -214,11 +214,22 @@ function Export-LocalRecipes {
         "conan\recipes\vulkan-memory-allocator",
         "conan\recipes\astc-encoder",
         "conan\recipes\cef-binary",
-        "conan\recipes\ffmpeg"
+        "conan\recipes\ffmpeg",
+        "conan\recipes\horizon"
     )
 
     foreach ($recipe in $recipes) {
         Invoke-NativeCommand -FilePath "conan" -Arguments @("export", $recipe)
+    }
+}
+
+function Clear-UpdatablePackageCache {
+    $refs = @(
+        "horizon/0.5.0"
+    )
+
+    foreach ($ref in $refs) {
+        Invoke-NativeCommand -FilePath "conan" -Arguments @("remove", $ref, "-c")
     }
 }
 
@@ -257,6 +268,9 @@ function Invoke-ConanInstall {
     param([bool]$Update = $false)
 
     Assert-NoEditableReference -Reference "horizon/0.5.0"
+    if ($Update) {
+        Clear-UpdatablePackageCache
+    }
     Export-LocalRecipes
 
     $profile = Get-ConanProfile
