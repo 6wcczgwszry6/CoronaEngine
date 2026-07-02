@@ -68,6 +68,11 @@ constexpr float kSsaoBias = 0.025f;
 constexpr float kSsaoStrength = 1.0f;
 constexpr float kSsaoPower = 1.5f;
 
+// Perf toggle: sky-driven SH9 ambient. Set to false to skip both the sky→SH
+// projection dispatch and the per-pixel evalSkySH in lighting, so the SH
+// ambient's cost can be measured in isolation. Compile-time single point.
+constexpr bool kSkyAmbientEnabled = true;
+
 struct RenderInstanceBatch {
     std::vector<Hardware::InstanceInfo> instances;
     std::vector<Hardware::MaterialInfo> materials;
@@ -123,11 +128,15 @@ struct OpticsNativePerfSample {
     double total_ms = 0.0;
     double collect_ms = 0.0;
     double submit_ms = 0.0;
+    double shadow_ms = 0.0;
+    double commit_ms = 0.0;
     uint32_t output_width = 0;
     uint32_t output_height = 0;
     uint32_t instance_count = 0;
     bool shadows_enabled = false;
     bool debug_mode = false;
+    bool sky_ambient_enabled = false;
+    bool sky_sh_updated = false;
 };
 
 void record_optics_native_perf(const OpticsNativePerfSample& sample) {
@@ -137,13 +146,19 @@ void record_optics_native_perf(const OpticsNativePerfSample& sample) {
         double total_ms = 0.0;
         double collect_ms = 0.0;
         double submit_ms = 0.0;
+        double shadow_ms = 0.0;
+        double commit_ms = 0.0;
         double max_total_ms = 0.0;
         double max_submit_ms = 0.0;
+        double max_shadow_ms = 0.0;
+        double max_commit_ms = 0.0;
         uint32_t max_output_width = 0;
         uint32_t max_output_height = 0;
         uint32_t max_instance_count = 0;
         uint32_t shadow_samples = 0;
         uint32_t debug_samples = 0;
+        uint32_t sky_ambient_samples = 0;
+        uint32_t sky_sh_update_samples = 0;
     };
 
     static Aggregate aggregate;
@@ -152,14 +167,24 @@ void record_optics_native_perf(const OpticsNativePerfSample& sample) {
     aggregate.total_ms += sample.total_ms;
     aggregate.collect_ms += sample.collect_ms;
     aggregate.submit_ms += sample.submit_ms;
+    aggregate.shadow_ms += sample.shadow_ms;
+    aggregate.commit_ms += sample.commit_ms;
     aggregate.max_total_ms = std::max(aggregate.max_total_ms, sample.total_ms);
     aggregate.max_submit_ms = std::max(aggregate.max_submit_ms, sample.submit_ms);
+    aggregate.max_shadow_ms = std::max(aggregate.max_shadow_ms, sample.shadow_ms);
+    aggregate.max_commit_ms = std::max(aggregate.max_commit_ms, sample.commit_ms);
     aggregate.max_instance_count = std::max(aggregate.max_instance_count, sample.instance_count);
     if (sample.shadows_enabled) {
         aggregate.shadow_samples += 1;
     }
     if (sample.debug_mode) {
         aggregate.debug_samples += 1;
+    }
+    if (sample.sky_ambient_enabled) {
+        aggregate.sky_ambient_samples += 1;
+    }
+    if (sample.sky_sh_updated) {
+        aggregate.sky_sh_update_samples += 1;
     }
     if ((static_cast<uint64_t>(sample.output_width) * sample.output_height) >
         (static_cast<uint64_t>(aggregate.max_output_width) * aggregate.max_output_height)) {
@@ -172,22 +197,31 @@ void record_optics_native_perf(const OpticsNativePerfSample& sample) {
         return;
     }
 
-    // const double inv_samples = aggregate.samples > 0 ? 1.0 / aggregate.samples : 0.0;
+    const double inv_samples = aggregate.samples > 0 ? 1.0 / aggregate.samples : 0.0;
     // CFW_LOG_INFO(
     //     "OpticsNativePerf samples={} avg_total_ms={:.2f} max_total_ms={:.2f} "
     //     "avg_collect_ms={:.2f} avg_submit_ms={:.2f} max_submit_ms={:.2f} "
-    //     "max_output={}x{} max_instances={} shadows={} debug={}",
+    //     "avg_shadow_ms={:.2f} max_shadow_ms={:.2f} "
+    //     "avg_commit_ms={:.2f} max_commit_ms={:.2f} "
+    //     "max_output={}x{} max_instances={} shadows={} debug={} "
+    //     "sky_ambient={} sky_sh_updates={}",
     //     aggregate.samples,
     //     aggregate.total_ms * inv_samples,
     //     aggregate.max_total_ms,
     //     aggregate.collect_ms * inv_samples,
     //     aggregate.submit_ms * inv_samples,
     //     aggregate.max_submit_ms,
+    //     aggregate.shadow_ms * inv_samples,
+    //     aggregate.max_shadow_ms,
+    //     aggregate.commit_ms * inv_samples,
+    //     aggregate.max_commit_ms,
     //     aggregate.max_output_width,
     //     aggregate.max_output_height,
     //     aggregate.max_instance_count,
     //     aggregate.shadow_samples,
-    //     aggregate.debug_samples);
+    //     aggregate.debug_samples,
+    //     aggregate.sky_ambient_samples,
+    //     aggregate.sky_sh_update_samples);
 
     aggregate = Aggregate{};
     aggregate.window_start = now;
@@ -2527,6 +2561,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 const auto native_frame_start = PerfClock::now();
                 double native_collect_ms = 0.0;
                 double native_submit_ms = 0.0;
+                double native_shadow_ms = 0.0;
+                double native_commit_ms = 0.0;
                 uint32_t native_instance_count = 0;
                 bool native_shadows_enabled = false;
                 bool native_debug_mode = false;
@@ -3107,6 +3143,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 lighting.pushConsts.ssaoImageIndex = ssaoBlurredSampledDescriptor;
                 lighting.pushConsts.ssaoEnabled = camera->ssao_enabled ? 1u : 0u;
                 lighting.pushConsts.ssaoStrength = kSsaoStrength;
+                lighting.pushConsts.skyAmbientEnabled = kSkyAmbientEnabled ? 1u : 0u;
                 {
                     ktm::fvec3 lightColor;
                     lightColor.x = sun_color.x * sun_intensity;
@@ -3130,7 +3167,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 mix_hash_float(sky_sig, sun_dir.z);
                 mix_hash_float(sky_sig, sky_intensity);
                 const bool sky_sh_needs_update =
-                    !sky_sh_initialized_ || sky_sig != sky_sh_signature_;
+                    kSkyAmbientEnabled &&
+                    (!sky_sh_initialized_ || sky_sig != sky_sh_signature_);
                 if (sky_sh_needs_update) {
                     auto& skySH = *hardware_->skySHProjectPipeline;
                     skySH.pushConsts.outputBufferIndex =
@@ -3263,12 +3301,15 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                         // ============================================================
                         stream << visibility(hardware_->gbufferSize.x, hardware_->gbufferSize.y);
                         if (hardware_->shadowInfoBufferObjects.shadowEnabled != 0u) {
+                            const auto native_shadow_start = PerfClock::now();
                             for (uint32_t cascade = 0; cascade < kShadowCascadeCount; ++cascade) {
                                 record_shadow_cascade(
                                     hardware_->shadowInfoBufferObjects.lightViewProj[cascade],
                                     hardware_->shadowCascadeImages[cascade]);
                                 stream << shadow(kShadowMapSize, kShadowMapSize);
                             }
+                            native_shadow_ms =
+                                elapsed_ms(native_shadow_start, PerfClock::now());
                         }
                         if (sky_sh_needs_update) {
                             stream << (*hardware_->skySHProjectPipeline)(1, 1, 1);
@@ -3295,7 +3336,9 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                             ui_state.mode, ui_state.calibration, frame_index);
                     }
 
+                    const auto native_commit_start = PerfClock::now();
                     latest_submit_receipt = stream << Horizon::commit();
+                    native_commit_ms = elapsed_ms(native_commit_start, PerfClock::now());
                     native_submit_ms = elapsed_ms(native_submit_start, PerfClock::now());
                 }
 
@@ -3318,11 +3361,17 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 native_perf_sample.total_ms = elapsed_ms(native_frame_start, PerfClock::now());
                 native_perf_sample.collect_ms = native_collect_ms;
                 native_perf_sample.submit_ms = native_submit_ms;
+                native_perf_sample.shadow_ms = native_shadow_ms;
+                native_perf_sample.commit_ms = native_commit_ms;
                 native_perf_sample.output_width = camera->width;
                 native_perf_sample.output_height = camera->height;
                 native_perf_sample.instance_count = native_instance_count;
                 native_perf_sample.shadows_enabled = native_shadows_enabled;
                 native_perf_sample.debug_mode = native_debug_mode;
+                native_perf_sample.sky_ambient_enabled =
+                    !native_debug_mode && kSkyAmbientEnabled;
+                native_perf_sample.sky_sh_updated =
+                    !native_debug_mode && sky_sh_needs_update;
                 record_optics_native_perf(native_perf_sample);
 
                 if (offscreen_screenshot) {

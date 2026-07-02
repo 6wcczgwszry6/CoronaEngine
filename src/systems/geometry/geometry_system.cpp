@@ -2437,6 +2437,9 @@ void GeometrySystem::reconcile_lod_residency() {
             // 与本驻留决策严格一致，故 render 选中的级必然已建好 GPU 缓冲。
             if (demand != prev_committed) {
                 ++impl_->diag_demand_changes;  // 诊断：committed_demand 实际变更
+                CFW_LOG_NOTICE("[LOD] switch geom={} mesh={} level {} -> {} ({}) levels={}",
+                               geom_handle, mesh_idx, prev_committed, demand,
+                               (demand < prev_committed) ? "finer" : "coarser", level_count);
                 std::unique_lock lock(impl_->lod_cache_mutex);
                 auto cit = impl_->lod_cache.find(lod_key);
                 if (cit != impl_->lod_cache.end() && cit->second.model_id == model_id)

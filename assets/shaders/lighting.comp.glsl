@@ -29,6 +29,7 @@ layout(push_constant) uniform PushConsts
     uint ssaoImageIndex;
     uint ssaoEnabled;
     float ssaoStrength;
+    uint skyAmbientEnabled;  // 0 = skip SH sky-driven ambient (perf toggle)
 } pushConsts;
 
 // ============================================================================
@@ -404,16 +405,20 @@ vec3 DisneyBRDF(vec3 WorldPos, vec3 Normal, vec3 Tangent, vec3 Bitangent,
 
     // Sky-driven ambient (SH9). evalSkySH returns the directional irradiance
     // E(n) from the atmospheric model; Lambertian exitance = albedo·E(n)/π.
-    // The SH already carries the physical sky magnitude, so the old
-    // ambientIntensity fudge (sun_intensity·0.02 ≈ 0.2) is dropped — it was
-    // darkening the fill ~5× and crushing interiors.
-    vec3 skyE = evalSkySH(N, pushConsts.skyIrradianceSHBufferIndex);
-    // Average-sky (DC) fill. Without GI, surfaces the sky cannot reach directly
-    // — down-facing, indoor, occluded — get near-zero directional irradiance and
-    // read as black. Floor the irradiance at a fraction of the average sky
-    // (c4·L00 = DC irradiance) so those faces keep a soft ambient base.
-    vec3 skyDC = vec3(0.886227) * readVec3(pushConsts.skyIrradianceSHBufferIndex, 0u);
-    vec3 irradiance = max(skyE, skyDC * 0.5);
+    // Perf toggle (skyAmbientEnabled): when off, skip the whole SH ambient —
+    // both the per-pixel evaluation and the DC fill — so its cost is measurable
+    // in isolation. The C++ side also skips the projection dispatch.
+    vec3 irradiance = vec3(0.0);
+    if (pushConsts.skyAmbientEnabled != 0u) {
+        vec3 skyE = evalSkySH(N, pushConsts.skyIrradianceSHBufferIndex);
+        // Average-sky (DC) fill. Without GI, surfaces the sky cannot reach
+        // directly — down-facing, indoor, occluded — get near-zero directional
+        // irradiance and read as black. Floor the irradiance at a fraction of
+        // the average sky (c4·L00 = DC irradiance) so those faces keep a soft
+        // ambient base.
+        vec3 skyDC = vec3(0.886227) * readVec3(pushConsts.skyIrradianceSHBufferIndex, 0u);
+        irradiance = max(skyE, skyDC * 0.5);
+    }
     vec3 ambient = albedo * irradiance * (1.0 / PI);
     ambient *= clamp(ambientOcclusion, 0.0, 1.0);
 
