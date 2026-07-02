@@ -2710,6 +2710,120 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             Corona::API::load_vision_scene(arg_string(request.args, 0));
             return native_success({{"status", "success"}});
         }},
+        {"save_screenshot", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto scene_route = normalize_route(arg_string(request.args, 0));
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+
+            const auto output_path = arg_string(request.args, 1);
+            if (output_path.empty()) {
+                return native_failure("Screenshot path is required", 2);
+            }
+
+            const auto camera_name = arg_string(request.args, 2);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+
+            camera->engine_camera->set_size(std::max(camera->width, 1), std::max(camera->height, 1));
+            const bool saved = camera->engine_camera->save_screenshot_sync(output_path);
+            if (!saved) {
+                return native_failure("Screenshot save failed", 2);
+            }
+
+            return native_success({
+                {"status", "success"},
+                {"ok", true},
+                {"scene", scene->route},
+                {"path", output_path},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
+        {"set_render_backend", [](const NativeRequest& request, const NativeContext&) {
+            const auto mode = arg_string(request.args, 0, "native");
+            auto* scene = ensure_native_editor_scene();
+            const auto scene_route = normalize_route(arg_string(request.args, 1));
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+
+            const auto camera_name = arg_string(request.args, 2);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+
+            camera->engine_camera->set_render_backend(mode);
+            const auto actual = camera->engine_camera->get_render_backend();
+            return native_success({
+                {"status", "success"},
+                {"mode", actual},
+                {"fallback", mode == "vision" && actual != "vision"},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
+        {"get_render_backend", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto scene_route = normalize_route(arg_string(request.args, 0));
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+
+            const auto camera_name = arg_string(request.args, 1);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+
+            return native_success({
+                {"status", "success"},
+                {"mode", camera->engine_camera->get_render_backend()},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
+        {"set_vision_render_mode", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto scene_route = normalize_route(arg_string(request.args, 0));
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+
+            const auto camera_name = arg_string(request.args, 1);
+            const auto mode = arg_string(request.args, 2, "path_tracing");
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+
+            camera->engine_camera->set_vision_render_mode(mode);
+            return native_success({
+                {"status", "success"},
+                {"mode", camera->engine_camera->get_vision_render_mode()},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
+        {"get_vision_render_mode", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto scene_route = normalize_route(arg_string(request.args, 0));
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+
+            const auto camera_name = arg_string(request.args, 1);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+
+            return native_success({
+                {"status", "success"},
+                {"mode", camera->engine_camera->get_vision_render_mode()},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
         {"set_output_mode", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto camera_name = arg_string(request.args, 1);
