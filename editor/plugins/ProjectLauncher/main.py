@@ -236,13 +236,22 @@ class ProjectLauncher(PluginBase):
             # 3. 往入口 .scene 注入内嵌 Vision JSON 文档（格式同 Scene.save_data）
             scene_cfg = configparser.ConfigParser()
             scene_cfg.read(scene_file, encoding='utf-8')
-            if 'vision' in scene_cfg:
-                scene_cfg.remove_section('vision')
+            scene_cfg['vision'] = {
+                'source_path': abs_json,
+                'import_mode': 'external_live',
+            }
             scene_cfg['vision_document'] = {
                 'encoding': VISION_DOCUMENT_ENCODING,
                 'version': VISION_DOCUMENT_VERSION,
                 'data': _encode_vision_document(vision_document),
             }
+            if 'camera' not in scene_cfg:
+                scene_cfg['camera'] = {}
+            scene_cfg['camera'].setdefault('count', '1')
+            scene_cfg['camera'].setdefault('active_id', '')
+            scene_cfg['camera']['camera0.render_backend'] = 'vision'
+            scene_cfg['camera'].setdefault('camera0.vision_render_mode', 'path_tracing')
+            scene_cfg['camera'].setdefault('camera0.output_mode', 'final_color')
             with open(scene_file, 'w', encoding='utf-8') as f:
                 scene_cfg.write(f)
 
