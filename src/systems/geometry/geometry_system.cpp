@@ -1905,41 +1905,6 @@ namespace {
     return best;
 }
 
-// 带滞回的 LOD 选级（方案 B）。
-//
-// 入参：
-//   current      当前已提交级（committed_demand）
-//   raw_target   本帧按 max 屏占比算出的原始目标级（select_lod_level 结果）
-//   screen_ratio 本帧 max 屏占比（多相机取最高精度 = 最大屏占比）
-//   thresholds   各级阈值表（thresholds[i] = levels[i+1].screen_threshold，单调递减）
-//   h            滞回死区比例
-//
-// 策略：用死区"门控"是否离开 current；一旦越过死区，直接跳到 raw_target（支持大跳变，
-// 不受每帧一级限制）。死区内保持 current，吸收阈值边界的微小抖动。
-//   - raw_target 更高精度(< current)：仅当 screen_ratio > thresholds[current-1]*(1+h) 才切。
-//   - raw_target 更低精度(> current)：仅当 screen_ratio < thresholds[current]  *(1-h) 才切。
-[[nodiscard]] int select_lod_with_hysteresis(int                       current,
-                                             int                       raw_target,
-                                             float                     screen_ratio,
-                                             const std::vector<float>& thresholds,
-                                             float                     h) {
-    const int max_level = static_cast<int>(thresholds.size());  // 级号上界（含）
-    if (current < 0) current = 0;
-    if (current > max_level) current = max_level;
-    if (raw_target == current) return current;  // 目标即当前级，无切换
-
-    if (raw_target < current) {
-        // 升精度方向：要求屏占比显著高于"升回 current-1 级"的边界
-        const float up_bound = thresholds[current - 1] * (1.0f + h);
-        if (screen_ratio > up_bound) return raw_target;
-    } else {
-        // 降精度方向：要求屏占比显著低于"降到 current+1 级"的边界
-        const float down_bound = thresholds[current] * (1.0f - h);
-        if (screen_ratio < down_bound) return raw_target;
-    }
-    return current;  // 死区内：保持当前级
-}
-
 }  // namespace
 
 void GeometrySystem::process_pending_geometry_imports() {
@@ -2223,14 +2188,17 @@ void GeometrySystem::upload_lod_from_scene_data() {
             entry.model_id = model_id;
             entry.residency_epoch = impl_->next_residency_epoch++;  // 身份版本（方案 C ABA 守卫）
 
-            // 包围半径（Fix 1）：与 reconcile 旧逻辑同源（0.5·diag(Scene 局部 AABB)），在此
-            // 算一次缓存，使 reconcile 选级无需每帧重新 acquire_read<Scene>。
+            // per-mesh 局部 AABB（屏幕空间误差选级用）：缓存本 mesh 自身的局部包围盒，
+            // 而非整场景 AABB——旧逻辑用 scene.get_scene_aabb()（所有 mesh 合并）会让大场景里的
+            // 小 mesh 拿到巨大半径而恒选 LOD0。reconcile 用完整 transform 矩阵把这套局部 AABB
+            // 映到世界，求相机到最近点距离（各向异性、不受轴心偏移影响）。
+            // bounding_radius 保留（旧 fallback 路径仍读），= 0.5·diag(局部 AABB)。
             {
-                const auto aabb_min = scene.get_scene_aabb().min;
-                const auto aabb_max = scene.get_scene_aabb().max;
-                const float ex = aabb_max[0] - aabb_min[0];
-                const float ey = aabb_max[1] - aabb_min[1];
-                const float ez = aabb_max[2] - aabb_min[2];
+                entry.local_aabb_min = make_fvec3(mesh.aabb_min[0], mesh.aabb_min[1], mesh.aabb_min[2]);
+                entry.local_aabb_max = make_fvec3(mesh.aabb_max[0], mesh.aabb_max[1], mesh.aabb_max[2]);
+                const float ex = mesh.aabb_max[0] - mesh.aabb_min[0];
+                const float ey = mesh.aabb_max[1] - mesh.aabb_min[1];
+                const float ez = mesh.aabb_max[2] - mesh.aabb_min[2];
                 float r = 0.5f * std::sqrt(ex * ex + ey * ey + ez * ez);
                 if (!(r > 0.0f)) r = 1.0f;
                 entry.bounding_radius = r;
@@ -2260,6 +2228,9 @@ void GeometrySystem::upload_lod_from_scene_data() {
 
                 LODMeshBuffers lod_buf;  // 缓冲全空、ready=false、mesh_mem 计 0
                 lod_buf.error            = lod_data.error;
+                // 屏幕空间误差选级主用此值：模型空间几何误差（meshopt 相对偏差 × simplifyScale）。
+                // reconcile 运行时 × actor_scale 得世界误差，再除以相机距离得角误差判级。
+                lod_buf.geometric_error  = lod_data.geometric_error;
                 // 切换阈值直接采用生成端按几何误差/像素预算算出的 screen_threshold
                 // （generate_lod_levels 已保证严格单调递减、且 emit 的级 error>0 无死级）。
                 // 防御性 clamp：异常值（<=0 或 >=1）夹回开区间，避免死级/恒选。
@@ -2306,20 +2277,26 @@ void GeometrySystem::reconcile_lod_residency() {
     auto& hub = SharedDataHub::instance();
     auto& geom_storage = hub.geometry_storage();
 
-    // ---- 收集相机 (世界位置, 垂直 FOV)；无相机则不改动驻留 ----
-    struct CamView { ktm::fvec3 pos; float fov; };
-    std::vector<CamView> cams;
+    // ---- 收集观察者 (世界位置, 角误差预算 epsilon)；无则不改动驻留 ----
+    // 每个相机把「像素预算 + 自身 fov/分辨率」塌缩成单个角阈值 epsilon。选级判据
+    // world_error/d ≤ epsilon 是纯球形量（与方向无关）→ 相机背后物体同样有定义，
+    // 未来 GI 观察者（光源/探针）可用各自的固定 epsilon 复用同一路径与聚合逻辑。
+    struct Viewer { ktm::fvec3 pos; float epsilon; };
+    std::vector<Viewer> viewers;
     {
         auto& camera_storage = hub.camera_storage();
         for (auto sit = hub.scene_storage().cbegin(); sit != hub.scene_storage().cend(); ++sit) {
             for (std::uintptr_t cam_handle : sit->camera_handles) {
                 if (auto cam = camera_storage.try_acquire_read_nowait(cam_handle)) {
-                    cams.push_back({cam->position, cam->fov});
+                    const float eps = compute_angular_epsilon(
+                        Impl::kLodPixelErrorBudget, cam->fov,
+                        static_cast<float>(cam->height));
+                    viewers.push_back({cam->position, eps});
                 }
             }
         }
     }
-    if (cams.empty()) return;
+    if (viewers.empty()) return;
 
     // 释放冷却（方案 A）：每帧推进一次帧计数器，作为各级 last_demand_frame 的基准。
     // 仅在确有相机（会真正评估需求级）时推进，避免无相机帧空转计数。
@@ -2336,16 +2313,15 @@ void GeometrySystem::reconcile_lod_residency() {
         }
         if (model_id == 0) continue;
 
-        // 世界中心（transform.position，与渲染端一致）+ 缩放因子。
-        // 缓存的 bounding_radius 是模型局部空间半径（0.5·diag(局部 AABB)），不含 actor 缩放。
-        // 屏占比 = r/(d·tan(fov/2))，若不乘 scale：放大的物体半径被低估 → 屏占比偏小 →
-        // 选到偏粗的 LOD；缩小的物体反之选过细。这里取缩放各分量绝对值最大者作为包围球的
-        // 等比上界（非均匀缩放下仍是有效外接半径），下方乘入 bounding_radius 后再选级。
-        ktm::fvec3 world_center{0.0f, 0.0f, 0.0f};
-        float      scale_factor = 1.0f;
+        // 取 actor transform 副本：完整矩阵把 mesh 局部 AABB 映到世界（求相机最近点距离），
+        // scale_factor 把模型空间几何误差放大到世界误差。一次 acquire，下方各 mesh 复用。
+        Corona::ModelTransform transform{};
+        bool have_transform = false;
+        float scale_factor = 1.0f;
         if (geom_dev.transform_handle) {
             if (auto tr = hub.model_transform_storage().try_acquire_read(geom_dev.transform_handle)) {
-                world_center = tr->position;
+                transform = *tr;
+                have_transform = true;
                 scale_factor = std::max({std::abs(tr->scale.x),
                                          std::abs(tr->scale.y),
                                          std::abs(tr->scale.z)});
@@ -2360,40 +2336,65 @@ void GeometrySystem::reconcile_lod_residency() {
             const uint64_t lod_key = Impl::make_lod_key(geom_handle, mesh_idx);
             ++impl_->diag_reconcile_mesh_visits;  // 诊断：处理的 (geom,mesh) 次数
 
-            // ---- 快照：级数 + 各级阈值（levels[1..N]）+ 包围半径 ----
-            std::vector<float> thresholds;
+            // ---- 快照：级数 + 各级世界误差 + mesh 局部 AABB ----
+            // world_errors[i] = geometric_error[i]·scale_factor（世界单位）；level 0 误差恒 0。
+            // 屏幕空间误差选级用：到 mesh 世界 AABB 最近点距离 d 处，角误差 = world_error/d，
+            // 与相机角预算 epsilon 比较。local AABB 经完整 transform 映到世界。
+            std::vector<float> world_errors;
+            ktm::fvec3 local_min{0.0f, 0.0f, 0.0f};
+            ktm::fvec3 local_max{0.0f, 0.0f, 0.0f};
             size_t level_count = 0;
-            float  bounding_radius = 1.0f;
+            bool   have_error_data = false;
             {
                 std::shared_lock lock(impl_->lod_cache_mutex);
                 auto cit = impl_->lod_cache.find(lod_key);
                 if (cit == impl_->lod_cache.end() || cit->second.model_id != model_id) continue;
                 level_count = cit->second.levels.size();
-                bounding_radius = cit->second.bounding_radius;
-                thresholds.reserve(level_count);
-                for (size_t i = 1; i < level_count; ++i)
-                    thresholds.push_back(cit->second.levels[i].screen_threshold);
+                local_min = make_fvec3(cit->second.local_aabb_min[0],
+                                       cit->second.local_aabb_min[1],
+                                       cit->second.local_aabb_min[2]);
+                local_max = make_fvec3(cit->second.local_aabb_max[0],
+                                       cit->second.local_aabb_max[1],
+                                       cit->second.local_aabb_max[2]);
+                world_errors.reserve(level_count);
+                for (size_t i = 0; i < level_count; ++i) {
+                    const float ge = cit->second.levels[i].geometric_error;
+                    world_errors.push_back(ge * scale_factor);
+                    if (i >= 1 && ge > 0.0f) have_error_data = true;
+                }
             }
             if (level_count <= 1) continue;  // 无简化级，无需 reconcile
 
-            // 计入 actor 缩放：缓存半径是局部空间，乘缩放上界得世界空间外接半径，
-            // 屏占比与选级才与物体在屏幕上的实际大小一致。
-            bounding_radius *= scale_factor;
-
-            // ---- 需求级 D：所有相机取最高精度（最小级号）+ 滞回门控 ----
-            // raw_demand = 各相机原始选级取最小（最高精度）；同时记录最大屏占比，
-            // 供滞回判定使用（多相机最高精度对应最大屏占比）。
-            int   raw_demand = static_cast<int>(level_count) - 1;
-            float max_sr     = 0.0f;
-            for (const auto& cam : cams) {
-                const float sr = compute_screen_ratio(cam.pos, cam.fov, world_center, bounding_radius);
-                max_sr = std::max(max_sr, sr);
-                raw_demand = std::min(raw_demand, select_lod_level(sr, thresholds));
+            // ---- 需求级 D：屏幕空间误差选级，所有观察者取最高精度（最小级号）----
+            // mesh 局部 AABB 经完整 transform（含 R/S/T）映到世界 → 对每个观察者求其到
+            // 世界 AABB 最近点距离 d → select_lod_by_error 返回「角误差 world_error/d ≤
+            // epsilon 的最粗一级」。多观察者取 min（任一视角的最高精度需求都要满足）。
+            // 无几何误差数据（旧资源未含 geometric_error）→ 回退旧屏占比阈值路径。
+            ktm::fvec3 world_min{0.0f, 0.0f, 0.0f};
+            ktm::fvec3 world_max{0.0f, 0.0f, 0.0f};
+            if (have_transform) {
+                Spatial::AABB world_aabb;
+                GeometryInternal::world_aabb_from_local_bounds(transform, local_min, local_max, world_aabb);
+                world_min = world_aabb.min;
+                world_max = world_aabb.max;
+            } else {
+                world_min = local_min;
+                world_max = local_max;
             }
-            if (raw_demand < 0) raw_demand = 0;
-            if (static_cast<size_t>(raw_demand) >= level_count) raw_demand = static_cast<int>(level_count) - 1;
 
-            // 读当前已提交级，应用滞回死区门控；落在死区内则维持原级（吸收边界抖动）。
+            // 滞回带（替代旧 select_lod_with_hysteresis）：用收紧/放宽的 epsilon 各算一次
+            // 聚合需求，构成死区。eps·(1+h) 偏粗（抗"变精细"），eps·(1-h) 偏精细（抗"变粗"）。
+            // 仅当方向明确越过死区才切换，吸收相机微动时的边界抖动。
+            auto aggregate_demand = [&](float eps_scale) -> int {
+                int dem = static_cast<int>(level_count) - 1;
+                for (const auto& v : viewers) {
+                    const float d = distance_point_to_aabb(v.pos, world_min, world_max);
+                    dem = std::min(dem, select_lod_by_error(d, world_errors, v.epsilon * eps_scale));
+                }
+                return dem;
+            };
+
+            // 读当前已提交级。
             int prev_committed = 0;
             {
                 std::shared_lock lock(impl_->lod_cache_mutex);
@@ -2401,8 +2402,24 @@ void GeometrySystem::reconcile_lod_residency() {
                 if (cit == impl_->lod_cache.end() || cit->second.model_id != model_id) continue;
                 prev_committed = cit->second.committed_demand;
             }
-            int demand = select_lod_with_hysteresis(prev_committed, raw_demand, max_sr,
-                                                    thresholds, Impl::kLodHysteresis);
+
+            int demand = prev_committed;
+            if (!have_error_data) {
+                // 回退：无 geometric_error 的旧资源仍按距离选级（误差全 0 → 恒 LOD0），
+                // 实际通常 level_count<=1 已被上面拦截；此处只防御性保持 prev。
+                demand = prev_committed;
+            } else {
+                const float h = Impl::kLodHysteresis;
+                const int demand_finer  = aggregate_demand(1.0f + h);  // 偏粗估计；仍 < prev 才允许变精细
+                const int demand_coarser = aggregate_demand(1.0f - h); // 偏细估计；仍 > prev 才允许变粗
+                if (demand_finer < prev_committed) {
+                    demand = demand_finer;
+                } else if (demand_coarser > prev_committed) {
+                    demand = demand_coarser;
+                } else {
+                    demand = prev_committed;  // 死区内：维持
+                }
+            }
             if (demand < 0) demand = 0;
             if (static_cast<size_t>(demand) >= level_count) demand = static_cast<int>(level_count) - 1;
 

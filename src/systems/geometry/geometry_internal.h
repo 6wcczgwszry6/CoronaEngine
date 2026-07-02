@@ -126,7 +126,18 @@ struct GeometrySystem::Impl {
         // 包围半径（Fix 1）：= 0.5·diag(Scene 局部 AABB)，模型空间恒定，upload 时算一次缓存。
         // reconcile 每帧选级只需此标量，从而无需每帧每 geom 再 acquire_read<Scene> 重算 AABB
         // （消除 diag 标注的"scene_acquires 每帧每 geom"卡顿源）；仅真正 build 时才取 Scene。
+        // [legacy] 旧屏占比选级用；screen-space-error 选级改用下方 per-mesh 局部 AABB。
         float bounding_radius = 1.0f;
+
+        // per-mesh 局部空间 AABB（screen-space-error 选级用）。upload 时从 Scene 的
+        // mesh.aabb_min/max 缓存（归一化模型空间，与 geometric_error 同空间）。
+        // reconcile 每帧用 world_aabb_from_local_bounds(transform, ...) 经完整 R/S/T 变换得
+        // mesh 世界 AABB → 算相机到最近点距离。这比"轴心 + 外接球"正确：
+        //   (1) per-mesh 而非整场景，小 mesh 不被大场景半径误判；
+        //   (2) 保留各向异性（扁平/细长物体不被外接球高估）；
+        //   (3) 距离基于几何 AABB 而非轴心，相机环绕几何中心时距离恒定 → 不再无谓跳级。
+        ktm::fvec3 local_aabb_min{0.0f, 0.0f, 0.0f};
+        ktm::fvec3 local_aabb_max{0.0f, 0.0f, 0.0f};
     };
 
     mutable std::shared_mutex          lod_cache_mutex;
@@ -202,6 +213,14 @@ struct GeometrySystem::Impl {
     //   升精度(L→L-1)：screen_ratio 必须 > threshold[L-1] * (1 + h)
     // h=0.15 给出约 ±15% 的死区，正常运动平滑切换、边界抖动被吸收。
     static constexpr float kLodHysteresis = 0.15f;
+
+    // 屏幕空间像素误差预算（screen-space error 选级）：某级简化误差投影到主相机
+    // 屏幕后超过此像素数才弃用该级（选更精细级）。等价于"以相机为中心的角预算"
+    //   ε = 2·budget_px·tan(fov/2)/height_px
+    // 主相机用本预算 + 自身 fov/分辨率换算 ε；选级判据 geometric_error·scale / d ≤ ε，
+    // 全方向有定义（相机背后物体同样选级），故未来 GI 观察者可复用同一路径。
+    // 1.5px：误差小于约 1.5 像素即视觉无感，可安全切粗级。
+    static constexpr float kLodPixelErrorBudget = 1.5f;
 
     // ========================================
     // LRU ActorCache（M3 生产化）

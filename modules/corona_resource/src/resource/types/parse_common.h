@@ -1278,6 +1278,15 @@ inline std::vector<LODLevel> generate_lod_levels_adaptive(
 
     const size_t T0 = indices_u32.size() / 3;
 
+    // meshopt 的 result_error 是相对归一化偏差；乘 simplifyScale 得模型空间（object-space）
+    // 绝对误差，供运行时屏幕空间/角度误差选级使用（screen-space error LOD）。
+    // 顶点已在 import 时归一化，故此 scale 与运行时 actor scale 互补：
+    //   world_error = geometric_error * actor_scale。一次算好缓存。
+    const float simplify_scale =
+        vertices.empty() ? 1.0f
+                         : meshopt_simplifyScale(&vertices[0].position[0],
+                                                 vertices.size(), sizeof(Vertex));
+
     // 相对比例下限（+ 可选绝对下限）。蒙皮网格更保守（静止误差对动画偏乐观）。
     const float min_ratio_eff = has_bones ? options.skinned_min_ratio : options.min_ratio;
     const float ratio = std::max(0.0f, std::min(min_ratio_eff, 1.0f));
@@ -1357,6 +1366,9 @@ inline std::vector<LODLevel> generate_lod_levels_adaptive(
             indices_u32.size(), lod_label);
 
         level.error = result_error;
+        // 模型空间绝对误差（screen-space error LOD 的核心输入）：result_error 为归一化
+        // 相对偏差，× simplify_scale 转模型空间。运行时再 × actor_scale 得世界误差。
+        level.geometric_error = result_error * simplify_scale;
         // 切换阈值按"实际三角形保留比例 r = 该级三角形 / LOD0"推导：
         //   screen_threshold = clamp(sqrt(r) * kAggr)
         // r 恒在 (0,1]，跨网格稳定；保留比例越低（越粗）→ 阈值越小 → 物体越小才用，
@@ -1440,6 +1452,12 @@ inline std::vector<LODLevel> generate_lod_levels(
         lock_ptr = &seam_locks;
     }
 
+    // meshopt 误差为归一化量（相对网格尺度）；乘 simplifyScale 转模型空间绝对误差，
+    // 供运行时 screen-space-error 选级（geometric_error）。与自适应路径同源。
+    const float simplify_scale = (!vertices.empty())
+        ? meshopt_simplifyScale(&vertices[0].position[0], vertices.size(), sizeof(Vertex))
+        : 1.0f;
+
     for (std::uint32_t i = 0; i < actual_levels; ++i) {
         float ratio = options.target_ratios[i];
         float level_max_error = options.max_errors[i];
@@ -1494,8 +1512,10 @@ inline std::vector<LODLevel> generate_lod_levels(
             indices_u32.size(), lod_label);
 
         level.error = result_error;
-        // 旧反比公式（保持 legacy 行为）
+        // 旧反比公式（保持 legacy 行为，作为无 geometric_error 时的回退阈值）
         level.screen_threshold = (result_error > 0.0f) ? std::max(0.01f, 1.0f / (1.0f + result_error * 80.0f)) : 0.0f;
+        // 模型空间绝对几何误差（运行时 screen-space-error 选级主用）
+        level.geometric_error = result_error * simplify_scale;
 
         (void)ratio;
         levels.push_back(std::move(level));

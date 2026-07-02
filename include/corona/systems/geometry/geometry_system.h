@@ -117,7 +117,11 @@ struct LODMeshBuffers {
     Horizon::HardwareBuffer vertex_storage;   // GPU 顶点 StorageBuffer（Compute Shader 用）
     Horizon::HardwareBuffer index_storage;    // GPU 索引 StorageBuffer（Compute Shader 用）
     float  error            = 0.0f;  // 该级别的几何误差（QEM 计算得出，用于调试）
-    float  screen_threshold = 1.0f;  // 屏幕占比阈值：低于此值时切换到此级别
+    float  screen_threshold = 1.0f;  // 屏幕占比阈值：低于此值时切换到此级别（legacy 回退用）
+    // 模型空间几何误差（meshopt result_error × simplifyScale）。运行时 × actor_scale 得
+    // 世界单位误差，再除以相机到 mesh 世界 AABB 最近点距离得角误差，与相机角预算 ε 比较选级。
+    // LOD0 恒为 0（无简化误差）。这是 screen-space-error 选级的核心量，取代 screen_threshold。
+    float  geometric_error  = 0.0f;
     bool   ready            = false; // GPU 缓冲是否已创建完毕（创建前不能用于渲染）
     std::uint32_t vertex_count = 0;  // 该级别顶点数（调试/诊断用）
     std::uint32_t index_count  = 0;  // 该级别索引数（调试/诊断用）
@@ -269,9 +273,39 @@ class GeometrySystem : public Kernel::SystemBase {
                                       const ktm::fvec3& world_center,
                                       float              bounding_radius);
 
-    /// 根据屏幕占比选择 LOD 等级（0 = 原始网格）
+    /// 根据屏幕占比选择 LOD 等级（0 = 原始网格）。
+    /// 旧屏占比路径：仍保留供无几何误差数据的资源 fallback。
     static int select_lod_level(float                     screen_ratio,
                                 const std::vector<float>& thresholds);
+
+    // ---- 屏幕空间误差选级（统一相机/GI 的球形角预算模型）----
+    //
+    // 核心恒等：屏幕像素误差 = 角误差 × 焦距(px)。投影/FOV/分辨率全部塌缩进单个
+    // 标量角预算 epsilon = pixel_budget · 2·tan(fov/2) / height_px。于是选级判据
+    //   world_error / d ≤ epsilon
+    // 是纯球形量（只看距离、与方向无关）→ 相机背后物体（GI 需要）同样有定义。
+    //
+    // d 取「相机到 mesh 世界 AABB 最近点」的距离：保留各向异性（扁平/细长物体不被
+    // 外接球高估），且不受轴心(pivot)偏移影响（消除环绕跳级）。相机进入 AABB → d→0
+    // → 角误差→∞ → 强制最高精度 LOD0，天然正确，无需 d=max(d,r) 补丁。
+
+    /// 相机到一个世界空间 AABB 的最近点欧氏距离（点在盒内时为 0）。
+    static float distance_point_to_aabb(const ktm::fvec3& p,
+                                        const ktm::fvec3& aabb_min,
+                                        const ktm::fvec3& aabb_max);
+
+    /// 相机角预算 epsilon：把像素预算换算成「每弧度多少世界误差可接受」的角阈值。
+    /// height_px 为相机渲染高度（像素），fov_deg 为垂直 FOV（度）。
+    static float compute_angular_epsilon(float pixel_budget,
+                                         float fov_deg,
+                                         float height_px);
+
+    /// 屏幕空间误差选级：给定到 mesh 最近点距离 d、各级世界误差（world_errors[i] =
+    /// geometric_error[i]·actor_scale，下标与 levels 对齐，level 0 误差为 0），以及相机角
+    /// 预算 epsilon，返回「角误差仍 ≤ epsilon 的最粗一级」。0 = LOD0（最高精度）。
+    static int select_lod_by_error(float                     distance_to_aabb,
+                                   const std::vector<float>& world_errors,
+                                   float                     epsilon);
 
     // ========================================
     // 动态减面 (Mesh Simplification) API
