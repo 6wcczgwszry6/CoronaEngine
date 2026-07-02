@@ -3,6 +3,7 @@ import shutil
 import configparser
 import datetime
 import logging
+import json
 
 from CoronaCore.utils.proejct_utils import (
     create_project_from_template,
@@ -19,6 +20,63 @@ def _safe_project_dir_name(name, fallback):
     safe_name = "".join("_" if c in '<>:"/\\|?*' else c for c in raw_name)
     safe_name = safe_name.strip(" .")
     return safe_name or "project"
+
+
+def _ensure_vision_camera_defaults(scene_config):
+    if 'camera' not in scene_config:
+        scene_config['camera'] = {}
+    scene_config['camera'].setdefault('count', '1')
+    scene_config['camera'].setdefault('active_id', '')
+    scene_config['camera']['camera0.render_backend'] = 'vision'
+    scene_config['camera'].setdefault('camera0.vision_render_mode', 'path_tracing')
+    scene_config['camera'].setdefault('camera0.output_mode', 'final_color')
+
+
+def _ensure_native_vision_metadata(project_path):
+    project_ini = os.path.join(project_path, "project.ini")
+    project_config = configparser.ConfigParser()
+    project_config.read(project_ini, encoding='utf-8')
+    entrance = project_config.get('Project', 'entrance_scene', fallback='').strip()
+    if not entrance:
+        return
+
+    scene_file = os.path.join(project_path, *entrance.replace('\\', '/').split('/'))
+    if not os.path.isfile(scene_file):
+        return
+
+    scene_config = configparser.ConfigParser()
+    scene_config.read(scene_file, encoding='utf-8')
+    vision_source_path = scene_config.get('vision', 'source_path', fallback='').strip()
+    if vision_source_path:
+        _ensure_vision_camera_defaults(scene_config)
+        with open(scene_file, 'w', encoding='utf-8') as f:
+            scene_config.write(f)
+        return
+
+    if 'vision_document' not in scene_config:
+        return
+
+    section = scene_config['vision_document']
+    if section.get('encoding', '') != 'zlib_base64_json' or not section.get('data', ''):
+        return
+
+    from CoronaCore.core.entities.scene import _decode_vision_document
+    document = _decode_vision_document(section.get('data', ''))
+    runtime_dir = os.path.join(project_path, ".corona", "vision_runtime")
+    os.makedirs(runtime_dir, exist_ok=True)
+    scene_stem = os.path.splitext(os.path.basename(scene_file))[0] or "scene"
+    runtime_path = os.path.join(runtime_dir, f"{scene_stem}_embedded.json")
+    with open(runtime_path, 'w', encoding='utf-8') as f:
+        json.dump(document, f, ensure_ascii=False)
+
+    runtime_route = os.path.relpath(runtime_path, project_path).replace('\\', '/')
+    scene_config['vision'] = {
+        'source_path': runtime_route,
+        'import_mode': 'external_live',
+    }
+    _ensure_vision_camera_defaults(scene_config)
+    with open(scene_file, 'w', encoding='utf-8') as f:
+        scene_config.write(f)
 
 
 class ProjectCopy:
@@ -86,6 +144,7 @@ class ProjectCopy:
 
         try:
             normalize_project_runtime_paths(project_path)
+            _ensure_native_vision_metadata(project_path)
             project_ini = os.path.join(project_path, "project.ini")
             update_project_config(project_ini, update_only_time=True)
             settings_manager.set_active_project(project_path)

@@ -550,6 +550,28 @@ void apply_native_scene_environment(NativeEditorScene& scene) {
     scene.environment->set_sky_intensity(scene.sun_enabled ? 20.0f : 0.0f);
 }
 
+void apply_native_scene_vision_source(const NativeEditorScene& scene) {
+    const auto source_path = normalize_route(scene.vision_source_path);
+    if (source_path.empty()) {
+        Corona::API::load_vision_scene("");
+        return;
+    }
+
+    const auto resolved = resolve_project_path(scene.project_root, source_path);
+    Corona::API::load_vision_scene(path_to_utf8(resolved));
+}
+
+void apply_native_scene_vision_camera_defaults(NativeEditorScene& scene) {
+    if (normalize_route(scene.vision_source_path).empty() || scene.cameras.empty()) {
+        return;
+    }
+    auto& camera = scene.cameras[std::min(scene.active_camera_index, scene.cameras.size() - 1)];
+    if (camera.engine_camera) {
+        camera.engine_camera->set_render_backend("vision");
+        camera.engine_camera->set_output_mode("final_color");
+    }
+}
+
 std::filesystem::path resolve_native_actor_asset_path(const NativeEditorScene& scene,
                                                       NativeEditorActor& item) {
     if (item.actor_type != "actor" || to_lower_ascii(actor_file_extension(item.route)) != "actor") {
@@ -796,8 +818,10 @@ std::unique_ptr<NativeEditorScene> load_native_scene(const std::filesystem::path
     if (!scene->cameras.empty()) {
         scene->engine_scene->set_active_camera(scene->cameras[scene->active_camera_index].engine_camera.get());
     }
+    apply_native_scene_vision_camera_defaults(*scene);
     scene->engine_scene->set_simulation_enabled(true);
     scene->engine_scene->set_enabled(true);
+    apply_native_scene_vision_source(*scene);
     return scene;
 }
 
