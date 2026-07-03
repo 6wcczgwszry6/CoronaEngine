@@ -21,6 +21,7 @@
 #include <exception>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <system_error>
@@ -1089,6 +1090,10 @@ template <typename T>
     return Corona::Horizon::HardwareBuffer(desc);
 }
 
+// instance/material 表容量（init 与池租用的 factory 共用同一上限）。
+constexpr uint32_t kMaxInstances = 4096;
+constexpr uint32_t kMaxMaterials = 1024;
+
 template <typename T>
 bool write_object_bytes(const Corona::Horizon::HardwareBuffer& buffer, const T& value) {
     return buffer.write_bytes(std::as_bytes(std::span<const T>(&value, 1)));
@@ -1100,6 +1105,7 @@ bool write_array_bytes(const Corona::Horizon::HardwareBuffer& buffer,
                        std::size_t count) {
     return buffer.write_bytes(std::as_bytes(std::span<const T>(data, count)));
 }
+
 
 [[nodiscard]] bool has_native_local_correction(const Corona::GeometryDevice& geom) {
     const auto& offset = geom.native_local_correction_offset;
@@ -2071,8 +2077,7 @@ bool OpticsSystem::initialize_hardware_resources() {
             make_storage_buffer<Hardware::VPUniformBufferObject>(1, "optics.ui_vp_uniform");
 
         // --- Instance & Material table buffers (pre-allocate reasonable capacity) ---
-        constexpr uint32_t kMaxInstances = 4096;
-        constexpr uint32_t kMaxMaterials = 1024;
+        // 容量常量 kMaxInstances/kMaxMaterials 提到文件作用域，与池租用 factory 共用。
         hardware_->instanceInfoBuffer =
             make_storage_buffer<Hardware::InstanceInfo>(kMaxInstances, "optics.instances");
         hardware_->uiInstanceInfoBuffer =
@@ -2605,7 +2610,28 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 hardware_->uniformBufferObjects.eyeInvProjMatrix =
                     make_inverse_projection_matrix(*camera);
                 hardware_->vpUniformBufferObjects.viewProjMatrix = camera->compute_view_proj_matrix();
-                (void)write_object_bytes(hardware_->vpUniformBuffer,
+
+                // ---- Per-submission buffer 租用（消除跨帧/跨相机共享 buffer 覆盖竞争）----
+                // 从池各租一份当前无 GPU 在用的 buffer，本相机 pass 全程改用这些 lease，
+                // 不再触碰 hardware_->*Buffer 单例（单例仅留给已 wait_idle 的冷路径）。
+                // commit 前会 stream << keep_alive(busy)，GPU 用完自动回池复用。
+                auto vpLease = hardware_->vpUniformBufferPool.acquire(
+                    [] { return make_storage_buffer<Hardware::VPUniformBufferObject>(1, "optics.vp_uniform.pool"); });
+                auto uboLease = hardware_->uniformBufferPool.acquire(
+                    [] { return make_storage_buffer<Hardware::UniformBufferObject>(1, "optics.uniform.pool"); });
+                auto shadowLease = hardware_->shadowInfoBufferPool.acquire(
+                    [] { return make_storage_buffer<Hardware::ShadowInfoBufferObject>(1, "optics.shadow_info.pool"); });
+                auto instLease = hardware_->instanceInfoBufferPool.acquire(
+                    [] { return make_storage_buffer<Hardware::InstanceInfo>(kMaxInstances, "optics.instances.pool"); });
+                auto matLease = hardware_->materialTableBufferPool.acquire(
+                    [] { return make_storage_buffer<Hardware::MaterialInfo>(kMaxMaterials, "optics.materials.pool"); });
+                Horizon::HardwareBuffer& sceneVpBuffer = *vpLease.buffer;
+                Horizon::HardwareBuffer& sceneUboBuffer = *uboLease.buffer;
+                Horizon::HardwareBuffer& sceneShadowBuffer = *shadowLease.buffer;
+                Horizon::HardwareBuffer& sceneInstanceBuffer = *instLease.buffer;
+                Horizon::HardwareBuffer& sceneMaterialBuffer = *matLease.buffer;
+
+                (void)write_object_bytes(sceneVpBuffer,
                                          hardware_->vpUniformBufferObjects);
 
                 // Configure visibility pipeline render targets
@@ -2986,7 +3012,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     }
                 };
 
-                const uint32_t sceneVpDescriptor = hardware_->vpUniformBuffer.storeDescriptor();
+                const uint32_t sceneVpDescriptor = sceneVpBuffer.storeDescriptor();
                 (void)sceneVpDescriptor;
                 {
                     const auto native_collect_start = PerfClock::now();
@@ -2997,8 +3023,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                                      nullptr,
                                                      sceneBatch);
                     upload_instance_tables(sceneBatch,
-                                           hardware_->instanceInfoBuffer,
-                                           hardware_->materialTableBuffer);
+                                           sceneInstanceBuffer,
+                                           sceneMaterialBuffer);
                     native_collect_ms = elapsed_ms(native_collect_start, PerfClock::now());
                     native_instance_count = static_cast<uint32_t>(sceneBatch.instances.size());
                 }
@@ -3060,12 +3086,12 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 hardware_->shadowInfoBufferObjects.shadowEnabled =
                     sun_intensity > 0.0f ? 1u : 0u;
                 native_shadows_enabled = hardware_->shadowInfoBufferObjects.shadowEnabled != 0u;
-                (void)write_object_bytes(hardware_->shadowInfoBuffer,
+                (void)write_object_bytes(sceneShadowBuffer,
                                          hardware_->shadowInfoBufferObjects);
 
-                (void)write_object_bytes(hardware_->uniformBuffer,
+                (void)write_object_bytes(sceneUboBuffer,
                                          hardware_->uniformBufferObjects);
-                const uint32_t uboDescriptor = hardware_->uniformBuffer.storeDescriptor();
+                const uint32_t uboDescriptor = sceneUboBuffer.storeDescriptor();
                 const uint32_t depthSampledDescriptor =
                     hardware_->depthImage.storeSampledDescriptor();
 
@@ -3096,9 +3122,9 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     hardware_->visibilityImage.storeStorageDescriptor();
                 ssao.pushConsts.depthImageIndex = depthSampledDescriptor;
                 ssao.pushConsts.instanceInfoBufferIndex =
-                    hardware_->instanceInfoBuffer.storeDescriptor();
+                    sceneInstanceBuffer.storeDescriptor();
                 ssao.pushConsts.vpBufferIndex =
-                    hardware_->vpUniformBuffer.storeDescriptor();
+                    sceneVpBuffer.storeDescriptor();
                 ssao.pushConsts.uniformBufferIndex = uboDescriptor;
                 ssao.pushConsts.outputImageIndex = ssaoRawStorageDescriptor;
                 ssao.pushConsts.radius = kSsaoRadius;
@@ -3121,11 +3147,11 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     hardware_->visibilityImage.storeStorageDescriptor();
                 lighting.pushConsts.depthImageIndex = depthSampledDescriptor;
                 lighting.pushConsts.instanceInfoBufferIndex =
-                    hardware_->instanceInfoBuffer.storeDescriptor();
+                    sceneInstanceBuffer.storeDescriptor();
                 lighting.pushConsts.materialTableBufferIndex =
-                    hardware_->materialTableBuffer.storeDescriptor();
+                    sceneMaterialBuffer.storeDescriptor();
                 lighting.pushConsts.vpBufferIndex =
-                    hardware_->vpUniformBuffer.storeDescriptor();
+                    sceneVpBuffer.storeDescriptor();
                 lighting.pushConsts.finalOutputImage = finalOutputDescriptor;
                 lighting.pushConsts.uniformBufferIndex = uboDescriptor;
                 lighting.bind_storage_image(0, hardware_->visibilityImage);
@@ -3137,7 +3163,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 lighting.pushConsts.shadowEnabled =
                     hardware_->shadowInfoBufferObjects.shadowEnabled;
                 lighting.pushConsts.shadowInfoBufferIndex =
-                    hardware_->shadowInfoBuffer.storeDescriptor();
+                    sceneShadowBuffer.storeDescriptor();
                 lighting.pushConsts.shadowCascadeDebug =
                     camera->shadow_cascade_debug ? 1u : 0u;
                 lighting.pushConsts.ssaoImageIndex = ssaoBlurredSampledDescriptor;
@@ -3277,16 +3303,16 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                 hardware_->visibilityImage.storeSampledDescriptor();
                             debugResolve.pushConsts.depthImageIndex = depthSampledDescriptor;
                             debugResolve.pushConsts.instanceInfoBufferIndex =
-                                hardware_->instanceInfoBuffer.storeDescriptor();
+                                sceneInstanceBuffer.storeDescriptor();
                             debugResolve.pushConsts.materialTableBufferIndex =
-                                hardware_->materialTableBuffer.storeDescriptor();
+                                sceneMaterialBuffer.storeDescriptor();
                             debugResolve.pushConsts.vpBufferIndex =
-                                hardware_->vpUniformBuffer.storeDescriptor();
+                                sceneVpBuffer.storeDescriptor();
                             debugResolve.pushConsts.outputImageIndex = finalOutputDescriptor;
                             debugResolve.pushConsts.debugMode = debugMode;
                             debugResolve.pushConsts.uniformBufferIndex = uboDescriptor;
                             debugResolve.pushConsts.shadowInfoBufferIndex =
-                                hardware_->shadowInfoBuffer.storeDescriptor();
+                                sceneShadowBuffer.storeDescriptor();
                             debugResolve.pushConsts.shadowCascadeDebug =
                                 camera->shadow_cascade_debug ? 1u : 0u;
                             debugResolve.pushConsts.ssaoImageIndex =
@@ -3337,6 +3363,14 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     }
 
                     const auto native_commit_start = PerfClock::now();
+                    // 保活本相机租用的 buffer 至 GPU 完成：executor 持有这些 busy 哨兵，
+                    // 直到本 submission 的 timeline semaphore 完成才 retire 掉，届时 busy
+                    // use_count 落回 1，池方可复用该 buffer。这是消除覆盖竞争的关键。
+                    stream << Horizon::keep_alive(vpLease.busy)
+                           << Horizon::keep_alive(uboLease.busy)
+                           << Horizon::keep_alive(shadowLease.busy)
+                           << Horizon::keep_alive(instLease.busy)
+                           << Horizon::keep_alive(matLease.busy);
                     latest_submit_receipt = stream << Horizon::commit();
                     native_commit_ms = elapsed_ms(native_commit_start, PerfClock::now());
                     native_submit_ms = elapsed_ms(native_submit_start, PerfClock::now());
@@ -3489,9 +3523,15 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
 
     hardware_->vpUniformBufferObjects.viewProjMatrix =
         multiply_ktm_mat4(ortho_proj, camera.compute_view_matrix());
-    (void)write_object_bytes(hardware_->uiVpUniformBuffer,
+    // UI overlay pass 同样每相机重写共享 buffer，与场景 pass 同一竞争；改为池租用。
+    // keep_alive 挂在传入的 stream 上（与本 overlay 的 dispatch 同一 submission）。
+    auto uiVpLease = hardware_->uiVpUniformBufferPool.acquire(
+        [] { return make_storage_buffer<Hardware::VPUniformBufferObject>(1, "optics.ui_vp_uniform.pool"); });
+    Horizon::HardwareBuffer& uiVpBuffer = *uiVpLease.buffer;
+    (void)write_object_bytes(uiVpBuffer,
                              hardware_->vpUniformBufferObjects);
-    const uint32_t uiVpDescriptor = hardware_->uiVpUniformBuffer.storeDescriptor();
+    const uint32_t uiVpDescriptor = uiVpBuffer.storeDescriptor();
+    stream << Horizon::keep_alive(uiVpLease.busy);
 
     uiVisibility.visibilityData = hardware_->uiVisibilityImage;
     uiVisibility.bind_depth_target(hardware_->uiDepthImage);
@@ -3546,17 +3586,25 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
 
     const uint32_t overlayDescriptor = target.ui_overlay.storeStorageDescriptor();
     if (has_follow_camera_instances) {
+        auto uiInstLease = hardware_->uiInstanceInfoBufferPool.acquire(
+            [] { return make_storage_buffer<Hardware::InstanceInfo>(kMaxInstances, "optics.ui_instances.pool"); });
+        auto uiMatLease = hardware_->uiMaterialTableBufferPool.acquire(
+            [] { return make_storage_buffer<Hardware::MaterialInfo>(kMaxMaterials, "optics.ui_materials.pool"); });
+        Horizon::HardwareBuffer& uiInstanceBuffer = *uiInstLease.buffer;
+        Horizon::HardwareBuffer& uiMaterialBuffer = *uiMatLease.buffer;
         upload_instance_tables(uiBatch,
-                               hardware_->uiInstanceInfoBuffer,
-                               hardware_->uiMaterialTableBuffer);
+                               uiInstanceBuffer,
+                               uiMaterialBuffer);
+        stream << Horizon::keep_alive(uiInstLease.busy)
+               << Horizon::keep_alive(uiMatLease.busy);
 
         opticsOverlay.pushConsts.gbufferSize = upload_value(hardware_->gbufferSize);
         opticsOverlay.pushConsts.visibilityImageIndex =
             hardware_->uiVisibilityImage.storeStorageDescriptor();
         opticsOverlay.pushConsts.instanceInfoBufferIndex =
-            hardware_->uiInstanceInfoBuffer.storeDescriptor();
+            uiInstanceBuffer.storeDescriptor();
         opticsOverlay.pushConsts.materialTableBufferIndex =
-            hardware_->uiMaterialTableBuffer.storeDescriptor();
+            uiMaterialBuffer.storeDescriptor();
         opticsOverlay.pushConsts.vpBufferIndex = uiVpDescriptor;
         opticsOverlay.pushConsts.outputImage = overlayDescriptor;
         opticsOverlay.bind_storage_image(0, hardware_->uiVisibilityImage);

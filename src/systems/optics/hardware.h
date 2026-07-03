@@ -8,7 +8,9 @@
 #include "Codegen/TypeAlias.h"
 
 #include <array>
+#include <memory>
 #include <optional>
+#include <vector>
 
 // clang-format off
 #include GLSL(../../../assets/shaders/visibility.vert.glsl)
@@ -32,6 +34,58 @@
 #include GLSL(../../../assets/shaders/vision_resolve.comp.glsl)
 #endif
 // clang-format on
+
+// ============================================================================
+// FramePlaceBufferPool — 消除 V-buffer 共享 buffer 的跨帧/跨相机覆盖竞争
+// ============================================================================
+// 背景：V-buffer 延迟着色第 2 趟（lighting/ssao/debug_resolve/overlay compute）
+// 在 GPU 执行时才从 SSBO 回读 vp / instance / material / ubo / shadow 表，重投影
+// 三角形算重心坐标→UV。这些表原本是 Hardware 的单例，CPU 每相机/每帧立即 memcpy
+// 覆写、commit 又异步不等待——于是前一相机的 compute 还在飞，其读取的 buffer 已被
+// 下一相机的 CPU 写覆盖，导致纹理错位（错误 VP）与 LOD 闪烁（错误 instance 表）。
+// Vulkan barrier 只能串行化 GPU-GPU，管不了 CPU memcpy，故必须换缓冲。
+//
+// 本池按 per-submission 租用：acquire() 返回一份当前无 GPU 在用的 buffer；调用方写
+// 它、取 storeDescriptor() 进 push constant，并在 commit 前 `stream << keep_alive(busy)`。
+// GPU 完成后 executor retire() 会 drop 该 busy 哨兵（device_manager.cpp:332），使
+// busy.use_count() 落回 1，下次 acquire 即可复用。每次 commit 内 Queue::acquire()
+// 都先 retire_completed()，故完成即回收，池稳态大小 = 实际在飞 submission 数。
+//
+// 为何用哨兵 shared_ptr 而非直接查 buffer：HardwareBuffer 的引用计数是 private，
+// 外部不可查；horizon 也无公开的 completion-poll。哨兵是唯一可观测的在飞标记。
+class FramePlaceBufferPool {
+public:
+    struct Lease {
+        Corona::Horizon::HardwareBuffer* buffer{nullptr};
+        std::shared_ptr<int> busy;  // 传给 stream << keep_alive(busy)
+    };
+
+    // factory: 无空闲槽时用它新建底层 buffer（尺寸/类型由调用方闭包决定）。
+    template <typename Factory>
+    Lease acquire(Factory&& factory) {
+        for (auto& slot : slots_) {
+            // busy 为空（从未租出）或仅池自己持有（use_count()==1，GPU 已完成并
+            // retire 掉哨兵）→ 该槽空闲，可复用其已建好的 buffer。
+            if (!slot.busy || slot.busy.use_count() == 1) {
+                slot.busy = std::make_shared<int>(0);
+                return Lease{&slot.buffer, slot.busy};
+            }
+        }
+        // 全部在飞 → 新增一槽（稳态极少触发；池大小自适应收敛到在飞数）。
+        Slot slot;
+        slot.buffer = factory();
+        slot.busy = std::make_shared<int>(0);
+        slots_.push_back(std::move(slot));
+        return Lease{&slots_.back().buffer, slots_.back().busy};
+    }
+
+private:
+    struct Slot {
+        Corona::Horizon::HardwareBuffer buffer;
+        std::shared_ptr<int> busy;  // nullptr=从未用；use_count()>1=GPU 在飞
+    };
+    std::vector<Slot> slots_;
+};
 
 struct Hardware {
     // === Visibility Buffer (replaces GBuffer rasterization output) ===
@@ -61,6 +115,18 @@ struct Hardware {
     Corona::Horizon::HardwareBuffer actorPickBuffer;
     Corona::Horizon::HardwareBuffer skyIrradianceSHBuffer;  // 9 vec3 SH coeffs (sky-driven ambient)
     Corona::Horizon::HardwareBuffer shadowInfoBuffer;
+
+    // === Per-submission buffer 池（消除 V-buffer 共享 buffer 跨帧/跨相机覆盖竞争）===
+    // 上面这些 *Buffer 单例的语义已改为"每相机从对应池租一份写入"，见 optics_system.cpp
+    // 场景/overlay pass。单例本身仅保留给冷路径（actor-pick/screenshot，均已 wait_idle）。
+    FramePlaceBufferPool vpUniformBufferPool;
+    FramePlaceBufferPool uniformBufferPool;
+    FramePlaceBufferPool shadowInfoBufferPool;
+    FramePlaceBufferPool instanceInfoBufferPool;
+    FramePlaceBufferPool materialTableBufferPool;
+    FramePlaceBufferPool uiVpUniformBufferPool;
+    FramePlaceBufferPool uiInstanceInfoBufferPool;
+    FramePlaceBufferPool uiMaterialTableBufferPool;
 
     // === Shader pipelines ===
     bool shaderHasInit = false;
