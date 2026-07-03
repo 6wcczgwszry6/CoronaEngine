@@ -7,6 +7,24 @@
 
 namespace Corona::Systems::UI {
 
+namespace {
+
+bool should_log_rpc_route(const NativeRequest& request) {
+    return request.module == "ProjectLauncher" || request.module == "MainView";
+}
+
+std::string compact_rpc_json(const nlohmann::json& value) {
+    auto text = value.dump();
+    constexpr size_t max_length = 512;
+    if (text.size() > max_length) {
+        text.resize(max_length);
+        text += "...";
+    }
+    return text;
+}
+
+}  // namespace
+
 BrowserSideJSHandler::~BrowserSideJSHandler() {
     if (!Py_IsInitialized()) {
         pFunc_ = nullptr;
@@ -91,11 +109,31 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
     }
 
     register_builtin_native_rpc_handlers();
+    const bool log_route = should_log_rpc_route(native_request);
+    if (log_route) {
+        CFW_LOG_INFO("CEF RPC request {}.{} args={}",
+                     native_request.module,
+                     native_request.function,
+                     compact_rpc_json(native_request.args));
+    }
     NativeContext native_context{browser, frame, query_id};
     if (auto native_result = NativeRpcRegistry::instance().dispatch(native_request, native_context)) {
         if (native_result->success) {
+            if (log_route) {
+                CFW_LOG_INFO("CEF RPC native success {}.{} route={}",
+                             native_request.module,
+                             native_request.function,
+                             native_result->route);
+            }
             callback->Success(native_success_json(native_request, *native_result));
         } else {
+            if (log_route) {
+                CFW_LOG_ERROR("CEF RPC native failure {}.{} route={} error={}",
+                              native_request.module,
+                              native_request.function,
+                              native_result->route,
+                              native_result->error);
+            }
             callback->Failure(native_result->error_code, native_result->error);
         }
         return true;
@@ -107,7 +145,17 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
         callback->Success(unsupported_python_route_json(native_request));
         return true;
     }
+    if (log_route) {
+        CFW_LOG_INFO("CEF RPC python fallback {}.{}",
+                     native_request.module,
+                     native_request.function);
+    }
     if (!Py_IsInitialized()) {
+        if (log_route) {
+            CFW_LOG_ERROR("CEF RPC python unavailable {}.{}",
+                          native_request.module,
+                          native_request.function);
+        }
         callback->Failure(503, "Python backend is not initialized");
         return true;
     }

@@ -531,19 +531,12 @@ class Scene:
 
         if 'vision' in self.file_data:
             self.file_data.remove_section('vision')
-        vision_document = getattr(self, 'vision_document', None)
-        if vision_document is not None:
-            self.file_data['vision_document'] = {
-                'encoding': VISION_DOCUMENT_ENCODING,
-                'version': VISION_DOCUMENT_VERSION,
-                'data': _encode_vision_document(vision_document),
-            }
-        elif 'vision_document' in self.file_data:
+        if 'vision_document' in self.file_data:
             self.file_data.remove_section('vision_document')
-
-        self._write_indexed_section('vision_bindings', getattr(self, 'vision_bindings', []))
-        self._write_indexed_section('vision_unsupported_shapes',
-                                    getattr(self, 'vision_unsupported_shapes', []))
+        if 'vision_bindings' in self.file_data:
+            self.file_data.remove_section('vision_bindings')
+        if 'vision_unsupported_shapes' in self.file_data:
+            self.file_data.remove_section('vision_unsupported_shapes')
 
         # 相机数据
         self.file_data['camera'] = {}

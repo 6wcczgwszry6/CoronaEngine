@@ -940,8 +940,8 @@ inline void optimize_mesh_for_gpu(std::vector<Vertex>& vertices,
 inline MeshOptimizeResult optimize_mesh_pipeline(
     std::vector<Vertex>& unindexed_vertices,
     std::vector<std::uint32_t>& indices,
-    bool /*simplify_mesh*/,          // 忽略：始终简化
-    float /*simplification_error*/,  // 忽略：使用渐进式误差
+    bool simplify_mesh,
+    float /*simplification_error*/,  // 渐进式简化路径使用固定误差阶梯
     const std::string& mesh_name,
     const std::vector<BoneWeights>* bone_weights = nullptr) {
     MeshOptimizeResult result;
@@ -953,6 +953,66 @@ inline MeshOptimizeResult optimize_mesh_pipeline(
     if (!can_simplify) {
         CFW_LOG_WARNING("[MeshOpt] Mesh '{}' cannot be simplified (not a triangle mesh or empty), skipping simplification",
                         mesh_name);
+        return result;
+    }
+
+    std::vector<unsigned int> remap(unindexed_vertices.size());
+    const size_t unique_vertex_count = generate_vertex_remap_rig_aware(
+        remap, indices, unindexed_vertices, bone_weights);
+
+    if (!simplify_mesh) {
+        if (unique_vertex_count <= kMaxVerticesUint16) {
+            result.indices.resize(indices.size());
+            meshopt_remapIndexBuffer(result.indices.data(), indices.data(),
+                                     indices.size(), remap.data());
+
+            result.vertices.resize(unique_vertex_count);
+            meshopt_remapVertexBuffer(
+                result.vertices.data(),
+                unindexed_vertices.data(),
+                unindexed_vertices.size(),
+                sizeof(Vertex),
+                remap.data());
+
+            if (has_bones) {
+                result.bone_weights.resize(unique_vertex_count);
+                meshopt_remapVertexBuffer(
+                    result.bone_weights.data(),
+                    bone_weights->data(),
+                    bone_weights->size(),
+                    sizeof(BoneWeights),
+                    remap.data());
+            }
+
+            if (!result.vertices.empty()) {
+                optimize_mesh_for_gpu(result.vertices, result.indices, mesh_name,
+                                      has_bones ? &result.bone_weights : nullptr);
+            }
+
+            result.was_split = false;
+            result.success = true;
+            return result;
+        }
+
+        auto split_results = split_mesh_uniformly(unindexed_vertices, indices,
+                                                  unique_vertex_count, mesh_name,
+                                                  has_bones ? bone_weights : nullptr);
+        if (split_results.empty()) {
+            CFW_LOG_ERROR("[MeshOpt] Mesh '{}': failed to split mesh", mesh_name);
+            return result;
+        }
+
+        for (auto& sub_mesh : split_results) {
+            if (!sub_mesh.vertices.empty()) {
+                const bool sub_has_bones = !sub_mesh.bone_weights.empty();
+                optimize_mesh_for_gpu(sub_mesh.vertices, sub_mesh.indices, mesh_name,
+                                      sub_has_bones ? &sub_mesh.bone_weights : nullptr);
+            }
+        }
+
+        result.sub_meshes = std::move(split_results);
+        result.was_split = true;
+        result.success = true;
         return result;
     }
 

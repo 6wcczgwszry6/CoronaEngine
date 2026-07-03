@@ -433,8 +433,9 @@ export const projectLauncherService = {
   openProject: (projectPath) =>
     Bridge.callCEF('ProjectLauncher', 'open_project', [projectPath]).then((result) => {
       const success = result?.data ?? result;
-      if (success && projectPath) {
-        window.localStorage?.setItem('corona.activeProjectPath', projectPath);
+      const activeProjectPath = success?.path || projectPath;
+      if (success && activeProjectPath) {
+        window.localStorage?.setItem('corona.activeProjectPath', activeProjectPath);
       }
       return result;
     }),

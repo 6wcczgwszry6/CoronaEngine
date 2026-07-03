@@ -9,6 +9,7 @@ namespace Corona::Systems::UI {
 void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry);
 void register_scene_datas_rpc_handlers(NativeRpcRegistry& registry);
 void register_main_view_rpc_handlers(NativeRpcRegistry& registry);
+void register_project_launcher_rpc_handlers(NativeRpcRegistry& registry);
 void register_project_settings_rpc_handlers(NativeRpcRegistry& registry);
 void register_network_rpc_handlers(NativeRpcRegistry& registry);
 void register_lanchat_rpc_handlers(NativeRpcRegistry& registry);
@@ -125,16 +126,8 @@ bool is_python_fallback_allowed(const std::string& module, const std::string& fu
             "run_project",
         }},
         {"ProjectLauncher", {
-            "get_default_project_path",
-            "get_app_version",
-            "get_recent_projects",
-            "create_project",
-            "create_world_project",
-            "create_multiplayer_project",
-            "open_project",
             "open_project_file",
             "browse_folder",
-            "set_project_mode",
         }},
         {"FileManager", {
             "open_file",
@@ -166,6 +159,7 @@ void register_builtin_native_rpc_handlers() {
     static std::once_flag once;
     std::call_once(once, [] {
         auto& registry = NativeRpcRegistry::instance();
+        register_project_launcher_rpc_handlers(registry);
         register_main_view_rpc_handlers(registry);
         register_project_settings_rpc_handlers(registry);
         register_scene_datas_rpc_handlers(registry);

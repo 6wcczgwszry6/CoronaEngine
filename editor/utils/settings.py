@@ -65,9 +65,19 @@ class CoronaSettings:
             self.config_path = config_path
 
         self.config = configparser.ConfigParser()
-        self.active_project_path = None
+        self._active_project_path = None
         self.active_project_config = None
         self._ensure_file_exists()
+
+    @property
+    def active_project_path(self):
+        if not self._active_project_path:
+            self._hydrate_active_project_from_last_project()
+        return self._active_project_path
+
+    @active_project_path.setter
+    def active_project_path(self, value):
+        self._active_project_path = value
 
     def _ensure_file_exists(self):
         if not os.path.exists(self.config_path):
@@ -87,6 +97,32 @@ class CoronaSettings:
             self.config.read(self.config_path, encoding='utf-8')
         except Exception as e:
             logger.error(f"Failed to load config: {e}")
+
+    def _hydrate_active_project_from_last_project(self):
+        try:
+            self.load()
+            project_path = self.config.get('General', 'last_project', fallback='') or ''
+            if not project_path:
+                return False
+            project_path = os.path.abspath(project_path)
+            ini_path = os.path.join(project_path, "project.ini")
+            if not os.path.isdir(project_path) or not os.path.exists(ini_path):
+                return False
+
+            proj_cfg = configparser.ConfigParser()
+            proj_cfg.read(ini_path, encoding='utf-8')
+            self._active_project_path = project_path
+            self.active_project_config = proj_cfg
+            from CoronaCore.core.corona_editor import CoronaEditor
+            try:
+                CoronaEditor.CoronaEngine.active_project_path = project_path
+            except Exception:
+                logger.debug("CoronaEngine active_project_path is not writable; using settings_manager only")
+            logger.info("Active project hydrated from last_project: %s", project_path)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to hydrate active project from last_project: {e}")
+            return False
 
     def save(self):
         try:
@@ -173,7 +209,7 @@ class CoronaSettings:
         try:
             proj_cfg = configparser.ConfigParser()
             proj_cfg.read(ini_path, encoding='utf-8')
-            self.active_project_path = project_path
+            self._active_project_path = project_path
             from CoronaCore.core.corona_editor import CoronaEditor
             try:
                 CoronaEditor.CoronaEngine.active_project_path = project_path

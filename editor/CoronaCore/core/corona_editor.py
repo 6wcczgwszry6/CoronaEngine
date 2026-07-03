@@ -30,16 +30,8 @@ _PYTHON_ROUTE_METHOD_ALLOWLIST = {
         "run_project",
     }),
     "ProjectLauncher": frozenset({
-        "get_default_project_path",
-        "get_app_version",
-        "get_recent_projects",
-        "create_project",
-        "create_world_project",
-        "create_multiplayer_project",
-        "open_project",
         "open_project_file",
         "browse_folder",
-        "set_project_mode",
     }),
     "FileManager": frozenset({
         "open_file",

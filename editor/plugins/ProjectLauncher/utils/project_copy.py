@@ -3,7 +3,6 @@ import shutil
 import configparser
 import datetime
 import logging
-import json
 
 from CoronaCore.utils.proejct_utils import (
     create_project_from_template,
@@ -46,35 +45,16 @@ def _ensure_native_vision_metadata(project_path):
 
     scene_config = configparser.ConfigParser()
     scene_config.read(scene_file, encoding='utf-8')
-    vision_source_path = scene_config.get('vision', 'source_path', fallback='').strip()
-    if vision_source_path:
-        _ensure_vision_camera_defaults(scene_config)
-        with open(scene_file, 'w', encoding='utf-8') as f:
-            scene_config.write(f)
+    has_vision = 'vision' in scene_config
+    has_document = 'vision_document' in scene_config
+    if not has_vision and not has_document:
         return
 
-    if 'vision_document' not in scene_config:
-        return
-
-    section = scene_config['vision_document']
-    if section.get('encoding', '') != 'zlib_base64_json' or not section.get('data', ''):
-        return
-
-    from CoronaCore.core.entities.scene import _decode_vision_document
-    document = _decode_vision_document(section.get('data', ''))
-    runtime_dir = os.path.join(project_path, ".corona", "vision_runtime")
-    os.makedirs(runtime_dir, exist_ok=True)
-    scene_stem = os.path.splitext(os.path.basename(scene_file))[0] or "scene"
-    runtime_path = os.path.join(runtime_dir, f"{scene_stem}_embedded.json")
-    with open(runtime_path, 'w', encoding='utf-8') as f:
-        json.dump(document, f, ensure_ascii=False)
-
-    runtime_route = os.path.relpath(runtime_path, project_path).replace('\\', '/')
-    scene_config['vision'] = {
-        'source_path': runtime_route,
-        'import_mode': 'external_live',
-    }
     _ensure_vision_camera_defaults(scene_config)
+    scene_config.remove_section('vision')
+    scene_config.remove_section('vision_document')
+    scene_config.remove_section('vision_bindings')
+    scene_config.remove_section('vision_unsupported_shapes')
     with open(scene_file, 'w', encoding='utf-8') as f:
         scene_config.write(f)
 
