@@ -865,6 +865,8 @@ void UiFrameRunner::render_window(UiFrameContext& context, const ManagedWindow& 
         }
         QuadDraw quad;
         quad.texture = image;
+        quad.texture_ready =
+            BrowserManager::instance().get_texture_upload_receipt(tab->texture_id);
         quad.dest_min = ktm::fvec2(placement.rect.x * scale_x, placement.rect.y * scale_y);
         quad.dest_max = ktm::fvec2((placement.rect.x + placement.rect.w) * scale_x,
                                    (placement.rect.y + placement.rect.h) * scale_y);

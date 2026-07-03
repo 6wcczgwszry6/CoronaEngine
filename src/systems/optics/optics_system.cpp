@@ -68,6 +68,8 @@ constexpr float kSsaoRadius = 0.6f;
 constexpr float kSsaoBias = 0.025f;
 constexpr float kSsaoStrength = 1.0f;
 constexpr float kSsaoPower = 1.5f;
+constexpr std::uint64_t kInitialInstanceTableCapacity = 4096;
+constexpr std::uint64_t kInitialMaterialTableCapacity = 1024;
 
 // Perf toggle: sky-driven SH9 ambient. Set to false to skip both the sky→SH
 // projection dispatch and the per-pixel evalSkySH in lighting, so the SH
@@ -1090,9 +1092,39 @@ template <typename T>
     return Corona::Horizon::HardwareBuffer(desc);
 }
 
-// instance/material 表容量（init 与池租用的 factory 共用同一上限）。
-constexpr uint32_t kMaxInstances = 4096;
-constexpr uint32_t kMaxMaterials = 1024;
+[[nodiscard]] std::uint64_t grow_table_capacity(std::uint64_t current,
+                                                std::uint64_t required) {
+    std::uint64_t next = current == 0 ? 1 : current;
+    while (next < required) {
+        next *= 2;
+    }
+    return next;
+}
+
+template <typename T>
+bool ensure_storage_buffer_capacity(Corona::Horizon::HardwareBuffer& buffer,
+                                    std::uint64_t& capacity,
+                                    std::uint64_t required,
+                                    const std::string& name) {
+    if (required <= capacity && buffer) {
+        return true;
+    }
+
+    const std::uint64_t old_capacity = capacity;
+    const std::uint64_t new_capacity = grow_table_capacity(capacity, required);
+    auto new_buffer = make_storage_buffer<T>(new_capacity, name);
+    if (!new_buffer) {
+        CFW_LOG_ERROR("OpticsSystem: failed to resize {} table buffer from {} to {} entries",
+                      name, old_capacity, new_capacity);
+        return false;
+    }
+
+    buffer = std::move(new_buffer);
+    capacity = new_capacity;
+    CFW_LOG_WARNING("OpticsSystem: resized {} table buffer from {} to {} entries (required={})",
+                    name, old_capacity, new_capacity, required);
+    return true;
+}
 
 template <typename T>
 bool write_object_bytes(const Corona::Horizon::HardwareBuffer& buffer, const T& value) {
@@ -1296,15 +1328,47 @@ bool collect_actor_instances_for_visibility(
     return has_instances;
 }
 
-void upload_instance_tables(const RenderInstanceBatch& batch,
+bool upload_instance_tables(const RenderInstanceBatch& batch,
+                            Hardware& hardware,
                             Corona::Horizon::HardwareBuffer& instance_buffer,
-                            Corona::Horizon::HardwareBuffer& material_buffer) {
+                            std::uint64_t& instance_capacity,
+                            Corona::Horizon::HardwareBuffer& material_buffer,
+                            std::uint64_t& material_capacity,
+                            std::string_view label) {
+    const auto instance_count = static_cast<std::uint64_t>(batch.instances.size());
+    const auto material_count = static_cast<std::uint64_t>(batch.materials.size());
+    if (instance_count > instance_capacity || material_count > material_capacity ||
+        !instance_buffer || !material_buffer) {
+        hardware.executor.wait_idle(hardware.executor.last_receipt());
+    }
+
+    const std::string instance_name = std::string(label) + ".instances";
+    if (!ensure_storage_buffer_capacity<Hardware::InstanceInfo>(
+            instance_buffer, instance_capacity, instance_count, instance_name)) {
+        return false;
+    }
+
+    const std::string material_name = std::string(label) + ".materials";
+    if (!ensure_storage_buffer_capacity<Hardware::MaterialInfo>(
+            material_buffer, material_capacity, material_count, material_name)) {
+        return false;
+    }
+
     if (!batch.instances.empty()) {
-        (void)write_array_bytes(instance_buffer, batch.instances.data(), batch.instances.size());
+        if (!write_array_bytes(instance_buffer, batch.instances.data(), batch.instances.size())) {
+            CFW_LOG_ERROR("OpticsSystem: failed to upload {} instance table ({} entries, capacity={})",
+                          label, instance_count, instance_capacity);
+            return false;
+        }
     }
     if (!batch.materials.empty()) {
-        (void)write_array_bytes(material_buffer, batch.materials.data(), batch.materials.size());
+        if (!write_array_bytes(material_buffer, batch.materials.data(), batch.materials.size())) {
+            CFW_LOG_ERROR("OpticsSystem: failed to upload {} material table ({} entries, capacity={})",
+                          label, material_count, material_capacity);
+            return false;
+        }
     }
+    return true;
 }
 
 #ifdef CORONA_ENABLE_VISION
@@ -2076,16 +2140,23 @@ bool OpticsSystem::initialize_hardware_resources() {
         hardware_->uiVpUniformBuffer =
             make_storage_buffer<Hardware::VPUniformBufferObject>(1, "optics.ui_vp_uniform");
 
-        // --- Instance & Material table buffers (pre-allocate reasonable capacity) ---
-        // 容量常量 kMaxInstances/kMaxMaterials 提到文件作用域，与池租用 factory 共用。
+        // --- Instance & Material table buffers ---
+        hardware_->instanceInfoCapacity = kInitialInstanceTableCapacity;
+        hardware_->uiInstanceInfoCapacity = kInitialInstanceTableCapacity;
+        hardware_->materialTableCapacity = kInitialMaterialTableCapacity;
+        hardware_->uiMaterialTableCapacity = kInitialMaterialTableCapacity;
         hardware_->instanceInfoBuffer =
-            make_storage_buffer<Hardware::InstanceInfo>(kMaxInstances, "optics.instances");
+            make_storage_buffer<Hardware::InstanceInfo>(hardware_->instanceInfoCapacity,
+                                                        "optics.instances");
         hardware_->uiInstanceInfoBuffer =
-            make_storage_buffer<Hardware::InstanceInfo>(kMaxInstances, "optics.ui_instances");
+            make_storage_buffer<Hardware::InstanceInfo>(hardware_->uiInstanceInfoCapacity,
+                                                        "optics.ui_instances");
         hardware_->materialTableBuffer =
-            make_storage_buffer<Hardware::MaterialInfo>(kMaxMaterials, "optics.materials");
+            make_storage_buffer<Hardware::MaterialInfo>(hardware_->materialTableCapacity,
+                                                        "optics.materials");
         hardware_->uiMaterialTableBuffer =
-            make_storage_buffer<Hardware::MaterialInfo>(kMaxMaterials, "optics.ui_materials");
+            make_storage_buffer<Hardware::MaterialInfo>(hardware_->uiMaterialTableCapacity,
+                                                        "optics.ui_materials");
         hardware_->actorPickBuffer =
             make_storage_buffer<std::uint32_t>(1, "optics.actor_pick");
         hardware_->shadowInfoBuffer =
@@ -2621,15 +2692,11 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     [] { return make_storage_buffer<Hardware::UniformBufferObject>(1, "optics.uniform.pool"); });
                 auto shadowLease = hardware_->shadowInfoBufferPool.acquire(
                     [] { return make_storage_buffer<Hardware::ShadowInfoBufferObject>(1, "optics.shadow_info.pool"); });
-                auto instLease = hardware_->instanceInfoBufferPool.acquire(
-                    [] { return make_storage_buffer<Hardware::InstanceInfo>(kMaxInstances, "optics.instances.pool"); });
-                auto matLease = hardware_->materialTableBufferPool.acquire(
-                    [] { return make_storage_buffer<Hardware::MaterialInfo>(kMaxMaterials, "optics.materials.pool"); });
+                FramePlaceBufferPool::Lease instLease;
+                FramePlaceBufferPool::Lease matLease;
                 Horizon::HardwareBuffer& sceneVpBuffer = *vpLease.buffer;
                 Horizon::HardwareBuffer& sceneUboBuffer = *uboLease.buffer;
                 Horizon::HardwareBuffer& sceneShadowBuffer = *shadowLease.buffer;
-                Horizon::HardwareBuffer& sceneInstanceBuffer = *instLease.buffer;
-                Horizon::HardwareBuffer& sceneMaterialBuffer = *matLease.buffer;
 
                 (void)write_object_bytes(sceneVpBuffer,
                                          hardware_->vpUniformBufferObjects);
@@ -2877,21 +2944,6 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     return has_instances;
                 };
 
-                auto upload_instance_tables = [&](const RenderInstanceBatch& batch,
-                                                  Horizon::HardwareBuffer& instance_buffer,
-                                                  Horizon::HardwareBuffer& material_buffer) {
-                    if (!batch.instances.empty()) {
-                        (void)write_array_bytes(instance_buffer,
-                                                batch.instances.data(),
-                                                batch.instances.size());
-                    }
-                    if (!batch.materials.empty()) {
-                        (void)write_array_bytes(material_buffer,
-                                                batch.materials.data(),
-                                                batch.materials.size());
-                    }
-                };
-
                 auto compute_shadow_scene_bounds = [&]() {
                     ShadowSceneBounds bounds;
                     for (auto actor_handle : scene.actor_handles) {
@@ -3022,12 +3074,41 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                                      false,
                                                      nullptr,
                                                      sceneBatch);
-                    upload_instance_tables(sceneBatch,
-                                           sceneInstanceBuffer,
-                                           sceneMaterialBuffer);
+                    const auto scene_instance_capacity = grow_table_capacity(
+                        kInitialInstanceTableCapacity,
+                        static_cast<std::uint64_t>(sceneBatch.instances.size()));
+                    const auto scene_material_capacity = grow_table_capacity(
+                        kInitialMaterialTableCapacity,
+                        static_cast<std::uint64_t>(sceneBatch.materials.size()));
+                    instLease = hardware_->instanceInfoBufferPool.acquire(
+                        scene_instance_capacity,
+                        [scene_instance_capacity] {
+                            return make_storage_buffer<Hardware::InstanceInfo>(
+                                scene_instance_capacity, "optics.instances.pool");
+                        });
+                    matLease = hardware_->materialTableBufferPool.acquire(
+                        scene_material_capacity,
+                        [scene_material_capacity] {
+                            return make_storage_buffer<Hardware::MaterialInfo>(
+                                scene_material_capacity, "optics.materials.pool");
+                        });
+                    auto sceneInstanceCapacity = instLease.capacity;
+                    auto sceneMaterialCapacity = matLease.capacity;
+                    if (!upload_instance_tables(sceneBatch,
+                                                *hardware_,
+                                                *instLease.buffer,
+                                                sceneInstanceCapacity,
+                                                *matLease.buffer,
+                                                sceneMaterialCapacity,
+                                                "optics.scene.pool")) {
+                        visibility.clear_records();
+                        sceneBatch.clear();
+                    }
                     native_collect_ms = elapsed_ms(native_collect_start, PerfClock::now());
                     native_instance_count = static_cast<uint32_t>(sceneBatch.instances.size());
                 }
+                Horizon::HardwareBuffer& sceneInstanceBuffer = *instLease.buffer;
+                Horizon::HardwareBuffer& sceneMaterialBuffer = *matLease.buffer;
 
                 // ================================================================
                 // 4. Environment parameters
@@ -3418,6 +3499,17 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 // 显示相机把自己 surface 的输出发布给 DisplaySystem（按 surface 区分）。
                 if (auto image_device =
                         SharedDataHub::instance().image_storage().acquire_write(target.image_handle)) {
+                    if (latest_submit_receipt.empty()) {
+                        CFW_LOG_WARNING(
+                            "OpticsSystem: publishing native frame with empty submit receipt "
+                            "(camera={}, surface={}, image_handle={}, frame={}, extent={}x{})",
+                            cam_handle,
+                            surface,
+                            target.image_handle,
+                            frame_index,
+                            camera->width,
+                            camera->height);
+                    }
                     image_device->image = *presented_target;
                     image_device->submit_receipt = latest_submit_receipt;
                 }
@@ -3585,34 +3677,66 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
     }
 
     const uint32_t overlayDescriptor = target.ui_overlay.storeStorageDescriptor();
+    bool follow_camera_overlay_ready = has_follow_camera_instances;
     if (has_follow_camera_instances) {
+        const auto ui_instance_capacity = grow_table_capacity(
+            kInitialInstanceTableCapacity,
+            static_cast<std::uint64_t>(uiBatch.instances.size()));
+        const auto ui_material_capacity = grow_table_capacity(
+            kInitialMaterialTableCapacity,
+            static_cast<std::uint64_t>(uiBatch.materials.size()));
         auto uiInstLease = hardware_->uiInstanceInfoBufferPool.acquire(
-            [] { return make_storage_buffer<Hardware::InstanceInfo>(kMaxInstances, "optics.ui_instances.pool"); });
+            ui_instance_capacity,
+            [ui_instance_capacity] {
+                return make_storage_buffer<Hardware::InstanceInfo>(
+                    ui_instance_capacity, "optics.ui_instances.pool");
+            });
         auto uiMatLease = hardware_->uiMaterialTableBufferPool.acquire(
-            [] { return make_storage_buffer<Hardware::MaterialInfo>(kMaxMaterials, "optics.ui_materials.pool"); });
+            ui_material_capacity,
+            [ui_material_capacity] {
+                return make_storage_buffer<Hardware::MaterialInfo>(
+                    ui_material_capacity, "optics.ui_materials.pool");
+            });
         Horizon::HardwareBuffer& uiInstanceBuffer = *uiInstLease.buffer;
         Horizon::HardwareBuffer& uiMaterialBuffer = *uiMatLease.buffer;
-        upload_instance_tables(uiBatch,
-                               uiInstanceBuffer,
-                               uiMaterialBuffer);
+        auto uiInstanceCapacity = uiInstLease.capacity;
+        auto uiMaterialCapacity = uiMatLease.capacity;
+        follow_camera_overlay_ready =
+            upload_instance_tables(uiBatch,
+                                   *hardware_,
+                                   uiInstanceBuffer,
+                                   uiInstanceCapacity,
+                                   uiMaterialBuffer,
+                                   uiMaterialCapacity,
+                                   "optics.ui.pool");
+        if (!follow_camera_overlay_ready) {
+            uiVisibility.clear_records();
+            uiBatch.clear();
+        }
         stream << Horizon::keep_alive(uiInstLease.busy)
                << Horizon::keep_alive(uiMatLease.busy);
 
-        opticsOverlay.pushConsts.gbufferSize = upload_value(hardware_->gbufferSize);
-        opticsOverlay.pushConsts.visibilityImageIndex =
-            hardware_->uiVisibilityImage.storeStorageDescriptor();
-        opticsOverlay.pushConsts.instanceInfoBufferIndex =
-            uiInstanceBuffer.storeDescriptor();
-        opticsOverlay.pushConsts.materialTableBufferIndex =
-            uiMaterialBuffer.storeDescriptor();
-        opticsOverlay.pushConsts.vpBufferIndex = uiVpDescriptor;
-        opticsOverlay.pushConsts.outputImage = overlayDescriptor;
-        opticsOverlay.bind_storage_image(0, hardware_->uiVisibilityImage);
-        opticsOverlay.bind_storage_image(1, target.ui_overlay);
+        if (follow_camera_overlay_ready) {
+            opticsOverlay.pushConsts.gbufferSize = upload_value(hardware_->gbufferSize);
+            opticsOverlay.pushConsts.visibilityImageIndex =
+                hardware_->uiVisibilityImage.storeStorageDescriptor();
+            opticsOverlay.pushConsts.instanceInfoBufferIndex =
+                uiInstanceBuffer.storeDescriptor();
+            opticsOverlay.pushConsts.materialTableBufferIndex =
+                uiMaterialBuffer.storeDescriptor();
+            opticsOverlay.pushConsts.vpBufferIndex = uiVpDescriptor;
+            opticsOverlay.pushConsts.outputImage = overlayDescriptor;
+            opticsOverlay.bind_storage_image(0, hardware_->uiVisibilityImage);
+            opticsOverlay.bind_storage_image(1, target.ui_overlay);
+        }
+    }
+
+    if (!follow_camera_overlay_ready && !cursor_visible) {
+        return &background;
     }
 
     if (cursor_visible && cursor_state != nullptr) {
-        const bool preserve_existing_overlay = has_follow_camera_instances;
+        const bool preserve_existing_overlay = follow_camera_overlay_ready;
         uint32_t cursor_origin_x = 0;
         uint32_t cursor_origin_y = 0;
         uint32_t cursor_width = hardware_->gbufferSize.x;
@@ -3678,7 +3802,7 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
     opticsComposite.bind_storage_image(1, stereo_ui ? target.ui_warped_overlay : target.ui_overlay);
     opticsComposite.bind_storage_image(2, target.composite_output);
 
-    if (has_follow_camera_instances) {
+    if (follow_camera_overlay_ready) {
         stream << uiVisibility(hardware_->gbufferSize.x, hardware_->gbufferSize.y)
                << opticsOverlay(dispatchX, dispatchY, 1);
     }
@@ -3806,9 +3930,16 @@ void OpticsSystem::process_vision_actor_pick(std::uintptr_t camera_handle,
                                            nullptr,
                                            scene_batch,
                                            geometry_system_);
-    upload_instance_tables(scene_batch,
-                           hardware_->instanceInfoBuffer,
-                           hardware_->materialTableBuffer);
+    if (!upload_instance_tables(scene_batch,
+                                *hardware_,
+                                hardware_->instanceInfoBuffer,
+                                hardware_->instanceInfoCapacity,
+                                hardware_->materialTableBuffer,
+                                hardware_->materialTableCapacity,
+                                "optics.actor_pick")) {
+        visibility.clear_records();
+        scene_batch.clear();
+    }
 
     auto& actor_pick = *hardware_->actorPickPipeline;
     actor_pick.pushConsts.pixel =
@@ -5253,6 +5384,17 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 if (auto image_device =
                         SharedDataHub::instance().image_storage().acquire_write(
                             target.image_handle)) {
+                    if (vision_submit_receipt.empty()) {
+                        CFW_LOG_WARNING(
+                            "OpticsSystem: publishing Vision frame with empty submit receipt "
+                            "(camera={}, surface={}, image_handle={}, frame={}, extent={}x{})",
+                            cam_handle,
+                            surface,
+                            target.image_handle,
+                            frame_index,
+                            camera.width,
+                            camera.height);
+                    }
                     image_device->image = *presented;
                     image_device->submit_receipt = vision_submit_receipt;
                 }

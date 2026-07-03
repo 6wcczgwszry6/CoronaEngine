@@ -8,8 +8,10 @@
 #include "Codegen/TypeAlias.h"
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 // clang-format off
@@ -57,31 +59,43 @@ class FramePlaceBufferPool {
 public:
     struct Lease {
         Corona::Horizon::HardwareBuffer* buffer{nullptr};
+        std::uint64_t capacity{0};
         std::shared_ptr<int> busy;  // 传给 stream << keep_alive(busy)
     };
 
     // factory: 无空闲槽时用它新建底层 buffer（尺寸/类型由调用方闭包决定）。
     template <typename Factory>
     Lease acquire(Factory&& factory) {
+        return acquire(0, std::forward<Factory>(factory));
+    }
+
+    template <typename Factory>
+    Lease acquire(std::uint64_t required_capacity, Factory&& factory) {
         for (auto& slot : slots_) {
             // busy 为空（从未租出）或仅池自己持有（use_count()==1，GPU 已完成并
             // retire 掉哨兵）→ 该槽空闲，可复用其已建好的 buffer。
             if (!slot.busy || slot.busy.use_count() == 1) {
+                if (required_capacity > slot.capacity || !slot.buffer) {
+                    slot.buffer = factory();
+                    slot.capacity = required_capacity;
+                }
                 slot.busy = std::make_shared<int>(0);
-                return Lease{&slot.buffer, slot.busy};
+                return Lease{&slot.buffer, slot.capacity, slot.busy};
             }
         }
         // 全部在飞 → 新增一槽（稳态极少触发；池大小自适应收敛到在飞数）。
         Slot slot;
         slot.buffer = factory();
+        slot.capacity = required_capacity;
         slot.busy = std::make_shared<int>(0);
         slots_.push_back(std::move(slot));
-        return Lease{&slots_.back().buffer, slots_.back().busy};
+        return Lease{&slots_.back().buffer, slots_.back().capacity, slots_.back().busy};
     }
 
 private:
     struct Slot {
         Corona::Horizon::HardwareBuffer buffer;
+        std::uint64_t capacity{0};
         std::shared_ptr<int> busy;  // nullptr=从未用；use_count()>1=GPU 在飞
     };
     std::vector<Slot> slots_;
@@ -112,6 +126,10 @@ struct Hardware {
     Corona::Horizon::HardwareBuffer materialTableBuffer;
     Corona::Horizon::HardwareBuffer uiInstanceInfoBuffer;
     Corona::Horizon::HardwareBuffer uiMaterialTableBuffer;
+    std::uint64_t instanceInfoCapacity = 0;
+    std::uint64_t materialTableCapacity = 0;
+    std::uint64_t uiInstanceInfoCapacity = 0;
+    std::uint64_t uiMaterialTableCapacity = 0;
     Corona::Horizon::HardwareBuffer actorPickBuffer;
     Corona::Horizon::HardwareBuffer skyIrradianceSHBuffer;  // 9 vec3 SH coeffs (sky-driven ambient)
     Corona::Horizon::HardwareBuffer shadowInfoBuffer;

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <exception>
 #include <ranges>
 #include <span>
 
@@ -280,37 +281,97 @@ void DisplaySystem::update() {
             ui_receipt_ptr = &ui_frame->submit_receipt;
         }
 
-        Horizon::HardwareImage& bg_image = (optics_img_ptr && *optics_img_ptr) ? *optics_img_ptr : transparent_storage_;
-        Horizon::HardwareImage& fg_image = (ui_img_ptr && *ui_img_ptr) ? *ui_img_ptr : transparent_storage_;
+        void* surface = nullptr;
+        if (auto surface_it = surfaces_snapshot.find(surface_id);
+            surface_it != surfaces_snapshot.end()) {
+            surface = surface_it->second;
+        }
+
+        bool use_optics_layer = optics_img_ptr && *optics_img_ptr;
+        bool use_ui_layer = ui_img_ptr && *ui_img_ptr;
+        if (use_optics_layer && optics_receipt_ptr != nullptr && optics_receipt_ptr->empty()) {
+            if (state.optics.frame_index <= 1 || state.optics.frame_index % 120 == 0) {
+                CFW_LOG_WARNING(
+                    "DisplaySystem: skipping optics layer with empty submit receipt "
+                    "(surface={}, image_handle={}, frame={}, extent={}x{})",
+                    surface,
+                    state.optics.image_handle,
+                    state.optics.frame_index,
+                    state.optics.width,
+                    state.optics.height);
+            }
+            use_optics_layer = false;
+            optics_receipt_ptr = nullptr;
+        }
+        if (use_ui_layer && ui_receipt_ptr != nullptr && ui_receipt_ptr->empty()) {
+            if (state.ui.frame_index <= 1 || state.ui.frame_index % 120 == 0) {
+                CFW_LOG_WARNING(
+                    "DisplaySystem: skipping UI layer with empty submit receipt "
+                    "(surface={}, image_handle={}, frame={}, extent={}x{})",
+                    surface,
+                    state.ui.image_handle,
+                    state.ui.frame_index,
+                    state.ui.width,
+                    state.ui.height);
+            }
+            use_ui_layer = false;
+            ui_receipt_ptr = nullptr;
+        }
+
+        Horizon::HardwareImage& bg_image = use_optics_layer ? *optics_img_ptr : transparent_storage_;
+        Horizon::HardwareImage& fg_image = use_ui_layer ? *ui_img_ptr : transparent_storage_;
 
         if (!bg_image || !fg_image) {
             continue;
         }
 
         auto& composite_resources = composite_resources_[surface_id];
-        void* surface = nullptr;
-        if (auto surface_it = surfaces_snapshot.find(surface_id);
-            surface_it != surfaces_snapshot.end()) {
-            surface = surface_it->second;
-        }
-        if (!compose_and_present(
+        bool composed = false;
+        try {
+            composed = compose_and_present(
                 displayer,
                 surface,
                 state,
                 composite_resources,
                 bg_image,
-                (optics_img_ptr && *optics_img_ptr) ? optics_receipt_ptr : nullptr,
+                use_optics_layer ? optics_receipt_ptr : nullptr,
                 fg_image,
-                (ui_img_ptr && *ui_img_ptr) ? ui_receipt_ptr : nullptr)) {
+                use_ui_layer ? ui_receipt_ptr : nullptr);
+        } catch (const std::exception& error) {
+            CFW_LOG_ERROR(
+                "DisplaySystem: compose/present failed "
+                "(surface={}, optics_handle={}, optics_frame={}, optics_receipt_empty={}, "
+                "ui_handle={}, ui_frame={}, ui_receipt_empty={}, output={}x{}): {}",
+                surface,
+                state.optics.image_handle,
+                state.optics.frame_index,
+                optics_receipt_ptr == nullptr || optics_receipt_ptr->empty(),
+                state.ui.image_handle,
+                state.ui.frame_index,
+                ui_receipt_ptr == nullptr || ui_receipt_ptr->empty(),
+                composite_resources.width,
+                composite_resources.height,
+                error.what());
+            continue;
+        } catch (...) {
+            CFW_LOG_ERROR(
+                "DisplaySystem: compose/present failed with unknown exception "
+                "(surface={}, optics_handle={}, ui_handle={})",
+                surface,
+                state.optics.image_handle,
+                state.ui.image_handle);
+            continue;
+        }
+        if (!composed) {
             continue;
         }
 
         // Write back the consumed signal so producers know when to safely reuse their image.
         const Horizon::SubmitReceipt consumed_receipt = composite_resources.executor.last_receipt();
-        if (has_optics && optics_frame) {
+        if (use_optics_layer && optics_frame) {
             optics_frame->consumed_receipt = consumed_receipt;
         }
-        if (has_ui && ui_frame) {
+        if (use_ui_layer && ui_frame) {
             ui_frame->consumed_receipt = consumed_receipt;
         }
     }
