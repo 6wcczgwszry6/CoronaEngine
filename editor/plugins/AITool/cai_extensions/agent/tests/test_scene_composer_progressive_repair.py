@@ -10,7 +10,10 @@ for candidate in (EDITOR_DIR, AITOOL_DIR):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-from plugins.AITool.cai_extensions.agent.scene_composer_progressive import _repair_recent_imports
+from plugins.AITool.cai_extensions.agent.scene_composer_progressive import (
+    _repair_recent_imports,
+    _runtime_status_to_scene_mode,
+)
 from plugins.AITool.cai_extensions.data_model.layout import LayoutInstance, SceneLayout
 from plugins.AITool.cai_extensions.mcp.tools import native_scene_state
 
@@ -79,3 +82,34 @@ def test_repair_recent_imports_waits_for_delayed_native_bounds() -> None:
     assert engine.transform_calls
     assert engine.transform_calls[0][2]["geometry"]["position"] == [0.0, 0.52, 0.0]
     assert layout.get("床").transform["pos"] == [0.0, 0.52, 0.0]
+
+
+def test_runtime_status_to_scene_mode_prefers_runtime_plan_status() -> None:
+    assert _runtime_status_to_scene_mode({
+        "status": {
+            "plan_summary": {"status": "paused"},
+            "runtime_command_summary": {"latest_commands": []},
+        }
+    }) == "PAUSED"
+
+
+def test_runtime_status_to_scene_mode_reads_latest_runtime_command() -> None:
+    assert _runtime_status_to_scene_mode({
+        "runtime_command_summary": {
+            "latest_commands": [
+                {"command": "resume", "new_status": "confirmed"},
+                {"command": "pause", "new_status": "paused"},
+            ]
+        }
+    }) == "PAUSED"
+
+
+def test_runtime_status_to_scene_mode_ignores_active_runtime_status() -> None:
+    assert _runtime_status_to_scene_mode({"plan_summary": {"status": "confirmed"}}) == ""
+    assert _runtime_status_to_scene_mode({
+        "runtime_command_summary": {
+            "latest_commands": [
+                {"command": "resume", "new_status": "confirmed"},
+            ]
+        }
+    }) == ""

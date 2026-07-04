@@ -38,6 +38,7 @@ try:
     )
     from plugins.AITool.services.intent_understanding import get_intent_understanding_service
     from plugins.AITool.services.lanchat_scene_runtime import get_lanchat_scene_runtime
+    from plugins.AITool.services.agent_runtime import AgentRuntimeFlags
     from plugins.AITool.services.workflow_command_policy import (
         DEPRECATED_WORKFLOW_COMMAND_MESSAGE,
         is_deprecated_user_workflow_command,
@@ -49,12 +50,25 @@ except Exception:  # noqa: BLE001
     )
     from services.intent_understanding import get_intent_understanding_service  # type: ignore
     from services.lanchat_scene_runtime import get_lanchat_scene_runtime  # type: ignore
+    from services.agent_runtime import AgentRuntimeFlags  # type: ignore
     from services.workflow_command_policy import (  # type: ignore
         DEPRECATED_WORKFLOW_COMMAND_MESSAGE,
         is_deprecated_user_workflow_command,
     )
 
 logger = logging.getLogger(__name__)
+
+AGENT_RUNTIME_REQUIRED_MESSAGE = (
+    "这是生成/场景写入类请求。当前已切换到 AgentRuntime 主控，"
+    "请先在聊天室形成并确认方案，再由 Runtime 生成队列执行。"
+)
+
+
+def _legacy_main_workflow_allowed() -> bool:
+    try:
+        return AgentRuntimeFlags.from_env().can_call_legacy_main_workflow()
+    except Exception:  # noqa: BLE001
+        return False
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 场景指令检测
@@ -933,6 +947,9 @@ class MasterAgent:
                 logger.info("[MasterAgent] routing → planning confirmation gate")
                 return str(gate_payload or "")
             if gate_action == "compose":
+                if get_current_progress_sink() is not None:
+                    logger.info("[MasterAgent] LANChat planning compose blocked before scene handler")
+                    return "这是生成类请求，但尚未开始生成。请先由房主确认当前方案，确认后系统会通过生成队列执行。"
                 logger.info("[MasterAgent] routing → compose (confirmed plan)")
                 return self._handle_scene(str(gate_payload or trigger), system, messages, force_compose=True)
 
@@ -966,6 +983,10 @@ class MasterAgent:
 
     def _handle_direct_import(self, file_path: str) -> str:
         """直接导入指定模型文件到引擎场景（跳过 LLM 和混元生成）。"""
+        if not _legacy_main_workflow_allowed():
+            logger.info("[MasterAgent] direct import blocked by AgentRuntime migration guard")
+            return AGENT_RUNTIME_REQUIRED_MESSAGE
+
         import os as _os
         try:
             from plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers import get_tool
@@ -1403,6 +1424,10 @@ class MasterAgent:
         注册进它的 ToolRegistry。这里只负责：① 给它真实 actor 列表（解决 __shell_ 名字
         映射）；② 用【执行框架】prompt（而非聊天人设）让它真去调工具，不退化成闲聊。
         """
+        if not _legacy_main_workflow_allowed():
+            logger.info("[MasterAgent] edit blocked by AgentRuntime migration guard")
+            return AGENT_RUNTIME_REQUIRED_MESSAGE
+
         # 1. 取真实 actor 列表（含 __shell_，排除 __room_/__interior_ 基础设施）
         try:
             from CoronaCore.core.managers import scene_manager
@@ -1458,6 +1483,10 @@ class MasterAgent:
 
     def _handle_scene(self, user_text: str, persona: str, messages: List[str],
                       force_compose: bool = False) -> str:
+        if not _legacy_main_workflow_allowed():
+            logger.info("[MasterAgent] scene write blocked by AgentRuntime migration guard")
+            return AGENT_RUNTIME_REQUIRED_MESSAGE
+
         specialist = self._router.route(persona)
         logger.info("[MasterAgent] scene → %s: %s (force_compose=%s)",
                     specialist.key, user_text[:80], force_compose)
@@ -1502,6 +1531,10 @@ class MasterAgent:
     def _handle_scene_compose(self, user_text: str, messages: List[str],
                               specialist: "Specialist", persona: str = "") -> str:
         """整体场景组合：从清单/方案批量生成模型、布局、导入引擎。"""
+        if not _legacy_main_workflow_allowed():
+            logger.info("[MasterAgent] direct scene compose blocked by AgentRuntime migration guard")
+            return AGENT_RUNTIME_REQUIRED_MESSAGE
+
         from .scene_composer import SceneComposer
 
         # 优先从最近对话中找完整清单文本（用户可能只说"按清单生成"）
@@ -1703,6 +1736,10 @@ class MasterAgent:
                              style_bible: Dict[str, Any], specialist: "Specialist",
                              messages: List[str]) -> str:
         """单步场景编辑 — 含协同感知（意图预览 / 冲突检测 / 物体锁）。"""
+        if not _legacy_main_workflow_allowed():
+            logger.info("[MasterAgent] scene single-step blocked by AgentRuntime migration guard")
+            return AGENT_RUNTIME_REQUIRED_MESSAGE
+
         sender = self._extract_sender(messages)
 
         # 注入引擎场景中已有的物体列表（供 LLM 感知当前状态，实现渐进式交互）
@@ -1777,6 +1814,10 @@ class MasterAgent:
     def _handle_scene_multistep(self, user_text: str, scene_state: Dict[str, Any],
                                 style_bible: Dict[str, Any], specialist: "Specialist") -> str:
         """复杂需求 — 分解为子任务并逐步执行，返回计划+执行摘要。"""
+        if not _legacy_main_workflow_allowed():
+            logger.info("[MasterAgent] scene multi-step blocked by AgentRuntime migration guard")
+            return AGENT_RUNTIME_REQUIRED_MESSAGE
+
         plan = self.planner.decompose(user_text, scene_state=scene_state)
         tasks = plan.get("tasks", [])
         if not tasks:

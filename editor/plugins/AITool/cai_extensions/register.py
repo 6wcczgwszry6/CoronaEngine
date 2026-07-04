@@ -15,9 +15,21 @@ from pathlib import Path
 from typing import Iterable
 
 try:
-    from plugins.AITool.services.workflow_command_policy import should_register_workflow_command
+    from plugins.AITool.services.workflow_command_policy import (
+        classify_workflow_command_exposure,
+        install_workflow_command_policy,
+        install_workflow_function_policy,
+        record_workflow_function_exposure,
+        should_register_workflow_command,
+    )
 except Exception:  # noqa: BLE001
-    from services.workflow_command_policy import should_register_workflow_command  # type: ignore
+    from services.workflow_command_policy import (  # type: ignore
+        classify_workflow_command_exposure,
+        install_workflow_command_policy,
+        install_workflow_function_policy,
+        record_workflow_function_exposure,
+        should_register_workflow_command,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +130,13 @@ class CabbageWorkflowPlugin:
     def register(self, runtime) -> dict:
         registry = runtime.get_registry("workflow")
         command_registry = runtime.get_registry("workflow_command")
+        install_workflow_command_policy(command_registry)
+        install_workflow_function_policy(registry, command_registry)
         registered_flows: list[int] = []
         registered_commands: list[str] = []
         hidden_commands: list[str] = []
+        hidden_deprecated_commands: list[str] = []
+        hidden_internal_commands: list[str] = []
 
         for module_name in self.flow_modules:
             try:
@@ -150,8 +166,14 @@ class CabbageWorkflowPlugin:
                 for command, function_id in commands.items():
                     if not isinstance(command, str) or not isinstance(function_id, int):
                         continue
+                    exposure = classify_workflow_command_exposure(command)
+                    record_workflow_function_exposure(command_registry, command, function_id)
                     if not should_register_workflow_command(command):
                         hidden_commands.append(command)
+                        if exposure == "deprecated":
+                            hidden_deprecated_commands.append(command)
+                        elif exposure == "internal":
+                            hidden_internal_commands.append(command)
                         continue
                     try:
                         command_registry.register(command, function_id, overwrite=True)
@@ -168,6 +190,8 @@ class CabbageWorkflowPlugin:
             "flows": registered_flows,
             "commands": registered_commands,
             "hidden_commands": hidden_commands,
+            "hidden_deprecated_commands": hidden_deprecated_commands,
+            "hidden_internal_commands": hidden_internal_commands,
         }
         logger.info(
             "[cai_extensions] commands registered: %s hidden: %s",
@@ -179,6 +203,8 @@ class CabbageWorkflowPlugin:
             "flows": registered_flows,
             "commands": registered_commands,
             "hidden_commands": hidden_commands,
+            "hidden_deprecated_commands": hidden_deprecated_commands,
+            "hidden_internal_commands": hidden_internal_commands,
         }
 
 
