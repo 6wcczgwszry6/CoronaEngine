@@ -33,6 +33,9 @@ _PYTHON_ROUTE_METHOD_ALLOWLIST = {
         "open_project_file",
         "browse_folder",
     }),
+    "CoronaEditor": frozenset({
+        "close_process",
+    }),
     "FileManager": frozenset({
         "open_file",
     }),

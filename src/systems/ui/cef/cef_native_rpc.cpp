@@ -129,6 +129,9 @@ bool is_python_fallback_allowed(const std::string& module, const std::string& fu
             "open_project_file",
             "browse_folder",
         }},
+        {"CoronaEditor", {
+            "close_process",
+        }},
         {"FileManager", {
             "open_file",
         }},
