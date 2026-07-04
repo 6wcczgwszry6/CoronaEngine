@@ -23,6 +23,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <ctime>
 #include <cstring>
 #include <filesystem>
@@ -43,6 +44,15 @@
 namespace Corona::Systems::UI {
 
 namespace {
+
+constexpr const char* VISION_DOCUMENT_ENCODING = "zlib_base64_json";
+constexpr const char* VISION_DOCUMENT_VERSION = "1";
+
+struct EmbeddedVisionDocument {
+    nlohmann::json document;
+    std::string data;
+    std::string asset_root;
+};
 
 std::shared_ptr<Corona::Systems::NetworkSystem> get_network_system() {
     auto sys_mgr = Corona::Kernel::KernelContext::instance().system_manager();
@@ -288,8 +298,14 @@ struct NativeEditorScene {
     std::string script_path;
     std::string terrain_type;
     std::string terrain_path;
+    std::string vision_storage;
+    std::string vision_source_id;
     std::string vision_source_path;
     std::string vision_import_mode;
+    std::string vision_document_version;
+    std::string vision_document_encoding;
+    std::string vision_document_data;
+    std::string vision_document_asset_root;
     std::array<float, 3> sun_direction{1.0f, 1.0f, 1.0f};
     bool sun_enabled{true};
     bool floor_grid_enabled{true};
@@ -312,6 +328,21 @@ NativeEditorState& native_editor_state() {
 
 bool is_valid_project_dir(const std::filesystem::path& project_dir);
 std::filesystem::path canonical_project_dir_for_settings(const std::filesystem::path& project_dir);
+std::string safe_project_dir_name(std::string name, const std::string& fallback);
+std::string sanitize_vision_source_id(std::string source_id);
+std::string fnv1a_hex12(std::string_view text);
+nlohmann::json decode_vision_document_data(const std::string& data);
+void replace_ini_section_from_map(const std::filesystem::path& file_path,
+                                  const std::string& section_name,
+                                  const std::map<std::string, std::string>& values);
+EmbeddedVisionDocument create_embedded_vision_document(const std::filesystem::path& project_dir,
+                                                       const std::filesystem::path& json_path,
+                                                       const nlohmann::json& source_document);
+void persist_vision_proxy_actors_from_document(const std::filesystem::path& project_dir,
+                                               const std::filesystem::path& scene_file,
+                                               const nlohmann::json& document,
+                                               const std::filesystem::path& source_dir);
+std::map<std::string, std::string> vision_camera_section(const nlohmann::json& document);
 
 std::string read_last_project_from_editor_ini() {
     const auto cwd_ini = std::filesystem::current_path() / "CoronaEditor.ini";
@@ -687,15 +718,111 @@ void persist_native_scene_cameras(const NativeEditorScene& scene) {
     replace_ini_section(scene_file, "camera", build_camera_section_lines(scene));
 }
 
+std::filesystem::path resolve_project_sidecar_vision_json(const NativeEditorScene& scene) {
+    const auto source_id = sanitize_vision_source_id(scene.vision_source_id);
+    if (source_id.empty()) {
+        return {};
+    }
+    return scene.project_root / ".corona" / "vision_sources" / source_id / "vision.json";
+}
+
+void persist_native_scene_vision_metadata(const NativeEditorScene& scene) {
+    const auto scene_file = resolve_project_path(scene.project_root, scene.route);
+    const auto storage = normalize_route(scene.vision_storage);
+    const auto source_id = sanitize_vision_source_id(scene.vision_source_id);
+    if (storage == "embedded" && !scene.vision_document_data.empty()) {
+        replace_ini_section(scene_file,
+                            "vision",
+                            {"[vision]",
+                             "import_mode = external",
+                             "storage = embedded"});
+        return;
+    }
+    if (storage == "project_sidecar" && !source_id.empty()) {
+        replace_ini_section(scene_file,
+                            "vision",
+                            {"[vision]",
+                             "import_mode = external",
+                             "source_id = " + source_id,
+                             "storage = project_sidecar"});
+        return;
+    }
+
+    const std::string vision_section = "vision";
+    remove_ini_section(scene_file, vision_section);
+}
+
+void persist_native_scene_vision_document(const NativeEditorScene& scene) {
+    const auto scene_file = resolve_project_path(scene.project_root, scene.route);
+    if (normalize_route(scene.vision_storage) != "embedded" ||
+        scene.vision_document_data.empty()) {
+        return;
+    }
+    replace_ini_section(scene_file,
+                        "vision_document",
+                        {"[vision_document]",
+                         "version = " + (scene.vision_document_version.empty()
+                                             ? std::string(VISION_DOCUMENT_VERSION)
+                                             : scene.vision_document_version),
+                         "encoding = " + (scene.vision_document_encoding.empty()
+                                              ? std::string(VISION_DOCUMENT_ENCODING)
+                                              : scene.vision_document_encoding),
+                         "asset_root = " + scene.vision_document_asset_root,
+                         "data = " + scene.vision_document_data});
+}
+
 void persist_native_scene_common(const NativeEditorScene& scene) {
     const auto scene_file = resolve_project_path(scene.project_root, scene.route);
     persist_native_scene_actors(scene);
     persist_native_scene_environment(scene);
     persist_native_scene_cameras(scene);
-    remove_ini_section(scene_file, "vision");
-    remove_ini_section(scene_file, "vision_document");
+    persist_native_scene_vision_metadata(scene);
+    persist_native_scene_vision_document(scene);
     remove_ini_section(scene_file, "vision_bindings");
     remove_ini_section(scene_file, "vision_unsupported_shapes");
+}
+
+bool migrate_project_sidecar_scene_to_embedded(NativeEditorScene& scene,
+                                               const std::filesystem::path& scene_file) {
+    if (scene.vision_storage != "project_sidecar" ||
+        !scene.vision_document_data.empty()) {
+        return false;
+    }
+
+    const auto sidecar_json = resolve_project_sidecar_vision_json(scene);
+    if (sidecar_json.empty() || !std::filesystem::is_regular_file(sidecar_json)) {
+        return false;
+    }
+
+    try {
+        std::ifstream input(sidecar_json);
+        if (!input) {
+            return false;
+        }
+        const auto document = nlohmann::json::parse(input);
+        const auto embedded = create_embedded_vision_document(scene.project_root, sidecar_json, document);
+
+        scene.vision_storage = "embedded";
+        scene.vision_source_id.clear();
+        scene.vision_source_path.clear();
+        scene.vision_import_mode = "external";
+        scene.vision_document_version = VISION_DOCUMENT_VERSION;
+        scene.vision_document_encoding = VISION_DOCUMENT_ENCODING;
+        scene.vision_document_asset_root = embedded.asset_root;
+        scene.vision_document_data = embedded.data;
+
+        replace_ini_section_from_map(scene_file, "camera", vision_camera_section(embedded.document));
+        persist_vision_proxy_actors_from_document(scene.project_root, scene_file, embedded.document, scene.project_root);
+        persist_native_scene_vision_metadata(scene);
+        persist_native_scene_vision_document(scene);
+        return true;
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("Vision sidecar migration failed: project={}, scene={}, error={}",
+                      scene.project_root.string(),
+                      scene.route,
+                      e.what());
+        return false;
+    }
 }
 
 void apply_native_scene_environment(NativeEditorScene& scene) {
@@ -710,6 +837,42 @@ void apply_native_scene_environment(NativeEditorScene& scene) {
 }
 
 void apply_native_scene_vision_source(const NativeEditorScene& scene) {
+    if (scene.vision_storage == "embedded") {
+        if (scene.vision_document_data.empty()) {
+            CFW_LOG_ERROR("Vision embedded scene missing: project={}, scene={}",
+                          scene.project_root.string(),
+                          scene.route);
+            return;
+        }
+        try {
+            const auto document = decode_vision_document_data(scene.vision_document_data);
+            const auto scene_key =
+                path_to_utf8(resolve_project_path(scene.project_root, scene.route)) +
+                "#embedded:" + fnv1a_hex12(scene.vision_document_data);
+            Corona::API::load_vision_scene_from_json(document.dump(),
+                                                     path_to_utf8(scene.project_root),
+                                                     scene_key);
+        } catch (const std::exception& e) {
+            CFW_LOG_ERROR("Vision embedded scene load failed: project={}, scene={}, error={}",
+                          scene.project_root.string(),
+                          scene.route,
+                          e.what());
+        }
+        return;
+    }
+
+    if (scene.vision_storage == "project_sidecar") {
+        const auto sidecar_json = resolve_project_sidecar_vision_json(scene);
+        if (sidecar_json.empty() || !std::filesystem::is_regular_file(sidecar_json)) {
+            CFW_LOG_ERROR("Vision sidecar scene missing: project={}, source_id={}",
+                          scene.project_root.string(),
+                          scene.vision_source_id);
+            return;
+        }
+        Corona::API::load_vision_scene(path_to_utf8(sidecar_json));
+        return;
+    }
+
     const auto source_path = normalize_route(scene.vision_source_path);
     if (source_path.empty()) {
         Corona::API::load_vision_scene("");
@@ -721,7 +884,12 @@ void apply_native_scene_vision_source(const NativeEditorScene& scene) {
 }
 
 void apply_native_scene_vision_camera_defaults(NativeEditorScene& scene) {
-    if (normalize_route(scene.vision_source_path).empty() || scene.cameras.empty()) {
+    const bool has_sidecar = scene.vision_storage == "project_sidecar" &&
+                             !sanitize_vision_source_id(scene.vision_source_id).empty();
+    const bool has_embedded = scene.vision_storage == "embedded" &&
+                              !scene.vision_document_data.empty();
+    if ((!has_embedded && !has_sidecar && normalize_route(scene.vision_source_path).empty()) ||
+        scene.cameras.empty()) {
         return;
     }
     auto& camera = scene.cameras[std::min(scene.active_camera_index, scene.cameras.size() - 1)];
@@ -966,7 +1134,7 @@ NativeEditorCamera make_native_camera(NativeEditorScene& scene,
 std::unique_ptr<NativeEditorScene> load_native_scene(const std::filesystem::path& project_root,
                                                      const std::string& scene_route) {
     const auto scene_file = resolve_project_path(project_root, scene_route);
-    const auto scene_ini = read_ini_file(scene_file);
+    auto scene_ini = read_ini_file(scene_file);
 
     auto scene = std::make_unique<NativeEditorScene>();
     scene->project_root = project_root;
@@ -975,8 +1143,17 @@ std::unique_ptr<NativeEditorScene> load_native_scene(const std::filesystem::path
     scene->script_path = ini_value(scene_ini, "scripts", "path");
     scene->terrain_type = ini_value(scene_ini, "terrain", "type");
     scene->terrain_path = ini_value(scene_ini, "terrain", "path");
+    scene->vision_storage = ini_value(scene_ini, "vision", "storage");
+    scene->vision_source_id = ini_value(scene_ini, "vision", "source_id");
     scene->vision_source_path = ini_value(scene_ini, "vision", "source_path");
     scene->vision_import_mode = ini_value(scene_ini, "vision", "import_mode");
+    scene->vision_document_version = ini_value(scene_ini, "vision_document", "version");
+    scene->vision_document_encoding = ini_value(scene_ini, "vision_document", "encoding");
+    scene->vision_document_data = ini_value(scene_ini, "vision_document", "data");
+    scene->vision_document_asset_root = ini_value(scene_ini, "vision_document", "asset_root");
+    if (migrate_project_sidecar_scene_to_embedded(*scene, scene_file)) {
+        scene_ini = read_ini_file(scene_file);
+    }
     scene->sun_direction = parse_float3(
         ini_value(scene_ini, "sun", "sun_direction", "1.0, 1.0, 1.0"),
         {1.0f, 1.0f, 1.0f});
@@ -1246,6 +1423,8 @@ nlohmann::json scene_to_json(const NativeEditorScene& scene) {
         {"grid", {{"enabled", scene.floor_grid_enabled}}},
         {"terrain", {{"path", scene.terrain_path}, {"type", scene.terrain_type}}},
         {"vision", {
+            {"storage", scene.vision_storage},
+            {"source_id", scene.vision_source_id},
             {"source_path", scene.vision_source_path},
             {"import_mode", scene.vision_import_mode},
             {"bindings", nlohmann::json::array()},
@@ -2116,6 +2295,25 @@ std::string safe_project_dir_name(std::string name, const std::string& fallback)
     return name.empty() ? "project" : name;
 }
 
+std::string fnv1a_hex12(std::string_view text) {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const unsigned char c : text) {
+        hash ^= c;
+        hash *= 1099511628211ull;
+    }
+    std::ostringstream out;
+    out << std::hex << std::setw(16) << std::setfill('0') << hash;
+    return out.str().substr(0, 12);
+}
+
+std::string sanitize_vision_source_id(std::string source_id) {
+    source_id = trim_ascii(std::move(source_id));
+    if (source_id.empty()) {
+        return {};
+    }
+    return safe_project_dir_name(std::move(source_id), "vision");
+}
+
 std::string settings_value(const std::string& section,
                            const std::string& key,
                            const std::string& fallback = {}) {
@@ -2342,8 +2540,8 @@ std::string vision_shape_guid(const nlohmann::json& shape, size_t index) {
     return "vision-shape-" + std::to_string(index);
 }
 
-std::filesystem::path resolve_vision_model_path(const std::filesystem::path& json_path,
-                                                const nlohmann::json& shape) {
+std::filesystem::path resolve_vision_model_path_from_dir(const std::filesystem::path& source_dir,
+                                                         const nlohmann::json& shape) {
     const auto& params = vision_param_object(shape);
     std::string model = json_string_value(params, {"fn", "path"});
     if (model.empty()) {
@@ -2357,11 +2555,26 @@ std::filesystem::path resolve_vision_model_path(const std::filesystem::path& jso
     if (path.is_absolute()) {
         return path;
     }
-    return json_path.parent_path() / path;
+    return source_dir / path;
+}
+
+std::filesystem::path resolve_vision_model_path(const std::filesystem::path& json_path,
+                                                const nlohmann::json& shape) {
+    return resolve_vision_model_path_from_dir(json_path.parent_path(), shape);
 }
 
 std::filesystem::path copy_vision_model_into_project(const std::filesystem::path& project_dir,
                                                      const std::filesystem::path& source_model) {
+    std::error_code rel_ec;
+    const auto existing_rel = std::filesystem::relative(source_model, project_dir, rel_ec);
+    if (!rel_ec && path_is_inside_project(existing_rel)) {
+        const auto existing_route = normalize_route(path_to_utf8(existing_rel));
+        if (existing_route.rfind("Resource/vision_imports/", 0) == 0 ||
+            existing_route == "Resource/vision_imports") {
+            return existing_rel;
+        }
+    }
+
     const auto rel_dir = std::filesystem::path("Resource") / "vision_imports";
     const auto dst_dir = project_dir / rel_dir;
     std::filesystem::create_directories(dst_dir);
@@ -2484,20 +2697,409 @@ std::map<std::string, std::string> vision_camera_section(const nlohmann::json& d
     return camera;
 }
 
-void apply_vision_json_to_scene_native(const std::filesystem::path& project_dir,
-                                       const std::filesystem::path& scene_file,
-                                       const std::filesystem::path& json_path) {
-    std::ifstream input(json_path);
-    if (!input) {
-        throw std::runtime_error("Vision scene file not found: " + path_to_utf8(json_path));
-    }
-    nlohmann::json document = nlohmann::json::parse(input);
-    remove_ini_section(scene_file, "vision");
-    remove_ini_section(scene_file, "vision_document");
-    remove_ini_section(scene_file, "vision_bindings");
-    remove_ini_section(scene_file, "vision_unsupported_shapes");
-    replace_ini_section_from_map(scene_file, "camera", vision_camera_section(document));
+bool is_vision_resource_path_key(std::string key) {
+    key = to_lower_ascii(std::move(key));
+    return key == "fn" ||
+           key == "path" ||
+           key == "file" ||
+           key == "filename" ||
+           key == "texture" ||
+           key == "image";
+}
 
+bool is_external_resource_reference(const std::string& value) {
+    const auto lower = to_lower_ascii(value);
+    return lower.find("://") != std::string::npos ||
+           lower.rfind("data:", 0) == 0;
+}
+
+std::string read_text_file(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return {};
+    }
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
+
+std::uint32_t adler32_bytes(const std::string& payload) {
+    constexpr std::uint32_t mod_adler = 65521;
+    std::uint32_t a = 1;
+    std::uint32_t b = 0;
+    for (unsigned char ch : payload) {
+        a = (a + ch) % mod_adler;
+        b = (b + a) % mod_adler;
+    }
+    return (b << 16) | a;
+}
+
+std::string base64_encode(const std::string& input) {
+    static constexpr char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string output;
+    output.reserve(((input.size() + 2) / 3) * 4);
+    for (size_t index = 0; index < input.size(); index += 3) {
+        const auto b0 = static_cast<unsigned char>(input[index]);
+        const auto b1 = index + 1 < input.size() ? static_cast<unsigned char>(input[index + 1]) : 0;
+        const auto b2 = index + 2 < input.size() ? static_cast<unsigned char>(input[index + 2]) : 0;
+        output.push_back(alphabet[b0 >> 2]);
+        output.push_back(alphabet[((b0 & 0x03) << 4) | (b1 >> 4)]);
+        output.push_back(index + 1 < input.size() ? alphabet[((b1 & 0x0f) << 2) | (b2 >> 6)] : '=');
+        output.push_back(index + 2 < input.size() ? alphabet[b2 & 0x3f] : '=');
+    }
+    return output;
+}
+
+int base64_value(unsigned char ch) {
+    if (ch >= 'A' && ch <= 'Z') return ch - 'A';
+    if (ch >= 'a' && ch <= 'z') return ch - 'a' + 26;
+    if (ch >= '0' && ch <= '9') return ch - '0' + 52;
+    if (ch == '+') return 62;
+    if (ch == '/') return 63;
+    return -1;
+}
+
+std::string base64_decode(const std::string& input) {
+    std::string output;
+    int value = 0;
+    int bits = -8;
+    for (unsigned char ch : input) {
+        if (std::isspace(ch) || ch == '=') {
+            continue;
+        }
+        const int decoded = base64_value(ch);
+        if (decoded < 0) {
+            throw std::runtime_error("Invalid base64 data in embedded Vision document");
+        }
+        value = (value << 6) | decoded;
+        bits += 6;
+        if (bits >= 0) {
+            output.push_back(static_cast<char>((value >> bits) & 0xff));
+            bits -= 8;
+        }
+    }
+    return output;
+}
+
+std::string zlib_store_blocks(const std::string& payload) {
+    std::string output;
+    output.reserve(payload.size() + payload.size() / 65535 * 5 + 16);
+    output.push_back(static_cast<char>(0x78));
+    output.push_back(static_cast<char>(0x01));
+
+    size_t offset = 0;
+    do {
+        const auto remaining = payload.size() - offset;
+        const auto chunk_size = std::min<size_t>(remaining, 65535);
+        const bool final_block = offset + chunk_size >= payload.size();
+        output.push_back(static_cast<char>(final_block ? 0x01 : 0x00));
+        const auto len = static_cast<std::uint16_t>(chunk_size);
+        const auto nlen = static_cast<std::uint16_t>(~len);
+        output.push_back(static_cast<char>(len & 0xff));
+        output.push_back(static_cast<char>((len >> 8) & 0xff));
+        output.push_back(static_cast<char>(nlen & 0xff));
+        output.push_back(static_cast<char>((nlen >> 8) & 0xff));
+        output.append(payload.data() + offset, chunk_size);
+        offset += chunk_size;
+    } while (offset < payload.size());
+
+    const auto checksum = adler32_bytes(payload);
+    output.push_back(static_cast<char>((checksum >> 24) & 0xff));
+    output.push_back(static_cast<char>((checksum >> 16) & 0xff));
+    output.push_back(static_cast<char>((checksum >> 8) & 0xff));
+    output.push_back(static_cast<char>(checksum & 0xff));
+    return output;
+}
+
+std::string zlib_unstore_blocks(const std::string& payload) {
+    if (payload.size() < 6) {
+        throw std::runtime_error("Embedded Vision document zlib payload is truncated");
+    }
+    size_t offset = 2;
+    const size_t checksum_offset = payload.size() - 4;
+    std::string output;
+    while (offset < checksum_offset) {
+        const auto header = static_cast<unsigned char>(payload[offset++]);
+        const bool final_block = (header & 0x01) != 0;
+        const auto block_type = (header >> 1) & 0x03;
+        if (block_type != 0) {
+            throw std::runtime_error("Embedded Vision document uses unsupported compressed deflate blocks");
+        }
+        if (offset + 4 > checksum_offset) {
+            throw std::runtime_error("Embedded Vision document stored block is truncated");
+        }
+        const auto len = static_cast<std::uint16_t>(
+            static_cast<unsigned char>(payload[offset]) |
+            (static_cast<unsigned char>(payload[offset + 1]) << 8));
+        const auto nlen = static_cast<std::uint16_t>(
+            static_cast<unsigned char>(payload[offset + 2]) |
+            (static_cast<unsigned char>(payload[offset + 3]) << 8));
+        offset += 4;
+        if (static_cast<std::uint16_t>(~len) != nlen) {
+            throw std::runtime_error("Embedded Vision document stored block length check failed");
+        }
+        if (offset + len > checksum_offset) {
+            throw std::runtime_error("Embedded Vision document stored block exceeds payload");
+        }
+        output.append(payload.data() + offset, len);
+        offset += len;
+        if (final_block) {
+            break;
+        }
+    }
+    const auto expected = (static_cast<std::uint32_t>(static_cast<unsigned char>(payload[checksum_offset])) << 24) |
+                          (static_cast<std::uint32_t>(static_cast<unsigned char>(payload[checksum_offset + 1])) << 16) |
+                          (static_cast<std::uint32_t>(static_cast<unsigned char>(payload[checksum_offset + 2])) << 8) |
+                          static_cast<std::uint32_t>(static_cast<unsigned char>(payload[checksum_offset + 3]));
+    if (adler32_bytes(output) != expected) {
+        throw std::runtime_error("Embedded Vision document checksum mismatch");
+    }
+    return output;
+}
+
+std::string encode_vision_document_data(const nlohmann::json& document) {
+    return base64_encode(zlib_store_blocks(document.dump()));
+}
+
+nlohmann::json decode_vision_document_data(const std::string& data) {
+    const auto json_text = zlib_unstore_blocks(base64_decode(data));
+    auto document = nlohmann::json::parse(json_text);
+    if (!document.is_object()) {
+        throw std::runtime_error("Embedded Vision document must be a JSON object");
+    }
+    return document;
+}
+
+std::filesystem::path relative_path_if_safe(const std::filesystem::path& path,
+                                            const std::filesystem::path& base_dir) {
+    std::error_code ec;
+    auto relative = std::filesystem::relative(path, base_dir, ec);
+    if (ec || relative.empty()) {
+        return path.filename();
+    }
+    for (const auto& part : relative) {
+        if (part == "..") {
+            return path.filename();
+        }
+    }
+    return relative;
+}
+
+void copy_file_creating_directories(const std::filesystem::path& source,
+                                    const std::filesystem::path& destination) {
+    std::filesystem::create_directories(destination.parent_path());
+    std::error_code ec;
+    std::filesystem::copy_file(source,
+                               destination,
+                               std::filesystem::copy_options::overwrite_existing,
+                               ec);
+    if (ec) {
+        CFW_LOG_WARNING("Vision asset copy failed: {} -> {} ({})",
+                        source.string(),
+                        destination.string(),
+                        ec.message());
+    }
+}
+
+void copy_mtl_texture_dependencies(const std::filesystem::path& source_mtl,
+                                   const std::filesystem::path& sidecar_dir,
+                                   const std::filesystem::path& copied_mtl_rel) {
+    std::ifstream input(source_mtl);
+    if (!input) {
+        return;
+    }
+
+    static const std::unordered_set<std::string> texture_keys = {
+        "map_ka", "map_kd", "map_ks", "map_ke", "map_ns", "map_bump",
+        "bump", "disp", "decal", "refl", "norm"};
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream line_stream(line);
+        std::string key;
+        line_stream >> key;
+        key = to_lower_ascii(key);
+        if (!texture_keys.contains(key)) {
+            continue;
+        }
+
+        std::string token;
+        std::string texture;
+        while (line_stream >> token) {
+            if (!token.empty() && token.front() == '-') {
+                std::string ignored;
+                line_stream >> ignored;
+                continue;
+            }
+            texture = token;
+        }
+        if (texture.empty() || is_external_resource_reference(texture)) {
+            continue;
+        }
+
+        const auto source_texture = source_mtl.parent_path() / path_from_utf8(texture);
+        if (!std::filesystem::is_regular_file(source_texture)) {
+            continue;
+        }
+        const auto destination =
+            sidecar_dir / copied_mtl_rel.parent_path() / path_from_utf8(texture);
+        copy_file_creating_directories(source_texture, destination);
+    }
+}
+
+void copy_obj_dependencies(const std::filesystem::path& source_obj,
+                           const std::filesystem::path& sidecar_dir,
+                           const std::filesystem::path& copied_obj_rel) {
+    std::ifstream input(source_obj);
+    if (!input) {
+        return;
+    }
+
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream line_stream(line);
+        std::string key;
+        line_stream >> key;
+        if (to_lower_ascii(key) != "mtllib") {
+            continue;
+        }
+
+        std::string mtl_name;
+        while (line_stream >> mtl_name) {
+            if (mtl_name.empty() || is_external_resource_reference(mtl_name)) {
+                continue;
+            }
+            const auto source_mtl = source_obj.parent_path() / path_from_utf8(mtl_name);
+            if (!std::filesystem::is_regular_file(source_mtl)) {
+                continue;
+            }
+            const auto copied_mtl_rel = copied_obj_rel.parent_path() / path_from_utf8(mtl_name);
+            copy_file_creating_directories(source_mtl, sidecar_dir / copied_mtl_rel);
+            copy_mtl_texture_dependencies(source_mtl, sidecar_dir, copied_mtl_rel);
+        }
+    }
+}
+
+void copy_gltf_dependencies(const std::filesystem::path& source_gltf,
+                            const std::filesystem::path& sidecar_dir,
+                            const std::filesystem::path& copied_gltf_rel) {
+    std::ifstream input(source_gltf);
+    if (!input) {
+        return;
+    }
+
+    nlohmann::json document;
+    try {
+        document = nlohmann::json::parse(input);
+    } catch (...) {
+        return;
+    }
+
+    auto copy_uri_array = [&](const char* section) {
+        if (!document.contains(section) || !document[section].is_array()) {
+            return;
+        }
+        for (const auto& item : document[section]) {
+            if (!item.is_object() || !item.contains("uri") || !item["uri"].is_string()) {
+                continue;
+            }
+            const auto uri = item["uri"].get<std::string>();
+            if (uri.empty() || is_external_resource_reference(uri)) {
+                continue;
+            }
+            const auto source_dep = source_gltf.parent_path() / path_from_utf8(uri);
+            if (!std::filesystem::is_regular_file(source_dep)) {
+                continue;
+            }
+            const auto destination =
+                sidecar_dir / copied_gltf_rel.parent_path() / path_from_utf8(uri);
+            copy_file_creating_directories(source_dep, destination);
+        }
+    };
+
+    copy_uri_array("buffers");
+    copy_uri_array("images");
+}
+
+std::string copy_vision_archive_asset(const std::filesystem::path& source,
+                                      const std::filesystem::path& project_dir,
+                                      const std::filesystem::path& archive_root_rel,
+                                      const std::filesystem::path& original_scene_dir) {
+    if (!std::filesystem::is_regular_file(source)) {
+        return {};
+    }
+
+    const auto source_rel = relative_path_if_safe(source, original_scene_dir);
+    const auto copied_rel = archive_root_rel / source_rel;
+    copy_file_creating_directories(source, project_dir / copied_rel);
+
+    const auto ext = to_lower_ascii(source.extension().string());
+    if (ext == ".obj") {
+        copy_obj_dependencies(source, project_dir, copied_rel);
+    } else if (ext == ".gltf") {
+        copy_gltf_dependencies(source, project_dir, copied_rel);
+    }
+
+    return normalize_route(path_to_utf8(copied_rel));
+}
+
+void rewrite_vision_resource_paths_for_project_archive(nlohmann::json& value,
+                                                       const std::filesystem::path& source_dir,
+                                                       const std::filesystem::path& project_dir,
+                                                       const std::filesystem::path& archive_root_rel) {
+    if (value.is_object()) {
+        for (auto& item : value.items()) {
+            auto& child = item.value();
+            if (is_vision_resource_path_key(item.key()) && child.is_string()) {
+                const auto text = trim_ascii(child.get<std::string>());
+                if (!text.empty() && !is_external_resource_reference(text)) {
+                    const auto candidate_path = path_from_utf8(text);
+                    const auto source_path =
+                        candidate_path.is_absolute() ? candidate_path : source_dir / candidate_path;
+                    const auto copied = copy_vision_archive_asset(
+                        source_path, project_dir, archive_root_rel, source_dir);
+                    if (!copied.empty()) {
+                        child = copied;
+                        continue;
+                    }
+                }
+            }
+            rewrite_vision_resource_paths_for_project_archive(child, source_dir, project_dir, archive_root_rel);
+        }
+        return;
+    }
+
+    if (value.is_array()) {
+        for (auto& child : value) {
+            rewrite_vision_resource_paths_for_project_archive(child, source_dir, project_dir, archive_root_rel);
+        }
+    }
+}
+
+EmbeddedVisionDocument create_embedded_vision_document(const std::filesystem::path& project_dir,
+                                                       const std::filesystem::path& json_path,
+                                                       const nlohmann::json& source_document) {
+    const auto raw = read_text_file(json_path);
+    const auto import_id = safe_project_dir_name(path_to_utf8(json_path.stem()), "vision") +
+                         "_" + fnv1a_hex12(raw.empty() ? path_to_utf8(json_path) : raw);
+    const auto asset_root = std::filesystem::path("Resource") / "vision_imports" / import_id;
+    std::filesystem::create_directories(project_dir / asset_root);
+
+    auto embedded_document = source_document;
+    rewrite_vision_resource_paths_for_project_archive(
+        embedded_document, json_path.parent_path(), project_dir, asset_root);
+
+    return EmbeddedVisionDocument{
+        embedded_document,
+        encode_vision_document_data(embedded_document),
+        normalize_route(path_to_utf8(asset_root)),
+    };
+}
+
+void persist_vision_proxy_actors_from_document(const std::filesystem::path& project_dir,
+                                               const std::filesystem::path& scene_file,
+                                               const nlohmann::json& document,
+                                               const std::filesystem::path& source_dir) {
     const auto scene_data = extract_scene_data(document);
     std::map<std::string, std::string> actors;
     size_t imported = 0;
@@ -2510,7 +3112,7 @@ void apply_vision_json_to_scene_native(const std::filesystem::path& project_dir,
         std::filesystem::path source_model;
         std::filesystem::path route;
         if (shape_type == "model") {
-            source_model = resolve_vision_model_path(json_path, shape);
+            source_model = resolve_vision_model_path_from_dir(source_dir, shape);
             if (source_model.empty() || !std::filesystem::is_regular_file(source_model)) {
                 return;
             }
@@ -2564,10 +3166,33 @@ void apply_vision_json_to_scene_native(const std::filesystem::path& project_dir,
     replace_ini_section_from_map(scene_file, "actors", actors);
 }
 
+void apply_vision_json_to_scene_native(const std::filesystem::path& project_dir,
+                                       const std::filesystem::path& scene_file,
+                                       const std::filesystem::path& json_path) {
+    std::ifstream input(json_path);
+    if (!input) {
+        throw std::runtime_error("Vision scene file not found: " + path_to_utf8(json_path));
+    }
+    nlohmann::json document = nlohmann::json::parse(input);
+    const std::string legacy_vision_section = "vision";
+    remove_ini_section(scene_file, legacy_vision_section);
+    remove_ini_section(scene_file, "vision_document");
+    remove_ini_section(scene_file, "vision_bindings");
+    remove_ini_section(scene_file, "vision_unsupported_shapes");
+    replace_ini_section_from_map(scene_file, "camera", vision_camera_section(document));
+    persist_vision_proxy_actors_from_document(project_dir, scene_file, document, json_path.parent_path());
+}
+
 std::filesystem::path create_vision_project_native(const std::filesystem::path& json_path) {
     if (!Corona::API::is_vision_available()) {
         throw std::runtime_error("Vision backend is not available in this build");
     }
+    std::ifstream input(json_path);
+    if (!input) {
+        throw std::runtime_error("Vision scene file not found: " + path_to_utf8(json_path));
+    }
+    nlohmann::json document = nlohmann::json::parse(input);
+
     const auto base_dir_text = settings_value("General", "default_path", path_to_utf8(runtime_data_dir()));
     const auto base_dir = path_from_utf8(base_dir_text.empty() ? path_to_utf8(runtime_data_dir()) : base_dir_text);
     std::filesystem::create_directories(base_dir);
@@ -2577,7 +3202,22 @@ std::filesystem::path create_vision_project_native(const std::filesystem::path& 
     const auto project_ini = create_project_from_template_native(target, final_name, "3d");
     const auto project = read_ini_file(project_ini);
     const auto entrance = ini_value(project, "Project", "entrance_scene", "Scene/default.scene");
-    apply_vision_json_to_scene_native(target, resolve_project_path(target, entrance), json_path);
+    const auto scene_file = resolve_project_path(target, entrance);
+    const auto embedded = create_embedded_vision_document(target, json_path, document);
+    remove_ini_section(scene_file, "vision_bindings");
+    remove_ini_section(scene_file, "vision_unsupported_shapes");
+    replace_ini_section_from_map(scene_file, "camera", vision_camera_section(embedded.document));
+    persist_vision_proxy_actors_from_document(target, scene_file, embedded.document, target);
+    replace_ini_section_from_map(scene_file,
+                                 "vision",
+                                 {{"storage", "embedded"},
+                                  {"import_mode", "external"}});
+    replace_ini_section_from_map(scene_file,
+                                 "vision_document",
+                                 {{"version", VISION_DOCUMENT_VERSION},
+                                  {"encoding", VISION_DOCUMENT_ENCODING},
+                                  {"asset_root", embedded.asset_root},
+                                  {"data", embedded.data}});
     return target;
 }
 
@@ -3562,11 +4202,16 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             for (const auto& camera : scene->cameras) {
                 cameras.push_back(camera_to_json(camera));
             }
+            const bool has_project_sidecar =
+                scene->vision_storage == "project_sidecar" &&
+                !sanitize_vision_source_id(scene->vision_source_id).empty();
             return native_success({
                 {"actors", actors},
                 {"cameras", cameras},
                 {"vision", {
-                    {"enabled", !scene->vision_source_path.empty()},
+                    {"enabled", has_project_sidecar || !scene->vision_source_path.empty()},
+                    {"storage", scene->vision_storage},
+                    {"source_id", scene->vision_source_id},
                     {"source_path", scene->vision_source_path},
                     {"import_mode", scene->vision_import_mode},
                     {"binding_count", 0},

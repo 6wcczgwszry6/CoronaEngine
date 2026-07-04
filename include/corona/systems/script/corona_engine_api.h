@@ -443,6 +443,12 @@ void set_vision_render_mode(const std::string& mode, std::uintptr_t camera_handl
 ///             恢复由引擎数据构建的场景。
 void load_vision_scene(const std::string& path);
 
+/// 请求从内存中的 Vision JSON 加载外部场景。base_dir 用于解析 JSON 内的相对
+/// 资源路径；scene_key 用于缓存、日志和运行时身份标识。
+void load_vision_scene_from_json(const std::string& json_text,
+                                 const std::string& base_dir,
+                                 const std::string& scene_key);
+
 // ============================================================================
 // Media (video/audio) import
 //

@@ -2552,7 +2552,26 @@ void load_vision_scene(const std::string& path) {
     }
 
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
-        event_bus->publish<Events::VisionSceneLoadEvent>({path});
+        Events::VisionSceneLoadEvent event;
+        event.scene_path = path;
+        event_bus->publish<Events::VisionSceneLoadEvent>(std::move(event));
+    }
+}
+
+void load_vision_scene_from_json(const std::string& json_text,
+                                 const std::string& base_dir,
+                                 const std::string& scene_key) {
+    if (!is_vision_available()) {
+        CFW_LOG_WARNING("[load_vision_scene_from_json] Vision not compiled in; request ignored");
+        return;
+    }
+
+    if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
+        Events::VisionSceneLoadEvent event;
+        event.scene_json = json_text;
+        event.base_dir = base_dir;
+        event.scene_key = scene_key;
+        event_bus->publish<Events::VisionSceneLoadEvent>(std::move(event));
     }
 }
 

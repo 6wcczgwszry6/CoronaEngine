@@ -824,6 +824,10 @@ void BindAll(nanobind::module_& m) {
           "Load an external Vision scene file (.json). Pass an empty string to "
           "unload and restore the engine-built scene. Only effective when Vision "
           "is available and the Vision backend is active.");
+    m.def("load_vision_scene_from_json", &load_vision_scene_from_json,
+          nb::arg("json_text"), nb::arg("base_dir"), nb::arg("scene_key"),
+          "Load an external Vision scene from in-memory JSON. base_dir resolves "
+          "relative resources and scene_key identifies the runtime cache entry.");
 
     // ============================================================================
     // Media (video/audio) import — standalone resources, not 3D actors

@@ -1707,11 +1707,49 @@ void bind_pipeline_scene_gpu_resource(
     }
 }
 
-// Loads a Vision scene from disk and brings it to a renderable state, mirroring
-// the reference snippet (import_scene -> init -> prepare -> prepare_view_texture).
-// Resolves relative texture/mesh references against the scene's own folder.
-// Returns an empty pointer if the file is missing or import fails so the caller
-// can skip without crashing.
+// Loads a Vision scene description and brings it to a renderable state,
+// mirroring the reference snippet (ProjectDesc -> init -> prepare).
+// Resolves relative texture/mesh references against base_dir.
+[[nodiscard]] auto import_vision_scene_from_data(vision::DataWrap project_data,
+                                                const std::filesystem::path& base_dir,
+                                                const std::string& scene_label,
+                                                Corona::CameraVisionRenderMode mode,
+                                                const std::shared_ptr<
+                                                    Corona::Systems::Vision::VisionSceneResource>&
+                                                    scene_resource,
+                                                Corona::Systems::Vision::VisionPipelineSource source)
+    -> ocarina::SP<vision::Pipeline> {
+    Corona::Systems::Vision::configure_vision_scene_for_mode(project_data, mode);
+
+    vision::Global::instance().set_scene_path(base_dir);
+
+    vision::ProjectDesc project_desc;
+    project_desc.scene_path = base_dir;
+    project_desc.init(project_data);
+
+    auto pipeline = vision::Node::create_shared<vision::Pipeline>(project_desc.pipeline_desc);
+    if (!pipeline) {
+        CFW_LOG_ERROR("OpticsSystem: Vision pipeline creation returned null for {}",
+                      scene_label);
+        return {};
+    }
+    bind_pipeline_scene_resource_early(*pipeline, scene_resource);
+    pipeline->init_project(project_desc);
+    if (scene_resource) {
+        bind_pipeline_scene_gpu_resource(
+            *pipeline, *scene_resource, source, mode, scene_label);
+    }
+    pipeline->init_postprocessor(project_desc.renderer_desc.denoiser_desc);
+    pipeline->init();
+    pipeline->set_output_denoise(project_desc.output_desc.denoise);
+    pipeline->prepare();
+    // prepare() does not create FrameBuffer::view_texture_; the render path tone
+    // maps into it and we later read it back, so create it explicitly here.
+    pipeline->frame_buffer()->prepare_view_texture();
+    return pipeline;
+}
+
+// Loads a Vision scene from disk and brings it to a renderable state.
 [[nodiscard]] auto import_vision_scene_from_file(const std::filesystem::path& scene_path,
                                                 Corona::CameraVisionRenderMode mode,
                                                 const std::shared_ptr<
@@ -1725,37 +1763,12 @@ void bind_pipeline_scene_gpu_resource(
         return {};
     }
 
-    auto project_data = vision::create_json_from_file(scene_path);
-    Corona::Systems::Vision::configure_vision_scene_for_mode(project_data, mode);
-
-    // Resolve relative texture/mesh references against the scene's own folder.
-    const auto scene_folder = scene_path.parent_path();
-    vision::Global::instance().set_scene_path(scene_folder);
-
-    vision::ProjectDesc project_desc;
-    project_desc.scene_path = scene_folder;
-    project_desc.init(project_data);
-
-    auto pipeline = vision::Node::create_shared<vision::Pipeline>(project_desc.pipeline_desc);
-    if (!pipeline) {
-        CFW_LOG_ERROR("OpticsSystem: Vision pipeline creation returned null for {}",
-                      scene_path.string());
-        return {};
-    }
-    bind_pipeline_scene_resource_early(*pipeline, scene_resource);
-    pipeline->init_project(project_desc);
-    if (scene_resource) {
-        bind_pipeline_scene_gpu_resource(
-            *pipeline, *scene_resource, source, mode, scene_path.string());
-    }
-    pipeline->init_postprocessor(project_desc.renderer_desc.denoiser_desc);
-    pipeline->init();
-    pipeline->set_output_denoise(project_desc.output_desc.denoise);
-    pipeline->prepare();
-    // prepare() does not create FrameBuffer::view_texture_; the render path tone
-    // maps into it and we later read it back, so create it explicitly here.
-    pipeline->frame_buffer()->prepare_view_texture();
-    return pipeline;
+    return import_vision_scene_from_data(vision::create_json_from_file(scene_path),
+                                         scene_path.parent_path(),
+                                         scene_path.string(),
+                                         mode,
+                                         scene_resource,
+                                         source);
 }
 
 #ifdef CORONA_VISION_IMPORT_DEMO
@@ -1802,6 +1815,8 @@ struct OpticsSystem::VisionPipelineRuntime {
     std::shared_ptr<VisionSceneResource> scene_resource;
     VisionPipelineSource source{VisionPipelineSource::EngineBuilt};
     std::string scene_path;
+    std::string scene_json;
+    std::string base_dir;
     Corona::CameraVisionRenderMode mode{Corona::CameraVisionRenderMode::PathTracing};
     uint64_t last_used_frame{0};
     uint64_t scene_gpu_transform_version{0};
@@ -1866,6 +1881,8 @@ struct OpticsSystem::VisionPipelineRuntime {
         pipeline = std::move(next_pipeline);
         source = next_source;
         scene_path = std::move(next_scene_path);
+        scene_json.clear();
+        base_dir.clear();
         mode = next_mode;
         scene_gpu_transform_version = 0;
         bind_shared_scene_gpu_resource();
@@ -2507,11 +2524,16 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
 #ifdef CORONA_ENABLE_VISION
         vision_scene_load_sub_id_ = event_bus->subscribe<Events::VisionSceneLoadEvent>(
             [this](const Events::VisionSceneLoadEvent& event) {
-                // Only stash the path here (any thread). The actual import touches
+                // Only stash the request here (any thread). The actual import touches
                 // the CUDA pipeline and MUST run on the render thread, so it is
                 // deferred to apply_pending_vision_scene_load() in update().
                 std::lock_guard<std::mutex> lock(vision_scene_load_mutex_);
-                pending_vision_scene_load_ = event.scene_path;
+                pending_vision_scene_load_ = VisionSceneLoadRequest{
+                    event.scene_path,
+                    event.scene_json,
+                    event.base_dir,
+                    event.scene_key,
+                };
             });
 #endif
 
@@ -5021,10 +5043,12 @@ bool OpticsSystem::init_vision_lazy() {
         vision_initialized_ = true;
         return true;
 #else
-        std::optional<std::string> pending_external_scene;
+        std::optional<VisionSceneLoadRequest> pending_external_scene;
         {
             std::lock_guard<std::mutex> lock(vision_scene_load_mutex_);
-            if (pending_vision_scene_load_ && !pending_vision_scene_load_->empty()) {
+            if (pending_vision_scene_load_ &&
+                (!pending_vision_scene_load_->scene_path.empty() ||
+                 !pending_vision_scene_load_->scene_json.empty())) {
                 pending_external_scene.swap(pending_vision_scene_load_);
             }
         }
@@ -5033,23 +5057,35 @@ bool OpticsSystem::init_vision_lazy() {
             const auto requested_mode = mode_selection.has_visible_camera
                                             ? mode_selection.mode
                                             : current_vision_render_mode_;
-            if (!load_external_vision_scene(*pending_external_scene,
-                                            requested_mode,
-                                            std::nullopt,
-                                            true)) {
+            const bool loaded = !pending_external_scene->scene_json.empty()
+                                    ? load_external_vision_scene_from_json(
+                                          *pending_external_scene, requested_mode, true)
+                                    : load_external_vision_scene(pending_external_scene->scene_path,
+                                                                 requested_mode,
+                                                                 std::nullopt,
+                                                                 true);
+            if (!loaded) {
                 CFW_LOG_ERROR("OpticsSystem: failed to initialize Vision from external scene: {}",
-                              *pending_external_scene);
+                              pending_external_scene->scene_json.empty()
+                                  ? pending_external_scene->scene_path
+                                  : pending_external_scene->scene_key);
                 return false;
             }
             vision_initialized_ = true;
-            const bool external_live = has_external_live_bindings_for_scene(*pending_external_scene);
+            const bool external_live =
+                pending_external_scene->scene_json.empty() &&
+                has_external_live_bindings_for_scene(pending_external_scene->scene_path);
             vision_applied_signature_ = 0;
             vision_pending_signature_ = 0;
             vision_stable_frames_ = 0;
             vision_rebuild_retries_ = 0;
             CFW_LOG_INFO("OpticsSystem: initialized Vision from {} scene: {}",
-                         external_live ? "external_live" : "external",
-                         *pending_external_scene);
+                         !pending_external_scene->scene_json.empty()
+                             ? "embedded"
+                             : (external_live ? "external_live" : "external"),
+                         pending_external_scene->scene_json.empty()
+                             ? pending_external_scene->scene_path
+                             : pending_external_scene->scene_key);
             return true;
         }
 
@@ -5626,18 +5662,30 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
 }
 
 void OpticsSystem::apply_pending_vision_scene_load() {
-    std::optional<std::string> request;
+    std::optional<VisionSceneLoadRequest> request;
     {
         std::lock_guard<std::mutex> lock(vision_scene_load_mutex_);
         if (!pending_vision_scene_load_) return;
         request.swap(pending_vision_scene_load_);
     }
 
-    const std::string& path = *request;
     const auto mode_selection = select_visible_vision_render_mode();
     const auto requested_mode = mode_selection.has_visible_camera
                                     ? mode_selection.mode
                                     : current_vision_render_mode_;
+    if (!request->scene_json.empty()) {
+        if (load_external_vision_scene_from_json(*request, requested_mode, true)) {
+            vision_applied_signature_ = 0;
+            vision_pending_signature_ = 0;
+            vision_stable_frames_ = 0;
+            vision_rebuild_retries_ = 0;
+            CFW_LOG_INFO("OpticsSystem: embedded Vision scene loaded: {}",
+                         request->scene_key);
+        }
+        return;
+    }
+
+    const std::string& path = request->scene_path;
     if (!path.empty()) {
         if (load_external_vision_scene(path, requested_mode, std::nullopt, true)) {
             const auto& runtime = active_vision_runtime();
@@ -5805,6 +5853,23 @@ void OpticsSystem::apply_vision_render_mode(CameraVisionRenderMode mode) {
 
     const auto source_path = runtime.scene_path;
     const auto source_type = runtime.source;
+    if (!runtime.scene_json.empty()) {
+        VisionSceneLoadRequest request;
+        request.scene_json = runtime.scene_json;
+        request.base_dir = runtime.base_dir;
+        request.scene_key = runtime.scene_path;
+        if (!load_external_vision_scene_from_json(request, mode)) {
+            CFW_LOG_WARNING(
+                "OpticsSystem: failed to switch embedded Vision scene '{}' to mode '{}'; "
+                "continuing with previous pipeline mode '{}'",
+                source_path,
+                std::string(Vision::vision_render_mode_name(mode)),
+                std::string(Vision::vision_render_mode_name(current_vision_render_mode_)));
+            return;
+        }
+        return;
+    }
+
     if (!load_external_vision_scene(source_path, mode, source_type)) {
         CFW_LOG_WARNING(
             "OpticsSystem: failed to switch external Vision scene '{}' to mode '{}'; "
@@ -5835,6 +5900,94 @@ bool OpticsSystem::load_external_vision_scene(const std::string& scene_path,
     CFW_LOG_INFO("OpticsSystem: active Vision runtime key ({})",
                  describe_vision_pipeline_key(key));
     return true;
+}
+
+bool OpticsSystem::load_external_vision_scene_from_json(const VisionSceneLoadRequest& request,
+                                                        CameraVisionRenderMode mode,
+                                                        bool force_reload_scene_resource) {
+    if (request.scene_json.empty()) {
+        return false;
+    }
+
+    const auto source = VisionPipelineSource::ExternalFile;
+    auto scene_key = request.scene_key;
+    if (scene_key.empty()) {
+        scene_key = std::string("embedded_vision_") +
+                    std::to_string(std::hash<std::string>{}(request.scene_json));
+    }
+    const auto key = make_vision_pipeline_key(scene_key, mode, source);
+
+    try {
+        const auto scene_resource_key =
+            make_vision_scene_resource_key(key.scene_path, key.source);
+        if (force_reload_scene_resource) {
+            for (auto it = vision_runtimes_.begin(); it != vision_runtimes_.end();) {
+                if (!(make_vision_scene_resource_key(it->first.scene_path, it->first.source) ==
+                      scene_resource_key)) {
+                    ++it;
+                    continue;
+                }
+                if (it->second) {
+                    CFW_LOG_INFO(
+                        "OpticsSystem: releasing embedded Vision runtime before shared scene reload ({})",
+                        describe_vision_pipeline_key(it->first));
+                    it->second->commit_and_clear_contexts();
+                }
+                it = vision_runtimes_.erase(it);
+            }
+        }
+
+        auto& runtime = get_or_create_runtime(key);
+        auto scene_resource =
+            get_or_create_vision_scene_resource(scene_resource_key, key.scene_path);
+        runtime.scene_resource = scene_resource;
+        if (force_reload_scene_resource && scene_resource) {
+            CFW_LOG_INFO("OpticsSystem: reloading embedded Vision scene resource ({})",
+                         describe_vision_scene_resource_key(scene_resource->key));
+            scene_resource->reset_loaded_scene();
+        }
+
+        if (runtime.pipeline && !force_reload_scene_resource) {
+            runtime.pipeline->set_output_denoise(
+                Vision::vision_render_mode_uses_denoise(key.mode));
+            active_vision_runtime_key_ = key;
+            current_vision_render_mode_ = mode;
+            return true;
+        }
+
+        const auto base_dir = request.base_dir.empty()
+                                  ? std::filesystem::current_path()
+                                  : std::filesystem::u8path(request.base_dir);
+        auto pipeline = import_vision_scene_from_data(
+            vision::DataWrap::parse(request.scene_json),
+            base_dir,
+            key.scene_path,
+            key.mode,
+            scene_resource,
+            key.source);
+        if (!pipeline) {
+            CFW_LOG_ERROR("OpticsSystem: Embedded Vision scene import failed: {}",
+                          key.scene_path);
+            release_unused_vision_scene_resources();
+            return false;
+        }
+
+        log_vision_pipeline_diagnostics(
+            *pipeline,
+            std::string("embedded import mode=") +
+                std::string(Vision::vision_render_mode_name(key.mode)));
+        runtime.reset_pipeline(std::move(pipeline), key.source, key.scene_path, key.mode);
+        runtime.scene_json = request.scene_json;
+        runtime.base_dir = request.base_dir;
+        active_vision_runtime_key_ = key;
+        current_vision_render_mode_ = mode;
+        CFW_LOG_INFO("OpticsSystem: loaded embedded Vision runtime ({})",
+                     describe_vision_pipeline_key(key));
+        return true;
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("OpticsSystem: Embedded Vision scene import threw: {}", e.what());
+        return false;
+    }
 }
 #endif  // CORONA_ENABLE_VISION
 

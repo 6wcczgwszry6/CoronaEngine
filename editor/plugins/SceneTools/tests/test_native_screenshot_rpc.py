@@ -30,11 +30,19 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             with self.subTest(method=method):
                 self.assertIn(f'{{"{method}"', scene_tools_handlers)
 
-    def test_native_scene_save_persists_common_scene_without_vision_sections(self):
+    def test_native_scene_save_preserves_embedded_vision_document(self):
         source = self._handler_source()
         self.assertIn("persist_native_scene_common", source)
-        self.assertIn('remove_ini_section(scene_file, "vision")', source)
-        self.assertIn('remove_ini_section(scene_file, "vision_document")', source)
+        self.assertIn("persist_native_scene_vision_metadata", source)
+        self.assertIn("storage == \"embedded\"", source)
+        self.assertIn("storage = embedded", source)
+        self.assertIn("persist_native_scene_vision_document", source)
+        start = source.find("void persist_native_scene_common")
+        end = source.find("void apply_native_scene_environment", start)
+        self.assertGreaterEqual(start, 0)
+        self.assertGreater(end, start)
+        persist_body = source[start:end]
+        self.assertNotIn('remove_ini_section(scene_file, "vision_document")', persist_body)
 
         match = re.search(
             r'\{"scene_save", \[\]\(const NativeRequest& request, const NativeContext&\).*?'
@@ -44,6 +52,108 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         )
         self.assertIsNotNone(match)
         self.assertIn("persist_native_scene_common(*scene)", match.group(0))
+
+    def test_vision_project_open_embeds_document_without_scene_source_path(self):
+        source = self._handler_source()
+
+        self.assertIn("create_embedded_vision_document", source)
+        self.assertIn("VISION_DOCUMENT_ENCODING", source)
+        self.assertIn('"storage", "embedded"', source)
+        self.assertIn('"import_mode", "external"', source)
+        self.assertIn('"vision_document"', source)
+
+        start = source.find("std::filesystem::path create_vision_project_native")
+        end = source.find("std::filesystem::path copy_existing_project_to_data_native", start)
+        self.assertGreaterEqual(start, 0)
+        self.assertGreater(end, start)
+        create_body = source[start:end]
+        self.assertIn("create_embedded_vision_document", create_body)
+        self.assertIn("persist_vision_proxy_actors_from_document", create_body)
+        self.assertIn("replace_ini_section_from_map", create_body)
+        self.assertNotIn('"source_path"', create_body)
+
+    def test_embedded_vision_source_loads_from_memory_without_runtime_json(self):
+        source = self._handler_source()
+        repo_root = pathlib.Path(__file__).resolve().parents[4]
+        scene_tools_source = (
+            repo_root / "editor" / "plugins" / "SceneTools" / "main.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("write_embedded_vision_runtime_scene", source)
+        self.assertNotIn("vision_runtime", source)
+        self.assertNotIn("vision_runtime", scene_tools_source)
+        self.assertIn('scene.vision_storage == "embedded"', source)
+        self.assertIn("decode_vision_document_data(scene.vision_document_data)", source)
+        self.assertIn("Corona::API::load_vision_scene_from_json", source)
+        self.assertIn('CFW_LOG_ERROR("Vision embedded scene missing', source)
+
+    def test_project_sidecar_vision_source_remains_compatible(self):
+        source = self._handler_source()
+
+        self.assertIn("resolve_project_sidecar_vision_json", source)
+        self.assertIn('scene.vision_storage == "project_sidecar"', source)
+        self.assertIn('Corona::API::load_vision_scene(path_to_utf8(sidecar_json))', source)
+        self.assertIn('CFW_LOG_ERROR("Vision sidecar scene missing', source)
+        self.assertIn("migrate_project_sidecar_scene_to_embedded", source)
+        self.assertIn("create_embedded_vision_document(scene.project_root, sidecar_json, document)", source)
+        self.assertIn("scene_ini = read_ini_file(scene_file)", source)
+
+    def test_vision_scene_load_event_supports_embedded_json_payload(self):
+        repo_root = pathlib.Path(__file__).resolve().parents[4]
+        event_source = (
+            repo_root / "include" / "corona" / "events" / "optics_system_events.h"
+        ).read_text(encoding="utf-8")
+        api_header = (
+            repo_root / "include" / "corona" / "systems" / "script" / "corona_engine_api.h"
+        ).read_text(encoding="utf-8")
+        api_source = (
+            repo_root / "src" / "systems" / "script" / "python" / "corona_engine_api.cpp"
+        ).read_text(encoding="utf-8")
+        optics_header = (
+            repo_root / "include" / "corona" / "systems" / "optics" / "optics_system.h"
+        ).read_text(encoding="utf-8")
+        optics_source = (
+            repo_root / "src" / "systems" / "optics" / "optics_system.cpp"
+        ).read_text(encoding="utf-8")
+        fallback_source = (
+            repo_root / "editor" / "CoronaCore" / "utils" / "corona_engine_fallback.py"
+        ).read_text(encoding="utf-8")
+
+        for snippet in (
+            "std::string scene_json",
+            "std::string base_dir",
+            "std::string scene_key",
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertIn(snippet, event_source)
+        self.assertIn("load_vision_scene_from_json", api_header)
+        self.assertIn("load_vision_scene_from_json", api_source)
+        self.assertIn("event_bus->publish<Events::VisionSceneLoadEvent>", api_source)
+        self.assertIn("VisionSceneLoadRequest", optics_header)
+        self.assertIn("std::optional<VisionSceneLoadRequest> pending_vision_scene_load_", optics_header)
+        self.assertIn("import_vision_scene_from_data", optics_source)
+        self.assertIn("DataWrap::parse(request.scene_json)", optics_source)
+        self.assertIn("vision::Global::instance().set_scene_path(base_dir)", optics_source)
+        self.assertIn("load_vision_scene_from_json", fallback_source)
+
+    def test_embedded_vision_rewrites_and_copies_common_vision_assets(self):
+        source = self._handler_source()
+
+        for snippet in (
+            "rewrite_vision_resource_paths_for_project_archive",
+            "copy_vision_archive_asset",
+            "copy_obj_dependencies",
+            "copy_mtl_texture_dependencies",
+            "copy_gltf_dependencies",
+            'std::filesystem::path("Resource")',
+            '"vision_imports"',
+            'key == "fn"',
+            'key == "texture"',
+            'copy_uri_array("buffers")',
+            'copy_uri_array("images")',
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertIn(snippet, source)
 
     def test_native_actor_save_load_preserves_common_optics_fields(self):
         source = self._handler_source()
@@ -82,7 +192,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             '"create_multiplayer_project"',
             '"open_project"',
             "create_vision_project_native",
-            "apply_vision_json_to_scene_native",
+            "create_embedded_vision_document",
             "copy_existing_project_to_data_native",
         ):
             with self.subTest(snippet=snippet):
@@ -164,14 +274,11 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("std::filesystem::path open_project_native", source)
         self.assertIn("return project_dir;", source)
 
-        match = re.search(
-            r'\{"open_project", \[\]\(const NativeRequest& request, const NativeContext&\).*?'
-            r"return native_success\(.*?\);",
-            source,
-            re.S,
-        )
-        self.assertIsNotNone(match)
-        handler = match.group(0)
+        start = source.find('{"open_project", [](const NativeRequest& request, const NativeContext&)')
+        end = source.find('{"set_project_mode"', start)
+        self.assertGreaterEqual(start, 0)
+        self.assertGreater(end, start)
+        handler = source[start:end]
         self.assertIn("const auto opened = open_project_native", handler)
         self.assertIn('{"path", path_to_utf8(opened)}', handler)
 
@@ -226,18 +333,32 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, bridge_source)
 
+    def test_python_scene_save_preserves_embedded_vision_document(self):
+        repo_root = pathlib.Path(__file__).resolve().parents[4]
+        source = (repo_root / "editor" / "CoronaCore" / "core" / "entities" / "scene.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("self.vision_storage", source)
+        self.assertIn("self.vision_document", source)
+        self.assertIn("_encode_vision_document(vision_document)", source)
+        self.assertIn("zlib.compressobj(level=0)", source)
+        self.assertIn("self.file_data['vision']['storage'] = 'embedded'", source)
+        self.assertIn("self.file_data['vision_document']['data']", source)
+        self.assertIn("if vision_storage == 'project_sidecar' and vision_source_id:", source)
+        self.assertIn("self.file_data['vision']['source_id']", source)
+        self.assertNotIn("self.file_data['vision']['source_path']", source)
+
     def test_recent_games_import_awaits_open_project_and_catches_errors(self):
         repo_root = pathlib.Path(__file__).resolve().parents[4]
         source = (
             repo_root / "editor" / "Frontend" / "src" / "views" / "layout" / "RecentGames.vue"
         ).read_text(encoding="utf-8")
-        match = re.search(
-            r"const handleImport = async \\(\\) => \\{(?P<body>.*?)\\n\\};",
-            source,
-            re.S,
-        )
-        self.assertIsNotNone(match)
-        body = match.group("body")
+        start = source.find("const handleImport = async () => {")
+        end = source.find("\n};", start)
+        self.assertGreaterEqual(start, 0)
+        self.assertGreater(end, start)
+        body = source[start:end]
         self.assertIn("try {", body)
         self.assertIn("await handleOpenProject(result.data.path)", body)
         self.assertIn("console.error('打开现有项目失败:'", body)

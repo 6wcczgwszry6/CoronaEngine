@@ -621,6 +621,10 @@ class CoronaEngine:
         _log(f"[Fallback][load_vision_scene] path={path}")
 
     @staticmethod
+    def load_vision_scene_from_json(json_text, base_dir, scene_key):
+        _log(f"[Fallback][load_vision_scene_from_json] base_dir={base_dir}, scene_key={scene_key}, bytes={len(json_text or '')}")
+
+    @staticmethod
     def set_vision_render_mode(mode, camera_handle=0):
         _log(f"[Fallback][set_vision_render_mode] mode={mode}, camera_handle={camera_handle}")
 
