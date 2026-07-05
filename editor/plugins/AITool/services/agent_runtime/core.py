@@ -25869,6 +25869,11 @@ class AgentRuntime:
             active_plan_id,
             batch_id=active_batch_id,
         )
+        scene_snapshot_summary = self._scene_snapshot_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
         scene_entity_registry = self._scene_entity_registry_for_plan(
             room,
             active_plan_id,
@@ -25923,7 +25928,7 @@ class AgentRuntime:
             sync_summary=sync_summary,
             engine_write_summary=engine_write_summary,
             engine_write_boundary_summary=engine_write_boundary_summary,
-            scene_snapshot_summary={},
+            scene_snapshot_summary=scene_snapshot_summary,
         )
         operation_scope = self._operation_log_snapshot_from_entries(
             self._operation_log_entries_for_runtime_scope(
@@ -25956,6 +25961,7 @@ class AgentRuntime:
             "engine_write_adapter_summary": engine_write_adapter_summary,
             "fact_source_boundary_summary": fact_source_boundary_summary,
             "layout_adjustment_summary": layout_adjustment_summary,
+            "scene_snapshot_summary": scene_snapshot_summary,
             "actors": dict(self._actor_facts_for_plan(room, active_plan_id, batch_id=active_batch_id)),
             "geometry_summary": geometry_summary,
             "review_summary": review_summary,

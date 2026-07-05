@@ -22689,6 +22689,15 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             "runtime-state-is-business-truth",
             query_summary["fact_source_boundary_summary"]["boundary_notes"],
         )
+        self.assertIn("scene_snapshot_summary", query_summary)
+        self.assertEqual(
+            query_summary["fact_source_boundary_summary"]["scene_snapshot_count"],
+            int(
+                query_summary["scene_snapshot_summary"].get("scoped_snapshot_count")
+                or query_summary["scene_snapshot_summary"].get("snapshot_count")
+                or 0
+            ),
+        )
         self.assertIn("proposal_count", query_summary["layout_adjustment_summary"])
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["actor"], 2)
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["terrain"], 2)
