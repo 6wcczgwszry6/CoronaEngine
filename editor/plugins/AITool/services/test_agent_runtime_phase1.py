@@ -22723,6 +22723,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             [step["step"] for step in query_flow["steps"]],
             ["plan", "terrain", "asset", "actor", "review", "report"],
         )
+        query_flow_steps = {step["step"]: step for step in query_flow["steps"]}
+        self.assertEqual(query_flow_steps["actor"]["readiness_status"], "ready")
+        self.assertEqual(query_flow_steps["actor"]["missing_transform_count"], 0)
+        self.assertEqual(query_flow_steps["actor"]["missing_aabb_count"], 0)
         self.assertEqual(query_flow["steps"][-1]["status"], "pending")
         query_registry = query_summary["scene_entity_registry"]
         self.assertIn("asset_transfer_status_counts", query_registry)
@@ -22839,6 +22843,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         for role in ("wooden table", "tent", "forest", "sky", "grass"):
             self.assertIn("asset_transfer_status", report_roles[role])
         self.assertEqual(report["runtime_scene_flow_summary"]["status"], "ok")
+        report_flow_steps = {
+            step["step"]: step
+            for step in report["runtime_scene_flow_summary"]["steps"]
+        }
+        self.assertEqual(report_flow_steps["actor"]["readiness_status"], "ready")
+        self.assertEqual(report_flow_steps["actor"]["missing_transform_count"], 0)
+        self.assertEqual(report_flow_steps["actor"]["missing_aabb_count"], 0)
         self.assertEqual(report["runtime_scene_flow_summary"]["steps"][-1]["status"], "ok")
         self.assertEqual(report["fact_source_boundary_summary"]["runtime_state_source"], "RuntimeState")
         self.assertEqual(report["fact_source_boundary_summary"]["external_truth_source"], "engine_lanchat_mirrored")

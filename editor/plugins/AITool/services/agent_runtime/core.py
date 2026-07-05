@@ -17704,6 +17704,13 @@ class AgentRuntime:
         image_phase = dict(resource_by_phase.get("image") or {})
         model_phase = dict(resource_by_phase.get("model") or {})
         entity_type_counts = dict(scene_entity_registry.get("entity_type_counts") or {})
+        actor_readiness_status = str(scene_entity_registry.get("readiness_status") or "").strip()
+        actor_missing_transform_count = int(scene_entity_registry.get("missing_transform_count") or 0)
+        actor_missing_aabb_count = int(scene_entity_registry.get("missing_aabb_count") or 0)
+        imported_count = int(import_summary.get("imported_count") or 0)
+        actor_step_status = "missing"
+        if imported_count > 0:
+            actor_step_status = "ok" if actor_readiness_status in {"", "ready"} else "partial"
         flow_steps = [
             {
                 "step": "plan",
@@ -17728,9 +17735,12 @@ class AgentRuntime:
             },
             {
                 "step": "actor",
-                "status": "ok" if int(import_summary.get("imported_count") or 0) > 0 else "missing",
+                "status": actor_step_status,
+                "readiness_status": actor_readiness_status,
                 "actor_count": int(scene_entity_registry.get("actor_count") or entity_type_counts.get("actor") or 0),
-                "imported_count": int(import_summary.get("imported_count") or 0),
+                "imported_count": imported_count,
+                "missing_transform_count": actor_missing_transform_count,
+                "missing_aabb_count": actor_missing_aabb_count,
             },
             {
                 "step": "review",
