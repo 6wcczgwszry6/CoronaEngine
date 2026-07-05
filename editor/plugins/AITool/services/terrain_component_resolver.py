@@ -94,6 +94,65 @@ class TerrainComponentResolver:
                 terrain_spec={"type": "interior_floor", "surface": "neutral", "walkable": True},
                 boundary_spec={"type": "room_walls", "coverage": "enclosure"},
             )
+        is_outdoor_nature = (
+            any(
+                word in raw
+                for word in (
+                    "\u68ee\u6797",
+                    "\u6811\u6797",
+                    "\u6797\u5730",
+                    "\u8425\u5730",
+                    "\u9732\u8425",
+                    "\u8349\u5730",
+                    "\u5929\u7a7a",
+                    "\u5730\u5f62",
+                    "\u5730\u9762",
+                    "\u5c71\u5761",
+                    "\u6cb3\u6d41",
+                    "\u6e56",
+                    "\u81ea\u7136",
+                    "\u6237\u5916",
+                    "\u5ba4\u5916",
+                )
+            )
+            or any(
+                word in lower
+                for word in (
+                    "forest",
+                    "woods",
+                    "woodland",
+                    "camp",
+                    "campsite",
+                    "outdoor",
+                    "nature",
+                    "grass",
+                    "ground",
+                    "terrain",
+                    "sky",
+                    "hill",
+                    "river",
+                    "lake",
+                )
+            )
+        )
+        if is_outdoor_nature:
+            return TerrainComponentProfile(
+                scene_key="outdoor_nature",
+                terrain_spec={
+                    "type": "outdoor_nature_ground",
+                    "surface": "grass_with_walkable_clearings",
+                    "walkable": True,
+                    "detail_pattern": "natural_clearings",
+                    "sky": "open_sky",
+                },
+                boundary_spec={
+                    "type": "soft_natural_boundary",
+                    "coverage": "optional",
+                    "style": "tree_line_or_terrain_edge",
+                    "height": "low_or_none",
+                    "avoid": ["room walls", "indoor box", "tall ranch fence"],
+                },
+            )
         return TerrainComponentProfile(
             scene_key=scene_type or "mixed",
             terrain_spec={"type": "neutral_ground", "surface": "neutral", "walkable": True},
