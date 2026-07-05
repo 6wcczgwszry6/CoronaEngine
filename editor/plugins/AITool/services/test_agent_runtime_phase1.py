@@ -22662,6 +22662,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(status["environment_component_summary"]["type_counts"]["terrain"], 2)
         query_summary = runtime.query_state("room-forest")["summary"]
         self.assertEqual(query_summary["model_items"], ["wooden table", "tent"])
+        self.assertEqual(set(query_summary["asset_request_plan"]), {"wooden table", "tent"})
+        self.assertEqual(set(query_summary["image_resources"]), {"wooden table", "tent"})
+        self.assertEqual(set(query_summary["model_resources"]), {"wooden table", "tent"})
+        self.assertEqual(query_summary["resource_summary"]["by_phase"]["model"]["requested_count"], 2)
+        self.assertEqual(query_summary["import_summary"]["imported_count"], 2)
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["actor"], 2)
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["terrain"], 2)
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["skybox"], 1)
