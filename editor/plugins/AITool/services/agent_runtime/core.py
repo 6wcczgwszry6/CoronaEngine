@@ -25911,6 +25911,19 @@ class AgentRuntime:
             limit=None,
         )
         engine_write_summary = self._engine_write_replay_summary(engine_write_entries)
+        batch_resource_flow_summary = self._batch_resource_flow_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
+        report_health_summary = self._report_health_summary(
+            batch_resource_flow_summary=batch_resource_flow_summary,
+            import_summary=import_summary,
+            sync_health_digest=sync_health_digest,
+            resource_summary=resource_summary,
+            environment_component_summary=environment_component_summary,
+            engine_write_summary=engine_write_summary,
+        )
         engine_write_adapter_summary = self._engine_write_adapter_summary(
             readiness_summary=engine_write_readiness_summary,
             boundary_summary=engine_write_boundary_summary,
@@ -25955,6 +25968,8 @@ class AgentRuntime:
             "image_resources": dict(dict(room.get("image_resource_plans") or {}).get(active_batch_id) or {}),
             "model_resources": dict(dict(room.get("model_resource_plans") or {}).get(active_batch_id) or {}),
             "resource_summary": resource_summary,
+            "batch_resource_flow_summary": batch_resource_flow_summary,
+            "report_health_summary": report_health_summary,
             "import_summary": import_summary,
             "sync_summary": sync_summary,
             "asset_transfer_summary": asset_transfer_summary,
