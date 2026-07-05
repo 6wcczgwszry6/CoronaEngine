@@ -484,6 +484,21 @@ constexpr uint64_t kVisionRuntimeIdleEvictFrames = 240;
     return sig;
 }
 
+[[nodiscard]] std::size_t external_live_hidden_transform_signature(int shape_index) {
+    std::size_t sig = 0;
+    mix_hash(sig, static_cast<std::size_t>(shape_index));
+    mix_hash(sig, 0x76497369626c6548ULL);
+    return sig;
+}
+
+[[nodiscard]] ::vision::float4x4 hidden_external_live_o2w() {
+    auto o2w = ::vision::make_float4x4(1.f);
+    o2w[0][0] = 0.f;
+    o2w[1][1] = 0.f;
+    o2w[2][2] = 0.f;
+    return o2w;
+}
+
 [[nodiscard]] int external_live_shape_index(const Corona::ExternalVisionBindingDevice& binding) {
     if (binding.shape_index >= 0) {
         return binding.shape_index;
@@ -2533,6 +2548,7 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
                     event.scene_json,
                     event.base_dir,
                     event.scene_key,
+                    event.external_live,
                 };
             });
 #endif
@@ -4507,6 +4523,7 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
 
     std::unordered_map<std::uintptr_t, Corona::ExternalVisionBindingDevice> active_bindings;
     std::unordered_set<std::uintptr_t> active_bound_actors;
+    std::unordered_set<std::uintptr_t> hidden_bound_actors;
     for (auto scene_it = hub.scene_storage().cbegin(); scene_it != hub.scene_storage().cend(); ++scene_it) {
         const auto& scene_dev = *scene_it;
         if (!scene_dev.enabled) {
@@ -4527,6 +4544,9 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
             }
             active_bound_actors.insert(actor_handle);
             active_bindings.emplace(actor_handle, *binding);
+            if (!binding->visible) {
+                hidden_bound_actors.insert(actor_handle);
+            }
         }
     }
 
@@ -4577,6 +4597,10 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
     auto remove_actor_shape = [&](std::uintptr_t actor_handle) {
         const auto* record = scene_resource->find_external_live_shape(actor_handle);
         if (record == nullptr || record->shape_index < 0) {
+            scene_resource->erase_external_live_shape(actor_handle);
+            return;
+        }
+        if (!record->dynamically_added) {
             scene_resource->erase_external_live_shape(actor_handle);
             return;
         }
@@ -4669,22 +4693,21 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
 
     for (const auto& [actor_handle, active_binding] : active_bindings) {
         auto binding = active_binding;
-        if (const auto* record = scene_resource->find_external_live_shape(actor_handle);
-            record != nullptr && record->shape_index >= 0) {
-            binding.shape_index = record->shape_index;
-            binding.json_path = external_live_json_path_for_shape(record->shape_index);
+        const auto* existing_shape_record =
+            scene_resource->find_external_live_shape(actor_handle);
+        if (existing_shape_record != nullptr && existing_shape_record->shape_index >= 0) {
+            binding.shape_index = existing_shape_record->shape_index;
+            binding.json_path = external_live_json_path_for_shape(existing_shape_record->shape_index);
         }
 
-        const auto resolved = resolve_external_live_transform(actor_handle, binding);
+        auto resolved = resolve_external_live_transform(actor_handle, binding);
         if (!resolved) {
             continue;
         }
-
-        const auto cached =
-            scene_resource->external_live_transform_signatures.find(actor_handle);
-        const bool actor_signature_changed =
-            cached == scene_resource->external_live_transform_signatures.end() ||
-            cached->second != resolved->signature;
+        const auto normal_signature = resolved->signature;
+        const bool actor_hidden = hidden_bound_actors.contains(actor_handle);
+        const bool original_external_shape =
+            existing_shape_record != nullptr && !existing_shape_record->dynamically_added;
 
         const auto group_index = static_cast<std::size_t>(resolved->shape_index);
         if (group_index >= groups.size() || !groups[group_index]) {
@@ -4695,30 +4718,33 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
         const bool first_time_actor_sync =
             scene_resource->external_live_transform_signatures.find(actor_handle) ==
             scene_resource->external_live_transform_signatures.end();
-        group->aabb = ::vision::Box3f{};
-        const auto object_to_world = flatten_vision_matrix(resolved->o2w);
-        bool logical_instance_changed = false;
-        group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
-                            std::uint32_t instance_index) {
-            if (!instance) {
-                return;
-            }
-            logical_instance_changed |= scene_resource->upsert_logical_instance({
-                .key = {.shape_index = resolved->shape_index,
-                        .instance_index = static_cast<int>(instance_index)},
-                .actor_handle = actor_handle,
-                .transform_signature = resolved->signature,
-                .object_to_world = object_to_world,
-            });
-            instance->set_o2w(resolved->o2w);
-            instance->init_aabb();
-            group->aabb.extend(instance->aabb);
-        });
 
-        scene_resource->external_live_transform_signatures[actor_handle] =
-            resolved->signature;
-        const auto* existing_shape_record =
-            scene_resource->find_external_live_shape(actor_handle);
+        if (original_external_shape) {
+            group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
+                                std::uint32_t instance_index) {
+                if (!instance) {
+                    return;
+                }
+                scene_resource->cache_external_live_original_instance({
+                    .key = {.shape_index = resolved->shape_index,
+                            .instance_index = static_cast<int>(instance_index)},
+                    .actor_handle = actor_handle,
+                    .transform_signature = normal_signature,
+                    .object_to_world = flatten_vision_matrix(instance->o2w()),
+                });
+            });
+            scene_resource->external_live_original_transform_signatures.try_emplace(
+                actor_handle,
+                normal_signature);
+        }
+
+        const auto original_signature =
+            scene_resource->external_live_original_transform_signatures.find(actor_handle);
+        const bool actor_transform_changed_from_original =
+            original_external_shape &&
+            original_signature != scene_resource->external_live_original_transform_signatures.end() &&
+            original_signature->second != normal_signature;
+
         scene_resource->upsert_external_live_shape({
             .actor_handle = actor_handle,
             .shape_index = resolved->shape_index,
@@ -4728,7 +4754,82 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
                                    ? existing_shape_record->dynamically_added
                                    : false,
         });
-        if (!first_time_actor_sync &&
+
+        if (original_external_shape && !actor_hidden && first_time_actor_sync) {
+            scene_resource->external_live_transform_signatures[actor_handle] =
+                normal_signature;
+            continue;
+        }
+
+        std::size_t target_signature = normal_signature;
+        auto target_o2w = resolved->o2w;
+        if (actor_hidden) {
+            target_signature = external_live_hidden_transform_signature(resolved->shape_index);
+            target_o2w = hidden_external_live_o2w();
+        }
+        const bool restore_original =
+            original_external_shape && !actor_hidden && !actor_transform_changed_from_original;
+
+        const auto cached =
+            scene_resource->external_live_transform_signatures.find(actor_handle);
+        const bool actor_signature_changed =
+            cached == scene_resource->external_live_transform_signatures.end() ||
+            cached->second != target_signature;
+
+        group->aabb = ::vision::Box3f{};
+        bool logical_instance_changed = false;
+        if (restore_original) {
+            const auto original_instances =
+                scene_resource->restore_external_live_original_instances(resolved->shape_index);
+            group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
+                                std::uint32_t instance_index) {
+                if (!instance) {
+                    return;
+                }
+                const auto original =
+                    std::find_if(original_instances.begin(),
+                                 original_instances.end(),
+                                 [&](const auto& record) {
+                                     return record.key.instance_index ==
+                                            static_cast<int>(instance_index);
+                                 });
+                if (original == original_instances.end()) {
+                    return;
+                }
+                const auto original_o2w = unflatten_vision_matrix(original->object_to_world);
+                logical_instance_changed |= scene_resource->upsert_logical_instance({
+                    .key = original->key,
+                    .actor_handle = actor_handle,
+                    .transform_signature = target_signature,
+                    .object_to_world = original->object_to_world,
+                });
+                instance->set_o2w(original_o2w);
+                instance->init_aabb();
+                group->aabb.extend(instance->aabb);
+            });
+        } else {
+            const auto object_to_world = flatten_vision_matrix(target_o2w);
+            group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
+                                std::uint32_t instance_index) {
+                if (!instance) {
+                    return;
+                }
+                logical_instance_changed |= scene_resource->upsert_logical_instance({
+                    .key = {.shape_index = resolved->shape_index,
+                            .instance_index = static_cast<int>(instance_index)},
+                    .actor_handle = actor_handle,
+                    .transform_signature = target_signature,
+                    .object_to_world = object_to_world,
+                });
+                instance->set_o2w(target_o2w);
+                instance->init_aabb();
+                group->aabb.extend(instance->aabb);
+            });
+        }
+
+        scene_resource->external_live_transform_signatures[actor_handle] =
+            target_signature;
+        if ((actor_hidden || restore_original || !first_time_actor_sync) &&
             (actor_signature_changed || logical_instance_changed)) {
             changed = true;
             ++updated_actors;
@@ -5858,6 +5959,7 @@ void OpticsSystem::apply_vision_render_mode(CameraVisionRenderMode mode) {
         request.scene_json = runtime.scene_json;
         request.base_dir = runtime.base_dir;
         request.scene_key = runtime.scene_path;
+        request.external_live = runtime.source == VisionPipelineSource::ExternalLive;
         if (!load_external_vision_scene_from_json(request, mode)) {
             CFW_LOG_WARNING(
                 "OpticsSystem: failed to switch embedded Vision scene '{}' to mode '{}'; "
@@ -5909,7 +6011,9 @@ bool OpticsSystem::load_external_vision_scene_from_json(const VisionSceneLoadReq
         return false;
     }
 
-    const auto source = VisionPipelineSource::ExternalFile;
+    const auto source = request.external_live
+        ? VisionPipelineSource::ExternalLive
+        : VisionPipelineSource::ExternalFile;
     auto scene_key = request.scene_key;
     if (scene_key.empty()) {
         scene_key = std::string("embedded_vision_") +

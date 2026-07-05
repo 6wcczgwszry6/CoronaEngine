@@ -192,6 +192,7 @@ struct ProfileDevice {
 
 struct ExternalVisionBindingDevice {
     bool enabled{false};
+    bool visible{true};
     std::string source_path;
     std::string shape_guid;
     int shape_index{-1};

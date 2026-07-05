@@ -15,6 +15,7 @@
 
 #include <corona/events/acoustics_system_events.h>
 #include <corona/kernel/core/kernel_context.h>
+#include <corona/shared_data_hub.h>
 #include <corona/systems/network/network_system.h>
 #include <corona/systems/script/corona_engine_api.h>
 #include <corona/utils/path_utils.h>
@@ -331,7 +332,24 @@ std::filesystem::path canonical_project_dir_for_settings(const std::filesystem::
 std::string safe_project_dir_name(std::string name, const std::string& fallback);
 std::string sanitize_vision_source_id(std::string source_id);
 std::string fnv1a_hex12(std::string_view text);
+std::string encode_vision_document_data(const nlohmann::json& document);
 nlohmann::json decode_vision_document_data(const std::string& data);
+nlohmann::json vision_document_for_render(nlohmann::json document);
+void cleanup_vision_document_editor_transform_overrides(nlohmann::json& document);
+std::string embedded_vision_scene_key(const NativeEditorScene& scene);
+void clear_embedded_vision_actor_bindings(NativeEditorScene& scene);
+void register_embedded_vision_actor_bindings(NativeEditorScene& scene,
+                                             const nlohmann::json& document,
+                                             const std::string& scene_key);
+bool refresh_embedded_vision_view(NativeEditorScene& scene,
+                                  const nlohmann::json& document);
+bool persist_embedded_vision_document(NativeEditorScene& scene, nlohmann::json& document);
+bool sync_native_actor_to_embedded_vision_document(NativeEditorScene& scene,
+                                                   const NativeEditorActor& actor,
+                                                   bool create_if_missing = false,
+                                                   bool sync_transform = true);
+bool remove_native_actor_from_embedded_vision_document(NativeEditorScene& scene,
+                                                       const std::string& actor_guid);
 void replace_ini_section_from_map(const std::filesystem::path& file_path,
                                   const std::string& section_name,
                                   const std::map<std::string, std::string>& values);
@@ -510,6 +528,8 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
         lines.push_back(key + ".geometry.rotation = " + format_float3(actor.geometry ? actor.geometry->get_rotation() : actor.rotation));
         lines.push_back(key + ".geometry.scale = " + format_float3(actor.geometry ? actor.geometry->get_scale() : actor.scale));
         if (actor.optics) {
+            lines.push_back(key + ".optics.visible = " +
+                            std::string(actor.optics->get_visible() ? "true" : "false"));
             lines.push_back(key + ".optics.diffuse = " + format_float3(actor.optics->get_diffuse()));
             lines.push_back(key + ".optics.metallic = " + std::to_string(actor.optics->get_metallic()));
             lines.push_back(key + ".optics.roughness = " + std::to_string(actor.optics->get_roughness()));
@@ -836,7 +856,7 @@ void apply_native_scene_environment(NativeEditorScene& scene) {
     scene.environment->set_sky_intensity(scene.sun_enabled ? 20.0f : 0.0f);
 }
 
-void apply_native_scene_vision_source(const NativeEditorScene& scene) {
+void apply_native_scene_vision_source(NativeEditorScene& scene) {
     if (scene.vision_storage == "embedded") {
         if (scene.vision_document_data.empty()) {
             CFW_LOG_ERROR("Vision embedded scene missing: project={}, scene={}",
@@ -846,12 +866,13 @@ void apply_native_scene_vision_source(const NativeEditorScene& scene) {
         }
         try {
             const auto document = decode_vision_document_data(scene.vision_document_data);
-            const auto scene_key =
-                path_to_utf8(resolve_project_path(scene.project_root, scene.route)) +
-                "#embedded:" + fnv1a_hex12(scene.vision_document_data);
-            Corona::API::load_vision_scene_from_json(document.dump(),
+            const auto render_document = vision_document_for_render(document);
+            const auto scene_key = embedded_vision_scene_key(scene);
+            register_embedded_vision_actor_bindings(scene, render_document, scene_key);
+            Corona::API::load_vision_scene_from_json(render_document.dump(),
                                                      path_to_utf8(scene.project_root),
-                                                     scene_key);
+                                                     scene_key,
+                                                     true);
         } catch (const std::exception& e) {
             CFW_LOG_ERROR("Vision embedded scene load failed: project={}, scene={}, error={}",
                           scene.project_root.string(),
@@ -861,6 +882,7 @@ void apply_native_scene_vision_source(const NativeEditorScene& scene) {
         return;
     }
 
+    clear_embedded_vision_actor_bindings(scene);
     if (scene.vision_storage == "project_sidecar") {
         const auto sidecar_json = resolve_project_sidecar_vision_json(scene);
         if (sidecar_json.empty() || !std::filesystem::is_regular_file(sidecar_json)) {
@@ -1079,6 +1101,10 @@ void load_native_actor(NativeEditorScene& scene,
         item.actor_guid = make_actor_guid(scene.route, item.name, index);
     }
     auto& actor = add_native_actor_to_scene(scene, std::move(item), asset_path);
+    if (actor.optics && actors_section.contains(actor_key + ".optics.visible")) {
+        actor.optics->set_visible(
+            parse_bool(actors_section.at(actor_key + ".optics.visible"), true));
+    }
     if (actor.actor_type != "ui_image" && actors_section.contains(actor_key + ".mechanics.physics_enabled")) {
         actor.mechanics->set_physics_enabled(
             parse_bool(actors_section.at(actor_key + ".mechanics.physics_enabled"), true));
@@ -1971,6 +1997,7 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
             actor.mechanics->set_physics_enabled(*physics_enabled);
         }
     }
+    sync_native_actor_to_embedded_vision_document(*scene, actor, true);
     persist_native_scene_actors(*scene);
     emit_scene_tree_changed(scene->route);
     return native_success({
@@ -2040,6 +2067,7 @@ NativeResult remove_native_editor_actor(const std::string& scene_route_arg,
         scene->engine_scene->remove_actor(it->engine_actor.get());
     }
     scene->actors.erase(it);
+    remove_native_actor_from_embedded_vision_document(*scene, removed_guid);
     persist_native_scene_actors(*scene);
     emit_scene_tree_changed(scene->route);
 
@@ -2096,6 +2124,7 @@ NativeResult set_native_editor_actor_transform(const std::string& scene_route_ar
             actor->geometry->set_scale(*scale);
         }
     }
+    sync_native_actor_to_embedded_vision_document(*scene, *actor);
     persist_native_scene_actors(*scene);
     return native_success({
         {"status", "success"},
@@ -2146,6 +2175,11 @@ NativeResult apply_actor_operation(NativeEditorScene& scene,
         return native_failure("Unsupported actor operation: " + operation, 2);
     }
 
+    sync_native_actor_to_embedded_vision_document(
+        scene,
+        actor,
+        false,
+        operation != "SetVisible");
     return native_success({
         {"scene", scene.route},
         {"actor", actor.name},
@@ -2871,6 +2905,431 @@ nlohmann::json decode_vision_document_data(const std::string& data) {
     return document;
 }
 
+nlohmann::json* mutable_vision_scene_data(nlohmann::json& document) {
+    if (document.is_object() && document.contains("scene") && document["scene"].is_object()) {
+        return &document["scene"];
+    }
+    return document.is_object() ? &document : nullptr;
+}
+
+nlohmann::json* mutable_vision_shapes(nlohmann::json& document) {
+    auto* scene_data = mutable_vision_scene_data(document);
+    if (!scene_data) {
+        return nullptr;
+    }
+    auto it = scene_data->find("shapes");
+    if (it == scene_data->end() || (!it->is_array() && !it->is_object())) {
+        return nullptr;
+    }
+    return &*it;
+}
+
+bool vision_shape_visible(const nlohmann::json& shape) {
+    if (!shape.is_object()) {
+        return true;
+    }
+    if (shape.contains("visible") && shape["visible"].is_boolean()) {
+        return shape["visible"].get<bool>();
+    }
+    const auto params_it = shape.find("param");
+    if (params_it != shape.end() && params_it->is_object() &&
+        params_it->contains("visible") && (*params_it)["visible"].is_boolean()) {
+        return (*params_it)["visible"].get<bool>();
+    }
+    return true;
+}
+
+void cleanup_editor_trs_overrides_for_non_trs_transform(nlohmann::json& shape) {
+    if (!shape.is_object()) {
+        return;
+    }
+    auto params_it = shape.find("param");
+    if (params_it == shape.end() || !params_it->is_object()) {
+        return;
+    }
+    auto transform_it = params_it->find("transform");
+    if (transform_it == params_it->end() || !transform_it->is_object()) {
+        return;
+    }
+    const auto transform_type = json_string_value(*transform_it, {"type"});
+    if (transform_type == "trs") {
+        return;
+    }
+    auto transform_params_it = transform_it->find("param");
+    if (transform_params_it == transform_it->end() || !transform_params_it->is_object()) {
+        return;
+    }
+    transform_params_it->erase("t");
+    transform_params_it->erase("s");
+    transform_params_it->erase("r");
+}
+
+void cleanup_vision_document_editor_transform_overrides(nlohmann::json& document) {
+    auto* shapes = mutable_vision_shapes(document);
+    if (!shapes) {
+        return;
+    }
+    if (shapes->is_array()) {
+        for (auto& shape : *shapes) {
+            cleanup_editor_trs_overrides_for_non_trs_transform(shape);
+        }
+        return;
+    }
+    if (shapes->is_object()) {
+        for (auto& item : shapes->items()) {
+            cleanup_editor_trs_overrides_for_non_trs_transform(item.value());
+        }
+    }
+}
+
+nlohmann::json vision_document_for_render(nlohmann::json document) {
+    cleanup_vision_document_editor_transform_overrides(document);
+    return document;
+}
+
+std::array<float, 3> corona_vec_to_vision(const std::array<float, 3>& value) {
+    return {value[0], value[1], -value[2]};
+}
+
+std::string vision_shape_match_guid(const nlohmann::json& shape, size_t index) {
+    return vision_shape_guid(shape, index);
+}
+
+nlohmann::json* find_vision_shape_for_actor(nlohmann::json& document,
+                                            const NativeEditorActor& actor) {
+    auto* shapes = mutable_vision_shapes(document);
+    if (!shapes) {
+        return nullptr;
+    }
+    const auto actor_guid = trim_ascii(actor.actor_guid);
+    const auto actor_name = trim_ascii(actor.name);
+    auto matches = [&](const nlohmann::json& shape, size_t index) {
+        if (!actor_guid.empty() && vision_shape_match_guid(shape, index) == actor_guid) {
+            return true;
+        }
+        return !actor_name.empty() && vision_shape_name(shape, {}, index) == actor_name;
+    };
+    if (shapes->is_array()) {
+        for (size_t index = 0; index < shapes->size(); ++index) {
+            if (matches((*shapes)[index], index)) {
+                return &(*shapes)[index];
+            }
+        }
+    } else if (shapes->is_object()) {
+        size_t index = 0;
+        for (auto& item : shapes->items()) {
+            if (matches(item.value(), index++)) {
+                return &item.value();
+            }
+        }
+    }
+    return nullptr;
+}
+
+std::string embedded_vision_scene_key(const NativeEditorScene& scene) {
+    return path_to_utf8(resolve_project_path(scene.project_root, scene.route)) + ".embedded";
+}
+
+void clear_embedded_vision_actor_bindings(NativeEditorScene& scene) {
+    for (auto& actor : scene.actors) {
+        if (actor.engine_actor) {
+            actor.engine_actor->clear_external_vision_binding();
+        }
+    }
+}
+
+NativeEditorActor* find_native_actor_by_guid(NativeEditorScene& scene,
+                                             const std::string& actor_guid) {
+    if (actor_guid.empty()) {
+        return nullptr;
+    }
+    for (auto& actor : scene.actors) {
+        if (actor.actor_guid == actor_guid) {
+            return &actor;
+        }
+    }
+    return nullptr;
+}
+
+void register_embedded_vision_actor_binding(NativeEditorScene& scene,
+                                            const nlohmann::json& shape,
+                                            const std::string& scene_key,
+                                            size_t index,
+                                            const std::string& json_path) {
+    const auto shape_guid = vision_shape_guid(shape, index);
+    auto* actor = find_native_actor_by_guid(scene, shape_guid);
+    if (!actor || !actor->engine_actor) {
+        return;
+    }
+    const bool visible = actor->optics ? actor->optics->get_visible() : true;
+
+    actor->engine_actor->set_external_vision_binding(
+        scene_key,
+        shape_guid,
+        static_cast<int>(index),
+        json_path,
+        vision_shape_type(shape),
+        shape_guid,
+        normalize_route(actor->route),
+        visible);
+}
+
+void register_embedded_vision_actor_bindings(NativeEditorScene& scene,
+                                             const nlohmann::json& document,
+                                             const std::string& scene_key) {
+    clear_embedded_vision_actor_bindings(scene);
+    const auto scene_data = extract_scene_data(document);
+    const auto shapes_it = scene_data.find("shapes");
+    if (shapes_it == scene_data.end()) {
+        return;
+    }
+    if (shapes_it->is_array()) {
+        for (size_t index = 0; index < shapes_it->size(); ++index) {
+            const auto& shape = (*shapes_it)[index];
+            register_embedded_vision_actor_binding(
+                scene,
+                shape,
+                scene_key,
+                index,
+                "shapes[" + std::to_string(index) + "]");
+        }
+        return;
+    }
+    if (shapes_it->is_object()) {
+        size_t index = 0;
+        for (const auto& item : shapes_it->items()) {
+            register_embedded_vision_actor_binding(
+                scene,
+                item.value(),
+                scene_key,
+                index++,
+                "shapes." + item.key());
+        }
+    }
+}
+
+void ensure_vision_shape_guids(nlohmann::json& document) {
+    auto* shapes = mutable_vision_shapes(document);
+    if (!shapes) {
+        return;
+    }
+    auto ensure_guid = [](nlohmann::json& shape, size_t index) {
+        if (!shape.is_object()) {
+            return;
+        }
+        if (!shape.contains("guid") &&
+            !shape.contains("id") &&
+            !shape.contains("shape_guid")) {
+            shape["guid"] = vision_shape_match_guid(shape, index);
+        }
+    };
+    if (shapes->is_array()) {
+        for (size_t index = 0; index < shapes->size(); ++index) {
+            ensure_guid((*shapes)[index], index);
+        }
+    } else if (shapes->is_object()) {
+        size_t index = 0;
+        for (auto& item : shapes->items()) {
+            ensure_guid(item.value(), index++);
+        }
+    }
+}
+
+nlohmann::json& ensure_vision_shape_param(nlohmann::json& shape) {
+    if (!shape.is_object()) {
+        shape = nlohmann::json::object();
+    }
+    auto& params = shape["param"];
+    if (!params.is_object()) {
+        params = nlohmann::json::object();
+    }
+    return params;
+}
+
+nlohmann::json make_vision_shape_from_actor(const NativeEditorActor& actor) {
+    nlohmann::json shape = nlohmann::json::object();
+    shape["type"] = "model";
+    shape["name"] = actor.name;
+    if (!actor.actor_guid.empty()) {
+        shape["guid"] = actor.actor_guid;
+    }
+    auto& params = ensure_vision_shape_param(shape);
+    params["fn"] = normalize_route(actor.route);
+    return shape;
+}
+
+void write_actor_visibility_to_vision_shape(const NativeEditorActor& actor,
+                                            nlohmann::json& shape) {
+    const bool visible = actor.optics ? actor.optics->get_visible() : true;
+    shape["visible"] = visible;
+    auto& params = ensure_vision_shape_param(shape);
+    params["visible"] = visible;
+    cleanup_editor_trs_overrides_for_non_trs_transform(shape);
+    if (actor.engine_actor) {
+        const auto actor_handle = actor.engine_actor->get_handle();
+        auto binding = Corona::SharedDataHub::instance().external_vision_binding(actor_handle);
+        if (binding) {
+            binding->visible = visible;
+            Corona::SharedDataHub::instance().set_external_vision_binding(actor_handle,
+                                                                          std::move(*binding));
+        }
+    }
+}
+
+void write_actor_state_to_vision_shape(const NativeEditorActor& actor,
+                                       nlohmann::json& shape,
+                                       bool sync_transform) {
+    if (!actor.name.empty()) {
+        shape["name"] = actor.name;
+    }
+    if (!actor.actor_guid.empty() &&
+        !shape.contains("guid") &&
+        !shape.contains("id") &&
+        !shape.contains("shape_guid")) {
+        shape["guid"] = actor.actor_guid;
+    }
+    auto& params = ensure_vision_shape_param(shape);
+    if (sync_transform) {
+        auto& transform = params["transform"];
+        if (!transform.is_object()) {
+            transform = nlohmann::json::object();
+        }
+        transform["type"] = "trs";
+        auto& transform_params = transform["param"];
+        if (!transform_params.is_object()) {
+            transform_params = nlohmann::json::object();
+        }
+        const auto position = actor.geometry ? actor.geometry->get_position() : actor.position;
+        const auto scale = actor.geometry ? actor.geometry->get_scale() : actor.scale;
+        transform_params["t"] = corona_vec_to_vision(position);
+        transform_params["s"] = scale;
+    }
+    write_actor_visibility_to_vision_shape(actor, shape);
+}
+
+bool persist_embedded_vision_document(NativeEditorScene& scene, nlohmann::json& document) {
+    if (scene.vision_storage != "embedded") {
+        return false;
+    }
+    scene.vision_document_data = encode_vision_document_data(document);
+    scene.vision_document_version = VISION_DOCUMENT_VERSION;
+    scene.vision_document_encoding = VISION_DOCUMENT_ENCODING;
+    persist_native_scene_vision_document(scene);
+    return true;
+}
+
+bool refresh_embedded_vision_view(NativeEditorScene& scene,
+                                  const nlohmann::json& document) {
+    if (scene.vision_storage != "embedded") {
+        return false;
+    }
+    try {
+        const auto render_document = vision_document_for_render(document);
+        const auto scene_key = embedded_vision_scene_key(scene);
+        register_embedded_vision_actor_bindings(scene, render_document, scene_key);
+        Corona::API::load_vision_scene_from_json(render_document.dump(),
+                                                 path_to_utf8(scene.project_root),
+                                                 scene_key,
+                                                 true);
+        return true;
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("Vision embedded view refresh failed: project={}, scene={}, error={}",
+                      scene.project_root.string(),
+                      scene.route,
+                      e.what());
+        return false;
+    }
+}
+
+bool sync_native_actor_to_embedded_vision_document(NativeEditorScene& scene,
+                                                   const NativeEditorActor& actor,
+                                                   bool create_if_missing,
+                                                   bool sync_transform) {
+    if (scene.vision_storage != "embedded" || scene.vision_document_data.empty()) {
+        return false;
+    }
+    try {
+        auto document = decode_vision_document_data(scene.vision_document_data);
+        ensure_vision_shape_guids(document);
+        auto* shape = find_vision_shape_for_actor(document, actor);
+        bool created_shape = false;
+        if (!shape && create_if_missing) {
+            auto* scene_data = mutable_vision_scene_data(document);
+            if (!scene_data) {
+                return false;
+            }
+            auto& shapes = (*scene_data)["shapes"];
+            if (!shapes.is_array()) {
+                shapes = nlohmann::json::array();
+            }
+            shapes.push_back(make_vision_shape_from_actor(actor));
+            shape = &shapes.back();
+            created_shape = true;
+        }
+        if (!shape) {
+            return false;
+        }
+        write_actor_state_to_vision_shape(actor, *shape, sync_transform);
+        const bool persisted = persist_embedded_vision_document(scene, document);
+        if (persisted && created_shape) {
+            refresh_embedded_vision_view(scene, document);
+        }
+        return persisted;
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("Vision embedded actor sync failed: actor={}, guid={}, error={}",
+                      actor.name,
+                      actor.actor_guid,
+                      e.what());
+        return false;
+    }
+}
+
+bool remove_native_actor_from_embedded_vision_document(NativeEditorScene& scene,
+                                                       const std::string& actor_guid) {
+    if (scene.vision_storage != "embedded" || scene.vision_document_data.empty() ||
+        trim_ascii(actor_guid).empty()) {
+        return false;
+    }
+    try {
+        auto document = decode_vision_document_data(scene.vision_document_data);
+        ensure_vision_shape_guids(document);
+        auto* shapes = mutable_vision_shapes(document);
+        if (!shapes) {
+            return false;
+        }
+        bool removed = false;
+        if (shapes->is_array()) {
+            for (size_t index = 0; index < shapes->size(); ++index) {
+                if (vision_shape_match_guid((*shapes)[index], index) == actor_guid) {
+                    shapes->erase(shapes->begin() + static_cast<nlohmann::json::difference_type>(index));
+                    removed = true;
+                    break;
+                }
+            }
+        } else if (shapes->is_object()) {
+            size_t index = 0;
+            for (auto it = shapes->begin(); it != shapes->end(); ++index) {
+                if (vision_shape_match_guid(it.value(), index) == actor_guid) {
+                    it = shapes->erase(it);
+                    removed = true;
+                    break;
+                }
+                ++it;
+            }
+        }
+        const bool persisted = removed && persist_embedded_vision_document(scene, document);
+        if (persisted) {
+            refresh_embedded_vision_view(scene, document);
+        }
+        return persisted;
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("Vision embedded actor remove failed: guid={}, error={}",
+                      actor_guid,
+                      e.what());
+        return false;
+    }
+}
+
 std::filesystem::path relative_path_if_safe(const std::filesystem::path& path,
                                             const std::filesystem::path& base_dir) {
     std::error_code ec;
@@ -3088,6 +3547,7 @@ EmbeddedVisionDocument create_embedded_vision_document(const std::filesystem::pa
     auto embedded_document = source_document;
     rewrite_vision_resource_paths_for_project_archive(
         embedded_document, json_path.parent_path(), project_dir, asset_root);
+    ensure_vision_shape_guids(embedded_document);
 
     return EmbeddedVisionDocument{
         embedded_document,
@@ -3144,6 +3604,7 @@ void persist_vision_proxy_actors_from_document(const std::filesystem::path& proj
         actors[key + ".geometry.position"] = format_float3(position);
         actors[key + ".geometry.rotation"] = "0, 0, 0";
         actors[key + ".geometry.scale"] = format_float3(scale);
+        actors[key + ".optics.visible"] = vision_shape_visible(shape) ? "true" : "false";
         const auto& material = json_object_or_empty(params, "material");
         if (!material.empty()) {
             if (material.contains("base_color")) actors[key + ".optics.diffuse"] = format_float3(json_float3_or(material["base_color"], {0.8f, 0.8f, 0.8f}));
@@ -4313,6 +4774,7 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             }
             const auto old_name = actor->name;
             actor->name = new_name;
+            sync_native_actor_to_embedded_vision_document(*scene, *actor);
             persist_native_scene_actors(*scene);
             emit_actor_change(context, *scene, *actor);
             return native_success({

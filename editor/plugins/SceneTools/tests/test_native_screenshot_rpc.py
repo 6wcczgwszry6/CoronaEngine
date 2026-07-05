@@ -115,6 +115,14 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         optics_source = (
             repo_root / "src" / "systems" / "optics" / "optics_system.cpp"
         ).read_text(encoding="utf-8")
+        scene_resource_header = (
+            repo_root
+            / "include"
+            / "corona"
+            / "systems"
+            / "optics"
+            / "vision_scene_resource.h"
+        ).read_text(encoding="utf-8")
         fallback_source = (
             repo_root / "editor" / "CoronaCore" / "utils" / "corona_engine_fallback.py"
         ).read_text(encoding="utf-8")
@@ -123,6 +131,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "std::string scene_json",
             "std::string base_dir",
             "std::string scene_key",
+            "bool external_live",
         ):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, event_source)
@@ -134,7 +143,118 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("import_vision_scene_from_data", optics_source)
         self.assertIn("DataWrap::parse(request.scene_json)", optics_source)
         self.assertIn("vision::Global::instance().set_scene_path(base_dir)", optics_source)
+        self.assertIn("request.external_live", optics_source)
+        self.assertIn("VisionPipelineSource::ExternalLive", optics_source)
+        self.assertIn("binding->visible", optics_source)
         self.assertIn("load_vision_scene_from_json", fallback_source)
+
+    def test_embedded_vision_registers_synthetic_external_live_bindings(self):
+        source = self._handler_source()
+
+        for snippet in (
+            "embedded_vision_scene_key",
+            "register_embedded_vision_actor_bindings",
+            "clear_embedded_vision_actor_bindings",
+            "set_external_vision_binding(",
+            "clear_external_vision_binding()",
+            "const auto shape_guid = vision_shape_guid(shape, index)",
+            "scene_key,",
+            "static_cast<int>(index)",
+            "Corona::API::load_vision_scene_from_json(render_document.dump()",
+            "true);",
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertIn(snippet, source)
+
+        load_body = re.search(
+            r"void apply_native_scene_vision_source\(.*?\n\}",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(load_body)
+        self.assertIn("register_embedded_vision_actor_bindings", load_body.group(0))
+        self.assertIn("register_embedded_vision_actor_bindings(scene, render_document, scene_key)", load_body.group(0))
+
+    def test_embedded_vision_visibility_uses_live_transform_without_scene_reload(self):
+        source = self._handler_source()
+        repo_root = pathlib.Path(__file__).resolve().parents[4]
+        optics_source = (
+            repo_root / "src" / "systems" / "optics" / "optics_system.cpp"
+        ).read_text(encoding="utf-8")
+        scene_resource_header = (
+            repo_root
+            / "include"
+            / "corona"
+            / "systems"
+            / "optics"
+            / "vision_scene_resource.h"
+        ).read_text(encoding="utf-8")
+
+        render_body = re.search(
+            r"nlohmann::json vision_document_for_render\(.*?\n\}",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(render_body)
+        self.assertNotIn("remove_if", render_body.group(0))
+        self.assertNotIn("vision_shape_visible(shape)", render_body.group(0))
+
+        sync_start = source.find(
+            "bool sync_native_actor_to_embedded_vision_document(NativeEditorScene& scene,\n"
+            "                                                   const NativeEditorActor& actor,\n"
+            "                                                   bool create_if_missing,\n"
+            "                                                   bool sync_transform) {"
+        )
+        sync_end = source.find("bool remove_native_actor_from_embedded_vision_document", sync_start)
+        self.assertGreaterEqual(sync_start, 0)
+        self.assertGreater(sync_end, sync_start)
+        sync_body = source[sync_start:sync_end]
+        self.assertIn("persisted && created_shape", sync_body)
+        self.assertNotIn("previous_visible != next_visible", sync_body)
+
+        remove_body = re.search(
+            r"auto remove_actor_shape = .*?\n    \};",
+            optics_source,
+            re.S,
+        )
+        self.assertIsNotNone(remove_body)
+        self.assertIn("!record->dynamically_added", remove_body.group(0))
+        self.assertIn("scene_resource->erase_external_live_shape(actor_handle)", remove_body.group(0))
+
+        transform_body = re.search(
+            r"void OpticsSystem::sync_external_live_vision_transforms\(.*?\n\}",
+            optics_source,
+            re.S,
+        )
+        self.assertIsNotNone(transform_body)
+        self.assertIn("hidden_bound_actors", transform_body.group(0))
+        self.assertIn("hidden_external_live_o2w()", transform_body.group(0))
+        self.assertIn("external_live_hidden_transform_signature", transform_body.group(0))
+        self.assertIn("!binding->visible", transform_body.group(0))
+        self.assertNotIn("!actor_has_visible_optics(actor_handle)", transform_body.group(0))
+        self.assertIn("cache_external_live_original_instance", transform_body.group(0))
+        self.assertIn("external_live_original_transform_signatures", transform_body.group(0))
+        self.assertIn("restore_external_live_original_instances", transform_body.group(0))
+        self.assertIn("continue;", transform_body.group(0))
+
+        self.assertIn("external_live_original_instances", scene_resource_header)
+        self.assertIn("external_live_original_transform_signatures", scene_resource_header)
+        self.assertIn("cache_external_live_original_instance", scene_resource_header)
+        self.assertIn("restore_external_live_original_instances", scene_resource_header)
+
+    def test_embedded_vision_visibility_does_not_rewrite_transform_schema(self):
+        source = self._handler_source()
+
+        for snippet in (
+            "write_actor_visibility_to_vision_shape",
+            "write_actor_state_to_vision_shape(actor, *shape, sync_transform)",
+            "operation == \"SetVisible\"",
+            "operation != \"SetVisible\"",
+            "cleanup_editor_trs_overrides_for_non_trs_transform",
+            "cleanup_vision_document_editor_transform_overrides",
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertIn(snippet, source)
 
     def test_embedded_vision_rewrites_and_copies_common_vision_assets(self):
         source = self._handler_source()
@@ -169,6 +289,57 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         ):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, source)
+
+    def test_embedded_vision_actor_operations_update_document_without_reload(self):
+        source = self._handler_source()
+
+        for snippet in (
+            "sync_native_actor_to_embedded_vision_document",
+            "remove_native_actor_from_embedded_vision_document",
+            "persist_embedded_vision_document",
+            "vision_document_for_render",
+            "ensure_vision_shape_guids",
+            "scene.vision_document_data = encode_vision_document_data(document)",
+            "Corona::API::load_vision_scene_from_json(",
+            '"visible"',
+            '".optics.visible = "',
+            'actor.optics->set_visible',
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertIn(snippet, source)
+
+        sync_body = re.search(
+            r"bool sync_native_actor_to_embedded_vision_document\(.*?\n\}",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(sync_body)
+        self.assertNotIn("load_vision_scene_from_json", sync_body.group(0))
+
+        transform_body = re.search(
+            r"NativeResult set_native_editor_actor_transform\(.*?\n\}",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(transform_body)
+        self.assertIn("sync_native_actor_to_embedded_vision_document(*scene, *actor)", transform_body.group(0))
+
+        operation_body = re.search(
+            r"NativeResult apply_actor_operation\(.*?\n\}",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(operation_body)
+        self.assertIn("sync_native_actor_to_embedded_vision_document(", operation_body.group(0))
+        self.assertIn('operation != "SetVisible"', operation_body.group(0))
+
+        remove_body = re.search(
+            r"NativeResult remove_native_editor_actor\(.*?\n\}",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(remove_body)
+        self.assertIn("remove_native_actor_from_embedded_vision_document(*scene, removed_guid)", remove_body.group(0))
 
     def test_native_camera_save_load_preserves_vision_render_settings(self):
         source = self._handler_source()

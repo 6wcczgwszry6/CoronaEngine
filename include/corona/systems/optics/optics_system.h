@@ -130,6 +130,7 @@ class OpticsSystem : public Kernel::SystemBase {
         std::string scene_json;
         std::string base_dir;
         std::string scene_key;
+        bool external_live{false};
     };
 
     VisionPipelineRuntime& get_or_create_runtime(const VisionPipelineKey& key);

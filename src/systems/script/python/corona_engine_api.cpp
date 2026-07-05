@@ -1861,7 +1861,8 @@ void Corona::API::Actor::set_external_vision_binding(const std::string& source_p
                                                      const std::string& json_path,
                                                      const std::string& shape_type,
                                                      const std::string& shape_identity_key,
-                                                     const std::string& model_path) {
+                                                     const std::string& model_path,
+                                                     bool visible) {
     if (handle_ == 0) {
         CFW_LOG_WARNING("[Actor::set_external_vision_binding] Invalid actor handle");
         return;
@@ -1869,6 +1870,7 @@ void Corona::API::Actor::set_external_vision_binding(const std::string& source_p
 
     ExternalVisionBindingDevice binding{};
     binding.enabled = true;
+    binding.visible = visible;
     binding.source_path = source_path;
     binding.shape_guid = shape_guid;
     binding.shape_index = shape_index;
@@ -2560,7 +2562,8 @@ void load_vision_scene(const std::string& path) {
 
 void load_vision_scene_from_json(const std::string& json_text,
                                  const std::string& base_dir,
-                                 const std::string& scene_key) {
+                                 const std::string& scene_key,
+                                 bool external_live) {
     if (!is_vision_available()) {
         CFW_LOG_WARNING("[load_vision_scene_from_json] Vision not compiled in; request ignored");
         return;
@@ -2571,6 +2574,7 @@ void load_vision_scene_from_json(const std::string& json_text,
         event.scene_json = json_text;
         event.base_dir = base_dir;
         event.scene_key = scene_key;
+        event.external_live = external_live;
         event_bus->publish<Events::VisionSceneLoadEvent>(std::move(event));
     }
 }

@@ -272,10 +272,11 @@ class Actor:
 
     def set_external_vision_binding(self, source_path: str, shape_guid: str, shape_index: int,
                                     json_path: str, shape_type: str, shape_identity_key: str,
-                                    model_path: str):
+                                    model_path: str, visible: bool = True):
         _log(f"[Fallback][Actor.set_external_vision_binding] source_path={source_path}, shape_guid={shape_guid}")
         self._external_vision_binding = {
             "source_path": source_path or "",
+            "visible": bool(visible),
             "shape_guid": shape_guid or "",
             "shape_index": int(shape_index),
             "json_path": json_path or "",
@@ -621,8 +622,8 @@ class CoronaEngine:
         _log(f"[Fallback][load_vision_scene] path={path}")
 
     @staticmethod
-    def load_vision_scene_from_json(json_text, base_dir, scene_key):
-        _log(f"[Fallback][load_vision_scene_from_json] base_dir={base_dir}, scene_key={scene_key}, bytes={len(json_text or '')}")
+    def load_vision_scene_from_json(json_text, base_dir, scene_key, external_live=False):
+        _log(f"[Fallback][load_vision_scene_from_json] base_dir={base_dir}, scene_key={scene_key}, external_live={external_live}, bytes={len(json_text or '')}")
 
     @staticmethod
     def set_vision_render_mode(mode, camera_handle=0):

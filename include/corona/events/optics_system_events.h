@@ -65,6 +65,8 @@ struct RenderBackendSwitchEvent {
  * scene_path: absolute path to a Vision *.json scene.
  * scene_json/base_dir/scene_key: in-memory Vision scene JSON, the directory
  * used to resolve relative resources, and a stable cache/log key.
+ * external_live: use the ExternalLive Vision runtime so native proxy actors can
+ * update bound Vision shapes without rebuilding the whole scene.
  * Empty path and empty json means "unload the external scene and rebuild the
  * engine-driven scene from SharedDataHub".
  *
@@ -77,6 +79,7 @@ struct VisionSceneLoadEvent {
     std::string scene_json;
     std::string base_dir;
     std::string scene_key;
+    bool external_live = false;
 };
 
 }  // namespace Corona::Events
