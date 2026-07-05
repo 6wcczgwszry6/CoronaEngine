@@ -15311,11 +15311,23 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertIn("runtime_provider_status_snapshot_recorded", runtime.operation_log.events())
         status_summary = runtime.status_summary("room-provider-status")
         readiness_summary = status_summary["provider_readiness_summary"]
+        engine_adapter_summary = status_summary["engine_write_adapter_summary"]
         self.assertEqual(readiness_summary["channel_count"], 10)
         self.assertEqual(readiness_summary["requested_count"], 1)
         self.assertEqual(readiness_summary["enabled_count"], 1)
         self.assertIn("image_resource", readiness_summary["enabled_channels"])
+        self.assertEqual(engine_adapter_summary["channel_count"], 4)
+        self.assertEqual(engine_adapter_summary["write_attempt_count"], 0)
+        self.assertEqual(
+            engine_adapter_summary["channels"]["environment_import"]["readiness_status"],
+            "disabled",
+        )
+        self.assertEqual(
+            engine_adapter_summary["channels"]["actor_delete"]["readiness_status"],
+            "runtime_state_only",
+        )
         self.assertNotIn("provider", str(readiness_summary))
+        self.assertNotIn("provider", str(engine_adapter_summary))
         self.assertNotIn("image_provider", str(readiness_summary))
         self.assertIn("runtime_provider_status_queried", runtime.operation_log.events())
         self.assertIn("runtime_provider_readiness_published", runtime.operation_log.events())
@@ -15341,9 +15353,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertNotIn("f5_preflight", str(readiness_replay))
         report = runtime.generate_report("room-provider-status")
         report_readiness = report["operation_replay_summary"]["resource_readiness_replay_summary"]
+        report_engine_adapter = report["engine_write_adapter_summary"]
         self.assertEqual(report_readiness["status_query_count"], 1)
         self.assertEqual(report_readiness["published_count"], 1)
         self.assertEqual(report_readiness["readiness_event_count"], 1)
+        self.assertEqual(report_engine_adapter["channel_count"], 4)
+        self.assertEqual(report_engine_adapter["readiness_mismatch_count"], 0)
+        self.assertNotIn("provider", str(report_engine_adapter))
 
     def test_provider_status_external_plan_scopes_engine_write_summary(self) -> None:
         runtime = AgentRuntime()
@@ -28478,4 +28494,3 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

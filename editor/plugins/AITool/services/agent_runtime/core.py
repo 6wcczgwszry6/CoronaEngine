@@ -2973,6 +2973,7 @@ class ReportRecordValidator:
         "batch_tooling_summary",
         "classification_summary",
         "environment_component_summary",
+        "engine_write_adapter_summary",
         "engine_write_boundary_summary",
         "engine_write_readiness_summary",
         "fact_source_boundary_summary",
@@ -7219,6 +7220,137 @@ class AgentRuntime:
             "fallback_channels": fallback_channels,
             "disabled_channels": disabled_channels,
             "unavailable_channels": unavailable_channels,
+        }
+
+    @staticmethod
+    def _engine_write_adapter_summary(
+        *,
+        readiness_summary: Mapping[str, Any] | None = None,
+        boundary_summary: Mapping[str, Any] | None = None,
+        replay_summary: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return a compact read-only proof that engine writes are adapter-gated."""
+
+        readiness = dict(readiness_summary or {})
+        boundary = dict(boundary_summary or {})
+        replay = dict(replay_summary or {})
+        channel_specs = {
+            "environment_import": {
+                "boundary_count": "environment_import_boundary_count",
+                "result_count": "environment_import_result_count",
+                "status_counts": "environment_import_status_counts",
+            },
+            "actor_import": {
+                "boundary_count": "import_boundary_count",
+                "result_count": "import_result_count",
+                "status_counts": "import_status_counts",
+            },
+            "actor_delete": {
+                "boundary_count": "delete_boundary_count",
+                "result_count": "delete_result_count",
+                "status_counts": "delete_status_counts",
+            },
+            "layout_transform": {
+                "boundary_count": "transform_boundary_count",
+                "result_count": "transform_result_count",
+                "status_counts": "transform_status_counts",
+            },
+        }
+
+        def channel_set(key: str) -> set[str]:
+            return {
+                str(item or "").strip().replace("-", "_")
+                for item in list(readiness.get(key) or [])
+                if str(item or "").strip()
+            }
+
+        native_channels = channel_set("native_enabled_channels")
+        runtime_state_only_channels = channel_set("runtime_state_only_channels")
+        fallback_channels = channel_set("fallback_channels")
+        disabled_channels = channel_set("disabled_channels")
+        unavailable_channels = channel_set("unavailable_channels")
+        requested_channels = channel_set("requested_channels")
+        replay_mismatch_channels = {
+            str(item or "").strip().replace("-", "_")
+            for item in list(replay.get("readiness_mismatch_channels") or [])
+            if str(item or "").strip()
+        }
+        bridge_failed_count = int(boundary.get("bridge_failed_count") or 0)
+        bridge_call_count = int(boundary.get("bridge_call_count") or 0)
+        bridge_success_count = int(boundary.get("bridge_success_count") or 0)
+        channels: dict[str, dict[str, Any]] = {}
+        native_ready_count = 0
+        runtime_state_only_count = 0
+        fallback_count = 0
+        disabled_count = 0
+        unavailable_count = 0
+        mismatch_count = 0
+        write_attempt_count = 0
+        for channel, spec in channel_specs.items():
+            boundary_count = int(boundary.get(spec["boundary_count"]) or 0)
+            result_count = int(replay.get(spec["result_count"]) or 0)
+            attempted = boundary_count > 0 or result_count > 0
+            write_attempt_count += 1 if attempted else 0
+            if channel in native_channels:
+                readiness_status = "native_ready"
+                native_ready_count += 1
+            elif channel in runtime_state_only_channels:
+                readiness_status = "runtime_state_only"
+                runtime_state_only_count += 1
+            elif channel in fallback_channels:
+                readiness_status = "fallback"
+                fallback_count += 1
+            elif channel in disabled_channels:
+                readiness_status = "disabled"
+                disabled_count += 1
+            elif channel in unavailable_channels:
+                readiness_status = "unavailable"
+                unavailable_count += 1
+            else:
+                readiness_status = "unknown"
+            mismatch = bool(channel in replay_mismatch_channels or (attempted and channel not in native_channels))
+            mismatch_count += 1 if mismatch else 0
+            channels[channel] = {
+                "requested": channel in requested_channels,
+                "readiness_status": readiness_status,
+                "write_attempted": attempted,
+                "boundary_count": boundary_count,
+                "result_count": result_count,
+                "status_counts": AgentRuntime._safe_status_count_map(
+                    replay.get(spec["status_counts"])
+                ),
+                "native_bridge_required": attempted,
+                "native_ready": channel in native_channels,
+                "readiness_mismatch": mismatch,
+            }
+        if bridge_failed_count or mismatch_count:
+            status = "needs_attention"
+        elif write_attempt_count and bridge_success_count >= write_attempt_count:
+            status = "native_write_observed"
+        elif native_ready_count:
+            status = "native_ready"
+        elif runtime_state_only_count:
+            status = "runtime_state_only"
+        elif fallback_count:
+            status = "fallback"
+        elif disabled_count == len(channel_specs):
+            status = "disabled"
+        else:
+            status = "unknown"
+        return {
+            "status": status,
+            "channel_count": len(channel_specs),
+            "native_ready_count": native_ready_count,
+            "runtime_state_only_count": runtime_state_only_count,
+            "fallback_count": fallback_count,
+            "disabled_count": disabled_count,
+            "unavailable_count": unavailable_count,
+            "write_attempt_count": write_attempt_count,
+            "bridge_call_count": bridge_call_count,
+            "bridge_success_count": bridge_success_count,
+            "bridge_failed_count": bridge_failed_count,
+            "readiness_mismatch_count": mismatch_count,
+            "channels": channels,
         }
 
     @staticmethod
@@ -18223,6 +18355,12 @@ class AgentRuntime:
             active_plan_id,
             batch_id=batch_id,
         )
+        engine_write_readiness_summary = self._engine_write_readiness_summary(self._provider_summary)
+        engine_write_adapter_summary = self._engine_write_adapter_summary(
+            readiness_summary=engine_write_readiness_summary,
+            boundary_summary=engine_write_boundary_summary,
+            replay_summary=dict(operation_replay_summary.get("engine_write_summary") or {}),
+        )
         resource_summary = self._resource_summary_for_plan(room, active_plan_id, batch_id=batch_id)
         batch_resource_flow_summary = self._batch_resource_flow_summary_for_plan(
             room,
@@ -18497,6 +18635,7 @@ class AgentRuntime:
                 ],
             },
             "import_summary": import_summary,
+            "engine_write_adapter_summary": engine_write_adapter_summary,
             "engine_write_boundary_summary": engine_write_boundary_summary,
             "intervention_batch_summary": intervention_batch_summary,
             "batch_tooling_summary": batch_tooling_summary,
@@ -18548,7 +18687,7 @@ class AgentRuntime:
                 "tool_execution_digest": tool_execution_digest,
             "provider_summary": self._safe_provider_summary(self._provider_summary),
             "provider_readiness_summary": self._provider_readiness_summary(self._provider_summary),
-            "engine_write_readiness_summary": self._engine_write_readiness_summary(self._provider_summary),
+            "engine_write_readiness_summary": engine_write_readiness_summary,
             "latest_runtime_events": self.user_visible_events(
                 str(room_id),
                 plan_id=active_plan_id,
@@ -20095,6 +20234,12 @@ class AgentRuntime:
             active_plan_id,
             batch_id=active_batch_id,
         )
+        engine_write_readiness_summary = self._engine_write_readiness_summary(self._provider_summary)
+        engine_write_adapter_summary = self._engine_write_adapter_summary(
+            readiness_summary=engine_write_readiness_summary,
+            boundary_summary=engine_write_boundary_summary,
+            replay_summary=engine_write_summary,
+        )
         resource_summary = self._resource_summary_for_plan(room, active_plan_id, batch_id=active_batch_id)
         batch_resource_flow_summary = self._batch_resource_flow_summary_for_plan(
             room,
@@ -20214,7 +20359,8 @@ class AgentRuntime:
             "actor_count": len(scoped_actor_facts),
             "provider_summary": self._safe_provider_summary(self._provider_summary),
             "provider_readiness_summary": self._provider_readiness_summary(self._provider_summary),
-            "engine_write_readiness_summary": self._engine_write_readiness_summary(self._provider_summary),
+            "engine_write_readiness_summary": engine_write_readiness_summary,
+            "engine_write_adapter_summary": engine_write_adapter_summary,
             "tool_capability_summary": {
                 key: value
                 for key, value in tool_capability_summary.items()
