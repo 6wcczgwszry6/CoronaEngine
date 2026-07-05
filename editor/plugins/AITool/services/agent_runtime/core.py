@@ -16962,6 +16962,8 @@ class AgentRuntime:
         }
         asset_incomplete_count = int(sync_health.get("asset_incomplete_count") or 0)
         asset_failed_count = int(sync_health.get("asset_failed_count") or 0)
+        asset_transferring_count = int(sync_health.get("asset_transferring_count") or 0)
+        asset_overall_progress = int(sync_health.get("asset_overall_progress") or 0)
         sync_actor_transform_count = int(sync_health.get("actor_transform_count") or 0)
         sync_actor_delete_count = int(sync_health.get("actor_delete_count") or 0)
         sync_status = str(sync_health.get("status") or "")
@@ -17066,6 +17068,8 @@ class AgentRuntime:
             reasons.append("resource_phase_partial")
         if asset_incomplete_count:
             reasons.append("asset_transfer_incomplete")
+        if asset_transferring_count:
+            reasons.append("asset_transfer_in_progress")
         if sync_status in {"partial", "needs_attention"}:
             reasons.append(f"sync_{sync_status}")
         sync_failure_count = sum(int(value or 0) for value in sync_failure_code_counts.values())
@@ -17152,6 +17156,8 @@ class AgentRuntime:
             "actor_registry_missing_aabb_count": actor_registry_missing_aabb_count,
             "asset_incomplete_count": asset_incomplete_count,
             "asset_failed_count": asset_failed_count,
+            "asset_transferring_count": asset_transferring_count,
+            "asset_overall_progress": max(0, min(100, asset_overall_progress)),
         }
 
     @staticmethod
