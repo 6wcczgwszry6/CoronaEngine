@@ -25869,6 +25869,20 @@ class AgentRuntime:
             active_plan_id,
             batch_id=active_batch_id,
         )
+        sync_summary = self._sync_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
+        asset_transfer_summary = self._asset_transfer_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
+        sync_health_digest = self._sync_health_digest_for_report(
+            sync_summary=sync_summary,
+            asset_transfer_summary=asset_transfer_summary,
+        )
         operation_scope = self._operation_log_snapshot_from_entries(
             self._operation_log_entries_for_runtime_scope(
                 room_id=str(room_id),
@@ -25892,6 +25906,9 @@ class AgentRuntime:
             "model_resources": dict(dict(room.get("model_resource_plans") or {}).get(active_batch_id) or {}),
             "resource_summary": resource_summary,
             "import_summary": import_summary,
+            "sync_summary": sync_summary,
+            "asset_transfer_summary": asset_transfer_summary,
+            "sync_health_digest": sync_health_digest,
             "actors": dict(self._actor_facts_for_plan(room, active_plan_id, batch_id=active_batch_id)),
             "geometry_summary": geometry_summary,
             "review_summary": review_summary,
