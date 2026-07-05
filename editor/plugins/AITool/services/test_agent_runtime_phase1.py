@@ -22680,6 +22680,15 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertTrue(
             query_summary["engine_write_adapter_summary"]["channels"]["actor_import"]["write_attempted"]
         )
+        self.assertEqual(query_summary["fact_source_boundary_summary"]["runtime_state_source"], "RuntimeState")
+        self.assertEqual(
+            query_summary["fact_source_boundary_summary"]["external_truth_source"],
+            "engine_lanchat_mirrored",
+        )
+        self.assertIn(
+            "runtime-state-is-business-truth",
+            query_summary["fact_source_boundary_summary"]["boundary_notes"],
+        )
         self.assertIn("proposal_count", query_summary["layout_adjustment_summary"])
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["actor"], 2)
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["terrain"], 2)
@@ -22749,6 +22758,12 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         )
         self.assertEqual(report["runtime_scene_flow_summary"]["status"], "ok")
         self.assertEqual(report["runtime_scene_flow_summary"]["steps"][-1]["status"], "ok")
+        self.assertEqual(report["fact_source_boundary_summary"]["runtime_state_source"], "RuntimeState")
+        self.assertEqual(report["fact_source_boundary_summary"]["external_truth_source"], "engine_lanchat_mirrored")
+        self.assertIn(
+            "runtime-state-is-business-truth",
+            report["fact_source_boundary_summary"]["boundary_notes"],
+        )
         self.assertGreaterEqual(report["review_summary"]["review_count"], 2)
         self.assertIn("structure_review", report["review_summary"]["checkpoint_counts"])
         replay = report["operation_replay_summary"]

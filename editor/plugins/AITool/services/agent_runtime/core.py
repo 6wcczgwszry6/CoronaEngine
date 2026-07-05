@@ -25912,6 +25912,19 @@ class AgentRuntime:
             replay_summary=engine_write_summary,
             layout_adjustment_summary=layout_adjustment_summary,
         )
+        fact_source_boundary_summary = self._fact_source_boundary_summary(
+            plan_summary={
+                "title": str(plan.get("title") or ""),
+                "status": str(plan.get("status") or ""),
+            },
+            batch_summary={"batch_count": len(self._batch_ids_for_plan(room, active_plan_id))},
+            resource_summary=resource_summary,
+            import_summary=import_summary,
+            sync_summary=sync_summary,
+            engine_write_summary=engine_write_summary,
+            engine_write_boundary_summary=engine_write_boundary_summary,
+            scene_snapshot_summary={},
+        )
         operation_scope = self._operation_log_snapshot_from_entries(
             self._operation_log_entries_for_runtime_scope(
                 room_id=str(room_id),
@@ -25941,6 +25954,7 @@ class AgentRuntime:
             "engine_write_boundary_summary": engine_write_boundary_summary,
             "engine_write_readiness_summary": engine_write_readiness_summary,
             "engine_write_adapter_summary": engine_write_adapter_summary,
+            "fact_source_boundary_summary": fact_source_boundary_summary,
             "layout_adjustment_summary": layout_adjustment_summary,
             "actors": dict(self._actor_facts_for_plan(room, active_plan_id, batch_id=active_batch_id)),
             "geometry_summary": geometry_summary,
