@@ -2859,14 +2859,19 @@ class EnvironmentComponentValidator:
 
     _ALLOWED_FIELDS = {
         "actor_id",
+        "boundary_style",
         "component_id",
         "component_type",
+        "environment_profile",
         "handler",
         "name",
         "requires_engine_write",
         "scene_name",
         "source",
         "status",
+        "surface",
+        "sky_mode",
+        "terrain_profile",
     }
     _BLOCKED_FIELDS = {
         "api_key",
@@ -2921,9 +2926,24 @@ class EnvironmentComponentValidator:
         component_id = str(component.get("component_id") or fallback_component_id or "")
         if not component_id.strip():
             raise ValueError("environment component fact requires component_id")
-        for field in ("actor_id", "component_id", "name", "component_type", "handler", "scene_name", "source", "status"):
+        for field in (
+            "actor_id",
+            "boundary_style",
+            "component_id",
+            "name",
+            "component_type",
+            "handler",
+            "scene_name",
+            "source",
+            "status",
+            "surface",
+            "sky_mode",
+            "terrain_profile",
+        ):
             if field in component and not isinstance(component.get(field), str):
                 raise ValueError(f"environment component fact {field} must be a string")
+        if "environment_profile" in component and not isinstance(component.get("environment_profile"), Mapping):
+            raise ValueError("environment component fact environment_profile must be a mapping")
         component_type = str(component.get("component_type") or "")
         if not component_type.strip():
             raise ValueError("environment component fact requires component_type")
@@ -2936,8 +2956,25 @@ class EnvironmentComponentValidator:
             raise ValueError("environment component fact requires name")
         if "requires_engine_write" in component and not isinstance(component.get("requires_engine_write"), bool):
             raise ValueError("environment component fact requires_engine_write must be a bool")
-        for field in ("actor_id", "component_id", "name", "handler", "scene_name", "source", "status"):
+        for field in (
+            "actor_id",
+            "boundary_style",
+            "component_id",
+            "name",
+            "handler",
+            "scene_name",
+            "source",
+            "status",
+            "surface",
+            "sky_mode",
+            "terrain_profile",
+        ):
             EnvironmentComponentValidator._validate_safe_text(component.get(field), field)
+        profile = component.get("environment_profile")
+        if isinstance(profile, Mapping):
+            for key, value in profile.items():
+                EnvironmentComponentValidator._validate_safe_text(str(key or ""), "environment_profile key")
+                EnvironmentComponentValidator._validate_safe_text(value, "environment_profile value")
 
     @staticmethod
     def _validate_safe_text(value: Any, field: str) -> None:
@@ -17390,6 +17427,14 @@ class AgentRuntime:
             value = row.get(key)
             return dict(value) if isinstance(value, Mapping) else {}
 
+        def environment_profile_from(row: Mapping[str, Any]) -> dict[str, Any]:
+            profile = mapping_field(row, "environment_profile")
+            for key in ("terrain_profile", "surface", "sky_mode", "boundary_style"):
+                value = str(row.get(key) or "").strip()
+                if value:
+                    profile[key] = value
+            return profile
+
         def actor_sync_status(row: Mapping[str, Any], asset_id: str) -> str:
             for key in ("sync_status", "sync_lifecycle_status", "last_sync_event"):
                 value = str(row.get(key) or "").strip()
@@ -17449,6 +17494,7 @@ class AgentRuntime:
 
         entities: list[dict[str, Any]] = []
         seen_entity_ids: set[str] = set()
+        seen_semantic_roles: set[str] = set()
 
         for actor_id, actor_row in sorted(actors.items()):
             if not isinstance(actor_row, Mapping):
@@ -17488,6 +17534,8 @@ class AgentRuntime:
                 "batch_id": str(merged.get("batch_id") or ""),
             }
             seen_entity_ids.add(entity["entity_id"])
+            if entity["semantic_role"]:
+                seen_semantic_roles.add(entity["semantic_role"])
             entities.append(entity)
 
         for current_batch_id in candidate_batch_ids:
@@ -17516,6 +17564,7 @@ class AgentRuntime:
                     "physics_profile": mapping_field(component, "physics_profile"),
                     "audio_profile": mapping_field(component, "audio_profile"),
                     "lighting_profile": mapping_field(component, "lighting_profile"),
+                    "environment_profile": environment_profile_from(component),
                     "script_bindings": list_field(component, "script_bindings"),
                     "sync_status": str(component.get("sync_status") or component.get("status") or "runtime_state"),
                     "asset_transfer_status": asset_transfer_status(str(component.get("asset_id") or "")),
@@ -17524,6 +17573,8 @@ class AgentRuntime:
                     "batch_id": str(current_batch_id),
                 }
                 seen_entity_ids.add(entity_id)
+                if entity["semantic_role"]:
+                    seen_semantic_roles.add(entity["semantic_role"])
                 entities.append(entity)
 
         for name in list(classification.get("substrate_items") or []):
@@ -17531,7 +17582,7 @@ class AgentRuntime:
             if not text:
                 continue
             entity_id = f"substrate:{text}"
-            if entity_id in seen_entity_ids:
+            if entity_id in seen_entity_ids or text in seen_semantic_roles:
                 continue
             entities.append({
                 "entity_id": entity_id,

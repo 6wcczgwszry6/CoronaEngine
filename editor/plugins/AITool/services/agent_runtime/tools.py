@@ -2287,6 +2287,7 @@ def _default_environment_component_provider(payload: dict[str, Any]) -> dict[str
             "status": "planned",
             "source": "runtime_environment_component",
             "requires_engine_write": False,
+            **_environment_semantic_fields(name=name, component_type=component_type, handler=str(item.get("handler") or "")),
         }
     _add_default_framework_components(payload, components)
     return components
@@ -2347,7 +2348,52 @@ def _ensure_environment_component(
         "status": "planned",
         "source": "runtime_environment_component",
         "requires_engine_write": False,
+        **_environment_semantic_fields(name=name, component_type=component_type, handler=handler),
     }
+
+
+def _environment_semantic_fields(*, name: str, component_type: str, handler: str) -> dict[str, Any]:
+    text = " ".join([str(name or ""), str(component_type or ""), str(handler or "")]).lower()
+    fields: dict[str, Any] = {}
+    if component_type == "skybox" or "sky" in text or "天空" in text:
+        fields["terrain_profile"] = "outdoor_nature"
+        fields["sky_mode"] = "open_sky"
+    elif component_type in {"room_box", "room_floor"}:
+        fields["terrain_profile"] = "indoor_room"
+        if component_type == "room_floor":
+            fields["surface"] = "indoor_floor"
+    elif component_type == "terrain":
+        fields["terrain_profile"] = "outdoor_nature" if _is_nature_environment_text(text) else "terrain"
+        if any(term in text for term in ("grass", "草地", "草原", "forest", "森林", "camp", "营地")):
+            fields["surface"] = "grass_with_walkable_clearings"
+        elif any(term in text for term in ("ground", "terrain", "地面", "地形")):
+            fields["surface"] = "walkable_ground"
+    elif "boundary" in text or "边界" in text or "栅栏" in text:
+        fields["boundary_style"] = "soft_natural_boundary" if _is_nature_environment_text(text) else "boundary"
+    if fields:
+        fields["environment_profile"] = dict(fields)
+    return fields
+
+
+def _is_nature_environment_text(text: str) -> bool:
+    nature_terms = (
+        "forest",
+        "woods",
+        "camp",
+        "grass",
+        "ground",
+        "terrain",
+        "sky",
+        "森林",
+        "树林",
+        "营地",
+        "草地",
+        "草原",
+        "地面",
+        "地形",
+        "天空",
+    )
+    return any(term in text for term in nature_terms)
 
 
 def _is_indoor_environment_text(text: str) -> bool:

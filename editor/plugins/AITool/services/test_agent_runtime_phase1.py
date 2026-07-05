@@ -22630,6 +22630,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(resolved_substrate["grass"]["component_type"], "terrain")
         self.assertFalse(any(item["requires_engine_write"] for item in substrate_resolution))
         environment_components = state["environment_components"][batch_id]
+        components_by_name = {item["name"]: item for item in environment_components.values()}
         component_names = {item["name"] for item in environment_components.values()}
         component_types = {item["name"]: item["component_type"] for item in environment_components.values()}
         self.assertTrue({"forest", "sky", "grass"}.issubset(component_names))
@@ -22637,6 +22638,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertFalse(any(item["component_type"] == "room_box" for item in environment_components.values()))
         self.assertEqual(component_types["sky"], "skybox")
         self.assertEqual(component_types["forest"], "terrain")
+        self.assertEqual(components_by_name["sky"]["sky_mode"], "open_sky")
+        self.assertEqual(components_by_name["sky"]["terrain_profile"], "outdoor_nature")
+        self.assertEqual(components_by_name["forest"]["terrain_profile"], "outdoor_nature")
+        self.assertEqual(components_by_name["grass"]["surface"], "grass_with_walkable_clearings")
         self.assertFalse(any(item["requires_engine_write"] for item in environment_components.values()))
         routes = state["element_routes"][batch_id]
         substrate_names = {
@@ -22676,6 +22681,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         for role in ("forest", "sky", "grass"):
             self.assertNotEqual(status_roles[role]["entity_type"], "actor")
             self.assertEqual(status_roles[role]["grounding_status"], "not_applicable")
+        self.assertEqual(status_roles["sky"]["environment_profile"]["sky_mode"], "open_sky")
+        self.assertEqual(status_roles["forest"]["environment_profile"]["terrain_profile"], "outdoor_nature")
+        self.assertEqual(status_roles["grass"]["environment_profile"]["surface"], "grass_with_walkable_clearings")
         self.assertGreaterEqual(status["review_summary"]["review_count"], 2)
         self.assertIn("structure_review", status["review_summary"]["checkpoint_counts"])
         report = runtime.generate_report("room-forest", plan_id=plan.plan_id)
