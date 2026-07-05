@@ -17627,11 +17627,23 @@ class AgentRuntime:
         entity_type_counts: dict[str, int] = {}
         grounding_status_counts: dict[str, int] = {}
         sync_status_counts: dict[str, int] = {}
+        asset_transfer_status_counts: dict[str, int] = {}
         review_status_counts: dict[str, int] = {}
         for entity in entities:
             add_count(entity_type_counts, str(entity.get("entity_type") or "unknown"))
             add_count(grounding_status_counts, str(entity.get("grounding_status") or "unknown"))
             add_count(sync_status_counts, str(entity.get("sync_status") or "unknown"))
+            transfer_status = entity.get("asset_transfer_status")
+            if isinstance(transfer_status, Mapping):
+                if not transfer_status.get("available"):
+                    add_count(asset_transfer_status_counts, "unavailable")
+                else:
+                    add_count(
+                        asset_transfer_status_counts,
+                        str(transfer_status.get("transfer_status") or "available"),
+                    )
+            else:
+                add_count(asset_transfer_status_counts, "unknown")
             add_count(review_status_counts, str(entity.get("review_status") or "unknown"))
 
         return {
@@ -17644,6 +17656,7 @@ class AgentRuntime:
             "entity_type_counts": dict(sorted(entity_type_counts.items())),
             "grounding_status_counts": dict(sorted(grounding_status_counts.items())),
             "sync_status_counts": dict(sorted(sync_status_counts.items())),
+            "asset_transfer_status_counts": dict(sorted(asset_transfer_status_counts.items())),
             "review_status_counts": dict(sorted(review_status_counts.items())),
             "entities": entities,
         }
