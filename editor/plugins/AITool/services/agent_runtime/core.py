@@ -12751,9 +12751,19 @@ class AgentRuntime:
                         active_runtime_plan.plan_id,
                         confirmed_by=sender_name or sender_id,
                     )
+                explicit_item_count = len([
+                    item
+                    for item in list(active_runtime_plan.concrete_object_items or [])
+                    if str(item or "").strip()
+                ])
+                effective_max_items = (
+                    max(max_items_per_batch, explicit_item_count or max_items_per_batch)
+                    if max_items_per_batch == 3
+                    else max_items_per_batch
+                )
                 execution = self.execute_planned_batches(
                     active_runtime_plan.plan_id,
-                    max_items_per_batch=max_items_per_batch,
+                    max_items_per_batch=effective_max_items,
                     scene_name=scene_name,
                 )
             except Exception:  # noqa: BLE001

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any, Callable, Mapping, Sequence
@@ -41,7 +42,6 @@ _ABSTRACT_LAYOUT_TERMS = (
 
 _TREASURE_ROOM_ITEMS = ("木门", "藏宝箱", "金币堆", "木桌", "木椅", "木箱", "酒桶", "武器架", "火把")
 _BEDROOM_ITEMS = ("床", "书桌", "衣柜", "台灯", "地毯", "玩偶", "书架")
-_FOREST_CAMP_ITEMS = ("帐篷", "小木桌", "篝火", "长椅", "背包")
 _MARKET_ITEMS = ("入口拱门", "摊位", "导视牌", "长椅", "灯笼", "展示架")
 _COMMON_ADD_OBJECTS = (
     "天使雕像",
@@ -72,7 +72,6 @@ _TREASURE_ROOM_TEXT_MARKERS = (
     "鐩楄棌",
 )
 _BEDROOM_TEXT_MARKERS = ("卧室", "bedroom", "鍗у", "搴", "台灯", "床")
-_FOREST_CAMP_TEXT_MARKERS = ("森林", "营地", "草地", "天空", "forest", "camp", "妫", "钀ュ湴")
 _MARKET_TEXT_MARKERS = ("集市", "夜市", "市场", "market")
 _ADD_OBJECT_ALIASES = (
     (("天使雕像", "天使", "雕像", "澶╀娇", "闆曞儚", "ぉ浣", "洉鍍"), "天使雕像"),
@@ -726,10 +725,13 @@ def extract_candidate_items(text: str) -> list[str]:
         return list(_TREASURE_ROOM_ITEMS)
     if any(marker in clean or marker in lowered for marker in _BEDROOM_TEXT_MARKERS):
         return list(_BEDROOM_ITEMS)
-    if any(marker in clean or marker in lowered for marker in _FOREST_CAMP_TEXT_MARKERS):
-        return ["森林", "天空", "草地", *_FOREST_CAMP_ITEMS]
     if any(marker in clean or marker in lowered for marker in _MARKET_TEXT_MARKERS):
         return list(_MARKET_ITEMS)
+    explicit_mentions = _explicit_item_candidates_from_text(clean)
+    if explicit_mentions:
+        merged_mentions = list(dict.fromkeys([*explicit_mentions, *aliased_objects]))
+        if len(merged_mentions) > 1 or not any(_looks_like_mojibake_name(name) for name in merged_mentions):
+            return merged_mentions
     if aliased_objects:
         return list(dict.fromkeys(aliased_objects))
     explicit_objects = [item for item in _COMMON_ADD_OBJECTS if item in clean]
@@ -737,6 +739,44 @@ def extract_candidate_items(text: str) -> list[str]:
     if explicit_objects:
         return list(dict.fromkeys(explicit_objects))
     return ["主体物件", "辅助物件"]
+
+
+def _explicit_item_candidates_from_text(text: str) -> list[str]:
+    value = str(text or "").strip()
+    if not value:
+        return []
+    value = re.sub(r"@\S+\s*", "", value)
+    value = re.sub(
+        r"(?i)\b(?:create|generate|make|build|with|and|plus|include|including)\b",
+        ",",
+        value,
+    )
+    value = re.sub(
+        r"(?:生成|创建|做一个|做个|有|包含|包括|以及|和|还有|再加|加入|添加|新增)",
+        "，",
+        value,
+    )
+    chunks = re.split(r"[、，,;；。.\n]+", value)
+    ignored_tokens = {
+        "简单",
+        "一个",
+        "场景",
+    }
+    candidates: list[str] = []
+    for chunk in chunks:
+        item = re.sub(r"\s+", " ", str(chunk or "").strip())
+        item = item.strip(" -:：")
+        if not item:
+            continue
+        lowered = item.lower()
+        if lowered in ignored_tokens or item in ignored_tokens:
+            continue
+        if len(item) > 32:
+            continue
+        if any(word in lowered for word in ("please", "scene", "style", "simple")):
+            continue
+        candidates.append(item)
+    return list(dict.fromkeys(candidates))[:8]
 
 
 def route_candidate_model_names(text: str, items: list[str] | None = None) -> list[str]:
@@ -761,7 +801,9 @@ def route_candidate_model_names(text: str, items: list[str] | None = None) -> li
 
 def _looks_like_mojibake_name(name: str) -> bool:
     text = str(name or "")
-    return "\ufffd" in text or "�" in text
+    if "\ufffd" in text or "�" in text:
+        return True
+    return any("\ue000" <= char <= "\uf8ff" for char in text)
 
 
 def _extract_scene_plan_tool(call: ToolCall) -> ToolResult:
@@ -1282,7 +1324,6 @@ def _batch_prioritize_items_tool(call: ToolCall) -> ToolResult:
                 "source_index": index,
             }
         )
-    priority_rows.sort(key=lambda row: (int(row.get("priority") or 0), int(row.get("source_index") or 0)))
     ordered_items = [str(row.get("name") or "") for row in priority_rows if str(row.get("name") or "")]
     fact_id = f"{plan_id}:item_priorities"
     return ToolResult(
