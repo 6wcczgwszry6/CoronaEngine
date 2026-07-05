@@ -49,6 +49,7 @@ PY_COMPILE_TARGETS = [
     "editor/plugins/AITool/cai_extensions/register.py",
     "editor/plugins/AITool/cai_extensions/agent/agent_adapter.py",
     "editor/plugins/AITool/cai_extensions/agent/engine_write_gate.py",
+    "editor/plugins/AITool/cai_extensions/agent/scene_composer.py",
     "editor/plugins/AITool/cai_extensions/agent/scene_composer_progressive.py",
     "editor/plugins/AITool/cai_extensions/agent/scene_element_classifier.py",
     "docs/probes/v3_f5_log_check.py",
@@ -102,6 +103,13 @@ DIRECT_SCENE_COMPOSE_GUARDED_CALLS = {
     ],
 }
 
+MASTER_AGENT_LEGACY_COMPOSE_ROUTE_GUARDED_CALLS = {
+    "editor/plugins/AITool/cai_extensions/agent/agent_adapter.py": [
+        ("if gate_action == \"compose\":", "return self._handle_scene(str(gate_payload or trigger)"),
+        ("if intent_class == \"compose\":", "return self._handle_scene(trigger, system, messages, force_compose=True)"),
+    ],
+}
+
 DIRECT_ENGINE_WRITE_SCAN_ROOTS = [
     "editor/plugins/AITool/cai_extensions/agent/agent_adapter.py",
 ]
@@ -143,13 +151,13 @@ DIRECT_PROGRESSIVE_WORKFLOW_ALLOWED_LINE_PATTERNS = {
         "result = run_progressive_workflow(",
     ),
     "editor/plugins/AITool/cai_extensions/agent/scene_composer_progressive.py": (
-        "本模块提供 `_run_progressive_workflow`",
+        "鏈ā鍧楁彁渚?`_run_progressive_workflow`",
         "def run_progressive_workflow(",
         "prog_result = session.progressive_compose(",
         '__all__ = ["run_progressive_workflow"]',
     ),
     "editor/plugins/AITool/cai_extensions/agent/scene_session.py": (
-        "progressive_compose() 是主循环",
+        "progressive_compose() 鏄富寰幆",
         "def progressive_compose(",
     ),
 }
@@ -165,6 +173,16 @@ DIRECT_PROGRESSIVE_WORKFLOW_CONTAINED_CALLS = {
 }
 
 DIRECT_PROGRESSIVE_WORKFLOW_REQUIRED_SCOPE_TOKENS = {
+    "editor/plugins/AITool/cai_extensions/agent/scene_composer.py": [
+        (
+            "    def compose(",
+            (
+                "Agent-native migration: compose() no longer honors",
+                "from .scene_composer_progressive import run_progressive_workflow",
+                "result = run_progressive_workflow(",
+            ),
+        ),
+    ],
     "editor/plugins/AITool/cai_extensions/agent/scene_composer_progressive.py": [
         (
             "def run_progressive_workflow(",
@@ -175,6 +193,18 @@ DIRECT_PROGRESSIVE_WORKFLOW_REQUIRED_SCOPE_TOKENS = {
                 "incremental_import(",
                 "import_tool=import_tool,\n            scene_layout=scene_layout,\n            engine_gate=engine_gate",
                 "session.progressive_compose(",
+            ),
+        ),
+    ],
+}
+
+DIRECT_PROGRESSIVE_WORKFLOW_FORBIDDEN_SCOPE_TOKENS = {
+    "editor/plugins/AITool/cai_extensions/agent/scene_composer.py": [
+        (
+            "    def compose(",
+            (
+                "USE_PROGRESSIVE_COMPOSE",
+                "self._run_original_workflow(",
             ),
         ),
     ],
@@ -300,12 +330,15 @@ WORKFLOW_COMMAND_SCAN_ROOTS = [
 
 AGENT_RUNTIME_CORE = "editor/plugins/AITool/services/agent_runtime/core.py"
 AGENT_RUNTIME_TOOLS = "editor/plugins/AITool/services/agent_runtime/tools.py"
+AGENT_RUNTIME_ADAPTERS = "editor/plugins/AITool/services/agent_runtime/adapters.py"
 AGENT_RUNTIME_FLAGS = "editor/plugins/AITool/services/agent_runtime/flags.py"
 GENERATION_COMPOSER_ADAPTER = "editor/plugins/AITool/services/generation_composer_adapter.py"
 LANCHAT_AGENT_WORKER = "editor/plugins/AITool/services/lanchat_agent_worker.py"
 LANCHAT_HOST_ACTION_EXECUTOR = "editor/plugins/AITool/services/lanchat_host_action_executor.py"
+LEGACY_AGENT_COORDINATOR = "editor/plugins/AITool/cai_extensions/agent/coordinator.py"
 AGENT_RUNTIME_PHASE1_TESTS = "editor/plugins/AITool/services/test_agent_runtime_phase1.py"
 LANCHAT_RUNTIME_GUARD_TESTS = "editor/plugins/AITool/services/test_lanchat_runtime_guard.py"
+SCENE_ELEMENT_CLASSIFIER = "editor/plugins/AITool/cai_extensions/agent/scene_element_classifier.py"
 
 REQUIRED_RUNTIME_VALIDATORS = {
     "ScenePlanValidator",
@@ -375,6 +408,22 @@ def _syntax_check(paths: list[str]) -> bool:
 
 def _to_repo_path(path: Path) -> str:
     return path.relative_to(REPO_ROOT).as_posix()
+
+def _safe_console_text(value: object) -> str:
+    text = str(value)
+    try:
+        text.encode(sys.stdout.encoding or "utf-8")
+        return text
+    except UnicodeEncodeError:
+        return text.encode(sys.stdout.encoding or "utf-8", errors="backslashreplace").decode(
+            sys.stdout.encoding or "utf-8",
+            errors="replace",
+        )
+
+
+def _print_violation(item: object) -> None:
+    print(f"       {_safe_console_text(item)}")
+
 
 
 def _should_skip_direct_scene_compose_scan(path: Path) -> bool:
@@ -454,7 +503,7 @@ def _direct_scene_compose_entry_gate() -> bool:
     if violations:
         print("[FAIL] static direct SceneComposer entry gate")
         for item in violations:
-            print(f"       {item}")
+            _print_violation(item)
         return False
     print("[OK]  static direct SceneComposer entry gate")
     return True
@@ -488,9 +537,43 @@ def _direct_engine_write_entry_gate() -> bool:
     if violations:
         print("[FAIL] static direct engine-write entry gate")
         for item in violations:
-            print(f"       {item}")
+            _print_violation(item)
         return False
     print("[OK]  static direct engine-write entry gate")
+    return True
+
+
+def _master_agent_legacy_compose_route_gate() -> bool:
+    print("[RUN] static MasterAgent legacy compose route gate")
+    violations: list[str] = []
+    for rel, calls in MASTER_AGENT_LEGACY_COMPOSE_ROUTE_GUARDED_CALLS.items():
+        path = REPO_ROOT / rel
+        try:
+            source = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            source = path.read_text(encoding="utf-8-sig")
+        for entry_marker, route_marker in calls:
+            try:
+                entry_index = source.index(entry_marker)
+            except ValueError:
+                violations.append(f"{rel}: missing MasterAgent route marker {entry_marker!r}")
+                continue
+            try:
+                route_index = source.index(route_marker, entry_index)
+            except ValueError:
+                violations.append(f"{rel}: missing legacy scene route marker {route_marker!r}")
+                continue
+            guarded_prefix = source[entry_index:route_index]
+            if "_legacy_main_workflow_allowed()" not in guarded_prefix:
+                violations.append(f"{rel}: {entry_marker} can reach legacy scene handler without legacy-main guard")
+            if "AGENT_RUNTIME_REQUIRED_MESSAGE" not in guarded_prefix:
+                violations.append(f"{rel}: {entry_marker} can reach legacy scene handler without Runtime-required reply")
+    if violations:
+        print("[FAIL] static MasterAgent legacy compose route gate")
+        for item in violations:
+            _print_violation(item)
+        return False
+    print("[OK]  static MasterAgent legacy compose route gate")
     return True
 
 
@@ -539,7 +622,7 @@ def _direct_progressive_workflow_entry_gate() -> bool:
     print("[RUN] static direct ProgressiveWorkflow entry gate")
     violations: list[str] = []
     markers = (
-        "run_progressive_workflow",
+        "run_progressive_workflow(",
         "progressive_compose(",
     )
     for path in _iter_direct_progressive_workflow_scan_files():
@@ -554,6 +637,8 @@ def _direct_progressive_workflow_entry_gate() -> bool:
             if not stripped or stripped.startswith("#"):
                 continue
             if stripped.startswith(("\"", "'")):
+                continue
+            if "progressive_compose()" in stripped:
                 continue
             if any(marker in stripped for marker in markers):
                 interesting_lines.append((lineno, stripped))
@@ -594,10 +679,18 @@ def _direct_progressive_workflow_entry_gate() -> bool:
                         f"{rel}: {entry_marker} scope has required token {token!r} out of execution order"
                     )
                 last_index = token_index
+        for entry_marker, forbidden_tokens in DIRECT_PROGRESSIVE_WORKFLOW_FORBIDDEN_SCOPE_TOKENS.get(rel, []):
+            scope, scope_errors = _function_scope(source, entry_marker)
+            if scope_errors:
+                violations.extend(f"{rel}: {item}" for item in scope_errors)
+                continue
+            for token in forbidden_tokens:
+                if token in scope:
+                    violations.append(f"{rel}: {entry_marker} scope must not contain legacy token {token!r}")
     if violations:
         print("[FAIL] static direct ProgressiveWorkflow entry gate")
         for item in violations:
-            print(f"       {item}")
+            _print_violation(item)
         return False
     print("[OK]  static direct ProgressiveWorkflow entry gate")
     return True
@@ -688,7 +781,7 @@ def _direct_generation_scheduler_entry_gate() -> bool:
     if violations:
         print("[FAIL] static direct GenerationScheduler entry gate")
         for item in violations:
-            print(f"       {item}")
+            _print_violation(item)
         return False
     print("[OK]  static direct GenerationScheduler entry gate")
     return True
@@ -770,7 +863,7 @@ def _direct_host_action_executor_entry_gate() -> bool:
     if violations:
         print("[FAIL] static direct host action executor entry gate")
         for item in violations:
-            print(f"       {item}")
+            _print_violation(item)
         return False
     print("[OK]  static direct host action executor entry gate")
     return True
@@ -809,7 +902,6 @@ def _host_action_executor_policy_gate() -> bool:
             "if self._structured_action_handler is None:",
             "return str(self._structured_action_handler(dict(payload)))",
             "if not self._allow_legacy_agent_fallback:",
-            "旧 Agent 执行回退已关闭",
             "agent = self._get_agent()",
         )
         last_index = -1
@@ -836,9 +928,133 @@ def _host_action_executor_policy_gate() -> bool:
     if violations:
         print("[FAIL] static host action executor policy gate")
         for item in violations:
-            print(f"       {item}")
+            _print_violation(item)
         return False
     print("[OK]  static host action executor policy gate")
+    return True
+
+
+def _legacy_agent_coordinator_policy_gate() -> bool:
+    print("[RUN] static legacy AgentCoordinator policy gate")
+    path = REPO_ROOT / LEGACY_AGENT_COORDINATOR
+    try:
+        source = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        source = path.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        print(f"[FAIL] static legacy AgentCoordinator policy gate: cannot read {LEGACY_AGENT_COORDINATOR}: {exc}")
+        return False
+
+    violations: list[str] = []
+    execute_source = _function_source(source, "execute")
+    allow_source = _function_source(source, "_legacy_direct_execute_allowed")
+
+    for token in (
+        '_RUNTIME_CONTROLLED_ACTIONS = frozenset({"add", "delete", "move", "modify"})',
+        "agent_runtime_required",
+    ):
+        if token not in source:
+            violations.append(f"AgentCoordinator missing required Runtime takeover token: {token}")
+
+    if not execute_source:
+        violations.append("AgentCoordinator.execute not found")
+    else:
+        required_order = (
+            "if action in self._RUNTIME_CONTROLLED_ACTIONS and not self._legacy_direct_execute_allowed(scene_state):",
+            '"status": "blocked"',
+            '"reason": "agent_runtime_required"',
+            '"execution": "agent_runtime_required"',
+            "self._broadcast(intent, spatial, result)",
+            "self._record(intent, spatial, result, scene_state)",
+            "return result",
+        )
+        last_index = -1
+        for token in required_order:
+            token_index = execute_source.find(token)
+            if token_index < 0:
+                violations.append(f"AgentCoordinator.execute missing Runtime takeover token: {token}")
+                continue
+            if token_index < last_index:
+                violations.append(f"AgentCoordinator.execute Runtime takeover token out of order: {token}")
+            last_index = token_index
+
+    if not allow_source:
+        violations.append("AgentCoordinator._legacy_direct_execute_allowed not found")
+    else:
+        for token in (
+            "allow_legacy_direct_agent_execute",
+            "allow_legacy_agent_coordinator_execute",
+            "AgentRuntimeFlags.from_env().old_workflow_direct_entry_disabled",
+            "return False",
+        ):
+            if token not in allow_source:
+                violations.append(f"AgentCoordinator._legacy_direct_execute_allowed missing token: {token}")
+
+    if violations:
+        print("[FAIL] static legacy AgentCoordinator policy gate")
+        for item in violations:
+            _print_violation(item)
+        return False
+    print("[OK]  static legacy AgentCoordinator policy gate")
+    return True
+
+
+def _legacy_role_agent_scene_write_policy_gate() -> bool:
+    print("[RUN] static legacy RoleAgent scene-write policy gate")
+    path = REPO_ROOT / LANCHAT_AGENT_WORKER
+    try:
+        source = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        source = path.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        print(f"[FAIL] static legacy RoleAgent scene-write policy gate: cannot read {LANCHAT_AGENT_WORKER}: {exc}")
+        return False
+
+    violations: list[str] = []
+    process_trigger = _function_source(source, "_process_trigger")
+    write_gate = _function_source(source, "_handle_agent_trigger_runtime_write_gate")
+    if not process_trigger:
+        violations.append("LANChatAgentWorker._process_trigger not found")
+    else:
+        required_order = (
+            "if self._handle_agent_trigger_planning_gate(trigger):",
+            "if self._handle_agent_trigger_runtime_write_gate(trigger):",
+            "result = self._run_agent(trigger)",
+        )
+        last_index = -1
+        for token in required_order:
+            token_index = process_trigger.find(token)
+            if token_index < 0:
+                violations.append(f"LANChatAgentWorker._process_trigger missing RoleAgent scene-write token: {token}")
+                continue
+            if token_index < last_index:
+                violations.append(f"LANChatAgentWorker._process_trigger RoleAgent scene-write token out of order: {token}")
+            last_index = token_index
+    if not write_gate:
+        violations.append("LANChatAgentWorker._handle_agent_trigger_runtime_write_gate not found")
+    else:
+        for token in (
+            "if self._agent_runtime_flags.can_call_legacy_main_workflow():",
+            "get_intent_understanding_service().classify(",
+            '"generation_start"',
+            '"intervention_add"',
+            '"intervention_modify"',
+            '"intervention_delete"',
+            '"post_generation_add"',
+            '"final_adjustment_request"',
+            "legacy_role_agent_scene_write_blocked",
+            "agent_runtime_required",
+            'self._send_final_reply("gm-system"',
+        ):
+            if token not in write_gate:
+                violations.append(f"LANChatAgentWorker._handle_agent_trigger_runtime_write_gate missing token: {token}")
+
+    if violations:
+        print("[FAIL] static legacy RoleAgent scene-write policy gate")
+        for item in violations:
+            _print_violation(item)
+        return False
+    print("[OK]  static legacy RoleAgent scene-write policy gate")
     return True
 
 
@@ -848,16 +1064,25 @@ def _agent_runtime_flag_boundary_gate() -> bool:
     adapter_path = REPO_ROOT / GENERATION_COMPOSER_ADAPTER
     worker_path = REPO_ROOT / LANCHAT_AGENT_WORKER
     core_path = REPO_ROOT / AGENT_RUNTIME_CORE
+    runtime_tools_path = REPO_ROOT / AGENT_RUNTIME_TOOLS
+    runtime_adapters_path = REPO_ROOT / AGENT_RUNTIME_ADAPTERS
+    runtime_guard_test_path = REPO_ROOT / "editor/plugins/AITool/services/test_lanchat_runtime_guard.py"
     try:
         flags_source = flags_path.read_text(encoding="utf-8")
         adapter_source = adapter_path.read_text(encoding="utf-8")
         worker_source = worker_path.read_text(encoding="utf-8")
         core_source = core_path.read_text(encoding="utf-8")
+        runtime_tools_source = runtime_tools_path.read_text(encoding="utf-8")
+        runtime_adapters_source = runtime_adapters_path.read_text(encoding="utf-8")
+        runtime_guard_test_source = runtime_guard_test_path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         flags_source = flags_path.read_text(encoding="utf-8-sig")
         adapter_source = adapter_path.read_text(encoding="utf-8-sig")
         worker_source = worker_path.read_text(encoding="utf-8-sig")
         core_source = core_path.read_text(encoding="utf-8-sig")
+        runtime_tools_source = runtime_tools_path.read_text(encoding="utf-8-sig")
+        runtime_adapters_source = runtime_adapters_path.read_text(encoding="utf-8-sig")
+        runtime_guard_test_source = runtime_guard_test_path.read_text(encoding="utf-8-sig")
 
     violations: list[str] = []
 
@@ -1001,6 +1226,36 @@ def _agent_runtime_flag_boundary_gate() -> bool:
                     "LANChatAgentWorker._create_agent_runtime provider factory appears before its flag guard: "
                     f"{factory_token}"
                 )
+        for required in (
+            "legacy_model_adapter_unavailable",
+            "return resources",
+        ):
+            if required not in runtime_adapters_source:
+                violations.append(f"legacy model resource adapter missing provider-unavailable fact token: {required}")
+        if 'in {"legacy_model_failure", "legacy_model_adapter_unavailable"}' not in runtime_tools_source:
+            violations.append(
+                "runtime.asset.model.prepare must treat legacy model adapter unavailable facts as hard model failure"
+            )
+        for required in (
+            "test_model_provider_flag_does_not_fallback_to_legacy_model_provider",
+            '"AGENT_RUNTIME_USE_MODEL_PROVIDER": "1"',
+            "legacy_model_provider",
+            "assertNotIn",
+        ):
+            if required not in runtime_guard_test_source:
+                violations.append(f"LANChat Runtime guard missing model-provider no-legacy-fallback test token: {required}")
+        for required in (
+            "_failed_environment_import_components",
+            "runtime_environment_import_failed",
+            "runtime_environment_import_missing",
+            '"environment_components": {batch_id: failed_components}',
+            '"custom_import_facts"',
+            'f"{batch_id}:environment_import_result"',
+            "_environment_import_result_fact(",
+            "changes=changes",
+        ):
+            if required not in runtime_tools_source:
+                violations.append(f"runtime.environment.import_components missing failed-fact token: {required}")
 
     runtime_status_reply = _function_source(worker_source, "_agent_runtime_status_reply")
     gm_summary_reply = _function_source(worker_source, "_agent_runtime_gm_summary_reply")
@@ -1017,6 +1272,10 @@ def _agent_runtime_flag_boundary_gate() -> bool:
     resource_flow_formatter = _function_source(worker_source, "_format_agent_runtime_resource_flow_report")
     scene_snapshot_formatter = _function_source(worker_source, "_format_agent_runtime_scene_snapshot_report")
     resource_stage_formatter = _function_source(worker_source, "_format_agent_runtime_resource_stage_report")
+    report_health_formatter = _function_source(worker_source, "_format_agent_runtime_report_health_report")
+    message_delivery_formatter = _function_source(worker_source, "_format_agent_runtime_message_delivery_report")
+    engine_write_formatter = _function_source(worker_source, "_format_agent_runtime_engine_write_report")
+    engine_write_readiness_formatter = _function_source(worker_source, "_format_agent_runtime_engine_write_readiness_report")
     import_stage_formatter = _function_source(worker_source, "_format_agent_runtime_import_stage_report")
     geometry_fact_formatter = _function_source(worker_source, "_format_agent_runtime_geometry_fact_report")
     tool_queue_health_formatter = _function_source(
@@ -1057,11 +1316,23 @@ def _agent_runtime_flag_boundary_gate() -> bool:
         core_source,
         "_runtime_event_replay_summary",
     )
+    runtime_guard_replay_summary = _function_source(
+        core_source,
+        "_runtime_guard_replay_summary",
+    )
+    resource_readiness_replay_summary = _function_source(
+        core_source,
+        "_resource_readiness_replay_summary",
+    )
     replay_failure_strategy_formatter = _function_source(
         worker_source,
         "_format_agent_runtime_replay_failure_strategy_report",
     )
     replay_layout_formatter = _function_source(worker_source, "_format_agent_runtime_replay_layout_report")
+    replay_final_adjustment_formatter = _function_source(
+        worker_source,
+        "_format_agent_runtime_replay_final_adjustment_report",
+    )
     replay_vlm_formatter = _function_source(worker_source, "_format_agent_runtime_replay_vlm_report")
     replay_environment_formatter = _function_source(worker_source, "_format_agent_runtime_replay_environment_report")
     replay_readiness_formatter = _function_source(
@@ -1081,6 +1352,10 @@ def _agent_runtime_flag_boundary_gate() -> bool:
         worker_source,
         "_format_agent_runtime_gm_runtime_event_replay_digest",
     )
+    gm_sync_replay_formatter = _function_source(
+        worker_source,
+        "_format_agent_runtime_gm_sync_replay_digest",
+    )
     if not resource_flow_formatter:
         violations.append("LANChatAgentWorker._format_agent_runtime_resource_flow_report not found")
     else:
@@ -1091,6 +1366,9 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "image_ready_count",
             "model_ready_count",
             "import_ready_count",
+            "import_failure_code_counts",
+            "import-failures",
+            "safe_label(code)",
         ):
             if token not in resource_flow_formatter:
                 violations.append(f"LANChatAgentWorker resource flow formatter missing token: {token}")
@@ -1120,6 +1398,26 @@ def _agent_runtime_flag_boundary_gate() -> bool:
         ):
             if token not in lanchat_sync_bridge_reason:
                 violations.append(f"LANChatAgentWorker sync bridge reason sanitizer missing token: {token}")
+    if not report_health_formatter:
+        violations.append("LANChatAgentWorker._format_agent_runtime_report_health_report not found")
+    else:
+        for token in (
+            "sync_failure_code_counts",
+            "latest_sync_failure_code",
+            "sync failures",
+            "import_failure_code_counts",
+            "import failures",
+        ):
+            if token not in report_health_formatter:
+                violations.append(f"LANChatAgentWorker report health formatter missing sync failure diagnostic token: {token}")
+    if not message_delivery_formatter:
+        violations.append("LANChatAgentWorker._format_agent_runtime_message_delivery_report not found")
+    else:
+        for token in ("failure_code_counts", "latest_failure_code", "failure codes"):
+            if token not in message_delivery_formatter:
+                violations.append(
+                    f"LANChatAgentWorker message delivery formatter missing failure diagnostic token: {token}"
+                )
     if not scene_snapshot_formatter:
         violations.append("LANChatAgentWorker._format_agent_runtime_scene_snapshot_report not found")
     else:
@@ -1248,6 +1546,8 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "_format_agent_runtime_replay_failure_strategy_report",
             "layout_adjustment_summary",
             "_format_agent_runtime_replay_layout_report",
+            "final_adjustment_confirmation_replay_summary",
+            "_format_agent_runtime_replay_final_adjustment_report",
             "vlm_checkpoint_summary",
             "_format_agent_runtime_replay_vlm_report",
             "environment_component_summary",
@@ -1272,6 +1572,7 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "runtime_events",
             "failure_strategy",
             "layout",
+            "final_adjustment",
             "vlm",
             "environment",
             "resource_readiness",
@@ -1351,6 +1652,10 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "review_advisory_replay_text",
             "_format_agent_runtime_replay_review_advisory_report",
             "review advisory replay",
+            "final_adjustment_confirmation_replay_summary",
+            "final_adjustment_replay_text",
+            "_format_agent_runtime_replay_final_adjustment_report",
+            "final adjustment replay",
         ):
             if token not in runtime_report_reply:
                 violations.append(f"LANChatAgentWorker runtime report reply missing VLM/review replay token: {token}")
@@ -1526,6 +1831,14 @@ def _agent_runtime_flag_boundary_gate() -> bool:
         ):
             if token not in replay_guard_formatter:
                 violations.append(f"LANChatAgentWorker replay guard formatter missing token: {token}")
+    for token in (
+        "write-blocked 1",
+        "unconfirmed 1",
+        "risk medium:1",
+        "latest write-confirmation-required risk:medium/write/unconfirmed",
+    ):
+        if token not in runtime_guard_test_source:
+            violations.append(f"LANChat replay guard formatter regression missing token: {token}")
     if not replay_plan_lifecycle_formatter:
         violations.append("LANChatAgentWorker._format_agent_runtime_replay_plan_lifecycle_report not found")
     else:
@@ -1577,6 +1890,48 @@ def _agent_runtime_flag_boundary_gate() -> bool:
         ):
             if token not in replay_geometry_formatter:
                 violations.append(f"LANChatAgentWorker replay geometry formatter missing token: {token}")
+    if not engine_write_readiness_formatter:
+        violations.append("LANChatAgentWorker._format_agent_runtime_engine_write_readiness_report not found")
+    else:
+        for token in (
+            "native_enabled_count",
+            "runtime_state_only_count",
+            "fallback_count",
+            "disabled_count",
+            "native_enabled_channels",
+            "runtime_state_only_channels",
+            "fallback_channels",
+            "disabled_channels",
+            "runtime-state",
+        ):
+            if token not in engine_write_readiness_formatter:
+                violations.append(f"LANChatAgentWorker engine-write readiness formatter missing token: {token}")
+
+    if not engine_write_formatter:
+        violations.append("LANChatAgentWorker._format_agent_runtime_engine_write_report not found")
+    else:
+        for token in (
+            "status_export_count",
+            "latest_status_export",
+            "status-export",
+            "readiness_mismatch_count",
+            "readiness_mismatch_channels",
+            "readiness-mismatch",
+            "engine_write_bridge_error_code_counts",
+            "bridge-failed",
+            "engine_write_readiness_native_enabled_count",
+            "engine_write_readiness_runtime_state_only_count",
+            "engine_write_readiness_fallback_count",
+            "engine_write_readiness_disabled_count",
+            "engine_write_readiness_native_enabled_channels",
+            "engine_write_readiness_runtime_state_only_channels",
+            "engine_write_readiness_fallback_channels",
+            "engine_write_readiness_disabled_channels",
+            "channels ",
+            "readiness ",
+        ):
+            if token not in engine_write_formatter:
+                violations.append(f"LANChatAgentWorker engine-write formatter missing status-export token: {token}")
     if not replay_runtime_event_formatter:
         violations.append("LANChatAgentWorker._format_agent_runtime_replay_runtime_event_report not found")
     else:
@@ -1588,6 +1943,13 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "latest_runtime_event",
             "latest_disclosure_skip",
             "skipped {skipped_count}",
+            "environment_import_failure_code_counts",
+            "env-import-failures",
+            "engine_write_bridge_error_code_counts",
+            "engine-write-failures",
+            "engine_write_readiness_mismatch_count",
+            "engine_write_readiness_mismatch_channels",
+            "engine-write-mismatch",
         ):
             if token not in replay_runtime_event_formatter:
                 violations.append(f"LANChatAgentWorker replay runtime event formatter missing token: {token}")
@@ -1598,9 +1960,34 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "runtime_system_event_disclosure_skipped",
             "disclosure_skipped_count",
             "latest_disclosure_skip",
+            "layout_applied_delta_count",
+            "layout_skipped_delta_count",
+            "layout_transform_result_count",
+            "layout_ground_snapped_count",
+            "layout_overlap_resolved_count",
+            "environment_import_failure_code_counts",
+            "engine_write_boundary_fact_count",
+            "engine_write_bridge_failed_count",
+            "engine_write_bridge_error_code_counts",
+            "engine_write_readiness_mismatch_count",
+            "engine_write_readiness_mismatch_channels",
         ):
             if token not in runtime_event_replay_summary:
                 violations.append(f"AgentRuntime runtime event replay summary missing token: {token}")
+    if not runtime_guard_replay_summary:
+        violations.append("AgentRuntime._runtime_guard_replay_summary not found")
+    else:
+        for token in (
+            "risk_level_counts",
+            "requires_write_blocked_count",
+            "confirmed_blocked_count",
+            "unconfirmed_blocked_count",
+            'payload.get("risk_level")',
+            'payload.get("requires_write")',
+            'payload.get("confirmed")',
+        ):
+            if token not in runtime_guard_replay_summary:
+                violations.append(f"AgentRuntime RuntimeGuard replay summary missing blocked-call audit token: {token}")
     if not replay_failure_strategy_formatter:
         violations.append("LANChatAgentWorker._format_agent_runtime_replay_failure_strategy_report not found")
     else:
@@ -1635,6 +2022,22 @@ def _agent_runtime_flag_boundary_gate() -> bool:
         ):
             if token not in replay_layout_formatter:
                 violations.append(f"LANChatAgentWorker replay layout formatter missing token: {token}")
+    if not replay_final_adjustment_formatter:
+        violations.append("LANChatAgentWorker._format_agent_runtime_replay_final_adjustment_report not found")
+    else:
+        for token in (
+            "confirmation_count",
+            "confirmation_failed_count",
+            "confirmation_skipped_count",
+            "decision_counts",
+            "latest_confirmation",
+            "conflict_item_count",
+        ):
+            if token not in replay_final_adjustment_formatter:
+                violations.append(
+                    "LANChatAgentWorker replay final adjustment formatter missing token: "
+                    f"{token}"
+                )
     if not replay_vlm_formatter:
         violations.append("LANChatAgentWorker._format_agent_runtime_replay_vlm_report not found")
     else:
@@ -1668,11 +2071,39 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "published_count",
             "publish_failed_count",
             "readiness_event_count",
+            "publish_requested_total",
+            "publish_enabled_total",
+            "publish_unavailable_total",
+            "publish_status_counts",
+            "status_query_requested_total",
+            "status_query_enabled_total",
+            "status_query_unavailable_total",
+            "status_query_status_counts",
             "status_counts",
             "latest_readiness_event",
+            "def safe_label",
+            "provider",
+            "url",
+            "safe_label(key)",
         ):
             if token not in replay_readiness_formatter:
                 violations.append(f"LANChatAgentWorker replay resource readiness formatter missing token: {token}")
+    if not resource_readiness_replay_summary:
+        violations.append("AgentRuntime._resource_readiness_replay_summary not found")
+    for token in (
+        '"publish_requested_total"',
+        '"publish_enabled_total"',
+        '"publish_unavailable_total"',
+        '"publish_status_counts"',
+        '"latest_publish_event"',
+        '"status_query_requested_total"',
+        '"status_query_enabled_total"',
+        '"status_query_unavailable_total"',
+        '"status_query_status_counts"',
+        '"latest_provider_status_query"',
+    ):
+        if token not in resource_readiness_replay_summary:
+            violations.append(f"AgentRuntime._resource_readiness_replay_summary missing token: {token}")
     if not replay_sync_formatter:
         violations.append("LANChatAgentWorker._format_agent_runtime_sync_replay_report not found")
     else:
@@ -1682,6 +2113,9 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "actor_transform_count",
             "transfer_progress_count",
             "latest_transfer_progress",
+            "failure_code_counts",
+            "latest_failure_code",
+            "failure codes",
         ):
             if token not in replay_sync_formatter:
                 violations.append(f"LANChatAgentWorker sync replay formatter missing token: {token}")
@@ -1732,16 +2166,24 @@ def _agent_runtime_flag_boundary_gate() -> bool:
         for token in (
             "resource_flow_digest",
             "_format_agent_runtime_resource_flow_report",
-            "资源批次",
             "sync_replay_digest",
             "_format_agent_runtime_gm_sync_replay_digest",
             "runtime_event_replay_digest",
             "_format_agent_runtime_gm_runtime_event_replay_digest",
             "RuntimeEvent replay",
-            "同步复盘",
         ):
             if token not in gm_summary_reply:
                 violations.append(f"LANChatAgentWorker GM summary reply missing Runtime digest token: {token}")
+        if not gm_sync_replay_formatter:
+            violations.append("LANChatAgentWorker._format_agent_runtime_gm_sync_replay_digest not found")
+        else:
+            for token in (
+                "failure_code_counts",
+                "latest_failure_code",
+                "failure codes",
+            ):
+                if token not in gm_sync_replay_formatter:
+                    violations.append(f"LANChatAgentWorker GM sync replay formatter missing token: {token}")
         for token in (
             "batch_tooling_digest",
             "_format_agent_runtime_batch_tooling_report",
@@ -1765,6 +2207,10 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "engine_write_digest",
             "_format_agent_runtime_engine_write_report",
             "Engine write",
+            "engine_write_readiness_digest",
+            "engine_write_readiness_text",
+            "_format_agent_runtime_engine_write_readiness_report",
+            "Engine write readiness",
             "message_delivery_digest",
             "_format_agent_runtime_message_delivery_report",
             "Message delivery",
@@ -1845,6 +2291,13 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "disclosure_skipped_count",
             "latest_disclosure_skip",
             "latest-skip",
+            "environment_import_failure_code_counts",
+            "env-import-failures",
+            "engine_write_bridge_error_code_counts",
+            "engine-write-failures",
+            "engine_write_readiness_mismatch_count",
+            "engine_write_readiness_mismatch_channels",
+            "engine-write-mismatch",
         ):
             if token not in gm_runtime_event_replay_formatter:
                 violations.append(f"LANChatAgentWorker GM runtime event replay formatter missing token: {token}")
@@ -1862,8 +2315,14 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "runtime_event_replay_summary",
             "_format_agent_runtime_replay_runtime_event_report",
             "RuntimeEvent replay",
-            "同传复盘",
-            "Peer 复盘",
+            "gm_summary_replay_summary",
+            "gm_summary_replay_text",
+            "_format_agent_runtime_gm_summary_replay_report",
+            "GM replay",
+            "batch_execution_replay_summary",
+            "tool_graph_queue_replay_summary",
+            "_format_agent_runtime_tool_graph_replay_report",
+            "ToolGraph replay",
         ):
             if token not in runtime_status_reply:
                 violations.append(f"LANChatAgentWorker Runtime status reply missing resource flow token: {token}")
@@ -1927,7 +2386,6 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "scene_design_contract_summary",
             "scene_contract_text",
             "_format_agent_runtime_scene_contract_report",
-            "场景契约",
         ):
             if token not in runtime_status_reply:
                 violations.append(f"LANChatAgentWorker Runtime status reply missing scene contract token: {token}")
@@ -1935,7 +2393,6 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "semantic_arbitration_summary",
             "semantic_arbitration_text",
             "_format_agent_runtime_semantic_arbitration_report",
-            "语义仲裁",
         ):
             if token not in runtime_status_reply:
                 violations.append(f"LANChatAgentWorker Runtime status reply missing semantic arbitration token: {token}")
@@ -1943,15 +2400,16 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "scene_snapshot_summary",
             "scene_snapshot_text",
             "_format_agent_runtime_scene_snapshot_report",
-            "场景快照",
             "resource_summary",
             "runtime_resource_text",
             "_format_agent_runtime_resource_stage_report",
-            "Runtime 资源",
+            "engine_write_readiness_summary",
+            "engine_write_readiness_text",
+            "_format_agent_runtime_engine_write_readiness_report",
+            "Engine write readiness",
             "import_summary",
             "import_text",
             "_format_agent_runtime_import_stage_report",
-            "导入",
         ):
             if token not in runtime_status_reply:
                 violations.append(f"LANChatAgentWorker Runtime status reply missing scene/resource/import token: {token}")
@@ -1959,7 +2417,6 @@ def _agent_runtime_flag_boundary_gate() -> bool:
             "geometry_fact_summary",
             "geometry_text",
             "_format_agent_runtime_geometry_fact_report",
-            "几何事实",
         ):
             if token not in runtime_status_reply:
                 violations.append(f"LANChatAgentWorker Runtime status reply missing geometry fact token: {token}")
@@ -1967,7 +2424,7 @@ def _agent_runtime_flag_boundary_gate() -> bool:
     if violations:
         print("[FAIL] static AgentRuntime flag boundary gate")
         for item in violations:
-            print(f"       {item}")
+            _print_violation(item)
         return False
     print("[OK]  static AgentRuntime flag boundary gate")
     return True
@@ -2012,7 +2469,7 @@ def _runtime_state_apply_patch_boundary_gate() -> bool:
     if violations:
         print("[FAIL] static RuntimeState apply_patch boundary gate")
         for item in violations:
-            print(f"       {item}")
+            _print_violation(item)
         return False
     print("[OK]  static RuntimeState apply_patch boundary gate")
     return True
@@ -2160,7 +2617,7 @@ def _workflow_command_exposure_gate() -> bool:
     if violations:
         print("[FAIL] static workflow command exposure gate")
         for item in violations:
-            print(f"       {item}")
+            _print_violation(item)
         return False
     print("[OK]  static workflow command exposure gate")
     return True
@@ -2184,11 +2641,21 @@ def _runtime_report_fact_source_gate() -> bool:
         source = core_path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         source = core_path.read_text(encoding="utf-8-sig")
+    phase1_test_path = REPO_ROOT / "editor/plugins/AITool/services/test_agent_runtime_phase1.py"
+    try:
+        phase1_test_source = phase1_test_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        phase1_test_source = phase1_test_path.read_text(encoding="utf-8-sig")
     generate_report = _function_source(source, "generate_report")
     operation_replay = _function_source(source, "operation_replay")
     compose_operation_replay = _function_source(source, "_compose_operation_replay")
     operation_replay_snapshot = _function_source(source, "_operation_replay_snapshot_via_tool_graph")
+    record_operation_replay_snapshot = _function_source(source, "_record_operation_replay_snapshot_tool")
+    operation_replay_snapshot_payload = _function_source(source, "_operation_replay_snapshot_audit_payload")
+    record_operation_replay_summary = _function_source(source, "_record_operation_replay_summary_tool")
+    operation_replay_summary_snapshot = _function_source(source, "_operation_replay_summary_via_tool_graph")
     operation_replay_summary_for_report = _function_source(source, "_operation_replay_summary_for_report")
+    operation_replay_summary_payload = _function_source(source, "_operation_replay_snapshot_summary_payload")
     tool_manifest = _function_source(source, "tool_manifest")
     provider_status = _function_source(source, "provider_status")
     provider_status_snapshot = _function_source(source, "_provider_status_snapshot_via_tool_graph")
@@ -2202,10 +2669,24 @@ def _runtime_report_fact_source_gate() -> bool:
     enqueue_pending_intervention_batch = _function_source(source, "enqueue_pending_intervention_batch")
     build_batch_execution_graph = _function_source(source, "_build_batch_execution_graph")
     handle_message = _function_source(source, "handle_message")
+    apply_runtime_command = _function_source(source, "apply_runtime_command")
     status_summary = _function_source(source, "status_summary")
+    tool_manifest = _function_source(source, "tool_manifest")
     status_summary_snapshot = _function_source(source, "_status_summary_snapshot_via_tool_graph")
+    gm_summary_snapshot = _function_source(source, "_gm_summary_snapshot_via_tool_graph")
+    runtime_events_snapshot = _function_source(source, "_runtime_events_snapshot_via_tool_graph")
+    sync_status_snapshot = _function_source(source, "_sync_status_snapshot_via_tool_graph")
+    provider_status_snapshot = _function_source(source, "_provider_status_snapshot_via_tool_graph")
+    operation_replay_snapshot = _function_source(source, "_operation_replay_snapshot_via_tool_graph")
+    record_status_summary_snapshot = _function_source(source, "_record_status_summary_snapshot_tool")
+    snapshot_failure_payload = _function_source(source, "_snapshot_failure_audit_payload")
     batch_resource_lifecycle_replay = _function_source(source, "_batch_resource_lifecycle_replay_summary")
     intervention_batch_replay = _function_source(source, "_intervention_batch_replay_summary")
+    gm_summary_replay = _function_source(source, "_gm_summary_replay_summary")
+    final_adjustment_confirmation_replay = _function_source(
+        source,
+        "_final_adjustment_confirmation_replay_summary",
+    )
     violations: list[str] = []
 
     if not generate_report:
@@ -2243,12 +2724,29 @@ def _runtime_report_fact_source_gate() -> bool:
             violations.append("AgentRuntime.generate_report must derive sync health from Runtime sync summaries")
         if '"runtime_guard_replay_summary": dict(operation_replay_summary.get("runtime_guard_replay_summary") or {})' not in generate_report:
             violations.append("AgentRuntime.generate_report missing RuntimeGuard replay summary token")
+        for required in (
+            '"requires_write_blocked_count": int(runtime_guard_replay_summary.get("requires_write_blocked_count") or 0)',
+            '"confirmed_blocked_count": int(runtime_guard_replay_summary.get("confirmed_blocked_count") or 0)',
+            '"unconfirmed_blocked_count": int(runtime_guard_replay_summary.get("unconfirmed_blocked_count") or 0)',
+            '"risk_level_counts": {',
+            '"risk_level": str(latest_guard_block.get("risk_level") or "")',
+            '"requires_write": bool(latest_guard_block.get("requires_write"))',
+            '"confirmed": bool(latest_guard_block.get("confirmed"))',
+        ):
+            if required not in source:
+                violations.append(f"AgentRuntime GM runtime_guard_digest missing blocked-call audit token: {required}")
         if '"scene_plan_lifecycle_summary": dict(operation_replay_summary.get("scene_plan_lifecycle_summary") or {})' not in generate_report:
             violations.append("AgentRuntime.generate_report missing ScenePlan lifecycle summary token")
         if '"vlm_checkpoint_summary": dict(operation_replay_summary.get("vlm_checkpoint_summary") or {})' not in generate_report:
             violations.append("AgentRuntime.generate_report missing VLM checkpoint replay summary token")
         if '"review_advisory_replay_summary": dict(operation_replay_summary.get("review_advisory_summary") or {})' not in generate_report:
             violations.append("AgentRuntime.generate_report missing review advisory replay summary token")
+        if (
+            '"final_adjustment_confirmation_replay_summary": dict(' not in generate_report
+            or 'operation_replay_summary.get("final_adjustment_confirmation_replay_summary") or {}'
+            not in generate_report
+        ):
+            violations.append("AgentRuntime.generate_report missing final adjustment confirmation replay summary token")
         for required in (
             "scene_design_contract_summary = self._scene_design_contract_summary_for_plan",
             '"scene_design_contract_summary": scene_design_contract_summary',
@@ -2262,11 +2760,53 @@ def _runtime_report_fact_source_gate() -> bool:
             '"resource_summary": resource_summary',
             "import_summary = self._import_summary_for_plan",
             '"import_summary": import_summary',
+            "environment_component_summary = self._environment_component_summary_for_plan",
+            '"environment_component_summary": environment_component_summary',
+            "environment_component_summary=environment_component_summary",
+            '"engine_write_readiness_summary": self._engine_write_readiness_summary(self._provider_summary)',
             "tool_execution_digest = self._tool_execution_digest_for_report",
             '"tool_execution_digest": tool_execution_digest',
+            '"layout_applied_delta_count": int(layout_adjustment_summary.get("applied_delta_count") or 0)',
+            '"layout_skipped_delta_count": int(layout_adjustment_summary.get("skipped_delta_count") or 0)',
+            '"layout_transform_result_count": int(layout_adjustment_summary.get("transform_result_count") or 0)',
+            '"layout_ground_snapped_count": int(layout_adjustment_summary.get("ground_snapped_count") or 0)',
+            '"layout_overlap_resolved_count": int(layout_adjustment_summary.get("overlap_resolved_count") or 0)',
+            '"layout_transform_failure_code_counts": dict(',
+            '"sync_failure_code_counts": dict(sorted(sync_failure_code_counts.items()))',
+            '"latest_sync_failure_code": latest_sync_failure_code',
         ):
             if required not in generate_report:
                 violations.append(f"AgentRuntime.generate_report missing runtime report token: {required}")
+        for required in (
+            "environment_component_summary: Mapping[str, Any] | None = None",
+            '"environment_import_failed_count": environment_import_failed_count',
+            '"environment_import_failure_code_counts": dict(',
+            '"environment_import_failed"',
+        ):
+            if required not in source:
+                violations.append(f"AgentRuntime report health missing environment health token: {required}")
+        for safe_event_payload_key in (
+            '"layout_applied_delta_count"',
+            '"layout_skipped_delta_count"',
+            '"layout_transform_result_count"',
+            '"layout_ground_snapped_count"',
+            '"layout_overlap_resolved_count"',
+            '"layout_transform_failure_code_counts"',
+            '"engine_write_boundary_fact_count"',
+            '"engine_write_bridge_call_count"',
+            '"engine_write_bridge_success_count"',
+            '"engine_write_bridge_failed_count"',
+            '"engine_write_bridge_error_code_counts"',
+            '"environment_failed_count"',
+            '"environment_import_requested_count"',
+            '"environment_imported_count"',
+            '"environment_import_failed_count"',
+            '"environment_import_failure_code_counts"',
+            '"sync_failure_code_counts"',
+            '"latest_sync_failure_code"',
+        ):
+            if safe_event_payload_key not in source:
+                violations.append(f"AgentRuntime safe runtime event payload keys missing: {safe_event_payload_key}")
         sync_health_tool = _function_source(source, "_sync_health_digest_for_report")
         for required in (
             '"peer_join_count": peer_join_count',
@@ -2305,6 +2845,31 @@ def _runtime_report_fact_source_gate() -> bool:
                 "AgentRuntime.tool_manifest must read ToolRegistry facts through "
                 "runtime.tool_manifest.snapshot instead of direct registry access"
             )
+        if "test_tool_manifest_snapshot_failure_records_safe_audit_payload" not in phase1_test_source:
+            violations.append("AgentRuntime.tool_manifest snapshot failure audit missing regression test")
+        for required_test_token in (
+            'payload["guard_requires_write_blocked_count"]',
+            'payload["guard_unconfirmed_blocked_count"]',
+            'payload["guard_risk_level_counts"]',
+            'replay_recorded_payload["guard_requires_write_blocked_count"]',
+            'replay_recorded_payload["guard_risk_level_counts"]',
+            'summary["runtime_guard_digest"]["requires_write_blocked_count"]',
+            'gm_snapshot_payload["runtime_guard_requires_write_blocked_count"]',
+            'gm_snapshot_payload["runtime_guard_risk_level_counts"]',
+        ):
+            if required_test_token not in phase1_test_source:
+                violations.append(f"AgentRuntime operation replay RuntimeGuard audit regression missing token: {required_test_token}")
+        for manifest_contract_token in (
+            '"execution_contract": execution_contract',
+            '"state_contract": "stateful" if stateful else "stateless"',
+            '"confirmation_required": bool(self.requires_write or self.default_risk_level == RiskLevel.HIGH)',
+            '"read_only_tool_count"',
+            '"stateful_tool_count"',
+        ):
+            if manifest_contract_token not in source:
+                violations.append(
+                    f"ToolRegistry manifest missing Agent-native execution contract token: {manifest_contract_token}"
+                )
 
     if not operation_replay:
         violations.append("AgentRuntime.operation_replay not found")
@@ -2313,6 +2878,7 @@ def _runtime_report_fact_source_gate() -> bool:
             "runtime_operation_replay_requested",
             "runtime_operation_replay_queried",
             "_operation_replay_snapshot_via_tool_graph",
+            "payload=self._operation_replay_snapshot_audit_payload(replay)",
         ):
             if required not in operation_replay:
                 violations.append(f"AgentRuntime.operation_replay missing Runtime replay fact token: {required}")
@@ -2321,14 +2887,200 @@ def _runtime_report_fact_source_gate() -> bool:
                 "AgentRuntime._operation_replay_snapshot_via_tool_graph must execute "
                 "runtime.operation_replay.snapshot"
             )
+        if operation_replay_snapshot:
+            for required in (
+                "payload=self._operation_replay_snapshot_audit_payload(replay_with_evidence)",
+                "replay_with_evidence[\"snapshot_recorded\"] = True",
+                "replay_with_evidence[\"snapshot_status\"] = str(graph.status or \"\")",
+                "replay_with_evidence[\"snapshot_tool_status\"] = str(snapshot_call.status.value)",
+                "replay_with_evidence[\"snapshot_state_version\"] = int(self.state.version)",
+            ):
+                if required not in operation_replay_snapshot:
+                    violations.append(
+                        "AgentRuntime._operation_replay_snapshot_via_tool_graph missing Runtime replay "
+                        f"ToolCall evidence token: {required}"
+                    )
+        if not operation_replay_snapshot_payload:
+            violations.append("AgentRuntime._operation_replay_snapshot_audit_payload not found")
+        else:
+            for required in (
+                '"summary_type": "runtime_operation_replay"',
+                '"entry_count": int(replay.get("entry_count") or 0)',
+                '"event_counts": dict(sorted(event_counts.items()))',
+                '"runtime_event_emitted_count": int(runtime_events.get("emitted_count") or 0)',
+                '"runtime_event_emit_failed_count": int(runtime_events.get("emit_failed_count") or 0)',
+                '"sync_recorded_count": int(sync_summary.get("recorded_count") or 0)',
+                '"sync_failed_count": int(sync_summary.get("failed_count") or 0)',
+                '"asset_transfer_failed_count": int(asset_transfer.get("asset_transfer_failed_count") or 0)',
+                '"peer_event_count": int(peer_sync.get("peer_event_count") or 0)',
+                '"engine_write_import_result_count": int(engine_write.get("import_result_count") or 0)',
+                '"engine_write_transform_result_count": int(engine_write.get("transform_result_count") or 0)',
+                '"report_health_status": AgentRuntime._safe_report_text',
+                '"report_health_attention_required": bool(report_health.get("attention_required"))',
+                '"runtime_fact_injection_count": int(runtime_fact_injection.get("injection_event_count") or 0)',
+                '"runtime_fact_injection_field_count": int(',
+                '"runtime_fact_injection_unique_field_count": len(',
+                '"runtime_fact_injection_field_counts": {',
+            ):
+                if required not in operation_replay_snapshot_payload:
+                    violations.append(
+                        "AgentRuntime._operation_replay_snapshot_audit_payload missing audit token: "
+                        f"{required}"
+                    )
+            if any(secret in operation_replay_snapshot_payload for secret in ("entries", "prompt", "provider", "asset_path")):
+                violations.append(
+                    "AgentRuntime._operation_replay_snapshot_audit_payload must stay safe and avoid "
+                    "entries/prompt/provider/path fields"
+                )
+        for function_name, function_source in (
+            ("_record_operation_replay_snapshot_tool", record_operation_replay_snapshot),
+            ("_operation_replay_snapshot_via_tool_graph", operation_replay_snapshot),
+        ):
+            if not (
+                "payload=self._operation_replay_snapshot_audit_payload(replay)" in function_source
+                or "payload=self._operation_replay_snapshot_audit_payload(replay_with_evidence)" in function_source
+                or "payload=audit_payload" in function_source
+            ):
+                violations.append(
+                    f"AgentRuntime.{function_name} must record the shared operation replay snapshot audit payload"
+                )
+        if record_operation_replay_snapshot and "**audit_payload" not in record_operation_replay_snapshot:
+            violations.append(
+                "AgentRuntime._record_operation_replay_snapshot_tool must persist snapshot audit payload into custom_report_facts"
+            )
+        if not operation_replay_summary_payload:
+            violations.append("AgentRuntime._operation_replay_snapshot_summary_payload not found")
+        else:
+            for required in (
+                '"summary_type": "operation_replay_summary"',
+                '"entry_count": int(summary.get("entry_count") or 0)',
+                '"runtime_event_emitted_count": int(runtime_events.get("emitted_count") or 0)',
+                '"runtime_event_emit_failed_count": int(runtime_events.get("emit_failed_count") or 0)',
+                '"runtime_event_report_ready_count": int(runtime_events.get("report_ready_count") or 0)',
+                '"sync_recorded_count": int(sync_replay.get("recorded_count") or 0)',
+                '"sync_failed_count": int(sync_replay.get("failed_count") or 0)',
+                '"sync_actor_transform_count": int(sync_replay.get("actor_transform_count") or 0)',
+                '"asset_transfer_failed_count": int(asset_transfer.get("asset_transfer_failed_count") or 0)',
+                '"asset_transfer_progress_count": int(asset_transfer.get("asset_transfer_progress_count") or 0)',
+                '"peer_event_count": int(peer_sync.get("peer_event_count") or 0)',
+                '"sync_reconcile_failed_count": int(peer_sync.get("sync_reconcile_failed_count") or 0)',
+                '"gm_summary_exported_count": int(gm_replay.get("exported_count") or 0)',
+                '"gm_summary_failed_count": int(gm_replay.get("failed_count") or 0)',
+                '"guard_blocked_count": int(guard_replay.get("blocked_count") or 0)',
+                '"state_patch_conflict_count": int(state_patch.get("conflict") or 0)',
+                '"queue_blocked_count": int(queue_replay.get("blocked_count") or 0)',
+                '"failure_retry_scheduled_count": int(failure_strategy.get("retry_scheduled_count") or 0)',
+                '"engine_write_import_result_count": int(engine_write.get("import_result_count") or 0)',
+                '"engine_write_bridge_failed_count": int(',
+                '"runtime_fact_injection_count": int(runtime_fact_injection.get("injection_event_count") or 0)',
+                '"runtime_fact_injection_field_count": int(',
+                '"runtime_fact_injection_unique_field_count": len(',
+                '"runtime_fact_injection_field_counts": {',
+            ):
+                if required not in operation_replay_summary_payload:
+                    violations.append(
+                        "AgentRuntime._operation_replay_snapshot_summary_payload missing audit token: "
+                        f"{required}"
+                    )
+            if any(secret in operation_replay_summary_payload for secret in ("prompt", "provider", "asset_path")):
+                violations.append(
+                    "AgentRuntime._operation_replay_snapshot_summary_payload must stay safe and avoid "
+                    "prompt/provider/path fields"
+                )
+        for function_name, function_source in (
+            ("_record_operation_replay_summary_tool", record_operation_replay_summary),
+            ("_operation_replay_summary_via_tool_graph", operation_replay_summary_snapshot),
+        ):
+            if not (
+                "payload=self._operation_replay_snapshot_summary_payload(summary)" in function_source
+                or "payload=audit_payload" in function_source
+            ):
+                violations.append(
+                    f"AgentRuntime.{function_name} must record the shared operation replay summary audit payload"
+                )
+        if record_operation_replay_summary and "**audit_payload" not in record_operation_replay_summary:
+            violations.append(
+                "AgentRuntime._record_operation_replay_summary_tool must persist summary audit payload into custom_report_facts"
+            )
         if not operation_replay_summary_for_report or "gm_summary_replay_summary" not in operation_replay_summary_for_report:
             violations.append(
                 "AgentRuntime._operation_replay_summary_for_report must include gm_summary_replay_summary"
             )
+        if (
+            not operation_replay_summary_for_report
+            or '"runtime_fact_injection_replay_summary": self._runtime_fact_injection_replay_summary(raw_entries)' not in operation_replay_summary_for_report
+        ):
+            violations.append(
+                "AgentRuntime._operation_replay_summary_for_report must include runtime_fact_injection_replay_summary"
+            )
+        if (
+            not compose_operation_replay
+            or 'replay["runtime_fact_injection_replay_summary"] = self._runtime_fact_injection_replay_summary(raw_entries)' not in compose_operation_replay
+        ):
+            violations.append(
+                "AgentRuntime._compose_operation_replay must include runtime_fact_injection_replay_summary"
+            )
+        if not gm_summary_replay:
+            violations.append("AgentRuntime._gm_summary_replay_summary not found")
+        else:
+            for required in (
+                "resource_readiness_publish_total",
+                "resource_readiness_publish_failed_total",
+                "resource_readiness_query_total",
+                "resource_readiness_publish_requested_total",
+                "resource_readiness_publish_enabled_total",
+                "resource_readiness_publish_unavailable_total",
+                "resource_readiness_publish_count",
+                "resource_readiness_query_count",
+                "engine_write_boundary_fact_total",
+                "engine_write_bridge_call_total",
+                "engine_write_bridge_success_total",
+                "engine_write_bridge_failed_total",
+                "engine_write_bridge_error_code_counts",
+                "engine_write_bridge_failed_count",
+                "sync_actor_transform_total",
+                "sync_actor_delete_total",
+                "sync_actor_transform_count",
+                "sync_actor_delete_count",
+            ):
+                if required not in gm_summary_replay:
+                    violations.append(
+                        f"AgentRuntime._gm_summary_replay_summary missing resource readiness token: {required}"
+                    )
         if '"geometry_fact_replay_summary": self._geometry_fact_replay_summary' not in operation_replay_summary_for_report:
             violations.append(
                 "AgentRuntime._operation_replay_summary_for_report must include geometry_fact_replay_summary"
             )
+        if not apply_runtime_command:
+            violations.append("AgentRuntime.apply_runtime_command not found")
+        else:
+            required_order = (
+                "self._persist_runtime_command_state(",
+                "self.operation_log.append(",
+                'f"runtime_{normalized}_command_applied"',
+                "self.emit_runtime_event(",
+            )
+            positions = []
+            for token in required_order:
+                pos = apply_runtime_command.find(token)
+                if pos < 0:
+                    violations.append(f"AgentRuntime.apply_runtime_command missing command fact-order token: {token}")
+                positions.append(pos)
+            if all(pos >= 0 for pos in positions) and positions != sorted(positions):
+                violations.append(
+                    "AgentRuntime.apply_runtime_command must persist RuntimeState command facts "
+                    "before logging replay events and emitting user-visible Runtime events"
+                )
+            for token in (
+                "command_record = self._persist_runtime_command_state(",
+                '"command_recorded": bool((command_record or {}).get("command_recorded"))',
+                '"graph_status": str((command_record or {}).get("graph_status") or "")',
+                '"tool_call_status": str((command_record or {}).get("tool_call_status") or "")',
+                '"state_version": int((command_record or {}).get("state_version") or self.state.version)',
+                'payload={"status": new_status, "command": normalized, **dict(command_record or {})}',
+            ):
+                if token not in apply_runtime_command:
+                    violations.append(f"AgentRuntime.apply_runtime_command missing command ToolCall evidence token: {token}")
         runtime_command_replay = _function_source(source, "_runtime_command_replay_summary")
         for required in (
             '"cancelled_batch_total": cancelled_batch_total',
@@ -2356,9 +3108,45 @@ def _runtime_report_fact_source_gate() -> bool:
             '"confirmed_proposal_count": int(proposal_status_counts.get("confirmed") or 0)',
             '"failed_proposal_count": int(proposal_status_counts.get("failed") or 0)',
             '"delta_count": delta_count',
+            '"layout_transform_failure_code_counts": dict(',
         ):
             if required not in layout_adjustment_replay:
                 violations.append(f"AgentRuntime layout adjustment replay missing proposal-status token: {required}")
+        if not final_adjustment_confirmation_replay:
+            violations.append("AgentRuntime._final_adjustment_confirmation_replay_summary not found")
+        else:
+            for required in (
+                '"confirmation_count": confirmation_count',
+                '"confirmation_failed_count": confirmation_failed_count',
+                '"confirmation_skipped_count": confirmation_skipped_count',
+                '"decision_counts": dict(sorted(decision_counts.items()))',
+                '"latest_confirmation": latest_confirmation',
+                'event == "final_adjustment_confirmation_recorded"',
+                'event == "final_adjustment_confirmation_record_failed"',
+            ):
+                if required not in final_adjustment_confirmation_replay:
+                    violations.append(
+                        "AgentRuntime final adjustment confirmation replay missing token: "
+                        f"{required}"
+                    )
+        for required in (
+            '"final_adjustment_confirmation_replay_summary": (',
+            "self._final_adjustment_confirmation_replay_summary(entries)",
+        ):
+            if required not in operation_replay_summary_for_report:
+                violations.append(
+                    "AgentRuntime._operation_replay_summary_for_report missing final adjustment replay token: "
+                    f"{required}"
+                )
+        if (
+            'replay["final_adjustment_confirmation_replay_summary"] = ('
+            not in compose_operation_replay
+            or "self._final_adjustment_confirmation_replay_summary(replay.get(\"entries\", []))"
+            not in compose_operation_replay
+        ):
+            violations.append(
+                "AgentRuntime._compose_operation_replay must include final_adjustment_confirmation_replay_summary"
+            )
         asset_transfer_replay = _function_source(source, "_asset_transfer_replay_summary")
         for required in (
             '"asset_transfer_started_count": started_count',
@@ -2501,6 +3289,74 @@ def _runtime_report_fact_source_gate() -> bool:
                 "AgentRuntime._status_summary_snapshot_via_tool_graph must execute "
                 "runtime.status_summary.snapshot"
             )
+        if status_summary_snapshot:
+            for required in (
+                "status_with_evidence[\"snapshot_recorded\"] = True",
+                "status_with_evidence[\"snapshot_status\"] = str(graph.status or \"\")",
+                "status_with_evidence[\"snapshot_tool_status\"] = str(snapshot_call.status.value)",
+                "status_with_evidence[\"snapshot_state_version\"] = int(self.state.version)",
+            ):
+                if required not in status_summary_snapshot:
+                    violations.append(
+                        "AgentRuntime._status_summary_snapshot_via_tool_graph missing Runtime status "
+                        f"ToolCall evidence token: {required}"
+                    )
+        status_snapshot_sources = {
+            "AgentRuntime._status_summary_snapshot_via_tool_graph": status_summary_snapshot,
+            "AgentRuntime._record_status_summary_snapshot_tool": record_status_summary_snapshot,
+        }
+        if not snapshot_failure_payload:
+            violations.append("AgentRuntime._snapshot_failure_audit_payload not found")
+        else:
+            for required in (
+                '"recorded": False',
+                '"failure_code": "snapshot_record_failed"',
+                '"reason": AgentRuntime._safe_report_text(reason or "unknown")[:160]',
+            ):
+                if required not in snapshot_failure_payload:
+                    violations.append(f"AgentRuntime._snapshot_failure_audit_payload missing token: {required}")
+            if any(secret in snapshot_failure_payload for secret in ("prompt", "provider", "asset_path")):
+                violations.append(
+                    "AgentRuntime._snapshot_failure_audit_payload must stay safe and avoid prompt/provider/path fields"
+                )
+        snapshot_failure_sources = {
+            "AgentRuntime.tool_manifest": tool_manifest,
+            "AgentRuntime._status_summary_snapshot_via_tool_graph": status_summary_snapshot,
+            "AgentRuntime._gm_summary_snapshot_via_tool_graph": gm_summary_snapshot,
+            "AgentRuntime._runtime_events_snapshot_via_tool_graph": runtime_events_snapshot,
+            "AgentRuntime._sync_status_snapshot_via_tool_graph": sync_status_snapshot,
+            "AgentRuntime._provider_status_snapshot_via_tool_graph": provider_status_snapshot,
+            "AgentRuntime._operation_replay_snapshot_via_tool_graph": operation_replay_snapshot,
+            "AgentRuntime._operation_replay_summary_via_tool_graph": operation_replay_summary_snapshot,
+        }
+        for snapshot_name, snapshot_source in snapshot_failure_sources.items():
+            if 'snapshot_failed' in snapshot_source and 'payload=self._snapshot_failure_audit_payload(' not in snapshot_source:
+                violations.append(f"{snapshot_name} must record safe snapshot failure payloads")
+            if 'payload={"reason": reason' in snapshot_source or '"reason": reason}' in snapshot_source:
+                violations.append(f"{snapshot_name} must not regress to reason-only snapshot failure payloads")
+        for required in (
+            "report_health_summary = dict(",
+            '"report_health_status": AgentRuntime._safe_report_text(',
+            '"report_health_attention_required": bool(',
+            '"report_health_reasons": [',
+            "engine_write_readiness_summary = dict(",
+            '"engine_write_readiness_native_enabled_count": int(',
+            '"engine_write_readiness_runtime_state_only_count": int(',
+            '"engine_write_readiness_fallback_count": int(',
+            '"engine_write_readiness_disabled_count": int(',
+            '"engine_write_readiness_unavailable_count": int(',
+            '"engine_write_readiness_native_enabled_channels": [',
+            '"engine_write_readiness_runtime_state_only_channels": [',
+            '"engine_write_readiness_fallback_channels": [',
+            '"engine_write_readiness_disabled_channels": [',
+            '"engine_write_readiness_unavailable_channels": [',
+        ):
+            for name, snippet in status_snapshot_sources.items():
+                if required not in snippet:
+                    violations.append(
+                        f"{name} must preserve report health / engine-write "
+                        f"audit payload: missing {required}"
+                    )
 
     if not provider_status:
         violations.append("AgentRuntime.provider_status not found")
@@ -2519,6 +3375,36 @@ def _runtime_report_fact_source_gate() -> bool:
                 "AgentRuntime._provider_status_snapshot_via_tool_graph must execute "
                 "runtime.resource_status.snapshot"
             )
+        if provider_status_snapshot:
+            for required in (
+                "provider_status_with_evidence[\"snapshot_recorded\"] = True",
+                "provider_status_with_evidence[\"snapshot_status\"] = str(graph.status or \"\")",
+                "provider_status_with_evidence[\"snapshot_tool_status\"] = str(snapshot_call.status.value)",
+                "provider_status_with_evidence[\"snapshot_state_version\"] = int(self.state.version)",
+            ):
+                if required not in provider_status_snapshot:
+                    violations.append(
+                        "AgentRuntime._provider_status_snapshot_via_tool_graph missing Runtime provider "
+                        f"ToolCall evidence token: {required}"
+                    )
+        for required in (
+            "engine_write_readiness_summary = dict(",
+            '"engine_write_readiness_native_enabled_count": int(',
+            '"engine_write_readiness_runtime_state_only_count": int(',
+            '"engine_write_readiness_fallback_count": int(',
+            '"engine_write_readiness_disabled_count": int(',
+            '"engine_write_readiness_unavailable_count": int(',
+            '"engine_write_readiness_native_enabled_channels": [',
+            '"engine_write_readiness_runtime_state_only_channels": [',
+            '"engine_write_readiness_fallback_channels": [',
+            '"engine_write_readiness_disabled_channels": [',
+            '"engine_write_readiness_unavailable_channels": [',
+        ):
+            if required not in provider_status_snapshot:
+                violations.append(
+                    "AgentRuntime._provider_status_snapshot_via_tool_graph must preserve "
+                    f"engine-write readiness snapshot payload: missing {required}"
+                )
 
     if not gm_summary:
         violations.append("AgentRuntime.gm_summary not found")
@@ -2533,9 +3419,22 @@ def _runtime_report_fact_source_gate() -> bool:
 	            "context_digest",
 	            "agent_contributions",
 	            "intervention_digest",
-	            "intervention_pending_count",
+            "intervention_pending_count",
             "intervention_accepted_count",
             "intervention_deferred_count",
+            "layout_proposal_count",
+            "layout_applied_delta_count",
+            "layout_skipped_delta_count",
+            "layout_transform_result_count",
+            "layout_ground_snapped_count",
+            "layout_overlap_resolved_count",
+            "layout_transform_failure_code_counts",
+            "engine_write_boundary_digest",
+            "engine_write_boundary_fact_count",
+            "engine_write_bridge_call_count",
+            "engine_write_bridge_success_count",
+            "engine_write_bridge_failed_count",
+            "engine_write_bridge_error_code_counts",
             "batch_tooling_summary",
             "batch_tooling_digest",
             "created_batch_count",
@@ -2547,6 +3446,8 @@ def _runtime_report_fact_source_gate() -> bool:
             "resource_batch_count",
             "resource_failed_count",
             "resource_waiting_count",
+            "resource_import_failure_code_counts",
+            "report_import_failure_code_counts",
             "tool_queue_health_summary",
             "tool_queue_health_digest",
             "queue_pressure",
@@ -2624,8 +3525,17 @@ def _runtime_report_fact_source_gate() -> bool:
 	            "attention_reasons",
 	            "engine_write_summary",
             "engine_write_digest",
+            "engine_write_readiness_summary",
+            "engine_write_readiness_digest",
+            "runtime_state_only_count",
+            "fallback_count",
+            "disabled_count",
             "import_result_count",
             "transform_result_count",
+            "status_export_count",
+            "latest_status_export",
+            "engine_write_bridge_failed_count",
+            "engine_write_bridge_error_code_counts",
             "message_delivery_summary",
             "message_delivery_digest",
             "requested_count",
@@ -2633,12 +3543,20 @@ def _runtime_report_fact_source_gate() -> bool:
             "failed_count",
             "sync_health_digest",
             "sync_health_status",
+            "sync_failure_code_counts",
+            "latest_sync_failure_code",
             "sync_replay_summary",
             "asset_transfer_replay_summary",
             "peer_sync_replay_summary",
             "runtime_event_replay_summary",
             "sync_replay_digest",
             "runtime_event_replay_digest",
+            "resource_readiness_replay_summary",
+            "resource_readiness_replay_digest",
+            "resource_readiness_publish_count",
+            "resource_readiness_query_count",
+            "resource_readiness_publish_enabled_total",
+            "status_query_status_counts",
             "disclosure_skipped_count",
             "asset_transfer_progress_count",
             "peer_asset_ready_count",
@@ -2651,6 +3569,51 @@ def _runtime_report_fact_source_gate() -> bool:
                 "AgentRuntime._gm_summary_snapshot_via_tool_graph must execute "
                 "runtime.gm_summary.snapshot"
             )
+        if gm_summary_snapshot:
+            for required in (
+                "summary_with_evidence[\"snapshot_recorded\"] = True",
+                "summary_with_evidence[\"snapshot_status\"] = str(graph.status or \"\")",
+                "summary_with_evidence[\"snapshot_tool_status\"] = str(snapshot_call.status.value)",
+                "summary_with_evidence[\"snapshot_state_version\"] = int(self.state.version)",
+            ):
+                if required not in gm_summary_snapshot:
+                    violations.append(
+                        "AgentRuntime._gm_summary_snapshot_via_tool_graph missing Runtime GM summary "
+                        f"ToolCall evidence token: {required}"
+                    )
+        for required in (
+            "context_digest = dict(",
+            "intervention_digest = dict(",
+            "layout_digest = dict(",
+            "runtime_event_digest = dict(",
+            "report_health_digest = dict(",
+            "runtime_guard_digest = dict(",
+            '"agent_contribution_count": len(list(context_digest.get("agent_contributions") or []))',
+            '"latest_user_point_count": len(list(context_digest.get("latest_user_points") or []))',
+            '"intervention_pending_count": int(intervention_digest.get("pending_count") or 0)',
+            '"intervention_accepted_count": int(intervention_digest.get("accepted_count") or 0)',
+            '"intervention_deferred_count": int(intervention_digest.get("deferred_count") or 0)',
+            '"layout_proposal_count": int(layout_digest.get("proposal_count") or 0)',
+            '"layout_applied_delta_count": int(layout_digest.get("applied_delta_count") or 0)',
+            '"layout_skipped_delta_count": int(layout_digest.get("skipped_delta_count") or 0)',
+            '"runtime_event_emitted_count": int(runtime_event_digest.get("emitted_count") or 0)',
+            '"runtime_event_emit_failed_count": int(runtime_event_digest.get("emit_failed_count") or 0)',
+            '"report_health_status": AgentRuntime._safe_report_text(report_health_digest.get("status"))[:48]',
+            '"report_attention_required": bool(report_health_digest.get("attention_required"))',
+            '"runtime_guard_blocked_count": int(runtime_guard_digest.get("blocked_count") or 0)',
+            '"runtime_guard_requires_write_blocked_count": int(',
+            'runtime_guard_digest.get("requires_write_blocked_count") or 0',
+            '"runtime_guard_confirmed_blocked_count": int(',
+            'runtime_guard_digest.get("confirmed_blocked_count") or 0',
+            '"runtime_guard_unconfirmed_blocked_count": int(',
+            'runtime_guard_digest.get("unconfirmed_blocked_count") or 0',
+            '"runtime_guard_risk_level_counts": {',
+        ):
+            if required not in gm_summary_snapshot:
+                violations.append(
+                    "AgentRuntime._gm_summary_snapshot_via_tool_graph must preserve "
+                    f"GM context/intervention/layout audit payload: missing {required}"
+                )
 
     if not handle_message:
         violations.append("AgentRuntime.handle_message not found")
@@ -2665,6 +3628,45 @@ def _runtime_report_fact_source_gate() -> bool:
                 "AgentRuntime._runtime_events_snapshot_via_tool_graph must execute "
                 "runtime.events.snapshot"
             )
+        if runtime_events_snapshot:
+            for required in (
+                "\"snapshot_recorded\": True",
+                "\"snapshot_status\": str(graph.status or \"\")",
+                "\"snapshot_tool_status\": str(snapshot_call.status.value)",
+                "\"snapshot_state_version\": int(self.state.version)",
+            ):
+                if required not in runtime_events_snapshot:
+                    violations.append(
+                        "AgentRuntime._runtime_events_snapshot_via_tool_graph missing Runtime events "
+                        f"ToolCall evidence token: {required}"
+                    )
+        for required in (
+            "events_snapshot = self._runtime_events_snapshot_via_tool_graph(",
+            "events = list(events_snapshot.get(\"runtime_events\") or [])",
+            "\"snapshot_recorded\": bool(events_snapshot.get(\"snapshot_recorded\"))",
+            "\"snapshot_status\": str(events_snapshot.get(\"snapshot_status\") or \"\")",
+            "\"snapshot_tool_status\": str(events_snapshot.get(\"snapshot_tool_status\") or \"\")",
+            "\"snapshot_state_version\": int(events_snapshot.get(\"snapshot_state_version\") or self.state.version)",
+        ):
+            if required not in handle_message:
+                violations.append(f"AgentRuntime.handle_message runtime_events missing snapshot evidence token: {required}")
+        for required in (
+            "_runtime_event_snapshot_summary(",
+            '"event_type_counts": dict(sorted(event_type_counts.items()))',
+            '"level_counts": dict(sorted(level_counts.items()))',
+            '"audience_counts": dict(sorted(audience_counts.items()))',
+            '"progress_event_count": progress_event_count',
+            '"warning_count": int(level_counts.get("warning") or 0)',
+            '"error_count": int(level_counts.get("error") or 0)',
+            '"latest_event_type": latest_event_type',
+            "event_summary = self._runtime_event_snapshot_summary(",
+            "**event_summary",
+        ):
+            if required not in source:
+                violations.append(
+                    "AgentRuntime runtime events snapshot must preserve "
+                    f"safe event audit summary: missing {required}"
+                )
         if "_sync_status_snapshot_via_tool_graph" not in handle_message:
             violations.append(
                 "AgentRuntime.handle_message sync_status action must snapshot "
@@ -2672,7 +3674,27 @@ def _runtime_report_fact_source_gate() -> bool:
             )
         for required in (
             'engine_write_summary = dict(provider_status.get("engine_write_summary") or {})',
+            'engine_write_readiness_summary = dict(',
+            '"engine_write_readiness_summary": engine_write_readiness_summary',
             '"engine_write_summary": engine_write_summary',
+            '"runtime_engine_write_status_exported"',
+            '"engine_write_boundary_fact_count": int(',
+            '"engine_write_import_boundary_count": int(',
+            '"engine_write_environment_import_boundary_count": int(',
+            '"engine_write_transform_boundary_count": int(',
+            '"engine_write_delete_boundary_count": int(',
+            '"engine_write_bridge_call_count": int(',
+            '"engine_write_bridge_success_count": int(',
+            '"engine_write_bridge_failed_count": int(',
+            '"engine_write_bridge_error_code_counts": dict(',
+            '"engine_write_readiness_native_enabled_count": int(',
+            '"engine_write_readiness_runtime_state_only_count": int(',
+            '"engine_write_readiness_fallback_count": int(',
+            '"engine_write_readiness_disabled_count": int(',
+            '"engine_write_readiness_native_enabled_channels": [',
+            '"engine_write_readiness_runtime_state_only_channels": [',
+            '"engine_write_readiness_fallback_channels": [',
+            '"engine_write_readiness_disabled_channels": [',
         ):
             if required not in handle_message:
                 violations.append(f"AgentRuntime.handle_message engine_write_status missing replay token: {required}")
@@ -2683,6 +3705,8 @@ def _runtime_report_fact_source_gate() -> bool:
             '"asset_transfer_completed_count": int(asset_transfer_replay.get("asset_transfer_completed_count") or 0)',
             '"asset_transfer_failed_count": int(asset_transfer_replay.get("asset_transfer_failed_count") or 0)',
             '"peer_asset_ready_count": int(asset_transfer_replay.get("peer_asset_ready_count") or 0)',
+            '"actor_transform_count": int(sync_replay.get("actor_transform_count") or 0)',
+            '"actor_delete_count": int(sync_replay.get("actor_delete_count") or 0)',
             '"peer_sync_replay_summary": peer_sync_replay',
             '"peer_event_count": int(peer_sync_replay.get("peer_event_count") or 0)',
             '"sync_reconcile_count": int(peer_sync_replay.get("sync_reconcile_count") or 0)',
@@ -2695,6 +3719,18 @@ def _runtime_report_fact_source_gate() -> bool:
                 "AgentRuntime._sync_status_snapshot_via_tool_graph must execute "
                 "runtime.sync_status.snapshot"
             )
+        if sync_status_snapshot:
+            for required in (
+                "sync_status_with_evidence[\"snapshot_recorded\"] = True",
+                "sync_status_with_evidence[\"snapshot_status\"] = str(graph.status or \"\")",
+                "sync_status_with_evidence[\"snapshot_tool_status\"] = str(snapshot_call.status.value)",
+                "sync_status_with_evidence[\"snapshot_state_version\"] = int(self.state.version)",
+            ):
+                if required not in sync_status_snapshot:
+                    violations.append(
+                        "AgentRuntime._sync_status_snapshot_via_tool_graph missing Runtime sync status "
+                        f"ToolCall evidence token: {required}"
+                    )
         for required in (
             'asset_transfer_replay = dict(status.get("asset_transfer_replay_summary") or {})',
             '"asset_transfer_started_count": int(',
@@ -2706,6 +3742,13 @@ def _runtime_report_fact_source_gate() -> bool:
             '"peer_event_count": int(peer_sync_replay.get("peer_event_count") or 0)',
             '"sync_reconcile_count": int(peer_sync_replay.get("sync_reconcile_count") or 0)',
             '"state_reconcile_count": int(peer_sync_replay.get("state_reconcile_count") or 0)',
+            '"sync_event_type_counts": AgentRuntime._safe_status_count_map(',
+            '"asset_transfer_status_counts": AgentRuntime._safe_status_count_map(',
+            '"asset_transfer_event_type_counts": AgentRuntime._safe_status_count_map(',
+            '"peer_sync_event_type_counts": AgentRuntime._safe_status_count_map(',
+            '"latest_transfer_status": AgentRuntime._safe_report_text(',
+            '"latest_transfer_progress": int(',
+            '"latest_peer_event_type": AgentRuntime._safe_report_text(',
         ):
             if required not in sync_status_snapshot:
                 violations.append(f"AgentRuntime sync status snapshot missing transfer/peer token: {required}")
@@ -2770,6 +3813,36 @@ def _runtime_report_fact_source_gate() -> bool:
         violations.append("AgentRuntime must not keep legacy _build_mock_graph compatibility wrapper")
     if not build_batch_execution_graph:
         violations.append("AgentRuntime._build_batch_execution_graph not found")
+    else:
+        for required in (
+            'tool_name="scene.extract_objects"',
+            '"plan_id": plan.plan_id',
+            '"batch_id": batch.batch_id',
+        ):
+            if required not in build_batch_execution_graph:
+                violations.append(
+                    f"AgentRuntime._build_batch_execution_graph missing plan/batch boundary token: {required}"
+                )
+        if '"plan_id": batch.batch_id' in build_batch_execution_graph:
+            violations.append(
+                "AgentRuntime._build_batch_execution_graph must not pass batch_id as scene.extract_objects plan_id"
+            )
+        for required in (
+            'tool_name="runtime.placement.propose"',
+            '"batch_id": batch.batch_id',
+        ):
+            if required not in build_batch_execution_graph:
+                violations.append(
+                    f"AgentRuntime._build_batch_execution_graph missing placement batch-boundary token: {required}"
+                )
+        for required in (
+            'tool_name="runtime.asset.plan"',
+            '"batch_id": batch.batch_id',
+        ):
+            if required not in build_batch_execution_graph:
+                violations.append(
+                    f"AgentRuntime._build_batch_execution_graph missing asset request batch-boundary token: {required}"
+                )
     for forbidden in (
         "def _register_default_mock_tools(",
         "def _mock_import_actor(",
@@ -2782,7 +3855,7 @@ def _runtime_report_fact_source_gate() -> bool:
     if violations:
         print("[FAIL] static Runtime report fact-source gate")
         for item in violations:
-            print(f"       {item}")
+            _print_violation(item)
         return False
     print("[OK]  static Runtime report fact-source gate")
     return True
@@ -2800,6 +3873,16 @@ def _runtime_validator_contract_gate() -> bool:
         tools_source = tools_path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         tools_source = tools_path.read_text(encoding="utf-8-sig")
+    adapters_path = REPO_ROOT / AGENT_RUNTIME_ADAPTERS
+    try:
+        adapters_source = adapters_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        adapters_source = adapters_path.read_text(encoding="utf-8-sig")
+    worker_path = REPO_ROOT / LANCHAT_AGENT_WORKER
+    try:
+        worker_source = worker_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        worker_source = worker_path.read_text(encoding="utf-8-sig")
     test_path = REPO_ROOT / LANCHAT_RUNTIME_GUARD_TESTS
     try:
         test_source = test_path.read_text(encoding="utf-8")
@@ -2810,19 +3893,61 @@ def _runtime_validator_contract_gate() -> bool:
         phase1_test_source = phase1_test_path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         phase1_test_source = phase1_test_path.read_text(encoding="utf-8-sig")
+    report_health_formatter = _function_source(worker_source, "_format_agent_runtime_report_health_report")
     violations: list[str] = []
 
     for validator in sorted(REQUIRED_RUNTIME_VALIDATORS):
         if f"class {validator}" not in source:
             violations.append(f"missing required Runtime schema validator: {validator}")
+    for required_tool_contract in (
+        '"runtime.asset.plan"',
+        '"runtime.placement.propose"',
+    ):
+        if required_tool_contract not in tools_source:
+            violations.append(
+                f"Runtime batch execution tool contract missing token: {required_tool_contract}"
+            )
+    if tools_source.count('required_args=("room_id", "batch_id", "model_items")') < 2:
+        violations.append(
+            "Runtime batch execution asset/placement tools must both require room_id, batch_id, and model_items"
+        )
+    for required_resource_fact_token in (
+        "def _resource_phase_fact(",
+        "plan_id: str = \"\"",
+        '"plan_id": safe_plan_id',
+        '"source": "runtime_resource_phase_fact"',
+    ):
+        if required_resource_fact_token not in tools_source:
+            violations.append(
+                f"Runtime resource phase fact contract missing token: {required_resource_fact_token}"
+            )
 
     execute = _function_source(source, "execute")
     apply_patch = _function_source(source, "apply_patch")
+    handle_message = _function_source(source, "handle_message")
     generate_report = _function_source(source, "generate_report")
+    status_summary = _function_source(source, "status_summary")
+    runtime_execution_reply = _function_source(worker_source, "_format_agent_runtime_execution_reply")
+    runtime_intervention_reply = _function_source(worker_source, "_format_agent_runtime_intervention_reply")
+    runtime_layout_reply = _function_source(worker_source, "_format_agent_runtime_layout_confirmation_reply")
+    runtime_layout_report = _function_source(worker_source, "_format_agent_runtime_layout_report")
     persist_graph = _function_source(source, "_persist_graph")
     persist_user_report = _function_source(source, "_persist_user_report")
     persist_user_report_tool = _function_source(source, "_persist_user_report_tool")
+    record_audit_event_tool = _function_source(source, "_record_audit_event_tool")
+    execute_planning_context_persist_graph = _function_source(source, "_execute_planning_context_persist_graph")
+    persist_planning_context_tool = _function_source(source, "_persist_planning_context_tool")
+    record_agent_context_message = _function_source(source, "record_agent_context_message")
+    record_user_context_message = _function_source(source, "record_user_context_message")
     apply_layout_delta_tool = _function_source(source, "_apply_layout_delta_tool")
+    engine_write_replay_summary = _function_source(source, "_engine_write_replay_summary")
+    report_record_validator_start = source.find("class ReportRecordValidator")
+    report_record_allowed_fields_end = source.find("_BLOCKED_FIELDS", report_record_validator_start)
+    report_record_allowed_fields = (
+        source[report_record_validator_start:report_record_allowed_fields_end]
+        if report_record_validator_start >= 0 and report_record_allowed_fields_end > report_record_validator_start
+        else ""
+    )
 
     required_execute_tokens = (
         "ToolCallGraphValidator.validate(graph, self.registry)",
@@ -2833,6 +3958,18 @@ def _runtime_validator_contract_gate() -> bool:
     for token in required_execute_tokens:
         if token not in execute:
             violations.append(f"ToolCallGraphExecutor.execute missing validation/guard token: {token}")
+    for token in (
+        "guard_payload = {",
+        '"guard_reason": str(reason or "")',
+        '"risk_level": effective_risk.value',
+        '"requires_write": requires_write',
+        '"confirmed": bool(call.confirmed)',
+        "payload=guard_payload",
+        "guard_payload=guard_payload",
+        'payload={"status": "blocked", **dict(guard_payload or {})}',
+    ):
+        if token not in source:
+            violations.append(f"ToolCallGraphExecutor blocked-call audit missing guard payload token: {token}")
     if "ToolCallGraphValidator.safe_graph_fact" not in persist_graph:
         violations.append("ToolCallGraphExecutor._persist_graph must persist only safe ToolCallGraph facts")
 
@@ -2866,18 +4003,295 @@ def _runtime_validator_contract_gate() -> bool:
         if required not in generate_report:
             violations.append(f"AgentRuntime.generate_report missing Runtime queue/batch summary token: {required}")
     batch_resource_flow_summary = _function_source(source, "_batch_resource_flow_summary_for_plan")
+    import_summary = _function_source(source, "_import_summary_for_plan")
+    emit_resource_stage_events = _function_source(source, "_emit_resource_stage_events_for_graph")
     if '"ready_count" in import_fact' not in batch_resource_flow_summary:
         violations.append("AgentRuntime batch resource flow must preserve explicit import ready_count=0")
     if 'import_fact.get("ready_count") or import_fact.get("actor_count")' in batch_resource_flow_summary:
         violations.append("AgentRuntime batch resource flow must not coerce ready_count=0 to actor_count")
+    for token in (
+        "aggregate_import_failure_code_counts",
+        '"import_failure_code_counts": dict(sorted(aggregate_import_failure_code_counts.items()))',
+    ):
+        if token not in import_summary:
+            violations.append(f"AgentRuntime import summary missing import failure-code token: {token}")
+    if '"import_failure_code_counts": {"actor_import_provider_failed": 2}' not in phase1_test_source:
+        violations.append("AgentRuntime import summary failure-code regression assertion missing")
+    for token in (
+        "_actor_import_failure_code_counts_for_batch(",
+        '"import_failure_code_counts"',
+    ):
+        if token not in emit_resource_stage_events:
+            violations.append(f"AgentRuntime actor import event missing failure-code payload token: {token}")
+    if "_safe_user_visible_failure_code(" not in source:
+        violations.append("AgentRuntime actor import event missing safe user-visible failure-code helper")
+    if '"import_failure_code_counts": {"actor_import_adapter_failed": 2}' not in phase1_test_source:
+        violations.append("AgentRuntime actor import failed event must expose safe adapter failure-code regression")
+    if '"import_failure_code_counts": {"cpp_actor_import_failed": 1}' not in phase1_test_source:
+        violations.append("AgentRuntime actor import partial event failure-code regression assertion missing")
+    if not engine_write_replay_summary:
+        violations.append("AgentRuntime._engine_write_replay_summary not found")
+    else:
+        for token in (
+            "status_export_count",
+            "latest_status_export",
+            "readiness_mismatch_count",
+            "readiness_mismatch_channels",
+            "runtime_engine_write_status_exported",
+            "engine_write_import_boundary_count",
+            "engine_write_environment_import_boundary_count",
+            "engine_write_transform_boundary_count",
+            "engine_write_delete_boundary_count",
+            "engine_write_bridge_error_code_counts",
+        ):
+            if token not in engine_write_replay_summary:
+                violations.append(f"AgentRuntime._engine_write_replay_summary missing status-export token: {token}")
+    report_health_summary_function = _function_source(source, "_report_health_summary")
+    if not report_health_summary_function:
+        violations.append("AgentRuntime._report_health_summary not found")
+    else:
+        for token in (
+            "engine_write_summary: Mapping[str, Any] | None = None",
+            "engine_write_state = dict(engine_write_summary or {})",
+            "engine_write_readiness_mismatch_count",
+            "engine_write_readiness_mismatch_channels",
+            "engine_write_readiness_mismatch",
+            'status = "needs_attention"',
+        ):
+            if token not in report_health_summary_function:
+                violations.append(f"AgentRuntime._report_health_summary missing engine-write mismatch token: {token}")
+    for token in (
+        "engine_write_readiness_mismatch_count",
+        "engine_write_readiness_mismatch_channels",
+        "engine-write mismatch",
+    ):
+        if token not in report_health_formatter:
+            violations.append(f"LANChat report health formatter missing engine-write mismatch token: {token}")
+    for token in (
+        'engine_replay["status_export_count"]',
+        'engine_replay["latest_status_export"]',
+        '"runtime_engine_write_status_exported"',
+    ):
+        if token not in phase1_test_source:
+            violations.append(f"AgentRuntime engine-write status export replay regression missing token: {token}")
+    for token in (
+        '"engine_write_readiness_native_enabled_count"',
+        '"engine_write_readiness_runtime_state_only_count"',
+        '"engine_write_readiness_native_enabled_channels"',
+        '"engine_write_readiness_runtime_state_only_channels"',
+        'readiness native:1',
+        'channels native actor-import',
+        'readiness-mismatch 1(layout-transform)',
+        'engine-write mismatch 1(layout-transform)',
+        'report_health["status"], "needs_attention"',
+        'engine_write_readiness_mismatch", report_health["reasons"]',
+    ):
+        if token not in test_source:
+            violations.append(f"LANChat engine-write status export readiness regression missing token: {token}")
     if "runtime.user_report.persist" not in persist_user_report or "executor.execute(graph" not in persist_user_report:
         violations.append("AgentRuntime._persist_user_report must use ToolCallGraphExecutor")
+    for token in (
+        "safe_apply_reason = \"completed\" if applied else \"RuntimeState persistence failed\"",
+        '"failure_code": "" if applied else "user_report_state_persist_failed"',
+        '"reason": "" if applied else safe_apply_reason',
+    ):
+        if token not in persist_user_report:
+            violations.append(f"AgentRuntime._persist_user_report missing safe failure audit token: {token}")
+    for token in (
+        'failed_payload["failure_code"]',
+        'failed_payload["reason"]',
+        'self.assertNotIn("provider", str(failed_payload).lower())',
+    ):
+        if token not in phase1_test_source:
+            violations.append(f"AgentRuntime user report persist failure regression missing token: {token}")
     if "ReportRecordValidator.validate(report)" not in persist_user_report_tool:
         violations.append("runtime.user_report.persist must validate ReportRecord before StatePatch persistence")
+    for token in (
+        "runtime.audit_event.record",
+        "self._record_audit_event_tool",
+        'required_args=("room_id", "event_name", "payload")',
+    ):
+        if token not in source:
+            violations.append(f"AgentRuntime audit event tool registration missing token: {token}")
+    for token in (
+        'tool_name="runtime.audit_event.record"',
+        "ToolCallGraphExecutor(",
+        "executor.execute(graph",
+        "tool_graph_id",
+        "tool_call_status",
+    ):
+        if token not in handle_message:
+            violations.append(f"AgentRuntime runtime_audit_event branch must go through ToolCallGraph: {token}")
+    for token in (
+        '"intent"',
+        '"route"',
+        '"target_agent"',
+    ):
+        if token not in handle_message:
+            violations.append(f"AgentRuntime runtime_audit_event branch must preserve safe semantic audit field: {token}")
+    for token in (
+        "self.operation_log.append(",
+        "OperationLog._safe_payload",
+        "entry.event",
+        "operation_log_index",
+    ):
+        if token not in record_audit_event_tool:
+            violations.append(f"runtime.audit_event.record tool missing safe OperationLog write token: {token}")
+    for token in (
+        '"intent"',
+        '"route"',
+        '"target_agent"',
+    ):
+        if token not in record_audit_event_tool:
+            violations.append(f"runtime.audit_event.record tool must preserve safe semantic audit field: {token}")
+    if "test_handle_message_runtime_audit_event_records_safe_operation_log_without_creating_plan" not in phase1_test_source:
+        violations.append("AgentRuntime audit event ToolCallGraph path missing regression test")
+    if "runtime.audit_event.record" not in phase1_test_source or "tool_graph_id" not in phase1_test_source:
+        violations.append("AgentRuntime audit event regression must assert tool graph execution")
+    for token in (
+        "runtime.planning_context.persist",
+        "self._persist_planning_context_tool",
+        'required_args=("room_id", "changes", "context_event")',
+        'produces_state=("active_plan_id", "scene_plans", "planning_context_events")',
+    ):
+        if token not in source:
+            violations.append(f"AgentRuntime planning context tool registration missing token: {token}")
+    for token in (
+        'tool_name="runtime.planning_context.persist"',
+        "ToolCallGraphExecutor(",
+        "executor.execute(graph",
+        "context_call.status == ToolCallStatus.SUCCEEDED",
+    ):
+        if token not in execute_planning_context_persist_graph:
+            violations.append(f"AgentRuntime planning context persist must go through ToolCallGraph: {token}")
+    for token in (
+        "PlanningContextEventValidator.validate(context_event)",
+        "StatePatchValidator.validate(state_patch, self.state.room(room))",
+        "state_patch=state_patch",
+    ):
+        if token not in persist_planning_context_tool:
+            violations.append(f"runtime.planning_context.persist tool missing validator/token: {token}")
+    for token in (
+        "_persist_planning_context_changes(",
+        "context_type=\"agent_reply\" if plan_id else \"room_agent_reply\"",
+        "reply_to=reply_to",
+    ):
+        if token not in record_agent_context_message:
+            violations.append(f"AgentRuntime.record_agent_context_message missing context handoff token: {token}")
+    for token in (
+        "_persist_planning_context_event(",
+        'context_type = "user_discussion" if plan_id else "room_chat"',
+        "speaker_type=\"user\"",
+    ):
+        if token not in record_user_context_message:
+            violations.append(f"AgentRuntime.record_user_context_message missing context handoff token: {token}")
+    if "runtime.planning_context.persist" not in phase1_test_source:
+        violations.append("AgentRuntime planning context ToolCallGraph path missing regression assertion")
+    if '"final_adjustment_confirmation_replay_summary"' not in report_record_allowed_fields:
+        violations.append(
+            "ReportRecordValidator must allow final_adjustment_confirmation_replay_summary as a persisted user-report field"
+        )
+    for reply_token in (
+        "graph",
+        "report_health_summary",
+        "attention_required",
+    ):
+        if reply_token not in runtime_execution_reply:
+            violations.append(f"LANChatAgentWorker Runtime execution reply missing token: {reply_token}")
+    if "宸茶繘鍏?Runtime 鎵ц闃熷垪" in runtime_execution_reply:
+        violations.append("LANChatAgentWorker Runtime execution reply must not describe executed Runtime graphs as only queued")
+    for intervention_reply_token in (
+        "patch_type",
+        "status",
+        "items",
+    ):
+        if intervention_reply_token not in runtime_intervention_reply:
+            violations.append(
+                f"LANChatAgentWorker Runtime intervention reply missing token: {intervention_reply_token}"
+            )
+    if "AgentRuntime execution result" in runtime_intervention_reply:
+        violations.append("LANChatAgentWorker Runtime intervention reply must not collapse patch facts into a generic result")
+    for layout_reply_token in (
+        "ToolCallGraph",
+        "graph",
+        "applied_deltas",
+        "skipped_deltas",
+        "engine_transform_results",
+        "ground_snapped",
+        "overlap_resolved",
+    ):
+        if layout_reply_token not in runtime_layout_reply:
+            violations.append(
+                f"LANChatAgentWorker Runtime layout confirmation reply missing token: {layout_reply_token}"
+            )
+    if "AgentRuntime 鎵ц缁撴灉锛氬凡搴旂敤" in runtime_layout_reply:
+        violations.append("LANChatAgentWorker Runtime layout confirmation reply must not collapse graph/proposal facts")
+    if "mojibake" in runtime_layout_reply:
+        violations.append("LANChatAgentWorker Runtime layout confirmation reply must not preserve mojibake text")
+    for layout_report_token in (
+        "applied_delta_count",
+        "skipped_delta_count",
+        "transform_result_count",
+        "ground_snapped_count",
+        "overlap_resolved_count",
+        "layout_transform_failure_code_counts",
+        "transform-failures",
+        "ground-snapped",
+        "overlap-resolved",
+    ):
+        if layout_report_token not in runtime_layout_report:
+            violations.append(f"LANChatAgentWorker Runtime layout report missing token: {layout_report_token}")
+    if "mojibake" in runtime_layout_report:
+        violations.append("LANChatAgentWorker Runtime layout report must not preserve mojibake text")
+    for status_token in (
+        '"resource_readiness_replay_summary"',
+        '"resource_readiness_publish_count"',
+        '"resource_readiness_publish_failed_count"',
+        '"resource_readiness_query_count"',
+        '"resource_readiness_publish_requested_total"',
+        '"resource_readiness_publish_enabled_total"',
+        '"resource_readiness_publish_unavailable_total"',
+        '"gm_summary_replay_summary"',
+        '"gm_summary_exported_count"',
+        '"gm_summary_failed_count"',
+        '"gm_summary_resource_readiness_publish_total"',
+        '"gm_summary_resource_readiness_query_total"',
+        '"batch_execution_replay_summary"',
+        '"tool_graph_queue_replay_summary"',
+        '"batch_execution_started_count"',
+        '"batch_execution_completed_count"',
+        '"batch_execution_finalized_count"',
+        '"tool_graph_queue_queued_count"',
+        '"tool_graph_queue_dequeued_count"',
+        '"tool_graph_queue_rejected_count"',
+        '"tool_graph_queue_blocked_count"',
+        '"resource_phase_failure_code_counts"',
+        '"import_failure_code_counts"',
+        '"sync_failure_code_counts"',
+        '"latest_sync_failure_code"',
+        '"layout_proposal_count"',
+        '"layout_applied_delta_count"',
+        '"layout_skipped_delta_count"',
+        '"layout_transform_result_count"',
+        '"layout_ground_snapped_count"',
+        '"layout_overlap_resolved_count"',
+        '"layout_transform_failure_code_counts"',
+        '"engine_write_boundary_fact_count"',
+        '"engine_write_bridge_call_count"',
+        '"engine_write_bridge_success_count"',
+        '"engine_write_bridge_failed_count"',
+        '"engine_write_bridge_error_code_counts"',
+    ):
+        if status_token not in status_summary:
+            violations.append(f"AgentRuntime.status_summary runtime_status_queried payload missing token: {status_token}")
     for token in (
         "_layout_support_type(actor)",
         "_shift_actor_aabb(",
         "_snap_actor_bottom_to_ground_if_supported(",
+        "runtime_layout_transform_result",
+        '"custom_report_facts": {layout_fact_key: layout_fact}',
+        "_layout_transform_sync_changes(",
+        "runtime_layout_transform",
     ):
         if token not in apply_layout_delta_tool:
             violations.append(f"runtime.layout.apply_delta missing selective grounding token: {token}")
@@ -2891,6 +4305,7 @@ def _runtime_validator_contract_gate() -> bool:
         "def _layout_support_type(",
         "def _shift_actor_aabb(",
         "def _snap_actor_bottom_to_ground_if_supported(",
+        "def _layout_transform_sync_changes(",
     ):
         if helper not in source:
             violations.append(f"AgentRuntime missing Agent-native Runtime helper: {helper}")
@@ -2902,6 +4317,62 @@ def _runtime_validator_contract_gate() -> bool:
     ):
         if test_name not in test_source:
             violations.append(f"RuntimeCppBridge boundary missing regression test: {test_name}")
+    for bridge_token in (
+        "boundary_fact",
+        "bridge_call_count",
+        "bridge_success_count",
+        "bridge_failed_count",
+        "bridge_error_code_counts",
+        "_merge_bridge_boundary_facts",
+    ):
+        if bridge_token not in adapters_source:
+            violations.append(f"RuntimeCppBridge adapter missing boundary fact token: {bridge_token}")
+    for bridge_token in (
+        "bridge_call_count",
+        "bridge_success_count",
+        "bridge_failed_count",
+        "bridge_method_counts",
+        "bridge_error_code_counts",
+    ):
+        if bridge_token not in source or bridge_token not in tools_source or bridge_token not in test_source:
+            violations.append(f"Engine write boundary missing bridge token across Runtime layers: {bridge_token}")
+    for import_failure_token in (
+        "missing_ready_model_resource",
+        "cpp_actor_import_failed",
+        "actor_import_invalid_result",
+        "cpp_environment_component_import_failed",
+        "missing_transform_target",
+        "cpp_actor_transform_failed",
+        "missing_delete_target",
+        "cpp_actor_delete_failed",
+    ):
+        if import_failure_token not in adapters_source:
+            violations.append(f"Runtime engine write provider missing safe failure code: {import_failure_token}")
+    safe_engine_result_rows = _function_source(source, "_safe_engine_result_rows")
+    if '"failure_code"' not in safe_engine_result_rows:
+        violations.append("ToolCallGraphExecutor engine-write replay summary must preserve safe failure_code")
+    if "def _safe_environment_import_results(" not in tools_source or '"failure_code"' not in tools_source:
+        violations.append("Runtime environment import result facts must preserve safe failure_code")
+    for token in (
+        "def _failed_component_patch_result(",
+        '"custom_import_facts"',
+        "_environment_import_result_fact(",
+        "_environment_import_boundary_fact(",
+    ):
+        if token not in tools_source:
+            violations.append(f"Runtime failed environment import path missing replay fact token: {token}")
+    for test_name in (
+        "test_engine_actor_import_provider_failure_codes_are_safe",
+        "test_engine_environment_component_import_provider_failure_code_is_safe",
+        "test_runtime_environment_import_tool_uses_provider_and_persists_sanitized_components",
+        "test_runtime_environment_import_failure_preserves_provider_failure_code_fact",
+        "test_engine_actor_delete_provider_failure_code_is_safe",
+        "test_engine_layout_transform_provider_respects_status_and_success_failure",
+        "test_engine_layout_transform_provider_keeps_partial_success_when_one_actor_fails",
+        "test_engine_write_replay_summary_sanitizes_raw_engine_results",
+    ):
+        if test_name not in phase1_test_source:
+            violations.append(f"Runtime engine write failure-code boundary missing regression test: {test_name}")
     for required_tool in (
         "runtime.environment.import_components",
         "runtime.actor.import_batch",
@@ -2921,6 +4392,15 @@ def _runtime_validator_contract_gate() -> bool:
     ):
         if test_name not in phase1_test_source:
             violations.append(f"RuntimeGuard boundary missing regression test: {test_name}")
+    for token in (
+        'blocked_log.payload["guard_reason"]',
+        'emitted[-1].payload["guard_reason"]',
+        "expected_guard_payload",
+        '"requires_write": True',
+        '"confirmed": False',
+    ):
+        if token not in phase1_test_source:
+            violations.append(f"RuntimeGuard blocked-call audit regression missing token: {token}")
     for test_name in REQUIRED_STATE_PATCH_CONFLICT_TESTS:
         if test_name not in phase1_test_source:
             violations.append(f"RuntimeState StatePatch conflict/reconcile missing regression test: {test_name}")
@@ -2928,18 +4408,23 @@ def _runtime_validator_contract_gate() -> bool:
         "runtime.queue.plan_enqueue_items",
         "runtime.geometry.compute_aabb",
         "runtime.geometry.check_overlap",
+        "runtime.geometry.snap_to_ground_selective",
     ):
         if tool_name not in tools_source:
             violations.append(f"AgentRuntime required Runtime tool missing: {tool_name}")
     for token in (
         "def _failed_resource_entries(",
+        '"failure_code": safe_source',
+        '"failure_code_counts"',
         "image_resource_unavailable",
         "model_resource_unavailable",
+        "missing_ready_model_resource",
         'plan_status = "failed"',
         'plan_status = "partial"',
         '"runtime.actor.import_batch"',
         'produces_state=("actors", "custom_import_facts")',
         "def _actor_import_result_fact(",
+        '"failure_code": failure_code',
         "actor import skipped and failed resource fact recorded",
         "actor import failed and result fact recorded",
         "runtime_actor_import_result",
@@ -2947,8 +4432,227 @@ def _runtime_validator_contract_gate() -> bool:
     ):
         if token not in tools_source:
             violations.append(f"AgentRuntime resource provider result handling missing token: {token}")
+    safe_actor_import_results = tools_source[
+        tools_source.find("def _safe_actor_import_results("):
+        tools_source.find("def _actor_import_boundary_fact(", tools_source.find("def _safe_actor_import_results("))
+    ]
+    if '"failure_code"' not in safe_actor_import_results:
+        violations.append("Runtime actor import result facts must preserve safe failure_code")
+    image_allowed_fields = source[
+        source.find("_IMAGE_ALLOWED_FIELDS = {"):
+        source.find("_MODEL_ALLOWED_FIELDS = {", source.find("_IMAGE_ALLOWED_FIELDS = {"))
+    ]
+    if '"failure_code"' not in image_allowed_fields:
+        violations.append("Runtime image resource plans must preserve safe failure_code")
+    batch_resource_summary = source[
+        source.find("def _batch_resource_flow_summary_for_plan("):
+        source.find("def _scene_snapshot_summary_for_plan(", source.find("def _batch_resource_flow_summary_for_plan("))
+    ]
+    for token in (
+        "def failure_code_counts(",
+        "def import_failure_code_counts(",
+        '"image_failure_code_counts"',
+        '"model_failure_code_counts"',
+        '"import_failure_code_counts"',
+        '"import_failure_code_counts": dict(',
+    ):
+        if token not in batch_resource_summary:
+            violations.append(f"Runtime batch resource flow must preserve resource failure-code diagnostics: {token}")
+    report_health_summary = source[
+        source.find("def _report_health_summary("):
+        source.find("def _batch_ids_for_plan(", source.find("def _report_health_summary("))
+    ]
+    for token in (
+        "resource_phase_failure_code_counts",
+        "failure_code_counts = dict(row.get(\"failure_code_counts\") or {})",
+        "import_failure_code_counts",
+        'dict(batch_flow.get("import_failure_code_counts") or {})',
+        "environment_import_failure_code_counts",
+        'dict(environment_state.get("import_failure_code_counts") or {})',
+    ):
+        if token not in report_health_summary:
+            violations.append(f"Runtime report health must preserve resource failure-code diagnostics: {token}")
+    for token in (
+        '"resource_phase_failure_code_counts": dict(',
+        '"import_failure_code_counts": dict(',
+        '"environment_import_failure_code_counts": dict(',
+        '"engine_write_readiness_mismatch_count": engine_write_readiness_mismatch_count',
+        '"engine_write_readiness_mismatch_channels": engine_write_readiness_mismatch_channels',
+    ):
+        if token not in source:
+            violations.append(f"Runtime report_ready payload must expose safe resource failure-code diagnostics: {token}")
+    runtime_event_validator_source = source[
+        source.find("class RuntimeEventValidator:"):
+        source.find("class SyncEventValidator:", source.find("class RuntimeEventValidator:"))
+    ]
+    agent_runtime_event_payload_keys = source[
+        source.find("_SAFE_RUNTIME_EVENT_PAYLOAD_KEYS = {"):
+        source.find("def _build_provider_summary(", source.find("_SAFE_RUNTIME_EVENT_PAYLOAD_KEYS = {"))
+    ]
+    for token in (
+        '"engine_write_readiness_mismatch_count"',
+        '"engine_write_readiness_mismatch_channels"',
+    ):
+        if token not in runtime_event_validator_source:
+            violations.append(f"RuntimeEventValidator safe payload allowlist missing token: {token}")
+        if token not in agent_runtime_event_payload_keys:
+            violations.append(f"AgentRuntime user-visible event payload allowlist missing token: {token}")
+    operation_log_safe_payload = source[
+        source.find("def _safe_payload(payload: Mapping[str, Any])"):
+        source.find("blocked_keys = {", source.find("def _safe_payload(payload: Mapping[str, Any])"))
+    ]
+    for token in (
+        '"fields"',
+        '"field_count"',
+        '"field_names"',
+    ):
+        if token not in operation_log_safe_payload:
+            violations.append(f"OperationLog._safe_payload missing runtime fact injection token: {token}")
+        if token not in runtime_event_validator_source:
+            violations.append(f"RuntimeEventValidator safe payload allowlist missing runtime fact injection token: {token}")
+    for token in (
+        'normalized_key in {"field_names", "fields"}',
+        'RuntimeEventValidator.safe_text(item) if isinstance(item, str) else item',
+    ):
+        if token not in runtime_event_validator_source:
+            violations.append(f"RuntimeEventValidator safe payload missing runtime fact injection list sanitizer: {token}")
+    for token in (
+        '"field_count": len(injected)',
+        '"field_names": injected',
+    ):
+        if token not in execute:
+            violations.append(f"ToolCallGraphExecutor runtime fact injection audit missing token: {token}")
+    for token in (
+        '"tool_call_runtime_facts_injected"',
+        '"runtime_fact_injection_count"',
+        '"runtime_fact_injection_field_counts"',
+        '"runtime_fact_injection_replay_summary"',
+    ):
+        if token not in phase1_test_source:
+            violations.append(f"AgentRuntime runtime fact injection safe replay regression missing token: {token}")
+    for token in (
+        '"operation_log_event"',
+        '"operation_log_index"',
+    ):
+        if token not in operation_log_safe_payload:
+            violations.append(f"OperationLog._safe_payload missing report provenance token: {token}")
+        if token not in runtime_event_validator_source:
+            violations.append(f"RuntimeEventValidator safe payload allowlist missing report provenance token: {token}")
+    for token in (
+        'replay_payload = replay["entries"][-1]["payload"]',
+        'replay_payload["operation_log_event"]',
+        'replay_payload["operation_log_index"]',
+    ):
+        if token not in phase1_test_source:
+            violations.append(f"AgentRuntime user report persist replay regression missing token: {token}")
+    for name, section in (
+        ("OperationLog safe payload allowlist", operation_log_safe_payload),
+        ("RuntimeEventValidator", runtime_event_validator_source),
+        ("AgentRuntime user-visible event payload allowlist", agent_runtime_event_payload_keys),
+    ):
+        for token in (
+            '"guard_reason"',
+            '"risk_level"',
+            '"requires_write"',
+            '"confirmed"',
+        ):
+            if token not in section:
+                violations.append(f"{name} must allow RuntimeGuard blocked-call audit field: {token}")
+    for name, section in (
+        ("RuntimeEventValidator", runtime_event_validator_source),
+        ("AgentRuntime user-visible event payload allowlist", agent_runtime_event_payload_keys),
+    ):
+        for token in (
+            '"resource_phase_failure_code_counts"',
+            '"import_failure_code_counts"',
+            '"environment_import_failure_code_counts"',
+            '"sync_event_count"',
+            '"sync_actor_transform_count"',
+        ):
+            if token not in section:
+                violations.append(f"{name} must allow safe resource failure-code diagnostics: {token}")
+    message_delivery_summary = source[
+        source.find("def _message_delivery_replay_summary("):
+        source.find("def _planning_context_replay_summary(", source.find("def _message_delivery_replay_summary("))
+    ]
+    for token in (
+        '"failure_code_counts"',
+        '"latest_failure_code"',
+        'payload.get("failure_code") or payload.get("error_code") or payload.get("reason")',
+    ):
+        if token not in message_delivery_summary:
+            violations.append(f"Runtime message delivery replay must preserve safe failure diagnostics: {token}")
+    message_delivery_digest = source[
+        source.find("message_delivery_digest = {"):
+        source.find("latest_resource_batches =", source.find("message_delivery_digest = {"))
+    ]
+    for token in ('"failure_code_counts"', '"latest_failure_code"'):
+        if token not in message_delivery_digest:
+            violations.append(f"Runtime message delivery digest must expose safe failure diagnostics: {token}")
+    sync_replay_summary = source[
+        source.find("def _sync_replay_summary("):
+        source.find("def _asset_transfer_replay_summary(", source.find("def _sync_replay_summary("))
+    ]
+    for token in (
+        '"failure_code_counts"',
+        '"latest_failure_code"',
+        'payload.get("failure_code")',
+    ):
+        if token not in sync_replay_summary:
+            violations.append(f"Runtime sync replay must preserve safe failure diagnostics: {token}")
+    sync_summary_for_plan = source[
+        source.find("def _sync_summary_for_plan("):
+        source.find("def _asset_transfer_summary_for_plan(", source.find("def _sync_summary_for_plan("))
+    ]
+    for token in ('"actor_transform_count"', '"actor_delete_count"', '"event_type_counts"'):
+        if token not in sync_summary_for_plan:
+            violations.append(f"Runtime sync summary must expose actor transform/delete diagnostics: {token}")
+    sync_health_digest = source[
+        source.find("def _sync_health_digest_for_report("):
+        source.find("def _report_health_summary(", source.find("def _sync_health_digest_for_report("))
+    ]
+    for token in ('"sync_failure_code_counts"', '"latest_sync_failure_code"'):
+        if token not in sync_health_digest:
+            violations.append(f"Runtime sync health digest must expose safe failure diagnostics: {token}")
+    report_health_summary = source[
+        source.find("def _report_health_summary("):
+        source.find("def _batch_ids_for_plan(", source.find("def _report_health_summary("))
+    ]
+    for token in (
+        '"sync_failure_code_counts"',
+        '"latest_sync_failure_code"',
+        '"sync_actor_transform_count"',
+        '"sync_actor_delete_count"',
+    ):
+        if token not in report_health_summary:
+            violations.append(f"Runtime report health summary must preserve safe sync diagnostics: {token}")
+    for token in (
+        '"sync_failure_code_counts"',
+        '"latest_sync_failure_code"',
+        '"sync_event_count"',
+        '"sync_actor_transform_count"',
+        '"sync_actor_delete_count"',
+    ):
+        if token not in runtime_event_validator_source:
+            violations.append(f"RuntimeEventValidator must allow safe sync diagnostics: {token}")
     if "without calling providers" in tools_source:
         violations.append("AgentRuntime resource tool manifest must not claim providers are never called")
+    for token in (
+        "def _resource_provider_failure_tool_result(",
+        "failed_resources = _failed_resource_entries(",
+        "_resource_phase_fact_key(batch_id, kind)",
+        "_resource_phase_fact(",
+    ):
+        if token not in tools_source:
+            violations.append(f"AgentRuntime provider failure must record resource phase facts: {token}")
+    for token in (
+        "actor_import provider failed; recorded failed import fact",
+        "actor_import_provider_failed",
+        "environment_import_result",
+        "_environment_import_result_fact(",
+    ):
+        if token not in tools_source:
+            violations.append(f"AgentRuntime import provider failure must record import result facts: {token}")
     for token in (
         "def _plan_queue_items_via_tool_graph(",
         "runtime.queue.plan_enqueue_items",
@@ -2956,6 +4660,86 @@ def _runtime_validator_contract_gate() -> bool:
     ):
         if token not in source:
             violations.append(f"AgentRuntime enqueue_planned_batches missing queue planning token: {token}")
+    for token in (
+        "def drain_next_tool_graph(",
+        "runtime.queue.select_next_graph",
+        "def _persist_tool_graph_state(",
+        "runtime.queue.record_graph_state",
+        "def _mark_tool_graph_queue_item(",
+        "runtime.queue.mark_graph_status",
+    ):
+        if token not in source:
+            violations.append(f"AgentRuntime ToolCallGraph queue executor missing queue ToolCall token: {token}")
+    for token in (
+        "skipped_count = 0",
+        "skipped_count += 1",
+        '"skipped_count": skipped_count',
+        "skipped_count=skipped_count",
+        '"skipped_count": max(0, int(skipped_count or 0))',
+    ):
+        if token not in source:
+            violations.append(f"ToolCallGraphExecutor stopped-by-command audit missing skipped-count token: {token}")
+    for token in (
+        'paused["command"]["command_recorded"]',
+        'paused["command"]["tool_call_status"]',
+        'latest_runtime_event["payload"]["command_recorded"]',
+        'latest_runtime_event["payload"]["tool_call_status"]',
+    ):
+        if token not in phase1_test_source:
+            violations.append(f"Runtime command ToolCall evidence regression missing token: {token}")
+    for token in (
+        'replay["snapshot_recorded"]',
+        'replay["snapshot_status"]',
+        'replay["snapshot_tool_status"]',
+        'replay["snapshot_state_version"]',
+        'replay_without_snapshot_evidence.pop(key, None)',
+    ):
+        if token not in phase1_test_source:
+            violations.append(f"Runtime operation replay ToolCall evidence regression missing token: {token}")
+    for token in (
+        'status["snapshot_recorded"]',
+        'status["snapshot_status"]',
+        'status["snapshot_tool_status"]',
+        'status["snapshot_state_version"]',
+        'status_without_snapshot_evidence.pop(key, None)',
+        'summary["snapshot_recorded"]',
+        'summary["snapshot_status"]',
+        'summary["snapshot_tool_status"]',
+        'summary["snapshot_state_version"]',
+        'summary_without_snapshot_evidence.pop(key, None)',
+    ):
+        if token not in phase1_test_source:
+            violations.append(f"Runtime status/GM summary ToolCall evidence regression missing token: {token}")
+    for token in (
+        'result["snapshot_recorded"]',
+        'result["snapshot_status"]',
+        'result["snapshot_tool_status"]',
+        'result["snapshot_state_version"]',
+        'sync_status_without_snapshot_evidence.pop(key, None)',
+        'provider_status_without_snapshot_evidence.pop(key, None)',
+    ):
+        if token not in phase1_test_source:
+            violations.append(f"Runtime sync/provider ToolCall evidence regression missing token: {token}")
+    for token in (
+        'result["snapshot_recorded"]',
+        'result["snapshot_status"]',
+        'result["snapshot_tool_status"]',
+        'result["snapshot_state_version"]',
+        'self.assertNotIn("snapshot_recorded", events_fact)',
+        'self.assertNotIn("snapshot_state_version", events_fact)',
+    ):
+        if token not in phase1_test_source:
+            violations.append(f"Runtime events ToolCall evidence regression missing token: {token}")
+    if "test_tool_graph_executor_stops_before_next_tool_when_plan_is_paused" not in phase1_test_source:
+        violations.append("ToolCallGraph stopped-by-command skipped-count audit missing regression test")
+    else:
+        for token in (
+            'stopped_log.payload["skipped_count"]',
+            'emitted_logs[-1].payload["skipped_count"]',
+            '{"status": "paused", "skipped_count": 1}',
+        ):
+            if token not in phase1_test_source:
+                violations.append(f"ToolCallGraph stopped-by-command regression missing token: {token}")
     forbidden_runtime_tool_manifest_tokens = (
         "legacy.scene_compose",
         "legacy.progressive_compose",
@@ -3005,10 +4789,16 @@ def _runtime_validator_contract_gate() -> bool:
                     )
     for test_name in (
         "test_queue_enqueue_item_planning_tool_records_safe_drafts_without_persisting_queue",
+        "test_drain_next_tool_graph_executes_queued_graph_as_runtime_worker_slice",
+        "test_tool_registry_manifest_exposes_safe_capability_metadata",
         "test_tool_definition_rejects_legacy_workflow_main_control_tools",
         "test_tool_registry_manifest_does_not_expose_legacy_workflow_main_control_tools",
         "test_empty_resource_provider_result_records_failed_resource_facts",
         "test_empty_model_resource_provider_result_records_failed_resource_facts",
+        "test_runtime_provider_failure_fails_graph_and_records_failed_resource_facts",
+        "test_model_resource_provider_failure_emits_safe_runtime_event",
+        "test_actor_import_provider_failure_emits_safe_runtime_event",
+        "test_runtime_environment_import_failure_does_not_count_planned_components_as_imported",
     ):
         if test_name not in phase1_test_source:
             violations.append(f"legacy main-control manifest boundary missing regression test: {test_name}")
@@ -3019,9 +4809,74 @@ def _runtime_validator_contract_gate() -> bool:
     if violations:
         print("[FAIL] static Runtime validator contract gate")
         for item in violations:
-            print(f"       {item}")
+            _print_violation(item)
         return False
     print("[OK]  static Runtime validator contract gate")
+    return True
+
+
+def _scene_substrate_guardrail_gate() -> bool:
+    print("[RUN] static scene substrate/layout guardrail gate")
+    classifier_path = REPO_ROOT / SCENE_ELEMENT_CLASSIFIER
+    phase1_test_path = REPO_ROOT / AGENT_RUNTIME_PHASE1_TESTS
+    try:
+        classifier_source = classifier_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        classifier_source = classifier_path.read_text(encoding="utf-8-sig")
+    try:
+        phase1_test_source = phase1_test_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        phase1_test_source = phase1_test_path.read_text(encoding="utf-8-sig")
+
+    violations: list[str] = []
+    classifier_contract_tokens = (
+        "_SUBSTRATE_TERMS",
+        "_LAYOUT_TERMS",
+        '"grassland"',
+        '"grass"',
+        '"sky"',
+        '"forest"',
+        '"terrain"',
+        '"ground"',
+        '"ceiling"',
+        '"entrance"',
+        '"path"',
+        '"main street"',
+        '"boundary"',
+        "folded = clean.lower()",
+        "str(term).lower() == folded",
+        "str(term).lower() in folded",
+    )
+    for token in classifier_contract_tokens:
+        if token not in classifier_source:
+            violations.append(f"SceneElementClassifier substrate guardrail missing token: {token}")
+
+    phase1_regression_tokens = (
+        "test_substrate_terms_are_classified_but_not_imported_as_actors",
+        "test_layout_terms_are_classified_but_not_imported_as_actors",
+        "Create a forest camp with sky, forest, grass, wooden table, and tent",
+        "Create a market with entrance, main street, boundary, wooden table, and tent",
+        '["forest", "sky", "grass", "wooden table", "tent"]',
+        '["entrance", "main street", "boundary", "wooden table", "tent"]',
+        'self.assertEqual(state["model_item_lists"][batch_id], ["wooden table", "tent"])',
+        'self.assertEqual(set(state["image_resource_plans"][batch_id]), {"wooden table", "tent"})',
+        'self.assertEqual(set(state["model_resource_plans"][batch_id]), {"wooden table", "tent"})',
+        '{"forest", "sky", "grass"}.issubset',
+        '{"entrance", "main street", "boundary"}.issubset',
+        'route["target_pipeline"] == "layout_structure"',
+        'self.assertEqual(status["classification_summary"]["model_items"], ["wooden table", "tent"])',
+        'self.assertEqual(node["args"]["model_items"], ["wooden table", "tent"])',
+    )
+    for token in phase1_regression_tokens:
+        if token not in phase1_test_source:
+            violations.append(f"AgentRuntime substrate routing regression missing token: {token}")
+
+    if violations:
+        print("[FAIL] static scene substrate/layout guardrail gate")
+        for item in violations:
+            _print_violation(item)
+        return False
+    print("[OK]  static scene substrate/layout guardrail gate")
     return True
 
 
@@ -3048,6 +4903,9 @@ def main() -> int:
     if not _direct_engine_write_entry_gate():
         failed += 1
 
+    if not _master_agent_legacy_compose_route_gate():
+        failed += 1
+
     if not _direct_progressive_workflow_entry_gate():
         failed += 1
 
@@ -3060,6 +4918,12 @@ def main() -> int:
     if not _host_action_executor_policy_gate():
         failed += 1
 
+    if not _legacy_agent_coordinator_policy_gate():
+        failed += 1
+
+    if not _legacy_role_agent_scene_write_policy_gate():
+        failed += 1
+
     if not _agent_runtime_flag_boundary_gate():
         failed += 1
 
@@ -3070,6 +4934,9 @@ def main() -> int:
         failed += 1
 
     if not _runtime_report_fact_source_gate():
+        failed += 1
+
+    if not _scene_substrate_guardrail_gate():
         failed += 1
 
     if not _runtime_validator_contract_gate():

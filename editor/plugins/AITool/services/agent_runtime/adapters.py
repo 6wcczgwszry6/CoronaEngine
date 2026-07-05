@@ -21,6 +21,7 @@ class RuntimeCppBridgeResult:
     payload: dict[str, Any]
     error_code: str = ""
     message: str = ""
+    boundary_fact: dict[str, Any] | None = None
 
 
 class RuntimeCppBridge:
@@ -49,21 +50,29 @@ class RuntimeCppBridge:
         *,
         error_code: str = "cpp_tool_failed",
     ) -> RuntimeCppBridgeResult:
+        method = "invoke_tool"
         if tool is None:
-            return RuntimeCppBridgeResult(False, {}, error_code="cpp_tool_missing", message="C++ tool is missing")
+            return self._result(
+                False,
+                {},
+                error_code="cpp_tool_missing",
+                message="C++ tool is missing",
+                method=method,
+            )
         invoke_tool = getattr(self._engine_gate, "invoke_tool", None)
         if not callable(invoke_tool):
-            return RuntimeCppBridgeResult(
+            return self._result(
                 False,
                 {},
                 error_code="cpp_gate_method_missing",
                 message="C++ engine write gate method is missing",
+                method=method,
             )
         try:
             raw = invoke_tool(tool, payload)
-            return self._normalize(raw, error_code=error_code)
+            return self._normalize(raw, error_code=error_code, method=method)
         except Exception:  # noqa: BLE001
-            return RuntimeCppBridgeResult(False, {}, error_code=error_code, message="C++ tool failed")
+            return self._result(False, {}, error_code=error_code, message="C++ tool failed", method=method)
 
     def set_transform(
         self,
@@ -72,21 +81,29 @@ class RuntimeCppBridge:
         *,
         error_code: str = "cpp_transform_failed",
     ) -> RuntimeCppBridgeResult:
+        method = "set_transform"
         if tool is None:
-            return RuntimeCppBridgeResult(False, {}, error_code="cpp_tool_missing", message="C++ transform tool is missing")
+            return self._result(
+                False,
+                {},
+                error_code="cpp_tool_missing",
+                message="C++ transform tool is missing",
+                method=method,
+            )
         set_transform = getattr(self._engine_gate, "set_transform", None)
         if not callable(set_transform):
-            return RuntimeCppBridgeResult(
+            return self._result(
                 False,
                 {},
                 error_code="cpp_gate_method_missing",
                 message="C++ engine write gate method is missing",
+                method=method,
             )
         try:
             raw = set_transform(tool, payload)
-            return self._normalize(raw, error_code=error_code)
+            return self._normalize(raw, error_code=error_code, method=method)
         except Exception:  # noqa: BLE001
-            return RuntimeCppBridgeResult(False, {}, error_code=error_code, message="C++ transform failed")
+            return self._result(False, {}, error_code=error_code, message="C++ transform failed", method=method)
 
     def remove_actor(
         self,
@@ -95,30 +112,39 @@ class RuntimeCppBridge:
         *,
         error_code: str = "cpp_actor_delete_failed",
     ) -> RuntimeCppBridgeResult:
+        method = "remove_actor"
         if tool is None:
-            return RuntimeCppBridgeResult(False, {}, error_code="cpp_tool_missing", message="C++ delete tool is missing")
+            return self._result(
+                False,
+                {},
+                error_code="cpp_tool_missing",
+                message="C++ delete tool is missing",
+                method=method,
+            )
         remove_actor = getattr(self._engine_gate, "remove_actor", None)
         if not callable(remove_actor):
-            return RuntimeCppBridgeResult(
+            return self._result(
                 False,
                 {},
                 error_code="cpp_gate_method_missing",
                 message="C++ engine write gate method is missing",
+                method=method,
             )
         try:
             raw = remove_actor(tool, payload)
-            return self._normalize(raw, error_code=error_code)
+            return self._normalize(raw, error_code=error_code, method=method)
         except Exception:  # noqa: BLE001
-            return RuntimeCppBridgeResult(False, {}, error_code=error_code, message="C++ actor delete failed")
+            return self._result(False, {}, error_code=error_code, message="C++ actor delete failed", method=method)
 
-    def _normalize(self, raw: Any, *, error_code: str) -> RuntimeCppBridgeResult:
+    def _normalize(self, raw: Any, *, error_code: str, method: str) -> RuntimeCppBridgeResult:
         parsed = self._parse_result(raw) if self._parse_result is not None else _parse_tool_result(raw)
         if _is_unstructured_raw_result(parsed):
-            return RuntimeCppBridgeResult(
+            return self._result(
                 False,
                 {},
                 error_code=error_code,
                 message="C++ binding returned invalid result",
+                method=method,
             )
         status_text = str(parsed.get("status") or parsed.get("status_info") or "").strip().lower()
         type_text = str(parsed.get("type") or parsed.get("event_type") or "").strip().lower()
@@ -161,13 +187,40 @@ class RuntimeCppBridge:
                 normalized_error_code = native_error_code.strip()
                 if normalized_error_code and not normalized_error_code.isdigit():
                     error_code = normalized_error_code
-            return RuntimeCppBridgeResult(
+            return self._result(
                 False,
                 {"status": "error", "error": message, "error_code": error_code},
                 error_code=error_code,
                 message=message,
+                method=method,
             )
-        return RuntimeCppBridgeResult(True, _safe_cpp_success_payload(parsed))
+        return self._result(True, _safe_cpp_success_payload(parsed), method=method)
+
+    @staticmethod
+    def _result(
+        success: bool,
+        payload: dict[str, Any],
+        *,
+        error_code: str = "",
+        message: str = "",
+        method: str,
+    ) -> RuntimeCppBridgeResult:
+        safe_method = _safe_component_token(method, fallback="engine_call")
+        safe_error = _safe_component_token(error_code, fallback="", allow_empty=True)
+        fact = {
+            "bridge_call_count": 1,
+            "bridge_success_count": 1 if success else 0,
+            "bridge_failed_count": 0 if success else 1,
+            "bridge_method_counts": {safe_method: 1},
+            "bridge_error_code_counts": {safe_error: 1} if safe_error and not success else {},
+        }
+        return RuntimeCppBridgeResult(
+            success,
+            dict(payload or {}),
+            error_code=safe_error,
+            message=_safe_cpp_error_message(message) if message else "",
+            boundary_fact=fact,
+        )
 
 
 def make_image_resource_provider(
@@ -437,6 +490,7 @@ def make_engine_environment_component_import_provider(
         requested = _environment_components_from_payload(payload)
         component_updates: dict[str, dict[str, Any]] = {}
         import_results: list[dict[str, Any]] = []
+        bridge_results: list[RuntimeCppBridgeResult] = []
         for index, component in enumerate(requested, start=1):
             component_id = _safe_component_token(
                 component.get("component_id"),
@@ -464,12 +518,14 @@ def make_engine_environment_component_import_provider(
                 import_payload,
                 error_code="cpp_environment_component_import_failed",
             )
+            bridge_results.append(bridge_result)
             if not bridge_result.success:
                 import_results.append({
                     "component_id": component_id,
                     "name": name,
                     "component_type": component_type,
                     "status": "failed",
+                    "failure_code": "cpp_environment_component_import_failed",
                     "reason": _safe_adapter_error_message(
                         {"message": bridge_result.message},
                         fallback="environment component import failed",
@@ -487,9 +543,27 @@ def make_engine_environment_component_import_provider(
                 "component_type": update["component_type"],
                 "status": "success",
             })
+        status_counts: dict[str, int] = {}
+        for item in import_results:
+            status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
+            status_counts[status_key] = status_counts.get(status_key, 0) + 1
         return {
             "environment_components": component_updates,
             "environment_import_results": import_results,
+            "source": "engine_environment_import_provider",
+            "engine_write_result": {
+                "provider_source": "engine_environment_import_provider",
+                "requested_count": len(requested),
+                "identity_result_count": len(component_updates),
+                "missing_identity_count": sum(
+                    1
+                    for item in import_results
+                    if str(item.get("status") or "").strip().lower() == "failed"
+                    and "component id" in str(item.get("reason") or "").lower()
+                ),
+                "status_counts": status_counts,
+                **_merge_bridge_boundary_facts(bridge_results),
+            },
         }
 
     return _provider
@@ -511,12 +585,22 @@ def make_legacy_model_resource_provider(
 
     def _provider(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         nonlocal provider_instance
-        if provider_instance is None:
-            provider_instance = _create_model_provider(model_provider_factory)
-
         batch_id = str(payload.get("batch_id") or "")
         model_items = [str(item) for item in (payload.get("model_items") or []) if str(item or "")]
         resources: dict[str, dict[str, Any]] = {}
+        if provider_instance is None:
+            try:
+                provider_instance = _create_model_provider(model_provider_factory)
+            except Exception:  # noqa: BLE001
+                for index, name in enumerate(model_items, start=1):
+                    resources[name] = _failed_model_resource(
+                        name=name,
+                        batch_id=batch_id,
+                        index=index,
+                        source="legacy_model_adapter_unavailable",
+                        failure_code="legacy_model_adapter_unavailable",
+                    )
+                return resources
         for index, name in enumerate(model_items, start=1):
             object_id = f"{batch_id}-{index:02d}" if batch_id else f"runtime-{index:02d}"
             try:
@@ -526,13 +610,23 @@ def make_legacy_model_resource_provider(
                     prompt_text=str(_item_value(payload, name, "prompt_text") or name),
                     object_id=object_id,
                 )
-            except Exception as exc:  # noqa: BLE001
-                resources[name] = _failed_model_resource(name=name, batch_id=batch_id, index=index)
+            except Exception:  # noqa: BLE001
+                resources[name] = _failed_model_resource(
+                    name=name,
+                    batch_id=batch_id,
+                    index=index,
+                    failure_code="legacy_model_acquire_exception",
+                )
                 continue
             try:
                 resources[name] = _normalize_acquire_result(result, name=name, batch_id=batch_id, index=index)
             except RuntimeError:
-                resources[name] = _failed_model_resource(name=name, batch_id=batch_id, index=index)
+                resources[name] = _failed_model_resource(
+                    name=name,
+                    batch_id=batch_id,
+                    index=index,
+                    failure_code="legacy_model_invalid_result",
+                )
         return resources
 
     return _provider
@@ -600,6 +694,34 @@ def _environment_components_from_payload(payload: dict[str, Any]) -> list[dict[s
     if isinstance(raw, list):
         return [dict(value) for value in raw if isinstance(value, dict)]
     return []
+
+
+def _merge_bridge_boundary_facts(results: list[RuntimeCppBridgeResult]) -> dict[str, Any]:
+    call_count = 0
+    success_count = 0
+    failed_count = 0
+    method_counts: dict[str, int] = {}
+    error_code_counts: dict[str, int] = {}
+    for result in results:
+        fact = result.boundary_fact if isinstance(result.boundary_fact, dict) else {}
+        call_count += int(fact.get("bridge_call_count") or 0)
+        success_count += int(fact.get("bridge_success_count") or 0)
+        failed_count += int(fact.get("bridge_failed_count") or 0)
+        for key, value in dict(fact.get("bridge_method_counts") or {}).items():
+            safe_key = _safe_component_token(key, fallback="", allow_empty=True)
+            if safe_key:
+                method_counts[safe_key] = method_counts.get(safe_key, 0) + int(value or 0)
+        for key, value in dict(fact.get("bridge_error_code_counts") or {}).items():
+            safe_key = _safe_component_token(key, fallback="", allow_empty=True)
+            if safe_key:
+                error_code_counts[safe_key] = error_code_counts.get(safe_key, 0) + int(value or 0)
+    return {
+        "bridge_call_count": call_count,
+        "bridge_success_count": success_count,
+        "bridge_failed_count": failed_count,
+        "bridge_method_counts": dict(sorted(method_counts.items())),
+        "bridge_error_code_counts": dict(sorted(error_code_counts.items())),
+    }
 
 
 def _normalize_environment_component_import_result(
@@ -938,6 +1060,7 @@ def make_engine_actor_import_provider(
         model_resources = _model_resources_from_payload(payload)
         actors: dict[str, dict[str, Any]] = {}
         import_results: list[dict[str, Any]] = []
+        bridge_results: list[RuntimeCppBridgeResult] = []
         for index, name in enumerate(model_items, start=1):
             resource = model_resources.get(name)
             model_path = str(_resource_model_path(resource) or "")
@@ -945,6 +1068,7 @@ def make_engine_actor_import_provider(
                 import_results.append({
                     "actor_name": name,
                     "status": "failed",
+                    "failure_code": "missing_ready_model_resource",
                     "reason": "missing ready model resource",
                 })
                 continue
@@ -967,10 +1091,12 @@ def make_engine_actor_import_provider(
             if effective_scene_name:
                 import_payload["scene_name"] = effective_scene_name
             bridge_result = bridge.invoke_tool(import_tool, import_payload, error_code="cpp_actor_import_failed")
+            bridge_results.append(bridge_result)
             if not bridge_result.success:
                 import_results.append({
                     "actor_name": name,
                     "status": "failed",
+                    "failure_code": "cpp_actor_import_failed",
                     "reason": (
                         _safe_adapter_error_message(
                             {"message": bridge_result.message},
@@ -994,6 +1120,7 @@ def make_engine_actor_import_provider(
                 import_results.append({
                     "actor_name": name,
                     "status": "failed",
+                    "failure_code": "actor_import_invalid_result",
                     "reason": _safe_adapter_error_message(exc, fallback="actor import failed"),
                 })
                 continue
@@ -1003,7 +1130,28 @@ def make_engine_actor_import_provider(
                 "actor_name": actor["name"],
                 "status": "success",
             })
-        return {"actors": actors, "import_results": import_results}
+        status_counts: dict[str, int] = {}
+        for item in import_results:
+            status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
+            status_counts[status_key] = status_counts.get(status_key, 0) + 1
+        return {
+            "actors": actors,
+            "import_results": import_results,
+            "source": "engine_actor_import_provider",
+            "engine_write_result": {
+                "provider_source": "engine_actor_import_provider",
+                "requested_count": len(model_items),
+                "identity_result_count": len(actors),
+                "missing_identity_count": sum(
+                    1
+                    for item in import_results
+                    if str(item.get("status") or "").strip().lower() == "failed"
+                    and "actor id" in str(item.get("reason") or "").lower()
+                ),
+                "status_counts": status_counts,
+                **_merge_bridge_boundary_facts(bridge_results),
+            },
+        }
 
     return _provider
 
@@ -1036,6 +1184,7 @@ def make_engine_layout_transform_provider(
         actors = {str(key): dict(value) for key, value in (payload.get("actors") or {}).items() if isinstance(value, dict)}
         actor_updates: dict[str, dict[str, Any]] = {}
         transform_results: list[dict[str, Any]] = []
+        bridge_results: list[RuntimeCppBridgeResult] = []
         for item in applied:
             actor_id = str(item.get("actor_id") or "")
             actor = dict(actors.get(actor_id) or {})
@@ -1046,6 +1195,7 @@ def make_engine_layout_transform_provider(
                     "actor_id": actor_id,
                     "actor_name": actor_name,
                     "status": "skipped",
+                    "failure_code": "missing_transform_target",
                     "reason": "missing actor or position",
                 })
                 continue
@@ -1063,11 +1213,13 @@ def make_engine_layout_transform_provider(
             if effective_scene_name:
                 transform_payload["scene_name"] = effective_scene_name
             bridge_result = bridge.set_transform(transform_tool, transform_payload, error_code="cpp_actor_transform_failed")
+            bridge_results.append(bridge_result)
             if not bridge_result.success:
                 transform_results.append({
                     "actor_id": actor_id,
                     "actor_name": actor_name,
                     "status": "failed",
+                    "failure_code": "cpp_actor_transform_failed",
                     "reason": (
                         _safe_transform_skip_reason(bridge_result.message)
                         or "actor transform failed"
@@ -1092,7 +1244,26 @@ def make_engine_layout_transform_provider(
                 "position": list(update.get("position") or position),
                 "observed_position": bool(engine_result.get("observed_position")),
             })
-        return {"actor_updates": actor_updates, "transform_results": transform_results}
+        status_counts: dict[str, int] = {}
+        observed_position_count = 0
+        for item in transform_results:
+            status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
+            status_counts[status_key] = status_counts.get(status_key, 0) + 1
+            if item.get("observed_position"):
+                observed_position_count += 1
+        return {
+            "actor_updates": actor_updates,
+            "transform_results": transform_results,
+            "source": "engine_layout_transform_provider",
+            "engine_write_result": {
+                "provider_source": "engine_layout_transform_provider",
+                "requested_count": len(applied),
+                "updated_count": len(actor_updates),
+                "observed_position_count": observed_position_count,
+                "status_counts": status_counts,
+                **_merge_bridge_boundary_facts(bridge_results),
+            },
+        }
 
     return _provider
 
@@ -1133,6 +1304,7 @@ def make_engine_actor_delete_provider(
         ]
         actor_updates: dict[str, dict[str, Any]] = {}
         delete_results: list[dict[str, Any]] = []
+        bridge_results: list[RuntimeCppBridgeResult] = []
         for item in requested:
             actor_id = str(item.get("actor_id") or "").strip()
             actor = dict(actors.get(actor_id) or {})
@@ -1142,6 +1314,7 @@ def make_engine_actor_delete_provider(
                     "actor_id": actor_id,
                     "actor_name": actor_name,
                     "status": "skipped",
+                    "failure_code": "missing_delete_target",
                     "reason": "missing actor",
                 })
                 continue
@@ -1159,11 +1332,13 @@ def make_engine_actor_delete_provider(
             if effective_scene_name:
                 delete_payload["scene_name"] = effective_scene_name
             bridge_result = bridge.remove_actor(delete_tool, delete_payload, error_code="cpp_actor_delete_failed")
+            bridge_results.append(bridge_result)
             if not bridge_result.success:
                 delete_results.append({
                     "actor_id": actor_id,
                     "actor_name": actor_name,
                     "status": "failed",
+                    "failure_code": "cpp_actor_delete_failed",
                     "reason": _safe_adapter_error_message({"message": bridge_result.message}, fallback="actor delete failed"),
                 })
                 continue
@@ -1189,7 +1364,26 @@ def make_engine_actor_delete_provider(
                     or str(parsed.get("event_type") or "").strip().lower() in {"actor_deleted", "actor_removed"}
                 ),
             })
-        return {"actor_updates": actor_updates, "delete_results": delete_results}
+        status_counts: dict[str, int] = {}
+        observed_deleted_count = 0
+        for item in delete_results:
+            status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
+            status_counts[status_key] = status_counts.get(status_key, 0) + 1
+            if item.get("observed_deleted"):
+                observed_deleted_count += 1
+        return {
+            "actor_updates": actor_updates,
+            "delete_results": delete_results,
+            "source": "engine_actor_delete_provider",
+            "engine_write_result": {
+                "provider_source": "engine_actor_delete_provider",
+                "requested_count": len(requested),
+                "deleted_count": len(actor_updates),
+                "observed_deleted_count": observed_deleted_count,
+                "status_counts": status_counts,
+                **_merge_bridge_boundary_facts(bridge_results),
+            },
+        }
 
     return _provider
 
@@ -1634,7 +1828,8 @@ def _failed_model_resource(
     name: str,
     batch_id: str,
     index: int,
-    source: str = "legacy_model",
+    source: str = "legacy_model_failure",
+    failure_code: str = "legacy_model_failure",
 ) -> dict[str, Any]:
     return {
         "model_request_id": (
@@ -1643,6 +1838,7 @@ def _failed_model_resource(
         "name": name,
         "status": "failed",
         "source": _safe_model_resource_source(source),
+        "failure_code": _safe_model_failure_code(failure_code),
     }
 
 
@@ -1670,11 +1866,26 @@ def _safe_model_resource_source(value: Any) -> str:
         "local",
         "local_asset",
         "legacy_model",
+        "legacy_model_failure",
+        "legacy_model_adapter_unavailable",
         "model_resource",
     }
     if source in allowed:
         return source
     return "legacy_model"
+
+
+def _safe_model_failure_code(value: Any) -> str:
+    code = str(value or "").strip().lower().replace("-", "_")
+    allowed = {
+        "legacy_model_failure",
+        "legacy_model_adapter_unavailable",
+        "legacy_model_acquire_exception",
+        "legacy_model_invalid_result",
+    }
+    if code in allowed:
+        return code
+    return "legacy_model_failure"
 
 
 def _image_resource_value(payload: dict[str, Any], name: str) -> Any:

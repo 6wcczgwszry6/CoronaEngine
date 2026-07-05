@@ -1,4 +1,4 @@
-﻿"""Minimal Agent-native runtime foundation.
+"""Minimal Agent-native runtime foundation.
 
 This module implements the first runnable slice of the Agent-native plan.  It
 does not call SceneComposer, ProgressiveWorkflow, C++, or provider APIs.  The
@@ -39,6 +39,7 @@ class BatchPlanStatus(str, Enum):
     PLANNED = "planned"
     EXECUTING = "executing"
     COMPLETED = "completed"
+    PARTIAL = "partial"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
@@ -268,24 +269,41 @@ class OperationLog:
             "cancelled_graphs",
             "category",
             "command",
+            "command_recorded",
             "context_type",
             "created",
             "confirmed_by",
+            "confirmed",
             "conflict_item_count",
             "decision",
             "delta_count",
             "entry_count",
             "error_code",
+            "engine_write_boundary_fact_count",
+            "engine_write_import_boundary_count",
+            "engine_write_environment_import_boundary_count",
+            "engine_write_transform_boundary_count",
+            "engine_write_delete_boundary_count",
+            "engine_write_bridge_call_count",
+            "engine_write_bridge_error_code_counts",
+            "engine_write_bridge_failed_count",
+            "engine_write_bridge_success_count",
             "event",
             "event_type",
             "execution",
             "failed_count",
+            "failure_code",
+            "field_count",
+            "field_names",
+            "fields",
+            "guard_reason",
             "graph_count",
             "graph_status",
             "ground_snapped_count",
             "audience",
             "agent_name",
             "agent_id",
+            "intent",
             "issue_count",
             "item_count",
             "message_kind",
@@ -299,6 +317,8 @@ class OperationLog:
             "provider_count",
             "change_key_count",
             "operation_count",
+            "operation_log_event",
+            "operation_log_index",
             "applied_version",
             "channel",
             "bytes_transferred",
@@ -309,9 +329,11 @@ class OperationLog:
             "recorded",
             "recorded_count",
             "read_only",
+            "requires_write",
             "may_create_plan",
             "requires_existing_plan",
             "retryable",
+            "risk_level",
             "resumed_graphs",
             "retried_graphs",
             "room_id",
@@ -324,16 +346,28 @@ class OperationLog:
             "runtime_plan_id",
             "runtime_progress",
             "runtime_stage",
+            "state_version",
+            "tool_call_status",
+            "runtime_fact_injection_count",
+            "runtime_fact_injection_field_count",
+            "runtime_fact_injection_field_counts",
+            "runtime_fact_injection_unique_field_count",
+            "route",
             "sent",
             "source",
             "stage",
             "status",
+            "sync_actor_delete_count",
+            "sync_actor_transform_count",
+            "sync_event_count",
             "speaker_type",
+            "target_agent",
             "target_hint",
             "tool_count",
             "transfer_status",
             "total_bytes",
             "transfer_failed_count",
+            "layout_transform_failure_code_counts",
             "transform_failed_count",
             "transform_result_count",
             "transform_success_count",
@@ -384,6 +418,29 @@ class OperationLog:
                     if isinstance(item, (str, int, float, bool))
                 ][:10]
             elif isinstance(value, Mapping):
+                if normalized_key in {
+                    "engine_write_bridge_error_code_counts",
+                    "environment_import_failure_code_counts",
+                    "import_failure_code_counts",
+                    "layout_transform_failure_code_counts",
+                    "resource_phase_failure_code_counts",
+                    "runtime_fact_injection_field_counts",
+                    "sync_failure_code_counts",
+                }:
+                    count_map: dict[str, int] = {}
+                    for nested_key, nested_value in dict(value).items():
+                        safe_key = OperationLog._safe_text(str(nested_key or "")).strip()
+                        if not safe_key or safe_key == "[redacted]":
+                            continue
+                        try:
+                            count = int(nested_value or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if count > 0:
+                            count_map[safe_key[:80]] = count
+                    if count_map:
+                        cleaned[normalized_key] = dict(sorted(count_map.items()))
+                    continue
                 nested = OperationLog._safe_payload(value)
                 if nested:
                     cleaned[normalized_key] = nested
@@ -473,11 +530,16 @@ class RuntimeEventValidator:
         "applied_count",
         "applied_version",
         "asset_event_count",
+        "asset_failed_count",
         "asset_id",
+        "asset_incomplete_count",
         "audience",
         "available",
         "batch_count",
+        "batch_failed_count",
         "batch_index",
+        "batch_partial_count",
+        "batch_semantic_status_counts",
         "bytes_transferred",
         "cancelled_batches",
         "cancelled_graphs",
@@ -487,7 +549,10 @@ class RuntimeEventValidator:
         "chunk_count",
         "chunk_index",
         "command",
+        "command",
+        "command_recorded",
         "component_count",
+        "confirmed",
         "conflict_item_count",
         "confirmed_by",
         "context_type",
@@ -496,18 +561,46 @@ class RuntimeEventValidator:
         "delta_count",
         "entry_count",
         "error_code",
+        "engine_write_boundary_fact_count",
+        "engine_write_import_boundary_count",
+        "engine_write_environment_import_boundary_count",
+        "engine_write_transform_boundary_count",
+        "engine_write_delete_boundary_count",
+        "engine_write_bridge_call_count",
+        "engine_write_bridge_error_code_counts",
+        "engine_write_bridge_failed_count",
+        "engine_write_bridge_success_count",
+        "engine_write_readiness_mismatch_count",
+        "engine_write_readiness_mismatch_channels",
+        "environment_failed_count",
+        "environment_import_failed_count",
+        "environment_import_failure_code_counts",
+        "environment_import_requested_count",
+        "environment_imported_count",
         "event",
         "event_type",
         "execution",
+        "failure_code",
+        "field_count",
+        "field_names",
+        "fields",
         "graph_count",
         "graph_status",
+        "graph_status",
         "ground_snapped_count",
+        "guard_reason",
         "agent_id",
         "agent_name",
         "context_count",
         "has_scene_plan",
+        "intent",
         "issue_count",
         "item_count",
+        "layout_applied_delta_count",
+        "layout_ground_snapped_count",
+        "layout_overlap_resolved_count",
+        "layout_skipped_delta_count",
+        "layout_transform_result_count",
         "message_kind",
         "node_count",
         "old_status",
@@ -527,8 +620,19 @@ class RuntimeEventValidator:
         "recorded_count",
         "read_only",
         "reason",
+        "requires_write",
         "requested_count",
+        "risk_level",
+        "report_attention_required",
+        "report_health_reasons",
+        "report_health_status",
+        "resource_phase_failed_count",
+        "resource_phase_failure_code_counts",
+        "resource_phase_partial_count",
+        "resource_phase_waiting_count",
         "may_create_plan",
+        "operation_log_event",
+        "operation_log_index",
         "requires_existing_plan",
         "retryable",
         "resumed_graphs",
@@ -543,22 +647,38 @@ class RuntimeEventValidator:
         "runtime_plan_id",
         "runtime_progress",
         "runtime_stage",
+        "runtime_fact_injection_count",
+        "runtime_fact_injection_field_count",
+        "runtime_fact_injection_field_counts",
+        "runtime_fact_injection_unique_field_count",
+        "route",
         "sent",
         "source",
         "speaker_type",
         "stage",
         "imported_count",
+        "import_failure_code_counts",
         "failed_count",
         "max_retries",
         "retry_count",
         "skipped_count",
+        "state_version",
         "status",
+        "tool_call_status",
+        "sync_actor_delete_count",
+        "sync_actor_transform_count",
+        "sync_event_count",
+        "sync_health_status",
+        "sync_failure_code_counts",
+        "latest_sync_failure_code",
+        "target_agent",
         "target_hint",
         "tool_count",
         "transfer_failed_count",
         "transfer_status",
         "total_bytes",
         "total_batches",
+        "layout_transform_failure_code_counts",
         "transform_failed_count",
         "transform_result_count",
         "transform_success_count",
@@ -644,7 +764,6 @@ class RuntimeEventValidator:
             raise ValueError("runtime event title contains unsafe text")
         if str(row.get("message") or "") != RuntimeEventValidator.safe_text(row.get("message")):
             raise ValueError("runtime event message contains unsafe text")
-
     @staticmethod
     def safe_text(value: Any) -> str:
         return OperationLog._safe_text(value)
@@ -663,6 +782,39 @@ class RuntimeEventValidator:
                 cleaned[normalized_key] = RuntimeEventValidator.safe_text(value)
             elif isinstance(value, (int, float, bool)) or value is None:
                 cleaned[normalized_key] = value
+            elif normalized_key in {"field_names", "fields"} and isinstance(value, (list, tuple)):
+                cleaned[normalized_key] = [
+                    RuntimeEventValidator.safe_text(item) if isinstance(item, str) else item
+                    for item in value
+                    if isinstance(item, (str, int, float, bool))
+                ][:10]
+            elif normalized_key in {
+                "batch_semantic_status_counts",
+                "engine_write_bridge_error_code_counts",
+                "environment_import_failure_code_counts",
+                "layout_transform_failure_code_counts",
+                "resource_phase_failure_code_counts",
+                "import_failure_code_counts",
+                "runtime_fact_injection_field_counts",
+                "sync_failure_code_counts",
+            } and isinstance(value, Mapping):
+                status_counts: dict[str, int] = {}
+                for status_key, count_value in dict(value).items():
+                    status_text = RuntimeEventValidator.safe_text(status_key).strip()
+                    if not status_text:
+                        continue
+                    try:
+                        status_counts[status_text[:48]] = max(0, int(count_value))
+                    except (TypeError, ValueError):
+                        continue
+                cleaned[normalized_key] = status_counts
+            elif normalized_key == "report_health_reasons" and isinstance(value, list):
+                reasons = [
+                    RuntimeEventValidator.safe_text(item).strip()[:64]
+                    for item in value[:6]
+                    if RuntimeEventValidator.safe_text(item).strip()
+                ]
+                cleaned[normalized_key] = reasons
         return cleaned
 
 
@@ -997,6 +1149,7 @@ class ResourcePlanValidator:
     """Schema and normalization for image/model resource plan facts."""
 
     _IMAGE_ALLOWED_FIELDS = {
+        "failure_code",
         "image_request_id",
         "name",
         "status",
@@ -1006,6 +1159,7 @@ class ResourcePlanValidator:
         "source",
     }
     _MODEL_ALLOWED_FIELDS = {
+        "failure_code",
         "model_request_id",
         "name",
         "status",
@@ -1031,6 +1185,7 @@ class ResourcePlanValidator:
     }
     _SAFE_TEXT_FIELDS = {
         "image_request_id",
+        "failure_code",
         "model_request_id",
         "name",
         "mode",
@@ -1097,6 +1252,7 @@ class ResourcePlanValidator:
                         fallback = {
                             "image_request_id": f"image-resource-{len(cleaned) + 1:02d}",
                             "mode": "adapter",
+                            "failure_code": "resource_unavailable",
                             "model_request_id": f"model-resource-{len(cleaned) + 1:02d}",
                             "name": key,
                             "source": "image_resource" if kind == "image" else "legacy_model",
@@ -2817,6 +2973,10 @@ class ReportRecordValidator:
         "batch_tooling_summary",
         "classification_summary",
         "environment_component_summary",
+        "engine_write_boundary_summary",
+        "engine_write_readiness_summary",
+        "fact_source_boundary_summary",
+        "final_adjustment_confirmation_replay_summary",
         "final_adjustment_confirmation_summary",
         "geometry_fact_summary",
         "geometry_fact_replay_summary",
@@ -2835,6 +2995,7 @@ class ReportRecordValidator:
         "planning_context_summary",
         "provider_readiness_summary",
         "provider_summary",
+        "report_health_summary",
         "review_advisory_confirmation_summary",
         "review_advisory_replay_summary",
         "review_advisory_proposal_summary",
@@ -2847,22 +3008,22 @@ class ReportRecordValidator:
         "semantic_arbitration_summary",
         "scene_plan_lifecycle_summary",
         "runtime_command_summary",
-	        "state_patch_summary",
-	        "state_version",
+        "state_patch_summary",
+        "state_version",
         "sync_health_digest",
         "sync_summary",
-	        "tool_queue_health_summary",
-	        "tool_graph_summary",
-	        "tool_execution_digest",
-	        "vlm_checkpoint_summary",
-	    }
+        "tool_queue_health_summary",
+        "tool_graph_summary",
+        "tool_execution_digest",
+        "vlm_checkpoint_summary",
+    }
     _BLOCKED_FIELDS = {
         "api_key",
         "asset_path",
-	        "context_id",
-	        "correlation_id",
-	        "graph_id",
-	        "headers",
+        "context_id",
+        "correlation_id",
+        "graph_id",
+        "headers",
         "message_id",
         "metadata",
         "model_path",
@@ -2973,6 +3134,7 @@ class RuntimeState:
                 "asset_request_plans": {},
                 "image_resource_plans": {},
                 "model_resource_plans": {},
+                "custom_resource_phase_facts": {},
                 "placement_proposals": {},
                 "geometry_reviews": {},
                 "custom_vlm_checkpoint_facts": {},
@@ -3355,6 +3517,15 @@ class ToolDefinition:
         return str(type(value).__name__)
 
     def as_manifest(self) -> dict[str, Any]:
+        stateful = bool(self.consumes_state or self.produces_state)
+        execution_contract = {
+            "access": "write" if self.requires_write else "read",
+            "stateful": stateful,
+            "state_contract": "stateful" if stateful else "stateless",
+            "confirmation_required": bool(self.requires_write or self.default_risk_level == RiskLevel.HIGH),
+            "user_visible_failure": self.requires_user_visible_failure,
+            "system_actor_write": self.allow_system_actor_write,
+        }
         return {
             "name": ToolDefinition._safe_manifest_identifier(self.name),
             "category": self.category.value,
@@ -3366,6 +3537,7 @@ class ToolDefinition:
             "produces_state": ToolDefinition._safe_manifest_identifier_list(self.produces_state),
             "requires_user_visible_failure": self.requires_user_visible_failure,
             "suppress_dependency_skip_event": self.suppress_dependency_skip_event,
+            "execution_contract": execution_contract,
             "description": OperationLog._safe_text(self.description),
         }
 
@@ -3663,9 +3835,11 @@ class ToolRegistry:
         summary = {
             "tool_count": sum(category_counts.values()),
             "category_counts": dict(sorted(category_counts.items())),
+            "read_only_tool_count": sum(category_counts.values()) - len(write_tools),
             "write_tool_count": len(write_tools),
             "high_risk_tool_count": len(high_risk_tools),
             "user_visible_failure_tool_count": len(user_visible_failure_tools),
+            "stateful_tool_count": len(set(consumes_state_tools) | set(produces_state_tools)),
             "consumes_state_tool_count": len(consumes_state_tools),
             "produces_state_tool_count": len(produces_state_tools),
             "consumed_state_keys": ToolDefinition._safe_manifest_identifier_list(
@@ -5427,10 +5601,12 @@ class ToolCallGraphExecutor:
                     stop_status = self._runtime_plan_stop_status(room_id=room_id, plan_id=graph.plan_id)
                 if stop_status:
                     graph.status = stop_status
+                    skipped_count = 0
                     for pending in graph.nodes.values():
                         if pending.status in {ToolCallStatus.PLANNED, ToolCallStatus.READY}:
                             pending.status = ToolCallStatus.SKIPPED
                             pending.error = f"runtime plan {stop_status}"
+                            skipped_count += 1
                     stopped_persisted = self._persist_graph(graph, room_id=room_id)
                     if not stopped_persisted:
                         graph.status = "failed"
@@ -5443,17 +5619,32 @@ class ToolCallGraphExecutor:
                         batch_id=graph.batch_id,
                         tool_call_id=call.tool_call_id,
                         message=f"runtime plan {stop_status}",
-                        payload={"graph_id": graph.graph_id, "status": stop_status},
+                        payload={"graph_id": graph.graph_id, "status": stop_status, "skipped_count": skipped_count},
                     )
                     self._emit_graph_stopped_runtime_event(
                         room_id=room_id,
                         graph=graph,
                         status=stop_status,
                         tool_call_id=call.tool_call_id,
+                        skipped_count=skipped_count,
                     )
                     return graph
                 allowed, reason = self.guard.authorize(call, definition)
                 if not allowed:
+                    effective_risk = max(
+                        call.risk_level,
+                        definition.default_risk_level if definition is not None else call.risk_level,
+                        key=lambda risk: (RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH).index(risk),
+                    )
+                    requires_write = bool(
+                        call.requires_write or (definition.requires_write if definition is not None else False)
+                    )
+                    guard_payload = {
+                        "guard_reason": str(reason or ""),
+                        "risk_level": effective_risk.value,
+                        "requires_write": requires_write,
+                        "confirmed": bool(call.confirmed),
+                    }
                     call.status = ToolCallStatus.BLOCKED
                     call.error = reason
                     if self.policy.fail_fast:
@@ -5472,12 +5663,14 @@ class ToolCallGraphExecutor:
                         batch_id=graph.batch_id,
                         tool_call_id=call.tool_call_id,
                         message=reason,
+                        payload=guard_payload,
                     )
                     self._emit_tool_blocked_runtime_event(
                         room_id=room_id,
                         graph=graph,
                         call=call,
                         reason=reason,
+                        guard_payload=guard_payload,
                     )
                     if self.policy.skip_dependents_on_failure:
                         self._skip_dependents(graph, call.tool_call_id, room_id=room_id)
@@ -5548,7 +5741,12 @@ class ToolCallGraphExecutor:
                         plan_id=graph.plan_id,
                         batch_id=graph.batch_id,
                         tool_call_id=call.tool_call_id,
-                        payload={"fields": injected, "source": injection_source},
+                        payload={
+                            "fields": injected,
+                            "field_count": len(injected),
+                            "field_names": injected,
+                            "source": injection_source,
+                        },
                     )
 
                 missing_required_args = self._missing_required_args_after_runtime_facts(call, definition)
@@ -6006,6 +6204,55 @@ class ToolCallGraphExecutor:
                         )
                         self._persist_graph(graph, room_id=room_id)
                         continue
+                    if result.state_patch is not None:
+                        patch_room_id = str(result.state_patch.room_id or "").strip()
+                        expected_room_id = str(room_id or "").strip()
+                        allowed_state_keys = set(definition.produces_state if definition is not None else ())
+                        patch_keys = {str(key) for key in result.state_patch.changes}
+                        unexpected_keys = sorted(patch_keys - allowed_state_keys) if allowed_state_keys else []
+                        if patch_room_id == expected_room_id and not unexpected_keys:
+                            result.state_patch.source_tool_call_id = call.tool_call_id
+                            if result.state_patch.expected_version is None:
+                                result.state_patch.expected_version = self.state.version
+                                self.operation_log.append(
+                                    "runtime_state_patch_version_stamped",
+                                    room_id=room_id,
+                                    plan_id=graph.plan_id,
+                                    batch_id=graph.batch_id,
+                                    tool_call_id=call.tool_call_id,
+                                    payload={"expected_version": result.state_patch.expected_version},
+                                )
+                            applied, apply_reason = self.state.apply_patch(result.state_patch)
+                            self.operation_log.append(
+                                "failed_tool_result_state_patch_applied"
+                                if applied else "failed_tool_result_state_patch_conflict",
+                                room_id=room_id,
+                                plan_id=graph.plan_id,
+                                batch_id=graph.batch_id,
+                                tool_call_id=call.tool_call_id,
+                                message=apply_reason,
+                                payload={
+                                    "patch_id": result.state_patch.patch_id,
+                                    "change_key_count": len(result.state_patch.changes),
+                                    "operation_count": len(result.state_patch.operations or result.state_patch.changes),
+                                    "applied_version": self.state.version if applied else "",
+                                    **self._geometry_state_patch_operation_payload(result.state_patch),
+                                },
+                            )
+                        else:
+                            self.operation_log.append(
+                                "failed_tool_result_state_patch_rejected",
+                                room_id=room_id,
+                                plan_id=graph.plan_id,
+                                batch_id=graph.batch_id,
+                                tool_call_id=call.tool_call_id,
+                                message="failed tool result state patch rejected",
+                                payload={
+                                    "patch_room_id": patch_room_id,
+                                    "execution_room_id": expected_room_id,
+                                    "unexpected_state_keys": unexpected_keys,
+                                },
+                            )
                     call.status = ToolCallStatus.FAILED
                     call.error = result.message
                     failed_result_persisted = self._persist_graph(graph, room_id=room_id)
@@ -6120,7 +6367,7 @@ class ToolCallGraphExecutor:
             "url",
             "://",
         )
-        allowed_fields = {*id_fields, "status", "reason", "observed_position", "observed_deleted"}
+        allowed_fields = {*id_fields, "status", "reason", "failure_code", "observed_position", "observed_deleted"}
         for item in value:
             if not isinstance(item, Mapping):
                 continue
@@ -6296,6 +6543,7 @@ class ToolCallGraphExecutor:
         graph: ToolCallGraph,
         call: ToolCall,
         reason: str,
+        guard_payload: Mapping[str, Any] | None = None,
     ) -> None:
         event = RuntimeEvent(
             event_id=_id("evt"),
@@ -6309,7 +6557,7 @@ class ToolCallGraphExecutor:
             level="warning",
             title="执行步骤已被拦截",
             message="该步骤需要确认或更高权限，已被安全策略拦截。",
-            payload={"status": "blocked"},
+            payload={"status": "blocked", **dict(guard_payload or {})},
         )
         applied, apply_reason = self.state.apply_patch(
             StatePatch(
@@ -6330,7 +6578,7 @@ class ToolCallGraphExecutor:
                 "event_id": event.event_id,
                 "event_type": event.event_type,
                 "reason": apply_reason,
-                "guard_reason": str(reason or ""),
+                **dict(guard_payload or {}),
             },
         )
 
@@ -6341,6 +6589,7 @@ class ToolCallGraphExecutor:
         graph: ToolCallGraph,
         status: str,
         tool_call_id: str = "",
+        skipped_count: int = 0,
     ) -> None:
         label = "暂停" if status == ScenePlanStatus.PAUSED.value else "取消"
         event = RuntimeEvent(
@@ -6355,7 +6604,7 @@ class ToolCallGraphExecutor:
             level="warning",
             title=f"执行图已{label}",
             message=f"当前方案已{label}，不会继续执行后续工具。",
-            payload={"status": str(status or "")},
+            payload={"status": str(status or ""), "skipped_count": max(0, int(skipped_count or 0))},
         )
         applied, reason = self.state.apply_patch(
             StatePatch(
@@ -6376,6 +6625,7 @@ class ToolCallGraphExecutor:
                 "event_id": event.event_id,
                 "event_type": event.event_type,
                 "reason": reason,
+                "skipped_count": max(0, int(skipped_count or 0)),
             },
         )
 
@@ -6784,30 +7034,76 @@ class AgentRuntime:
         "actor_count",
         "applied_count",
         "batch_count",
+        "batch_failed_count",
         "batch_index",
+        "batch_partial_count",
+        "batch_semantic_status_counts",
         "bytes_transferred",
         "chunk_count",
         "chunk_index",
+        "command",
+        "command_recorded",
         "component_count",
+        "confirmed",
         "delta_count",
+        "environment_failed_count",
+        "environment_import_failed_count",
+        "environment_import_failure_code_counts",
+        "environment_import_requested_count",
+        "environment_imported_count",
+        "engine_write_boundary_fact_count",
+        "engine_write_transform_boundary_count",
+        "engine_write_bridge_call_count",
+        "engine_write_bridge_error_code_counts",
+        "engine_write_bridge_failed_count",
+        "engine_write_bridge_success_count",
+        "engine_write_readiness_mismatch_count",
+        "engine_write_readiness_mismatch_channels",
+        "graph_status",
         "ground_snapped_count",
+        "guard_reason",
         "item_count",
+        "layout_applied_delta_count",
+        "layout_ground_snapped_count",
+        "layout_overlap_resolved_count",
+        "layout_skipped_delta_count",
+        "layout_transform_result_count",
         "overlap_resolved_count",
         "progress",
         "proposal_count",
         "queue_limit",
         "requested_count",
+        "requires_write",
+        "report_attention_required",
+        "report_health_reasons",
+        "report_health_status",
+        "resource_phase_failed_count",
+        "resource_phase_failure_code_counts",
+        "resource_phase_partial_count",
+        "resource_phase_waiting_count",
+        "risk_level",
         "imported_count",
+        "import_failure_code_counts",
         "failed_count",
         "skipped_count",
+        "state_version",
         "status",
+        "tool_call_status",
+        "sync_actor_delete_count",
+        "sync_actor_transform_count",
+        "sync_event_count",
+        "sync_health_status",
+        "sync_failure_code_counts",
+        "latest_sync_failure_code",
+        "asset_failed_count",
+        "asset_incomplete_count",
         "total_bytes",
         "total_batches",
+        "layout_transform_failure_code_counts",
         "transform_failed_count",
         "transform_result_count",
         "transform_success_count",
     }
-
     def _build_provider_summary(self) -> dict[str, Any]:
         summary = {
             "scene_snapshot": self._provider_mode(self._scene_snapshot_provider, "mock_empty"),
@@ -6863,6 +7159,65 @@ class AgentRuntime:
             "status_counts": dict(sorted(status_counts.items())),
             "enabled_channels": enabled_channels[:8],
             "unavailable_channels": unavailable_channels[:8],
+        }
+
+    @staticmethod
+    def _engine_write_readiness_summary(provider_summary: Mapping[str, Any]) -> dict[str, Any]:
+        safe = AgentRuntime._safe_provider_summary(provider_summary)
+        engine_channels = ("environment_import", "actor_import", "actor_delete", "layout_transform")
+        status_counts: dict[str, int] = {}
+        mode_counts: dict[str, int] = {}
+        native_enabled_channels: list[str] = []
+        runtime_state_only_channels: list[str] = []
+        fallback_channels: list[str] = []
+        disabled_channels: list[str] = []
+        unavailable_channels: list[str] = []
+        requested_channels: list[str] = []
+        for key in engine_channels:
+            item = dict(safe.get(key) or {})
+            mode = str(item.get("mode") or "").strip()
+            status = str(item.get("status") or "").strip()
+            if not status:
+                if mode == "adapter":
+                    status = "enabled"
+                elif mode == "disabled":
+                    status = "disabled"
+                elif mode == "runtime_state_only":
+                    status = "runtime_state_only"
+                elif mode.startswith("mock_"):
+                    status = "fallback"
+                else:
+                    status = mode or "unknown"
+            status_counts[status] = status_counts.get(status, 0) + 1
+            mode_counts[mode or "unknown"] = mode_counts.get(mode or "unknown", 0) + 1
+            if item.get("requested"):
+                requested_channels.append(key)
+            if status == "enabled":
+                native_enabled_channels.append(key)
+            elif status == "runtime_state_only":
+                runtime_state_only_channels.append(key)
+            elif status == "disabled":
+                disabled_channels.append(key)
+            elif status == "fallback":
+                fallback_channels.append(key)
+            else:
+                unavailable_channels.append(key)
+        return {
+            "channel_count": len(engine_channels),
+            "requested_count": len(requested_channels),
+            "native_enabled_count": len(native_enabled_channels),
+            "runtime_state_only_count": len(runtime_state_only_channels),
+            "fallback_count": len(fallback_channels),
+            "disabled_count": len(disabled_channels),
+            "unavailable_count": len(unavailable_channels),
+            "status_counts": dict(sorted(status_counts.items())),
+            "mode_counts": dict(sorted(mode_counts.items())),
+            "requested_channels": requested_channels,
+            "native_enabled_channels": native_enabled_channels,
+            "runtime_state_only_channels": runtime_state_only_channels,
+            "fallback_channels": fallback_channels,
+            "disabled_channels": disabled_channels,
+            "unavailable_channels": unavailable_channels,
         }
 
     @staticmethod
@@ -6964,7 +7319,11 @@ class AgentRuntime:
             reason = manifest_call.error or graph.status or "unknown"
             self.operation_log.append(
                 "runtime_tool_manifest_snapshot_failed",
-                payload={"category": category_value, "reason": reason},
+                payload=self._snapshot_failure_audit_payload(
+                    summary_type="runtime_tool_manifest",
+                    reason=reason,
+                    event=category_value,
+                ),
             )
             raise RuntimeError(f"failed to record tool manifest snapshot: {reason}")
         manifest = list(fact.get("tools") or [])
@@ -6984,6 +7343,7 @@ class AgentRuntime:
     def _publish_provider_readiness(self, room_id: str, *, plan_id: str = "") -> dict[str, Any]:
         room = str(room_id or "default")
         provider_readiness = self._safe_provider_summary(self._provider_summary)
+        readiness_summary = self._provider_readiness_summary(self._provider_summary)
         graph = ToolCallGraph(
             graph_id=_id("graph-provider-readiness-publish"),
             plan_id=str(plan_id or "").strip() or "room-provider-readiness",
@@ -7016,7 +7376,14 @@ class AgentRuntime:
             "runtime_provider_readiness_published" if applied else "runtime_provider_readiness_publish_failed",
             room_id=room,
             plan_id=str(plan_id or ""),
-            payload={"reason": reason},
+            payload={
+                "reason": reason,
+                "readiness_channel_count": int(readiness_summary.get("channel_count") or 0),
+                "readiness_requested_count": int(readiness_summary.get("requested_count") or 0),
+                "readiness_enabled_count": int(readiness_summary.get("enabled_count") or 0),
+                "readiness_unavailable_count": int(readiness_summary.get("unavailable_count") or 0),
+                "readiness_status_counts": dict(readiness_summary.get("status_counts") or {}),
+            },
         )
         if not applied:
             return {"persisted": False, "reason": reason, "event_count": 0}
@@ -7066,6 +7433,8 @@ class AgentRuntime:
                 allow_active=False,
             )
             if not active_plan_id:
+                readiness_summary = self._provider_readiness_summary(self._provider_summary)
+                engine_write_readiness_summary = self._engine_write_readiness_summary(self._provider_summary)
                 status = {
                     "room_id": room,
                     "plan_id": "",
@@ -7077,8 +7446,10 @@ class AgentRuntime:
                         "event_count": 0,
                     },
                     "provider_summary": self._safe_provider_summary(self._provider_summary),
-                    "provider_readiness_summary": self._provider_readiness_summary(self._provider_summary),
+                    "provider_readiness_summary": readiness_summary,
+                    "engine_write_readiness_summary": engine_write_readiness_summary,
                     "engine_write_summary": self._engine_write_replay_summary([]),
+                    "engine_write_boundary_summary": self._engine_write_boundary_summary_for_plan({}, ""),
                     "message_delivery_summary": self._message_delivery_replay_summary([]),
                     "latest_runtime_events": [],
                 }
@@ -7090,6 +7461,11 @@ class AgentRuntime:
                         "external_plan_id": str(external_plan_id or ""),
                         "recorded": False,
                         "reason": "no runtime plan",
+                        "readiness_channel_count": int(readiness_summary.get("channel_count") or 0),
+                        "readiness_requested_count": int(readiness_summary.get("requested_count") or 0),
+                        "readiness_enabled_count": int(readiness_summary.get("enabled_count") or 0),
+                        "readiness_unavailable_count": int(readiness_summary.get("unavailable_count") or 0),
+                        "readiness_status_counts": dict(readiness_summary.get("status_counts") or {}),
                     },
                 )
                 return self._provider_status_snapshot_via_tool_graph(
@@ -7099,6 +7475,8 @@ class AgentRuntime:
                     provider_status=status,
                 )
         readiness_publish = self._publish_provider_readiness(room, plan_id=active_plan_id)
+        readiness_summary = self._provider_readiness_summary(self._provider_summary)
+        engine_write_readiness_summary = self._engine_write_readiness_summary(self._provider_summary)
         safe_readiness_publish = {
             "persisted": bool(readiness_publish.get("persisted")),
             "reason": "ok" if readiness_publish.get("persisted") else "RuntimeState persistence failed",
@@ -7126,8 +7504,13 @@ class AgentRuntime:
             "readiness_published": bool(safe_readiness_publish.get("persisted")),
             "readiness_publish": safe_readiness_publish,
             "provider_summary": self._safe_provider_summary(self._provider_summary),
-            "provider_readiness_summary": self._provider_readiness_summary(self._provider_summary),
+            "provider_readiness_summary": readiness_summary,
+            "engine_write_readiness_summary": engine_write_readiness_summary,
             "engine_write_summary": self._engine_write_replay_summary(replay_entries),
+            "engine_write_boundary_summary": self._engine_write_boundary_summary_for_plan(
+                self.state.room(room),
+                active_plan_id,
+            ),
             "message_delivery_summary": self._message_delivery_replay_summary(message_entries),
             "latest_runtime_events": self.user_visible_events(
                 room,
@@ -7143,6 +7526,11 @@ class AgentRuntime:
                 "provider_count": len(self._provider_summary),
                 "external_plan_id": str(external_plan_id or ""),
                 "recorded": True,
+                "readiness_channel_count": int(readiness_summary.get("channel_count") or 0),
+                "readiness_requested_count": int(readiness_summary.get("requested_count") or 0),
+                "readiness_enabled_count": int(readiness_summary.get("enabled_count") or 0),
+                "readiness_unavailable_count": int(readiness_summary.get("unavailable_count") or 0),
+                "readiness_status_counts": dict(readiness_summary.get("status_counts") or {}),
             },
         )
         return self._provider_status_snapshot_via_tool_graph(
@@ -7804,6 +8192,8 @@ class AgentRuntime:
             )
         if call.tool_name == "batch.mark_completed":
             next_status = BatchPlanStatus.COMPLETED
+        elif call.tool_name == "batch.mark_partial":
+            next_status = BatchPlanStatus.PARTIAL
         elif call.tool_name == "batch.mark_failed":
             next_status = BatchPlanStatus.FAILED
         elif call.tool_name == "batch.mark_cancelled":
@@ -8207,6 +8597,58 @@ class AgentRuntime:
             user_visible_message="最终报告已写入 Runtime 状态，可用于后续查询与复盘。",
         )
 
+    def _record_audit_event_tool(self, call: ToolCall) -> ToolResult:
+        room = str(call.args.get("room_id") or "default")
+        event_name = self._safe_audit_event_name(call.args.get("event_name") or "runtime_audit_event_recorded")
+        event_message = OperationLog._safe_text(call.args.get("message") or "")
+        plan_id = str(call.args.get("plan_id") or "").strip()
+        batch_id = str(call.args.get("batch_id") or "").strip()
+        raw_payload = dict(call.args.get("payload") or {})
+        payload = OperationLog._safe_payload(raw_payload)
+        for key in (
+            "event_id",
+            "external_plan_id",
+            "reply_to",
+            "source_user_id",
+            "agent_id",
+            "intent",
+            "route",
+            "target_agent",
+            "phase",
+            "runtime_payload_prepared_by_worker",
+        ):
+            if key not in raw_payload:
+                continue
+            value = raw_payload.get(key)
+            if isinstance(value, bool):
+                payload[key] = value
+            elif isinstance(value, (int, float)):
+                payload[key] = value
+            elif value is None:
+                payload[key] = ""
+            else:
+                payload[key] = str(value or "")[:240]
+        if "action" not in payload:
+            payload["action"] = str(call.args.get("action") or "runtime_audit_event")
+        entry = self.operation_log.append(
+            event_name,
+            room_id=room,
+            plan_id=plan_id,
+            batch_id=batch_id,
+            message=event_message,
+            payload=payload,
+        )
+        return ToolResult(
+            True,
+            "runtime audit event recorded",
+            payload={
+                "event": entry.event,
+                "operation_log_index": len(self.operation_log.entries()),
+                "plan_id": plan_id,
+                "batch_id": batch_id,
+            },
+        )
+
     def _record_tool_manifest_snapshot_tool(self, call: ToolCall) -> ToolResult:
         room = str(call.args.get("room_id") or "default")
         manifest_key = str(call.args.get("manifest_key") or "").strip()
@@ -8269,12 +8711,14 @@ class AgentRuntime:
             plan_id=plan_id,
             batch_id=batch_id,
         )
+        audit_payload = self._operation_replay_snapshot_summary_payload(summary)
         fact = {
             "plan_id": plan_id,
             "batch_id": batch_id,
             "summary_type": "operation_replay_summary",
             "operation_replay_summary": summary,
             "source": "runtime_report_operation_replay_summary",
+            **audit_payload,
         }
         state_patch = StatePatch(
             room_id=room,
@@ -8295,10 +8739,7 @@ class AgentRuntime:
             True,
             "operation replay summary recorded",
             state_patch=state_patch,
-            payload={
-                "summary_type": "operation_replay_summary",
-                "entry_count": int(summary.get("entry_count") or 0),
-            },
+            payload=audit_payload,
         )
 
     def _record_status_summary_snapshot_tool(self, call: ToolCall) -> ToolResult:
@@ -8336,6 +8777,8 @@ class AgentRuntime:
                 error_code="invalid_status_summary_snapshot_state",
                 user_visible_message="Runtime 状态摘要快照未通过结构校验，已停止该步骤。",
             )
+        report_health_summary = dict(status_summary.get("report_health_summary") or {})
+        engine_write_readiness_summary = dict(status_summary.get("engine_write_readiness_summary") or {})
         return ToolResult(
             True,
             "status summary snapshot recorded",
@@ -8345,6 +8788,57 @@ class AgentRuntime:
                 "batch_count": int(
                     dict(status_summary.get("batch_summary") or {}).get("batch_count") or 0
                 ),
+                "report_health_status": AgentRuntime._safe_report_text(
+                    report_health_summary.get("status")
+                )[:48],
+                "report_health_attention_required": bool(
+                    report_health_summary.get("attention_required")
+                ),
+                "report_health_reasons": [
+                    AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                    for item in list(report_health_summary.get("reasons") or [])[:8]
+                    if AgentRuntime._safe_report_text(item).strip()
+                ],
+                "engine_write_readiness_native_enabled_count": int(
+                    engine_write_readiness_summary.get("native_enabled_count") or 0
+                ),
+                "engine_write_readiness_runtime_state_only_count": int(
+                    engine_write_readiness_summary.get("runtime_state_only_count") or 0
+                ),
+                "engine_write_readiness_fallback_count": int(
+                    engine_write_readiness_summary.get("fallback_count") or 0
+                ),
+                "engine_write_readiness_disabled_count": int(
+                    engine_write_readiness_summary.get("disabled_count") or 0
+                ),
+                "engine_write_readiness_unavailable_count": int(
+                    engine_write_readiness_summary.get("unavailable_count") or 0
+                ),
+                "engine_write_readiness_native_enabled_channels": [
+                    AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                    for item in list(engine_write_readiness_summary.get("native_enabled_channels") or [])[:8]
+                    if AgentRuntime._safe_report_text(item).strip()
+                ],
+                "engine_write_readiness_runtime_state_only_channels": [
+                    AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                    for item in list(engine_write_readiness_summary.get("runtime_state_only_channels") or [])[:8]
+                    if AgentRuntime._safe_report_text(item).strip()
+                ],
+                "engine_write_readiness_fallback_channels": [
+                    AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                    for item in list(engine_write_readiness_summary.get("fallback_channels") or [])[:8]
+                    if AgentRuntime._safe_report_text(item).strip()
+                ],
+                "engine_write_readiness_disabled_channels": [
+                    AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                    for item in list(engine_write_readiness_summary.get("disabled_channels") or [])[:8]
+                    if AgentRuntime._safe_report_text(item).strip()
+                ],
+                "engine_write_readiness_unavailable_channels": [
+                    AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                    for item in list(engine_write_readiness_summary.get("unavailable_channels") or [])[:8]
+                    if AgentRuntime._safe_report_text(item).strip()
+                ],
             },
         )
 
@@ -8385,6 +8879,11 @@ class AgentRuntime:
                 error_code="invalid_gm_summary_snapshot_state",
                 user_visible_message="Runtime GM 摘要快照未通过结构校验，已停止该步骤。",
             )
+        context_digest = dict(gm_summary.get("context_digest") or {})
+        intervention_digest = dict(gm_summary.get("intervention_digest") or {})
+        layout_digest = dict(gm_summary.get("layout_adjustment_summary") or {})
+        runtime_event_digest = dict(gm_summary.get("runtime_event_replay_digest") or {})
+        report_health_digest = dict(gm_summary.get("report_health_digest") or {})
         return ToolResult(
             True,
             "GM summary snapshot recorded",
@@ -8393,6 +8892,18 @@ class AgentRuntime:
                 "available": bool(gm_summary.get("available")),
                 "context_count": int(gm_summary.get("context_count") or 0),
                 "has_scene_plan": bool(gm_summary.get("has_scene_plan")),
+                "agent_contribution_count": len(list(context_digest.get("agent_contributions") or [])),
+                "latest_user_point_count": len(list(context_digest.get("latest_user_points") or [])),
+                "intervention_pending_count": int(intervention_digest.get("pending_count") or 0),
+                "intervention_accepted_count": int(intervention_digest.get("accepted_count") or 0),
+                "intervention_deferred_count": int(intervention_digest.get("deferred_count") or 0),
+                "layout_proposal_count": int(layout_digest.get("proposal_count") or 0),
+                "layout_applied_delta_count": int(layout_digest.get("applied_delta_count") or 0),
+                "layout_skipped_delta_count": int(layout_digest.get("skipped_delta_count") or 0),
+                "runtime_event_emitted_count": int(runtime_event_digest.get("emitted_count") or 0),
+                "runtime_event_emit_failed_count": int(runtime_event_digest.get("emit_failed_count") or 0),
+                "report_health_status": AgentRuntime._safe_report_text(report_health_digest.get("status"))[:48],
+                "report_attention_required": bool(report_health_digest.get("attention_required")),
             },
         )
 
@@ -8402,6 +8913,7 @@ class AgentRuntime:
         plan_id = str(call.args.get("plan_id") or "").strip()
         batch_id = str(call.args.get("batch_id") or "").strip()
         audience = str(call.args.get("audience") or "").strip()
+        limit = call.args.get("limit") if isinstance(call.args.get("limit"), int) else None
         events_key = str(call.args.get("events_key") or "").strip()
         raw_events = call.args.get("runtime_events")
         if not isinstance(raw_events, list):
@@ -8418,6 +8930,11 @@ class AgentRuntime:
                 error_code="invalid_runtime_events_snapshot_request",
                 user_visible_message="Runtime 事件快照缺少必要信息，已停止该步骤。",
             )
+        event_summary = self._runtime_event_snapshot_summary(
+            runtime_events,
+            audience=audience,
+            limit=limit,
+        )
         fact = {
             "room_id": source_room,
             "plan_id": plan_id,
@@ -8425,7 +8942,7 @@ class AgentRuntime:
             "audience": audience,
             "summary_type": "runtime_events",
             "runtime_events": runtime_events,
-            "event_count": len(runtime_events),
+            **event_summary,
             "source": "runtime_events_snapshot",
         }
         state_patch = StatePatch(
@@ -8448,7 +8965,7 @@ class AgentRuntime:
             "Runtime events snapshot recorded",
             state_patch=state_patch,
             payload={
-                "event_count": len(runtime_events),
+                **event_summary,
                 "recorded": True,
             },
         )
@@ -8523,6 +9040,27 @@ class AgentRuntime:
                 "sync_reconcile_failed_count": int(peer_sync_replay.get("sync_reconcile_failed_count") or 0),
                 "state_reconcile_count": int(peer_sync_replay.get("state_reconcile_count") or 0),
                 "state_reconcile_failed_count": int(peer_sync_replay.get("state_reconcile_failed_count") or 0),
+                "sync_event_type_counts": AgentRuntime._safe_status_count_map(
+                    sync_summary.get("event_type_counts")
+                ),
+                "asset_transfer_status_counts": AgentRuntime._safe_status_count_map(
+                    asset_transfer_replay.get("transfer_status_counts")
+                ),
+                "asset_transfer_event_type_counts": AgentRuntime._safe_status_count_map(
+                    asset_transfer_replay.get("event_type_counts")
+                ),
+                "peer_sync_event_type_counts": AgentRuntime._safe_status_count_map(
+                    peer_sync_replay.get("event_type_counts")
+                ),
+                "latest_transfer_status": AgentRuntime._safe_report_text(
+                    asset_transfer_replay.get("latest_transfer_status")
+                )[:48],
+                "latest_transfer_progress": int(
+                    asset_transfer_replay.get("latest_transfer_progress") or 0
+                ),
+                "latest_peer_event_type": AgentRuntime._safe_report_text(
+                    peer_sync_replay.get("latest_peer_event_type")
+                )[:48],
             },
         )
 
@@ -8563,6 +9101,9 @@ class AgentRuntime:
                 error_code="invalid_provider_status_snapshot_state",
                 user_visible_message="Runtime 资源通道状态快照未通过结构校验，已停止该步骤。",
             )
+        engine_write_readiness_summary = dict(
+            provider_status.get("engine_write_readiness_summary") or {}
+        )
         return ToolResult(
             True,
             "provider status snapshot recorded",
@@ -8570,6 +9111,46 @@ class AgentRuntime:
             payload={
                 "readiness_published": bool(provider_status.get("readiness_published")),
                 "provider_count": len(dict(provider_status.get("provider_summary") or {})),
+                "engine_write_readiness_native_enabled_count": int(
+                    engine_write_readiness_summary.get("native_enabled_count") or 0
+                ),
+                "engine_write_readiness_runtime_state_only_count": int(
+                    engine_write_readiness_summary.get("runtime_state_only_count") or 0
+                ),
+                "engine_write_readiness_fallback_count": int(
+                    engine_write_readiness_summary.get("fallback_count") or 0
+                ),
+                "engine_write_readiness_disabled_count": int(
+                    engine_write_readiness_summary.get("disabled_count") or 0
+                ),
+                "engine_write_readiness_unavailable_count": int(
+                    engine_write_readiness_summary.get("unavailable_count") or 0
+                ),
+                "engine_write_readiness_native_enabled_channels": [
+                    AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                    for item in list(engine_write_readiness_summary.get("native_enabled_channels") or [])[:8]
+                    if AgentRuntime._safe_report_text(item).strip()
+                ],
+                "engine_write_readiness_runtime_state_only_channels": [
+                    AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                    for item in list(engine_write_readiness_summary.get("runtime_state_only_channels") or [])[:8]
+                    if AgentRuntime._safe_report_text(item).strip()
+                ],
+                "engine_write_readiness_fallback_channels": [
+                    AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                    for item in list(engine_write_readiness_summary.get("fallback_channels") or [])[:8]
+                    if AgentRuntime._safe_report_text(item).strip()
+                ],
+                "engine_write_readiness_disabled_channels": [
+                    AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                    for item in list(engine_write_readiness_summary.get("disabled_channels") or [])[:8]
+                    if AgentRuntime._safe_report_text(item).strip()
+                ],
+                "engine_write_readiness_unavailable_channels": [
+                    AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                    for item in list(engine_write_readiness_summary.get("unavailable_channels") or [])[:8]
+                    if AgentRuntime._safe_report_text(item).strip()
+                ],
             },
         )
 
@@ -8598,6 +9179,7 @@ class AgentRuntime:
             event=event,
             limit=limit,
         )
+        audit_payload = self._operation_replay_snapshot_audit_payload(replay)
         fact = {
             "room_id": source_room,
             "plan_id": plan_id,
@@ -8606,6 +9188,7 @@ class AgentRuntime:
             "summary_type": "runtime_operation_replay",
             "operation_replay": replay,
             "source": "runtime_operation_replay_snapshot",
+            **audit_payload,
         }
         state_patch = StatePatch(
             room_id=room,
@@ -8626,10 +9209,7 @@ class AgentRuntime:
             True,
             "operation replay snapshot recorded",
             state_patch=state_patch,
-            payload={
-                "entry_count": int(replay.get("entry_count") or 0),
-                "event": event,
-            },
+            payload=audit_payload,
         )
 
     def _publish_provider_readiness_tool(self, call: ToolCall) -> ToolResult:
@@ -9779,7 +10359,7 @@ class AgentRuntime:
         if queue_updates:
             changes["tool_graph_queue"] = queue_updates
         cancelled_graph_count = len(set(graph_updates) | set(queue_updates)) if normalized == "cancel" else 0
-        self._persist_runtime_command_state(
+        command_record = self._persist_runtime_command_state(
             room_id=room,
             plan_id=active_plan_id,
             changes=changes,
@@ -9819,7 +10399,7 @@ class AgentRuntime:
             title=title,
             message=message,
             progress=5 if normalized in {"resume", "retry"} else 0,
-            payload={"status": new_status, "command": normalized},
+            payload={"status": new_status, "command": normalized, **dict(command_record or {})},
         )
         return {
             "applied": True,
@@ -9831,6 +10411,10 @@ class AgentRuntime:
             "cancelled_graphs": cancelled_graph_count,
             "resumed_graphs": resumed_graph_count,
             "retried_graphs": retried_graph_count,
+            "command_recorded": bool((command_record or {}).get("command_recorded")),
+            "graph_status": str((command_record or {}).get("graph_status") or ""),
+            "tool_call_status": str((command_record or {}).get("tool_call_status") or ""),
+            "state_version": int((command_record or {}).get("state_version") or self.state.version),
             "message": message,
         }
 
@@ -10029,6 +10613,9 @@ class AgentRuntime:
                 "reply_to",
                 "source_user_id",
                 "agent_id",
+                "intent",
+                "route",
+                "target_agent",
                 "phase",
                 "runtime_payload_prepared_by_worker",
             ):
@@ -10069,21 +10656,51 @@ class AgentRuntime:
                         safe_payload["missing_runtime_plan"] = True
             if "action" not in safe_payload:
                 safe_payload["action"] = normalized_action
-            entry = self.operation_log.append(
-                event_name,
-                room_id=room,
-                plan_id=event_plan_id,
+            graph = ToolCallGraph(
+                graph_id=_id("graph-runtime-audit-event"),
+                plan_id=event_plan_id or "room-runtime-audit",
                 batch_id=requested_batch_id,
-                message=event_message,
-                payload=safe_payload,
             )
+            graph.add(
+                ToolCall(
+                    tool_call_id=_id("tool-runtime-audit-event"),
+                    tool_name="runtime.audit_event.record",
+                    args={
+                        "room_id": room,
+                        "plan_id": event_plan_id,
+                        "batch_id": requested_batch_id,
+                        "event_name": event_name,
+                        "message": event_message,
+                        "payload": safe_payload,
+                        "action": normalized_action,
+                    },
+                    risk_level=RiskLevel.LOW,
+                    requires_write=True,
+                    confirmed=True,
+                )
+            )
+            executor = ToolCallGraphExecutor(
+                registry=self.registry,
+                guard=self.guard,
+                state=self.state,
+                operation_log=self.operation_log,
+            )
+            executor.execute(graph, room_id=room)
+            audit_call = next(iter(graph.nodes.values()))
+            recorded = graph.status == "completed" and audit_call.status == ToolCallStatus.SUCCEEDED
             return {
                 "handled": True,
                 "action": normalized_action,
-                "recorded": True,
-                "event": entry.event,
+                "recorded": recorded,
+                "event": event_name if recorded else "",
                 "runtime_plan_id": event_plan_id,
-                "message": "AgentRuntime audit event has been recorded.",
+                "tool_graph_id": graph.graph_id,
+                "tool_call_status": audit_call.status.value,
+                "message": (
+                    "AgentRuntime audit event has been recorded through ToolCallGraph."
+                    if recorded
+                    else "AgentRuntime audit event was not recorded."
+                ),
             }
         if normalized_action in self._RUNTIME_EVENT_ACTIONS:
             event_plan_id = ""
@@ -10173,7 +10790,7 @@ class AgentRuntime:
                         filtered_events.append(event)
                 events = filtered_events
             try:
-                events = self._runtime_events_snapshot_via_tool_graph(
+                events_snapshot = self._runtime_events_snapshot_via_tool_graph(
                     room_id=room,
                     plan_id=event_plan_id,
                     batch_id=requested_batch_id,
@@ -10181,6 +10798,7 @@ class AgentRuntime:
                     limit=limit,
                     runtime_events=events,
                 )
+                events = list(events_snapshot.get("runtime_events") or [])
             except Exception:  # noqa: BLE001
                 self.operation_log.append(
                     "runtime_events_queried",
@@ -10221,6 +10839,10 @@ class AgentRuntime:
                 "recorded": True,
                 "runtime_events": events,
                 "event_count": len(events),
+                "snapshot_recorded": bool(events_snapshot.get("snapshot_recorded")),
+                "snapshot_status": str(events_snapshot.get("snapshot_status") or ""),
+                "snapshot_tool_status": str(events_snapshot.get("snapshot_tool_status") or ""),
+                "snapshot_state_version": int(events_snapshot.get("snapshot_state_version") or self.state.version),
                 "message": "AgentRuntime user-visible events have been listed.",
             }
         if normalized_action in self._PROVIDER_STATUS_ACTIONS:
@@ -10249,6 +10871,8 @@ class AgentRuntime:
                         "event_count": 0,
                     },
                     "provider_summary": {},
+                    "engine_write_summary": {},
+                    "engine_write_boundary_summary": {},
                     "latest_runtime_events": [],
                 }
             readiness_published = bool(provider_status.get("readiness_published"))
@@ -10308,12 +10932,98 @@ class AgentRuntime:
                 for key in ("environment_import", "actor_import", "actor_delete", "layout_transform")
             }
             engine_write_summary = dict(provider_status.get("engine_write_summary") or {})
+            engine_write_boundary_summary = dict(
+                provider_status.get("engine_write_boundary_summary") or {}
+            )
+            engine_write_readiness_summary = dict(
+                provider_status.get("engine_write_readiness_summary") or {}
+            )
+            self.operation_log.append(
+                "runtime_engine_write_status_exported",
+                room_id=room,
+                plan_id=str(provider_status.get("plan_id") or ""),
+                payload={
+                    "action": normalized_action,
+                    "external_plan_id": str(external_plan_id or ""),
+                    "recorded": readiness_published,
+                    "reason": readiness_reason or ("ok" if readiness_published else "RuntimeState persistence failed"),
+                    "engine_write_boundary_fact_count": int(
+                        engine_write_boundary_summary.get("boundary_fact_count") or 0
+                    ),
+                    "engine_write_import_boundary_count": int(
+                        engine_write_boundary_summary.get("import_boundary_count") or 0
+                    ),
+                    "engine_write_environment_import_boundary_count": int(
+                        engine_write_boundary_summary.get("environment_import_boundary_count") or 0
+                    ),
+                    "engine_write_transform_boundary_count": int(
+                        engine_write_boundary_summary.get("transform_boundary_count") or 0
+                    ),
+                    "engine_write_delete_boundary_count": int(
+                        engine_write_boundary_summary.get("delete_boundary_count") or 0
+                    ),
+                    "engine_write_bridge_call_count": int(
+                        engine_write_boundary_summary.get("bridge_call_count") or 0
+                    ),
+                    "engine_write_bridge_success_count": int(
+                        engine_write_boundary_summary.get("bridge_success_count") or 0
+                    ),
+                    "engine_write_bridge_failed_count": int(
+                        engine_write_boundary_summary.get("bridge_failed_count") or 0
+                    ),
+                    "engine_write_bridge_error_code_counts": dict(
+                        engine_write_boundary_summary.get("bridge_error_code_counts") or {}
+                    ),
+                    "engine_write_readiness_native_enabled_count": int(
+                        engine_write_readiness_summary.get("native_enabled_count") or 0
+                    ),
+                    "engine_write_readiness_runtime_state_only_count": int(
+                        engine_write_readiness_summary.get("runtime_state_only_count") or 0
+                    ),
+                    "engine_write_readiness_fallback_count": int(
+                        engine_write_readiness_summary.get("fallback_count") or 0
+                    ),
+                    "engine_write_readiness_disabled_count": int(
+                        engine_write_readiness_summary.get("disabled_count") or 0
+                    ),
+                    "engine_write_readiness_unavailable_count": int(
+                        engine_write_readiness_summary.get("unavailable_count") or 0
+                    ),
+                    "engine_write_readiness_native_enabled_channels": [
+                        str(item).strip()
+                        for item in list(engine_write_readiness_summary.get("native_enabled_channels") or [])[:8]
+                        if str(item).strip()
+                    ],
+                    "engine_write_readiness_runtime_state_only_channels": [
+                        str(item).strip()
+                        for item in list(engine_write_readiness_summary.get("runtime_state_only_channels") or [])[:8]
+                        if str(item).strip()
+                    ],
+                    "engine_write_readiness_fallback_channels": [
+                        str(item).strip()
+                        for item in list(engine_write_readiness_summary.get("fallback_channels") or [])[:8]
+                        if str(item).strip()
+                    ],
+                    "engine_write_readiness_disabled_channels": [
+                        str(item).strip()
+                        for item in list(engine_write_readiness_summary.get("disabled_channels") or [])[:8]
+                        if str(item).strip()
+                    ],
+                    "engine_write_readiness_unavailable_channels": [
+                        str(item).strip()
+                        for item in list(engine_write_readiness_summary.get("unavailable_channels") or [])[:8]
+                        if str(item).strip()
+                    ],
+                },
+            )
             return {
                 "handled": True,
                 "action": normalized_action,
                 "recorded": readiness_published,
                 "engine_write_status": engine_write_status,
+                "engine_write_readiness_summary": engine_write_readiness_summary,
                 "engine_write_summary": engine_write_summary,
+                "engine_write_boundary_summary": engine_write_boundary_summary,
                 "provider_status": provider_status,
                 "message": (
                     "AgentRuntime engine write readiness has been published."
@@ -10848,6 +11558,8 @@ class AgentRuntime:
                     "batch_id": requested_batch_id,
                     "event_count": int(sync_summary.get("event_count") or 0),
                     "actor_event_count": int(sync_summary.get("actor_event_count") or 0),
+                    "actor_transform_count": int(sync_replay.get("actor_transform_count") or 0),
+                    "actor_delete_count": int(sync_replay.get("actor_delete_count") or 0),
                     "asset_event_count": int(sync_summary.get("asset_event_count") or 0),
                     "recorded_count": int(sync_replay.get("recorded_count") or 0),
                     "failed_count": int(sync_replay.get("failed_count") or 0),
@@ -10910,15 +11622,15 @@ class AgentRuntime:
                     },
                 )
                 return {
-	                    "handled": True,
-		                    "action": normalized_action,
-		                    "sync_status": {},
-		                    "sync_replay": {},
-		                    "asset_transfer_replay_summary": {},
-		                    "peer_sync_replay_summary": {},
-		                    "sync_health_digest": {},
-		                    "message_delivery_summary": {},
-		                    "latest_runtime_events": [],
+                        "handled": True,
+                            "action": normalized_action,
+                            "sync_status": {},
+                            "sync_replay": {},
+                            "asset_transfer_replay_summary": {},
+                            "peer_sync_replay_summary": {},
+                            "sync_health_digest": {},
+                            "message_delivery_summary": {},
+                            "latest_runtime_events": [],
                     "message": "AgentRuntime sync status was not exported; RuntimeState persistence failed.",
                 }
         if normalized_action in self._SCENE_SNAPSHOT_STATUS_ACTIONS:
@@ -12279,7 +12991,7 @@ class AgentRuntime:
         if plan.status not in {ScenePlanStatus.PAUSED, ScenePlanStatus.CANCELLED}:
             plan.status = (
                 ScenePlanStatus.COMPLETED
-                if batch.status == BatchPlanStatus.COMPLETED
+                if batch.status in {BatchPlanStatus.COMPLETED, BatchPlanStatus.PARTIAL}
                 else ScenePlanStatus.FAILED
                 if batch.status == BatchPlanStatus.FAILED
                 else ScenePlanStatus.EXECUTING
@@ -13469,7 +14181,7 @@ class AgentRuntime:
             next_status = plan.status
         elif batches and any(batch.status == BatchPlanStatus.FAILED for batch in batches):
             next_status = ScenePlanStatus.FAILED
-        elif batches and all(batch.status == BatchPlanStatus.COMPLETED for batch in batches):
+        elif batches and all(batch.status in {BatchPlanStatus.COMPLETED, BatchPlanStatus.PARTIAL} for batch in batches):
             next_status = ScenePlanStatus.COMPLETED
         else:
             next_status = ScenePlanStatus.EXECUTING
@@ -14030,7 +14742,25 @@ class AgentRuntime:
         batch = self.batch_plans.get(graph.batch_id)
         if batch is None:
             return
-        if graph.status == "completed":
+        import_fact_status = self._terminal_batch_status_from_import_facts(
+            room_id=str(room_id),
+            batch_id=graph.batch_id,
+        )
+        if import_fact_status is not None:
+            next_status = import_fact_status
+            self.operation_log.append(
+                "batch_terminal_status_from_runtime_facts",
+                room_id=str(room_id),
+                plan_id=graph.plan_id,
+                batch_id=graph.batch_id,
+                payload={
+                    "graph_id": graph.graph_id,
+                    "graph_status": graph.status,
+                    "batch_status": next_status.value,
+                    "source": "import_facts",
+                },
+            )
+        elif graph.status == "completed":
             next_status = BatchPlanStatus.COMPLETED
         elif graph.status == ScenePlanStatus.CANCELLED.value:
             next_status = BatchPlanStatus.CANCELLED
@@ -14074,6 +14804,33 @@ class AgentRuntime:
             },
         )
 
+    def _terminal_batch_status_from_import_facts(
+        self,
+        *,
+        room_id: str,
+        batch_id: str,
+    ) -> BatchPlanStatus | None:
+        room = self.state.room(str(room_id))
+        facts = dict(room.get("custom_import_facts") or {})
+        result_fact = dict(facts.get(f"{batch_id}:actor_import_result") or {})
+        plan_fact = dict(facts.get(f"{batch_id}:actor_import_plan") or {})
+        for fact in (result_fact, plan_fact):
+            if not fact:
+                continue
+            status = str(fact.get("status") or "").strip().lower()
+            actor_count = int(fact.get("actor_count") or fact.get("requested_count") or 0)
+            ready_count = int(fact.get("ready_count") or fact.get("imported_count") or 0)
+            failed_count = int(fact.get("failed_count") or 0)
+            if status in {"failed", "error", "missing"}:
+                return BatchPlanStatus.FAILED
+            if actor_count > 0 and ready_count <= 0 and failed_count >= actor_count:
+                return BatchPlanStatus.FAILED
+            if ready_count > 0 and (failed_count > 0 or (actor_count > 0 and ready_count < actor_count)):
+                return BatchPlanStatus.PARTIAL
+            if status in {"partial", "partially_succeeded", "partial_success"}:
+                return BatchPlanStatus.PARTIAL
+        return None
+
     def _mark_batch_terminal_status_via_tool_graph(
         self,
         graph: ToolCallGraph,
@@ -14086,6 +14843,8 @@ class AgentRuntime:
             raise KeyError(f"batch plan not found: {graph.batch_id}")
         if next_status == BatchPlanStatus.COMPLETED:
             tool_name = "batch.mark_completed"
+        elif next_status == BatchPlanStatus.PARTIAL:
+            tool_name = "batch.mark_partial"
         elif next_status == BatchPlanStatus.FAILED:
             tool_name = "batch.mark_failed"
         elif next_status == BatchPlanStatus.CANCELLED:
@@ -14302,6 +15061,12 @@ class AgentRuntime:
                     payload["requested_count"] = requested_count
                     payload["imported_count"] = actor_count
                     payload["failed_count"] = max(0, requested_count - actor_count)
+                    failure_code_counts = self._actor_import_failure_code_counts_for_batch(
+                        room,
+                        str(graph.batch_id or ""),
+                    )
+                    if failure_code_counts:
+                        payload["import_failure_code_counts"] = failure_code_counts
             elif payload_count_key == "environment_component_count":
                 if call.tool_name == "runtime.environment.import_components":
                     requested_count = len([
@@ -14394,6 +15159,49 @@ class AgentRuntime:
                     payload=payload,
                 )
 
+    @staticmethod
+    def _actor_import_failure_code_counts_for_batch(
+        room: Mapping[str, Any],
+        batch_id: str,
+    ) -> dict[str, int]:
+        if not batch_id:
+            return {}
+        fact = dict(dict(room.get("custom_import_facts") or {}).get(f"{batch_id}:actor_import_result") or {})
+        if not fact:
+            return {}
+        counts: dict[str, int] = {}
+        explicit = fact.get("failure_code_counts")
+        if isinstance(explicit, Mapping):
+            for key, value in explicit.items():
+                code = AgentRuntime._safe_user_visible_failure_code(key)
+                count = int(value or 0)
+                if code and count > 0:
+                    counts[code] = counts.get(code, 0) + count
+        if counts:
+            return dict(sorted(counts.items()))
+        results = fact.get("import_results") if isinstance(fact.get("import_results"), list) else []
+        for row in results:
+            if not isinstance(row, Mapping):
+                continue
+            code = AgentRuntime._safe_user_visible_failure_code(row.get("failure_code"))
+            if not code:
+                continue
+            counts[code] = counts.get(code, 0) + 1
+        return dict(sorted(counts.items()))
+
+    @staticmethod
+    def _safe_user_visible_failure_code(value: Any) -> str:
+        code = str(value or "").strip().lower()
+        if not code:
+            return ""
+        cleaned = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in code)
+        cleaned = "_".join(part for part in cleaned.split("_") if part)
+        cleaned = cleaned.replace("provider", "adapter")
+        blocked = ("api_key", "authorization", "bearer", "token", "secret", "prompt", "url", "path")
+        if not cleaned or any(token in cleaned for token in blocked):
+            return ""
+        return cleaned[:80]
+
     def emit_runtime_event(
         self,
         *,
@@ -14479,17 +15287,81 @@ class AgentRuntime:
                 ):
                     reason = str(entry.message)
                     break
+        log_payload = {
+            "event_id": event.event_id,
+            "event_type": event.event_type,
+            "reason": reason,
+        }
+        if event.event_type == "report_ready":
+            report_reasons = [
+                RuntimeEventValidator.safe_text(reason_text)
+                for reason_text in list(safe_payload.get("report_health_reasons") or [])[:6]
+                if str(reason_text or "").strip()
+            ]
+            log_payload.update(
+                {
+                    "report_health_status": str(safe_payload.get("report_health_status") or ""),
+                    "report_attention_required": bool(safe_payload.get("report_attention_required")),
+                    "resource_phase_failed_count": int(safe_payload.get("resource_phase_failed_count") or 0),
+                    "resource_phase_partial_count": int(safe_payload.get("resource_phase_partial_count") or 0),
+                    "resource_phase_waiting_count": int(safe_payload.get("resource_phase_waiting_count") or 0),
+                    "environment_failed_count": int(safe_payload.get("environment_failed_count") or 0),
+                    "environment_import_requested_count": int(
+                        safe_payload.get("environment_import_requested_count") or 0
+                    ),
+                    "environment_imported_count": int(safe_payload.get("environment_imported_count") or 0),
+                    "environment_import_failed_count": int(
+                        safe_payload.get("environment_import_failed_count") or 0
+                    ),
+                    "environment_import_failure_code_counts": dict(
+                        safe_payload.get("environment_import_failure_code_counts") or {}
+                    ),
+                    "layout_applied_delta_count": int(safe_payload.get("layout_applied_delta_count") or 0),
+                    "layout_skipped_delta_count": int(safe_payload.get("layout_skipped_delta_count") or 0),
+                    "layout_transform_result_count": int(safe_payload.get("layout_transform_result_count") or 0),
+                    "layout_ground_snapped_count": int(safe_payload.get("layout_ground_snapped_count") or 0),
+                    "layout_overlap_resolved_count": int(safe_payload.get("layout_overlap_resolved_count") or 0),
+                    "sync_actor_transform_count": int(safe_payload.get("sync_actor_transform_count") or 0),
+                    "sync_actor_delete_count": int(safe_payload.get("sync_actor_delete_count") or 0),
+                    "layout_transform_failure_code_counts": dict(
+                        safe_payload.get("layout_transform_failure_code_counts") or {}
+                    ),
+                    "engine_write_boundary_fact_count": int(
+                        safe_payload.get("engine_write_boundary_fact_count") or 0
+                    ),
+                    "engine_write_transform_boundary_count": int(
+                        safe_payload.get("engine_write_transform_boundary_count") or 0
+                    ),
+                    "engine_write_bridge_call_count": int(
+                        safe_payload.get("engine_write_bridge_call_count") or 0
+                    ),
+                    "engine_write_bridge_success_count": int(
+                        safe_payload.get("engine_write_bridge_success_count") or 0
+                    ),
+                    "engine_write_bridge_failed_count": int(
+                        safe_payload.get("engine_write_bridge_failed_count") or 0
+                    ),
+                    "engine_write_bridge_error_code_counts": dict(
+                        safe_payload.get("engine_write_bridge_error_code_counts") or {}
+                    ),
+                    "sync_failure_code_counts": dict(safe_payload.get("sync_failure_code_counts") or {}),
+                    "latest_sync_failure_code": RuntimeEventValidator.safe_text(
+                        safe_payload.get("latest_sync_failure_code")
+                    ).strip()[:80],
+                    "report_health_reasons": report_reasons,
+                }
+            )
+        elif event.event_type == "provider_readiness":
+            log_payload["readiness_status"] = RuntimeEventValidator.safe_text(
+                safe_payload.get("status")
+            ).strip()[:64] or "unknown"
         self.operation_log.append(
             "runtime_event_emitted" if applied else "runtime_event_emit_failed",
             room_id=str(room_id),
             plan_id=str(plan_id or ""),
             batch_id=str(batch_id or ""),
             message=str(event_type or "runtime_event"),
-            payload={
-                "event_id": event.event_id,
-                "event_type": event.event_type,
-                "reason": reason,
-            },
+            payload=log_payload,
         )
         result = dict(event_row)
         result["persisted"] = applied
@@ -14553,6 +15425,184 @@ class AgentRuntime:
             except (TypeError, ValueError):
                 pass
         return row
+
+    @staticmethod
+    def _operation_replay_snapshot_summary_payload(summary: Mapping[str, Any]) -> dict[str, Any]:
+        runtime_events = dict(summary.get("runtime_event_replay_summary") or {})
+        sync_replay = dict(summary.get("sync_replay_summary") or {})
+        asset_transfer = dict(summary.get("asset_transfer_replay_summary") or {})
+        peer_sync = dict(summary.get("peer_sync_replay_summary") or {})
+        gm_replay = dict(summary.get("gm_summary_replay_summary") or {})
+        guard_replay = dict(summary.get("runtime_guard_replay_summary") or {})
+        runtime_fact_injection = dict(summary.get("runtime_fact_injection_replay_summary") or {})
+        state_patch = dict(summary.get("state_patch_summary") or {})
+        queue_replay = dict(summary.get("tool_graph_queue_summary") or {})
+        failure_strategy = dict(summary.get("tool_failure_strategy_summary") or {})
+        engine_write = dict(summary.get("engine_write_summary") or {})
+        return {
+            "summary_type": "operation_replay_summary",
+            "entry_count": int(summary.get("entry_count") or 0),
+            "runtime_event_emitted_count": int(runtime_events.get("emitted_count") or 0),
+            "runtime_event_emit_failed_count": int(runtime_events.get("emit_failed_count") or 0),
+            "runtime_event_report_ready_count": int(runtime_events.get("report_ready_count") or 0),
+            "sync_recorded_count": int(sync_replay.get("recorded_count") or 0),
+            "sync_failed_count": int(sync_replay.get("failed_count") or 0),
+            "sync_actor_transform_count": int(sync_replay.get("actor_transform_count") or 0),
+            "asset_transfer_failed_count": int(asset_transfer.get("asset_transfer_failed_count") or 0),
+            "asset_transfer_progress_count": int(asset_transfer.get("asset_transfer_progress_count") or 0),
+            "peer_event_count": int(peer_sync.get("peer_event_count") or 0),
+            "sync_reconcile_failed_count": int(peer_sync.get("sync_reconcile_failed_count") or 0),
+            "gm_summary_exported_count": int(gm_replay.get("exported_count") or 0),
+            "gm_summary_failed_count": int(gm_replay.get("failed_count") or 0),
+            "guard_blocked_count": int(guard_replay.get("blocked_count") or 0),
+            "guard_requires_write_blocked_count": int(guard_replay.get("requires_write_blocked_count") or 0),
+            "guard_unconfirmed_blocked_count": int(guard_replay.get("unconfirmed_blocked_count") or 0),
+            "guard_confirmed_blocked_count": int(guard_replay.get("confirmed_blocked_count") or 0),
+            "guard_risk_level_counts": {
+                AgentRuntime._safe_report_text(key).replace("_", "-")[:48]: int(value or 0)
+                for key, value in dict(guard_replay.get("risk_level_counts") or {}).items()
+                if AgentRuntime._safe_report_text(key).strip()
+            },
+            "runtime_fact_injection_count": int(runtime_fact_injection.get("injection_event_count") or 0),
+            "runtime_fact_injection_field_count": int(
+                runtime_fact_injection.get("injected_field_total_count") or 0
+            ),
+            "runtime_fact_injection_unique_field_count": len(
+                dict(runtime_fact_injection.get("injected_field_name_counts") or {})
+            ),
+            "runtime_fact_injection_field_counts": {
+                AgentRuntime._safe_report_text(key).replace("_", "-")[:64]: int(value or 0)
+                for key, value in dict(runtime_fact_injection.get("injected_field_name_counts") or {}).items()
+                if AgentRuntime._safe_report_text(key).strip()
+            },
+            "state_patch_conflict_count": int(state_patch.get("conflict") or 0),
+            "queue_blocked_count": int(queue_replay.get("blocked_count") or 0),
+            "failure_retry_scheduled_count": int(failure_strategy.get("retry_scheduled_count") or 0),
+            "engine_write_import_result_count": int(engine_write.get("import_result_count") or 0),
+            "engine_write_bridge_failed_count": int(
+                dict(engine_write.get("latest_status_export") or {}).get("engine_write_bridge_failed_count")
+                or 0
+            ),
+        }
+
+    @staticmethod
+    def _operation_replay_snapshot_audit_payload(replay: Mapping[str, Any]) -> dict[str, Any]:
+        filters = dict(replay.get("filters") or {})
+        event_counts = {
+            AgentRuntime._safe_report_text(key).replace("_", "-")[:80]: int(value or 0)
+            for key, value in dict(replay.get("event_counts") or {}).items()
+            if AgentRuntime._safe_report_text(key).strip()
+        }
+        runtime_events = dict(replay.get("runtime_event_replay_summary") or {})
+        sync_summary = dict(replay.get("sync_summary") or {})
+        asset_transfer = dict(replay.get("asset_transfer_replay_summary") or {})
+        peer_sync = dict(replay.get("peer_sync_replay_summary") or {})
+        engine_write = dict(replay.get("engine_write_summary") or {})
+        report_health = dict(replay.get("report_health_summary") or {})
+        guard_replay = dict(replay.get("runtime_guard_replay_summary") or {})
+        runtime_fact_injection = dict(replay.get("runtime_fact_injection_replay_summary") or {})
+        return {
+            "summary_type": "runtime_operation_replay",
+            "entry_count": int(replay.get("entry_count") or 0),
+            "event": AgentRuntime._safe_report_text(filters.get("event"))[:80],
+            "limit": filters.get("limit"),
+            "event_counts": dict(sorted(event_counts.items())),
+            "runtime_event_emitted_count": int(runtime_events.get("emitted_count") or 0),
+            "runtime_event_emit_failed_count": int(runtime_events.get("emit_failed_count") or 0),
+            "guard_blocked_count": int(guard_replay.get("blocked_count") or 0),
+            "guard_requires_write_blocked_count": int(guard_replay.get("requires_write_blocked_count") or 0),
+            "guard_unconfirmed_blocked_count": int(guard_replay.get("unconfirmed_blocked_count") or 0),
+            "guard_confirmed_blocked_count": int(guard_replay.get("confirmed_blocked_count") or 0),
+            "guard_risk_level_counts": {
+                AgentRuntime._safe_report_text(key).replace("_", "-")[:48]: int(value or 0)
+                for key, value in dict(guard_replay.get("risk_level_counts") or {}).items()
+                if AgentRuntime._safe_report_text(key).strip()
+            },
+            "runtime_fact_injection_count": int(runtime_fact_injection.get("injection_event_count") or 0),
+            "runtime_fact_injection_field_count": int(
+                runtime_fact_injection.get("injected_field_total_count") or 0
+            ),
+            "runtime_fact_injection_unique_field_count": len(
+                dict(runtime_fact_injection.get("injected_field_name_counts") or {})
+            ),
+            "runtime_fact_injection_field_counts": {
+                AgentRuntime._safe_report_text(key).replace("_", "-")[:64]: int(value or 0)
+                for key, value in dict(runtime_fact_injection.get("injected_field_name_counts") or {}).items()
+                if AgentRuntime._safe_report_text(key).strip()
+            },
+            "sync_recorded_count": int(sync_summary.get("recorded_count") or 0),
+            "sync_failed_count": int(sync_summary.get("failed_count") or 0),
+            "asset_transfer_failed_count": int(asset_transfer.get("asset_transfer_failed_count") or 0),
+            "asset_transfer_progress_count": int(asset_transfer.get("asset_transfer_progress_count") or 0),
+            "peer_event_count": int(peer_sync.get("peer_event_count") or 0),
+            "engine_write_import_result_count": int(engine_write.get("import_result_count") or 0),
+            "engine_write_transform_result_count": int(engine_write.get("transform_result_count") or 0),
+            "engine_write_delete_result_count": int(engine_write.get("delete_result_count") or 0),
+            "report_health_status": AgentRuntime._safe_report_text(report_health.get("status") or "unknown")[:48],
+            "report_health_attention_required": bool(report_health.get("attention_required")),
+        }
+
+    @staticmethod
+    def _snapshot_failure_audit_payload(
+        *,
+        summary_type: str,
+        reason: Any,
+        event: str = "",
+        limit: Any = None,
+        external_plan_id: str = "",
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "summary_type": AgentRuntime._safe_report_text(summary_type).replace("_", "-")[:80],
+            "recorded": False,
+            "failure_code": "snapshot_record_failed",
+            "reason": AgentRuntime._safe_report_text(reason or "unknown")[:160],
+        }
+        if event:
+            payload["event"] = AgentRuntime._safe_report_text(event)[:80]
+        if limit is not None:
+            payload["limit"] = limit
+        if external_plan_id:
+            payload["external_plan_id"] = AgentRuntime._safe_report_text(external_plan_id)[:120]
+        return payload
+
+    @staticmethod
+    def _runtime_event_snapshot_summary(
+        events: Iterable[Mapping[str, Any]],
+        *,
+        audience: str = "",
+        limit: Any = None,
+    ) -> dict[str, Any]:
+        rows = [dict(event) for event in events if isinstance(event, Mapping)]
+        event_type_counts: dict[str, int] = {}
+        level_counts: dict[str, int] = {}
+        audience_counts: dict[str, int] = {}
+        progress_event_count = 0
+        latest_event_type = ""
+        for row in rows:
+            event_type = AgentRuntime._safe_report_text(row.get("event_type")).replace("_", "-")[:64]
+            level = AgentRuntime._safe_report_text(row.get("level") or "info").replace("_", "-")[:32]
+            row_audience = AgentRuntime._safe_report_text(row.get("audience") or "host").replace("_", "-")[:32]
+            if event_type:
+                event_type_counts[event_type] = event_type_counts.get(event_type, 0) + 1
+                latest_event_type = event_type
+            if level:
+                level_counts[level] = level_counts.get(level, 0) + 1
+            if row_audience:
+                audience_counts[row_audience] = audience_counts.get(row_audience, 0) + 1
+            if row.get("progress") is not None:
+                progress_event_count += 1
+        return {
+            "event_count": len(rows),
+            "requested_audience": AgentRuntime._safe_report_text(audience).replace("_", "-")[:32],
+            "limit": limit if isinstance(limit, int) or limit is None else None,
+            "event_type_counts": dict(sorted(event_type_counts.items())),
+            "level_counts": dict(sorted(level_counts.items())),
+            "audience_counts": dict(sorted(audience_counts.items())),
+            "progress_event_count": progress_event_count,
+            "warning_count": int(level_counts.get("warning") or 0),
+            "error_count": int(level_counts.get("error") or 0),
+            "latest_event_type": latest_event_type,
+        }
 
     @staticmethod
     def _ready_resource_count(resources: Mapping[str, Any]) -> int:
@@ -14705,6 +15755,35 @@ class AgentRuntime:
             )
             and (not active_batch_id or str(event.get("batch_id") or "") == active_batch_id)
         ]
+        environment_import_event_batch_ids = {
+            str(event.get("batch_id") or "")
+            for event in events
+            if str(event.get("event_type") or "") in {
+                "environment_components_imported",
+                "environment_components_import_failed",
+            }
+            and str(event.get("batch_id") or "")
+        }
+        environment_import_fact_rows: list[dict[str, Any]] = []
+        for key, fact in dict(room.get("custom_import_facts") or {}).items():
+            if not isinstance(fact, Mapping):
+                continue
+            if not str(key or "").endswith(":environment_import_result"):
+                continue
+            fact_batch_id = str(fact.get("batch_id") or str(key).split(":", 1)[0] or "")
+            if not fact_batch_id:
+                continue
+            if fact_batch_id in environment_import_event_batch_ids:
+                continue
+            if active_batch_id and fact_batch_id != active_batch_id:
+                continue
+            fact_plan_id = str(fact.get("plan_id") or "")
+            if active_plan_id:
+                if fact_plan_id and fact_plan_id != active_plan_id:
+                    continue
+                if not fact_plan_id and batch_ids and fact_batch_id not in batch_ids:
+                    continue
+            environment_import_fact_rows.append(dict(fact))
         status_counts: dict[str, int] = {}
         requested_count = 0
         ready_count = 0
@@ -14713,6 +15792,7 @@ class AgentRuntime:
         import_requested_count = 0
         imported_count = 0
         import_failed_count = 0
+        import_failure_code_counts: dict[str, int] = {}
         latest_events: list[dict[str, Any]] = []
         for event in events:
             event_type = str(event.get("event_type") or "")
@@ -14727,6 +15807,13 @@ class AgentRuntime:
                 import_requested_count += event_requested
                 imported_count += event_ready
                 import_failed_count += event_failed
+                for failure_code, count in dict(payload.get("environment_import_failure_code_counts") or {}).items():
+                    normalized_failure_code = RuntimeEventValidator.safe_text(failure_code).strip()
+                    if not normalized_failure_code:
+                        continue
+                    import_failure_code_counts[normalized_failure_code[:80]] = (
+                        import_failure_code_counts.get(normalized_failure_code[:80], 0) + int(count or 0)
+                    )
             else:
                 requested_count += event_requested
                 ready_count += event_ready
@@ -14740,6 +15827,47 @@ class AgentRuntime:
                 "component_count": event_ready,
                 "requested_count": event_requested,
                 "failed_count": event_failed,
+            })
+        for fact in environment_import_fact_rows:
+            fact_batch_id = str(fact.get("batch_id") or "")
+            batch_info = batch_lookup.get(fact_batch_id, {})
+            status = str(fact.get("status") or "unknown").strip() or "unknown"
+            fact_requested = int(fact.get("component_count") or fact.get("requested_count") or 0)
+            fact_imported = int(fact.get("imported_count") or fact.get("ready_count") or 0)
+            fact_failed = int(fact.get("failed_count") or max(0, fact_requested - fact_imported))
+            status_counts[status] = status_counts.get(status, 0) + 1
+            import_event_count += 1
+            import_requested_count += fact_requested
+            imported_count += fact_imported
+            import_failed_count += fact_failed
+            fact_failure_code_counts = dict(fact.get("failure_code_counts") or {})
+            if not fact_failure_code_counts:
+                for result in fact.get("environment_import_results") or []:
+                    if not isinstance(result, Mapping):
+                        continue
+                    if str(result.get("status") or "").strip() not in {"failed", "error", "skipped"}:
+                        continue
+                    failure_code = RuntimeEventValidator.safe_text(
+                        result.get("failure_code") or result.get("reason") or "environment_import_failed"
+                    ).strip()
+                    if failure_code:
+                        fact_failure_code_counts[failure_code[:80]] = fact_failure_code_counts.get(failure_code[:80], 0) + 1
+            for failure_code, count in fact_failure_code_counts.items():
+                normalized_failure_code = RuntimeEventValidator.safe_text(failure_code).strip()
+                if not normalized_failure_code:
+                    continue
+                import_failure_code_counts[normalized_failure_code[:80]] = (
+                    import_failure_code_counts.get(normalized_failure_code[:80], 0) + int(count or 0)
+                )
+            latest_events.append({
+                "batch_id": fact_batch_id,
+                "batch_index": int(batch_info.get("batch_index") or 0),
+                "event_type": "environment_import_result",
+                "total_batches": int(batch_info.get("total_batches") or 0),
+                "status": status,
+                "component_count": fact_imported,
+                "requested_count": fact_requested,
+                "failed_count": fact_failed,
             })
         effective_ready_count = max(ready_count, component_count)
         effective_requested_count = max(requested_count, effective_ready_count)
@@ -14755,7 +15883,10 @@ class AgentRuntime:
             "import_requested_count": effective_import_requested_count,
             "imported_count": effective_imported_count,
             "import_failed_count": import_failed_count,
-            "status_counts": dict(sorted((status_counts if events else component_status_counts).items())),
+            "import_failure_code_counts": dict(sorted(import_failure_code_counts.items())),
+            "status_counts": dict(
+                sorted((status_counts if events or environment_import_fact_rows else component_status_counts).items())
+            ),
             "type_counts": dict(sorted(type_counts.items())),
             "latest_components": latest_components[-6:],
             "latest_events": latest_events[-3:],
@@ -14785,8 +15916,12 @@ class AgentRuntime:
         for key, review in {**reviews, **vlm_checkpoint_facts}.items():
             if not isinstance(review, Mapping):
                 continue
-            review_plan_id = str(review.get("plan_id") or key or "")
-            review_batch_id = str(review.get("batch_id") or "")
+            key_text = str(key or "")
+            key_parts = key_text.split(":")
+            key_plan_id = key_parts[0] if key_parts else ""
+            key_batch_id = key_parts[1] if len(key_parts) > 1 else ""
+            review_plan_id = str(review.get("plan_id") or key_plan_id)
+            review_batch_id = str(review.get("batch_id") or key_batch_id)
             if active_batch_id and review_batch_id != active_batch_id:
                 continue
             if (
@@ -14826,8 +15961,12 @@ class AgentRuntime:
         for key, summary in review_summary_facts.items():
             if not isinstance(summary, Mapping):
                 continue
-            summary_plan_id = str(summary.get("plan_id") or "")
-            summary_batch_id = str(summary.get("batch_id") or key or "")
+            key_text = str(key or "")
+            key_parts = key_text.split(":")
+            key_plan_id = key_parts[0] if key_parts else ""
+            key_batch_id = key_parts[1] if len(key_parts) > 1 else ""
+            summary_plan_id = str(summary.get("plan_id") or key_plan_id)
+            summary_batch_id = str(summary.get("batch_id") or key_batch_id or key_text)
             dedupe_key = (summary_plan_id, summary_batch_id)
             if dedupe_key in seen_batch_summary_keys:
                 continue
@@ -14930,11 +16069,15 @@ class AgentRuntime:
         for key, fact in facts.items():
             if not isinstance(fact, Mapping):
                 continue
-            fact_plan_id = str(fact.get("plan_id") or key).split(":", 1)[0]
-            fact_batch_id = str(fact.get("batch_id") or "")
+            key_text = str(key or "")
+            key_parts = key_text.split(":")
+            key_plan_id = key_parts[0] if key_parts else ""
+            key_batch_id = key_parts[1] if len(key_parts) > 1 else ""
+            fact_plan_id = str(fact.get("plan_id") or key_plan_id)
+            fact_batch_id = str(fact.get("batch_id") or key_batch_id)
             if active_plan_id and fact_plan_id != active_plan_id and str(key) != active_plan_id:
                 continue
-            if active_batch_id and fact_batch_id and fact_batch_id != active_batch_id:
+            if active_batch_id and fact_batch_id != active_batch_id:
                 continue
             fact_type = str(fact.get("fact_type") or "geometry_fact").strip() or "geometry_fact"
             status = str(fact.get("status") or "recorded").strip() or "recorded"
@@ -14987,9 +16130,11 @@ class AgentRuntime:
             status = str(proposal.get("status") or "unknown").strip() or "unknown"
             items = proposal.get("items") if isinstance(proposal.get("items"), list) else []
             if active_batch_id:
+                proposal_batch_id = str(proposal.get("batch_id") or "")
                 items = [
                     item for item in items
-                    if isinstance(item, Mapping) and str(item.get("batch_id") or "") == active_batch_id
+                    if isinstance(item, Mapping)
+                    and str(item.get("batch_id") or proposal_batch_id or "") == active_batch_id
                 ]
                 if not items:
                     continue
@@ -15037,9 +16182,14 @@ class AgentRuntime:
         transform_result_count = 0
         ground_snapped_count = 0
         overlap_resolved_count = 0
+        transform_failure_code_counts: dict[str, int] = {}
+        seen_transform_fact_proposal_ids: set[str] = set()
         for item in layout_proposals:
             status = str(item.get("status") or "unknown").strip() or "unknown"
             risk_level = str(item.get("risk_level") or "unknown").strip() or "unknown"
+            proposal_id = str(item.get("proposal_id") or "")
+            if proposal_id:
+                seen_transform_fact_proposal_ids.add(proposal_id)
             deltas = item.get("deltas") if isinstance(item.get("deltas"), list) else []
             applied_deltas = item.get("applied_deltas") if isinstance(item.get("applied_deltas"), list) else []
             skipped_deltas = item.get("skipped_deltas") if isinstance(item.get("skipped_deltas"), list) else []
@@ -15078,13 +16228,21 @@ class AgentRuntime:
                     continue
                 transform_status = str(result.get("status") or "unknown").strip() or "unknown"
                 transform_status_counts[transform_status] = transform_status_counts.get(transform_status, 0) + 1
+                if transform_status in {"failed", "failure", "error", "rejected"}:
+                    failure_code = RuntimeEventValidator.safe_text(
+                        result.get("failure_code") or result.get("reason") or "layout_transform_failed"
+                    ).strip()
+                    if failure_code:
+                        transform_failure_code_counts[failure_code[:80]] = (
+                            transform_failure_code_counts.get(failure_code[:80], 0) + 1
+                        )
                 if bool(result.get("ground_snapped")):
                     ground_snapped_count += 1
                 if bool(result.get("overlap_resolved")):
                     overlap_resolved_count += 1
             proposal_rows.append(
                 {
-                    "proposal_id": str(item.get("proposal_id") or ""),
+                    "proposal_id": proposal_id,
                     "status": status,
                     "risk_level": risk_level,
                     "delta_count": len(deltas),
@@ -15093,8 +16251,58 @@ class AgentRuntime:
                     "transform_result_count": len(transform_results),
                 }
             )
+        for key, fact in dict(room.get("custom_report_facts") or {}).items():
+            if not str(key or "").endswith(":layout_transform_result"):
+                continue
+            if not isinstance(fact, Mapping):
+                continue
+            if str(fact.get("source") or "") != "runtime_layout_transform_result":
+                continue
+            fact_plan_id = str(fact.get("plan_id") or "")
+            if active_plan_id and fact_plan_id != active_plan_id:
+                continue
+            fact_batch_id = str(fact.get("batch_id") or "")
+            if active_batch_id and fact_batch_id != active_batch_id:
+                continue
+            proposal_id = str(fact.get("proposal_id") or "")
+            if proposal_id and proposal_id in seen_transform_fact_proposal_ids:
+                continue
+            seen_transform_fact_proposal_ids.add(proposal_id or str(key))
+            status = str(fact.get("status") or "unknown").strip() or "unknown"
+            status_counts[status] = status_counts.get(status, 0) + 1
+            risk_counts["runtime_fact"] = risk_counts.get("runtime_fact", 0) + 1
+            applied_delta_count += int(fact.get("applied_count") or 0)
+            skipped_delta_count += int(fact.get("skipped_count") or 0)
+            fact_transform_count = int(fact.get("transform_result_count") or 0)
+            transform_result_count += fact_transform_count
+            transform_success_count = int(fact.get("transform_success_count") or 0)
+            transform_failed_count = int(fact.get("transform_failed_count") or 0)
+            if transform_success_count:
+                transform_status_counts["success"] = transform_status_counts.get("success", 0) + transform_success_count
+            if transform_failed_count:
+                transform_status_counts["failed"] = transform_status_counts.get("failed", 0) + transform_failed_count
+            ground_snapped_count += int(fact.get("ground_snapped_count") or 0)
+            overlap_resolved_count += int(fact.get("overlap_resolved_count") or 0)
+            for code, value in dict(fact.get("layout_transform_failure_code_counts") or {}).items():
+                safe_code = RuntimeEventValidator.safe_text(code).strip()[:80]
+                if not safe_code:
+                    continue
+                transform_failure_code_counts[safe_code] = (
+                    transform_failure_code_counts.get(safe_code, 0) + int(value or 0)
+                )
+            proposal_rows.append(
+                {
+                    "proposal_id": proposal_id,
+                    "status": status,
+                    "risk_level": "runtime_fact",
+                    "delta_count": 0,
+                    "applied_delta_count": int(fact.get("applied_count") or 0),
+                    "skipped_delta_count": int(fact.get("skipped_count") or 0),
+                    "transform_result_count": fact_transform_count,
+                }
+            )
         return {
-            "proposal_count": len(layout_proposals),
+            "proposal_count": len(proposal_rows),
             "delta_count": delta_count,
             "applied_delta_count": applied_delta_count,
             "skipped_delta_count": skipped_delta_count,
@@ -15104,6 +16312,7 @@ class AgentRuntime:
             "status_counts": dict(sorted(status_counts.items())),
             "risk_counts": dict(sorted(risk_counts.items())),
             "transform_status_counts": dict(sorted(transform_status_counts.items())),
+            "layout_transform_failure_code_counts": dict(sorted(transform_failure_code_counts.items())),
             "proposals": proposal_rows[-5:],
         }
 
@@ -15126,7 +16335,17 @@ class AgentRuntime:
             event_batch_id = str(event.get("batch_id") or "")
             fact_batch_id = str(fact.get("batch_id") or "")
             if active_batch_id:
-                return event_batch_id == active_batch_id or fact_batch_id == active_batch_id
+                if event_batch_id != active_batch_id and fact_batch_id != active_batch_id:
+                    return False
+                if not active_plan_id:
+                    return True
+                event_plan_id = str(event.get("plan_id") or "")
+                fact_plan_id = str(fact.get("plan_id") or "")
+                if event_plan_id:
+                    return event_plan_id == active_plan_id
+                if fact_plan_id:
+                    return fact_plan_id == active_plan_id
+                return not active_batch_ids or active_batch_id in active_batch_ids
             if not active_plan_id:
                 return True
             event_plan_id = str(event.get("plan_id") or "")
@@ -15171,11 +16390,29 @@ class AgentRuntime:
         if active_plan_id or active_batch_id:
             last_sync_event = dict(scoped_sync_events[-1]) if scoped_sync_events else {}
         scoped_event_count = len(scoped_sync_events) if scoped_sync_events else len(actor_events) + len(asset_events)
+        sync_event_rows = scoped_sync_events or actor_events + asset_events
+        event_type_counts: dict[str, int] = {}
+        for event in sync_event_rows:
+            event_type = str(event.get("event_type") or "")
+            if event_type:
+                event_type_counts[event_type] = event_type_counts.get(event_type, 0) + 1
+        actor_transform_events = {
+            "actor_transform",
+            "actor_updated",
+            "actor_moved",
+            "actor_position",
+            "actor_scaled",
+            "actor_rotated",
+        }
+        actor_delete_events = {"actor_removed", "actor_deleted", "actor_destroyed", "actor_delete"}
         summary = {
             "event_count": scoped_event_count if (active_plan_id or active_batch_id) else int(sync_state.get("event_count") or len(room.get("sync_events") or [])),
             "room_status": str(sync_state.get("room_status") or "active"),
             "actor_event_count": len(actor_events),
+            "actor_transform_count": sum(1 for event in actor_events if str(event.get("event_type") or "") in actor_transform_events),
+            "actor_delete_count": sum(1 for event in actor_events if str(event.get("event_type") or "") in actor_delete_events),
             "asset_event_count": len(asset_events),
+            "event_type_counts": dict(sorted(event_type_counts.items())),
             "latest_actors": [
                 {
                     "actor_id": str(event.get("actor_id") or ""),
@@ -15294,7 +16531,14 @@ class AgentRuntime:
         def belongs_to_scope(asset: Mapping[str, Any]) -> bool:
             asset_batch_id = str(asset.get("batch_id") or "")
             if active_batch_id:
-                return asset_batch_id == active_batch_id
+                if asset_batch_id != active_batch_id:
+                    return False
+                if not active_plan_id:
+                    return True
+                asset_plan_id = str(asset.get("plan_id") or "")
+                if asset_plan_id:
+                    return asset_plan_id == active_plan_id
+                return not active_batch_ids or active_batch_id in active_batch_ids
             if not active_plan_id:
                 return True
             asset_plan_id = str(asset.get("plan_id") or "")
@@ -15340,6 +16584,7 @@ class AgentRuntime:
                 "scene_name": str(asset.get("scene_name") or ""),
                 "last_sync_event": str(asset.get("last_sync_event") or ""),
             })
+        incomplete_count = max(0, len(scoped_assets) - ready_count - failed_count)
         weighted_progress = int((bytes_transferred / total_bytes) * 100) if total_bytes > 0 else 0
         if not weighted_progress and progress_values:
             weighted_progress = max(progress_values)
@@ -15348,6 +16593,7 @@ class AgentRuntime:
             "status_counts": dict(sorted(status_counts.items())),
             "ready_count": ready_count,
             "failed_count": failed_count,
+            "incomplete_count": incomplete_count,
             "transferring_count": int(status_counts.get("transferring", 0)),
             "completed_count": int(status_counts.get("completed", 0)),
             "bytes_transferred": bytes_transferred,
@@ -15401,6 +16647,7 @@ class AgentRuntime:
         asset_count = int(asset.get("asset_count") or 0)
         ready_count = int(asset.get("ready_count") or 0)
         failed_count = int(asset.get("failed_count") or 0)
+        incomplete_count = int(asset.get("incomplete_count") or max(0, asset_count - ready_count - failed_count))
         transferring_count = int(asset.get("transferring_count") or 0)
         completed_count = int(asset.get("completed_count") or 0)
         peer_join_count = int(replay.get("peer_join_count") or 0)
@@ -15411,6 +16658,11 @@ class AgentRuntime:
         latest_room_status = str(replay.get("latest_room_status") or sync.get("room_status") or "")
         transfer_failed_count = int(replay.get("transfer_failed_count") or 0)
         transfer_progress_count = int(replay.get("transfer_progress_count") or 0)
+        sync_failure_code_counts = {
+            str(key): int(value or 0)
+            for key, value in dict(replay.get("failure_code_counts") or {}).items()
+        }
+        latest_sync_failure_code = str(replay.get("latest_failure_code") or "")
         message_delivery_failed_count = int(delivery.get("failed_count") or 0)
         message_delivery_requested_count = int(delivery.get("requested_count") or 0)
         overall_progress = int(asset.get("overall_progress") or replay.get("latest_transfer_progress") or 0)
@@ -15424,7 +16676,7 @@ class AgentRuntime:
             needs_attention.append("message_delivery_failed")
         if transferring_count:
             needs_attention.append("asset_transfer_in_progress")
-        if asset_count and ready_count + failed_count < asset_count and not transferring_count:
+        if incomplete_count and not transferring_count:
             needs_attention.append("asset_transfer_incomplete")
 
         if room_close_count or latest_room_status == "closed" or failed_count or transfer_failed_count or message_delivery_failed_count:
@@ -15458,15 +16710,223 @@ class AgentRuntime:
             "asset_ready_count": ready_count,
             "asset_completed_count": completed_count,
             "asset_transferring_count": transferring_count,
+            "asset_incomplete_count": incomplete_count,
             "asset_failed_count": failed_count,
             "asset_overall_progress": max(0, min(100, overall_progress)),
             "transfer_failed_count": transfer_failed_count,
             "transfer_progress_count": transfer_progress_count,
+            "sync_failure_code_counts": dict(sorted(sync_failure_code_counts.items())),
+            "latest_sync_failure_code": latest_sync_failure_code,
             "message_delivery_requested_count": message_delivery_requested_count,
             "message_delivery_failed_count": message_delivery_failed_count,
             "needs_attention": sorted(set(needs_attention)),
         }
-	
+
+    @staticmethod
+    def _report_health_summary(
+        *,
+        batch_resource_flow_summary: Mapping[str, Any],
+        import_summary: Mapping[str, Any],
+        sync_health_digest: Mapping[str, Any],
+        resource_summary: Mapping[str, Any] | None = None,
+        environment_component_summary: Mapping[str, Any] | None = None,
+        engine_write_summary: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        batch_flow = dict(batch_resource_flow_summary or {})
+        import_state = dict(import_summary or {})
+        sync_health = dict(sync_health_digest or {})
+        resource_state = dict(resource_summary or {})
+        environment_state = dict(environment_component_summary or {})
+        engine_write_state = dict(engine_write_summary or {})
+        batch_failed_count = int(batch_flow.get("failed_count") or 0)
+        batch_partial_count = int(batch_flow.get("partial_count") or 0)
+        batch_waiting_count = int(batch_flow.get("waiting_count") or 0)
+        import_failed_count = int(import_state.get("failed_count") or 0)
+        import_requested_count = int(import_state.get("requested_count") or 0)
+        import_imported_count = int(import_state.get("imported_count") or 0)
+        environment_failed_count = int(environment_state.get("failed_count") or 0)
+        environment_import_failed_count = int(environment_state.get("import_failed_count") or 0)
+        environment_import_requested_count = int(environment_state.get("import_requested_count") or 0)
+        environment_imported_count = int(environment_state.get("imported_count") or 0)
+        environment_import_failure_code_counts = {
+            str(key): int(value)
+            for key, value in dict(environment_state.get("import_failure_code_counts") or {}).items()
+            if str(key or "").strip()
+        }
+        asset_incomplete_count = int(sync_health.get("asset_incomplete_count") or 0)
+        asset_failed_count = int(sync_health.get("asset_failed_count") or 0)
+        sync_actor_transform_count = int(sync_health.get("actor_transform_count") or 0)
+        sync_actor_delete_count = int(sync_health.get("actor_delete_count") or 0)
+        sync_status = str(sync_health.get("status") or "")
+        sync_failure_code_counts = {
+            str(key): int(value)
+            for key, value in dict(sync_health.get("sync_failure_code_counts") or {}).items()
+            if str(key or "").strip()
+        }
+        latest_sync_failure_code = str(sync_health.get("latest_sync_failure_code") or "")
+        engine_write_readiness_mismatch_count = int(
+            engine_write_state.get("readiness_mismatch_count") or 0
+        )
+        engine_write_readiness_mismatch_channels = [
+            str(item).strip().replace("_", "-")[:48]
+            for item in list(engine_write_state.get("readiness_mismatch_channels") or [])[:8]
+            if str(item).strip()
+        ]
+        status_by_batch_id = {
+            str(key): str(value or "unknown")
+            for key, value in dict(batch_flow.get("status_by_batch_id") or {}).items()
+            if str(key or "").strip()
+        }
+        resource_phase_failed_count = 0
+        resource_phase_partial_count = 0
+        resource_phase_waiting_count = 0
+        resource_phase_status_counts: dict[str, int] = {}
+        resource_phase_failure_code_counts: dict[str, int] = {}
+        import_failure_code_counts = {
+            str(key): int(value)
+            for key, value in dict(batch_flow.get("import_failure_code_counts") or {}).items()
+            if str(key or "").strip()
+        }
+        by_phase = resource_state.get("by_phase") if isinstance(resource_state.get("by_phase"), Mapping) else {}
+        for phase, row in dict(by_phase or {}).items():
+            if not isinstance(row, Mapping):
+                continue
+            phase_name = str(phase or "").strip()
+            failed = int(row.get("failed_count") or 0)
+            requested = int(row.get("requested_count") or 0)
+            ready = int(row.get("item_count") or 0)
+            status_counts = dict(row.get("status_counts") or {})
+            failure_code_counts = dict(row.get("failure_code_counts") or {})
+            has_status_counts = bool(status_counts)
+            for status_key, count in status_counts.items():
+                normalized_status = str(status_key or "unknown").strip().lower() or "unknown"
+                count_value = int(count or 0)
+                resource_phase_status_counts[normalized_status] = (
+                    resource_phase_status_counts.get(normalized_status, 0) + count_value
+                )
+                if normalized_status in {"failed", "error"}:
+                    resource_phase_failed_count += count_value
+                elif normalized_status in {"partial", "degraded"}:
+                    resource_phase_partial_count += count_value
+                elif normalized_status in {"waiting", "queued", "planned", "running"}:
+                    resource_phase_waiting_count += count_value
+            if failed and not has_status_counts:
+                resource_phase_failed_count += failed
+            if requested > 0 and ready + failed < requested:
+                resource_phase_partial_count += 1
+            if phase_name and requested > 0 and ready == 0 and failed == 0:
+                resource_phase_waiting_count += 1
+            for failure_code, count in failure_code_counts.items():
+                normalized_failure_code = str(failure_code or "").strip()
+                if not normalized_failure_code:
+                    continue
+                resource_phase_failure_code_counts[normalized_failure_code] = (
+                    resource_phase_failure_code_counts.get(normalized_failure_code, 0) + int(count or 0)
+                )
+        batch_semantic_status_counts: dict[str, int] = {}
+        for status in status_by_batch_id.values():
+            status_text = str(status or "unknown").strip() or "unknown"
+            batch_semantic_status_counts[status_text] = batch_semantic_status_counts.get(status_text, 0) + 1
+        reasons: list[str] = []
+        if batch_failed_count:
+            reasons.append("batch_failed")
+        if import_failed_count:
+            reasons.append("import_failed")
+        if environment_failed_count:
+            reasons.append("environment_component_failed")
+        if environment_import_failed_count:
+            reasons.append("environment_import_failed")
+        if asset_failed_count:
+            reasons.append("asset_transfer_failed")
+        if resource_phase_failed_count:
+            reasons.append("resource_phase_failed")
+        if batch_partial_count:
+            reasons.append("batch_partial")
+        if resource_phase_partial_count:
+            reasons.append("resource_phase_partial")
+        if asset_incomplete_count:
+            reasons.append("asset_transfer_incomplete")
+        if sync_status in {"partial", "needs_attention"}:
+            reasons.append(f"sync_{sync_status}")
+        sync_failure_count = sum(int(value or 0) for value in sync_failure_code_counts.values())
+        if sync_failure_count or latest_sync_failure_code:
+            reasons.append("sync_failed")
+        if engine_write_readiness_mismatch_count:
+            reasons.append("engine_write_readiness_mismatch")
+        if batch_waiting_count:
+            reasons.append("batch_waiting")
+        if resource_phase_waiting_count:
+            reasons.append("resource_phase_waiting")
+        import_all_failed = import_failed_count > 0 and import_imported_count <= 0
+        import_partial = import_failed_count > 0 and import_imported_count > 0
+        environment_import_partial = environment_import_failed_count > 0 and environment_imported_count > 0
+        environment_import_all_failed = (
+            environment_import_failed_count > 0
+            and environment_import_requested_count > 0
+            and environment_imported_count <= 0
+        )
+        if batch_failed_count or import_all_failed or asset_failed_count or resource_phase_failed_count:
+            status = "failed"
+        elif (
+            batch_partial_count
+            or import_partial
+            or environment_import_partial
+            or environment_import_all_failed
+            or environment_failed_count
+            or resource_phase_partial_count
+            or asset_incomplete_count
+            or sync_status == "partial"
+        ):
+            status = "partial"
+        elif batch_waiting_count or resource_phase_waiting_count:
+            status = "waiting"
+        elif (
+            sync_status == "needs_attention"
+            or sync_failure_count
+            or latest_sync_failure_code
+            or engine_write_readiness_mismatch_count
+        ):
+            status = "needs_attention"
+        elif batch_flow.get("batch_count") or import_requested_count or sync_status:
+            status = "ok"
+        else:
+            status = "unknown"
+        return {
+            "status": status,
+            "attention_required": status in {"failed", "partial", "waiting", "needs_attention"},
+            "reasons": list(dict.fromkeys(reasons))[:8],
+            "batch_count": int(batch_flow.get("batch_count") or 0),
+            "batch_failed_count": batch_failed_count,
+            "batch_partial_count": batch_partial_count,
+            "batch_waiting_count": batch_waiting_count,
+            "batch_semantic_status_counts": dict(sorted(batch_semantic_status_counts.items())),
+            "import_requested_count": import_requested_count,
+            "import_imported_count": import_imported_count,
+            "import_failed_count": import_failed_count,
+            "environment_failed_count": environment_failed_count,
+            "environment_import_requested_count": environment_import_requested_count,
+            "environment_imported_count": environment_imported_count,
+            "environment_import_failed_count": environment_import_failed_count,
+            "environment_import_failure_code_counts": dict(
+                sorted(environment_import_failure_code_counts.items())
+            ),
+            "resource_phase_failed_count": resource_phase_failed_count,
+            "resource_phase_partial_count": resource_phase_partial_count,
+            "resource_phase_waiting_count": resource_phase_waiting_count,
+            "resource_phase_status_counts": dict(sorted(resource_phase_status_counts.items())),
+            "resource_phase_failure_code_counts": dict(sorted(resource_phase_failure_code_counts.items())),
+            "import_failure_code_counts": dict(sorted(import_failure_code_counts.items())),
+            "sync_health_status": sync_status,
+            "sync_actor_transform_count": sync_actor_transform_count,
+            "sync_actor_delete_count": sync_actor_delete_count,
+            "sync_failure_code_counts": dict(sorted(sync_failure_code_counts.items())),
+            "latest_sync_failure_code": latest_sync_failure_code,
+            "engine_write_readiness_mismatch_count": engine_write_readiness_mismatch_count,
+            "engine_write_readiness_mismatch_channels": engine_write_readiness_mismatch_channels,
+            "asset_incomplete_count": asset_incomplete_count,
+            "asset_failed_count": asset_failed_count,
+        }
+
     @staticmethod
     def _batch_ids_for_plan(room: Mapping[str, Any], plan_id: str) -> set[str]:
         active_plan_id = str(plan_id or "")
@@ -15592,12 +17052,21 @@ class AgentRuntime:
         active_batch_id = str(batch_id or "")
         actors = dict(room.get("actors") or {})
         if active_batch_id:
-            return {
-                str(actor_id): dict(actor)
-                for actor_id, actor in actors.items()
-                if isinstance(actor, Mapping)
-                and str(actor.get("batch_id") or "") == active_batch_id
-            }
+            batch_ids = AgentRuntime._batch_ids_for_plan(room, active_plan_id) if active_plan_id else set()
+            scoped: dict[str, dict[str, Any]] = {}
+            for actor_id, actor in actors.items():
+                if not isinstance(actor, Mapping):
+                    continue
+                actor_plan_id = str(actor.get("plan_id") or "")
+                actor_batch_id = str(actor.get("batch_id") or "")
+                if actor_batch_id != active_batch_id:
+                    continue
+                if active_plan_id and actor_plan_id and actor_plan_id != active_plan_id:
+                    continue
+                if active_plan_id and not actor_plan_id and actor_batch_id not in batch_ids:
+                    continue
+                scoped[str(actor_id)] = dict(actor)
+            return scoped
         if not active_plan_id:
             return {
                 str(actor_id): dict(actor)
@@ -15627,17 +17096,25 @@ class AgentRuntime:
         observed = dict(room.get("observed_actors") or {})
         if active_batch_id:
             runtime_actors = dict(room.get("actors") or {})
+            batch_ids = AgentRuntime._batch_ids_for_plan(room, active_plan_id) if active_plan_id else set()
             scoped: dict[str, dict[str, Any]] = {}
             for actor_id, actor in observed.items():
                 if not isinstance(actor, Mapping):
                     continue
                 actor_key = str(actor_id)
+                actor_plan_id = str(actor.get("plan_id") or "")
                 actor_batch_id = str(actor.get("batch_id") or "")
                 runtime_actor = runtime_actors.get(actor_key)
                 if isinstance(runtime_actor, Mapping):
+                    actor_plan_id = actor_plan_id or str(runtime_actor.get("plan_id") or "")
                     actor_batch_id = actor_batch_id or str(runtime_actor.get("batch_id") or "")
-                if actor_batch_id == active_batch_id:
-                    scoped[actor_key] = dict(actor)
+                if actor_batch_id != active_batch_id:
+                    continue
+                if active_plan_id and actor_plan_id and actor_plan_id != active_plan_id:
+                    continue
+                if active_plan_id and not actor_plan_id and actor_batch_id not in batch_ids:
+                    continue
+                scoped[actor_key] = dict(actor)
             return scoped
         if not active_plan_id:
             return {
@@ -15715,7 +17192,7 @@ class AgentRuntime:
                 room_id=room,
                 plan_id=safe_plan_id,
                 batch_id=safe_batch_id,
-                payload={"entry_count": int(summary.get("entry_count") or 0)},
+                payload=self._operation_replay_snapshot_summary_payload(summary),
             )
             return dict(summary)
         reason = summary_call.error or graph.status or "unknown"
@@ -15724,7 +17201,10 @@ class AgentRuntime:
             room_id=room,
             plan_id=safe_plan_id,
             batch_id=safe_batch_id,
-            payload={"reason": reason},
+            payload=self._snapshot_failure_audit_payload(
+                summary_type="runtime_report_operation_replay_summary",
+                reason=reason,
+            ),
         )
         raise RuntimeError(f"failed to record operation replay summary: {reason}")
 
@@ -15780,6 +17260,8 @@ class AgentRuntime:
             and snapshot_call.status == ToolCallStatus.SUCCEEDED
             and isinstance(status, Mapping)
         ):
+            report_health_summary = dict(status.get("report_health_summary") or {})
+            engine_write_readiness_summary = dict(status.get("engine_write_readiness_summary") or {})
             self.operation_log.append(
                 "runtime_status_summary_snapshot_recorded",
                 room_id=room,
@@ -15788,16 +17270,75 @@ class AgentRuntime:
                 payload={
                     "available": bool(status.get("available")),
                     "batch_count": int(dict(status.get("batch_summary") or {}).get("batch_count") or 0),
+                    "report_health_status": AgentRuntime._safe_report_text(
+                        report_health_summary.get("status")
+                    )[:48],
+                    "report_health_attention_required": bool(
+                        report_health_summary.get("attention_required")
+                    ),
+                    "report_health_reasons": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(report_health_summary.get("reasons") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
+                    "engine_write_readiness_native_enabled_count": int(
+                        engine_write_readiness_summary.get("native_enabled_count") or 0
+                    ),
+                    "engine_write_readiness_runtime_state_only_count": int(
+                        engine_write_readiness_summary.get("runtime_state_only_count") or 0
+                    ),
+                    "engine_write_readiness_fallback_count": int(
+                        engine_write_readiness_summary.get("fallback_count") or 0
+                    ),
+                    "engine_write_readiness_disabled_count": int(
+                        engine_write_readiness_summary.get("disabled_count") or 0
+                    ),
+                    "engine_write_readiness_unavailable_count": int(
+                        engine_write_readiness_summary.get("unavailable_count") or 0
+                    ),
+                    "engine_write_readiness_native_enabled_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(engine_write_readiness_summary.get("native_enabled_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
+                    "engine_write_readiness_runtime_state_only_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(engine_write_readiness_summary.get("runtime_state_only_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
+                    "engine_write_readiness_fallback_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(engine_write_readiness_summary.get("fallback_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
+                    "engine_write_readiness_disabled_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(engine_write_readiness_summary.get("disabled_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
+                    "engine_write_readiness_unavailable_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(engine_write_readiness_summary.get("unavailable_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
                 },
             )
-            return dict(status)
+            status_with_evidence = dict(status)
+            status_with_evidence["snapshot_recorded"] = True
+            status_with_evidence["snapshot_status"] = str(graph.status or "")
+            status_with_evidence["snapshot_tool_status"] = str(snapshot_call.status.value)
+            status_with_evidence["snapshot_state_version"] = int(self.state.version)
+            return status_with_evidence
         reason = snapshot_call.error or graph.status or "unknown"
         self.operation_log.append(
             "runtime_status_summary_snapshot_failed",
             room_id=room,
             plan_id=safe_plan_id,
             batch_id=safe_batch_id,
-            payload={"reason": reason},
+            payload=self._snapshot_failure_audit_payload(
+                summary_type="runtime_status_summary",
+                reason=reason,
+            ),
         )
         raise RuntimeError(f"failed to record runtime status summary: {reason}")
 
@@ -15853,6 +17394,12 @@ class AgentRuntime:
             and snapshot_call.status == ToolCallStatus.SUCCEEDED
             and isinstance(summary, Mapping)
         ):
+            context_digest = dict(summary.get("context_digest") or {})
+            intervention_digest = dict(summary.get("intervention_digest") or {})
+            layout_digest = dict(summary.get("layout_adjustment_summary") or {})
+            runtime_event_digest = dict(summary.get("runtime_event_replay_digest") or {})
+            report_health_digest = dict(summary.get("report_health_digest") or {})
+            runtime_guard_digest = dict(summary.get("runtime_guard_digest") or {})
             self.operation_log.append(
                 "runtime_gm_summary_snapshot_recorded",
                 room_id=room,
@@ -15862,16 +17409,51 @@ class AgentRuntime:
                     "available": bool(summary.get("available")),
                     "context_count": int(summary.get("context_count") or 0),
                     "has_scene_plan": bool(summary.get("has_scene_plan")),
+                    "agent_contribution_count": len(list(context_digest.get("agent_contributions") or [])),
+                    "latest_user_point_count": len(list(context_digest.get("latest_user_points") or [])),
+                    "intervention_pending_count": int(intervention_digest.get("pending_count") or 0),
+                    "intervention_accepted_count": int(intervention_digest.get("accepted_count") or 0),
+                    "intervention_deferred_count": int(intervention_digest.get("deferred_count") or 0),
+                    "layout_proposal_count": int(layout_digest.get("proposal_count") or 0),
+                    "layout_applied_delta_count": int(layout_digest.get("applied_delta_count") or 0),
+                    "layout_skipped_delta_count": int(layout_digest.get("skipped_delta_count") or 0),
+                    "runtime_event_emitted_count": int(runtime_event_digest.get("emitted_count") or 0),
+                    "runtime_event_emit_failed_count": int(runtime_event_digest.get("emit_failed_count") or 0),
+                    "report_health_status": AgentRuntime._safe_report_text(report_health_digest.get("status"))[:48],
+                    "report_attention_required": bool(report_health_digest.get("attention_required")),
+                    "runtime_guard_blocked_count": int(runtime_guard_digest.get("blocked_count") or 0),
+                    "runtime_guard_requires_write_blocked_count": int(
+                        runtime_guard_digest.get("requires_write_blocked_count") or 0
+                    ),
+                    "runtime_guard_confirmed_blocked_count": int(
+                        runtime_guard_digest.get("confirmed_blocked_count") or 0
+                    ),
+                    "runtime_guard_unconfirmed_blocked_count": int(
+                        runtime_guard_digest.get("unconfirmed_blocked_count") or 0
+                    ),
+                    "runtime_guard_risk_level_counts": {
+                        AgentRuntime._safe_report_text(key).replace("_", "-")[:48]: int(value or 0)
+                        for key, value in dict(runtime_guard_digest.get("risk_level_counts") or {}).items()
+                        if AgentRuntime._safe_report_text(key).strip()
+                    },
                 },
             )
-            return dict(summary)
+            summary_with_evidence = dict(summary)
+            summary_with_evidence["snapshot_recorded"] = True
+            summary_with_evidence["snapshot_status"] = str(graph.status or "")
+            summary_with_evidence["snapshot_tool_status"] = str(snapshot_call.status.value)
+            summary_with_evidence["snapshot_state_version"] = int(self.state.version)
+            return summary_with_evidence
         reason = snapshot_call.error or graph.status or "unknown"
         self.operation_log.append(
             "runtime_gm_summary_snapshot_failed",
             room_id=room,
             plan_id=safe_plan_id,
             batch_id=safe_batch_id,
-            payload={"reason": reason},
+            payload=self._snapshot_failure_audit_payload(
+                summary_type="runtime_gm_summary",
+                reason=reason,
+            ),
         )
         raise RuntimeError(f"failed to record runtime GM summary: {reason}")
 
@@ -15884,7 +17466,7 @@ class AgentRuntime:
         audience: str = "",
         limit: int | None = None,
         runtime_events: Iterable[Mapping[str, Any]],
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         room = str(room_id or "default")
         snapshot_room = "runtime-events-snapshot"
         safe_plan_id = str(plan_id or "").strip()
@@ -15941,24 +17523,39 @@ class AgentRuntime:
             and snapshot_call.status == ToolCallStatus.SUCCEEDED
             and isinstance(events, list)
         ):
+            event_summary = self._runtime_event_snapshot_summary(
+                [dict(event) for event in events if isinstance(event, Mapping)],
+                audience=safe_audience,
+                limit=limit,
+            )
             self.operation_log.append(
                 "runtime_events_snapshot_recorded",
                 room_id=room,
                 plan_id=safe_plan_id,
                 batch_id=safe_batch_id,
                 payload={
-                    "event_count": len(events),
+                    **event_summary,
                     "recorded": True,
                 },
             )
-            return [dict(event) for event in events if isinstance(event, Mapping)]
+            return {
+                "runtime_events": [dict(event) for event in events if isinstance(event, Mapping)],
+                "snapshot_recorded": True,
+                "snapshot_status": str(graph.status or ""),
+                "snapshot_tool_status": str(snapshot_call.status.value),
+                "snapshot_state_version": int(self.state.version),
+            }
         reason = snapshot_call.error or graph.status or "unknown"
         self.operation_log.append(
             "runtime_events_snapshot_failed",
             room_id=room,
             plan_id=safe_plan_id,
             batch_id=safe_batch_id,
-            payload={"reason": reason, "recorded": False},
+            payload=self._snapshot_failure_audit_payload(
+                summary_type="runtime_events",
+                reason=reason,
+                limit=limit,
+            ),
         )
         raise RuntimeError(f"failed to record runtime events snapshot: {reason}")
 
@@ -16048,16 +17645,45 @@ class AgentRuntime:
                     "sync_reconcile_failed_count": int(peer_sync_replay.get("sync_reconcile_failed_count") or 0),
                     "state_reconcile_count": int(peer_sync_replay.get("state_reconcile_count") or 0),
                     "state_reconcile_failed_count": int(peer_sync_replay.get("state_reconcile_failed_count") or 0),
+                    "sync_event_type_counts": AgentRuntime._safe_status_count_map(
+                        sync_summary.get("event_type_counts")
+                    ),
+                    "asset_transfer_status_counts": AgentRuntime._safe_status_count_map(
+                        asset_transfer_replay.get("transfer_status_counts")
+                    ),
+                    "asset_transfer_event_type_counts": AgentRuntime._safe_status_count_map(
+                        asset_transfer_replay.get("event_type_counts")
+                    ),
+                    "peer_sync_event_type_counts": AgentRuntime._safe_status_count_map(
+                        peer_sync_replay.get("event_type_counts")
+                    ),
+                    "latest_transfer_status": AgentRuntime._safe_report_text(
+                        asset_transfer_replay.get("latest_transfer_status")
+                    )[:48],
+                    "latest_transfer_progress": int(
+                        asset_transfer_replay.get("latest_transfer_progress") or 0
+                    ),
+                    "latest_peer_event_type": AgentRuntime._safe_report_text(
+                        peer_sync_replay.get("latest_peer_event_type")
+                    )[:48],
                 },
             )
-            return dict(status)
+            sync_status_with_evidence = dict(status)
+            sync_status_with_evidence["snapshot_recorded"] = True
+            sync_status_with_evidence["snapshot_status"] = str(graph.status or "")
+            sync_status_with_evidence["snapshot_tool_status"] = str(snapshot_call.status.value)
+            sync_status_with_evidence["snapshot_state_version"] = int(self.state.version)
+            return sync_status_with_evidence
         reason = snapshot_call.error or graph.status or "unknown"
         self.operation_log.append(
             "runtime_sync_status_snapshot_failed",
             room_id=room,
             plan_id=safe_plan_id,
             batch_id=safe_batch_id,
-            payload={"reason": reason},
+            payload=self._snapshot_failure_audit_payload(
+                summary_type="runtime_sync_status",
+                reason=reason,
+            ),
         )
         raise RuntimeError(f"failed to record runtime sync status: {reason}")
 
@@ -16112,6 +17738,9 @@ class AgentRuntime:
             and snapshot_call.status == ToolCallStatus.SUCCEEDED
             and isinstance(status, Mapping)
         ):
+            engine_write_readiness_summary = dict(
+                status.get("engine_write_readiness_summary") or {}
+            )
             self.operation_log.append(
                 "runtime_provider_status_snapshot_recorded",
                 room_id=room,
@@ -16120,15 +17749,64 @@ class AgentRuntime:
                     "external_plan_id": safe_external_plan_id,
                     "readiness_published": bool(status.get("readiness_published")),
                     "provider_count": len(dict(status.get("provider_summary") or {})),
+                    "engine_write_readiness_native_enabled_count": int(
+                        engine_write_readiness_summary.get("native_enabled_count") or 0
+                    ),
+                    "engine_write_readiness_runtime_state_only_count": int(
+                        engine_write_readiness_summary.get("runtime_state_only_count") or 0
+                    ),
+                    "engine_write_readiness_fallback_count": int(
+                        engine_write_readiness_summary.get("fallback_count") or 0
+                    ),
+                    "engine_write_readiness_disabled_count": int(
+                        engine_write_readiness_summary.get("disabled_count") or 0
+                    ),
+                    "engine_write_readiness_unavailable_count": int(
+                        engine_write_readiness_summary.get("unavailable_count") or 0
+                    ),
+                    "engine_write_readiness_native_enabled_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(engine_write_readiness_summary.get("native_enabled_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
+                    "engine_write_readiness_runtime_state_only_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(engine_write_readiness_summary.get("runtime_state_only_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
+                    "engine_write_readiness_fallback_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(engine_write_readiness_summary.get("fallback_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
+                    "engine_write_readiness_disabled_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(engine_write_readiness_summary.get("disabled_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
+                    "engine_write_readiness_unavailable_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(engine_write_readiness_summary.get("unavailable_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
                 },
             )
-            return dict(status)
+            provider_status_with_evidence = dict(status)
+            provider_status_with_evidence["snapshot_recorded"] = True
+            provider_status_with_evidence["snapshot_status"] = str(graph.status or "")
+            provider_status_with_evidence["snapshot_tool_status"] = str(snapshot_call.status.value)
+            provider_status_with_evidence["snapshot_state_version"] = int(self.state.version)
+            return provider_status_with_evidence
         reason = snapshot_call.error or graph.status or "unknown"
         self.operation_log.append(
             "runtime_provider_status_snapshot_failed",
             room_id=room,
             plan_id=safe_plan_id,
-            payload={"external_plan_id": safe_external_plan_id, "reason": reason},
+            payload=self._snapshot_failure_audit_payload(
+                summary_type="runtime_provider_status",
+                reason=reason,
+                external_plan_id=safe_external_plan_id,
+            ),
         )
         raise RuntimeError(f"failed to record runtime provider status: {reason}")
 
@@ -16194,19 +17872,20 @@ class AgentRuntime:
             and snapshot_call.status == ToolCallStatus.SUCCEEDED
             and isinstance(replay, Mapping)
         ):
+            replay_with_evidence = dict(replay)
+            replay_with_evidence["snapshot_recorded"] = True
+            replay_with_evidence["snapshot_status"] = str(graph.status or "")
+            replay_with_evidence["snapshot_tool_status"] = str(snapshot_call.status.value)
+            replay_with_evidence["snapshot_state_version"] = int(self.state.version)
             self.operation_log.append(
                 "runtime_operation_replay_snapshot_recorded",
                 room_id=source_room,
                 plan_id=safe_plan_id,
                 batch_id=safe_batch_id,
                 tool_call_id=safe_tool_call_id,
-                payload={
-                    "event": safe_event,
-                    "limit": limit,
-                    "entry_count": int(replay.get("entry_count") or 0),
-                },
+                payload=self._operation_replay_snapshot_audit_payload(replay_with_evidence),
             )
-            return dict(replay)
+            return replay_with_evidence
         reason = snapshot_call.error or graph.status or "unknown"
         self.operation_log.append(
             "runtime_operation_replay_snapshot_failed",
@@ -16214,7 +17893,12 @@ class AgentRuntime:
             plan_id=safe_plan_id,
             batch_id=safe_batch_id,
             tool_call_id=safe_tool_call_id,
-            payload={"event": safe_event, "limit": limit, "reason": reason},
+            payload=self._snapshot_failure_audit_payload(
+                summary_type="runtime_operation_replay",
+                reason=reason,
+                event=safe_event,
+                limit=limit,
+            ),
         )
         raise RuntimeError(f"failed to record runtime operation replay: {reason}")
 
@@ -16248,12 +17932,18 @@ class AgentRuntime:
             batch_id=batch_id,
         )
         import_summary = self._import_summary_for_plan(room, active_plan_id, batch_id=batch_id)
+        engine_write_boundary_summary = self._engine_write_boundary_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=batch_id,
+        )
         resource_summary = self._resource_summary_for_plan(room, active_plan_id, batch_id=batch_id)
         batch_resource_flow_summary = self._batch_resource_flow_summary_for_plan(
             room,
             active_plan_id,
             batch_id=batch_id,
         )
+        semantic_status_by_batch = dict(batch_resource_flow_summary.get("status_by_batch_id") or {})
         state_patch_conflict_summary = self._state_patch_conflict_summary(room)
         layout_adjustment_summary = self._layout_adjustment_summary_for_plan(
             room,
@@ -16393,6 +18083,14 @@ class AgentRuntime:
             sync_replay_summary=dict(operation_replay_summary.get("sync_replay_summary") or {}),
             message_delivery_summary=dict(operation_replay_summary.get("message_delivery_summary") or {}),
         )
+        report_health_summary = self._report_health_summary(
+            batch_resource_flow_summary=batch_resource_flow_summary,
+            import_summary=import_summary,
+            sync_health_digest=sync_health_digest,
+            resource_summary=resource_summary,
+            environment_component_summary=environment_component_summary,
+            engine_write_summary=dict(operation_replay_summary.get("engine_write_summary") or {}),
+        )
         scoped_actor_facts = self._actor_facts_for_plan(room, active_plan_id, batch_id=batch_id)
         intervention_digest = self._intervention_digest_for_report(
             pending_interventions=pending,
@@ -16430,6 +18128,9 @@ class AgentRuntime:
             "scene_plan_lifecycle_summary": dict(operation_replay_summary.get("scene_plan_lifecycle_summary") or {}),
             "vlm_checkpoint_summary": dict(operation_replay_summary.get("vlm_checkpoint_summary") or {}),
             "review_advisory_replay_summary": dict(operation_replay_summary.get("review_advisory_summary") or {}),
+            "final_adjustment_confirmation_replay_summary": dict(
+                operation_replay_summary.get("final_adjustment_confirmation_replay_summary") or {}
+            ),
             "state_patch_summary": {
                 **dict(operation_replay_summary.get("state_patch_summary") or {}),
                 "conflict_fact_count": int(state_patch_conflict_summary.get("conflict_count") or 0),
@@ -16451,6 +18152,7 @@ class AgentRuntime:
             "environment_component_summary": environment_component_summary,
             "resource_summary": resource_summary,
             "batch_resource_flow_summary": batch_resource_flow_summary,
+            "report_health_summary": report_health_summary,
             "review_summary": review_summary,
             "geometry_fact_summary": geometry_fact_summary,
             "geometry_fact_replay_summary": dict(
@@ -16489,6 +18191,10 @@ class AgentRuntime:
                         "batch_id": str(item.get("batch_id") or ""),
                         "graph_status": str(graph_by_batch.get(str(item.get("batch_id") or ""), {}).get("status") or ""),
                         "graph_node_count": len(dict(graph_by_batch.get(str(item.get("batch_id") or ""), {}).get("nodes") or {})),
+                        "semantic_status": str(semantic_status_by_batch.get(str(item.get("batch_id") or "")) or item.get("status") or ""),
+                        "semantic_status_source": "batch_resource_flow"
+                        if str(item.get("batch_id") or "") in semantic_status_by_batch
+                        else "batch_plan",
                         "status": str(item.get("status") or ""),
                         "batch_index": int(item.get("batch_index") or 0),
                         "total_batches": int(item.get("total_batches") or 0),
@@ -16499,6 +18205,7 @@ class AgentRuntime:
                 ],
             },
             "import_summary": import_summary,
+            "engine_write_boundary_summary": engine_write_boundary_summary,
             "intervention_batch_summary": intervention_batch_summary,
             "batch_tooling_summary": batch_tooling_summary,
             "tool_queue_health_summary": tool_queue_health_summary,
@@ -16513,25 +18220,43 @@ class AgentRuntime:
                 "command_count": len(runtime_commands),
                 "latest_commands": self._compact_runtime_commands_for_report(runtime_commands[-3:]),
             },
-            "sync_summary": sync_summary,
-            "asset_transfer_summary": asset_transfer_summary,
-            "sync_health_digest": sync_health_digest,
-	            "tool_graph_summary": {
-	                "graph_count": len(user_visible_graphs),
-	                "graphs": [
+                "sync_summary": sync_summary,
+                "asset_transfer_summary": asset_transfer_summary,
+                "sync_health_digest": sync_health_digest,
+                "fact_source_boundary_summary": self._fact_source_boundary_summary(
+                    plan_summary={
+                        "title": str(plan.get("title") or ""),
+                        "status": str(plan.get("status") or ""),
+                    },
+                    batch_summary={"batch_count": len(batches)},
+                    resource_summary=resource_summary,
+                    import_summary=import_summary,
+                    sync_summary=sync_summary,
+                    engine_write_summary=dict(operation_replay_summary.get("engine_write_summary") or {}),
+                    engine_write_boundary_summary=engine_write_boundary_summary,
+                    scene_snapshot_summary=scene_snapshot_summary,
+                ),
+                    "tool_graph_summary": {
+                    "graph_count": len(user_visible_graphs),
+                    "graphs": [
                     {
                         "status": str(item.get("status") or ""),
                         "node_count": len(item.get("nodes") or {}),
                         "batch_id": str(item.get("batch_id") or ""),
+                        "semantic_status": str(semantic_status_by_batch.get(str(item.get("batch_id") or "")) or item.get("status") or ""),
+                        "semantic_status_source": "batch_resource_flow"
+                        if str(item.get("batch_id") or "") in semantic_status_by_batch
+                        else "tool_graph",
                         "batch_index": int(batch_by_id.get(str(item.get("batch_id") or ""), {}).get("batch_index") or 0),
                         "total_batches": int(batch_by_id.get(str(item.get("batch_id") or ""), {}).get("total_batches") or 0),
                     }
-	                    for item in user_visible_graphs
-	                ],
-	            },
-	            "tool_execution_digest": tool_execution_digest,
-	            "provider_summary": self._safe_provider_summary(self._provider_summary),
+                        for item in user_visible_graphs
+                    ],
+                },
+                "tool_execution_digest": tool_execution_digest,
+            "provider_summary": self._safe_provider_summary(self._provider_summary),
             "provider_readiness_summary": self._provider_readiness_summary(self._provider_summary),
+            "engine_write_readiness_summary": self._engine_write_readiness_summary(self._provider_summary),
             "latest_runtime_events": self.user_visible_events(
                 str(room_id),
                 plan_id=active_plan_id,
@@ -16551,23 +18276,168 @@ class AgentRuntime:
         report["operation_log_index"] = len(self.operation_log.entries())
         report = self._sanitize_report_record(report)
         self._persist_user_report(str(room_id), active_plan_id, batch_id, report)
+        batch_semantic_status_counts = dict(report_health_summary.get("batch_semantic_status_counts") or {})
+        batch_failed_count = int(report_health_summary.get("batch_failed_count") or 0)
+        batch_partial_count = int(report_health_summary.get("batch_partial_count") or 0)
+        import_failed_count = int(report_health_summary.get("import_failed_count") or 0)
+        sync_health_status = str(report_health_summary.get("sync_health_status") or "")
+        asset_incomplete_count = int(report_health_summary.get("asset_incomplete_count") or 0)
+        asset_failed_count = int(report_health_summary.get("asset_failed_count") or 0)
+        resource_phase_failed_count = int(report_health_summary.get("resource_phase_failed_count") or 0)
+        resource_phase_partial_count = int(report_health_summary.get("resource_phase_partial_count") or 0)
+        resource_phase_waiting_count = int(report_health_summary.get("resource_phase_waiting_count") or 0)
+        layout_transform_failure_code_counts = {
+            self._safe_report_text(str(key or "")): int(value or 0)
+            for key, value in dict(
+                layout_adjustment_summary.get("layout_transform_failure_code_counts") or {}
+            ).items()
+            if str(key or "").strip()
+        }
+        engine_write_bridge_error_code_counts = {
+            self._safe_report_text(str(key or "")): int(value or 0)
+            for key, value in dict(
+                engine_write_boundary_summary.get("bridge_error_code_counts") or {}
+            ).items()
+            if str(key or "").strip()
+        }
+        resource_phase_failure_code_counts = {
+            self._safe_report_text(str(key or "")): int(value or 0)
+            for key, value in dict(report_health_summary.get("resource_phase_failure_code_counts") or {}).items()
+            if str(key or "").strip()
+        }
+        import_failure_code_counts = {
+            self._safe_report_text(str(key or "")): int(value or 0)
+            for key, value in dict(report_health_summary.get("import_failure_code_counts") or {}).items()
+            if str(key or "").strip()
+        }
+        environment_import_failure_code_counts = {
+            self._safe_report_text(str(key or "")): int(value or 0)
+            for key, value in dict(report_health_summary.get("environment_import_failure_code_counts") or {}).items()
+            if str(key or "").strip()
+        }
+        sync_failure_code_counts = {
+            self._safe_report_text(str(key or "")): int(value or 0)
+            for key, value in dict(report_health_summary.get("sync_failure_code_counts") or {}).items()
+            if str(key or "").strip()
+        }
+        latest_sync_failure_code = self._safe_report_text(
+            str(report_health_summary.get("latest_sync_failure_code") or "")
+        )
+        engine_write_readiness_mismatch_count = int(
+            report_health_summary.get("engine_write_readiness_mismatch_count") or 0
+        )
+        engine_write_readiness_mismatch_channels = [
+            self._safe_report_text(str(item or "").replace("_", "-"))[:48]
+            for item in list(report_health_summary.get("engine_write_readiness_mismatch_channels") or [])[:8]
+            if str(item or "").strip()
+        ]
+        environment_failed_count = int(report_health_summary.get("environment_failed_count") or 0)
+        environment_import_requested_count = int(
+            report_health_summary.get("environment_import_requested_count") or 0
+        )
+        environment_imported_count = int(report_health_summary.get("environment_imported_count") or 0)
+        environment_import_failed_count = int(report_health_summary.get("environment_import_failed_count") or 0)
+        report_health_reasons = [
+            self._safe_report_text(str(reason or ""))
+            for reason in list(report_health_summary.get("reasons") or [])[:6]
+            if str(reason or "").strip()
+        ]
+        report_event_level = "info"
+        report_event_title = "生成报告已完成"
+        report_event_message = "已汇总当前计划、批次、介入、布局调整和导入状态。"
+        if batch_failed_count > 0 or import_failed_count > 0 or asset_failed_count > 0:
+            report_event_level = "warning"
+            report_event_title = "生成报告已完成（存在失败项）"
+            report_event_message = (
+                "已汇总当前计划、批次和导入状态；"
+                f"{batch_failed_count} 个批次失败，{import_failed_count} 个导入失败。"
+            )
+            if asset_failed_count > 0:
+                report_event_message += f" 模型同传失败 {asset_failed_count} 项。"
+            if environment_import_failed_count > 0:
+                report_event_message += f" 环境组件导入失败 {environment_import_failed_count} 项。"
+        elif batch_partial_count > 0 or asset_incomplete_count > 0 or sync_health_status == "partial":
+            report_event_level = "warning"
+            report_event_title = "生成报告已完成（仍有未完成项）"
+            report_event_message = (
+                "已汇总当前计划、批次和同步状态；"
+                f"{batch_partial_count} 个批次部分完成，{asset_incomplete_count} 个模型同传未完成。"
+            )
+            if environment_import_failed_count > 0:
+                report_event_message += f" 环境组件导入失败 {environment_import_failed_count} 项。"
         self.emit_runtime_event(
             room_id=str(room_id),
             plan_id=active_plan_id,
             batch_id=batch_id,
             event_type="report_ready",
             phase="report",
-            title="生成报告已完成",
-            message="已汇总当前计划、批次、介入、布局调整和导入状态。",
+            title=report_event_title,
+            message=report_event_message,
+            level=report_event_level,
             progress=100,
             payload={
                 "status": str(plan.get("status") or ""),
                 "actor_count": len(scoped_actor_facts),
                 "batch_count": len(batches),
-                "proposal_count": len(layout_proposals),
+                "proposal_count": int(layout_adjustment_summary.get("proposal_count") or 0),
+                "layout_applied_delta_count": int(layout_adjustment_summary.get("applied_delta_count") or 0),
+                "layout_skipped_delta_count": int(layout_adjustment_summary.get("skipped_delta_count") or 0),
+                "layout_transform_result_count": int(layout_adjustment_summary.get("transform_result_count") or 0),
+                "layout_ground_snapped_count": int(layout_adjustment_summary.get("ground_snapped_count") or 0),
+                "layout_overlap_resolved_count": int(layout_adjustment_summary.get("overlap_resolved_count") or 0),
+                "layout_transform_failure_code_counts": dict(
+                    sorted(layout_transform_failure_code_counts.items())
+                ),
+                "engine_write_boundary_fact_count": int(
+                    engine_write_boundary_summary.get("boundary_fact_count") or 0
+                ),
+                "engine_write_transform_boundary_count": int(
+                    engine_write_boundary_summary.get("transform_boundary_count") or 0
+                ),
+                "engine_write_bridge_call_count": int(
+                    engine_write_boundary_summary.get("bridge_call_count") or 0
+                ),
+                "engine_write_bridge_success_count": int(
+                    engine_write_boundary_summary.get("bridge_success_count") or 0
+                ),
+                "engine_write_bridge_failed_count": int(
+                    engine_write_boundary_summary.get("bridge_failed_count") or 0
+                ),
+                "engine_write_bridge_error_code_counts": dict(
+                    sorted(engine_write_bridge_error_code_counts.items())
+                ),
                 "requested_count": int(import_summary.get("requested_count") or 0),
                 "imported_count": int(import_summary.get("imported_count") or 0),
-                "failed_count": int(import_summary.get("failed_count") or 0),
+                "failed_count": import_failed_count,
+                "batch_semantic_status_counts": dict(sorted(batch_semantic_status_counts.items())),
+                "batch_failed_count": batch_failed_count,
+                "batch_partial_count": batch_partial_count,
+                "sync_health_status": sync_health_status,
+                "sync_actor_transform_count": int(report_health_summary.get("sync_actor_transform_count") or 0),
+                "sync_actor_delete_count": int(report_health_summary.get("sync_actor_delete_count") or 0),
+                "sync_failure_code_counts": dict(sorted(sync_failure_code_counts.items())),
+                "latest_sync_failure_code": latest_sync_failure_code,
+                "engine_write_readiness_mismatch_count": engine_write_readiness_mismatch_count,
+                "engine_write_readiness_mismatch_channels": engine_write_readiness_mismatch_channels,
+                "asset_incomplete_count": asset_incomplete_count,
+                "asset_failed_count": asset_failed_count,
+                "report_health_status": str(report_health_summary.get("status") or "unknown"),
+                "report_attention_required": bool(report_health_summary.get("attention_required")),
+                "resource_phase_failed_count": resource_phase_failed_count,
+                "resource_phase_partial_count": resource_phase_partial_count,
+                "resource_phase_waiting_count": resource_phase_waiting_count,
+                "resource_phase_failure_code_counts": dict(
+                    sorted(resource_phase_failure_code_counts.items())
+                ),
+                "import_failure_code_counts": dict(sorted(import_failure_code_counts.items())),
+                "environment_failed_count": environment_failed_count,
+                "environment_import_requested_count": environment_import_requested_count,
+                "environment_imported_count": environment_imported_count,
+                "environment_import_failed_count": environment_import_failed_count,
+                "environment_import_failure_code_counts": dict(
+                    sorted(environment_import_failure_code_counts.items())
+                ),
+                "report_health_reasons": report_health_reasons,
             },
         )
         return report
@@ -16682,20 +18552,72 @@ class AgentRuntime:
             else log_sync_summary
         )
         asset_transfer_replay_summary = self._asset_transfer_replay_summary(list(entries) + state_sync_entries)
+        room_state = self.state.snapshot(str(room_id or ""))["room"] if str(room_id or "").strip() else {}
+        resource_summary = self._resource_summary_for_plan(
+            room_state,
+            str(plan_id or ""),
+            batch_id=str(batch_id or ""),
+        )
+        import_summary = self._import_summary_for_plan(
+            room_state,
+            str(plan_id or ""),
+            batch_id=str(batch_id or ""),
+        )
+        asset_transfer_summary = self._asset_transfer_summary_for_plan(
+            room_state,
+            str(plan_id or ""),
+            batch_id=str(batch_id or ""),
+        )
+        engine_write_boundary_summary = self._engine_write_boundary_summary_for_plan(
+            room_state,
+            str(plan_id or ""),
+            batch_id=str(batch_id or ""),
+        )
+        message_delivery_summary = self._message_delivery_replay_summary(entries)
+        engine_write_summary = self._engine_write_replay_summary(raw_entries)
+        report_health_summary = self._report_health_summary(
+            batch_resource_flow_summary=self._batch_resource_flow_summary_for_plan(
+                room_state,
+                str(plan_id or ""),
+                batch_id=str(batch_id or ""),
+            ),
+            import_summary=import_summary,
+            sync_health_digest=self._sync_health_digest_for_report(
+                sync_summary=sync_replay_summary,
+                asset_transfer_summary=asset_transfer_summary,
+                sync_replay_summary=sync_replay_summary,
+                message_delivery_summary=message_delivery_summary,
+            ),
+            resource_summary=resource_summary,
+            environment_component_summary=self._environment_component_summary_for_plan(
+                room_state,
+                str(plan_id or ""),
+                batch_id=str(batch_id or ""),
+            ),
+            engine_write_summary=engine_write_summary,
+        )
         return {
             "entry_count": int(replay.get("entry_count") or 0),
             "event_counts": dict(replay.get("event_counts") or {}),
             "latest_events": latest_events,
+            "resource_summary": resource_summary,
+            "import_summary": import_summary,
+            "asset_transfer_summary": asset_transfer_summary,
+            "engine_write_boundary_summary": engine_write_boundary_summary,
+            "engine_write_summary": engine_write_summary,
+            "report_health_summary": report_health_summary,
             "planning_context_summary": self._planning_context_replay_summary(entries),
             "vlm_checkpoint_summary": self._vlm_checkpoint_replay_summary(raw_entries),
             "review_advisory_summary": self._review_advisory_replay_summary(entries),
+            "final_adjustment_confirmation_replay_summary": (
+                self._final_adjustment_confirmation_replay_summary(entries)
+            ),
             "environment_component_replay_summary": self._environment_component_replay_summary(entries),
             "layout_adjustment_replay_summary": self._layout_adjustment_replay_summary(entries),
-            "engine_write_summary": self._engine_write_replay_summary(raw_entries),
             "sync_replay_summary": sync_replay_summary,
             "asset_transfer_replay_summary": asset_transfer_replay_summary,
             "peer_sync_replay_summary": self._peer_sync_replay_summary(list(entries) + state_sync_entries),
-            "message_delivery_summary": self._message_delivery_replay_summary(entries),
+            "message_delivery_summary": message_delivery_summary,
             "runtime_command_summary": self._runtime_command_replay_summary(entries),
             "batch_execution_summary": self._batch_execution_replay_summary(entries),
             "batch_resource_lifecycle_summary": self._batch_resource_lifecycle_replay_summary(raw_entries),
@@ -16707,6 +18629,7 @@ class AgentRuntime:
             "scene_plan_lifecycle_summary": self._scene_plan_lifecycle_replay_summary(lifecycle_entries),
             "runtime_event_replay_summary": self._runtime_event_replay_summary(raw_entries),
             "runtime_guard_replay_summary": self._runtime_guard_replay_summary(raw_entries),
+            "runtime_fact_injection_replay_summary": self._runtime_fact_injection_replay_summary(raw_entries),
             "gm_summary_replay_summary": self._gm_summary_replay_summary(raw_entries),
             "geometry_fact_replay_summary": self._geometry_fact_replay_summary(raw_entries),
             "tool_failure_strategy_summary": self._tool_failure_strategy_replay_summary(raw_entries),
@@ -16723,7 +18646,20 @@ class AgentRuntime:
         pending_total = 0
         accepted_total = 0
         deferred_total = 0
+        readiness_publish_total = 0
+        readiness_publish_failed_total = 0
+        readiness_query_total = 0
+        readiness_publish_requested_total = 0
+        readiness_publish_enabled_total = 0
+        readiness_publish_unavailable_total = 0
         sync_attention_total = 0
+        sync_actor_transform_total = 0
+        sync_actor_delete_total = 0
+        engine_write_boundary_fact_total = 0
+        engine_write_bridge_call_total = 0
+        engine_write_bridge_success_total = 0
+        engine_write_bridge_failed_total = 0
+        engine_write_bridge_error_code_counts: dict[str, int] = {}
         sync_health_status_counts: dict[str, int] = {}
         latest_event: dict[str, Any] = {}
         for entry in entries:
@@ -16740,7 +18676,44 @@ class AgentRuntime:
                 pending_total += int(payload.get("intervention_pending_count") or 0)
                 accepted_total += int(payload.get("intervention_accepted_count") or 0)
                 deferred_total += int(payload.get("intervention_deferred_count") or 0)
+                readiness_publish_total += int(payload.get("resource_readiness_publish_count") or 0)
+                readiness_publish_failed_total += int(
+                    payload.get("resource_readiness_publish_failed_count") or 0
+                )
+                readiness_query_total += int(payload.get("resource_readiness_query_count") or 0)
+                readiness_publish_requested_total += int(
+                    payload.get("resource_readiness_publish_requested_total") or 0
+                )
+                readiness_publish_enabled_total += int(
+                    payload.get("resource_readiness_publish_enabled_total") or 0
+                )
+                readiness_publish_unavailable_total += int(
+                    payload.get("resource_readiness_publish_unavailable_total") or 0
+                )
                 sync_attention_total += int(payload.get("sync_attention_count") or 0)
+                sync_actor_transform_total += int(payload.get("sync_actor_transform_count") or 0)
+                sync_actor_delete_total += int(payload.get("sync_actor_delete_count") or 0)
+                engine_write_boundary_fact_total += int(
+                    payload.get("engine_write_boundary_fact_count") or 0
+                )
+                engine_write_bridge_call_total += int(
+                    payload.get("engine_write_bridge_call_count") or 0
+                )
+                engine_write_bridge_success_total += int(
+                    payload.get("engine_write_bridge_success_count") or 0
+                )
+                engine_write_bridge_failed_total += int(
+                    payload.get("engine_write_bridge_failed_count") or 0
+                )
+                for key, value in dict(
+                    payload.get("engine_write_bridge_error_code_counts") or {}
+                ).items():
+                    safe_key = str(key or "").strip()
+                    if not safe_key:
+                        continue
+                    engine_write_bridge_error_code_counts[safe_key] = (
+                        engine_write_bridge_error_code_counts.get(safe_key, 0) + int(value or 0)
+                    )
                 sync_status = str(payload.get("sync_health_status") or "unknown").strip() or "unknown"
                 sync_health_status_counts[sync_status] = sync_health_status_counts.get(sync_status, 0) + 1
                 latest_event = {
@@ -16748,6 +18721,24 @@ class AgentRuntime:
                     "available": bool(payload.get("available")),
                     "has_scene_plan": bool(payload.get("has_scene_plan")),
                     "sync_health_status": sync_status,
+                    "sync_actor_transform_count": int(payload.get("sync_actor_transform_count") or 0),
+                    "sync_actor_delete_count": int(payload.get("sync_actor_delete_count") or 0),
+                    "resource_readiness_publish_count": int(
+                        payload.get("resource_readiness_publish_count") or 0
+                    ),
+                    "resource_readiness_query_count": int(
+                        payload.get("resource_readiness_query_count") or 0
+                    ),
+                    "engine_write_bridge_failed_count": int(
+                        payload.get("engine_write_bridge_failed_count") or 0
+                    ),
+                    "engine_write_bridge_error_code_counts": {
+                        str(key): int(value)
+                        for key, value in dict(
+                            payload.get("engine_write_bridge_error_code_counts") or {}
+                        ).items()
+                        if str(key or "").strip()
+                    },
                 }
             elif event == "runtime_gm_summary_failed":
                 failed_count += 1
@@ -16767,7 +18758,22 @@ class AgentRuntime:
             "intervention_pending_total": pending_total,
             "intervention_accepted_total": accepted_total,
             "intervention_deferred_total": deferred_total,
+            "resource_readiness_publish_total": readiness_publish_total,
+            "resource_readiness_publish_failed_total": readiness_publish_failed_total,
+            "resource_readiness_query_total": readiness_query_total,
+            "resource_readiness_publish_requested_total": readiness_publish_requested_total,
+            "resource_readiness_publish_enabled_total": readiness_publish_enabled_total,
+            "resource_readiness_publish_unavailable_total": readiness_publish_unavailable_total,
+            "engine_write_boundary_fact_total": engine_write_boundary_fact_total,
+            "engine_write_bridge_call_total": engine_write_bridge_call_total,
+            "engine_write_bridge_success_total": engine_write_bridge_success_total,
+            "engine_write_bridge_failed_total": engine_write_bridge_failed_total,
+            "engine_write_bridge_error_code_counts": dict(
+                sorted(engine_write_bridge_error_code_counts.items())
+            ),
             "sync_attention_total": sync_attention_total,
+            "sync_actor_transform_total": sync_actor_transform_total,
+            "sync_actor_delete_total": sync_actor_delete_total,
             "sync_health_status_counts": dict(sorted(sync_health_status_counts.items())),
             "latest_gm_summary_event": latest_event,
         }
@@ -17069,6 +19075,54 @@ class AgentRuntime:
         }
 
     @staticmethod
+    def _runtime_fact_injection_replay_summary(entries: Any) -> dict[str, Any]:
+        if not isinstance(entries, list):
+            return {
+                "injection_event_count": 0,
+                "injected_field_total_count": 0,
+                "injected_field_name_counts": {},
+                "latest_injection": {},
+            }
+        injection_event_count = 0
+        injected_field_total_count = 0
+        injected_field_name_counts: dict[str, int] = {}
+        latest_injection: dict[str, Any] = {}
+        for entry in entries:
+            if isinstance(entry, OperationLogEntry):
+                event = str(entry.event or "")
+                batch_id = str(entry.batch_id or "")
+                payload = entry.payload if isinstance(entry.payload, Mapping) else {}
+            elif isinstance(entry, Mapping):
+                event = str(entry.get("event") or "")
+                batch_id = str(entry.get("batch_id") or "")
+                payload = entry.get("payload") if isinstance(entry.get("payload"), Mapping) else {}
+            else:
+                continue
+            if event != "tool_call_runtime_facts_injected":
+                continue
+            injection_event_count += 1
+            field_names = [
+                AgentRuntime._safe_report_text(str(item or "")).replace("_", "-")[:64]
+                for item in list(payload.get("field_names") or payload.get("fields") or [])[:10]
+                if str(item or "").strip()
+            ]
+            field_count = int(payload.get("field_count") or len(field_names))
+            injected_field_total_count += max(0, field_count)
+            for field_name in field_names:
+                injected_field_name_counts[field_name] = injected_field_name_counts.get(field_name, 0) + 1
+            latest_injection = {
+                "batch_id": batch_id,
+                "field_count": max(0, field_count),
+                "field_names": field_names,
+                "source": AgentRuntime._safe_report_text(payload.get("source") or "runtime_state")[:64],
+            }
+        return {
+            "injection_event_count": injection_event_count,
+            "injected_field_total_count": injected_field_total_count,
+            "injected_field_name_counts": dict(sorted(injected_field_name_counts.items())),
+            "latest_injection": latest_injection,
+        }
+    @staticmethod
     def _runtime_event_replay_summary(entries: Any) -> dict[str, Any]:
         if not isinstance(entries, list):
             return {
@@ -17076,15 +19130,25 @@ class AgentRuntime:
                 "emit_failed_count": 0,
                 "disclosure_skipped_count": 0,
                 "event_type_counts": {},
+                "report_ready_count": 0,
+                "report_attention_count": 0,
+                "report_health_status_counts": {},
+                "report_health_reason_counts": {},
                 "latest_runtime_event": {},
                 "latest_disclosure_skip": {},
+                "latest_report_ready": {},
             }
         emitted_count = 0
         emit_failed_count = 0
         disclosure_skipped_count = 0
+        report_ready_count = 0
+        report_attention_count = 0
         event_type_counts: dict[str, int] = {}
+        report_health_status_counts: dict[str, int] = {}
+        report_health_reason_counts: dict[str, int] = {}
         latest_runtime_event: dict[str, Any] = {}
         latest_disclosure_skip: dict[str, Any] = {}
+        latest_report_ready: dict[str, Any] = {}
         for entry in entries:
             if isinstance(entry, OperationLogEntry):
                 event = str(entry.event or "")
@@ -17120,13 +19184,96 @@ class AgentRuntime:
                 "batch_id": batch_id,
                 "status": status,
             }
+            if event_type == "report_ready":
+                report_ready_count += 1
+                health_status = str(payload.get("report_health_status") or "unknown").strip() or "unknown"
+                report_health_status_counts[health_status] = report_health_status_counts.get(health_status, 0) + 1
+                attention_required = bool(payload.get("report_attention_required"))
+                if attention_required:
+                    report_attention_count += 1
+                reason_values = [
+                    AgentRuntime._safe_report_text(reason)
+                    for reason in list(payload.get("report_health_reasons") or [])[:6]
+                    if str(reason or "").strip()
+                ]
+                for reason in reason_values:
+                    report_health_reason_counts[reason] = report_health_reason_counts.get(reason, 0) + 1
+                latest_report_ready = {
+                    "batch_id": batch_id,
+                    "status": health_status,
+                    "attention_required": attention_required,
+                    "resource_phase_failed_count": int(payload.get("resource_phase_failed_count") or 0),
+                    "resource_phase_partial_count": int(payload.get("resource_phase_partial_count") or 0),
+                    "resource_phase_waiting_count": int(payload.get("resource_phase_waiting_count") or 0),
+                    "environment_failed_count": int(payload.get("environment_failed_count") or 0),
+                    "environment_import_requested_count": int(payload.get("environment_import_requested_count") or 0),
+                    "environment_imported_count": int(payload.get("environment_imported_count") or 0),
+                    "environment_import_failed_count": int(payload.get("environment_import_failed_count") or 0),
+                    "environment_import_failure_code_counts": {
+                        AgentRuntime._safe_report_text(str(key or "")): int(value or 0)
+                        for key, value in dict(
+                            payload.get("environment_import_failure_code_counts") or {}
+                        ).items()
+                        if str(key or "").strip()
+                    },
+                    "layout_applied_delta_count": int(payload.get("layout_applied_delta_count") or 0),
+                    "layout_skipped_delta_count": int(payload.get("layout_skipped_delta_count") or 0),
+                    "layout_transform_result_count": int(payload.get("layout_transform_result_count") or 0),
+                    "layout_ground_snapped_count": int(payload.get("layout_ground_snapped_count") or 0),
+                    "layout_overlap_resolved_count": int(payload.get("layout_overlap_resolved_count") or 0),
+                    "sync_actor_transform_count": int(payload.get("sync_actor_transform_count") or 0),
+                    "sync_actor_delete_count": int(payload.get("sync_actor_delete_count") or 0),
+                    "engine_write_readiness_mismatch_count": int(
+                        payload.get("engine_write_readiness_mismatch_count") or 0
+                    ),
+                    "engine_write_readiness_mismatch_channels": [
+                        AgentRuntime._safe_report_text(str(item or "").replace("_", "-"))[:48]
+                        for item in list(payload.get("engine_write_readiness_mismatch_channels") or [])[:8]
+                        if str(item or "").strip()
+                    ],
+                    "layout_transform_failure_code_counts": {
+                        AgentRuntime._safe_report_text(str(key or "")): int(value or 0)
+                        for key, value in dict(
+                            payload.get("layout_transform_failure_code_counts") or {}
+                        ).items()
+                        if str(key or "").strip()
+                    },
+                    "engine_write_boundary_fact_count": int(
+                        payload.get("engine_write_boundary_fact_count") or 0
+                    ),
+                    "engine_write_transform_boundary_count": int(
+                        payload.get("engine_write_transform_boundary_count") or 0
+                    ),
+                    "engine_write_bridge_call_count": int(
+                        payload.get("engine_write_bridge_call_count") or 0
+                    ),
+                    "engine_write_bridge_success_count": int(
+                        payload.get("engine_write_bridge_success_count") or 0
+                    ),
+                    "engine_write_bridge_failed_count": int(
+                        payload.get("engine_write_bridge_failed_count") or 0
+                    ),
+                    "engine_write_bridge_error_code_counts": {
+                        AgentRuntime._safe_report_text(str(key or "")): int(value or 0)
+                        for key, value in dict(
+                            payload.get("engine_write_bridge_error_code_counts") or {}
+                        ).items()
+                        if str(key or "").strip()
+                    },
+                    "reasons": reason_values[:4],
+                }
         return {
             "emitted_count": emitted_count,
             "emit_failed_count": emit_failed_count,
             "disclosure_skipped_count": disclosure_skipped_count,
             "event_type_counts": dict(sorted(event_type_counts.items())),
+            "report_ready_count": report_ready_count,
+            "report_attention_count": report_attention_count,
+            "report_health_status_counts": dict(sorted(report_health_status_counts.items())),
+            "report_health_reason_counts": dict(sorted(report_health_reason_counts.items())),
             "latest_runtime_event": latest_runtime_event,
             "latest_disclosure_skip": latest_disclosure_skip,
+            "latest_report_ready": latest_report_ready,
         }
 
     @staticmethod
@@ -17138,7 +19285,11 @@ class AgentRuntime:
                 "write_confirmation_required_count": 0,
                 "system_actor_write_blocked_count": 0,
                 "user_visible_blocked_event_count": 0,
+                "requires_write_blocked_count": 0,
+                "confirmed_blocked_count": 0,
+                "unconfirmed_blocked_count": 0,
                 "reason_counts": {},
+                "risk_level_counts": {},
                 "latest_block": {},
             }
         blocked_count = 0
@@ -17146,7 +19297,11 @@ class AgentRuntime:
         write_confirmation_required_count = 0
         system_actor_write_blocked_count = 0
         user_visible_blocked_event_count = 0
+        requires_write_blocked_count = 0
+        confirmed_blocked_count = 0
+        unconfirmed_blocked_count = 0
         reason_counts: dict[str, int] = {}
+        risk_level_counts: dict[str, int] = {}
         latest_block: dict[str, Any] = {}
         for entry in entries:
             if isinstance(entry, OperationLogEntry):
@@ -17167,6 +19322,16 @@ class AgentRuntime:
             if event != "tool_call_blocked":
                 continue
             blocked_count += 1
+            risk_level = str(payload.get("risk_level") or "unknown").strip().lower() or "unknown"
+            risk_level_counts[risk_level] = risk_level_counts.get(risk_level, 0) + 1
+            requires_write = bool(payload.get("requires_write"))
+            confirmed = bool(payload.get("confirmed"))
+            if requires_write:
+                requires_write_blocked_count += 1
+            if confirmed:
+                confirmed_blocked_count += 1
+            else:
+                unconfirmed_blocked_count += 1
             reason_key = "other"
             lowered = message.lower()
             if "high risk tool call requires confirmation" in lowered:
@@ -17182,6 +19347,9 @@ class AgentRuntime:
             latest_block = {
                 "batch_id": batch_id,
                 "reason": reason_key,
+                "risk_level": risk_level,
+                "requires_write": requires_write,
+                "confirmed": confirmed,
             }
         return {
             "blocked_count": blocked_count,
@@ -17189,7 +19357,11 @@ class AgentRuntime:
             "write_confirmation_required_count": write_confirmation_required_count,
             "system_actor_write_blocked_count": system_actor_write_blocked_count,
             "user_visible_blocked_event_count": user_visible_blocked_event_count,
+            "requires_write_blocked_count": requires_write_blocked_count,
+            "confirmed_blocked_count": confirmed_blocked_count,
+            "unconfirmed_blocked_count": unconfirmed_blocked_count,
             "reason_counts": dict(sorted(reason_counts.items())),
+            "risk_level_counts": dict(sorted(risk_level_counts.items())),
             "latest_block": latest_block,
         }
 
@@ -17532,6 +19704,14 @@ class AgentRuntime:
             for entry in sync_replay_entries
         ])
         runtime_event_replay_summary = self._runtime_event_replay_summary(sync_replay_entries)
+        resource_readiness_replay_summary = self._resource_readiness_replay_summary(sync_replay_entries)
+        gm_summary_replay_summary = self._gm_summary_replay_summary(sync_replay_entries)
+        safe_execution_replay_entries = [
+            OperationLog._safe_entry(entry)
+            for entry in engine_write_entries
+        ]
+        batch_execution_replay_summary = self._batch_execution_replay_summary(safe_execution_replay_entries)
+        tool_graph_queue_replay_summary = self._tool_graph_queue_replay_summary(safe_execution_replay_entries)
         runtime_guard_replay_summary = self._runtime_guard_replay_summary(sync_replay_entries)
         scene_plan_lifecycle_summary = self._scene_plan_lifecycle_replay_summary(scene_plan_lifecycle_entries)
         vlm_checkpoint_summary = self._vlm_checkpoint_replay_summary(sync_replay_entries)
@@ -17613,11 +19793,25 @@ class AgentRuntime:
             batch_id=active_batch_id,
         )
         import_summary = self._import_summary_for_plan(room, active_plan_id, batch_id=active_batch_id)
+        engine_write_boundary_summary = self._engine_write_boundary_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
         resource_summary = self._resource_summary_for_plan(room, active_plan_id, batch_id=active_batch_id)
         batch_resource_flow_summary = self._batch_resource_flow_summary_for_plan(
             room,
             active_plan_id,
             batch_id=active_batch_id,
+        )
+        semantic_status_by_batch = dict(batch_resource_flow_summary.get("status_by_batch_id") or {})
+        report_health_summary = self._report_health_summary(
+            batch_resource_flow_summary=batch_resource_flow_summary,
+            import_summary=import_summary,
+            sync_health_digest=sync_health_digest,
+            resource_summary=resource_summary,
+            environment_component_summary=environment_component_summary,
+            engine_write_summary=engine_write_summary,
         )
         layout_adjustment_summary = self._layout_adjustment_summary_for_plan(
             room,
@@ -17723,6 +19917,7 @@ class AgentRuntime:
             "actor_count": len(scoped_actor_facts),
             "provider_summary": self._safe_provider_summary(self._provider_summary),
             "provider_readiness_summary": self._provider_readiness_summary(self._provider_summary),
+            "engine_write_readiness_summary": self._engine_write_readiness_summary(self._provider_summary),
             "tool_capability_summary": {
                 key: value
                 for key, value in tool_capability_summary.items()
@@ -17743,6 +19938,7 @@ class AgentRuntime:
             "environment_component_summary": environment_component_summary,
             "resource_summary": resource_summary,
             "batch_resource_flow_summary": batch_resource_flow_summary,
+            "report_health_summary": report_health_summary,
             "review_summary": review_summary,
             "geometry_fact_summary": geometry_fact_summary,
             "review_advisory_proposal_summary": review_advisory_proposal_summary,
@@ -17757,6 +19953,10 @@ class AgentRuntime:
                         "batch_id": str(batch.get("batch_id") or ""),
                         "graph_status": str(graph_by_batch.get(str(batch.get("batch_id") or ""), {}).get("status") or ""),
                         "graph_node_count": len(dict(graph_by_batch.get(str(batch.get("batch_id") or ""), {}).get("nodes") or {})),
+                        "semantic_status": str(semantic_status_by_batch.get(str(batch.get("batch_id") or "")) or batch.get("status") or ""),
+                        "semantic_status_source": "batch_resource_flow"
+                        if str(batch.get("batch_id") or "") in semantic_status_by_batch
+                        else "batch_plan",
                         "status": str(batch.get("status") or ""),
                         "batch_index": int(batch.get("batch_index") or 0),
                         "total_batches": int(batch.get("total_batches") or 0),
@@ -17769,6 +19969,7 @@ class AgentRuntime:
                 ],
             },
             "import_summary": import_summary,
+            "engine_write_boundary_summary": engine_write_boundary_summary,
             "intervention_batch_summary": intervention_batch_summary,
             "batch_tooling_summary": batch_tooling_summary,
             "tool_queue_health_summary": tool_queue_health_summary,
@@ -17818,8 +20019,8 @@ class AgentRuntime:
                     for item in final_adjustment_confirmations[-3:]
                 ],
             },
-	            "tool_graph_summary": {
-	                "graph_count": len(visible_graphs),
+                "tool_graph_summary": {
+                    "graph_count": len(visible_graphs),
                 "status_counts": graph_status_counts,
                 "queue_count": len(graph_queue_items),
                 "queue_status_counts": queue_status_counts,
@@ -17828,6 +20029,10 @@ class AgentRuntime:
                     {
                         "status": str(graph.get("status") or ""),
                         "batch_id": str(graph.get("batch_id") or ""),
+                        "semantic_status": str(semantic_status_by_batch.get(str(graph.get("batch_id") or "")) or graph.get("status") or ""),
+                        "semantic_status_source": "batch_resource_flow"
+                        if str(graph.get("batch_id") or "") in semantic_status_by_batch
+                        else "tool_graph",
                         "batch_index": int(batch_by_id.get(str(graph.get("batch_id") or ""), {}).get("batch_index") or 0),
                         "total_batches": int(batch_by_id.get(str(graph.get("batch_id") or ""), {}).get("total_batches") or 0),
                         "node_count": len(graph.get("nodes") or {}),
@@ -17841,23 +20046,41 @@ class AgentRuntime:
                         "batch_index": int(batch_by_id.get(str(item.get("batch_id") or ""), {}).get("batch_index") or 0),
                         "total_batches": int(batch_by_id.get(str(item.get("batch_id") or ""), {}).get("total_batches") or 0),
                     }
-	                    for item in graph_queue_items[-3:]
-	                ],
-	            },
-	            "tool_execution_digest": tool_execution_digest,
-	            "sync_summary": sync_summary,
-            "asset_transfer_summary": asset_transfer_summary,
-            "sync_health_digest": sync_health_digest,
-            "sync_replay_summary": sync_replay_summary,
+                        for item in graph_queue_items[-3:]
+                    ],
+                },
+                "tool_execution_digest": tool_execution_digest,
+                    "sync_summary": sync_summary,
+                "asset_transfer_summary": asset_transfer_summary,
+                "sync_health_digest": sync_health_digest,
+                "fact_source_boundary_summary": self._fact_source_boundary_summary(
+                    plan_summary={
+                        "title": str(plan.get("title") or ""),
+                        "status": str(plan.get("status") or ""),
+                    },
+                    batch_summary={"batch_count": len(batches)},
+                    resource_summary=resource_summary,
+                    import_summary=import_summary,
+                    sync_summary=sync_summary,
+                    engine_write_summary=engine_write_summary,
+                    engine_write_boundary_summary=engine_write_boundary_summary,
+                    scene_snapshot_summary=scene_snapshot_summary,
+                ),
+                "sync_replay_summary": sync_replay_summary,
             "asset_transfer_replay_summary": asset_transfer_replay_summary,
             "peer_sync_replay_summary": peer_sync_replay_summary,
             "runtime_event_replay_summary": runtime_event_replay_summary,
+            "resource_readiness_replay_summary": resource_readiness_replay_summary,
+            "gm_summary_replay_summary": gm_summary_replay_summary,
+            "batch_execution_replay_summary": batch_execution_replay_summary,
+            "tool_graph_queue_replay_summary": tool_graph_queue_replay_summary,
             "runtime_guard_replay_summary": runtime_guard_replay_summary,
             "scene_plan_lifecycle_summary": scene_plan_lifecycle_summary,
             "vlm_checkpoint_summary": vlm_checkpoint_summary,
             "review_advisory_replay_summary": review_advisory_replay_summary,
             "tool_failure_strategy_summary": tool_failure_strategy_summary,
             "engine_write_summary": engine_write_summary,
+            "engine_write_boundary_summary": engine_write_boundary_summary,
             "state_patch_summary": {
                 **state_patch_summary,
                 "conflict_fact_count": int(state_patch_conflict_summary.get("conflict_count") or 0),
@@ -17895,6 +20118,144 @@ class AgentRuntime:
                 "context_count": len(context_events),
                 "context_type_counts": dict(sorted(context_type_counts.items())),
                 "speaker_type_counts": dict(sorted(speaker_type_counts.items())),
+                "report_health_status": str(report_health_summary.get("status") or "unknown"),
+                "report_attention_required": bool(report_health_summary.get("attention_required")),
+                "report_health_reasons": list(report_health_summary.get("reasons") or [])[:6],
+                "layout_proposal_count": int(layout_adjustment_summary.get("proposal_count") or 0),
+                "layout_applied_delta_count": int(layout_adjustment_summary.get("applied_delta_count") or 0),
+                "layout_skipped_delta_count": int(layout_adjustment_summary.get("skipped_delta_count") or 0),
+                "layout_transform_result_count": int(layout_adjustment_summary.get("transform_result_count") or 0),
+                "layout_ground_snapped_count": int(layout_adjustment_summary.get("ground_snapped_count") or 0),
+                "layout_overlap_resolved_count": int(layout_adjustment_summary.get("overlap_resolved_count") or 0),
+                "layout_transform_failure_code_counts": {
+                    str(key): int(value)
+                    for key, value in dict(
+                        layout_adjustment_summary.get("layout_transform_failure_code_counts") or {}
+                    ).items()
+                    if str(key or "").strip()
+                },
+                "sync_failure_code_counts": {
+                    str(key): int(value)
+                    for key, value in dict(
+                        sync_health_digest.get("sync_failure_code_counts") or {}
+                    ).items()
+                    if str(key or "").strip()
+                },
+                "latest_sync_failure_code": str(sync_health_digest.get("latest_sync_failure_code") or ""),
+                "sync_actor_transform_count": int(
+                    report_health_summary.get("sync_actor_transform_count") or 0
+                ),
+                "sync_actor_delete_count": int(
+                    report_health_summary.get("sync_actor_delete_count") or 0
+                ),
+                "engine_write_readiness_mismatch_count": int(
+                    report_health_summary.get("engine_write_readiness_mismatch_count") or 0
+                ),
+                "engine_write_readiness_mismatch_channels": [
+                    str(item).strip().replace("_", "-")[:48]
+                    for item in list(report_health_summary.get("engine_write_readiness_mismatch_channels") or [])[:8]
+                    if str(item).strip()
+                ],
+                "resource_phase_failure_code_counts": {
+                    str(key): int(value)
+                    for key, value in dict(
+                        report_health_summary.get("resource_phase_failure_code_counts") or {}
+                    ).items()
+                    if str(key or "").strip()
+                },
+                "import_failure_code_counts": {
+                    str(key): int(value)
+                    for key, value in dict(
+                        report_health_summary.get("import_failure_code_counts") or {}
+                    ).items()
+                    if str(key or "").strip()
+                },
+                "environment_import_failure_code_counts": {
+                    str(key): int(value)
+                    for key, value in dict(
+                        report_health_summary.get("environment_import_failure_code_counts") or {}
+                    ).items()
+                    if str(key or "").strip()
+                },
+                "engine_write_boundary_fact_count": int(
+                    engine_write_boundary_summary.get("boundary_fact_count") or 0
+                ),
+                "engine_write_transform_boundary_count": int(
+                    engine_write_boundary_summary.get("transform_boundary_count") or 0
+                ),
+                "engine_write_bridge_call_count": int(
+                    engine_write_boundary_summary.get("bridge_call_count") or 0
+                ),
+                "engine_write_bridge_success_count": int(
+                    engine_write_boundary_summary.get("bridge_success_count") or 0
+                ),
+                "engine_write_bridge_failed_count": int(
+                    engine_write_boundary_summary.get("bridge_failed_count") or 0
+                ),
+                "engine_write_bridge_error_code_counts": {
+                    str(key): int(value)
+                    for key, value in dict(
+                        engine_write_boundary_summary.get("bridge_error_code_counts") or {}
+                    ).items()
+                    if str(key or "").strip()
+                },
+                "runtime_event_report_ready_count": int(
+                    runtime_event_replay_summary.get("report_ready_count") or 0
+                ),
+                "runtime_event_report_attention_count": int(
+                    runtime_event_replay_summary.get("report_attention_count") or 0
+                ),
+                "resource_readiness_publish_count": int(
+                    resource_readiness_replay_summary.get("published_count") or 0
+                ),
+                "resource_readiness_publish_failed_count": int(
+                    resource_readiness_replay_summary.get("publish_failed_count") or 0
+                ),
+                "resource_readiness_query_count": int(
+                    resource_readiness_replay_summary.get("status_query_count") or 0
+                ),
+                "resource_readiness_publish_requested_total": int(
+                    resource_readiness_replay_summary.get("publish_requested_total") or 0
+                ),
+                "resource_readiness_publish_enabled_total": int(
+                    resource_readiness_replay_summary.get("publish_enabled_total") or 0
+                ),
+                "resource_readiness_publish_unavailable_total": int(
+                    resource_readiness_replay_summary.get("publish_unavailable_total") or 0
+                ),
+                "gm_summary_exported_count": int(
+                    gm_summary_replay_summary.get("exported_count") or 0
+                ),
+                "gm_summary_failed_count": int(
+                    gm_summary_replay_summary.get("failed_count") or 0
+                ),
+                "gm_summary_resource_readiness_publish_total": int(
+                    gm_summary_replay_summary.get("resource_readiness_publish_total") or 0
+                ),
+                "gm_summary_resource_readiness_query_total": int(
+                    gm_summary_replay_summary.get("resource_readiness_query_total") or 0
+                ),
+                "batch_execution_started_count": int(
+                    batch_execution_replay_summary.get("started_count") or 0
+                ),
+                "batch_execution_completed_count": int(
+                    batch_execution_replay_summary.get("completed_count") or 0
+                ),
+                "batch_execution_finalized_count": int(
+                    batch_execution_replay_summary.get("finalized_count") or 0
+                ),
+                "tool_graph_queue_queued_count": int(
+                    tool_graph_queue_replay_summary.get("queued_count") or 0
+                ),
+                "tool_graph_queue_dequeued_count": int(
+                    tool_graph_queue_replay_summary.get("dequeued_count") or 0
+                ),
+                "tool_graph_queue_rejected_count": int(
+                    tool_graph_queue_replay_summary.get("rejected_count") or 0
+                ),
+                "tool_graph_queue_blocked_count": int(
+                    tool_graph_queue_replay_summary.get("blocked_count") or 0
+                ),
             },
         )
         sanitized_summary = self._sanitize_report_record(summary)
@@ -17945,6 +20306,11 @@ class AgentRuntime:
             if isinstance(summary.get("sync_replay_summary"), Mapping)
             else {}
         )
+        asset_transfer_summary = (
+            summary.get("asset_transfer_summary", {})
+            if isinstance(summary.get("asset_transfer_summary"), Mapping)
+            else {}
+        )
         asset_transfer_replay_summary = (
             summary.get("asset_transfer_replay_summary", {})
             if isinstance(summary.get("asset_transfer_replay_summary"), Mapping)
@@ -17960,6 +20326,11 @@ class AgentRuntime:
             if isinstance(summary.get("runtime_event_replay_summary"), Mapping)
             else {}
         )
+        resource_readiness_replay_summary = (
+            summary.get("resource_readiness_replay_summary", {})
+            if isinstance(summary.get("resource_readiness_replay_summary"), Mapping)
+            else {}
+        )
         intervention_summary = (
             summary.get("intervention_summary", {})
             if isinstance(summary.get("intervention_summary"), Mapping)
@@ -17973,6 +20344,55 @@ class AgentRuntime:
         batch_resource_flow = (
             summary.get("batch_resource_flow_summary", {})
             if isinstance(summary.get("batch_resource_flow_summary"), Mapping)
+            else {}
+        )
+        report_health = (
+            summary.get("report_health_summary", {})
+            if isinstance(summary.get("report_health_summary"), Mapping)
+            else {}
+        )
+        engine_write_readiness_summary = (
+            summary.get("engine_write_readiness_summary", {})
+            if isinstance(summary.get("engine_write_readiness_summary"), Mapping)
+            else {}
+        )
+        engine_write_readiness_digest = {
+            "channel_count": int(engine_write_readiness_summary.get("channel_count") or 0),
+            "requested_count": int(engine_write_readiness_summary.get("requested_count") or 0),
+            "native_enabled_count": int(engine_write_readiness_summary.get("native_enabled_count") or 0),
+            "runtime_state_only_count": int(engine_write_readiness_summary.get("runtime_state_only_count") or 0),
+            "fallback_count": int(engine_write_readiness_summary.get("fallback_count") or 0),
+            "disabled_count": int(engine_write_readiness_summary.get("disabled_count") or 0),
+            "unavailable_count": int(engine_write_readiness_summary.get("unavailable_count") or 0),
+            "native_enabled_channels": [
+                str(item).strip() for item in list(engine_write_readiness_summary.get("native_enabled_channels") or [])[:8]
+                if str(item).strip()
+            ],
+            "runtime_state_only_channels": [
+                str(item).strip() for item in list(engine_write_readiness_summary.get("runtime_state_only_channels") or [])[:8]
+                if str(item).strip()
+            ],
+            "fallback_channels": [
+                str(item).strip() for item in list(engine_write_readiness_summary.get("fallback_channels") or [])[:8]
+                if str(item).strip()
+            ],
+            "disabled_channels": [
+                str(item).strip() for item in list(engine_write_readiness_summary.get("disabled_channels") or [])[:8]
+                if str(item).strip()
+            ],
+            "unavailable_channels": [
+                str(item).strip() for item in list(engine_write_readiness_summary.get("unavailable_channels") or [])[:8]
+                if str(item).strip()
+            ],
+        }
+        layout_adjustment_summary = (
+            summary.get("layout_adjustment_summary", {})
+            if isinstance(summary.get("layout_adjustment_summary"), Mapping)
+            else {}
+        )
+        fact_source_boundary_summary = (
+            summary.get("fact_source_boundary_summary", {})
+            if isinstance(summary.get("fact_source_boundary_summary"), Mapping)
             else {}
         )
         batch_tooling_summary = (
@@ -18100,9 +20520,20 @@ class AgentRuntime:
             "user_visible_blocked_event_count": int(
                 runtime_guard_replay_summary.get("user_visible_blocked_event_count") or 0
             ),
+            "requires_write_blocked_count": int(runtime_guard_replay_summary.get("requires_write_blocked_count") or 0),
+            "confirmed_blocked_count": int(runtime_guard_replay_summary.get("confirmed_blocked_count") or 0),
+            "unconfirmed_blocked_count": int(runtime_guard_replay_summary.get("unconfirmed_blocked_count") or 0),
+            "risk_level_counts": {
+                AgentRuntime._safe_report_text(key).replace("_", "-")[:48]: int(value or 0)
+                for key, value in dict(runtime_guard_replay_summary.get("risk_level_counts") or {}).items()
+                if AgentRuntime._safe_report_text(key).strip()
+            },
             "latest_block": {
                 "reason": str(latest_guard_block.get("reason") or ""),
                 "batch_id": str(latest_guard_block.get("batch_id") or ""),
+                "risk_level": str(latest_guard_block.get("risk_level") or ""),
+                "requires_write": bool(latest_guard_block.get("requires_write")),
+                "confirmed": bool(latest_guard_block.get("confirmed")),
             },
         }
         scene_plan_lifecycle_summary = (
@@ -18184,6 +20615,31 @@ class AgentRuntime:
             "transform_status_counts": dict(engine_write_summary.get("transform_status_counts") or {}),
             "environment_import_status_counts": dict(engine_write_summary.get("environment_import_status_counts") or {}),
             "delete_status_counts": dict(engine_write_summary.get("delete_status_counts") or {}),
+            "status_export_count": int(engine_write_summary.get("status_export_count") or 0),
+            "latest_status_export": dict(engine_write_summary.get("latest_status_export") or {}),
+        }
+        engine_write_boundary_summary = (
+            summary.get("engine_write_boundary_summary", {})
+            if isinstance(summary.get("engine_write_boundary_summary"), Mapping)
+            else {}
+        )
+        engine_write_boundary_digest = {
+            "boundary_fact_count": int(engine_write_boundary_summary.get("boundary_fact_count") or 0),
+            "import_boundary_count": int(engine_write_boundary_summary.get("import_boundary_count") or 0),
+            "transform_boundary_count": int(engine_write_boundary_summary.get("transform_boundary_count") or 0),
+            "delete_boundary_count": int(engine_write_boundary_summary.get("delete_boundary_count") or 0),
+            "bridge_call_count": int(engine_write_boundary_summary.get("bridge_call_count") or 0),
+            "bridge_success_count": int(engine_write_boundary_summary.get("bridge_success_count") or 0),
+            "bridge_failed_count": int(engine_write_boundary_summary.get("bridge_failed_count") or 0),
+            "bridge_error_code_counts": {
+                str(key): int(value)
+                for key, value in dict(
+                    engine_write_boundary_summary.get("bridge_error_code_counts") or {}
+                ).items()
+                if str(key or "").strip()
+            },
+            "write_source_counts": dict(engine_write_boundary_summary.get("write_source_counts") or {}),
+            "status_counts": dict(engine_write_boundary_summary.get("status_counts") or {}),
         }
         message_delivery_summary = (
             summary.get("message_delivery_summary", {})
@@ -18194,8 +20650,10 @@ class AgentRuntime:
             "requested_count": int(message_delivery_summary.get("requested_count") or 0),
             "succeeded_count": int(message_delivery_summary.get("succeeded_count") or 0),
             "failed_count": int(message_delivery_summary.get("failed_count") or 0),
+            "failure_code_counts": dict(message_delivery_summary.get("failure_code_counts") or {}),
             "message_kind_counts": dict(message_delivery_summary.get("message_kind_counts") or {}),
             "channel_counts": dict(message_delivery_summary.get("channel_counts") or {}),
+            "latest_failure_code": str(message_delivery_summary.get("latest_failure_code") or ""),
             "latest_message_kind": str(message_delivery_summary.get("latest_message_kind") or ""),
             "latest_channel": str(message_delivery_summary.get("latest_channel") or ""),
             "latest_stage": str(message_delivery_summary.get("latest_stage") or ""),
@@ -18226,7 +20684,19 @@ class AgentRuntime:
                 "image_ready_count": int(latest_resource_batch.get("image_ready_count") or 0),
                 "model_ready_count": int(latest_resource_batch.get("model_ready_count") or 0),
                 "import_ready_count": int(latest_resource_batch.get("import_ready_count") or 0),
+                "import_failure_code_counts": {
+                    str(key): int(value)
+                    for key, value in dict(
+                        latest_resource_batch.get("import_failure_code_counts") or {}
+                    ).items()
+                    if str(key or "").strip()
+                },
                 "review_status": str(latest_resource_batch.get("review_status") or ""),
+            },
+            "import_failure_code_counts": {
+                str(key): int(value)
+                for key, value in dict(batch_resource_flow.get("import_failure_code_counts") or {}).items()
+                if str(key or "").strip()
             },
             "needs_attention": [
                 reason
@@ -18238,9 +20708,69 @@ class AgentRuntime:
                 if count > 0
             ],
         }
+        report_health_digest = {
+            "status": str(report_health.get("status") or ""),
+            "attention_required": bool(report_health.get("attention_required")),
+            "reasons": [
+                str(item).strip().replace("_", "-")[:80]
+                for item in list(report_health.get("reasons") or [])[:8]
+                if str(item).strip()
+            ],
+            "batch_failed_count": int(report_health.get("batch_failed_count") or 0),
+            "batch_partial_count": int(report_health.get("batch_partial_count") or 0),
+            "import_failed_count": int(report_health.get("import_failed_count") or 0),
+            "asset_incomplete_count": int(report_health.get("asset_incomplete_count") or 0),
+            "asset_failed_count": int(report_health.get("asset_failed_count") or 0),
+            "sync_health_status": str(report_health.get("sync_health_status") or ""),
+            "sync_actor_transform_count": int(report_health.get("sync_actor_transform_count") or 0),
+            "sync_actor_delete_count": int(report_health.get("sync_actor_delete_count") or 0),
+            "engine_write_readiness_mismatch_count": int(
+                report_health.get("engine_write_readiness_mismatch_count") or 0
+            ),
+            "engine_write_readiness_mismatch_channels": [
+                str(item).strip().replace("_", "-")[:48]
+                for item in list(report_health.get("engine_write_readiness_mismatch_channels") or [])[:8]
+                if str(item).strip()
+            ],
+            "import_failure_code_counts": {
+                str(key): int(value)
+                for key, value in dict(report_health.get("import_failure_code_counts") or {}).items()
+                if str(key or "").strip()
+            },
+            "environment_import_failure_code_counts": {
+                str(key): int(value)
+                for key, value in dict(report_health.get("environment_import_failure_code_counts") or {}).items()
+                if str(key or "").strip()
+            },
+        }
+        latest_assets = (
+            asset_transfer_summary.get("latest_assets")
+            if isinstance(asset_transfer_summary.get("latest_assets"), list)
+            else []
+        )
+        asset_transfer_digest = {
+            "asset_count": int(asset_transfer_summary.get("asset_count") or 0),
+            "ready_count": int(asset_transfer_summary.get("ready_count") or 0),
+            "completed_count": int(asset_transfer_summary.get("completed_count") or 0),
+            "transferring_count": int(asset_transfer_summary.get("transferring_count") or 0),
+            "failed_count": int(asset_transfer_summary.get("failed_count") or 0),
+            "overall_progress": int(asset_transfer_summary.get("overall_progress") or 0),
+            "bytes_transferred": int(asset_transfer_summary.get("bytes_transferred") or 0),
+            "total_bytes": int(asset_transfer_summary.get("total_bytes") or 0),
+            "latest_assets": [
+                {
+                    "asset_id": "",
+                    "transfer_status": str(item.get("transfer_status") or "")[:40],
+                }
+                for item in latest_assets[-3:]
+                if isinstance(item, Mapping)
+            ],
+        }
         sync_replay_digest = {
             "recorded_count": int(sync_replay_summary.get("recorded_count") or 0),
             "failed_count": int(sync_replay_summary.get("failed_count") or 0),
+            "failure_code_counts": dict(sync_replay_summary.get("failure_code_counts") or {}),
+            "latest_failure_code": str(sync_replay_summary.get("latest_failure_code") or ""),
             "actor_transform_count": int(sync_replay_summary.get("actor_transform_count") or 0),
             "actor_delete_count": int(sync_replay_summary.get("actor_delete_count") or 0),
             "asset_transfer_progress_count": int(
@@ -18272,6 +20802,48 @@ class AgentRuntime:
                 "audience": str(latest_disclosure_skip.get("audience") or ""),
                 "reason": str(latest_disclosure_skip.get("reason") or ""),
                 "batch_id": str(latest_disclosure_skip.get("batch_id") or ""),
+            },
+        }
+        latest_readiness_event = (
+            resource_readiness_replay_summary.get("latest_readiness_event", {})
+            if isinstance(resource_readiness_replay_summary.get("latest_readiness_event"), Mapping)
+            else {}
+        )
+        resource_readiness_replay_digest = {
+            "published_count": int(resource_readiness_replay_summary.get("published_count") or 0),
+            "publish_failed_count": int(resource_readiness_replay_summary.get("publish_failed_count") or 0),
+            "status_query_count": int(resource_readiness_replay_summary.get("status_query_count") or 0),
+            "readiness_event_count": int(resource_readiness_replay_summary.get("readiness_event_count") or 0),
+            "publish_requested_total": int(
+                resource_readiness_replay_summary.get("publish_requested_total") or 0
+            ),
+            "publish_enabled_total": int(
+                resource_readiness_replay_summary.get("publish_enabled_total") or 0
+            ),
+            "publish_unavailable_total": int(
+                resource_readiness_replay_summary.get("publish_unavailable_total") or 0
+            ),
+            "publish_status_counts": dict(
+                resource_readiness_replay_summary.get("publish_status_counts") or {}
+            ),
+            "status_query_requested_total": int(
+                resource_readiness_replay_summary.get("status_query_requested_total") or 0
+            ),
+            "status_query_enabled_total": int(
+                resource_readiness_replay_summary.get("status_query_enabled_total") or 0
+            ),
+            "status_query_unavailable_total": int(
+                resource_readiness_replay_summary.get("status_query_unavailable_total") or 0
+            ),
+            "status_query_status_counts": dict(
+                resource_readiness_replay_summary.get("status_query_status_counts") or {}
+            ),
+            "status_counts": dict(resource_readiness_replay_summary.get("status_counts") or {}),
+            "latest_readiness_event": {
+                "status": str(latest_readiness_event.get("status") or ""),
+                "requested_count": int(latest_readiness_event.get("requested_count") or 0),
+                "enabled_count": int(latest_readiness_event.get("enabled_count") or 0),
+                "unavailable_count": int(latest_readiness_event.get("unavailable_count") or 0),
             },
         }
         classification = (
@@ -18352,6 +20924,44 @@ class AgentRuntime:
         resource_stage_digest = {
             "event_count": int(resource_summary.get("event_count") or 0),
             "by_phase": resource_phase_digest,
+            "latest_events": [
+                {
+                    "batch_id": str(item.get("batch_id") or ""),
+                    "phase": str(item.get("phase") or ""),
+                    "status": str(item.get("status") or ""),
+                    "item_count": int(item.get("item_count") or 0),
+                    "requested_count": int(item.get("requested_count") or 0),
+                    "failed_count": int(item.get("failed_count") or 0),
+                }
+                for item in list(resource_summary.get("latest_events") or [])[-3:]
+                if isinstance(item, Mapping)
+            ],
+            "needs_attention": [
+                reason
+                for reason, count in (
+                    ("image_resource_failed", int(resource_phase_digest.get("image", {}).get("failed_count") or 0)),
+                    ("model_resource_failed", int(resource_phase_digest.get("model", {}).get("failed_count") or 0)),
+                    (
+                        "image_resource_partial",
+                        max(
+                            0,
+                            int(resource_phase_digest.get("image", {}).get("requested_count") or 0)
+                            - int(resource_phase_digest.get("image", {}).get("item_count") or 0)
+                            - int(resource_phase_digest.get("image", {}).get("failed_count") or 0),
+                        ),
+                    ),
+                    (
+                        "model_resource_partial",
+                        max(
+                            0,
+                            int(resource_phase_digest.get("model", {}).get("requested_count") or 0)
+                            - int(resource_phase_digest.get("model", {}).get("item_count") or 0)
+                            - int(resource_phase_digest.get("model", {}).get("failed_count") or 0),
+                        ),
+                    ),
+                )
+                if count > 0
+            ],
         }
         import_stage_digest = {
             "event_count": int(import_summary.get("event_count") or 0),
@@ -18427,22 +21037,28 @@ class AgentRuntime:
                     for item in list(semantic_arbitration_summary.get("risk_flags") or [])[:8]
                     if str(item).strip()
                 ],
-            },
-            "sync_health_digest": dict(sync_health_digest),
+                },
+                "sync_health_digest": dict(sync_health_digest),
+                "report_health_digest": report_health_digest,
+                "fact_source_boundary_digest": dict(fact_source_boundary_summary),
+            "asset_transfer_digest": asset_transfer_digest,
             "sync_replay_digest": sync_replay_digest,
             "runtime_event_replay_digest": runtime_event_replay_digest,
+            "resource_readiness_replay_digest": resource_readiness_replay_digest,
             "intervention_digest": dict(intervention_digest),
             "batch_tooling_digest": batch_tooling_digest,
-	            "resource_flow_digest": resource_flow_digest,
-	            "tool_queue_health_digest": tool_queue_health_digest,
-	            "tool_execution_digest": tool_execution_digest,
-	            "state_patch_digest": state_patch_digest,
+                "resource_flow_digest": resource_flow_digest,
+                "tool_queue_health_digest": tool_queue_health_digest,
+                "tool_execution_digest": tool_execution_digest,
+                "state_patch_digest": state_patch_digest,
             "tool_failure_strategy_digest": tool_failure_strategy_digest,
             "runtime_guard_digest": runtime_guard_digest,
             "scene_plan_lifecycle_digest": scene_plan_lifecycle_digest,
             "vlm_checkpoint_digest": vlm_checkpoint_digest,
             "review_advisory_replay_digest": review_advisory_replay_digest,
             "engine_write_digest": engine_write_digest,
+            "engine_write_readiness_digest": engine_write_readiness_digest,
+            "engine_write_boundary_digest": engine_write_boundary_digest,
             "message_delivery_digest": message_delivery_digest,
             "candidate_model_items": model_items[:12],
             "substrate_items": substrate_items[:12],
@@ -18471,13 +21087,60 @@ class AgentRuntime:
                 "intervention_pending_count": int(intervention_digest.get("pending_count") or 0),
                 "intervention_accepted_count": int(intervention_digest.get("accepted_count") or 0),
                 "intervention_deferred_count": int(intervention_digest.get("deferred_count") or 0),
+                "report_health_status": str(report_health_digest.get("status") or "unknown"),
+                "report_attention_required": bool(report_health_digest.get("attention_required")),
+                "report_health_reasons": list(report_health.get("reasons") or [])[:6],
+                "layout_proposal_count": int(layout_adjustment_summary.get("proposal_count") or 0),
+                "layout_applied_delta_count": int(
+                    layout_adjustment_summary.get("applied_delta_count") or 0
+                ),
+                "layout_skipped_delta_count": int(
+                    layout_adjustment_summary.get("skipped_delta_count") or 0
+                ),
+                "layout_transform_result_count": int(
+                    layout_adjustment_summary.get("transform_result_count") or 0
+                ),
+                "layout_ground_snapped_count": int(
+                    layout_adjustment_summary.get("ground_snapped_count") or 0
+                ),
+                "layout_overlap_resolved_count": int(
+                    layout_adjustment_summary.get("overlap_resolved_count") or 0
+                ),
+                "layout_transform_failure_code_counts": {
+                    str(key): int(value)
+                    for key, value in dict(
+                        layout_adjustment_summary.get("layout_transform_failure_code_counts") or {}
+                    ).items()
+                    if str(key or "").strip()
+                },
                 "resource_batch_count": int(resource_flow_digest.get("batch_count") or 0),
                 "resource_failed_count": int(resource_flow_digest.get("failed_count") or 0),
-	                "resource_waiting_count": int(resource_flow_digest.get("waiting_count") or 0),
-	                "tool_execution_attention_required": bool(tool_execution_digest.get("attention_required")),
-	                "tool_execution_failed_count": int(tool_execution_digest.get("failed_count") or 0),
-	                "tool_execution_blocked_count": int(tool_execution_digest.get("blocked_count") or 0),
-	                "scene_design_contract_available": bool(scene_design_contract_digest.get("available")),
+                    "resource_import_failure_code_counts": dict(
+                        resource_flow_digest.get("import_failure_code_counts") or {}
+                    ),
+                    "resource_waiting_count": int(resource_flow_digest.get("waiting_count") or 0),
+                    "resource_readiness_publish_count": int(
+                        resource_readiness_replay_digest.get("published_count") or 0
+                    ),
+                    "resource_readiness_publish_failed_count": int(
+                        resource_readiness_replay_digest.get("publish_failed_count") or 0
+                    ),
+                    "resource_readiness_query_count": int(
+                        resource_readiness_replay_digest.get("status_query_count") or 0
+                    ),
+                    "resource_readiness_publish_requested_total": int(
+                        resource_readiness_replay_digest.get("publish_requested_total") or 0
+                    ),
+                    "resource_readiness_publish_enabled_total": int(
+                        resource_readiness_replay_digest.get("publish_enabled_total") or 0
+                    ),
+                    "resource_readiness_publish_unavailable_total": int(
+                        resource_readiness_replay_digest.get("publish_unavailable_total") or 0
+                    ),
+                    "tool_execution_attention_required": bool(tool_execution_digest.get("attention_required")),
+                    "tool_execution_failed_count": int(tool_execution_digest.get("failed_count") or 0),
+                    "tool_execution_blocked_count": int(tool_execution_digest.get("blocked_count") or 0),
+                    "scene_design_contract_available": bool(scene_design_contract_digest.get("available")),
                 "scene_design_contract_scene_type": str(scene_design_contract_digest.get("scene_type") or ""),
                 "scene_design_contract_environment_type": str(
                     scene_design_contract_digest.get("environment_type") or ""
@@ -18490,15 +21153,58 @@ class AgentRuntime:
                 ),
                 "scene_snapshot_count": int(scene_snapshot_digest.get("snapshot_count") or 0),
                 "scene_observed_actor_count": int(scene_snapshot_digest.get("observed_actor_count") or 0),
-                "resource_event_count": int(resource_stage_digest.get("event_count") or 0),
-                "imported_actor_count": int(import_stage_digest.get("imported_count") or 0),
+                    "resource_event_count": int(resource_stage_digest.get("event_count") or 0),
+                    "resource_attention_count": len(list(resource_stage_digest.get("needs_attention") or [])),
+                    "imported_actor_count": int(import_stage_digest.get("imported_count") or 0),
                 "import_failed_count": int(import_stage_digest.get("failed_count") or 0),
+                "report_import_failure_code_counts": dict(
+                    report_health_digest.get("import_failure_code_counts") or {}
+                ),
+                "environment_import_failure_code_counts": dict(
+                    report_health_digest.get("environment_import_failure_code_counts") or {}
+                ),
+                "engine_write_boundary_fact_count": int(
+                    engine_write_boundary_digest.get("boundary_fact_count") or 0
+                ),
+                "engine_write_transform_boundary_count": int(
+                    engine_write_boundary_digest.get("transform_boundary_count") or 0
+                ),
+                "engine_write_bridge_call_count": int(
+                    engine_write_boundary_digest.get("bridge_call_count") or 0
+                ),
+                "engine_write_bridge_success_count": int(
+                    engine_write_boundary_digest.get("bridge_success_count") or 0
+                ),
+                "engine_write_bridge_failed_count": int(
+                    engine_write_boundary_digest.get("bridge_failed_count") or 0
+                ),
+                "engine_write_bridge_error_code_counts": dict(
+                    engine_write_boundary_digest.get("bridge_error_code_counts") or {}
+                ),
                 "geometry_fact_count": int(geometry_fact_digest.get("fact_count") or 0),
                 "geometry_overlap_issue_count": int(geometry_fact_digest.get("overlap_issue_count") or 0),
-                "sync_health_status": str(sync_health_digest.get("status") or ""),
-                "sync_attention_count": len(list(sync_health_digest.get("needs_attention") or [])),
-            },
-        )
+                    "sync_health_status": str(sync_health_digest.get("status") or ""),
+                    "sync_attention_count": len(list(sync_health_digest.get("needs_attention") or [])),
+                    "sync_actor_transform_count": int(
+                        report_health_digest.get("sync_actor_transform_count") or 0
+                    ),
+                    "sync_actor_delete_count": int(
+                        report_health_digest.get("sync_actor_delete_count") or 0
+                    ),
+                    "sync_failure_code_counts": dict(
+                        sync_health_digest.get("sync_failure_code_counts") or {}
+                    ),
+                    "latest_sync_failure_code": str(
+                        sync_health_digest.get("latest_sync_failure_code") or ""
+                    ),
+                    "fact_source_external_count": int(
+                        fact_source_boundary_summary.get("mirrored_external_fact_count") or 0
+                    ),
+                    "fact_source_runtime_count": int(
+                        fact_source_boundary_summary.get("runtime_business_fact_count") or 0
+                    ),
+                },
+            )
         return gm_summary
 
     def operation_replay(
@@ -18538,11 +21244,7 @@ class AgentRuntime:
             plan_id=str(plan_id or ""),
             batch_id=str(batch_id or ""),
             tool_call_id=str(tool_call_id or ""),
-            payload={
-                "event": str(event or ""),
-                "limit": limit,
-                "entry_count": replay["entry_count"],
-            },
+            payload=self._operation_replay_snapshot_audit_payload(replay),
         )
         return replay
 
@@ -18574,6 +21276,9 @@ class AgentRuntime:
         )
         replay["vlm_checkpoint_summary"] = self._vlm_checkpoint_replay_summary(raw_entries)
         replay["review_advisory_summary"] = self._review_advisory_replay_summary(replay.get("entries", []))
+        replay["final_adjustment_confirmation_replay_summary"] = (
+            self._final_adjustment_confirmation_replay_summary(replay.get("entries", []))
+        )
         replay["environment_component_summary"] = self._environment_component_replay_summary(replay.get("entries", []))
         replay["layout_adjustment_summary"] = self._layout_adjustment_replay_summary(replay.get("entries", []))
         replay["engine_write_summary"] = self._engine_write_replay_summary(raw_entries)
@@ -18598,6 +21303,50 @@ class AgentRuntime:
         replay["runtime_command_summary"] = self._runtime_command_replay_summary(replay.get("entries", []))
         replay["batch_execution_summary"] = self._batch_execution_replay_summary(replay.get("entries", []))
         replay["batch_resource_lifecycle_summary"] = self._batch_resource_lifecycle_replay_summary(raw_entries)
+        room_state = self.state.snapshot(str(room_id or ""))["room"] if str(room_id or "").strip() else {}
+        replay["resource_summary"] = self._resource_summary_for_plan(
+            room_state,
+            str(plan_id or ""),
+            batch_id=str(batch_id or ""),
+        )
+        replay["asset_transfer_summary"] = self._asset_transfer_summary_for_plan(
+            room_state,
+            str(plan_id or ""),
+            batch_id=str(batch_id or ""),
+        )
+        replay["batch_resource_flow_summary"] = self._batch_resource_flow_summary_for_plan(
+            room_state,
+            str(plan_id or ""),
+            batch_id=str(batch_id or ""),
+        )
+        replay_import_summary = self._import_summary_for_plan(
+            room_state,
+            str(plan_id or ""),
+            batch_id=str(batch_id or ""),
+        )
+        replay["import_summary"] = replay_import_summary
+        replay["engine_write_boundary_summary"] = self._engine_write_boundary_summary_for_plan(
+            room_state,
+            str(plan_id or ""),
+            batch_id=str(batch_id or ""),
+        )
+        replay["report_health_summary"] = self._report_health_summary(
+            batch_resource_flow_summary=dict(replay.get("batch_resource_flow_summary") or {}),
+            import_summary=replay_import_summary,
+            sync_health_digest=self._sync_health_digest_for_report(
+                sync_summary=dict(replay.get("sync_summary") or {}),
+                asset_transfer_summary=dict(replay.get("asset_transfer_summary") or {}),
+                sync_replay_summary=dict(replay.get("sync_summary") or {}),
+                message_delivery_summary=dict(replay.get("message_delivery_summary") or {}),
+            ),
+            resource_summary=dict(replay.get("resource_summary") or {}),
+            environment_component_summary=self._environment_component_summary_for_plan(
+                room_state,
+                str(plan_id or ""),
+                batch_id=str(batch_id or ""),
+            ),
+            engine_write_summary=dict(replay.get("engine_write_summary") or {}),
+        )
         replay["tool_execution_summary"] = self._tool_execution_replay_summary(replay.get("entries", []))
         replay["tool_graph_queue_summary"] = self._tool_graph_queue_replay_summary(replay.get("entries", []))
         replay["resource_readiness_replay_summary"] = self._resource_readiness_replay_summary(raw_entries)
@@ -18606,6 +21355,7 @@ class AgentRuntime:
         replay["scene_plan_lifecycle_summary"] = self._scene_plan_lifecycle_replay_summary(raw_entries)
         replay["runtime_event_replay_summary"] = self._runtime_event_replay_summary(raw_entries)
         replay["runtime_guard_replay_summary"] = self._runtime_guard_replay_summary(raw_entries)
+        replay["runtime_fact_injection_replay_summary"] = self._runtime_fact_injection_replay_summary(raw_entries)
         replay["gm_summary_replay_summary"] = self._gm_summary_replay_summary(raw_entries)
         replay["geometry_fact_replay_summary"] = self._geometry_fact_replay_summary(raw_entries)
         replay["tool_failure_strategy_summary"] = self._tool_failure_strategy_replay_summary(raw_entries)
@@ -18872,14 +21622,34 @@ class AgentRuntime:
                 "published_count": 0,
                 "publish_failed_count": 0,
                 "readiness_event_count": 0,
+                "publish_enabled_total": 0,
+                "publish_unavailable_total": 0,
+                "publish_requested_total": 0,
+                "publish_status_counts": {},
+                "status_query_enabled_total": 0,
+                "status_query_unavailable_total": 0,
+                "status_query_requested_total": 0,
+                "status_query_status_counts": {},
                 "status_counts": {},
+                "latest_publish_event": {},
+                "latest_provider_status_query": {},
                 "latest_readiness_event": {},
             }
         status_query_count = 0
         published_count = 0
         publish_failed_count = 0
         readiness_event_count = 0
+        publish_enabled_total = 0
+        publish_unavailable_total = 0
+        publish_requested_total = 0
+        publish_status_counts: dict[str, int] = {}
+        status_query_enabled_total = 0
+        status_query_unavailable_total = 0
+        status_query_requested_total = 0
+        status_query_status_counts: dict[str, int] = {}
         status_counts: dict[str, int] = {}
+        latest_publish_event: dict[str, Any] = {}
+        latest_provider_status_query: dict[str, Any] = {}
         latest_readiness_event: dict[str, Any] = {}
         for entry in entries:
             if isinstance(entry, OperationLogEntry):
@@ -18894,12 +21664,73 @@ class AgentRuntime:
                 continue
             if event == "runtime_provider_status_queried":
                 status_query_count += 1
+                enabled_count = int(payload.get("readiness_enabled_count") or 0)
+                unavailable_count = int(payload.get("readiness_unavailable_count") or 0)
+                requested_count = int(payload.get("readiness_requested_count") or 0)
+                status_query_enabled_total += enabled_count
+                status_query_unavailable_total += unavailable_count
+                status_query_requested_total += requested_count
+                payload_status_counts = (
+                    payload.get("readiness_status_counts")
+                    if isinstance(payload.get("readiness_status_counts"), Mapping)
+                    else {}
+                )
+                safe_status_counts: dict[str, int] = {}
+                for key, value in payload_status_counts.items():
+                    status_key = str(key or "").strip().replace("_", "-")[:64]
+                    if not status_key:
+                        continue
+                    count = int(value or 0)
+                    if count <= 0:
+                        continue
+                    status_query_status_counts[status_key] = (
+                        status_query_status_counts.get(status_key, 0) + count
+                    )
+                    safe_status_counts[status_key] = count
+                latest_provider_status_query = {
+                    "recorded": bool(payload.get("recorded")),
+                    "readiness_channel_count": int(payload.get("readiness_channel_count") or 0),
+                    "readiness_requested_count": requested_count,
+                    "readiness_enabled_count": enabled_count,
+                    "readiness_unavailable_count": unavailable_count,
+                    "readiness_status_counts": dict(sorted(safe_status_counts.items())),
+                }
                 continue
-            if event == "runtime_provider_readiness_published":
-                published_count += 1
-                continue
-            if event == "runtime_provider_readiness_publish_failed":
-                publish_failed_count += 1
+            if event in {"runtime_provider_readiness_published", "runtime_provider_readiness_publish_failed"}:
+                if event == "runtime_provider_readiness_published":
+                    published_count += 1
+                else:
+                    publish_failed_count += 1
+                enabled_count = int(payload.get("readiness_enabled_count") or 0)
+                unavailable_count = int(payload.get("readiness_unavailable_count") or 0)
+                requested_count = int(payload.get("readiness_requested_count") or 0)
+                publish_enabled_total += enabled_count
+                publish_unavailable_total += unavailable_count
+                publish_requested_total += requested_count
+                payload_status_counts = (
+                    payload.get("readiness_status_counts")
+                    if isinstance(payload.get("readiness_status_counts"), Mapping)
+                    else {}
+                )
+                safe_status_counts: dict[str, int] = {}
+                for key, value in payload_status_counts.items():
+                    status_key = str(key or "").strip().replace("_", "-")[:64]
+                    if not status_key:
+                        continue
+                    count = int(value or 0)
+                    if count <= 0:
+                        continue
+                    publish_status_counts[status_key] = publish_status_counts.get(status_key, 0) + count
+                    safe_status_counts[status_key] = count
+                latest_publish_event = {
+                    "event": event,
+                    "succeeded": event == "runtime_provider_readiness_published",
+                    "readiness_channel_count": int(payload.get("readiness_channel_count") or 0),
+                    "readiness_requested_count": requested_count,
+                    "readiness_enabled_count": enabled_count,
+                    "readiness_unavailable_count": unavailable_count,
+                    "readiness_status_counts": dict(sorted(safe_status_counts.items())),
+                }
                 continue
             if event != "runtime_event_emitted":
                 continue
@@ -18908,7 +21739,11 @@ class AgentRuntime:
                 continue
             readiness_event_count += 1
             event_payload = payload.get("payload") if isinstance(payload.get("payload"), Mapping) else {}
-            status = str(event_payload.get("status") or "").strip() or "unknown"
+            status = (
+                str(payload.get("readiness_status") or "").strip()
+                or str(event_payload.get("status") or "").strip()
+                or "unknown"
+            )
             status_counts[status] = status_counts.get(status, 0) + 1
             latest_readiness_event = {
                 "status": status,
@@ -18919,7 +21754,17 @@ class AgentRuntime:
             "published_count": published_count,
             "publish_failed_count": publish_failed_count,
             "readiness_event_count": readiness_event_count,
+            "publish_enabled_total": publish_enabled_total,
+            "publish_unavailable_total": publish_unavailable_total,
+            "publish_requested_total": publish_requested_total,
+            "publish_status_counts": dict(sorted(publish_status_counts.items())),
+            "status_query_enabled_total": status_query_enabled_total,
+            "status_query_unavailable_total": status_query_unavailable_total,
+            "status_query_requested_total": status_query_requested_total,
+            "status_query_status_counts": dict(sorted(status_query_status_counts.items())),
             "status_counts": dict(sorted(status_counts.items())),
+            "latest_publish_event": latest_publish_event,
+            "latest_provider_status_query": latest_provider_status_query,
             "latest_readiness_event": latest_readiness_event,
         }
 
@@ -19115,6 +21960,8 @@ class AgentRuntime:
                 "latest_transform_results": [],
                 "latest_delete_results": [],
                 "latest_environment_import_results": [],
+                "status_export_count": 0,
+                "latest_status_export": {},
             }
         import_status_counts: dict[str, int] = {}
         transform_status_counts: dict[str, int] = {}
@@ -19124,13 +21971,90 @@ class AgentRuntime:
         transform_rows: list[dict[str, Any]] = []
         delete_rows: list[dict[str, Any]] = []
         environment_import_rows: list[dict[str, Any]] = []
+        status_export_count = 0
+        latest_status_export: dict[str, Any] = {}
         for entry in entries:
             if isinstance(entry, OperationLogEntry):
+                event = str(entry.event or "")
                 payload = entry.payload if isinstance(entry.payload, Mapping) else {}
             elif isinstance(entry, Mapping):
+                event = str(entry.get("event") or "")
                 payload = entry.get("payload") if isinstance(entry.get("payload"), Mapping) else {}
             else:
                 continue
+            if event == "runtime_engine_write_status_exported":
+                status_export_count += 1
+                latest_status_export = {
+                    "recorded": bool(payload.get("recorded")),
+                    "reason": AgentRuntime._safe_report_text(payload.get("reason"))[:120],
+                    "engine_write_boundary_fact_count": int(
+                        payload.get("engine_write_boundary_fact_count") or 0
+                    ),
+                    "engine_write_import_boundary_count": int(
+                        payload.get("engine_write_import_boundary_count") or 0
+                    ),
+                    "engine_write_environment_import_boundary_count": int(
+                        payload.get("engine_write_environment_import_boundary_count") or 0
+                    ),
+                    "engine_write_transform_boundary_count": int(
+                        payload.get("engine_write_transform_boundary_count") or 0
+                    ),
+                    "engine_write_delete_boundary_count": int(
+                        payload.get("engine_write_delete_boundary_count") or 0
+                    ),
+                    "engine_write_bridge_call_count": int(
+                        payload.get("engine_write_bridge_call_count") or 0
+                    ),
+                    "engine_write_bridge_success_count": int(
+                        payload.get("engine_write_bridge_success_count") or 0
+                    ),
+                    "engine_write_bridge_failed_count": int(
+                        payload.get("engine_write_bridge_failed_count") or 0
+                    ),
+                    "engine_write_bridge_error_code_counts": AgentRuntime._safe_status_count_map(
+                        payload.get("engine_write_bridge_error_code_counts")
+                    ),
+                    "engine_write_readiness_native_enabled_count": int(
+                        payload.get("engine_write_readiness_native_enabled_count") or 0
+                    ),
+                    "engine_write_readiness_runtime_state_only_count": int(
+                        payload.get("engine_write_readiness_runtime_state_only_count") or 0
+                    ),
+                    "engine_write_readiness_fallback_count": int(
+                        payload.get("engine_write_readiness_fallback_count") or 0
+                    ),
+                    "engine_write_readiness_disabled_count": int(
+                        payload.get("engine_write_readiness_disabled_count") or 0
+                    ),
+                    "engine_write_readiness_unavailable_count": int(
+                        payload.get("engine_write_readiness_unavailable_count") or 0
+                    ),
+                    "engine_write_readiness_native_enabled_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(payload.get("engine_write_readiness_native_enabled_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
+                    "engine_write_readiness_runtime_state_only_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(payload.get("engine_write_readiness_runtime_state_only_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
+                    "engine_write_readiness_fallback_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(payload.get("engine_write_readiness_fallback_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
+                    "engine_write_readiness_disabled_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(payload.get("engine_write_readiness_disabled_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
+                    "engine_write_readiness_unavailable_channels": [
+                        AgentRuntime._safe_report_text(item).replace("_", "-")[:48]
+                        for item in list(payload.get("engine_write_readiness_unavailable_channels") or [])[:8]
+                        if AgentRuntime._safe_report_text(item).strip()
+                    ],
+                }
             safe_imports = ToolCallGraphExecutor._safe_engine_result_rows(
                 payload.get("import_results"),
                 id_fields=("actor_id", "actor_name"),
@@ -19163,11 +22087,27 @@ class AgentRuntime:
                 status = str(row.get("status") or "unknown").strip() or "unknown"
                 environment_import_status_counts[status] = environment_import_status_counts.get(status, 0) + 1
                 environment_import_rows.append(row)
+        native_channels = {
+            str(item or "").replace("_", "-").strip()
+            for item in list(latest_status_export.get("engine_write_readiness_native_enabled_channels") or [])
+            if str(item or "").strip()
+        }
+        mismatch_channels: list[str] = []
+        for channel, rows in (
+            ("actor-import", import_rows),
+            ("layout-transform", transform_rows),
+            ("actor-delete", delete_rows),
+            ("environment-import", environment_import_rows),
+        ):
+            if rows and channel not in native_channels:
+                mismatch_channels.append(channel)
         return {
             "import_result_count": len(import_rows),
             "transform_result_count": len(transform_rows),
             "delete_result_count": len(delete_rows),
             "environment_import_result_count": len(environment_import_rows),
+            "readiness_mismatch_count": len(mismatch_channels),
+            "readiness_mismatch_channels": mismatch_channels,
             "import_status_counts": dict(sorted(import_status_counts.items())),
             "transform_status_counts": dict(sorted(transform_status_counts.items())),
             "delete_status_counts": dict(sorted(delete_status_counts.items())),
@@ -19176,6 +22116,247 @@ class AgentRuntime:
             "latest_transform_results": transform_rows[-5:],
             "latest_delete_results": delete_rows[-5:],
             "latest_environment_import_results": environment_import_rows[-5:],
+            "status_export_count": status_export_count,
+            "latest_status_export": latest_status_export,
+        }
+
+    @staticmethod
+    def _engine_write_boundary_summary_for_plan(
+        room: Mapping[str, Any],
+        plan_id: str,
+        *,
+        batch_id: str = "",
+    ) -> dict[str, Any]:
+        if not isinstance(room, Mapping):
+            return {
+                "boundary_fact_count": 0,
+                "import_boundary_count": 0,
+                "environment_import_boundary_count": 0,
+                "transform_boundary_count": 0,
+                "delete_boundary_count": 0,
+                "write_source_counts": {},
+                "status_counts": {},
+                "latest_boundaries": [],
+            }
+        active_plan_id = str(plan_id or "")
+        active_batch_id = str(batch_id or "")
+        batch_ids = AgentRuntime._batch_ids_for_plan(room, active_plan_id) if active_plan_id else set()
+        rows: list[dict[str, Any]] = []
+
+        import_facts = dict(room.get("custom_import_facts") or {})
+        for key, fact in import_facts.items():
+            if not isinstance(fact, Mapping):
+                continue
+            key_text = str(key)
+            if key_text.endswith(":actor_import_result"):
+                boundary_kind = "actor_import"
+            elif key_text.endswith(":environment_import_result"):
+                boundary_kind = "environment_import"
+            else:
+                continue
+            fact_batch_id = str(fact.get("batch_id") or "").strip()
+            if active_batch_id and fact_batch_id != active_batch_id:
+                continue
+            if active_plan_id and fact_batch_id and fact_batch_id not in batch_ids:
+                continue
+            boundary = fact.get("engine_write_boundary")
+            if isinstance(boundary, Mapping):
+                rows.append(AgentRuntime._safe_engine_write_boundary_row(boundary_kind, boundary))
+
+        layout_proposals = dict(room.get("layout_adjustment_proposals") or {})
+        for key, proposal in layout_proposals.items():
+            if not isinstance(proposal, Mapping):
+                continue
+            proposal_plan_id = str(proposal.get("plan_id") or key or "")
+            if active_plan_id and proposal_plan_id != active_plan_id and str(key) != active_plan_id:
+                continue
+            if active_batch_id and str(proposal.get("batch_id") or "") not in {"", active_batch_id}:
+                continue
+            boundary = proposal.get("engine_transform_boundary")
+            if isinstance(boundary, Mapping):
+                rows.append(AgentRuntime._safe_engine_write_boundary_row("layout_transform", boundary))
+
+        review_proposals = dict(room.get("review_advisory_proposals") or {})
+        for key, proposal in review_proposals.items():
+            if not isinstance(proposal, Mapping):
+                continue
+            proposal_plan_id = str(proposal.get("plan_id") or "")
+            if active_plan_id and proposal_plan_id != active_plan_id and not str(key).startswith(f"{active_plan_id}:"):
+                continue
+            if active_batch_id and str(proposal.get("batch_id") or "") not in {"", active_batch_id}:
+                continue
+            boundary = proposal.get("engine_delete_boundary")
+            if isinstance(boundary, Mapping):
+                rows.append(AgentRuntime._safe_engine_write_boundary_row("actor_delete", boundary))
+
+        write_source_counts: dict[str, int] = {}
+        status_counts: dict[str, int] = {}
+        bridge_method_counts: dict[str, int] = {}
+        bridge_error_code_counts: dict[str, int] = {}
+        bridge_call_count = 0
+        bridge_success_count = 0
+        bridge_failed_count = 0
+        kind_counts = {"actor_import": 0, "environment_import": 0, "layout_transform": 0, "actor_delete": 0}
+        for row in rows:
+            kind = str(row.get("kind") or "")
+            if kind in kind_counts:
+                kind_counts[kind] += 1
+            source = str(row.get("write_source") or "unknown")
+            write_source_counts[source] = write_source_counts.get(source, 0) + 1
+            for status, count in dict(row.get("status_counts") or {}).items():
+                status_counts[status] = status_counts.get(status, 0) + int(count)
+            bridge_call_count += int(row.get("bridge_call_count") or 0)
+            bridge_success_count += int(row.get("bridge_success_count") or 0)
+            bridge_failed_count += int(row.get("bridge_failed_count") or 0)
+            for method, count in dict(row.get("bridge_method_counts") or {}).items():
+                method_text = str(method or "").strip()
+                if method_text:
+                    bridge_method_counts[method_text] = bridge_method_counts.get(method_text, 0) + int(count)
+            for error_code, count in dict(row.get("bridge_error_code_counts") or {}).items():
+                error_text = str(error_code or "").strip()
+                if error_text:
+                    bridge_error_code_counts[error_text] = bridge_error_code_counts.get(error_text, 0) + int(count)
+        return {
+            "boundary_fact_count": len(rows),
+            "import_boundary_count": kind_counts["actor_import"],
+            "environment_import_boundary_count": kind_counts["environment_import"],
+            "transform_boundary_count": kind_counts["layout_transform"],
+            "delete_boundary_count": kind_counts["actor_delete"],
+            "write_source_counts": dict(sorted(write_source_counts.items())),
+            "status_counts": dict(sorted(status_counts.items())),
+            "bridge_call_count": bridge_call_count,
+            "bridge_success_count": bridge_success_count,
+            "bridge_failed_count": bridge_failed_count,
+            "bridge_method_counts": dict(sorted(bridge_method_counts.items())),
+            "bridge_error_code_counts": dict(sorted(bridge_error_code_counts.items())),
+            "latest_boundaries": rows[-5:],
+        }
+
+    @staticmethod
+    def _safe_engine_write_boundary_row(kind: str, boundary: Mapping[str, Any]) -> dict[str, Any]:
+        safe_kind = str(kind or "").strip().lower()
+        if safe_kind not in {"actor_import", "environment_import", "layout_transform", "actor_delete"}:
+            safe_kind = "unknown"
+        status_counts = AgentRuntime._safe_status_count_map(boundary.get("status_counts"))
+        row = {
+            "kind": safe_kind,
+            "write_source": AgentRuntime._safe_engine_write_source_label(
+                boundary.get("provider_source") or ""
+            ),
+            "requested_count": max(0, int(boundary.get("requested_count") or 0)),
+            "status_counts": status_counts,
+            **AgentRuntime._safe_engine_bridge_boundary_fields(boundary),
+        }
+        if safe_kind == "actor_import":
+            row["accepted_count"] = max(0, int(boundary.get("identity_result_count") or 0))
+            row["observed_count"] = max(0, int(boundary.get("identity_result_count") or 0))
+            row["missing_identity_count"] = max(0, int(boundary.get("missing_identity_count") or 0))
+        elif safe_kind == "environment_import":
+            row["accepted_count"] = max(0, int(boundary.get("identity_result_count") or 0))
+            row["observed_count"] = max(0, int(boundary.get("identity_result_count") or 0))
+            row["missing_identity_count"] = max(0, int(boundary.get("missing_identity_count") or 0))
+        elif safe_kind == "layout_transform":
+            row["accepted_count"] = max(0, int(boundary.get("updated_count") or 0))
+            row["observed_count"] = max(0, int(boundary.get("observed_position_count") or 0))
+        elif safe_kind == "actor_delete":
+            row["accepted_count"] = max(0, int(boundary.get("deleted_count") or 0))
+            row["observed_count"] = max(0, int(boundary.get("observed_deleted_count") or 0))
+        else:
+            row["accepted_count"] = 0
+            row["observed_count"] = 0
+        return row
+
+    @staticmethod
+    def _safe_engine_bridge_boundary_fields(boundary: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "bridge_call_count": max(0, int(boundary.get("bridge_call_count") or 0)),
+            "bridge_success_count": max(0, int(boundary.get("bridge_success_count") or 0)),
+            "bridge_failed_count": max(0, int(boundary.get("bridge_failed_count") or 0)),
+            "bridge_method_counts": AgentRuntime._safe_status_count_map(
+                boundary.get("bridge_method_counts")
+            ),
+            "bridge_error_code_counts": AgentRuntime._safe_status_count_map(
+                boundary.get("bridge_error_code_counts")
+            ),
+        }
+
+    @staticmethod
+    def _fact_source_boundary_summary(
+        *,
+        plan_summary: Mapping[str, Any] | None = None,
+        batch_summary: Mapping[str, Any] | None = None,
+        resource_summary: Mapping[str, Any] | None = None,
+        import_summary: Mapping[str, Any] | None = None,
+        sync_summary: Mapping[str, Any] | None = None,
+        engine_write_summary: Mapping[str, Any] | None = None,
+        engine_write_boundary_summary: Mapping[str, Any] | None = None,
+        scene_snapshot_summary: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        plan_data = dict(plan_summary or {})
+        batch_data = dict(batch_summary or {})
+        resource_data = dict(resource_summary or {})
+        import_data = dict(import_summary or {})
+        sync_data = dict(sync_summary or {})
+        engine_data = dict(engine_write_summary or {})
+        engine_boundary_data = dict(engine_write_boundary_summary or {})
+        snapshot_data = dict(scene_snapshot_summary or {})
+        batch_count = int(batch_data.get("batch_count") or len(list(batch_data.get("batches") or [])) or 0)
+        runtime_plan_fact_count = int(bool(str(plan_data.get("title") or plan_data.get("status") or "").strip()))
+        runtime_batch_fact_count = batch_count
+        runtime_resource_fact_count = int(resource_data.get("event_count") or 0)
+        runtime_resource_phase_fact_count = int(resource_data.get("fact_count") or 0)
+        runtime_import_fact_count = int(import_data.get("event_count") or 0)
+        sync_event_count = int(sync_data.get("event_count") or 0)
+        engine_write_result_count = sum(
+            int(engine_data.get(key) or 0)
+            for key in (
+                "import_result_count",
+                "transform_result_count",
+                "delete_result_count",
+                "environment_import_result_count",
+            )
+        )
+        engine_write_boundary_fact_count = int(engine_boundary_data.get("boundary_fact_count") or 0)
+        scene_snapshot_count = int(
+            snapshot_data.get("scoped_snapshot_count")
+            or snapshot_data.get("snapshot_count")
+            or 0
+        )
+        mirrored_external_fact_count = (
+            sync_event_count
+            + engine_write_result_count
+            + engine_write_boundary_fact_count
+            + scene_snapshot_count
+        )
+        runtime_business_fact_count = (
+            runtime_plan_fact_count
+            + runtime_batch_fact_count
+            + runtime_resource_fact_count
+            + runtime_resource_phase_fact_count
+            + runtime_import_fact_count
+        )
+        boundary_notes = [
+            "runtime-state-is-business-truth",
+            "engine-lanchat-facts-are-mirrored",
+        ]
+        if mirrored_external_fact_count <= 0:
+            boundary_notes.append("external-engine-facts-not-yet-observed")
+        return {
+            "runtime_state_source": "RuntimeState",
+            "external_truth_source": "engine_lanchat_mirrored",
+            "runtime_business_fact_count": runtime_business_fact_count,
+            "runtime_plan_fact_count": runtime_plan_fact_count,
+            "runtime_batch_fact_count": runtime_batch_fact_count,
+            "runtime_resource_event_count": runtime_resource_fact_count,
+            "runtime_resource_phase_fact_count": runtime_resource_phase_fact_count,
+            "runtime_import_event_count": runtime_import_fact_count,
+            "sync_event_count": sync_event_count,
+            "engine_write_result_count": engine_write_result_count,
+            "engine_write_boundary_fact_count": engine_write_boundary_fact_count,
+            "scene_snapshot_count": scene_snapshot_count,
+            "mirrored_external_fact_count": mirrored_external_fact_count,
+            "external_authoritative_available": mirrored_external_fact_count > 0,
+            "boundary_notes": boundary_notes,
         }
 
     @staticmethod
@@ -19185,8 +22366,10 @@ class AgentRuntime:
                 "requested_count": 0,
                 "succeeded_count": 0,
                 "failed_count": 0,
+                "failure_code_counts": {},
                 "message_kind_counts": {},
                 "channel_counts": {},
+                "latest_failure_code": "",
                 "latest_message_kind": "",
                 "latest_channel": "",
                 "latest_stage": "",
@@ -19195,8 +22378,10 @@ class AgentRuntime:
         requested_count = 0
         succeeded_count = 0
         failed_count = 0
+        failure_code_counts: dict[str, int] = {}
         message_kind_counts: dict[str, int] = {}
         channel_counts: dict[str, int] = {}
+        latest_failure_code = ""
         latest_message_kind = ""
         latest_channel = ""
         latest_stage = ""
@@ -19218,6 +22403,14 @@ class AgentRuntime:
                 succeeded_count += 1
             elif event.endswith("_send_failed"):
                 failed_count += 1
+                failure_code = RuntimeEventValidator.safe_text(
+                    payload.get("failure_code") or payload.get("error_code") or payload.get("reason") or ""
+                ).strip()
+                if not failure_code:
+                    failure_code = "message_send_failed"
+                failure_code = failure_code[:64]
+                failure_code_counts[failure_code] = failure_code_counts.get(failure_code, 0) + 1
+                latest_failure_code = failure_code
             message_kind = str(payload.get("message_kind") or "").strip()
             channel = str(payload.get("channel") or "").strip()
             if message_kind:
@@ -19233,8 +22426,10 @@ class AgentRuntime:
             "requested_count": requested_count,
             "succeeded_count": succeeded_count,
             "failed_count": failed_count,
+            "failure_code_counts": dict(sorted(failure_code_counts.items())),
             "message_kind_counts": dict(sorted(message_kind_counts.items())),
             "channel_counts": dict(sorted(channel_counts.items())),
+            "latest_failure_code": latest_failure_code,
             "latest_message_kind": latest_message_kind,
             "latest_channel": latest_channel,
             "latest_stage": latest_stage,
@@ -19360,6 +22555,8 @@ class AgentRuntime:
         if not str(room_id or "").strip():
             return []
         room = self.state.room(str(room_id))
+        active_plan_id = str(plan_id or "")
+        active_batch_ids = self._batch_ids_for_plan(room, active_plan_id) if active_plan_id else set()
         entries: list[dict[str, Any]] = []
         for event in list(room.get("sync_events") or []):
             if not isinstance(event, Mapping):
@@ -19368,9 +22565,19 @@ class AgentRuntime:
             event_batch_id = str(event.get("batch_id") or "")
             # LAN sync events are room-authoritative facts.  Older bridge events
             # may not carry Runtime plan ids, so plan-scoped operation replay can
-            # still use them as a supplement when the log window is too small.
-            if plan_id and event_plan_id and event_plan_id != str(plan_id):
-                continue
+            # still use batch-attributable entries as a supplement when the log
+            # window is too small.  Unscoped room-level events are intentionally
+            # excluded from plan replay because they cannot be proven to belong
+            # to the requested plan.
+            if active_plan_id:
+                if event_plan_id:
+                    if event_plan_id != active_plan_id:
+                        continue
+                elif event_batch_id:
+                    if event_batch_id not in active_batch_ids:
+                        continue
+                else:
+                    continue
             if batch_id and event_batch_id != str(batch_id):
                 continue
             event_type = str(event.get("event_type") or "unknown")
@@ -19403,12 +22610,20 @@ class AgentRuntime:
         for key, value in dict(merged.get("event_type_counts") or {}).items():
             event_type_counts[str(key)] = max(int(event_type_counts.get(str(key)) or 0), int(value or 0))
         merged["event_type_counts"] = dict(sorted(event_type_counts.items()))
+        failure_code_counts = dict(persisted.get("failure_code_counts") or {})
+        for key, value in dict(merged.get("failure_code_counts") or {}).items():
+            failure_code_counts[str(key)] = max(
+                int(failure_code_counts.get(str(key)) or 0),
+                int(value or 0),
+            )
+        merged["failure_code_counts"] = dict(sorted(failure_code_counts.items()))
         for key in (
             "latest_event_type",
             "latest_actor_event_type",
             "latest_peer_event_type",
             "latest_peer_id",
             "latest_room_status",
+            "latest_failure_code",
         ):
             if not str(merged.get(key) or "").strip() and str(persisted.get(key) or "").strip():
                 merged[key] = str(persisted.get(key) or "")
@@ -19439,7 +22654,9 @@ class AgentRuntime:
                 "transfer_failed_count": 0,
                 "transfer_progress_count": 0,
                 "event_type_counts": {},
+                "failure_code_counts": {},
                 "latest_event_type": "",
+                "latest_failure_code": "",
                 "latest_actor_event_type": "",
                 "latest_peer_event_type": "",
                 "latest_peer_id": "",
@@ -19462,7 +22679,9 @@ class AgentRuntime:
         transfer_failed_count = 0
         transfer_progress_count = 0
         event_type_counts: dict[str, int] = {}
+        failure_code_counts: dict[str, int] = {}
         latest_event_type = ""
+        latest_failure_code = ""
         latest_actor_event_type = ""
         latest_peer_event_type = ""
         latest_peer_id = ""
@@ -19506,6 +22725,17 @@ class AgentRuntime:
                 recorded_count += 1
             else:
                 failed_count += 1
+                failure_code = RuntimeEventValidator.safe_text(
+                    payload.get("failure_code")
+                    or payload.get("error_code")
+                    or payload.get("reason")
+                    or ""
+                ).strip()
+                if not failure_code or failure_code == "[redacted]":
+                    failure_code = "sync_event_record_failed"
+                failure_code = failure_code[:64]
+                failure_code_counts[failure_code] = failure_code_counts.get(failure_code, 0) + 1
+                latest_failure_code = failure_code
             if str(payload.get("actor_id") or ""):
                 actor_event_count += 1
                 latest_actor_event_type = event_type
@@ -19550,7 +22780,9 @@ class AgentRuntime:
             "transfer_failed_count": transfer_failed_count,
             "transfer_progress_count": transfer_progress_count,
             "event_type_counts": dict(sorted(event_type_counts.items())),
+            "failure_code_counts": dict(sorted(failure_code_counts.items())),
             "latest_event_type": latest_event_type,
+            "latest_failure_code": latest_failure_code,
             "latest_actor_event_type": latest_actor_event_type,
             "latest_peer_event_type": latest_peer_event_type,
             "latest_peer_id": latest_peer_id,
@@ -19902,6 +23134,7 @@ class AgentRuntime:
                 "transform_failed_count": 0,
                 "ground_snapped_count": 0,
                 "overlap_resolved_count": 0,
+                "layout_transform_failure_code_counts": {},
                 "proposal_status_counts": {},
                 "pending_proposal_count": 0,
                 "confirmed_proposal_count": 0,
@@ -19921,6 +23154,7 @@ class AgentRuntime:
         transform_failed_count = 0
         ground_snapped_count = 0
         overlap_resolved_count = 0
+        transform_failure_code_counts: dict[str, int] = {}
         delta_count = 0
         proposal_status_by_id: dict[str, str] = {}
         latest_proposal_id = ""
@@ -19951,6 +23185,15 @@ class AgentRuntime:
                 transform_failed_count += int(payload.get("transform_failed_count") or 0)
                 ground_snapped_count += int(payload.get("ground_snapped_count") or 0)
                 overlap_resolved_count += int(payload.get("overlap_resolved_count") or 0)
+                for key, value in dict(
+                    payload.get("layout_transform_failure_code_counts") or {}
+                ).items():
+                    code = str(key or "").strip()
+                    if not code:
+                        continue
+                    transform_failure_code_counts[code] = (
+                        transform_failure_code_counts.get(code, 0) + int(value or 0)
+                    )
             elif event == "layout_adjustment_confirm_failed":
                 confirmation_failed_count += 1
                 latest_proposal_id = str(payload.get("proposal_id") or latest_proposal_id)
@@ -19972,6 +23215,9 @@ class AgentRuntime:
             "transform_failed_count": transform_failed_count,
             "ground_snapped_count": ground_snapped_count,
             "overlap_resolved_count": overlap_resolved_count,
+            "layout_transform_failure_code_counts": dict(
+                sorted(transform_failure_code_counts.items())
+            ),
             "proposal_status_counts": dict(sorted(proposal_status_counts.items())),
             "pending_proposal_count": int(proposal_status_counts.get("proposed") or 0),
             "confirmed_proposal_count": int(proposal_status_counts.get("confirmed") or 0),
@@ -20092,6 +23338,50 @@ class AgentRuntime:
             "advisory_item_count": advisory_item_count,
             "latest_decision": latest_decision,
             "latest_proposal_id": latest_proposal_id,
+        }
+
+    @staticmethod
+    def _final_adjustment_confirmation_replay_summary(entries: Any) -> dict[str, Any]:
+        if not isinstance(entries, list):
+            return {
+                "confirmation_count": 0,
+                "confirmation_failed_count": 0,
+                "confirmation_skipped_count": 0,
+                "decision_counts": {},
+                "latest_confirmation": {},
+            }
+        confirmation_count = 0
+        confirmation_failed_count = 0
+        confirmation_skipped_count = 0
+        decision_counts: dict[str, int] = {}
+        latest_confirmation: dict[str, Any] = {}
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            event = str(entry.get("event") or "")
+            payload = entry.get("payload") if isinstance(entry.get("payload"), Mapping) else {}
+            if event == "final_adjustment_confirmation_recorded":
+                confirmation_count += 1
+                decision = str(payload.get("decision") or entry.get("message") or "unknown").strip() or "unknown"
+                decision_counts[decision] = decision_counts.get(decision, 0) + 1
+                latest_confirmation = {
+                    "proposal_id": str(payload.get("proposal_id") or ""),
+                    "batch_id": str(payload.get("batch_id") or entry.get("batch_id") or ""),
+                    "decision": decision,
+                    "confirmed_by": str(payload.get("confirmed_by") or ""),
+                    "target_hint": str(payload.get("target_hint") or ""),
+                    "conflict_item_count": int(payload.get("conflict_item_count") or 0),
+                }
+            elif event == "final_adjustment_confirmation_record_failed":
+                confirmation_failed_count += 1
+            elif event == "final_adjustment_confirmation_skipped":
+                confirmation_skipped_count += 1
+        return {
+            "confirmation_count": confirmation_count,
+            "confirmation_failed_count": confirmation_failed_count,
+            "confirmation_skipped_count": confirmation_skipped_count,
+            "decision_counts": dict(sorted(decision_counts.items())),
+            "latest_confirmation": latest_confirmation,
         }
 
     def record_sync_event(
@@ -20417,6 +23707,7 @@ class AgentRuntime:
             payload={
                 "applied": applied,
                 "reason": reason,
+                "failure_code": "" if applied else "sync_event_record_failed",
                 "event_type": event_type,
                 "source": str(stored_event.get("source") or ""),
                 "actor_id": str(stored_event.get("actor_id") or ""),
@@ -21280,6 +24571,71 @@ class AgentRuntime:
             and AgentRuntime._event_belongs_to_plan(event, active_plan_id, batch_ids)
             and (not active_batch_id or str(event.get("batch_id") or "") == active_batch_id)
         ]
+        event_batch_ids = {
+            str(event.get("batch_id") or "")
+            for event in import_events
+            if str(event.get("batch_id") or "")
+        }
+        batch_meta_by_id = {
+            str(batch.get("batch_id") or ""): dict(batch)
+            for batch in dict(room.get("batch_plans") or {}).values()
+            if isinstance(batch, Mapping)
+            and str(batch.get("batch_id") or "")
+            and (not active_plan_id or str(batch.get("plan_id") or "") == active_plan_id)
+        }
+        import_fact_rows: list[dict[str, Any]] = []
+        aggregate_import_failure_code_counts: dict[str, int] = {}
+        import_failure_code_fact_batch_ids: set[str] = set()
+
+        def add_import_failure_code_counts(row: Mapping[str, Any]) -> None:
+            explicit = row.get("failure_code_counts")
+            if isinstance(explicit, Mapping):
+                has_explicit_count = False
+                for code, count in explicit.items():
+                    safe_code = str(code or "").strip()
+                    if not safe_code:
+                        continue
+                    count_value = int(count or 0)
+                    if count_value <= 0:
+                        continue
+                    has_explicit_count = True
+                    aggregate_import_failure_code_counts[safe_code] = (
+                        aggregate_import_failure_code_counts.get(safe_code, 0) + count_value
+                    )
+                if has_explicit_count:
+                    return
+            results = row.get("import_results") if isinstance(row.get("import_results"), list) else []
+            for result in results:
+                if not isinstance(result, Mapping):
+                    continue
+                safe_code = str(result.get("failure_code") or "").strip()
+                if not safe_code:
+                    continue
+                aggregate_import_failure_code_counts[safe_code] = (
+                    aggregate_import_failure_code_counts.get(safe_code, 0) + 1
+                )
+
+        for key, fact in dict(room.get("custom_import_facts") or {}).items():
+            if not isinstance(fact, Mapping):
+                continue
+            if not str(key or "").endswith(":actor_import_result"):
+                continue
+            fact_batch_id = str(fact.get("batch_id") or str(key).split(":", 1)[0] or "")
+            if not fact_batch_id:
+                continue
+            if active_batch_id and fact_batch_id != active_batch_id:
+                continue
+            fact_plan_id = str(fact.get("plan_id") or "")
+            if active_plan_id:
+                if fact_plan_id and fact_plan_id != active_plan_id:
+                    continue
+                if not fact_plan_id and batch_ids and fact_batch_id not in batch_ids:
+                    continue
+            add_import_failure_code_counts(fact)
+            import_failure_code_fact_batch_ids.add(fact_batch_id)
+            if fact_batch_id in event_batch_ids:
+                continue
+            import_fact_rows.append(dict(fact))
         status_counts: dict[str, int] = {}
         requested_count = 0
         imported_count = 0
@@ -21292,11 +24648,14 @@ class AgentRuntime:
             event_requested = int(payload.get("requested_count") or 0)
             event_imported = int(payload.get("actor_count") or 0)
             event_failed = int(payload.get("failed_count") or 0)
+            event_batch_id = str(event.get("batch_id") or "")
+            if event_batch_id not in import_failure_code_fact_batch_ids:
+                add_import_failure_code_counts(payload)
             requested_count += event_requested
             imported_count += event_imported
             failed_count += event_failed
             latest.append({
-                "batch_id": str(event.get("batch_id") or ""),
+                "batch_id": event_batch_id,
                 "batch_index": int(payload.get("batch_index") or 0),
                 "total_batches": int(payload.get("total_batches") or 0),
                 "status": status,
@@ -21304,11 +24663,32 @@ class AgentRuntime:
                 "requested_count": event_requested,
                 "failed_count": event_failed,
             })
+        for fact in import_fact_rows:
+            fact_batch_id = str(fact.get("batch_id") or "")
+            batch_meta = batch_meta_by_id.get(fact_batch_id, {})
+            status = str(fact.get("status") or "unknown").strip() or "unknown"
+            status_counts[status] = status_counts.get(status, 0) + 1
+            fact_requested = int(fact.get("actor_count") or fact.get("requested_count") or 0)
+            fact_imported = int(fact.get("imported_count") or fact.get("ready_count") or 0)
+            fact_failed = int(fact.get("failed_count") or max(0, fact_requested - fact_imported))
+            requested_count += fact_requested
+            imported_count += fact_imported
+            failed_count += fact_failed
+            latest.append({
+                "batch_id": fact_batch_id,
+                "batch_index": int(batch_meta.get("batch_index") or 0),
+                "total_batches": int(batch_meta.get("total_batches") or 0),
+                "status": status,
+                "actor_count": fact_imported,
+                "requested_count": fact_requested,
+                "failed_count": fact_failed,
+            })
         return {
             "event_count": len(import_events),
             "requested_count": requested_count,
             "imported_count": imported_count,
             "failed_count": failed_count,
+            "import_failure_code_counts": dict(sorted(aggregate_import_failure_code_counts.items())),
             "status_counts": dict(sorted(status_counts.items())),
             "latest_events": latest[-3:],
         }
@@ -21336,6 +24716,33 @@ class AgentRuntime:
             and AgentRuntime._event_belongs_to_plan(event, active_plan_id, batch_ids)
             and (not active_batch_id or str(event.get("batch_id") or "") == active_batch_id)
         ]
+        resource_phase_facts: list[dict[str, Any]] = []
+        for fact in dict(room.get("custom_resource_phase_facts") or {}).values():
+            if not isinstance(fact, Mapping):
+                continue
+            if batch_ids and str(fact.get("batch_id") or "") not in batch_ids:
+                continue
+            if active_batch_id and str(fact.get("batch_id") or "") != active_batch_id:
+                continue
+            resource_phase_facts.append({
+                "batch_id": str(fact.get("batch_id") or ""),
+                "phase": str(fact.get("phase") or ""),
+                "status": str(fact.get("status") or ""),
+                "requested_count": int(fact.get("requested_count") or 0),
+                "ready_count": int(fact.get("ready_count") or 0),
+                "failed_count": int(fact.get("failed_count") or 0),
+                "resource_count": int(fact.get("resource_count") or 0),
+                "status_counts": {
+                    str(key): int(value)
+                    for key, value in dict(fact.get("status_counts") or {}).items()
+                    if str(key or "").strip()
+                },
+                "failure_code_counts": {
+                    str(key): int(value)
+                    for key, value in dict(fact.get("failure_code_counts") or {}).items()
+                    if str(key or "").strip()
+                },
+            })
         by_phase: dict[str, dict[str, Any]] = {}
         latest: list[dict[str, Any]] = []
         for event in events:
@@ -21373,10 +24780,85 @@ class AgentRuntime:
                 "requested_count": requested_count,
                 "failed_count": failed_count,
             })
+        for fact in resource_phase_facts:
+            phase = str(fact.get("phase") or "").strip() or "custom"
+            if phase in {"image", "model"}:
+                failure_code_counts = {
+                    str(key): int(value)
+                    for key, value in dict(fact.get("failure_code_counts") or {}).items()
+                    if str(key or "").strip()
+                }
+                if failure_code_counts:
+                    summary = by_phase.setdefault(
+                        phase,
+                        {
+                            "event_count": 0,
+                            "item_count": 0,
+                            "requested_count": 0,
+                            "failed_count": 0,
+                            "status_counts": {},
+                            "failure_code_counts": {},
+                        },
+                    )
+                    merged_failure_code_counts = dict(summary.get("failure_code_counts") or {})
+                    for failure_code, count in failure_code_counts.items():
+                        merged_failure_code_counts[failure_code] = (
+                            merged_failure_code_counts.get(failure_code, 0) + int(count or 0)
+                        )
+                    summary["failure_code_counts"] = dict(sorted(merged_failure_code_counts.items()))
+                continue
+            status = str(fact.get("status") or "unknown").strip() or "unknown"
+            requested_count = int(fact.get("requested_count") or 0)
+            ready_count = int(fact.get("ready_count") or fact.get("resource_count") or 0)
+            failed_count = int(fact.get("failed_count") or 0)
+            summary = by_phase.setdefault(
+                phase,
+                {
+                    "event_count": 0,
+                    "item_count": 0,
+                    "requested_count": 0,
+                    "failed_count": 0,
+                    "status_counts": {},
+                    "failure_code_counts": {},
+                },
+            )
+            summary["event_count"] = int(summary.get("event_count") or 0) + 1
+            summary["item_count"] = int(summary.get("item_count") or 0) + ready_count
+            summary["requested_count"] = int(summary.get("requested_count") or 0) + requested_count
+            summary["failed_count"] = int(summary.get("failed_count") or 0) + failed_count
+            status_counts = dict(summary.get("status_counts") or {})
+            failure_code_counts = dict(summary.get("failure_code_counts") or {})
+            for key, value in dict(fact.get("status_counts") or {}).items():
+                status_key = str(key or "").strip()
+                if not status_key:
+                    continue
+                status_counts[status_key] = status_counts.get(status_key, 0) + int(value or 0)
+            if not status_counts:
+                status_counts[status] = 1
+            summary["status_counts"] = dict(sorted(status_counts.items()))
+            for key, value in dict(fact.get("failure_code_counts") or {}).items():
+                failure_code = str(key or "").strip()
+                if not failure_code:
+                    continue
+                failure_code_counts[failure_code] = failure_code_counts.get(failure_code, 0) + int(value or 0)
+            summary["failure_code_counts"] = dict(sorted(failure_code_counts.items()))
+            latest.append({
+                "batch_id": str(fact.get("batch_id") or ""),
+                "batch_index": 0,
+                "total_batches": 0,
+                "phase": phase,
+                "status": status,
+                "item_count": ready_count,
+                "requested_count": requested_count,
+                "failed_count": failed_count,
+                "failure_code_counts": dict(fact.get("failure_code_counts") or {}),
+            })
         return {
             "event_count": len(events),
+            "fact_count": len(resource_phase_facts),
             "by_phase": by_phase,
             "latest_events": latest[-5:],
+            "latest_facts": resource_phase_facts[-5:],
         }
 
     @staticmethod
@@ -21411,6 +24893,38 @@ class AgentRuntime:
                 counts[status] = counts.get(status, 0) + 1
             return dict(sorted(counts.items()))
 
+        def failure_code_counts(rows: Mapping[str, Any]) -> dict[str, int]:
+            counts: dict[str, int] = {}
+            for row in rows.values():
+                if not isinstance(row, Mapping):
+                    continue
+                failure_code = str(row.get("failure_code") or "").strip()
+                if not failure_code:
+                    continue
+                counts[failure_code] = counts.get(failure_code, 0) + 1
+            return dict(sorted(counts.items()))
+
+        def import_failure_code_counts(row: Mapping[str, Any]) -> dict[str, int]:
+            if not isinstance(row, Mapping):
+                return {}
+            explicit = row.get("failure_code_counts")
+            if isinstance(explicit, Mapping):
+                return {
+                    str(code): int(count or 0)
+                    for code, count in sorted(explicit.items())
+                    if str(code).strip() and int(count or 0) > 0
+                }
+            counts: dict[str, int] = {}
+            results = row.get("import_results") if isinstance(row.get("import_results"), list) else []
+            for result in results:
+                if not isinstance(result, Mapping):
+                    continue
+                failure_code = str(result.get("failure_code") or "").strip()
+                if not failure_code:
+                    continue
+                counts[failure_code] = counts.get(failure_code, 0) + 1
+            return dict(sorted(counts.items()))
+
         def ready_count(rows: Mapping[str, Any]) -> int:
             return AgentRuntime._ready_resource_count(rows)
 
@@ -21419,6 +24933,8 @@ class AgentRuntime:
         partial_count = 0
         failed_count = 0
         waiting_count = 0
+        status_by_batch_id: dict[str, str] = {}
+        aggregate_import_failure_code_counts: dict[str, int] = {}
         for batch in sorted(
             batches,
             key=lambda item: (int(item.get("batch_index") or 0), str(item.get("batch_id") or "")),
@@ -21460,6 +24976,7 @@ class AgentRuntime:
                 import_ready = int(import_fact.get("actor_count") or 0)
             import_expected = int(import_fact.get("actor_count") or requested_count)
             import_failed = max(0, import_expected - import_ready)
+            import_status = str(import_fact.get("status") or "").strip().lower()
             geometry_status = str(geometry_review.get("status") or "")
             vlm_status = str(vlm_review.get("status") or "")
             review_status = str(review_fact.get("status") or geometry_status or vlm_status or "")
@@ -21470,7 +24987,8 @@ class AgentRuntime:
             stage_failed = (
                 any("failed" in key or "error" in key for key in status_counts(image_rows))
                 or any("failed" in key or "error" in key for key in status_counts(model_rows))
-                or import_failed > 0
+                or import_status in {"failed", "error", "missing"}
+                or (import_expected > 0 and import_ready <= 0 and import_failed >= import_expected)
                 or review_status in {"failed", "error"}
             )
             stage_complete = (
@@ -21503,6 +25021,13 @@ class AgentRuntime:
             else:
                 waiting_count += 1
                 flow_status = "waiting"
+            if current_batch_id:
+                status_by_batch_id[current_batch_id] = flow_status
+            batch_import_failure_code_counts = import_failure_code_counts(import_fact)
+            for failure_code, count in batch_import_failure_code_counts.items():
+                aggregate_import_failure_code_counts[failure_code] = (
+                    aggregate_import_failure_code_counts.get(failure_code, 0) + int(count or 0)
+                )
             flows.append({
                 "batch_id": current_batch_id,
                 "batch_index": int(batch.get("batch_index") or 0),
@@ -21511,11 +25036,14 @@ class AgentRuntime:
                 "requested_count": requested_count,
                 "absorbed_intervention_count": len(batch.get("absorbed_intervention_ids") or []),
                 "image_status_counts": status_counts(image_rows),
+                "image_failure_code_counts": failure_code_counts(image_rows),
                 "image_ready_count": image_ready,
                 "model_status_counts": status_counts(model_rows),
+                "model_failure_code_counts": failure_code_counts(model_rows),
                 "model_ready_count": model_ready,
                 "import_ready_count": import_ready,
                 "import_failed_count": import_failed,
+                "import_failure_code_counts": batch_import_failure_code_counts,
                 "review_status": review_status,
                 "geometry_status": geometry_status,
                 "vlm_status": vlm_status,
@@ -21526,6 +25054,8 @@ class AgentRuntime:
             "partial_count": partial_count,
             "failed_count": failed_count,
             "waiting_count": waiting_count,
+            "status_by_batch_id": status_by_batch_id,
+            "import_failure_code_counts": dict(sorted(aggregate_import_failure_code_counts.items())),
             "latest_batches": flows[-5:],
         }
 
@@ -21628,11 +25158,12 @@ class AgentRuntime:
             row = dict(item)
             if active_batch_id:
                 proposal = proposals_by_id.get(str(row.get("proposal_id") or ""))
+                proposal_batch_id = str(proposal.get("batch_id") or "") if isinstance(proposal, Mapping) else ""
                 proposal_items = proposal.get("items") if isinstance(proposal, Mapping) else []
                 matching_items = [
                     proposal_item for proposal_item in (proposal_items if isinstance(proposal_items, list) else [])
                     if isinstance(proposal_item, Mapping)
-                    and str(proposal_item.get("batch_id") or "") == active_batch_id
+                    and str(proposal_item.get("batch_id") or proposal_batch_id or "") == active_batch_id
                 ]
                 if not matching_items:
                     continue
@@ -22322,6 +25853,7 @@ class AgentRuntime:
         transform_failed_count = 0
         ground_snapped_count = 0
         overlap_resolved_count = 0
+        transform_failure_code_counts: dict[str, int] = {}
         for transform_result in transform_results:
             if not isinstance(transform_result, Mapping):
                 continue
@@ -22330,10 +25862,32 @@ class AgentRuntime:
                 transform_success_count += 1
             elif status in {"failed", "failure", "error", "rejected"}:
                 transform_failed_count += 1
+                failure_code = RuntimeEventValidator.safe_text(
+                    transform_result.get("failure_code")
+                    or transform_result.get("reason")
+                    or "layout_transform_failed"
+                ).strip()
+                if failure_code:
+                    failure_code = failure_code[:80]
+                    transform_failure_code_counts[failure_code] = (
+                        transform_failure_code_counts.get(failure_code, 0) + 1
+                    )
             if bool(transform_result.get("ground_snapped")):
                 ground_snapped_count += 1
             if bool(transform_result.get("overlap_resolved")):
                 overlap_resolved_count += 1
+        layout_sync_events = [
+            dict(event)
+            for event in list(self.state.room(room).get("sync_events") or [])
+            if isinstance(event, Mapping)
+            and str(event.get("source") or "") == "runtime_layout_transform"
+            and str(event.get("plan_id") or "") == effective_plan_id
+            and (not proposal_batch_id or str(event.get("batch_id") or "") == proposal_batch_id)
+        ]
+        sync_actor_transform_count = sum(
+            1 for event in layout_sync_events
+            if str(event.get("event_type") or "") == "actor_transform"
+        )
         self.operation_log.append(
             "layout_adjustment_confirmed" if confirmed else "layout_adjustment_confirm_failed",
             room_id=room,
@@ -22350,6 +25904,11 @@ class AgentRuntime:
                 "transform_failed_count": transform_failed_count,
                 "ground_snapped_count": ground_snapped_count,
                 "overlap_resolved_count": overlap_resolved_count,
+                "sync_event_count": len(layout_sync_events),
+                "sync_actor_transform_count": sync_actor_transform_count,
+                "layout_transform_failure_code_counts": dict(
+                    sorted(transform_failure_code_counts.items())
+                ),
             },
         )
         if confirmed:
@@ -22375,6 +25934,11 @@ class AgentRuntime:
                     "transform_failed_count": transform_failed_count,
                     "ground_snapped_count": ground_snapped_count,
                     "overlap_resolved_count": overlap_resolved_count,
+                    "sync_event_count": len(layout_sync_events),
+                    "sync_actor_transform_count": sync_actor_transform_count,
+                    "layout_transform_failure_code_counts": dict(
+                        sorted(transform_failure_code_counts.items())
+                    ),
                 },
             )
         return {
@@ -23840,7 +27404,7 @@ class AgentRuntime:
         cancelled_graphs: int = 0,
         resumed_graphs: int = 0,
         retried_graphs: int = 0,
-    ) -> None:
+    ) -> dict[str, Any]:
         room = str(room_id or "default")
         graph = ToolCallGraph(
             graph_id=_id("graph-runtime-command"),
@@ -23894,6 +27458,12 @@ class AgentRuntime:
         )
         if not applied:
             raise RuntimeError(f"failed to persist runtime command state: {apply_reason}")
+        return {
+            "command_recorded": True,
+            "graph_status": graph_state,
+            "tool_call_status": command_call.status.value,
+            "state_version": self.state.version,
+        }
 
     def _persist_user_report(self, room_id: str, plan_id: str, batch_id: str, report: Mapping[str, Any]) -> None:
         room = str(room_id or "default")
@@ -23930,17 +27500,20 @@ class AgentRuntime:
         applied = graph.status == "completed" and report_call.status == ToolCallStatus.SUCCEEDED
         apply_reason = report_call.error or graph.status or "completed"
         event = "user_report_state_persisted" if applied else "user_report_state_persist_failed"
+        safe_apply_reason = "completed" if applied else "RuntimeState persistence failed"
         self.operation_log.append(
             event,
             room_id=room,
             plan_id=str(plan_id or ""),
             batch_id=str(batch_id or ""),
-            message=apply_reason,
+            message=safe_apply_reason,
             payload={
                 "applied": applied,
                 "state_version": self.state.version,
                 "operation_log_event": str(report_record.get("operation_log_event") or ""),
                 "operation_log_index": int(report_record.get("operation_log_index") or 0),
+                "failure_code": "" if applied else "user_report_state_persist_failed",
+                "reason": "" if applied else safe_apply_reason,
             },
         )
         if not applied:
@@ -24047,7 +27620,13 @@ class AgentRuntime:
                         "scope": "room",
                     },
                 },
-                produces_state=("layout_adjustment_proposals", "actors"),
+                produces_state=(
+                    "layout_adjustment_proposals",
+                    "actors",
+                    "custom_report_facts",
+                    "sync_events",
+                    "sync_state",
+                ),
                 description="Apply confirmed low-risk layout deltas to RuntimeState actors.",
             )
         if not self.registry.has("runtime.actor.mark_deleted"):
@@ -24332,6 +27911,18 @@ class AgentRuntime:
                 requires_user_visible_failure=True,
                 description="Mark a Runtime BatchPlan completed through a narrow ToolCallGraph state patch.",
             )
+        if not self.registry.has("batch.mark_partial"):
+            self.registry.register(
+                "batch.mark_partial",
+                self._mark_batch_terminal_status_tool,
+                category=ToolCategory.PLAN,
+                default_risk_level=RiskLevel.MEDIUM,
+                requires_write=True,
+                required_args=("room_id", "plan_id", "batch_id", "graph_status"),
+                produces_state=("batch_plans",),
+                requires_user_visible_failure=True,
+                description="Mark a Runtime BatchPlan partial through a narrow ToolCallGraph state patch.",
+            )
         if not self.registry.has("batch.mark_failed"):
             self.registry.register(
                 "batch.mark_failed",
@@ -24415,6 +28006,17 @@ class AgentRuntime:
                 produces_state=("reports",),
                 requires_user_visible_failure=True,
                 description="Persist a sanitized user-facing report through RuntimeState.",
+            )
+        if not self.registry.has("runtime.audit_event.record"):
+            self.registry.register(
+                "runtime.audit_event.record",
+                self._record_audit_event_tool,
+                category=ToolCategory.REPORT,
+                default_risk_level=RiskLevel.LOW,
+                requires_write=True,
+                required_args=("room_id", "event_name", "payload"),
+                requires_user_visible_failure=True,
+                description="Record sanitized external audit events through ToolCallGraph.",
             )
         if not self.registry.has("runtime.tool_manifest.snapshot"):
             self.registry.register(
@@ -24710,6 +28312,11 @@ class AgentRuntime:
         }
         if engine_delete_results:
             updated_proposal["engine_delete_results"] = engine_delete_results
+            updated_proposal["engine_delete_boundary"] = self._safe_engine_delete_boundary(
+                provider_result,
+                requested_count=len(target_actors),
+                deleted_count=len(marked),
+            )
         changes: dict[str, Any] = {
             "review_advisory_proposals": {proposal_key or plan_id: updated_proposal},
         }
@@ -24780,6 +28387,44 @@ class AgentRuntime:
         SyncEventValidator.validate_state(sync_state)
         return events, sync_state
 
+    @staticmethod
+    def _safe_engine_delete_boundary(
+        provider_result: Mapping[str, Any],
+        *,
+        requested_count: int,
+        deleted_count: int,
+    ) -> dict[str, Any]:
+        raw_engine_result = provider_result.get("engine_write_result") if isinstance(provider_result, Mapping) else None
+        engine_result = raw_engine_result if isinstance(raw_engine_result, Mapping) else {}
+        delete_results = (
+            provider_result.get("delete_results")
+            if isinstance(provider_result.get("delete_results"), list)
+            else []
+        )
+        status_counts: dict[str, int] = {}
+        observed_deleted_count = 0
+        for item in delete_results:
+            if not isinstance(item, Mapping):
+                continue
+            status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
+            status_counts[status_key] = status_counts.get(status_key, 0) + 1
+            if item.get("observed_deleted"):
+                observed_deleted_count += 1
+        return {
+            "provider_source": AgentRuntime._safe_engine_write_provider_source(
+                provider_result.get("source")
+                or engine_result.get("provider_source")
+                or "actor_delete_provider"
+            ),
+            "requested_count": int(engine_result.get("requested_count") or max(requested_count, len(delete_results))),
+            "deleted_count": int(engine_result.get("deleted_count") or deleted_count),
+            "observed_deleted_count": int(engine_result.get("observed_deleted_count") or observed_deleted_count),
+            "status_counts": AgentRuntime._safe_status_count_map(
+                engine_result.get("status_counts") or status_counts
+            ),
+            **AgentRuntime._safe_engine_bridge_boundary_fields(engine_result),
+        }
+
     def _build_batch_execution_graph(self, plan: ScenePlan, batch: BatchPlan, *, scene_name: str = "") -> ToolCallGraph:
         graph = ToolCallGraph(graph_id=_id("graph"), plan_id=plan.plan_id, batch_id=batch.batch_id)
         snapshot_id = _id("tool")
@@ -24796,6 +28441,7 @@ class AgentRuntime:
         geometry_review_id = _id("tool")
         import_plan_id = _id("tool")
         import_batch_id = _id("tool")
+        ground_snap_id = _id("tool")
         vlm_checkpoint_id = _id("tool")
         review_summary_id = _id("tool")
         review_adjustment_id = _id("tool")
@@ -24816,7 +28462,12 @@ class AgentRuntime:
             ToolCall(
                 tool_call_id=extract_id,
                 tool_name="scene.extract_objects",
-                args={"room_id": plan.room_id, "text": plan.design_brief, "plan_id": batch.batch_id},
+                args={
+                    "room_id": plan.room_id,
+                    "text": plan.design_brief,
+                    "plan_id": plan.plan_id,
+                    "batch_id": batch.batch_id,
+                },
                 risk_level=RiskLevel.LOW,
                 depends_on=[snapshot_id],
             )
@@ -24842,6 +28493,7 @@ class AgentRuntime:
                 tool_name="runtime.asset.plan",
                 args={
                     "room_id": plan.room_id,
+                    "batch_id": batch.batch_id,
                     "plan_id": plan.plan_id,
                 },
                 risk_level=RiskLevel.LOW,
@@ -24956,6 +28608,7 @@ class AgentRuntime:
                 tool_name="runtime.placement.propose",
                 args={
                     "room_id": plan.room_id,
+                    "batch_id": batch.batch_id,
                     "layout_items": list(plan.layout_items),
                     "plan_id": plan.plan_id,
                 },
@@ -25048,12 +28701,31 @@ class AgentRuntime:
                     "scene_name": str(scene_name or ""),
                 },
                 risk_level=RiskLevel.LOW,
-                depends_on=[import_batch_id, geometry_review_id, environment_dependency_id],
+                depends_on=[import_batch_id, ground_snap_id, geometry_review_id, environment_dependency_id],
                 consumes=self._tool_consumes(
                     "runtime.review.vlm_checkpoint",
                     "actors",
                     "placements",
                     "environment_components",
+                ),
+            )
+        )
+        graph.add(
+            ToolCall(
+                tool_call_id=ground_snap_id,
+                tool_name="runtime.geometry.snap_to_ground_selective",
+                args={
+                    "room_id": plan.room_id,
+                    "batch_id": batch.batch_id,
+                    "plan_id": plan.plan_id,
+                    "ground_y": 0.0,
+                    "scene_name": str(scene_name or ""),
+                },
+                risk_level=RiskLevel.LOW,
+                depends_on=[import_batch_id, geometry_review_id, environment_dependency_id],
+                consumes=self._tool_consumes(
+                    "runtime.geometry.snap_to_ground_selective",
+                    "actors",
                 ),
             )
         )
@@ -25068,10 +28740,11 @@ class AgentRuntime:
                     "scene_name": str(scene_name or ""),
                 },
                 risk_level=RiskLevel.LOW,
-                depends_on=[vlm_checkpoint_id, geometry_review_id, import_batch_id],
+                depends_on=[vlm_checkpoint_id, ground_snap_id, geometry_review_id, import_batch_id],
                 consumes=self._tool_consumes(
                     "runtime.review.summarize_batch",
                     "geometry_review",
+                    "ground_snap_reviews",
                     "vlm_checkpoints",
                     "actor_import_plan",
                     "actors",
@@ -25089,10 +28762,11 @@ class AgentRuntime:
                     "scene_name": str(scene_name or ""),
                 },
                 risk_level=RiskLevel.LOW,
-                depends_on=[review_summary_id, geometry_review_id, vlm_checkpoint_id],
+                depends_on=[review_summary_id, ground_snap_id, geometry_review_id, vlm_checkpoint_id],
                 consumes=self._tool_consumes(
                     "runtime.review.generate_adjustment_proposal",
                     "geometry_review",
+                    "ground_snap_reviews",
                     "batch_review_summary",
                     "review_advisories",
                 ),
@@ -25238,14 +28912,75 @@ class AgentRuntime:
             updated_proposal["engine_transform_results"] = self._safe_engine_transform_results(
                 provider_result.get("transform_results") or []
             )
+            updated_proposal["engine_transform_boundary"] = self._safe_engine_transform_boundary(
+                provider_result,
+                requested_count=len(applied),
+                updated_count=len(actor_updates),
+            )
             updated_proposal["status"] = "applied" if actor_updates else "skipped"
         if actor_updates:
             actor_updates = ActorFactValidator.safe_actor_map(actor_updates)
+        sync_changes = self._layout_transform_sync_changes(
+            room_id=room_id,
+            plan_id=plan_id,
+            proposal=updated_proposal,
+            actor_updates=actor_updates,
+            scene_name=scene_name,
+        )
+        proposal_id = str(updated_proposal.get("proposal_id") or "")
+        transform_results = (
+            updated_proposal.get("engine_transform_results")
+            if isinstance(updated_proposal.get("engine_transform_results"), list)
+            else []
+        )
+        transform_failure_code_counts: dict[str, int] = {}
+        ground_snapped_count = 0
+        overlap_resolved_count = 0
+        for transform_result in transform_results:
+            if not isinstance(transform_result, Mapping):
+                continue
+            if bool(transform_result.get("ground_snapped")):
+                ground_snapped_count += 1
+            if bool(transform_result.get("overlap_resolved")):
+                overlap_resolved_count += 1
+            status = str(transform_result.get("status") or "").strip().lower()
+            if status in {"failed", "failure", "error", "rejected"}:
+                failure_code = RuntimeEventValidator.safe_text(
+                    transform_result.get("failure_code")
+                    or transform_result.get("reason")
+                    or "layout_transform_failed"
+                ).strip()
+                if failure_code:
+                    failure_code = failure_code[:80]
+                    transform_failure_code_counts[failure_code] = (
+                        transform_failure_code_counts.get(failure_code, 0) + 1
+                    )
+        transform_failed_count = sum(transform_failure_code_counts.values())
+        transform_success_count = max(0, len(transform_results) - transform_failed_count)
+        layout_fact_key = f"{plan_id}:{proposal_id or 'layout'}:layout_transform_result"
+        layout_fact = {
+            "room_id": room_id,
+            "plan_id": plan_id,
+            "proposal_id": proposal_id,
+            "batch_id": self._batch_id_from_layout_proposal(updated_proposal),
+            "source": "runtime_layout_transform_result",
+            "status": str(updated_proposal.get("status") or ""),
+            "applied_count": len(updated_proposal.get("applied_deltas") or []),
+            "skipped_count": len(updated_proposal.get("skipped_deltas") or []),
+            "transform_result_count": len(transform_results),
+            "transform_success_count": transform_success_count,
+            "transform_failed_count": transform_failed_count,
+            "ground_snapped_count": ground_snapped_count,
+            "overlap_resolved_count": overlap_resolved_count,
+            "layout_transform_failure_code_counts": dict(sorted(transform_failure_code_counts.items())),
+        }
         changes: dict[str, Any] = {
             "layout_adjustment_proposals": {plan_id: updated_proposal},
+            "custom_report_facts": {layout_fact_key: layout_fact},
         }
         if actor_updates:
             changes["actors"] = actor_updates
+        changes.update(sync_changes)
         return ToolResult(
             True,
             "layout adjustment deltas applied" if applied else "layout adjustment had no applicable deltas",
@@ -25274,6 +29009,62 @@ class AgentRuntime:
                 return str(actor_id), dict(actor)
         return "", {}
 
+    def _layout_transform_sync_changes(
+        self,
+        *,
+        room_id: str,
+        plan_id: str,
+        proposal: Mapping[str, Any],
+        actor_updates: Mapping[str, Any],
+        scene_name: str = "",
+    ) -> dict[str, Any]:
+        if not actor_updates:
+            return {}
+        room_state = self.state.room(str(room_id))
+        existing_sync_state = dict(room_state.get("sync_state") or {})
+        existing_events = list(room_state.get("sync_events") or [])
+        sync_state = {
+            "event_count": int(existing_sync_state.get("event_count") or len(existing_events)),
+            "room_status": str(existing_sync_state.get("room_status") or "active"),
+            "last_event": dict(existing_sync_state.get("last_event") or {}),
+            "peer_events": dict(existing_sync_state.get("peer_events") or {}),
+            "actor_events": dict(existing_sync_state.get("actor_events") or {}),
+            "asset_events": dict(existing_sync_state.get("asset_events") or {}),
+        }
+        timestamp = _now()
+        batch_id = self._batch_id_from_layout_proposal(proposal)
+        stored_events: list[dict[str, Any]] = []
+        for actor_id, actor in actor_updates.items():
+            if not isinstance(actor, Mapping):
+                continue
+            event = {
+                "room_id": str(room_id),
+                "event_type": "actor_transform",
+                "source": "runtime_layout_transform",
+                "plan_id": str(plan_id),
+                "batch_id": str(actor.get("batch_id") or batch_id or ""),
+                "actor_id": str(actor_id),
+                "actor_name": str(actor.get("name") or actor_id),
+                "status": "applied",
+                "scene_name": str(actor.get("scene_name") or scene_name or ""),
+                "timestamp": timestamp,
+            }
+            for vector_key in ("position", "rotation", "scale"):
+                value = actor.get(vector_key)
+                if isinstance(value, list) and len(value) >= 3:
+                    event[vector_key] = list(value[:3])
+            stored_event = SyncEventValidator.safe_storage_event(event)
+            stored_events.append(stored_event)
+            sync_state["event_count"] += 1
+            sync_state["last_event"] = dict(stored_event)
+            sync_state["actor_events"][str(actor_id)] = dict(stored_event)
+        if not stored_events:
+            return {}
+        return {
+            "sync_events": stored_events,
+            "sync_state": sync_state,
+        }
+
     @staticmethod
     def _safe_engine_transform_results(results: Any) -> list[dict[str, Any]]:
         if not isinstance(results, list):
@@ -25282,6 +29073,7 @@ class AgentRuntime:
         allowed_scalar_fields = {
             "actor_id",
             "actor_name",
+            "failure_code",
             "name",
             "status",
             "reason",
@@ -25324,7 +29116,9 @@ class AgentRuntime:
                 if normalized not in allowed_scalar_fields:
                     continue
                 if isinstance(value, str):
-                    if normalized == "reason" and any(token in value.lower() for token in blocked_reason_tokens):
+                    if normalized in {"reason", "failure_code"} and any(
+                        token in value.lower() for token in blocked_reason_tokens
+                    ):
                         continue
                     safe[normalized] = value[:160]
                 elif isinstance(value, (int, float, bool)):
@@ -25332,6 +29126,93 @@ class AgentRuntime:
             if safe:
                 safe_results.append(safe)
         return safe_results
+
+    @staticmethod
+    def _safe_engine_transform_boundary(
+        provider_result: Mapping[str, Any],
+        *,
+        requested_count: int,
+        updated_count: int,
+    ) -> dict[str, Any]:
+        raw_engine_result = provider_result.get("engine_write_result") if isinstance(provider_result, Mapping) else None
+        engine_result = raw_engine_result if isinstance(raw_engine_result, Mapping) else {}
+        transform_results = (
+            provider_result.get("transform_results")
+            if isinstance(provider_result.get("transform_results"), list)
+            else []
+        )
+        status_counts: dict[str, int] = {}
+        observed_position_count = 0
+        for item in transform_results:
+            if not isinstance(item, Mapping):
+                continue
+            status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
+            status_counts[status_key] = status_counts.get(status_key, 0) + 1
+            if item.get("observed_position"):
+                observed_position_count += 1
+        return {
+            "provider_source": AgentRuntime._safe_engine_write_provider_source(
+                provider_result.get("source")
+                or engine_result.get("provider_source")
+                or "layout_transform_provider"
+            ),
+            "requested_count": int(engine_result.get("requested_count") or requested_count),
+            "updated_count": int(engine_result.get("updated_count") or updated_count),
+            "observed_position_count": int(engine_result.get("observed_position_count") or observed_position_count),
+            "status_counts": AgentRuntime._safe_status_count_map(
+                engine_result.get("status_counts") or status_counts
+            ),
+            **AgentRuntime._safe_engine_bridge_boundary_fields(engine_result),
+        }
+
+    @staticmethod
+    def _safe_engine_write_provider_source(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        allowed = {
+            "layout_transform_provider",
+            "engine_layout_transform_provider",
+            "actor_import_provider",
+            "engine_actor_import_provider",
+            "environment_import_provider",
+            "engine_environment_import_provider",
+            "actor_delete_provider",
+            "engine_actor_delete_provider",
+            "runtime_actor_import_precheck",
+        }
+        if text in allowed:
+            return text
+        return "layout_transform_provider"
+
+    @staticmethod
+    def _safe_engine_write_source_label(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        labels = {
+            "actor_import_provider": "runtime_actor_import",
+            "engine_actor_import_provider": "engine_actor_import",
+            "environment_import_provider": "runtime_environment_import",
+            "engine_environment_import_provider": "engine_environment_import",
+            "runtime_actor_import_precheck": "runtime_actor_import_precheck",
+            "layout_transform_provider": "runtime_layout_transform",
+            "engine_layout_transform_provider": "engine_layout_transform",
+            "actor_delete_provider": "runtime_actor_delete",
+            "engine_actor_delete_provider": "engine_actor_delete",
+        }
+        return labels.get(text, "runtime_engine_write")
+
+    @staticmethod
+    def _safe_status_count_map(value: Any) -> dict[str, int]:
+        if not isinstance(value, Mapping):
+            return {}
+        safe: dict[str, int] = {}
+        for key, count in value.items():
+            status = str(key or "").strip().lower()
+            if not status or not re.fullmatch(r"[a-z_]{1,32}", status):
+                continue
+            try:
+                safe[status] = max(0, int(count))
+            except (TypeError, ValueError):
+                continue
+        return safe
 
     @staticmethod
     def _is_system_actor_name(name: str) -> bool:
@@ -25542,4 +29423,3 @@ class AgentRuntime:
         from .tools import _derive_layout_items
 
         return _derive_layout_items(text)
-

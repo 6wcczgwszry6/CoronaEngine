@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import ast
 import importlib.util
@@ -486,10 +486,206 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                 continue
             if tool_names and tool_names <= {"runtime.event.emit"}:
                 continue
+            if tool_names and tool_names <= {"runtime.audit_event.record"}:
+                continue
             if tool_names and tool_names <= {"runtime.provider_readiness.publish"}:
                 continue
             graphs.append(dict(graph))
         return graphs
+
+    def test_runtime_resource_and_fact_source_formatters_surface_attention(self) -> None:
+        resource_text = LANChatAgentWorker._format_agent_runtime_resource_stage_report({
+            "event_count": 3,
+            "by_phase": {
+                "image": {"item_count": 1, "requested_count": 2, "failed_count": 1},
+                "model": {"item_count": 0, "requested_count": 1, "failed_count": 0},
+                "import": {"item_count": 1, "requested_count": 2, "failed_count": 1},
+                "review": {"item_count": 1, "requested_count": 1, "failed_count": 0},
+            },
+            "latest_events": [{"phase": "image", "status": "failed"}],
+            "needs_attention": ["image_resource_failed", "model_resource_partial"],
+        })
+        resource_flow_text = LANChatAgentWorker._format_agent_runtime_resource_flow_report({
+            "batch_count": 1,
+            "completed_count": 0,
+            "partial_count": 1,
+            "failed_count": 0,
+            "waiting_count": 0,
+            "latest_batch": {
+                "batch_index": 1,
+                "total_batches": 1,
+                "status": "partial",
+                "requested_count": 3,
+                "image_ready_count": 3,
+                "model_ready_count": 1,
+                "import_ready_count": 1,
+                "import_failure_code_counts": {
+                    "missing_ready_model_resource": 2,
+                    "provider_url_hidden": 1,
+                },
+            },
+        })
+        fact_source_text = LANChatAgentWorker._format_agent_runtime_fact_source_boundary_report({
+            "runtime_business_fact_count": 4,
+            "mirrored_external_fact_count": 2,
+            "runtime_plan_fact_count": 1,
+            "runtime_batch_fact_count": 1,
+            "runtime_resource_event_count": 1,
+            "runtime_import_event_count": 1,
+            "sync_event_count": 1,
+            "engine_write_result_count": 1,
+            "engine_write_boundary_fact_count": 1,
+            "scene_snapshot_count": 0,
+            "external_authoritative_available": True,
+            "boundary_notes": ["runtime-state-is-business-truth"],
+        })
+
+        self.assertIn("needs image-resource-failed,model-resource-partial", resource_text)
+        self.assertIn("import 1/2 failed 1", resource_text)
+        self.assertIn("review 1/1 failed 0", resource_text)
+        self.assertIn("import-failures", resource_flow_text)
+        self.assertIn("missing-ready-model-resource:2", resource_flow_text)
+        self.assertIn("resource-resource-hidden:1", resource_flow_text)
+        self.assertNotIn("provider", resource_flow_text)
+        self.assertNotIn("url", resource_flow_text)
+        self.assertIn("runtime 4", fact_source_text)
+        self.assertIn("external 2", fact_source_text)
+        self.assertIn("write-boundary 1", fact_source_text)
+        self.assertIn("external available", fact_source_text)
+
+        layout_text = LANChatAgentWorker._format_agent_runtime_layout_report(
+            {
+                "proposal_count": 1,
+                "delta_count": 3,
+                "applied_delta_count": 2,
+                "skipped_delta_count": 1,
+                "transform_result_count": 2,
+                "ground_snapped_count": 1,
+                "overlap_resolved_count": 1,
+                "layout_transform_failure_code_counts": {
+                    "cpp_actor_transform_failed": 1,
+                    "provider_raw_url_hidden": 2,
+                },
+                "proposals": [
+                    {
+                        "proposal_id": "layout-demo",
+                        "status": "confirmed",
+                        "risk_level": "low",
+                        "delta_count": 3,
+                    }
+                ],
+            },
+            {"confirmation_count": 1},
+        )
+        self.assertIn("applied 2", layout_text)
+        self.assertIn("skipped 1", layout_text)
+        self.assertIn("transforms 2", layout_text)
+        self.assertIn("ground-snapped 1", layout_text)
+        self.assertIn("overlap-resolved 1", layout_text)
+        self.assertIn("transform-failures cpp-actor-transform-failed:1,redacted:2", layout_text)
+        self.assertIn("confirmations 1", layout_text)
+        self.assertNotIn("provider", layout_text)
+        self.assertNotIn("url", layout_text)
+        self.assertNotIn("锛", layout_text)
+
+        report_health_text = LANChatAgentWorker._format_agent_runtime_report_health_report({
+            "status": "failed",
+            "attention_required": True,
+            "batch_failed_count": 1,
+            "batch_partial_count": 2,
+            "batch_waiting_count": 3,
+            "import_failed_count": 4,
+            "import_failure_code_counts": {
+                "missing_ready_model_resource": 2,
+                "provider_url_hidden": 1,
+            },
+            "resource_phase_failed_count": 5,
+            "resource_phase_partial_count": 6,
+            "resource_phase_waiting_count": 7,
+            "asset_failed_count": 8,
+            "asset_incomplete_count": 9,
+            "sync_health_status": "needs_attention",
+            "sync_failure_code_counts": {
+                "sync_event_record_failed": 2,
+                "provider_raw_url_hidden": 1,
+            },
+            "latest_sync_failure_code": "sync_event_record_failed",
+            "engine_write_readiness_mismatch_count": 1,
+            "engine_write_readiness_mismatch_channels": ["layout_transform"],
+            "reasons": ["resource_phase_failed", "provider_raw_url_hidden"],
+        })
+        self.assertIn("failed", report_health_text)
+        self.assertIn("attention yes", report_health_text)
+        self.assertIn("batch failed/partial/waiting 1/2/3", report_health_text)
+        self.assertIn("import failed 4", report_health_text)
+        self.assertIn("import failures missing-ready-model-resource, resource-resource-hidden", report_health_text)
+        self.assertIn("resource phase failed/partial/waiting 5/6/7", report_health_text)
+        self.assertIn("asset failed/incomplete 8/9", report_health_text)
+        self.assertIn("sync needs-attention", report_health_text)
+        self.assertIn("sync failures", report_health_text)
+        self.assertIn("sync-event-record-failed", report_health_text)
+        self.assertIn("latest sync failure sync-event-record-failed", report_health_text)
+        self.assertIn("engine-write mismatch 1(layout-transform)", report_health_text)
+        self.assertIn("reasons resource-phase-failed", report_health_text)
+        self.assertNotIn("provider", report_health_text)
+        self.assertNotIn("url", report_health_text)
+
+        runtime_event_text = LANChatAgentWorker._format_agent_runtime_replay_runtime_event_report({
+            "emitted_count": 4,
+            "emit_failed_count": 0,
+            "disclosure_skipped_count": 1,
+            "event_type_counts": {"report_ready": 1, "image_resources_ready": 2},
+            "report_ready_count": 1,
+            "report_attention_count": 1,
+            "report_health_status_counts": {"partial": 1},
+            "latest_report_ready": {
+                "status": "partial",
+                "attention_required": True,
+                "environment_import_failure_code_counts": {
+                    "cpp_environment_component_import_failed": 1,
+                    "provider_raw_url_hidden": 2,
+                },
+                "engine_write_bridge_failed_count": 1,
+                "engine_write_bridge_error_code_counts": {
+                    "cpp_actor_import_failed": 1,
+                    "provider_raw_url_hidden": 2,
+                },
+                "engine_write_readiness_mismatch_count": 1,
+                "engine_write_readiness_mismatch_channels": ["layout_transform"],
+            },
+        })
+        runtime_event_gm_text = LANChatAgentWorker._format_agent_runtime_gm_runtime_event_replay_digest({
+            "emitted_count": 4,
+            "emit_failed_count": 0,
+            "disclosure_skipped_count": 1,
+            "report_ready_count": 1,
+            "report_attention_count": 1,
+            "report_health_status_counts": {"partial": 1},
+            "latest_report_ready": {
+                "environment_import_failure_code_counts": {
+                    "cpp_environment_component_import_failed": 1,
+                },
+                "engine_write_bridge_failed_count": 1,
+                "engine_write_bridge_error_code_counts": {
+                    "cpp_actor_import_failed": 1,
+                },
+                "engine_write_readiness_mismatch_count": 1,
+                "engine_write_readiness_mismatch_channels": ["layout_transform"],
+            },
+        })
+        self.assertIn("report-ready 1/attention 1 partial:1", runtime_event_text)
+        self.assertIn("latest-report partial", runtime_event_text)
+        self.assertIn("env-import-failures cpp-environment-component-import-failed:1", runtime_event_text)
+        self.assertIn("engine-write-failures cpp-actor-import-failed:1", runtime_event_text)
+        self.assertIn("engine-write-mismatch 1(layout-transform)", runtime_event_text)
+        self.assertIn("report-ready 1/attention 1 partial:1", runtime_event_gm_text)
+        self.assertIn("env-import-failures cpp-environment-component-import-failed:1", runtime_event_gm_text)
+        self.assertIn("engine-write-failures cpp-actor-import-failed:1", runtime_event_gm_text)
+        self.assertIn("engine-write-mismatch 1(layout-transform)", runtime_event_gm_text)
+        self.assertNotIn("provider", runtime_event_text)
+        self.assertNotIn("url", runtime_event_text)
+        self.assertNotIn("provider", runtime_event_gm_text)
+        self.assertNotIn("url", runtime_event_gm_text)
 
     def test_runtime_cpp_bridge_success_payload_is_narrow_and_sanitized(self) -> None:
         class FakeEngineGate:
@@ -519,6 +715,10 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(result.payload["actor_id"], "actor-box")
         self.assertEqual(result.payload["actor_name"], "藏宝箱")
         self.assertIn("position", result.payload)
+        self.assertEqual(result.boundary_fact["bridge_call_count"], 1)
+        self.assertEqual(result.boundary_fact["bridge_success_count"], 1)
+        self.assertEqual(result.boundary_fact["bridge_failed_count"], 0)
+        self.assertEqual(result.boundary_fact["bridge_method_counts"], {"invoke_tool": 1})
         payload_text = json.dumps(result.payload, ensure_ascii=False)
         self.assertNotIn("model_path", payload_text)
         self.assertNotIn("internal-provider", payload_text)
@@ -544,6 +744,11 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(result.error_code, "native_transform_failed")
         self.assertEqual(result.message, "tool error native_transform_failed")
         self.assertEqual(result.payload["error"], "tool error native_transform_failed")
+        self.assertEqual(result.boundary_fact["bridge_call_count"], 1)
+        self.assertEqual(result.boundary_fact["bridge_success_count"], 0)
+        self.assertEqual(result.boundary_fact["bridge_failed_count"], 1)
+        self.assertEqual(result.boundary_fact["bridge_method_counts"], {"set_transform": 1})
+        self.assertEqual(result.boundary_fact["bridge_error_code_counts"], {"native_transform_failed": 1})
         payload_text = json.dumps(result.payload, ensure_ascii=False)
         self.assertNotIn("hunyuan", payload_text)
         self.assertNotIn("prompt", payload_text)
@@ -1598,6 +1803,40 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(edit_reply, agent_adapter.AGENT_RUNTIME_REQUIRED_MESSAGE)
         self.assertEqual(planning_gate_compose_reply, agent_adapter.AGENT_RUNTIME_REQUIRED_MESSAGE)
 
+    def test_master_agent_call_compose_routes_do_not_enter_legacy_scene_handler_by_default(self) -> None:
+        agent_adapter = _load_agent_adapter_module()
+        agent = agent_adapter.MasterAgent(fallback_chat=lambda system, messages: "fallback")
+
+        original_classifier = agent_adapter.classify_intent
+        original_runtime_getter = agent_adapter.get_lanchat_scene_runtime
+
+        class _NoPlanningGate:
+            def handle_planning_gate(self, agent_name: str, trigger: str):  # noqa: ANN001
+                return "", ""
+
+        class _ComposePlanningGate:
+            def handle_planning_gate(self, agent_name: str, trigger: str):  # noqa: ANN001
+                return "compose", "生成一个强盗藏宝室，有宝箱、金币和火把"
+
+        try:
+            with patch.object(
+                agent,
+                "_handle_scene",
+                side_effect=AssertionError("default AgentRuntime mode must block before legacy scene handler"),
+            ):
+                agent_adapter.get_lanchat_scene_runtime = lambda: _ComposePlanningGate()
+                planning_reply = agent("山贼", ["房主: 确认生成"])
+
+                agent_adapter.get_lanchat_scene_runtime = lambda: _NoPlanningGate()
+                agent_adapter.classify_intent = lambda text: "compose"
+                semantic_reply = agent("山贼", ["房主: 生成一个强盗藏宝室，有宝箱、金币和火把"])
+        finally:
+            agent_adapter.classify_intent = original_classifier
+            agent_adapter.get_lanchat_scene_runtime = original_runtime_getter
+
+        self.assertEqual(planning_reply, agent_adapter.AGENT_RUNTIME_REQUIRED_MESSAGE)
+        self.assertEqual(semantic_reply, agent_adapter.AGENT_RUNTIME_REQUIRED_MESSAGE)
+
     def test_master_agent_lanchat_progress_context_blocks_role_agent_direct_compose(self) -> None:
         source = (
             REPO_ROOT
@@ -1773,6 +2012,82 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             guarded_prefix = source[function_index:process_index]
             self.assertIn("can_call_legacy_main_workflow()", guarded_prefix)
             self.assertIn("旧生成链路已关闭", guarded_prefix)
+
+    def test_agent_trigger_scene_write_fallback_blocks_legacy_role_agent(self) -> None:
+        cases = (
+            ("intervention_add", "再添加一个天使雕像"),
+            ("intervention_modify", "把宝箱往左移动一点"),
+            ("intervention_delete", "删除宝箱"),
+            ("final_adjustment_request", "调整一下布局，模型有点浮空"),
+            ("generation_start", "确认生成"),
+        )
+        for expected_intent, text in cases:
+            with self.subTest(expected_intent=expected_intent):
+                engine = _FakeReplyEngine()
+                worker = _TestWorker(
+                    corona_engine=engine,
+                    interaction_coordinator=_ExplodingCoordinator(),
+                    agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+                )
+                worker._agent_runtime.handle_message(
+                    room_id="room-role-agent-write-block",
+                    external_plan_id="seed-role-agent-write-block",
+                    text="强盗藏宝室方案：中央宝箱，两侧武器架，入口火把",
+                    sender_id="host-1",
+                    sender_name="房主",
+                    owner_agent="商人",
+                    action="plan",
+                )
+
+                with patch.object(
+                    worker,
+                    "_handle_coordinator_generation_start",
+                    return_value=None,
+                ), patch.object(
+                    worker,
+                    "_handle_coordinator_completed_intervention",
+                    return_value=None,
+                ), patch.object(
+                    worker,
+                    "_handle_coordinator_executing_intervention",
+                    return_value=None,
+                ), patch.object(
+                    worker,
+                    "_seed_agent_trigger_planning_context_in_runtime",
+                    return_value=None,
+                ), patch.object(
+                    worker,
+                    "_handle_agent_trigger_planning_gate",
+                    return_value=False,
+                ), patch.object(
+                    worker,
+                    "_run_agent",
+                    side_effect=AssertionError("scene write fallback must not reach legacy RoleAgent"),
+                ):
+                    handled = worker._process_trigger({
+                        "room_id": "room-role-agent-write-block",
+                        "message_id": f"msg-role-agent-write-block-{expected_intent}",
+                        "text": text,
+                        "sender_id": "host-1",
+                        "sender_name": "房主",
+                        "sender_type": "host",
+                        "message_kind": "chat",
+                        "agent_id": "merchant",
+                        "agent_name": "商人",
+                    })
+
+                self.assertTrue(handled)
+                reply_texts = [str(reply.get("text") or "") for reply in engine.replies]
+                self.assertTrue(any("AgentRuntime 接管" in item for item in reply_texts))
+                self.assertTrue(any("旧 RoleAgent 直接执行链路已关闭" in item for item in reply_texts))
+                self.assertIn("legacy_role_agent_scene_write_blocked", worker._agent_runtime.operation_log.events())
+                block_entries = [
+                    entry
+                    for entry in worker._agent_runtime.operation_log.entries()
+                    if entry.event == "legacy_role_agent_scene_write_blocked"
+                ]
+                self.assertTrue(block_entries)
+                self.assertEqual(block_entries[-1].payload.get("intent"), expected_intent)
 
     def test_deprecated_workflow_commands_hidden_from_user_registry_by_default(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
@@ -2111,6 +2426,7 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                 "sent": False,
                 "stage": "资源调度",
                 "progress": 30,
+                "failure_code": "message_delivery_failed",
                 "url": "https://example.invalid/private",
             },
         )
@@ -2131,6 +2447,34 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             },
         )
         worker._agent_runtime.operation_log.append(
+            "runtime_engine_write_status_exported",
+            room_id="room-runtime-status",
+            plan_id=str(active_plan_id or ""),
+            payload={
+                "recorded": True,
+                "reason": "status query",
+                "engine_write_boundary_fact_count": 2,
+                "engine_write_import_boundary_count": 1,
+                "engine_write_environment_import_boundary_count": 0,
+                "engine_write_transform_boundary_count": 1,
+                "engine_write_delete_boundary_count": 0,
+                "engine_write_bridge_call_count": 3,
+                "engine_write_bridge_success_count": 2,
+                "engine_write_bridge_failed_count": 1,
+                "engine_write_bridge_error_code_counts": {"cpp_actor_transform_failed": 1},
+                "engine_write_readiness_native_enabled_count": 1,
+                "engine_write_readiness_runtime_state_only_count": 2,
+                "engine_write_readiness_fallback_count": 1,
+                "engine_write_readiness_disabled_count": 1,
+                "engine_write_readiness_native_enabled_channels": ["actor_import"],
+                "engine_write_readiness_runtime_state_only_channels": ["actor_delete", "layout_transform"],
+                "engine_write_readiness_fallback_channels": ["actor_import"],
+                "engine_write_readiness_disabled_channels": ["environment_import"],
+                "provider": "hidden-provider",
+                "prompt": "hidden prompt",
+            },
+        )
+        worker._agent_runtime.operation_log.append(
             "sync_event_recorded",
             room_id="room-runtime-status",
             plan_id=str(active_plan_id or ""),
@@ -2140,6 +2484,21 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                 "asset_id": "asset-gm-secret",
                 "peer_id": "peer-gm-secret",
                 "asset_path": "E:/secret/gm.glb",
+                "transfer_status": "transferring",
+                "progress": 60,
+                "chunk_index": 3,
+                "chunk_count": 5,
+                "bytes_transferred": 600,
+                "total_bytes": 1000,
+            },
+        )
+        worker._agent_runtime.handle_message(
+            room_id="room-runtime-status",
+            text="asset transfer progress",
+            action="asset_transfer_event",
+            sync_event={
+                "event_type": "asset_transfer_progress",
+                "asset_id": "asset-gm-visible",
                 "transfer_status": "transferring",
                 "progress": 60,
                 "chunk_index": 3,
@@ -2174,6 +2533,18 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             message="sync_reconcile_completed",
             payload={"event_type": "sync_reconcile_completed", "peer_id": "peer-gm-secret", "status": "completed"},
         )
+        worker._agent_runtime.operation_log.append(
+            "sync_event_record_failed",
+            room_id="room-runtime-status",
+            plan_id=str(active_plan_id or ""),
+            message="sync_event_record_failed",
+            payload={
+                "event_type": "actor_transform",
+                "failure_code": "sync_event_record_failed",
+                "provider": "hidden-provider",
+                "url": "https://example.invalid/sync",
+            },
+        )
 
         reply = worker._handle_coordinator_status_query({
             "room_id": "room-runtime-status",
@@ -2192,12 +2563,28 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("当前方案：测试方案", reply or "")
         self.assertIn("上下文：0 条", reply or "")
         self.assertIn("多人同步健康：needs_attention", reply or "")
-        self.assertIn("needs message-delivery-failed", reply or "")
+        self.assertIn("Report health:", reply or "")
+        self.assertIn("attention yes", reply or "")
+        self.assertIn("message-delivery-failed", reply or "")
+        self.assertIn("failure codes message-delivery-failed:1", reply or "")
+        self.assertIn("latest failure message-delivery-failed", reply or "")
         self.assertIn("同步复盘：", reply or "")
-        self.assertIn("asset progress 1", reply or "")
+        self.assertIn("asset progress", reply or "")
         self.assertIn("peer-ready 1", reply or "")
         self.assertIn("peer join/leave 1/0", reply or "")
         self.assertIn("reconcile 1/0", reply or "")
+        self.assertIn("failure codes sync-event-record-failed:1", reply or "")
+        self.assertIn("latest failure sync-event-record-failed", reply or "")
+        self.assertIn("模型同传：assets 1", reply or "")
+        self.assertIn("progress 60%", reply or "")
+        self.assertIn("Engine write:", reply or "")
+        self.assertNotIn("readiness-mismatch", reply or "")
+        self.assertIn("status-export 1(recorded, bridge-failed:1", reply or "")
+        self.assertIn("readiness native:1,runtime-state:2,fallback:1,disabled:1", reply or "")
+        self.assertIn("channels native actor-import", reply or "")
+        self.assertIn("runtime-state actor-delete/layout-transform", reply or "")
+        self.assertIn("disabled environment-import", reply or "")
+        self.assertIn("cpp-actor-transform-failed:1", reply or "")
         self.assertNotIn("ToolCallGraph", reply or "")
         self.assertNotIn("agent_reply", reply or "")
         self.assertNotIn("network_send_agent_reply_ex", reply or "")
@@ -2375,6 +2762,14 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             "entry_count": 8,
             "event_counts": {"tool_graph_completed": 1},
             "latest_events": [{"event": "runtime_event_emitted"}],
+            "engine_write_boundary_summary": {
+                "boundary_fact_count": 1,
+                "import_boundary_count": 1,
+                "transform_boundary_count": 0,
+                "delete_boundary_count": 0,
+                "write_source_counts": {"engine_actor_import": 1},
+                "status_counts": {"success": 1},
+            },
             "environment_component_replay_summary": {
                 "import_event_count": 2,
                 "import_failed_event_count": 1,
@@ -2383,6 +2778,9 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
 
         self.assertIn("env-import:2", text)
         self.assertIn("env-import-failed:1", text)
+        self.assertIn("engine_write_boundary", text)
+        self.assertIn("boundary 1", text)
+        self.assertIn("engine_actor_import:1", text)
         self.assertNotIn("provider", text)
 
     def test_engine_write_report_discloses_environment_import_results(self) -> None:
@@ -2395,13 +2793,43 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             "transform_status_counts": {},
             "environment_import_status_counts": {"failed": 1, "success": 1},
             "delete_status_counts": {"success": 1},
+            "status_export_count": 1,
+            "latest_status_export": {
+                "recorded": True,
+                "engine_write_bridge_failed_count": 2,
+                "engine_write_bridge_error_code_counts": {"cpp_actor_import_failed": 2},
+            },
         })
 
         self.assertIn("import 1(success:1)", text)
         self.assertIn("transform 0", text)
         self.assertIn("env-import 2(failed:1,success:1)", text)
         self.assertIn("actor-delete 1(success:1)", text)
+        self.assertIn("status-export 1(recorded, bridge-failed:2", text)
+        self.assertIn("cpp-actor-import-failed:2", text)
         self.assertNotIn("provider", text)
+
+    def test_engine_write_boundary_report_is_safe_and_user_readable(self) -> None:
+        text = LANChatAgentWorker._format_agent_runtime_engine_write_boundary_report({
+            "boundary_fact_count": 3,
+            "import_boundary_count": 1,
+            "transform_boundary_count": 1,
+            "delete_boundary_count": 1,
+            "write_source_counts": {
+                "engine_actor_import": 1,
+                "runtime_layout_transform": 1,
+                "secret_provider_raw": 1,
+            },
+            "status_counts": {"success": 2, "failed": 1},
+        })
+
+        self.assertIn("boundary 3", text)
+        self.assertIn("import/transform/delete 1/1/1", text)
+        self.assertIn("engine_actor_import:1", text)
+        self.assertIn("runtime_layout_transform:1", text)
+        self.assertIn("success:2", text)
+        self.assertNotIn("provider", text)
+        self.assertNotIn("secret_provider_raw", text)
 
     def test_gm_summary_includes_runtime_sync_summary(self) -> None:
         coordinator = _ExplodingCoordinator()
@@ -2530,6 +2958,27 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                 ],
             },
         )
+        worker._agent_runtime.state.apply_patch(
+            StatePatch(
+                room_id="room-runtime-provider-status",
+                changes={
+                    "custom_import_facts": {
+                        "batch-provider-status:actor_import_result": {
+                            "batch_id": "batch-provider-status",
+                            "status": "completed",
+                            "engine_write_boundary": {
+                                "provider_source": "engine_actor_import_provider",
+                                "requested_count": 1,
+                                "identity_result_count": 1,
+                                "missing_identity_count": 0,
+                                "status_counts": {"success": 1},
+                            },
+                        }
+                    }
+                },
+                expected_version=worker._agent_runtime.state.version,
+            )
+        )
 
         reply = worker._handle_agent_runtime_provider_status_query({
             "room_id": "room-runtime-provider-status",
@@ -2549,6 +2998,9 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("missing_engine", reply or "")
         self.assertIn("readiness:", reply or "")
         self.assertIn("engine_write:", reply or "")
+        self.assertIn("engine_write_boundary:", reply or "")
+        self.assertIn("boundary 1", reply or "")
+        self.assertIn("engine_actor_import:1", reply or "")
         self.assertIn("transform 1", reply or "")
         self.assertIn("success:1", reply or "")
         self.assertIn("message_delivery:", reply or "")
@@ -2567,6 +3019,37 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("provider_readiness", room)
         self.assertIn("runtime_provider_status_queried", worker._agent_runtime.operation_log.events())
         self.assertEqual(coordinator.ingest_calls, [])
+
+    def test_model_provider_flag_does_not_fallback_to_legacy_model_provider(self) -> None:
+        worker = _TestWorker(
+            agent_runtime_flags=AgentRuntimeFlags.from_env({
+                "AGENT_RUNTIME_USE_MODEL_PROVIDER": "1",
+            }),
+        )
+
+        result = worker._agent_runtime.handle_message(
+            room_id="room-model-provider-no-legacy-fallback",
+            text="check runtime provider readiness",
+            action="provider_status",
+        )
+
+        room = worker._agent_runtime.query_state("room-model-provider-no-legacy-fallback")["room"]
+        readiness = dict(room.get("provider_readiness") or {})
+        model_readiness = dict(readiness.get("model_resource") or {})
+        configured = worker._agent_runtime.operation_log.query(
+            event="runtime_provider_modes_configured",
+            limit=1,
+        )[0].payload
+        model_configured = dict(configured.get("model_resource") or {})
+
+        self.assertTrue(result["handled"])
+        self.assertEqual(model_readiness.get("requested"), True)
+        self.assertEqual(model_readiness.get("status"), "unavailable")
+        self.assertNotIn("legacy_model_provider", str(model_readiness))
+        self.assertNotIn("legacy_model_provider", str(model_configured))
+        self.assertNotIn("legacy_model", str(result))
+        self.assertEqual(room["active_plan_id"], "")
+        self.assertEqual(room["scene_plans"], {})
 
     def test_runtime_worker_drain_query_drains_queue_without_legacy_execute(self) -> None:
         coordinator = _FakeCoordinator()
@@ -2874,6 +3357,8 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("layout_transform", reply or "")
         self.assertIn("missing_engine", reply or "")
         self.assertIn("replay:", reply or "")
+        self.assertIn("engine boundary:", reply or "")
+        self.assertIn("boundary 0", reply or "")
         self.assertIn("import 1", reply or "")
         self.assertIn("transform 1", reply or "")
         self.assertIn("env-import 1", reply or "")
@@ -2885,6 +3370,68 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(room["scene_plans"], {})
         self.assertEqual(room["active_plan_id"], "")
         self.assertIn("provider_readiness", room)
+        self.assertEqual(coordinator.ingest_calls, [])
+
+    def test_runtime_engine_write_status_query_reports_engine_write_boundary(self) -> None:
+        coordinator = _FakeCoordinator()
+        worker = _TestWorker(
+            interaction_coordinator=coordinator,
+            agent_runtime_flags=AgentRuntimeFlags.from_env({
+                "AGENT_RUNTIME_USE_ENGINE_IMPORT_PROVIDER": "1",
+            }),
+        )
+        runtime_result = worker._agent_runtime.handle_message(
+            room_id="room-runtime-engine-boundary",
+            text="做一个强盗藏宝室，有宝箱和火把",
+            sender_id="host-1",
+            sender_name="host",
+            action="confirm_and_execute",
+            external_plan_id="seed-engine-boundary",
+            max_items_per_batch=2,
+        )
+        batch_id = runtime_result["batches"][0]["batch_id"]
+        worker._agent_runtime.state.apply_patch(
+            StatePatch(
+                room_id="room-runtime-engine-boundary",
+                changes={
+                    "custom_import_facts": {
+                        f"{batch_id}:actor_import_result": {
+                            "batch_id": batch_id,
+                            "status": "completed",
+                            "engine_write_boundary": {
+                                "provider_source": "engine_actor_import_provider",
+                                "requested_count": 2,
+                                "identity_result_count": 2,
+                                "missing_identity_count": 0,
+                                "status_counts": {"success": 2},
+                            },
+                        }
+                    }
+                },
+                expected_version=worker._agent_runtime.state.version,
+            )
+        )
+
+        reply = worker._handle_agent_runtime_engine_write_status_query({
+            "room_id": "room-runtime-engine-boundary",
+            "message_id": "msg-engine-boundary",
+            "text": "@GM runtime engine write status",
+            "sender_id": "host-1",
+            "sender_name": "host",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "agent_id": "gm",
+            "agent_name": "GM",
+            "is_host": True,
+        })
+
+        self.assertIn("engine boundary:", reply or "")
+        self.assertIn("boundary ", reply or "")
+        self.assertIn("import/transform/delete ", reply or "")
+        self.assertIn("engine_actor_import:1", reply or "")
+        self.assertIn("success:", reply or "")
+        self.assertNotIn("provider", reply or "")
+        self.assertNotIn("prompt", reply or "")
         self.assertEqual(coordinator.ingest_calls, [])
 
     def test_runtime_scene_snapshot_query_refreshes_without_creating_plan(self) -> None:
@@ -3045,6 +3592,18 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             payload={"proposal_id": "review-plan-review", "decision": "confirmed", "provider": "hidden"},
         )
         worker._agent_runtime.operation_log.append(
+            "final_adjustment_confirmation_recorded",
+            room_id="room-runtime-replay",
+            plan_id="plan-review",
+            message="confirmed",
+            payload={
+                "proposal_id": "final-plan-review",
+                "decision": "confirmed",
+                "conflict_item_count": 2,
+                "conflict_items": ["hidden raw conflict"],
+            },
+        )
+        worker._agent_runtime.operation_log.append(
             "tool_call_succeeded",
             room_id="room-runtime-replay",
             payload={
@@ -3057,6 +3616,29 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                         "reason": "provider raw https://example.invalid/native",
                     },
                 ]
+            },
+        )
+        worker._agent_runtime.operation_log.append(
+            "runtime_engine_write_status_exported",
+            room_id="room-runtime-replay",
+            payload={
+                "recorded": True,
+                "engine_write_boundary_fact_count": 1,
+                "engine_write_import_boundary_count": 1,
+                "engine_write_bridge_call_count": 2,
+                "engine_write_bridge_success_count": 1,
+                "engine_write_bridge_failed_count": 1,
+                "engine_write_bridge_error_code_counts": {"cpp_actor_import_failed": 1},
+                "engine_write_readiness_native_enabled_count": 1,
+                "engine_write_readiness_runtime_state_only_count": 1,
+                "engine_write_readiness_fallback_count": 1,
+                "engine_write_readiness_disabled_count": 1,
+                "engine_write_readiness_native_enabled_channels": ["actor_import"],
+                "engine_write_readiness_runtime_state_only_channels": ["actor_delete"],
+                "engine_write_readiness_fallback_channels": ["actor_import"],
+                "engine_write_readiness_disabled_channels": ["environment_import"],
+                "provider": "hidden",
+                "prompt": "hidden",
             },
         )
 
@@ -3081,10 +3663,22 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("proposals 1", reply or "")
         self.assertIn("confirmations 1", reply or "")
         self.assertIn("latest confirmed", reply or "")
+        self.assertIn("final_adjustment", reply or "")
+        self.assertIn("decisions confirmed:1", reply or "")
+        self.assertIn("conflicts 2", reply or "")
         self.assertIn("engine_write:", reply or "")
+        self.assertNotIn("readiness-mismatch", reply or "")
         self.assertIn("import 2", reply or "")
         self.assertIn("success:1", reply or "")
         self.assertIn("failed:1", reply or "")
+        self.assertIn("status-export 1(recorded, bridge-failed:1", reply or "")
+        self.assertIn("readiness native:1,runtime-state:1,fallback:1,disabled:1", reply or "")
+        self.assertIn("channels native actor-import", reply or "")
+        self.assertIn("runtime-state actor-delete", reply or "")
+        self.assertIn("disabled environment-import", reply or "")
+        self.assertIn("cpp-actor-import-failed:1", reply or "")
+        self.assertNotIn("conflict_items", reply or "")
+        self.assertNotIn("hidden raw conflict", reply or "")
         self.assertNotIn("provider", reply or "")
         self.assertNotIn("prompt", reply or "")
         self.assertNotIn("https://example.invalid", reply or "")
@@ -3093,6 +3687,81 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(room["active_plan_id"], "")
         self.assertEqual(coordinator.ingest_calls, [])
         self.assertIn("runtime_operation_replay_queried", worker._agent_runtime.operation_log.events())
+
+    def test_runtime_operation_replay_reports_engine_write_readiness_mismatch(self) -> None:
+        coordinator = _FakeCoordinator()
+        worker = _TestWorker(
+            interaction_coordinator=coordinator,
+            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+        )
+        worker._agent_runtime.operation_log.append(
+            "tool_call_succeeded",
+            room_id="room-runtime-replay-mismatch",
+            payload={
+                "transform_results": [
+                    {"actor_id": "actor-chair", "actor_name": "??", "status": "success"}
+                ],
+            },
+        )
+        worker._agent_runtime.operation_log.append(
+            "runtime_engine_write_status_exported",
+            room_id="room-runtime-replay-mismatch",
+            payload={
+                "recorded": True,
+                "engine_write_readiness_native_enabled_count": 1,
+                "engine_write_readiness_native_enabled_channels": ["actor_import"],
+                "engine_write_readiness_runtime_state_only_count": 1,
+                "engine_write_readiness_runtime_state_only_channels": ["layout_transform"],
+            },
+        )
+        worker._agent_runtime.operation_log.append(
+            "runtime_event_emitted",
+            room_id="room-runtime-replay-mismatch",
+            payload={
+                "event_type": "report_ready",
+                "report_health_status": "needs_attention",
+                "report_attention_required": True,
+                "report_health_reasons": ["engine_write_readiness_mismatch"],
+                "engine_write_readiness_mismatch_count": 1,
+                "engine_write_readiness_mismatch_channels": ["layout_transform"],
+            },
+        )
+
+        reply = worker._handle_agent_runtime_operation_replay_query({
+            "room_id": "room-runtime-replay-mismatch",
+            "message_id": "msg-runtime-replay-mismatch",
+            "text": "@GM runtime operation replay",
+            "sender_id": "host-1",
+            "sender_name": "host",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "agent_id": "gm",
+            "agent_name": "GM",
+            "is_host": True,
+        })
+
+        self.assertIn("engine_write:", reply or "")
+        self.assertIn("transform 1", reply or "")
+        self.assertIn("readiness-mismatch 1(layout-transform)", reply or "")
+        self.assertIn("channels native actor-import", reply or "")
+        replay = worker._agent_runtime.operation_replay(room_id="room-runtime-replay-mismatch")
+        report_health = replay["report_health_summary"]
+        self.assertEqual(report_health["status"], "needs_attention")
+        self.assertTrue(report_health["attention_required"])
+        self.assertEqual(report_health["engine_write_readiness_mismatch_count"], 1)
+        self.assertEqual(report_health["engine_write_readiness_mismatch_channels"], ["layout-transform"])
+        self.assertIn("engine_write_readiness_mismatch", report_health["reasons"])
+        latest_report_ready = replay["runtime_event_replay_summary"]["latest_report_ready"]
+        self.assertEqual(latest_report_ready["status"], "needs_attention")
+        self.assertEqual(latest_report_ready["engine_write_readiness_mismatch_count"], 1)
+        self.assertEqual(latest_report_ready["engine_write_readiness_mismatch_channels"], ["layout-transform"])
+        self.assertIn(
+            "engine_write_readiness_mismatch",
+            replay["runtime_event_replay_summary"]["report_health_reason_counts"],
+        )
+        self.assertNotIn("provider", reply or "")
+        self.assertNotIn("prompt", reply or "")
+        self.assertEqual(coordinator.ingest_calls, [])
 
     def test_runtime_operation_replay_query_filters_to_active_runtime_plan(self) -> None:
         coordinator = _ExplodingCoordinator()
@@ -3209,7 +3878,7 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             room_id="room-runtime-replay-batch",
             batch_id=first_batch_id,
             message="write tool call requires confirmed plan",
-            payload={"risk_level": "medium"},
+            payload={"risk_level": "medium", "requires_write": True, "confirmed": False},
         )
         worker._agent_runtime.operation_log.append(
             "tool_call_retry_scheduled",
@@ -3305,6 +3974,30 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             },
         )
         worker._agent_runtime.operation_log.append(
+            "final_adjustment_confirmation_recorded",
+            room_id="room-runtime-replay-batch",
+            batch_id=first_batch_id,
+            message="confirmed",
+            payload={
+                "proposal_id": "final-first-batch",
+                "batch_id": first_batch_id,
+                "decision": "confirmed",
+                "conflict_item_count": 1,
+            },
+        )
+        worker._agent_runtime.operation_log.append(
+            "final_adjustment_confirmation_recorded",
+            room_id="room-runtime-replay-batch",
+            batch_id=second_batch_id,
+            message="confirmed",
+            payload={
+                "proposal_id": "final-second-batch",
+                "batch_id": second_batch_id,
+                "decision": "confirmed",
+                "conflict_item_count": 1,
+            },
+        )
+        worker._agent_runtime.operation_log.append(
             "tool_call_succeeded",
             room_id="room-runtime-replay-batch",
             batch_id=first_batch_id,
@@ -3330,6 +4023,33 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             room_id="room-runtime-replay-batch",
             batch_id=first_batch_id,
             message="provider readiness",
+            payload={
+                "readiness_requested_count": 2,
+                "readiness_enabled_count": 1,
+                "readiness_unavailable_count": 1,
+                "readiness_status_counts": {
+                    "enabled": 1,
+                    "disabled": 1,
+                    "provider_url_hidden": 1,
+                },
+            },
+        )
+        worker._agent_runtime.operation_log.append(
+            "runtime_provider_status_queried",
+            room_id="room-runtime-replay-batch",
+            batch_id=first_batch_id,
+            message="provider status",
+            payload={
+                "recorded": True,
+                "readiness_requested_count": 2,
+                "readiness_enabled_count": 1,
+                "readiness_unavailable_count": 1,
+                "readiness_status_counts": {
+                    "enabled": 1,
+                    "disabled": 1,
+                    "provider_url_hidden": 1,
+                },
+            },
         )
         worker._agent_runtime.operation_log.append(
             "runtime_event_emitted",
@@ -3443,6 +4163,10 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("guard:", reply or "")
         self.assertIn("blocked 1", reply or "")
         self.assertIn("write-confirm 1", reply or "")
+        self.assertIn("write-blocked 1", reply or "")
+        self.assertIn("unconfirmed 1", reply or "")
+        self.assertIn("risk medium:1", reply or "")
+        self.assertIn("latest write-confirmation-required risk:medium/write/unconfirmed", reply or "")
         self.assertIn("plan_lifecycle:", reply or "")
         self.assertIn("created 0", reply or "")
         self.assertIn("confirmed 0", reply or "")
@@ -3459,8 +4183,8 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("overlap 1", reply or "")
         self.assertIn("latest runtime-geometry-overlap:needs-adjustment", reply or "")
         self.assertIn("runtime_events:", reply or "")
-        self.assertIn("emitted 9", reply or "")
-        self.assertIn("types actors-imported:2", reply or "")
+        self.assertIn("emitted 8", reply or "")
+        self.assertIn("types actors-imported:1", reply or "")
         self.assertIn("failure_strategy:", reply or "")
         self.assertIn("retry 1", reply or "")
         self.assertIn("latest retry-scheduled:scheduled", reply or "")
@@ -3468,6 +4192,10 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("requests 1/0", reply or "")
         self.assertIn("confirmations 1/0", reply or "")
         self.assertIn("ground 2", reply or "")
+        self.assertIn("final_adjustment:", reply or "")
+        self.assertIn("final-first-batch", reply or "")
+        self.assertIn("decisions confirmed:1", reply or "")
+        self.assertNotIn("final-second-batch", reply or "")
         self.assertIn("vlm:", reply or "")
         self.assertIn("checkpoints 1", reply or "")
         self.assertIn("advisory 2", reply or "")
@@ -3477,6 +4205,10 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("import 1/0", reply or "")
         self.assertIn("resource_readiness:", reply or "")
         self.assertIn("published 1/0", reply or "")
+        self.assertIn("publish-ready requested/enabled/unavailable 2/1/1", reply or "")
+        self.assertIn("publish-status disabled:1,enabled:1,resource-resource-hidden:1", reply or "")
+        self.assertIn("query-ready requested/enabled/unavailable 2/1/1", reply or "")
+        self.assertIn("query-status disabled:1,enabled:1,resource-resource-hidden:1", reply or "")
         self.assertIn("latest ready", reply or "")
         self.assertIn("sync:", reply or "")
         self.assertIn("recorded 5", reply or "")
@@ -3561,6 +4293,18 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                 "status": "completed",
             },
         )
+        worker._agent_runtime.operation_log.append(
+            "sync_event_record_failed",
+            room_id="room-runtime-report",
+            plan_id=created["plan"]["plan_id"],
+            message="sync_event_record_failed",
+            payload={
+                "event_type": "actor_transform",
+                "failure_code": "sync_event_record_failed",
+                "provider": "hidden-provider",
+                "url": "https://example.invalid/sync",
+            },
+        )
         worker._agent_runtime.state.apply_patch(
             StatePatch(
                 room_id="room-runtime-report",
@@ -3625,6 +4369,20 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                 "source_user_id": "host-secret",
                 "provider": "hidden",
                 "prompt": "hidden",
+                "url": "https://example.invalid/private",
+            },
+        )
+        worker._agent_runtime.operation_log.append(
+            "agent_reply_send_failed",
+            room_id="room-runtime-report",
+            plan_id=created["plan"]["plan_id"],
+            payload={
+                "message_kind": "agent_reply",
+                "channel": "network_send_agent_reply_ex",
+                "sent": False,
+                "stage": "resource",
+                "progress": 30,
+                "failure_code": "message_delivery_failed",
                 "url": "https://example.invalid/private",
             },
         )
@@ -3711,6 +4469,7 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("runtime resources:", reply or "")
         self.assertIn("image", reply or "")
         self.assertIn("model", reply or "")
+        self.assertIn("report health:", reply or "")
         self.assertIn("import:", reply or "")
         self.assertIn("imported", reply or "")
         self.assertIn("environment:", reply or "")
@@ -3733,6 +4492,8 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("progress 50%", reply or "")
         self.assertIn("sync replay:", reply or "")
         self.assertIn("transfer-progress", reply or "")
+        self.assertIn("failure codes sync-event-record-failed:1", reply or "")
+        self.assertIn("latest failure sync-event-record-failed", reply or "")
         self.assertIn("asset transfer replay:", reply or "")
         self.assertIn("peer-ready 1", reply or "")
         self.assertIn("peer sync replay:", reply or "")
@@ -3763,7 +4524,13 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("environment-component", reply or "")
         self.assertIn("resource readiness:", reply or "")
         self.assertIn("channels", reply or "")
+        self.assertIn("engine write readiness:", reply or "")
+        self.assertIn("runtime-state", reply or "")
+        self.assertIn("fallback", reply or "")
+        self.assertIn("disabled", reply or "")
         self.assertIn("message delivery:", reply or "")
+        self.assertIn("failure codes message-delivery-failed:1", reply or "")
+        self.assertIn("latest failure message-delivery-failed", reply or "")
         self.assertIn("runtime_status", reply or "")
         self.assertIn("runtime_status", reply or "")
         self.assertIn("network_send_system_message_ex", reply or "")
@@ -3798,6 +4565,12 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             external_plan_id="seed-runtime-report",
         )
         self.assertIn("几何事实：", status_reply)
+        self.assertIn("写入边界：", status_reply)
+        self.assertIn("报告健康：", status_reply)
+        self.assertIn("Engine write readiness:", status_reply)
+        self.assertIn("runtime-state", status_reply)
+        self.assertIn("fallback", status_reply)
+        self.assertIn("disabled", status_reply)
         self.assertIn("AABB actors 2", status_reply)
         self.assertIn("overlap issues 1", status_reply)
         room = worker._agent_runtime.query_state("room-runtime-report")["room"]
@@ -4033,11 +4806,18 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("asset-status-progress:transferring 40% chunk 2/5", reply or "")
         self.assertIn("场景快照", reply or "")
         self.assertIn("snapshots", reply or "")
+        self.assertIn("事实来源", reply or "")
+        self.assertIn("runtime", reply or "")
+        self.assertIn("external", reply or "")
         self.assertIn("Runtime 资源", reply or "")
         self.assertIn("image", reply or "")
         self.assertIn("model", reply or "")
         self.assertIn("导入", reply or "")
         self.assertIn("imported", reply or "")
+        self.assertIn("Engine write readiness:", reply or "")
+        self.assertIn("runtime-state", reply or "")
+        self.assertIn("fallback", reply or "")
+        self.assertIn("disabled", reply or "")
         self.assertNotIn("status-progress.glb", reply or "")
         self.assertNotIn("msg-status-progress", reply or "")
         self.assertEqual(coordinator.ingest_calls, [])
@@ -4109,6 +4889,7 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             batch_id="batch-gm-vlm",
             payload={"proposal_id": "review-gm-vlm", "item_count": 2},
         )
+        worker._agent_runtime.provider_status("room-gm-resource-flow", plan_id=plan_id)
 
         reply = worker._handle_coordinator_status_query({
             "room_id": "room-gm-resource-flow",
@@ -4145,14 +4926,24 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("ready-for-next-runtime-step", reply or "")
         self.assertIn("Scene snapshot", reply or "")
         self.assertIn("snapshots", reply or "")
+        self.assertIn("Fact source", reply or "")
+        self.assertIn("plan/batch", reply or "")
         self.assertIn("Runtime resources", reply or "")
         self.assertIn("image", reply or "")
         self.assertIn("model", reply or "")
         self.assertIn("Import", reply or "")
         self.assertIn("imported", reply or "")
         self.assertIn("Engine write", reply or "")
+        self.assertIn("Engine write readiness", reply or "")
+        self.assertIn("runtime-state", reply or "")
+        self.assertIn("fallback", reply or "")
+        self.assertIn("disabled", reply or "")
+        self.assertIn("Engine write boundary", reply or "")
         self.assertIn("Message delivery", reply or "")
         self.assertIn("资源批次：batches", reply or "")
+        self.assertIn("资源通道复盘：", reply or "")
+        self.assertIn("query-ready", reply or "")
+        self.assertIn("publish-ready", reply or "")
         self.assertIn("Runtime queue:", reply or "")
         self.assertIn("pressure", reply or "")
         self.assertIn("completed", reply or "")
@@ -4233,6 +5024,7 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertTrue(worker.coordinator_system_replies)
         self.assertIn("Runtime", worker.coordinator_system_replies[-1])
         self.assertIn("Tool execution", worker.coordinator_system_replies[-1])
+        self.assertIn("ToolGraph replay", worker.coordinator_system_replies[-1])
         self.assertIn("runtime_status_queried", worker._agent_runtime.operation_log.events())
 
     def test_status_query_does_not_fallback_to_old_coordinator_by_default_when_runtime_unavailable(self) -> None:
@@ -4593,6 +5385,11 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             batch_id=first_batch_id,
             payload={"proposal_id": "review-status-batch", "item_count": 1},
         )
+        worker._agent_runtime.gm_summary(
+            "room-status-batch",
+            plan_id=plan.plan_id,
+            batch_id=first_batch_id,
+        )
         reply = worker._agent_runtime_status_reply(
             room_id="room-status-batch",
             external_plan_id=plan.plan_id,
@@ -4614,6 +5411,8 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("advisory 1", reply)
         self.assertIn("- Review advisory replay:", reply)
         self.assertIn("proposals 1", reply)
+        self.assertIn("- GM replay:", reply)
+        self.assertIn("exported 1", reply)
         self.assertIn("- 场景契约：", reply)
         self.assertIn("indoor-room", reply)
         self.assertIn("room-box", reply)
@@ -6208,6 +7007,44 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(state["external_plan_links"]["seed-host-external-action"], state["active_plan_id"])
         self.assertTrue(state["tool_graphs"])
 
+    def test_host_action_post_generation_add_reports_runtime_patch_facts(self) -> None:
+        coordinator = _FakeCoordinator()
+        worker = _TestWorker(
+            interaction_coordinator=coordinator,
+            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+        )
+        worker._agent_runtime.handle_message(
+            room_id="room-host-post-add",
+            external_plan_id="seed-host-post-add",
+            text="强盗藏宝室方案：中央宝箱，两侧武器架，入口火把",
+            owner_agent="商人",
+            action="plan",
+        )
+        executor = worker._get_host_action_executor()
+
+        result = executor.enqueue_and_process({
+            "action_type": "post_generation_add",
+            "plan_id": "seed-host-post-add",
+            "room_id": "room-host-post-add",
+            "intent_text": "追加一个天使雕像",
+            "source_user_id": "房主",
+        })
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(coordinator.action_payload_calls, [])
+        self.assertEqual(coordinator.execute_calls, [])
+        self.assertIn("AgentRuntime 介入结果", result.message)
+        self.assertIn("post-generation-add", result.message)
+        self.assertIn("状态", result.message)
+        self.assertIn("对象", result.message)
+        self.assertNotIn("AgentRuntime 执行结果。", result.message)
+        state = worker._agent_runtime.query_state("room-host-post-add")["room"]
+        self.assertTrue(state["pending_interventions"])
+        patch = next(iter(state["pending_interventions"].values()))
+        self.assertEqual(patch["patch_type"], "post_generation_add")
+        self.assertIn("天使雕像", patch["items"])
+
     def test_host_action_structured_success_result_is_sanitized(self) -> None:
         engine = _FakeIdleEngine()
         worker = _TestWorker(
@@ -6725,6 +7562,16 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
 
         self.assertIn("布局调整建议已确认", reply or "")
         self.assertIn("AgentRuntime", reply or "")
+        self.assertIn("AgentRuntime 布局结果", reply or "")
+        self.assertIn("ScenePlan", reply or "")
+        self.assertIn("ToolCallGraph", reply or "")
+        self.assertIn("graph", reply or "")
+        self.assertIn("应用", reply or "")
+        self.assertIn("跳过", reply or "")
+        self.assertIn("贴地", reply or "")
+        self.assertIn("重叠修正", reply or "")
+        self.assertNotIn("AgentRuntime 执行结果：已应用", reply or "")
+        self.assertNotIn("纭", reply or "")
         self.assertEqual(worker.direct_layout_reflow_calls, 0)
         events = worker._agent_runtime.operation_log.events()
         self.assertIn("layout_adjustment_confirmed", events)
@@ -7841,6 +8688,10 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         )
 
         self.assertIn("AgentRuntime 执行结果", reply)
+        self.assertIn("已执行 Runtime 批次", reply)
+        self.assertIn("执行图", reply)
+        self.assertIn("报告健康", reply)
+        self.assertNotIn("已进入 Runtime 执行队列", reply)
         self.assertIn("room-confirm-remembers", worker._active_room_ids)
         state = worker._agent_runtime.query_state("room-confirm-remembers")["room"]
         self.assertTrue(state["tool_graph_queue"])
@@ -7865,6 +8716,10 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         )
 
         self.assertIn("AgentRuntime 执行结果", reply or "")
+        self.assertIn("已执行 Runtime 批次", reply or "")
+        self.assertIn("执行图", reply or "")
+        self.assertIn("报告健康", reply or "")
+        self.assertNotIn("已进入 Runtime 执行队列", reply or "")
         self.assertIn("room-active-remembers", worker._active_room_ids)
         state = worker._agent_runtime.query_state("room-active-remembers")["room"]
         self.assertEqual(state["active_plan_id"], plan.plan_id)
@@ -8071,5 +8926,3 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-

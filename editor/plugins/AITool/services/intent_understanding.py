@@ -303,6 +303,8 @@ class IntentUnderstandingService:
                 risk_level="medium",
                 reason="protocol/generation start",
             )
+        if _contains(_FINAL_LAYOUT_PATTERNS, normalized):
+            return IntentDecision("final_adjustment_request", 0.94, target_agent, reason="protocol/final layout")
         if generation_active and _contains(_ADD_PATTERNS, normalized):
             return IntentDecision("intervention_add", 0.94, target_agent, reason="active generation add")
         if generation_active and _contains(_MODIFY_PATTERNS, normalized):

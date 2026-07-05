@@ -302,7 +302,7 @@ def register_agent_runtime_planning_tools(
             _plan_asset_requests_tool,
             category=ToolCategory.ASSET,
             default_risk_level=RiskLevel.LOW,
-            required_args=("room_id", "model_items"),
+            required_args=("room_id", "batch_id", "model_items"),
             consumes_state={
                 "model_items": {
                     "state_key": "model_item_lists",
@@ -375,7 +375,7 @@ def register_agent_runtime_planning_tools(
                     "scope": "batch",
                 }
             },
-            produces_state=("environment_components",),
+            produces_state=("environment_components", "custom_import_facts"),
             requires_user_visible_failure=True,
             description="Import Runtime environment components through the dedicated engine bridge.",
         )
@@ -389,14 +389,14 @@ def register_agent_runtime_planning_tools(
             consumes_state={
                 "asset_requests": {
                     "state_key": "asset_request_plans",
-                    "scope": "plan",
+                    "scope": "batch",
                 },
                 "model_items": {
                     "state_key": "model_item_lists",
                     "scope": "batch",
                 }
             },
-            produces_state=("image_resource_plans",),
+            produces_state=("image_resource_plans", "custom_resource_phase_facts"),
             description="Prepare per-batch image/reference resource facts through the configured provider or Runtime fallback.",
         )
     if not registry.has("runtime.asset.model.prepare"):
@@ -409,7 +409,7 @@ def register_agent_runtime_planning_tools(
             consumes_state={
                 "asset_requests": {
                     "state_key": "asset_request_plans",
-                    "scope": "plan",
+                    "scope": "batch",
                 },
                 "model_items": {
                     "state_key": "model_item_lists",
@@ -420,7 +420,7 @@ def register_agent_runtime_planning_tools(
                     "scope": "batch",
                 }
             },
-            produces_state=("model_resource_plans",),
+            produces_state=("model_resource_plans", "custom_resource_phase_facts"),
             description="Prepare per-batch model resource facts through the configured provider or Runtime fallback.",
         )
     if not registry.has("runtime.placement.propose"):
@@ -429,7 +429,7 @@ def register_agent_runtime_planning_tools(
             _propose_placement_tool,
             category=ToolCategory.GEOMETRY,
             default_risk_level=RiskLevel.LOW,
-            required_args=("room_id", "model_items"),
+            required_args=("room_id", "batch_id", "model_items"),
             consumes_state={
                 "model_items": {
                     "state_key": "model_item_lists",
@@ -465,7 +465,7 @@ def register_agent_runtime_planning_tools(
                 },
                 "placements": {
                     "state_key": "placement_proposals",
-                    "scope": "plan",
+                    "scope": "batch",
                 },
                 "environment_components": {
                     "state_key": "environment_components",
@@ -494,7 +494,7 @@ def register_agent_runtime_planning_tools(
                 },
                 "placements": {
                     "state_key": "placement_proposals",
-                    "scope": "plan",
+                    "scope": "batch",
                 },
                 "environment_components": {
                     "state_key": "environment_components",
@@ -514,11 +514,11 @@ def register_agent_runtime_planning_tools(
             _make_geometry_review_tool(review_provider),
             category=ToolCategory.GEOMETRY,
             default_risk_level=RiskLevel.LOW,
-            required_args=("room_id", "plan_id", "placements"),
+            required_args=("room_id", "batch_id", "placements"),
             consumes_state={
                 "placements": {
                     "state_key": "placement_proposals",
-                    "scope": "plan",
+                    "scope": "batch",
                 },
                 "environment_components": {
                     "state_key": "environment_components",
@@ -560,6 +560,22 @@ def register_agent_runtime_planning_tools(
             produces_state=("custom_geometry_facts",),
             description="Check safe Runtime actor AABB overlaps without engine writes.",
         )
+    if not registry.has("runtime.geometry.snap_to_ground_selective"):
+        registry.register(
+            "runtime.geometry.snap_to_ground_selective",
+            _snap_actor_grounding_facts_tool,
+            category=ToolCategory.GEOMETRY,
+            default_risk_level=RiskLevel.LOW,
+            required_args=("room_id", "plan_id", "actors"),
+            consumes_state={
+                "actors": {
+                    "state_key": "actors",
+                    "scope": "room",
+                },
+            },
+            produces_state=("custom_geometry_facts", "geometry_reviews"),
+            description="Plan selective floor-supported actor ground snapping without engine writes.",
+        )
     if not registry.has("runtime.review.vlm_checkpoint"):
         registry.register(
             "runtime.review.vlm_checkpoint",
@@ -574,7 +590,7 @@ def register_agent_runtime_planning_tools(
                 },
                 "placements": {
                     "state_key": "placement_proposals",
-                    "scope": "plan",
+                    "scope": "batch",
                 },
                 "environment_components": {
                     "state_key": "environment_components",
@@ -595,7 +611,11 @@ def register_agent_runtime_planning_tools(
             consumes_state={
                 "geometry_review": {
                     "state_key": "geometry_reviews",
-                    "scope": "plan",
+                    "scope": "batch",
+                },
+                "ground_snap_reviews": {
+                    "state_key": "geometry_reviews",
+                    "scope": "room",
                 },
                 "vlm_checkpoints": {
                     "state_key": "custom_vlm_checkpoint_facts",
@@ -623,7 +643,11 @@ def register_agent_runtime_planning_tools(
             consumes_state={
                 "geometry_review": {
                     "state_key": "geometry_reviews",
-                    "scope": "plan",
+                    "scope": "batch",
+                },
+                "ground_snap_reviews": {
+                    "state_key": "geometry_reviews",
+                    "scope": "room",
                 },
                 "batch_review_summary": {
                     "state_key": "custom_review_summary_facts",
@@ -698,8 +722,6 @@ def extract_candidate_items(text: str) -> list[str]:
         for aliases, canonical in _ADD_OBJECT_ALIASES
         if any(alias and alias in clean for alias in aliases)
     ]
-    if aliased_objects and not any(marker in clean or marker in lowered for marker in _TREASURE_ROOM_TEXT_MARKERS):
-        return list(dict.fromkeys(aliased_objects))
     if any(marker in clean or marker in lowered for marker in _TREASURE_ROOM_TEXT_MARKERS):
         return list(_TREASURE_ROOM_ITEMS)
     if any(marker in clean or marker in lowered for marker in _BEDROOM_TEXT_MARKERS):
@@ -708,6 +730,8 @@ def extract_candidate_items(text: str) -> list[str]:
         return ["森林", "天空", "草地", *_FOREST_CAMP_ITEMS]
     if any(marker in clean or marker in lowered for marker in _MARKET_TEXT_MARKERS):
         return list(_MARKET_ITEMS)
+    if aliased_objects:
+        return list(dict.fromkeys(aliased_objects))
     explicit_objects = [item for item in _COMMON_ADD_OBJECTS if item in clean]
     explicit_objects.extend(aliased_objects)
     if explicit_objects:
@@ -1717,6 +1741,7 @@ def _plan_asset_requests_tool(call: ToolCall) -> ToolResult:
     room_id = str(call.args.get("room_id") or "")
     model_items = [str(item) for item in (call.args.get("model_items") or []) if str(item or "")]
     plan_id = str(call.args.get("plan_id") or call.tool_call_id)
+    batch_id = str(call.args.get("batch_id") or plan_id or call.tool_call_id)
     asset_requests = {
         name: {
             "asset_request_id": f"asset-req-{index + 1:02d}",
@@ -1731,9 +1756,9 @@ def _plan_asset_requests_tool(call: ToolCall) -> ToolResult:
         "asset requests planned",
         state_patch=StatePatch(
             room_id=room_id,
-            changes={"asset_request_plans": {plan_id: asset_requests}},
+            changes={"asset_request_plans": {batch_id: asset_requests}},
         ),
-        payload={"asset_requests": asset_requests},
+        payload={"plan_id": plan_id, "batch_id": batch_id, "asset_requests": asset_requests},
     )
 
 
@@ -1871,6 +1896,71 @@ def _make_environment_components_tool(provider: ResourceProvider | None) -> Call
 
 
 def _make_environment_import_components_tool(provider: ResourceProvider | None) -> Callable[[ToolCall], ToolResult]:
+    def _failed_component_patch_result(
+        *,
+        call: ToolCall,
+        room_id: str,
+        batch_id: str,
+        components: Mapping[str, Any],
+        message: str,
+        error_code: str,
+        source: str,
+        user_visible_message: str,
+        import_results: list[dict[str, Any]] | None = None,
+        provider_result: Mapping[str, Any] | None = None,
+    ) -> ToolResult:
+        failed_components = _failed_environment_import_components(
+            batch_id=batch_id,
+            components=components,
+            source=source,
+        )
+        safe_import_results = list(import_results or [])
+        engine_write_boundary = _environment_import_boundary_fact(
+            provider_result or {},
+            requested_count=len(components),
+            imported_count=0,
+            import_results=safe_import_results,
+            imported_component_ids=[],
+        ) if safe_import_results or provider_result else None
+        changes: dict[str, Any] = {
+            "environment_components": {batch_id: failed_components},
+            "custom_import_facts": {
+                f"{batch_id}:environment_import_result": _environment_import_result_fact(
+                    {
+                        "plan_id": str(call.args.get("plan_id") or ""),
+                        "batch_id": batch_id,
+                    },
+                    requested_count=len(components),
+                    imported_count=0,
+                    failed_count=max(len(failed_components), len(safe_import_results)),
+                    status="failed",
+                    import_results=safe_import_results,
+                    engine_write_boundary=engine_write_boundary,
+                )
+            },
+        }
+        payload = {
+            "environment_components": failed_components,
+            "environment_import_results": safe_import_results,
+            "engine_write_result": dict((provider_result or {}).get("engine_write_result") or {}) if provider_result else {},
+            "requested_count": len(components),
+            "ready_count": 0,
+            "failed_count": len(failed_components),
+        }
+        return ToolResult(
+            False,
+            message,
+            retryable=True,
+            error_code=error_code,
+            user_visible_message=user_visible_message,
+            state_patch=StatePatch(
+                room_id=room_id,
+                changes=changes,
+                source_tool_call_id=call.tool_call_id,
+            ),
+            payload=payload,
+        )
+
     def _tool(call: ToolCall) -> ToolResult:
         room_id = str(call.args.get("room_id") or "")
         batch_id = str(call.args.get("batch_id") or call.tool_call_id)
@@ -1880,13 +1970,15 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
             if str(component_id or "").strip() and isinstance(component, dict)
         }
         if provider is None:
-            return ToolResult(
-                False,
-                "environment import provider unavailable",
-                retryable=True,
+            return _failed_component_patch_result(
+                call=call,
+                room_id=room_id,
+                batch_id=batch_id,
+                components=components,
+                message="environment import provider unavailable",
                 error_code="environment_import_provider_missing",
+                source="runtime_environment_import_missing",
                 user_visible_message="环境组件导入工具不可用，Runtime 不会伪装为已写入地形或边界。",
-                payload={"requested_count": len(components)},
             )
         payload = {
             "room_id": room_id,
@@ -1898,28 +1990,44 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
         try:
             result = dict(provider(payload) or {})
         except Exception as exc:  # noqa: BLE001
-            return _provider_failure_tool_result(
-                "environment_import",
-                exc,
+            _ = exc
+            return _failed_component_patch_result(
+                call=call,
+                room_id=room_id,
+                batch_id=batch_id,
+                components=components,
+                message="environment import failed",
+                error_code="environment_import_failed",
+                source="runtime_environment_import_failed",
                 user_visible_message="环境组件导入失败，系统不会伪装为已写入地形或边界。",
             )
         imported_components = dict(result.get("environment_components") or {})
         requested_count = len(components)
         if requested_count and not imported_components:
-            return ToolResult(
-                False,
-                "environment import provider returned no components",
-                retryable=True,
+            return _failed_component_patch_result(
+                call=call,
+                room_id=room_id,
+                batch_id=batch_id,
+                components=components,
+                message="environment import provider returned no components",
                 error_code="environment_import_provider_empty",
+                source="runtime_environment_import_empty",
                 user_visible_message="环境组件导入没有返回可用结果，系统不会伪装为已写入地形或边界。",
-                payload={"requested_count": requested_count},
+                import_results=list(result.get("environment_import_results") or []),
+                provider_result=result,
             )
         try:
             EnvironmentComponentValidator.validate_component_batches({batch_id: imported_components})
         except Exception as exc:  # noqa: BLE001
-            return _provider_failure_tool_result(
-                "environment_import",
-                exc,
+            _ = exc
+            return _failed_component_patch_result(
+                call=call,
+                room_id=room_id,
+                batch_id=batch_id,
+                components=components,
+                message="environment import result invalid",
+                error_code="environment_import_invalid_result",
+                source="runtime_environment_import_invalid",
                 user_visible_message="环境组件导入结果不符合系统协议，系统不会伪装为已写入地形或边界。",
             )
         return ToolResult(
@@ -1927,11 +2035,33 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
             "environment components imported",
             state_patch=StatePatch(
                 room_id=room_id,
-                changes={"environment_components": {batch_id: imported_components}},
+                changes={
+                    "environment_components": {batch_id: imported_components},
+                    "custom_import_facts": {
+                        f"{batch_id}:environment_import_result": _environment_import_result_fact(
+                            payload,
+                            requested_count=requested_count,
+                            imported_count=len(imported_components),
+                            failed_count=max(0, requested_count - len(imported_components)),
+                            status="imported"
+                            if requested_count <= 0 or len(imported_components) >= requested_count
+                            else "partial",
+                            import_results=list(result.get("environment_import_results") or []),
+                            engine_write_boundary=_environment_import_boundary_fact(
+                                result,
+                                requested_count=requested_count,
+                                imported_count=len(imported_components),
+                                import_results=list(result.get("environment_import_results") or []),
+                                imported_component_ids=list(imported_components),
+                            ),
+                        ),
+                    },
+                },
             ),
             payload={
                 "environment_components": imported_components,
                 "environment_import_results": list(result.get("environment_import_results") or []),
+                "engine_write_result": dict(result.get("engine_write_result") or {}),
                 "requested_count": requested_count,
                 "ready_count": len(imported_components),
                 "failed_count": max(0, requested_count - len(imported_components)),
@@ -1939,6 +2069,203 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
         )
 
     return _tool
+
+
+def _environment_import_result_fact(
+    payload: Mapping[str, Any],
+    *,
+    requested_count: int,
+    imported_count: int,
+    failed_count: int,
+    status: str,
+    import_results: list[dict[str, Any]],
+    engine_write_boundary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    fact = {
+        "plan_id": str(payload.get("plan_id") or ""),
+        "batch_id": str(payload.get("batch_id") or ""),
+        "component_count": int(requested_count),
+        "ready_count": int(imported_count),
+        "imported_count": int(imported_count),
+        "failed_count": int(failed_count),
+        "status": str(status or "unknown"),
+        "source": "runtime_environment_import_result",
+        "environment_import_results": _safe_environment_import_results(import_results),
+    }
+    if engine_write_boundary:
+        fact["engine_write_boundary"] = dict(engine_write_boundary)
+    return fact
+
+
+def _safe_environment_import_results(results: Any) -> list[dict[str, Any]]:
+    if not isinstance(results, list):
+        return []
+    unsafe_tokens = (
+        "api_key",
+        "authorization",
+        "bearer ",
+        "c:\\",
+        "e:\\",
+        "http://",
+        "https://",
+        "metadata",
+        "model_path",
+        "prompt",
+        "provider",
+        "raw",
+        "token",
+        "url",
+        "://",
+    )
+    safe_results: list[dict[str, Any]] = []
+    for item in results:
+        if not isinstance(item, Mapping):
+            continue
+        safe: dict[str, Any] = {}
+        for field in ("component_id", "name", "component_type", "status", "reason", "failure_code"):
+            value = item.get(field)
+            if isinstance(value, str):
+                lowered = value.lower()
+                if any(token in lowered for token in unsafe_tokens):
+                    if field == "reason":
+                        value = "environment import failed"
+                    else:
+                        continue
+                safe[field] = value[:160]
+            elif isinstance(value, (int, float, bool)):
+                safe[field] = value
+        if safe:
+            safe_results.append(safe)
+    return safe_results
+
+
+def _environment_import_boundary_fact(
+    provider_result: Mapping[str, Any],
+    *,
+    requested_count: int,
+    imported_count: int,
+    import_results: list[dict[str, Any]],
+    imported_component_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    raw_engine_result = provider_result.get("engine_write_result") if isinstance(provider_result, Mapping) else None
+    engine_result = raw_engine_result if isinstance(raw_engine_result, Mapping) else {}
+    source = _safe_actor_import_provider_source(
+        provider_result.get("source")
+        or engine_result.get("provider_source")
+        or "environment_import_provider"
+    )
+    status_counts: dict[str, int] = {}
+    for item in import_results:
+        status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
+        status_counts[status_key] = status_counts.get(status_key, 0) + 1
+    if not status_counts and imported_count > 0:
+        status_counts["success"] = int(imported_count)
+    safe_component_ids = [
+        _safe_import_text(component_id, fallback="")
+        for component_id in (imported_component_ids or [])
+        if _safe_import_text(component_id, fallback="")
+    ]
+    missing_identity_count = int(engine_result.get("missing_identity_count") or 0)
+    if missing_identity_count <= 0:
+        missing_identity_count = sum(
+            1
+            for item in import_results
+            if str(item.get("status") or "").strip().lower() == "failed"
+            and "component id" in str(item.get("reason") or "").lower()
+        )
+    return {
+        "provider_source": source,
+        "requested_count": int(engine_result.get("requested_count") or requested_count),
+        "identity_result_count": int(engine_result.get("identity_result_count") or imported_count),
+        "missing_identity_count": max(0, missing_identity_count),
+        "status_counts": dict(engine_result.get("status_counts") or status_counts),
+        "imported_component_ids": safe_component_ids[:32],
+        "bridge_call_count": max(0, int(engine_result.get("bridge_call_count") or 0)),
+        "bridge_success_count": max(0, int(engine_result.get("bridge_success_count") or 0)),
+        "bridge_failed_count": max(0, int(engine_result.get("bridge_failed_count") or 0)),
+        "bridge_method_counts": _safe_import_count_map(engine_result.get("bridge_method_counts")),
+        "bridge_error_code_counts": _safe_import_count_map(engine_result.get("bridge_error_code_counts")),
+    }
+
+
+def _safe_environment_component_token(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    blocked_tokens = (
+        "api_key",
+        "asset_path",
+        "authorization",
+        "bearer ",
+        "metadata",
+        "model_path",
+        "prompt",
+        "provider",
+        "raw",
+        "token",
+        "url",
+        "://",
+        ":\\",
+        "/",
+        "\\",
+        " ",
+    )
+    if not text or any(token in text.lower() for token in blocked_tokens):
+        return fallback
+    return text[:48]
+
+
+def _safe_environment_component_text(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    blocked_tokens = (
+        "api_key",
+        "asset_path",
+        "authorization",
+        "bearer ",
+        "metadata",
+        "model_path",
+        "prompt",
+        "provider",
+        "raw",
+        "token",
+        "url",
+        "://",
+        ":\\",
+    )
+    if not text or any(token in text.lower() for token in blocked_tokens):
+        return fallback
+    return text[:96]
+
+
+def _failed_environment_import_components(
+    *,
+    batch_id: str,
+    components: Mapping[str, Any],
+    source: str,
+) -> dict[str, dict[str, Any]]:
+    failed_components: dict[str, dict[str, Any]] = {}
+    safe_source = _safe_environment_component_token(source, "runtime_environment_import_failed")
+    for index, (component_key, component_raw) in enumerate(components.items(), start=1):
+        component = dict(component_raw) if isinstance(component_raw, Mapping) else {}
+        fallback_component_id = f"{batch_id}-env-failed-{index:02d}" if batch_id else f"runtime-env-failed-{index:02d}"
+        component_id = _safe_environment_component_token(
+            component.get("component_id") or component_key,
+            fallback_component_id,
+        )
+        component_type = _safe_environment_component_token(
+            component.get("component_type") or "environment",
+            "environment",
+        )
+        failed_components[component_id] = {
+            "component_id": component_id,
+            "name": _safe_environment_component_text(component.get("name"), component_id),
+            "component_type": component_type,
+            "handler": _safe_environment_component_text(component.get("handler"), ""),
+            "scene_name": _safe_environment_component_text(component.get("scene_name"), ""),
+            "status": "failed",
+            "source": safe_source,
+            "requires_engine_write": False,
+        }
+    EnvironmentComponentValidator.validate_component_batches({batch_id: failed_components})
+    return failed_components
 
 
 def _default_environment_component_provider(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2075,6 +2402,7 @@ def _make_image_resource_tool(provider: ResourceProvider | None) -> Callable[[To
         room_id = str(call.args.get("room_id") or "")
         batch_id = str(call.args.get("batch_id") or call.tool_call_id)
         payload = _resource_payload_from_call(call)
+        plan_id = str(payload.get("plan_id") or "")
         requested_items = _model_items_from_resource_args(
             payload,
             asset_requests=dict(payload.get("asset_requests") or {}),
@@ -2082,9 +2410,13 @@ def _make_image_resource_tool(provider: ResourceProvider | None) -> Callable[[To
         try:
             image_resources = ResourcePlanValidator.safe_image_resource_map(dict(effective_provider(payload) or {}))
         except Exception as exc:  # noqa: BLE001
-            return _provider_failure_tool_result(
-                "image_resource",
+            return _resource_provider_failure_tool_result(
+                "image",
                 exc,
+                room_id=room_id,
+                batch_id=batch_id,
+                plan_id=plan_id,
+                requested_items=requested_items,
                 user_visible_message="图片资源准备失败，系统会稍后重试或降级处理。",
             )
         requested_count = len(requested_items)
@@ -2101,7 +2433,18 @@ def _make_image_resource_tool(provider: ResourceProvider | None) -> Callable[[To
                 "image resource provider returned no resources; recorded failed resource facts",
                 state_patch=StatePatch(
                     room_id=room_id,
-                    changes={"image_resource_plans": {batch_id: failed_resources}},
+                    changes={
+                        "image_resource_plans": {batch_id: failed_resources},
+                        "custom_resource_phase_facts": {
+                            _resource_phase_fact_key(batch_id, "image"): _resource_phase_fact(
+                                batch_id=batch_id,
+                                plan_id=plan_id,
+                                phase="image",
+                                resources=failed_resources,
+                                requested_count=requested_count,
+                            )
+                        },
+                    },
                 ),
                 payload={
                     "image_resources": failed_resources,
@@ -2116,7 +2459,18 @@ def _make_image_resource_tool(provider: ResourceProvider | None) -> Callable[[To
             "batch image resources prepared",
             state_patch=StatePatch(
                 room_id=room_id,
-                changes={"image_resource_plans": {batch_id: image_resources}},
+                changes={
+                    "image_resource_plans": {batch_id: image_resources},
+                    "custom_resource_phase_facts": {
+                        _resource_phase_fact_key(batch_id, "image"): _resource_phase_fact(
+                            batch_id=batch_id,
+                            plan_id=plan_id,
+                            phase="image",
+                            resources=image_resources,
+                            requested_count=requested_count,
+                        )
+                    },
+                },
             ),
             payload={
                 "image_resources": image_resources,
@@ -2141,6 +2495,7 @@ def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[To
         room_id = str(call.args.get("room_id") or "")
         batch_id = str(call.args.get("batch_id") or call.tool_call_id)
         payload = _resource_payload_from_call(call)
+        plan_id = str(payload.get("plan_id") or "")
         requested_items = _model_items_from_resource_args(
             payload,
             asset_requests=dict(payload.get("asset_requests") or {}),
@@ -2148,9 +2503,13 @@ def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[To
         try:
             model_resources = ResourcePlanValidator.safe_model_resource_map(dict(effective_provider(payload) or {}))
         except Exception as exc:  # noqa: BLE001
-            return _provider_failure_tool_result(
-                "model_resource",
+            return _resource_provider_failure_tool_result(
+                "model",
                 exc,
+                room_id=room_id,
+                batch_id=batch_id,
+                plan_id=plan_id,
+                requested_items=requested_items,
                 user_visible_message="模型资源准备失败，系统会稍后重试或降级处理。",
             )
         requested_count = len(requested_items)
@@ -2167,7 +2526,18 @@ def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[To
                 "model resource provider returned no resources; recorded failed resource facts",
                 state_patch=StatePatch(
                     room_id=room_id,
-                    changes={"model_resource_plans": {batch_id: failed_resources}},
+                    changes={
+                        "model_resource_plans": {batch_id: failed_resources},
+                        "custom_resource_phase_facts": {
+                            _resource_phase_fact_key(batch_id, "model"): _resource_phase_fact(
+                                batch_id=batch_id,
+                                plan_id=plan_id,
+                                phase="model",
+                                resources=failed_resources,
+                                requested_count=requested_count,
+                            )
+                        },
+                    },
                 ),
                 payload={
                     "model_resources": failed_resources,
@@ -2177,23 +2547,74 @@ def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[To
                 },
                 user_visible_message="模型资源准备没有返回可用结果，系统会稍后重试或降级处理。",
             )
+        ready_count = _ready_resource_count(model_resources)
+        legacy_hard_failed = (
+            requested_count > 0
+            and ready_count <= 0
+            and all(
+                isinstance(resource, dict)
+                and str(resource.get("status") or "").strip().lower() in {"failed", "failure", "error", "missing"}
+                and str(resource.get("source") or "").strip().lower()
+                in {"legacy_model_failure", "legacy_model_adapter_unavailable"}
+                for resource in model_resources.values()
+            )
+        )
+        if legacy_hard_failed:
+            return ToolResult(
+                False,
+                "model resource provider returned only failed resources; recorded failed resource facts",
+                error_code="model_resource_unavailable",
+                state_patch=StatePatch(
+                    room_id=room_id,
+                    changes={
+                        "model_resource_plans": {batch_id: model_resources},
+                        "custom_resource_phase_facts": {
+                            _resource_phase_fact_key(batch_id, "model"): _resource_phase_fact(
+                                batch_id=batch_id,
+                                plan_id=plan_id,
+                                phase="model",
+                                resources=model_resources,
+                                requested_count=requested_count,
+                            )
+                        },
+                    },
+                ),
+                payload={
+                    "model_resources": model_resources,
+                    "requested_count": requested_count,
+                    "ready_count": 0,
+                    "failed_count": requested_count,
+                },
+                user_visible_message="模型资源准备失败，本批不会继续导入虚假的场景物体。",
+            )
         return ToolResult(
             True,
             "batch model resources prepared",
             state_patch=StatePatch(
                 room_id=room_id,
-                changes={"model_resource_plans": {batch_id: model_resources}},
+                changes={
+                    "model_resource_plans": {batch_id: model_resources},
+                    "custom_resource_phase_facts": {
+                        _resource_phase_fact_key(batch_id, "model"): _resource_phase_fact(
+                            batch_id=batch_id,
+                            plan_id=plan_id,
+                            phase="model",
+                            resources=model_resources,
+                            requested_count=requested_count,
+                        )
+                    },
+                },
             ),
             payload={
                 "model_resources": model_resources,
                 "requested_count": requested_count,
-                "ready_count": _ready_resource_count(model_resources),
-                "failed_count": max(0, requested_count - _ready_resource_count(model_resources)),
+                "ready_count": ready_count,
+                "failed_count": max(0, requested_count - ready_count),
             },
             user_visible_message=_resource_ready_user_message(
                 "模型资源",
                 requested_count=requested_count,
-                ready_count=_ready_resource_count(model_resources),
+                ready_count=ready_count,
             ),
         )
 
@@ -2222,6 +2643,7 @@ def _failed_resource_entries(
                 "status": safe_status,
                 "mode": "unavailable",
                 "source": safe_source,
+                "failure_code": safe_source,
             }
         else:
             entries[name] = {
@@ -2229,10 +2651,65 @@ def _failed_resource_entries(
                 "name": name,
                 "status": safe_status,
                 "source": safe_source,
+                "failure_code": safe_source,
             }
     if safe_kind == "image":
         return ResourcePlanValidator.safe_image_resource_map(entries)
     return ResourcePlanValidator.safe_model_resource_map(entries)
+
+
+def _resource_phase_fact_key(batch_id: str, phase: str) -> str:
+    safe_batch_id = _safe_review_text(batch_id, fallback="batch", allow_empty=False)
+    safe_phase = "image" if str(phase or "") == "image" else "model"
+    return f"{safe_batch_id}:{safe_phase}"
+
+
+def _resource_phase_fact(
+    *,
+    batch_id: str,
+    plan_id: str = "",
+    phase: str,
+    resources: Mapping[str, Any],
+    requested_count: int,
+) -> dict[str, Any]:
+    safe_phase = "image" if str(phase or "") == "image" else "model"
+    safe_batch_id = _safe_review_text(batch_id, fallback="batch", allow_empty=False)
+    safe_plan_id = _safe_review_text(plan_id, fallback="", allow_empty=True)
+    resource_rows = {
+        str(key): dict(value)
+        for key, value in dict(resources or {}).items()
+        if isinstance(value, Mapping) and str(key or "").strip()
+    }
+    ready_count = _ready_resource_count(resource_rows)
+    requested = max(0, int(requested_count or 0))
+    failed_count = max(0, requested - ready_count)
+    if requested > 0 and ready_count <= 0 and failed_count >= requested:
+        status = "failed"
+    elif failed_count > 0 or (requested > 0 and ready_count < requested):
+        status = "partial"
+    else:
+        status = "completed"
+    status_counts: dict[str, int] = {}
+    failure_code_counts: dict[str, int] = {}
+    for row in resource_rows.values():
+        row_status = _safe_review_text(row.get("status") or "unknown", fallback="unknown", allow_empty=False)
+        status_counts[row_status] = status_counts.get(row_status, 0) + 1
+        failure_code = _safe_review_text(row.get("failure_code") or "", fallback="", allow_empty=True)
+        if failure_code:
+            failure_code_counts[failure_code] = failure_code_counts.get(failure_code, 0) + 1
+    return {
+        "batch_id": safe_batch_id,
+        "plan_id": safe_plan_id,
+        "phase": safe_phase,
+        "status": status,
+        "requested_count": requested,
+        "ready_count": ready_count,
+        "failed_count": failed_count,
+        "resource_count": len(resource_rows),
+        "status_counts": dict(sorted(status_counts.items())),
+        "failure_code_counts": dict(sorted(failure_code_counts.items())),
+        "source": "runtime_resource_phase_fact",
+    }
 
 
 def _resource_ready_user_message(label: str, *, requested_count: int, ready_count: int) -> str:
@@ -2260,6 +2737,7 @@ def _propose_placement_tool(call: ToolCall) -> ToolResult:
     room_id = str(call.args.get("room_id") or "")
     model_items = [str(item) for item in (call.args.get("model_items") or []) if str(item or "")]
     plan_id = str(call.args.get("plan_id") or call.tool_call_id)
+    batch_id = str(call.args.get("batch_id") or plan_id or call.tool_call_id)
     layout_items = [str(item) for item in (call.args.get("layout_items") or []) if str(item or "")]
     proposals = build_placement_proposals(model_items, layout_items)
     environment_components = call.args.get("environment_components")
@@ -2273,9 +2751,9 @@ def _propose_placement_tool(call: ToolCall) -> ToolResult:
         "placement proposal created",
         state_patch=StatePatch(
             room_id=room_id,
-            changes={"placement_proposals": {plan_id: proposals}},
+            changes={"placement_proposals": {batch_id: proposals}},
         ),
-        payload={"placements": proposals},
+        payload={"plan_id": plan_id, "batch_id": batch_id, "placements": proposals},
     )
 
 
@@ -2357,17 +2835,31 @@ def _plan_actor_import_batch_tool(call: ToolCall) -> ToolResult:
         if isinstance(value, dict)
     }
     planned_actors: list[dict[str, Any]] = []
+    failure_code_counts: dict[str, int] = {}
     for index, name in enumerate(model_items):
         resource = dict(model_resources.get(name) or {})
         placement = dict(placements.get(name) or {})
         status = str(resource.get("status") or "").strip().lower()
         model_ready = bool(resource) and status not in {"failed", "error", "missing"}
+        failure_code = ""
+        if not model_ready:
+            if not resource:
+                failure_code = "missing_ready_model_resource"
+            else:
+                failure_code = _safe_import_text(
+                    resource.get("failure_code")
+                    or resource.get("source")
+                    or f"model_resource_{status or 'unavailable'}",
+                    fallback="missing_ready_model_resource",
+                )
+            failure_code_counts[failure_code] = failure_code_counts.get(failure_code, 0) + 1
         planned_actors.append({
             "actor_name": name,
             "source_index": index,
             "model_ready": model_ready,
             "resource_status": status or ("missing" if not resource else "unknown"),
             "resource_source": _safe_import_text(resource.get("source"), fallback="runtime_resource"),
+            "failure_code": failure_code,
             "position": _safe_position(placement.get("position")),
             "rotation": _safe_position(placement.get("rotation")),
             "scale": _safe_position(placement.get("scale"), default=[1.0, 1.0, 1.0]),
@@ -2386,6 +2878,8 @@ def _plan_actor_import_batch_tool(call: ToolCall) -> ToolResult:
         "batch_id": batch_id,
         "actor_count": actor_count,
         "ready_count": ready_count,
+        "failed_count": max(0, actor_count - ready_count),
+        "failure_code_counts": dict(sorted(failure_code_counts.items())),
         "environment_component_count": len(environment_components),
         "planned_actors": planned_actors,
         "status": plan_status,
@@ -2407,6 +2901,8 @@ def _plan_actor_import_batch_tool(call: ToolCall) -> ToolResult:
             "batch_id": batch_id,
             "actor_count": fact["actor_count"],
             "ready_count": fact["ready_count"],
+            "failed_count": fact["failed_count"],
+            "failure_code_counts": dict(fact["failure_code_counts"]),
             "environment_component_count": fact["environment_component_count"],
         },
         user_visible_message=f"导入计划完成：{fact['ready_count']}/{fact['actor_count']} 个物体资源可进入导入。",
@@ -2440,6 +2936,7 @@ def _make_actor_import_tool(provider: ResourceProvider | None) -> Callable[[Tool
                 {
                     "actor_name": name,
                     "status": "failed",
+                    "failure_code": "missing_ready_model_resource",
                     "reason": "missing ready model resource",
                 }
                 for name in requested_items
@@ -2451,6 +2948,13 @@ def _make_actor_import_tool(provider: ResourceProvider | None) -> Callable[[Tool
                 failed_count=len(requested_items),
                 status="failed",
                 import_results=import_results,
+                engine_write_boundary=_actor_import_boundary_fact(
+                    {},
+                    requested_count=len(requested_items),
+                    imported_count=0,
+                    import_results=import_results,
+                    provider_source="runtime_actor_import_precheck",
+                ),
             )
             return ToolResult(
                 True,
@@ -2476,9 +2980,51 @@ def _make_actor_import_tool(provider: ResourceProvider | None) -> Callable[[Tool
         try:
             provider_result = dict(effective_provider(payload) or {})
         except Exception as exc:  # noqa: BLE001
-            return _provider_failure_tool_result(
-                "actor_import",
-                exc,
+            import_results = [
+                {
+                    "actor_name": name,
+                    "status": "failed",
+                    "failure_code": "actor_import_provider_failed",
+                    "reason": "actor import provider failed",
+                }
+                for name in requested_items
+            ]
+            import_result_fact = _actor_import_result_fact(
+                payload,
+                requested_count=len(requested_items),
+                imported_count=0,
+                failed_count=len(requested_items),
+                status="failed",
+                import_results=import_results,
+                engine_write_boundary=_actor_import_boundary_fact(
+                    {},
+                    requested_count=len(requested_items),
+                    imported_count=0,
+                    import_results=import_results,
+                    provider_source="actor_import_provider",
+                ),
+            )
+            return ToolResult(
+                False,
+                "actor_import provider failed; recorded failed import fact",
+                retryable=True,
+                error_code="actor_import_provider_failed",
+                state_patch=StatePatch(
+                    room_id=room_id,
+                    changes={
+                        "custom_import_facts": {
+                            f"{payload['batch_id']}:actor_import_result": import_result_fact,
+                        },
+                    },
+                ),
+                payload={
+                    "actor_ids": [],
+                    "batch_id": payload["batch_id"],
+                    "requested_count": len(requested_items),
+                    "imported_count": 0,
+                    "failed_count": len(requested_items),
+                    "import_results": import_results,
+                },
                 user_visible_message="场景导入失败，系统会稍后重试或等待进一步处理。",
             )
         if isinstance(provider_result.get("actors"), dict):
@@ -2505,6 +3051,12 @@ def _make_actor_import_tool(provider: ResourceProvider | None) -> Callable[[Tool
                 failed_count=requested_count,
                 status="failed",
                 import_results=import_results,
+                engine_write_boundary=_actor_import_boundary_fact(
+                    provider_result,
+                    requested_count=requested_count,
+                    imported_count=0,
+                    import_results=import_results,
+                ),
             )
             return ToolResult(
                 True,
@@ -2541,6 +3093,13 @@ def _make_actor_import_tool(provider: ResourceProvider | None) -> Callable[[Tool
             failed_count=failed_count,
             status=import_status,
             import_results=import_results,
+            engine_write_boundary=_actor_import_boundary_fact(
+                provider_result,
+                requested_count=requested_count,
+                imported_count=imported_count,
+                import_results=import_results,
+                imported_actor_ids=list(actors),
+            ),
         )
         return ToolResult(
             True,
@@ -2580,8 +3139,16 @@ def _actor_import_result_fact(
     failed_count: int,
     status: str,
     import_results: list[dict[str, Any]],
+    engine_write_boundary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    failure_code_counts: dict[str, int] = {}
+    for row in import_results or []:
+        if not isinstance(row, Mapping):
+            continue
+        failure_code = _safe_import_text(row.get("failure_code"), fallback="")
+        if failure_code:
+            failure_code_counts[failure_code] = failure_code_counts.get(failure_code, 0) + 1
+    fact = {
         "plan_id": str(payload.get("plan_id") or ""),
         "batch_id": str(payload.get("batch_id") or ""),
         "actor_count": int(requested_count),
@@ -2590,8 +3157,12 @@ def _actor_import_result_fact(
         "failed_count": int(failed_count),
         "status": str(status or "unknown"),
         "source": "runtime_actor_import_result",
+        "failure_code_counts": dict(sorted(failure_code_counts.items())),
         "import_results": list(import_results or []),
     }
+    if engine_write_boundary:
+        fact["engine_write_boundary"] = dict(engine_write_boundary)
+    return fact
 
 
 def _actor_import_user_message(*, requested_count: int, imported_count: int, failed_count: int) -> str:
@@ -2627,7 +3198,7 @@ def _safe_actor_import_results(results: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         safe: dict[str, Any] = {}
-        for field in ("actor_id", "actor_name", "status", "reason"):
+        for field in ("actor_id", "actor_name", "status", "reason", "failure_code"):
             value = item.get(field)
             if isinstance(value, str):
                 lowered = value.lower()
@@ -2644,16 +3215,100 @@ def _safe_actor_import_results(results: Any) -> list[dict[str, Any]]:
     return safe_results
 
 
+def _actor_import_boundary_fact(
+    provider_result: Mapping[str, Any],
+    *,
+    requested_count: int,
+    imported_count: int,
+    import_results: list[dict[str, Any]],
+    provider_source: str = "",
+    imported_actor_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    raw_engine_result = provider_result.get("engine_write_result") if isinstance(provider_result, Mapping) else None
+    engine_result = raw_engine_result if isinstance(raw_engine_result, Mapping) else {}
+    source = _safe_actor_import_provider_source(
+        provider_source
+        or provider_result.get("source")
+        or engine_result.get("provider_source")
+        or "actor_import_provider",
+    )
+    status_counts: dict[str, int] = {}
+    for item in import_results:
+        status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
+        status_counts[status_key] = status_counts.get(status_key, 0) + 1
+    if not status_counts and imported_count > 0:
+        status_counts["success"] = int(imported_count)
+    safe_actor_ids = [
+        _safe_import_text(actor_id, fallback="")
+        for actor_id in (imported_actor_ids or [])
+        if _safe_import_text(actor_id, fallback="")
+    ]
+    missing_identity_count = int(engine_result.get("missing_identity_count") or 0)
+    if missing_identity_count <= 0:
+        missing_identity_count = sum(
+            1
+            for item in import_results
+            if str(item.get("status") or "").strip().lower() == "failed"
+            and "actor id" in str(item.get("reason") or "").lower()
+        )
+    return {
+        "provider_source": source,
+        "requested_count": int(engine_result.get("requested_count") or requested_count),
+        "identity_result_count": int(engine_result.get("identity_result_count") or imported_count),
+        "missing_identity_count": max(0, missing_identity_count),
+        "status_counts": dict(engine_result.get("status_counts") or status_counts),
+        "imported_actor_ids": safe_actor_ids[:32],
+        "bridge_call_count": max(0, int(engine_result.get("bridge_call_count") or 0)),
+        "bridge_success_count": max(0, int(engine_result.get("bridge_success_count") or 0)),
+        "bridge_failed_count": max(0, int(engine_result.get("bridge_failed_count") or 0)),
+        "bridge_method_counts": _safe_import_count_map(engine_result.get("bridge_method_counts")),
+        "bridge_error_code_counts": _safe_import_count_map(engine_result.get("bridge_error_code_counts")),
+    }
+
+
+def _safe_import_count_map(raw: Any) -> dict[str, int]:
+    if not isinstance(raw, Mapping):
+        return {}
+    safe: dict[str, int] = {}
+    for key, value in raw.items():
+        label = _safe_import_text(key, fallback="")
+        if not label:
+            continue
+        try:
+            count = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            safe[label] = count
+    return dict(sorted(safe.items()))
+
+
+def _safe_actor_import_provider_source(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    allowed = {
+        "actor_import_provider",
+        "engine_actor_import_provider",
+        "environment_import_provider",
+        "engine_environment_import_provider",
+        "runtime_actor_import_precheck",
+        "runtime_default_import_provider",
+    }
+    if text in allowed:
+        return text
+    return "actor_import_provider"
+
+
 def _make_geometry_review_tool(provider: ResourceProvider | None) -> Callable[[ToolCall], ToolResult]:
     effective_provider = provider or _default_geometry_review_provider
 
     def _tool(call: ToolCall) -> ToolResult:
         room_id = str(call.args.get("room_id") or "")
         plan_id = str(call.args.get("plan_id") or call.tool_call_id)
+        batch_id = str(call.args.get("batch_id") or plan_id or call.tool_call_id)
         environment_components = dict(call.args.get("environment_components") or {})
         payload = {
             "room_id": room_id,
-            "batch_id": str(call.args.get("batch_id") or ""),
+            "batch_id": batch_id,
             "plan_id": plan_id,
             "contract_version": int(call.args.get("contract_version") or 0),
             "checkpoint_type": str(call.args.get("checkpoint_type") or "geometry_review"),
@@ -2683,7 +3338,7 @@ def _make_geometry_review_tool(provider: ResourceProvider | None) -> Callable[[T
         return ToolResult(
             True,
             "geometry review completed",
-            state_patch=StatePatch(room_id=room_id, changes={"geometry_reviews": {plan_id: review}}),
+            state_patch=StatePatch(room_id=room_id, changes={"geometry_reviews": {batch_id: review}}),
             payload=review,
         )
 
@@ -2782,6 +3437,140 @@ def _check_actor_overlap_facts_tool(call: ToolCall) -> ToolResult:
     )
 
 
+def _support_type_for_ground_snap(name: str) -> str:
+    safe_name = str(name or "").strip()
+    lowered = safe_name.lower()
+    if not safe_name:
+        return "unknown"
+    if (
+        lowered.startswith("__room")
+        or lowered.startswith("__terrain")
+        or lowered.startswith("_terrain")
+        or lowered in {"terrain", "ground", "sky", "room_box", "__room_box", "__room_terrain"}
+        or any(term in safe_name for term in ("地形", "天空", "边界"))
+    ):
+        return "system"
+    if any(
+        term in lowered or term in safe_name
+        for term in (
+            "吊灯", "吊旗", "吊笼", "悬挂", "铁链", "天花",
+            "ceiling", "chandelier", "hanging",
+        )
+    ):
+        return "ceiling_hung"
+    if any(
+        term in lowered or term in safe_name
+        for term in (
+            "火把", "壁灯", "墙灯", "墙饰", "地图", "旗帜", "窗", "门", "招牌", "武器架",
+            "torch", "sconce", "wall", "map", "flag", "window", "door", "sign", "weapon rack",
+        )
+    ):
+        return "wall_mounted"
+    if _floor_supported_name(safe_name) or any(
+        term in lowered
+        for term in (
+            "table", "chair", "box", "chest", "coin", "barrel", "sack", "bed", "cabinet",
+            "rug", "carpet", "statue", "animal", "bench", "sofa",
+        )
+    ):
+        return "floor_supported"
+    return "unknown"
+
+
+def _snap_actor_grounding_facts_tool(call: ToolCall) -> ToolResult:
+    room_id = str(call.args.get("room_id") or "")
+    plan_id = str(call.args.get("plan_id") or call.tool_call_id)
+    batch_id = str(call.args.get("batch_id") or "")
+    actors = _safe_actor_map_arg(call.args.get("actors"))
+    ground_y = _float(call.args.get("ground_y") if "ground_y" in call.args else 0.0)
+    epsilon = max(0.001, min(0.5, _float(call.args.get("epsilon") or 0.03)))
+    issues: list[dict[str, Any]] = []
+    reviewed_targets: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for actor_id, actor in actors.items():
+        actor_name = _safe_import_text(actor.get("name") or actor_id, fallback="actor")
+        support_type = _support_type_for_ground_snap(actor_name)
+        aabb = _safe_aabb(actor.get("aabb"))
+        if support_type != "floor_supported":
+            skipped.append({"actor_id": actor_id, "actor_name": actor_name, "reason": support_type})
+            continue
+        if aabb is None:
+            skipped.append({"actor_id": actor_id, "actor_name": actor_name, "reason": "aabb_unavailable"})
+            continue
+        reviewed_targets.append(actor_name)
+        bottom_y = round(float(aabb["min"][1]), 3)
+        delta_y = round(float(ground_y) - bottom_y, 3)
+        if abs(delta_y) <= epsilon:
+            continue
+        center = _aabb_center(aabb)
+        actor_position = _vector3(actor.get("position")) or center
+        suggested_position = [
+            round(float(actor_position[0]), 3),
+            round(float(actor_position[1]) + delta_y, 3),
+            round(float(actor_position[2]), 3),
+        ]
+        issues.append(
+            {
+                "type": "floating_or_sunken",
+                "actor_id": actor_id,
+                "actor_name": actor_name,
+                "name": actor_name,
+                "severity": "warn",
+                "current_y": bottom_y,
+                "suggested_y": round(float(ground_y), 3),
+                "current_position": actor_position,
+                "suggested_position": suggested_position,
+                "confidence": 0.9,
+                "reason": "floor_supported_actor_bottom_not_on_ground",
+            }
+        )
+    fact_key = f"{plan_id}:{batch_id}:ground_snap" if batch_id else f"{plan_id}:ground_snap"
+    fact = {
+        "fact_type": "runtime_geometry_ground_snap",
+        "plan_id": plan_id,
+        "batch_id": batch_id,
+        "ground_y": round(float(ground_y), 3),
+        "epsilon": round(float(epsilon), 3),
+        "actor_count": len(reviewed_targets),
+        "skipped_count": len(skipped),
+        "issue_count": len(issues),
+        "issues": issues[:24],
+        "skipped": skipped[:12],
+        "status": "needs_adjustment" if issues else "ok",
+    }
+    review = {
+        "plan_id": plan_id,
+        "batch_id": batch_id,
+        "checkpoint_type": "ground_snap_selective",
+        "status": fact["status"],
+        "overall": "NEEDS_ADJUSTMENT" if issues else "PASS",
+        "source": "runtime.geometry.snap_to_ground_selective",
+        "contract_version": 0,
+        "issue_count": len(issues),
+        "score": 0.7 if issues else 1.0,
+        "reviewed_targets": reviewed_targets[:24],
+        "environment_hints": [],
+        "issues": issues[:24],
+        "advisory_items": [
+            {
+                "type": "ground_snap",
+                "summary": "floor-supported objects need low-risk ground snap",
+                "requires_confirmation": True,
+                "confidence": 0.9,
+            }
+        ] if issues else [],
+    }
+    patch_changes: dict[str, Any] = {"custom_geometry_facts": {fact_key: fact}}
+    review_key = f"{batch_id}:ground_snap" if batch_id else f"{plan_id}:ground_snap"
+    patch_changes["geometry_reviews"] = {review_key: review}
+    return ToolResult(
+        True,
+        "selective ground snap facts planned",
+        state_patch=StatePatch(room_id=room_id, changes=patch_changes),
+        payload=fact,
+    )
+
+
 def _make_vlm_checkpoint_tool(provider: ResourceProvider | None) -> Callable[[ToolCall], ToolResult]:
     def _tool(call: ToolCall) -> ToolResult:
         room_id = str(call.args.get("room_id") or "")
@@ -2859,11 +3648,40 @@ def _vlm_checkpoint_user_visible_message(checkpoint_fact: dict[str, Any]) -> str
     return f"外观审查完成：{checkpoint_type} 未发现需要确认的建议。"
 
 
+def _matching_ground_snap_reviews(raw_reviews: Any, *, plan_id: str, batch_id: str) -> list[dict[str, Any]]:
+    reviews: list[dict[str, Any]] = []
+    for review in dict(raw_reviews or {}).values():
+        if not isinstance(review, dict):
+            continue
+        if str(review.get("checkpoint_type") or "") != "ground_snap_selective":
+            continue
+        if plan_id and str(review.get("plan_id") or "") != plan_id:
+            continue
+        if batch_id and str(review.get("batch_id") or "") != batch_id:
+            continue
+        reviews.append(dict(review))
+    return reviews
+
+
+def _review_issues(reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    for review in reviews:
+        for issue in review.get("issues") or []:
+            if isinstance(issue, dict):
+                issues.append(dict(issue))
+    return issues
+
+
 def _summarize_batch_review_tool(call: ToolCall) -> ToolResult:
     room_id = str(call.args.get("room_id") or "")
     plan_id = str(call.args.get("plan_id") or "")
     batch_id = str(call.args.get("batch_id") or call.tool_call_id)
     geometry_review = dict(call.args.get("geometry_review") or {})
+    ground_snap_reviews = _matching_ground_snap_reviews(
+        call.args.get("ground_snap_reviews"),
+        plan_id=plan_id,
+        batch_id=batch_id,
+    )
     vlm_checkpoints = {
         str(key): dict(value)
         for key, value in dict(call.args.get("vlm_checkpoints") or {}).items()
@@ -2893,13 +3711,18 @@ def _summarize_batch_review_tool(call: ToolCall) -> ToolResult:
             if safe_target and safe_target not in reviewed_targets:
                 reviewed_targets.append(safe_target)
     geometry_issues = geometry_review.get("issues") if isinstance(geometry_review.get("issues"), list) else []
+    ground_snap_issues = _review_issues(ground_snap_reviews)
     planned_actors = actor_import_plan.get("planned_actors") if isinstance(actor_import_plan.get("planned_actors"), list) else []
+    geometry_issue_count = int(geometry_review.get("issue_count") or len(geometry_issues))
+    ground_snap_issue_count = len(ground_snap_issues)
     fact = {
         "plan_id": plan_id,
         "batch_id": batch_id,
-        "status": "needs_attention" if geometry_issues or vlm_advisory_count else "ok",
+        "status": "needs_attention" if geometry_issues or ground_snap_issues or vlm_advisory_count else "ok",
         "geometry_status": _safe_review_text(geometry_review.get("status"), fallback="unknown", allow_empty=False),
-        "geometry_issue_count": int(geometry_review.get("issue_count") or len(geometry_issues)),
+        "geometry_issue_count": geometry_issue_count,
+        "ground_snap_review_count": len(ground_snap_reviews),
+        "ground_snap_issue_count": ground_snap_issue_count,
         "vlm_checkpoint_count": len(matching_vlm),
         "vlm_advisory_count": vlm_advisory_count,
         "vlm_status_counts": dict(sorted(vlm_status_counts.items())),
@@ -2925,6 +3748,7 @@ def _summarize_batch_review_tool(call: ToolCall) -> ToolResult:
         user_visible_message=(
             "批次审查汇总完成："
             f"几何问题 {fact['geometry_issue_count']} 项，"
+            f"贴地建议 {fact['ground_snap_issue_count']} 项，"
             f"外观建议 {fact['vlm_advisory_count']} 项。"
         ),
     )
@@ -2935,6 +3759,11 @@ def _generate_review_adjustment_proposal_tool(call: ToolCall) -> ToolResult:
     plan_id = str(call.args.get("plan_id") or call.tool_call_id)
     batch_id = str(call.args.get("batch_id") or "")
     geometry_review = dict(call.args.get("geometry_review") or {})
+    ground_snap_reviews = _matching_ground_snap_reviews(
+        call.args.get("ground_snap_reviews"),
+        plan_id=plan_id,
+        batch_id=batch_id,
+    )
     batch_summary = dict(call.args.get("batch_review_summary") or {})
     review_advisories = {
         str(key): dict(value)
@@ -2942,6 +3771,7 @@ def _generate_review_adjustment_proposal_tool(call: ToolCall) -> ToolResult:
         if isinstance(value, dict)
     }
     issues = [issue for issue in (geometry_review.get("issues") or []) if isinstance(issue, dict)]
+    issues.extend(_review_issues(ground_snap_reviews))
     deltas = _layout_deltas_from_review_issues(issues)
     matching_advisory_count = 0
     for advisory in review_advisories.values():
@@ -3330,12 +4160,17 @@ def _layout_deltas_from_review_issues(issues: list[dict[str, Any]]) -> list[dict
         if not name:
             continue
         if issue_type == "floating_or_sunken":
+            suggested_position = issue.get("suggested_position")
+            if isinstance(suggested_position, list) and len(suggested_position) >= 2:
+                target_y = _float(suggested_position[1])
+            else:
+                target_y = _float(issue.get("suggested_y", 0.0))
             deltas.append(
                 {
                     "op": "move",
                     "actor_name": name,
                     "batch_id": str(issue.get("batch_id") or ""),
-                    "position_patch": {"y": float(issue.get("suggested_y", 0.0))},
+                    "position_patch": {"y": target_y},
                     "reason": "snap floor-supported object to ground",
                     "risk_level": "low",
                 }
@@ -3537,6 +4372,57 @@ def _provider_failure_tool_result(
         f"{kind} provider failed",
         retryable=True,
         error_code=f"{kind}_provider_failed",
+        user_visible_message=str(user_visible_message or "服务暂时不可用，系统会稍后重试或降级处理。"),
+    )
+
+
+def _resource_provider_failure_tool_result(
+    resource_kind: str,
+    exc: Exception,
+    *,
+    room_id: str,
+    batch_id: str,
+    plan_id: str,
+    requested_items: Sequence[str],
+    user_visible_message: str,
+) -> ToolResult:
+    kind = "image" if str(resource_kind or "") == "image" else "model"
+    provider_kind = f"{kind}_resource"
+    failure_code = f"{provider_kind}_provider_failed"
+    failed_resources = _failed_resource_entries(
+        list(requested_items or []),
+        kind=kind,
+        batch_id=batch_id,
+        status="failed",
+        source=failure_code,
+    )
+    state_key = "image_resource_plans" if kind == "image" else "model_resource_plans"
+    return ToolResult(
+        False,
+        f"{provider_kind} provider failed; recorded failed resource facts",
+        retryable=True,
+        error_code=failure_code,
+        state_patch=StatePatch(
+            room_id=str(room_id or ""),
+            changes={
+                state_key: {str(batch_id or ""): failed_resources},
+                "custom_resource_phase_facts": {
+                    _resource_phase_fact_key(batch_id, kind): _resource_phase_fact(
+                        batch_id=batch_id,
+                        plan_id=plan_id,
+                        phase=kind,
+                        resources=failed_resources,
+                        requested_count=len(list(requested_items or [])),
+                    )
+                },
+            },
+        ),
+        payload={
+            f"{provider_kind}s": failed_resources,
+            "requested_count": len(list(requested_items or [])),
+            "ready_count": 0,
+            "failed_count": len(list(requested_items or [])),
+        },
         user_visible_message=str(user_visible_message or "服务暂时不可用，系统会稍后重试或降级处理。"),
     )
 

@@ -19,10 +19,13 @@ _SUBSTRATE_TERMS = (
     "草原", "草地", "天空", "森林", "树林", "地形", "地面", "地板", "木地板", "石板地面",
     "墙面", "墙壁", "天花板", "夜空", "云", "河流", "湖面", "海面", "雪地",
     "沙地", "道路", "路面", "庭院", "户外庭院", "雾", "光照", "灯光氛围",
+    "grassland", "grass", "sky", "forest", "woods", "terrain", "ground", "floor",
+    "wall", "ceiling", "road", "path", "courtyard", "fog", "mist", "lighting",
 )
 _LAYOUT_TERMS = (
     "入口", "出口", "通道", "动线", "主路", "主街", "区域", "边界", "围合",
     "室内展示区", "户外庭院", "入口过渡", "连接动线",
+    "entrance", "exit", "path", "walkway", "main street", "zone", "area", "boundary",
 )
 _CONCRETE_SUFFIXES = (
     "床", "柜", "桌", "椅", "灯", "雕像", "玩偶", "摊位", "牌", "架", "门",
@@ -76,11 +79,12 @@ def _is_compound_asset(name: str) -> bool:
 
 def _rule_route(name: str) -> RoutedSceneElement:
     clean = name.strip()
+    folded = clean.lower()
     if not clean:
         return RoutedSceneElement(clean, "empty", SUBSTRATE, 1.0, "empty name")
     if _is_compound_asset(clean):
         return RoutedSceneElement(clean, "asset", MODEL, 0.92, "compound concrete asset")
-    if any(term == clean or term in clean for term in _DECAL_TEXTURE_TERMS):
+    if any(term == clean or term in clean or str(term).lower() == folded or str(term).lower() in folded for term in _DECAL_TEXTURE_TERMS):
         return RoutedSceneElement(
             clean,
             "surface_decal",
@@ -88,7 +92,7 @@ def _rule_route(name: str) -> RoutedSceneElement:
             0.96,
             "surface/decal/texture should not be generated as a 3D model",
         )
-    if any(term == clean or term in clean for term in _THIN_OR_NET_TERMS):
+    if any(term == clean or term in clean or str(term).lower() == folded or str(term).lower() in folded for term in _THIN_OR_NET_TERMS):
         return RoutedSceneElement(
             clean,
             "thin_net_asset",
@@ -97,9 +101,9 @@ def _rule_route(name: str) -> RoutedSceneElement:
             "thin/net object is high risk for image-to-3D; prefer text-to-3D or procedural asset",
             generation_mode_hint=TEXT_TO_3D_PREFERRED,
         )
-    if any(term == clean or term in clean for term in _SUBSTRATE_TERMS):
+    if any(term == clean or term in clean or str(term).lower() == folded or str(term).lower() in folded for term in _SUBSTRATE_TERMS):
         return RoutedSceneElement(clean, "environment", SUBSTRATE, 0.98, "scene substrate/environment")
-    if any(term == clean or term in clean for term in _LAYOUT_TERMS):
+    if any(term == clean or term in clean or str(term).lower() == folded or str(term).lower() in folded for term in _LAYOUT_TERMS):
         return RoutedSceneElement(clean, "layout", LAYOUT, 0.92, "layout/structure element")
     return RoutedSceneElement(clean, "asset", MODEL, 0.75, "concrete object fallback")
 

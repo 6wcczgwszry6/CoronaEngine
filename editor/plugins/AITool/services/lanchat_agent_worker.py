@@ -1680,6 +1680,58 @@ class LANChatAgentWorker:
             self._logger.debug("AgentRuntime planning seed failed: %s", type(exc).__name__)
             return {"recorded": False, "reason": "internal_exception", "error_type": type(exc).__name__}
 
+    def _handle_agent_trigger_runtime_write_gate(self, trigger: dict[str, Any]) -> bool:
+        if self._agent_runtime_flags.can_call_legacy_main_workflow():
+            return False
+        text = str(trigger.get("text") or "").strip()
+        if not text:
+            return False
+        message_kind = str(trigger.get("message_kind") or "chat").strip().lower()
+        if message_kind not in {"", "chat"}:
+            return False
+        is_gm_target = (
+            str(trigger.get("agent_id") or trigger.get("target_agent_id") or "").strip().lower() == "gm"
+            or str(trigger.get("agent_name") or "").strip().lower() in {"gm", "主持人", "裁判", "game master"}
+        )
+        if is_gm_target:
+            return False
+        room_id = str(trigger.get("room_id") or "default")
+        try:
+            decision = get_intent_understanding_service().classify(
+                text,
+                allow_llm=False,
+                generation_active=bool(self._active_runtime_external_plan_id(room_id)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("AgentRuntime write-gate intent skipped: %s", type(exc).__name__)
+            return False
+        if decision.intent not in {
+            "generation_start",
+            "intervention_add",
+            "intervention_modify",
+            "intervention_delete",
+            "post_generation_add",
+            "final_adjustment_request",
+        }:
+            return False
+        self._record_runtime_audit_event(
+            event="legacy_role_agent_scene_write_blocked",
+            room_id=room_id,
+            message=text,
+            payload={
+                "intent": decision.intent,
+                "route": decision.route,
+                "target_agent": str(trigger.get("agent_name") or trigger.get("target_agent_name") or ""),
+                "reason": "agent_runtime_required",
+            },
+            external_plan_id=self._active_runtime_external_plan_id(room_id),
+        )
+        reply = (
+            "这是生成/场景写入类请求。当前已由 AgentRuntime 接管，"
+            "旧 RoleAgent 直接执行链路已关闭；请通过确认方案、生成队列或完成态调整链路执行。"
+        )
+        return bool(self._send_final_reply("gm-system", "系统", reply, trigger))
+
     def _send_runtime_planning_action(
         self,
         trigger: dict[str, Any],
@@ -1829,14 +1881,101 @@ class LANChatAgentWorker:
 
     @staticmethod
     def _format_agent_runtime_execution_reply(result: dict[str, Any]) -> str:
+        if not isinstance(result, dict):
+            return "【AgentRuntime 执行结果】Runtime 未返回执行结果。"
         runtime_plan = result.get("plan", {}) if isinstance(result, dict) else {}
         runtime_plan_id = str(runtime_plan.get("plan_id") or "")
         batches = result.get("batches", []) if isinstance(result, dict) else []
         graphs = result.get("graphs", []) if isinstance(result, dict) else []
         graph_statuses = [str(graph.get("status") or "") for graph in graphs if isinstance(graph, dict)]
+        status_counts: dict[str, int] = {}
+        for status in graph_statuses:
+            key = status or "unknown"
+            status_counts[key] = status_counts.get(key, 0) + 1
+        graph_status_text = ", ".join(
+            f"{key}:{value}"
+            for key, value in sorted(status_counts.items())
+        ) or "none"
+        report = result.get("report") if isinstance(result.get("report"), dict) else {}
+        health = report.get("report_health_summary") if isinstance(report.get("report_health_summary"), dict) else {}
+        health_status = str(health.get("status") or "unknown").strip().replace("_", "-") if health else "unknown"
+        attention = bool(health.get("attention_required")) if health else False
+        health_text = f"{health_status}，需关注" if attention else health_status
         if any(status == "failed" for status in graph_statuses):
-            return f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 执行未完成，部分工具调用失败。"
-        return f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 已进入 Runtime 执行队列。"
+            return (
+                f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 执行未完成，"
+                f"批次 {len(batches)} 个，执行图 {graph_status_text}，报告健康：{health_text}。"
+            )
+        return (
+            f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 已执行 Runtime 批次 {len(batches)} 个，"
+            f"执行图 {graph_status_text}，报告健康：{health_text}。"
+        )
+
+    @staticmethod
+    def _format_agent_runtime_intervention_reply(result: dict[str, Any]) -> str:
+        if not isinstance(result, dict):
+            return "【AgentRuntime 介入结果】Runtime 未返回介入结果。"
+        plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
+        patch = result.get("patch") if isinstance(result.get("patch"), dict) else {}
+        runtime_plan_id = str(plan.get("plan_id") or patch.get("plan_id") or "")
+        if not patch:
+            message = str(result.get("message") or "AgentRuntime 未记录介入。")
+            return f"【AgentRuntime 介入结果】{message}"
+        patch_type = str(patch.get("patch_type") or result.get("action") or "intervention").strip().replace("_", "-")
+        status = str(
+            patch.get("status")
+            or ("recorded" if result.get("recorded") else "not-recorded")
+        ).strip().replace("_", "-")
+        raw_items = patch.get("items") if isinstance(patch.get("items"), list) else []
+        item_count = len([item for item in raw_items if str(item or "").strip()])
+        return (
+            f"【AgentRuntime 介入结果】ScenePlan {runtime_plan_id} 已记录 {patch_type}，"
+            f"状态 {status}，对象 {item_count} 个。"
+        )
+
+    @staticmethod
+    def _format_agent_runtime_layout_confirmation_reply(result: dict[str, Any]) -> str:
+        if not isinstance(result, dict):
+            return "【AgentRuntime 布局结果】Runtime 未返回布局确认结果。"
+        graph = result.get("graph") if isinstance(result.get("graph"), dict) else {}
+        proposal = result.get("proposal") if isinstance(result.get("proposal"), dict) else {}
+        if not proposal:
+            reason = str(result.get("reason") or "未找到布局调整建议").strip()
+            return f"【AgentRuntime 布局结果】{reason}。"
+        plan_id = str(proposal.get("plan_id") or graph.get("plan_id") or "").strip()
+        proposal_id = str(proposal.get("proposal_id") or proposal.get("id") or "").strip()
+        graph_status = str(graph.get("status") or "unknown").strip().replace("_", "-")
+        applied = proposal.get("applied_deltas") if isinstance(proposal.get("applied_deltas"), list) else []
+        skipped = proposal.get("skipped_deltas") if isinstance(proposal.get("skipped_deltas"), list) else []
+        transform_results = (
+            proposal.get("engine_transform_results")
+            if isinstance(proposal.get("engine_transform_results"), list)
+            else []
+        )
+        transform_success = 0
+        transform_failed = 0
+        ground_snapped = 0
+        overlap_resolved = 0
+        for item in transform_results:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status") or "").strip().lower()
+            if status in {"success", "succeeded", "applied", "ok"}:
+                transform_success += 1
+            elif status in {"failed", "failure", "error", "rejected"}:
+                transform_failed += 1
+            if bool(item.get("ground_snapped")):
+                ground_snapped += 1
+            if bool(item.get("overlap_resolved")):
+                overlap_resolved += 1
+        prefix = f"ScenePlan {plan_id} " if plan_id else ""
+        proposal_part = f"建议 {proposal_id} " if proposal_id else ""
+        return (
+            f"【AgentRuntime 布局结果】{prefix}{proposal_part}已通过 ToolCallGraph 确认，"
+            f"graph {graph_status}，应用 {len(applied)} 项，跳过 {len(skipped)} 项，"
+            f"引擎写入成功 {transform_success} 项、失败 {transform_failed} 项，"
+            f"贴地 {ground_snapped} 项，重叠修正 {overlap_resolved} 项。"
+        )
 
     def _log_scene_route(
         self,
@@ -2361,6 +2500,8 @@ class LANChatAgentWorker:
             return bool(self._send_final_reply(agent_id, agent_name, executing_intervention_reply, trigger))
         self._seed_agent_trigger_planning_context_in_runtime(trigger)
         if self._handle_agent_trigger_planning_gate(trigger):
+            return True
+        if self._handle_agent_trigger_runtime_write_gate(trigger):
             return True
 
         try:
@@ -3041,6 +3182,11 @@ class LANChatAgentWorker:
         provider_readiness = status.get("provider_readiness_summary", {}) if isinstance(status, dict) and isinstance(status.get("provider_readiness_summary"), dict) else {}
         message_delivery = status.get("message_delivery_summary", {}) if isinstance(status, dict) and isinstance(status.get("message_delivery_summary"), dict) else {}
         engine_write = status.get("engine_write_summary", {}) if isinstance(status, dict) and isinstance(status.get("engine_write_summary"), dict) else {}
+        engine_write_boundary = (
+            status.get("engine_write_boundary_summary", {})
+            if isinstance(status, dict) and isinstance(status.get("engine_write_boundary_summary"), dict)
+            else {}
+        )
         if not isinstance(provider_summary, dict):
             return None
         lines: list[str] = []
@@ -3062,11 +3208,13 @@ class LANChatAgentWorker:
         readiness_text = self._format_agent_runtime_resource_readiness_report(provider_readiness)
         delivery_text = self._format_agent_runtime_message_delivery_report(message_delivery)
         engine_write_text = self._format_agent_runtime_engine_write_report(engine_write)
+        engine_write_boundary_text = self._format_agent_runtime_engine_write_boundary_report(engine_write_boundary)
         return (
             "銆怰untime Resources 棰勬銆慭n"
             + "\n".join(lines)
             + f"\n- readiness: {readiness_text}"
             + f"\n- engine_write: {engine_write_text}"
+            + f"\n- engine_write_boundary: {engine_write_boundary_text}"
             + f"\n- message_delivery: {delivery_text}"
         )
 
@@ -3237,8 +3385,13 @@ class LANChatAgentWorker:
             return None
         status = result.get("engine_write_status", {}) if isinstance(result, dict) else {}
         summary = result.get("engine_write_summary", {}) if isinstance(result, dict) else {}
+        boundary_summary = (
+            result.get("engine_write_boundary_summary", {}) if isinstance(result, dict) else {}
+        )
         if not isinstance(summary, dict):
             summary = {}
+        if not isinstance(boundary_summary, dict):
+            boundary_summary = {}
         if not isinstance(status, dict):
             return None
         lines: list[str] = []
@@ -3253,6 +3406,9 @@ class LANChatAgentWorker:
                 line += f" / {reason}"
             lines.append(line)
         lines.append(f"- replay: {self._format_agent_runtime_engine_write_report(summary)}")
+        lines.append(
+            f"- engine boundary: {self._format_agent_runtime_engine_write_boundary_report(boundary_summary)}"
+        )
         return "銆怰untime Engine Write 棰勬銆慭n" + "\n".join(lines)
 
     @staticmethod
@@ -3448,6 +3604,11 @@ class LANChatAgentWorker:
             if isinstance(replay.get("review_advisory_summary"), dict)
             else {}
         )
+        final_adjustment_confirmation = (
+            replay.get("final_adjustment_confirmation_replay_summary", {})
+            if isinstance(replay.get("final_adjustment_confirmation_replay_summary"), dict)
+            else {}
+        )
         message_delivery = (
             replay.get("message_delivery_summary", {})
             if isinstance(replay.get("message_delivery_summary"), dict)
@@ -3543,6 +3704,11 @@ class LANChatAgentWorker:
             if isinstance(replay.get("engine_write_summary"), dict)
             else {}
         )
+        engine_write_boundary = (
+            replay.get("engine_write_boundary_summary", {})
+            if isinstance(replay.get("engine_write_boundary_summary"), dict)
+            else {}
+        )
         batch_resource_lifecycle = (
             replay.get("batch_resource_lifecycle_summary", {})
             if isinstance(replay.get("batch_resource_lifecycle_summary"), dict)
@@ -3577,6 +3743,9 @@ class LANChatAgentWorker:
                 recent_events.append(event)
         recent_text = ", ".join(recent_events) or "none"
         review_advisory_text = self._format_agent_runtime_replay_review_advisory_report(review_advisory)
+        final_adjustment_text = self._format_agent_runtime_replay_final_adjustment_report(
+            final_adjustment_confirmation
+        )
         message_delivery_text = self._format_agent_runtime_message_delivery_report(message_delivery)
         command_text = self._format_agent_runtime_replay_command_report(runtime_commands)
         tool_execution_text = self._format_agent_runtime_replay_tool_execution_report(tool_execution)
@@ -3596,6 +3765,7 @@ class LANChatAgentWorker:
         asset_transfer_replay_text = self._format_agent_runtime_replay_asset_transfer_report(asset_transfer_replay)
         peer_sync_replay_text = self._format_agent_runtime_replay_peer_sync_report(peer_sync_replay)
         engine_write_text = self._format_agent_runtime_engine_write_report(engine_write)
+        engine_write_boundary_text = self._format_agent_runtime_engine_write_boundary_report(engine_write_boundary)
         batch_resource_lifecycle_text = self._format_agent_runtime_batch_resource_lifecycle_report(
             batch_resource_lifecycle
         )
@@ -3624,7 +3794,9 @@ class LANChatAgentWorker:
             f"- asset_transfer: {asset_transfer_replay_text}\n"
             f"- peer_sync: {peer_sync_replay_text}\n"
             f"- review_advisory: {review_advisory_text}\n"
+            f"- final_adjustment: {final_adjustment_text}\n"
             f"- engine_write: {engine_write_text}\n"
+            f"- engine_write_boundary: {engine_write_boundary_text}\n"
             f"- message_delivery: {message_delivery_text}\n"
             f"- recent: {recent_text}"
         )
@@ -3688,6 +3860,11 @@ class LANChatAgentWorker:
         scene_snapshot = report.get("scene_snapshot_summary", {}) if isinstance(report.get("scene_snapshot_summary"), dict) else {}
         environment = report.get("environment_component_summary", {}) if isinstance(report.get("environment_component_summary"), dict) else {}
         runtime_resources = report.get("resource_summary", {}) if isinstance(report.get("resource_summary"), dict) else {}
+        report_health = (
+            report.get("report_health_summary", {})
+            if isinstance(report.get("report_health_summary"), dict)
+            else {}
+        )
         review_summary = report.get("review_summary", {}) if isinstance(report.get("review_summary"), dict) else {}
         geometry_summary = report.get("geometry_fact_summary", {}) if isinstance(report.get("geometry_fact_summary"), dict) else {}
         review_proposals = report.get("review_advisory_proposal_summary", {}) if isinstance(report.get("review_advisory_proposal_summary"), dict) else {}
@@ -3707,6 +3884,11 @@ class LANChatAgentWorker:
         asset_transfer_summary = report.get("asset_transfer_summary", {}) if isinstance(report.get("asset_transfer_summary"), dict) else {}
         provider_summary = report.get("provider_summary", {}) if isinstance(report.get("provider_summary"), dict) else {}
         provider_readiness = report.get("provider_readiness_summary", {}) if isinstance(report.get("provider_readiness_summary"), dict) else {}
+        engine_write_readiness = (
+            report.get("engine_write_readiness_summary", {})
+            if isinstance(report.get("engine_write_readiness_summary"), dict)
+            else {}
+        )
         replay_summary = report.get("operation_replay_summary", {}) if isinstance(report.get("operation_replay_summary"), dict) else {}
         runtime_guard = (
             report.get("runtime_guard_replay_summary", {})
@@ -3736,8 +3918,20 @@ class LANChatAgentWorker:
             if isinstance(replay_summary.get("review_advisory_summary"), dict)
             else {}
         )
+        final_adjustment_replay = (
+            replay_summary.get("final_adjustment_confirmation_replay_summary", {})
+            if isinstance(replay_summary.get("final_adjustment_confirmation_replay_summary"), dict)
+            else {}
+        )
         message_delivery = replay_summary.get("message_delivery_summary", {}) if isinstance(replay_summary.get("message_delivery_summary"), dict) else {}
         engine_write = replay_summary.get("engine_write_summary", {}) if isinstance(replay_summary.get("engine_write_summary"), dict) else {}
+        engine_write_boundary = (
+            report.get("engine_write_boundary_summary", {})
+            if isinstance(report.get("engine_write_boundary_summary"), dict)
+            else replay_summary.get("engine_write_boundary_summary", {})
+            if isinstance(replay_summary.get("engine_write_boundary_summary"), dict)
+            else {}
+        )
         planning_context = replay_summary.get("planning_context_summary", {}) if isinstance(replay_summary.get("planning_context_summary"), dict) else {}
         sync_replay = replay_summary.get("sync_replay_summary", {}) if isinstance(replay_summary.get("sync_replay_summary"), dict) else {}
         asset_transfer_replay = (
@@ -3765,6 +3959,10 @@ class LANChatAgentWorker:
         semantic_arbitration_text = self._format_agent_runtime_semantic_arbitration_report(semantic_arbitration)
         scene_snapshot_text = self._format_agent_runtime_scene_snapshot_report(scene_snapshot)
         runtime_resource_text = self._format_agent_runtime_resource_stage_report(runtime_resources)
+        report_health_text = self._format_agent_runtime_report_health_report(report_health)
+        fact_source_text = self._format_agent_runtime_fact_source_boundary_report(
+            report.get("fact_source_boundary_summary")
+        )
         import_text = self._format_agent_runtime_import_stage_report(import_summary)
         environment_text = self._format_agent_runtime_environment_report(environment)
         review_text = self._format_agent_runtime_review_report(review_summary)
@@ -3786,12 +3984,19 @@ class LANChatAgentWorker:
         plan_lifecycle_text = self._format_agent_runtime_replay_plan_lifecycle_report(plan_lifecycle)
         vlm_checkpoint_text = self._format_agent_runtime_replay_vlm_report(vlm_checkpoint)
         review_advisory_replay_text = self._format_agent_runtime_replay_review_advisory_report(review_advisory_replay)
+        final_adjustment_replay_text = self._format_agent_runtime_replay_final_adjustment_report(
+            final_adjustment_replay
+        )
         tool_queue_health_text = self._format_agent_runtime_tool_queue_health_report(tool_queue_health)
         resource_text = self._format_agent_runtime_resource_report(provider_summary)
         resource_readiness_text = self._format_agent_runtime_resource_readiness_report(provider_readiness)
+        engine_write_readiness_text = self._format_agent_runtime_engine_write_readiness_report(
+            engine_write_readiness
+        )
         replay_text = self._format_agent_runtime_replay_report(replay_summary)
         message_delivery_text = self._format_agent_runtime_message_delivery_report(message_delivery)
         engine_write_text = self._format_agent_runtime_engine_write_report(engine_write)
+        engine_write_boundary_text = self._format_agent_runtime_engine_write_boundary_report(engine_write_boundary)
         planning_context_text = self._format_agent_runtime_context_report(planning_context)
         return (
             "[Runtime Report]\n"
@@ -3803,8 +4008,10 @@ class LANChatAgentWorker:
             f"- scene contract: {scene_contract_text}\n"
             f"- semantic arbitration: {semantic_arbitration_text}\n"
             f"- scene snapshot: {scene_snapshot_text}\n"
+            f"- fact source: {fact_source_text}\n"
             f"- environment: {environment_text}\n"
             f"- runtime resources: {runtime_resource_text}\n"
+            f"- report health: {report_health_text}\n"
             f"- import: {import_text}\n"
             f"- review: {review_text}\n"
             f"- geometry facts: {geometry_text}\n"
@@ -3821,6 +4028,7 @@ class LANChatAgentWorker:
             f"- plan lifecycle: {plan_lifecycle_text}\n"
             f"- vlm replay: {vlm_checkpoint_text}\n"
             f"- review advisory replay: {review_advisory_replay_text}\n"
+            f"- final adjustment replay: {final_adjustment_replay_text}\n"
                 f"- graphs: {int(graph_summary.get('graph_count') or 0)}\n"
                 f"- tool execution: {tool_execution_text}\n"
                 f"- runtime queue: {tool_queue_health_text}\n"
@@ -3831,7 +4039,9 @@ class LANChatAgentWorker:
             f"- peer sync replay: {peer_sync_replay_text}\n"
             f"- resources: {resource_text}\n"
             f"- resource readiness: {resource_readiness_text}\n"
+            f"- engine write readiness: {engine_write_readiness_text}\n"
             f"- engine write: {engine_write_text}\n"
+            f"- engine write boundary: {engine_write_boundary_text}\n"
             f"- context: {planning_context_text}\n"
             f"- message delivery: {message_delivery_text}\n"
             f"- replay: {replay_text}\n"
@@ -4111,7 +4321,7 @@ class LANChatAgentWorker:
             for key, value in sorted(decision_counts.items())
             if int(value or 0) > 0
         )
-        return f"{confirmation_count} confirmation(s)" + (f"锛宒ecision {decisions}" if decisions else "")
+        return f"{confirmation_count} confirmation(s)" + (f"；decision {decisions}" if decisions else "")
 
     @staticmethod
     def _format_agent_runtime_layout_report(summary: Any, confirmation_summary: Any = None) -> str:
@@ -4128,6 +4338,16 @@ class LANChatAgentWorker:
             return "none"
         status_counts: dict[str, int] = {}
         delta_count = 0
+        applied_delta_count = int(summary.get("applied_delta_count") or 0) if isinstance(summary, dict) else 0
+        skipped_delta_count = int(summary.get("skipped_delta_count") or 0) if isinstance(summary, dict) else 0
+        transform_result_count = int(summary.get("transform_result_count") or 0) if isinstance(summary, dict) else 0
+        ground_snapped_count = int(summary.get("ground_snapped_count") or 0) if isinstance(summary, dict) else 0
+        overlap_resolved_count = int(summary.get("overlap_resolved_count") or 0) if isinstance(summary, dict) else 0
+        transform_failure_code_counts = (
+            summary.get("layout_transform_failure_code_counts")
+            if isinstance(summary, dict) and isinstance(summary.get("layout_transform_failure_code_counts"), dict)
+            else {}
+        )
         risk_levels: list[str] = []
         for proposal in proposals:
             if not isinstance(proposal, dict):
@@ -4140,6 +4360,28 @@ class LANChatAgentWorker:
             if risk and risk not in risk_levels:
                 risk_levels.append(risk)
         parts = [f"{proposal_count} proposal(s)", f"deltas {delta_count}"]
+        parts.append(f"applied {applied_delta_count}")
+        parts.append(f"skipped {skipped_delta_count}")
+        parts.append(f"transforms {transform_result_count}")
+        if ground_snapped_count:
+            parts.append(f"ground-snapped {ground_snapped_count}")
+        if overlap_resolved_count:
+            parts.append(f"overlap-resolved {overlap_resolved_count}")
+        if transform_failure_code_counts:
+            def _safe_layout_failure_label(value: Any) -> str:
+                label = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+                blocked = ("provider", "url", "http", "prompt", "raw", "api-key", "apikey", "secret", "token")
+                if any(marker in label for marker in blocked):
+                    return "redacted"
+                return label[:64] or "unknown"
+
+            failure_items = ",".join(
+                f"{_safe_layout_failure_label(key)}:{int(value or 0)}"
+                for key, value in sorted(transform_failure_code_counts.items())
+                if int(value or 0) > 0
+            )
+            if failure_items:
+                parts.append(f"transform-failures {failure_items}")
         if confirmation_count:
             parts.append(f"confirmations {confirmation_count}")
         if risk_levels:
@@ -4319,6 +4561,21 @@ class LANChatAgentWorker:
         write_confirm = int(summary.get("write_confirmation_required_count") or 0)
         system_actor = int(summary.get("system_actor_write_blocked_count") or 0)
         visible_blocked = int(summary.get("user_visible_blocked_event_count") or 0)
+        requires_write = int(summary.get("requires_write_blocked_count") or 0)
+        unconfirmed = int(summary.get("unconfirmed_blocked_count") or 0)
+        confirmed = int(summary.get("confirmed_blocked_count") or 0)
+        risk_counts = summary.get("risk_level_counts") if isinstance(summary.get("risk_level_counts"), dict) else {}
+
+        def format_risk_counts() -> str:
+            parts: list[str] = []
+            for risk in ("high", "medium", "low", "unknown"):
+                try:
+                    count = int(risk_counts.get(risk) or 0)
+                except (TypeError, ValueError):
+                    count = 0
+                if count:
+                    parts.append(f"{risk}:{count}")
+            return "/".join(parts)
         parts = [f"blocked {blocked}"]
         if high_risk:
             parts.append(f"high-risk-confirm {high_risk}")
@@ -4328,10 +4585,29 @@ class LANChatAgentWorker:
             parts.append(f"system-actor {system_actor}")
         if visible_blocked:
             parts.append(f"visible-blocked {visible_blocked}")
+        if requires_write:
+            parts.append(f"write-blocked {requires_write}")
+        if unconfirmed:
+            parts.append(f"unconfirmed {unconfirmed}")
+        if confirmed:
+            parts.append(f"confirmed-blocked {confirmed}")
+        risk_text = format_risk_counts()
+        if risk_text:
+            parts.append(f"risk {risk_text}")
         latest = summary.get("latest_block") if isinstance(summary.get("latest_block"), dict) else {}
         reason = str(latest.get("reason") or "").strip().replace("_", "-")
         if reason:
-            parts.append(f"latest {reason}")
+            latest_risk = str(latest.get("risk_level") or "").strip().replace("_", "-")
+            latest_requires_write = bool(latest.get("requires_write"))
+            latest_confirmed = bool(latest.get("confirmed"))
+            latest_suffix = []
+            if latest_risk:
+                latest_suffix.append(f"risk:{latest_risk}")
+            if latest_requires_write:
+                latest_suffix.append("write")
+            latest_suffix.append("confirmed" if latest_confirmed else "unconfirmed")
+            suffix = " " + "/".join(latest_suffix) if latest_suffix else ""
+            parts.append(f"latest {reason}{suffix}")
         return ", ".join(parts)
 
     @staticmethod
@@ -4483,11 +4759,84 @@ class LANChatAgentWorker:
         ]
         if top_types:
             parts.append("types " + ",".join(top_types))
+        report_ready = int(summary.get("report_ready_count") or 0)
+        report_attention = int(summary.get("report_attention_count") or 0)
+        if report_ready > 0:
+            report_part = f"report-ready {report_ready}"
+            if report_attention > 0:
+                report_part += f"/attention {report_attention}"
+            status_counts = (
+                summary.get("report_health_status_counts")
+                if isinstance(summary.get("report_health_status_counts"), dict)
+                else {}
+            )
+            status_parts = [
+                f"{safe_label(key)}:{int(value or 0)}"
+                for key, value in sorted(status_counts.items())[:3]
+                if str(key).strip() and int(value or 0) > 0
+            ]
+            if status_parts:
+                report_part += " " + ",".join(status_parts)
+            parts.append(report_part)
         latest = summary.get("latest_runtime_event") if isinstance(summary.get("latest_runtime_event"), dict) else {}
         event_type = safe_label(latest.get("event_type"))
         status = safe_label(latest.get("status"))
         if event_type:
             parts.append(f"latest {event_type}:{status or 'unknown'}")
+        latest_report = summary.get("latest_report_ready") if isinstance(summary.get("latest_report_ready"), dict) else {}
+        report_status = safe_label(latest_report.get("status"))
+        if report_status:
+            parts.append(f"latest-report {report_status}")
+        environment_import_failure_code_counts = (
+            latest_report.get("environment_import_failure_code_counts")
+            if isinstance(latest_report.get("environment_import_failure_code_counts"), dict)
+            else {}
+        )
+        environment_failure_parts = [
+            f"{safe_label(key)}:{int(value or 0)}"
+            for key, value in sorted(environment_import_failure_code_counts.items())[:3]
+            if str(key).strip() and int(value or 0) > 0
+        ]
+        if environment_failure_parts:
+            parts.append("env-import-failures " + ",".join(environment_failure_parts))
+        engine_write_bridge_failed_count = int(
+            latest_report.get("engine_write_bridge_failed_count") or 0
+        )
+        engine_write_bridge_error_code_counts = (
+            latest_report.get("engine_write_bridge_error_code_counts")
+            if isinstance(latest_report.get("engine_write_bridge_error_code_counts"), dict)
+            else {}
+        )
+        engine_write_failure_parts = [
+            f"{safe_label(key)}:{int(value or 0)}"
+            for key, value in sorted(engine_write_bridge_error_code_counts.items())[:3]
+            if str(key).strip() and int(value or 0) > 0
+        ]
+        if engine_write_failure_parts:
+            parts.append("engine-write-failures " + ",".join(engine_write_failure_parts))
+        elif engine_write_bridge_failed_count > 0:
+            parts.append(f"engine-write-failures {engine_write_bridge_failed_count}")
+        engine_write_readiness_mismatch_count = int(
+            latest_report.get("engine_write_readiness_mismatch_count") or 0
+        )
+        engine_write_readiness_mismatch_channels = (
+            latest_report.get("engine_write_readiness_mismatch_channels")
+            if isinstance(latest_report.get("engine_write_readiness_mismatch_channels"), list)
+            else []
+        )
+        engine_write_mismatch_parts = [
+            safe_label(item)
+            for item in engine_write_readiness_mismatch_channels[:4]
+            if safe_label(item)
+        ]
+        if engine_write_readiness_mismatch_count:
+            if engine_write_mismatch_parts:
+                parts.append(
+                    "engine-write-mismatch "
+                    f"{engine_write_readiness_mismatch_count}(" + "/".join(engine_write_mismatch_parts) + ")"
+                )
+            else:
+                parts.append(f"engine-write-mismatch {engine_write_readiness_mismatch_count}")
         latest_skip = summary.get("latest_disclosure_skip") if isinstance(summary.get("latest_disclosure_skip"), dict) else {}
         skip_type = safe_label(latest_skip.get("event_type"))
         skip_audience = safe_label(latest_skip.get("audience"))
@@ -4627,6 +4976,39 @@ class LANChatAgentWorker:
         return ", ".join(parts)
 
     @staticmethod
+    def _format_agent_runtime_replay_final_adjustment_report(summary: Any) -> str:
+        if not isinstance(summary, dict) or not summary:
+            return "confirmations 0"
+        confirmations = int(summary.get("confirmation_count") or 0)
+        failed = int(summary.get("confirmation_failed_count") or 0)
+        skipped = int(summary.get("confirmation_skipped_count") or 0)
+        parts = [f"confirmations {confirmations}"]
+        if failed:
+            parts.append(f"failed {failed}")
+        if skipped:
+            parts.append(f"skipped {skipped}")
+        decision_counts = summary.get("decision_counts") if isinstance(summary.get("decision_counts"), dict) else {}
+        decision_text = ",".join(
+            f"{str(key).strip().replace('_', '-')}:{int(value or 0)}"
+            for key, value in sorted(decision_counts.items())[:4]
+            if str(key).strip() and int(value or 0) > 0
+        )
+        if decision_text:
+            parts.append(f"decisions {decision_text}")
+        latest = summary.get("latest_confirmation") if isinstance(summary.get("latest_confirmation"), dict) else {}
+        latest_decision = str(latest.get("decision") or "").strip().replace("_", "-")
+        latest_proposal = str(latest.get("proposal_id") or "").strip()
+        conflict_count = int(latest.get("conflict_item_count") or 0)
+        if latest_decision:
+            latest_text = f"latest {latest_decision}"
+            if latest_proposal:
+                latest_text += f" {latest_proposal[:48]}"
+            if conflict_count:
+                latest_text += f" conflicts {conflict_count}"
+            parts.append(latest_text)
+        return ", ".join(parts)
+
+    @staticmethod
     def _format_agent_runtime_replay_environment_report(summary: Any) -> str:
         if not isinstance(summary, dict) or not summary:
             return "ready 0, import 0"
@@ -4655,6 +5037,12 @@ class LANChatAgentWorker:
     def _format_agent_runtime_replay_resource_readiness_report(summary: Any) -> str:
         if not isinstance(summary, dict) or not summary:
             return "queries 0, published 0, events 0"
+        def safe_label(value: Any) -> str:
+            text = str(value or "").strip().replace("_", "-")
+            for marker in ("prompt", "provider", "url", "raw", "token", "api-key", "path", "session", "job"):
+                text = re.sub(marker, "resource", text, flags=re.IGNORECASE)
+            return text[:60]
+
         queries = int(summary.get("status_query_count") or 0)
         published = int(summary.get("published_count") or 0)
         publish_failed = int(summary.get("publish_failed_count") or 0)
@@ -4664,11 +5052,47 @@ class LANChatAgentWorker:
             f"published {published}/{publish_failed}",
             f"events {readiness_events}",
         ]
+        publish_requested = int(summary.get("publish_requested_total") or 0)
+        publish_enabled = int(summary.get("publish_enabled_total") or 0)
+        publish_unavailable = int(summary.get("publish_unavailable_total") or 0)
+        if publish_requested or publish_enabled or publish_unavailable:
+            parts.append(
+                f"publish-ready requested/enabled/unavailable {publish_requested}/{publish_enabled}/{publish_unavailable}"
+            )
+        publish_status_counts = (
+            summary.get("publish_status_counts")
+            if isinstance(summary.get("publish_status_counts"), dict)
+            else {}
+        )
+        publish_status_text = ",".join(
+            f"{safe_label(key)}:{int(value or 0)}"
+            for key, value in sorted(publish_status_counts.items())[:4]
+            if safe_label(key) and int(value or 0) > 0
+        )
+        if publish_status_text:
+            parts.append(f"publish-status {publish_status_text}")
+        requested_total = int(summary.get("status_query_requested_total") or 0)
+        enabled_total = int(summary.get("status_query_enabled_total") or 0)
+        unavailable_total = int(summary.get("status_query_unavailable_total") or 0)
+        if requested_total or enabled_total or unavailable_total:
+            parts.append(f"query-ready requested/enabled/unavailable {requested_total}/{enabled_total}/{unavailable_total}")
+        query_status_counts = (
+            summary.get("status_query_status_counts")
+            if isinstance(summary.get("status_query_status_counts"), dict)
+            else {}
+        )
+        query_status_text = ",".join(
+            f"{safe_label(key)}:{int(value or 0)}"
+            for key, value in sorted(query_status_counts.items())[:4]
+            if safe_label(key) and int(value or 0) > 0
+        )
+        if query_status_text:
+            parts.append(f"query-status {query_status_text}")
         status_counts = summary.get("status_counts") if isinstance(summary.get("status_counts"), dict) else {}
         status_text = ",".join(
-            f"{str(key).strip().replace('_', '-')}:{int(value or 0)}"
+            f"{safe_label(key)}:{int(value or 0)}"
             for key, value in sorted(status_counts.items())[:4]
-            if str(key).strip() and int(value or 0) > 0
+            if safe_label(key) and int(value or 0) > 0
         )
         if status_text:
             parts.append(f"status {status_text}")
@@ -4677,7 +5101,7 @@ class LANChatAgentWorker:
             if isinstance(summary.get("latest_readiness_event"), dict)
             else {}
         )
-        latest_status = str(latest.get("status") or "").strip().replace("_", "-")
+        latest_status = safe_label(latest.get("status"))
         if latest_status:
             parts.append(f"latest {latest_status}")
         return ", ".join(parts)
@@ -4703,6 +5127,12 @@ class LANChatAgentWorker:
     def _format_agent_runtime_resource_flow_report(summary: Any) -> str:
         if not isinstance(summary, dict) or not summary:
             return "batches 0"
+        def safe_label(value: Any) -> str:
+            text = str(value or "").strip().replace("_", "-")
+            for marker in ("prompt", "provider", "url", "raw", "token", "api-key", "path", "session", "job"):
+                text = re.sub(marker, "resource", text, flags=re.IGNORECASE)
+            return text[:60]
+
         batch_count = int(summary.get("batch_count") or 0)
         completed_count = int(summary.get("completed_count") or 0)
         partial_count = int(summary.get("partial_count") or 0)
@@ -4723,6 +5153,11 @@ class LANChatAgentWorker:
         image_ready_count = int(latest.get("image_ready_count") or 0)
         model_ready_count = int(latest.get("model_ready_count") or 0)
         import_ready_count = int(latest.get("import_ready_count") or 0)
+        import_failure_code_counts = (
+            latest.get("import_failure_code_counts")
+            if isinstance(latest.get("import_failure_code_counts"), dict)
+            else {}
+        )
         review_status = str(latest.get("review_status") or "").strip()
         if latest_status or latest_index or requested_count:
             batch_label = (
@@ -4738,6 +5173,13 @@ class LANChatAgentWorker:
             )
         if review_status:
             parts.append(f"review {review_status.replace('_', '-')[:40]}")
+        import_failure_codes = ",".join(
+            f"{safe_label(code)}:{int(count or 0)}"
+            for code, count in sorted(import_failure_code_counts.items())[:4]
+            if safe_label(code) and int(count or 0) > 0
+        )
+        if import_failure_codes:
+            parts.append(f"import-failures {import_failure_codes}")
         needs_attention = [
             str(item).strip().replace("_", "-")[:40]
             for item in list(summary.get("needs_attention") or [])[:4]
@@ -4769,10 +5211,17 @@ class LANChatAgentWorker:
             return "events 0"
         by_phase = summary.get("by_phase") if isinstance(summary.get("by_phase"), dict) else {}
         parts = [f"events {int(summary.get('event_count') or 0)}"]
-        for phase in ("image", "model"):
+        ordered_phases = ["image", "model", "import", "review"]
+        extra_phases = [
+            str(phase)
+            for phase in by_phase.keys()
+            if str(phase) not in set(ordered_phases)
+        ]
+        for phase in ordered_phases + sorted(extra_phases):
             row = by_phase.get(phase) if isinstance(by_phase.get(phase), dict) else {}
             if not row:
-                parts.append(f"{phase} 0/0 failed 0")
+                if phase in {"image", "model"}:
+                    parts.append(f"{phase} 0/0 failed 0")
                 continue
             parts.append(
                 f"{phase} {int(row.get('item_count') or 0)}/"
@@ -4784,6 +5233,136 @@ class LANChatAgentWorker:
         latest_status = str(latest_row.get("status") or "").strip().replace("_", "-")
         if latest_phase or latest_status:
             parts.append(f"latest {latest_phase or 'resource'}:{latest_status or 'unknown'}")
+        needs_attention = [
+            str(item).strip().replace("_", "-")[:40]
+            for item in list(summary.get("needs_attention") or [])[:4]
+            if str(item).strip()
+        ]
+        if needs_attention:
+            parts.append("needs " + ",".join(needs_attention))
+        return ", ".join(parts)
+
+    @staticmethod
+    def _format_agent_runtime_report_health_report(summary: Any) -> str:
+        if not isinstance(summary, dict) or not summary:
+            return "unknown"
+
+        def safe_label(value: Any) -> str:
+            text = str(value or "").strip().replace("_", "-")
+            for marker in ("prompt", "provider", "url", "raw", "token", "api-key", "path", "session", "job"):
+                text = re.sub(marker, "resource", text, flags=re.IGNORECASE)
+            return text[:60]
+
+        status = safe_label(summary.get("status")) or "unknown"
+        attention = "yes" if bool(summary.get("attention_required")) else "no"
+        batch_failed = int(summary.get("batch_failed_count") or 0)
+        batch_partial = int(summary.get("batch_partial_count") or 0)
+        batch_waiting = int(summary.get("batch_waiting_count") or 0)
+        import_failed = int(summary.get("import_failed_count") or 0)
+        resource_failed = int(summary.get("resource_phase_failed_count") or 0)
+        resource_partial = int(summary.get("resource_phase_partial_count") or 0)
+        resource_waiting = int(summary.get("resource_phase_waiting_count") or 0)
+        asset_failed = int(summary.get("asset_failed_count") or 0)
+        asset_incomplete = int(summary.get("asset_incomplete_count") or 0)
+        sync_health = safe_label(summary.get("sync_health_status")) or "unknown"
+        import_failure_code_counts = (
+            summary.get("import_failure_code_counts")
+            if isinstance(summary.get("import_failure_code_counts"), dict)
+            else {}
+        )
+        import_failure_codes = ", ".join(
+            safe_label(code)
+            for code, count in sorted(import_failure_code_counts.items())
+            if int(count or 0) > 0 and safe_label(code)
+        ) or "none"
+        sync_failure_code_counts = (
+            summary.get("sync_failure_code_counts")
+            if isinstance(summary.get("sync_failure_code_counts"), dict)
+            else {}
+        )
+        sync_failure_codes = ", ".join(
+            safe_label(code)
+            for code, count in sorted(sync_failure_code_counts.items())
+            if int(count or 0) > 0 and safe_label(code)
+        ) or "none"
+        latest_sync_failure_code = safe_label(summary.get("latest_sync_failure_code"))
+        engine_write_readiness_mismatch_count = int(
+            summary.get("engine_write_readiness_mismatch_count") or 0
+        )
+        raw_engine_write_readiness_mismatch_channels = (
+            summary.get("engine_write_readiness_mismatch_channels")
+            if isinstance(summary.get("engine_write_readiness_mismatch_channels"), list)
+            else []
+        )
+        engine_write_readiness_mismatch_channels = "/".join(
+            safe_label(item)
+            for item in raw_engine_write_readiness_mismatch_channels[:4]
+            if safe_label(item)
+        )
+        raw_reasons = summary.get("reasons") if isinstance(summary.get("reasons"), list) else []
+        reasons = ", ".join(
+            safe_label(reason)
+            for reason in raw_reasons[:5]
+            if safe_label(reason)
+        ) or "none"
+        parts = [
+            status,
+            f"attention {attention}",
+            f"batch failed/partial/waiting {batch_failed}/{batch_partial}/{batch_waiting}",
+            f"import failed {import_failed}",
+            f"resource phase failed/partial/waiting {resource_failed}/{resource_partial}/{resource_waiting}",
+            f"asset failed/incomplete {asset_failed}/{asset_incomplete}",
+            f"sync {sync_health}",
+        ]
+        if import_failure_codes != "none":
+            parts.append(f"import failures {import_failure_codes}")
+        if sync_failure_codes != "none":
+            parts.append(f"sync failures {sync_failure_codes}")
+        if latest_sync_failure_code:
+            parts.append(f"latest sync failure {latest_sync_failure_code}")
+        if engine_write_readiness_mismatch_count:
+            if engine_write_readiness_mismatch_channels:
+                parts.append(
+                    f"engine-write mismatch {engine_write_readiness_mismatch_count}"
+                    f"({engine_write_readiness_mismatch_channels})"
+                )
+            else:
+                parts.append(f"engine-write mismatch {engine_write_readiness_mismatch_count}")
+        if reasons != "none":
+            parts.append(f"reasons {reasons}")
+        return ", ".join(parts)
+
+    @staticmethod
+    def _format_agent_runtime_fact_source_boundary_report(summary: Any) -> str:
+        if not isinstance(summary, dict) or not summary:
+            return "runtime 0, external 0, external unavailable"
+        runtime_count = int(summary.get("runtime_business_fact_count") or 0)
+        external_count = int(summary.get("mirrored_external_fact_count") or 0)
+        plan_count = int(summary.get("runtime_plan_fact_count") or 0)
+        batch_count = int(summary.get("runtime_batch_fact_count") or 0)
+        resource_count = int(summary.get("runtime_resource_event_count") or 0)
+        import_count = int(summary.get("runtime_import_event_count") or 0)
+        sync_count = int(summary.get("sync_event_count") or 0)
+        engine_write_count = int(summary.get("engine_write_result_count") or 0)
+        engine_write_boundary_count = int(summary.get("engine_write_boundary_fact_count") or 0)
+        snapshot_count = int(summary.get("scene_snapshot_count") or 0)
+        external_available = bool(summary.get("external_authoritative_available"))
+        parts = [
+            f"runtime {runtime_count}",
+            f"external {external_count}",
+            f"plan/batch {plan_count}/{batch_count}",
+            f"resource/import {resource_count}/{import_count}",
+            f"sync/write/snapshot {sync_count}/{engine_write_count}/{snapshot_count}",
+            f"write-boundary {engine_write_boundary_count}",
+        ]
+        parts.append("external available" if external_available else "external unavailable")
+        notes = [
+            str(item).strip().replace("_", "-")[:48]
+            for item in list(summary.get("boundary_notes") or [])[:3]
+            if str(item).strip()
+        ]
+        if notes:
+            parts.append("notes " + ",".join(notes))
         return ", ".join(parts)
 
     @staticmethod
@@ -4952,6 +5531,12 @@ class LANChatAgentWorker:
     def _format_agent_runtime_sync_replay_report(summary: Any) -> str:
         if not isinstance(summary, dict):
             return "recorded 0, failed 0"
+        def safe_label(value: Any) -> str:
+            text = str(value or "").strip().replace("_", "-")
+            for marker in ("prompt", "provider", "url", "raw", "token", "api-key", "path", "session", "job"):
+                text = re.sub(marker, "resource", text, flags=re.IGNORECASE)
+            return text[:60]
+
         recorded_count = int(summary.get("recorded_count") or 0)
         failed_count = int(summary.get("failed_count") or 0)
         actor_transform_count = int(summary.get("actor_transform_count") or 0)
@@ -4966,6 +5551,17 @@ class LANChatAgentWorker:
         latest_bytes_transferred = int(summary.get("latest_bytes_transferred") or 0)
         latest_total_bytes = int(summary.get("latest_total_bytes") or 0)
         latest_event_type = str(summary.get("latest_event_type") or "").strip().replace("_", "-")
+        failure_code_counts = (
+            summary.get("failure_code_counts")
+            if isinstance(summary.get("failure_code_counts"), dict)
+            else {}
+        )
+        failure_codes = ", ".join(
+            f"{safe_label(code)}:{int(count or 0)}"
+            for code, count in sorted(failure_code_counts.items())[:5]
+            if int(count or 0) > 0 and safe_label(code)
+        )
+        latest_failure_code = safe_label(summary.get("latest_failure_code"))
         parts = [f"recorded {recorded_count}", f"failed {failed_count}"]
         if actor_transform_count:
             parts.append(f"actor-transform {actor_transform_count}")
@@ -4995,6 +5591,10 @@ class LANChatAgentWorker:
             parts.append(" ".join(transfer_parts))
         if latest_event_type:
             parts.append(f"latest {latest_event_type[:48]}")
+        if failure_codes:
+            parts.append(f"failure codes {failure_codes}")
+        if latest_failure_code:
+            parts.append(f"latest failure {latest_failure_code}")
         return ", ".join(parts)
 
     @staticmethod
@@ -5094,6 +5694,11 @@ class LANChatAgentWorker:
             if isinstance(summary.get("runtime_event_replay_summary"), dict)
             else {}
         )
+        engine_write_boundary = (
+            summary.get("engine_write_boundary_summary")
+            if isinstance(summary.get("engine_write_boundary_summary"), dict)
+            else {}
+        )
 
         def safe_event(value: Any) -> str:
             event = str(value or "").strip()
@@ -5144,6 +5749,11 @@ class LANChatAgentWorker:
             parts.append(
                 "runtime-events "
                 + LANChatAgentWorker._format_agent_runtime_replay_runtime_event_report(runtime_event_replay)
+            )
+        if int(engine_write_boundary.get("boundary_fact_count") or 0) > 0:
+            parts.append(
+                "engine_write_boundary "
+                + LANChatAgentWorker._format_agent_runtime_engine_write_boundary_report(engine_write_boundary)
             )
         if recent:
             parts.append("recent " + ",".join(recent[:3]))
@@ -5229,6 +5839,12 @@ class LANChatAgentWorker:
             if isinstance(summary.get("delete_status_counts"), dict)
             else {}
         )
+        status_export_count = int(summary.get("status_export_count") or 0)
+        latest_status_export = (
+            summary.get("latest_status_export")
+            if isinstance(summary.get("latest_status_export"), dict)
+            else {}
+        )
 
         def status_text(counts: Any) -> str:
             if not isinstance(counts, dict) or not counts:
@@ -5240,11 +5856,122 @@ class LANChatAgentWorker:
             ]
             return "(" + ",".join(rows[:4]) + ")" if rows else ""
 
+        parts = [
+            f"import {import_count}{status_text(import_status_counts)}",
+            f"transform {transform_count}{status_text(transform_status_counts)}",
+            f"env-import {environment_import_count}{status_text(environment_import_status_counts)}",
+            f"actor-delete {delete_count}{status_text(delete_status_counts)}",
+        ]
+        mismatch_count = int(summary.get("readiness_mismatch_count") or 0)
+        mismatch_channels = summary.get("readiness_mismatch_channels")
+        if mismatch_count and isinstance(mismatch_channels, list):
+            names = [
+                str(item or "").replace("_", "-")[:32]
+                for item in mismatch_channels[:4]
+                if str(item or "").strip()
+                and "provider" not in str(item).lower()
+                and "secret" not in str(item).lower()
+            ]
+            if names:
+                parts.append(f"readiness-mismatch {mismatch_count}(" + "/".join(names) + ")")
+        if status_export_count > 0:
+            export_bits = ["recorded" if latest_status_export.get("recorded") else "not-recorded"]
+            bridge_failed = int(latest_status_export.get("engine_write_bridge_failed_count") or 0)
+            if bridge_failed:
+                export_bits.append(f"bridge-failed:{bridge_failed}")
+            readiness_bits = []
+            for label, key in (
+                ("native", "engine_write_readiness_native_enabled_count"),
+                ("runtime-state", "engine_write_readiness_runtime_state_only_count"),
+                ("fallback", "engine_write_readiness_fallback_count"),
+                ("disabled", "engine_write_readiness_disabled_count"),
+                ("unavailable", "engine_write_readiness_unavailable_count"),
+            ):
+                value = int(latest_status_export.get(key) or 0)
+                if value:
+                    readiness_bits.append(f"{label}:{value}")
+            if readiness_bits:
+                export_bits.append("readiness " + ",".join(readiness_bits[:5]))
+            channel_bits = []
+            for label, key in (
+                ("native", "engine_write_readiness_native_enabled_channels"),
+                ("runtime-state", "engine_write_readiness_runtime_state_only_channels"),
+                ("fallback", "engine_write_readiness_fallback_channels"),
+                ("disabled", "engine_write_readiness_disabled_channels"),
+                ("unavailable", "engine_write_readiness_unavailable_channels"),
+            ):
+                values = latest_status_export.get(key)
+                if not isinstance(values, list) or not values:
+                    continue
+                names = [
+                    str(item or "").replace("_", "-")[:32]
+                    for item in values[:3]
+                    if str(item or "").strip()
+                    and "provider" not in str(item).lower()
+                    and "secret" not in str(item).lower()
+                ]
+                if names:
+                    channel_bits.append(f"{label} " + "/".join(names))
+            if channel_bits:
+                export_bits.append("channels " + "; ".join(channel_bits[:5]))
+            error_counts = latest_status_export.get("engine_write_bridge_error_code_counts")
+            if isinstance(error_counts, dict) and error_counts:
+                safe_errors = [
+                    f"{str(key).replace('_', '-')}:{int(value or 0)}"
+                    for key, value in sorted(error_counts.items())
+                    if int(value or 0) > 0
+                    and "provider" not in str(key).lower()
+                    and "secret" not in str(key).lower()
+                ]
+                if safe_errors:
+                    export_bits.append("errors " + ",".join(safe_errors[:3]))
+            parts.append(f"status-export {status_export_count}(" + ", ".join(export_bits) + ")")
+        return ", ".join(parts)
+
+    @staticmethod
+    def _format_agent_runtime_engine_write_boundary_report(summary: Any) -> str:
+        if not isinstance(summary, dict) or not summary:
+            return "boundary 0, import/transform/delete 0/0/0"
+        boundary_count = int(summary.get("boundary_fact_count") or 0)
+        import_count = int(summary.get("import_boundary_count") or 0)
+        transform_count = int(summary.get("transform_boundary_count") or 0)
+        delete_count = int(summary.get("delete_boundary_count") or 0)
+
+        def safe_label(value: Any) -> str:
+            text = str(value or "").strip().lower()
+            if not text:
+                return ""
+            text = re.sub(r"provider|prompt|raw|url|api[_-]?key|token", "runtime", text)
+            text = re.sub(r"[^a-z0-9_.:-]+", "-", text)
+            return text[:48].strip("-")
+
+        def count_rows(value: Any) -> str:
+            if not isinstance(value, dict) or not value:
+                return "none"
+            rows: list[str] = []
+            for key, count in sorted(value.items()):
+                label = safe_label(key)
+                if not label:
+                    continue
+                try:
+                    numeric_count = int(count or 0)
+                except (TypeError, ValueError):
+                    continue
+                if numeric_count > 0:
+                    rows.append(f"{label}:{numeric_count}")
+            return ",".join(rows[:4]) if rows else "none"
+
+        source_text = count_rows(summary.get("write_source_counts"))
+        status_text = count_rows(summary.get("status_counts"))
+        bridge_calls = int(summary.get("bridge_call_count") or 0)
+        bridge_success = int(summary.get("bridge_success_count") or 0)
+        bridge_failed = int(summary.get("bridge_failed_count") or 0)
+        bridge_error_text = count_rows(summary.get("bridge_error_code_counts"))
         return (
-            f"import {import_count}{status_text(import_status_counts)}, "
-            f"transform {transform_count}{status_text(transform_status_counts)}, "
-            f"env-import {environment_import_count}{status_text(environment_import_status_counts)}, "
-            f"actor-delete {delete_count}{status_text(delete_status_counts)}"
+            f"boundary {boundary_count}, "
+            f"import/transform/delete {import_count}/{transform_count}/{delete_count}, "
+            f"sources {source_text}, statuses {status_text}, "
+            f"bridge {bridge_calls}/{bridge_success}/{bridge_failed}, errors {bridge_error_text}"
         )
 
     @staticmethod
@@ -5292,6 +6019,40 @@ class LANChatAgentWorker:
             f"channels {channel_count}, requested {requested_count}, "
             f"enabled {enabled_count}, unavailable {unavailable_count}{unavailable_text}"
         )
+
+    @staticmethod
+    def _format_agent_runtime_engine_write_readiness_report(summary: Any) -> str:
+        if not isinstance(summary, dict) or not summary:
+            return "channels 0, native 0, runtime-state 0, fallback 0, disabled 0"
+
+        def count(name: str) -> int:
+            try:
+                return max(0, int(summary.get(name) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        def channel_list(name: str) -> str:
+            values = summary.get(name)
+            if not isinstance(values, list) or not values:
+                return ""
+            names = [
+                str(item or "").replace("_", "-")[:32]
+                for item in values[:3]
+                if str(item or "").strip()
+            ]
+            return "(" + "?".join(names) + ")" if names else ""
+
+        parts = [
+            f"channels {count('channel_count')}",
+            f"native {count('native_enabled_count')}{channel_list('native_enabled_channels')}",
+            f"runtime-state {count('runtime_state_only_count')}{channel_list('runtime_state_only_channels')}",
+            f"fallback {count('fallback_count')}{channel_list('fallback_channels')}",
+            f"disabled {count('disabled_count')}{channel_list('disabled_channels')}",
+        ]
+        unavailable_count = count("unavailable_count")
+        if unavailable_count:
+            parts.append(f"unavailable {unavailable_count}{channel_list('unavailable_channels')}")
+        return ", ".join(parts)
 
     @staticmethod
     def _is_runtime_report_query(text: str) -> bool:
@@ -5621,6 +6382,16 @@ class LANChatAgentWorker:
         import_summary = status.get("import_summary", {}) if isinstance(status.get("import_summary"), dict) else {}
         provider = status.get("provider_summary", {}) if isinstance(status.get("provider_summary"), dict) else {}
         provider_readiness = status.get("provider_readiness_summary", {}) if isinstance(status.get("provider_readiness_summary"), dict) else {}
+        engine_write_readiness = (
+            status.get("engine_write_readiness_summary", {})
+            if isinstance(status.get("engine_write_readiness_summary"), dict)
+            else {}
+        )
+        report_health = (
+            status.get("report_health_summary", {})
+            if isinstance(status.get("report_health_summary"), dict)
+            else {}
+        )
         sync_summary = status.get("sync_summary", {}) if isinstance(status.get("sync_summary"), dict) else {}
         sync_health = status.get("sync_health_digest", {}) if isinstance(status.get("sync_health_digest"), dict) else {}
         asset_transfer_summary = status.get("asset_transfer_summary", {}) if isinstance(status.get("asset_transfer_summary"), dict) else {}
@@ -5638,6 +6409,21 @@ class LANChatAgentWorker:
         runtime_event_replay = (
             status.get("runtime_event_replay_summary", {})
             if isinstance(status.get("runtime_event_replay_summary"), dict)
+            else {}
+        )
+        gm_summary_replay = (
+            status.get("gm_summary_replay_summary", {})
+            if isinstance(status.get("gm_summary_replay_summary"), dict)
+            else {}
+        )
+        batch_execution_replay = (
+            status.get("batch_execution_replay_summary", {})
+            if isinstance(status.get("batch_execution_replay_summary"), dict)
+            else {}
+        )
+        tool_graph_queue_replay = (
+            status.get("tool_graph_queue_replay_summary", {})
+            if isinstance(status.get("tool_graph_queue_replay_summary"), dict)
             else {}
         )
         runtime_guard = (
@@ -5661,6 +6447,11 @@ class LANChatAgentWorker:
             else {}
         )
         engine_write = status.get("engine_write_summary", {}) if isinstance(status.get("engine_write_summary"), dict) else {}
+        engine_write_boundary = (
+            status.get("engine_write_boundary_summary", {})
+            if isinstance(status.get("engine_write_boundary_summary"), dict)
+            else {}
+        )
         message_delivery = status.get("message_delivery_summary", {}) if isinstance(status.get("message_delivery_summary"), dict) else {}
         batch_resource_flow = (
             status.get("batch_resource_flow_summary", {})
@@ -5695,9 +6486,16 @@ class LANChatAgentWorker:
         semantic_arbitration_text = self._format_agent_runtime_semantic_arbitration_report(semantic_arbitration)
         scene_snapshot_text = self._format_agent_runtime_scene_snapshot_report(scene_snapshot)
         runtime_resource_text = self._format_agent_runtime_resource_stage_report(runtime_resources)
+        fact_source_text = self._format_agent_runtime_fact_source_boundary_report(
+            status.get("fact_source_boundary_summary")
+        )
         import_text = self._format_agent_runtime_import_stage_report(import_summary)
+        report_health_text = self._format_agent_runtime_report_health_report(report_health)
         resource_text = self._format_agent_runtime_resource_report(provider)
         resource_readiness_text = self._format_agent_runtime_resource_readiness_report(provider_readiness)
+        engine_write_readiness_text = self._format_agent_runtime_engine_write_readiness_report(
+            engine_write_readiness
+        )
         environment_text = self._format_agent_runtime_environment_report(environment)
         review_text = self._format_agent_runtime_review_report(review_summary)
         geometry_text = self._format_agent_runtime_geometry_fact_report(geometry_summary)
@@ -5712,7 +6510,13 @@ class LANChatAgentWorker:
         asset_transfer_replay_text = self._format_agent_runtime_replay_asset_transfer_report(asset_transfer_replay)
         peer_sync_replay_text = self._format_agent_runtime_replay_peer_sync_report(peer_sync_replay)
         runtime_event_replay_text = self._format_agent_runtime_replay_runtime_event_report(runtime_event_replay)
+        gm_summary_replay_text = self._format_agent_runtime_gm_summary_replay_report(gm_summary_replay)
+        tool_graph_replay_text = self._format_agent_runtime_tool_graph_replay_report(
+            batch_execution_replay,
+            tool_graph_queue_replay,
+        )
         engine_write_text = self._format_agent_runtime_engine_write_report(engine_write)
+        engine_write_boundary_text = self._format_agent_runtime_engine_write_boundary_report(engine_write_boundary)
         message_delivery_text = self._format_agent_runtime_message_delivery_report(message_delivery)
         resource_flow_text = self._format_agent_runtime_resource_flow_report(batch_resource_flow)
         batch_tooling_text = self._format_agent_runtime_batch_tooling_report(batch_tooling)
@@ -5754,9 +6558,11 @@ class LANChatAgentWorker:
             f"- 场景契约：{scene_contract_text}",
             f"- 语义仲裁：{semantic_arbitration_text}",
             f"- 场景快照：{scene_snapshot_text}",
+            f"- 事实来源：{fact_source_text}",
             f"- 环境组件：{environment_text}",
             f"- Runtime 资源：{runtime_resource_text}",
             f"- 导入：{import_text}",
+            f"- 报告健康：{report_health_text}",
             f"- 审查：{review_text}",
             f"- 几何事实：{geometry_text}",
             f"- 审查建议：{review_proposal_text}",
@@ -5768,6 +6574,7 @@ class LANChatAgentWorker:
             f"- 同传复盘：{asset_transfer_replay_text}",
             f"- Peer 复盘：{peer_sync_replay_text}",
             f"- 引擎写入：{engine_write_text}",
+            f"- 写入边界：{engine_write_boundary_text}",
             f"- 消息送达：{message_delivery_text}",
             f"- 高风险资源：{guarded_text}",
             f"- 批次：{batch.get('batch_count', 0)} 个，状态 {batch_status or '暂无'}",
@@ -5779,18 +6586,71 @@ class LANChatAgentWorker:
             f"- Plan lifecycle: {plan_lifecycle_text}",
             f"- VLM replay: {vlm_checkpoint_text}",
             f"- Review advisory replay: {review_advisory_replay_text}",
+            f"- GM replay: {gm_summary_replay_text}",
+            f"- ToolGraph replay: {tool_graph_replay_text}",
             f"- 介入批次：{intervention_batch_line}",
             f"- ToolCallGraph：{graphs.get('graph_count', 0)} 个，状态 {graph_status or '暂无'}",
             f"- Tool execution：{tool_execution_text}",
             f"- Runtime queue: {tool_queue_health_text}",
             f"- 资源通道：{resource_text}",
             f"- 资源可用性：{resource_readiness_text}",
+            f"- Engine write readiness: {engine_write_readiness_text}",
         ])
         reply_lines.insert(-8, f"- RuntimeEvent replay: {runtime_event_replay_text}")
         reply = "\n".join(reply_lines)
         if event_lines:
             reply += "\n- 最近状态：" + "；".join(event_lines)
         return reply
+
+    @staticmethod
+    def _format_agent_runtime_tool_graph_replay_report(
+        batch_summary: Any,
+        queue_summary: Any,
+    ) -> str:
+        if not isinstance(batch_summary, dict):
+            batch_summary = {}
+        if not isinstance(queue_summary, dict):
+            queue_summary = {}
+
+        def count(source: dict[str, Any], name: str) -> int:
+            try:
+                return max(0, int(source.get(name) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        return (
+            "batch start/done/final "
+            f"{count(batch_summary, 'started_count')}/"
+            f"{count(batch_summary, 'completed_count')}/"
+            f"{count(batch_summary, 'finalized_count')}, "
+            "queue queued/dequeued/rejected/blocked "
+            f"{count(queue_summary, 'queued_count')}/"
+            f"{count(queue_summary, 'dequeued_count')}/"
+            f"{count(queue_summary, 'rejected_count')}/"
+            f"{count(queue_summary, 'blocked_count')}"
+        )
+
+    @staticmethod
+    def _format_agent_runtime_gm_summary_replay_report(summary: Any) -> str:
+        if not isinstance(summary, dict) or not summary:
+            return "exported 0, failed 0, readiness publish/query 0/0"
+
+        def count(name: str) -> int:
+            try:
+                return max(0, int(summary.get(name) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        exported = count("exported_count")
+        failed = count("failed_count")
+        available = count("available_count")
+        scene_plan = count("scene_plan_count")
+        readiness_publish = count("resource_readiness_publish_total")
+        readiness_query = count("resource_readiness_query_total")
+        return (
+            f"exported {exported}, failed {failed}, available {available}, "
+            f"scene-plan {scene_plan}, readiness publish/query {readiness_publish}/{readiness_query}"
+        )
 
     def _agent_runtime_gm_summary_reply(
         self,
@@ -5817,6 +6677,11 @@ class LANChatAgentWorker:
         context_digest = summary.get("context_digest", {}) if isinstance(summary.get("context_digest"), dict) else {}
         speaker_counts = summary.get("speaker_type_counts", {}) if isinstance(summary.get("speaker_type_counts"), dict) else {}
         sync_health = summary.get("sync_health_digest", {}) if isinstance(summary.get("sync_health_digest"), dict) else {}
+        asset_transfer_digest = (
+            summary.get("asset_transfer_digest", {})
+            if isinstance(summary.get("asset_transfer_digest"), dict)
+            else {}
+        )
         sync_replay_digest = (
             summary.get("sync_replay_digest", {})
             if isinstance(summary.get("sync_replay_digest"), dict)
@@ -5872,6 +6737,16 @@ class LANChatAgentWorker:
             if isinstance(summary.get("engine_write_digest"), dict)
             else {}
         )
+        engine_write_readiness_digest = (
+            summary.get("engine_write_readiness_digest", {})
+            if isinstance(summary.get("engine_write_readiness_digest"), dict)
+            else {}
+        )
+        engine_write_boundary_digest = (
+            summary.get("engine_write_boundary_digest", {})
+            if isinstance(summary.get("engine_write_boundary_digest"), dict)
+            else {}
+        )
         message_delivery_digest = (
             summary.get("message_delivery_digest", {})
             if isinstance(summary.get("message_delivery_digest"), dict)
@@ -5880,6 +6755,11 @@ class LANChatAgentWorker:
         runtime_event_replay_digest = (
             summary.get("runtime_event_replay_digest", {})
             if isinstance(summary.get("runtime_event_replay_digest"), dict)
+            else {}
+        )
+        resource_readiness_replay_digest = (
+            summary.get("resource_readiness_replay_digest", {})
+            if isinstance(summary.get("resource_readiness_replay_digest"), dict)
             else {}
         )
         vlm_checkpoint_digest = (
@@ -5907,9 +6787,19 @@ class LANChatAgentWorker:
             if isinstance(summary.get("scene_snapshot_digest"), dict)
             else {}
         )
+        fact_source_boundary_digest = (
+            summary.get("fact_source_boundary_digest", {})
+            if isinstance(summary.get("fact_source_boundary_digest"), dict)
+            else {}
+        )
         resource_stage_digest = (
             summary.get("resource_stage_digest", {})
             if isinstance(summary.get("resource_stage_digest"), dict)
+            else {}
+        )
+        report_health_digest = (
+            summary.get("report_health_digest", {})
+            if isinstance(summary.get("report_health_digest"), dict)
             else {}
         )
         import_stage_digest = (
@@ -5960,6 +6850,12 @@ class LANChatAgentWorker:
             review_advisory_replay_digest
         )
         engine_write_text = self._format_agent_runtime_engine_write_report(engine_write_digest)
+        engine_write_readiness_text = self._format_agent_runtime_engine_write_readiness_report(
+            engine_write_readiness_digest
+        )
+        engine_write_boundary_text = self._format_agent_runtime_engine_write_boundary_report(
+            engine_write_boundary_digest
+        )
         message_delivery_text = self._format_agent_runtime_message_delivery_report(
             message_delivery_digest,
             redact_agent_reply=True,
@@ -5967,12 +6863,18 @@ class LANChatAgentWorker:
         runtime_event_replay_text = self._format_agent_runtime_gm_runtime_event_replay_digest(
             runtime_event_replay_digest
         )
+        resource_readiness_replay_text = self._format_agent_runtime_replay_resource_readiness_report(
+            resource_readiness_replay_digest
+        )
         scene_contract_text = self._format_agent_runtime_scene_contract_report(scene_design_contract_digest)
         semantic_arbitration_text = self._format_agent_runtime_semantic_arbitration_report(semantic_arbitration_digest)
         scene_snapshot_text = self._format_agent_runtime_scene_snapshot_report(scene_snapshot_digest)
+        fact_source_text = self._format_agent_runtime_fact_source_boundary_report(fact_source_boundary_digest)
         runtime_resource_text = self._format_agent_runtime_resource_stage_report(resource_stage_digest)
         import_text = self._format_agent_runtime_import_stage_report(import_stage_digest)
+        report_health_text = self._format_agent_runtime_report_health_report(report_health_digest)
         geometry_text = self._format_agent_runtime_geometry_fact_report(geometry_fact_digest)
+        asset_transfer_text = self._format_agent_runtime_asset_transfer_report(asset_transfer_digest)
         tool_queue_health_text = self._format_agent_runtime_tool_queue_health_report(tool_queue_health_digest)
         tool_execution_text = self._format_agent_runtime_tool_execution_digest_report(tool_execution_digest)
         contribution_text = "、".join(dict.fromkeys(contribution_names[:6])) if contribution_names else "暂无"
@@ -6003,8 +6905,10 @@ class LANChatAgentWorker:
             f"- Scene contract: {scene_contract_text}",
             f"- Semantic arbitration: {semantic_arbitration_text}",
             f"- Scene snapshot: {scene_snapshot_text}",
+            f"- Fact source: {fact_source_text}",
             f"- Runtime resources: {runtime_resource_text}",
             f"- Import: {import_text}",
+            f"- Report health: {report_health_text}",
             f"- Geometry facts: {geometry_text}",
             f"- Batch tooling: {batch_tooling_text}",
             f"- StatePatch: {state_patch_text}",
@@ -6014,13 +6918,17 @@ class LANChatAgentWorker:
             f"- VLM replay: {vlm_checkpoint_text}",
             f"- Review advisory replay: {review_advisory_replay_text}",
             f"- Engine write: {engine_write_text}",
+            f"- Engine write readiness: {engine_write_readiness_text}",
+            f"- Engine write boundary: {engine_write_boundary_text}",
             f"- Message delivery: {message_delivery_text}",
+            f"- 模型同传：{asset_transfer_text}",
             f"- 资源批次：{self._format_agent_runtime_resource_flow_report(resource_flow_digest)}",
             f"- Tool execution: {tool_execution_text}",
             f"- Runtime queue: {tool_queue_health_text}",
             f"- 多人同步健康：{self._format_agent_runtime_sync_health_report(sync_health)}",
             f"- 同步复盘：{self._format_agent_runtime_gm_sync_replay_digest(sync_replay_digest)}",
         ])
+        reply_lines.append(f"- 资源通道复盘：{resource_readiness_replay_text}")
         reply_lines.append(f"- RuntimeEvent replay: {runtime_event_replay_text}")
         return "\n".join(reply_lines)
 
@@ -6038,6 +6946,76 @@ class LANChatAgentWorker:
         failed = int(digest.get("emit_failed_count") or 0)
         skipped = int(digest.get("disclosure_skipped_count") or 0)
         parts = [f"emitted {emitted}", f"failed {failed}", f"skipped {skipped}"]
+        report_ready = int(digest.get("report_ready_count") or 0)
+        report_attention = int(digest.get("report_attention_count") or 0)
+        if report_ready > 0:
+            report_part = f"report-ready {report_ready}"
+            if report_attention > 0:
+                report_part += f"/attention {report_attention}"
+            status_counts = (
+                digest.get("report_health_status_counts")
+                if isinstance(digest.get("report_health_status_counts"), dict)
+                else {}
+            )
+            status_parts = [
+                f"{safe_label(key)}:{int(value or 0)}"
+                for key, value in sorted(status_counts.items())[:3]
+                if str(key).strip() and int(value or 0) > 0
+            ]
+            if status_parts:
+                report_part += " " + ",".join(status_parts)
+            parts.append(report_part)
+        latest_report = digest.get("latest_report_ready") if isinstance(digest.get("latest_report_ready"), dict) else {}
+        environment_import_failure_code_counts = (
+            latest_report.get("environment_import_failure_code_counts")
+            if isinstance(latest_report.get("environment_import_failure_code_counts"), dict)
+            else {}
+        )
+        environment_failure_parts = [
+            f"{safe_label(key)}:{int(value or 0)}"
+            for key, value in sorted(environment_import_failure_code_counts.items())[:3]
+            if str(key).strip() and int(value or 0) > 0
+        ]
+        if environment_failure_parts:
+            parts.append("env-import-failures " + ",".join(environment_failure_parts))
+        engine_write_bridge_failed_count = int(
+            latest_report.get("engine_write_bridge_failed_count") or 0
+        )
+        engine_write_bridge_error_code_counts = (
+            latest_report.get("engine_write_bridge_error_code_counts")
+            if isinstance(latest_report.get("engine_write_bridge_error_code_counts"), dict)
+            else {}
+        )
+        engine_write_failure_parts = [
+            f"{safe_label(key)}:{int(value or 0)}"
+            for key, value in sorted(engine_write_bridge_error_code_counts.items())[:3]
+            if str(key).strip() and int(value or 0) > 0
+        ]
+        if engine_write_failure_parts:
+            parts.append("engine-write-failures " + ",".join(engine_write_failure_parts))
+        elif engine_write_bridge_failed_count > 0:
+            parts.append(f"engine-write-failures {engine_write_bridge_failed_count}")
+        engine_write_readiness_mismatch_count = int(
+            latest_report.get("engine_write_readiness_mismatch_count") or 0
+        )
+        engine_write_readiness_mismatch_channels = (
+            latest_report.get("engine_write_readiness_mismatch_channels")
+            if isinstance(latest_report.get("engine_write_readiness_mismatch_channels"), list)
+            else []
+        )
+        engine_write_mismatch_parts = [
+            safe_label(item)
+            for item in engine_write_readiness_mismatch_channels[:4]
+            if safe_label(item)
+        ]
+        if engine_write_readiness_mismatch_count:
+            if engine_write_mismatch_parts:
+                parts.append(
+                    "engine-write-mismatch "
+                    f"{engine_write_readiness_mismatch_count}(" + "/".join(engine_write_mismatch_parts) + ")"
+                )
+            else:
+                parts.append(f"engine-write-mismatch {engine_write_readiness_mismatch_count}")
         latest_skip = digest.get("latest_disclosure_skip") if isinstance(digest.get("latest_disclosure_skip"), dict) else {}
         skip_type = safe_label(latest_skip.get("event_type"))
         skip_audience = safe_label(latest_skip.get("audience"))
@@ -6048,7 +7026,13 @@ class LANChatAgentWorker:
     @staticmethod
     def _format_agent_runtime_gm_sync_replay_digest(digest: Any) -> str:
         if not isinstance(digest, dict) or not digest:
-            return "recorded 0锛宎sset progress 0锛宲eer join 0锛宺econcile 0/0"
+            return "recorded 0, asset progress 0, peer join/leave 0/0, reconcile 0/0"
+        def safe_label(value: Any) -> str:
+            text = str(value or "").strip().replace("_", "-")
+            for marker in ("prompt", "provider", "url", "raw", "token", "api-key", "path", "session", "job"):
+                text = re.sub(marker, "resource", text, flags=re.IGNORECASE)
+            return text[:60]
+
         recorded_count = int(digest.get("recorded_count") or 0)
         failed_count = int(digest.get("failed_count") or 0)
         actor_transform_count = int(digest.get("actor_transform_count") or 0)
@@ -6061,6 +7045,17 @@ class LANChatAgentWorker:
         peer_leave_count = int(digest.get("peer_leave_count") or 0)
         sync_reconcile_count = int(digest.get("sync_reconcile_count") or 0)
         sync_reconcile_failed_count = int(digest.get("sync_reconcile_failed_count") or 0)
+        failure_code_counts = (
+            digest.get("failure_code_counts")
+            if isinstance(digest.get("failure_code_counts"), dict)
+            else {}
+        )
+        failure_codes = ", ".join(
+            f"{safe_label(code)}:{int(count or 0)}"
+            for code, count in sorted(failure_code_counts.items())[:5]
+            if int(count or 0) > 0 and safe_label(code)
+        )
+        latest_failure_code = safe_label(digest.get("latest_failure_code"))
         parts = [
             f"recorded {recorded_count}/{failed_count}",
             f"actor transform/delete {actor_transform_count}/{actor_delete_count}",
@@ -6069,6 +7064,8 @@ class LANChatAgentWorker:
             f"peer-ready {peer_ready_count}",
             f"peer join/leave {peer_join_count}/{peer_leave_count}",
             f"reconcile {sync_reconcile_count}/{sync_reconcile_failed_count}",
+            *([f"failure codes {failure_codes}"] if failure_codes else []),
+            *([f"latest failure {latest_failure_code}"] if latest_failure_code else []),
         ]
         return "；".join(parts)
 
@@ -6159,6 +7156,9 @@ class LANChatAgentWorker:
                 label = re.sub(marker, replacement, label, flags=re.IGNORECASE)
             return label[:80]
 
+        def safe_failure_label(value: Any) -> str:
+            return safe_delivery_label(value).replace("_", "-")
+
         requested = int(summary.get("requested_count") or 0)
         succeeded = int(summary.get("succeeded_count") or 0)
         failed = int(summary.get("failed_count") or 0)
@@ -6173,6 +7173,17 @@ class LANChatAgentWorker:
         latest_channel = str(summary.get("latest_channel") or "").strip()
         latest_stage = str(summary.get("latest_stage") or "").strip()
         latest_progress = summary.get("latest_progress")
+        failure_code_counts = (
+            summary.get("failure_code_counts")
+            if isinstance(summary.get("failure_code_counts"), dict)
+            else {}
+        )
+        failure_codes = ", ".join(
+            f"{safe_failure_label(code)}:{int(count or 0)}"
+            for code, count in sorted(failure_code_counts.items())[:5]
+            if int(count or 0) > 0 and safe_failure_label(code)
+        )
+        latest_failure_code = safe_failure_label(summary.get("latest_failure_code"))
         if message_kind_counts:
             safe_kinds = {
                 safe_delivery_label(key): int(value or 0)
@@ -6187,6 +7198,10 @@ class LANChatAgentWorker:
                 if safe_delivery_label(key)
             }
             parts.append(f"鍑哄彛 {safe_channels}")
+        if failure_codes:
+            parts.append(f"failure codes {failure_codes}")
+        if latest_failure_code:
+            parts.append(f"latest failure {latest_failure_code}")
         if latest_kind or latest_channel or latest_stage:
             latest = safe_delivery_label(latest_kind) or "unknown"
             if latest_channel:
@@ -6469,9 +7484,7 @@ class LANChatAgentWorker:
             len(batches),
             ",".join(graph_statuses),
         )
-        if any(status == "failed" for status in graph_statuses):
-            return f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 执行未完成，部分工具调用失败。"
-        return f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 已进入 Runtime 执行队列。"
+        return self._format_agent_runtime_execution_reply(result)
 
     def _execute_active_runtime_plan_generation(
         self,
@@ -6519,9 +7532,7 @@ class LANChatAgentWorker:
             len(batches),
             ",".join(graph_statuses),
         )
-        if any(status == "failed" for status in graph_statuses):
-            return f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 执行未完成，部分工具调用失败。"
-        return f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 已进入 Runtime 执行队列。"
+        return self._format_agent_runtime_execution_reply(result)
 
     def _execute_structured_host_action_via_agent_runtime(self, payload: dict[str, Any]) -> str:
         data = dict(payload or {})
@@ -6586,15 +7597,11 @@ class LANChatAgentWorker:
             )
             return "内部执行异常已记录，当前 Runtime 执行未完成。"
         if runtime_action == "post_generation_add":
-            patch = result.get("patch", {}) if isinstance(result, dict) else {}
-            return f"AgentRuntime 执行结果。"
+            return self._format_agent_runtime_intervention_reply(result if isinstance(result, dict) else {})
         runtime_plan = result.get("plan", {}) if isinstance(result, dict) else {}
-        runtime_plan_id = str(runtime_plan.get("plan_id") or "")
-        batches = result.get("batches", []) if isinstance(result, dict) else []
-        return (
-            f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} "
-            f"已进入 Runtime 执行队列，批次 {len(batches)} 个。"
-        )
+        if not runtime_plan:
+            return self._format_agent_runtime_execution_reply(result if isinstance(result, dict) else {})
+        return self._format_agent_runtime_execution_reply(result)
 
     @staticmethod
     def _runtime_scene_name_from_plan(plan: Any) -> str:
@@ -7058,7 +8065,7 @@ class LANChatAgentWorker:
             room_key = str(room_id or "default")
             result = self._agent_runtime.handle_message(
                 room_id=room_key,
-                text="纭甯冨眬璋冩暣",
+                text="确认布局调整",
                 sender_id=str(payload.get("sender_id") or ""),
                 sender_name=str(payload.get("sender_name") or ""),
                 action="confirm_layout_adjustment",
@@ -7066,15 +8073,7 @@ class LANChatAgentWorker:
             )
             if isinstance(result, dict) and not result.get("recorded") and not result.get("proposal"):
                 return "AgentRuntime 未能记录布局调整确认。"
-            proposal = result.get("proposal", {}) if isinstance(result, dict) else {}
-            proposal = proposal if isinstance(proposal, dict) else {}
-            applied = len(proposal.get("applied_deltas") or [])
-            skipped = len(proposal.get("skipped_deltas") or [])
-            if applied:
-                return f"AgentRuntime 执行结果：已应用 {applied} 项低风险布局调整。"
-            if skipped:
-                return f"AgentRuntime 执行结果：{skipped} 项布局调整因缺少几何信息被跳过。"
-            return "AgentRuntime 已确认布局调整。"
+            return self._format_agent_runtime_layout_confirmation_reply(result if isinstance(result, dict) else {})
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("AgentRuntime layout reflow confirmation skipped: %s", type(exc).__name__)
             return "内部异常已记录，AgentRuntime 布局调整未完成。"

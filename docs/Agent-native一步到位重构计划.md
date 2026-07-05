@@ -1,4 +1,4 @@
-﻿# Agent-native 一步到位重构计划：旧 Workflow 主控退场与能力工具化
+# Agent-native 一步到位重构计划：旧 Workflow 主控退场与能力工具化
 
 更新时间：2026-06-29
 
@@ -2612,7 +2612,110 @@ python editor/plugins/AITool/services/verify_ultimate_plan.py
 git diff --check
 ```
 
+2026-07-04 本轮推进记录：
+
+```text
+已修复 AgentRuntime Phase1 中的真实语义断点：
+- legacy model provider 全失败时，ToolCallGraph 会失败，Batch/Plan 不再伪装成功。
+- 失败 ToolResult 的 state_patch 在 ToolCallGraphExecutor 内部受控合并，仍满足 RuntimeState.apply_patch 边界。
+- 森林营地等场景 profile 优先于新增物体 alias，避免“帐篷”等对象词提前截断 substrate/object 分类。
+
+已清理 Phase1 测试中的多处 mojibake fixture 与脆弱中文标题断言，改为稳定语义/结构断言。
+
+本轮验证：
+- python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+  Ran 563 tests OK
+- python editor/plugins/AITool/services/verify_ultimate_plan.py
+  All current Agent-native non-native checks passed
+
+仍未验证：
+- native / C++ / CEF / F5 实机链路
+- 真实 provider 下的大分批 image/model/import/review 执行闭环
+- 真实多人 LAN 同步、模型同传与实机场景写入效果
+```
+
 当前这些检查已通过；`git diff --check` 只有 CRLF warning，无 whitespace error。
+
+2026-07-04 补充推进记录：
+
+```text
+已补齐 Runtime 报告/状态层的语义状态表达：
+- ToolCallGraph 的原始执行状态继续表示工具链是否按协议跑完，例如成功记录失败导入事实时仍可为 completed。
+- batch_summary / tool_graph_summary 新增 semantic_status 与 semantic_status_source。
+- semantic_status 来自 batch_resource_flow_summary，能把 actor import 失败、部分导入、等待资源等真实业务状态传递给报告、状态查询和后续 Disclosure/GM 层。
+- batch_resource_flow_summary 新增 status_by_batch_id，作为 RuntimeState fact-source 的批次语义索引。
+
+这样避免了“graph completed 但业务导入失败”在用户报告中被误读为场景成功，同时不破坏 ToolCallGraph Executor 的底层执行语义。
+
+本轮验证：
+- python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+  Ran 563 tests OK
+- python editor/plugins/AITool/services/verify_ultimate_plan.py
+  All current Agent-native non-native checks passed
+- git diff --check
+  only CRLF warnings, no whitespace error
+```
+
+2026-07-05 Operation Replay 补充推进记录：
+
+```text
+已把 RuntimeState 的批次资源语义状态接入 Operation Replay：
+- AgentRuntime.operation_replay() / _compose_operation_replay() 现在额外输出 batch_resource_flow_summary。
+- 该摘要来自 RuntimeState 中的 image/model/import/review facts，而不是只看 OperationLog 事件流。
+- LANChatAgentWorker._handle_agent_runtime_operation_replay_query() 新增 resource_flow 行，复用安全 formatter，能显示 latest i/n:status img/model/import x/y/z of requested。
+- 当 RuntimeState 显示批次 failed/partial/waiting 时，Operation Replay 也能显示 semantic failed/partial/waiting，避免排障时只看到 queue/tool completed。
+- 文案不暴露 batch_id、tool_name、provider、prompt、URL、模型路径或内部异常。
+
+本轮验证：
+- python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+  Ran 180 tests OK
+- python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+  Ran 563 tests OK
+- python editor/plugins/AITool/services/verify_ultimate_plan.py
+  All current Agent-native non-native checks passed
+- git diff --check
+  only CRLF warnings, no whitespace error
+```
+
+2026-07-05 LAN 同传状态补充推进记录：
+
+```text
+已增强 RuntimeState 中 asset/model transfer 的未完成状态表达：
+- AgentRuntime._asset_transfer_summary_for_plan() 新增 incomplete_count，表示 asset_count - ready_count - failed_count。
+- AgentRuntime._sync_health_digest_for_report() 新增 asset_incomplete_count，并继续在未 ready/failed 且未 transferring 时标记 asset_transfer_incomplete。
+- LANChatAgentWorker._format_agent_runtime_asset_transfer_report() 现在显示 incomplete N，用户问状态或 GM 总结时能直接看到模型同传还有多少资源未完成。
+- 这一步只补 RuntimeState 派生事实和用户可见安全摘要，不修改底层 LAN 同步协议、不改变 actor/model 传输行为。
+
+本轮验证：
+- python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+  Ran 180 tests OK
+- python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+  Ran 563 tests OK
+- python editor/plugins/AITool/services/verify_ultimate_plan.py
+  All current Agent-native non-native checks passed
+- git diff --check
+  only CRLF warnings, no whitespace error
+```
+
+2026-07-05 补充推进记录：
+
+```text
+已把 Runtime 资源批次语义状态继续接到 LANChat 用户可见回复面：
+- 修复 LANChatAgentWorker._format_agent_runtime_resource_flow_report() 只读取 latest_batch 单数的问题；Runtime 当前输出的是 latest_batches 列表，旧逻辑会漏掉最近批次 image/model/import 细节。
+- formatter 现在会从 latest_batches 取最近批次，显示 latest i/n:status img/model/import x/y/z of requested。
+- formatter 现在会读取 status_by_batch_id；当批次语义状态包含 failed/partial/waiting 等非完成状态时，输出 semantic failed/partial/waiting，避免用户只看到 ToolCallGraph completed 而误判业务成功。
+- 文案仍只暴露安全计数和状态，不暴露 batch_id、tool_name、provider、prompt、URL、模型路径或内部异常。
+
+本轮验证：
+- python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+  Ran 180 tests OK
+- python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+  Ran 563 tests OK
+- python editor/plugins/AITool/services/verify_ultimate_plan.py
+  All current Agent-native non-native checks passed
+- git diff --check
+  only CRLF warnings, no whitespace error
+```
 
 仍未完成：
 
@@ -4654,3 +4757,10271 @@ write.  This is intentional for the fact-first slice; later Phase 5/6 work
 should decide whether ToolCallGraph status should become semantic partial /
 failed when downstream fact summaries contain failed actor imports.
 ```
+
+### Progress Update 161 - report_ready now exposes semantic batch and sync health
+
+Goal:
+
+```text
+Close the user-visible report completion gap: the final report_ready RuntimeEvent
+must not only say "report ready" while hiding semantic batch failures, partial
+imports, or incomplete LAN asset transfer state inside the full report object.
+```
+
+Change:
+
+```text
+AgentRuntime.generate_report() now computes batch_semantic_status_counts from
+batch_resource_flow_summary.status_by_batch_id and includes the following safe
+payload fields in the final report_ready event:
+
+- batch_semantic_status_counts
+- batch_failed_count
+- batch_partial_count
+- sync_health_status
+- asset_incomplete_count
+- asset_failed_count
+
+RuntimeEventValidator.safe_payload() and AgentRuntime._SAFE_RUNTIME_EVENT_PAYLOAD_KEYS
+were updated together so these fields survive both emit-time sanitization and
+user_visible_events() filtering.  The only allowed nested payload in this slice
+is the small batch_semantic_status_counts status-count map; arbitrary nested
+payloads remain blocked.
+```
+
+Tests / gates:
+
+```text
+test_runtime_actor_import_persists_partial_success_from_engine_provider now
+asserts report_ready exposes semantic failed batch status and sync health.
+
+test_actor_import_provider_empty_actor_result_records_failed_import_fact now
+asserts report_ready exposes failed semantic batch status even when the import
+provider returns no actors and only failed import_results.
+
+test_asset_transfer_progress_sync_event_updates_runtime_asset_summary now asserts
+report_ready exposes partial sync health and incomplete asset transfer count.
+```
+
+Validation:
+
+```text
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 180 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This slice improves final user-visible report facts.  It does not change real
+provider execution, native engine import, C++ sync transport, or F5 validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 189 - report_ready health enters OperationLog replay
+
+Problem:
+
+```text
+Recent slices made report_health_summary visible in generate_report(),
+status_summary(), Runtime Report replies, and GM summaries.  The remaining
+audit gap was RuntimeEvent replay:
+
+- report_ready RuntimeEvent already carried safe report health fields;
+- user_visible_events() could expose those fields after payload whitelist fixes;
+- but emit_runtime_event() only wrote event_id/event_type/reason into
+  OperationLog;
+- _runtime_event_replay_summary() could count event types, but could not explain
+  whether a report_ready event was healthy, partial, failed, or attention-worthy.
+
+That weakened the invariant "OperationLog is the replay fact source before user
+reports": later diagnosis could see that a report was emitted, but not why it
+needed attention.
+```
+
+Change:
+
+```text
+AgentRuntime.emit_runtime_event() now writes safe report_ready health metadata
+into OperationLog payloads:
+
+- report_health_status
+- report_attention_required
+- resource_phase_failed_count
+- resource_phase_partial_count
+- resource_phase_waiting_count
+- report_health_reasons
+
+AgentRuntime._runtime_event_replay_summary() now aggregates:
+
+- report_ready_count
+- report_attention_count
+- report_health_status_counts
+- report_health_reason_counts
+- latest_report_ready
+
+LANChat runtime event replay formatters now surface compact report-ready health
+status in both normal replay reports and GM runtime replay digests.
+
+verify_ultimate_plan.py statically requires the report_ready health tokens to
+exist in RuntimeEventValidator payload keys, AgentRuntime safe event payload
+keys, generate_report(), emit_runtime_event(), and runtime event replay summary.
+```
+
+Behavior:
+
+```text
+This is an audit/read-side slice.  It does not change generation, provider
+calls, SceneComposer behavior, C++ writes, LAN sync, VLM execution, or UI
+rendering.
+
+It makes report_ready health explainable from OperationLog replay after the
+report event is emitted, while keeping provider/prompt/url/API-key data out of
+user-facing summaries.
+```
+
+Validation:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_partial_resource_results_report_ready_and_failed_counts
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted AgentRuntime report_ready replay test: passed
+targeted LANChat formatter test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+test_agent_runtime_phase1.py now runs 565 tests
+test_lanchat_runtime_guard.py runs 182 tests
+```
+
+Remaining:
+
+```text
+This slice only closes the RuntimeEvent/OperationLog replay gap for report
+health.  It does not yet complete real native provider rollout, C++ multiplayer
+sync transport replacement, front-end report rendering, or F5 runtime
+validation.  Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 184 - Report health becomes visible in LANChat status and GM summary
+
+Problem:
+
+```text
+RuntimeState and AgentRuntime already produced report_health_summary /
+report_health_digest, and Progress Update 183 made resource phase failures
+contribute to report health.  The remaining read-side gap was LANChat:
+
+- normal Runtime status replies showed resources, imports, geometry, sync, and
+  queues, but not final report health;
+- GM Runtime summary also omitted report health;
+- therefore resource/import/review failures could affect Runtime truth but still
+  be invisible in the user-facing diagnosis surface.
+
+That violated the Agent-native invariant "RuntimeState is the only state fact
+source" at the disclosure boundary: the fact existed, but the coordinator-facing
+status surface did not expose it.
+```
+
+Change:
+
+```text
+LANChatAgentWorker now formats report health through a safe formatter:
+
+- status
+- attention_required
+- batch failed / partial / waiting counts
+- import failed count
+- resource phase failed / partial / waiting counts
+- asset failed / incomplete counts
+- sync health status
+- safe reason list
+
+The formatter redacts internal provider / prompt / url / raw / token / api-key /
+path / session / job markers before displaying reasons.
+
+The formatted report health is now included in:
+
+- Runtime status replies: "报告健康：..."
+- GM Runtime summaries: "Report health: ..."
+```
+
+Behavior:
+
+```text
+This is a read-side Agent-native closure.  It does not change ToolCallGraph
+execution, resource generation, import behavior, C++ engine writes, LAN sync, or
+VLM behavior.
+
+It makes the existing Runtime report health fact visible to users and GM without
+leaking internal provider details.
+```
+
+Validation:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_gm_summary_reads_agent_runtime_status_when_runtime_plan_exists editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_report_query_generates_safe_summary_without_coordinator_ingest
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted LANChat Runtime health tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+test_lanchat_runtime_guard.py now runs 182 tests inside verify_ultimate_plan.py
+```
+
+Remaining:
+
+```text
+This slice only closes the report-health disclosure gap.  It does not yet
+complete real native provider rollout, C++ multiplayer sync transport
+replacement, front-end report rendering, or F5 runtime validation.  Those remain
+later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 185 - Runtime Report consumes report health
+
+Problem:
+
+```text
+Progress Update 184 made report health visible in:
+
+- Runtime status replies
+- GM Runtime summaries
+
+The remaining read-side split was the explicit Runtime Report path.  It already
+received a report object from AgentRuntime.generate_report(), but LANChat did not
+render report_health_summary inside the final "[Runtime Report]" text.
+
+That meant the three user-facing diagnosis surfaces were inconsistent:
+
+- status query: report health visible
+- GM summary: report health visible
+- runtime report: report health missing
+
+For the Agent-native invariant "RuntimeState is the only state fact source", the
+report surface must consume the same health fact instead of letting report
+trustworthiness remain implicit.
+```
+
+Change:
+
+```text
+LANChatAgentWorker._handle_agent_runtime_report_query() now reads
+report["report_health_summary"] and renders it through the same safe formatter
+used by status and GM summary.
+
+The Runtime Report output now includes:
+
+- report health: status, attention flag, batch/import/resource/asset failure
+  counts, sync health, and safe reason list
+```
+
+Behavior:
+
+```text
+This is a read-side consistency slice.  It does not alter report generation,
+ToolCallGraph execution, provider behavior, C++ engine writes, sync transport,
+or VLM behavior.
+
+The user-visible result is that report trustworthiness is now visible in all
+three Runtime diagnosis surfaces: status, GM summary, and report.
+```
+
+Validation:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_report_query_generates_safe_summary_without_coordinator_ingest
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime Report test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice closes the Runtime Report report-health visibility gap.  It does not
+yet complete real native provider rollout, C++ multiplayer sync transport
+replacement, front-end report rendering, or F5 runtime validation.  Those remain
+later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 186 - report_ready events carry report health metadata
+
+Problem:
+
+```text
+Progress Updates 183-185 made report health visible in status, GM summary, and
+Runtime Report text.  The remaining UI/event boundary gap was report_ready:
+
+- generate_report() used report_health_summary to choose the report_ready title
+  and warning level;
+- but the report_ready payload only exposed partial batch/import/asset counts;
+- it did not expose report health status, attention flag, resource phase counts,
+  or health reasons.
+
+That meant the event stream could say "warning" without carrying enough
+structured reason metadata for front-end WAIT UX, report cards, or later
+OperationLog replay to explain why.
+```
+
+Change:
+
+```text
+report_ready RuntimeEvent payload now includes safe report-health metadata:
+
+- report_health_status
+- report_attention_required
+- resource_phase_failed_count
+- resource_phase_partial_count
+- resource_phase_waiting_count
+- report_health_reasons
+
+RuntimeEventValidator._SAFE_PAYLOAD_KEYS and AgentRuntime._SAFE_RUNTIME_EVENT_PAYLOAD_KEYS
+now explicitly allow those fields.  report_health_reasons is restricted to a
+small list of safe short text values.
+```
+
+Behavior:
+
+```text
+This is an event disclosure contract slice.  It does not change report
+generation, ToolCallGraph execution, provider behavior, native writes,
+multiplayer sync transport, or VLM behavior.
+
+The user-visible effect is that report_ready can now explain whether the report
+is healthy, partial, or failed, and whether resource phase failures contributed
+to that status.
+```
+
+Validation:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_partial_resource_results_report_ready_and_failed_counts
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted report_ready health metadata test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice closes the RuntimeEvent report-health metadata gap.  It does not yet
+complete real native provider rollout, C++ multiplayer sync transport
+replacement, front-end report rendering, or F5 runtime validation.  Those remain
+later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 187 - report_ready health metadata passes the RuntimeEvent safe read boundary
+
+Problem:
+
+```text
+Progress Update 186 added report health fields to the report_ready event payload,
+but the RuntimeEvent path has two safety boundaries:
+
+1. RuntimeEventValidator.safe_payload() for write-time event safety.
+2. AgentRuntime._SAFE_RUNTIME_EVENT_PAYLOAD_KEYS inside _safe_runtime_event_row()
+   for read-time user-visible event filtering.
+
+The first boundary was updated, but the second boundary still filtered the new
+report-health fields out of user_visible_events().  As a result, the event was
+persisted with health metadata in RuntimeState, but callers reading the safe
+event feed still could not see it.
+```
+
+Change:
+
+```text
+AgentRuntime._SAFE_RUNTIME_EVENT_PAYLOAD_KEYS now also allows:
+
+- report_health_status
+- report_attention_required
+- resource_phase_failed_count
+- resource_phase_partial_count
+- resource_phase_waiting_count
+- report_health_reasons
+
+The existing report_ready regression now proves the metadata survives all the
+way through user_visible_events(), not just the initial emit call.
+```
+
+Behavior:
+
+```text
+This is a read-boundary contract fix.  It does not change generation,
+ToolCallGraph execution, providers, native writes, sync transport, or VLM.
+
+The user-visible RuntimeEvent stream can now explain report health without
+exposing provider, URL, prompt, raw payload, path, token, or job internals.
+```
+
+Validation:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_partial_resource_results_report_ready_and_failed_counts
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted report_ready health metadata read-boundary test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice closes the RuntimeEvent safe read-boundary gap for report health.
+It does not yet complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 188 - report_ready health metadata is locked by the static verifier
+
+Problem:
+
+```text
+Progress Updates 186-187 made report_ready health metadata work at runtime and
+through user_visible_events().  The remaining regression risk was that the
+contract depended on three separate locations staying aligned:
+
+- RuntimeEventValidator._SAFE_PAYLOAD_KEYS
+- AgentRuntime._SAFE_RUNTIME_EVENT_PAYLOAD_KEYS
+- AgentRuntime.generate_report() report_ready payload
+
+If a later edit removed one of those tokens, the behavior could silently regress
+unless the exact runtime test happened to catch it.  This is a contract-level
+boundary and belongs in verify_ultimate_plan.py.
+```
+
+Change:
+
+```text
+verify_ultimate_plan.py now statically requires every report_ready health token
+to appear in all three required places:
+
+- report_health_status
+- report_attention_required
+- resource_phase_failed_count
+- resource_phase_partial_count
+- resource_phase_waiting_count
+- report_health_reasons
+
+It also requires RuntimeEventValidator.safe_payload() to explicitly sanitize
+report_health_reasons, and requires the regression test
+test_partial_resource_results_report_ready_and_failed_counts to remain present.
+```
+
+Behavior:
+
+```text
+This is a contract-hardening slice.  It does not change runtime behavior,
+generation, ToolCallGraph execution, provider adapters, native writes, sync, or
+VLM.
+
+The Agent-native non-native gate will now fail if report_ready health metadata is
+removed from either write-time or read-time RuntimeEvent safety boundaries.
+```
+
+Validation:
+
+```text
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice only locks the RuntimeEvent report-health contract.  It does not yet
+complete real native provider rollout, C++ multiplayer sync transport
+replacement, front-end report rendering, or F5 runtime validation.  Those remain
+later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 183 - Resource phase failures affect report health
+
+Problem:
+
+```text
+Progress Update 182 made import/review/custom resource phase facts visible in
+resource_summary.by_phase.  The next semantic gap was report health:
+
+- status/report/GM could now show that a non image/model phase failed;
+- but _report_health_summary() only considered batch_resource_flow, import
+  summary, and sync health;
+- a future RuntimeState fact such as import/review phase failed could remain a
+  local resource-stage detail instead of changing the final health verdict.
+
+That would violate the Agent-native expectation that RuntimeState business facts
+drive user-facing report status, not just decorative diagnostics.
+```
+
+Change:
+
+```text
+AgentRuntime._report_health_summary() now accepts resource_summary and derives:
+
+- resource_phase_failed_count
+- resource_phase_partial_count
+- resource_phase_waiting_count
+- resource_phase_status_counts
+
+The health verdict now treats resource phase failures as failed, partial phases
+as partial, and planned/running/waiting phases as waiting.  The implementation
+uses status_counts when present and only falls back to failed_count/requested
+count inference when needed, avoiding double counting.
+
+generate_report(), status_summary(), and operation replay report health paths now
+pass the scoped resource_summary into _report_health_summary().
+```
+
+Behavior:
+
+```text
+This is a semantic read-side slice.  It does not change provider execution,
+resource generation, import execution, review execution, ToolCallGraph
+scheduling, C++ writes, or LAN sync.
+
+It prevents the UI/report/GM surface from saying "ok" when RuntimeState already
+contains a failed import/review/custom resource phase.
+```
+
+Validation:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_resource_summary_includes_custom_import_and_review_phase_facts editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted resource health tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+test_agent_runtime_phase1.py remains 565 tests
+```
+
+Remaining:
+
+```text
+This slice only makes existing RuntimeState phase facts affect report health.  It
+does not yet complete real native provider rollout, native import execution, C++
+multiplayer sync transport replacement, or F5 runtime validation.  Those remain
+later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 182 - Resource phase facts feed import/review stage summaries
+
+Problem:
+
+```text
+custom_resource_phase_facts had become a first-class RuntimeState room slot, and
+image/model resource tools already wrote phase facts.  However,
+_resource_summary_for_plan() still built by_phase mostly from user-visible
+runtime_events, which only covered image/model events.
+
+That left a read-side gap for the target batch loop:
+
+image -> model -> import -> review
+
+Future import/review/custom resource phase facts could exist in RuntimeState but
+would not appear in the compact resource stage summary shown by status, report,
+or GM surfaces.
+```
+
+Change:
+
+```text
+AgentRuntime._resource_summary_for_plan() now folds non image/model
+custom_resource_phase_facts into by_phase and latest_events.
+
+The merge deliberately avoids image/model double counting because those phases
+already have runtime_event coverage today.  Non image/model phases such as
+import, review, or future custom resource stages can now appear from
+RuntimeState facts even when no matching runtime_event exists.
+
+LANChatAgentWorker._format_agent_runtime_resource_stage_report() now renders:
+
+- image
+- model
+- import
+- review
+- any additional custom phases
+
+in a stable order.
+```
+
+Behavior:
+
+```text
+This is a read-side closure slice.  It does not change provider execution,
+resource generation, import execution, review execution, ToolCallGraph
+scheduling, C++ writes, or LAN sync.
+
+It moves the user-visible resource stage summary closer to the Agent-native
+target of a complete batch loop instead of a partial image/model-only view.
+```
+
+Validation:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_resource_summary_includes_custom_import_and_review_phase_facts editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted resource phase summary tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+test_agent_runtime_phase1.py now runs 565 tests
+```
+
+Remaining:
+
+```text
+This slice only makes import/review phase facts visible when RuntimeState already
+has them.  It does not yet complete real native provider rollout, native import
+execution, C++ multiplayer sync transport replacement, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 181 - GM Runtime summary exposes safe asset-transfer status
+
+Problem:
+
+```text
+AgentRuntime already tracked multiplayer sync, message delivery, engine-write
+boundaries, and asset-transfer state.  The regular Runtime status reply exposed
+those facts, but the GM summary path still missed the current asset-transfer
+digest and only showed transfer activity indirectly through sync replay.
+
+For multiplayer验收 this is a real visibility gap: when users ask GM to summarize
+the room after multi-agent discussion or generation, GM should report whether
+model transfer is active/complete/failed without leaking internal file paths,
+peer ids, provider details, or raw asset ids.
+```
+
+Change:
+
+```text
+AgentRuntime.gm_summary() now includes asset_transfer_digest from RuntimeState:
+
+- asset_count
+- ready_count
+- completed_count
+- transferring_count
+- failed_count
+- overall_progress
+- bytes_transferred / total_bytes
+- latest transfer statuses with asset ids redacted
+
+LANChatAgentWorker._agent_runtime_gm_summary_reply() now renders:
+
+- 模型同传：assets N, ready X, completed Y, transferring Z, failed K, progress P%
+
+The GM sync replay empty fallback was also cleaned from a mojibake string to:
+
+- recorded 0, asset progress 0, peer join/leave 0/0, reconcile 0/0
+```
+
+Behavior:
+
+```text
+This is a reporting/status slice only.  It does not change generation execution,
+ToolCallGraph scheduling, sync transport, native writes, or asset-transfer
+mechanics.
+
+It strengthens the Agent-native invariant that GM reads RuntimeState and
+OperationLog-derived facts instead of guessing from chat history.
+```
+
+Validation:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_gm_summary_action_records_snapshot_without_business_tool_graph
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_gm_summary_reads_agent_runtime_status_when_runtime_plan_exists
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_gm_summary_includes_runtime_sync_summary
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime GM summary test: passed
+targeted LANChat GM Runtime status tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice only closes the GM-facing multiplayer transfer visibility gap.  It
+does not yet complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 172 - Engine actor import writes provider boundary facts
+
+Problem:
+
+```text
+The Runtime actor import path already rejected unsafe engine results:
+
+- a successful native import without a stable actor identity fails the ToolCall;
+- partial native imports preserve successful actors and failed rows;
+- OperationLog exposes sanitized import result rows for replay.
+
+However, the RuntimeState import result fact still lacked an explicit provider
+boundary summary.  Future debugging would have to infer whether a batch result
+came from the real engine import provider, a runtime precheck, or a default
+mock-like provider by reading OperationLog events and final actor rows.
+```
+
+Change:
+
+```text
+make_engine_actor_import_provider now returns a safe provider boundary marker:
+
+- source = engine_actor_import_provider
+- engine_write_result.provider_source
+- requested_count
+- identity_result_count
+- missing_identity_count
+- status_counts
+
+runtime.actor.import_batch now persists this boundary summary into:
+
+custom_import_facts["<batch_id>:actor_import_result"].engine_write_boundary
+
+The fact stores only safe accounting fields and actor ids.  It does not store
+model_path, prompts, provider raw payloads, URLs, stack traces, API keys, or
+native tool response bodies.
+```
+
+Behavior:
+
+```text
+The slice does not change ToolCallGraph execution order or actor import
+success semantics.
+
+- missing model resources still create a failed import result fact without
+  creating fake actors;
+- native success without actor identity still fails the import ToolCall;
+- partial native import success still keeps real actors, marks the batch
+  partial, and records sanitized per-actor import rows;
+- the new boundary fact is additive evidence for replay/status/debugging.
+```
+
+Tests / gates:
+
+```text
+test_runtime_actor_import_persists_partial_success_from_engine_provider now
+verifies engine_write_boundary.provider_source, requested_count,
+identity_result_count, missing_identity_count, status_counts, imported_actor_ids,
+and sanitization.
+
+test_engine_actor_import_provider_requires_engine_actor_identity remains a
+tool-failure test; it confirms missing native actor identity does not become a
+fake Runtime actor.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/agent_runtime/adapters.py editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_actor_import_provider_requires_engine_actor_identity editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_actor_import_persists_partial_success_from_engine_provider
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted engine actor import provider tests: passed
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 180 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This slice strengthens RuntimeState evidence for real engine actor import
+boundaries.  It does not yet complete native engine import rollout, replace
+multiplayer sync transport, or prove F5 runtime behavior.  Those remain later
+Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 173 - Layout transform writes engine boundary facts
+
+Problem:
+
+```text
+Runtime layout adjustment already used a narrow layout_transform_provider
+boundary for confirmed low-risk move/align operations.  The provider returned
+sanitized transform_results and authoritative actor_updates, and OperationLog
+could replay transform result rows.
+
+The remaining evidence gap was similar to actor import before Progress Update
+172: RuntimeState layout_adjustment_proposals did not keep a compact provider
+boundary fact that explains whether the transform came from the real engine
+layout transform adapter, how many deltas were requested, how many actor updates
+were accepted, and whether the engine returned observed positions.
+```
+
+Change:
+
+```text
+make_engine_layout_transform_provider now returns:
+
+- source = engine_layout_transform_provider
+- engine_write_result.provider_source
+- requested_count
+- updated_count
+- observed_position_count
+- status_counts
+
+AgentRuntime._apply_layout_adjustment_tool now stores a sanitized copy in:
+
+layout_adjustment_proposals[plan_id].engine_transform_boundary
+
+The boundary fact stores only safe accounting fields.  It does not persist raw
+native responses, prompts, provider internals, URLs, local paths, stack traces,
+or API keys.
+```
+
+Behavior:
+
+```text
+This slice does not change layout proposal generation, low-risk delta
+selection, actor update authority, or ToolCallGraph execution order.
+
+- provider-confirmed actor_updates remain the only source that can update
+  RuntimeState actors after an engine transform provider is configured;
+- transform_results remain sanitized advisory/audit rows;
+- engine_transform_boundary is additive RuntimeState evidence for status,
+  replay, and later F5 debugging.
+```
+
+Tests / gates:
+
+```text
+test_engine_layout_transform_provider_uses_gate_and_returns_actor_updates now
+verifies the provider boundary source, requested_count, updated_count,
+observed_position_count, and status_counts.
+
+test_runtime_layout_adjustment_can_call_engine_transform_provider now verifies
+layout_adjustment_proposals[plan_id].engine_transform_boundary is persisted
+after confirmation.
+
+Existing native-name sanitization tests were updated to allow the safe
+engine_layout_transform_provider enum while still blocking provider raw,
+prompt, and secret/path leakage.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/adapters.py editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_layout_transform_provider_uses_gate_and_returns_actor_updates editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_layout_transform_provider_sanitizes_transform_skip_reason editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_layout_adjustment_can_call_engine_transform_provider
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted engine layout transform tests: passed
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 180 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This slice strengthens RuntimeState evidence for confirmed layout transforms.
+It does not yet complete native engine transform rollout, C++ multiplayer sync
+transport, or F5 runtime behavior.  Those remain later Agent-native Phase 5/6/7
+work.
+```
+
+### Progress Update 162 - report_ready event text is semantic-status aware
+
+Goal:
+
+```text
+Close the UI disclosure gap after Progress Update 161: report_ready payload now
+contains semantic batch/sync facts, but the user-visible title/message could
+still read like a clean completion.  The event text itself must surface failed
+or incomplete outcomes without exposing internal payloads.
+```
+
+Change:
+
+```text
+AgentRuntime.generate_report() now derives report_ready level/title/message from
+the same RuntimeState facts used by batch_resource_flow_summary and sync health:
+
+- failed batch/import/asset-transfer facts produce warning level and
+  "生成报告已完成（存在失败项）"
+- partial batch or incomplete asset transfer facts produce warning level and
+  "生成报告已完成（仍有未完成项）"
+- clean reports keep the original info-level completion wording
+
+This keeps LANChat automatic RuntimeEvent disclosure useful even when the UI
+only renders event title/message, while the detailed counts remain in safe
+payload fields.
+```
+
+Tests / gates:
+
+```text
+test_runtime_actor_import_persists_partial_success_from_engine_provider now
+asserts failed semantic import results make report_ready warning-level.
+
+test_actor_import_provider_empty_actor_result_records_failed_import_fact now
+asserts empty actor import with failed import_results makes report_ready
+warning-level and mentions import failure.
+
+test_asset_transfer_progress_sync_event_updates_runtime_asset_summary now
+asserts incomplete model transfer makes report_ready warning-level and mentions
+unfinished transfer.
+```
+
+Validation:
+
+```text
+targeted report_ready semantic text tests: passed
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted tests: 3 passed
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 180 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This slice improves user-visible disclosure after Runtime reports.  It does not
+change real provider execution, native engine import, C++ sync transport, or F5
+validation.  Those remain later Agent-native Phase 5/6/7 work.
+```
+
+### Progress Update 163 - report health summary enters status/report/GM read sides
+
+Goal:
+
+```text
+Close the remaining read-side split after Progress Updates 160-162: batch
+resource flow, import results, and sync/asset transfer health were visible in
+separate summaries, but status, final report, GM summary, and LANChat replies
+could still describe different health verdicts.  The Runtime now needs one
+sanitized health digest shared by these surfaces.
+```
+
+Change:
+
+```text
+AgentRuntime now derives report_health_summary from:
+
+- batch_resource_flow_summary
+- import_summary
+- sync_health_digest
+
+The summary contains:
+
+- status: ok / failed / partial / waiting / needs_attention / unknown
+- attention_required
+- reasons
+- batch failed / partial / waiting counts
+- batch_semantic_status_counts
+- import requested / imported / failed counts
+- sync health status
+- asset incomplete / failed counts
+
+generate_report(), status_summary(), and gm_summary() now read this same digest.
+LANChat status replies expose it as "报告健康"; LANChat GM summaries expose it as
+"Report health".  The text remains user-facing and strips internal provider,
+prompt, tool graph, path, and payload details.
+```
+
+Tests / gates:
+
+```text
+test_asset_transfer_progress_sync_event_updates_runtime_asset_summary now checks
+that status_summary() and generate_report() share the same partial
+report_health_summary when model transfer is incomplete.
+
+import failure tests now assert failed report_health_summary status, attention
+flag, and reasons such as batch_failed/import_failed.
+
+GM summary tests now assert the clean runtime path exposes ok report health.
+
+LANChat formatter tests now assert failed/partial health is visible without
+leaking provider or prompt fields.
+```
+
+Validation:
+
+```text
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 181 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice improves read-side consistency and user-visible health disclosure.
+It does not change real provider execution, native engine import, C++ sync
+transport, or F5 validation.  Those remain later Agent-native Phase 5/6/7 work.
+```
+
+### Progress Update 164 - operation replay carries the same report health digest
+
+Goal:
+
+```text
+Make OperationLog replay a first-class audit surface for report health.  After
+Progress Update 163, status_summary(), generate_report(), gm_summary(), and
+LANChat replies shared one health digest, but operation_replay() still only
+exposed separate sync/resource replay summaries.  That made postmortem review
+weaker than the live status/report surfaces.
+```
+
+Change:
+
+```text
+AgentRuntime._compose_operation_replay() now adds:
+
+- asset_transfer_summary: state-derived asset transfer facts for the replay
+  scope
+- report_health_summary: the same sanitized health digest shape used by status
+  and final reports
+
+The replay keeps asset_transfer_replay_summary for event-level audit, but the
+health verdict is computed from RuntimeState asset totals plus replay sync and
+message-delivery facts.  This avoids treating an in-progress or incomplete
+asset transfer as ok just because the replay stream only saw progress events.
+```
+
+Tests / gates:
+
+```text
+test_asset_transfer_progress_sync_event_updates_runtime_asset_summary now asserts
+operation_replay()["report_health_summary"] is partial, attention-required, and
+contains asset_transfer_incomplete when the RuntimeState transfer is incomplete.
+```
+
+Validation:
+
+```text
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py AgentRuntimePhase1Tests.test_asset_transfer_progress_sync_event_updates_runtime_asset_summary -f
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted asset transfer replay health test: passed
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 181 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice improves replay/postmortem consistency.  It does not change real
+provider execution, native engine import, C++ sync transport, or F5 validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+### Progress Update 165 - operation replay exposes import summary behind health
+
+Goal:
+
+```text
+Complete the audit trail behind Progress Update 164.  operation_replay() now
+shows the same report_health_summary as status/report, but import failures were
+only indirectly visible through engine_write_summary and batch resource flow.
+Replay needs to expose the import_summary that feeds report health so a
+postmortem can explain why import_failed_count was raised.
+```
+
+Change:
+
+```text
+AgentRuntime._compose_operation_replay() now includes import_summary from
+RuntimeState for the requested room / plan / batch scope.  report_health_summary
+continues to be derived from batch_resource_flow_summary, import_summary, and
+sync health.  This keeps replay aligned with status_summary() and
+generate_report() without parsing user-facing report text.
+```
+
+Tests / gates:
+
+```text
+test_runtime_actor_import_persists_partial_success_from_engine_provider now
+asserts operation_replay()["import_summary"] matches the report/status import
+summary and that replay report_health_summary is failed with import_failed in
+the reasons.
+```
+
+Validation:
+
+```text
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py AgentRuntimePhase1Tests.test_runtime_actor_import_persists_partial_success_from_engine_provider -f
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted partial import replay summary test: passed
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 181 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice improves replay/postmortem consistency for import failures.  It does
+not change real provider execution, native engine import, C++ sync transport, or
+F5 validation.  Those remain later Agent-native Phase 5/6/7 work.
+```
+
+### Progress Update 166 - operation replay exposes resource summary behind batch flow
+
+Goal:
+
+```text
+Continue making OperationLog replay a first-class audit surface.  Replay already
+exposes report health, import summary, sync and asset transfer facts, but image
+and model resource readiness were still only available through lifecycle replay
+events or final report/status surfaces.  A postmortem needs the same
+state-derived resource_summary that explains resource failed/partial counts.
+```
+
+Change:
+
+```text
+AgentRuntime._compose_operation_replay() now includes resource_summary from
+RuntimeState for the requested room / plan / batch scope.  This mirrors
+status_summary() and generate_report(), while batch_resource_lifecycle_summary
+continues to serve as the event-level resource audit trail.
+```
+
+Tests / gates:
+
+```text
+test_partial_resource_results_report_ready_and_failed_counts now asserts
+operation_replay()["resource_summary"]["by_phase"]["image"] matches the final
+report resource summary for a partial image-resource provider result.
+```
+
+Validation:
+
+```text
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py AgentRuntimePhase1Tests.test_partial_resource_results_report_ready_and_failed_counts -f
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted partial resource replay summary test: passed
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 181 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice improves replay/postmortem consistency for image/model resource
+readiness.  It does not change real provider execution, native engine import,
+C++ sync transport, or F5 validation.  Those remain later Agent-native Phase
+5/6/7 work.
+```
+
+### Progress Update 167 - final report replay summary carries state-derived resource/import/health facts
+
+Goal:
+
+```text
+Align the replay summary embedded inside generate_report() with the standalone
+operation_replay() surface.  Standalone replay already exposes resource,
+import, asset transfer, and health summaries, but final reports still embedded
+only the older event-level replay summaries.  A saved report should be
+self-contained enough to explain resource/import/health outcomes without
+requiring a separate replay query.
+```
+
+Change:
+
+```text
+AgentRuntime._operation_replay_summary_for_report() now adds state-derived:
+
+- resource_summary
+- import_summary
+- asset_transfer_summary
+- report_health_summary
+
+It still reads OperationLog directly and does not call operation_replay(), so
+generating a report does not create an extra replay-query side effect before
+the user_report_generated entry.
+```
+
+Tests / gates:
+
+```text
+test_partial_resource_results_report_ready_and_failed_counts now asserts the
+final report's operation_replay_summary.resource_summary image phase matches
+the report resource summary.
+
+test_runtime_actor_import_persists_partial_success_from_engine_provider now
+asserts the final report's operation_replay_summary.import_summary matches the
+report/status import summary and carries failed report health.
+```
+
+Validation:
+
+```text
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py AgentRuntimePhase1Tests.test_partial_resource_results_report_ready_and_failed_counts AgentRuntimePhase1Tests.test_runtime_actor_import_persists_partial_success_from_engine_provider -f
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted report embedded replay summary tests: 2 passed
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 181 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice improves saved-report self-containment and postmortem consistency.
+It does not change real provider execution, native engine import, C++ sync
+transport, or F5 validation.  Those remain later Agent-native Phase 5/6/7 work.
+```
+
+### Progress Update 168 - GM summary exposes resource-stage attention
+
+Problem:
+
+```text
+GM/runtime status replies already exposed batch-level resource flow and report
+health, but the GM read side could not clearly say which resource stage needed
+attention.  When image generation was partial/failed while later model/import
+steps continued, GM could see that a batch was not fully healthy but lacked a
+stage-level diagnostic such as image-resource-failed.
+```
+
+Change:
+
+```text
+AgentRuntime.gm_summary() now includes a resource_stage_digest with:
+
+- event_count
+- by_phase.image / by_phase.model counts
+- latest resource events
+- needs_attention reasons such as image_resource_failed and model_resource_failed
+
+LANChatAgentWorker now formats those attention reasons in GM/runtime replies
+without exposing provider, prompt, URL, API key, or raw payload fields.
+```
+
+Tests / gates:
+
+```text
+test_partial_resource_results_report_ready_and_failed_counts now verifies that
+GM summary carries image phase counts, latest resource event window, and
+image_resource_failed attention for partial image resource results.
+
+test_runtime_resource_stage_formatter_surfaces_phase_attention_without_internal_payloads
+checks that LANChat resource-stage formatting shows image/model counts, latest
+stage status, and attention reasons without leaking internal payload markers.
+```
+
+Validation:
+
+```text
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py AgentRuntimePhase1Tests.test_partial_resource_results_report_ready_and_failed_counts -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py LANChatRuntimeGuardTests.test_runtime_resource_stage_formatter_surfaces_phase_attention_without_internal_payloads -f
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted GM resource-stage tests: 2 passed
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 182 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: pass, LF/CRLF warnings only
+```
+
+Remaining:
+
+```text
+This slice improves GM/status observability and replay-facing diagnostics.  It
+does not change actual provider scheduling, native import, C++ multiplayer sync,
+or F5 runtime behavior.  Those remain later Agent-native Phase 5/6/7 work.
+```
+
+### Progress Update 169 - Runtime fact-source boundary enters report/status/GM read sides
+
+Problem:
+
+```text
+Python AgentRuntime and the C++ / LANChat / Engine layer are being unified
+gradually.  Before this slice, status/report/GM replies exposed RuntimeState
+facts and mirrored sync/engine facts, but did not explicitly show the boundary
+between:
+
+- RuntimeState business facts owned by Python AgentRuntime
+- external Engine / LANChat / sync facts mirrored back into RuntimeState
+
+That made it easy for future work to accidentally treat a Runtime plan fact as
+proof of engine-side import/sync success, or treat missing engine feedback as a
+successful external state.
+```
+
+Change:
+
+```text
+AgentRuntime now adds fact_source_boundary_summary to generate_report() and
+status_summary(), and exposes fact_source_boundary_digest through gm_summary().
+
+The digest records:
+
+- runtime_state_source = RuntimeState
+- external_truth_source = engine_lanchat_mirrored
+- runtime business fact counts split by plan / batch / resource / import
+- mirrored external fact counts split by sync / engine write / scene snapshot
+- whether authoritative external facts are currently available
+- boundary notes such as runtime-state-is-business-truth and
+  engine-lanchat-facts-are-mirrored
+
+LANChatAgentWorker formats the digest in Runtime Report, Runtime Status, and GM
+Runtime Summary replies without exposing provider, prompt, URL, API key, raw
+payload, peer id, actor id, or local file paths.
+```
+
+Additional cleanup:
+
+```text
+Several AgentRuntime tests still depended on mojibake Chinese strings that were
+not architectural invariants.  This slice converted those checks to structure,
+payload, count, state, ordering, and redaction assertions.  Where the test was
+meant to validate Chinese substrate routing, the data was restored to stable
+UTF-8 Chinese terms such as 森林 / 天空 / 草地 / 小木桌 / 帐篷.
+
+This keeps the test suite focused on Runtime invariants instead of editor
+encoding artifacts.
+```
+
+Tests / gates:
+
+```text
+test_report_includes_safe_sync_summary_from_runtime_state now verifies
+fact_source_boundary_summary in report/status/GM read sides.
+
+test_runtime_resource_and_fact_source_formatters_surface_attention verifies
+LANChat formatting for resource-stage attention and fact-source boundary
+counts.
+
+GM summary tests now verify the Fact source line appears alongside Runtime
+resources and sync health without leaking internal fields.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 180 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: pass, LF/CRLF warnings only
+```
+
+Remaining:
+
+```text
+This slice is a read-side and contract-hardening step.  It does not yet complete
+real provider scheduling, native engine import, C++ multiplayer sync transport,
+or F5 runtime validation.  Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 170 - Partial batch terminal status is now persisted by Runtime facts
+
+Problem:
+
+```text
+ToolCallGraph execution status and business execution status were still partly
+split.  A graph could finish with status=completed while the engine/import facts
+showed that only part of the requested actors were actually imported.
+
+Before this slice, failed import facts could force the BatchPlan to failed, but
+partial import success stayed mostly as a read-side report/resource-flow
+inference.  That meant RuntimeState itself could still look completed even when
+the authoritative import fact was partial.
+```
+
+Change:
+
+```text
+BatchPlanStatus now includes partial.
+
+AgentRuntime._terminal_batch_status_from_import_facts() now maps:
+
+- explicit failed/error/missing import facts to BatchPlanStatus.FAILED
+- zero-ready all-failed import facts to BatchPlanStatus.FAILED
+- ready_count > 0 with failed_count > 0 to BatchPlanStatus.PARTIAL
+- explicit partial / partially_succeeded / partial_success to BatchPlanStatus.PARTIAL
+
+_finalize_batch_after_drained_graph() records
+batch_terminal_status_from_runtime_facts before marking the terminal batch
+status, so OperationLog captures that the final batch business status came from
+Runtime import facts rather than the ToolCallGraph surface status.
+
+batch.mark_partial was added as a narrow ToolCallGraph state-writing tool, so
+partial is persisted through the same RuntimeGuard / StatePatch boundary as
+completed, failed, and cancelled.
+```
+
+Plan status rule:
+
+```text
+ScenePlanStatus still has no separate partial value.  A plan whose batches are
+all completed or partial is allowed to reach completed so users can receive the
+final report and continue with review/adjustment actions.
+
+The report health layer remains responsible for surfacing partial health:
+
+- batch_resource_flow_summary.partial_count
+- report_health_summary.status = partial
+- report_health_summary.attention_required = true
+- batch_summary.batches[].status / semantic_status = partial
+```
+
+Tests / gates:
+
+```text
+test_runtime_actor_import_persists_partial_success_from_engine_provider now
+verifies:
+
+- ToolCallGraph status may be completed
+- BatchPlan status is partial
+- batch_terminal_status_from_runtime_facts records source=import_facts
+- report/status batch resource flow marks the batch partial
+- report_health_summary.status is partial
+
+test_actor_import_provider_empty_actor_result_records_failed_import_fact now
+verifies full import failure still persists BatchPlan status failed and records
+the same import-facts terminal status event.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py AgentRuntimePhase1Tests.test_runtime_actor_import_persists_partial_success_from_engine_provider -f
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py AgentRuntimePhase1Tests.test_actor_import_provider_empty_actor_result_records_failed_import_fact -f
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted import fact terminal status tests: passed
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 180 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice improves AgentRuntime semantic execution state and report health.  It
+does not yet complete real provider scheduling, native engine import, C++
+multiplayer sync transport, or F5 runtime validation.  Those remain later
+Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 171 - Resource phase facts are persisted before report summaries
+
+Problem:
+
+```text
+Resource image/model preparation already wrote image_resource_plans and
+model_resource_plans into RuntimeState, and runtime_events exposed safe progress
+messages.  However, the phase-level resource outcome was still mostly derived
+from user-visible events at report time.
+
+That left a small Phase 5 evidence gap for future real providers:
+
+- resource rows existed;
+- events existed;
+- but the "image/model phase status for this batch" was not stored as its own
+  RuntimeState fact before report generation.
+```
+
+Change:
+
+```text
+runtime.asset.image.prepare and runtime.asset.model.prepare now also persist
+custom_resource_phase_facts for each batch/phase.
+
+Each fact stores only safe summary fields:
+
+- batch_id
+- phase = image / model
+- status = completed / partial / failed
+- requested_count
+- ready_count
+- failed_count
+- resource_count
+- status_counts
+- source = runtime_resource_phase_fact
+
+The ToolRegistry contract was updated so both resource tools declare:
+
+- image/model resource plan state
+- custom_resource_phase_facts
+
+This keeps RuntimeGuard / StatePatch validation honest instead of letting the
+new fact piggyback outside the declared tool contract.
+```
+
+Report/status read side:
+
+```text
+_resource_summary_for_plan() remains backward compatible with the existing
+runtime_event-based by_phase/latest_events summary.
+
+It now also includes:
+
+- fact_count
+- latest_facts
+
+These fields are read from custom_resource_phase_facts and contain only the
+safe summary fields above.  They do not expose provider names, prompts, URLs,
+local file paths, raw payloads, or API keys.
+
+fact_source_boundary_summary now also counts
+runtime_resource_phase_fact_count separately from runtime_resource_event_count,
+so Runtime business fact accounting reflects resource phase facts instead of
+only user-visible resource events.
+```
+
+Tests / gates:
+
+```text
+test_partial_resource_results_report_ready_and_failed_counts now verifies that
+partial image resources create a custom_resource_phase_facts entry and that the
+report carries the partial phase fact.
+
+test_empty_model_resource_provider_result_records_failed_resource_facts now
+verifies that an empty model provider result creates a failed model phase fact.
+
+Tool manifest tests now verify that runtime.asset.image.prepare and
+runtime.asset.model.prepare declare custom_resource_phase_facts in
+produces_state.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py AgentRuntimePhase1Tests.test_partial_resource_results_report_ready_and_failed_counts -f
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_empty_resource_provider_result_records_failed_resource_facts editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_empty_model_resource_provider_result_records_failed_resource_facts editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_image_adapter_item_failure_persists_failed_fact_and_partial_event editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_partial_model_resources_only_import_ready_items
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted resource phase fact tests: passed
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 180 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice moves resource phase outcome evidence further into RuntimeState.  It
+does not yet enable real providers by default, complete native engine import,
+replace C++ multiplayer sync transport, or provide F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 174 - Actor delete writes engine boundary facts
+
+Problem:
+
+```text
+Actor import and layout transform now persist compact engine-write boundary
+facts in RuntimeState.  Actor delete still only persisted sanitized
+engine_delete_results and actor deleted updates on the review advisory proposal.
+
+That left the delete path slightly behind the other engine write paths: replay
+could count delete rows, but RuntimeState did not explicitly say which provider
+boundary handled the deletion, how many delete attempts were represented, how
+many actors were accepted as deleted, or how many deletes were observed by the
+engine adapter.
+```
+
+Change:
+
+```text
+make_engine_actor_delete_provider now returns:
+
+- source = engine_actor_delete_provider
+- engine_write_result.provider_source
+- requested_count
+- deleted_count
+- observed_deleted_count
+- status_counts
+
+AgentRuntime._mark_actor_deleted_tool now stores a sanitized copy in:
+
+review_advisory_proposals[proposal_key].engine_delete_boundary
+
+The boundary fact stores only safe accounting fields.  It does not persist raw
+native responses, prompts, provider internals, URLs, local paths, stack traces,
+or API keys.
+```
+
+Behavior:
+
+```text
+This slice does not change delete approval, delete target selection, or actor
+update authority.
+
+- system actors remain skipped;
+- unconfirmed or high-risk delete actions still go through review advisory;
+- when an engine delete provider is configured, only provider-successful actor
+  ids are marked deleted in RuntimeState;
+- failed delete rows remain advisory/audit facts and do not pretend the engine
+  changed.
+```
+
+Tests / gates:
+
+```text
+test_engine_actor_delete_provider_uses_remove_gate_and_returns_actor_updates now
+verifies the provider boundary source, requested_count, deleted_count,
+observed_deleted_count, status_counts, and sanitization.
+
+test_confirmed_delete_advisory_with_engine_provider_only_marks_successful_delete
+now verifies review_advisory_proposals[proposal_key].engine_delete_boundary is
+persisted after execution and preserves mixed success/failed status counts.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/adapters.py editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_actor_delete_provider_uses_remove_gate_and_returns_actor_updates editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirmed_delete_advisory_with_engine_provider_only_marks_successful_delete
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted engine actor delete tests: passed
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 180 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This slice aligns actor delete with the import and transform engine-write
+boundary evidence pattern.  It does not yet complete native delete rollout, C++
+multiplayer sync transport, or F5 runtime behavior.  Those remain later
+Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 175 - Engine write boundary facts enter report/status/replay
+
+Problem:
+
+```text
+Progress Updates 172-174 persisted compact engine write boundary facts for
+actor import, layout transform, and actor delete.  Those facts existed in
+RuntimeState, but the user-facing read side was still split:
+
+- generate_report() and status_summary() did not expose one compact boundary
+  summary;
+- operation_replay() could count low-level engine write rows, but did not show
+  the new boundary facts as first-class replay evidence;
+- fact-source accounting did not count these write-boundary facts as mirrored
+  external facts.
+
+That meant RuntimeState already knew which engine boundary accepted a write, but
+the report/replay evidence chain was still harder to audit.
+```
+
+Change:
+
+```text
+AgentRuntime now derives engine_write_boundary_summary from RuntimeState:
+
+- custom_import_facts[*:actor_import_result].engine_write_boundary
+- layout_adjustment_proposals[*].engine_transform_boundary
+- review_advisory_proposals[*].engine_delete_boundary
+
+The summary is now included in:
+
+- generate_report()
+- status_summary()
+- operation_replay()
+- operation_replay_summary
+
+fact_source_boundary_summary now includes engine_write_boundary_fact_count and
+adds those boundary facts into mirrored_external_fact_count.
+```
+
+User-facing safety:
+
+```text
+The public summary deliberately uses write_source / write_source_counts rather
+than provider_source / provider_source_counts.
+
+Safe labels are mapped to:
+
+- engine_actor_import
+- runtime_layout_transform
+- runtime_actor_delete
+- runtime_engine_write
+
+This preserves write-boundary accountability without exposing provider internals,
+raw native responses, URLs, prompts, local paths, API keys, or stack traces.
+```
+
+Behavior:
+
+```text
+This slice is read-side only.  It does not change actor import, layout transform,
+actor delete, RuntimeGuard permissions, EngineWriteGate behavior, C++ engine
+calls, LAN sync, or provider enablement.
+
+It makes the existing write-boundary facts auditable from report/status/replay
+so OperationLog and RuntimeState remain the evidence source before any user
+report claims success.
+```
+
+Tests / gates:
+
+```text
+test_runtime_actor_import_persists_partial_success_from_engine_provider now
+checks report/status engine_write_boundary_summary for actor import boundaries
+and verifies fact_source_boundary_summary.engine_write_boundary_fact_count.
+
+test_runtime_layout_adjustment_can_call_engine_transform_provider now checks
+status engine_write_boundary_summary for layout transform boundaries.
+
+test_confirmed_delete_advisory_with_engine_provider_only_marks_successful_delete
+now checks operation_replay engine_write_boundary_summary for delete boundaries.
+
+test_handle_message_operation_replay_filters_by_external_plan verifies the
+operation replay surface still does not leak provider internals.
+```
+
+Validation:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_handle_message_operation_replay_filters_by_external_plan
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_actor_import_persists_partial_success_from_engine_provider editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_layout_adjustment_can_call_engine_transform_provider editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirmed_delete_advisory_with_engine_provider_only_marks_successful_delete
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted replay/internal-field test: passed
+targeted engine write boundary summary tests: passed
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 180 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This slice closes the read-side audit gap for engine write boundary facts.  It
+does not yet complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 176 - LANChat consumes engine write boundary digest
+
+Problem:
+
+```text
+Progress Update 175 made engine_write_boundary_summary available from
+generate_report(), status_summary(), operation_replay(), and report replay
+summaries.  The remaining read-side gap was LANChat/GM formatting:
+
+- RuntimeState and OperationLog could expose safe write-boundary facts;
+- LANChat status replies, Runtime Report, Operation Replay, and GM Runtime
+  summary still mainly showed engine_write result rows;
+- users could see that an import/transform/delete happened, but not the compact
+  write-boundary fact count that says the Runtime captured the engine write
+  boundary as auditable evidence.
+```
+
+Change:
+
+```text
+LANChatAgentWorker now formats engine write boundary facts through a dedicated
+safe formatter:
+
+- _format_agent_runtime_engine_write_boundary_report()
+
+The formatter outputs only:
+
+- boundary_fact_count
+- import / transform / delete boundary counts
+- safe write_source_counts
+- safe status_counts
+
+The formatter is consumed by:
+
+- Runtime Operation Replay reply
+- Runtime Report reply
+- normal Runtime status reply
+- GM Runtime summary reply
+
+GM summary now carries engine_write_boundary_digest from AgentRuntime.gm_summary().
+fact-source formatting also displays engine_write_boundary_fact_count as
+write-boundary N.
+```
+
+User-facing safety:
+
+```text
+The LANChat formatter preserves the same public vocabulary as Runtime:
+
+- write_source_counts, not provider_source_counts
+- safe labels such as engine_actor_import / runtime_layout_transform /
+  runtime_actor_delete
+
+It redacts or normalizes provider / prompt / raw / url / api key / token markers
+before rendering.  LANChat tests confirm the rendered text does not expose the
+word provider.
+```
+
+Behavior:
+
+```text
+This slice is a read-side disclosure step.  It does not change EngineWriteGate,
+actor import, layout transform, actor delete, RuntimeGuard decisions, C++
+bindings, multiplayer sync transport, or provider enablement.
+
+It makes the already-persisted engine write boundary facts visible in the
+surfaces users and GM actually query, while keeping OperationLog and RuntimeState
+as the source of truth.
+```
+
+Tests / gates:
+
+```text
+test_runtime_resource_and_fact_source_formatters_surface_attention now verifies
+fact-source text includes write-boundary counts.
+
+test_runtime_replay_report_discloses_environment_import_events now verifies the
+compact replay report includes engine_write_boundary facts.
+
+test_engine_write_boundary_report_is_safe_and_user_readable covers the new
+formatter and provider redaction.
+
+test_gm_summary_reply_includes_runtime_resource_flow_digest now verifies GM
+Runtime summary includes Engine write boundary.
+
+The Runtime status reply path also verifies the 写入边界 line is present.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_replay_report_discloses_environment_import_events editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_engine_write_report_discloses_environment_import_results editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_engine_write_boundary_report_is_safe_and_user_readable editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_gm_summary_reply_includes_runtime_resource_flow_digest
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted LANChat engine write boundary tests: passed
+test_lanchat_runtime_guard.py: 181 tests passed
+test_agent_runtime_phase1.py: 563 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This slice closes the LANChat/GM read-side gap for engine write boundary
+evidence.  It does not yet complete real native provider rollout, C++ multiplayer
+sync transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 177 - Provider status preflight exposes write-boundary digest
+
+Problem:
+
+```text
+Progress Update 176 made engine write boundary facts visible in Runtime status,
+Runtime Report, Operation Replay, and GM Runtime summary.  One user-facing
+capability boundary still lagged behind:
+
+- provider_status / Runtime Resources preflight could show provider readiness,
+  message delivery, and engine_write result rows;
+- it did not include engine_write_boundary_summary;
+- this made the C++/provider capability preflight less useful for checking
+  whether Runtime had captured engine write boundary evidence.
+```
+
+Change:
+
+```text
+AgentRuntime.provider_status() now includes engine_write_boundary_summary.
+
+The no-plan branch returns an empty boundary summary instead of falling back to
+the active plan.  The external-plan branch scopes boundary facts through the
+resolved Runtime plan, just like engine_write_summary.
+
+LANChatAgentWorker._handle_agent_runtime_provider_status_query() now renders:
+
+- engine_write
+- engine_write_boundary
+- message_delivery
+
+using the same safe boundary formatter introduced in Progress Update 176.
+```
+
+Behavior:
+
+```text
+This is still a read-only/preflight path.  It does not create a ScenePlan, does
+not enable real providers, does not invoke C++ writes, and does not change
+EngineWriteGate or RuntimeGuard decisions.
+
+The goal is capability visibility: when a host/GM asks for Runtime resource
+preflight, the reply now shows whether Runtime has safe write-boundary evidence
+for the scoped plan.
+```
+
+Tests / gates:
+
+```text
+test_provider_status_external_plan_scopes_engine_write_summary now verifies
+provider_status includes engine_write_boundary_summary and does not mix in the
+second external plan.
+
+test_runtime_provider_status_query_runs_preflight_without_creating_plan now
+verifies the LANChat preflight reply includes engine_write_boundary while still
+not creating a scene plan and not exposing provider internals.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_provider_status_external_plan_scopes_engine_write_summary editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_provider_status_publishes_safe_readiness_without_creating_plan
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_provider_status_query_runs_preflight_without_creating_plan editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_engine_write_boundary_report_is_safe_and_user_readable
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted provider status boundary tests: passed
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 181 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This slice closes the provider_status/readiness visibility gap for write
+boundary evidence.  It does not yet complete real native provider rollout, C++
+multiplayer sync transport replacement, front-end report rendering, or F5
+runtime validation.  Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 178 - Engine write status exposes write-boundary digest
+
+Problem:
+
+```text
+Progress Update 177 made provider_status / Runtime Resources preflight expose
+engine_write_boundary_summary.  The direct engine_write_status action still
+lagged behind:
+
+- AgentRuntime.handle_message(action="engine_write_status") returned
+  engine_write_status and engine_write_summary;
+- LANChatAgentWorker._handle_agent_runtime_engine_write_status_query() rendered
+  adapter readiness and replay rows;
+- neither direct status surface showed the compact write-boundary digest that
+  says Runtime captured engine import / transform / delete boundary facts.
+
+This left one read-side gap in the C++/engine write evidence chain.
+```
+
+Change:
+
+```text
+AgentRuntime.handle_message(action="engine_write_status") now returns:
+
+- engine_write_status
+- engine_write_summary
+- engine_write_boundary_summary
+- provider_status
+
+The exception/fallback path also returns an empty engine_write_boundary_summary
+so callers do not need a separate missing-field branch.
+
+LANChatAgentWorker._handle_agent_runtime_engine_write_status_query() now appends:
+
+- engine boundary: boundary N, import/transform/delete A/B/C, sources ..., statuses ...
+
+using the same safe boundary formatter introduced in Progress Update 176.
+```
+
+Behavior:
+
+```text
+This is still read-only.  It does not create a ScenePlan, does not enable real
+native providers, does not write C++ state, and does not change RuntimeGuard or
+EngineWriteGate decisions.
+
+The goal is audit visibility: provider preflight, runtime report/replay, GM
+summary, and direct engine-write status now all expose the same safe
+write-boundary digest.
+```
+
+Tests / gates:
+
+```text
+test_provider_status_external_plan_scopes_engine_write_summary now also verifies
+the engine_write_status action returns the same scoped engine_write_summary and
+engine_write_boundary_summary as provider_status, without leaking the second
+external plan.
+
+test_engine_write_status_action_exception_is_operation_logged_safely now verifies
+the failure path returns empty engine_write_summary and
+engine_write_boundary_summary.
+
+test_runtime_engine_write_status_query_reports_write_adapters_without_creating_plan
+now verifies the LANChat engine-write status reply includes an empty boundary
+digest while still not creating a ScenePlan.
+
+test_runtime_engine_write_status_query_reports_engine_write_boundary verifies the
+LANChat direct engine-write status reply renders persisted engine write boundary
+facts and does not expose provider / prompt / URL internals.
+```
+
+Validation:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_provider_status_external_plan_scopes_engine_write_summary editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_write_status_action_exception_is_operation_logged_safely editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_engine_write_status_query_reports_write_adapters_without_creating_plan editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_engine_write_status_query_reports_engine_write_boundary
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B editor/plugins/AITool/services/test_lanchat_runtime_guard.py -f
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted engine-write status boundary tests: passed
+test_agent_runtime_phase1.py: 563 tests passed
+test_lanchat_runtime_guard.py: 182 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice closes the direct engine_write_status visibility gap for write
+boundary evidence.  It does not yet complete real native provider rollout, C++
+multiplayer sync transport replacement, front-end report rendering, or F5
+runtime validation.  Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 179 - Resource phase facts are locked into ToolCall manifest gates
+
+Problem:
+
+```text
+The image/model resource tools now write custom_resource_phase_facts so resource
+preparation can be audited through RuntimeState instead of remaining an implicit
+workflow-side detail.
+
+The functional path was already present, but the Agent-native contract gate was
+too easy to weaken later:
+
+- individual tools declared image_resource_plans / model_resource_plans;
+- tests checked individual tool produces_state rows;
+- the top-level manifest summary and static verifier did not explicitly lock
+  custom_resource_phase_facts as a produced state key.
+
+That left a small regression gap for the invariant: every decomposed resource
+phase must be visible as ToolCall-produced RuntimeState evidence.
+```
+
+Change:
+
+```text
+test_tool_registry_manifest_exposes_safe_capability_metadata now asserts that
+custom_resource_phase_facts appears in manifest["summary"]["produced_state_keys"].
+
+verify_ultimate_plan.py static Runtime validator contract gate now requires:
+
+- def _resource_phase_fact(
+- custom_resource_phase_facts
+- produces_state=("image_resource_plans", "custom_resource_phase_facts")
+- produces_state=("model_resource_plans", "custom_resource_phase_facts")
+
+This makes the resource phase fact channel part of the checked ToolCallGraph
+contract, not just an incidental implementation detail.
+```
+
+Behavior:
+
+```text
+This is a low-risk test/contract slice.  It does not change runtime behavior,
+providers, C++ writes, LANChat routing, or UI rendering.
+
+It strengthens the Agent-native invariant that resource preparation belongs to
+ToolCall-produced RuntimeState facts and must stay visible to reports/status
+instead of drifting back into hidden workflow state.
+```
+
+Validation:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_tool_registry_manifest_exposes_safe_capability_metadata
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted ToolRegistry manifest test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice only locks the resource phase manifest contract.  It does not yet
+complete real native provider rollout, C++ multiplayer sync transport
+replacement, front-end report rendering, or F5 runtime validation.  Those remain
+later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 180 - Resource phase facts enter the RuntimeState room schema
+
+Problem:
+
+```text
+Progress Update 179 locked custom_resource_phase_facts into the ToolCall
+manifest and static gates.  The next schema gap was RuntimeState itself:
+
+- runtime.asset.image.prepare and runtime.asset.model.prepare could produce
+  custom_resource_phase_facts through StatePatch;
+- reports and status summaries could consume that key;
+- but a newly created RuntimeState room did not declare
+  custom_resource_phase_facts in its default schema.
+
+That meant the fact channel worked, but it was still not a first-class room
+state slot.  For the Agent-native invariant "RuntimeState is the only state fact
+source", the room schema should explicitly declare every Runtime-owned fact
+channel.
+```
+
+Change:
+
+```text
+RuntimeState.room() now initializes:
+
+- custom_resource_phase_facts: {}
+
+test_runtime_state_default_room_declares_resource_phase_facts verifies every new
+room exposes this fact slot before any resource tool runs.
+
+verify_ultimate_plan.py now statically requires the default RuntimeState room
+schema to declare custom_resource_phase_facts.
+```
+
+Behavior:
+
+```text
+This is a schema/contract slice.  It does not change provider behavior, resource
+generation, C++ writes, LANChat routing, or UI rendering.
+
+It makes resource phase facts a first-class RuntimeState field instead of a
+dynamically introduced patch key.
+```
+
+Validation:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_state_default_room_declares_resource_phase_facts
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted RuntimeState schema test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+test_agent_runtime_phase1.py now runs 564 tests
+```
+
+Remaining:
+
+```text
+This slice only closes the RuntimeState schema gap for resource phase facts.  It
+does not yet complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 190 - status query OperationLog records report health digest
+
+Problem:
+
+```text
+Progress Update 189 made report_ready health visible in RuntimeEvent
+OperationLog replay.  The next nearby audit gap was status query logging:
+
+- status_summary() returned report_health_summary and runtime_event_replay_summary;
+- GM/status UI could read those summaries from RuntimeState and replay;
+- but the runtime_status_queried OperationLog row only recorded generic counts
+  such as batch_count, graph_count, context_count, and speaker counts.
+
+That meant a later audit could see that a status query happened, but not whether
+the status query observed a partial/failed report health state or report-ready
+attention events at that time.
+```
+
+Change:
+
+```text
+AgentRuntime.status_summary() now writes the compact health/replay digest into
+the runtime_status_queried OperationLog payload:
+
+- report_health_status
+- report_attention_required
+- runtime_event_report_ready_count
+- runtime_event_report_attention_count
+
+test_partial_resource_results_report_ready_and_failed_counts now performs a
+status_summary() query after a partial resource report and verifies the
+runtime_status_queried OperationLog payload carries the same safe health digest.
+
+verify_ultimate_plan.py now statically requires these status query audit tokens.
+```
+
+Behavior:
+
+```text
+This is an audit-only slice.  It does not change generation, providers,
+SceneComposer behavior, C++ writes, LAN sync, VLM execution, or UI rendering.
+
+It strengthens the Agent-native invariant that every user-visible status query
+must be explainable from OperationLog, not only from the returned Python object.
+```
+
+Validation:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_partial_resource_results_report_ready_and_failed_counts
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted AgentRuntime status query audit test: passed
+targeted LANChat formatter regression: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+test_agent_runtime_phase1.py runs 565 tests
+test_lanchat_runtime_guard.py runs 182 tests
+```
+
+Remaining:
+
+```text
+This slice only closes the status-query OperationLog audit gap for report
+health.  It does not yet complete real native provider rollout, C++ multiplayer
+sync transport replacement, front-end report rendering, or F5 runtime
+validation.  Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 191 - provider readiness status enters OperationLog replay
+
+Problem:
+
+```text
+Provider readiness could be published through AgentRuntime, and provider_status()
+could return a safe provider_readiness_summary to callers.  However, the
+OperationLog replay path still had two audit gaps:
+
+- runtime_event_emitted rows for provider_readiness did not preserve the safe
+  readiness status, so replay could collapse the latest readiness event to
+  unknown;
+- runtime_provider_status_queried rows recorded that a query happened, but not
+  how many channels were requested, enabled, or unavailable at query time.
+
+That meant GM/runtime replay could prove a readiness check occurred, but could
+not reconstruct the provider readiness facts that shaped the user-visible status.
+```
+
+Change:
+
+```text
+AgentRuntime.emit_runtime_event() now writes a safe readiness_status token for
+provider_readiness OperationLog rows.
+
+AgentRuntime.provider_status() now records compact readiness counts in the
+runtime_provider_status_queried OperationLog payload:
+
+- readiness_channel_count
+- readiness_requested_count
+- readiness_enabled_count
+- readiness_unavailable_count
+
+AgentRuntime._resource_readiness_replay_summary() now aggregates provider status
+query totals, preserves the latest provider status query snapshot, and reads
+provider_readiness event status from the safe OperationLog payload.
+
+LANChat replay formatting now exposes a concise provider readiness digest:
+
+query-ready requested/enabled/unavailable X/Y/Z
+
+verify_ultimate_plan.py statically requires the provider readiness event token,
+provider_status query payload counts, and replay summary fields.
+```
+
+Behavior:
+
+```text
+This is still an audit/replay slice.  It does not enable new providers, change
+the provider selection policy, alter SceneComposer, or touch native/CEF/C++
+paths.
+
+The value is that provider availability and degradation can now be explained
+from OperationLog replay instead of relying on transient return objects.
+```
+
+Validation:
+
+```text
+python -B editor/plugins/AITool/services/test_agent_runtime_phase1.py -f
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_operation_replay_query_uses_metadata_batch_scope
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+test_agent_runtime_phase1.py: 565 tests passed
+targeted LANChat metadata batch replay test: passed
+targeted LANChat resource/fact formatter test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice does not complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 193 - missing-plan provider preflight keeps readiness audit facts
+
+Problem:
+
+```text
+provider_status(external_plan_id=...) already handled the case where the
+external SeedPlan could not be resolved to a Runtime plan:
+
+- it returned readiness_published = false;
+- it returned reason = no runtime plan;
+- it did not create a ScenePlan;
+- it still returned a safe provider_readiness_summary.
+
+However, the runtime_provider_status_queried OperationLog row for this path only
+recorded recorded=false and reason=no runtime plan.  The returned Python object
+had provider readiness counts, but the replayable audit trail did not.
+
+That made a missing-plan preflight weaker than a normal preflight: later GM /
+OperationLog replay could explain why no Runtime plan was touched, but not what
+provider readiness looked like at the time of the failed mapping.
+```
+
+Change:
+
+```text
+The missing-plan provider_status branch now computes the same safe readiness
+summary as the normal branch and writes these fields into OperationLog:
+
+- readiness_channel_count
+- readiness_requested_count
+- readiness_enabled_count
+- readiness_unavailable_count
+- readiness_status_counts
+
+_resource_readiness_replay_summary() already consumes these fields, so the
+missing-plan path now contributes to status_query_* totals and
+latest_provider_status_query just like the normal path.
+```
+
+Behavior:
+
+```text
+This is a preflight/audit-only change.  It still does not create or mutate a
+ScenePlan when external_plan_id has no Runtime mapping, and it does not publish a
+provider_readiness RuntimeEvent for that missing plan.
+
+The invariant is now tighter:
+
+even failed provider preflight mapping is replayable from OperationLog with the
+safe readiness facts that shaped the user-facing response.
+```
+
+Validation:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_provider_status_external_plan_field_accepts_runtime_plan_id
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_provider_status_publishes_safe_readiness_without_creating_plan
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_provider_status_query_runs_preflight_without_creating_plan
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted missing-plan provider status test: passed
+targeted provider readiness test: passed
+targeted LANChat provider preflight test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice does not complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 192 - provider readiness query status counts are replayable
+
+Problem:
+
+```text
+Progress Update 191 made provider readiness query totals replayable:
+
+- requested_count
+- enabled_count
+- unavailable_count
+
+That was enough to prove broad provider availability, but not enough to explain
+which safe readiness modes contributed to the unavailable side.  A later audit
+could see "9 unavailable" but not whether those were disabled channels,
+runtime-state-only channels, mock adapters, or geometry-rule adapters.
+```
+
+Change:
+
+```text
+AgentRuntime.provider_status() now writes the safe readiness_status_counts
+dictionary into runtime_provider_status_queried OperationLog payloads.
+
+AgentRuntime._resource_readiness_replay_summary() now aggregates those counts as
+status_query_status_counts and preserves the latest query's
+readiness_status_counts snapshot.
+
+LANChat operation replay now formats a compact safe digest:
+
+query-status disabled:1,enabled:1
+
+The digest only contains normalized status/count pairs.  It does not expose raw
+provider names, provider internals, URLs, file paths, prompts, API keys, or
+diagnostic reasons.
+```
+
+Behavior:
+
+```text
+This is a read-side / audit-side slice.  It does not alter provider selection,
+generation, engine writes, C++ sync, VLM behavior, or UI command routing.
+
+It strengthens the Agent-native invariant that runtime capability checks must be
+reconstructable from OperationLog, not only from immediate Python return values.
+```
+
+Validation:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_provider_status_publishes_safe_readiness_without_creating_plan
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_operation_replay_query_uses_metadata_batch_scope
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted provider status readiness test: passed
+targeted LANChat operation replay batch-scope test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice does not complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 194 - provider readiness publish failure keeps safe readiness facts
+
+Problem:
+
+```text
+_publish_provider_readiness() used a ToolCallGraph to persist provider readiness
+into RuntimeState.  When that persistence failed, OperationLog recorded only:
+
+- runtime_provider_readiness_publish_failed
+- reason
+
+The Runtime knew the safe readiness summary before attempting the write, but the
+failure row did not preserve requested/enabled/unavailable counts or status
+counts.  A replay could prove that publication failed, but not what provider
+readiness state was lost with that failed write.
+```
+
+Change:
+
+```text
+_publish_provider_readiness() now computes the safe readiness summary once and
+writes it into both success and failure OperationLog rows:
+
+- readiness_channel_count
+- readiness_requested_count
+- readiness_enabled_count
+- readiness_unavailable_count
+- readiness_status_counts
+
+_resource_readiness_replay_summary() now aggregates publish-side readiness facts:
+
+- publish_requested_total
+- publish_enabled_total
+- publish_unavailable_total
+- publish_status_counts
+- latest_publish_event
+
+LANChat operation replay now surfaces a compact publish digest:
+
+publish-ready requested/enabled/unavailable X/Y/Z
+publish-status disabled:1,enabled:1
+```
+
+Behavior:
+
+```text
+This is an audit/replay slice.  It does not change provider selection, provider
+execution, generation, native engine writes, C++ sync, VLM behavior, or UI
+routing.
+
+The important invariant is that provider readiness publication failure is no
+longer a blind spot: the failed write and the safe readiness facts are both
+replayable from OperationLog.
+```
+
+Validation:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_provider_readiness_persist_failure_does_not_emit_runtime_event
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_operation_replay_query_uses_metadata_batch_scope
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted provider readiness publish failure test: passed
+targeted LANChat operation replay batch-scope test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice does not complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 195 - status queries carry resource readiness replay digest
+
+Problem:
+
+```text
+status_summary() returned the current provider_readiness_summary, but the status
+query path did not include the resource_readiness_replay_summary, and the
+runtime_status_queried OperationLog row did not record compact resource readiness
+publish/query counters.
+
+That left a gap between "current provider readiness" and "what readiness events
+and preflight queries have actually happened" when users or GM asked for status.
+A later audit had to run full operation_replay() to reconstruct the resource
+readiness timeline.
+```
+
+Change:
+
+```text
+status_summary() now computes resource_readiness_replay_summary from scoped
+OperationLog entries and returns it in the status summary.
+
+runtime_status_queried OperationLog payload now records safe compact counters:
+
+- resource_readiness_publish_count
+- resource_readiness_publish_failed_count
+- resource_readiness_query_count
+- resource_readiness_publish_requested_total
+- resource_readiness_publish_enabled_total
+- resource_readiness_publish_unavailable_total
+
+The field names intentionally use resource_readiness, not provider_readiness, so
+status query payloads remain free of provider wording while still preserving the
+capability facts needed for replay.
+```
+
+Behavior:
+
+```text
+This is a read-side/status-query audit slice.  It does not change provider
+selection, provider execution, generation, native engine writes, C++ sync, VLM
+behavior, or UI routing.
+
+The key invariant is stronger: status queries are now self-auditing for resource
+readiness publish/query history, without requiring a separate replay call to
+prove what the status response was based on.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/verify_ultimate_plan.py editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_partial_resource_results_report_ready_and_failed_counts
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_provider_status_publishes_safe_readiness_without_creating_plan
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_provider_readiness_persist_failure_does_not_emit_runtime_event
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted report health status query test: passed
+targeted provider status readiness test: passed
+targeted provider readiness publish failure test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice does not complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 196 - GM summary exposes resource readiness replay digest
+
+Problem:
+
+```text
+status_summary() and OperationLog replay already carried resource readiness
+publish/query history, but gm_summary() only exposed the broader resource batch
+flow. GM could report batch/resource execution shape, but could not directly
+restate whether resource readiness had been published, queried, or failed from
+the same RuntimeState read path.
+```
+
+Change:
+
+```text
+gm_summary() now derives a compact resource_readiness_replay_digest from
+status_summary(). The digest keeps only safe read-side counters:
+
+- published_count
+- publish_failed_count
+- status_query_count
+- readiness_event_count
+- publish requested/enabled/unavailable totals
+- query requested/enabled/unavailable totals
+- publish/query status count maps
+- latest readiness event status and counts
+
+runtime_gm_summary_exported now also records compact resource_readiness_* audit
+counters in OperationLog.
+
+LANChat GM Runtime summary now renders this as a user-visible resource channel
+replay line, reusing the existing safe formatter.
+```
+
+Behavior:
+
+```text
+This is a read-side GM/audit slice. It does not change provider selection,
+resource execution, generation, native writes, sync transport, VLM behavior, or
+front-end routing.
+
+The strengthened invariant is: GM summaries can now explain both current batch
+resource flow and the resource readiness publish/query replay facts that led to
+that status, without exposing provider internals.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_provider_status_publishes_safe_readiness_without_creating_plan
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_gm_summary_reply_includes_runtime_resource_flow_digest
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted Runtime provider readiness GM summary test: passed
+targeted LANChat GM Runtime summary test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice does not complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 197 - GM summary replay aggregates resource readiness audit counts
+
+Problem:
+
+```text
+runtime_gm_summary_exported now records compact resource_readiness_* counters,
+but gm_summary_replay_summary still only aggregated intervention and sync facts.
+That meant operation_replay() and generated reports could prove that GM summary
+was exported, but could not prove how many resource readiness publish/query facts
+were included in those GM exports.
+```
+
+Change:
+
+```text
+_gm_summary_replay_summary() now aggregates resource readiness counters from
+runtime_gm_summary_exported OperationLog rows:
+
+- resource_readiness_publish_total
+- resource_readiness_publish_failed_total
+- resource_readiness_query_total
+- resource_readiness_publish_requested_total
+- resource_readiness_publish_enabled_total
+- resource_readiness_publish_unavailable_total
+
+latest_gm_summary_event also carries the latest GM export's resource readiness
+publish/query counts.
+```
+
+Behavior:
+
+```text
+This is an OperationLog replay/report slice. It does not change resource channel
+selection, provider execution, generation, LANChat routing, native writes, sync
+transport, or VLM behavior.
+
+The strengthened invariant is: reports and replay queries can now audit not only
+that GM summarized RuntimeState, but also which resource readiness publish/query
+facts were present in those GM summaries.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_gm_summary_export_records_safe_intervention_counts
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_provider_status_publishes_safe_readiness_without_creating_plan
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted GM summary replay test: passed
+targeted provider readiness GM summary test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice does not complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 198 - status summary exposes GM summary replay audit facts
+
+Problem:
+
+```text
+operation_replay() and generated reports could replay gm_summary_replay_summary,
+but status_summary() did not expose that replay digest directly. A status query
+could show Runtime status, resource readiness replay, and recent events, but not
+whether GM summaries had already been exported or what resource readiness facts
+those GM summaries carried.
+```
+
+Change:
+
+```text
+status_summary() now derives gm_summary_replay_summary from scoped OperationLog
+entries and returns it in the status summary.
+
+runtime_status_queried now records compact GM replay counters:
+
+- gm_summary_exported_count
+- gm_summary_failed_count
+- gm_summary_resource_readiness_publish_total
+- gm_summary_resource_readiness_query_total
+
+The verifier now requires these status-summary tokens so the GM replay digest is
+kept on the normal status read path.
+```
+
+Behavior:
+
+```text
+This is a status/read-side audit slice. It does not change GM routing, generation,
+resource execution, native writes, sync transport, VLM behavior, or user-visible
+LANChat formatting.
+
+The strengthened invariant is: a normal Runtime status query can now audit GM
+summary export history and the resource readiness publish/query totals included
+in those GM summaries, without requiring a separate operation_replay() call.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_gm_summary_export_records_safe_intervention_counts
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_provider_status_publishes_safe_readiness_without_creating_plan
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted GM summary replay/status test: passed
+targeted provider readiness status test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice does not complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 199 - status summary includes GM summary replay digest
+
+Problem:
+
+```text
+operation_replay() and generated reports could replay gm_summary_replay_summary,
+but status_summary() did not expose the same GM replay digest directly. A normal
+status query could audit Runtime status and resource readiness replay, but not
+whether GM summaries had already been exported or which resource readiness
+publish/query totals those GM summaries contained.
+```
+
+Change:
+
+```text
+status_summary() now derives gm_summary_replay_summary from scoped OperationLog
+entries and returns it in the status summary.
+
+runtime_status_queried now records compact GM replay counters:
+
+- gm_summary_exported_count
+- gm_summary_failed_count
+- gm_summary_resource_readiness_publish_total
+- gm_summary_resource_readiness_query_total
+
+The verifier now requires these tokens on the status read path.
+```
+
+Behavior:
+
+```text
+This is a read-side/status audit slice. It does not change GM routing,
+generation, resource execution, native writes, sync transport, VLM behavior, or
+LANChat formatting.
+
+The strengthened invariant is: status_summary() can now audit GM summary export
+history and the resource readiness facts those summaries carried, without a
+separate operation_replay() call.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_gm_summary_export_records_safe_intervention_counts
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_provider_status_publishes_safe_readiness_without_creating_plan
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted GM summary status replay test: passed
+targeted provider readiness status test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice does not complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 200 - LANChat status reply surfaces GM replay digest
+
+Problem:
+
+```text
+status_summary() now exposes gm_summary_replay_summary, but the LANChat Runtime
+status reply still did not render it. A user asking for current Runtime status
+could see resource batches, RuntimeEvent replay, VLM replay, and sync replay, but
+not whether GM summaries had already been exported in this room/batch scope.
+```
+
+Change:
+
+```text
+LANChatAgentWorker._agent_runtime_status_reply() now reads
+status["gm_summary_replay_summary"] and renders a compact user-visible line:
+
+- GM replay: exported N, failed M, available K, scene-plan P, readiness publish/query X/Y
+
+A new safe formatter _format_agent_runtime_gm_summary_replay_report() keeps the
+output to counters only and does not expose internal payloads.
+
+The verifier now requires this formatter and the GM replay status line in the
+Runtime status reply path.
+```
+
+Behavior:
+
+```text
+This is a UI disclosure/read-side slice. It does not change status_summary(), GM
+routing, generation, resource execution, native writes, sync transport, or VLM
+behavior.
+
+The strengthened invariant is: when the Runtime status path has GM replay facts,
+the LANChat status reply can disclose them at the same compact audit level as
+resource, RuntimeEvent, VLM, and sync replay facts.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_status_reply_can_scope_to_explicit_batch_id
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted LANChat Runtime status reply test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice does not complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 201 - Runtime status exposes ToolGraph execution replay
+
+Problem:
+
+```text
+Operation replay and user reports already carried batch_execution_summary and
+tool_graph_queue_summary, but status_summary() and the LANChat Runtime status
+reply still leaned on current RuntimeState queue snapshots. For long sessions,
+recent-event windows can hide earlier batch start/completion facts, so status
+queries could not reliably audit whether ToolCallGraph execution actually
+started, completed, finalized, queued, dequeued, or was rejected.
+```
+
+Change:
+
+```text
+AgentRuntime.status_summary() now computes execution replay from the full current
+plan/batch OperationLog scope and exposes:
+
+- batch_execution_replay_summary
+- tool_graph_queue_replay_summary
+
+The runtime_status_queried audit payload now records compact counters for batch
+start/completion/finalization and queue queued/dequeued/rejected/blocked.
+
+LANChatAgentWorker._agent_runtime_status_reply() now renders a user-visible safe
+line:
+
+- ToolGraph replay: batch start/done/final X/Y/Z, queue queued/dequeued/rejected/blocked A/B/C/D
+
+The verifier requires these fields and the LANChat status reply formatter.
+```
+
+Behavior:
+
+```text
+This is a read-side / audit-side Agent-native slice. It does not change batch
+execution ordering, ToolCallGraph scheduling, RuntimeGuard permissions, native
+engine writes, sync transport, VLM, or legacy workflow behavior.
+
+The strengthened invariant is: Runtime status queries can replay the execution
+queue facts from OperationLog, not only inspect the latest RuntimeState snapshot.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_executes_planned_batches_as_separate_tool_graphs
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_plain_chat_status_query_uses_runtime_before_coordinator_lookup
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted ToolCallGraph batch execution replay test: passed
+targeted LANChat Runtime status reply test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice does not complete real native provider rollout, C++ multiplayer sync
+transport replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native Phase 5/6/7 work.
+```
+
+## Progress Update 202 - RuntimeCppBridge exposes engine boundary call facts
+
+Problem:
+
+```text
+Engine-plane providers already returned engine_write_result facts, and Runtime
+status/report could summarize engine write boundaries. However, the C++ bridge
+itself did not expose a uniform call-boundary fact. Actor import, layout
+transform, and actor delete providers had to infer success/failure from their
+own result lists, which made the Python/C++ interface less auditable during the
+Agent-native migration.
+```
+
+Change:
+
+```text
+RuntimeCppBridgeResult now carries a sanitized boundary_fact for every bridge
+call:
+
+- bridge_call_count
+- bridge_success_count
+- bridge_failed_count
+- bridge_method_counts
+- bridge_error_code_counts
+
+The engine actor import, layout transform, and actor delete providers aggregate
+these bridge facts into engine_write_result. Runtime engine_write_boundary facts
+preserve the bridge counters, and AgentRuntime._engine_write_boundary_summary_for_plan()
+now aggregates them across import/transform/delete boundaries.
+
+LANChatAgentWorker._format_agent_runtime_engine_write_boundary_report() now
+shows compact bridge health as:
+
+bridge calls/success/failed, errors <safe counts>
+
+The verifier requires the adapter, Runtime, tools, worker, and regression tests
+to keep these bridge-boundary fields present.
+```
+
+Behavior:
+
+```text
+This is an engine-interface unification slice. It does not call native build,
+modify C++ bindings, change EngineWriteGate behavior, alter actor placement, or
+change ToolCallGraph scheduling. It only makes C++/engine write boundary facts
+first-class and replayable from RuntimeState/OperationLog-derived summaries.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/adapters.py editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_cpp_bridge_success_payload_is_narrow_and_sanitized editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_cpp_bridge_failure_message_is_sanitized
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_actor_import_provider_uses_gate_and_returns_actor_facts editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_actor_delete_provider_uses_remove_gate_and_returns_actor_updates
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_actor_import_persists_partial_success_from_engine_provider
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted RuntimeCppBridge tests: passed
+targeted engine provider tests: passed
+targeted partial import boundary test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice does not replace native sync transport, finish real provider rollout,
+render front-end reports, or prove F5 runtime behavior. Those remain later
+Agent-native Phase 5/6/7 validation work.
+```
+
+## Progress Update 203 - MasterAgent compose routes stop before legacy scene handler
+
+Problem:
+
+```text
+MasterAgent._handle_scene(), _handle_scene_compose(), direct import, edit, and
+SceneComposerJobRunner already had AgentRuntime migration guards. However,
+MasterAgent.__call__ could still classify a request as compose and route into
+_handle_scene(..., force_compose=True) before the guard rejected it. That meant
+the outer RoleAgent route still behaved like a legacy workflow entry point,
+even though the inner write path was blocked.
+```
+
+Change:
+
+```text
+The planning-gate compose branch and the semantic intent compose branch in
+MasterAgent.__call__ now check _legacy_main_workflow_allowed() before calling
+_handle_scene(..., force_compose=True). In default AgentRuntime mode they return
+AGENT_RUNTIME_REQUIRED_MESSAGE immediately, so old RoleAgent compose routes stop
+at the user-entry boundary instead of entering the legacy scene handler.
+
+verify_ultimate_plan.py now includes a static MasterAgent legacy compose route
+gate. It requires both outer compose branches to contain the legacy-main guard
+and Runtime-required reply before any call into _handle_scene(...force_compose).
+```
+
+Behavior:
+
+```text
+This is a主控退场 boundary slice. It does not delete SceneComposer, change
+SceneComposerJobRunner, modify the LANChat Coordinator path, or alter explicit
+transition flags. If ALLOW_LEGACY_MAIN_WORKFLOW is explicitly enabled for
+transition/debug, the legacy path can still be reached; by default it is blocked
+before the old scene handler takes control.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/cai_extensions/agent/agent_adapter.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_master_agent_call_write_routes_return_runtime_required_message_by_default editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_master_agent_call_compose_routes_do_not_enter_legacy_scene_handler_by_default editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_master_agent_lanchat_progress_context_blocks_compose_even_when_legacy_enabled
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted MasterAgent compose route tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice does not complete real provider rollout, ToolCallGraph replacement
+for every old workflow ability, native sync replacement, front-end report
+rendering, or F5 runtime validation. Those remain later Agent-native work.
+```
+
+## Progress Update 204 - Confirmed generation reply reports Runtime execution facts
+
+Problem:
+
+```text
+The default LANChat confirmed-generation path already routes to AgentRuntime
+when legacy main workflow is disabled.  AgentRuntime.handle_message(action=
+confirm_and_execute) executes Runtime batch graphs and returns batches, graphs,
+and report facts.
+
+However, LANChatAgentWorker still replied with the old queue-oriented wording:
+"已进入 Runtime 执行队列".  This made a completed Runtime execution slice look
+like a queued legacy scheduler job, and hid graph status / report health from
+the immediate confirmation response.
+```
+
+Change:
+
+```text
+LANChatAgentWorker._format_agent_runtime_execution_reply() is now the shared
+formatter for confirmed SeedPlan execution, active Runtime plan execution, and
+structured host-action execution.
+
+The reply now reports:
+
+- Runtime batch count
+- safe ToolCallGraph status counts
+- compact report health status
+
+The wording uses "已执行 Runtime 批次..." instead of "已进入 Runtime 执行队列".
+Detailed failed/partial/waiting counts remain available through Runtime status
+and report queries.  The immediate execution reply only shows compact health
+status / attention flag, avoiding accidental HostActionExecutor failure
+classification from harmless strings such as "failed 0".
+
+verify_ultimate_plan.py now statically requires the execution reply formatter
+to include Runtime batch count, graph status, report_health_summary, and
+attention_required, and rejects the old queue-only wording inside that formatter.
+```
+
+Behavior:
+
+```text
+This is a disclosure/control-plane truthfulness slice.  It does not change
+ToolCallGraph execution, resource providers, C++ engine writes, LAN sync,
+VLM behavior, or the legacy transition flags.  It makes the user-facing
+confirmation response align with RuntimeState / report facts instead of legacy
+GenerationScheduler queue semantics.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_host_action_structured_seed_plan_routes_to_agent_runtime_by_default editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_host_action_structured_external_plan_id_routes_to_agent_runtime_by_default editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_host_action_visible_status_and_result_send_are_audited editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_confirmed_seedplan_execution_remembers_room_for_worker_drain editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_active_runtime_plan_generation_remembers_room_for_worker_drain
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted LANChat execution / host-action tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice does not complete real provider rollout, native sync replacement,
+front-end report rendering, or F5 runtime validation. Those remain later
+Agent-native work.
+```
+
+## Progress Update 205 - Post-generation add host actions report Runtime patch facts
+
+Problem:
+
+```text
+Structured host actions already route post_generation_add to AgentRuntime by
+default.  AgentRuntime.handle_message(action=post_generation_add) records a
+PlanPatch in RuntimeState and OperationLog.
+
+However, LANChatAgentWorker discarded that result and returned only the generic
+text "AgentRuntime 执行结果。".  That made user/GM-visible追加生成确认无法看出
+whether the intervention was actually recorded, which plan it belonged to, what
+patch type was created, or how many objects were extracted.
+```
+
+Change:
+
+```text
+LANChatAgentWorker now has _format_agent_runtime_intervention_reply(), used by
+structured host actions with action_type=post_generation_add.
+
+The reply reports safe Runtime patch facts:
+
+- ScenePlan id
+- patch type
+- patch status
+- extracted object count
+
+The generic "AgentRuntime 执行结果。" reply is no longer used for this path.
+verify_ultimate_plan.py now statically requires the intervention reply formatter
+to reference patch_type/status/items and rejects collapsing patch facts into the
+old generic result text.
+```
+
+Behavior:
+
+```text
+This is a control/disclosure slice for user intervention.  It does not execute a
+new provider call, create native actors, change pending-intervention routing, or
+modify legacy transition flags.  It makes the post-generation add confirmation
+surface reflect RuntimeState patch facts instead of hiding them behind a generic
+success string.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_host_action_post_generation_add_reports_runtime_patch_facts editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_host_action_structured_seed_plan_routes_to_agent_runtime_by_default editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_host_action_structured_external_plan_id_routes_to_agent_runtime_by_default
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted post-generation add / structured host-action tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice records and reports the Runtime intervention patch.  It does not yet
+complete automatic post-generation resource generation/import for that patch,
+native sync replacement, front-end report rendering, or F5 runtime validation.
+Those remain later Agent-native work.
+```
+
+## Progress Update 210 - Legacy model provider unavailable becomes Runtime failed resource facts
+
+Problem:
+
+```text
+make_legacy_model_resource_provider() had already decomposed the old
+ModelProvider.acquire() capability into a function-sized Runtime model resource
+provider.
+
+However, if the legacy ModelProvider factory itself failed to initialize, the
+exception escaped into runtime.asset.model.prepare.  That meant Runtime could
+lose per-item failed model facts for the batch and the ToolCallGraph failure was
+less useful for later reports, retries, or user-visible diagnostics.
+
+For Agent-native execution, even provider initialization failure should become
+RuntimeState evidence, not an unstructured exception.
+```
+
+Change:
+
+```text
+make_legacy_model_resource_provider() now parses batch_id and model_items before
+lazy provider initialization.
+
+If the legacy ModelProvider factory fails:
+
+- every requested model item gets a failed model resource fact
+- the source is the safe enum legacy_model_adapter_unavailable
+- no exception message, provider detail, api_key, raw payload, or secret text is
+  persisted
+- runtime.asset.model.prepare treats those facts as hard model resource failure
+  alongside legacy_model_failure
+- the failed ToolResult still carries a StatePatch, so model_resource_plans and
+  custom_resource_phase_facts are written before dependent ToolCalls are skipped
+
+ResourcePlanValidator / safe source normalization now preserves
+legacy_model_adapter_unavailable as a safe source value.
+
+verify_ultimate_plan.py now statically requires this provider-unavailable source
+and the runtime.asset.model.prepare hard-failure guard.
+```
+
+Behavior:
+
+```text
+This is a real-provider rollout robustness slice.  It does not enable the
+legacy model provider by default and does not call SceneComposer,
+ProgressiveWorkflow, GenerationScheduler, actor import, or native build.
+
+It makes the already-toolized legacy ModelProvider adapter safer to enable
+behind AGENT_RUNTIME_USE_LEGACY_MODEL_PROVIDER=1, because provider setup failure
+now leaves auditable Runtime facts instead of a missing batch state.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/adapters.py editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_legacy_model_provider_factory_failure_records_failed_resource_facts editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_legacy_model_provider_adapter_normalizes_acquire_results editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_model_provider_consumes_image_resources_from_previous_toolcall
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted legacy model provider / image-to-model ToolCall tests: passed
+verify_ultimate_plan.py: passed
+```
+
+Remaining:
+
+```text
+This slice improves provider failure evidence and ToolCallGraph behavior.  It
+does not complete default real provider rollout, native import replacement,
+ProgressiveWorkflow removal, multiplayer sync replacement, front-end report
+rendering, or F5 runtime validation.  Those remain later Agent-native work.
+```
+
+## Progress Update 209 - Tool manifest exposes execution contracts for Agent Runtime tools
+
+Problem:
+
+```text
+ToolRegistry already registered many function-level AgentRuntime tools, and the
+manifest exposed names, categories, risk, required args, consumes_state, and
+produces_state.
+
+However, the manifest did not provide a compact execution contract that an
+Agent / verifier can use to distinguish read-only tools from write tools,
+stateful tools from stateless tools, confirmation-required tools from safe
+planning tools, or user-visible failure tools from silent internal helpers.
+
+That weakens the Agent-native invariant:
+
+ToolCallGraph is the execution unit, RuntimeGuard owns write permission, and
+OperationLog / RuntimeState evidence must be available before user reports.
+```
+
+Change:
+
+```text
+ToolDefinition.as_manifest() now emits a safe execution_contract:
+
+- access: read / write
+- stateful: true / false
+- state_contract: stateful / stateless
+- confirmation_required: true when the tool writes or is high risk
+- user_visible_failure: whether failure must be surfaced safely
+- system_actor_write: whether this dedicated tool may touch system actors
+
+ToolRegistry.capability_summary() now also reports:
+
+- read_only_tool_count
+- stateful_tool_count
+
+The existing manifest test now asserts the contract for representative Runtime
+tools:
+
+- runtime.asset.image.prepare is read, stateful, non-confirmed, and
+  user-visible on failure
+- runtime.actor.import_batch is write, stateful, confirmation-required, and
+  user-visible on failure
+
+verify_ultimate_plan.py now statically requires these manifest contract tokens
+so the execution contract cannot quietly disappear from the Agent-native gate.
+```
+
+Behavior:
+
+```text
+This is an execution-plane observability slice.
+
+It does not alter tool execution behavior, SceneComposer, ProgressiveWorkflow,
+native import, provider selection, layout logic, or LANChat routing.
+
+It makes the current function-level tools more self-describing, so later
+Planner / Builder / Reviewer agents can select and validate tools by contract
+instead of relying on scattered hard-coded assumptions.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_tool_registry_manifest_exposes_safe_capability_metadata
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted tool manifest contract test: passed
+verify_ultimate_plan.py: passed
+```
+
+Remaining:
+
+```text
+This slice improves AgentRuntime tool contract visibility.  It does not complete
+real provider rollout, native ToolCallGraph execution replacement,
+ProgressiveWorkflow removal, multiplayer sync replacement, UI rendering, or F5
+runtime validation.  Those remain later Agent-native work.
+```
+
+## Progress Update 208 - report_ready RuntimeEvent carries layout application facts
+
+Problem:
+
+```text
+Runtime reports and status summaries already carried layout adjustment facts,
+and LANChat now formats those facts for users.  But the report_ready
+RuntimeEvent payload still exposed only proposal_count plus resource/import
+health.  That meant the event layer and OperationLog replay could say a report
+was ready, but could not prove whether the completed layout adjustment had
+applied deltas, skipped deltas, engine transform results, ground snapping, or
+overlap correction.
+```
+
+Change:
+
+```text
+AgentRuntime.generate_report() now includes the following safe count-only
+layout fields in the report_ready payload:
+
+- layout_applied_delta_count
+- layout_skipped_delta_count
+- layout_transform_result_count
+- layout_ground_snapped_count
+- layout_overlap_resolved_count
+
+RuntimeEventValidator._SAFE_PAYLOAD_KEYS and
+AgentRuntime._SAFE_RUNTIME_EVENT_PAYLOAD_KEYS allow these count-only fields,
+without exposing actor ids, provider names, prompts, graph ids, paths, URLs, or
+raw tool payloads.
+
+AgentRuntime._runtime_event_replay_summary() now preserves the same fields in
+latest_report_ready, so OperationLog replay can audit the report event without
+reading the full report object.
+
+verify_ultimate_plan.py now statically requires these fields in generate_report,
+runtime event replay, and safe RuntimeEvent payload keys.
+```
+
+Behavior:
+
+```text
+This is an event/replay fact-source slice.  It does not change layout planning,
+ToolCallGraph execution, RuntimeGuard policy, native transform providers,
+SceneComposer, or LAN sync.  It makes the report_ready event consistent with
+RuntimeState / OperationLog layout facts already produced by the Runtime path.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_applies_low_risk_deltas_through_runtime_tool editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_partial_resource_results_report_ready_and_failed_counts
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted layout/report_ready tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This slice strengthens report_ready event evidence.  It does not complete
+native layout transform replacement, real provider rollout, full front-end
+rendering, multiplayer sync replacement, or F5 runtime validation.  Those
+remain later Agent-native work.
+```
+
+## Progress Update 207 - Runtime status/report layout summaries include applied and grounding facts
+
+Problem:
+
+```text
+AgentRuntime already aggregates layout adjustment summary fields such as
+applied_delta_count, skipped_delta_count, transform_result_count,
+ground_snapped_count, and overlap_resolved_count.
+
+LANChatAgentWorker._format_agent_runtime_layout_report() only exposed proposal
+and delta counts.  Status queries, GM summaries, and final report-facing text
+therefore could say that a layout proposal existed, but could not show whether
+confirmed deltas were applied, skipped, written to engine, ground-snapped, or
+overlap-corrected.
+```
+
+Change:
+
+```text
+_format_agent_runtime_layout_report() now includes:
+
+- applied delta count
+- skipped delta count
+- transform result count
+- ground-snapped count
+- overlap-resolved count
+- confirmation count
+
+The nearby review-confirmation formatter also had a mojibake separator, which
+was normalized to a readable decision separator.
+
+verify_ultimate_plan.py now statically requires the layout report formatter to
+reference applied_delta_count / skipped_delta_count / transform_result_count /
+ground_snapped_count / overlap_resolved_count and rejects preserved mojibake.
+```
+
+Behavior:
+
+```text
+This is a read-side RuntimeState / OperationLog disclosure slice.  It does not
+change the layout planner, ToolCallGraph execution, RuntimeGuard policy,
+native transform adapter, SceneComposer, or legacy flags.  It makes status and
+report surfaces reflect the layout facts AgentRuntime already records.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_layout_reflow_confirmation_defaults_to_agent_runtime_not_direct_actor_transform
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted formatter / layout confirmation tests: passed
+```
+
+Remaining:
+
+```text
+This slice improves Runtime layout status visibility.  It does not complete
+real native layout transform replacement, full UI rendering, multiplayer sync
+replacement, or F5 runtime validation.  Those remain later Agent-native work.
+```
+
+## Progress Update 206 - Layout confirmation replies expose Runtime graph/proposal facts
+
+Problem:
+
+```text
+Completed-state layout reflow confirmation already routes to AgentRuntime by
+default, and AgentRuntime.confirm_layout_adjustment() writes ToolCallGraph,
+proposal, applied/skipped delta, engine transform, ground snap, and overlap
+facts into RuntimeState / OperationLog.
+
+However, LANChatAgentWorker collapsed that result into generic text such as
+"AgentRuntime 执行结果：已应用 N 项低风险布局调整。".  That made the user-facing
+confirmation weaker than the Runtime evidence: it did not expose which proposal
+was confirmed, graph status, skipped count, engine write success/failure, or
+whether selective ground snap participated.
+```
+
+Change:
+
+```text
+LANChatAgentWorker now has
+_format_agent_runtime_layout_confirmation_reply(), used by
+_confirm_layout_reflow_via_agent_runtime().
+
+The reply reports safe Runtime layout facts:
+
+- ScenePlan id
+- layout proposal id
+- ToolCallGraph status
+- applied delta count
+- skipped delta count
+- engine transform success / failure counts
+- ground-snapped count
+- overlap-resolved count
+
+The confirmation text sent to AgentRuntime was also fixed from mojibake to
+"确认布局调整", so OperationLog remains readable.
+
+verify_ultimate_plan.py now statically requires the layout confirmation
+formatter to reference ToolCallGraph / graph / applied_deltas / skipped_deltas /
+engine_transform_results / ground_snapped / overlap_resolved, and rejects the
+old collapsed "AgentRuntime 执行结果：已应用" response.
+```
+
+Behavior:
+
+```text
+This is a Runtime disclosure / auditability slice.  It does not change the
+layout delta planner, provider execution, native transform adapter, old legacy
+flags, or SceneComposer.  It makes completed-state layout confirmation visibly
+depend on RuntimeState / OperationLog facts rather than a generic success
+sentence.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_layout_reflow_confirmation_defaults_to_agent_runtime_not_direct_actor_transform editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_layout_reflow_runtime_failure_does_not_leak_internal_exception_text
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted layout confirmation / error-sanitization tests: passed
+```
+
+Remaining:
+
+```text
+This slice improves confirmation reporting and log readability.  It does not
+complete real native layout transform replacement, provider rollout, front-end
+report rendering, multiplayer sync replacement, or F5 runtime validation.
+Those remain later Agent-native work.
+```
+
+## Progress Update 211 - Environment import failures become Runtime failed component facts
+
+Problem:
+
+```text
+AgentRuntime already routed environment/substrate components through
+runtime.environment.import_components, and graph execution correctly failed when
+the engine environment import provider was unavailable, returned no components,
+returned invalid components, or raised an exception.
+
+However, the failed branch only produced a failed ToolCall/event.  RuntimeState
+did not persist which requested room_box / terrain / boundary components failed
+to import.  That left GM/report/replay unable to distinguish "no environment
+component was planned" from "a planned environment component failed to write".
+```
+
+Change:
+
+```text
+runtime.environment.import_components now writes sanitized failed environment
+component facts on failure:
+
+- provider missing -> source=runtime_environment_import_missing
+- provider exception -> source=runtime_environment_import_failed
+- empty provider result -> source=runtime_environment_import_empty
+- invalid provider result -> source=runtime_environment_import_invalid
+
+The failed facts keep component_id/name/component_type/handler/scene_name when
+safe, set status=failed, and force requires_engine_write=False.  They are
+validated through EnvironmentComponentValidator before entering RuntimeState, so
+provider/raw/path/prompt/token/url style internal details are not persisted.
+
+verify_ultimate_plan.py now statically requires the failed environment import
+fact helper and source tokens, so the branch cannot silently regress to
+"failed event only, no RuntimeState fact".
+```
+
+Behavior:
+
+```text
+This is an Agent-native RuntimeState fact-source slice.  It does not enable the
+real engine environment import provider, change SceneComposer, change
+ProgressiveWorkflow, or touch native build/runtime code.  Normal successful
+environment imports still persist imported environment component facts as
+before; failed imports now also remain auditable and reportable.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_environment_import_failure_does_not_count_planned_components_as_imported editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_environment_import_tool_fails_explicitly_without_provider
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_execution_graph_uses_environment_import_node_when_provider_is_enabled editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_environment_import_tool_uses_provider_and_persists_sanitized_components
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted environment import failure tests: passed
+targeted environment import success-path regression tests: passed
+verify_ultimate_plan.py: passed
+git diff --check: passed with CRLF warnings only
+```
+
+Remaining:
+
+```text
+This closes another adapter/fact-source gap, but the full Agent-native objective
+is still active.  Real native environment import provider rollout, full
+ToolCallGraph replacement of legacy progressive workflow behavior, multiplayer
+sync replacement, UI rendering validation, and F5 runtime validation remain
+later work.
+```
+
+## Progress Update 212 - Report health surfaces environment import failures
+
+Problem:
+
+```text
+Progress Update 211 made failed room_box / terrain / boundary imports persist as
+RuntimeState environment component facts.  But report_health_summary still only
+looked at batch resource flow, actor import, resource phases, sync health, and
+asset transfer.  A planned environment component could fail to import while the
+top-level report health did not explicitly name the environment/substrate
+failure.
+
+That violated the Agent-native invariant that RuntimeState is the single fact
+source and OperationLog/reporting must make important state failures visible to
+GM, replay, and users.
+```
+
+Change:
+
+```text
+AgentRuntime._report_health_summary now accepts environment_component_summary
+and includes:
+
+- environment_failed_count
+- environment_import_requested_count
+- environment_imported_count
+- environment_import_failed_count
+- reason=environment_component_failed
+- reason=environment_import_failed
+
+generate_report(), status_summary(), operation replay summary composition, and
+operation_replay() now pass the scoped environment component summary into report
+health.  A failed environment import therefore shows up in report, status, and
+replay health instead of remaining buried in runtime_events.
+
+verify_ultimate_plan.py now statically requires the environment health fields
+and generate_report wiring.
+```
+
+Behavior:
+
+```text
+Environment import failures no longer masquerade as an otherwise healthy report.
+If actor/model import succeeds but room_box / terrain / boundary import fails,
+the report can be partial / attention_required with environment_import_failed
+reason.  If the full batch already failed, the existing failed status remains,
+but the environment failure reason is still visible.
+
+This does not enable a real native environment import provider, change C++,
+change SceneComposer, or alter old workflow entry behavior.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_environment_import_failure_does_not_count_planned_components_as_imported editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_environment_import_tool_fails_explicitly_without_provider editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_execution_graph_uses_environment_import_node_when_provider_is_enabled
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted environment health tests: passed
+verify_ultimate_plan.py: passed
+git diff --check: passed with CRLF warnings only
+```
+
+Remaining:
+
+```text
+This improves the reporting/replay surface for environment failures.  The full
+Agent-native target still needs real provider rollout, full ToolCallGraph
+replacement of progressive execution, multiplayer sync replacement, UI
+rendering validation, and F5 runtime validation.
+```
+
+## Progress Update 213 - Environment import now has engine-write boundary evidence
+
+Problem:
+
+```text
+Progress Update 211/212 made environment component import success/failure visible
+as RuntimeState facts and report health.  But the real-provider rollout still
+had an evidence gap: actor import, layout transform, and actor delete already
+produced engine-write boundary facts, while environment import only returned
+environment component rows.  That meant room_box / terrain / boundary writes
+could be visible as imported components without the same provider / bridge /
+identity-count evidence used by other engine-write tools.
+
+For Agent-native execution this is too weak.  RuntimeState must be able to prove
+which tool attempted the engine write, how many identities were returned, and
+whether the C++ bridge accepted or failed the write.
+```
+
+Change:
+
+```text
+make_engine_environment_component_import_provider now returns engine_write_result
+with:
+
+- provider_source=engine_environment_import_provider
+- requested_count
+- identity_result_count
+- missing_identity_count
+- status_counts
+- bridge_call_count / bridge_success_count / bridge_failed_count
+- bridge_method_counts / bridge_error_code_counts
+
+runtime.environment.import_components now persists a sanitized
+custom_import_facts entry:
+
+    <batch_id>:environment_import_result
+
+That fact includes source=runtime_environment_import_result, sanitized
+environment_import_results, and an engine_write_boundary object.  The tool
+manifest now explicitly declares both produced RuntimeState keys:
+
+    environment_components
+    custom_import_facts
+
+AgentRuntime report generation now counts environment_import engine-write
+boundaries beside actor_import / layout_transform / actor_delete and exposes:
+
+- environment_import_boundary_count
+- write_source_counts.runtime_environment_import
+```
+
+Behavior:
+
+```text
+Environment/scene substrate imports now have parity with actor writes at the
+RuntimeState evidence layer.  A future real engine provider can be enabled
+without weakening OperationLog/report auditability: successful room_box,
+terrain, and boundary imports can show provider source, identity counts, and
+C++ bridge outcome; failures remain explicit and do not masquerade as imported.
+
+This is still a RuntimeState / adapter / report slice.  It does not enable the
+real native environment import provider by default, does not rewrite
+SceneComposer, does not touch C++/CMake/Ninja/CEF, and does not change the old
+workflow entry behavior.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/adapters.py editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_environment_component_import_provider_uses_gate_and_returns_component_updates editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_environment_import_tool_uses_provider_and_persists_sanitized_components editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_tool_registry_manifest_exposes_safe_capability_metadata
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted environment engine-write boundary tests: passed
+verify_ultimate_plan.py: passed
+```
+
+Remaining:
+
+```text
+This closes the environment import engine-write evidence gap.  The full
+Agent-native target still needs real provider rollout, full ToolCallGraph
+replacement of progressive execution, multiplayer sync replacement, UI
+rendering validation, and F5 runtime validation.
+```
+
+## Progress Update 214 - Report-ready events surface environment import health
+
+Problem:
+
+```text
+Progress Update 212 exposed environment import failures in report_health_summary,
+status_summary, and operation replay.  Progress Update 213 added engine-write
+boundary facts.  One user-visible event surface was still weaker:
+
+    report_ready
+
+The report object knew that room_box / terrain / boundary import failed, but
+the report_ready runtime event payload did not carry environment import counts.
+That meant LANChat/UI/GM consumers that react to runtime events could see a
+generic report-ready event without knowing that scene substrate import needed
+attention.
+```
+
+Change:
+
+```text
+AgentRuntime.generate_report now includes these safe counters in report_ready
+payload:
+
+- environment_failed_count
+- environment_import_requested_count
+- environment_imported_count
+- environment_import_failed_count
+
+RuntimeEventValidator and AgentRuntime._SAFE_RUNTIME_EVENT_PAYLOAD_KEYS now
+explicitly allow those fields.  runtime_event_emitted OperationLog payload and
+runtime_event_replay_summary.latest_report_ready also preserve the same
+environment counters.
+
+The environment import failure regression test now asserts:
+
+- report_ready exposes environment import requested/imported/failed counts
+- report_ready report_health_reasons includes environment_import_failed
+- operation_replay.latest_report_ready carries the same environment counters
+
+verify_ultimate_plan.py statically requires these safe runtime-event payload
+keys, so future cleanup cannot silently drop them.
+```
+
+Behavior:
+
+```text
+When environment components fail to import, the report, status query, operation
+replay, and report-ready event now agree.  UI/GM consumers can surface the
+problem without scraping internal facts or exposing provider/tool details.
+
+This remains a safe disclosure/reporting slice.  It does not enable native
+environment import, alter SceneComposer, or touch C++/CMake/Ninja/CEF.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_environment_import_failure_does_not_count_planned_components_as_imported
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted report_ready environment health test: passed
+verify_ultimate_plan.py: passed
+```
+
+Remaining:
+
+```text
+The event/status/report fact surfaces are stronger, but the full Agent-native
+objective still needs real provider rollout, full ToolCallGraph replacement of
+progressive execution, multiplayer sync replacement, UI rendering validation,
+and F5 runtime validation.
+```
+
+## Progress Update 215 - Engine-write provider readiness is explicit
+
+Problem:
+
+```text
+Provider readiness already existed, but real engine-write readiness still had
+to be inferred from the full provider_summary.  That was too indirect for the
+Agent-native rollout because environment_import, actor_import, actor_delete, and
+layout_transform have different execution semantics:
+
+- real native adapter
+- RuntimeState-only write
+- mock/fallback write
+- disabled channel
+- unavailable channel
+
+In particular, environment_import being disabled by default should be visible
+as an explicit Runtime fact, not as an implicit mode buried inside provider
+status.
+```
+
+Change:
+
+```text
+AgentRuntime now derives engine_write_readiness_summary from the sanitized
+provider summary.  It tracks:
+
+- channel_count
+- requested_count
+- native_enabled_count
+- runtime_state_only_count
+- fallback_count
+- disabled_count
+- unavailable_count
+- status_counts
+- mode_counts
+- requested_channels
+- native_enabled_channels
+- runtime_state_only_channels
+- fallback_channels
+- disabled_channels
+- unavailable_channels
+
+The summary is now included in:
+
+- provider_status()
+- engine_write_status handle_message action
+- generate_report()
+- status_summary()
+
+ReportRecordValidator allows the new top-level report field, and
+verify_ultimate_plan.py statically requires the summary on the report/status
+and engine_write_status paths.
+```
+
+Behavior:
+
+```text
+GM/UI/status consumers can now distinguish:
+
+- environment_import is disabled by default
+- actor_import is currently mock/fallback unless a real adapter is provided
+- actor_delete / layout_transform may be RuntimeState-only
+- actual native engine-write adapters are counted separately
+
+This prepares the real-provider rollout without enabling native writes, changing
+SceneComposer, or touching C++/CMake/Ninja/CEF.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_provider_status_publishes_safe_readiness_without_creating_plan editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_write_status_unknown_external_plan_does_not_publish_or_fallback_active
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted provider/engine-write readiness tests: passed
+verify_ultimate_plan.py: passed
+```
+
+Remaining:
+
+```text
+Readiness and evidence surfaces are stronger.  The full Agent-native objective
+still needs real provider rollout, full ToolCallGraph replacement of progressive
+execution, multiplayer sync replacement, UI rendering validation, and F5 runtime
+validation.
+```
+
+## Progress Update 230 - review advisory proposal summaries inherit top-level batch scope
+
+Problem:
+
+```text
+_review_advisory_proposal_summary_for_plan filtered batch-scoped advisory
+proposals only by item.batch_id.
+
+Newer Runtime proposals usually stamp batch_id on each advisory item, but older
+or adapter-authored proposals can carry batch_id at the proposal top level while
+their items have no item-level batch_id.  Those proposals were skipped from
+batch-scoped status/report summaries even though they belonged to the requested
+batch.  This weakens VLM/review advisory visibility during workflow-to-runtime
+migration.
+```
+
+Change:
+
+```text
+Review advisory proposal summary now uses proposal.batch_id as the fallback
+scope for items without item.batch_id.
+
+Rules:
+
+- item.batch_id still takes precedence when present;
+- proposal.batch_id fills the scope for legacy items;
+- items/proposals from another batch remain excluded;
+- plan-level summaries are unchanged.
+```
+
+Tests / gates:
+
+```text
+Extended test_review_advisory_proposal_uses_batch_scope_when_plan_id_is_missing:
+
+- injects a legacy proposal with top-level batch_id and an item without
+  item.batch_id;
+- verifies first-batch advisory summary includes the legacy item;
+- verifies second-batch advisory summary excludes it.
+```
+
+Validation:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_review_advisory_proposal_uses_batch_scope_when_plan_id_is_missing
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted review advisory proposal batch scope test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This hardens VLM/review advisory proposal visibility at the RuntimeState summary
+layer.  It does not prove real VLM screenshot quality, does not execute advisory
+fixes automatically, and does not prove F5 runtime behavior.  Full Agent-native
+completion still requires real provider rollout, full progressive replacement,
+multiplayer sync replacement, UI validation, and F5 runtime validation.
+```
+
+## Progress Update 216 - scene.extract_objects keeps plan and batch identity separate
+
+Problem:
+
+```text
+AgentRuntime._build_batch_execution_graph had a subtle ToolCallGraph boundary
+issue: the batch execution node for scene.extract_objects passed batch.batch_id
+through the args["plan_id"] field.
+
+The current scene.extract_objects tool uses args["plan_id"] as its extraction
+id, so this made a batch-level extraction look like the plan identity.  That is
+small in code but large architecturally: Agent-native RuntimeState must keep
+plan identity, batch identity, and extraction identity explicit instead of
+letting a batch id masquerade as a plan id.
+```
+
+Change:
+
+```text
+AgentRuntime._build_batch_execution_graph now passes both fields explicitly:
+
+- plan_id = plan.plan_id
+- batch_id = batch.batch_id
+
+The existing batch graph structure remains unchanged:
+
+- runtime.scene.snapshot still runs before scene.extract_objects
+- scene.extract_objects still feeds runtime.elements.classify
+- downstream asset/image/model/import/review nodes still operate at batch scope
+
+Only the identity boundary was corrected.
+```
+
+Tests / gates:
+
+```text
+test_tool_graph_consumed_state_requires_dependency_on_graph_producer now asserts
+the scene.extract_objects node receives the true plan_id plus separate batch_id,
+and that the two are not equal.
+
+verify_ultimate_plan.py now statically requires _build_batch_execution_graph to
+contain the scene.extract_objects ToolCall with plan_id=plan.plan_id and
+batch_id=batch.batch_id, and rejects plan_id=batch.batch_id.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_tool_graph_consumed_state_requires_dependency_on_graph_producer editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_executes_planned_batches_as_separate_tool_graphs
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted ToolCallGraph tests: 2 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This is a ToolCallGraph identity-boundary repair.  It does not enable native
+engine writes, does not change SceneComposer or C++/CEF, and does not prove F5
+runtime behavior.  Full Agent-native completion still requires real provider
+rollout, full progressive replacement, multiplayer sync replacement, UI
+validation, and F5 runtime validation.
+```
+
+## Progress Update 224 - operation replay excludes unattributable room sync facts
+
+Problem:
+
+```text
+Operation replay already uses plan/batch-scoped OperationLog entries, but it
+also supplements sync summaries from RuntimeState.sync_events so old or narrow
+log windows can still be diagnosed.
+
+That supplement accepted sync events without plan_id when replaying a specific
+plan.  Batch-only legacy sync events are useful and should remain compatible,
+but room-level sync events with neither plan_id nor batch_id cannot be proven to
+belong to the requested plan.  In multiplayer replay this can make a plan's
+sync summary look healthier or noisier than it really was.
+```
+
+Change:
+
+```text
+_state_sync_replay_entries now uses stricter plan attribution:
+
+- explicit event plan_id must match the requested plan;
+- batch-only legacy events are accepted only when the batch belongs to the
+  requested plan;
+- unscoped room-level sync events are excluded from plan-scoped replay;
+- batch_id filtering still applies after plan attribution.
+```
+
+Tests / gates:
+
+```text
+Added test_operation_replay_state_sync_skips_unattributable_room_events_for_plan:
+
+- creates a plan-scoped batch;
+- records one legacy batch-only sync event and one room-level unattributable
+  sync event;
+- verifies plan operation_replay counts only the attributable batch event;
+- verifies the unscoped actor does not leak into sync_summary.
+```
+
+Validation:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_operation_replay_plan_scope_rejects_other_plan_with_same_batch_id editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_operation_replay_state_sync_skips_unattributable_room_events_for_plan
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted operation replay ownership tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This hardens replay evidence for multiplayer sync diagnosis.  It does not
+replace C++ sync transport, does not prove LAN transfer performance, and does
+not prove F5 runtime behavior.  Full Agent-native completion still requires real
+provider rollout, full progressive replacement, multiplayer sync replacement,
+UI validation, and F5 runtime validation.
+```
+
+## Progress Update 225 - actor facts require consistent plan/batch ownership
+
+Problem:
+
+```text
+_actor_facts_for_plan and _observed_actor_facts_for_plan were plan-scoped when
+only plan_id was provided, but their active batch branches returned actors only
+by batch_id.
+
+That meant a caller could ask for plan A with a batch_id from plan B and still
+receive plan B actor facts.  The risk is small in normal generated batches, but
+it violates the Agent-native invariant that RuntimeState facts must be scoped by
+consistent plan/batch ownership before status, report, or scene snapshot output
+uses them.
+```
+
+Change:
+
+```text
+Actor fact helpers now apply combined ownership rules:
+
+- batch_id must match when provided;
+- when plan_id is also provided, actor.plan_id must match if present;
+- legacy actor facts without plan_id may still be attributed through
+  batch_plans ownership;
+- batch-only queries with no plan_id continue to work.
+
+Observed actor facts use the same rule, including runtime actor facts as the
+fallback source for missing observed plan_id / batch_id.
+```
+
+Tests / gates:
+
+```text
+Added test_actor_fact_helpers_require_matching_plan_and_batch_ownership:
+
+- verifies mismatched plan_id + batch_id returns no actor or observed actor
+  facts;
+- verifies batch-only queries still return the batch actor;
+- verifies legacy planless actor facts are accepted when their batch belongs to
+  the requested plan.
+```
+
+Validation:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_status_and_report_actor_count_are_plan_scoped editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_actor_fact_helpers_require_matching_plan_and_batch_ownership
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted actor ownership tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This hardens actor fact scoping for status/report/snapshot summaries.  It does
+not replace real engine actor observation, does not prove LAN synchronization,
+and does not prove F5 runtime behavior.  Full Agent-native completion still
+requires real provider rollout, full progressive replacement, multiplayer sync
+replacement, UI validation, and F5 runtime validation.
+```
+
+## Progress Update 227 - layout adjustment batch summaries count filtered proposals
+
+Problem:
+
+```text
+_layout_adjustment_summary_for_plan filtered deltas, applied_deltas,
+skipped_deltas, and engine_transform_results by batch_id, but proposal_count
+still returned the unfiltered plan-level layout proposal count.
+
+For a completed scene with a layout adjustment attached to batch A, a status or
+report query for batch B could show proposal_count > 0 even though batch B had
+no layout adjustment evidence.  That weakens the completed-state adjustment
+closed loop and makes batch replay harder to trust.
+```
+
+Change:
+
+```text
+layout_adjustment_summary now returns proposal_count from the filtered proposal
+rows that survive the requested plan/batch scope.
+
+The underlying proposal filtering is unchanged:
+
+- plan-level summaries still count plan-matching proposals;
+- batch-level summaries count only proposals with matching batch-scoped deltas,
+  applied/skipped deltas, or transform results;
+- operation replay continues to summarize confirmed execution events separately.
+```
+
+Tests / gates:
+
+```text
+Extended test_confirm_layout_adjustment_records_batch_scope_for_single_batch_proposal:
+
+- confirms a low-risk layout proposal for the first batch;
+- verifies first-batch status summary reports one layout proposal;
+- verifies second-batch status summary reports zero layout proposals;
+- keeps replay checks for confirmation and ground snap execution evidence.
+```
+
+Validation:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_records_batch_scope_for_single_batch_proposal
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted layout adjustment batch summary test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This hardens completed-state layout adjustment reporting at the RuntimeState
+summary layer.  It does not prove real engine transform execution, does not
+replace native actor synchronization, and does not prove F5 runtime behavior.
+Full Agent-native completion still requires real provider rollout, full
+progressive replacement, multiplayer sync replacement, UI validation, and F5
+runtime validation.
+```
+
+## Progress Update 229 - review summaries accept legacy plan/batch fact keys
+
+Problem:
+
+```text
+_review_summary_for_plan supported explicit plan_id and batch_id fields on
+geometry_reviews, custom_vlm_checkpoint_facts, and custom_review_summary_facts.
+However, legacy/runtime facts can also be keyed as plan_id:batch_id or
+plan_id:batch_id:suffix.
+
+Those key-shaped facts were not parsed consistently, so a review fact that only
+carried scope in its RuntimeState key could be skipped from plan/batch status or
+report summaries.  This weakens the migration path from old review workflow
+outputs into AgentRuntime facts.
+```
+
+Change:
+
+```text
+_review_summary_for_plan now derives scope from either payload fields or legacy
+RuntimeState keys:
+
+- first key segment is treated as plan_id;
+- second key segment is treated as batch_id;
+- additional suffix segments are ignored for scoping;
+- explicit payload plan_id/batch_id still take precedence.
+
+The same key parsing pattern was also tightened for geometry fact summaries so
+plan_id:batch_id:suffix keys remain batch-attributable.
+```
+
+Tests / gates:
+
+```text
+Added test_review_summary_accepts_legacy_plan_batch_fact_keys:
+
+- writes geometry review, VLM checkpoint, and review summary facts using only
+  plan_id:batch_id-style keys;
+- verifies first-batch status/report summaries include first-batch review facts;
+- verifies second-batch review evidence does not leak into first-batch output.
+```
+
+Validation:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_review_summary_uses_batch_scope_when_plan_id_is_missing editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_review_summary_accepts_legacy_plan_batch_fact_keys
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_geometry_fact_summary_requires_matching_batch_when_batch_scoped
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted review and geometry fact scoping tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This hardens RuntimeState review/VLM fact attribution during workflow-to-runtime
+migration.  It does not prove real VLM screenshot quality, does not replace
+native engine review capture, and does not prove F5 runtime behavior.  Full
+Agent-native completion still requires real provider rollout, full progressive
+replacement, multiplayer sync replacement, UI validation, and F5 runtime
+validation.
+```
+
+## Progress Update 228 - report_ready layout proposal count uses scoped summary
+
+Problem:
+
+```text
+Progress Update 227 fixed layout_adjustment_summary.proposal_count for
+batch-scoped status/report summaries, but the report_ready runtime event payload
+still used len(layout_proposals), the unfiltered plan-level proposal list.
+
+That meant the user-visible report_ready event for batch B could expose a
+proposal_count from batch A even though the batch-scoped layout summary was
+correct.  This is an information disclosure consistency gap: UI/event payloads
+must use the same RuntimeState fact source and scope as the report.
+```
+
+Change:
+
+```text
+report_ready payload now uses:
+
+proposal_count = layout_adjustment_summary.proposal_count
+
+instead of counting the raw plan-level layout proposal list.
+
+This keeps user-visible runtime events aligned with the scoped
+layout_adjustment_summary used by status/report output.
+```
+
+Tests / gates:
+
+```text
+Extended test_confirm_layout_adjustment_records_batch_scope_for_single_batch_proposal:
+
+- generates a report for the second batch after a first-batch layout adjustment;
+- reads the second-batch user-visible report_ready event;
+- verifies payload.proposal_count is 0 for the second batch.
+```
+
+Validation:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_records_batch_scope_for_single_batch_proposal
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted report_ready layout proposal count test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This hardens user-visible report event disclosure for completed-state layout
+adjustment facts.  It does not prove real engine transform execution, does not
+replace native actor synchronization, and does not prove F5 runtime behavior.
+Full Agent-native completion still requires real provider rollout, full
+progressive replacement, multiplayer sync replacement, UI validation, and F5
+runtime validation.
+```
+
+## Progress Update 226 - geometry fact summaries require batch attribution
+
+Problem:
+
+```text
+_geometry_fact_summary_for_plan filtered correctly by plan, but batch-scoped
+queries still accepted same-plan geometry facts with no batch_id.
+
+For a plan-level report this is acceptable, but for a batch-level status/report
+it can mix plan-level geometry facts into a specific batch's quality summary.
+That weakens the Agent-native replay/review invariant that batch evidence must
+belong to the requested batch.
+```
+
+Change:
+
+```text
+Geometry fact scoping now derives both plan_id and batch_id from either the fact
+payload or a legacy key shaped like plan_id:batch_id.
+
+When batch_id is requested:
+
+- fact batch_id must match exactly;
+- same-plan facts without batch attribution are excluded from the batch summary;
+- plan-level summaries still include all matching plan facts;
+- legacy keyed facts remain compatible.
+```
+
+Tests / gates:
+
+```text
+Added test_geometry_fact_summary_requires_matching_batch_when_batch_scoped:
+
+- writes one batch-a AABB fact, one plan-level overlap fact, and one batch-b AABB
+  fact;
+- verifies plan summary sees all plan facts;
+- verifies batch-a summary only sees batch-a geometry evidence;
+- verifies plan-level overlap and batch-b facts do not leak into batch-a.
+```
+
+Validation:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_phase6_geometry_compute_aabb_tool_records_safe_actor_facts editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_geometry_fact_summary_requires_matching_batch_when_batch_scoped editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_phase6_geometry_check_overlap_tool_records_safe_review_fact_without_actor_write
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted geometry fact tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This hardens Geometry/AABB review evidence at the RuntimeState summary layer.
+It does not replace real engine geometry capture, does not prove VLM behavior,
+and does not prove F5 runtime behavior.  Full Agent-native completion still
+requires real provider rollout, full progressive replacement, multiplayer sync
+replacement, UI validation, and F5 runtime validation.
+```
+
+## Progress Update 217 - runtime placement and geometry review facts are batch-scoped
+
+Problem:
+
+```text
+After the scene.extract_objects identity fix, the next batch-boundary gap was
+runtime.placement.propose and runtime.geometry.review:
+
+- placement proposals were written under plan_id even when produced inside a
+  batch execution ToolCallGraph;
+- runtime.actor.plan_import_batch / runtime.actor.import_batch / VLM checkpoint
+  consumed placement_proposals as plan-scoped facts;
+- geometry review facts were also written under plan_id and consumed by review
+  summary / adjustment proposal as plan-scoped facts.
+
+That made later batches able to overwrite or reuse earlier placement/review
+facts, which conflicts with the Agent-native target that every batch owns its
+image/model/import/placement/review evidence.
+```
+
+Change:
+
+```text
+Batch execution now keeps placement and geometry review facts batch-scoped:
+
+- _build_batch_execution_graph passes batch_id to runtime.placement.propose.
+- runtime.placement.propose writes placement_proposals[batch_id].
+- runtime.actor.plan_import_batch consumes placement_proposals with scope=batch.
+- runtime.actor.import_batch consumes placement_proposals with scope=batch.
+- runtime.review.vlm_checkpoint consumes placement_proposals with scope=batch.
+- runtime.geometry.review consumes placement_proposals with scope=batch and
+  writes geometry_reviews[batch_id].
+- runtime.review.summarize_batch and runtime.review.generate_adjustment_proposal
+  consume geometry_reviews with scope=batch.
+
+The planning-only placement.prepare_items path remains plan-scoped; this change
+only affects runtime batch execution facts.
+```
+
+Tests / gates:
+
+```text
+Updated Runtime tests now assert:
+
+- execute_scene_plan stores runtime placement proposals under batch_id.
+- batch graph import/review nodes receive the batch-scoped placement proposal.
+- manifest contracts expose placement and geometry review consumption as
+  batch-scoped for runtime execution tools.
+- manual review fixtures overwrite batch_id keys instead of adding unrelated
+  plan-level review rows.
+- verify_ultimate_plan.py statically requires runtime.placement.propose to carry
+  batch_id inside _build_batch_execution_graph.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_batch_report_scopes_resource_import_and_runtime_events_to_batch editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_geometry_review_issues_become_low_risk_layout_adjustment_proposal editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_review_generate_adjustment_proposal_reads_review_facts_without_applying
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted batch placement/review tests: 3 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This closes another batch fact-source boundary.  It does not enable real native
+providers, does not replace C++ sync transport, and does not prove F5 runtime
+behavior.  Full Agent-native completion still requires real provider rollout,
+full progressive replacement, multiplayer sync replacement, UI validation, and
+F5 runtime validation.
+```
+
+## Progress Update 220 - resource phase facts carry plan_id
+
+Problem:
+
+```text
+Runtime image/model phase facts were batch-scoped, but they did not carry
+plan_id.  The fact key and fact body identified the batch and phase, but not the
+owning ScenePlan.
+
+That is weak for Agent-native replay and diagnosis because RuntimeState should
+make plan/batch/phase relationships explicit without requiring a caller to
+reverse-map batch ids through separate batch_plans state.
+```
+
+Change:
+
+```text
+_resource_phase_fact now accepts plan_id and writes it into each
+custom_resource_phase_facts row.
+
+runtime.asset.image.prepare and runtime.asset.model.prepare now pass plan_id
+from their ToolCall args through the resource payload into every image/model
+phase fact, including:
+
+- successful image/model resource preparation
+- empty provider result fallback facts
+- hard failed legacy model adapter facts
+```
+
+Tests / gates:
+
+```text
+Updated tests assert:
+
+- partial image resource phase facts include plan_id.
+- failed model resource phase facts include plan_id.
+- legacy model adapter unavailable phase facts include plan_id.
+- verify_ultimate_plan.py statically requires _resource_phase_fact to keep
+  plan_id in the fact contract.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_partial_resource_results_report_ready_and_failed_counts editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_empty_model_resource_provider_result_records_failed_resource_facts editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_legacy_model_provider_factory_failure_records_failed_resource_facts
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted resource phase tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This strengthens RuntimeState fact traceability.  It does not enable real native
+providers, does not replace C++ sync transport, and does not prove F5 runtime
+behavior.  Full Agent-native completion still requires real provider rollout,
+full progressive replacement, multiplayer sync replacement, UI validation, and
+F5 runtime validation.
+```
+
+## Progress Update 219 - batch resource/placement tools require batch_id by contract
+
+Problem:
+
+```text
+Progress Updates 217 and 218 moved runtime placement, geometry review, and asset
+request facts to batch scope.  However, two runtime batch tools still allowed a
+caller to omit batch_id:
+
+- runtime.asset.plan
+- runtime.placement.propose
+
+Both tools had fallback logic that could use plan_id or tool_call_id as the fact
+key.  That fallback is useful for very early bring-up, but it is now too weak
+for Agent-native batch execution: a missing batch_id could silently reintroduce
+plan-scoped or unstable fact keys.
+```
+
+Change:
+
+```text
+ToolRegistry contracts now require batch_id for both runtime batch tools:
+
+- runtime.asset.plan required_args = room_id, batch_id, model_items
+- runtime.placement.propose required_args = room_id, batch_id, model_items
+
+The normal _build_batch_execution_graph path already passes batch_id to both
+tools, so this is a contract-hardening slice rather than a behavior rewrite.
+```
+
+Tests / gates:
+
+```text
+Updated tests assert:
+
+- Tool manifest exposes batch_id as required for runtime.asset.plan.
+- Tool manifest exposes batch_id as required for runtime.placement.propose.
+- Batch execution graph nodes pass the current batch_id to asset planning and
+  placement proposal tools.
+- verify_ultimate_plan.py statically requires both batch tools to have the
+  room_id/batch_id/model_items required-args contract.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_graph_plans_assets_and_placements_before_mock_import editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_execution_graph_consumes_are_derived_from_tool_definition_contract
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted graph/contract tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This hardens Runtime ToolRegistry contracts.  It does not enable real native
+providers, does not replace C++ sync transport, and does not prove F5 runtime
+behavior.  Full Agent-native completion still requires real provider rollout,
+full progressive replacement, multiplayer sync replacement, UI validation, and
+F5 runtime validation.
+```
+
+## Progress Update 218 - runtime asset requests are batch-scoped
+
+Problem:
+
+```text
+After placement and geometry review became batch-scoped, the same boundary issue
+still existed one step earlier:
+
+- runtime.asset.plan consumed batch-scoped model_items, but wrote
+  asset_request_plans under plan_id;
+- runtime.asset.image.prepare and runtime.asset.model.prepare consumed
+  asset_request_plans as plan-scoped facts.
+
+That meant each batch had independent model_items/image/model resources, but
+shared a single plan-level asset request map.  In a real multi-batch flow, a
+later batch could overwrite or accidentally reuse earlier asset request facts.
+```
+
+Change:
+
+```text
+Runtime asset request facts now stay batch-scoped:
+
+- _build_batch_execution_graph passes batch_id to runtime.asset.plan.
+- runtime.asset.plan writes asset_request_plans[batch_id].
+- runtime.asset.image.prepare consumes asset_request_plans with scope=batch.
+- runtime.asset.model.prepare consumes asset_request_plans with scope=batch.
+
+The planning-only asset.route_item path remains plan-scoped; this change only
+affects runtime batch execution facts.
+```
+
+Tests / gates:
+
+```text
+Updated Runtime tests now assert:
+
+- runtime batch graph stores asset_request_plans under batch_id.
+- image/model prepare nodes receive the batch-specific asset_requests map.
+- ToolRegistry manifest exposes batch-scoped asset_request consumption for
+  runtime.asset.image.prepare and runtime.asset.model.prepare.
+- pending intervention batch enqueue still works after the batch_id patch.
+- LANChat GM / active intervention replies still see queued intervention batches.
+- verify_ultimate_plan.py statically requires runtime.asset.plan to carry
+  batch_id inside _build_batch_execution_graph.
+```
+
+Validation:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_graph_plans_assets_and_placements_before_mock_import editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_asset_resource_tools_can_run_from_asset_requests_without_model_items editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_model_provider_consumes_image_resources_from_previous_toolcall
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_enqueue_pending_intervention_batch_adds_next_runtime_batch editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_enqueue_pending_intervention_batch_is_atomic_when_graph_queue_persist_fails editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_enqueue_pending_intervention_batch_stops_when_plan_status_persist_fails editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_worker_drain_executes_queued_intervention_batch editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_handle_message_can_enqueue_pending_intervention_batch_without_new_plan
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_gm_summary_includes_runtime_intervention_batch_summary editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_executing_intervention_does_not_require_coordinator_active_plan
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+py_compile: passed
+targeted asset/resource tests: passed
+targeted pending-intervention tests: passed
+targeted LANChat intervention tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This closes another batch resource fact-source boundary.  It does not enable
+real native providers, does not replace C++ sync transport, and does not prove
+F5 runtime behavior.  Full Agent-native completion still requires real provider
+rollout, full progressive replacement, multiplayer sync replacement, UI
+validation, and F5 runtime validation.
+```
+
+## Progress Update 221 - import summary consumes RuntimeState import facts
+
+Problem:
+
+```text
+runtime.actor.import_batch writes plan_id/batch_id-scoped
+custom_import_facts, but _import_summary_for_plan only consumed runtime_events.
+
+If an import tool result was recorded in RuntimeState facts but the corresponding
+actors_imported / actors_import_failed event was missing, pruned, or delayed,
+the final/status import summary could incorrectly report 0 imported/failed
+actors.  That violates the Agent-native invariant that RuntimeState is the
+state fact source.
+```
+
+Change:
+
+```text
+_import_summary_for_plan now merges import evidence from two sources:
+
+1. runtime_events remain the preferred source when present;
+2. custom_import_facts[*:actor_import_result] fill gaps only for batches that
+   have no import event.
+
+The merge remains plan/batch scoped:
+
+- facts with plan_id must match the requested plan;
+- facts without plan_id are accepted only if their batch_id belongs to the
+  requested plan;
+- facts from another plan are ignored;
+- event-backed batches are not double-counted.
+```
+
+Tests / gates:
+
+```text
+Added test_import_summary_consumes_runtime_state_import_fact_without_event:
+
+- creates two plans in one room;
+- records only custom_import_facts, with no import runtime_events;
+- verifies the import summary counts the target plan's imported/failed actors;
+- verifies the other plan's batch does not leak into the summary.
+```
+
+Validation:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_import_summary_consumes_runtime_state_import_fact_without_event editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_actor_import_provider_empty_actor_result_records_failed_import_fact
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted import summary tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This strengthens RuntimeState-driven reporting for the actor import phase.  It
+does not enable real native providers, does not replace C++ sync transport, and
+does not prove F5 runtime behavior.  Full Agent-native completion still
+requires real provider rollout, full progressive replacement, multiplayer sync
+replacement, UI validation, and F5 runtime validation.
+```
+
+## Progress Update 222 - environment import summary consumes RuntimeState import facts
+
+Problem:
+
+```text
+Environment/substrate import had the same class of RuntimeState/reporting gap
+as actor import.
+
+runtime.environment.import_components writes
+custom_import_facts[*:environment_import_result], but
+_environment_component_summary_for_plan primarily counted import requested /
+imported / failed numbers from environment import runtime_events.
+
+If the event was missing, pruned, or delayed, a partial environment import could
+be reported as if 1/1 components were imported, even when the RuntimeState fact
+said 1/2 imported and 1 failed.  That weakens terrain/boundary evidence in open
+scene generation.
+```
+
+Change:
+
+```text
+_environment_component_summary_for_plan now consumes environment import result
+facts as a fallback:
+
+- environment_components_imported / environment_components_import_failed events
+  remain the preferred source;
+- custom_import_facts[*:environment_import_result] fill gaps only for batches
+  without environment import events;
+- plan_id and batch_id filtering mirrors actor import summary behavior;
+- fact-backed batches are not double-counted;
+- latest_events marks the fallback row as environment_import_result.
+```
+
+Tests / gates:
+
+```text
+Added test_environment_component_summary_consumes_import_fact_without_event:
+
+- creates two plans in one room;
+- records environment_components and environment_import_result facts without
+  environment import runtime_events;
+- verifies target plan import_requested/imported/import_failed counts are
+  derived from RuntimeState facts;
+- verifies the other plan's batch does not leak into the summary.
+```
+
+Validation:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_environment_component_summary_consumes_import_fact_without_event editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_environment_component_summary_uses_batch_scope_for_runtime_events
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted environment import summary tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This strengthens RuntimeState-driven reporting for terrain/environment import
+facts.  It does not enable real native providers, does not replace C++ sync
+transport, and does not prove F5 runtime behavior.  Full Agent-native
+completion still requires real provider rollout, full progressive replacement,
+multiplayer sync replacement, UI validation, and F5 runtime validation.
+```
+
+## Progress Update 223 - sync summaries enforce plan/batch ownership together
+
+Problem:
+
+```text
+Sync summary scoping already supported plan_id-only and batch_id-only queries,
+but when a caller supplied both plan_id and batch_id, the batch branch could
+accept events/assets solely because the batch_id matched.
+
+If a caller accidentally asked for plan A with a batch_id that belonged to plan B,
+sync_summary and asset_transfer_summary could expose plan B sync facts under a
+plan A status query.  This is small but important for multiplayer Agent-native
+state: plan/batch ownership must be consistent wherever RuntimeState is used as
+the fact source.
+```
+
+Change:
+
+```text
+_sync_summary_for_plan now applies combined ownership rules:
+
+- batch_id must match when provided;
+- if event/fact carries plan_id, that plan_id must also match;
+- if plan_id is absent, batch_plans ownership is used as the fallback;
+- batch-only queries still work when no plan_id is supplied.
+
+_asset_transfer_summary_for_plan now applies the same combined ownership rule
+for asset transfer facts.
+```
+
+Tests / gates:
+
+```text
+Extended test_sync_summary_uses_batch_scope_when_plan_id_is_missing:
+
+- keeps the existing batch-only behavior;
+- adds a mismatched plan_id + batch_id query;
+- verifies sync_summary and asset_transfer_summary return empty scoped results;
+- verifies facts from the other plan are not leaked.
+```
+
+Validation:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_sync_summary_uses_batch_scope_when_plan_id_is_missing
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted sync ownership test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This hardens RuntimeState sync/report ownership.  It does not replace C++ sync
+transport, does not prove LAN file transfer performance, and does not prove F5
+runtime behavior.  Full Agent-native completion still requires real provider
+rollout, full progressive replacement, multiplayer sync replacement, UI
+validation, and F5 runtime validation.
+```
+
+## Progress Update 231 - review advisory confirmation summaries inherit top-level batch scope
+
+Problem:
+
+```text
+Review advisory proposal summaries already accepted legacy proposals whose
+batch_id lived on the proposal itself rather than on each proposal item.
+
+The matching confirmation summary still required every proposal item to carry
+its own batch_id.  For older VLM/review advisory proposal records, a batch-level
+status or report could therefore show the advisory proposal but omit the
+matching host confirmation.
+```
+
+Change:
+
+```text
+_review_advisory_confirmation_summary_for_plan now uses the proposal-level
+batch_id as a fallback when proposal items do not carry batch_id themselves.
+
+This keeps confirmation summaries consistent with review advisory proposal
+summaries and preserves RuntimeState as the single report fact source for
+batch-scoped VLM/review advisory decisions.
+```
+
+Tests / gates:
+
+```text
+Extended test_review_advisory_proposal_uses_batch_scope_when_plan_id_is_missing:
+
+- keeps the existing proposal summary top-level batch compatibility coverage;
+- records a confirmation against a legacy proposal whose item lacks batch_id;
+- verifies the first batch sees the confirmation and item_count;
+- verifies the second batch does not see the confirmation.
+```
+
+Validation:
+
+```text
+python editor/plugins/AITool/services/test_agent_runtime_phase1.py -k test_review_advisory_proposal_uses_batch_scope_when_plan_id_is_missing
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted review advisory batch compatibility test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This hardens RuntimeState report scoping for VLM/review advisory confirmations.
+It does not prove live VLM screenshot quality, does not replace C++ sync
+transport, and does not prove F5 runtime behavior.  Full Agent-native
+completion still requires real provider rollout, full progressive replacement,
+multiplayer sync replacement, UI validation, and F5 runtime validation.
+```
+
+## Progress Update 232 - final adjustment confirmations enter OperationLog replay summary
+
+Problem:
+
+```text
+Final adjustment confirmations were already persisted as RuntimeState facts and
+written to OperationLog as safe final_adjustment_confirmation_recorded entries.
+
+Report/status summaries could show final_adjustment_confirmation_summary, but
+operation_replay() only exposed the raw log entries.  That made the confirmation
+auditable, but not directly explainable from a compact replay summary.  It left
+a small mismatch with the Agent-native invariant that OperationLog must be useful
+before user-facing reports.
+```
+
+Change:
+
+```text
+Added _final_adjustment_confirmation_replay_summary and wired it into both:
+
+- operation_replay()
+- generate_report().operation_replay_summary
+
+The summary includes safe aggregate fields only:
+
+- confirmation_count
+- confirmation_failed_count
+- confirmation_skipped_count
+- decision_counts
+- latest_confirmation with proposal_id, batch_id, decision, confirmed_by,
+  target_hint, and conflict_item_count
+
+It deliberately does not expose raw conflict_items or internal payload details.
+```
+
+Tests / gates:
+
+```text
+Extended test_record_final_adjustment_confirmation_is_runtime_fact:
+
+- verifies direct operation_replay contains final_adjustment_confirmation_replay_summary;
+- verifies report.operation_replay_summary contains the same compact replay fact;
+- verifies conflict_items are not exposed in replay summaries.
+```
+
+Validation:
+
+```text
+python editor/plugins/AITool/services/test_agent_runtime_phase1.py -k test_record_final_adjustment_confirmation_is_runtime_fact
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted final adjustment confirmation replay test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This strengthens OperationLog replay and report explainability for final
+adjustment confirmations.  It does not execute live final adjustment UI flows,
+does not replace C++ sync transport, and does not prove F5 runtime behavior.
+Full Agent-native completion still requires real provider rollout, full
+progressive replacement, multiplayer sync replacement, UI validation, and F5
+runtime validation.
+```
+
+## Progress Update 233 - LANChat replay surfaces final adjustment confirmations
+
+Problem:
+
+```text
+Progress Update 232 made final adjustment confirmations available in
+operation_replay() and report.operation_replay_summary.
+
+LANChat operation replay replies and Runtime Report text still displayed review
+advisory replay and layout replay, but did not render the new final adjustment
+confirmation replay summary.  That meant the Runtime replay fact existed but was
+not visible at the main chat diagnosis surface.
+```
+
+Change:
+
+```text
+LANChatAgentWorker now formats final_adjustment_confirmation_replay_summary with
+a safe user-visible formatter.
+
+The formatter is included in:
+
+- direct Runtime Operation Replay query replies;
+- Runtime Report text through report.operation_replay_summary.
+
+The output includes only compact safe fields:
+
+- confirmation count;
+- failed / skipped counts when present;
+- decision counts;
+- latest proposal id, decision, and conflict item count.
+
+It does not expose raw conflict_items or internal provider/prompt/path details.
+```
+
+Tests / gates:
+
+```text
+Extended LANChat runtime replay tests:
+
+- room-level operation replay now shows final_adjustment and decision counts;
+- batch-scoped replay shows the first batch final adjustment confirmation;
+- batch-scoped replay does not leak second-batch final adjustment confirmation;
+- raw conflict_items remain hidden from user-visible replay text.
+```
+
+Validation:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_operation_replay_query_exports_safe_summary_without_creating_plan editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_operation_replay_query_uses_metadata_batch_scope
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted LANChat replay formatter tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This closes the chat-facing replay disclosure gap for final adjustment
+confirmations.  It does not execute live UI flows, does not replace C++ sync
+transport, and does not prove F5 runtime behavior.  Full Agent-native
+completion still requires real provider rollout, full progressive replacement,
+multiplayer sync replacement, UI validation, and F5 runtime validation.
+```
+
+## Progress Update 234 - Runtime Report protects final adjustment replay as persisted fact
+
+Problem:
+
+```text
+Progress Update 233 exposed final adjustment confirmation replay in LANChat
+diagnostic text, but the Runtime Report top-level payload did not yet carry the
+same replay summary as a persisted user-report field.
+
+The first static gate patch also used an overly exact source-token check, which
+could miss valid multi-line report formatting.  After adding the report field,
+RuntimeState correctly rejected it until the report schema explicitly allowed
+the new safe top-level field.
+```
+
+Change:
+
+```text
+AgentRuntime.generate_report now includes:
+
+- final_adjustment_confirmation_replay_summary
+
+from operation_replay_summary, so the same replay facts are available through:
+
+- operation_replay();
+- report.operation_replay_summary;
+- report.final_adjustment_confirmation_replay_summary;
+- LANChat operation replay text;
+- LANChat Runtime Report text.
+
+ReportRecordValidator now explicitly allows the new top-level report field.
+The static Runtime report fact-source gate was tightened to require the field
+and its OperationLog-derived source without depending on one fragile continuous
+line of source text.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+test_agent_runtime_phase1.py: 572 tests passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This closes the Runtime Report persistence gap for final adjustment confirmation
+replay facts.  It does not execute live final adjustment UI flows, does not
+replace C++ sync transport, and does not prove F5 runtime behavior.  Full
+Agent-native completion still requires real provider rollout, full progressive
+replacement, multiplayer sync replacement, UI validation, and F5 runtime
+validation.
+```
+
+## Progress Update 235 - final adjustment replay report schema is regression-protected
+
+Problem:
+
+```text
+Progress Update 234 added final_adjustment_confirmation_replay_summary to the
+top-level Runtime Report and allowed it through ReportRecordValidator.
+
+That fixed the immediate RuntimeState persistence failure, but the regression
+coverage still needed to prove two exact boundaries:
+
+- report.final_adjustment_confirmation_replay_summary must match the
+  OperationLog-derived report.operation_replay_summary field;
+- ReportRecordValidator._ALLOWED_TOP_LEVEL_FIELDS must continue to allow the
+  persisted user-report field.
+```
+
+Change:
+
+```text
+The final adjustment confirmation Runtime fact test now asserts the top-level
+Runtime Report replay summary equals the nested operation_replay_summary value
+and still hides raw conflict_items.
+
+The static Runtime validator contract gate now checks the allowed top-level
+report field block directly, so a future report-only addition cannot pass if
+the RuntimeState report schema would reject it during persistence.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_record_final_adjustment_confirmation_is_runtime_fact
+python -m py_compile editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted final adjustment confirmation Runtime fact test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This is a regression-protection slice for Runtime Report persistence and replay
+consistency.  It does not execute live final adjustment UI flows, does not
+replace C++ sync transport, and does not prove F5 runtime behavior.  Full
+Agent-native completion still requires real provider rollout, full progressive
+replacement, multiplayer sync replacement, UI validation, and F5 runtime
+validation.
+```
+
+## Progress Update 236 - legacy model provider failures expose safe failure codes
+
+Problem:
+
+```text
+The legacy ModelProvider adapter had already been narrowed into a Runtime model
+resource provider, but per-item failures still collapsed to generic failed
+model resource facts.
+
+That made real-provider rollout harder to diagnose from RuntimeState and reports:
+the graph could prove "model resource failed", but not safely distinguish adapter
+factory unavailable, provider acquire exception, or invalid provider result.
+```
+
+Change:
+
+```text
+Model resource facts now support a safe failure_code field.
+
+make_legacy_model_resource_provider() writes only enum-like failure codes:
+
+- legacy_model_adapter_unavailable
+- legacy_model_acquire_exception
+- legacy_model_invalid_result
+- legacy_model_failure
+
+The adapter still does not expose exception text, provider names, raw payloads,
+URLs, model paths beyond existing sanitized resource fields, prompts, tokens, or
+API keys.  It still only acquires model resource facts and does not import
+actors or re-enter SceneComposer / ProgressiveWorkflow.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_adapters_sanitize_tool_exceptions_before_runtime_tool_layer editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_legacy_model_provider_adapter_coerces_success_flag editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_legacy_model_provider_factory_failure_records_failed_resource_facts
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/agent_runtime/adapters.py editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted legacy model provider failure-code tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This is a provider-rollout diagnostics slice.  It does not enable the legacy
+model provider by default, does not call SceneComposer, does not import actors,
+and does not prove F5 real-provider behavior.  Full Agent-native completion
+still requires real provider rollout, full progressive replacement,
+multiplayer sync replacement, UI validation, and F5 runtime validation.
+```
+
+## Progress Update 237 - actor import failures expose safe failure codes
+
+Problem:
+
+```text
+The Runtime engine actor import provider already wrote safe import result facts,
+but native / bridge failure rows still lacked a stable failure code.
+
+That made OperationLog replay and final report summaries able to show that an
+import failed, but unable to safely distinguish "missing model resource" from
+"C++ bridge import failed" or "invalid import result".
+```
+
+Change:
+
+```text
+make_engine_actor_import_provider() now records enum-like import failure codes:
+
+- missing_ready_model_resource
+- cpp_actor_import_failed
+- actor_import_invalid_result
+
+ToolCallGraphExecutor._safe_engine_result_rows() now preserves failure_code in
+the sanitized engine_write_summary replay rows.
+
+The bridge still does not expose raw exception text, URLs, provider payloads,
+API keys, function names, or internal model-generation details.  The imported
+actor facts remain RuntimeState facts; SceneComposer / ProgressiveWorkflow do
+not regain control.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_cpp_bridge_success_payload_still_supports_engine_import_provider editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_actor_import_provider_failure_codes_are_safe editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_write_replay_summary_sanitizes_raw_engine_results
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/agent_runtime/adapters.py editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted actor import failure-code tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This is an engine-import diagnostics slice.  It does not prove live C++ import,
+LAN actor synchronization, F5 runtime behavior, or visual placement quality.
+Full Agent-native completion still requires real provider rollout, full
+progressive replacement, multiplayer sync replacement, UI validation, and F5
+runtime validation.
+```
+
+## Progress Update 238 - actor import failure-code contract is now gated
+
+Problem:
+
+```text
+Progress Update 237 added safe actor-import failure codes, but without a static
+contract gate the refactor could later remove those codes or strip failure_code
+from replay summaries while still leaving unrelated tests green.
+```
+
+Change:
+
+```text
+verify_ultimate_plan.py now checks the Runtime validator contract for:
+
+- missing_ready_model_resource
+- cpp_actor_import_failed
+- actor_import_invalid_result
+- ToolCallGraphExecutor._safe_engine_result_rows() preserving "failure_code"
+- regression tests covering actor import failure-code safety and replay summary
+  sanitization
+
+This keeps the C++ / engine import boundary diagnostic signal in the mandatory
+non-native Agent-native gate.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This protects the Python/static Runtime contract only.  It does not prove live
+C++ import behavior, multiplayer actor synchronization, or F5 visual placement.
+Those remain in the real-provider and runtime-validation workstreams.
+```
+
+## Progress Update 239 - transform/delete engine-write failures expose safe failure codes
+
+Problem:
+
+```text
+Actor import failures had safe failure_code facts, but the adjacent engine-write
+providers for layout transform and actor delete still returned only status and
+reason.
+
+That left Runtime replay able to say "transform/delete failed", but not safely
+distinguish missing targets from C++ bridge failures.
+```
+
+Change:
+
+```text
+make_engine_layout_transform_provider() now records safe failure codes:
+
+- missing_transform_target
+- cpp_actor_transform_failed
+
+make_engine_actor_delete_provider() now records safe failure codes:
+
+- missing_delete_target
+- cpp_actor_delete_failed
+
+verify_ultimate_plan.py now gates these failure-code tokens alongside actor
+import failure codes and the replay preservation of "failure_code".
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_actor_delete_provider_uses_remove_gate_and_returns_actor_updates editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_actor_delete_provider_failure_code_is_safe editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_layout_transform_provider_respects_status_and_success_failure editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_layout_transform_provider_keeps_partial_success_when_one_actor_fails
+python -m py_compile editor/plugins/AITool/services/agent_runtime/adapters.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted transform/delete failure-code tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This is still a Python Runtime boundary slice.  It does not prove live C++
+transform/delete behavior, multiplayer sync convergence, or F5 visual layout
+quality.  Those remain [待 F5/实机验证] after real provider rollout.
+```
+
+## Progress Update 240 - environment component import failures expose safe failure codes
+
+Problem:
+
+```text
+Room boxes, terrain, boundaries, and other scene substrate components are moving
+through the Runtime environment-component import path, but failed engine imports
+only returned status/reason.
+
+That made Runtime replay able to say "environment import failed", but not safely
+distinguish a C++ environment-component bridge failure from other resource or
+validation failures.
+```
+
+Change:
+
+```text
+make_engine_environment_component_import_provider() now records the safe failure
+code:
+
+- cpp_environment_component_import_failed
+
+The Runtime environment import result sanitizer now allows the safe
+"failure_code" field, and verify_ultimate_plan.py gates both the failure-code
+token and the sanitizer contract.
+
+This keeps terrain / room_box / boundary import failures diagnosable without
+exposing raw provider payloads, paths, URLs, prompt text, API keys, or C++
+internal details.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_environment_component_import_provider_uses_gate_and_returns_component_updates editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_environment_component_import_provider_failure_code_is_safe editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_environment_import_tool_uses_provider_and_persists_sanitized_components
+python -m py_compile editor/plugins/AITool/services/agent_runtime/adapters.py editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted environment import failure-code tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This protects the Python Runtime boundary for environment component imports.
+It does not prove live C++ terrain / room_box / boundary creation, LAN
+synchronization, or F5 visual scene substrate quality.  Those remain
+[待 F5/实机验证] after real provider rollout.
+```
+
+## Progress Update 241 - failed environment imports persist replayable Runtime facts
+
+Problem:
+
+```text
+Progress Update 240 added a safe provider-level failure_code for environment
+component import failures, but runtime.environment.import_components could still
+collapse a provider failure into generic failed environment_components when no
+component was imported.
+
+That meant room_box / terrain / boundary import failures were safe at the
+adapter boundary, but the provider's environment_import_results and bridge
+boundary counts could be lost before RuntimeState / OperationLog replay.
+```
+
+Change:
+
+```text
+The failed environment import path now preserves safe provider failure facts:
+
+- failed environment_components are still written so Runtime does not pretend
+  terrain / room_box / boundary actors were imported
+- custom_import_facts now include runtime_environment_import_result for provider
+  failures that returned environment_import_results
+- engine_write_boundary is preserved with bridge call / failure counts
+- operation_replay().engine_write_summary can now show the failed
+  environment_import_results with failure_code
+
+The static AgentRuntime flag boundary gate now checks that failed environment
+import paths keep both environment_components and custom_import_facts.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_environment_component_import_provider_failure_code_is_safe editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_environment_import_failure_preserves_provider_failure_code_fact editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_environment_import_tool_uses_provider_and_persists_sanitized_components
+python -m py_compile editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted failed environment import Runtime fact tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves RuntimeState / OperationLog / replay preservation for Python-level
+provider failures.  It does not prove live C++ terrain / room_box / boundary
+creation or multiplayer sync convergence.  Those remain [待 F5/实机验证].
+```
+
+## Progress Update 242 - actor import result failure codes survive Runtime sanitization
+
+Problem:
+
+```text
+Engine actor import providers could emit safe per-row failure_code values, but
+runtime.actor.import_batch sanitized import_results down to actor_id /
+actor_name / status / reason.
+
+That meant C++ actor import failures and missing-ready-model precheck failures
+could still lose their stable failure_code before RuntimeState, OperationLog,
+and operation_replay summaries.
+```
+
+Change:
+
+```text
+runtime.actor.import_batch now preserves safe import result failure_code values.
+
+The missing-ready-model precheck path now records:
+
+- missing_ready_model_resource
+
+Provider-backed actor import failures preserve:
+
+- cpp_actor_import_failed
+
+verify_ultimate_plan.py now gates _safe_actor_import_results() so future
+refactors cannot silently strip safe failure_code from actor import facts.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_actor_import_provider_missing_model_resource_fails_runtime_graph editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_actor_import_persists_partial_success_from_engine_provider
+python -m py_compile editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted actor import failure-code Runtime fact tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This proves Python Runtime actor-import fact preservation.  It does not prove
+live C++ actor import behavior, LAN actor synchronization, or F5 visual scene
+quality.  Those remain [待 F5/实机验证].
+```
+
+## Progress Update 243 - image/model resource failures keep safe failure codes
+
+Problem:
+
+```text
+The Runtime resource stage could already mark image/model preparation as failed,
+partial, or completed, but empty provider results still collapsed to generic
+status/source fields.
+
+Image resource plans also filtered out failure_code, so image-stage failures
+could lose the stable diagnostic token before RuntimeState, resource_summary,
+and batch_resource_flow_summary.
+```
+
+Change:
+
+```text
+ResourcePlanValidator now preserves safe failure_code values for image resources,
+matching the model resource contract.
+
+runtime.image.prepare_batch and runtime.model.prepare_batch failed-resource rows
+now record:
+
+- image_resource_unavailable
+- model_resource_unavailable
+
+custom_resource_phase_facts now include failure_code_counts, and
+batch_resource_flow_summary exposes:
+
+- image_failure_code_counts
+- model_failure_code_counts
+
+verify_ultimate_plan.py now gates this contract so future refactors cannot
+silently strip safe resource-stage failure-code diagnostics.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_model_resource_provider_failure_emits_safe_runtime_event editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_empty_resource_provider_result_records_failed_resource_facts editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_empty_model_resource_provider_result_records_failed_resource_facts
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted resource failure-code Runtime fact tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This proves Python Runtime resource-stage failure-code preservation and replay
+summaries.  It does not prove live image/model provider latency behavior,
+Hunyuan3D service stability, or F5 visual import quality.  Those remain
+[待 F5/实机验证].
+```
+
+## Progress Update 259 - report/status/GM preserve environment import failure diagnostics
+
+Problem:
+
+```text
+Environment component import failures already persisted sanitized provider
+failure_code values in custom_import_facts and engine_write replay summaries.
+However, the higher-level Runtime read surfaces only carried aggregate counts:
+
+- environment_component_summary had import_failed_count but no failure-code map
+- report_health_summary could mark environment_import_failed but not explain why
+- report_ready, runtime_status_queried, and runtime_gm_summary_exported payloads
+  did not preserve the safe environment import failure category
+
+This meant the AgentRuntime fact layer knew that a room_box / terrain / boundary
+engine write failed, but the final user-report and GM/status audit surfaces
+could not name the safe failure bucket without digging into lower-level facts.
+```
+
+Change:
+
+```text
+AgentRuntime._environment_component_summary_for_plan() now aggregates
+environment import failure_code counts from both RuntimeEvents and
+custom_import_facts.
+
+AgentRuntime._report_health_summary() now exposes:
+
+- environment_import_failure_code_counts
+
+AgentRuntime.generate_report() copies that field into the report_ready
+RuntimeEvent payload.
+
+AgentRuntime.emit_runtime_event() persists the same safe map in the
+runtime_event_emitted OperationLog payload for report_ready.
+
+AgentRuntime.status_summary() and AgentRuntime.gm_summary() audit payloads also
+preserve environment_import_failure_code_counts, keeping report/status/GM views
+aligned on the same RuntimeState-derived failure facts.
+
+RuntimeEventValidator and AgentRuntime._SAFE_RUNTIME_EVENT_PAYLOAD_KEYS now
+allow the field as sanitized diagnostic metadata.  It remains a compact failure
+code count map and does not expose provider raw output, URLs, API keys, native
+payloads, prompts, paths, or internal bridge details.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_environment_import_failure_preserves_provider_failure_code_fact
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime environment-import failure diagnostic test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python RuntimeState summaries, final report health, report_ready
+RuntimeEvents, status audit payloads, and GM audit payloads preserve safe
+environment import failure diagnostics.  It does not prove live engine
+environment writes, native C++ room_box / terrain import behavior, UI display,
+or F5 multiplayer scene convergence.  Those remain [待 F5/实机验证].
+```
+
+## Progress Update 260 - operation replay keeps report_ready environment diagnostics
+
+Problem:
+
+```text
+Progress Update 259 made report_ready RuntimeEvents and status/GM audit payloads
+preserve environment_import_failure_code_counts.
+
+One adjacent replay surface still had a narrower summary:
+
+- _runtime_event_replay_summary().latest_report_ready included
+  environment_import_failed_count
+- but it did not include environment_import_failure_code_counts
+
+That meant OperationLog replay could show that the final report noticed
+environment import failures, but the compact latest_report_ready replay digest
+still could not name the safe failure bucket.
+```
+
+Change:
+
+```text
+AgentRuntime._runtime_event_replay_summary() now includes
+environment_import_failure_code_counts in latest_report_ready.
+
+The existing environment import provider failure test now verifies the same
+safe failure map across:
+
+- environment_component_summary
+- report_health_summary
+- report_ready RuntimeEvent payload
+- runtime_event_emitted OperationLog payload
+- runtime_event_replay_summary.latest_report_ready
+- runtime_status_queried OperationLog payload
+- runtime_gm_summary_exported OperationLog payload
+
+verify_ultimate_plan.py now statically checks the replay summary token as part
+of the Agent-native non-native gate.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_environment_import_failure_preserves_provider_failure_code_fact
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime environment-import failure replay test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python OperationLog replay summaries retain safe environment import
+failure diagnostics for final report events.  It does not prove live native
+environment import, C++ actor/component creation, UI rendering, or F5
+multiplayer convergence.  Those remain [待 F5/实机验证].
+```
+
+## Progress Update 263 - report_ready keeps engine-write bridge diagnostics
+
+Problem:
+
+```text
+Runtime reports already contained engine_write_boundary_summary, including
+bridge_call_count, bridge_failed_count, and bridge_error_code_counts from the
+C++/Python engine-write bridge.
+
+However, report_ready RuntimeEvents and runtime_event replay summaries did not
+carry those bridge diagnostics.  A post-run status or GM replay could therefore
+show that a report was partial/failed while losing the direct C++ write-boundary
+cause such as cpp_actor_import_failed.
+```
+
+Change:
+
+```text
+report_ready RuntimeEvent payloads now preserve safe engine-write bridge
+diagnostics:
+
+- engine_write_boundary_fact_count
+- engine_write_bridge_call_count
+- engine_write_bridge_success_count
+- engine_write_bridge_failed_count
+- engine_write_bridge_error_code_counts
+
+RuntimeEventValidator, AgentRuntime runtime-event persistence allowlists, and
+OperationLog safe payload handling now accept those aggregate fields.
+
+AgentRuntime._runtime_event_replay_summary() copies the same fields into
+latest_report_ready.
+
+LANChatAgentWorker replay formatters now expose safe bridge failures as:
+
+engine-write-failures <safe-code>:<count>
+
+The formatter continues to sanitize provider/url/raw/prompt/token style labels.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_actor_import_persists_partial_success_from_engine_provider
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check -- editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime actor-import bridge diagnostics test: passed
+targeted LANChat runtime replay formatter test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: no whitespace errors; only existing Windows LF/CRLF warnings
+```
+
+Remaining:
+
+```text
+This proves Python RuntimeEvent / OperationLog / LANChat replay paths preserve
+safe C++ engine-write bridge diagnostics.  It does not prove real native actor
+import quality, live C++ bridge behavior, multiplayer sync convergence, or UI
+rendering.  Those remain [待 F5/实机验证].
+```
+
+## Progress Update 262 - layout adjustment reports preserve transform failure causes
+
+Problem:
+
+```text
+Completed-state layout adjustment already counted transform failures, but the
+failure cause was not consistently preserved across RuntimeState summaries,
+OperationLog replay, report_ready events, GM/status summaries, and LANChat
+runtime text.
+
+In F5 terms, "layout adjustment cannot find actor / cannot write transform"
+could collapse into transform_failed_count=1.  That was not enough for the GM,
+status query, or post-run replay to explain whether the issue was an engine
+write failure, missing actor, stale actor mapping, or another transform bucket.
+```
+
+Change:
+
+```text
+AgentRuntime now aggregates layout_transform_failure_code_counts from failed
+engine_transform_results.
+
+The count map is preserved through:
+
+- layout_adjustment_summary
+- report_ready RuntimeEvent payload
+- runtime_event_emitted OperationLog payload
+- runtime_status_queried payload
+- runtime_gm_summary_exported payload
+- layout_adjustment_confirmed event payload
+- operation_replay layout_adjustment_summary
+- runtime_event_replay_summary.latest_report_ready
+
+OperationLog._safe_payload() now supports safe dynamic failure-code count maps,
+matching the resource/import/sync diagnostics shape.
+
+LANChatAgentWorker._format_agent_runtime_layout_report() now shows:
+
+transform-failures <safe-code>:<count>
+
+The LANChat formatter redacts provider/url/raw/prompt/token style labels before
+display, so this remains diagnostic without exposing internal payloads.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_applies_low_risk_deltas_through_runtime_tool
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check -- editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime layout transform failure-code test: passed
+targeted LANChat runtime layout formatter test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: no whitespace errors; only existing Windows LF/CRLF warnings
+```
+
+Remaining:
+
+```text
+This proves Python Runtime/OperationLog/LANChat text paths retain safe layout
+transform failure causes.  It does not prove live C++ actor transform writes,
+native actor-id resolution, UI rendering, or multiplayer F5 layout adjustment.
+Those remain [待 F5/实机验证].
+```
+
+## Progress Update 244 - report health exposes resource failure-code diagnostics
+
+Problem:
+
+```text
+Progress Update 243 preserved image/model resource failure codes in RuntimeState
+and batch_resource_flow_summary, but report_health_summary and the user-visible
+report_ready event still only exposed coarse counters such as
+resource_phase_failed_count.
+
+That meant GM/status/report consumers could know that a resource phase failed,
+but still had to inspect lower-level resource facts to know whether the cause
+was image_resource_unavailable, model_resource_unavailable, or another safe
+resource-stage failure code.
+```
+
+Change:
+
+```text
+report_health_summary now aggregates resource_phase_failure_code_counts from
+resource_summary.by_phase.
+
+report_ready payload now exposes safe resource_phase_failure_code_counts through
+both RuntimeEventValidator and the AgentRuntime user-visible event payload
+allowlist.
+
+verify_ultimate_plan.py now gates this contract so Runtime report health and
+user-visible report events cannot silently drop safe resource failure-code
+diagnostics.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_empty_resource_provider_result_records_failed_resource_facts editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_empty_model_resource_provider_result_records_failed_resource_facts editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_partial_resource_results_report_ready_and_failed_counts
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted report-health resource failure-code tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This proves Python Runtime report/replay disclosure of safe resource-stage
+failure codes.  It does not prove live provider latency, external model service
+availability, or F5 user-facing pacing quality.  Those remain [待 F5/实机验证].
+```
+
+## Progress Update 245 - message delivery replay keeps safe failure diagnostics
+
+Problem:
+
+```text
+message_delivery_summary already counted requested / succeeded / failed message
+delivery events, message kinds, channels, latest stage, and progress.
+
+For multiplayer verification that was still too coarse: if a LANChat / runtime
+message failed to reach peers, status/report/replay could say "message delivery
+failed" but not preserve a stable safe reason such as network_send_failed.
+```
+
+Change:
+
+```text
+_message_delivery_replay_summary now aggregates safe failure diagnostics from
+send-failed OperationLog entries:
+
+- failure_code_counts
+- latest_failure_code
+
+The summary prefers payload.failure_code, then payload.error_code, then a
+sanitized payload.reason, and falls back to message_send_failed.  Unsafe fields
+such as provider, prompt, URL, and asset paths remain filtered.
+
+message_delivery_digest now carries the same safe failure-code summary so GM /
+status/report consumers can distinguish generation success from multiplayer
+message delivery failure without reading raw logs.
+
+verify_ultimate_plan.py now gates the message delivery replay and digest
+contract.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_message_delivery_summary_is_derived_from_safe_operation_log
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check
+```
+
+Result:
+
+```text
+targeted message delivery failure-diagnostics test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+git diff --check: only LF/CRLF warnings, no whitespace errors
+```
+
+Remaining:
+
+```text
+This proves Python OperationLog / Runtime report replay preservation for safe
+message delivery failure diagnostics.  It does not prove live LAN peer delivery,
+native network stability, or F5 multiplayer convergence.  Those remain
+[待 F5/实机验证].
+```
+
+## Progress Update 246 - sync replay keeps safe failure diagnostics
+
+Problem:
+
+```text
+sync_replay_summary already counted recorded / failed sync events, actor events,
+asset events, peer joins/leaves, room close, and transfer progress.
+
+For multiplayer F5 analysis that was still too coarse: if RuntimeState rejected
+or failed to persist a LANChat / engine sync event, status/report/replay could
+show a sync_event_record_failed count but not preserve a stable safe diagnostic
+that GM/status/report consumers could use without reading raw logs.
+```
+
+Change:
+
+```text
+OperationLog safe payload allowlists now include failure_code, and
+RuntimeEventValidator also accepts failure_code plus sync_failure_code_counts.
+
+record_sync_event now writes a safe failure_code on failed sync-event record
+OperationLog entries.
+
+_sync_replay_summary now aggregates:
+
+- failure_code_counts
+- latest_failure_code
+
+_merge_sync_replay_summaries preserves those diagnostics when persisted
+RuntimeState sync events supplement the OperationLog replay window.
+
+_sync_health_digest_for_report now exposes:
+
+- sync_failure_code_counts
+- latest_sync_failure_code
+
+gm_summary's sync_replay_digest also carries the same safe failure-code summary.
+
+verify_ultimate_plan.py now gates the sync replay / sync health diagnostic
+contract.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_record_sync_event_failure_does_not_report_recorded_or_candidate_state
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted sync event failure-diagnostics test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python OperationLog / Runtime status/report replay preservation for
+safe sync-event failure diagnostics.  It does not prove live LAN packet
+delivery, C++ network bridge behavior, peer convergence, or F5 multiplayer
+stability.  Those remain [待 F5/实机验证].
+```
+
+## Progress Update 247 - LANChat report health surfaces sync failure diagnostics
+
+Problem:
+
+```text
+Progress Update 246 made sync failure diagnostics available inside Runtime
+status/report/replay, but LANChat's compact report-health formatter still only
+showed sync status as healthy / partial / needs_attention.
+
+That meant GM/user-facing summaries could still say "sync needs attention"
+without showing the safe stable cause, even when RuntimeState already had
+failure_code_counts.
+```
+
+Change:
+
+```text
+LANChatAgentWorker._format_agent_runtime_report_health_report now reads:
+
+- sync_failure_code_counts
+- latest_sync_failure_code
+
+and appends user-safe labels such as:
+
+- sync failures sync-event-record-failed
+- latest sync failure sync-event-record-failed
+
+The formatter continues to sanitize sensitive tokens such as provider, prompt,
+URL, path, session, token, and job.
+
+verify_ultimate_plan.py now gates the formatter contract so the LANChat report
+health view cannot silently drop sync failure diagnostics.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python -m py_compile editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted LANChat report-health formatter test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python LANChat/GM-facing report-health text can surface safe sync
+failure diagnostics from Runtime facts.  It does not prove live LAN delivery,
+C++ bridge behavior, UI rendering, or F5 multiplayer convergence.  Those remain
+[待 F5/实机验证].
+```
+
+## Progress Update 248 - Sync replay and GM summary preserve failure causes
+
+Problem:
+
+```text
+Progress Update 246 preserved sync-event failure_code_counts inside Runtime
+state/report data, and Progress Update 247 surfaced the same facts through
+report-health summaries.
+
+However, two user-facing replay paths could still collapse the cause to only
+"failed N":
+
+- Runtime report sync replay
+- GM Runtime summary sync replay
+
+This made multiplayer diagnostics less actionable during F5 review because the
+summary could show sync replay failures without the stable reason code.
+```
+
+Change:
+
+```text
+LANChatAgentWorker._format_agent_runtime_sync_replay_report now reads:
+
+- failure_code_counts
+- latest_failure_code
+
+and emits safe labels such as:
+
+- failure codes sync-event-record-failed:1
+- latest failure sync-event-record-failed
+
+LANChatAgentWorker._format_agent_runtime_gm_sync_replay_digest now applies the
+same safe failure-code disclosure for GM summaries.
+
+Both formatters sanitize sensitive markers such as provider, prompt, URL, raw,
+token, API key, path, session, and job before text reaches LANChat.
+
+verify_ultimate_plan.py now gates both formatter contracts so safe sync replay
+failure diagnostics cannot be silently dropped.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_report_query_generates_safe_summary_without_coordinator_ingest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_gm_summary_reads_agent_runtime_status_when_runtime_plan_exists
+python -m py_compile editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted LANChat Runtime report + GM summary tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python LANChat report/GM summary text preserves safe sync replay
+failure causes from Runtime facts.  It does not prove live LAN delivery,
+C++ bridge behavior, UI rendering, or F5 multiplayer convergence.  Those remain
+[待 F5/实机验证].
+```
+
+## Progress Update 249 - Message delivery diagnostics surface safe failure causes
+
+Problem:
+
+```text
+Runtime already preserved message delivery failure diagnostics in:
+
+- message_delivery_replay_summary.failure_code_counts
+- message_delivery_replay_summary.latest_failure_code
+- GM summary message_delivery_digest
+
+But LANChatAgentWorker._format_agent_runtime_message_delivery_report only showed
+requested / succeeded / failed counts, message kinds, channels, and latest
+stage.  The stable reason code could be present in Runtime facts while missing
+from Runtime Report and GM Runtime summary text.
+
+That left a small but important diagnosis gap for cases where LANChat delivery
+failed but the user-facing summary only said "failed 1".
+```
+
+Change:
+
+```text
+LANChatAgentWorker._format_agent_runtime_message_delivery_report now reads:
+
+- failure_code_counts
+- latest_failure_code
+
+and emits safe labels such as:
+
+- failure codes message-delivery-failed:1
+- latest failure message-delivery-failed
+
+The formatter uses failure-code-specific sanitization so message kind/channel
+labels keep their existing wording, while stable failure codes use the same
+hyphenated shape as other Runtime diagnostics.
+
+verify_ultimate_plan.py now gates the formatter contract so LANChat message
+delivery summaries cannot silently drop safe failure diagnostics.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_report_query_generates_safe_summary_without_coordinator_ingest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_gm_summary_reads_agent_runtime_status_when_runtime_plan_exists
+python -m py_compile editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted LANChat Runtime report + GM summary tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python LANChat Runtime report and GM summary text can surface safe
+message delivery failure causes from Runtime facts.  It does not prove live UI
+rendering, native C++ message transport, or F5 multiplayer convergence.  Those
+remain [待 F5/实机验证].
+```
+
+## Progress Update 250 - Resource readiness replay labels are sanitized
+
+Problem:
+
+```text
+ProviderReadinessValidator already blocks unsafe readiness fields at the
+RuntimeState boundary, and resource readiness replay summaries expose useful
+requested / enabled / unavailable counts.
+
+The remaining disclosure hardening gap was the LANChat replay formatter:
+
+- publish_status_counts
+- status_query_status_counts
+- status_counts
+- latest_readiness_event.status
+
+were rendered by replacing underscores with hyphens, but without applying the
+same sensitive-marker sanitization used by other Runtime diagnostics.
+
+If an unsafe or legacy status label containing provider / prompt / url / raw /
+token / path slipped into replay facts, the user-visible Operation Replay,
+Runtime Report, or GM summary could echo that label directly.
+```
+
+Change:
+
+```text
+LANChatAgentWorker._format_agent_runtime_replay_resource_readiness_report now
+uses a local safe_label helper for all readiness status labels.
+
+The helper normalizes underscores to hyphens and redacts sensitive markers:
+
+- prompt
+- provider
+- url
+- raw
+- token
+- api-key
+- path
+- session
+- job
+
+verify_ultimate_plan.py now gates the formatter contract so readiness replay
+labels continue to pass through safe_label instead of raw string replacement.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_operation_replay_query_exports_safe_summary_without_creating_plan
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_report_query_generates_safe_summary_without_coordinator_ingest
+python -m py_compile editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Operation Replay + Runtime Report tests: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python LANChat replay/report text sanitizes resource readiness labels
+before disclosure.  It does not prove live provider readiness behavior, front-end
+rendering, native C++ transport, or F5 multiplayer convergence.  Those remain
+[待 F5/实机验证].
+```
+
+## Progress Update 251 - Actor import preserves missing model failure causes
+
+Problem:
+
+```text
+Runtime actor import planning already knew which requested actors could not be
+imported because their model resources were not ready.  However, the diagnostic
+chain was still too weak:
+
+- the actor import plan did not expose a stable aggregate failure_code_counts
+- each planned actor did not preserve a safe failure_code
+- actor import result facts did not aggregate failed import reasons
+- batch resource flow reports did not surface import failure causes to LANChat
+
+This made a partial batch look like a generic import gap instead of an explicit
+"model resource missing / unavailable" condition.
+```
+
+Change:
+
+```text
+runtime.actor.import_batch now records safe import failure causes at three
+levels:
+
+- planned actor row: failure_code
+- actor import plan fact: failed_count + failure_code_counts
+- actor import result fact: failure_code_counts
+
+AgentRuntime._batch_resource_flow_summary_for_plan now carries
+import_failure_code_counts into the batch resource flow summary.
+
+LANChatAgentWorker._format_agent_runtime_resource_flow_report now renders a
+sanitized import-failures segment, redacting provider / prompt / url / raw /
+token / api-key / path / session / job markers before user-visible disclosure.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_empty_model_resource_provider_result_records_failed_resource_facts
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python -m py_compile editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime import failure test: passed
+targeted LANChat formatter test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python Runtime actor import planning, result facts, batch resource
+flow summaries, and LANChat report text preserve safe missing-model failure
+diagnostics.  It does not prove native C++ actor import behavior, actual engine
+asset availability, front-end rendering, or F5 multiplayer convergence.  Those
+remain [待 F5/实机验证].
+```
+
+## Progress Update 252 - Report health consumes actor import failure causes
+
+Problem:
+
+```text
+Progress Update 251 made import failure causes visible in batch resource flow
+and LANChat resource-flow text.  The next read-side gap was report health:
+
+- batch_resource_flow_summary could explain why actor import failed
+- but report_health_summary still focused on batch/import counts and resource
+  phase failure codes
+- a final report could therefore say partial/failed without preserving the
+  stable actor import failure cause at the health layer
+```
+
+Change:
+
+```text
+AgentRuntime._batch_resource_flow_summary_for_plan now aggregates
+import_failure_code_counts at the top level across scoped batches.
+
+AgentRuntime._report_health_summary now carries import_failure_code_counts from
+batch resource flow into report health.
+
+LANChatAgentWorker._format_agent_runtime_report_health_report now renders a
+sanitized import failures segment, using the same marker redaction policy as
+other Runtime diagnostics.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_empty_model_resource_provider_result_records_failed_resource_facts
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime import failure test: passed
+targeted LANChat formatter test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python Runtime report health and LANChat report text can preserve
+safe actor-import failure diagnostics.  It does not prove native C++ actor
+import behavior, engine asset availability, front-end rendering, or F5
+multiplayer convergence.  Those remain [待 F5/实机验证].
+```
+
+## Progress Update 253 - report_ready event carries actor import failure causes
+
+Problem:
+
+```text
+Progress Update 252 moved actor import failure causes into report_health_summary
+and LANChat report text.  The next event-layer gap was report_ready:
+
+- report_health_summary contained import_failure_code_counts
+- but the user-visible report_ready RuntimeEvent payload did not carry the same
+  field
+- RuntimeEventValidator.safe_payload also did not treat import_failure_code_counts
+  as an allowed safe mapping payload
+
+That meant UI/event replay could still lose the stable import failure reason even
+when the persisted report health already had it.
+```
+
+Change:
+
+```text
+RuntimeEventValidator._SAFE_PAYLOAD_KEYS now allows import_failure_code_counts.
+
+RuntimeEventValidator.safe_payload now treats import_failure_code_counts as a
+safe count mapping, applying the same safe text normalization used by
+resource_phase_failure_code_counts and sync_failure_code_counts.
+
+AgentRuntime.generate_report now includes import_failure_code_counts in the
+report_ready event payload.
+
+verify_ultimate_plan.py now gates the report_ready payload and RuntimeEvent
+allowlists for both resource phase and import failure diagnostics.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_empty_model_resource_provider_result_records_failed_resource_facts
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime report_ready failure-code test: passed
+targeted LANChat formatter test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python RuntimeEvent/report_ready payloads preserve safe actor-import
+failure diagnostics.  It does not prove live UI rendering, native C++ actor
+import behavior, LAN transport, or F5 multiplayer convergence.  Those remain
+[待 F5/实机验证].
+```
+
+## Progress Update 254 - status queries log actor import failure causes
+
+Problem:
+
+```text
+Progress Update 253 made report_ready RuntimeEvents carry actor import failure
+causes.  The next audit gap was status query logging:
+
+- status_summary() returned batch_resource_flow_summary and report_health_summary
+  with import_failure_code_counts
+- but the runtime_status_queried OperationLog payload only recorded compact
+  status/count fields
+- GM/status replay could therefore prove that a report was failed or partial,
+  but not why actor import failed
+```
+
+Change:
+
+```text
+AgentRuntime.status_summary() now writes two safe diagnostic maps into the
+runtime_status_queried OperationLog payload:
+
+- resource_phase_failure_code_counts
+- import_failure_code_counts
+
+The fields are compact count maps derived from report_health_summary, not raw
+provider payloads or tool args.
+
+verify_ultimate_plan.py now gates these tokens in the status_summary static
+contract so future changes cannot silently drop them from status-query audit
+events.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_empty_model_resource_provider_result_records_failed_resource_facts
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime status-query failure-code test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python status-query OperationLog payloads preserve safe actor-import
+failure diagnostics.  It does not prove live GM UI rendering, native C++ actor
+import behavior, LAN transport, or F5 multiplayer convergence.  Those remain
+[待 F5/实机验证].
+```
+
+## Progress Update 255 - GM summary export logs actor import failure causes
+
+Problem:
+
+```text
+Progress Update 254 made status queries preserve actor import failure causes in
+OperationLog.  The next audit gap was GM summary export:
+
+- gm_summary() already derives resource_flow_digest and report_health_digest from
+  status_summary(), so the returned summary can carry import_failure_code_counts
+- LANChat GM rendering can format those digests for user-visible diagnosis
+- but runtime_gm_summary_exported only logged compact counts, not the safe
+  failure-code maps
+
+That meant a replay could prove the GM summary saw failed imports, but not the
+reason category such as missing_ready_model_resource.
+```
+
+Change:
+
+```text
+AgentRuntime.gm_summary() now writes safe failure-code count maps into the
+runtime_gm_summary_exported OperationLog payload:
+
+- resource_import_failure_code_counts
+- report_import_failure_code_counts
+
+These are compact diagnostic count maps.  They do not include raw provider
+payloads, paths, prompts, URLs, API keys, tool args, or internal worker details.
+
+verify_ultimate_plan.py now gates both fields in the gm_summary static contract.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_empty_model_resource_provider_result_records_failed_resource_facts
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime GM-summary failure-code test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python GM-summary OperationLog payloads preserve safe actor-import
+failure diagnostics.  It does not prove live GM UI rendering, native C++ actor
+import behavior, LAN transport, or F5 multiplayer convergence.  Those remain
+[待 F5/实机验证].
+```
+
+## Progress Update 256 - status and GM audit logs preserve sync failure causes
+
+Problem:
+
+```text
+Runtime sync health already carried safe synchronization failure diagnostics:
+
+- sync_health_digest.sync_failure_code_counts
+- sync_health_digest.latest_sync_failure_code
+
+But the read-side audit events were weaker:
+
+- runtime_status_queried did not persist the sync failure-code maps
+- runtime_gm_summary_exported logged sync health status and attention count, but
+  not the reason category for sync failures
+
+That meant RuntimeState/report could show sync failure causes, while status/GM
+OperationLog replay could still lose the diagnostic category.
+```
+
+Change:
+
+```text
+AgentRuntime.status_summary() now writes safe sync failure diagnostics into the
+runtime_status_queried OperationLog payload:
+
+- sync_failure_code_counts
+- latest_sync_failure_code
+
+AgentRuntime.gm_summary() now writes the same safe fields into
+runtime_gm_summary_exported.
+
+The fields are compact failure-code categories and counts.  They do not include
+message_id, correlation_id, peer-private payloads, asset paths, URLs, provider
+details, prompts, or raw sync event bodies.
+
+verify_ultimate_plan.py now gates both fields in status-summary and GM-summary
+static contracts.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_record_sync_event_failure_does_not_report_recorded_or_candidate_state
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime sync-failure status/GM audit test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python RuntimeState/status/GM OperationLog payloads preserve safe
+sync failure diagnostics.  It does not prove live LAN transport behavior, native
+C++ sync callbacks, multiplayer convergence, or UI rendering.  Those remain
+[待 F5/实机验证].
+```
+
+## Progress Update 257 - status and GM audit logs preserve layout adjustment outcomes
+
+Problem:
+
+```text
+完成态布局调整已经能进入 RuntimeState / report / operation replay：
+
+- layout_adjustment_summary
+- final_adjustment_confirmation_summary
+- layout_adjustment_replay_summary
+- report_ready layout counts
+
+但 status query 和 GM summary 的 OperationLog payload 仍偏弱：
+
+- runtime_status_queried 没有持久记录 layout applied / skipped / transform / ground snap / overlap counts
+- runtime_gm_summary_exported 没有持久记录同一组布局调整结果计数
+
+这会导致用户问“刚才调整到底执行了什么”时，RuntimeState 可以查到，
+但 status / GM 审计事件本身不能独立证明低风险布局调整的结果。
+```
+
+Change:
+
+```text
+AgentRuntime.status_summary() now writes safe layout adjustment counts into the
+runtime_status_queried OperationLog payload:
+
+- layout_proposal_count
+- layout_applied_delta_count
+- layout_skipped_delta_count
+- layout_transform_result_count
+- layout_ground_snapped_count
+- layout_overlap_resolved_count
+
+AgentRuntime.gm_summary() writes the same safe fields into
+runtime_gm_summary_exported.
+
+The fields are aggregate counts only.  They do not include actor IDs, actor
+names, coordinates, raw deltas, provider output, or private engine payloads.
+
+verify_ultimate_plan.py now gates these fields in status-summary and GM-summary
+static contracts.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_applies_low_risk_deltas_through_runtime_tool
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime layout-adjustment status/GM audit test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python RuntimeState/status/GM OperationLog payloads preserve safe
+layout adjustment outcome counts.  It does not prove live engine transform
+behavior, native C++ actor movement, UI rendering, or F5 multiplayer scene
+convergence.  Those remain [待 F5/实机验证].
+```
+
+## Progress Update 258 - report_ready preserves sync failure diagnostics
+
+Problem:
+
+```text
+Progress Update 256 made status and GM audit logs preserve sync failure causes.
+However, the final report health path still had a gap:
+
+- sync_health_digest contained sync_failure_code_counts and latest_sync_failure_code
+- report_health_summary only carried sync_health_status and asset counts
+- report_ready RuntimeEvent payload and runtime_event_emitted audit payload
+  therefore could show that sync needed attention, but not the safe failure
+  category
+
+This weakened the final user-report boundary: OperationLog could prove the final
+report was ready, but report_ready itself could not explain the sync failure
+category without consulting another summary.
+```
+
+Change:
+
+```text
+AgentRuntime._report_health_summary() now preserves safe sync diagnostics:
+
+- sync_failure_code_counts
+- latest_sync_failure_code
+
+AgentRuntime.generate_report() copies those fields into the report_ready
+RuntimeEvent payload.
+
+AgentRuntime.emit_runtime_event() persists the same safe fields in the
+runtime_event_emitted OperationLog payload when event_type == report_ready.
+
+RuntimeEventValidator and _SAFE_RUNTIME_EVENT_PAYLOAD_KEYS allow these fields as
+sanitized diagnostic metadata.  They remain compact failure-code categories and
+do not include peer-private data, message_id, correlation_id, asset paths, URLs,
+provider details, prompts, or raw sync event bodies.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_record_sync_event_failure_does_not_report_recorded_or_candidate_state
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime sync-failure report_ready test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python report health summaries, report_ready RuntimeEvents, and
+runtime_event_emitted OperationLog payloads preserve safe sync failure
+diagnostics.  It does not prove live LAN transport behavior, native C++ sync
+callbacks, multiplayer convergence, or UI rendering.  Those remain
+[待 F5/实机验证].
+```
+
+## Progress Update 261 - LANChat replay text surfaces environment import failure buckets
+
+Problem:
+
+```text
+Progress Update 260 made OperationLog replay summaries retain
+latest_report_ready.environment_import_failure_code_counts.
+
+The LANChat-facing replay formatter still compressed that replay state to:
+
+- report-ready count
+- report attention count
+- latest-report status
+
+It did not show the safe environment import failure bucket.  A user or GM asking
+for the runtime replay could therefore see that the latest report needed
+attention, but not whether the relevant failure was a room_box / terrain /
+boundary engine import bucket such as cpp_environment_component_import_failed.
+```
+
+Change:
+
+```text
+LANChatAgentWorker._format_agent_runtime_replay_runtime_event_report() now
+formats latest_report_ready.environment_import_failure_code_counts as:
+
+env-import-failures <safe-code>:<count>
+
+LANChatAgentWorker._format_agent_runtime_gm_runtime_event_replay_digest() now
+does the same for GM replay digest text.
+
+The formatter keeps the same safety behavior as other Runtime replay reports:
+provider, prompt, url, raw, token, and api-key markers are rewritten to safe
+resource labels before display.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted LANChat runtime replay formatter test: passed
+verify_ultimate_plan.py: All current Agent-native non-native checks passed
+```
+
+Remaining:
+
+```text
+This proves Python LANChat replay text can expose safe environment import
+failure buckets without leaking provider/url/internal labels.  It does not
+prove UI rendering, live GM chat wording, native engine import, or F5
+multiplayer convergence.  Those remain [待 F5/实机验证].
+```
+
+## Progress Update 264 - tail note for report_ready engine-write bridge diagnostics
+
+This note records the latest continuation at the current document tail.  The
+full detail for this change is in `Progress Update 263 - report_ready keeps
+engine-write bridge diagnostics`.
+
+Summary:
+
+```text
+report_ready RuntimeEvents, runtime_event replay summaries, and LANChat replay
+formatters now preserve safe C++ engine-write bridge diagnostics:
+
+- engine_write_boundary_fact_count
+- engine_write_bridge_call_count
+- engine_write_bridge_success_count
+- engine_write_bridge_failed_count
+- engine_write_bridge_error_code_counts
+
+LANChat replay text surfaces those as:
+
+engine-write-failures <safe-code>:<count>
+```
+
+Verification:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_actor_import_persists_partial_success_from_engine_provider
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+All listed non-native checks passed.
+Remaining live C++ bridge behavior, native import quality, UI rendering, and
+multiplayer convergence remain [待 F5/实机验证].
+```
+
+## Progress Update 265 - status and GM summaries keep engine-write bridge diagnostics
+
+Continuation goal:
+
+```text
+Make AgentRuntime read paths preserve the same safe engine-write bridge
+diagnostics that report_ready already emits, so status queries and GM summaries
+can explain C++ bridge/import partial failures without parsing raw provider
+details.
+```
+
+Change:
+
+```text
+AgentRuntime.status_summary() now writes compact engine-write bridge counters
+into the runtime_status_queried OperationLog payload:
+
+- engine_write_boundary_fact_count
+- engine_write_bridge_call_count
+- engine_write_bridge_success_count
+- engine_write_bridge_failed_count
+- engine_write_bridge_error_code_counts
+
+AgentRuntime.gm_summary() now includes the same bridge counters in
+engine_write_boundary_digest and in runtime_gm_summary_exported payloads.
+
+The values come from RuntimeState engine_write_boundary facts and are routed
+through the existing OperationLog safe-payload allowlist.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_actor_import_persists_partial_success_from_engine_provider
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check -- editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted partial engine import test: passed
+verify_ultimate_plan.py: 576 + 184 tests passed; all current Agent-native
+non-native checks passed
+diff check: only existing LF/CRLF warnings
+```
+
+Remaining:
+
+```text
+This proves Python Runtime status/GM/report paths can carry safe engine-write
+bridge diagnostics.  It still does not prove live C++ bridge behavior, native
+import quality, UI rendering, or multiplayer convergence.  Those remain
+[待 F5/实机验证].
+```
+
+## Progress Update 266 - GM replay aggregates engine-write bridge diagnostics
+
+Continuation goal:
+
+```text
+Move one more diagnosis path from ad-hoc report parsing into OperationLog
+replay facts.  GM summary replay should aggregate the safe engine-write bridge
+diagnostics exported by runtime_gm_summary_exported events.
+```
+
+Change:
+
+```text
+AgentRuntime._gm_summary_replay_summary() now aggregates:
+
+- engine_write_boundary_fact_total
+- engine_write_bridge_call_total
+- engine_write_bridge_success_total
+- engine_write_bridge_failed_total
+- engine_write_bridge_error_code_counts
+
+latest_gm_summary_event also preserves the latest GM-exported bridge failure
+count and safe failure-code bucket map.
+
+This keeps GM replay aligned with RuntimeState / OperationLog as the replay
+facts source, rather than requiring consumers to inspect raw event payloads.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_actor_import_persists_partial_success_from_engine_provider
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check -- editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted partial engine import replay test: passed
+verify_ultimate_plan.py: 576 + 184 tests passed; all current Agent-native
+non-native checks passed
+diff check: only existing LF/CRLF warnings
+```
+
+Remaining:
+
+```text
+This proves Python OperationLog replay can aggregate safe engine-write bridge
+failure buckets for GM summaries.  It does not prove live C++ bridge behavior,
+native import quality, UI rendering, or multiplayer convergence.  Those remain
+[待 F5/实机验证].
+```
+
+## Progress Update 267 - Phase 6 selective ground snap becomes a Runtime geometry ToolCall
+
+Task anchor:
+
+```text
+Phase 6 requires floating checks and grounding to become Runtime ToolCalls.
+Before this update, selective grounding existed mainly as LANChat/completed
+layout helper behavior.  It was useful, but the grounding review itself was
+not yet an auditable AgentRuntime geometry tool.
+```
+
+Change:
+
+```text
+AgentRuntime ToolRegistry now exposes runtime.geometry.snap_to_ground_selective.
+
+The tool:
+
+- consumes room-scoped actors
+- reads actor AABB bottom_y
+- classifies only floor-supported objects as eligible
+- skips wall-mounted, ceiling-hung, system, and unknown objects
+- writes custom_geometry_facts with runtime_geometry_ground_snap
+- writes a geometry_reviews entry with checkpoint_type=ground_snap_selective
+- does not move actors, import models, write engine state, or call native code
+
+This keeps the actual transform write path in layout/apply-delta tools while
+making the floating/grounding diagnosis itself replayable from RuntimeState /
+OperationLog.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_phase6_geometry_snap_to_ground_tool_records_review_without_actor_write editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_tool_registry_manifest_exposes_safe_capability_metadata
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check -- editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Phase 6 ground snap ToolCall tests: passed
+verify_ultimate_plan.py: 577 + 184 tests passed; all current Agent-native
+non-native checks passed
+diff check: only existing LF/CRLF warnings
+```
+
+Remaining:
+
+```text
+This proves Python Runtime can produce replayable selective grounding facts
+without writing actors directly.  It does not yet prove live native AABB
+quality, real actor transform application, UI wording, or multiplayer F5
+convergence.  Those remain [待 F5/实机验证].
+```
+
+## Progress Update 268 - selective ground snap is wired into the batch ToolCallGraph
+
+Task anchor:
+
+```text
+Progress 267 made selective grounding an auditable Runtime geometry tool.
+However, a registered tool is not enough for Agent-native execution: the
+batch ToolCallGraph must actually schedule it after import and before review
+summaries/advisory proposals so floating diagnostics become part of the real
+runtime execution slice.
+```
+
+Change:
+
+```text
+The batch execution graph now inserts:
+
+runtime.geometry.snap_to_ground_selective
+
+after runtime.actor.import_batch and runtime.geometry.review, and before:
+
+- runtime.review.vlm_checkpoint
+- runtime.review.summarize_batch
+- runtime.review.generate_adjustment_proposal
+
+The node consumes actors through the registry-derived consumes contract, keeps
+risk_level=LOW, and records its ground_snap_selective review under a separate
+batch ground-snap key so it does not overwrite the main geometry review.
+
+Tests were updated to treat ground_snap_selective as a first-class batch review
+only for real graph execution.  Legacy review-key compatibility tests still
+expect their manually injected two-review state and do not fabricate a ground
+snap review.
+```
+
+Tests / gates:
+
+```text
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_batch_report_scopes_resource_import_and_runtime_events_to_batch editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_vlm_checkpoint_tool_creates_advisory_after_import_without_mutating_actors editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_substrate_terms_are_classified_but_not_imported_as_actors
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_review_summary_accepts_legacy_plan_batch_fact_keys
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check -- editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py docs/Agent-native一步到位重构计划.md
+```
+
+Result:
+
+```text
+targeted graph/review regression tests: passed
+verify_ultimate_plan.py: 577 AgentRuntime tests + 184 LANChat guard tests passed
+F5 log probes and static non-native Agent-native gates passed
+diff check: only existing LF/CRLF warnings
+```
+
+Remaining:
+
+```text
+This closes the Python Runtime scheduling gap for Phase 6 selective grounding
+diagnostics.  It still does not claim that native actors are physically moved
+or that live F5 scenes are fully grounded; actual transform application, native
+AABB quality, and multiplayer visual convergence remain [待 F5/实机验证].
+```
+
+## Progress Update 269 - ground snap diagnostics feed review summaries and proposals
+
+Task anchor:
+
+```text
+Progress 268 scheduled runtime.geometry.snap_to_ground_selective inside the
+batch ToolCallGraph, but its findings were still mostly isolated review facts.
+For Agent-native execution, a review fact must be usable by downstream summary
+and proposal tools without bypassing RuntimeState or directly writing actors.
+```
+
+Change:
+
+```text
+runtime.review.summarize_batch now consumes room-scoped geometry_reviews as
+ground_snap_reviews and filters only checkpoint_type=ground_snap_selective for
+the same plan_id/batch_id.
+
+The batch summary now exposes:
+
+- ground_snap_review_count
+- ground_snap_issue_count
+
+runtime.review.generate_adjustment_proposal also consumes ground_snap_reviews,
+merges their low-risk floating_or_sunken issues with normal geometry issues,
+and can produce a confirmable move delta from selective AABB grounding.
+
+The floating/sunken delta now prefers suggested_position[1] over suggested_y,
+so AABB bottom-snap proposals move the actor toward the corrected transform y
+instead of assuming the actor origin should equal ground_y.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_phase6_geometry_snap_to_ground_tool_records_review_without_actor_write editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_phase6_ground_snap_review_flows_into_batch_summary_and_adjustment_proposal editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_tool_registry_manifest_exposes_safe_capability_metadata editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_execution_graph_consumes_are_derived_from_tool_definition_contract
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check -- editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py docs/Agent-native一步到位重构计划.md
+```
+
+Result:
+
+```text
+targeted Phase 6 summary/proposal slice tests: passed
+verify_ultimate_plan.py: 578 AgentRuntime tests + 184 LANChat guard tests passed
+F5 log probes and static non-native Agent-native gates passed
+diff check: only existing LF/CRLF warnings
+```
+
+Remaining:
+
+```text
+This proves selective grounding diagnostics can flow through RuntimeState into
+batch summaries and confirmable low-risk adjustment proposals.  It still does
+not execute native actor transforms by itself; live transform application,
+native AABB accuracy, and multiplayer scene convergence remain [待 F5/实机验证].
+```
+
+## Progress Update 270 - ground snap proposals can be confirmed through Runtime layout apply
+
+Task anchor:
+
+```text
+After Progress 269, selective AABB grounding could produce a low-risk layout
+adjustment proposal.  The next Agent-native invariant to prove was that this
+proposal can use the existing Runtime confirmation/apply path instead of
+requiring a LANChat-side helper or direct actor write.
+```
+
+Change:
+
+```text
+Added a focused Runtime slice test covering:
+
+ground_snap_selective review
+-> review.summarize_batch
+-> review.generate_adjustment_proposal
+-> confirm_layout_adjustment
+-> runtime.layout.apply_delta
+
+The test uses RuntimeState-only execution with no native provider.  It proves
+that a floating floor-supported actor can be moved through the guarded layout
+apply tool, updating both actor.position and actor.aabb while preserving the
+proposal/applied_deltas audit trail.
+
+This reuses the existing runtime.layout.apply_delta write boundary and keeps
+native/C++ transform execution behind the existing layout_transform_provider
+bridge.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_phase6_ground_snap_review_flows_into_batch_summary_and_adjustment_proposal editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_phase6_ground_snap_adjustment_confirmation_updates_runtime_actor_without_native_provider editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_applies_low_risk_deltas_through_runtime_tool
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+git diff --check -- editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py docs/Agent-native一步到位重构计划.md
+```
+
+Result:
+
+```text
+targeted ground snap confirmation slice tests: passed
+verify_ultimate_plan.py: 579 AgentRuntime tests + 184 LANChat guard tests passed
+F5 log probes and static non-native Agent-native gates passed
+diff check: only existing LF/CRLF warnings
+```
+
+Remaining:
+
+```text
+This proves the Python Runtime confirmation/apply loop can execute the
+selective ground-snap proposal against RuntimeState.  It still does not prove
+native layout_transform_provider behavior, real engine actor transform, or
+multiplayer sync convergence; those remain [待 F5/实机验证].
+```
+
+## Progress Update 271 - layout transform write boundary is visible in Runtime reports
+
+Task anchor:
+
+```text
+Progress 270 proved that a ground-snap proposal can be confirmed through the
+Runtime layout apply path.  The next missing invariant was observability:
+when layout_transform_provider is present, the Runtime report/status/GM/replay
+surfaces must show that the native transform write boundary was crossed,
+without exposing provider internals.
+```
+
+Change:
+
+```text
+Extended the safe Runtime event/report payload contract with
+engine_write_transform_boundary_count.
+
+The field is now emitted through:
+
+1. report_ready
+2. runtime status summaries
+3. GM summary payloads
+4. runtime event replay summaries
+
+The existing engine_write_boundary_fact_count remains the broad write-boundary
+fact counter.  The new transform-specific count makes low-risk layout
+adjustment confirmation auditable without leaking native provider details,
+job ids, object pointers, or tool internals.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_applies_low_risk_deltas_through_runtime_tool
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted layout transform boundary observability test: passed
+verify_ultimate_plan.py: 579 AgentRuntime tests + 184 LANChat guard tests passed
+F5 log probes and static non-native Agent-native gates passed
+```
+
+Remaining:
+
+```text
+This proves the Python Runtime surfaces can safely expose native layout
+transform write-boundary evidence after a confirmed adjustment.  It still does
+not prove real engine transform behavior, native AABB precision after transform,
+or multiplayer actor convergence; those remain [待 F5/实机验证].
+```
+
+## Progress Update 272 - sync failures now raise report health and GM/status attention
+
+Task anchor:
+
+```text
+Recent multiplayer F5 reviews showed that sync problems must not be buried in
+low-level replay details.  Agent-native Runtime reports, status queries, and GM
+summaries need to surface sync failure evidence as an attention state while
+still preserving safe replayable failure-code counts.
+```
+
+Change:
+
+```text
+Updated Runtime report health aggregation so sync_failure_code_counts or a
+latest_sync_failure_code now add the sync_failed reason and raise the overall
+report health status to needs_attention when no stronger failure status already
+applies.
+
+Also added report_health_status / report_attention_required /
+report_health_reasons to runtime_gm_summary_exported operation-log payloads.
+Status-query payloads now preserve report_health_reasons as structured reasons
+instead of only exposing the status flag.
+
+This keeps user-facing summaries and GM-facing operation logs aligned with the
+same RuntimeState + OperationLog facts used by final reports.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_record_sync_event_failure_does_not_report_recorded_or_candidate_state
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_record_sync_event_failure_does_not_report_recorded_or_candidate_state editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_applies_low_risk_deltas_through_runtime_tool editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_environment_import_failure_preserves_provider_failure_code_fact
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted sync/report/GM attention propagation tests: passed
+verify_ultimate_plan.py: 579 AgentRuntime tests + 184 LANChat guard tests passed
+F5 log probes and static non-native Agent-native gates passed
+```
+
+Remaining:
+
+```text
+This proves Python Runtime can elevate recorded sync failures into report,
+status, and GM attention surfaces.  It still does not prove live network
+recovery, peer convergence, or C++ broadcast correctness; those remain
+[待 F5/实机验证].
+```
+
+## Progress Update 273 - legacy AgentCoordinator write actions are blocked by default
+
+Task anchor:
+
+```text
+CodeGraph showed that the old AgentCoordinator can still execute add/delete/
+move/modify through legacy helpers such as model acquisition and actor
+transform tools.  Under the Agent-native invariants, user-facing write actions
+must be routed through AgentRuntime, RuntimeGuard, ToolCallGraph, ToolResult,
+StatePatch, RuntimeState, and OperationLog instead of being executed directly
+by a legacy Agent coordinator.
+```
+
+Change:
+
+```text
+Added a default guard in AgentCoordinator.execute():
+
+- add
+- delete
+- move
+- modify
+
+now return a structured blocked result with reason=agent_runtime_required when
+OLD_WORKFLOW_DIRECT_ENTRY_DISABLED remains enabled.
+
+Legacy direct execution is still available only through explicit debug/legacy
+metadata:
+
+- allow_legacy_direct_agent_execute
+- allow_legacy_agent_coordinator_execute
+
+This treats AgentCoordinator as old code category A/B: no longer a main-control
+entry for normal users, but still available as a controlled legacy/debug
+baseline while capabilities are migrated into Runtime tools.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/cai_extensions/agent/coordinator.py editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_legacy_agent_coordinator_blocks_runtime_controlled_actions_by_default editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_legacy_agent_coordinator_can_be_explicitly_enabled_for_debug
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_legacy_agent_coordinator_blocks_runtime_controlled_actions_by_default editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_legacy_agent_coordinator_can_be_explicitly_enabled_for_debug editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_record_sync_event_failure_does_not_report_recorded_or_candidate_state editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_applies_low_risk_deltas_through_runtime_tool
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted legacy AgentCoordinator entry tests: passed
+verify_ultimate_plan.py: 581 AgentRuntime tests + 184 LANChat guard tests passed
+F5 log probes and static non-native Agent-native gates passed
+```
+
+Remaining:
+
+```text
+This closes one legacy Python Agent write-entry gap.  It does not remove old
+workflow/helper code yet; remaining旧代码仍需按主控类禁用、可复用函数工具化、
+状态迁移到 RuntimeState、测试/文档保留为 baseline 的分类继续处理。
+```
+
+## Progress Update 274 - legacy AgentCoordinator write block is now a static gate
+
+Task anchor:
+
+```text
+Progress Update 273 blocked the old AgentCoordinator add/delete/move/modify
+write actions by default.  That runtime guard also needs a non-native static
+gate so future refactors cannot silently remove the AgentRuntime takeover
+boundary while tests still pass through other paths.
+```
+
+Change:
+
+```text
+Added `static legacy AgentCoordinator policy gate` to
+verify_ultimate_plan.py.
+
+The gate now checks that coordinator.py keeps:
+
+- _RUNTIME_CONTROLLED_ACTIONS for add/delete/move/modify
+- default blocked result with reason/execution=agent_runtime_required
+- broadcast + record of the blocked decision
+- explicit debug-only legacy opt-ins:
+  - allow_legacy_direct_agent_execute
+  - allow_legacy_agent_coordinator_execute
+- AgentRuntimeFlags.old_workflow_direct_entry_disabled as the runtime flag
+  boundary
+
+The gate is wired into the main non-native verification sequence immediately
+after the host action executor policy gate.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+verify_ultimate_plan.py: 581 AgentRuntime tests + 184 LANChat guard tests passed
+static legacy AgentCoordinator policy gate passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This prevents regression of one legacy direct-write boundary.  It still does
+not complete old workflow dismantling: remaining旧主控/可复用函数/状态/测试文档
+分类仍要继续按 AgentRuntime ToolCallGraph + RuntimeGuard + RuntimeState 的
+目标架构推进。
+```
+
+## Progress Update 275 - RoleAgent scene-write fallback is blocked before legacy execution
+
+Task anchor:
+
+```text
+LANChatAgentWorker can still route @Agent triggers into the old
+LanChatAgentOrchestrator / MasterAgent path after Coordinator/Runtime planning
+gates decline a message.  MasterAgent already has its own Runtime guard, but
+Agent-native invariants require user-facing scene-write actions to be stopped
+at the Worker boundary before the old RoleAgent execution path is entered.
+```
+
+Change:
+
+```text
+Added LANChatAgentWorker._handle_agent_trigger_runtime_write_gate().
+
+For normal @Agent chat triggers, when legacy main workflow execution is
+disabled and IntentUnderstanding classifies the message as:
+
+- generation_start
+- intervention_add
+- intervention_modify
+- intervention_delete
+- post_generation_add
+- final_adjustment_request
+
+the worker now records `legacy_role_agent_scene_write_blocked` in OperationLog
+and returns a user-safe system reply explaining that AgentRuntime owns the
+scene-write path.
+
+The gate runs after the planning gate and before `_run_agent(trigger)`, so
+ordinary discussion / plan drafting can still use RoleAgent replies, while
+missed scene-write requests cannot fall through into legacy RoleAgent direct
+execution.
+
+Added `static legacy RoleAgent scene-write policy gate` to
+verify_ultimate_plan.py to lock this ordering and required audit event.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/lanchat_agent_worker.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_agent_trigger_scene_write_fallback_blocks_legacy_role_agent
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted RoleAgent scene-write fallback test: passed
+verify_ultimate_plan.py: 581 AgentRuntime tests + 185 LANChat guard tests passed
+static legacy RoleAgent scene-write policy gate passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This closes another Worker-level legacy write-entry fallback.  It still keeps
+RoleAgent available for normal discussion and planning replies.  Remaining old
+workflow/helper code still needs continued A/B/C/D classification and
+ToolCallGraph replacement where it owns execution or state.
+```
+
+## Progress Update 276 - External Runtime audit events now go through ToolCallGraph
+
+Task anchor:
+
+```text
+AgentRuntime.handle_message(runtime_audit_event / audit_event) still recorded
+external audit facts by directly appending OperationLog entries.  Although this
+did not mutate RuntimeState, it was still an execution fact path outside the
+ToolCallGraph invariant.
+```
+
+Change:
+
+```text
+Added `runtime.audit_event.record` as a low-risk Runtime tool.
+
+The `runtime_audit_event` handle_message branch now:
+
+- sanitizes the external audit payload
+- resolves any external/runtime plan link
+- builds a one-node ToolCallGraph
+- executes `runtime.audit_event.record`
+- returns tool_graph_id and tool_call_status
+
+The tool preserves required stable audit fields such as reply_to, event_id,
+phase, source_user_id, agent_id, external_plan_id, and
+runtime_payload_prepared_by_worker while still filtering provider/api_key/raw
+payload-style internal fields.
+
+The LANChat guard test helper now treats `runtime.audit_event.record` as an
+internal mirror/audit graph, the same way it already treats runtime.event.emit
+and planning-context mirror tools.
+
+Added static verifier checks so future refactors cannot move
+runtime_audit_event back to a direct OperationLog append branch.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_handle_message_runtime_audit_event_records_safe_operation_log_without_creating_plan
+python editor/plugins/AITool/services/test_lanchat_runtime_guard.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted Runtime audit event ToolCallGraph test: passed
+LANChat Runtime guard tests: 185 passed
+verify_ultimate_plan.py: 581 AgentRuntime tests + 185 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This closes the external Runtime audit-event fact path.  Internal executor
+lifecycle OperationLog writes remain intentionally direct because they are the
+ToolCallGraphExecutor's own replay surface.  Remaining work is still the larger
+A/B/C/D classification and replacement of old workflow主控能力 with Runtime
+ToolCallGraph tools.
+```
+
+## Progress Update 277 - Planning context handoff ToolCallGraph path is locked by tests and static gate
+
+Task anchor:
+
+```text
+Multi-user / multi-Agent discussion context must survive across plan drafting,
+Agent replies, host confirmation, and generation.  This path is not a scene
+write, but it is the control-plane memory that prevents "方案跑偏" and must not
+regress to direct RuntimeState writes or hidden legacy workflow state.
+```
+
+Change:
+
+```text
+Kept the existing `runtime.planning_context.persist` ToolCallGraph path and
+added stronger regression coverage instead of rewriting the working link.
+
+The Agent reply context test now asserts that mirrored Agent discussion creates
+a completed ToolCallGraph containing `runtime.planning_context.persist`.
+
+The static Runtime validator gate now checks:
+
+- `runtime.planning_context.persist` is registered as a Runtime PLAN tool
+- it requires room_id, changes, and context_event
+- it declares active_plan_id / scene_plans / planning_context_events outputs
+- `_execute_planning_context_persist_graph()` builds and executes a ToolCallGraph
+- `_persist_planning_context_tool()` validates PlanningContextEvent and StatePatch
+- user and Agent context mirror paths call the planning-context persist helpers
+
+This is intentionally a防回退切口: the current path was already mostly correct,
+so the value is to make the invariant mechanically enforced before larger
+Agent-native dismantling continues.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_record_agent_context_message_is_read_only_planning_context
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted planning context ToolCallGraph assertion: passed
+verify_ultimate_plan.py: 581 AgentRuntime tests + 185 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This locks the multi-Agent planning-context handoff path.  It does not yet
+finish the larger old workflow拆解; next work should continue classifying old
+主控能力 and replacing execution/state ownership with Runtime tools where the
+current code still owns behavior outside AgentRuntime.
+```
+
+## Progress Update 278 - RoleAgent write fallback audit now preserves semantic intent safely
+
+Task anchor:
+
+```text
+Normal @Agent chat must remain available for discussion, but write-like scene
+requests must not fall through into legacy RoleAgent execution when old main
+workflow is disabled.  When such a request is blocked, OperationLog must keep
+enough safe semantic facts to explain which Runtime route absorbed it.
+```
+
+Change:
+
+```text
+Expanded the existing RoleAgent scene-write fallback regression from a single
+add-object case to the full default-blocked write surface:
+
+- generation_start
+- intervention_add
+- intervention_modify
+- intervention_delete
+- final_adjustment_request
+
+This verifies `_process_trigger()` stops before `_run_agent()` for these write
+intents and records `legacy_role_agent_scene_write_blocked` through the
+Runtime audit ToolCallGraph path.
+
+During the test expansion, the final layout phrase exposed a real routing bug:
+when a Runtime plan existed, `_protocol_guardrail()` matched the broad modify
+pattern before layout / floating / grounding patterns.  Final layout phrases now
+take priority and route to `final_adjustment_request` before generic active
+generation modify handling.
+
+The Runtime audit path now preserves safe semantic audit fields:
+
+- `intent`
+- `route`
+- `target_agent`
+
+These fields are allowed in OperationLog payloads, RuntimeEvent-safe payloads,
+the `handle_message(action=runtime_audit_event)` pre-graph sanitization path,
+and the `runtime.audit_event.record` tool.  This fixes the previous redaction of
+`final_adjustment_request` caused by the generic `request` safety marker while
+still keeping provider / prompt / path / token fields blocked.
+
+The static Runtime validator gate now requires the audit branch and audit tool
+to preserve those semantic fields, preventing this replay visibility from
+regressing.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_agent_trigger_scene_write_fallback_blocks_legacy_role_agent
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_agent_trigger_scene_write_fallback_blocks_legacy_role_agent editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_handle_message_runtime_audit_event_records_safe_operation_log_without_creating_plan editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_gm_summary_export_records_safe_intervention_counts editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_enqueue_pending_intervention_batch_adds_next_runtime_batch editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirmed_delete_advisory_with_engine_provider_only_marks_successful_delete
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted RoleAgent write fallback test: passed
+targeted audit / replay regression set: passed
+verify_ultimate_plan.py: 581 AgentRuntime tests + 185 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This closes another user-entry fallback and replay-visibility gap.  It does not
+finish full old workflow拆解; remaining work is still to continue A/B/C/D
+classification and replace old workflow execution/state ownership with
+ToolCall-sized Runtime capabilities.
+```
+
+## Progress Update 279 - LANChat model provider fallback boundary is now mechanically guarded
+
+Task anchor:
+
+```text
+Runtime resource providers may temporarily adapt existing function-sized tools,
+but missing modern model-resource tooling must not silently fall back to the old
+ModelProvider unless the explicit legacy model adapter flag is enabled.  This is
+part of the "old code B: reusable functions can be adapted, old main/control
+paths cannot re-enter by accident" invariant.
+```
+
+Change:
+
+```text
+Added a LANChat Worker regression for the model-resource provider boundary.
+
+When only `AGENT_RUNTIME_USE_MODEL_PROVIDER=1` is set, Worker Runtime creation
+now proves that:
+
+- the model-resource channel is marked requested
+- unavailable modern tooling is recorded as an unavailable provider-readiness
+  fact
+- no active plan or ScenePlan is created by the preflight
+- `legacy_model_provider` does not appear in Runtime readiness, configured
+  provider diagnostics, or the user-facing provider-status result
+
+The static AgentRuntime flag boundary gate now also requires this regression
+test to exist, so future refactors cannot accidentally restore an implicit
+fallback from modern model tooling into the legacy `ModelProvider`.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_model_provider_flag_does_not_fallback_to_legacy_model_provider
+python -m py_compile editor/plugins/AITool/services/test_lanchat_runtime_guard.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted LANChat model-provider no-legacy-fallback test: passed
+syntax compile for touched test/verifier files: passed
+verify_ultimate_plan.py: 581 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This closes one more feature-flag / adapter-boundary regression hole.  It does
+not remove the legacy model adapter itself; that adapter remains a flagged,
+function-sized transition bridge and still needs later A/B/C/D classification
+once the AgentRuntime-native model resource provider is complete.
+```
+
+## Progress Update 280 - Runtime command fact ordering is now statically guarded
+
+Task anchor:
+
+```text
+Runtime pause / cancel / resume / retry commands are control-plane state writes.
+They already use the `runtime.command.record` ToolCallGraph tool for
+RuntimeState persistence, but the replay OperationLog event and user-visible
+RuntimeEvent must always happen after the state fact is persisted.  Otherwise a
+report could claim a command happened before RuntimeState proves it.
+```
+
+Change:
+
+```text
+Added a static order check in the Runtime report fact-source gate.
+
+The verifier now inspects `AgentRuntime.apply_runtime_command()` and requires
+this order:
+
+1. `_persist_runtime_command_state(...)`
+2. `self.operation_log.append(...)`
+3. `runtime_{normalized}_command_applied`
+4. `self.emit_runtime_event(...)`
+
+This keeps the current stable Runtime command implementation, but prevents a
+future refactor from moving replay/user-visible events ahead of the
+ToolCallGraph-backed StatePatch persistence.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+syntax compile for verifier: passed
+verify_ultimate_plan.py: 581 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This is a防回退门禁, not a new Runtime command implementation.  The next
+larger step remains replacing remaining old workflow execution/state ownership
+with ToolCall-sized Runtime capabilities where the current code still relies on
+legacy progressive/session behavior.
+```
+
+## Progress Update 281 - SceneComposer old original-workflow fallback is now closed
+
+Task anchor:
+
+```text
+`SceneComposer.compose()` was still a legacy main-control boundary because it
+honored `USE_PROGRESSIVE_COMPOSE=0` and could route user/runtime generation back
+to `_run_original_workflow(...)`.  That old clear-and-import workflow is useful
+as historical baseline / A-B-C-D classification material, but it must not remain
+a live user/runtime fallback while the Agent-native migration is making
+ProgressiveWorkflow and SceneSession退场 into ToolCall-sized capabilities.
+```
+
+Change:
+
+```text
+`SceneComposer.compose()` no longer reads `USE_PROGRESSIVE_COMPOSE` and no
+longer branches to `self._run_original_workflow(...)`.
+
+The method now always enters `run_progressive_workflow(...)` after model
+resolution/review preparation.  `_run_original_workflow` remains in the file for
+legacy classification and comparison, but it is no longer reachable from the
+normal compose entry.
+
+The static direct ProgressiveWorkflow gate was strengthened:
+
+- `scene_composer.py` is now part of the non-native py_compile target list.
+- the gate requires the Agent-native migration marker and progressive call to
+  remain inside `compose()`.
+- the gate forbids `USE_PROGRESSIVE_COMPOSE` and
+  `self._run_original_workflow(` inside the `compose()` scope.
+
+This turns the old original workflow escape hatch into a mechanically checked
+regression boundary.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/cai_extensions/agent/scene_composer.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+syntax compile for SceneComposer and verifier: passed
+verify_ultimate_plan.py: 581 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This closes only the old `SceneComposer._run_original_workflow` fallback.  The
+current `run_progressive_workflow` / `SceneSession.progressive_compose` path is
+still a legacy workflow主控 area and must continue to be decomposed into
+BatchPlan / import / review / adjustment Runtime tools in later slices.
+```
+
+## Progress Update 282 - Runtime ToolCallGraph queue executor invariants are now statically guarded
+
+Task anchor:
+
+```text
+Phase 5 requires the old scheduler / queue behavior to退场 into ToolCallGraph
+executor semantics.  Current Runtime queue execution already uses narrow queue
+tools for selecting, marking, and recording graph state, but the verifier did
+not yet mechanically require those queue ToolCalls to stay in place.
+```
+
+Change:
+
+```text
+Strengthened the Runtime validator contract gate for queue execution.
+
+The verifier now requires AgentRuntime to keep these queue ToolCall boundaries:
+
+- `drain_next_tool_graph(...)` must use `runtime.queue.select_next_graph`
+- `_persist_tool_graph_state(...)` must use `runtime.queue.record_graph_state`
+- `_mark_tool_graph_queue_item(...)` must use `runtime.queue.mark_graph_status`
+
+The same gate now also requires existing regression coverage for:
+
+- draining a queued graph as a Runtime worker slice
+- safe ToolRegistry manifest metadata, including queue select / mark / record
+  tools
+
+This does not change queue behavior; it turns the existing Phase 5 queue
+executor slice into a防回退门禁.
+```
+
+Tests / gates:
+
+```text
+python -m py_compile editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+syntax compile for verifier: passed
+verify_ultimate_plan.py: 581 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This guards the Runtime queue executor cut, but does not yet remove all legacy
+GenerationScheduler responsibilities.  Remaining Phase 5 work is to keep
+migrating business status, backpressure, pause/cancel/retry, and resource
+long-running state out of old scheduler semantics and into RuntimeState /
+ToolCallGraph facts.
+```
+
+## Progress Update 283 - Provider exceptions now leave resource phase facts
+
+Task anchor:
+
+```text
+Phase 5 provider/result handling requires real image/model provider failures to
+be replayable Runtime facts.  Before this slice, a provider exception could fail
+the ToolCallGraph but leave no image/model resource phase fact, which made
+RuntimeState weaker than OperationLog for diagnosing why the batch stopped.
+```
+
+Change:
+
+```text
+Added `_resource_provider_failure_tool_result(...)` for image/model resource
+tools.
+
+When `runtime.asset.image.prepare` or `runtime.asset.model.prepare` catches a
+provider exception:
+
+- the ToolResult still fails and remains retryable
+- the graph / batch / plan still fail through existing Runtime semantics
+- the failed ToolResult now carries a StatePatch
+- RuntimeState records failed `{phase}_resource_plans`
+- RuntimeState records `custom_resource_phase_facts` for the failed image/model
+  phase
+- failure codes are sanitized as resource-unavailable codes, not raw provider
+  exception text
+
+This keeps the user-visible failure safe while making provider exceptions
+visible to report/status/replay through RuntimeState facts.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_provider_failure_fails_graph_and_records_failed_resource_facts editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_model_resource_provider_failure_emits_safe_runtime_event
+python -m py_compile editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted provider-failure resource fact tests: passed
+syntax compile for touched Runtime/tool/test/verifier files: passed
+verify_ultimate_plan.py: 581 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This records provider exception facts; it does not yet connect real F5
+image/model providers end-to-end through Runtime-native ToolCallGraph execution,
+nor does it change provider retry policy or native import behavior.  Those
+remain Phase 5/6 work.
+```
+
+## Progress Update 284 - Import provider failures now leave import result facts
+
+Task anchor:
+
+```text
+Phase 5/6 provider/result handling requires import failures to be replayable
+from RuntimeState, not only visible as a failed ToolCallGraph or OperationLog
+entry.  Before this slice, environment import and actor import provider failures
+could stop a graph without consistently leaving a batch-scoped import result fact
+for report/status/replay.
+```
+
+Change:
+
+```text
+Strengthened Runtime-native import failure facts:
+
+- `runtime.environment.import_components` now records
+  `{batch_id}:environment_import_result` even when component import fails before
+  usable engine results are returned
+- failed environment components remain in `environment_components` as failed
+  facts, but are not counted as imported
+- actor import provider exceptions now record
+  `{batch_id}:actor_import_result`
+- actor import provider exception facts include failed per-actor import rows,
+  sanitized failure codes, and zero imported/ready counts
+- the verifier now checks semantic import-fact tokens instead of relying on an
+  exact one-line dict formatting shape
+
+This keeps failed import attempts visible to Runtime reports without creating
+fake actors or fake imported environment components.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_actor_import_provider_requires_engine_actor_identity editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_environment_import_failure_does_not_count_planned_components_as_imported editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_actor_import_provider_failure_emits_safe_runtime_event
+python -m py_compile editor/plugins/AITool/services/agent_runtime/tools.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted import-failure fact tests: passed
+syntax compile for touched Runtime/tool/test/verifier files: passed
+verify_ultimate_plan.py: 581 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This records import failure facts in RuntimeState.  It does not yet change real
+engine import behavior, native actor identity behavior, or F5 scene import
+quality.  Those remain Phase 6/7 Runtime toolization and real-engine validation
+work.
+```
+
+## Progress Update 285 - Import summaries now expose Runtime import failure codes
+
+Task anchor:
+
+```text
+Phase 5/6 report/status handling requires RuntimeState facts to be the source
+of user-visible diagnostics.  After Progress Update 284, actor import failures
+were stored as `actor_import_result` facts, but `import_summary` still only
+surfaced counts in some event-backed paths.  Failure codes could remain visible
+only through lower-level batch resource flow details.
+```
+
+Change:
+
+```text
+Strengthened `_import_summary_for_plan(...)` so import failure codes flow into
+report/status summaries:
+
+- aggregates `failure_code_counts` from batch-scoped `actor_import_result` facts
+- falls back to per-row `import_results[*].failure_code` when explicit counts
+  are absent or empty
+- avoids double-counting actor import counts when both runtime events and import
+  facts exist for the same batch
+- keeps empty failure-code maps explicit when a fact has no safe failure code
+- verifier now requires the import-summary failure-code aggregation contract and
+  its regression assertion
+
+This makes report/status replay more fact-first: the user report can now say not
+only that import failed, but also the sanitized Runtime reason family.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_actor_import_provider_failure_emits_safe_runtime_event editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_import_summary_consumes_runtime_state_import_fact_without_event editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_actor_import_persists_partial_success_from_engine_provider
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted import-summary failure-code tests: passed
+syntax compile for touched Runtime/core/test/verifier files: passed
+verify_ultimate_plan.py: 581 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This improves Runtime report/status diagnostics.  It does not yet change real
+engine import quality, native actor identity repair, provider retry scheduling,
+or LAN asset transfer behavior.  Those remain Phase 6/7 work.
+```
+
+## Progress Update 286 - Actor import events now carry safe failure-code families
+
+Task anchor:
+
+```text
+Phase 5/6 disclosure handling requires Runtime events to reflect the same
+fact-first import diagnostics that report/status can replay.  After Progress
+Update 285, `import_summary` exposed import failure codes, but the live
+`actors_imported` / `actors_import_failed` events still only surfaced counts.
+```
+
+Change:
+
+```text
+Strengthened Runtime actor-import event disclosure:
+
+- `_emit_resource_stage_events_for_graph(...)` now reads the batch-scoped
+  `actor_import_result` fact when emitting actor import events
+- event payload includes `import_failure_code_counts` when a batch has safe
+  import failure codes
+- user-visible event codes are normalized through
+  `_safe_user_visible_failure_code(...)`
+- provider-specific wording is converted to adapter wording before disclosure,
+  avoiding RuntimeEvent redaction while preserving the failure family
+- report/status summaries still retain their existing Runtime-level diagnostic
+  behavior
+
+This closes another gap between RuntimeState facts and user-visible progress
+events without changing provider execution or engine import behavior.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_actor_import_provider_failure_emits_safe_runtime_event editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_runtime_actor_import_persists_partial_success_from_engine_provider
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted actor-import event failure-code tests: passed
+syntax compile for touched Runtime/core/test/verifier files: passed
+verify_ultimate_plan.py: 581 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This improves live Runtime event disclosure.  It does not yet change native
+engine actor identity repair, real import quality, host-authoritative sync, or
+LAN asset transfer behavior.  Those remain Phase 6/7 work.
+```
+
+## Progress Update 287 - Layout transform results are now RuntimeState facts
+
+Task anchor:
+
+```text
+Phase 6/7 layout adjustment work requires low-risk move / align / selective
+ground snap results to be replayable from RuntimeState, not only inferred from
+proposal fields or live events.  This keeps OperationLog / RuntimeState ahead
+of user reports while preserving the existing layout tool graph.
+```
+
+Change:
+
+```text
+Strengthened Runtime layout-adjustment fact handling:
+
+- `runtime.layout.apply_delta` now declares `custom_report_facts` as produced
+  state in addition to actor/proposal updates
+- successful layout confirmations write a
+  `runtime_layout_transform_result` fact keyed by plan/proposal
+- the fact records applied/skipped delta counts, transform result count,
+  selective ground-snap count, overlap-resolved count, and safe transform
+  failure-code families
+- the existing user-visible event, report, status, GM summary, and operation
+  replay paths continue to expose the same safe layout diagnostics
+- `verify_ultimate_plan.py` now gates that layout apply keeps this fact write
+  path and selective-grounding tokens
+
+This moves completed-state layout adjustment another step toward Agent-native
+fact-first execution without changing the native engine transform provider or
+the low-risk layout delta semantics.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_applies_low_risk_deltas_through_runtime_tool editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_tool_registry_manifest_exposes_safe_capability_metadata
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted layout transform fact + manifest tests: passed
+syntax compile for touched Runtime/core/test/verifier files: passed
+verify_ultimate_plan.py: 581 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This improves RuntimeState replayability for completed layout adjustment.  It
+does not yet change native transform quality, real collision/settle behavior,
+host-authoritative layout sync, or LAN asset transfer behavior.  Those remain
+Phase 6/7 work.
+```
+
+## Progress Update 288 - Layout summaries can replay transform facts without proposals
+
+Task anchor:
+
+```text
+After Progress Update 287, completed layout adjustment wrote
+`runtime_layout_transform_result` facts, but summary paths still primarily
+depended on `layout_adjustment_proposals`.  Agent-native RuntimeState should
+remain queryable even if proposal rows are absent, trimmed, or repaired later.
+```
+
+Change:
+
+```text
+Strengthened fact-first layout summary replay:
+
+- `runtime_layout_transform_result` facts now include transform success/failed
+  counts in addition to applied/skipped, ground-snap, overlap, and failure-code
+  counts
+- `_layout_adjustment_summary_for_plan(...)` now consumes
+  `runtime_layout_transform_result` facts when no matching proposal row has
+  already accounted for the proposal
+- proposal/fact de-duplication is keyed by proposal id to avoid double-counting
+  the normal confirmation path
+- fact-only layout summaries now surface safe status/risk rows, transform
+  status counts, ground-snap counts, overlap-resolved counts, and safe failure
+  code families
+
+This makes status/report/GM summary consumers less dependent on proposal shape
+and moves layout adjustment closer to RuntimeState-as-source-of-truth.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_applies_low_risk_deltas_through_runtime_tool editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_layout_adjustment_summary_can_replay_transform_fact_without_proposal editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_tool_registry_manifest_exposes_safe_capability_metadata
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted layout fact replay + manifest tests: passed
+syntax compile for touched Runtime/core/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This improves completed layout adjustment observability and replay.  It does
+not yet implement host-authoritative native transform sync, real collision
+settle quality, or LAN asset transfer repair.  Those remain Phase 6/7 work.
+```
+
+## Progress Update 289 - Layout transform now feeds Runtime sync facts
+
+Task anchor:
+
+```text
+Phase 7 requires engine-facing actor changes to become sync-visible Runtime
+facts.  After Progress Update 288, layout transform results were replayable as
+report facts, but successful actor transform updates were not yet reflected in
+`sync_events` / `sync_state`.
+```
+
+Change:
+
+```text
+Strengthened layout-transform sync fact handoff:
+
+- `runtime.layout.apply_delta` now declares `sync_events` and `sync_state` as
+  produced state in addition to actors/proposals/report facts
+- successful low-risk layout transform actor updates are converted into safe
+  `actor_transform` sync facts with source `runtime_layout_transform`
+- sync facts carry plan id, batch id, actor id/name, scene name, status, and
+  safe transform vectors when available
+- `sync_state.actor_events` and `sync_events` now reflect layout-confirmation
+  actor transform results, so later status/report/sync summaries can consume
+  the transform as Runtime state instead of only proposal metadata
+- static verifier gates now require `_layout_transform_sync_changes(...)` and
+  `runtime_layout_transform` to remain in the layout apply path
+
+This is a Runtime-level sync handoff only: it does not broadcast network
+packets or alter C++ sync behavior, but it makes layout transform updates
+visible to the Agent-native sync state boundary.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_applies_low_risk_deltas_through_runtime_tool editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_tool_registry_manifest_exposes_safe_capability_metadata
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted layout sync fact + manifest tests: passed
+syntax compile for touched Runtime/core/test files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This improves Runtime sync-state visibility for layout transforms.  It does
+not yet implement host-authoritative C++ transform broadcast, native collision
+settle, or LAN asset transfer repair.  Those remain Phase 7 work.
+```
+
+## Progress Update 290 - Runtime sync summary exposes layout transform events
+
+Task anchor:
+
+```text
+After Progress Update 289, layout transforms produced Runtime `actor_transform`
+sync facts, but `status_summary.sync_summary` did not expose transform/delete
+event diagnostics directly.  This left status queries weaker than operation
+replay/report replay for completed layout adjustments.
+```
+
+Change:
+
+```text
+Strengthened Runtime sync status visibility:
+
+- `_sync_summary_for_plan(...)` now computes safe `event_type_counts`
+- actor transform events are counted as `actor_transform_count`
+- actor delete events are counted as `actor_delete_count`
+- completed layout adjustment tests now require transform sync facts to appear
+  in `status_summary`, `operation_replay`, and report replay
+- static verifier gates now require sync summary to expose transform/delete
+  diagnostics and event-type counts
+
+This closes another read-path gap: layout transform sync facts now flow through
+RuntimeState, sync replay, report replay, and status summary without touching
+the native network broadcast layer.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_applies_low_risk_deltas_through_runtime_tool editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_record_actor_transform_and_delete_sync_events_update_runtime_facts
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted layout sync status + actor transform sync tests: passed
+syntax compile for touched Runtime/core/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This improves Runtime status/read-path completeness for layout transform sync
+facts.  It still does not perform host-authoritative C++ transform broadcast,
+native settle/collision correction, or LAN transfer repair.  Those remain
+Phase 7/native-boundary work.
+```
+
+## Progress Update 291 - Layout confirmation events disclose sync handoff counts
+
+Task anchor:
+
+```text
+Progress Updates 289/290 made layout transform results visible in Runtime
+sync facts, replay, report replay, and status summary.  The remaining
+disclosure gap was the live `layout_adjustment_confirmed` RuntimeEvent:
+it did not tell the host that the layout adjustment had also produced sync
+facts.
+```
+
+Change:
+
+```text
+Strengthened user-visible RuntimeEvent disclosure for layout adjustment:
+
+- layout confirmation operation-log payload now includes safe sync handoff
+  counts: `sync_event_count` and `sync_actor_transform_count`
+- live `layout_adjustment_confirmed` RuntimeEvent payload now exposes the same
+  counts after safe sanitization
+- RuntimeEventValidator, OperationLog, and AgentRuntime user-visible event
+  payload allowlists now preserve these count-only diagnostics
+- layout confirmation tests now require the sync handoff counts to survive
+  both operation log and `user_visible_events(...)`
+- static verifier gates now require both RuntimeEventValidator and the
+  user-visible event payload allowlist to keep these sync count fields
+
+This keeps the event disclosure aligned with RuntimeState: the host can see
+that a completed layout adjustment produced sync-visible actor transform facts
+without exposing actor ids, provider details, or raw payloads.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_applies_low_risk_deltas_through_runtime_tool
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted layout confirmation event disclosure test: passed
+syntax compile for touched Runtime/core/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This improves live disclosure of Runtime sync handoff.  It does not yet
+implement native host-authoritative broadcast, collision settle, or LAN asset
+transfer repair.  Those remain Phase 7/native-boundary work.
+```
+
+## Progress Update 292 - Report health carries layout sync activity counts
+
+Task anchor:
+
+```text
+Progress Updates 289-291 made layout transform sync facts visible in Runtime
+state, replay, status summary, and live layout-confirmation events.  The next
+read-path gap was the report health digest: it preserved sync failures but did
+not carry count-only evidence that layout adjustments had produced actor
+transform/delete sync activity.
+```
+
+Change:
+
+```text
+Extended safe sync diagnostics across the report/status/GM read path:
+
+- `_report_health_summary(...)` now copies `sync_actor_transform_count` and
+  `sync_actor_delete_count` from `sync_health_digest`
+- GM/report-facing `report_health_digest` now includes these two count-only
+  fields
+- `runtime_status_queried` operation-log payload now includes the same safe
+  counts for status-query replay
+- layout adjustment confirmation regression now checks report health,
+  status summary, status-query operation log, and GM summary digest
+- static verifier now requires report health to preserve these safe sync
+  diagnostics
+
+This keeps OperationLog/RuntimeState/GM summary aligned: after a completed
+layout adjustment, the system can prove that low-risk transform deltas also
+created sync-visible actor transform facts without exposing actor ids or raw
+engine payloads.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_applies_low_risk_deltas_through_runtime_tool
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_record_actor_transform_and_delete_sync_events_update_runtime_facts
+python -m py_compile editor/plugins/AITool/services/agent_runtime/core.py editor/plugins/AITool/services/test_agent_runtime_phase1.py editor/plugins/AITool/services/verify_ultimate_plan.py
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted layout sync report-health test: passed
+targeted actor transform/delete sync fact test: passed
+syntax compile for touched Runtime/core/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This is still a Runtime read-path/diagnostic improvement.  It does not replace
+native host-authoritative actor broadcast, collision/settle correction, or LAN
+asset transfer repair.  Those remain Phase 7/native-boundary work.
+```
+
+## Progress Update 293 - GM/report replay keeps layout sync activity counts
+
+Task anchor:
+
+```text
+Progress Update 292 carried layout sync activity counts into report health and
+status query payloads.  The adjacent replay gap was GM/report event replay:
+`gm_summary(...)` returned the digest, but `runtime_gm_summary_exported` and
+`runtime_event_replay_summary.latest_report_ready` did not preserve the same
+count-only sync activity fields.
+```
+
+Change:
+
+```text
+Closed the GM/report replay read-path gap:
+
+- `report_ready` RuntimeEvent payload and `runtime_event_emitted` replay payload
+  now preserve `sync_actor_transform_count` and `sync_actor_delete_count`
+- `runtime_gm_summary_exported` operation-log payload now preserves the same
+  sync activity counts from `report_health_digest`
+- `_gm_summary_replay_summary(...)` now aggregates
+  `sync_actor_transform_total` and `sync_actor_delete_total`, and exposes the
+  latest GM summary event's count-only sync activity diagnostics
+- RuntimeEvent/OperationLog/AgentRuntime safe payload allowlists now include
+  `sync_actor_delete_count`
+- layout confirmation regression now verifies report-ready event replay,
+  GM summary payload, and GM summary replay totals
+- `verify_ultimate_plan.py` was hardened against mojibake display-token
+  fragility: static gates now rely on stable structure/function tokens and
+  violation printing uses safe console encoding
+
+This keeps completion-time layout adjustment evidence visible through all
+Runtime read paths: status, report, runtime event replay, GM summary, and GM
+summary replay.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_confirm_layout_adjustment_applies_low_risk_deltas_through_runtime_tool
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_record_actor_transform_and_delete_sync_events_update_runtime_facts
+python -B -c "import ast, pathlib; [compile(pathlib.Path(p).read_text(encoding='utf-8-sig'), p, 'exec', ast.PyCF_ONLY_AST) for p in ['editor/plugins/AITool/services/agent_runtime/core.py','editor/plugins/AITool/services/test_agent_runtime_phase1.py','editor/plugins/AITool/services/verify_ultimate_plan.py']]"
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted layout sync replay test: passed
+targeted actor transform/delete sync fact test: passed
+AST syntax compile for touched Runtime/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This is still inside the Python Runtime read/replay boundary.  Native
+host-authoritative transform broadcast, collision/settle correction, LAN asset
+transfer repair, and real F5 sync behavior remain Phase 7/native-boundary
+validation work.
+```
+
+## Progress Update 294 - Sync status export keeps actor transform/delete counts
+
+Task anchor:
+
+```text
+Progress Updates 292-293 closed report/status/GM replay visibility for layout
+sync activity.  The adjacent explicit sync-status query path still exported
+actor event counts but did not preserve actor transform/delete activity counts
+in the `runtime_sync_status_exported` operation-log payload.
+```
+
+Change:
+
+```text
+Closed the explicit sync-status read-path gap:
+
+- `runtime_sync_status_exported` operation-log payload now includes
+  `actor_transform_count` and `actor_delete_count` from sync replay facts
+- OperationLog safe payload allowlist now preserves `actor_transform_count` and
+  `actor_delete_count`
+- `test_sync_status_action_exports_sync_summary_without_creating_plan` now
+  records actor create, transform, and delete sync events and verifies the
+  counts across sync status, sync replay, sync health digest, and exported
+  operation-log payload
+- `verify_ultimate_plan.py` now statically requires the sync-status path to keep
+  these transform/delete replay counters
+
+This makes the direct `sync_status` action consistent with report/status/GM
+read paths: every Runtime sync inspection surface can now distinguish generic
+actor events from transform/delete activity without exposing actor internals.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_sync_status_action_exports_sync_summary_without_creating_plan
+python -B -c "import ast, pathlib; [compile(pathlib.Path(p).read_text(encoding='utf-8-sig'), p, 'exec', ast.PyCF_ONLY_AST) for p in ['editor/plugins/AITool/services/agent_runtime/core.py','editor/plugins/AITool/services/test_agent_runtime_phase1.py','editor/plugins/AITool/services/verify_ultimate_plan.py']]"
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted sync status export test: passed
+AST syntax compile for touched Runtime/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This is a Runtime sync read-path improvement.  Real host-authoritative network
+broadcast, native actor settle/collision correction, and LAN asset transfer
+repair remain Phase 7/native-boundary work.
+```
+
+## Progress Update 295 - Runtime sync-status action exports actor transform/delete counts
+
+Task anchor:
+
+```text
+Progress Update 294 made the direct sync-status read path preserve actor
+transform/delete counts in operation-log exports.  The next closure point was to
+verify this path end to end: Runtime sync status, sync replay, sync health, and
+exported operation-log payload should all distinguish actor create, transform,
+and delete activity.
+```
+
+Change:
+
+```text
+Closed the explicit Runtime sync-status action coverage gap:
+
+- OperationLog safe payloads now allow `actor_transform_count` and
+  `actor_delete_count`
+- `runtime_sync_status_exported` now writes these counts from sync replay facts
+- sync-status regression now records actor create, actor transform, and actor
+  delete events in one room and verifies all exported count surfaces
+- verifier now statically requires the sync-status handler to export
+  `actor_transform_count` and `actor_delete_count`
+
+This keeps the direct `sync_status` action aligned with report/status/GM replay:
+all Runtime sync inspection paths can identify transform/delete activity without
+exposing actor ids, message ids, provider data, or raw payloads.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_sync_status_action_exports_sync_summary_without_creating_plan
+python -B -c "import ast, pathlib; [compile(pathlib.Path(p).read_text(encoding='utf-8-sig'), p, 'exec', ast.PyCF_ONLY_AST) for p in ['editor/plugins/AITool/services/agent_runtime/core.py','editor/plugins/AITool/services/test_agent_runtime_phase1.py','editor/plugins/AITool/services/verify_ultimate_plan.py']]"
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted sync-status action export test: passed
+AST syntax compile for touched Runtime/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This remains a Python Runtime read/export improvement.  Native host-authoritative
+sync broadcast, collision/settle correction, LAN transfer repair, and real F5
+multiplayer behavior remain Phase 7/native-boundary validation work.
+```
+
+## Progress Update 296 - Engine-write status action exports boundary diagnostics
+
+Task anchor:
+
+```text
+After Progress Updates 292-295 closed the direct sync-status read path, the next
+parallel gap was the direct engine-write status action.  Engine-write boundary
+facts were already visible in reports, status summaries, GM summaries, and
+report-ready events, but an explicit `engine_write_status` query did not leave a
+dedicated OperationLog export event for later replay/audit.
+```
+
+Change:
+
+```text
+Closed the direct Runtime engine-write status export gap:
+
+- `engine_write_status` / `runtime_engine_status` / `engine_bridge_status` now
+  append `runtime_engine_write_status_exported` after collecting provider status
+- the export payload carries safe count-only diagnostics for import,
+  environment-import, transform, delete, bridge call/success/failure, and bridge
+  error-code buckets
+- missing external plan queries still do not fall back to the active plan, but
+  now also leave an explicit recorded=false engine-write status export
+- OperationLog safe payload keys now include the new engine-write boundary count
+  fields
+- regression tests cover normal status export, unknown external-plan export, and
+  exception redaction
+- verifier static gates now require the explicit engine-write status export and
+  its safe diagnostic fields
+
+This makes `engine_write_status` consistent with the rest of the Runtime read
+surfaces: an operator can replay whether real engine-write boundary facts were
+present without exposing actor internals, provider raw payloads, paths, URLs, or
+secrets.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_write_status_reports_import_and_transform_without_creating_plan editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_write_status_unknown_external_plan_does_not_publish_or_fallback_active editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_write_status_action_exception_is_operation_logged_safely
+python -B -c "import ast, pathlib; [compile(pathlib.Path(p).read_text(encoding='utf-8-sig'), p, 'exec', ast.PyCF_ONLY_AST) for p in ['editor/plugins/AITool/services/agent_runtime/core.py','editor/plugins/AITool/services/test_agent_runtime_phase1.py','editor/plugins/AITool/services/verify_ultimate_plan.py']]"
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted engine-write status export tests: passed
+AST syntax compile for touched Runtime/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This is still a Python Runtime read/export improvement.  Real native actor
+import/transform/delete execution, host-authoritative engine-write reconciliation,
+collision/settle correction, and F5 multiplayer behavior remain Phase
+7/native-boundary validation work.
+```
+
+## Progress Update 297 - Engine-write status exports enter Operation Replay
+
+Task anchor:
+
+```text
+Progress Update 296 added a dedicated `runtime_engine_write_status_exported`
+OperationLog event for direct engine-write status queries.  The follow-up gap was
+that Operation Replay still treated that event as a raw entry; the replay summary
+did not aggregate whether engine-write status had been exported or what safe
+boundary counters were visible at query time.
+```
+
+Change:
+
+```text
+Closed the engine-write status replay gap:
+
+- `_engine_write_replay_summary()` now recognizes
+  `runtime_engine_write_status_exported`
+- replay summaries include `status_export_count` and `latest_status_export`
+- `latest_status_export` contains only safe count/status fields: recorded flag,
+  reason, boundary counts, bridge call/success/failure counts, and sanitized
+  bridge error-code buckets
+- `RuntimeEventValidator` safe payload keys now allow the new engine-write
+  boundary count fields, so Operation Replay snapshots can be persisted through
+  RuntimeState instead of bypassing schema validation
+- targeted tests now verify both normal and stale external-plan engine-write
+  status exports are visible in `operation_replay()["engine_write_summary"]`
+- verifier static gates require `_engine_write_replay_summary()` and its tests to
+  keep the status-export replay fields
+
+This keeps `OperationLog must precede reports` intact: direct engine-write status
+queries are now replayable as structured Runtime facts, not just loose log rows.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_write_status_reports_import_and_transform_without_creating_plan editor.plugins.AITool.services.test_agent_runtime_phase1.AgentRuntimePhase1Tests.test_engine_write_status_unknown_external_plan_does_not_publish_or_fallback_active
+python -B -c "import ast, pathlib; [compile(pathlib.Path(p).read_text(encoding='utf-8-sig'), p, 'exec', ast.PyCF_ONLY_AST) for p in ['editor/plugins/AITool/services/agent_runtime/core.py','editor/plugins/AITool/services/test_agent_runtime_phase1.py','editor/plugins/AITool/services/verify_ultimate_plan.py']]"
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted engine-write status replay tests: passed
+AST syntax compile for touched Runtime/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This remains a Runtime read/replay closure.  It does not prove native engine
+writes are correct at runtime; real actor import/transform/delete execution,
+host-authoritative reconciliation, collision/settle correction, and F5
+multiplayer behavior remain Phase 7/native-boundary validation work.
+```
+
+## Progress Update 298 - LANChat replay surfaces engine-write status exports
+
+Task anchor:
+
+```text
+Progress Update 297 made `runtime_engine_write_status_exported` replayable inside
+AgentRuntime Operation Replay.  The next gap was the LANChat user-facing replay
+surface: `_format_agent_runtime_engine_write_report()` still displayed only
+import / transform / environment-import / delete result counts, so an operator
+could not see whether an explicit engine-write status query had been exported.
+```
+
+Change:
+
+```text
+Closed the LANChat engine-write status-export visibility gap:
+
+- `_format_agent_runtime_engine_write_report()` now appends a compact
+  `status-export N(...)` segment when Operation Replay includes engine-write
+  status export facts
+- the segment shows only safe status facts: recorded/not-recorded,
+  bridge-failed count, and sanitized bridge error-code buckets
+- provider/raw/prompt/url/internal path data remains filtered from the formatter
+  and regression tests
+- LANChat Operation Replay test now records a synthetic
+  `runtime_engine_write_status_exported` event and verifies the replay reply
+  surfaces `status-export` and safe error buckets
+- verifier static gates now require the LANChat engine-write formatter to keep
+  `status_export_count`, `latest_status_export`, and the user-visible
+  `status-export` text path
+
+This connects the Runtime replay fact from Progress Update 297 to the actual
+chat-facing diagnostic surface without exposing low-level provider details.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_engine_write_report_discloses_environment_import_results editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_operation_replay_query_exports_safe_summary_without_creating_plan
+python -B -c "import ast, pathlib; [compile(pathlib.Path(p).read_text(encoding='utf-8-sig'), p, 'exec', ast.PyCF_ONLY_AST) for p in ['editor/plugins/AITool/services/lanchat_agent_worker.py','editor/plugins/AITool/services/test_lanchat_runtime_guard.py','editor/plugins/AITool/services/verify_ultimate_plan.py']]"
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted LANChat engine-write replay tests: passed
+AST syntax compile for touched LANChat/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This is a read/report surface improvement.  It does not replace real native
+engine-write execution, host-authoritative reconciliation, collision/settle
+correction, or F5 multiplayer validation.
+```
+
+## Progress Update 299 - GM summary surfaces engine-write status exports
+
+Task anchor:
+
+```text
+Progress Update 298 exposed engine-write status-export facts in LANChat Operation
+Replay.  The remaining read-surface gap was GM summary: `gm_summary()` built an
+`engine_write_digest` from Operation Replay, but only copied import / transform /
+environment-import / delete result counts.  GM could not see whether an explicit
+engine-write status export had been recorded, nor whether the bridge reported
+safe failure buckets.
+```
+
+Change:
+
+```text
+Closed the GM-facing engine-write status-export visibility gap:
+
+- `AgentRuntime.gm_summary()` now carries `status_export_count` and
+  `latest_status_export` inside `engine_write_digest`
+- `_agent_runtime_gm_summary_reply()` already reuses the shared
+  `_format_agent_runtime_engine_write_report()` formatter, so GM summaries now
+  show the same safe `status-export N(...)` segment as Operation Replay
+- the GM summary regression test records a synthetic
+  `runtime_engine_write_status_exported` event and verifies the user-facing GM
+  reply surfaces only safe facts: recorded/not-recorded, bridge-failed count,
+  and sanitized bridge error-code buckets
+- verifier static gates now require `AgentRuntime.gm_summary()` to keep the
+  status-export fields in the GM Runtime digest
+
+This keeps GM as a read-only coordinator over RuntimeState / OperationLog facts:
+GM reads the same engine-write status truth as replay/status surfaces, without
+creating plans, calling legacy workflow, or leaking provider/prompt/url data.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_gm_summary_reads_agent_runtime_status_when_runtime_plan_exists
+python -B -c "import ast, pathlib; [compile(pathlib.Path(p).read_text(encoding='utf-8-sig'), p, 'exec', ast.PyCF_ONLY_AST) for p in ['editor/plugins/AITool/services/agent_runtime/core.py','editor/plugins/AITool/services/test_lanchat_runtime_guard.py','editor/plugins/AITool/services/verify_ultimate_plan.py']]"
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted GM summary status-export test: passed
+AST syntax compile for touched Runtime/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This is still a Runtime read/report closure.  It does not prove native engine
+writes are correct at runtime; real actor import/transform/delete execution,
+host-authoritative reconciliation, collision/settle correction, and F5
+multiplayer behavior remain Phase 7/native-boundary validation work.
+```
+
+## Progress Update 300 - Engine-write readiness is visible in status/report/GM surfaces
+
+Task anchor:
+
+```text
+The Runtime already had `engine_write_readiness_summary`, but LANChat user-facing
+surfaces mainly showed provider readiness and engine-write result/replay facts.
+Operators could see whether writes had happened, but not clearly whether each
+engine-write channel was currently native-enabled, runtime-state-only, fallback,
+disabled, or unavailable.
+```
+
+Change:
+
+```text
+Closed the engine-write readiness visibility gap without changing provider
+behavior:
+
+- `AgentRuntime.gm_summary()` now carries an `engine_write_readiness_digest`
+  derived from Runtime status facts
+- `LANChatAgentWorker` now has
+  `_format_agent_runtime_engine_write_readiness_report()` for safe count-only
+  readiness display
+- Runtime status replies, Runtime report replies, and GM Runtime summaries now
+  include engine-write readiness alongside engine-write result and boundary facts
+- tests verify the default transition shape is visible: actor import fallback,
+  actor delete / layout transform runtime-state-only, and environment import
+  disabled
+- verifier static gates now require the formatter and read surfaces to keep the
+  readiness fields
+
+This clarifies the Python/C++ interface boundary for F5 and implementation
+handoff: read surfaces now say whether a write channel is native, fallback,
+runtime-state-only, disabled, or unavailable, instead of forcing operators to
+infer that from lower-level logs.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_status_query_prefers_agent_runtime_status_when_runtime_plan_exists editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_gm_summary_reads_agent_runtime_status_when_runtime_plan_exists
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_report_query_generates_safe_summary_without_coordinator_ingest
+python -B -c "import ast, pathlib; [compile(pathlib.Path(p).read_text(encoding='utf-8-sig'), p, 'exec', ast.PyCF_ONLY_AST) for p in ['editor/plugins/AITool/services/agent_runtime/core.py','editor/plugins/AITool/services/lanchat_agent_worker.py','editor/plugins/AITool/services/test_lanchat_runtime_guard.py','editor/plugins/AITool/services/verify_ultimate_plan.py']]"
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted status/report/GM engine-write readiness tests: passed
+AST syntax compile for touched Runtime/LANChat/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 log probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This is still a read/report boundary improvement.  It does not enable native
+engine-write providers by default, and it does not prove live C++ bridge writes,
+host-authoritative transform broadcast, collision/settle correction, or LAN
+asset transfer repair.  Those remain Phase 7/native-boundary validation work.
+```
+
+## Progress Update 301 - Engine-write status exports preserve readiness at replay time
+
+Status: completed in current non-native slice.
+
+Phase:
+
+```text
+Phase 7 / Python-C++ bridge boundary
+```
+
+Task anchor:
+
+```text
+Progress Update 300 made current engine-write readiness visible in status/report/GM
+surfaces.  The remaining audit gap was temporal: an explicit
+`engine_write_status` query exported bridge/result facts into OperationLog, but
+its replay fact did not preserve the readiness counts observed at that moment.
+After later provider flag changes, replay could show write outcomes but not the
+native / fallback / runtime-state-only / disabled split that existed when the
+status query was made.
+```
+
+Change:
+
+```text
+Closed the engine-write status replay readiness gap without changing provider
+behavior or native writes:
+
+- `AgentRuntime.handle_message(action=engine_write_status)` now records safe
+  engine-write readiness counts in the `runtime_engine_write_status_exported`
+  OperationLog payload
+- `_engine_write_replay_summary()` preserves these counts in
+  `latest_status_export`
+- LANChat `_format_agent_runtime_engine_write_report()` now appends compact
+  readiness counts inside the `status-export` segment, for example
+  `readiness native:1,runtime-state:2,fallback:1,disabled:1`
+- GM summary and Operation Replay inherit this through the shared engine-write
+  formatter, so operators can distinguish "writes happened" from "which write
+  channels were native/fallback/runtime-state-only at the query time"
+- tests cover both GM summary and Operation Replay text, and verifier gates now
+  require the status export payload, replay summary, formatter, and LANChat
+  regression assertions to keep these safe readiness facts
+
+No provider/raw/prompt/url/API-key/internal path data is added to the replay
+surface.  The new fields are count-only readiness facts.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_gm_summary_reads_agent_runtime_status_when_runtime_plan_exists editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_operation_replay_query_exports_safe_summary_without_creating_plan
+python -B -c "import ast, pathlib; [compile(pathlib.Path(p).read_text(encoding='utf-8-sig'), p, 'exec', ast.PyCF_ONLY_AST) for p in ['editor/plugins/AITool/services/agent_runtime/core.py','editor/plugins/AITool/services/lanchat_agent_worker.py','editor/plugins/AITool/services/test_lanchat_runtime_guard.py','editor/plugins/AITool/services/verify_ultimate_plan.py']]"
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted GM/replay status-export readiness tests: passed
+AST syntax compile for touched Runtime/LANChat/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This is still a non-native audit/read-surface closure.  It does not prove real
+C++ actor import / transform / delete execution, host-authoritative broadcast,
+collision/settle correction, LAN asset transfer repair, UI rendering, or F5
+multiplayer convergence.  Those remain Phase 7/native-boundary validation work.
+```
+
+## Progress Update 302 - Engine-write status replay preserves readiness channel names
+
+Status: completed in current non-native slice.
+
+Phase:
+
+```text
+Phase 7 / Python-C++ bridge boundary
+```
+
+Task anchor:
+
+```text
+Progress Update 301 preserved engine-write readiness counts in status-export
+replay facts.  Counts alone still left an audit gap: after provider flags or
+engine adapters changed, an operator could tell how many channels were native /
+fallback / runtime-state-only / disabled at query time, but not which write
+channels were in each mode.
+```
+
+Change:
+
+```text
+Closed the channel-level status-export replay gap without enabling or changing
+native writes:
+
+- `AgentRuntime.handle_message(action=engine_write_status)` now records safe
+  channel-name lists from `engine_write_readiness_summary` into the
+  `runtime_engine_write_status_exported` OperationLog payload
+- `_engine_write_replay_summary()` preserves sanitized channel lists in
+  `latest_status_export`
+- LANChat `_format_agent_runtime_engine_write_report()` appends compact channel
+  groups inside the `status-export` segment, for example
+  `channels native actor-import; runtime-state actor-delete/layout-transform`
+- GM summary and Operation Replay inherit this through the shared formatter
+- regression tests verify both count and channel-name disclosure, while still
+  rejecting provider / prompt / URL / secret leakage
+- verifier gates now require the export payload, replay summary, formatter, and
+  LANChat tests to keep the channel-level readiness replay facts
+
+This makes the replay evidence stronger for F5 and native-boundary handoff:
+operators can see not only whether write channels were native/fallback/etc., but
+which channel category each engine-write surface belonged to at the exact status
+query time.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_gm_summary_reads_agent_runtime_status_when_runtime_plan_exists editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_operation_replay_query_exports_safe_summary_without_creating_plan
+python -B -c "import ast, pathlib; [compile(pathlib.Path(p).read_text(encoding='utf-8-sig'), p, 'exec', ast.PyCF_ONLY_AST) for p in ['editor/plugins/AITool/services/agent_runtime/core.py','editor/plugins/AITool/services/lanchat_agent_worker.py','editor/plugins/AITool/services/test_lanchat_runtime_guard.py','editor/plugins/AITool/services/verify_ultimate_plan.py']]"
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted GM/replay channel-level status-export readiness tests: passed
+AST syntax compile for touched Runtime/LANChat/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 186 LANChat guard tests passed
+F5 probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This remains a non-native replay/audit improvement.  It does not prove real C++
+actor import / transform / delete execution, native collision/settle correction,
+host-authoritative broadcast, LAN asset transfer repair, UI rendering, or F5
+multiplayer convergence.  Those remain Phase 7/native-boundary validation work.
+```
+
+## Progress Update 303 - Engine-write replay flags readiness/result mismatches
+
+Status: completed in current non-native slice.
+
+Phase:
+
+```text
+Phase 7 / Python-C++ bridge boundary
+```
+
+Task anchor:
+
+```text
+Progress Updates 301-302 made engine-write status-export replay preserve readiness
+counts and channel names.  The next audit gap was that operators still had to
+manually compare write results with readiness channels.  If replay showed a
+transform/import/delete result while the latest status export said the matching
+channel was not native-enabled, the system should surface that as an attention
+fact instead of requiring human eye-balling.
+```
+
+Change:
+
+```text
+Added conservative readiness/result consistency checks to engine-write replay:
+
+- `_engine_write_replay_summary()` now computes `readiness_mismatch_count` and
+  `readiness_mismatch_channels` from safe replay facts
+- mismatch detection is count/channel based only: if import / transform / delete
+  / environment-import result rows exist, but the latest status-export native
+  channel list does not include the matching channel, replay records a safe
+  channel label such as `layout-transform`
+- LANChat `_format_agent_runtime_engine_write_report()` surfaces this as
+  `readiness-mismatch N(channel...)`
+- GM summary and Operation Replay inherit the signal through the shared
+  engine-write formatter
+- regression coverage includes both the no-mismatch path and a mismatch case
+  where transform results exist while `layout_transform` is runtime-state-only
+- verifier gates require the summary fields, formatter text, and LANChat
+  regression assertion to remain in place
+
+This moves the boundary from passive observability toward auditable consistency:
+Runtime can now tell an operator that recorded write outcomes and current replay
+readiness evidence disagree, without calling C++ or exposing provider details.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_gm_summary_reads_agent_runtime_status_when_runtime_plan_exists editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_operation_replay_query_exports_safe_summary_without_creating_plan editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_operation_replay_reports_engine_write_readiness_mismatch
+python -B -c "import ast, pathlib; [compile(pathlib.Path(p).read_text(encoding='utf-8-sig'), p, 'exec', ast.PyCF_ONLY_AST) for p in ['editor/plugins/AITool/services/agent_runtime/core.py','editor/plugins/AITool/services/lanchat_agent_worker.py','editor/plugins/AITool/services/test_lanchat_runtime_guard.py','editor/plugins/AITool/services/verify_ultimate_plan.py']]"
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted GM/replay readiness mismatch tests: passed
+AST syntax compile for touched Runtime/LANChat/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 187 LANChat guard tests passed
+F5 probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This is an audit consistency slice.  It does not prove native C++ writes,
+collision/settle correction, host-authoritative broadcast, LAN asset transfer
+repair, UI rendering, or F5 multiplayer convergence.  Those remain
+Phase 7/native-boundary validation work.
+```
+
+
+## Progress Update 304 - Engine-write readiness mismatch enters report health attention
+
+Status: completed in current non-native slice.
+
+Phase:
+
+```text
+Phase 7 / Python-C++ bridge boundary
+```
+
+Task anchor:
+
+```text
+Progress Update 303 made engine-write replay detect readiness/result mismatches,
+but the signal still lived mainly in replay text.  The remaining gap was that
+report health and GM-facing summaries could still appear healthy unless a human
+read the replay line manually.  For Agent-native operation, audit facts need to
+flow into Runtime health state, not only formatter text.
+```
+
+Change:
+
+```text
+Promoted engine-write readiness mismatch into report health attention:
+
+- `_report_health_summary()` now accepts `engine_write_summary`
+- readiness mismatch count/channels are copied into report health as
+  `engine_write_readiness_mismatch_count` and
+  `engine_write_readiness_mismatch_channels`
+- any mismatch adds `engine_write_readiness_mismatch` to report health reasons
+- if no stronger failed/partial/waiting state exists, mismatch moves report
+  health to `needs_attention`
+- generate report, operation replay, GM/status summary, and replay report paths
+  pass the existing engine-write replay summary into report health
+- LANChat `_format_agent_runtime_report_health_report()` surfaces this as
+  `engine-write mismatch N(channel...)`
+- regression coverage now asserts that a transform result without native
+  `layout-transform` readiness becomes report-health `needs_attention`
+- verifier gates require Runtime health, LANChat formatter, and tests to keep
+  this bridge in place
+
+This closes another Python/C++ boundary audit gap: mismatch is now part of the
+Runtime health contract, so GM/user status surfaces can flag it without relying
+on manual replay interpretation.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_operation_replay_reports_engine_write_readiness_mismatch editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python -B -c "import ast, pathlib; paths=['editor/plugins/AITool/services/agent_runtime/core.py','editor/plugins/AITool/services/lanchat_agent_worker.py','editor/plugins/AITool/services/test_lanchat_runtime_guard.py','editor/plugins/AITool/services/verify_ultimate_plan.py']; [compile(pathlib.Path(p).read_text(encoding='utf-8-sig'), p, 'exec', ast.PyCF_ONLY_AST) for p in paths]; print('syntax ok')"
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted mismatch/report-health formatter tests: passed
+AST syntax compile for touched Runtime/LANChat/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 187 LANChat guard tests passed
+F5 probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This remains a non-native audit/health-state improvement.  It does not prove
+real C++ actor import / transform / delete execution, native collision/settle
+correction, host-authoritative broadcast, LAN asset transfer repair, UI
+rendering, or F5 multiplayer convergence.  Those remain Phase 7/native-boundary
+validation work.
+```
+
+
+## Progress Update 305 - Report-ready events preserve engine-write mismatch attention
+
+Status: completed in current non-native slice.
+
+Phase:
+
+```text
+Phase 7 / Python-C++ bridge boundary
+```
+
+Task anchor:
+
+```text
+Progress Update 304 promoted engine-write readiness mismatch into report health.
+The next gap was that RuntimeEvent / OperationLog report-ready evidence could
+still lose the mismatch detail.  That violated the Agent-native invariant that
+OperationLog must carry the auditable state before user-facing reports depend on
+it.
+```
+
+Change:
+
+```text
+Extended engine-write mismatch attention through RuntimeEvent and replay:
+
+- `report_ready` RuntimeEvent payload now includes
+  `engine_write_readiness_mismatch_count` and
+  `engine_write_readiness_mismatch_channels`
+- RuntimeEventValidator and AgentRuntime user-visible event payload allowlists
+  now explicitly permit these two safe fields
+- `_runtime_event_replay_summary()` preserves the mismatch fields in
+  `latest_report_ready`
+- runtime status query audit payload also carries the mismatch count/channels
+- LANChat runtime-event replay formatter and GM runtime-event digest show
+  `engine-write-mismatch N(channel...)`
+- regression tests assert mismatch survives operation replay latest-report
+  extraction and both user/GM runtime-event formatters
+- verifier gates require report-ready payload, runtime-event replay, formatter,
+  GM digest, tests, and payload allowlists to keep this bridge intact
+
+This makes the audit chain continuous: engine-write replay detects the mismatch,
+report health marks attention, report-ready OperationLog preserves the detail,
+and GM/user replay summaries can surface it without reinterpreting raw logs.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_operation_replay_reports_engine_write_readiness_mismatch editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python -B -c "import ast, pathlib; paths=['editor/plugins/AITool/services/agent_runtime/core.py','editor/plugins/AITool/services/lanchat_agent_worker.py','editor/plugins/AITool/services/test_lanchat_runtime_guard.py','editor/plugins/AITool/services/verify_ultimate_plan.py']; [compile(pathlib.Path(p).read_text(encoding='utf-8-sig'), p, 'exec', ast.PyCF_ONLY_AST) for p in paths]; print('syntax ok')"
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted runtime-event mismatch tests: passed
+AST syntax compile for touched Runtime/LANChat/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 187 LANChat guard tests passed
+F5 probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This remains a non-native OperationLog / RuntimeEvent / health-state bridge.
+It does not prove real C++ actor import / transform / delete execution, native
+collision/settle correction, host-authoritative broadcast, LAN asset transfer
+repair, UI rendering, or F5 multiplayer convergence.  Those remain
+Phase 7/native-boundary validation work.
+```
+
+
+## Progress Update 306 - RuntimeEvent safe payload carries engine-write mismatch evidence
+
+Status: completed in current non-native slice.
+
+Phase:
+
+```text
+Phase 7 / Python-C++ bridge boundary
+```
+
+Task anchor:
+
+```text
+Progress Update 305 pushed engine-write readiness mismatch into report-ready
+runtime events and replay summaries.  The follow-up gap was the safe-payload
+boundary: real `emit_runtime_event()` paths use allowlists, so mismatch fields
+must be explicitly permitted and covered by static gates instead of only working
+in direct OperationLog test fixtures.
+```
+
+Change:
+
+```text
+Closed the RuntimeEvent safe-payload part of the mismatch evidence chain:
+
+- RuntimeEventValidator safe payload keys now include
+  `engine_write_readiness_mismatch_count` and
+  `engine_write_readiness_mismatch_channels`
+- AgentRuntime `_SAFE_RUNTIME_EVENT_PAYLOAD_KEYS` now also permits those fields
+  for user-visible runtime events
+- `report_ready` emits mismatch count/channels through the normal safe event
+  path instead of relying on direct OperationLog append fixtures
+- `_runtime_event_replay_summary()` preserves these fields in
+  `latest_report_ready`
+- status-query audit payloads also include mismatch count/channels
+- LANChat runtime-event replay formatter and GM runtime-event digest surface
+  `engine-write-mismatch N(channel...)`
+- verifier gates now require RuntimeEventValidator, AgentRuntime safe payload
+  allowlist, report-ready payload, replay summary, LANChat formatter, GM digest,
+  and tests to keep the chain intact
+
+This makes the previous report-health mismatch work survive the real RuntimeEvent
+sanitization boundary, which is critical for Agent-native user-visible status and
+OperationLog-first auditability.
+```
+
+Tests / gates:
+
+```text
+python -B -m unittest editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_operation_replay_reports_engine_write_readiness_mismatch editor.plugins.AITool.services.test_lanchat_runtime_guard.LANChatRuntimeGuardTests.test_runtime_resource_and_fact_source_formatters_surface_attention
+python -B -c "import ast, pathlib; paths=['editor/plugins/AITool/services/agent_runtime/core.py','editor/plugins/AITool/services/lanchat_agent_worker.py','editor/plugins/AITool/services/test_lanchat_runtime_guard.py','editor/plugins/AITool/services/verify_ultimate_plan.py']; [compile(pathlib.Path(p).read_text(encoding='utf-8-sig'), p, 'exec', ast.PyCF_ONLY_AST) for p in paths]; print('syntax ok')"
+python editor/plugins/AITool/services/verify_ultimate_plan.py
+```
+
+Result:
+
+```text
+targeted RuntimeEvent safe mismatch tests: passed
+AST syntax compile for touched Runtime/LANChat/test/verifier files: passed
+verify_ultimate_plan.py: 582 AgentRuntime tests + 187 LANChat guard tests passed
+F5 probes and all current non-native Agent-native static gates passed
+```
+
+Remaining:
+
+```text
+This remains a Python-side RuntimeEvent / OperationLog boundary improvement.
+It does not prove real C++ actor import / transform / delete execution, native
+collision/settle correction, host-authoritative broadcast, LAN asset transfer
+repair, UI rendering, or F5 multiplayer convergence.  Those remain
+Phase 7/native-boundary validation work.
+```
+
+### Progress Update 307 - Provider Status Snapshot Engine-Write Readiness Audit
+
+- Implemented a narrow AgentRuntime audit slice for `runtime.resource_status.snapshot`: the snapshot ToolResult now carries sanitized engine-write readiness counts and channel lists (`native_enabled`, `runtime_state_only`, `fallback`, `disabled`, `unavailable`).
+- Extended `runtime_provider_status_snapshot_recorded` OperationLog payload with the same engine-write readiness digest, so F5/runtime replay can tell whether native engine-write channels were actually available without opening internal provider details.
+- Added regression coverage in `test_provider_status_publishes_safe_readiness_without_creating_plan` to prove provider snapshots preserve engine-write readiness while still hiding provider URLs/names.
+- Strengthened `verify_ultimate_plan.py` static gates so provider status snapshot code cannot silently drop the engine-write readiness audit fields.
+- Verification passed: `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`582` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 308 - Status Summary Snapshot Health and Engine-Write Audit
+
+- Extended `runtime.status_summary.snapshot` OperationLog output so `runtime_status_summary_snapshot_recorded` now includes sanitized `report_health_status`, `report_health_attention_required`, `report_health_reasons`, and engine-write readiness counts/channel lists.
+- Kept the snapshot event narrow: it records replay-critical health/readiness facts without exposing full tool manifests, provider details, URLs, or raw internal state.
+- Added regression coverage in `test_tool_registry_manifest_can_filter_by_category_and_status_summary_reports_counts` to prove status snapshot events preserve report-health and engine-write readiness evidence.
+- Strengthened `verify_ultimate_plan.py` static gates so status summary snapshots cannot silently drop report-health / engine-write audit fields.
+- Verification passed: targeted provider/status snapshot tests and `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`582` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 309 - GM Summary Snapshot Context and Intervention Audit
+
+- Extended `runtime.gm_summary.snapshot` so both the ToolResult payload and `runtime_gm_summary_snapshot_recorded` OperationLog event now preserve sanitized GM audit fields: agent contribution count, latest user point count, intervention pending/accepted/deferred counts, layout proposal/applied/skipped counts, runtime event emitted/failed counts, and report-health status/attention.
+- Kept GM snapshot logging narrow and replay-safe: the snapshot records counts and status only, without exposing raw conversation text, asset ids, provider internals, URLs, or prompt material.
+- Added regression coverage in `test_runtime_gm_summary_action_records_snapshot_without_business_tool_graph` to prove GM snapshot events carry multi-agent context/intervention/layout health evidence.
+- Strengthened `verify_ultimate_plan.py` static gates so GM summary snapshots cannot silently drop context/intervention/layout/runtime-event/report-health audit fields.
+- Verification passed: targeted GM snapshot test and `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`582` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 310 - Runtime Events Snapshot Disclosure Audit Summary
+
+- Added `_runtime_event_snapshot_summary()` as a narrow AgentRuntime helper that summarizes already-sanitized RuntimeEvent rows by event type, level, audience, progress-event count, warning/error count, latest event type, requested audience, and limit.
+- Extended `runtime.events.snapshot` so RuntimeState facts, ToolResult payloads, and `runtime_events_snapshot_recorded` OperationLog events all carry the same safe event-disclosure audit summary.
+- This keeps user-progress/disclosure verification replayable from OperationLog without exposing raw prompts, providers, URLs, or unsanitized payload fields.
+- Added regression coverage for runtime event snapshot facts and OperationLog payloads, including empty-event snapshots for missing external plans.
+- Strengthened `verify_ultimate_plan.py` static gates so runtime event snapshots cannot silently drop event type / level / audience / progress / warning / error audit fields.
+- Verification passed: targeted runtime event snapshot tests and `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`582` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 311 - Sync Status Snapshot Transfer and Peer Audit Summary
+
+- Extended `runtime.sync_status.snapshot` ToolResult payloads and `runtime_sync_status_snapshot_recorded` OperationLog events with sanitized multiplayer sync audit maps: `sync_event_type_counts`, `asset_transfer_status_counts`, `asset_transfer_event_type_counts`, and `peer_sync_event_type_counts`.
+- Added replay-safe latest status hints (`latest_transfer_status`, `latest_transfer_progress`, `latest_peer_event_type`) while deliberately excluding asset ids, peer ids, file paths, provider internals, and raw sync payloads.
+- Strengthened existing peer-sync and asset-transfer tests to prove sync snapshot events preserve transfer/peer/reconcile evidence without leaking asset paths or ids.
+- Updated `verify_ultimate_plan.py` static gates so sync status snapshots cannot silently drop transfer/peer event-count audit fields.
+- Verification passed: targeted sync snapshot tests and `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`582` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 312 - Status Snapshot ToolResult and OperationLog Consistency
+
+- Closed a consistency gap in `runtime.status_summary.snapshot`: `_record_status_summary_snapshot_tool()` now returns the same sanitized report-health and engine-write readiness audit fields that `_status_summary_snapshot_via_tool_graph()` records to `runtime_status_summary_snapshot_recorded`.
+- The ToolGraph execution result and OperationLog replay now agree on status snapshot health/readiness evidence, reducing ambiguity when diagnosing Runtime state through tool execution traces.
+- Extended `verify_ultimate_plan.py` to check both `_status_summary_snapshot_via_tool_graph()` and `_record_status_summary_snapshot_tool()` for report-health and engine-write readiness payload fields.
+- Verification passed: targeted status summary snapshot test and `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`582` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 313 - Operation Replay Summary Snapshot Audit Payload
+
+- Added `_operation_replay_snapshot_summary_payload()` to condense operation replay summaries into a replay-safe top-level audit payload covering RuntimeEvent emission/report readiness, sync replay, asset transfer, peer sync, GM summary export, RuntimeGuard blocks, StatePatch conflicts, queue pressure, failure strategy retries, and engine-write import/bridge failure counts.
+- Updated both `runtime.report.operation_replay_summary` ToolResult payloads and `runtime_report_operation_replay_summary_recorded` OperationLog events to use the shared audit payload instead of preserving only `entry_count`.
+- Added regression coverage in `test_generate_report_contains_safe_operation_replay_summary` to prove operation replay summary snapshot events preserve key audit counts while still hiding prompts, providers, and asset paths.
+- Strengthened `verify_ultimate_plan.py` static gates so `_operation_replay_snapshot_summary_payload()`, `_record_operation_replay_summary_tool()`, and `_operation_replay_summary_via_tool_graph()` cannot silently drop the audit payload.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted operation replay summary test; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`582` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 314 - Operation Replay Snapshot Audit Payload
+
+- Added `_operation_replay_snapshot_audit_payload()` so direct `runtime.operation_replay.snapshot` executions produce a safe top-level audit payload instead of only `entry_count/event`.
+- Updated `_record_operation_replay_snapshot_tool()` ToolResult payloads and `runtime_operation_replay_snapshot_recorded` OperationLog events to share this audit payload.
+- The payload preserves replay-critical counts (`event_counts`, RuntimeEvent emitted/failed counts, sync/asset-transfer/peer counts, engine-write import/transform/delete counts, and report-health status/attention) while deliberately excluding raw `entries`, prompts, providers, URLs, graph/session/context/patch ids, and private paths.
+- Strengthened `test_operation_replay_exports_runtime_audit_without_mutating_reports` to prove snapshot record events carry the safe audit payload and still do not mutate reports or leak internal fields.
+- Strengthened `verify_ultimate_plan.py` static gates so `_operation_replay_snapshot_audit_payload()`, `_record_operation_replay_snapshot_tool()`, and `_operation_replay_snapshot_via_tool_graph()` cannot silently regress to entry-count-only replay evidence.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted operation replay audit test; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`582` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 315 - Operation Replay Query Audit Payload
+
+- Extended `runtime_operation_replay_queried` OperationLog events to use the same safe `_operation_replay_snapshot_audit_payload()` that now backs `runtime_operation_replay_snapshot_recorded`.
+- Direct Operation Replay queries now leave replayable audit evidence for `event_counts`, RuntimeEvent emitted/failed counts, sync/asset-transfer/peer counts, engine-write import/transform/delete counts, and report-health status/attention instead of preserving only `event/limit/entry_count`.
+- Strengthened `test_operation_replay_exports_runtime_audit_without_mutating_reports` so both snapshot-recorded and queried replay events preserve the safe audit payload while excluding raw entries, prompts, providers, URLs, graph/session/context/patch ids, and private paths.
+- Strengthened `verify_ultimate_plan.py` static gates so `AgentRuntime.operation_replay()` cannot silently regress to entry-count-only queried payloads.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted operation replay audit test; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`582` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 316 - Status Snapshot Failure Audit Payload
+
+- Added `_snapshot_failure_audit_payload()` as a shared safe failure-payload helper for Runtime snapshot ToolCallGraph failures.
+- Updated `runtime_status_summary_snapshot_failed` to record `summary_type`, `recorded=false`, `failure_code=snapshot_record_failed`, and sanitized `reason` instead of a reason-only payload.
+- Strengthened `test_status_summary_snapshot_failure_blocks_status_return` to prove failed status snapshots are replayable without leaking prompt/provider/path fields.
+- Strengthened `verify_ultimate_plan.py` static gates so status summary snapshot failures cannot silently regress to reason-only payloads.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted status snapshot failure test; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`582` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 317 - Unified Snapshot Failure Audit Payloads
+
+- Extended `_snapshot_failure_audit_payload()` usage from status snapshots to all current Runtime snapshot failure paths: tool manifest, GM summary, runtime events, sync status, provider status, status summary, and operation replay.
+- Replaced remaining reason-only / ad-hoc `*_snapshot_failed` OperationLog payloads with replay-safe payloads carrying `summary_type`, `recorded=false`, `failure_code=snapshot_record_failed`, sanitized `reason`, and narrow scope hints such as event, limit, or external plan id where relevant.
+- Added `_assert_snapshot_failure_payload()` test helper and strengthened six existing failure-path tests so GM/events/sync/provider/status/operation replay snapshot failures remain auditable without leaking prompt/provider/path fields.
+- Strengthened `verify_ultimate_plan.py` static gates so any current snapshot failure path that regresses to a reason-only payload is blocked by the Agent-native verifier.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted snapshot failure tests; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`582` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 318 - Tool Manifest Snapshot Failure Regression
+
+- Added runtime regression coverage for `runtime_tool_manifest_snapshot_failed`, forcing the `runtime.tool_manifest.snapshot` ToolCallGraph write path to fail at the RuntimeState `custom_report_facts` boundary.
+- Reused `_assert_snapshot_failure_payload()` for the global tool-manifest snapshot path, proving the failure event records `summary_type=runtime-tool-manifest`, `recorded=false`, `failure_code=snapshot_record_failed`, sanitized `reason`, and the requested category event without leaking prompt/provider/path fields.
+- Strengthened `verify_ultimate_plan.py` so the tool-manifest snapshot failure regression test is required by the Runtime report fact-source gate, while keeping it out of unrelated RuntimeCppBridge test requirements.
+- Verification passed: syntax compile for touched test/verifier files; targeted `test_tool_manifest_snapshot_failure_records_safe_audit_payload`; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`583` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 319 - ToolGraph Stop Skipped-Count Audit
+
+- Extended `ToolCallGraphExecutor` stopped-by-runtime-command handling so pause/cancel stops count how many pending/ready downstream ToolCalls were marked skipped.
+- Added `skipped_count` to the `tool_graph_stopped_by_runtime_command` OperationLog payload, the corresponding host-visible RuntimeEvent payload, and the `runtime_event_emitted` OperationLog payload for that event.
+- Strengthened `test_tool_graph_executor_stops_before_next_tool_when_plan_is_paused` to prove both OperationLog-first replay and RuntimeEvent disclosure preserve the skipped-count impact without exposing downstream tool names.
+- Strengthened `verify_ultimate_plan.py` static gates so ToolGraph stopped-by-command audit cannot silently drop skipped-count evidence.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted ToolGraph stop test; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`583` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 320 - RuntimeGuard Blocked ToolCall Audit Payload
+
+- Extended ToolCallGraph blocked-call handling so `tool_call_blocked`, the host-visible blocked RuntimeEvent, and the corresponding `runtime_event_emitted` OperationLog entry carry safe RuntimeGuard audit fields: `guard_reason`, effective `risk_level`, `requires_write`, and `confirmed`.
+- Kept the payload narrow and user-safe: it explains why RuntimeGuard blocked execution without exposing tool names, actor names, arguments, provider details, prompts, or paths.
+- Strengthened `test_runtime_guard_blocks_unconfirmed_low_risk_write_tool` to prove OperationLog-first replay and RuntimeEvent disclosure preserve the guard decision fields while retaining existing no-leak guarantees.
+- Strengthened `verify_ultimate_plan.py` static gates so RuntimeGuard blocked-call audit fields and allowlists cannot silently regress.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted RuntimeGuard blocked-call test; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`583` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 321 - RuntimeGuard Replay Summary Audit Dimensions
+
+- Extended `_runtime_guard_replay_summary()` so Operation Replay now summarizes blocked ToolCalls by effective `risk_level`, `requires_write`, and `confirmed` state in addition to existing reason counts.
+- Added replay fields `risk_level_counts`, `requires_write_blocked_count`, `confirmed_blocked_count`, `unconfirmed_blocked_count`, and enriched `latest_block` with risk/write/confirmation flags.
+- Strengthened `test_runtime_guard_blocks_unconfirmed_low_risk_write_tool` to prove the RuntimeGuard payload survives from `tool_call_blocked` through RuntimeEvent disclosure into `operation_replay` summary without leaking tool names or actor names.
+- Strengthened `verify_ultimate_plan.py` so RuntimeGuard replay summaries and regression tests cannot silently drop the blocked-call audit dimensions.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted RuntimeGuard blocked-call test; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`583` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 322 - LANChat RuntimeGuard Replay Disclosure
+
+- Extended `LANChatAgentWorker._format_agent_runtime_replay_guard_report()` so Runtime status and GM replay summaries now expose safe RuntimeGuard blocked-call dimensions: write-blocked count, confirmed/unconfirmed blocked count, and risk-level distribution.
+- Kept the disclosure compact and safe: summaries show counts such as `write-blocked 1`, `unconfirmed 1`, and `risk medium:1`, while still avoiding tool names, actor names, raw arguments, prompts, provider details, or paths.
+- Strengthened `test_runtime_operation_replay_query_uses_metadata_batch_scope` so LANChat Operation Replay output proves the new RuntimeGuard dimensions reach user-visible replay text for the selected batch.
+- Strengthened `verify_ultimate_plan.py` static gates so the LANChat RuntimeGuard replay formatter and LANChat regression tests cannot silently drop the new audit dimensions.
+- Verification passed: syntax compile for touched LANChat/test/verifier files; targeted LANChat operation replay test; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`583` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 323 - OperationReplay Snapshot RuntimeGuard Audit Dimensions
+
+- Extended Operation Replay snapshot/report audit payloads so `runtime_operation_replay_snapshot_recorded`, `runtime_operation_replay_queried`, and `runtime_report_operation_replay_summary_recorded` preserve RuntimeGuard blocked-call dimensions: blocked count, write-blocked count, confirmed/unconfirmed blocked counts, and risk-level distribution.
+- Extended GM summary `runtime_guard_digest` with the same safe RuntimeGuard dimensions plus latest-block risk/write/confirmation flags, so GM/status reports do not lose the guard decision context after replay summarization.
+- Strengthened `test_operation_replay_exports_runtime_audit_without_mutating_reports` and `test_generate_report_contains_safe_operation_replay_summary` to prove replay snapshot/query/report payloads retain the RuntimeGuard audit dimensions without exposing prompts, providers, asset paths, graph ids, session ids, context ids, patch ids, tool names, or actor names.
+- Strengthened `verify_ultimate_plan.py` static gates so OperationReplay snapshot/report payloads, GM runtime_guard_digest, and regression tests cannot silently drop these RuntimeGuard audit dimensions.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted OperationReplay snapshot/report tests; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`583` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 324 - GM Summary Snapshot RuntimeGuard Audit Dimensions
+
+- Extended `runtime_gm_summary_snapshot_recorded` so GM summary snapshot OperationLog events preserve the same safe RuntimeGuard blocked-call dimensions already present in GM summaries: blocked count, write-blocked count, confirmed/unconfirmed blocked counts, and risk-level distribution.
+- Kept the snapshot payload narrow and replay-safe: it records guard decision counts only, without exposing tool names, actor names, raw arguments, prompts, providers, asset paths, graph ids, session ids, context ids, or patch ids.
+- Strengthened `test_runtime_gm_summary_action_records_snapshot_without_business_tool_graph` to seed a blocked write ToolCall and prove both `runtime_guard_digest` and the GM snapshot payload retain RuntimeGuard audit dimensions.
+- Strengthened `verify_ultimate_plan.py` static gates so `_gm_summary_snapshot_via_tool_graph` and the GM snapshot regression cannot silently drop RuntimeGuard audit dimensions.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted GM summary snapshot test; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`583` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 325 - Operation Replay Summary Failure Audit Payload
+
+- Closed a missed snapshot-failure gap in `_operation_replay_summary_via_tool_graph`: `runtime_report_operation_replay_summary_failed` now records the shared safe `_snapshot_failure_audit_payload` instead of a reason-only payload.
+- Strengthened `test_generate_report_replay_summary_failure_blocks_user_report` to prove report generation remains blocked when the OperationReplay summary snapshot cannot persist, while the failure is still replayable through `summary_type`, `recorded=false`, `failure_code=snapshot_record_failed`, and sanitized reason.
+- Extended `verify_ultimate_plan.py` snapshot-failure static gates so `_operation_replay_summary_via_tool_graph` is checked with the other Runtime snapshot paths and cannot silently regress to reason-only failure logging.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted OperationReplay summary failure test; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`583` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 326 - User Report Persist Failure Safe Audit Payload
+
+- Extended `_persist_user_report` OperationLog payloads so `user_report_state_persist_failed` carries a structured, replay-safe failure audit: `failure_code=user_report_state_persist_failed` and sanitized generic `reason=RuntimeState persistence failed`, while preserving existing report operation-log index facts.
+- Kept raw StatePatch / provider / prompt details out of the failure payload and OperationLog message, so report persistence failures remain diagnosable without leaking internal adapter/provider details.
+- Strengthened `test_generate_report_failure_does_not_emit_report_ready_or_write_state_report` and `test_handle_message_runtime_report_persist_failure_returns_safe_failure` to prove report-ready is not emitted, RuntimeState reports stay empty, and failed payloads include safe failure code/reason without provider or prompt leakage.
+- Strengthened `verify_ultimate_plan.py` static gates so `_persist_user_report` and the report-persist failure regressions cannot silently drop safe failure audit fields.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted report persistence failure tests; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`583` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 327 - User Report Persist Failure Replay Provenance
+
+- Extended `OperationLog._safe_payload` and `RuntimeEventValidator.safe_payload` allowlists so safe OperationLog snapshots can preserve report provenance fields `operation_log_event` and `operation_log_index` when replaying `user_report_state_persist_failed` payloads.
+- Kept the provenance narrow: only the generated-report OperationLog event name and index survive replay, while provider, prompt, raw payload, graph ids, session ids, paths, and tool details remain filtered.
+- Strengthened `test_generate_report_failure_does_not_emit_report_ready_or_write_state_report` to prove `OperationLog.snapshot()` keeps the report provenance and failure code in the safe replay entry after user report persistence fails.
+- Strengthened `verify_ultimate_plan.py` static gates so both OperationLog and RuntimeEvent payload sanitizers, plus the report-persist replay regression, cannot silently drop this provenance bridge.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted report persist failure + OperationReplay regression tests; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`583` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+### Progress Update 328 - Runtime Facts Injection Safe Replay Audit
+
+- Extended `tool_call_runtime_facts_injected` OperationLog payloads with replay-safe `field_count` and `field_names` while preserving the existing raw `fields` list for direct OperationLog checks.
+- Extended OperationLog and RuntimeEvent safe payload allowlists so OperationLog snapshots and OperationReplay snapshot facts retain which RuntimeState facts were injected into ToolCalls without exposing raw fact values, provider details, prompts, paths, graph ids, session ids, tool names, or tool payloads.
+- Strengthened `test_batch_graph_consumes_scene_snapshot_for_placement_and_import` to prove safe OperationLog snapshots preserve injected runtime fact names and counts for placement/review/import ToolCalls.
+- Strengthened `verify_ultimate_plan.py` static gates so ToolCallGraphExecutor runtime fact injection audit and both safe payload allowlists cannot silently drop this execution-plane provenance.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted runtime fact injection and OperationReplay regression tests; `python editor/plugins/AITool/services/verify_ultimate_plan.py` (`583` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current non-native static gates passed).
+
+### Progress Update 329 - Runtime Fact Injection OperationReplay Summary
+
+- Added `_runtime_fact_injection_replay_summary()` so OperationReplay now summarizes `tool_call_runtime_facts_injected` events by injection count, injected field total, safe field-name counts, and latest injection scope.
+- Extended direct `runtime.operation_replay.snapshot` and report-side `runtime.report.operation_replay_summary` audit payloads with safe runtime-fact injection counts and field-name distributions, preserving execution-plane provenance without exposing raw RuntimeState facts, tool args, prompts, providers, paths, graph ids, session ids, or tool names.
+- Persisted the shared snapshot/report audit payload into the corresponding `custom_report_facts` records, so replay queries and generated-report facts expose the same safe runtime fact injection evidence.
+- Strengthened OperationReplay and generated-report regressions to prove runtime fact injection summaries reach both replay query payloads and user-report replay summaries.
+- Strengthened `verify_ultimate_plan.py` static gates so OperationReplay summary paths cannot silently drop runtime fact injection audit evidence.
+- Verification status: syntax compile passed for touched Runtime/test/verifier files; targeted OperationReplay/report tests passed. Full `python editor/plugins/AITool/services/verify_ultimate_plan.py` is not green in the current worktree because `test_agent_runtime_phase1.py` had to be restored from HEAD after an encoding/write corruption, which removed earlier accumulated regression-test updates required by current static gates. This is a known recovery item before claiming full gate completion.
+
+### Progress Update 330 - Runtime Validator Static Gate Recovery
+
+- Recovered the Runtime validator static contract gate after the `test_agent_runtime_phase1.py` restore by re-adding targeted regression anchors for actor-import failure-code summaries, partial import failure-code runtime events, and `runtime.audit_event.record` ToolCallGraph execution evidence.
+- Updated high-signal regression tests to assert structured payloads instead of brittle localized message text where the restored file still contains historical mojibake expectations.
+- Verified targeted regressions pass: `test_handle_message_runtime_audit_event_records_safe_operation_log_without_creating_plan`, `test_engine_actor_import_provider_missing_model_resource_fails_runtime_graph`, and `test_runtime_actor_import_persists_partial_success_from_engine_provider`.
+- Full `python editor/plugins/AITool/services/verify_ultimate_plan.py` status now has all non-native static gates clear except the intentionally visible `test_agent_runtime_phase1.py` suite failure. The remaining failures are concentrated in restored legacy assertions and old expectations: stale localized/mojibake text comparisons, old provider-string no-leak checks that now collide with safe `provider_source` metadata names, and several older batch/tool manifest contract expectations. `test_lanchat_runtime_guard.py` remains green.
+- Next recovery priority: fix only Agent-native contract-relevant failures in `test_agent_runtime_phase1.py`; do not spend time making every stale localized assertion exact before the Runtime execution architecture advances.
+
+### Progress Update 331 - Batch-Scoped Runtime Contract Test Recovery
+
+- Migrated high-signal AgentRuntime regression tests from legacy plan-scoped expectations to the current Agent-native batch-scoped fact model: `geometry_reviews`, `placement_proposals`, asset requests, and import/review consumes contracts now assert batch keys where the ToolCallGraph actually consumes state.
+- Cleared the remaining `test_agent_runtime_phase1.py` errors by fixing stale test assumptions around `execute_scene_plan()` result shape, direct review provider batch ids, and legacy model provider item-name assertions. The suite now fails only with assertion failures, not runtime errors.
+- Updated VLM/review advisory tests to recognize checkpoint evidence structurally through `custom_vlm_checkpoint_facts`, `review_advisory_proposals`, `structure_review`, and payload status, instead of brittle localized message substrings.
+- Updated ToolRegistry/ToolCallGraph contract tests for the current Agent-native tool schema: asset tools consume batch-scoped requests and emit resource-phase facts; import and placement tools consume batch-scoped placement facts; review tools consume ground-snap review facts; environment import writes import facts; layout apply writes report and sync state.
+- Recovered the OperationLog-first report invariant test by checking structured runtime-event payloads rather than a mojibake message prefix. The ordering invariant remains verified: `user_report_generated` is logged before `user_report_state_persisted` and before report-ready disclosure.
+- Verification passed: syntax compile for touched Runtime/test/verifier files; targeted 7-test contract group passed (`runtime_graph_plans_assets_and_placements`, scene snapshot injection, scene review provider, VLM checkpoint advisory, ToolRegistry manifest, execution graph consumes, report log-before-state`). Full `test_agent_runtime_phase1.py` currently reports `568` tests run with `37` assertion failures and `0` errors; remaining failures are mostly legacy localized text / old provider-string / old batch-count expectations and are intentionally lower priority than continuing the Runtime architecture migration.
+
+### Progress Update 332 - Phase1 Suite Recovery and Substrate Guardrail Alignment
+
+- Recovered `test_agent_runtime_phase1.py` from the remaining restored legacy assertion failures: the suite now verifies Agent-native contracts structurally through RuntimeState, ToolCallGraph facts, OperationLog events, payload status, batch-scoped state, and safe summaries instead of brittle localized/mojibake UI text.
+- Added a small but real scene-element guardrail fix in `scene_element_classifier.py`: English substrate/environment terms such as `forest`, `sky`, `grass`, `terrain`, `ground`, `wall`, and `ceiling` now route to `scene_substrate` with case-insensitive matching, preventing them from being imported as ordinary actor/model items.
+- Re-aligned high-signal batch/resource tests with current Agent-native state ownership: environment components, placement proposals, asset requests, geometry reviews, and resource summaries are asserted by batch/runtime facts rather than legacy plan-level caches or exact user-facing strings.
+- Preserved the execution-plane safety checks while loosening only stale presentation assertions: provider failures, import failures, sync events, context messages, invalid ToolResult ownership, and invalid StatePatch writes still prove safe failure, no raw provider/prompt/path leakage, no cross-room writes, no undeclared state writes, and dependent ToolCall skipping.
+- Verification passed: `python -B -m unittest editor.plugins.AITool.services.test_agent_runtime_phase1` (`568` tests, OK) and `python -B editor/plugins/AITool/services/verify_ultimate_plan.py` (`568` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current Agent-native non-native static gates passed).
+
+### Progress Update 333 - Scene Substrate Guardrail Static Gate
+
+- Added `static scene substrate guardrail gate` to `verify_ultimate_plan.py`, so English environment/substrate terms such as `forest`, `sky`, `grass`, `terrain`, and `ground` remain protected from slipping back into actor/model generation lists.
+- The gate now checks both the `SceneElementClassifier` case-insensitive substrate guardrail and the AgentRuntime regression `test_substrate_terms_are_classified_but_not_imported_as_actors`, keeping the plan/resource boundary mechanically enforced.
+- Verification passed: targeted substrate regression (`1` test, OK) and `python -B editor/plugins/AITool/services/verify_ultimate_plan.py` (`568` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current Agent-native non-native static gates passed).
+
+### Progress Update 334 - Layout Structure Guardrail Regression
+
+- Extended the scene element guardrail slice beyond substrate/environment terms: English layout structure terms such as `entrance`, `main street`, and `boundary` are now regression-tested as `layout_structure`, not actor/model generation inputs.
+- Added `test_layout_terms_are_classified_but_not_imported_as_actors`, verifying layout terms stay out of actors, image resource plans, model resource plans, and import model_items while still appearing in classification summaries as layout items.
+- Extended `verify_ultimate_plan.py` static scene substrate/layout guardrail gate so both classifier tokens and the substrate/layout AgentRuntime regressions are required by the project-level non-native verifier.
+- Verification passed: targeted substrate/layout regressions (`2` tests, OK) and `python -B editor/plugins/AITool/services/verify_ultimate_plan.py` (`569` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current Agent-native non-native static gates passed).
+
+### Progress Update 335 - Runtime Command ToolCall Evidence Propagation
+
+- Strengthened the Phase 5 runtime command path (`pause`, `cancel`, `resume`, `retry`) so `_persist_runtime_command_state()` returns a safe ToolCallGraph persistence summary instead of only raising/returning implicitly.
+- `apply_runtime_command()` now propagates `command_recorded`, `graph_status`, `tool_call_status`, and `state_version` into the command result and the user-visible RuntimeEvent payload. This makes command success prove that the state transition was recorded through `runtime.command.record` before replay logs and user-facing events are emitted.
+- Extended safe RuntimeEvent payload allowlists for these narrow status fields; no tool args, provider, prompt, URL, model path, raw graph payload, or private path is exposed.
+- Strengthened runtime command regression coverage for pause/resume/cancel and retry, and extended `verify_ultimate_plan.py` static gates so `apply_runtime_command()` cannot silently regress to command events without ToolCallGraph persistence evidence.
+- Verification passed: targeted runtime command regressions (`2` tests, OK) and `python -B editor/plugins/AITool/services/verify_ultimate_plan.py` (`569` AgentRuntime tests, `187` LANChat guard tests, F5 probes, syntax compile, and all current Agent-native non-native static gates passed).
+
+
+### Progress Update 336 - Operation Replay Snapshot Evidence Propagation
+
+- Change: `AgentRuntime._operation_replay_snapshot_via_tool_graph()` now returns safe snapshot evidence with operation replay results: `snapshot_recorded`, `snapshot_status`, `snapshot_tool_status`, and `snapshot_state_version`.
+- Why: Operation replay is a core audit surface. The returned replay should prove that it was captured through `runtime.operation_replay.snapshot` and persisted through `RuntimeState`, without leaking `graph_id` / `tool_call_id` / prompt / provider internals.
+- Tests: strengthened `test_operation_replay_exports_runtime_audit_without_mutating_reports` and the static Runtime report fact-source gate in `verify_ultimate_plan.py`.
+- Verification: `python -B editor/plugins/AITool/services/verify_ultimate_plan.py` passed: AgentRuntime 569 tests OK, LANChat guard 187 tests OK, V3 F5 probes OK, syntax compile OK, all static Agent-native gates OK.
+- Scope: no native build; no Quasar changes; no generation main-chain behavior change.
+
+### Progress Update 337 - Status and GM Summary Snapshot Evidence Propagation
+
+- Change: `AgentRuntime._status_summary_snapshot_via_tool_graph()` and `AgentRuntime._gm_summary_snapshot_via_tool_graph()` now return safe snapshot evidence with their summaries: `snapshot_recorded`, `snapshot_status`, `snapshot_tool_status`, and `snapshot_state_version`.
+- Why: Status query and GM summary are coordinator-facing diagnosis surfaces. Their returned summaries should prove that they were captured through Runtime ToolCallGraph snapshot tools and persisted through `RuntimeState`, without exposing graph/tool identifiers or provider/prompt internals.
+- Tests: strengthened `test_tool_registry_manifest_can_filter_by_category_and_status_summary_reports_counts` and `test_runtime_gm_summary_action_records_snapshot_without_business_tool_graph`; persisted RuntimeState facts are compared after stripping return-layer snapshot evidence so business summaries remain clean.
+- Static gate: `verify_ultimate_plan.py` now requires status/GM snapshot evidence tokens and matching regression assertions.
+- Verification: `python -B editor/plugins/AITool/services/verify_ultimate_plan.py` passed: AgentRuntime 569 tests OK, LANChat guard 187 tests OK, V3 F5 probes OK, syntax compile OK, all current Agent-native non-native static gates OK.
+- Scope: no native build; no Quasar changes; no generation main-chain behavior change.
+### Progress Update 338 - Provider and Sync Status Snapshot Evidence Propagation
+
+- Change: `AgentRuntime._provider_status_snapshot_via_tool_graph()` and `AgentRuntime._sync_status_snapshot_via_tool_graph()` now return safe snapshot evidence with their status payloads: `snapshot_recorded`, `snapshot_status`, `snapshot_tool_status`, and `snapshot_state_version`.
+- Why: Provider readiness / engine-write status and multiplayer sync status are important operator-facing diagnostics. Returned diagnostics should prove that they were captured through Runtime ToolCallGraph snapshot tools and persisted through `RuntimeState`, without exposing graph/tool identifiers, provider internals, prompts, URLs, private paths, or raw sync ids.
+- Tests: strengthened sync-status and provider-status regressions so returned payloads assert snapshot evidence while persisted `custom_report_facts` are compared after stripping return-layer evidence. This keeps RuntimeState facts clean and makes the caller-visible result auditable.
+- Static gate: `verify_ultimate_plan.py` now requires provider/sync snapshot evidence tokens and regression assertions for evidence stripping.
+- Verification: syntax compile passed for touched Runtime/test/verifier files; targeted provider/sync regressions passed; `python -B editor/plugins/AITool/services/verify_ultimate_plan.py` passed: AgentRuntime 569 tests OK, LANChat guard 187 tests OK, V3 F5 probes OK, syntax compile OK, and all current Agent-native non-native static gates OK.
+- Scope: no native build; no Quasar changes; no generation main-chain behavior change.
+### Progress Update 339 - Runtime Events Snapshot Evidence Propagation
+
+- Change: `AgentRuntime._runtime_events_snapshot_via_tool_graph()` now returns a narrow snapshot envelope for runtime event feeds: `runtime_events`, `snapshot_recorded`, `snapshot_status`, `snapshot_tool_status`, and `snapshot_state_version`.
+- Why: Runtime event feeds are user-visible diagnosis surfaces. The returned feed should prove that it was captured through `runtime.events.snapshot` and persisted through `RuntimeState`, while the `runtime_events` list and stored `custom_report_facts` remain clean and user-safe.
+- Tests: strengthened `test_handle_message_runtime_events_lists_safe_events_without_creating_plan` so returned payloads assert snapshot evidence, and persisted event facts explicitly reject return-layer snapshot evidence. Existing failure-path tests still prove failed snapshots do not return unrecorded feeds.
+- Static gate: `verify_ultimate_plan.py` now requires runtime-events snapshot evidence tokens in both `_runtime_events_snapshot_via_tool_graph()` and the `handle_message(runtime_events)` response path.
+- Verification: `python -B editor/plugins/AITool/services/verify_ultimate_plan.py` passed: AgentRuntime 569 tests OK, LANChat guard 187 tests OK, V3 F5 probes OK, syntax compile OK, and all current Agent-native non-native static gates OK.
+- Scope: no native build; no Quasar changes; no generation main-chain behavior change.

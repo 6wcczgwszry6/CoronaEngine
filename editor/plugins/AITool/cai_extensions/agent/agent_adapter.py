@@ -950,6 +950,9 @@ class MasterAgent:
                 if get_current_progress_sink() is not None:
                     logger.info("[MasterAgent] LANChat planning compose blocked before scene handler")
                     return "这是生成类请求，但尚未开始生成。请先由房主确认当前方案，确认后系统会通过生成队列执行。"
+                if not _legacy_main_workflow_allowed():
+                    logger.info("[MasterAgent] planning compose blocked by AgentRuntime migration guard")
+                    return AGENT_RUNTIME_REQUIRED_MESSAGE
                 logger.info("[MasterAgent] routing → compose (confirmed plan)")
                 return self._handle_scene(str(gate_payload or trigger), system, messages, force_compose=True)
 
@@ -959,6 +962,9 @@ class MasterAgent:
             intent_class = classify_intent(trigger)
             if intent_class == "compose":
                 # 整场景生成（含清单外描述"海底世界""蒙古包草原"）→ force_compose 跳内层关键词门
+                if not _legacy_main_workflow_allowed():
+                    logger.info("[MasterAgent] semantic compose blocked by AgentRuntime migration guard")
+                    return AGENT_RUNTIME_REQUIRED_MESSAGE
                 logger.info("[MasterAgent] routing → compose (意图分类)")
                 return self._handle_scene(trigger, system, messages, force_compose=True)
             if intent_class == "edit":
