@@ -22697,6 +22697,32 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         )
         self.assertGreaterEqual(report["review_summary"]["review_count"], 2)
         self.assertIn("structure_review", report["review_summary"]["checkpoint_counts"])
+        replay = report["operation_replay_summary"]
+        self.assertGreaterEqual(replay["scene_plan_lifecycle_summary"]["created_count"], 1)
+        self.assertGreaterEqual(replay["scene_plan_lifecycle_summary"]["confirmed_count"], 1)
+        self.assertGreaterEqual(replay["environment_component_replay_summary"]["ready_event_count"], 1)
+        self.assertEqual(replay["resource_summary"]["by_phase"]["image"]["requested_count"], 2)
+        self.assertEqual(replay["resource_summary"]["by_phase"]["model"]["requested_count"], 2)
+        self.assertEqual(replay["import_summary"]["requested_count"], 2)
+        self.assertEqual(replay["import_summary"]["imported_count"], 2)
+        self.assertGreaterEqual(replay["geometry_fact_replay_summary"]["fact_count"], 1)
+        self.assertGreaterEqual(replay["vlm_checkpoint_summary"]["checkpoint_count"], 1)
+        self.assertIn("structure_review", replay["vlm_checkpoint_summary"]["checkpoint_counts"])
+        self.assertEqual(replay["batch_execution_summary"]["completed_count"], 1)
+        self.assertEqual(report["operation_log_event"], "user_report_generated")
+        runtime_event_messages = [
+            entry.as_dict().get("message")
+            for entry in runtime.operation_log.query(event="runtime_event_emitted")
+        ]
+        replay_order = [
+            "environment_components_ready",
+            "image_resources_ready",
+            "model_resources_ready",
+            "actors_imported",
+            "report_ready",
+        ]
+        replay_indices = [runtime_event_messages.index(event) for event in replay_order]
+        self.assertEqual(replay_indices, sorted(replay_indices))
         graph_nodes = result["graph"]["nodes"].values()
         for node in graph_nodes:
             if node["tool_name"] in {

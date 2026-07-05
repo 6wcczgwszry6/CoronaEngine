@@ -15438,3 +15438,10 @@ Phase 7/native-boundary validation work.
 - Tests: added `test_terrain_component_resolver.py` covering outdoor nature/camp substrate, profile-priority regressions, and indoor priority. Existing AgentRuntime substrate regression still proves environment terms do not enter normal actor/model generation.
 - Verification: direct terrain resolver tests passed; targeted AgentRuntime substrate regression passed; syntax compile passed for touched resolver/test files; `python -B editor/plugins/AITool/services/verify_ultimate_plan.py` passed: AgentRuntime 569 tests OK, LANChat guard 187 tests OK, V3 F5 probes OK, syntax compile OK, and all current Agent-native non-native static gates OK.
 - Scope: no native build; no Quasar changes; real terrain actor creation, visual terrain material, C++ environment import, sync transfer, and F5 forest-camp visual result remain `[Pending F5/native verification]`.
+### Progress Update 345 - Forest Camp OperationLog Replay Closure
+
+- Change: strengthened the existing forest-camp AgentRuntime regression to prove the F5 minimum scene can be replayed from OperationLog/report evidence across plan, environment, image/model resource, actor import, geometry/review, and final report stages.
+- Why: the RuntimeState and scene_entity_registry already showed forest/sky/grass as substrate/environment entities and wooden table/tent as actor entities. This update ties the same minimum acceptance path to OperationLog-derived summaries and user-visible runtime event ordering.
+- Evidence: the regression now asserts scene plan lifecycle counts, environment readiness replay, image/model resource replay, actor import replay, geometry fact replay, VLM checkpoint replay, batch completion, report generation, and ordered user-facing runtime events from environment ready to report ready.
+- Tests: targeted `test_substrate_terms_are_classified_but_not_imported_as_actors` passed.
+- Scope: no production Runtime code change; no native build; no Quasar changes; real engine terrain import, actor import, visual grounding, LAN sync, and VLM screenshot remain `[Pending F5/native verification]`.
