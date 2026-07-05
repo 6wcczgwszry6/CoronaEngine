@@ -22685,6 +22685,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(query_summary["batch_resource_flow_summary"]["batch_count"], 1)
         self.assertEqual(query_summary["report_health_summary"]["status"], "ok")
         self.assertFalse(query_summary["report_health_summary"]["attention_required"])
+        self.assertEqual(query_summary["report_health_summary"]["actor_registry_readiness_status"], "ready")
+        self.assertEqual(query_summary["report_health_summary"]["actor_registry_missing_transform_count"], 0)
+        self.assertEqual(query_summary["report_health_summary"]["actor_registry_missing_aabb_count"], 0)
         self.assertEqual(query_summary["import_summary"]["imported_count"], 2)
         self.assertEqual(query_summary["engine_write_readiness_summary"]["channel_count"], 4)
         self.assertIn("actor_import", query_summary["engine_write_adapter_summary"]["channels"])
@@ -22816,6 +22819,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(status_roles["grass"]["environment_profile"]["surface"], "grass_with_walkable_clearings")
         self.assertGreaterEqual(status["review_summary"]["review_count"], 2)
         self.assertIn("structure_review", status["review_summary"]["checkpoint_counts"])
+        self.assertEqual(status["report_health_summary"]["actor_registry_readiness_status"], "ready")
+        self.assertEqual(status["report_health_summary"]["actor_registry_missing_transform_count"], 0)
+        self.assertEqual(status["report_health_summary"]["actor_registry_missing_aabb_count"], 0)
         report = runtime.generate_report("room-forest", plan_id=plan.plan_id)
         self.assertTrue(
             {"forest", "sky", "grass"}.issubset(
@@ -22865,6 +22871,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         )
         self.assertGreaterEqual(report["review_summary"]["review_count"], 2)
         self.assertIn("structure_review", report["review_summary"]["checkpoint_counts"])
+        self.assertEqual(report["report_health_summary"]["actor_registry_readiness_status"], "ready")
+        self.assertEqual(report["report_health_summary"]["actor_registry_missing_transform_count"], 0)
+        self.assertEqual(report["report_health_summary"]["actor_registry_missing_aabb_count"], 0)
         replay = report["operation_replay_summary"]
         self.assertGreaterEqual(replay["scene_plan_lifecycle_summary"]["created_count"], 1)
         self.assertGreaterEqual(replay["scene_plan_lifecycle_summary"]["confirmed_count"], 1)

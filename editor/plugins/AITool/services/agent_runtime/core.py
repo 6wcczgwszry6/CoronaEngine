@@ -16936,6 +16936,7 @@ class AgentRuntime:
         resource_summary: Mapping[str, Any] | None = None,
         environment_component_summary: Mapping[str, Any] | None = None,
         engine_write_summary: Mapping[str, Any] | None = None,
+        scene_entity_registry: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         batch_flow = dict(batch_resource_flow_summary or {})
         import_state = dict(import_summary or {})
@@ -16943,6 +16944,7 @@ class AgentRuntime:
         resource_state = dict(resource_summary or {})
         environment_state = dict(environment_component_summary or {})
         engine_write_state = dict(engine_write_summary or {})
+        registry_state = dict(scene_entity_registry or {})
         batch_failed_count = int(batch_flow.get("failed_count") or 0)
         batch_partial_count = int(batch_flow.get("partial_count") or 0)
         batch_waiting_count = int(batch_flow.get("waiting_count") or 0)
@@ -16977,6 +16979,19 @@ class AgentRuntime:
             for item in list(engine_write_state.get("readiness_mismatch_channels") or [])[:8]
             if str(item).strip()
         ]
+        actor_registry_readiness_status = str(registry_state.get("readiness_status") or "").strip()
+        actor_registry_count = int(registry_state.get("actor_count") or 0)
+        actor_registry_missing_transform_count = int(registry_state.get("missing_transform_count") or 0)
+        actor_registry_missing_aabb_count = int(registry_state.get("missing_aabb_count") or 0)
+        actor_registry_incomplete = (
+            import_imported_count > 0
+            and (
+                actor_registry_readiness_status not in {"", "ready"}
+                or actor_registry_count <= 0
+                or actor_registry_missing_transform_count > 0
+                or actor_registry_missing_aabb_count > 0
+            )
+        )
         status_by_batch_id = {
             str(key): str(value or "unknown")
             for key, value in dict(batch_flow.get("status_by_batch_id") or {}).items()
@@ -17058,6 +17073,8 @@ class AgentRuntime:
             reasons.append("sync_failed")
         if engine_write_readiness_mismatch_count:
             reasons.append("engine_write_readiness_mismatch")
+        if actor_registry_incomplete:
+            reasons.append("actor_registry_incomplete")
         if batch_waiting_count:
             reasons.append("batch_waiting")
         if resource_phase_waiting_count:
@@ -17080,6 +17097,7 @@ class AgentRuntime:
             or environment_failed_count
             or resource_phase_partial_count
             or asset_incomplete_count
+            or actor_registry_incomplete
             or sync_status == "partial"
         ):
             status = "partial"
@@ -17128,6 +17146,10 @@ class AgentRuntime:
             "latest_sync_failure_code": latest_sync_failure_code,
             "engine_write_readiness_mismatch_count": engine_write_readiness_mismatch_count,
             "engine_write_readiness_mismatch_channels": engine_write_readiness_mismatch_channels,
+            "actor_registry_readiness_status": actor_registry_readiness_status,
+            "actor_registry_actor_count": actor_registry_count,
+            "actor_registry_missing_transform_count": actor_registry_missing_transform_count,
+            "actor_registry_missing_aabb_count": actor_registry_missing_aabb_count,
             "asset_incomplete_count": asset_incomplete_count,
             "asset_failed_count": asset_failed_count,
         }
@@ -18728,6 +18750,7 @@ class AgentRuntime:
             resource_summary=resource_summary,
             environment_component_summary=environment_component_summary,
             engine_write_summary=dict(operation_replay_summary.get("engine_write_summary") or {}),
+            scene_entity_registry=scene_entity_registry,
         )
         scoped_actor_facts = self._actor_facts_for_plan(room, active_plan_id, batch_id=batch_id)
         intervention_digest = self._intervention_digest_for_report(
@@ -19249,6 +19272,11 @@ class AgentRuntime:
                 batch_id=str(batch_id or ""),
             ),
             engine_write_summary=engine_write_summary,
+            scene_entity_registry=self._scene_entity_registry_for_plan(
+                room_state,
+                str(plan_id or ""),
+                batch_id=str(batch_id or ""),
+            ),
         )
         return {
             "entry_count": int(replay.get("entry_count") or 0),
@@ -20483,6 +20511,7 @@ class AgentRuntime:
             resource_summary=resource_summary,
             environment_component_summary=environment_component_summary,
             engine_write_summary=engine_write_summary,
+            scene_entity_registry=scene_entity_registry,
         )
         context_type_counts: dict[str, int] = {}
         speaker_type_counts: dict[str, int] = {}
@@ -22028,6 +22057,11 @@ class AgentRuntime:
                 batch_id=str(batch_id or ""),
             ),
             engine_write_summary=dict(replay.get("engine_write_summary") or {}),
+            scene_entity_registry=self._scene_entity_registry_for_plan(
+                room_state,
+                str(plan_id or ""),
+                batch_id=str(batch_id or ""),
+            ),
         )
         replay["tool_execution_summary"] = self._tool_execution_replay_summary(replay.get("entries", []))
         replay["tool_graph_queue_summary"] = self._tool_graph_queue_replay_summary(replay.get("entries", []))
@@ -25969,6 +26003,7 @@ class AgentRuntime:
             resource_summary=resource_summary,
             environment_component_summary=environment_component_summary,
             engine_write_summary=engine_write_summary,
+            scene_entity_registry=scene_entity_registry,
         )
         engine_write_adapter_summary = self._engine_write_adapter_summary(
             readiness_summary=engine_write_readiness_summary,
