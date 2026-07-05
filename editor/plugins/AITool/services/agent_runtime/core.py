@@ -25936,6 +25936,7 @@ class AgentRuntime:
             "engine_write_boundary_summary": engine_write_boundary_summary,
             "engine_write_readiness_summary": engine_write_readiness_summary,
             "engine_write_adapter_summary": engine_write_adapter_summary,
+            "layout_adjustment_summary": layout_adjustment_summary,
             "actors": dict(self._actor_facts_for_plan(room, active_plan_id, batch_id=active_batch_id)),
             "geometry_summary": geometry_summary,
             "review_summary": review_summary,

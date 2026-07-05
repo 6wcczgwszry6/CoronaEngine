@@ -22680,6 +22680,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertTrue(
             query_summary["engine_write_adapter_summary"]["channels"]["actor_import"]["write_attempted"]
         )
+        self.assertIn("proposal_count", query_summary["layout_adjustment_summary"])
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["actor"], 2)
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["terrain"], 2)
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["skybox"], 1)
