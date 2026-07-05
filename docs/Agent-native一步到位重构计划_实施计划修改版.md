@@ -15445,3 +15445,11 @@ Phase 7/native-boundary validation work.
 - Evidence: the regression now asserts scene plan lifecycle counts, environment readiness replay, image/model resource replay, actor import replay, geometry fact replay, VLM checkpoint replay, batch completion, report generation, and ordered user-facing runtime events from environment ready to report ready.
 - Tests: targeted `test_substrate_terms_are_classified_but_not_imported_as_actors` passed.
 - Scope: no production Runtime code change; no native build; no Quasar changes; real engine terrain import, actor import, visual grounding, LAN sync, and VLM screenshot remain `[Pending F5/native verification]`.
+
+### Progress Update 346 - Transform/Delete Adapter Summary Closure
+
+- Change: `engine_write_adapter_summary` now merges layout adjustment transform results into the `layout_transform` channel, so status and final reports show transform result counts/statuses even when those results are produced by the layout adjustment Runtime tool rather than the generic engine-write replay bucket.
+- Why: F5 operator-facing reports must prove actor import/transform/delete writes are adapter-gated. Delete results were already visible through engine-write replay; layout transform results were visible in `layout_adjustment_summary` but not in the adapter channel summary.
+- Tests: strengthened the confirmed delete advisory provider regression so final reports expose actor delete result counts/statuses in `engine_write_adapter_summary`. Strengthened the layout adjustment confirmation regression so both status and final report expose layout transform result counts/statuses in `engine_write_adapter_summary`.
+- Verification: targeted delete-advisory and layout-transform regressions passed; syntax compile passed for touched Runtime/test files; `python -B editor/plugins/AITool/services/verify_ultimate_plan.py` passed: AgentRuntime 569 tests OK, LANChat guard 187 tests OK, V3 F5 probes OK, syntax compile OK, and all current Agent-native non-native static gates OK.
+- Scope: no native build; no Quasar changes; real C++ actor delete/transform calls and visual engine effects remain `[Pending F5/native verification]`.

@@ -27402,6 +27402,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             replay["engine_write_summary"]["latest_delete_results"][0]["observed_deleted"],
             True,
         )
+        report = runtime.generate_report("room-pending-delete-provider", plan_id=plan.plan_id)
+        delete_channel = report["engine_write_adapter_summary"]["channels"]["actor_delete"]
+        self.assertTrue(delete_channel["write_attempted"])
+        self.assertEqual(delete_channel["result_count"], 2)
+        self.assertEqual(delete_channel["status_counts"], {"failed": 1, "success": 1})
         engine_status = runtime.handle_message(
             room_id="room-pending-delete-provider",
             text="鏌ヨ鍐欏紩鎿庣姸鎬?",
@@ -27804,6 +27809,14 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             self.assertEqual(summary["transform_status_counts"], {"failed": 1, "success": 1})
             self.assertEqual(summary["ground_snapped_count"], 1)
             self.assertEqual(summary["proposals"][0]["transform_result_count"], 2)
+        for summary in (
+            report["engine_write_adapter_summary"],
+            status["engine_write_adapter_summary"],
+        ):
+            transform_channel = summary["channels"]["layout_transform"]
+            self.assertTrue(transform_channel["write_attempted"])
+            self.assertEqual(transform_channel["result_count"], 2)
+            self.assertEqual(transform_channel["status_counts"], {"failed": 1, "success": 1})
         replay = runtime.operation_replay(room_id="room-adjust-confirm", plan_id=plan.plan_id)
         replay_summary = replay["layout_adjustment_summary"]
         self.assertEqual(replay_summary["confirmation_count"], 1)

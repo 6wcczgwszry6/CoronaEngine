@@ -7232,12 +7232,14 @@ class AgentRuntime:
         readiness_summary: Mapping[str, Any] | None = None,
         boundary_summary: Mapping[str, Any] | None = None,
         replay_summary: Mapping[str, Any] | None = None,
+        layout_adjustment_summary: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return a compact read-only proof that engine writes are adapter-gated."""
 
         readiness = dict(readiness_summary or {})
         boundary = dict(boundary_summary or {})
         replay = dict(replay_summary or {})
+        layout_adjustment = dict(layout_adjustment_summary or {})
         channel_specs = {
             "environment_import": {
                 "boundary_count": "environment_import_boundary_count",
@@ -7293,6 +7295,22 @@ class AgentRuntime:
         for channel, spec in channel_specs.items():
             boundary_count = int(boundary.get(spec["boundary_count"]) or 0)
             result_count = int(replay.get(spec["result_count"]) or 0)
+            status_counts = AgentRuntime._safe_status_count_map(
+                replay.get(spec["status_counts"])
+            )
+            if channel == "layout_transform":
+                result_count = max(
+                    result_count,
+                    int(layout_adjustment.get("transform_result_count") or 0),
+                )
+                layout_status_counts = AgentRuntime._safe_status_count_map(
+                    layout_adjustment.get("transform_status_counts")
+                )
+                for status_key, status_count in layout_status_counts.items():
+                    status_counts[status_key] = max(
+                        int(status_counts.get(status_key) or 0),
+                        int(status_count or 0),
+                    )
             attempted = boundary_count > 0 or result_count > 0
             write_attempt_count += 1 if attempted else 0
             if channel in native_channels:
@@ -7320,9 +7338,7 @@ class AgentRuntime:
                 "write_attempted": attempted,
                 "boundary_count": boundary_count,
                 "result_count": result_count,
-                "status_counts": AgentRuntime._safe_status_count_map(
-                    replay.get(spec["status_counts"])
-                ),
+                "status_counts": status_counts,
                 "native_bridge_required": attempted,
                 "native_ready": channel in native_channels,
                 "readiness_mismatch": mismatch,
@@ -18364,10 +18380,17 @@ class AgentRuntime:
             batch_id=batch_id,
         )
         engine_write_readiness_summary = self._engine_write_readiness_summary(self._provider_summary)
+        state_patch_conflict_summary = self._state_patch_conflict_summary(room)
+        layout_adjustment_summary = self._layout_adjustment_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=batch_id,
+        )
         engine_write_adapter_summary = self._engine_write_adapter_summary(
             readiness_summary=engine_write_readiness_summary,
             boundary_summary=engine_write_boundary_summary,
             replay_summary=dict(operation_replay_summary.get("engine_write_summary") or {}),
+            layout_adjustment_summary=layout_adjustment_summary,
         )
         resource_summary = self._resource_summary_for_plan(room, active_plan_id, batch_id=batch_id)
         batch_resource_flow_summary = self._batch_resource_flow_summary_for_plan(
@@ -18376,12 +18399,6 @@ class AgentRuntime:
             batch_id=batch_id,
         )
         semantic_status_by_batch = dict(batch_resource_flow_summary.get("status_by_batch_id") or {})
-        state_patch_conflict_summary = self._state_patch_conflict_summary(room)
-        layout_adjustment_summary = self._layout_adjustment_summary_for_plan(
-            room,
-            active_plan_id,
-            batch_id=batch_id,
-        )
         pending = [
             dict(item)
             for item in room.get("pending_interventions", {}).values()
@@ -20243,10 +20260,16 @@ class AgentRuntime:
             batch_id=active_batch_id,
         )
         engine_write_readiness_summary = self._engine_write_readiness_summary(self._provider_summary)
+        layout_adjustment_summary = self._layout_adjustment_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
         engine_write_adapter_summary = self._engine_write_adapter_summary(
             readiness_summary=engine_write_readiness_summary,
             boundary_summary=engine_write_boundary_summary,
             replay_summary=engine_write_summary,
+            layout_adjustment_summary=layout_adjustment_summary,
         )
         resource_summary = self._resource_summary_for_plan(room, active_plan_id, batch_id=active_batch_id)
         batch_resource_flow_summary = self._batch_resource_flow_summary_for_plan(
@@ -20262,11 +20285,6 @@ class AgentRuntime:
             resource_summary=resource_summary,
             environment_component_summary=environment_component_summary,
             engine_write_summary=engine_write_summary,
-        )
-        layout_adjustment_summary = self._layout_adjustment_summary_for_plan(
-            room,
-            active_plan_id,
-            batch_id=active_batch_id,
         )
         context_type_counts: dict[str, int] = {}
         speaker_type_counts: dict[str, int] = {}
