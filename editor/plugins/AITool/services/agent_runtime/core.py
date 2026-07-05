@@ -17517,6 +17517,7 @@ class AgentRuntime:
                     if key not in merged or merged.get(key) in (None, "", [], {}):
                         merged[key] = value
             asset_id = actor_asset_id(merged)
+            bounds = bounds_from(merged)
             entity = {
                 "entity_id": str(actor_id),
                 "actor_id": str(actor_id),
@@ -17530,7 +17531,8 @@ class AgentRuntime:
                 ),
                 "entity_type": "actor",
                 "transform": transform_from(merged),
-                "bounds": bounds_from(merged),
+                "bounds": bounds,
+                "aabb": dict(bounds),
                 "grounding_status": actor_grounding_status(merged),
                 "interaction_capability": list_field(merged, "interaction_capability"),
                 "gameplay_tags": list_field(merged, "gameplay_tags"),
@@ -17560,6 +17562,7 @@ class AgentRuntime:
                 entity_id = f"environment:{current_batch_id}:{component_id}"
                 if entity_id in seen_entity_ids:
                     continue
+                bounds = bounds_from(component)
                 entity = {
                     "entity_id": entity_id,
                     "actor_id": "",
@@ -17568,7 +17571,8 @@ class AgentRuntime:
                     "semantic_role": str(component.get("name") or component_id),
                     "entity_type": "terrain" if component_type in {"terrain", "room_floor", "room_box"} else component_type,
                     "transform": transform_from(component),
-                    "bounds": bounds_from(component),
+                    "bounds": bounds,
+                    "aabb": dict(bounds),
                     "grounding_status": "not_applicable",
                     "interaction_capability": list_field(component, "interaction_capability"),
                     "gameplay_tags": list_field(component, "gameplay_tags") or ["environment"],
@@ -17604,6 +17608,7 @@ class AgentRuntime:
                 "entity_type": "substrate",
                 "transform": {},
                 "bounds": {},
+                "aabb": {},
                 "grounding_status": "not_applicable",
                 "interaction_capability": [],
                 "gameplay_tags": ["environment"],
