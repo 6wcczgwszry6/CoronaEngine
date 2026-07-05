@@ -22727,6 +22727,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         query_registry = query_summary["scene_entity_registry"]
         self.assertIn("asset_transfer_status_counts", query_registry)
         self.assertGreaterEqual(query_registry["asset_transfer_status_counts"].get("unavailable", 0), 1)
+        self.assertGreaterEqual(query_registry["transform_available_count"], 2)
+        self.assertGreaterEqual(query_registry["aabb_available_count"], 2)
         query_roles = {entity["semantic_role"]: entity for entity in query_registry["entities"]}
         self.assertTrue({"forest", "sky", "grass", "wooden table", "tent"}.issubset(query_roles))
         for role in ("wooden table", "tent"):
@@ -22763,6 +22765,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(status_registry["entity_type_counts"]["terrain"], 2)
         self.assertEqual(status_registry["entity_type_counts"]["skybox"], 1)
         self.assertIn("asset_transfer_status_counts", status_registry)
+        self.assertGreaterEqual(status_registry["transform_available_count"], 2)
+        self.assertGreaterEqual(status_registry["aabb_available_count"], 2)
         for role in ("wooden table", "tent"):
             entity = status_roles[role]
             self.assertEqual(entity["entity_type"], "actor")
@@ -22817,6 +22821,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             status_registry["entity_count"],
         )
         self.assertIn("asset_transfer_status_counts", report["scene_entity_registry"])
+        self.assertGreaterEqual(report["scene_entity_registry"]["transform_available_count"], 2)
+        self.assertGreaterEqual(report["scene_entity_registry"]["aabb_available_count"], 2)
         report_roles = {
             entity["semantic_role"]: entity
             for entity in report["scene_entity_registry"]["entities"]

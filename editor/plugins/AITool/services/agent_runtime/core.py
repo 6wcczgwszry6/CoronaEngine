@@ -17629,10 +17629,16 @@ class AgentRuntime:
         sync_status_counts: dict[str, int] = {}
         asset_transfer_status_counts: dict[str, int] = {}
         review_status_counts: dict[str, int] = {}
+        transform_available_count = 0
+        aabb_available_count = 0
         for entity in entities:
             add_count(entity_type_counts, str(entity.get("entity_type") or "unknown"))
             add_count(grounding_status_counts, str(entity.get("grounding_status") or "unknown"))
             add_count(sync_status_counts, str(entity.get("sync_status") or "unknown"))
+            if isinstance(entity.get("transform"), Mapping) and bool(entity.get("transform")):
+                transform_available_count += 1
+            if isinstance(entity.get("aabb"), Mapping) and bool(entity.get("aabb")):
+                aabb_available_count += 1
             transfer_status = entity.get("asset_transfer_status")
             if isinstance(transfer_status, Mapping):
                 if not transfer_status.get("available"):
@@ -17653,6 +17659,8 @@ class AgentRuntime:
             "entity_count": len(entities),
             "actor_count": sum(1 for entity in entities if entity.get("entity_type") == "actor"),
             "environment_count": sum(1 for entity in entities if entity.get("entity_type") != "actor"),
+            "transform_available_count": transform_available_count,
+            "aabb_available_count": aabb_available_count,
             "entity_type_counts": dict(sorted(entity_type_counts.items())),
             "grounding_status_counts": dict(sorted(grounding_status_counts.items())),
             "sync_status_counts": dict(sorted(sync_status_counts.items())),
