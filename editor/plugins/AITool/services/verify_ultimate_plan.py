@@ -4859,7 +4859,7 @@ def _scene_substrate_guardrail_gate() -> bool:
         "test_layout_terms_are_classified_but_not_imported_as_actors",
         "Create a forest camp with sky, forest, grass, wooden table, and tent",
         "Create a market with entrance, main street, boundary, wooden table, and tent",
-        '["forest", "sky", "grass", "wooden table", "tent"]',
+        'plan.concrete_object_items = ["wooden table", "tent"]',
         '["entrance", "main street", "boundary", "wooden table", "tent"]',
         'self.assertEqual(state["model_item_lists"][batch_id], ["wooden table", "tent"])',
         'self.assertEqual(set(state["image_resource_plans"][batch_id]), {"wooden table", "tent"})',

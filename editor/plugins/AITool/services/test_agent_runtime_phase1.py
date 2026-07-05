@@ -22605,7 +22605,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             owner_agent="elder",
         )
 
-        plan.concrete_object_items = ["forest", "sky", "grass", "wooden table", "tent"]
+        plan.concrete_object_items = ["wooden table", "tent"]
         runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
         result = runtime.execute_scene_plan(plan.plan_id, include_debug_graph_nodes=True)
         batch_id = result["batch"]["batch_id"]

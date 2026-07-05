@@ -771,12 +771,59 @@ def _explicit_item_candidates_from_text(text: str) -> list[str]:
         lowered = item.lower()
         if lowered in ignored_tokens or item in ignored_tokens:
             continue
+        if _is_scene_container_phrase(item):
+            continue
         if len(item) > 32:
             continue
         if any(word in lowered for word in ("please", "scene", "style", "simple")):
             continue
         candidates.append(item)
     return list(dict.fromkeys(candidates))[:8]
+
+
+def _is_scene_container_phrase(value: str) -> bool:
+    text = str(value or "").strip()
+    lowered = text.lower()
+    if not text:
+        return False
+    if text.endswith(("场景", "空间", "营地", "房间", "集市", "市场")) and len(text) > 2:
+        return True
+    if lowered.startswith(("a ", "an ", "the ")):
+        lowered = lowered.split(" ", 1)[1].strip()
+    return lowered.endswith((" scene", " space", " camp", " room", " market"))
+
+
+def _explicit_substrate_candidates_from_text(text: str) -> list[str]:
+    substrate_terms = {
+        "天空",
+        "天幕",
+        "草地",
+        "草原",
+        "森林",
+        "树林",
+        "地形",
+        "地面",
+        "山坡",
+        "道路",
+        "sky",
+        "grassland",
+        "grass",
+        "forest",
+        "woods",
+        "terrain",
+        "ground",
+        "hill",
+        "road",
+    }
+    out: list[str] = []
+    for item in _explicit_item_candidates_from_text(text):
+        normalized = str(item or "").strip()
+        lowered = normalized.lower()
+        if normalized in substrate_terms:
+            out.append(normalized)
+        elif lowered in substrate_terms:
+            out.append(lowered)
+    return list(dict.fromkeys(out))
 
 
 def route_candidate_model_names(text: str, items: list[str] | None = None) -> list[str]:
@@ -1733,7 +1780,11 @@ def _classify_scene_elements_tool(call: ToolCall) -> ToolResult:
     raw_items = call.args.get("items") or []
     if isinstance(raw_items, dict):
         raw_items = raw_items.get("candidate_items") or raw_items.get("items") or []
-    items = [{"name": str(item)} if not isinstance(item, dict) else dict(item) for item in raw_items]
+    merged_raw_items = list(raw_items)
+    for candidate in _explicit_substrate_candidates_from_text(text):
+        if candidate not in merged_raw_items:
+            merged_raw_items.append(candidate)
+    items = [{"name": str(item)} if not isinstance(item, dict) else dict(item) for item in merged_raw_items]
     classifier = _load_scene_element_classifier()
     route_model_items = classifier.route_model_items
     summarize_classification = classifier.summarize_classification
@@ -4371,18 +4422,46 @@ def _default_actor_import_provider(payload: dict[str, Any]) -> dict[str, Any]:
     for index, name in enumerate(model_items):
         actor_id = f"actor-{batch_id}-{index + 1:02d}"
         placement = dict(placements.get(name) or {})
+        position = list(placement.get("position") or [0.0, 0.0, 0.0])
+        rotation = list(placement.get("rotation") or [0.0, 0.0, 0.0])
+        scale = list(placement.get("scale") or [1.0, 1.0, 1.0])
+        aabb = _default_actor_aabb(position=position, scale=scale)
         actors[actor_id] = {
             "actor_id": actor_id,
+            "asset_id": str(name),
             "name": name,
             "plan_id": plan_id,
             "batch_id": batch_id,
-            "position": list(placement.get("position") or [0.0, 0.0, 0.0]),
-            "rotation": list(placement.get("rotation") or [0.0, 0.0, 0.0]),
-            "scale": list(placement.get("scale") or [1.0, 1.0, 1.0]),
+            "position": position,
+            "rotation": rotation,
+            "scale": scale,
+            "aabb": aabb,
+            "grounding_status": "grounded",
+            "support_type": "floor_supported",
+            "sync_lifecycle_status": "runtime_state",
             "zone_hint": str(placement.get("zone_hint") or ""),
             "source": "runtime_default_import",
         }
     return actors
+
+
+def _default_actor_aabb(*, position: Sequence[Any], scale: Sequence[Any]) -> dict[str, list[float]]:
+    def number_at(values: Sequence[Any], index: int, fallback: float) -> float:
+        try:
+            return float(values[index])
+        except (IndexError, TypeError, ValueError):
+            return fallback
+
+    x = number_at(position, 0, 0.0)
+    y = number_at(position, 1, 0.0)
+    z = number_at(position, 2, 0.0)
+    sx = max(0.1, abs(number_at(scale, 0, 1.0)))
+    sy = max(0.1, abs(number_at(scale, 1, 1.0)))
+    sz = max(0.1, abs(number_at(scale, 2, 1.0)))
+    return {
+        "min": [round(x - sx * 0.5, 4), round(y, 4), round(z - sz * 0.5, 4)],
+        "max": [round(x + sx * 0.5, 4), round(y + sy, 4), round(z + sz * 0.5, 4)],
+    }
 
 
 def _make_scene_snapshot_tool(provider: Callable[[Any], dict[str, Any]]) -> Callable[[ToolCall], ToolResult]:
