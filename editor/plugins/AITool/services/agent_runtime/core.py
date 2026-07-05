@@ -1344,6 +1344,7 @@ class ActorFactValidator:
         "batch_id",
         "deleted",
         "deleted_at",
+        "grounding_status",
         "last_sync_event",
         "last_sync_status",
         "last_sync_timestamp",
@@ -1355,6 +1356,7 @@ class ActorFactValidator:
         "scale",
         "scene_name",
         "source",
+        "support_type",
         "sync_lifecycle_status",
         "version",
         "zone_hint",
@@ -1387,6 +1389,8 @@ class ActorFactValidator:
         "plan_id",
         "scene_name",
         "source",
+        "grounding_status",
+        "support_type",
         "sync_lifecycle_status",
         "zone_hint",
     }
@@ -16373,6 +16377,10 @@ class AgentRuntime:
                     ground_snapped_count += 1
                 if bool(result.get("overlap_resolved")):
                     overlap_resolved_count += 1
+            if not transform_results:
+                for applied_delta in applied_deltas:
+                    if isinstance(applied_delta, Mapping) and bool(applied_delta.get("ground_snapped")):
+                        ground_snapped_count += 1
             proposal_rows.append(
                 {
                     "proposal_id": proposal_id,
@@ -29311,6 +29319,17 @@ class AgentRuntime:
             if ground_snap.get("snapped"):
                 next_position[1] = float(ground_snap["position_y"])
                 updated["aabb"] = ground_snap["aabb"]
+            updated["support_type"] = support_type
+            if support_type == "floor_supported":
+                updated["grounding_status"] = (
+                    "grounded"
+                    if ground_snap.get("snapped") or ground_snap.get("reason") == "already grounded"
+                    else "needs_review"
+                )
+            elif support_type in {"wall_mounted", "ceiling_hung", "system"}:
+                updated["grounding_status"] = "not_applicable"
+            else:
+                updated["grounding_status"] = "unknown"
             updated["position"] = [round(float(value), 3) for value in next_position[:3]]
             if scene_name:
                 updated["scene_name"] = scene_name
@@ -29409,6 +29428,10 @@ class AgentRuntime:
                     transform_failure_code_counts[failure_code] = (
                         transform_failure_code_counts.get(failure_code, 0) + 1
                     )
+        if not transform_results:
+            for applied_delta in updated_proposal.get("applied_deltas") or []:
+                if isinstance(applied_delta, Mapping) and bool(applied_delta.get("ground_snapped")):
+                    ground_snapped_count += 1
         transform_failed_count = sum(transform_failure_code_counts.values())
         transform_success_count = max(0, len(transform_results) - transform_failed_count)
         layout_fact_key = f"{plan_id}:{proposal_id or 'layout'}:layout_transform_result"

@@ -27877,8 +27877,12 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(chest["position"], [1.0, 0.3, 1.0])
         self.assertEqual(chest["aabb"]["min"], [0.5, 0.0, 0.5])
         self.assertEqual(chest["aabb"]["max"], [1.5, 1.0, 1.5])
+        self.assertEqual(chest["support_type"], "floor_supported")
+        self.assertEqual(chest["grounding_status"], "grounded")
         self.assertEqual(torch["position"], [-1.2, 1.4, 0.0])
         self.assertEqual(torch["aabb"]["min"][1], 1.0)
+        self.assertEqual(torch["support_type"], "wall_mounted")
+        self.assertEqual(torch["grounding_status"], "not_applicable")
         proposal = room["layout_adjustment_proposals"][plan.plan_id]
         applied_by_actor = {item["actor_id"]: item for item in proposal["applied_deltas"]}
         self.assertTrue(applied_by_actor["actor-chest"]["ground_snapped"])
@@ -27889,6 +27893,23 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             applied_by_actor["actor-torch"]["ground_snap_reason"],
             "wall_mounted actor skipped",
         )
+        status = runtime.status_summary("room-adjust-ground-runtime", plan_id=plan.plan_id)
+        status_roles = {
+            entity["actor_id"]: entity
+            for entity in status["scene_entity_registry"]["entities"]
+            if entity["entity_type"] == "actor"
+        }
+        self.assertEqual(status_roles["actor-chest"]["grounding_status"], "grounded")
+        self.assertEqual(status_roles["actor-torch"]["grounding_status"], "not_applicable")
+        self.assertEqual(status["layout_adjustment_summary"]["ground_snapped_count"], 1)
+        report = runtime.generate_report("room-adjust-ground-runtime", plan_id=plan.plan_id)
+        report_roles = {
+            entity["actor_id"]: entity
+            for entity in report["scene_entity_registry"]["entities"]
+            if entity["entity_type"] == "actor"
+        }
+        self.assertEqual(report_roles["actor-chest"]["grounding_status"], "grounded")
+        self.assertEqual(report["layout_adjustment_summary"]["ground_snapped_count"], 1)
 
     def test_confirm_layout_adjustment_records_batch_scope_for_single_batch_proposal(self) -> None:
         def fake_layout_transform_provider(payload: dict) -> dict:
