@@ -22744,11 +22744,15 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             self.assertIn("lighting_profile", entity)
             self.assertIn("script_bindings", entity)
             self.assertIn("sync_status", entity)
+            self.assertIn("asset_transfer_status", entity)
             self.assertIn("review_status", entity)
+            self.assertIn("available", entity["asset_transfer_status"])
+            self.assertIn("transfer_status", entity["asset_transfer_status"])
         for role in ("forest", "sky", "grass"):
             self.assertNotEqual(query_roles[role]["entity_type"], "actor")
             self.assertIn("aabb", query_roles[role])
             self.assertEqual(query_roles[role]["grounding_status"], "not_applicable")
+            self.assertIn("asset_transfer_status", query_roles[role])
         status_registry = status["scene_entity_registry"]
         status_entities = status_registry["entities"]
         status_roles = {entity["semantic_role"]: entity for entity in status_entities}
@@ -22773,7 +22777,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             self.assertIn("lighting_profile", entity)
             self.assertIn("script_bindings", entity)
             self.assertIn("sync_status", entity)
+            self.assertIn("asset_transfer_status", entity)
             self.assertIn("review_status", entity)
+            self.assertIn("available", entity["asset_transfer_status"])
+            self.assertIn("transfer_status", entity["asset_transfer_status"])
         for role in ("forest", "sky", "grass"):
             self.assertNotEqual(status_roles[role]["entity_type"], "actor")
             self.assertIn("aabb", status_roles[role])
@@ -22782,6 +22789,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             self.assertIn("audio_profile", status_roles[role])
             self.assertIn("lighting_profile", status_roles[role])
             self.assertIn("script_bindings", status_roles[role])
+            self.assertIn("asset_transfer_status", status_roles[role])
             self.assertEqual(status_roles[role]["grounding_status"], "not_applicable")
         self.assertEqual(status_roles["sky"]["environment_profile"]["sky_mode"], "open_sky")
         self.assertEqual(status_roles["forest"]["environment_profile"]["terrain_profile"], "outdoor_nature")
@@ -22805,6 +22813,12 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             report["scene_entity_registry"]["entity_count"],
             status_registry["entity_count"],
         )
+        report_roles = {
+            entity["semantic_role"]: entity
+            for entity in report["scene_entity_registry"]["entities"]
+        }
+        for role in ("wooden table", "tent", "forest", "sky", "grass"):
+            self.assertIn("asset_transfer_status", report_roles[role])
         self.assertEqual(report["runtime_scene_flow_summary"]["status"], "ok")
         self.assertEqual(report["runtime_scene_flow_summary"]["steps"][-1]["status"], "ok")
         self.assertEqual(report["fact_source_boundary_summary"]["runtime_state_source"], "RuntimeState")
