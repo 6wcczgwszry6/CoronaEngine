@@ -17651,16 +17651,28 @@ class AgentRuntime:
             else:
                 add_count(asset_transfer_status_counts, "unknown")
             add_count(review_status_counts, str(entity.get("review_status") or "unknown"))
+        actor_count = sum(1 for entity in entities if entity.get("entity_type") == "actor")
+        missing_transform_count = max(0, actor_count - transform_available_count)
+        missing_aabb_count = max(0, actor_count - aabb_available_count)
+        if not actor_count:
+            readiness_status = "no_actors"
+        elif missing_transform_count or missing_aabb_count:
+            readiness_status = "partial"
+        else:
+            readiness_status = "ready"
 
         return {
             "available": bool(entities),
             "plan_id": active_plan_id,
             "batch_id": active_batch_id,
             "entity_count": len(entities),
-            "actor_count": sum(1 for entity in entities if entity.get("entity_type") == "actor"),
+            "actor_count": actor_count,
             "environment_count": sum(1 for entity in entities if entity.get("entity_type") != "actor"),
+            "readiness_status": readiness_status,
             "transform_available_count": transform_available_count,
             "aabb_available_count": aabb_available_count,
+            "missing_transform_count": missing_transform_count,
+            "missing_aabb_count": missing_aabb_count,
             "entity_type_counts": dict(sorted(entity_type_counts.items())),
             "grounding_status_counts": dict(sorted(grounding_status_counts.items())),
             "sync_status_counts": dict(sorted(sync_status_counts.items())),
