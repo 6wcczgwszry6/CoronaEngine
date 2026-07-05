@@ -22605,6 +22605,27 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(status["environment_component_summary"]["component_count"], len(environment_components))
         self.assertEqual(status["environment_component_summary"]["type_counts"]["skybox"], 1)
         self.assertEqual(status["environment_component_summary"]["type_counts"]["terrain"], 2)
+        status_registry = status["scene_entity_registry"]
+        status_entities = status_registry["entities"]
+        status_roles = {entity["semantic_role"]: entity for entity in status_entities}
+        self.assertTrue({"forest", "sky", "grass", "wooden table", "tent"}.issubset(status_roles))
+        self.assertEqual(status_registry["entity_type_counts"]["actor"], 2)
+        self.assertEqual(status_registry["entity_type_counts"]["terrain"], 2)
+        self.assertEqual(status_registry["entity_type_counts"]["skybox"], 1)
+        for role in ("wooden table", "tent"):
+            entity = status_roles[role]
+            self.assertEqual(entity["entity_type"], "actor")
+            self.assertIn("actor_id", entity)
+            self.assertIn("asset_id", entity)
+            self.assertIn("model_ref", entity)
+            self.assertIn("transform", entity)
+            self.assertIn("bounds", entity)
+            self.assertIn("grounding_status", entity)
+            self.assertIn("sync_status", entity)
+            self.assertIn("review_status", entity)
+        for role in ("forest", "sky", "grass"):
+            self.assertNotEqual(status_roles[role]["entity_type"], "actor")
+            self.assertEqual(status_roles[role]["grounding_status"], "not_applicable")
         self.assertGreaterEqual(status["review_summary"]["review_count"], 2)
         self.assertIn("structure_review", status["review_summary"]["checkpoint_counts"])
         report = runtime.generate_report("room-forest", plan_id=plan.plan_id)
@@ -22616,6 +22637,14 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(report["environment_component_summary"]["component_count"], len(environment_components))
         self.assertEqual(report["environment_component_summary"]["type_counts"]["skybox"], 1)
         self.assertEqual(report["environment_component_summary"]["type_counts"]["terrain"], 2)
+        self.assertEqual(
+            report["scene_entity_registry"]["entity_type_counts"],
+            status_registry["entity_type_counts"],
+        )
+        self.assertEqual(
+            report["scene_entity_registry"]["entity_count"],
+            status_registry["entity_count"],
+        )
         self.assertGreaterEqual(report["review_summary"]["review_count"], 2)
         self.assertIn("structure_review", report["review_summary"]["checkpoint_counts"])
         graph_nodes = result["graph"]["nodes"].values()
@@ -28415,7 +28444,6 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
 
 
 

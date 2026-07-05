@@ -3003,6 +3003,7 @@ class ReportRecordValidator:
         "resource_summary",
         "room_id",
         "runtime_guard_replay_summary",
+        "scene_entity_registry",
         "scene_snapshot_summary",
         "scene_design_contract_summary",
         "semantic_arbitration_summary",
@@ -17139,6 +17140,260 @@ class AgentRuntime:
                 scoped[actor_key] = dict(actor)
         return scoped
 
+    @staticmethod
+    def _scene_entity_registry_for_plan(
+        room: Mapping[str, Any],
+        plan_id: str,
+        *,
+        batch_id: str = "",
+    ) -> dict[str, Any]:
+        """Return a game-facing entity registry derived from RuntimeState facts."""
+
+        active_plan_id = str(plan_id or "")
+        active_batch_id = str(batch_id or "")
+        actors = AgentRuntime._actor_facts_for_plan(room, active_plan_id, batch_id=active_batch_id)
+        observed = AgentRuntime._observed_actor_facts_for_plan(room, active_plan_id, batch_id=active_batch_id)
+        classification = AgentRuntime._classification_summary_for_plan(room, active_plan_id, batch_id=active_batch_id)
+        assets = dict(room.get("assets") or {})
+        environment_components = dict(room.get("environment_components") or {})
+        batch_ids = AgentRuntime._batch_ids_for_plan(room, active_plan_id) if active_plan_id else set()
+        if active_batch_id:
+            candidate_batch_ids = [active_batch_id]
+        elif batch_ids:
+            candidate_batch_ids = sorted(batch_ids)
+        else:
+            candidate_batch_ids = sorted(str(key) for key in environment_components)
+
+        def vector3(value: Any) -> list[float]:
+            if isinstance(value, Mapping):
+                raw = [value.get("x"), value.get("y"), value.get("z")]
+            elif isinstance(value, (list, tuple)):
+                raw = list(value[:3])
+            else:
+                return []
+            if len(raw) < 3:
+                return []
+            try:
+                return [round(float(raw[0] or 0.0), 4), round(float(raw[1] or 0.0), 4), round(float(raw[2] or 0.0), 4)]
+            except (TypeError, ValueError):
+                return []
+
+        def transform_from(row: Mapping[str, Any]) -> dict[str, Any]:
+            position = vector3(row.get("position") or row.get("location") or row.get("translation"))
+            rotation = vector3(row.get("rotation") or row.get("euler") or row.get("rotator"))
+            scale = vector3(row.get("scale"))
+            transform: dict[str, Any] = {}
+            if position:
+                transform["position"] = position
+            if rotation:
+                transform["rotation"] = rotation
+            if scale:
+                transform["scale"] = scale
+            return transform
+
+        def bounds_from(row: Mapping[str, Any]) -> dict[str, Any]:
+            for key in ("aabb", "bounds", "scene_aabb"):
+                value = row.get(key)
+                if isinstance(value, Mapping):
+                    return dict(value)
+            return {}
+
+        def actor_asset_id(row: Mapping[str, Any]) -> str:
+            for key in ("asset_id", "model_asset_id", "resource_id", "model_id"):
+                value = str(row.get(key) or "").strip()
+                if value:
+                    return value
+            return ""
+
+        def actor_model_ref(row: Mapping[str, Any], asset_id: str) -> str:
+            for key in ("model_ref", "model_id", "resource_id"):
+                value = str(row.get(key) or "").strip()
+                if value:
+                    if "://" not in value and ":\\" not in value and "/" not in value and "\\" not in value:
+                        return value
+            asset = assets.get(asset_id)
+            if isinstance(asset, Mapping):
+                for key in ("model_ref", "model_id", "resource_id"):
+                    value = str(asset.get(key) or "").strip()
+                    if value:
+                        if "://" not in value and ":\\" not in value and "/" not in value and "\\" not in value:
+                            return value
+            return asset_id
+
+        def list_field(row: Mapping[str, Any], key: str) -> list[Any]:
+            value = row.get(key)
+            if isinstance(value, list):
+                return list(value)
+            if isinstance(value, tuple):
+                return list(value)
+            if isinstance(value, str) and value.strip():
+                return [value.strip()]
+            return []
+
+        def mapping_field(row: Mapping[str, Any], key: str) -> dict[str, Any]:
+            value = row.get(key)
+            return dict(value) if isinstance(value, Mapping) else {}
+
+        def actor_sync_status(row: Mapping[str, Any], asset_id: str) -> str:
+            for key in ("sync_status", "sync_lifecycle_status", "last_sync_event"):
+                value = str(row.get(key) or "").strip()
+                if value:
+                    return value
+            asset = assets.get(asset_id)
+            if isinstance(asset, Mapping):
+                value = str(asset.get("transfer_status") or "").strip()
+                if value:
+                    return value
+            return "runtime_state"
+
+        def actor_grounding_status(row: Mapping[str, Any]) -> str:
+            explicit = str(row.get("grounding_status") or row.get("grounded_status") or "").strip()
+            if explicit:
+                return explicit
+            bounds = bounds_from(row)
+            min_value = bounds.get("min") if isinstance(bounds, Mapping) else None
+            if isinstance(min_value, (list, tuple)) and len(min_value) >= 2:
+                try:
+                    return "grounded" if abs(float(min_value[1])) <= 0.05 else "needs_review"
+                except (TypeError, ValueError):
+                    return "unknown"
+            return "unknown"
+
+        def add_count(target: dict[str, int], key: str) -> None:
+            normalized = str(key or "unknown").strip() or "unknown"
+            target[normalized] = target.get(normalized, 0) + 1
+
+        entities: list[dict[str, Any]] = []
+        seen_entity_ids: set[str] = set()
+
+        for actor_id, actor_row in sorted(actors.items()):
+            if not isinstance(actor_row, Mapping):
+                continue
+            observed_row = observed.get(actor_id, {})
+            merged = {**dict(actor_row)}
+            if isinstance(observed_row, Mapping):
+                for key, value in dict(observed_row).items():
+                    if key not in merged or merged.get(key) in (None, "", [], {}):
+                        merged[key] = value
+            asset_id = actor_asset_id(merged)
+            entity = {
+                "entity_id": str(actor_id),
+                "actor_id": str(actor_id),
+                "asset_id": asset_id,
+                "model_ref": actor_model_ref(merged, asset_id),
+                "semantic_role": str(
+                    merged.get("semantic_role")
+                    or merged.get("role")
+                    or merged.get("name")
+                    or actor_id
+                ),
+                "entity_type": "actor",
+                "transform": transform_from(merged),
+                "bounds": bounds_from(merged),
+                "grounding_status": actor_grounding_status(merged),
+                "interaction_capability": list_field(merged, "interaction_capability"),
+                "gameplay_tags": list_field(merged, "gameplay_tags"),
+                "physics_profile": mapping_field(merged, "physics_profile"),
+                "audio_profile": mapping_field(merged, "audio_profile"),
+                "lighting_profile": mapping_field(merged, "lighting_profile"),
+                "script_bindings": list_field(merged, "script_bindings"),
+                "sync_status": actor_sync_status(merged, asset_id),
+                "review_status": str(merged.get("review_status") or "pending_review"),
+                "plan_id": str(merged.get("plan_id") or active_plan_id),
+                "batch_id": str(merged.get("batch_id") or ""),
+            }
+            seen_entity_ids.add(entity["entity_id"])
+            entities.append(entity)
+
+        for current_batch_id in candidate_batch_ids:
+            components = environment_components.get(current_batch_id, {})
+            if not isinstance(components, Mapping):
+                continue
+            for component_id, component in sorted(components.items()):
+                if not isinstance(component, Mapping):
+                    continue
+                component_type = str(component.get("component_type") or "environment").strip() or "environment"
+                entity_id = f"environment:{current_batch_id}:{component_id}"
+                if entity_id in seen_entity_ids:
+                    continue
+                entity = {
+                    "entity_id": entity_id,
+                    "actor_id": "",
+                    "asset_id": str(component.get("asset_id") or ""),
+                    "model_ref": str(component.get("model_ref") or component.get("handler") or component_type),
+                    "semantic_role": str(component.get("name") or component_id),
+                    "entity_type": "terrain" if component_type in {"terrain", "room_floor", "room_box"} else component_type,
+                    "transform": transform_from(component),
+                    "bounds": bounds_from(component),
+                    "grounding_status": "not_applicable",
+                    "interaction_capability": list_field(component, "interaction_capability"),
+                    "gameplay_tags": list_field(component, "gameplay_tags") or ["environment"],
+                    "physics_profile": mapping_field(component, "physics_profile"),
+                    "audio_profile": mapping_field(component, "audio_profile"),
+                    "lighting_profile": mapping_field(component, "lighting_profile"),
+                    "script_bindings": list_field(component, "script_bindings"),
+                    "sync_status": str(component.get("sync_status") or component.get("status") or "runtime_state"),
+                    "review_status": str(component.get("review_status") or "pending_review"),
+                    "plan_id": active_plan_id,
+                    "batch_id": str(current_batch_id),
+                }
+                seen_entity_ids.add(entity_id)
+                entities.append(entity)
+
+        for name in list(classification.get("substrate_items") or []):
+            text = str(name or "").strip()
+            if not text:
+                continue
+            entity_id = f"substrate:{text}"
+            if entity_id in seen_entity_ids:
+                continue
+            entities.append({
+                "entity_id": entity_id,
+                "actor_id": "",
+                "asset_id": "",
+                "model_ref": "",
+                "semantic_role": text,
+                "entity_type": "substrate",
+                "transform": {},
+                "bounds": {},
+                "grounding_status": "not_applicable",
+                "interaction_capability": [],
+                "gameplay_tags": ["environment"],
+                "physics_profile": {},
+                "audio_profile": {},
+                "lighting_profile": {},
+                "script_bindings": [],
+                "sync_status": "planned",
+                "review_status": "pending_review",
+                "plan_id": active_plan_id,
+                "batch_id": active_batch_id,
+            })
+            seen_entity_ids.add(entity_id)
+
+        entity_type_counts: dict[str, int] = {}
+        grounding_status_counts: dict[str, int] = {}
+        sync_status_counts: dict[str, int] = {}
+        review_status_counts: dict[str, int] = {}
+        for entity in entities:
+            add_count(entity_type_counts, str(entity.get("entity_type") or "unknown"))
+            add_count(grounding_status_counts, str(entity.get("grounding_status") or "unknown"))
+            add_count(sync_status_counts, str(entity.get("sync_status") or "unknown"))
+            add_count(review_status_counts, str(entity.get("review_status") or "unknown"))
+
+        return {
+            "available": bool(entities),
+            "plan_id": active_plan_id,
+            "batch_id": active_batch_id,
+            "entity_count": len(entities),
+            "actor_count": sum(1 for entity in entities if entity.get("entity_type") == "actor"),
+            "environment_count": sum(1 for entity in entities if entity.get("entity_type") != "actor"),
+            "entity_type_counts": dict(sorted(entity_type_counts.items())),
+            "grounding_status_counts": dict(sorted(grounding_status_counts.items())),
+            "sync_status_counts": dict(sorted(sync_status_counts.items())),
+            "review_status_counts": dict(sorted(review_status_counts.items())),
+            "entities": entities,
+        }
+
     def _operation_replay_summary_via_tool_graph(
         self,
         *,
@@ -18083,6 +18338,11 @@ class AgentRuntime:
             sync_replay_summary=dict(operation_replay_summary.get("sync_replay_summary") or {}),
             message_delivery_summary=dict(operation_replay_summary.get("message_delivery_summary") or {}),
         )
+        scene_entity_registry = self._scene_entity_registry_for_plan(
+            room,
+            active_plan_id,
+            batch_id=batch_id,
+        )
         report_health_summary = self._report_health_summary(
             batch_resource_flow_summary=batch_resource_flow_summary,
             import_summary=import_summary,
@@ -18148,6 +18408,7 @@ class AgentRuntime:
             "classification_summary": classification_summary,
             "scene_design_contract_summary": scene_design_contract_summary,
             "semantic_arbitration_summary": semantic_arbitration_summary,
+            "scene_entity_registry": scene_entity_registry,
             "scene_snapshot_summary": scene_snapshot_summary,
             "environment_component_summary": environment_component_summary,
             "resource_summary": resource_summary,
@@ -19792,6 +20053,11 @@ class AgentRuntime:
             active_plan_id,
             batch_id=active_batch_id,
         )
+        scene_entity_registry = self._scene_entity_registry_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
         import_summary = self._import_summary_for_plan(room, active_plan_id, batch_id=active_batch_id)
         engine_write_boundary_summary = self._engine_write_boundary_summary_for_plan(
             room,
@@ -19934,6 +20200,7 @@ class AgentRuntime:
             "classification_summary": classification_summary,
             "scene_design_contract_summary": scene_design_contract_summary,
             "semantic_arbitration_summary": semantic_arbitration_summary,
+            "scene_entity_registry": scene_entity_registry,
             "scene_snapshot_summary": scene_snapshot_summary,
             "environment_component_summary": environment_component_summary,
             "resource_summary": resource_summary,
