@@ -22665,6 +22665,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["actor"], 2)
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["terrain"], 2)
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["skybox"], 1)
+        query_flow = query_summary["runtime_scene_flow_summary"]
+        self.assertEqual(query_flow["status"], "ok")
+        self.assertEqual(
+            [step["step"] for step in query_flow["steps"]],
+            ["plan", "terrain", "asset", "actor", "review", "report"],
+        )
+        self.assertEqual(query_flow["steps"][-1]["status"], "pending")
         status_registry = status["scene_entity_registry"]
         status_entities = status_registry["entities"]
         status_roles = {entity["semantic_role"]: entity for entity in status_entities}
@@ -22708,6 +22715,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             report["scene_entity_registry"]["entity_count"],
             status_registry["entity_count"],
         )
+        self.assertEqual(report["runtime_scene_flow_summary"]["status"], "ok")
+        self.assertEqual(report["runtime_scene_flow_summary"]["steps"][-1]["status"], "ok")
         self.assertGreaterEqual(report["review_summary"]["review_count"], 2)
         self.assertIn("structure_review", report["review_summary"]["checkpoint_counts"])
         replay = report["operation_replay_summary"]

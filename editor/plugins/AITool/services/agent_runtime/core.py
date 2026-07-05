@@ -3045,6 +3045,7 @@ class ReportRecordValidator:
         "resource_summary",
         "room_id",
         "runtime_guard_replay_summary",
+        "runtime_scene_flow_summary",
         "scene_entity_registry",
         "scene_snapshot_summary",
         "scene_design_contract_summary",
@@ -17642,6 +17643,77 @@ class AgentRuntime:
             "entities": entities,
         }
 
+    @staticmethod
+    def _runtime_scene_flow_summary(
+        *,
+        plan_summary: Mapping[str, Any],
+        classification_summary: Mapping[str, Any],
+        environment_component_summary: Mapping[str, Any],
+        resource_summary: Mapping[str, Any],
+        import_summary: Mapping[str, Any],
+        review_summary: Mapping[str, Any],
+        scene_entity_registry: Mapping[str, Any],
+        operation_replay_summary: Mapping[str, Any],
+        report_generated: bool = False,
+    ) -> dict[str, Any]:
+        """Compact F5-facing replay of plan -> terrain -> asset -> actor -> review -> report."""
+
+        concrete_items = list(plan_summary.get("concrete_object_items") or [])
+        model_items = list(classification_summary.get("model_items") or [])
+        substrate_items = list(classification_summary.get("substrate_items") or [])
+        environment_type_counts = dict(environment_component_summary.get("type_counts") or {})
+        resource_by_phase = dict(resource_summary.get("by_phase") or {})
+        image_phase = dict(resource_by_phase.get("image") or {})
+        model_phase = dict(resource_by_phase.get("model") or {})
+        entity_type_counts = dict(scene_entity_registry.get("entity_type_counts") or {})
+        flow_steps = [
+            {
+                "step": "plan",
+                "status": "ok" if concrete_items or model_items else "missing",
+                "item_count": len(concrete_items or model_items),
+            },
+            {
+                "step": "terrain",
+                "status": "ok" if environment_type_counts else "missing",
+                "substrate_count": len(substrate_items),
+                "component_type_counts": dict(sorted(environment_type_counts.items())),
+            },
+            {
+                "step": "asset",
+                "status": "ok"
+                if int(image_phase.get("failed_count") or 0) == 0
+                and int(model_phase.get("failed_count") or 0) == 0
+                and int(model_phase.get("requested_count") or 0) > 0
+                else "missing",
+                "image_requested_count": int(image_phase.get("requested_count") or 0),
+                "model_requested_count": int(model_phase.get("requested_count") or 0),
+            },
+            {
+                "step": "actor",
+                "status": "ok" if int(import_summary.get("imported_count") or 0) > 0 else "missing",
+                "actor_count": int(scene_entity_registry.get("actor_count") or entity_type_counts.get("actor") or 0),
+                "imported_count": int(import_summary.get("imported_count") or 0),
+            },
+            {
+                "step": "review",
+                "status": "ok" if int(review_summary.get("review_count") or 0) > 0 else "missing",
+                "review_count": int(review_summary.get("review_count") or 0),
+                "issue_count": int(review_summary.get("issue_count") or 0),
+            },
+            {
+                "step": "report",
+                "status": "ok" if report_generated else "pending",
+                "operation_entry_count": int(operation_replay_summary.get("entry_count") or 0),
+            },
+        ]
+        return {
+            "status": "ok" if all(step["status"] in {"ok", "pending"} for step in flow_steps) else "incomplete",
+            "steps": flow_steps,
+            "model_items": model_items,
+            "substrate_items": substrate_items,
+            "entity_type_counts": dict(sorted(entity_type_counts.items())),
+        }
+
     def _operation_replay_summary_via_tool_graph(
         self,
         *,
@@ -18630,6 +18702,19 @@ class AgentRuntime:
             graphs=user_visible_graphs,
             queue_items=graph_queue_items,
         )
+        runtime_scene_flow_summary = self._runtime_scene_flow_summary(
+            plan_summary={
+                "concrete_object_items": list(plan.get("concrete_object_items") or []),
+            },
+            classification_summary=classification_summary,
+            environment_component_summary=environment_component_summary,
+            resource_summary=resource_summary,
+            import_summary=import_summary,
+            review_summary=review_summary,
+            scene_entity_registry=scene_entity_registry,
+            operation_replay_summary=operation_replay_summary,
+            report_generated=True,
+        )
         report = {
             "room_id": str(room_id),
             "plan_id": active_plan_id,
@@ -18640,6 +18725,7 @@ class AgentRuntime:
             "operation_total_count": len(self.operation_log.entries()),
             "operation_replay_summary": operation_replay_summary,
             "runtime_guard_replay_summary": dict(operation_replay_summary.get("runtime_guard_replay_summary") or {}),
+            "runtime_scene_flow_summary": runtime_scene_flow_summary,
             "scene_plan_lifecycle_summary": dict(operation_replay_summary.get("scene_plan_lifecycle_summary") or {}),
             "vlm_checkpoint_summary": dict(operation_replay_summary.get("vlm_checkpoint_summary") or {}),
             "review_advisory_replay_summary": dict(operation_replay_summary.get("review_advisory_summary") or {}),
@@ -20435,6 +20521,19 @@ class AgentRuntime:
             batch_id=active_batch_id,
         )
         tool_capability_summary = dict(self.tool_manifest().get("summary") or {})
+        runtime_scene_flow_summary = self._runtime_scene_flow_summary(
+            plan_summary={
+                "concrete_object_items": list(plan.get("concrete_object_items") or []),
+            },
+            classification_summary=classification_summary,
+            environment_component_summary=environment_component_summary,
+            resource_summary=resource_summary,
+            import_summary=import_summary,
+            review_summary=review_summary,
+            scene_entity_registry=scene_entity_registry,
+            operation_replay_summary=operation_scope,
+            report_generated=False,
+        )
         summary = {
             "room_id": room_key,
             "available": available,
@@ -20448,6 +20547,7 @@ class AgentRuntime:
             "provider_readiness_summary": self._provider_readiness_summary(self._provider_summary),
             "engine_write_readiness_summary": engine_write_readiness_summary,
             "engine_write_adapter_summary": engine_write_adapter_summary,
+            "runtime_scene_flow_summary": runtime_scene_flow_summary,
             "tool_capability_summary": {
                 key: value
                 for key, value in tool_capability_summary.items()
@@ -25733,6 +25833,52 @@ class AgentRuntime:
             batch_ids = self._batch_ids_for_plan(room, active_plan_id)
             if batch_ids:
                 active_batch_id = sorted(batch_ids)[-1]
+        plan = dict(room.get("scene_plans", {}).get(active_plan_id, {}) or {})
+        classification_summary = self._classification_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
+        environment_component_summary = self._environment_component_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
+        resource_summary = self._resource_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
+        import_summary = self._import_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
+        geometry_summary = self._geometry_fact_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
+        review_summary = self._review_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
+        scene_entity_registry = self._scene_entity_registry_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
+        operation_scope = self._operation_log_snapshot_from_entries(
+            self._operation_log_entries_for_runtime_scope(
+                room_id=str(room_id),
+                plan_id=active_plan_id,
+                batch_id=active_batch_id,
+            ),
+            room_id=str(room_id),
+            plan_id=active_plan_id,
+            batch_id=active_batch_id,
+        )
         snapshot["summary"] = {
             "room_id": str(room_id),
             "plan_id": active_plan_id,
@@ -25742,20 +25888,21 @@ class AgentRuntime:
             "substrate_resolutions": list(dict(room.get("substrate_resolutions") or {}).get(active_batch_id) or []),
             "environment_components": dict(dict(room.get("environment_components") or {}).get(active_batch_id) or {}),
             "actors": dict(self._actor_facts_for_plan(room, active_plan_id, batch_id=active_batch_id)),
-            "geometry_summary": self._geometry_fact_summary_for_plan(
-                room,
-                active_plan_id,
-                batch_id=active_batch_id,
-            ),
-            "review_summary": self._review_summary_for_plan(
-                room,
-                active_plan_id,
-                batch_id=active_batch_id,
-            ),
-            "scene_entity_registry": self._scene_entity_registry_for_plan(
-                room,
-                active_plan_id,
-                batch_id=active_batch_id,
+            "geometry_summary": geometry_summary,
+            "review_summary": review_summary,
+            "scene_entity_registry": scene_entity_registry,
+            "runtime_scene_flow_summary": self._runtime_scene_flow_summary(
+                plan_summary={
+                    "concrete_object_items": list(plan.get("concrete_object_items") or []),
+                },
+                classification_summary=classification_summary,
+                environment_component_summary=environment_component_summary,
+                resource_summary=resource_summary,
+                import_summary=import_summary,
+                review_summary=review_summary,
+                scene_entity_registry=scene_entity_registry,
+                operation_replay_summary=operation_scope,
+                report_generated=False,
             ),
         }
         return snapshot
