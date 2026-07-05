@@ -529,6 +529,10 @@ class RuntimeEventValidator:
         "applied",
         "applied_count",
         "applied_version",
+        "actor_registry_actor_count",
+        "actor_registry_missing_aabb_count",
+        "actor_registry_missing_transform_count",
+        "actor_registry_readiness_status",
         "asset_event_count",
         "asset_failed_count",
         "asset_id",
@@ -7078,6 +7082,10 @@ class AgentRuntime:
 
     _SAFE_RUNTIME_EVENT_PAYLOAD_KEYS = {
         "actor_count",
+        "actor_registry_actor_count",
+        "actor_registry_missing_aabb_count",
+        "actor_registry_missing_transform_count",
+        "actor_registry_readiness_status",
         "applied_count",
         "batch_count",
         "batch_failed_count",
@@ -19125,6 +19133,18 @@ class AgentRuntime:
                 ),
                 "asset_overall_progress": int(
                     report_health_summary.get("asset_overall_progress") or 0
+                ),
+                "actor_registry_readiness_status": str(
+                    report_health_summary.get("actor_registry_readiness_status") or ""
+                ),
+                "actor_registry_actor_count": int(
+                    report_health_summary.get("actor_registry_actor_count") or 0
+                ),
+                "actor_registry_missing_transform_count": int(
+                    report_health_summary.get("actor_registry_missing_transform_count") or 0
+                ),
+                "actor_registry_missing_aabb_count": int(
+                    report_health_summary.get("actor_registry_missing_aabb_count") or 0
                 ),
                 "report_health_status": str(report_health_summary.get("status") or "unknown"),
                 "report_attention_required": bool(report_health_summary.get("attention_required")),
