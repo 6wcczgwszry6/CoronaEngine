@@ -9051,6 +9051,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertIn("asset_transfer_in_progress", report_health["reasons"])
         self.assertEqual(report_health["asset_transferring_count"], 1)
         self.assertEqual(report_health["asset_overall_progress"], 50)
+        report_ready_event = runtime.user_visible_events("room-sync-asset-progress")[-1]
+        self.assertEqual(report_ready_event["event_type"], "report_ready")
+        self.assertEqual(report_ready_event["payload"]["asset_transferring_count"], 1)
+        self.assertEqual(report_ready_event["payload"]["asset_overall_progress"], 50)
         report_registry_roles = {
             entity["semantic_role"]: entity
             for entity in report["scene_entity_registry"]["entities"]

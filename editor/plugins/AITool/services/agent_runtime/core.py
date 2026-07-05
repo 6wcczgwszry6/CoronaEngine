@@ -533,6 +533,8 @@ class RuntimeEventValidator:
         "asset_failed_count",
         "asset_id",
         "asset_incomplete_count",
+        "asset_overall_progress",
+        "asset_transferring_count",
         "audience",
         "available",
         "batch_count",
@@ -7141,6 +7143,8 @@ class AgentRuntime:
         "latest_sync_failure_code",
         "asset_failed_count",
         "asset_incomplete_count",
+        "asset_overall_progress",
+        "asset_transferring_count",
         "total_bytes",
         "total_batches",
         "layout_transform_failure_code_counts",
@@ -19104,6 +19108,12 @@ class AgentRuntime:
                 "engine_write_readiness_mismatch_channels": engine_write_readiness_mismatch_channels,
                 "asset_incomplete_count": asset_incomplete_count,
                 "asset_failed_count": asset_failed_count,
+                "asset_transferring_count": int(
+                    report_health_summary.get("asset_transferring_count") or 0
+                ),
+                "asset_overall_progress": int(
+                    report_health_summary.get("asset_overall_progress") or 0
+                ),
                 "report_health_status": str(report_health_summary.get("status") or "unknown"),
                 "report_attention_required": bool(report_health_summary.get("attention_required")),
                 "resource_phase_failed_count": resource_phase_failed_count,
