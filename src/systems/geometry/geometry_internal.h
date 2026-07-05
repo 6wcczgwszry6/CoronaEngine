@@ -118,6 +118,17 @@ struct GeometrySystem::Impl {
         // 而被迫降级到 LOD0。0 = LOD0（最高精度）。
         int committed_demand = 0;
 
+        // ---- swap 模型状态（替代旧冷却窗口）----
+        // 稳态：swap_in_progress=false，prev_committed=-1，lod_cache 在 LOD1..N 中
+        // 至多保有 committed_demand 这 1 套 GPU 缓冲（LOD0 永驻但只是 mesh_dev 的引用计数副本，
+        // 不占额外显存）。
+        // 切换中：demand 跳到新级但新级尚未 ready → swap_in_progress=true，
+        // prev_committed 记录旧级（保活供 select_render_buffers 降级使用）。
+        // 切换完成：process_pending_lod_builds 检测到新级 ready → 立即释放 prev_committed，
+        // swap_in_progress=false，VRAM 回到稳态 1 套简化缓冲。
+        int  prev_committed    = -1;    // ≥0 表示保活中的旧简化级；-1 表示无保活
+        bool swap_in_progress  = false; // true = 正在等待新级 build 完成
+
         // 条目身份版本（方案 C 异步构建 ABA 守卫）：upload 每次 (重)建本条目时自增。
         // 异步构建任务捕获发起时的 epoch；回写时比对，防止 evict→erase→重载同 model_id
         // 后旧任务误填新条目（model_id 相同骗过 model_id 校验的极端情形）。
@@ -203,9 +214,11 @@ struct GeometrySystem::Impl {
     std::uint64_t diag_scene_acquires       = 0;   // acquire_read<Scene> 次数（每帧每 geom）
     std::uint64_t diag_demand_changes       = 0;   // committed_demand 实际变更次数
 
-    // 已就绪的简化级连续多少帧不被需求后才释放（冷却窗口）。
-    // 90 帧 ≈ 1.5 秒@60fps：足够覆盖阈值边界的来回横跳，又不长期占用显存。
-    static constexpr std::uint64_t kLodReleaseCooldownFrames = 90;
+    // kLodReleaseCooldownFrames 已废弃（保留注释供历史参考）：
+    // 旧机制：demand 切换后旧级保留 90 帧（≈1.5s@60fps），防止阈值边界横跳反复重建。
+    // 新机制（swap 模型）：仅在新级 build 完成前保留旧级（通常 <5 帧），
+    // 切换完成后立即释放，无额外等待；阈值横跳由滞回死区（kLodHysteresis）吸收。
+    // static constexpr std::uint64_t kLodReleaseCooldownFrames = 90;  // 已废弃
 
     // LOD 选级滞回死区（方案 B）：升/降级用不对称阈值，避免物体停在阈值边界微动时
     // 需求级在相邻级反复横跳（视觉 pop）。当前驻留 L 级时：
@@ -291,6 +304,27 @@ struct GeometrySystem::Impl {
     float    evict_low_ratio  = 0.80f;  // 淘汰目标：降到 low*capacity
     int      pressure_eval_interval = 15;  // 每隔多少帧评估一次压力（避免每帧查 VMA/系统）
     int      pressure_eval_counter  = 0;
+
+    // ========================================
+    // CPU LOD 驻留窗口（RAM 3层管理）
+    // ========================================
+    // 每 model_id 维护固定窗口 {lod_levels[0], lod_levels[demand_idx], lod_levels[coarsest_idx]}：
+    //   finest_idx    = 0（lod_levels[0] = 最精细简化级，始终保留）
+    //   demand_idx    = 所有实例 committed_demand 的中位数 - 1（对应 lod_levels[] 下标）
+    //   coarsest_idx  = lod_levels.size()-1（最粗级，始终保留）
+    // LOD0（MeshData::vertices/indices）永远保留，不在此管理。
+    // 窗口外的 LODLevel::vertices/indices/bone_weights 被清空以节省 RAM。
+    struct ModelCpuWindow {
+        int finest_idx   = 0;  // 始终为 0
+        int demand_idx   = 0;  // 中位数对应 lod_levels[] 下标（= median_committed_demand - 1，≥0）
+        int coarsest_idx = 0;  // lod_levels.size()-1
+    };
+    mutable std::mutex cpu_window_mutex;
+    std::unordered_map<uint64_t /*model_id*/, ModelCpuWindow> model_cpu_windows;
+
+    // CPU 协调帧间隔计数器（避免每帧 acquire_write<Scene>，每2秒@60fps 评估一次）
+    int cpu_window_eval_counter = 0;
+    static constexpr int kCpuWindowEvalInterval = 120;
 
     [[nodiscard]] static uint64_t make_lod_key(std::uintptr_t geometry_handle,
                                                uint32_t       mesh_index) {

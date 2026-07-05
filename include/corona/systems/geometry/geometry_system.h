@@ -331,6 +331,41 @@ class GeometrySystem : public Kernel::SystemBase {
         Horizon::HardwareBuffer index_storage;
     };
 
+    /// 单个 mesh 的当前 GPU 状态快照（LOD 已由 GeometrySystem 内部解析）。
+    ///
+    /// 所有句柄均为引用计数值副本，调用方在 query_mesh_slots 返回后无需持有任何锁。
+    /// 适用于所有需要访问 mesh GPU 资源的系统（光学、力学、Vision 等）。
+    ///
+    /// valid=false 仅在 Actor 首次加载尚未完成时成立（mesh_handles 为空），
+    /// 是唯一合法的跳过原因。对于所有已加载的 Actor，valid=true 且
+    /// geo.vertex / geo.index 一定非空。
+    struct MeshSlot {
+        uint32_t               mesh_index    = 0;
+        RenderMeshBuffers      geo;              ///< LOD 解析后的几何缓冲
+        Horizon::HardwareImage texture;          ///< 贴图句柄（null = 无贴图）
+        std::array<float, 4>   material_color = {1.f, 1.f, 1.f, 1.f}; ///< 材质颜色 RGBA
+        bool                   valid = false;    ///< false = 首次加载中，唯一合法的跳过原因
+    };
+
+    /// 查询一个 geometry 的所有 MeshSlot（常驻路由，无相机上下文）。
+    ///
+    /// 适用：V-buffer 收集、Vision BVH 构建、MechanicsSystem 蒙皮、无相机的通用遍历。
+    /// 内部取 geometry 写锁（texture storeDescriptor 需非 const 访问）；
+    /// 调用方不得持有同一 geometry_handle 的锁。
+    /// @return 每个 mesh_index 对应一个 MeshSlot；geometry 无效或首次加载中时返回空 vector。
+    [[nodiscard]] std::vector<MeshSlot> query_mesh_slots(
+        std::uintptr_t geometry_handle) const;
+
+    /// 查询一个 geometry 的所有 MeshSlot（LOD 选级路由，带相机上下文）。
+    ///
+    /// 适用：主渲染 pass、阴影 pass、需要 committed_demand 精度的所有路径。
+    [[nodiscard]] std::vector<MeshSlot> query_mesh_slots(
+        std::uintptr_t    geometry_handle,
+        const ktm::fvec3& camera_pos,
+        float             camera_fov_deg,
+        const ktm::fvec3& world_center,
+        float             bounding_radius) const;
+
     /// 一站式渲染缓冲选择（渲染线程调用，线程安全）。
     ///
     /// 内部流程：compute_screen_ratio() → 选 LOD 级别 → 降级到已就绪级别，
@@ -512,6 +547,12 @@ class GeometrySystem : public Kernel::SystemBase {
     /// (mesh CPU) 与其 Image 纹理 (texture CPU)，按 rid 去重；并对 ResourceManager
     /// 的存活集合做对账，删除已被驱逐的 rid。低频调用（~1Hz）即可，CPU 用量变化缓慢。
     void update_cpu_resource_ledger();
+
+    /// CPU LOD 驻留协调（RAM 3层窗口管理）。
+    /// 遍历所有 model_id，按各实例 committed_demand 的中位数确定 CPU 驻留窗口
+    /// {lod_levels[0], lod_levels[demand_median-1], lod_levels[N-1]}，清空窗口外级的
+    /// vertices/indices/bone_weights。每 kCpuWindowEvalInterval 帧调用一次。
+    void reconcile_cpu_residency();
 
     /// 计算 mesh/texture 的 VRAM/RAM 用量 + 预算视图（线程安全，内部加锁）。
     [[nodiscard]] MemoryReport compute_memory_report() const;

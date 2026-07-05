@@ -1306,7 +1306,7 @@ void MechanicsSystem::update_skinned_geometry() {
                 vstoragebufs.push_back(md.vertexStorageBuffer);
             }
         }
-        if (mesh_count == 0) continue;
+        if (mesh_count == 0) continue;  // mesh_count==0 等价于 MeshSlot.valid=false：Actor 首次加载未完成
 
         // ---- 第 4b 步：借出各 mesh 的 LOD1..N GPU 缓冲句柄（蒙皮需写入所有已驻留级别）----
         // 否则拉远切到低 LOD 会读到未蒙皮的绑定姿态顶点 → 冻住不动。

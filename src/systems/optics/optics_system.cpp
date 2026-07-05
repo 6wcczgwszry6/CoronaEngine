@@ -1238,104 +1238,111 @@ bool collect_actor_instances_for_visibility(
                 ++object_id;
                 continue;
             }
-            // Mesh texture descriptors are non-const, so the geometry storage must be
-            // write-acquired here. Skipping on transient lock contention causes flicker.
-            if (auto geom = geom_storage.try_acquire_write(optics.geometry_handle)) {
-                ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
-                if (auto transform = transform_storage.try_acquire_read(geom->transform_handle)) {
-                    model_matrix = transform->compute_matrix();
-                    model_matrix = apply_native_local_correction(model_matrix, *geom);
-                    if (camera_basis != nullptr) {
-                        model_matrix = multiply_ktm_mat4(*camera_basis, model_matrix);
+            // ---- 获取几何变换信息（读锁即可，texture 由 query_mesh_slots 内部处理）----
+            std::uintptr_t transform_handle_a = 0;
+            float          nlc_scale_a   = 1.0f;
+            ktm::fvec3     nlc_offset_a  = {0.0f, 0.0f, 0.0f};
+            if (auto geom_r = geom_storage.try_acquire_read(optics.geometry_handle)) {
+                transform_handle_a = geom_r->transform_handle;
+                nlc_scale_a        = geom_r->native_local_correction_scale;
+                nlc_offset_a       = geom_r->native_local_correction_offset;
+            }
+
+            ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
+            if (auto transform = transform_storage.try_acquire_read(transform_handle_a)) {
+                model_matrix = transform->compute_matrix();
+                // 用提取的 nlc 参数重现 apply_native_local_correction 逻辑
+                if (std::abs(nlc_scale_a - 1.0f) > 1e-6f ||
+                    std::abs(nlc_offset_a.x) > 1e-6f ||
+                    std::abs(nlc_offset_a.y) > 1e-6f ||
+                    std::abs(nlc_offset_a.z) > 1e-6f) {
+                    ktm::fmat4x4 correction = ktm::fmat4x4::from_eye();
+                    correction[0][0] = nlc_scale_a;
+                    correction[1][1] = nlc_scale_a;
+                    correction[2][2] = nlc_scale_a;
+                    correction[3][0] = nlc_offset_a.x;
+                    correction[3][1] = nlc_offset_a.y;
+                    correction[3][2] = nlc_offset_a.z;
+                    model_matrix = multiply_ktm_mat4(model_matrix, correction);
+                }
+                if (camera_basis != nullptr) {
+                    model_matrix = multiply_ktm_mat4(*camera_basis, model_matrix);
+                }
+            }
+
+            // ---- query_mesh_slots：统一获取所有 mesh 的 LOD 缓冲 + 材质信息 ----
+            // 内部取读锁，返回值为值副本（refcount 安全），无需再持有 geometry 写锁。
+            // valid=false 仅在 Actor 首次加载未完成时出现，是唯一合法跳过原因。
+            const auto mesh_slots = geometry_system
+                ? geometry_system->query_mesh_slots(optics.geometry_handle)
+                : std::vector<Corona::Systems::GeometrySystem::MeshSlot>{};
+
+            for (const auto& ms : mesh_slots) {
+                if (!ms.valid) continue;  // 首次加载中，跳过
+
+                auto material_id = static_cast<uint32_t>(batch.materials.size());
+                {
+                    Hardware::MaterialInfo mat_info{};
+
+                    const float lighting_enabled = optics.bEnableLighting ? 1.0f : 0.0f;
+                    mat_info.textureDescriptor = ms.texture
+                        ? ms.texture.storeSampledDescriptor() : 0;
+
+                    if (optics.bEnableLighting) {
+                        mat_info.metallic = optics.metallic;
+                        mat_info.roughness = optics.roughness;
+                        mat_info.subsurface = optics.subsurface;
+                        mat_info.specular = optics.specular;
+                        mat_info.specularTint = optics.specularTint;
+                        mat_info.anisotropic = optics.anisotropic;
+                        mat_info.sheen = optics.sheen;
+                        mat_info.sheenTint = optics.sheenTint;
+                        mat_info.clearcoat = optics.clearcoat;
+                        mat_info.clearcoatGloss = optics.clearcoatGloss;
+                    } else {
+                        mat_info.metallic = 0.0f;
+                        mat_info.roughness = 1.0f;
+                        mat_info.subsurface = 0.0f;
+                        mat_info.specular = 0.0f;
+                        mat_info.specularTint = 0.0f;
+                        mat_info.anisotropic = 0.0f;
+                        mat_info.sheen = 0.0f;
+                        mat_info.sheenTint = 0.0f;
+                        mat_info.clearcoat = 0.0f;
+                        mat_info.clearcoatGloss = 0.0f;
                     }
+
+                    mat_info.lightingEnabled = lighting_enabled;
+                    mat_info.materialColor = ktm::fvec4{
+                        ms.material_color[0], ms.material_color[1],
+                        ms.material_color[2], ms.material_color[3]};
+                    batch.materials.push_back(mat_info);
                 }
 
-                for (uint32_t mesh_index = 0;
-                     mesh_index < static_cast<uint32_t>(geom->mesh_handles.size());
-                     ++mesh_index) {
-                    auto& m = geom->mesh_handles[mesh_index];
-
-                    // ---- 几何缓冲常驻路由 ----
-                    // 渲染统一经 GeometrySystem 取当前常驻的几何缓冲，而非直接读
-                    // MeshDevice：Tier2 降级释放 LOD0 后仍能路由到已就绪的低 LOD 级，
-                    // 不至于读到空缓冲。本路径无相机上下文，故用 resident_render_buffers
-                    // （常驻路由，不做屏幕占比选级）。texture/materialColor 不属几何缓冲，
-                    // 仍从 m 读取。返回值为句柄拷贝（refcount 安全）。
-                    Corona::Systems::GeometrySystem::RenderMeshBuffers geo_bufs{
-                        m.vertexBuffer, m.indexBuffer,
-                        m.vertexStorageBuffer, m.indexStorageBuffer};
-                    if (geometry_system) {
-                        geo_bufs = geometry_system->resident_render_buffers(
-                            optics.geometry_handle, mesh_index, geo_bufs);
-                    }
-                    // 几何缓冲全不常驻（Tier2/3 已释放且无低级可用）→ 跳过该 mesh
-                    if (!geo_bufs.vertex || !geo_bufs.index) {
-                        continue;
-                    }
-
-                    auto material_id = static_cast<uint32_t>(batch.materials.size());
-                    {
-                        Hardware::MaterialInfo mat_info{};
-
-                        const float lighting_enabled = optics.bEnableLighting ? 1.0f : 0.0f;
-                        mat_info.textureDescriptor = m.textureBuffer ? m.textureBuffer.storeSampledDescriptor() : 0;
-
-                        if (optics.bEnableLighting) {
-                            mat_info.metallic = optics.metallic;
-                            mat_info.roughness = optics.roughness;
-                            mat_info.subsurface = optics.subsurface;
-                            mat_info.specular = optics.specular;
-                            mat_info.specularTint = optics.specularTint;
-                            mat_info.anisotropic = optics.anisotropic;
-                            mat_info.sheen = optics.sheen;
-                            mat_info.sheenTint = optics.sheenTint;
-                            mat_info.clearcoat = optics.clearcoat;
-                            mat_info.clearcoatGloss = optics.clearcoatGloss;
-                        } else {
-                            mat_info.metallic = 0.0f;
-                            mat_info.roughness = 1.0f;
-                            mat_info.subsurface = 0.0f;
-                            mat_info.specular = 0.0f;
-                            mat_info.specularTint = 0.0f;
-                            mat_info.anisotropic = 0.0f;
-                            mat_info.sheen = 0.0f;
-                            mat_info.sheenTint = 0.0f;
-                            mat_info.clearcoat = 0.0f;
-                            mat_info.clearcoatGloss = 0.0f;
-                        }
-
-                        mat_info.lightingEnabled = lighting_enabled;
-                        mat_info.materialColor = ktm::fvec4{
-                            m.materialColor[0], m.materialColor[1],
-                            m.materialColor[2], m.materialColor[3]};
-                        batch.materials.push_back(mat_info);
-                    }
-
-                    auto instance_id = static_cast<uint32_t>(batch.instances.size());
-                    {
-                        Hardware::InstanceInfo inst{};
-                        inst.modelMatrix = model_matrix;
-                        inst.vertexBufferIndex =
-                            geo_bufs.vertex_storage ? geo_bufs.vertex_storage.storeDescriptor() : 0;
-                        inst.indexBufferIndex =
-                            geo_bufs.index_storage ? geo_bufs.index_storage.storeDescriptor() : 0;
-                        inst.materialID = material_id;
-                        inst.objectID = object_id;
-                        batch.instances.push_back(inst);
-                        batch.actorHandles.push_back(actor_handle);
-                        has_instances = true;
-                    }
-
-                    target_visibility[visibility_vert_glsl_t::pushConsts::modelMatrix] =
-                        upload_value(model_matrix);
-                    target_visibility[visibility_vert_glsl_t::pushConsts::uniformBufferIndex] =
-                        target_vp_descriptor;
-                    target_visibility[visibility_vert_glsl_t::pushConsts::instanceID] =
-                        instance_id + 1;
-                    target_visibility[visibility_frag_glsl_t::pushConsts::textureIndex] =
-                        m.textureBuffer ? m.textureBuffer.storeSampledDescriptor() : static_cast<uint32_t>(0);
-                    target_visibility.record(geo_bufs.index, geo_bufs.vertex);
+                auto instance_id = static_cast<uint32_t>(batch.instances.size());
+                {
+                    Hardware::InstanceInfo inst{};
+                    inst.modelMatrix = model_matrix;
+                    inst.vertexBufferIndex =
+                        ms.geo.vertex_storage ? ms.geo.vertex_storage.storeDescriptor() : 0;
+                    inst.indexBufferIndex =
+                        ms.geo.index_storage ? ms.geo.index_storage.storeDescriptor() : 0;
+                    inst.materialID = material_id;
+                    inst.objectID = object_id;
+                    batch.instances.push_back(inst);
+                    batch.actorHandles.push_back(actor_handle);
+                    has_instances = true;
                 }
+
+                target_visibility[visibility_vert_glsl_t::pushConsts::modelMatrix] =
+                    upload_value(model_matrix);
+                target_visibility[visibility_vert_glsl_t::pushConsts::uniformBufferIndex] =
+                    target_vp_descriptor;
+                target_visibility[visibility_vert_glsl_t::pushConsts::instanceID] =
+                    instance_id + 1;
+                target_visibility[visibility_frag_glsl_t::pushConsts::textureIndex] =
+                    ms.texture ? ms.texture.storeSampledDescriptor() : static_cast<uint32_t>(0);
+                target_visibility.record(ms.geo.index, ms.geo.vertex);
             }
             ++object_id;
         }
@@ -2834,147 +2841,125 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                 ++object_id;
                                 continue;
                             }
-                            // 阻塞写锁：mesh 的 textureBuffer.storeDescriptor() 是非 const，
-                            // 必须持写句柄。此处绝不能用 _nowait——拿不到锁就跳过会导致该物体
-                            // 本帧不进 instance/material 表（模型没上 GPU），表现为闪烁。用阻塞
-                            // 版 try_acquire_write 等锁（不漏帧），槽位失效时返回无效句柄而非抛异常。
-                            if (auto geom = geom_storage.try_acquire_write(optics.geometry_handle)) {
-                                ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
-                                ktm::fvec3 world_center{0.0f, 0.0f, 0.0f};
-                                if (auto transform = transform_storage.try_acquire_read(geom->transform_handle)) {
-                                    model_matrix = transform->compute_matrix();
-                                    // 必须在 camera_basis 变换前提取世界位置（否则 model_matrix[3] 不再是世界坐标）
-                                    world_center = transform->position;
-                                    model_matrix = apply_native_local_correction(model_matrix, *geom);
-                                    if (camera_basis != nullptr) {
-                                        model_matrix = multiply_ktm_mat4(*camera_basis, model_matrix);
-                                    }
+                            // ---- 提取几何变换信息（读锁）----
+                            std::uintptr_t transform_handle_b = 0;
+                            float          nlc_scale_b  = 1.0f;
+                            ktm::fvec3     nlc_offset_b = {0.0f, 0.0f, 0.0f};
+                            if (auto geom_r = geom_storage.try_acquire_read(optics.geometry_handle)) {
+                                transform_handle_b = geom_r->transform_handle;
+                                nlc_scale_b        = geom_r->native_local_correction_scale;
+                                nlc_offset_b       = geom_r->native_local_correction_offset;
+                            }
+
+                            ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
+                            ktm::fvec3   world_center{0.0f, 0.0f, 0.0f};
+                            if (auto transform = transform_storage.try_acquire_read(transform_handle_b)) {
+                                model_matrix = transform->compute_matrix();
+                                world_center = transform->position;
+                                if (std::abs(nlc_scale_b - 1.0f) > 1e-6f ||
+                                    std::abs(nlc_offset_b.x) > 1e-6f ||
+                                    std::abs(nlc_offset_b.y) > 1e-6f ||
+                                    std::abs(nlc_offset_b.z) > 1e-6f) {
+                                    ktm::fmat4x4 correction = ktm::fmat4x4::from_eye();
+                                    correction[0][0] = nlc_scale_b;
+                                    correction[1][1] = nlc_scale_b;
+                                    correction[2][2] = nlc_scale_b;
+                                    correction[3][0] = nlc_offset_b.x;
+                                    correction[3][1] = nlc_offset_b.y;
+                                    correction[3][2] = nlc_offset_b.z;
+                                    model_matrix = multiply_ktm_mat4(model_matrix, correction);
                                 }
-
-                                // ---- 计算物体在世界空间中的包围信息（用于LOD选择） ----
-                                float bounding_radius = 1.0f;
-                                bool use_lod = false;
-
-                                if (geometry_system_) {
-                                    auto& ms = SharedDataHub::instance().mechanics_storage();
-                                    if (auto mech = ms.try_acquire_read(profile->mechanics_handle)) {
-                                        float dx = mech->max_xyz.x - mech->min_xyz.x;
-                                        float dy = mech->max_xyz.y - mech->min_xyz.y;
-                                        float dz = mech->max_xyz.z - mech->min_xyz.z;
-                                        bounding_radius = std::sqrt(dx*dx + dy*dy + dz*dz) * 0.5f;
-                                        use_lod = true;
-                                    }
+                                if (camera_basis != nullptr) {
+                                    model_matrix = multiply_ktm_mat4(*camera_basis, model_matrix);
                                 }
+                            }
 
-                                for (uint32_t mesh_index = 0; mesh_index < static_cast<uint32_t>(geom->mesh_handles.size()); ++mesh_index) {
-                                    auto& m = geom->mesh_handles[mesh_index];
+                            // ---- 计算包围半径（LOD 选级用）----
+                            float bounding_radius = 1.0f;
+                            bool  have_bounds     = false;
+                            if (geometry_system_) {
+                                auto& ms = SharedDataHub::instance().mechanics_storage();
+                                if (auto mech = ms.try_acquire_read(profile->mechanics_handle)) {
+                                    float dx = mech->max_xyz.x - mech->min_xyz.x;
+                                    float dy = mech->max_xyz.y - mech->min_xyz.y;
+                                    float dz = mech->max_xyz.z - mech->min_xyz.z;
+                                    bounding_radius = std::sqrt(dx*dx + dy*dy + dz*dz) * 0.5f;
+                                    have_bounds = true;
+                                }
+                            }
 
-                                    // ---- LOD 缓冲选择 ----
-                                    // 屏幕占比计算 + 选级 + 降级兜底全部由 GeometrySystem 内部完成，
-                                    // 返回值保证可直接渲染，无需判空或逐 buffer 覆写。
-                                    GeometrySystem::RenderMeshBuffers bufs{
-                                        m.vertexBuffer, m.indexBuffer,
-                                        m.vertexStorageBuffer, m.indexStorageBuffer};
-                                    if (use_lod && geometry_system_) {
-                                        bufs = geometry_system_->select_render_buffers(
-                                            optics.geometry_handle, mesh_index,
-                                            camera->position, camera->fov,
-                                            world_center, bounding_radius, bufs);
-                                    }
-                                    Horizon::HardwareBuffer render_vb = bufs.vertex;
-                                    Horizon::HardwareBuffer render_ib = bufs.index;
-                                    Horizon::HardwareBuffer render_vs = bufs.vertex_storage;
-                                    Horizon::HardwareBuffer render_is = bufs.index_storage;
-                                    // Step 2：若无任何常驻几何缓冲（后续 Tier2 降级释放 LOD0
-                                    // 且无低级常驻时），跳过该 mesh，避免录入空缓冲绘制。
-                                    // 当前 LOD0 恒常驻，此分支不触发（零行为变化）。
-                                    if (!render_vb || !render_ib) {
-                                        continue;
-                                    }
-                                    // --- Collect material info ---
-                                    auto materialID = static_cast<uint32_t>(batch.materials.size());
-                                    {
-                                        Hardware::MaterialInfo mat_info{};
+                            // ---- query_mesh_slots：统一接口，LOD 已解析，无需手动 fallback ----
+                            const auto mesh_slots_b = (geometry_system_ && have_bounds)
+                                ? geometry_system_->query_mesh_slots(
+                                      optics.geometry_handle,
+                                      camera->position, camera->fov,
+                                      world_center, bounding_radius)
+                                : (geometry_system_
+                                      ? geometry_system_->query_mesh_slots(optics.geometry_handle)
+                                      : std::vector<GeometrySystem::MeshSlot>{});
 
-                                        // 光照开关：bEnableLighting 为 true 时物体接收光照，false 时不接收光照
-                                        float lighting_enabled = optics.bEnableLighting ? 1.0f : 0.0f;
+                            for (const auto& ms : mesh_slots_b) {
+                                if (!ms.valid) continue;  // 首次加载中，跳过
 
-                                        mat_info.textureDescriptor = m.textureBuffer
-                                                                         ? m.textureBuffer.storeSampledDescriptor()
-                                                                         : 0;
-
-                                        // 当光照关闭时，将 BRDF 参数设为中性值，使物体不受方向光影响
-                                        if (optics.bEnableLighting) {
-                                            mat_info.metallic = optics.metallic;
-                                            mat_info.roughness = optics.roughness;
-                                            mat_info.subsurface = optics.subsurface;
-                                            mat_info.specular = optics.specular;
-                                            mat_info.specularTint = optics.specularTint;
-                                            mat_info.anisotropic = optics.anisotropic;
-                                            mat_info.sheen = optics.sheen;
-                                            mat_info.sheenTint = optics.sheenTint;
-                                            mat_info.clearcoat = optics.clearcoat;
-                                            mat_info.clearcoatGloss = optics.clearcoatGloss;
-                                        } else {
-                                            // 关闭光照：使用中性BRDF参数（完全漫反射，无高光，无清漆等）
-                                            mat_info.metallic = 0.0f;
-                                            mat_info.roughness = 1.0f;
-                                            mat_info.subsurface = 0.0f;
-                                            mat_info.specular = 0.0f;
-                                            mat_info.specularTint = 0.0f;
-                                            mat_info.anisotropic = 0.0f;
-                                            mat_info.sheen = 0.0f;
-                                            mat_info.sheenTint = 0.0f;
-                                            mat_info.clearcoat = 0.0f;
-                                            mat_info.clearcoatGloss = 0.0f;
-                                        }
-
-                                        mat_info.lightingEnabled = lighting_enabled;
-                                        mat_info.materialColor = ktm::fvec4{
-                                            m.materialColor[0], m.materialColor[1],
-                                            m.materialColor[2], m.materialColor[3]};
-                                        batch.materials.push_back(mat_info);
-                                    }
-
-                                    // --- Collect instance info ---
-                                    auto instanceID = static_cast<uint32_t>(batch.instances.size());
-                                    {
-                                        Hardware::InstanceInfo inst{};
-                                        inst.modelMatrix = model_matrix;
-                                        inst.vertexBufferIndex = render_vs
-                                                                     ? render_vs.storeDescriptor()
-                                                                     : 0;
-                                        inst.indexBufferIndex = render_is
-                                                                    ? render_is.storeDescriptor()
-                                                                    : 0;
-                                        inst.materialID = materialID;
-                                        inst.objectID = object_id;
-                                        batch.instances.push_back(inst);
-                                        batch.actorHandles.push_back(actor_handle);
-                                        has_instances = true;
-                                    }
-
-                                    // --- Record visibility draw call ---
-                                    const ktm::fmat4x4 clip_matrix =
-                                        multiply_ktm_mat4(view_proj_matrix, model_matrix);
-                                    target_visibility[visibility_vert_glsl_t::pushConsts::modelMatrix] =
-                                        upload_value(clip_matrix);
-                                    target_visibility[visibility_vert_glsl_t::pushConsts::uniformBufferIndex] =
-                                        0u;
-                                    // VBuffer uses 1-based instanceID (0 = background sentinel after clear)
-                                    target_visibility[visibility_vert_glsl_t::pushConsts::instanceID] =
-                                        instanceID + 1;
-                                    // Keep texture descriptor in the push constants for shader ABI compatibility.
-                                    if (m.textureBuffer) {
-                                        target_visibility[visibility_frag_glsl_t::pushConsts::textureIndex] =
-                                            m.textureBuffer.storeSampledDescriptor();
+                                auto materialID = static_cast<uint32_t>(batch.materials.size());
+                                {
+                                    Hardware::MaterialInfo mat_info{};
+                                    float lighting_enabled = optics.bEnableLighting ? 1.0f : 0.0f;
+                                    mat_info.textureDescriptor = ms.texture
+                                        ? ms.texture.storeSampledDescriptor() : 0;
+                                    if (optics.bEnableLighting) {
+                                        mat_info.metallic = optics.metallic;
+                                        mat_info.roughness = optics.roughness;
+                                        mat_info.subsurface = optics.subsurface;
+                                        mat_info.specular = optics.specular;
+                                        mat_info.specularTint = optics.specularTint;
+                                        mat_info.anisotropic = optics.anisotropic;
+                                        mat_info.sheen = optics.sheen;
+                                        mat_info.sheenTint = optics.sheenTint;
+                                        mat_info.clearcoat = optics.clearcoat;
+                                        mat_info.clearcoatGloss = optics.clearcoatGloss;
                                     } else {
-                                        target_visibility[visibility_frag_glsl_t::pushConsts::textureIndex] =
-                                            static_cast<uint32_t>(0);
+                                        mat_info.metallic = 0.0f; mat_info.roughness = 1.0f;
+                                        mat_info.subsurface = 0.0f; mat_info.specular = 0.0f;
+                                        mat_info.specularTint = 0.0f; mat_info.anisotropic = 0.0f;
+                                        mat_info.sheen = 0.0f; mat_info.sheenTint = 0.0f;
+                                        mat_info.clearcoat = 0.0f; mat_info.clearcoatGloss = 0.0f;
                                     }
-                                    target_visibility.record(render_ib, render_vb);
-                                    ++recorded_draws;
+                                    mat_info.lightingEnabled = lighting_enabled;
+                                    mat_info.materialColor = ktm::fvec4{
+                                        ms.material_color[0], ms.material_color[1],
+                                        ms.material_color[2], ms.material_color[3]};
+                                    batch.materials.push_back(mat_info);
                                 }
+
+                                auto instanceID = static_cast<uint32_t>(batch.instances.size());
+                                {
+                                    Hardware::InstanceInfo inst{};
+                                    inst.modelMatrix = model_matrix;
+                                    inst.vertexBufferIndex = ms.geo.vertex_storage
+                                        ? ms.geo.vertex_storage.storeDescriptor() : 0;
+                                    inst.indexBufferIndex = ms.geo.index_storage
+                                        ? ms.geo.index_storage.storeDescriptor() : 0;
+                                    inst.materialID = materialID;
+                                    inst.objectID = object_id;
+                                    batch.instances.push_back(inst);
+                                    batch.actorHandles.push_back(actor_handle);
+                                    has_instances = true;
+                                }
+
+                                const ktm::fmat4x4 clip_matrix =
+                                    multiply_ktm_mat4(view_proj_matrix, model_matrix);
+                                target_visibility[visibility_vert_glsl_t::pushConsts::modelMatrix] =
+                                    upload_value(clip_matrix);
+                                target_visibility[visibility_vert_glsl_t::pushConsts::uniformBufferIndex] =
+                                    0u;
+                                target_visibility[visibility_vert_glsl_t::pushConsts::instanceID] =
+                                    instanceID + 1;
+                                target_visibility[visibility_frag_glsl_t::pushConsts::textureIndex] =
+                                    ms.texture ? ms.texture.storeSampledDescriptor()
+                                               : static_cast<uint32_t>(0);
+                                target_visibility.record(ms.geo.index, ms.geo.vertex);
+                                ++recorded_draws;
                             }
                             ++object_id;
                         }
@@ -3049,54 +3034,67 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                             auto optics_acc = optics_storage.try_acquire_read(profile->optics_handle);
                             if (!optics_acc || !optics_acc->visible) continue;
 
-                            if (auto geom = geom_storage.try_acquire_write(optics_acc->geometry_handle)) {
-                                ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
-                                ktm::fvec3 world_center{0.0f, 0.0f, 0.0f};
-                                if (auto transform = transform_storage.try_acquire_read(geom->transform_handle)) {
-                                    model_matrix = transform->compute_matrix();
-                                    world_center = transform->position;
-                                    model_matrix = apply_native_local_correction(model_matrix, *geom);
+                            // ---- 提取几何变换信息（读锁）----
+                            std::uintptr_t transform_handle_c = 0;
+                            float          nlc_scale_c  = 1.0f;
+                            ktm::fvec3     nlc_offset_c = {0.0f, 0.0f, 0.0f};
+                            if (auto geom_r = geom_storage.try_acquire_read(optics_acc->geometry_handle)) {
+                                transform_handle_c = geom_r->transform_handle;
+                                nlc_scale_c        = geom_r->native_local_correction_scale;
+                                nlc_offset_c       = geom_r->native_local_correction_offset;
+                            }
+
+                            ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
+                            ktm::fvec3   world_center{0.0f, 0.0f, 0.0f};
+                            if (auto transform = transform_storage.try_acquire_read(transform_handle_c)) {
+                                model_matrix = transform->compute_matrix();
+                                world_center = transform->position;
+                                if (std::abs(nlc_scale_c - 1.0f) > 1e-6f ||
+                                    std::abs(nlc_offset_c.x) > 1e-6f ||
+                                    std::abs(nlc_offset_c.y) > 1e-6f ||
+                                    std::abs(nlc_offset_c.z) > 1e-6f) {
+                                    ktm::fmat4x4 correction = ktm::fmat4x4::from_eye();
+                                    correction[0][0] = nlc_scale_c;
+                                    correction[1][1] = nlc_scale_c;
+                                    correction[2][2] = nlc_scale_c;
+                                    correction[3][0] = nlc_offset_c.x;
+                                    correction[3][1] = nlc_offset_c.y;
+                                    correction[3][2] = nlc_offset_c.z;
+                                    model_matrix = multiply_ktm_mat4(model_matrix, correction);
                                 }
+                            }
 
-                                float bounding_radius = 1.0f;
-                                bool use_lod = false;
-                                if (geometry_system_) {
-                                    auto& ms = SharedDataHub::instance().mechanics_storage();
-                                    if (auto mech = ms.try_acquire_read(profile->mechanics_handle)) {
-                                        const float dx = mech->max_xyz.x - mech->min_xyz.x;
-                                        const float dy = mech->max_xyz.y - mech->min_xyz.y;
-                                        const float dz = mech->max_xyz.z - mech->min_xyz.z;
-                                        bounding_radius = std::sqrt(dx * dx + dy * dy + dz * dz) * 0.5f;
-                                        use_lod = true;
-                                    }
+                            float bounding_radius = 1.0f;
+                            bool  have_bounds_c   = false;
+                            if (geometry_system_) {
+                                auto& ms = SharedDataHub::instance().mechanics_storage();
+                                if (auto mech = ms.try_acquire_read(profile->mechanics_handle)) {
+                                    const float dx = mech->max_xyz.x - mech->min_xyz.x;
+                                    const float dy = mech->max_xyz.y - mech->min_xyz.y;
+                                    const float dz = mech->max_xyz.z - mech->min_xyz.z;
+                                    bounding_radius = std::sqrt(dx * dx + dy * dy + dz * dz) * 0.5f;
+                                    have_bounds_c = true;
                                 }
+                            }
 
-                                for (uint32_t mesh_index = 0;
-                                     mesh_index < static_cast<uint32_t>(geom->mesh_handles.size());
-                                     ++mesh_index) {
-                                    auto& m = geom->mesh_handles[mesh_index];
-                                    GeometrySystem::RenderMeshBuffers bufs{
-                                        m.vertexBuffer, m.indexBuffer,
-                                        m.vertexStorageBuffer, m.indexStorageBuffer};
-                                    if (use_lod && geometry_system_) {
-                                        bufs = geometry_system_->select_render_buffers(
-                                            optics_acc->geometry_handle, mesh_index,
-                                            camera->position, camera->fov,
-                                            world_center, bounding_radius, bufs);
-                                    }
+                            // ---- query_mesh_slots（阴影pass无需 texture/material）----
+                            const auto shadow_slots = (geometry_system_ && have_bounds_c)
+                                ? geometry_system_->query_mesh_slots(
+                                      optics_acc->geometry_handle,
+                                      camera->position, camera->fov,
+                                      world_center, bounding_radius)
+                                : (geometry_system_
+                                      ? geometry_system_->query_mesh_slots(optics_acc->geometry_handle)
+                                      : std::vector<GeometrySystem::MeshSlot>{});
 
-                                    // Step 2：无常驻几何缓冲（后续 Tier2 降级释放 LOD0
-                                    // 且无其它常驻级）→ 跳过该 mesh 的阴影绘制，不录入空缓冲。
-                                    if (!bufs.vertex || !bufs.index) {
-                                        continue;
-                                    }
+                            for (const auto& ss : shadow_slots) {
+                                if (!ss.valid) continue;
 
-                                    const ktm::fmat4x4 clip_matrix =
-                                        multiply_ktm_mat4(light_view_proj, model_matrix);
-                                    shadow[shadow_vert_glsl_t::pushConsts::lightViewProjModel] =
-                                        upload_value(clip_matrix);
-                                    shadow.record(bufs.index, bufs.vertex);
-                                }
+                                const ktm::fmat4x4 clip_matrix =
+                                    multiply_ktm_mat4(light_view_proj, model_matrix);
+                                shadow[shadow_vert_glsl_t::pushConsts::lightViewProjModel] =
+                                    upload_value(clip_matrix);
+                                shadow.record(ss.geo.index, ss.geo.vertex);
                             }
                         }
                     }
