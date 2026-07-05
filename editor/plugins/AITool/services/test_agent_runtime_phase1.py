@@ -22660,6 +22660,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(status["environment_component_summary"]["component_count"], len(environment_components))
         self.assertEqual(status["environment_component_summary"]["type_counts"]["skybox"], 1)
         self.assertEqual(status["environment_component_summary"]["type_counts"]["terrain"], 2)
+        query_summary = runtime.query_state("room-forest")["summary"]
+        self.assertEqual(query_summary["model_items"], ["wooden table", "tent"])
+        self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["actor"], 2)
+        self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["terrain"], 2)
+        self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["skybox"], 1)
         status_registry = status["scene_entity_registry"]
         status_entities = status_registry["entities"]
         status_roles = {entity["semantic_role"]: entity for entity in status_entities}

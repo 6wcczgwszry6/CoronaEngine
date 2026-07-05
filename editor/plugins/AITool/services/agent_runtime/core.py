@@ -25725,7 +25725,40 @@ class AgentRuntime:
 
     def query_state(self, room_id: str) -> dict[str, Any]:
         self.operation_log.append("runtime_state_queried", room_id=str(room_id))
-        return self.state.snapshot(room_id)
+        snapshot = self.state.snapshot(room_id)
+        room = dict(snapshot.get("room") or {})
+        active_plan_id = str(room.get("active_plan_id") or "")
+        active_batch_id = str(room.get("active_batch_id") or "")
+        if not active_batch_id and active_plan_id:
+            batch_ids = self._batch_ids_for_plan(room, active_plan_id)
+            if batch_ids:
+                active_batch_id = sorted(batch_ids)[-1]
+        snapshot["summary"] = {
+            "room_id": str(room_id),
+            "plan_id": active_plan_id,
+            "batch_id": active_batch_id,
+            "model_items": list(dict(room.get("model_item_lists") or {}).get(active_batch_id) or []),
+            "substrate_plan": list(dict(room.get("substrate_plans") or {}).get(active_batch_id) or []),
+            "substrate_resolutions": list(dict(room.get("substrate_resolutions") or {}).get(active_batch_id) or []),
+            "environment_components": dict(dict(room.get("environment_components") or {}).get(active_batch_id) or {}),
+            "actors": dict(self._actor_facts_for_plan(room, active_plan_id, batch_id=active_batch_id)),
+            "geometry_summary": self._geometry_fact_summary_for_plan(
+                room,
+                active_plan_id,
+                batch_id=active_batch_id,
+            ),
+            "review_summary": self._review_summary_for_plan(
+                room,
+                active_plan_id,
+                batch_id=active_batch_id,
+            ),
+            "scene_entity_registry": self._scene_entity_registry_for_plan(
+                room,
+                active_plan_id,
+                batch_id=active_batch_id,
+            ),
+        }
+        return snapshot
 
     def refresh_scene_snapshot(self, room_id: str) -> dict[str, Any]:
         room = str(room_id)
