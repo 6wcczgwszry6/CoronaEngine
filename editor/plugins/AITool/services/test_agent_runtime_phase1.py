@@ -22724,6 +22724,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             ["plan", "terrain", "asset", "actor", "review", "report"],
         )
         query_flow_steps = {step["step"]: step for step in query_flow["steps"]}
+        self.assertEqual(query_flow["actor_readiness_status"], "ready")
+        self.assertEqual(query_flow["actor_missing_transform_count"], 0)
+        self.assertEqual(query_flow["actor_missing_aabb_count"], 0)
         self.assertEqual(query_flow_steps["actor"]["readiness_status"], "ready")
         self.assertEqual(query_flow_steps["actor"]["missing_transform_count"], 0)
         self.assertEqual(query_flow_steps["actor"]["missing_aabb_count"], 0)
@@ -22847,6 +22850,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             step["step"]: step
             for step in report["runtime_scene_flow_summary"]["steps"]
         }
+        self.assertEqual(report["runtime_scene_flow_summary"]["actor_readiness_status"], "ready")
+        self.assertEqual(report["runtime_scene_flow_summary"]["actor_missing_transform_count"], 0)
+        self.assertEqual(report["runtime_scene_flow_summary"]["actor_missing_aabb_count"], 0)
         self.assertEqual(report_flow_steps["actor"]["readiness_status"], "ready")
         self.assertEqual(report_flow_steps["actor"]["missing_transform_count"], 0)
         self.assertEqual(report_flow_steps["actor"]["missing_aabb_count"], 0)

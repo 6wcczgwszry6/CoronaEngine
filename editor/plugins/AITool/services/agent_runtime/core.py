@@ -17756,6 +17756,9 @@ class AgentRuntime:
         ]
         return {
             "status": "ok" if all(step["status"] in {"ok", "pending"} for step in flow_steps) else "incomplete",
+            "actor_readiness_status": actor_readiness_status,
+            "actor_missing_transform_count": actor_missing_transform_count,
+            "actor_missing_aabb_count": actor_missing_aabb_count,
             "steps": flow_steps,
             "model_items": model_items,
             "substrate_items": substrate_items,
