@@ -17246,6 +17246,34 @@ class AgentRuntime:
                     return value
             return "runtime_state"
 
+        def asset_transfer_status(asset_id: str) -> dict[str, Any]:
+            asset = assets.get(asset_id)
+            if not isinstance(asset, Mapping):
+                return {
+                    "available": False,
+                    "transfer_status": "",
+                    "ready": False,
+                    "failed": False,
+                    "progress": 0,
+                    "chunk_index": 0,
+                    "chunk_count": 0,
+                    "bytes_transferred": 0,
+                    "total_bytes": 0,
+                    "last_sync_event": "",
+                }
+            return {
+                "available": True,
+                "transfer_status": str(asset.get("transfer_status") or asset.get("status") or ""),
+                "ready": bool(asset.get("ready")),
+                "failed": bool(asset.get("failed")),
+                "progress": max(0, min(100, int(asset.get("progress") or 0))),
+                "chunk_index": int(asset.get("chunk_index") or 0),
+                "chunk_count": int(asset.get("chunk_count") or 0),
+                "bytes_transferred": int(asset.get("bytes_transferred") or 0),
+                "total_bytes": int(asset.get("total_bytes") or 0),
+                "last_sync_event": str(asset.get("last_sync_event") or ""),
+            }
+
         def actor_grounding_status(row: Mapping[str, Any]) -> str:
             explicit = str(row.get("grounding_status") or row.get("grounded_status") or "").strip()
             if explicit:
@@ -17298,6 +17326,7 @@ class AgentRuntime:
                 "lighting_profile": mapping_field(merged, "lighting_profile"),
                 "script_bindings": list_field(merged, "script_bindings"),
                 "sync_status": actor_sync_status(merged, asset_id),
+                "asset_transfer_status": asset_transfer_status(asset_id),
                 "review_status": str(merged.get("review_status") or "pending_review"),
                 "plan_id": str(merged.get("plan_id") or active_plan_id),
                 "batch_id": str(merged.get("batch_id") or ""),
@@ -17333,6 +17362,7 @@ class AgentRuntime:
                     "lighting_profile": mapping_field(component, "lighting_profile"),
                     "script_bindings": list_field(component, "script_bindings"),
                     "sync_status": str(component.get("sync_status") or component.get("status") or "runtime_state"),
+                    "asset_transfer_status": asset_transfer_status(str(component.get("asset_id") or "")),
                     "review_status": str(component.get("review_status") or "pending_review"),
                     "plan_id": active_plan_id,
                     "batch_id": str(current_batch_id),
@@ -17364,6 +17394,7 @@ class AgentRuntime:
                 "lighting_profile": {},
                 "script_bindings": [],
                 "sync_status": "planned",
+                "asset_transfer_status": asset_transfer_status(""),
                 "review_status": "pending_review",
                 "plan_id": active_plan_id,
                 "batch_id": active_batch_id,
@@ -23687,6 +23718,12 @@ class AgentRuntime:
                 or ""
             )
             asset_id = str(event.get("asset_id") or event.get("asset") or event.get("file_id") or "")
+            actor_asset_id = str(
+                event.get("actor_asset_id")
+                or event.get("model_asset_id")
+                or event.get("model_resource_id")
+                or ""
+            )
             normalized = {
                 "event_type": event_type,
                 "room_id": room,
@@ -23703,6 +23740,7 @@ class AgentRuntime:
                 "actor_id": actor_id,
                 "actor_name": str(event.get("actor_name") or event.get("name") or ""),
                 "asset_id": asset_id,
+                "actor_asset_id": actor_asset_id,
                 "asset_path": str(event.get("asset_path") or event.get("model_path") or event.get("path") or ""),
                 "status": str(event.get("status") or ""),
                 "scene_name": str(event.get("scene_name") or event.get("scene") or event.get("scene_path") or ""),
@@ -23834,6 +23872,9 @@ class AgentRuntime:
                 "last_sync_status": str(normalized.get("status") or actor_fact.get("last_sync_status") or ""),
                 "last_sync_timestamp": normalized.get("timestamp"),
             })
+            actor_asset_id = str(normalized.get("actor_asset_id") or asset_id or "")
+            if actor_asset_id:
+                actor_fact["asset_id"] = actor_asset_id
             if scene_name:
                 actor_fact["scene_name"] = scene_name
             transform_events = {

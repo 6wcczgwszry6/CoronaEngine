@@ -8941,6 +8941,18 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
     def test_asset_transfer_progress_sync_event_updates_runtime_asset_summary(self) -> None:
         runtime = AgentRuntime()
 
+        runtime.record_sync_event(
+            room_id="room-sync-asset-progress",
+            event={
+                "event": "actor_created",
+                "room_id": "room-sync-asset-progress",
+                "actor_guid": "actor-progress",
+                "actor_name": "market table",
+                "model_asset_id": "asset-progress",
+                "timestamp": 126.0,
+            },
+            source="unit-test",
+        )
         recorded = runtime.record_sync_event(
             room_id="room-sync-asset-progress",
             event={
@@ -8993,6 +9005,20 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(status["sync_health_digest"]["asset_transferring_count"], 1)
         self.assertEqual(status["sync_health_digest"]["asset_overall_progress"], 50)
         self.assertIn("asset_transfer_in_progress", status["sync_health_digest"]["needs_attention"])
+        registry_roles = {
+            entity["semantic_role"]: entity
+            for entity in status["scene_entity_registry"]["entities"]
+        }
+        self.assertIn("market table", registry_roles)
+        registry_actor = registry_roles["market table"]
+        self.assertEqual(registry_actor["asset_id"], "asset-progress")
+        self.assertEqual(registry_actor["sync_status"], "active")
+        self.assertEqual(registry_actor["asset_transfer_status"]["transfer_status"], "transferring")
+        self.assertEqual(registry_actor["asset_transfer_status"]["progress"], 50)
+        self.assertEqual(registry_actor["asset_transfer_status"]["chunk_index"], 3)
+        self.assertEqual(registry_actor["asset_transfer_status"]["chunk_count"], 8)
+        self.assertEqual(registry_actor["asset_transfer_status"]["bytes_transferred"], 4096)
+        self.assertEqual(registry_actor["asset_transfer_status"]["total_bytes"], 8192)
         self.assertNotIn("asset_path", str(transfer_summary))
         self.assertNotIn("message_id", str(transfer_summary))
         visible_events = runtime.user_visible_events("room-sync-asset-progress")
@@ -9016,6 +9042,14 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(report["asset_transfer_summary"]["overall_progress"], 50)
         self.assertEqual(report["asset_transfer_summary"]["status_counts"], {"transferring": 1})
         self.assertEqual(report["sync_health_digest"], status["sync_health_digest"])
+        report_registry_roles = {
+            entity["semantic_role"]: entity
+            for entity in report["scene_entity_registry"]["entities"]
+        }
+        self.assertEqual(
+            report_registry_roles["market table"]["asset_transfer_status"],
+            registry_actor["asset_transfer_status"],
+        )
         report_sync_replay = report["operation_replay_summary"]["sync_replay_summary"]
         self.assertEqual(report_sync_replay["transfer_progress_count"], 1)
         self.assertEqual(report_sync_replay["latest_transfer_progress"], 50)
@@ -28444,7 +28478,4 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
 
