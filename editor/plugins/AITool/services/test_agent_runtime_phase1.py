@@ -22724,6 +22724,31 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             ["plan", "terrain", "asset", "actor", "review", "report"],
         )
         self.assertEqual(query_flow["steps"][-1]["status"], "pending")
+        query_registry = query_summary["scene_entity_registry"]
+        query_roles = {entity["semantic_role"]: entity for entity in query_registry["entities"]}
+        self.assertTrue({"forest", "sky", "grass", "wooden table", "tent"}.issubset(query_roles))
+        for role in ("wooden table", "tent"):
+            entity = query_roles[role]
+            self.assertEqual(entity["entity_type"], "actor")
+            self.assertIn("actor_id", entity)
+            self.assertIn("asset_id", entity)
+            self.assertIn("model_ref", entity)
+            self.assertIn("transform", entity)
+            self.assertIn("bounds", entity)
+            self.assertIn("aabb", entity)
+            self.assertIn("grounding_status", entity)
+            self.assertIn("interaction_capability", entity)
+            self.assertIn("gameplay_tags", entity)
+            self.assertIn("physics_profile", entity)
+            self.assertIn("audio_profile", entity)
+            self.assertIn("lighting_profile", entity)
+            self.assertIn("script_bindings", entity)
+            self.assertIn("sync_status", entity)
+            self.assertIn("review_status", entity)
+        for role in ("forest", "sky", "grass"):
+            self.assertNotEqual(query_roles[role]["entity_type"], "actor")
+            self.assertIn("aabb", query_roles[role])
+            self.assertEqual(query_roles[role]["grounding_status"], "not_applicable")
         status_registry = status["scene_entity_registry"]
         status_entities = status_registry["entities"]
         status_roles = {entity["semantic_role"]: entity for entity in status_entities}
