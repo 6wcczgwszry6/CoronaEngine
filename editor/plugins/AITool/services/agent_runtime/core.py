@@ -7098,7 +7098,10 @@ class AgentRuntime:
         "environment_import_requested_count",
         "environment_imported_count",
         "engine_write_boundary_fact_count",
+        "engine_write_import_boundary_count",
+        "engine_write_environment_import_boundary_count",
         "engine_write_transform_boundary_count",
+        "engine_write_delete_boundary_count",
         "engine_write_bridge_call_count",
         "engine_write_bridge_error_code_counts",
         "engine_write_bridge_failed_count",
@@ -19078,8 +19081,17 @@ class AgentRuntime:
                 "engine_write_boundary_fact_count": int(
                     engine_write_boundary_summary.get("boundary_fact_count") or 0
                 ),
+                "engine_write_import_boundary_count": int(
+                    engine_write_boundary_summary.get("import_boundary_count") or 0
+                ),
+                "engine_write_environment_import_boundary_count": int(
+                    engine_write_boundary_summary.get("environment_import_boundary_count") or 0
+                ),
                 "engine_write_transform_boundary_count": int(
                     engine_write_boundary_summary.get("transform_boundary_count") or 0
+                ),
+                "engine_write_delete_boundary_count": int(
+                    engine_write_boundary_summary.get("delete_boundary_count") or 0
                 ),
                 "engine_write_bridge_call_count": int(
                     engine_write_boundary_summary.get("bridge_call_count") or 0
