@@ -25883,6 +25883,30 @@ class AgentRuntime:
             sync_summary=sync_summary,
             asset_transfer_summary=asset_transfer_summary,
         )
+        engine_write_boundary_summary = self._engine_write_boundary_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
+        engine_write_readiness_summary = self._engine_write_readiness_summary(self._provider_summary)
+        layout_adjustment_summary = self._layout_adjustment_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
+        engine_write_entries = self._operation_log_entries_for_runtime_scope(
+            room_id=str(room_id),
+            plan_id=active_plan_id,
+            batch_id=active_batch_id,
+            limit=None,
+        )
+        engine_write_summary = self._engine_write_replay_summary(engine_write_entries)
+        engine_write_adapter_summary = self._engine_write_adapter_summary(
+            readiness_summary=engine_write_readiness_summary,
+            boundary_summary=engine_write_boundary_summary,
+            replay_summary=engine_write_summary,
+            layout_adjustment_summary=layout_adjustment_summary,
+        )
         operation_scope = self._operation_log_snapshot_from_entries(
             self._operation_log_entries_for_runtime_scope(
                 room_id=str(room_id),
@@ -25909,6 +25933,9 @@ class AgentRuntime:
             "sync_summary": sync_summary,
             "asset_transfer_summary": asset_transfer_summary,
             "sync_health_digest": sync_health_digest,
+            "engine_write_boundary_summary": engine_write_boundary_summary,
+            "engine_write_readiness_summary": engine_write_readiness_summary,
+            "engine_write_adapter_summary": engine_write_adapter_summary,
             "actors": dict(self._actor_facts_for_plan(room, active_plan_id, batch_id=active_batch_id)),
             "geometry_summary": geometry_summary,
             "review_summary": review_summary,

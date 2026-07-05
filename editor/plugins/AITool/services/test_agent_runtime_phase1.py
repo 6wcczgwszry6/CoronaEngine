@@ -22671,6 +22671,15 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(set(query_summary["model_resources"]), {"wooden table", "tent"})
         self.assertEqual(query_summary["resource_summary"]["by_phase"]["model"]["requested_count"], 2)
         self.assertEqual(query_summary["import_summary"]["imported_count"], 2)
+        self.assertEqual(query_summary["engine_write_readiness_summary"]["channel_count"], 4)
+        self.assertIn("actor_import", query_summary["engine_write_adapter_summary"]["channels"])
+        self.assertEqual(
+            query_summary["engine_write_adapter_summary"]["channels"]["actor_import"]["boundary_count"],
+            query_summary["engine_write_boundary_summary"]["import_boundary_count"],
+        )
+        self.assertTrue(
+            query_summary["engine_write_adapter_summary"]["channels"]["actor_import"]["write_attempted"]
+        )
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["actor"], 2)
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["terrain"], 2)
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["skybox"], 1)
