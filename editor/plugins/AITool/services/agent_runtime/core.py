@@ -25967,6 +25967,7 @@ class AgentRuntime:
             "asset_request_plan": dict(dict(room.get("asset_request_plans") or {}).get(active_batch_id) or {}),
             "image_resources": dict(dict(room.get("image_resource_plans") or {}).get(active_batch_id) or {}),
             "model_resources": dict(dict(room.get("model_resource_plans") or {}).get(active_batch_id) or {}),
+            "classification_summary": classification_summary,
             "resource_summary": resource_summary,
             "batch_resource_flow_summary": batch_resource_flow_summary,
             "report_health_summary": report_health_summary,

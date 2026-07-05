@@ -22672,6 +22672,15 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(set(query_summary["asset_request_plan"]), {"wooden table", "tent"})
         self.assertEqual(set(query_summary["image_resources"]), {"wooden table", "tent"})
         self.assertEqual(set(query_summary["model_resources"]), {"wooden table", "tent"})
+        self.assertTrue(
+            {"forest", "sky", "grass"}.issubset(
+                set(query_summary["classification_summary"]["substrate_items"])
+            )
+        )
+        self.assertEqual(
+            query_summary["classification_summary"]["model_items"],
+            ["wooden table", "tent"],
+        )
         self.assertEqual(query_summary["resource_summary"]["by_phase"]["model"]["requested_count"], 2)
         self.assertEqual(query_summary["batch_resource_flow_summary"]["batch_count"], 1)
         self.assertEqual(query_summary["report_health_summary"]["status"], "ok")
