@@ -23391,6 +23391,21 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertTrue({"草地", "天空"}.issubset(substrate_plan))
         self.assertEqual(substrate_plan["草地"]["preferred_handler"], "terrain_component")
         self.assertEqual(substrate_plan["天空"]["preferred_handler"], "skybox")
+        substrate_resolution = {
+            item["name"]: item
+            for item in state["substrate_resolutions"][batch_id]
+        }
+        self.assertEqual(substrate_resolution["草地"]["component_type"], "terrain")
+        self.assertEqual(substrate_resolution["天空"]["component_type"], "skybox")
+        environment_components = state["environment_components"][batch_id]
+        environment_names = {item["name"] for item in environment_components.values()}
+        self.assertTrue({"草地", "天空"}.issubset(environment_names))
+        self.assertEqual(set(state["asset_request_plans"][batch_id]), {"帐篷", "小木桌"})
+        self.assertEqual(set(state["image_resource_plans"][batch_id]), {"帐篷", "小木桌"})
+        self.assertEqual(set(state["model_resource_plans"][batch_id]), {"帐篷", "小木桌"})
+        self.assertGreaterEqual(len(state["geometry_reviews"]), 1)
+        self.assertGreaterEqual(len(state["custom_vlm_checkpoint_facts"]), 1)
+        self.assertGreaterEqual(len(state["custom_review_summary_facts"]), 1)
 
         actors = {actor.get("name"): actor for actor in state["actors"].values()}
         self.assertTrue({"帐篷", "小木桌"}.issubset(actors))
