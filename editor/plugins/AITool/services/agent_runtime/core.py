@@ -579,6 +579,7 @@ class RuntimeEventValidator:
         "engine_write_bridge_success_count",
         "engine_write_readiness_mismatch_count",
         "engine_write_readiness_mismatch_channels",
+        "entity_type_counts",
         "environment_failed_count",
         "environment_import_failed_count",
         "environment_import_failure_code_counts",
@@ -806,6 +807,7 @@ class RuntimeEventValidator:
                 "asset_transfer_status_counts",
                 "batch_semantic_status_counts",
                 "engine_write_bridge_error_code_counts",
+                "entity_type_counts",
                 "environment_import_failure_code_counts",
                 "grounding_status_counts",
                 "layout_transform_failure_code_counts",
@@ -7129,6 +7131,7 @@ class AgentRuntime:
         "engine_write_bridge_success_count",
         "engine_write_readiness_mismatch_count",
         "engine_write_readiness_mismatch_channels",
+        "entity_type_counts",
         "graph_status",
         "grounding_status_counts",
         "ground_snapped_count",
@@ -19166,6 +19169,9 @@ class AgentRuntime:
                 ),
                 "actor_registry_missing_aabb_count": int(
                     report_health_summary.get("actor_registry_missing_aabb_count") or 0
+                ),
+                "entity_type_counts": AgentRuntime._safe_status_count_map(
+                    scene_entity_registry.get("entity_type_counts")
                 ),
                 "grounding_status_counts": dict(
                     sorted(dict(scene_entity_registry.get("grounding_status_counts") or {}).items())

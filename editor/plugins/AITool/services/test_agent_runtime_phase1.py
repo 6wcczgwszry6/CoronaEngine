@@ -22905,6 +22905,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(report_ready_event["payload"]["actor_registry_missing_transform_count"], 0)
         self.assertEqual(report_ready_event["payload"]["actor_registry_missing_aabb_count"], 0)
         self.assertEqual(
+            report_ready_event["payload"]["entity_type_counts"],
+            report["scene_entity_registry"]["entity_type_counts"],
+        )
+        self.assertEqual(
             report_ready_event["payload"]["grounding_status_counts"],
             report["scene_entity_registry"]["grounding_status_counts"],
         )
