@@ -23189,6 +23189,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(status["report_health_summary"]["actor_registry_readiness_status"], "ready")
         self.assertEqual(status["report_health_summary"]["actor_registry_missing_transform_count"], 0)
         self.assertEqual(status["report_health_summary"]["actor_registry_missing_aabb_count"], 0)
+
         report = runtime.generate_report("room-forest", plan_id=plan.plan_id)
         self.assertTrue(
             {"forest", "sky", "grass"}.issubset(
@@ -23365,6 +23366,71 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 "runtime.asset.model.prepare",
             }:
                 self.assertEqual(set(node["args"]["asset_requests"]), set(state["asset_request_plans"][batch_id]))
+
+
+    def test_f5_chinese_forest_camp_routes_substrate_and_actor_items(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-f5-cn",
+            text="生成一个简单森林营地，有草地、天空、帐篷、小木桌。",
+            owner_agent="elder",
+        )
+
+        self.assertEqual(plan.concrete_object_items, ["帐篷", "小木桌"])
+        self.assertNotIn("草地", plan.concrete_object_items)
+        self.assertNotIn("天空", plan.concrete_object_items)
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
+        result = runtime.execute_scene_plan(plan.plan_id, include_debug_graph_nodes=True)
+        batch_id = result["batch"]["batch_id"]
+        state = runtime.query_state("room-f5-cn")["room"]
+
+        self.assertEqual(state["model_item_lists"][batch_id], ["帐篷", "小木桌"])
+        self.assertEqual(set(state["image_resource_plans"][batch_id]), {"帐篷", "小木桌"})
+        self.assertEqual(set(state["model_resource_plans"][batch_id]), {"帐篷", "小木桌"})
+        substrate_plan = {item["name"]: item for item in state["substrate_plans"][batch_id]}
+        self.assertTrue({"草地", "天空"}.issubset(substrate_plan))
+        self.assertEqual(substrate_plan["草地"]["preferred_handler"], "terrain_component")
+        self.assertEqual(substrate_plan["天空"]["preferred_handler"], "skybox")
+
+        actors = {actor.get("name"): actor for actor in state["actors"].values()}
+        self.assertTrue({"帐篷", "小木桌"}.issubset(actors))
+        self.assertNotIn("草地", actors)
+        self.assertNotIn("天空", actors)
+        for actor_name in ("帐篷", "小木桌"):
+            actor = actors[actor_name]
+            self.assertIn("position", actor)
+            self.assertIn("rotation", actor)
+            self.assertIn("scale", actor)
+            self.assertIn("aabb", actor)
+            self.assertEqual(actor["grounding_status"], "grounded")
+
+        status = runtime.status_summary("room-f5-cn", plan_id=plan.plan_id)
+        registry = status["scene_entity_registry"]
+        roles = {entity["semantic_role"]: entity for entity in registry["entities"]}
+        self.assertTrue({"草地", "天空", "帐篷", "小木桌"}.issubset(roles))
+        self.assertEqual(roles["草地"]["entity_type"], "terrain")
+        self.assertEqual(roles["天空"]["entity_type"], "skybox")
+        for role in ("帐篷", "小木桌"):
+            entity = roles[role]
+            self.assertEqual(entity["entity_type"], "actor")
+            self.assertIn("actor_id", entity)
+            self.assertIn("model_ref", entity)
+            self.assertIn("transform", entity)
+            self.assertIn("aabb", entity)
+            self.assertEqual(entity["grounding_status"], "grounded")
+            self.assertIn("asset_transfer_status", entity)
+            self.assertIn("sync_status", entity)
+            self.assertIn("review_status", entity)
+
+        flow = status["runtime_scene_flow_summary"]
+        self.assertEqual(
+            [step["step"] for step in flow["steps"]],
+            ["plan", "terrain", "asset", "actor", "review", "report"],
+        )
+        self.assertEqual(flow["actor_readiness_status"], "ready")
+        self.assertEqual(status["fact_source_boundary_summary"]["runtime_state_source"], "RuntimeState")
+        self.assertGreaterEqual(status["operation_count"], 1)
+        self.assertGreaterEqual(status["operation_total_count"], status["operation_count"])
 
 
     def test_layout_terms_are_classified_but_not_imported_as_actors(self) -> None:
