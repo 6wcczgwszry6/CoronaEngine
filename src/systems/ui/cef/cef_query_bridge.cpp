@@ -1,94 +1,10 @@
-#include "cef_client.h"
-#include "cef_native_rpc.h"
+﻿#include "cef_client.h"
+#include "cef_editor_api.h"
+#include "cef_editor_native_api_registry.h"
 
-#include <iostream>
-#include <stdexcept>
 #include <string>
 
 namespace Corona::Systems::UI {
-
-namespace {
-
-bool should_log_rpc_route(const NativeRequest& request) {
-    return request.module == "ProjectLauncher" || request.module == "MainView";
-}
-
-std::string compact_rpc_json(const nlohmann::json& value) {
-    auto text = value.dump();
-    constexpr size_t max_length = 512;
-    if (text.size() > max_length) {
-        text.resize(max_length);
-        text += "...";
-    }
-    return text;
-}
-
-}  // namespace
-
-BrowserSideJSHandler::~BrowserSideJSHandler() {
-    if (!Py_IsInitialized()) {
-        pFunc_ = nullptr;
-        return;
-    }
-
-    PyGILState_STATE state = PyGILState_Ensure();
-    Py_XDECREF(pFunc_);
-    PyGILState_Release(state);
-}
-
-void BrowserSideJSHandler::initialize_python() {
-    if (!Py_IsInitialized()) {
-        throw std::runtime_error("Python interpreter is not initialized");
-    }
-
-    PyGILState_STATE state = PyGILState_Ensure();
-    PyObject* pModule = nullptr;
-
-    try {
-        PyRun_SimpleString("import sys");
-        PyRun_SimpleString("import os");
-        PyRun_SimpleString("sys.path.insert(0, os.path.join(os.getcwd(), 'CabbageEditor'))");
-
-        PyObject* pName = PyUnicode_FromString("main");
-        if (!pName) {
-            throw std::runtime_error("Failed to create module name");
-        }
-
-        pModule = PyImport_Import(pName);
-        Py_DECREF(pName);
-
-        if (!pModule) {
-            PyErr_Print();
-            PyGILState_Release(state);
-            throw std::runtime_error("Failed to import Python module 'main'");
-        }
-
-        PyObject* pClass = PyObject_GetAttrString(pModule, "editor");
-        if (!pClass) {
-            Py_DECREF(pModule);
-            PyErr_Print();
-            PyGILState_Release(state);
-            throw std::runtime_error("Failed to get 'editor' attribute from module");
-        }
-
-        if (PyCallable_Check(pClass)) {
-            pFunc_ = PyObject_GetAttrString(pClass, "deal_func_from_js");
-        }
-
-        Py_DECREF(pClass);
-        Py_DECREF(pModule);
-
-    } catch (const std::exception&) {
-        if (pModule) {
-            Py_DECREF(pModule);
-        }
-        PyErr_Print();
-        PyGILState_Release(state);
-        throw;
-    }
-
-    PyGILState_Release(state);
-}
 
 bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
                                    CefRefPtr<CefFrame> frame,
@@ -99,105 +15,92 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
     CEF_REQUIRE_UI_THREAD();
     std::string req = request.ToString();
 
-    NativeRequest native_request;
-    try {
-        native_request = parse_native_request(req);
-    } catch (const std::exception&) {
+    const auto request_payload = nlohmann::json::parse(req, nullptr, false);
+    if (request_payload.is_discarded()) {
         NativeRequest invalid_request;
-        callback->Success(unsupported_python_route_json(invalid_request));
+        callback->Success(unsupported_editor_api_route_json(invalid_request));
         return true;
     }
 
-    register_builtin_native_rpc_handlers();
-    const bool log_route = should_log_rpc_route(native_request);
-    if (log_route) {
-        CFW_LOG_INFO("CEF RPC request {}.{} args={}",
-                     native_request.module,
-                     native_request.function,
-                     compact_rpc_json(native_request.args));
-    }
+    register_builtin_native_api_handlers();
     NativeContext native_context{browser, frame, query_id};
-    if (auto native_result = NativeRpcRegistry::instance().dispatch(native_request, native_context)) {
-        if (native_result->success) {
-            if (log_route) {
-                CFW_LOG_INFO("CEF RPC native success {}.{} route={}",
-                             native_request.module,
-                             native_request.function,
-                             native_result->route);
-            }
-            callback->Success(native_success_json(native_request, *native_result));
-        } else {
-            if (log_route) {
-                CFW_LOG_ERROR("CEF RPC native failure {}.{} route={} error={}",
-                              native_request.module,
-                              native_request.function,
-                              native_result->route,
-                              native_result->error);
-            }
-            callback->Failure(native_result->error_code, native_result->error);
+    CefEditorApiEndpoint editor_api;
+
+    if (request_payload.value("api", std::string{}) == "EditorApi.register_callback") {
+        const auto args = request_payload.value("args", nlohmann::json::array());
+        if (!args.is_array() || args.empty() || !args[0].is_string()) {
+            callback->Failure(400, "EditorApi.register_callback requires an event name");
+            return true;
         }
+        const auto callback_spec = args.size() > 1 && args[1].is_object()
+                                       ? args[1]
+                                       : nlohmann::json::object();
+        const auto token = editor_api.register_callback(args[0].get<std::string>(),
+                                                        callback_spec,
+                                                        native_context);
+        if (token == 0) {
+            callback->Failure(404, args[0].get<std::string>() + " is not a defined Editor API event");
+            return true;
+        }
+        NativeRequest response_request;
+        response_request.module = "EditorApi";
+        response_request.function = "register_callback";
+        response_request.args = args;
+        callback->Success(native_success_json(response_request,
+                                              native_success({{"callback_token", token}},
+                                                             "editor-api-callback")));
         return true;
     }
 
-    if (!native_request.module.empty() &&
-        !native_request.function.empty() &&
-        !is_python_fallback_allowed(native_request.module, native_request.function)) {
-        callback->Success(unsupported_python_route_json(native_request));
+    if (request_payload.value("api", std::string{}) == "EditorApi.unregister_callback") {
+        const auto args = request_payload.value("args", nlohmann::json::array());
+        if (!args.is_array() || args.empty() || !args[0].is_number_integer()) {
+            callback->Failure(400, "EditorApi.unregister_callback requires a callback token");
+            return true;
+        }
+        const auto raw_token = args[0].get<std::int64_t>();
+        if (raw_token < 0) {
+            callback->Failure(400, "EditorApi.unregister_callback requires a non-negative callback token");
+            return true;
+        }
+        const auto removed = editor_api.unregister_callback(static_cast<std::uint64_t>(raw_token));
+        NativeRequest response_request;
+        response_request.module = "EditorApi";
+        response_request.function = "unregister_callback";
+        response_request.args = args;
+        callback->Success(native_success_json(response_request,
+                                              native_success({{"removed", removed}},
+                                                             "editor-api-callback")));
         return true;
     }
-    if (log_route) {
-        CFW_LOG_INFO("CEF RPC python fallback {}.{}",
-                     native_request.module,
-                     native_request.function);
+
+    const auto editor_api_request = parse_editor_api_request(request_payload, EditorApiCaller::Cef);
+    if (!editor_api_request) {
+        NativeRequest invalid_request;
+        invalid_request.module = "EditorApi";
+        invalid_request.function = "invalid_request";
+        callback->Success(unsupported_editor_api_route_json(invalid_request));
+        return true;
     }
-    if (!Py_IsInitialized()) {
-        if (log_route) {
-            CFW_LOG_ERROR("CEF RPC python unavailable {}.{}",
-                          native_request.module,
-                          native_request.function);
-        }
-        callback->Failure(503, "Python backend is not initialized");
+    if (!EditorApiRegistry::instance().find(editor_api_request->api_name)) {
+        callback->Failure(404,
+                          editor_api_request->api_name + " is not defined by C++ Editor API");
         return true;
     }
 
-    PyGILState_STATE gstate = PyGILState_Ensure();
-
-    try {
-        if (!pFunc_) {
-            initialize_python();
-        }
-
-        PyObject* args = PyTuple_Pack(1, PyUnicode_FromString(req.c_str()));
-        PyObject* object = PyObject_CallObject(pFunc_, args);
-        Py_DECREF(args);
-
-        if (!object) {
-            PyErr_Print();
-            VUE_LOG_ERROR("Python function call failed for request");
-            callback->Failure(0, "Python function call failed");
-        } else {
-            if (PyUnicode_Check(object)) {
-                const char* result = PyUnicode_AsUTF8(object);
-                callback->Success(result);
-            } else {
-                if (PyObject* str_obj = PyObject_Str(object)) {
-                    const char* result = PyUnicode_AsUTF8(str_obj);
-                    callback->Success(result);
-                    Py_DECREF(str_obj);
-                }
-            }
-            Py_DECREF(object);
-        }
-
-    } catch (const std::exception& e) {
-        std::cerr << "Exception in OnQuery: " << e.what() << std::endl;
-        callback->Failure(0, e.what());
-        PyGILState_Release(gstate);
-        return false;
+    auto native_result = editor_api.invoke(editor_api_request->api_name,
+                                           editor_api_request->args,
+                                           native_context);
+    NativeRequest response_request;
+    response_request.module = "EditorApi";
+    response_request.function = editor_api_request->api_name;
+    response_request.args = editor_api_request->args;
+    if (native_result.success) {
+        callback->Success(native_success_json(response_request, native_result));
+    } else {
+        callback->Failure(native_result.error_code, native_result.error);
     }
-
-    PyGILState_Release(gstate);
     return true;
 }
 
-}  // namespace Corona::Systems::UI
+}  // namespace Corona::Systems::UI 

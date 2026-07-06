@@ -1,29 +1,29 @@
-#include "cef_native_rpc.h"
+﻿#include "cef_editor_native_api_registry.h"
 
 #include <mutex>
 #include <stdexcept>
-#include <unordered_set>
 
 namespace Corona::Systems::UI {
 
-void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry);
-void register_scene_datas_rpc_handlers(NativeRpcRegistry& registry);
-void register_main_view_rpc_handlers(NativeRpcRegistry& registry);
-void register_project_launcher_rpc_handlers(NativeRpcRegistry& registry);
-void register_project_settings_rpc_handlers(NativeRpcRegistry& registry);
-void register_network_rpc_handlers(NativeRpcRegistry& registry);
-void register_lanchat_rpc_handlers(NativeRpcRegistry& registry);
+void register_scene_tools_api_handlers(NativeApiRegistry& registry);
+void register_scene_datas_api_handlers(NativeApiRegistry& registry);
+void register_main_view_api_handlers(NativeApiRegistry& registry);
+void register_project_launcher_api_handlers(NativeApiRegistry& registry);
+void register_project_settings_api_handlers(NativeApiRegistry& registry);
+void register_network_api_handlers(NativeApiRegistry& registry);
+void register_lanchat_api_handlers(NativeApiRegistry& registry);
+void register_python_script_api_handlers(NativeApiRegistry& registry);
 
-NativeRpcRegistry& NativeRpcRegistry::instance() {
-    static NativeRpcRegistry registry;
+NativeApiRegistry& NativeApiRegistry::instance() {
+    static NativeApiRegistry registry;
     return registry;
 }
 
-void NativeRpcRegistry::register_module(std::string module, NativeHandlerFn handler) {
+void NativeApiRegistry::register_module(std::string module, NativeHandlerFn handler) {
     handlers_[std::move(module)] = std::move(handler);
 }
 
-std::optional<NativeResult> NativeRpcRegistry::dispatch(
+std::optional<NativeResult> NativeApiRegistry::dispatch(
     const NativeRequest& request,
     const NativeContext& context) const {
     const auto it = handlers_.find(request.module);
@@ -63,31 +63,6 @@ NativeResult native_unhandled() {
     return result;
 }
 
-NativeRequest parse_native_request(const std::string& request_json) {
-    const auto root = nlohmann::json::parse(request_json, nullptr, false);
-    if (root.is_discarded() || !root.is_object()) {
-        throw std::runtime_error("Invalid native request JSON");
-    }
-
-    NativeRequest request;
-
-    if (auto it = root.find("module"); it != root.end() && it->is_string()) {
-        request.module = it->get<std::string>();
-    }
-    if (auto it = root.find("function"); it != root.end() && it->is_string()) {
-        request.function = it->get<std::string>();
-    }
-    if (auto it = root.find("args"); it != root.end()) {
-        request.args = *it;
-    } else {
-        request.args = nlohmann::json::array();
-    }
-    if (!request.args.is_array()) {
-        request.args = nlohmann::json::array({request.args});
-    }
-    return request;
-}
-
 std::string native_success_json(const NativeRequest& request, const NativeResult& result) {
     nlohmann::json payload;
     payload["success"] = true;
@@ -98,77 +73,28 @@ std::string native_success_json(const NativeRequest& request, const NativeResult
     return payload.dump();
 }
 
-std::string unsupported_python_route_json(const NativeRequest& request) {
+std::string unsupported_editor_api_route_json(const NativeRequest& request) {
     nlohmann::json payload;
     payload["success"] = false;
-    payload["error"] = request.module + "." + request.function + " is not allowed on Python route";
+    payload["error"] = request.module + "." + request.function + " is not supported by Editor API";
     payload["module"] = request.module;
     payload["function"] = request.function;
     payload["route"] = "unsupported";
     return payload.dump();
 }
 
-bool is_python_fallback_allowed(const std::string& module, const std::string& function) {
-    static const std::unordered_set<std::string> module_allowlist = {
-        "AITool",
-        "ScratchTool",
-    };
-    if (module_allowlist.contains(module)) {
-        return true;
-    }
-
-    static const std::unordered_map<std::string, std::unordered_set<std::string>> method_allowlist = {
-        {"MainView", {
-            "import_resource_file",
-            "import_model",
-            "import_media",
-            "import_scene_file",
-            "run_project",
-        }},
-        {"ProjectLauncher", {
-            "open_project_file",
-            "browse_folder",
-        }},
-        {"CoronaEditor", {
-            "close_process",
-        }},
-        {"FileManager", {
-            "open_file",
-        }},
-        {"ProjectSettings", {
-            "save_active_project_info",
-            "browse_scene_file",
-        }},
-        {"SceneDatas", {
-            "select_model_file",
-        }},
-        {"SceneTools", {
-            "save_screenshot",
-            "select_screenshot_path",
-            "select_vision_scene_path",
-            "import_vision_scene_into_current_scene",
-            "sun_direction",
-            "floor_grid",
-            "set_ssao_enabled",
-            "get_ssao_enabled",
-        }},
-    };
-
-    const auto it = method_allowlist.find(module);
-    return it != method_allowlist.end() && it->second.contains(function);
-}
-
-void register_builtin_native_rpc_handlers() {
+void register_builtin_native_api_handlers() {
     static std::once_flag once;
     std::call_once(once, [] {
-        auto& registry = NativeRpcRegistry::instance();
-        register_project_launcher_rpc_handlers(registry);
-        register_main_view_rpc_handlers(registry);
-        register_project_settings_rpc_handlers(registry);
-        register_scene_datas_rpc_handlers(registry);
-        register_scene_tools_rpc_handlers(registry);
-        register_network_rpc_handlers(registry);
-        register_lanchat_rpc_handlers(registry);
+        auto& registry = NativeApiRegistry::instance();
+        register_project_launcher_api_handlers(registry);
+        register_main_view_api_handlers(registry);
+        register_project_settings_api_handlers(registry);
+        register_scene_datas_api_handlers(registry);
+        register_scene_tools_api_handlers(registry);
+        register_network_api_handlers(registry);
+        register_lanchat_api_handlers(registry);
+        register_python_script_api_handlers(registry);
     });
 }
 

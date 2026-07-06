@@ -1,4 +1,4 @@
-#ifdef _WIN32
+﻿#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -11,7 +11,8 @@
 
 #include "browser_manager.h"
 #include "cef_client.h"
-#include "cef_native_rpc.h"
+#include "cef_editor_api.h"
+#include "cef_editor_native_api_registry.h"
 
 #include <corona/events/acoustics_system_events.h>
 #include <corona/kernel/core/kernel_context.h>
@@ -4075,6 +4076,10 @@ NativeResult dispatch_method(const std::string& module,
     }
 }
 
+NativeResult script_method(const NativeRequest& request, const NativeContext&) {
+    return invoke_python_script_service(request);
+}
+
 std::shared_ptr<Corona::Systems::NetworkSystem> require_network_system() {
     return get_network_system();
 }
@@ -4402,8 +4407,9 @@ std::string capture_editor_camera_view_from_python(const std::string& scene_name
     }
 }
 
-void register_project_launcher_rpc_handlers(NativeRpcRegistry& registry) {
+void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
+        {"browse_folder", script_method},
         {"get_default_project_path", [](const NativeRequest&, const NativeContext&) {
             const auto value = settings_value("General", "default_path", path_to_utf8(runtime_data_dir()));
             return native_success(value);
@@ -4475,12 +4481,13 @@ void register_project_launcher_rpc_handlers(NativeRpcRegistry& registry) {
             const auto path = normalize_route(arg_string(request.args, 0));
             CFW_LOG_INFO("[ProjectLauncher] open_project request path='{}'", path);
             if (path.empty()) {
-                return native_success(false);
+                return native_success({{"ok", false}, {"path", std::string{}}, {"status", "cancelled"}});
             }
             const auto opened = open_project_native(path_from_utf8(path));
             CFW_LOG_INFO("[ProjectLauncher] open_project opened path='{}'", path_to_utf8(opened));
             return native_success({{"ok", true}, {"path", path_to_utf8(opened)}});
         }},
+        {"open_project_file", script_method},
         {"set_project_mode", [](const NativeRequest&, const NativeContext&) {
             return native_success(true);
         }},
@@ -4508,13 +4515,16 @@ void register_project_launcher_rpc_handlers(NativeRpcRegistry& registry) {
     });
 }
 
-void register_main_view_rpc_handlers(NativeRpcRegistry& registry) {
+void register_main_view_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
+        {"get_menu_data", script_method},
+        {"import_resource_file", script_method},
         {"on_init", [](const NativeRequest& request, const NativeContext&) {
             const auto project_path = resolve_active_project_path(request.args);
             auto* scene = ensure_native_editor_scene(project_path);
             return native_success(make_on_init_payload(*scene));
         }},
+        {"run_project", script_method},
         {"scene_save", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto scene_route = normalize_route(arg_string(request.args, 0));
@@ -4528,6 +4538,7 @@ void register_main_view_rpc_handlers(NativeRpcRegistry& registry) {
                 {"format", "corona_scene"},
             });
         }},
+        {"update_view_tool_state", script_method},
     };
 
     registry.register_module("MainView", [](const NativeRequest& request,
@@ -4546,11 +4557,13 @@ void register_main_view_rpc_handlers(NativeRpcRegistry& registry) {
     });
 }
 
-void register_project_settings_rpc_handlers(NativeRpcRegistry& registry) {
+void register_project_settings_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
+        {"browse_scene_file", script_method},
         {"get_active_project_info", [](const NativeRequest&, const NativeContext&) {
             return native_success(active_project_info_json());
         }},
+        {"save_active_project_info", script_method},
     };
 
     registry.register_module("ProjectSettings", [](const NativeRequest& request,
@@ -4569,7 +4582,7 @@ void register_project_settings_rpc_handlers(NativeRpcRegistry& registry) {
     });
 }
 
-void register_scene_datas_rpc_handlers(NativeRpcRegistry& registry) {
+void register_scene_datas_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
         {"get_scene", [](const NativeRequest&, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
@@ -4618,6 +4631,7 @@ void register_scene_datas_rpc_handlers(NativeRpcRegistry& registry) {
                 {"actor", actor_name},
             });
         }},
+        {"select_model_file", script_method},
     };
 
     registry.register_module("SceneDatas", [](const NativeRequest& request,
@@ -4636,8 +4650,12 @@ void register_scene_datas_rpc_handlers(NativeRpcRegistry& registry) {
     });
 }
 
-void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
+void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
+        {"close_camera_view", script_method},
+        {"create_camera_view", script_method},
+        {"create_scene", script_method},
+        {"delete_camera", script_method},
         {"list_scene_tree", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto scene_route = normalize_route(arg_string(request.args, 0));
@@ -4800,6 +4818,7 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             Corona::API::load_vision_scene(arg_string(request.args, 0));
             return native_success({{"status", "success"}});
         }},
+        {"select_screenshot_path", script_method},
         {"save_screenshot", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto scene_route = normalize_route(arg_string(request.args, 0));
@@ -4925,6 +4944,7 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             camera->engine_camera->set_output_mode(mode);
             return native_success({{"status", "success"}, {"mode", camera->engine_camera->get_output_mode()}});
         }},
+        {"set_physics_params", script_method},
         {"get_output_mode", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto camera_name = arg_string(request.args, 1);
@@ -4934,6 +4954,7 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             }
             return native_success({{"status", "success"}, {"mode", camera->engine_camera->get_output_mode()}});
         }},
+        {"get_physics_params", script_method},
         {"set_shadow_cascade_debug", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto camera_name = arg_string(request.args, 1);
@@ -4996,6 +5017,7 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             emit_actor_change(context, *scene, *actor);
             return native_success({{"status", "success"}, {"actor", actor_to_json(*scene, *actor)}});
         }},
+        {"open_camera_view", script_method},
         {"focus_actor", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto actor_name = arg_string(request.args, 1);
@@ -5038,6 +5060,7 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             const auto actor_name = arg_string(request.args, 1);
             return remove_native_editor_actor(scene_route, actor_name);
         }},
+        {"rename_camera_view", script_method},
         {"pick_actor_at_pixel", [](const NativeRequest& request, const NativeContext& context) {
             auto* scene = ensure_native_editor_scene();
             auto* camera = find_native_camera(*scene, {});
@@ -5129,6 +5152,7 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             payload["ok"] = true;
             return native_success(payload);
         }},
+        {"update_camera_view", script_method},
     };
 
     registry.register_module("SceneTools", [](const NativeRequest& request,
@@ -5147,7 +5171,66 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
     });
 }
 
-void register_network_rpc_handlers(NativeRpcRegistry& registry) {
+void register_python_script_api_handlers(NativeApiRegistry& registry) {
+    static const NativeMethodTable ai_tool_methods = {
+        {"ai_rpc", script_method},
+        {"generate_hint", script_method},
+        {"read_local_file_as_base64", script_method},
+        {"send_message_to_ai_stream", script_method},
+    };
+    static const NativeMethodTable corona_editor_methods = {
+        {"close_process", script_method},
+    };
+    static const NativeMethodTable file_manager_methods = {
+        {"create_file", script_method},
+        {"create_folder", script_method},
+        {"delete_item", script_method},
+        {"get_file_tree", script_method},
+        {"get_files", script_method},
+        {"get_project_info", script_method},
+        {"open_file", script_method},
+        {"rename_item", script_method},
+    };
+    static const NativeMethodTable resource_search_methods = {
+        {"focus_actor", script_method},
+        {"fuzzy_search", script_method},
+        {"get_stats", script_method},
+        {"image_search", script_method},
+        {"list_types", script_method},
+        {"mark_index_dirty", script_method},
+        {"prepare_index", script_method},
+        {"rebuild_index", script_method},
+    };
+    static const NativeMethodTable scratch_tool_methods = {
+        {"execute_python_code", script_method},
+        {"get_game_preview_status", script_method},
+        {"get_script_status", script_method},
+        {"key_event", script_method},
+        {"key_release", script_method},
+        {"load_blockly_target", script_method},
+        {"mouse_event", script_method},
+        {"save_blockly_target", script_method},
+        {"start_game_preview", script_method},
+        {"stop_game_preview", script_method},
+        {"stop_script_execution", script_method},
+    };
+
+    auto register_script_module = [&](const char* module, const NativeMethodTable& methods) {
+        const auto* method_table = &methods;
+        registry.register_module(module, [module, method_table](const NativeRequest& request,
+                                                                const NativeContext& context) {
+            return dispatch_method(module, *method_table, request, context);
+        });
+    };
+
+    register_script_module("AITool", ai_tool_methods);
+    register_script_module("CoronaEditor", corona_editor_methods);
+    register_script_module("FileManager", file_manager_methods);
+    register_script_module("ResourceSearch", resource_search_methods);
+    register_script_module("ScratchTool", scratch_tool_methods);
+}
+
+void register_network_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
         {"start_session", [](const NativeRequest& request, const NativeContext&) {
             auto sys = require_network_system();
@@ -5507,7 +5590,7 @@ void register_network_rpc_handlers(NativeRpcRegistry& registry) {
     });
 }
 
-void register_lanchat_rpc_handlers(NativeRpcRegistry& registry) {
+void register_lanchat_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
         {"start_room", [](const NativeRequest& request, const NativeContext&) {
             auto sys = require_network_system();

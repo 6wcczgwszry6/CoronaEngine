@@ -1,7 +1,6 @@
 ﻿#pragma once
 
 // CEF headers
-#include <Python.h>
 #include <cef_app.h>
 #include <cef_browser.h>
 #include <cef_render_handler.h>
@@ -52,8 +51,8 @@ class OffscreenRenderHandler : public CefRenderHandler {
 class BrowserSideJSHandler : public CefMessageRouterBrowserSide::Handler,
                              public CefBaseRefCounted {
    public:
-    BrowserSideJSHandler() { initialize_python(); }
-    ~BrowserSideJSHandler() override;
+    BrowserSideJSHandler() = default;
+    ~BrowserSideJSHandler() override = default;
 
     bool OnQuery(CefRefPtr<CefBrowser> browser,
                  CefRefPtr<CefFrame> frame,
@@ -70,9 +69,6 @@ class BrowserSideJSHandler : public CefMessageRouterBrowserSide::Handler,
     }
 
    private:
-    PyObject* pFunc_{};
-    void initialize_python();
-
     IMPLEMENT_REFCOUNTING(BrowserSideJSHandler);
     DISALLOW_COPY_AND_ASSIGN(BrowserSideJSHandler);
 };
