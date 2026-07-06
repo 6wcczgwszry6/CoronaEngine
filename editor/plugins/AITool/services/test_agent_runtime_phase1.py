@@ -23469,14 +23469,27 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             "RuntimeState",
         )
         self.assertEqual(report["operation_log_event"], "user_report_generated")
+        replay = report["operation_replay_summary"]
+        self.assertGreaterEqual(replay["scene_plan_lifecycle_summary"]["created_count"], 1)
+        self.assertGreaterEqual(replay["scene_plan_lifecycle_summary"]["confirmed_count"], 1)
         self.assertGreaterEqual(
-            report["operation_replay_summary"]["environment_component_replay_summary"]["ready_event_count"],
+            replay["environment_component_replay_summary"]["ready_event_count"],
             1,
         )
         self.assertEqual(
-            report["operation_replay_summary"]["resource_summary"]["by_phase"]["model"]["requested_count"],
+            replay["resource_summary"]["by_phase"]["image"]["requested_count"],
             2,
         )
+        self.assertEqual(
+            replay["resource_summary"]["by_phase"]["model"]["requested_count"],
+            2,
+        )
+        self.assertEqual(replay["import_summary"]["requested_count"], 2)
+        self.assertEqual(replay["import_summary"]["imported_count"], 2)
+        self.assertGreaterEqual(replay["geometry_fact_replay_summary"]["fact_count"], 1)
+        self.assertGreaterEqual(replay["vlm_checkpoint_summary"]["checkpoint_count"], 1)
+        self.assertIn("structure_review", replay["vlm_checkpoint_summary"]["checkpoint_counts"])
+        self.assertEqual(replay["batch_execution_summary"]["completed_count"], 1)
 
 
     def test_layout_terms_are_classified_but_not_imported_as_actors(self) -> None:
