@@ -593,6 +593,7 @@ class RuntimeEventValidator:
         "graph_count",
         "graph_status",
         "graph_status",
+        "grounding_status_counts",
         "ground_snapped_count",
         "guard_reason",
         "agent_id",
@@ -632,6 +633,7 @@ class RuntimeEventValidator:
         "report_attention_required",
         "report_health_reasons",
         "report_health_status",
+        "review_status_counts",
         "resource_phase_failed_count",
         "resource_phase_failure_code_counts",
         "resource_phase_partial_count",
@@ -798,7 +800,9 @@ class RuntimeEventValidator:
                 "batch_semantic_status_counts",
                 "engine_write_bridge_error_code_counts",
                 "environment_import_failure_code_counts",
+                "grounding_status_counts",
                 "layout_transform_failure_code_counts",
+                "review_status_counts",
                 "resource_phase_failure_code_counts",
                 "import_failure_code_counts",
                 "runtime_fact_injection_field_counts",
@@ -7117,6 +7121,7 @@ class AgentRuntime:
         "engine_write_readiness_mismatch_count",
         "engine_write_readiness_mismatch_channels",
         "graph_status",
+        "grounding_status_counts",
         "ground_snapped_count",
         "guard_reason",
         "item_count",
@@ -7134,6 +7139,7 @@ class AgentRuntime:
         "report_attention_required",
         "report_health_reasons",
         "report_health_status",
+        "review_status_counts",
         "resource_phase_failed_count",
         "resource_phase_failure_code_counts",
         "resource_phase_partial_count",
@@ -19145,6 +19151,12 @@ class AgentRuntime:
                 ),
                 "actor_registry_missing_aabb_count": int(
                     report_health_summary.get("actor_registry_missing_aabb_count") or 0
+                ),
+                "grounding_status_counts": dict(
+                    sorted(dict(scene_entity_registry.get("grounding_status_counts") or {}).items())
+                ),
+                "review_status_counts": dict(
+                    sorted(dict(scene_entity_registry.get("review_status_counts") or {}).items())
                 ),
                 "report_health_status": str(report_health_summary.get("status") or "unknown"),
                 "report_attention_required": bool(report_health_summary.get("attention_required")),
