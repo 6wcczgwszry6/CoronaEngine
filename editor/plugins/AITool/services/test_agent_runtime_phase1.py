@@ -22897,6 +22897,20 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             report_ready_event["payload"]["engine_write_delete_boundary_count"],
             report["engine_write_boundary_summary"]["delete_boundary_count"],
         )
+        self.assertEqual(
+            report_ready_event["payload"]["model_item_count"],
+            len(report["classification_summary"]["model_items"]),
+        )
+        self.assertEqual(report_ready_event["payload"]["model_item_count"], 2)
+        self.assertEqual(
+            report_ready_event["payload"]["substrate_item_count"],
+            len(report["classification_summary"]["substrate_items"]),
+        )
+        self.assertGreaterEqual(report_ready_event["payload"]["substrate_item_count"], 3)
+        self.assertEqual(
+            report_ready_event["payload"]["layout_item_count"],
+            len(report["classification_summary"]["layout_items"]),
+        )
         self.assertEqual(report_ready_event["payload"]["actor_registry_readiness_status"], "ready")
         self.assertEqual(
             report_ready_event["payload"]["actor_registry_actor_count"],
