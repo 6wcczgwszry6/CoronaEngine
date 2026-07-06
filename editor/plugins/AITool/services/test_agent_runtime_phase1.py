@@ -21032,6 +21032,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                             "position": payload["position"],
                             "rotation": payload["rotation"],
                             "scale": payload["scale"],
+                            "aabb": [-0.5, 0.0, -0.5, 0.5, 1.0, 0.5],
                         },
                     },
                 }
@@ -21060,6 +21061,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(actors["guid-钘忓疂绠?"]["name"], "钘忓疂绠?")
         self.assertEqual(actors["guid-钘忓疂绠?"]["scene_name"], "Scene/场景1.scene")
         self.assertEqual(actors["guid-钘忓疂绠?"]["position"], [1, 0, 2])
+        self.assertEqual(actors["guid-钘忓疂绠?"]["aabb"]["min"], [-0.5, 0.0, -0.5])
+        self.assertEqual(actors["guid-钘忓疂绠?"]["aabb"]["max"], [0.5, 1.0, 0.5])
         self.assertNotIn("native-safe-but-wrong-name", str(actors))
         self.assertNotIn("native-old.scene", str(actors))
         self.assertNotIn("engine_result", actors["guid-钘忓疂绠?"])
@@ -21235,6 +21238,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                     "position": list(payload["position"]),
                     "rotation": [0.0, 90.0, 0.0],
                     "scale": [1.0, 1.0, 1.0],
+                    "aabb": [-0.4, 0.0, -0.4, 0.4, 0.9, 0.4],
                     "ground_snapped": False,
                     "overlap_resolved": False,
                 }
@@ -21278,6 +21282,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(result["actor_updates"]["actor-box"]["name"], "box")
         self.assertEqual(result["actor_updates"]["actor-box"]["scene_name"], "Scene/test.scene")
         self.assertEqual(result["actor_updates"]["actor-box"]["position"], [1.0, 0.0, 2.0])
+        self.assertEqual(result["actor_updates"]["actor-box"]["aabb"]["min"], [-0.4, 0.0, -0.4])
+        self.assertEqual(result["actor_updates"]["actor-box"]["aabb"]["max"], [0.4, 0.9, 0.4])
         self.assertNotIn("native-safe-but-wrong-name", str(result["actor_updates"]))
         self.assertNotIn("native-old.scene", str(result["actor_updates"]))
         self.assertNotIn("engine_transform_result", result["actor_updates"]["actor-box"])

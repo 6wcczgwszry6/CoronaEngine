@@ -1475,6 +1475,8 @@ def _safe_cpp_success_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "actor_guid",
         "actor_id",
         "actor_name",
+        "aabb",
+        "bounds",
         "event_type",
         "geometry",
         "ground_snapped",
@@ -1485,12 +1487,15 @@ def _safe_cpp_success_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "position",
         "rotation",
         "scale",
+        "scene_aabb",
         "scene_name",
         "skipped_reason",
         "status",
         "status_info",
         "success",
         "type",
+        "world_aabb",
+        "world_bounds",
     }
     return {
         str(key): safe_value
@@ -1591,6 +1596,41 @@ def _tool_error_code(raw: Any) -> str:
     return text
 
 
+def _normalized_bounds_from(*sources: Any) -> dict[str, list[float]]:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("aabb", "bounds", "scene_aabb", "world_aabb", "world_bounds"):
+            value = source.get(key)
+            if isinstance(value, dict):
+                min_value = _vector3(value.get("min"))
+                max_value = _vector3(value.get("max"))
+                if min_value and max_value:
+                    return {"min": min_value, "max": max_value}
+            elif isinstance(value, (list, tuple)) and len(value) >= 6:
+                try:
+                    numbers = [round(float(item), 4) for item in list(value[:6])]
+                except (TypeError, ValueError):
+                    continue
+                return {"min": numbers[:3], "max": numbers[3:6]}
+    return {}
+
+
+def _vector3(value: Any) -> list[float]:
+    if isinstance(value, dict):
+        raw = [value.get("x"), value.get("y"), value.get("z")]
+    elif isinstance(value, (list, tuple)):
+        raw = list(value[:3])
+    else:
+        return []
+    if len(raw) < 3:
+        return []
+    try:
+        return [round(float(raw[0]), 4), round(float(raw[1]), 4), round(float(raw[2]), 4)]
+    except (TypeError, ValueError):
+        return []
+
+
 def _normalize_import_result(
     parsed: dict[str, Any],
     *,
@@ -1631,7 +1671,7 @@ def _normalize_import_result(
     if not actor_id.strip():
         raise RuntimeError(f"{fallback_name}: actor import returned no actor id")
     geometry = actor.get("geometry") if isinstance(actor.get("geometry"), dict) else {}
-    return {
+    result = {
         "actor_id": actor_id,
         "name": actor_name,
         "plan_id": plan_id,
@@ -1643,6 +1683,10 @@ def _normalize_import_result(
         "rotation": list(geometry.get("rotation") or placement.get("rotation") or [0.0, 0.0, 0.0]),
         "scale": list(geometry.get("scale") or placement.get("scale") or [1.0, 1.0, 1.0]),
     }
+    bounds = _normalized_bounds_from(geometry, actor, parsed)
+    if bounds:
+        result["aabb"] = bounds
+    return result
 
 
 def _normalize_transform_result(
@@ -1698,6 +1742,9 @@ def _normalize_transform_result(
         update["rotation"] = list(rotation)
     if scale is not None:
         update["scale"] = list(scale)
+    bounds = _normalized_bounds_from(actor_data, parsed)
+    if bounds:
+        update["aabb"] = bounds
     return update
 
 
