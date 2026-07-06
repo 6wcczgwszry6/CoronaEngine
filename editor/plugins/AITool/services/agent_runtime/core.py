@@ -534,6 +534,7 @@ class RuntimeEventValidator:
         "actor_registry_missing_transform_count",
         "actor_registry_readiness_status",
         "asset_event_count",
+        "asset_transfer_status_counts",
         "asset_failed_count",
         "asset_id",
         "asset_incomplete_count",
@@ -682,6 +683,7 @@ class RuntimeEventValidator:
         "sync_event_count",
         "sync_health_status",
         "sync_failure_code_counts",
+        "sync_status_counts",
         "latest_sync_failure_code",
         "target_agent",
         "target_hint",
@@ -801,6 +803,7 @@ class RuntimeEventValidator:
                     if isinstance(item, (str, int, float, bool))
                 ][:10]
             elif normalized_key in {
+                "asset_transfer_status_counts",
                 "batch_semantic_status_counts",
                 "engine_write_bridge_error_code_counts",
                 "environment_import_failure_code_counts",
@@ -811,6 +814,7 @@ class RuntimeEventValidator:
                 "import_failure_code_counts",
                 "runtime_fact_injection_field_counts",
                 "sync_failure_code_counts",
+                "sync_status_counts",
             } and isinstance(value, Mapping):
                 status_counts: dict[str, int] = {}
                 for status_key, count_value in dict(value).items():
@@ -7100,6 +7104,7 @@ class AgentRuntime:
         "batch_index",
         "batch_partial_count",
         "batch_semantic_status_counts",
+        "asset_transfer_status_counts",
         "bytes_transferred",
         "chunk_count",
         "chunk_index",
@@ -7166,6 +7171,7 @@ class AgentRuntime:
         "sync_event_count",
         "sync_health_status",
         "sync_failure_code_counts",
+        "sync_status_counts",
         "latest_sync_failure_code",
         "asset_failed_count",
         "asset_incomplete_count",
@@ -19163,6 +19169,12 @@ class AgentRuntime:
                 ),
                 "grounding_status_counts": dict(
                     sorted(dict(scene_entity_registry.get("grounding_status_counts") or {}).items())
+                ),
+                "sync_status_counts": AgentRuntime._safe_status_count_map(
+                    scene_entity_registry.get("sync_status_counts")
+                ),
+                "asset_transfer_status_counts": AgentRuntime._safe_status_count_map(
+                    scene_entity_registry.get("asset_transfer_status_counts")
                 ),
                 "review_status_counts": dict(
                     sorted(dict(scene_entity_registry.get("review_status_counts") or {}).items())

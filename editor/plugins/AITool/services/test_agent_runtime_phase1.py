@@ -22909,6 +22909,14 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             report["scene_entity_registry"]["grounding_status_counts"],
         )
         self.assertEqual(
+            report_ready_event["payload"]["sync_status_counts"],
+            report["scene_entity_registry"]["sync_status_counts"],
+        )
+        self.assertEqual(
+            report_ready_event["payload"]["asset_transfer_status_counts"],
+            report["scene_entity_registry"]["asset_transfer_status_counts"],
+        )
+        self.assertEqual(
             report_ready_event["payload"]["review_status_counts"],
             report["scene_entity_registry"]["review_status_counts"],
         )
