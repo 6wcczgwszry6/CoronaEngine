@@ -1364,26 +1364,38 @@ class ActorFactValidator:
         "actor_id",
         "asset_id",
         "aabb",
+        "audio_profile",
         "batch_id",
         "bounds",
         "deleted",
         "deleted_at",
+        "entity_type",
+        "gameplay_tags",
         "grounding_status",
+        "interaction_capability",
         "last_sync_event",
         "last_sync_status",
         "last_sync_timestamp",
+        "lighting_profile",
+        "model_ref",
         "model_path",
         "name",
+        "physics_profile",
         "plan_id",
         "position",
         "rotation",
+        "role",
         "scale",
         "scene_name",
         "scene_aabb",
+        "script_bindings",
+        "semantic_role",
         "source",
         "support_type",
+        "sync_status",
         "sync_lifecycle_status",
         "version",
+        "review_status",
         "zone_hint",
     }
     _BLOCKED_FIELDS = {
@@ -1410,14 +1422,30 @@ class ActorFactValidator:
         "batch_id",
         "last_sync_event",
         "last_sync_status",
+        "model_ref",
         "name",
         "plan_id",
+        "role",
         "scene_name",
+        "semantic_role",
         "source",
         "grounding_status",
         "support_type",
+        "entity_type",
+        "sync_status",
         "sync_lifecycle_status",
+        "review_status",
         "zone_hint",
+    }
+    _LIST_FIELDS = {
+        "gameplay_tags",
+        "interaction_capability",
+        "script_bindings",
+    }
+    _PROFILE_FIELDS = {
+        "audio_profile",
+        "lighting_profile",
+        "physics_profile",
     }
 
     @staticmethod
@@ -1458,6 +1486,14 @@ class ActorFactValidator:
                     if bounds is not None:
                         actor[normalized_field] = bounds
                     continue
+                if normalized_field in ActorFactValidator._LIST_FIELDS:
+                    actor[normalized_field] = ActorFactValidator._safe_text_list(value)
+                    continue
+                if normalized_field in ActorFactValidator._PROFILE_FIELDS:
+                    profile = ActorFactValidator._safe_profile_mapping(value)
+                    if profile:
+                        actor[normalized_field] = profile
+                    continue
                 if isinstance(value, (str, int, float, bool)):
                     actor[normalized_field] = value
             cleaned[actor_id] = actor
@@ -1485,6 +1521,12 @@ class ActorFactValidator:
                     ActorFactValidator._require_vector3(value, normalized_field)
                 elif normalized_field in {"aabb", "bounds", "scene_aabb"}:
                     ActorFactValidator._require_aabb_bounds(value, normalized_field)
+                elif normalized_field in ActorFactValidator._LIST_FIELDS:
+                    ActorFactValidator._require_safe_text_list(value, normalized_field)
+                elif normalized_field in ActorFactValidator._PROFILE_FIELDS:
+                    if not isinstance(value, Mapping):
+                        raise ValueError(f"actor fact {normalized_field} must be a mapping")
+                    ReportRecordValidator._validate_safe_tree(value, path=f"actor_fact.{normalized_field}")
                 elif not isinstance(value, (str, int, float, bool)):
                     raise ValueError(f"actor fact {normalized_field} must be scalar")
                 if normalized_field in ActorFactValidator._SAFE_TEXT_FIELDS and isinstance(value, str):
@@ -1529,6 +1571,40 @@ class ActorFactValidator:
                     raise ValueError(f"actor fact {field_name} entries must be numeric")
             return
         raise ValueError(f"actor fact {field_name} must be a min/max mapping or 6-value list")
+
+    @staticmethod
+    def _safe_text_list(value: Any) -> list[str]:
+        if isinstance(value, str):
+            raw_items = [value]
+        elif isinstance(value, (list, tuple)):
+            raw_items = list(value)
+        else:
+            return []
+        cleaned: list[str] = []
+        for item in raw_items[:16]:
+            text = str(item or "").strip()[:120]
+            if not text:
+                continue
+            ActorFactValidator._validate_safe_text(text, "actor fact list item")
+            cleaned.append(text)
+        return cleaned
+
+    @staticmethod
+    def _require_safe_text_list(value: Any, field_name: str) -> None:
+        if not isinstance(value, list):
+            raise ValueError(f"actor fact {field_name} must be a list")
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError(f"actor fact {field_name} entries must be strings")
+            ActorFactValidator._validate_safe_text(item, field_name)
+
+    @staticmethod
+    def _safe_profile_mapping(value: Any) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            return {}
+        profile = dict(value)
+        ReportRecordValidator._validate_safe_tree(profile, path="actor_fact.profile")
+        return profile
 
     @staticmethod
     def _require_vector3(value: Any, field_name: str) -> None:

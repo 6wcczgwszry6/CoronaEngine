@@ -22779,6 +22779,74 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(actors["actor-table"]["scene_aabb"]["min"], [-0.7, 0.0, -0.7])
         self.assertEqual(actors["actor-table"]["scene_aabb"]["max"], [0.7, 1.0, 0.7])
 
+    def test_state_patch_preserves_game_ready_actor_fields_in_registry(self) -> None:
+        state = RuntimeState()
+
+        applied, reason = state.apply_patch(
+            StatePatch(
+                room_id="room-game-ready-fields",
+                changes={
+                    "actors": {
+                        "actor-camp-table": {
+                            "actor_id": "actor-camp-table",
+                            "plan_id": "plan-game-ready-fields",
+                            "batch_id": "batch-game-ready-fields",
+                            "name": "camp table",
+                            "asset_id": "asset-camp-table",
+                            "model_ref": "camp_table_model",
+                            "semantic_role": "utility_table",
+                            "position": [0.0, 0.0, 0.0],
+                            "aabb": [-0.5, 0.0, -0.5, 0.5, 0.7, 0.5],
+                            "grounding_status": "grounded",
+                            "interaction_capability": ["inspect", "move"],
+                            "gameplay_tags": ["camp", "furniture"],
+                            "physics_profile": {"collision": "static"},
+                            "audio_profile": {"surface": "wood"},
+                            "lighting_profile": {"receives_light": True},
+                            "script_bindings": ["runtime_scene_entity"],
+                            "sync_status": "ready",
+                            "review_status": "passed",
+                        },
+                    },
+                    "assets": {
+                        "asset-camp-table": {
+                            "asset_id": "asset-camp-table",
+                            "transfer_status": "ready",
+                            "ready": True,
+                            "progress": 100,
+                        },
+                    },
+                    "batch_plans": {
+                        "batch-game-ready-fields": {
+                            "batch_id": "batch-game-ready-fields",
+                            "room_id": "room-game-ready-fields",
+                            "plan_id": "plan-game-ready-fields",
+                            "batch_index": 1,
+                            "total_batches": 1,
+                            "status": "completed",
+                        },
+                    },
+                },
+            )
+        )
+
+        self.assertTrue(applied, reason)
+        registry = AgentRuntime._scene_entity_registry_for_plan(
+            state.room("room-game-ready-fields"),
+            "plan-game-ready-fields",
+        )
+        entity = registry["entities"][0]
+        self.assertEqual(entity["model_ref"], "camp_table_model")
+        self.assertEqual(entity["semantic_role"], "utility_table")
+        self.assertEqual(entity["interaction_capability"], ["inspect", "move"])
+        self.assertEqual(entity["gameplay_tags"], ["camp", "furniture"])
+        self.assertEqual(entity["physics_profile"], {"collision": "static"})
+        self.assertEqual(entity["audio_profile"], {"surface": "wood"})
+        self.assertEqual(entity["lighting_profile"], {"receives_light": True})
+        self.assertEqual(entity["script_bindings"], ["runtime_scene_entity"])
+        self.assertEqual(entity["sync_status"], "ready")
+        self.assertEqual(entity["review_status"], "passed")
+
     def test_substrate_terms_are_classified_but_not_imported_as_actors(self) -> None:
         runtime = AgentRuntime()
         plan = runtime.propose_scene_plan(
