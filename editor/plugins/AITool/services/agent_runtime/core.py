@@ -1365,6 +1365,7 @@ class ActorFactValidator:
         "asset_id",
         "aabb",
         "batch_id",
+        "bounds",
         "deleted",
         "deleted_at",
         "grounding_status",
@@ -1378,6 +1379,7 @@ class ActorFactValidator:
         "rotation",
         "scale",
         "scene_name",
+        "scene_aabb",
         "source",
         "support_type",
         "sync_lifecycle_status",
@@ -1451,9 +1453,10 @@ class ActorFactValidator:
                     if vector is not None:
                         actor[normalized_field] = vector
                     continue
-                if normalized_field == "aabb":
-                    if isinstance(value, Mapping):
-                        actor[normalized_field] = dict(value)
+                if normalized_field in {"aabb", "bounds", "scene_aabb"}:
+                    bounds = ActorFactValidator._safe_aabb_bounds(value)
+                    if bounds is not None:
+                        actor[normalized_field] = bounds
                     continue
                 if isinstance(value, (str, int, float, bool)):
                     actor[normalized_field] = value
@@ -1480,9 +1483,8 @@ class ActorFactValidator:
                     raise ValueError(f"actor fact has unsupported field: {normalized_field}")
                 if normalized_field in {"position", "rotation", "scale"}:
                     ActorFactValidator._require_vector3(value, normalized_field)
-                elif normalized_field == "aabb":
-                    if not isinstance(value, Mapping):
-                        raise ValueError("actor fact aabb must be a mapping")
+                elif normalized_field in {"aabb", "bounds", "scene_aabb"}:
+                    ActorFactValidator._require_aabb_bounds(value, normalized_field)
                 elif not isinstance(value, (str, int, float, bool)):
                     raise ValueError(f"actor fact {normalized_field} must be scalar")
                 if normalized_field in ActorFactValidator._SAFE_TEXT_FIELDS and isinstance(value, str):
@@ -1498,6 +1500,35 @@ class ActorFactValidator:
             return [round(float(value[0]), 4), round(float(value[1]), 4), round(float(value[2]), 4)]
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _safe_aabb_bounds(value: Any) -> dict[str, list[float]] | None:
+        if isinstance(value, Mapping):
+            min_vec = ActorFactValidator._safe_vector3(value.get("min"), default=None)
+            max_vec = ActorFactValidator._safe_vector3(value.get("max"), default=None)
+            if min_vec is not None and max_vec is not None:
+                return {"min": min_vec, "max": max_vec}
+            return None
+        if isinstance(value, (list, tuple)) and len(value) >= 6:
+            try:
+                numbers = [round(float(item), 4) for item in list(value[:6])]
+            except (TypeError, ValueError):
+                return None
+            return {"min": numbers[:3], "max": numbers[3:6]}
+        return None
+
+    @staticmethod
+    def _require_aabb_bounds(value: Any, field_name: str) -> None:
+        if isinstance(value, Mapping):
+            ActorFactValidator._require_vector3(value.get("min"), f"{field_name}.min")
+            ActorFactValidator._require_vector3(value.get("max"), f"{field_name}.max")
+            return
+        if isinstance(value, list) and len(value) == 6:
+            for item in value:
+                if not isinstance(item, (int, float)):
+                    raise ValueError(f"actor fact {field_name} entries must be numeric")
+            return
+        raise ValueError(f"actor fact {field_name} must be a min/max mapping or 6-value list")
 
     @staticmethod
     def _require_vector3(value: Any, field_name: str) -> None:

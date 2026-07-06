@@ -22713,6 +22713,72 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(tent["aabb"]["max"], [1.5, 2.2, 1.0])
         self.assertEqual(tent["grounding_status"], "grounded")
 
+    def test_state_patch_accepts_native_six_value_actor_aabb(self) -> None:
+        state = RuntimeState()
+
+        applied, reason = state.apply_patch(
+            StatePatch(
+                room_id="room-native-aabb-patch",
+                changes={
+                    "actors": {
+                        "actor-tent": {
+                            "actor_id": "actor-tent",
+                            "plan_id": "plan-native-aabb-patch",
+                            "batch_id": "batch-native-aabb-patch",
+                            "name": "tent",
+                            "asset_id": "asset-tent",
+                            "position": [1.0, 0.0, 2.0],
+                            "aabb": [-1.5, 0.0, -1.0, 1.5, 2.2, 1.0],
+                        },
+                    },
+                    "assets": {
+                        "asset-tent": {
+                            "asset_id": "asset-tent",
+                            "transfer_status": "ready",
+                            "ready": True,
+                            "progress": 100,
+                        },
+                    },
+                    "batch_plans": {
+                        "batch-native-aabb-patch": {
+                            "batch_id": "batch-native-aabb-patch",
+                            "room_id": "room-native-aabb-patch",
+                            "plan_id": "plan-native-aabb-patch",
+                            "batch_index": 1,
+                            "total_batches": 1,
+                            "status": "completed",
+                        },
+                    },
+                },
+            )
+        )
+
+        self.assertTrue(applied, reason)
+        room = state.room("room-native-aabb-patch")
+        registry = AgentRuntime._scene_entity_registry_for_plan(room, "plan-native-aabb-patch")
+        tent = registry["entities"][0]
+        self.assertEqual(registry["actor_aabb_available_count"], 1)
+        self.assertEqual(registry["missing_aabb_count"], 0)
+        self.assertEqual(tent["aabb"]["min"], [-1.5, 0.0, -1.0])
+        self.assertEqual(tent["aabb"]["max"], [1.5, 2.2, 1.0])
+
+    def test_actor_fact_validator_normalizes_native_bounds_aliases(self) -> None:
+        actors = ActorFactValidator.safe_actor_map(
+            {
+                "actor-table": {
+                    "actor_id": "actor-table",
+                    "name": "table",
+                    "bounds": [-0.5, 0.0, -0.5, 0.5, 0.8, 0.5],
+                    "scene_aabb": [-0.7, 0.0, -0.7, 0.7, 1.0, 0.7],
+                },
+            }
+        )
+
+        self.assertEqual(actors["actor-table"]["bounds"]["min"], [-0.5, 0.0, -0.5])
+        self.assertEqual(actors["actor-table"]["bounds"]["max"], [0.5, 0.8, 0.5])
+        self.assertEqual(actors["actor-table"]["scene_aabb"]["min"], [-0.7, 0.0, -0.7])
+        self.assertEqual(actors["actor-table"]["scene_aabb"]["max"], [0.7, 1.0, 0.7])
+
     def test_substrate_terms_are_classified_but_not_imported_as_actors(self) -> None:
         runtime = AgentRuntime()
         plan = runtime.propose_scene_plan(
