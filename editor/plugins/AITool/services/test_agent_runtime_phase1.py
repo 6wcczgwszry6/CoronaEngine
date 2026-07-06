@@ -22900,6 +22900,68 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(entity["sync_status"], "ready")
         self.assertEqual(entity["review_status"], "passed")
 
+    def test_environment_component_fields_are_preserved_in_registry(self) -> None:
+        state = RuntimeState()
+
+        applied, reason = state.apply_patch(
+            StatePatch(
+                room_id="room-environment-fields",
+                changes={
+                    "environment_components": {
+                        "batch-environment-fields": {
+                            "terrain-grass": {
+                                "component_id": "terrain-grass",
+                                "component_type": "terrain",
+                                "name": "grass ground",
+                                "status": "imported",
+                                "handler": "terrain",
+                                "model_ref": "terrain_runtime",
+                                "position": [0.0, 0.0, 0.0],
+                                "bounds": [-5.0, 0.0, -5.0, 5.0, 0.1, 5.0],
+                                "environment_profile": {"surface": "grass", "sky_mode": "clear"},
+                                "gameplay_tags": ["environment", "walkable"],
+                                "interaction_capability": ["walk_on"],
+                                "physics_profile": {"collision": "walkable_static"},
+                                "audio_profile": {"surface": "grass"},
+                                "lighting_profile": {"receives_light": True},
+                                "script_bindings": ["runtime_environment_entity"],
+                                "review_status": "passed",
+                            },
+                        },
+                    },
+                    "batch_plans": {
+                        "batch-environment-fields": {
+                            "batch_id": "batch-environment-fields",
+                            "room_id": "room-environment-fields",
+                            "plan_id": "plan-environment-fields",
+                            "batch_index": 1,
+                            "total_batches": 1,
+                            "status": "completed",
+                        },
+                    },
+                },
+            )
+        )
+
+        self.assertTrue(applied, reason)
+        registry = AgentRuntime._scene_entity_registry_for_plan(
+            state.room("room-environment-fields"),
+            "plan-environment-fields",
+        )
+        entity = registry["entities"][0]
+        self.assertEqual(entity["entity_type"], "terrain")
+        self.assertEqual(entity["model_ref"], "terrain_runtime")
+        self.assertEqual(entity["aabb"]["min"], [-5.0, 0.0, -5.0])
+        self.assertEqual(entity["aabb"]["max"], [5.0, 0.1, 5.0])
+        self.assertEqual(entity["environment_profile"], {"surface": "grass", "sky_mode": "clear"})
+        self.assertEqual(entity["gameplay_tags"], ["environment", "walkable"])
+        self.assertEqual(entity["interaction_capability"], ["walk_on"])
+        self.assertEqual(entity["physics_profile"], {"collision": "walkable_static"})
+        self.assertEqual(entity["audio_profile"], {"surface": "grass"})
+        self.assertEqual(entity["lighting_profile"], {"receives_light": True})
+        self.assertEqual(entity["script_bindings"], ["runtime_environment_entity"])
+        self.assertEqual(entity["review_status"], "passed")
+
     def test_substrate_terms_are_classified_but_not_imported_as_actors(self) -> None:
         runtime = AgentRuntime()
         plan = runtime.propose_scene_plan(

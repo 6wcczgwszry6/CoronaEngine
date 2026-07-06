@@ -2989,14 +2989,28 @@ class EnvironmentComponentValidator:
 
     _ALLOWED_FIELDS = {
         "actor_id",
+        "aabb",
+        "audio_profile",
         "boundary_style",
+        "bounds",
         "component_id",
         "component_type",
         "environment_profile",
+        "gameplay_tags",
         "handler",
+        "interaction_capability",
+        "lighting_profile",
+        "model_ref",
         "name",
+        "physics_profile",
+        "position",
         "requires_engine_write",
+        "review_status",
+        "rotation",
+        "scale",
+        "scene_aabb",
         "scene_name",
+        "script_bindings",
         "source",
         "status",
         "surface",
@@ -3024,6 +3038,17 @@ class EnvironmentComponentValidator:
         "tool_call_id",
         "tool_name",
         "url",
+    }
+    _LIST_FIELDS = {
+        "gameplay_tags",
+        "interaction_capability",
+        "script_bindings",
+    }
+    _PROFILE_FIELDS = {
+        "audio_profile",
+        "environment_profile",
+        "lighting_profile",
+        "physics_profile",
     }
 
     @staticmethod
@@ -3063,6 +3088,8 @@ class EnvironmentComponentValidator:
             "name",
             "component_type",
             "handler",
+            "model_ref",
+            "review_status",
             "scene_name",
             "source",
             "status",
@@ -3074,6 +3101,18 @@ class EnvironmentComponentValidator:
                 raise ValueError(f"environment component fact {field} must be a string")
         if "environment_profile" in component and not isinstance(component.get("environment_profile"), Mapping):
             raise ValueError("environment component fact environment_profile must be a mapping")
+        for field in ("position", "rotation", "scale"):
+            if field in component:
+                ActorFactValidator._require_vector3(component.get(field), f"environment component {field}")
+        for field in ("aabb", "bounds", "scene_aabb"):
+            if field in component:
+                ActorFactValidator._require_aabb_bounds(component.get(field), f"environment component {field}")
+        for field in EnvironmentComponentValidator._LIST_FIELDS:
+            if field in component:
+                ActorFactValidator._require_safe_text_list(component.get(field), f"environment component {field}")
+        for field in EnvironmentComponentValidator._PROFILE_FIELDS:
+            if field in component and not isinstance(component.get(field), Mapping):
+                raise ValueError(f"environment component fact {field} must be a mapping")
         component_type = str(component.get("component_type") or "")
         if not component_type.strip():
             raise ValueError("environment component fact requires component_type")
@@ -3092,6 +3131,8 @@ class EnvironmentComponentValidator:
             "component_id",
             "name",
             "handler",
+            "model_ref",
+            "review_status",
             "scene_name",
             "source",
             "status",
@@ -3100,11 +3141,10 @@ class EnvironmentComponentValidator:
             "terrain_profile",
         ):
             EnvironmentComponentValidator._validate_safe_text(component.get(field), field)
-        profile = component.get("environment_profile")
-        if isinstance(profile, Mapping):
-            for key, value in profile.items():
-                EnvironmentComponentValidator._validate_safe_text(str(key or ""), "environment_profile key")
-                EnvironmentComponentValidator._validate_safe_text(value, "environment_profile value")
+        for field in EnvironmentComponentValidator._PROFILE_FIELDS:
+            profile = component.get(field)
+            if isinstance(profile, Mapping):
+                ReportRecordValidator._validate_safe_tree(profile, path=f"environment_component.{field}")
 
     @staticmethod
     def _validate_safe_text(value: Any, field: str) -> None:
