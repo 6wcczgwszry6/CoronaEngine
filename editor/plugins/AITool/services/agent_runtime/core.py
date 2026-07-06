@@ -17704,14 +17704,23 @@ class AgentRuntime:
         review_status_counts: dict[str, int] = {}
         transform_available_count = 0
         aabb_available_count = 0
+        actor_transform_available_count = 0
+        actor_aabb_available_count = 0
         for entity in entities:
             add_count(entity_type_counts, str(entity.get("entity_type") or "unknown"))
             add_count(grounding_status_counts, str(entity.get("grounding_status") or "unknown"))
             add_count(sync_status_counts, str(entity.get("sync_status") or "unknown"))
-            if isinstance(entity.get("transform"), Mapping) and bool(entity.get("transform")):
+            is_actor_entity = entity.get("entity_type") == "actor"
+            has_transform = isinstance(entity.get("transform"), Mapping) and bool(entity.get("transform"))
+            has_aabb = isinstance(entity.get("aabb"), Mapping) and bool(entity.get("aabb"))
+            if has_transform:
                 transform_available_count += 1
-            if isinstance(entity.get("aabb"), Mapping) and bool(entity.get("aabb")):
+                if is_actor_entity:
+                    actor_transform_available_count += 1
+            if has_aabb:
                 aabb_available_count += 1
+                if is_actor_entity:
+                    actor_aabb_available_count += 1
             transfer_status = entity.get("asset_transfer_status")
             if isinstance(transfer_status, Mapping):
                 if not transfer_status.get("available"):
@@ -17725,8 +17734,8 @@ class AgentRuntime:
                 add_count(asset_transfer_status_counts, "unknown")
             add_count(review_status_counts, str(entity.get("review_status") or "unknown"))
         actor_count = sum(1 for entity in entities if entity.get("entity_type") == "actor")
-        missing_transform_count = max(0, actor_count - transform_available_count)
-        missing_aabb_count = max(0, actor_count - aabb_available_count)
+        missing_transform_count = max(0, actor_count - actor_transform_available_count)
+        missing_aabb_count = max(0, actor_count - actor_aabb_available_count)
         if not actor_count:
             readiness_status = "no_actors"
         elif missing_transform_count or missing_aabb_count:
@@ -17744,6 +17753,8 @@ class AgentRuntime:
             "readiness_status": readiness_status,
             "transform_available_count": transform_available_count,
             "aabb_available_count": aabb_available_count,
+            "actor_transform_available_count": actor_transform_available_count,
+            "actor_aabb_available_count": actor_aabb_available_count,
             "missing_transform_count": missing_transform_count,
             "missing_aabb_count": missing_aabb_count,
             "entity_type_counts": dict(sorted(entity_type_counts.items())),

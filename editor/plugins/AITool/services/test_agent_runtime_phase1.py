@@ -22610,6 +22610,62 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(summary["type_counts"]["room_box"], 1)
         self.assertEqual(summary["type_counts"]["room_floor"], 1)
 
+    def test_scene_entity_registry_actor_readiness_ignores_environment_geometry(self) -> None:
+        room = {
+            "actors": {
+                "actor-table": {
+                    "actor_id": "actor-table",
+                    "plan_id": "plan-registry",
+                    "batch_id": "batch-registry",
+                    "name": "wooden table",
+                    "asset_id": "asset-table",
+                },
+            },
+            "observed_actors": {},
+            "assets": {
+                "asset-table": {
+                    "asset_id": "asset-table",
+                    "transfer_status": "ready",
+                    "ready": True,
+                    "progress": 100,
+                },
+            },
+            "batch_plans": {
+                "batch-registry": {
+                    "batch_id": "batch-registry",
+                    "plan_id": "plan-registry",
+                    "batch_index": 1,
+                    "total_batches": 1,
+                },
+            },
+            "environment_components": {
+                "batch-registry": {
+                    "terrain-grass": {
+                        "component_id": "terrain-grass",
+                        "name": "grass",
+                        "component_type": "terrain",
+                        "status": "imported",
+                        "position": [0, 0, 0],
+                        "bounds": {"min": [-5, 0, -5], "max": [5, 0, 5]},
+                    },
+                },
+            },
+            "element_routes": {},
+            "model_item_lists": {},
+            "classification_summaries": {},
+        }
+
+        registry = AgentRuntime._scene_entity_registry_for_plan(room, "plan-registry")
+
+        self.assertEqual(registry["actor_count"], 1)
+        self.assertEqual(registry["transform_available_count"], 1)
+        self.assertEqual(registry["aabb_available_count"], 1)
+        self.assertEqual(registry["actor_transform_available_count"], 0)
+        self.assertEqual(registry["actor_aabb_available_count"], 0)
+        self.assertEqual(registry["missing_transform_count"], 1)
+        self.assertEqual(registry["missing_aabb_count"], 1)
+        self.assertEqual(registry["readiness_status"], "partial")
+
     def test_substrate_terms_are_classified_but_not_imported_as_actors(self) -> None:
         runtime = AgentRuntime()
         plan = runtime.propose_scene_plan(
