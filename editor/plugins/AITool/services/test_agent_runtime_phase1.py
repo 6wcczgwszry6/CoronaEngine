@@ -9357,6 +9357,59 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(exported.payload["message_delivery_failed_count"], 1)
         self.assertEqual(exported.payload["sync_health_status"], "needs_attention")
 
+    def test_sync_actor_snapshot_preserves_aabb_and_asset_transfer_status(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-sync-registry",
+            text="Create a forest camp with a tent and wooden table",
+            owner_agent="elder",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
+
+        runtime.record_sync_event(
+            room_id="room-sync-registry",
+            event={
+                "event": "asset_transfer_completed",
+                "room_id": "room-sync-registry",
+                "plan_id": plan.plan_id,
+                "asset_id": "asset-tent",
+                "progress": 100,
+                "chunk_index": 4,
+                "chunk_count": 4,
+                "bytes_transferred": 4096,
+                "total_bytes": 4096,
+            },
+            source="unit-test",
+        )
+        runtime.record_sync_event(
+            room_id="room-sync-registry",
+            event={
+                "event": "actor_created",
+                "room_id": "room-sync-registry",
+                "plan_id": plan.plan_id,
+                "actor_guid": "actor-tent-sync",
+                "actor_name": "tent",
+                "actor_asset_id": "asset-tent",
+                "position": [1.0, 0.0, 2.0],
+                "aabb": [-1.0, 0.0, -1.0, 1.0, 1.6, 1.0],
+            },
+            source="unit-test",
+        )
+
+        room = runtime.query_state("room-sync-registry")["room"]
+        registry = AgentRuntime._scene_entity_registry_for_plan(room, plan.plan_id)
+        entity = next(item for item in registry["entities"] if item["entity_id"] == "actor-tent-sync")
+        sync_health = runtime.status_summary("room-sync-registry")["sync_health_digest"]
+
+        self.assertEqual(entity["aabb"]["min"], [-1.0, 0.0, -1.0])
+        self.assertEqual(entity["aabb"]["max"], [1.0, 1.6, 1.0])
+        self.assertEqual(entity["grounding_status"], "grounded")
+        self.assertEqual(entity["asset_transfer_status"]["transfer_status"], "completed")
+        self.assertTrue(entity["asset_transfer_status"]["ready"])
+        self.assertEqual(entity["sync_status"], "active")
+        self.assertEqual(sync_health["latest_active_actor_count"], 1)
+        self.assertEqual(sync_health["asset_ready_count"], 1)
+
     def test_sync_status_action_exports_peer_sync_replay_snapshot(self) -> None:
         runtime = AgentRuntime()
         for event in (

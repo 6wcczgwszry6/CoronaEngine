@@ -24413,6 +24413,13 @@ class AgentRuntime:
                 normalized["rotation"] = rotation
             if scale is not None:
                 normalized["scale"] = scale
+            event_bounds = ActorFactValidator._safe_aabb_bounds(
+                event.get("aabb")
+                or event.get("bounds")
+                or event.get("scene_aabb")
+                or event.get("world_aabb")
+                or event.get("world_bounds")
+            )
             for target_key, candidates in {
                 "chunk_index": ("chunk_index", "chunk", "chunk_id", "chunk_no", "chunk_number"),
                 "chunk_count": ("chunk_count", "total_chunks", "chunk_total"),
@@ -24424,6 +24431,8 @@ class AgentRuntime:
                 if numeric_value is not None:
                     normalized[target_key] = numeric_value
             room_id = room
+        if not isinstance(event, dict):
+            event_bounds = None
 
         room_key = str(room_id or normalized.get("room_id") or "default")
         room_state = self.state.room(room_key)
@@ -24529,6 +24538,8 @@ class AgentRuntime:
                 actor_fact["asset_id"] = actor_asset_id
             if scene_name:
                 actor_fact["scene_name"] = scene_name
+            if event_bounds is not None:
+                actor_fact["aabb"] = event_bounds
             transform_events = {
                 "actor_transform",
                 "actor_updated",
