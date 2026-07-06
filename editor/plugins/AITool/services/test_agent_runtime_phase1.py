@@ -23491,6 +23491,39 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertIn("structure_review", replay["vlm_checkpoint_summary"]["checkpoint_counts"])
         self.assertEqual(replay["batch_execution_summary"]["completed_count"], 1)
 
+    def test_ground_and_terrain_terms_route_to_substrate_not_model_items(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-ground-terrain",
+            text="Create a small outdoor camp with ground, terrain, wooden table, and tent",
+            owner_agent="elder",
+        )
+
+        self.assertEqual(plan.concrete_object_items, ["wooden table", "tent"])
+        self.assertNotIn("ground", plan.concrete_object_items)
+        self.assertNotIn("terrain", plan.concrete_object_items)
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+        result = runtime.execute_scene_plan(plan.plan_id, include_debug_graph_nodes=True)
+        batch_id = result["batch"]["batch_id"]
+        state = runtime.query_state("room-ground-terrain")["room"]
+
+        self.assertEqual(state["model_item_lists"][batch_id], ["wooden table", "tent"])
+        substrate_plan = {item["name"]: item for item in state["substrate_plans"][batch_id]}
+        self.assertTrue({"ground", "terrain"}.issubset(substrate_plan))
+        self.assertEqual(substrate_plan["ground"]["preferred_handler"], "terrain_component")
+        self.assertEqual(substrate_plan["terrain"]["preferred_handler"], "terrain_component")
+        actor_names = {actor.get("name") for actor in state["actors"].values()}
+        self.assertTrue({"wooden table", "tent"}.issubset(actor_names))
+        self.assertNotIn("ground", actor_names)
+        self.assertNotIn("terrain", actor_names)
+        report = runtime.generate_report("room-ground-terrain", plan_id=plan.plan_id)
+        self.assertEqual(report["classification_summary"]["model_items"], ["wooden table", "tent"])
+        self.assertTrue(
+            {"ground", "terrain"}.issubset(
+                set(report["classification_summary"]["substrate_items"])
+            )
+        )
+
 
     def test_layout_terms_are_classified_but_not_imported_as_actors(self) -> None:
         runtime = AgentRuntime()
