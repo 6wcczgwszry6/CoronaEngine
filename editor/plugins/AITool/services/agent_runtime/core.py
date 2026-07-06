@@ -651,6 +651,9 @@ class RuntimeEventValidator:
         "runtime_batch_id",
         "runtime_event_id",
         "runtime_event_type",
+        "runtime_scene_flow_actor_readiness_status",
+        "runtime_scene_flow_status",
+        "runtime_scene_flow_step_count",
         "runtime_level",
         "runtime_plan_id",
         "runtime_progress",
@@ -7145,6 +7148,9 @@ class AgentRuntime:
         "resource_phase_partial_count",
         "resource_phase_waiting_count",
         "risk_level",
+        "runtime_scene_flow_actor_readiness_status",
+        "runtime_scene_flow_status",
+        "runtime_scene_flow_step_count",
         "imported_count",
         "import_failure_code_counts",
         "failed_count",
@@ -19157,6 +19163,15 @@ class AgentRuntime:
                 ),
                 "review_status_counts": dict(
                     sorted(dict(scene_entity_registry.get("review_status_counts") or {}).items())
+                ),
+                "runtime_scene_flow_status": str(
+                    runtime_scene_flow_summary.get("status") or "unknown"
+                ),
+                "runtime_scene_flow_step_count": len(
+                    list(runtime_scene_flow_summary.get("steps") or [])
+                ),
+                "runtime_scene_flow_actor_readiness_status": str(
+                    runtime_scene_flow_summary.get("actor_readiness_status") or ""
                 ),
                 "report_health_status": str(report_health_summary.get("status") or "unknown"),
                 "report_attention_required": bool(report_health_summary.get("attention_required")),
