@@ -20,7 +20,7 @@ ScriptSystem::~ScriptSystem() = default;
 bool ScriptSystem::initialize(Kernel::ISystemContext* ctx) {
     CFW_LOG_NOTICE("ScriptSystem: Initializing...");
 
-    // JS→Python 走 CEF query bridge (deal_func_from_js)，ScriptSystem 不再订阅 UI 事件。
+    // JS/Python 业务能力走 C++ Editor API；ScriptSystem 不再订阅 UI 事件。
     if (ctx->event_bus() == nullptr) {
         CFW_LOG_WARNING("ScriptSystem: No event bus available");
     }

@@ -11,51 +11,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# 高频 UI 心跳类回调，日志降到 DEBUG，避免淹没业务日志
-_NOISY_FUNCTIONS = frozenset({
-})
-
-_PYTHON_ROUTE_MODULE_ALLOWLIST = frozenset({
-    "AITool",
-    "ScratchTool",
-})
-
-_PYTHON_ROUTE_METHOD_ALLOWLIST = {
-    "MainView": frozenset({
-        "scene_save",
-        "import_resource_file",
-        "import_model",
-        "import_media",
-        "import_scene_file",
-        "run_project",
-    }),
-    "ProjectLauncher": frozenset({
-        "open_project_file",
-        "browse_folder",
-    }),
-    "CoronaEditor": frozenset({
-        "close_process",
-    }),
-    "FileManager": frozenset({
-        "open_file",
-    }),
-    "ProjectSettings": frozenset({
-        "save_active_project_info",
-        "browse_scene_file",
-    }),
-    "SceneDatas": frozenset({
-        "save_actor",
-        "select_model_file",
-    }),
-    "SceneTools": frozenset({
-        "save_screenshot",
-        "select_screenshot_path",
-        "select_vision_scene_path",
-        "import_vision_scene_into_current_scene",
-    }),
-}
-
-
 class CoronaEditor:
     CoronaEngine = get_corona_engine()
     url = core_path.frontend_dist
@@ -64,31 +19,24 @@ class CoronaEditor:
     _selected_scene = None
     _selected_actor = None
 
-    @staticmethod
-    def is_python_route_allowed(module_name, func_name):
-        if module_name in _PYTHON_ROUTE_MODULE_ALLOWLIST:
-            return True
-        return func_name in _PYTHON_ROUTE_METHOD_ALLOWLIST.get(module_name, ())
-
     @classmethod
-    def deal_func_from_js(cls, json_str):
+    def _dispatch_script_request(cls, json_str):
         try:
             request = json.loads(json_str)
+            if 'api' in request:
+                return create_error_response(
+                    "Editor API payload is not accepted by Python script dispatcher"
+                )
             module_name = request.get('module', None)
             func_name = request.get('function', None)
             args = request.get('args', [])
             log_level = logging.DEBUG  # 全量降为 DEBUG，默认静默
-            logger.log(log_level, f"func_name: {func_name} module_name: {module_name} args: {args}")
+            logger.log(log_level, f"script request: {module_name}.{func_name} args: {args}")
             if not module_name or not func_name:
-                return create_error_response(f"Please input module and function")
-
-            if not cls.is_python_route_allowed(module_name, func_name):
-                return create_error_response(
-                    f"{module_name}.{func_name} is not allowed on Python route"
-                )
+                return create_error_response("Please input script module and function")
 
             if module_name not in cls.module_list or not hasattr(cls.module_list[module_name], func_name):
-                return create_error_response(f"Not find module or function")
+                return create_error_response("Not find script function")
 
             module = cls.module_list.get(module_name, None)
             result = getattr(module, func_name)(*args)
@@ -99,8 +47,25 @@ class CoronaEditor:
             return create_error_response(f"Error processing request: {str(e)}")
 
     @classmethod
+    def dispatch_script_request_from_cpp(cls, json_str):
+        """C++ 脚本服务显式调用 Python 运行时时使用的内部入口。"""
+        return cls._dispatch_script_request(json_str)
+
+    @classmethod
+    def register_script_dispatcher(cls):
+        register = getattr(cls.CoronaEngine, "register_python_script_dispatcher", None)
+        if callable(register):
+            register(cls.dispatch_script_request_from_cpp)
+
+    @classmethod
+    def unregister_script_dispatcher(cls):
+        unregister = getattr(cls.CoronaEngine, "unregister_python_script_dispatcher", None)
+        if callable(unregister):
+            unregister()
+
+    @classmethod
     def emit_editor_event(cls, event_name, args=None):
-        """记录 Python 后端事件；前端投递由 C++ 明确事件通道负责。"""
+        """记录 Python 脚本事件；前端投递由 C++ 明确事件通道负责。"""
         if args is None:
             args = []
         logger.debug("Python editor event emitted: %s args=%s", event_name, args)

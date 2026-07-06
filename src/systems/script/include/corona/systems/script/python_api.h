@@ -39,8 +39,7 @@ struct PythonAPI {
      */
     bool is_shutting_down() const { return shutting_down_.load(); }
 
-    nanobind::object pStartFunc;   // callable 'start'
-    nanobind::object pJsCallFunc;  // callable 'js_call'
+    nanobind::object pStartFunc;  // callable 'start'
 
    private:
     static const std::string codePath;

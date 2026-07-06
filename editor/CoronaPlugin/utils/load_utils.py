@@ -6,9 +6,9 @@ logger = logging.getLogger(__name__)
 
 def reimport():
     """
-    注册显式 Python 后端服务。
+    注册显式 Python 脚本服务。
 
-    不再扫描 editor/plugins/*/main.py；Python 后端不按 Vue 页面拆分。
+    不再扫描 editor/plugins/*/main.py；脚本服务不按 Vue 页面拆分。
     """
     try:
         registry = None
@@ -26,7 +26,7 @@ def reimport():
         if registry is None:
             raise registry_errors[-1]
 
-        registered = registry.register_python_backends()
-        logger.info("Registered Python backends: %s", ", ".join(registered))
+        registered = registry.register_python_script_services()
+        logger.info("Registered Python script services: %s", ", ".join(registered))
     except Exception as e:
-        logger.error("注册 Python 后端失败: %s", e, exc_info=True)
+        logger.error("注册 Python 脚本服务失败: %s", e, exc_info=True)
