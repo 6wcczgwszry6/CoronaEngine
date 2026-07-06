@@ -22924,6 +22924,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             report_ready_event["payload"]["runtime_scene_flow_actor_readiness_status"],
             report["runtime_scene_flow_summary"]["actor_readiness_status"],
         )
+        self.assertEqual(report_ready_event["payload"]["operation_count"], report["operation_count"])
+        self.assertGreaterEqual(
+            report_ready_event["payload"]["operation_total_count"],
+            report["operation_total_count"],
+        )
         replay = report["operation_replay_summary"]
         self.assertGreaterEqual(replay["scene_plan_lifecycle_summary"]["created_count"], 1)
         self.assertGreaterEqual(replay["scene_plan_lifecycle_summary"]["confirmed_count"], 1)

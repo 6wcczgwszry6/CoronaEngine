@@ -614,6 +614,7 @@ class RuntimeEventValidator:
         "new_status",
         "overlap_resolved_count",
         "operation_count",
+        "operation_total_count",
         "peer_id",
         "phase",
         "plan_id",
@@ -7134,6 +7135,8 @@ class AgentRuntime:
         "layout_skipped_delta_count",
         "layout_transform_result_count",
         "overlap_resolved_count",
+        "operation_count",
+        "operation_total_count",
         "progress",
         "proposal_count",
         "queue_limit",
@@ -19173,6 +19176,8 @@ class AgentRuntime:
                 "runtime_scene_flow_actor_readiness_status": str(
                     runtime_scene_flow_summary.get("actor_readiness_status") or ""
                 ),
+                "operation_count": int(operation_replay_summary.get("entry_count") or 0),
+                "operation_total_count": len(self.operation_log.entries()),
                 "report_health_status": str(report_health_summary.get("status") or "unknown"),
                 "report_attention_required": bool(report_health_summary.get("attention_required")),
                 "resource_phase_failed_count": resource_phase_failed_count,
