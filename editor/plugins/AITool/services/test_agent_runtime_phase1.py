@@ -22666,6 +22666,53 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(registry["missing_aabb_count"], 1)
         self.assertEqual(registry["readiness_status"], "partial")
 
+    def test_scene_entity_registry_accepts_native_six_value_aabb(self) -> None:
+        room = {
+            "actors": {
+                "actor-tent": {
+                    "actor_id": "actor-tent",
+                    "plan_id": "plan-native-aabb",
+                    "batch_id": "batch-native-aabb",
+                    "name": "tent",
+                    "asset_id": "asset-tent",
+                    "position": [1.0, 0.0, 2.0],
+                    "aabb": [-1.5, 0.0, -1.0, 1.5, 2.2, 1.0],
+                },
+            },
+            "observed_actors": {},
+            "assets": {
+                "asset-tent": {
+                    "asset_id": "asset-tent",
+                    "transfer_status": "ready",
+                    "ready": True,
+                    "progress": 100,
+                },
+            },
+            "batch_plans": {
+                "batch-native-aabb": {
+                    "batch_id": "batch-native-aabb",
+                    "plan_id": "plan-native-aabb",
+                    "batch_index": 1,
+                    "total_batches": 1,
+                },
+            },
+            "environment_components": {},
+            "element_routes": {},
+            "model_item_lists": {},
+            "classification_summaries": {},
+        }
+
+        registry = AgentRuntime._scene_entity_registry_for_plan(room, "plan-native-aabb")
+        tent = registry["entities"][0]
+
+        self.assertEqual(registry["actor_count"], 1)
+        self.assertEqual(registry["actor_aabb_available_count"], 1)
+        self.assertEqual(registry["missing_aabb_count"], 0)
+        self.assertEqual(registry["readiness_status"], "ready")
+        self.assertEqual(tent["aabb"]["min"], [-1.5, 0.0, -1.0])
+        self.assertEqual(tent["aabb"]["max"], [1.5, 2.2, 1.0])
+        self.assertEqual(tent["grounding_status"], "grounded")
+
     def test_substrate_terms_are_classified_but_not_imported_as_actors(self) -> None:
         runtime = AgentRuntime()
         plan = runtime.propose_scene_plan(

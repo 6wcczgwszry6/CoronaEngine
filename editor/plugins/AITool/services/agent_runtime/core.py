@@ -17473,6 +17473,15 @@ class AgentRuntime:
                 value = row.get(key)
                 if isinstance(value, Mapping):
                     return dict(value)
+                if isinstance(value, (list, tuple)) and len(value) >= 6:
+                    try:
+                        numbers = [round(float(item or 0.0), 4) for item in list(value[:6])]
+                    except (TypeError, ValueError):
+                        continue
+                    return {
+                        "min": numbers[:3],
+                        "max": numbers[3:6],
+                    }
             return {}
 
         def actor_asset_id(row: Mapping[str, Any]) -> str:
