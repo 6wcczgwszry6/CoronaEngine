@@ -23432,6 +23432,52 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertGreaterEqual(status["operation_count"], 1)
         self.assertGreaterEqual(status["operation_total_count"], status["operation_count"])
 
+        report = runtime.generate_report("room-f5-cn", plan_id=plan.plan_id)
+        self.assertEqual(report["classification_summary"]["model_items"], ["帐篷", "小木桌"])
+        self.assertTrue(
+            {"草地", "天空"}.issubset(
+                set(report["classification_summary"]["substrate_items"])
+            )
+        )
+        report_registry = report["scene_entity_registry"]
+        report_roles = {
+            entity["semantic_role"]: entity
+            for entity in report_registry["entities"]
+        }
+        self.assertTrue({"草地", "天空", "帐篷", "小木桌"}.issubset(report_roles))
+        self.assertEqual(report_roles["草地"]["entity_type"], "terrain")
+        self.assertEqual(report_roles["天空"]["entity_type"], "skybox")
+        for role in ("帐篷", "小木桌"):
+            entity = report_roles[role]
+            self.assertEqual(entity["entity_type"], "actor")
+            self.assertIn("transform", entity)
+            self.assertIn("aabb", entity)
+            self.assertEqual(entity["grounding_status"], "grounded")
+            self.assertIn("asset_transfer_status", entity)
+            self.assertIn("sync_status", entity)
+            self.assertIn("review_status", entity)
+        self.assertEqual(
+            [step["step"] for step in report["runtime_scene_flow_summary"]["steps"]],
+            ["plan", "terrain", "asset", "actor", "review", "report"],
+        )
+        self.assertEqual(
+            report["runtime_scene_flow_summary"]["actor_readiness_status"],
+            "ready",
+        )
+        self.assertEqual(
+            report["fact_source_boundary_summary"]["runtime_state_source"],
+            "RuntimeState",
+        )
+        self.assertEqual(report["operation_log_event"], "user_report_generated")
+        self.assertGreaterEqual(
+            report["operation_replay_summary"]["environment_component_replay_summary"]["ready_event_count"],
+            1,
+        )
+        self.assertEqual(
+            report["operation_replay_summary"]["resource_summary"]["by_phase"]["model"]["requested_count"],
+            2,
+        )
+
 
     def test_layout_terms_are_classified_but_not_imported_as_actors(self) -> None:
         runtime = AgentRuntime()
