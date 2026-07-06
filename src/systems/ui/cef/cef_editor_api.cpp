@@ -453,7 +453,7 @@ constexpr std::array<EditorApiMethodSpec, 130> kEditorApiMethods = {{
     EDITOR_API_METHOD_SCHEMA(SceneTools, is_vision_available, kNoParams, EditorApiValueType::Object),
     EDITOR_API_METHOD1(SceneTools, list_actor_tree, "scene_name", EditorApiValueType::String, EditorApiValueType::Array),
     EDITOR_API_METHOD_SCHEMA(SceneTools, list_camera_views, kSceneNameParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, list_scene_tree, kSceneNameParam, EditorApiValueType::Array),
+    EDITOR_API_METHOD_SCHEMA(SceneTools, list_scene_tree, kSceneNameParam, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(SceneTools, load_vision_scene, kPathParam, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(SceneTools, open_actor, kSceneActorParams, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(SceneTools, open_camera_view, kSceneCameraParams, EditorApiValueType::Object),

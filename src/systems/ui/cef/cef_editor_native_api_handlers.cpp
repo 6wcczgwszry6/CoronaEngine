@@ -1303,6 +1303,15 @@ NativeEditorScene* reload_native_editor_scene(const std::string& project_path_ar
     return state.scene.get();
 }
 
+NativeEditorScene* scene_for_request_route(const NativeRequest& request, std::size_t scene_arg_index = 0) {
+    auto* scene = ensure_native_editor_scene();
+    const auto scene_route = normalize_route(arg_string(request.args, scene_arg_index));
+    if (!scene_route.empty() && scene_route != scene->route) {
+        scene = reload_native_editor_scene("", scene_route);
+    }
+    return scene;
+}
+
 nlohmann::json make_on_init_payload(const NativeEditorScene& scene) {
     return {
         {"scenes", nlohmann::json::array({{
@@ -1485,6 +1494,76 @@ NativeEditorCamera* find_native_camera(NativeEditorScene& scene, const std::stri
         }
     }
     return nullptr;
+}
+
+std::string unique_camera_name(const NativeEditorScene& scene, const std::string& preferred_name) {
+    const auto base = trim_ascii(preferred_name).empty() ? std::string("Camera") : trim_ascii(preferred_name);
+    auto exists = [&](const std::string& candidate) {
+        return std::any_of(scene.cameras.begin(), scene.cameras.end(), [&](const NativeEditorCamera& camera) {
+            return camera.name == candidate || camera.camera_id == candidate;
+        });
+    };
+    if (!exists(base)) {
+        return base;
+    }
+    for (int index = 1; index < 10000; ++index) {
+        const auto candidate = base + "_" + std::to_string(index);
+        if (!exists(candidate)) {
+            return candidate;
+        }
+    }
+    return base + "_" + std::to_string(scene.cameras.size() + 1);
+}
+
+NativeEditorCamera& create_native_camera_view(NativeEditorScene& scene, const std::string& requested_name) {
+    NativeEditorCamera item;
+    item.name = unique_camera_name(scene, requested_name);
+    item.camera_id = scene.route + "#" + item.name;
+    item.deletable = true;
+    item.width = 1920;
+    item.height = 1080;
+    item.view_open = true;
+    item.view_x = 120;
+    item.view_y = 120;
+    item.view_width = 960;
+    item.view_height = 540;
+    item.move_speed = 1.0f;
+
+    std::array<float, 3> position{0.0f, 0.0f, -5.0f};
+    std::array<float, 3> forward{0.0f, 0.0f, 1.0f};
+    std::array<float, 3> world_up{0.0f, 1.0f, 0.0f};
+    float fov = 45.0f;
+    if (auto* source = find_native_camera(scene, {}); source && source->engine_camera) {
+        position = source->engine_camera->get_position();
+        forward = source->engine_camera->get_forward();
+        world_up = source->engine_camera->get_world_up();
+        fov = source->engine_camera->get_fov();
+        item.width = source->width;
+        item.height = source->height;
+        item.move_speed = source->move_speed;
+    }
+
+    item.engine_camera = std::make_unique<Corona::API::Camera>(position, forward, world_up, fov);
+    item.engine_camera->set_size(item.width, item.height);
+    item.engine_camera->set_output_mode("final_color");
+    item.engine_camera->set_render_backend("native");
+    item.engine_camera->set_vision_render_mode("path_tracing");
+    item.engine_camera->set_ssao_enabled(true);
+    item.engine_camera->set_view_state(item.view_open, item.view_x, item.view_y,
+                                       item.view_width, item.view_height, item.move_speed);
+    item.engine_camera->set_offscreen_capture_mode(true);
+    item.engine_camera->set_surface(0);
+
+    scene.cameras.push_back(std::move(item));
+    auto& camera = scene.cameras.back();
+    if (scene.engine_scene && camera.engine_camera) {
+        scene.engine_scene->add_camera(camera.engine_camera.get());
+    }
+    return camera;
+}
+
+NativeResult camera_not_found_result(const std::string& camera_name) {
+    return native_failure("Camera not found: " + camera_name, 2);
 }
 
 bool aabb_has_usable_extent(const std::array<float, 6>& aabb) {
@@ -4584,12 +4663,12 @@ void register_project_settings_api_handlers(NativeApiRegistry& registry) {
 
 void register_scene_datas_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
-        {"get_scene", [](const NativeRequest&, const NativeContext&) {
-            auto* scene = ensure_native_editor_scene();
+        {"get_scene", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
             return native_success(scene_to_json(*scene));
         }},
         {"get_actor", [](const NativeRequest& request, const NativeContext&) {
-            auto* scene = ensure_native_editor_scene();
+            auto* scene = scene_for_request_route(request);
             const auto actor_name = arg_string(request.args, 1);
             auto* actor = find_native_actor(*scene, actor_name);
             if (!actor) {
@@ -4598,7 +4677,7 @@ void register_scene_datas_api_handlers(NativeApiRegistry& registry) {
             return native_success(actor_to_json(*scene, *actor));
         }},
         {"actor_operation", [](const NativeRequest& request, const NativeContext&) {
-            auto* scene = ensure_native_editor_scene();
+            auto* scene = scene_for_request_route(request);
             const auto actor_name = arg_string(request.args, 1);
             const auto operation = arg_string(request.args, 2);
             const auto vector = request.args.is_array() && request.args.size() > 3
@@ -4615,11 +4694,7 @@ void register_scene_datas_api_handlers(NativeApiRegistry& registry) {
             return result;
         }},
         {"save_actor", [](const NativeRequest& request, const NativeContext&) {
-            auto* scene = ensure_native_editor_scene();
-            const auto scene_route = normalize_route(arg_string(request.args, 0));
-            if (!scene_route.empty() && scene_route != scene->route) {
-                scene = reload_native_editor_scene("", scene_route);
-            }
+            auto* scene = scene_for_request_route(request);
             const auto actor_name = arg_string(request.args, 1);
             if (!actor_name.empty() && !find_native_actor(*scene, actor_name)) {
                 return native_failure("Actor not found: " + actor_name, 2);
@@ -4652,16 +4727,75 @@ void register_scene_datas_api_handlers(NativeApiRegistry& registry) {
 
 void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
-        {"close_camera_view", script_method},
-        {"create_camera_view", script_method},
-        {"create_scene", script_method},
-        {"delete_camera", script_method},
-        {"list_scene_tree", [](const NativeRequest& request, const NativeContext&) {
-            auto* scene = ensure_native_editor_scene();
-            const auto scene_route = normalize_route(arg_string(request.args, 0));
-            if (!scene_route.empty() && scene_route != scene->route) {
-                scene = reload_native_editor_scene("", scene_route);
+        {"close_camera_view", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            const auto camera_name = arg_string(request.args, 1);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return camera_not_found_result(camera_name);
             }
+            camera->view_open = false;
+            camera->engine_camera->set_view_state(false, camera->view_x, camera->view_y,
+                                                  camera->view_width, camera->view_height,
+                                                  camera->move_speed);
+            camera->engine_camera->set_surface(0);
+            persist_native_scene_cameras(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
+        {"create_camera_view", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            auto& camera = create_native_camera_view(*scene, arg_string(request.args, 1));
+            persist_native_scene_cameras(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"camera", camera_to_json(camera)},
+            });
+        }},
+        {"create_scene", script_method},
+        {"delete_camera", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            const auto camera_name = arg_string(request.args, 1);
+            if (scene->cameras.size() <= 1) {
+                return native_failure("A scene must keep at least one camera", 2);
+            }
+            const auto it = std::find_if(scene->cameras.begin(), scene->cameras.end(), [&](const NativeEditorCamera& camera) {
+                return camera.name == camera_name || camera.camera_id == camera_name ||
+                       (camera.engine_camera && std::to_string(camera.engine_camera->get_handle()) == camera_name);
+            });
+            if (it == scene->cameras.end()) {
+                return camera_not_found_result(camera_name);
+            }
+            if (!it->deletable) {
+                return native_failure("The main camera cannot be deleted", 2);
+            }
+            const auto removed_id = it->camera_id;
+            if (it->engine_camera) {
+                it->engine_camera->set_surface(0);
+                if (scene->engine_scene) {
+                    scene->engine_scene->remove_camera(it->engine_camera.get());
+                }
+            }
+            const auto removed_index = static_cast<size_t>(std::distance(scene->cameras.begin(), it));
+            scene->cameras.erase(it);
+            if (scene->active_camera_index >= scene->cameras.size()) {
+                scene->active_camera_index = scene->cameras.empty() ? 0 : scene->cameras.size() - 1;
+            } else if (removed_index < scene->active_camera_index) {
+                --scene->active_camera_index;
+            }
+            persist_native_scene_cameras(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"camera_id", removed_id},
+            });
+        }},
+        {"list_scene_tree", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
             nlohmann::json actors = nlohmann::json::array();
             for (const auto& actor : scene->actors) {
                 actors.push_back({
@@ -4698,8 +4832,8 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
                 }},
             });
         }},
-        {"list_actor_tree", [](const NativeRequest&, const NativeContext&) {
-            auto* scene = ensure_native_editor_scene();
+        {"list_actor_tree", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
             nlohmann::json actors = nlohmann::json::array();
             for (const auto& actor : scene->actors) {
                 actors.push_back(actor_to_json(*scene, actor));
@@ -4774,7 +4908,7 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
             return create_native_editor_actor(scene_route, source_path, actor_type, actor_data);
         }},
         {"rename_actor", [](const NativeRequest& request, const NativeContext& context) {
-            auto* scene = ensure_native_editor_scene();
+            auto* scene = scene_for_request_route(request);
             const auto actor_name = arg_string(request.args, 1);
             const auto new_name = trim_ascii(arg_string(request.args, 2));
             if (new_name.empty()) {
@@ -4803,8 +4937,8 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
                 {"actor", actor_to_json(*scene, *actor)},
             });
         }},
-        {"list_camera_views", [](const NativeRequest&, const NativeContext&) {
-            auto* scene = ensure_native_editor_scene();
+        {"list_camera_views", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
             nlohmann::json cameras = nlohmann::json::array();
             for (const auto& camera : scene->cameras) {
                 cameras.push_back(camera_to_json(camera));
@@ -5017,7 +5151,24 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
             emit_actor_change(context, *scene, *actor);
             return native_success({{"status", "success"}, {"actor", actor_to_json(*scene, *actor)}});
         }},
-        {"open_camera_view", script_method},
+        {"open_camera_view", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            const auto camera_name = arg_string(request.args, 1);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return camera_not_found_result(camera_name);
+            }
+            camera->view_open = true;
+            camera->engine_camera->set_view_state(true, camera->view_x, camera->view_y,
+                                                  camera->view_width, camera->view_height,
+                                                  camera->move_speed);
+            persist_native_scene_cameras(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
         {"focus_actor", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto actor_name = arg_string(request.args, 1);
@@ -5060,7 +5211,34 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
             const auto actor_name = arg_string(request.args, 1);
             return remove_native_editor_actor(scene_route, actor_name);
         }},
-        {"rename_camera_view", script_method},
+        {"rename_camera_view", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            const auto camera_name = arg_string(request.args, 1);
+            const auto new_name = trim_ascii(arg_string(request.args, 2));
+            if (new_name.empty()) {
+                return native_failure("Camera name cannot be empty", 2);
+            }
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return camera_not_found_result(camera_name);
+            }
+            const bool duplicate = std::any_of(scene->cameras.begin(), scene->cameras.end(), [&](const NativeEditorCamera& other) {
+                return &other != camera && other.name == new_name;
+            });
+            if (duplicate) {
+                return native_failure("Camera name already exists: " + new_name, 2);
+            }
+            camera->name = new_name;
+            if (camera->camera_id.empty() || camera->camera_id == scene->route + "#" + camera_name) {
+                camera->camera_id = scene->route + "#" + new_name;
+            }
+            persist_native_scene_cameras(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
         {"pick_actor_at_pixel", [](const NativeRequest& request, const NativeContext& context) {
             auto* scene = ensure_native_editor_scene();
             auto* camera = find_native_camera(*scene, {});
@@ -5152,7 +5330,35 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
             payload["ok"] = true;
             return native_success(payload);
         }},
-        {"update_camera_view", script_method},
+        {"update_camera_view", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            const auto camera_name = arg_string(request.args, 1);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return camera_not_found_result(camera_name);
+            }
+            const auto state = request.args.is_array() && request.args.size() > 2 && request.args[2].is_object()
+                                   ? request.args[2]
+                                   : nlohmann::json::object();
+            camera->view_open = json_bool_value(state, "view_open", camera->view_open);
+            camera->view_x = json_int_value(state, "view_x", camera->view_x);
+            camera->view_y = json_int_value(state, "view_y", camera->view_y);
+            camera->view_width = std::max(json_int_value(state, "view_width", camera->view_width), 1);
+            camera->view_height = std::max(json_int_value(state, "view_height", camera->view_height), 1);
+            camera->move_speed = json_float_value(state, "move_speed", camera->move_speed);
+            camera->width = std::max(json_int_value(state, "width", camera->width), 1);
+            camera->height = std::max(json_int_value(state, "height", camera->height), 1);
+            camera->engine_camera->set_size(camera->width, camera->height);
+            camera->engine_camera->set_view_state(camera->view_open, camera->view_x, camera->view_y,
+                                                  camera->view_width, camera->view_height,
+                                                  camera->move_speed);
+            persist_native_scene_cameras(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
     };
 
     registry.register_module("SceneTools", [](const NativeRequest& request,

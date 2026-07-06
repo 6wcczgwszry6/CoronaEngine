@@ -461,7 +461,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
 
         expected = {
             "SceneTools.create_scene": ("kSceneNameParam", "EditorApiValueType::Object"),
-            "SceneTools.list_scene_tree": ("kSceneNameParam", "EditorApiValueType::Array"),
+            "SceneTools.list_scene_tree": ("kSceneNameParam", "EditorApiValueType::Object"),
             "SceneTools.reload_scene": ("kSceneToolsReloadSceneParams", "EditorApiValueType::Object"),
             "SceneTools.create_camera_view": ("kSceneToolsCreateCameraViewParams", "EditorApiValueType::Object"),
             "SceneTools.open_camera_view": ("kSceneCameraParams", "EditorApiValueType::Object"),
@@ -478,6 +478,20 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
                     f"EDITOR_API_METHOD_SCHEMA({module}, {method}, {params_name}, {return_type})",
                     source,
                 )
+
+    def test_scene_tools_camera_lifecycle_apis_are_native_handlers(self):
+        source = self._handler_source()
+        for method in (
+            "create_camera_view",
+            "open_camera_view",
+            "close_camera_view",
+            "rename_camera_view",
+            "update_camera_view",
+            "delete_camera",
+        ):
+            with self.subTest(method=method):
+                self.assertNotIn(f'{{"{method}", script_method}}', source)
+                self.assertIn(f'{{"{method}", [](const NativeRequest& request', source)
 
     def test_scene_tools_scene_camera_apis_use_frontend_typed_wrappers(self):
         bridge_source = self._frontend_bridge_source()
@@ -608,6 +622,27 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         ):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, bridge_source)
+
+    def test_scene_tree_and_property_handlers_respect_scene_route_args(self):
+        source = self._handler_source()
+
+        self.assertIn("NativeEditorScene* scene_for_request_route", source)
+        expected = (
+            '{"get_scene", [](const NativeRequest& request',
+            '{"get_actor", [](const NativeRequest& request',
+            '{"actor_operation", [](const NativeRequest& request',
+            '{"save_actor", [](const NativeRequest& request',
+            '{"list_scene_tree", [](const NativeRequest& request',
+            '{"list_actor_tree", [](const NativeRequest& request',
+            '{"rename_actor", [](const NativeRequest& request',
+            '{"list_camera_views", [](const NativeRequest& request',
+        )
+        for snippet in expected:
+            with self.subTest(snippet=snippet):
+                start = source.find(snippet)
+                self.assertGreaterEqual(start, 0)
+                body = source[start:source.find("}},", start)]
+                self.assertIn("scene_for_request_route(request)", body)
 
     def test_project_launcher_editor_apis_have_explicit_schema(self):
         source = self._editor_api_source()
