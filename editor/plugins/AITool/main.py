@@ -111,9 +111,9 @@ class AITool(PluginBase):
             return "继续探索编辑器吧！"
 
     @classmethod
-    def ai_rpc(cls, request) -> dict:
-        """AI 统一 RPC 入口（兼容旧 integrated payload）。"""
-        return cls._controller.ai_rpc(request)
+    def submit_request(cls, request) -> dict:
+        """AI script-service request entry for the C++ Editor API facade."""
+        return cls._controller.submit_request(request)
 
     @classmethod
     def cleanup(cls):

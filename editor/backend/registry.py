@@ -38,6 +38,3 @@ def register_python_script_services():
         )
         registered.append(service_name)
     return registered
-
-
-register_python_backends = register_python_script_services

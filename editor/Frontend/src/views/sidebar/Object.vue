@@ -1326,7 +1326,7 @@ import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick } from
 import { useRoute } from 'vue-router';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import BlocklyWorkspace from '@/blockly/components/BlocklyWorkspace.vue';
-import { sceneService, projectService } from '@/utils/bridge.js';
+import { sceneService, projectService, editorApi } from '@/utils/bridge.js';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
@@ -1336,6 +1336,8 @@ import { useDockPanel } from '@/composables/useDockPanel.js';
 const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 
 const { error: logError, warn: logWarn } = useErrorHandler('Object');
+let actorSelectionChangedCallbackToken = null;
+let actorTransformUpdatedCallbackToken = null;
 
 // ========== 防抖工具 ==========
 const _debounceTimers = {};
@@ -2774,18 +2776,41 @@ onMounted(async () => {
 
   setupWindowListener();
 
-  coronaEventBus.on('actor-change', (type, sceneId, actorId, oldPath) => {
-    if (window.onActorChange) window.onActorChange(type, sceneId, actorId, oldPath);
-  });
-  coronaEventBus.on('transform-update', (sceneName, actorName, position, rotation, scale, type) => {
-    if (window.onTransformUpdate) window.onTransformUpdate(sceneName, actorName, position, rotation, scale, type);
-  });
+  const onActorSelectionChangedEvent = (payload) => {
+    if (window.onActorChange) {
+      window.onActorChange(payload?.actor_type, payload?.scene, payload?.actor, payload?.previous);
+    }
+  };
+  actorSelectionChangedCallbackToken = await editorApi.events.onActorSelectionChanged(onActorSelectionChangedEvent);
+  const onActorTransformUpdatedEvent = (payload) => {
+    if (window.onTransformUpdate) {
+      window.onTransformUpdate(
+        payload?.scene,
+        payload?.actor,
+        payload?.position,
+        payload?.rotation,
+        payload?.scale,
+        payload?.actor_type
+      );
+    }
+  };
+  actorTransformUpdatedCallbackToken = await editorApi.events.onActorTransformUpdated(onActorTransformUpdatedEvent);
 });
 
 onUnmounted(() => {
   stopPlayback();
-  coronaEventBus.off('actor-change');
-  coronaEventBus.off('transform-update');
+  if (actorSelectionChangedCallbackToken) {
+    editorApi.off(actorSelectionChangedCallbackToken).catch((error) => {
+      logError('Failed to unregister actor selection callback', error);
+    });
+    actorSelectionChangedCallbackToken = null;
+  }
+  if (actorTransformUpdatedCallbackToken) {
+    editorApi.off(actorTransformUpdatedCallbackToken).catch((error) => {
+      logError('Failed to unregister actor transform callback', error);
+    });
+    actorTransformUpdatedCallbackToken = null;
+  }
 });
 </script>
 

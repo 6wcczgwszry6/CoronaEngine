@@ -698,7 +698,7 @@
 import { ref, reactive, onMounted, onUnmounted, computed } from 'vue';
 import { useRoute } from 'vue-router';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
-import { appService, sceneService, projectService, resourceService } from '@/utils/bridge.js';
+import { editorApi, appService, sceneService, projectService, resourceService } from '@/utils/bridge.js';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
@@ -725,6 +725,9 @@ const cameraSpeedLabel = computed(() =>
 );
 let viewportControlPollTimer = null;
 let speedApplyTimer = null;
+let actorChangedCallbackToken = null;
+let focusPoseResultCallbackToken = null;
+let sceneTreeChangedCallbackToken = null;
 
 const normalizeViewportControls = (state = {}) => {
   const modes = Array.isArray(state.viewportUiModes) && state.viewportUiModes.length > 0
@@ -1173,7 +1176,10 @@ const clearActorSingleClickTimer = () => {
   }
 };
 
-const handleFocusPoseResult = (requestId, payload) => {
+const handleFocusPoseResult = (payloadOrRequestId, maybePayload) => {
+  const payload = maybePayload ?? payloadOrRequestId;
+  const requestId =
+    typeof payloadOrRequestId === 'string' ? payloadOrRequestId : payload?.request_id;
   const pending = pendingFocusPoseRequests.get(requestId);
   if (!pending) return;
 
@@ -1240,11 +1246,9 @@ const SelectActor = (scene) => {
   if (isMediaItem(scene) && !isAudioActor(scene)) return;
   // 通知积木编辑器当前选中的物体
   setActorContext(currentSceneName.value, scene.name);
-  if (typeof window !== 'undefined' && typeof window.__coronaEmit === 'function') {
-    window.__coronaEmit('actor-change', scene.type || 'actor', currentSceneName.value, scene.name);
-  } else {
-    coronaEventBus.emit('actor-change', scene.type || 'actor', currentSceneName.value, scene.name);
-  }
+  editorApi.sceneTools.selectActor(currentSceneName.value, scene.type || 'actor', scene.name).catch((error) => {
+    logError('Failed to publish actor selection', error);
+  });
 };
 
 const SelectCamera = (cam) => {
@@ -1834,12 +1838,6 @@ const createActorFromSelectedFile = async (payload, actorType, logLabel) => {
 };
 
 const HandleFileImport = async () => {
-  // 测试 window.cefQuery 是否存在
-  if (typeof window.cefQuery === 'undefined') {
-    alert('错误：window.cefQuery 未定义！CEF bridge 未初始化。');
-    return;
-  }
-
   ShowModelDropdown.value = false;
   if (!currentSceneName.value) {
     logWarn('File import aborted: no active scene');
@@ -1868,11 +1866,6 @@ const HandleFileImport = async () => {
 
 const HandleUiImageImport = async () => {
   // 导入一张图片，自动创建一个带该图为纹理的 quad（光场 UI 平面），默认作为 UI。
-  if (typeof window.cefQuery === 'undefined') {
-    alert('错误：window.cefQuery 未定义！CEF bridge 未初始化。');
-    return;
-  }
-
   ShowModelDropdown.value = false;
   if (!currentSceneName.value) {
     logWarn('UI image import aborted: no active scene');
@@ -2091,21 +2084,24 @@ onMounted(async () => {
   requestViewportControlsState();
   viewportControlPollTimer = window.setInterval(requestViewportControlsState, 1000);
 
-  // 监听 Python 推送的 actor-change：场景切换/物体变化时重新加载场景树
+  // 后端对象变化：场景切换/物体变化时重新加载场景树
   coronaEventBus.on('viewport-controls-state', onViewportControlsState);
-  coronaEventBus.on('actor-change', onActorChangeEvent);
-  coronaEventBus.on('scene-tree-changed', onSceneTreeChangedEvent);
-  coronaEventBus.on('focus-pose-result', handleFocusPoseResult);
+  actorChangedCallbackToken = await editorApi.events.onActorChanged(onActorChangeEvent);
+  sceneTreeChangedCallbackToken = await editorApi.events.onSceneTreeChanged(onSceneTreeChangedEvent);
+  focusPoseResultCallbackToken = await editorApi.events.onFocusPoseResult(handleFocusPoseResult);
 });
 
 // 场景切换时刷新当前场景树；actor 选择只更新详情面板，不重建树，避免点击闪烁。
-const onActorChangeEvent = (type, sceneId /*, actorId, oldPath */) => {
+const onActorChangeEvent = (payload, maybeSceneId /*, actorId, oldPath */) => {
+  const type = payload?.actor_type ?? payload?.type ?? payload;
+  const sceneId = payload?.scene ?? maybeSceneId;
   if (type !== 'scene' || !sceneId) return;
   currentSceneName.value = sceneId;
   OnInitObjTree();
 };
 
-const onSceneTreeChangedEvent = (sceneName) => {
+const onSceneTreeChangedEvent = (payload) => {
+  const sceneName = payload?.scene ?? payload;
   if (!sceneName || sceneName === currentSceneName.value) {
     OnInitObjTree();
   }
@@ -2199,9 +2195,24 @@ onUnmounted(() => {
   pendingFocusCameraMoveFrames.clear();
 
   coronaEventBus.off('viewport-controls-state', onViewportControlsState);
-  coronaEventBus.off('actor-change', onActorChangeEvent);
-  coronaEventBus.off('scene-tree-changed', onSceneTreeChangedEvent);
-  coronaEventBus.off('focus-pose-result', handleFocusPoseResult);
+  if (actorChangedCallbackToken) {
+    editorApi.off(actorChangedCallbackToken).catch((error) => {
+      logError('Failed to unregister actor changed callback', error);
+    });
+    actorChangedCallbackToken = null;
+  }
+  if (sceneTreeChangedCallbackToken) {
+    editorApi.off(sceneTreeChangedCallbackToken).catch((error) => {
+      logError('Failed to unregister scene tree changed callback', error);
+    });
+    sceneTreeChangedCallbackToken = null;
+  }
+  if (focusPoseResultCallbackToken) {
+    editorApi.off(focusPoseResultCallbackToken).catch((error) => {
+      logError('Failed to unregister focus pose result callback', error);
+    });
+    focusPoseResultCallbackToken = null;
+  }
 });
 </script>
 

@@ -80,6 +80,195 @@ Corona::Systems::NetworkSystem::SessionRole parse_network_session_role(
     return Corona::Systems::NetworkSystem::SessionRole::Host;
 }
 
+const char* editor_api_value_type_name(EditorApiValueType type) {
+    switch (type) {
+        case EditorApiValueType::Any:
+            return "any";
+        case EditorApiValueType::Null:
+            return "null";
+        case EditorApiValueType::Boolean:
+            return "boolean";
+        case EditorApiValueType::Integer:
+            return "integer";
+        case EditorApiValueType::Number:
+            return "number";
+        case EditorApiValueType::String:
+            return "string";
+        case EditorApiValueType::Object:
+            return "object";
+        case EditorApiValueType::Array:
+            return "array";
+    }
+    return "unknown";
+}
+
+std::string snake_to_lower_camel(const char* value) {
+    if (!value) {
+        return {};
+    }
+    std::string result;
+    bool upper_next = false;
+    for (const char ch : std::string(value)) {
+        if (ch == '_') {
+            upper_next = true;
+            continue;
+        }
+        if (upper_next) {
+            result.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
+            upper_next = false;
+        } else {
+            result.push_back(ch);
+        }
+    }
+    return result;
+}
+
+const char* editor_api_module_js_wrapper_alias(const char* module) {
+    const std::string_view name = module ? std::string_view(module) : std::string_view();
+    if (name == "AITool") {
+        return "ai";
+    }
+    if (name == "CoronaEditor") {
+        return "app";
+    }
+    if (name == "EditorApi") {
+        return "editor";
+    }
+    if (name == "FileManager") {
+        return "files";
+    }
+    if (name == "LANChat") {
+        return "lanChat";
+    }
+    if (name == "MainView") {
+        return "main";
+    }
+    if (name == "Network") {
+        return "network";
+    }
+    if (name == "ProjectLauncher") {
+        return "project";
+    }
+    if (name == "ProjectSettings") {
+        return "projectSettings";
+    }
+    if (name == "ResourceSearch") {
+        return "resourceSearch";
+    }
+    if (name == "SceneDatas") {
+        return "sceneDatas";
+    }
+    if (name == "SceneTools") {
+        return "sceneTools";
+    }
+    if (name == "ScratchTool") {
+        return "scratch";
+    }
+    return "";
+}
+
+const char* editor_api_module_python_wrapper_alias(const char* module) {
+    const std::string_view name = module ? std::string_view(module) : std::string_view();
+    if (name == "AITool") {
+        return "ai";
+    }
+    if (name == "CoronaEditor") {
+        return "app";
+    }
+    if (name == "EditorApi") {
+        return "editor";
+    }
+    if (name == "FileManager") {
+        return "files";
+    }
+    if (name == "LANChat") {
+        return "lan_chat";
+    }
+    if (name == "MainView") {
+        return "main";
+    }
+    if (name == "Network") {
+        return "network";
+    }
+    if (name == "ProjectLauncher") {
+        return "project";
+    }
+    if (name == "ProjectSettings") {
+        return "project_settings";
+    }
+    if (name == "ResourceSearch") {
+        return "resource_search";
+    }
+    if (name == "SceneDatas") {
+        return "scene_datas";
+    }
+    if (name == "SceneTools") {
+        return "scene_tools";
+    }
+    if (name == "ScratchTool") {
+        return "scratch";
+    }
+    return "";
+}
+
+std::string editor_api_js_wrapper_path(const EditorApiMethodSpec& spec) {
+    if (spec.js_wrapper && *spec.js_wrapper) {
+        return spec.js_wrapper;
+    }
+    const std::string module_alias = editor_api_module_js_wrapper_alias(spec.native_module);
+    const std::string function_name = snake_to_lower_camel(spec.native_function);
+    if (module_alias.empty() || function_name.empty()) {
+        return {};
+    }
+    return module_alias + "." + function_name;
+}
+
+std::string editor_api_python_wrapper_path(const EditorApiMethodSpec& spec) {
+    if (spec.python_wrapper && *spec.python_wrapper) {
+        return spec.python_wrapper;
+    }
+    const std::string module_alias = editor_api_module_python_wrapper_alias(spec.native_module);
+    const std::string function_name = spec.native_function ? spec.native_function : "";
+    if (module_alias.empty() || function_name.empty()) {
+        return {};
+    }
+    return module_alias + "." + function_name;
+}
+
+nlohmann::json editor_api_method_to_json(const EditorApiMethodSpec& spec) {
+    nlohmann::json params = nlohmann::json::array();
+    for (std::size_t index = 0; index < spec.param_count; ++index) {
+        const auto& param = spec.params[index];
+        params.push_back({
+            {"name", param.name ? param.name : ""},
+            {"type", editor_api_value_type_name(param.type)},
+            {"optional", param.optional},
+        });
+    }
+
+    return {
+        {"api", spec.api_name ? spec.api_name : ""},
+        {"native_module", spec.native_module ? spec.native_module : ""},
+        {"native_function", spec.native_function ? spec.native_function : ""},
+        {"params", params},
+        {"return", editor_api_value_type_name(spec.return_spec.type)},
+        {"js_wrapper", editor_api_js_wrapper_path(spec)},
+        {"python_wrapper", editor_api_python_wrapper_path(spec)},
+        {"async", spec.async},
+        {"allowed_callers", spec.allowed_callers},
+    };
+}
+
+nlohmann::json editor_api_event_to_json(const EditorApiEventSpec& spec) {
+    return {
+        {"event", spec.event_name ? spec.event_name : ""},
+        {"payload", editor_api_value_type_name(spec.payload_type)},
+        {"allowed_callers", spec.allowed_callers},
+        {"js_wrapper", spec.js_wrapper ? spec.js_wrapper : ""},
+        {"python_wrapper", spec.python_wrapper ? spec.python_wrapper : ""},
+    };
+}
+
 std::string to_lower_ascii(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -2249,7 +2438,7 @@ NativeResult apply_actor_operation(NativeEditorScene& scene,
     } else if (operation == "SetCameraLock" ||
                operation == "SetCameraLockOffset" ||
                operation == "SetCameraLockRotation") {
-        // Camera-lock metadata is not yet stored natively; keep the RPC shape
+        // Camera-lock metadata is not yet stored natively; keep the existing payload shape
         // alive so the details panel remains usable while native persistence catches up.
     } else {
         return native_failure("Unsupported actor operation: " + operation, 2);
@@ -2271,41 +2460,15 @@ NativeResult apply_actor_operation(NativeEditorScene& scene,
 void emit_actor_change(const NativeContext& context,
                        const NativeEditorScene& scene,
                        const NativeEditorActor& actor) {
-    if (!context.frame) {
-        return;
-    }
-    const std::string script =
-        "window.__coronaEmit&&window.__coronaEmit(" +
-        nlohmann::json("actor-change").dump() + "," +
-        nlohmann::json(actor.actor_type).dump() + "," +
-        nlohmann::json(scene.route).dump() + "," +
-        nlohmann::json(actor.name).dump() + ");";
-    context.frame->ExecuteJavaScript(script, context.frame->GetURL(), 0);
-}
-
-void emit_editor_event_to_all_tabs(const std::string& event_name,
-                                   const nlohmann::json& args = nlohmann::json::array()) {
-    if (event_name.empty()) {
-        return;
-    }
-    const nlohmann::json event_args = args.is_array() ? args : nlohmann::json::array({args});
-    std::string script = "if(window.__coronaEmit)window.__coronaEmit(" +
-                         nlohmann::json(event_name).dump();
-    for (const auto& arg : event_args) {
-        script += "," + arg.dump();
-    }
-    script += ",{\"_fromCross\":1});";
-    for (auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
-        if (tab && !tab->minimized && tab->client && tab->client->GetBrowser()) {
-            tab->client->GetBrowser()->GetMainFrame()->ExecuteJavaScript(script, "", 0);
-        }
-    }
+    (void)context;
+    emit_editor_api_event("SceneTools.actorChanged",
+                          {{"actor_type", actor.actor_type},
+                           {"scene", scene.route},
+                           {"actor", actor.name}});
 }
 
 void emit_scene_tree_changed(const std::string& scene_route) {
-    emit_editor_event_to_all_tabs(
-        "scene-tree-changed",
-        nlohmann::json::array({scene_route}));
+    emit_editor_api_event("SceneTools.sceneTreeChanged", {{"scene", scene_route}});
 }
 
 std::string current_time_string() {
@@ -4021,14 +4184,16 @@ void emit_lanchat_event_json(const std::string& event_json) {
     if (event_json.empty()) {
         return;
     }
-    std::string js = "if(window.__coronaEmit)window.__coronaEmit(" +
-                     nlohmann::json("lanchat-event").dump() + "," +
-                     event_json + ",{\"_fromCross\":1})";
-    for (auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
-        if (tab && !tab->minimized && tab->client && tab->client->GetBrowser()) {
-            tab->client->GetBrowser()->GetMainFrame()->ExecuteJavaScript(js, "", 0);
+    nlohmann::json event_payload = nlohmann::json::object();
+    try {
+        event_payload = nlohmann::json::parse(event_json);
+        if (!event_payload.is_object()) {
+            event_payload = {{"payload", event_payload}};
         }
+    } catch (...) {
+        event_payload = {{"raw", event_json}};
     }
+    emit_editor_api_event("LANChat.event", event_payload);
 }
 
 nlohmann::json build_lanchat_members(
@@ -4564,6 +4729,7 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
             }
             const auto opened = open_project_native(path_from_utf8(path));
             CFW_LOG_INFO("[ProjectLauncher] open_project opened path='{}'", path_to_utf8(opened));
+            emit_editor_api_event("ProjectLauncher.projectOpened", {{"path", path_to_utf8(opened)}});
             return native_success({{"ok", true}, {"path", path_to_utf8(opened)}});
         }},
         {"open_project_file", script_method},
@@ -5151,6 +5317,23 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
             emit_actor_change(context, *scene, *actor);
             return native_success({{"status", "success"}, {"actor", actor_to_json(*scene, *actor)}});
         }},
+        {"select_actor", [](const NativeRequest& request, const NativeContext&) {
+            const auto scene_name = arg_string(request.args, 0);
+            const auto actor_type = arg_string(request.args, 1, "actor");
+            const auto actor_name = arg_string(request.args, 2);
+            nlohmann::json payload = {
+                {"actor_type", actor_type},
+                {"scene", scene_name},
+                {"actor", actor_name},
+            };
+            emit_editor_api_event("SceneTools.actorSelectionChanged", payload);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene_name},
+                {"actor_type", actor_type},
+                {"actor", actor_name},
+            });
+        }},
         {"open_camera_view", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = scene_for_request_route(request);
             const auto camera_name = arg_string(request.args, 1);
@@ -5377,12 +5560,57 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
     });
 }
 
+void register_editor_api_handlers(NativeApiRegistry& registry) {
+    static const NativeMethodTable methods = {
+        {"register_callback", [](const NativeRequest& request, const NativeContext& context) {
+            const auto event_name = arg_string(request.args, 0);
+            const auto callback_spec = arg_object(request.args, 1);
+            const auto token = EditorApiCallbackRegistry::instance().register_cef_callback(
+                event_name,
+                callback_spec,
+                context);
+            if (token == 0) {
+                return native_failure(event_name + " is not a defined Editor API event", 404);
+            }
+            return native_success({{"callback_token", token}}, "editor-api-callback");
+        }},
+        {"unregister_callback", [](const NativeRequest& request, const NativeContext&) {
+            const auto token = arg_uint64(request.args, 0);
+            const auto removed = EditorApiCallbackRegistry::instance().unregister(token);
+            return native_success({{"removed", removed}}, "editor-api-callback");
+        }},
+        {"list_methods", [](const NativeRequest&, const NativeContext&) {
+            nlohmann::json methods_json = nlohmann::json::array();
+            for (const auto& spec : EditorApiRegistry::instance().list_methods()) {
+                methods_json.push_back(editor_api_method_to_json(spec));
+            }
+            return native_success({
+                {"methods", methods_json},
+            });
+        }},
+        {"list_events", [](const NativeRequest&, const NativeContext&) {
+            nlohmann::json events_json = nlohmann::json::array();
+            for (const auto& spec : EditorApiRegistry::instance().list_events()) {
+                events_json.push_back(editor_api_event_to_json(spec));
+            }
+            return native_success({
+                {"events", events_json},
+            });
+        }},
+    };
+
+    registry.register_module("EditorApi", [](const NativeRequest& request,
+                                             const NativeContext& context) {
+        return dispatch_method("EditorApi", methods, request, context);
+    });
+}
+
 void register_python_script_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable ai_tool_methods = {
-        {"ai_rpc", script_method},
         {"generate_hint", script_method},
         {"read_local_file_as_base64", script_method},
         {"send_message_to_ai_stream", script_method},
+        {"submit_request", script_method},
     };
     static const NativeMethodTable corona_editor_methods = {
         {"close_process", script_method},

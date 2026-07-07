@@ -455,7 +455,7 @@
 import { computed, ref, onMounted, onUnmounted, reactive, watch, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
-import { Bridge, appService, sceneService, projectService, scriptingService } from '@/utils/bridge.js';
+import { Bridge, editorApi, appService, sceneService, projectService, scriptingService } from '@/utils/bridge.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { useDockStore } from '@/stores/dockStore.js';
 import { PLUGIN_MANIFEST } from '@/config/pluginManifest.js';
@@ -501,6 +501,9 @@ const cameraBindingState = ref({
   cameraHandle: null,
 });
 let actorPickIndex = new Map();
+let actorPickResultCallbackToken = null;
+let sceneAddedCallbackToken = null;
+let sceneRenamedCallbackToken = null;
 const viewportPickSurfaceRef = ref(null);
 const viewportLayoutVersion = ref(0);
 const viewportUiMode = ref('flat2d');
@@ -584,11 +587,9 @@ const currentViewportUiDescriptor = () => ({
 });
 
 const emitActorChangeFast = (type, sceneId, actorName) => {
-  if (typeof window.__coronaEmit === 'function') {
-    window.__coronaEmit('actor-change', type, sceneId, actorName);
-  } else {
-    coronaEventBus.emit('actor-change', type, sceneId, actorName);
-  }
+  editorApi.sceneTools.selectActor(sceneId, type, actorName).catch((error) => {
+    logError('Failed to publish actor selection', error);
+  });
 };
 
 const viewportPickController = createViewportPickController({
@@ -979,18 +980,6 @@ const syncSceneCameraBinding = async (sceneId) => {
   } catch (e) {
     logError('Failed to sync scene camera binding', e);
   }
-};
-
-const handleVisionSceneImported = async (payload = {}) => {
-  const sceneId = payload?.sceneId || tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
-  if (sceneId !== (tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME)) {
-    return;
-  }
-  if (payload?.visionRenderMode) {
-    mainRenderBackend.value = 'vision';
-    mainVisionRenderMode.value = payload.visionRenderMode;
-  }
-  await syncSceneCameraBinding(sceneId);
 };
 
 const restoreCameraViews = async (sceneId) => {
@@ -2020,6 +2009,10 @@ const renameSceneTab = (oldId, newId, newName) => {
   return true;
 };
 
+const onSceneAddedEvent = (payload) => addSceneTab(payload?.name, payload?.route);
+
+const onSceneRenamedEvent = (payload) => renameSceneTab(payload?.old_path, payload?.new_path, payload?.name);
+
 const handlePanelClosed = (payload) => {
   const panelId = payload?.panelId;
   if (!panelId) return;
@@ -2090,17 +2083,16 @@ onMounted(async () => {
   window.addEventListener('resize', handleViewportLayoutChange);
   registerEditorControls();
 
-  // 跨窗口事件监听：scene-add / scene-rename / panel-closed
-  coronaEventBus.on('scene-add', addSceneTab);
-  coronaEventBus.on('scene-rename', renameSceneTab);
+  // 跨窗口事件监听：panel / loading / viewport 等 UI 本地通道
   coronaEventBus.on('panel-closed', handlePanelClosed);
   coronaEventBus.on('loading-show', showLoading);
   coronaEventBus.on('loading-update', updateLoading);
   coronaEventBus.on('loading-hide', hideLoading);
   coronaEventBus.on('camera-pose-request', applyCameraPose);
   coronaEventBus.on('viewport-controls-request', handleViewportControlsRequest);
-  coronaEventBus.on('vision-scene-imported', handleVisionSceneImported);
-  coronaEventBus.on('actor-pick-result', handleActorPickResult);
+  sceneAddedCallbackToken = await editorApi.events.onSceneAdded(onSceneAddedEvent);
+  sceneRenamedCallbackToken = await editorApi.events.onSceneRenamed(onSceneRenamedEvent);
+  actorPickResultCallbackToken = await editorApi.events.onActorPickResult(handleActorPickResult);
   coronaEventBus.on('viewport-ui-calibration-changed', applyViewportUiCalibration);
 
   await openDefaultFloatingToolPanels();
@@ -2126,16 +2118,30 @@ onUnmounted(() => {
   setGamePreviewInputLocked(false);
   unregisterEditorControls();
   stopStageHints();
-  coronaEventBus.off('scene-add', addSceneTab);
-  coronaEventBus.off('scene-rename', renameSceneTab);
   coronaEventBus.off('panel-closed', handlePanelClosed);
   coronaEventBus.off('loading-show', showLoading);
   coronaEventBus.off('loading-update', updateLoading);
   coronaEventBus.off('loading-hide', hideLoading);
   coronaEventBus.off('camera-pose-request', applyCameraPose);
   coronaEventBus.off('viewport-controls-request', handleViewportControlsRequest);
-  coronaEventBus.off('vision-scene-imported', handleVisionSceneImported);
-  coronaEventBus.off('actor-pick-result', handleActorPickResult);
+  if (actorPickResultCallbackToken) {
+    editorApi.off(actorPickResultCallbackToken).catch((error) => {
+      logError('Failed to unregister actor pick result callback', error);
+    });
+    actorPickResultCallbackToken = null;
+  }
+  if (sceneAddedCallbackToken) {
+    editorApi.off(sceneAddedCallbackToken).catch((error) => {
+      logError('Failed to unregister scene added callback', error);
+    });
+    sceneAddedCallbackToken = null;
+  }
+  if (sceneRenamedCallbackToken) {
+    editorApi.off(sceneRenamedCallbackToken).catch((error) => {
+      logError('Failed to unregister scene renamed callback', error);
+    });
+    sceneRenamedCallbackToken = null;
+  }
   window.removeEventListener('storage', onStorageChange);
   window.removeEventListener('resize', handleViewportLayoutChange);
   stopMoveLoop();

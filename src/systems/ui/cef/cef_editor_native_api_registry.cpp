@@ -12,6 +12,7 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry);
 void register_project_settings_api_handlers(NativeApiRegistry& registry);
 void register_network_api_handlers(NativeApiRegistry& registry);
 void register_lanchat_api_handlers(NativeApiRegistry& registry);
+void register_editor_api_handlers(NativeApiRegistry& registry);
 void register_python_script_api_handlers(NativeApiRegistry& registry);
 
 NativeApiRegistry& NativeApiRegistry::instance() {
@@ -94,6 +95,7 @@ void register_builtin_native_api_handlers() {
         register_scene_tools_api_handlers(registry);
         register_network_api_handlers(registry);
         register_lanchat_api_handlers(registry);
+        register_editor_api_handlers(registry);
         register_python_script_api_handlers(registry);
     });
 }

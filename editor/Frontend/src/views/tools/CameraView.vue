@@ -207,27 +207,6 @@ const loadCamera = async () => {
   renderHeight.value = camera.value.height || 540;
 };
 
-const handleVisionSceneImported = async (payload = {}) => {
-  if (payload?.sceneId && String(payload.sceneId) !== sceneId) return;
-  const importedCameraId = payload?.cameraId ? String(payload.cameraId) : '';
-  const importedCameraName = payload?.cameraName ? String(payload.cameraName) : '';
-  if (importedCameraId && importedCameraId !== cameraId) return;
-  if (!importedCameraId && importedCameraName && importedCameraName !== cameraName.value) return;
-  if (payload?.visionRenderMode) {
-    backend.value = 'vision';
-    visionRenderMode.value = payload.visionRenderMode;
-    if (camera.value) {
-      camera.value.render_backend = 'vision';
-      camera.value.vision_render_mode = payload.visionRenderMode;
-    }
-  }
-  try {
-    await loadCamera();
-  } catch (error) {
-    errorText.value = error.message;
-  }
-};
-
 const renameCamera = async () => {
   if (!camera.value || !cameraName.value.trim() || cameraName.value === camera.value.name) return;
   try {
@@ -736,7 +715,6 @@ onMounted(async () => {
   window.addEventListener('keyup', onKeyUp);
   window.addEventListener('storage', handleViewportUiCalibrationStorage);
   coronaEventBus.on('viewport-ui-calibration-changed', handleViewportUiCalibrationChanged);
-  coronaEventBus.on('vision-scene-imported', handleVisionSceneImported);
   animationFrame = requestAnimationFrame(movementFrame);
 });
 
@@ -751,7 +729,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('storage', handleViewportUiCalibrationStorage);
   coronaEventBus.off('viewport-ui-calibration-changed', handleViewportUiCalibrationChanged);
   viewportUiPointerController.dispose();
-  coronaEventBus.off('vision-scene-imported', handleVisionSceneImported);
 });
 </script>
 

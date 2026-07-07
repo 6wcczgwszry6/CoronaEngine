@@ -18,7 +18,7 @@ constexpr std::uint32_t caller_mask(EditorApiCaller caller) {
 }
 
 constexpr std::uint32_t all_callers() {
-    return caller_mask(EditorApiCaller::Cef) | caller_mask(EditorApiCaller::Python);
+    return caller_mask(EditorApiCaller::Cef) | caller_mask(EditorApiCaller::PythonScript);
 }
 
 constexpr EditorApiReturnSpec returns(EditorApiValueType type) {
@@ -53,6 +53,15 @@ constexpr std::array<EditorApiParamSpec, 1> kObjectPayloadParam = {{
 
 constexpr std::array<EditorApiParamSpec, 1> kAnyPayloadParam = {{
     param("payload", EditorApiValueType::Any),
+}};
+
+constexpr std::array<EditorApiParamSpec, 2> kEditorApiRegisterCallbackParams = {{
+    param("event_name", EditorApiValueType::String),
+    param("callback_spec", EditorApiValueType::Object, true),
+}};
+
+constexpr std::array<EditorApiParamSpec, 1> kCallbackTokenParam = {{
+    param("callback_token", EditorApiValueType::Integer),
 }};
 
 constexpr std::array<EditorApiParamSpec, 2> kAiToolGenerateHintParams = {{
@@ -225,6 +234,12 @@ constexpr std::array<EditorApiParamSpec, 3> kSceneToolsFocusActorParams = {{
     param("camera_name", EditorApiValueType::String, true),
 }};
 
+constexpr std::array<EditorApiParamSpec, 3> kSceneToolsSelectActorParams = {{
+    param("scene_name", EditorApiValueType::String),
+    param("actor_type", EditorApiValueType::String),
+    param("actor_name", EditorApiValueType::String),
+}};
+
 constexpr std::array<EditorApiParamSpec, 3> kSceneToolsSetRenderBackendParams = {{
     param("mode", EditorApiValueType::String),
     param("scene_name", EditorApiValueType::String, true),
@@ -345,21 +360,34 @@ constexpr std::array<EditorApiParamSpec, 4> kScratchMouseEventParams = {{
     param("y", EditorApiValueType::Number),
 }};
 
+#define EDITOR_API_METHOD0_WRAPPED(module, function, js_path, python_path, return_type) \
+    {#module "." #function, #module, #function, nullptr, 0, returns(return_type), js_path, python_path, true, all_callers()}
+
+#define EDITOR_API_METHOD1_WRAPPED(module, function, js_path, python_path, param0_name, param0_type, return_type) \
+    {#module "." #function, #module, #function, kSceneNameParam.data(), kSceneNameParam.size(), returns(return_type), js_path, python_path, true, all_callers()}
+
+#define EDITOR_API_METHOD_SCHEMA_WRAPPED(module, function, params_array, js_path, python_path, return_type) \
+    {#module "." #function, #module, #function, params_array.data(), params_array.size(), returns(return_type), js_path, python_path, true, all_callers()}
+
 #define EDITOR_API_METHOD0(module, function, return_type) \
-    {#module "." #function, #module, #function, nullptr, 0, returns(return_type), true, all_callers()}
+    EDITOR_API_METHOD0_WRAPPED(module, function, "", "", return_type)
 
 #define EDITOR_API_METHOD1(module, function, param0_name, param0_type, return_type) \
-    {#module "." #function, #module, #function, kSceneNameParam.data(), kSceneNameParam.size(), returns(return_type), true, all_callers()}
+    EDITOR_API_METHOD1_WRAPPED(module, function, "", "", param0_name, param0_type, return_type)
 
 #define EDITOR_API_METHOD_SCHEMA(module, function, params_array, return_type) \
-    {#module "." #function, #module, #function, params_array.data(), params_array.size(), returns(return_type), true, all_callers()}
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(module, function, params_array, "", "", return_type)
 
-constexpr std::array<EditorApiMethodSpec, 130> kEditorApiMethods = {{
-    EDITOR_API_METHOD_SCHEMA(AITool, ai_rpc, kObjectPayloadParam, EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA(AITool, generate_hint, kAiToolGenerateHintParams, EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA(AITool, read_local_file_as_base64, kPathParam, EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA(AITool, send_message_to_ai_stream, kAnyPayloadParam, EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA(CoronaEditor, close_process, kNoParams, EditorApiValueType::Null),
+constexpr std::array<EditorApiMethodSpec, 135> kEditorApiMethods = {{
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(AITool, submit_request, kObjectPayloadParam, "ai.submitRequest", "ai.submit_request", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(AITool, generate_hint, kAiToolGenerateHintParams, "ai.generateHint", "ai.generate_hint", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(AITool, read_local_file_as_base64, kPathParam, "ai.readLocalFileAsBase64", "ai.read_local_file_as_base64", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(AITool, send_message_to_ai_stream, kAnyPayloadParam, "ai.sendMessageToAIStream", "ai.send_message_to_ai_stream", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(CoronaEditor, close_process, kNoParams, "app.closeProcess", "app.close_process", EditorApiValueType::Null),
+    EDITOR_API_METHOD_SCHEMA(EditorApi, register_callback, kEditorApiRegisterCallbackParams, EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA(EditorApi, unregister_callback, kCallbackTokenParam, EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA(EditorApi, list_events, kNoParams, EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA(EditorApi, list_methods, kNoParams, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(FileManager, create_file, kFileManagerCreateFileParams, EditorApiValueType::Boolean),
     EDITOR_API_METHOD_SCHEMA(FileManager, create_folder, kFileManagerCreateFolderParams, EditorApiValueType::Boolean),
     EDITOR_API_METHOD_SCHEMA(FileManager, delete_item, kPathParam, EditorApiValueType::Boolean),
@@ -368,52 +396,52 @@ constexpr std::array<EditorApiMethodSpec, 130> kEditorApiMethods = {{
     EDITOR_API_METHOD_SCHEMA(FileManager, get_project_info, kNoParams, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(FileManager, open_file, kFileManagerOpenFileParams, EditorApiValueType::Boolean),
     EDITOR_API_METHOD_SCHEMA(FileManager, rename_item, kFileManagerRenameItemParams, EditorApiValueType::Boolean),
-    EDITOR_API_METHOD_SCHEMA(LANChat, add_agent, kObjectPayloadParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(LANChat, get_history, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(LANChat, get_local_ip, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(LANChat, join_room, kObjectPayloadParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(LANChat, leave_room, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(LANChat, list_agents, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(LANChat, list_history_rooms, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(LANChat, load_history_room, kObjectPayloadParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(LANChat, remove_agent, kObjectPayloadParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(LANChat, send_message, kObjectPayloadParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(LANChat, start_local_room, kObjectPayloadParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(LANChat, start_room, kObjectPayloadParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(LANChat, stop_local_room, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(LANChat, stop_room, kNoParams, EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(LANChat, add_agent, kObjectPayloadParam, "lanChat.addAgent", "lan_chat.add_agent", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(LANChat, get_history, kNoParams, "lanChat.getHistory", "lan_chat.get_history", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(LANChat, get_local_ip, kNoParams, "lanChat.getLocalIp", "lan_chat.get_local_ip", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(LANChat, join_room, kObjectPayloadParam, "lanChat.joinRoom", "lan_chat.join_room", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(LANChat, leave_room, kNoParams, "lanChat.leaveRoom", "lan_chat.leave_room", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(LANChat, list_agents, kNoParams, "lanChat.listAgents", "lan_chat.list_agents", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(LANChat, list_history_rooms, kNoParams, "lanChat.listHistoryRooms", "lan_chat.list_history_rooms", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(LANChat, load_history_room, kObjectPayloadParam, "lanChat.loadHistoryRoom", "lan_chat.load_history_room", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(LANChat, remove_agent, kObjectPayloadParam, "lanChat.removeAgent", "lan_chat.remove_agent", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(LANChat, send_message, kObjectPayloadParam, "lanChat.sendMessage", "lan_chat.send_message", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(LANChat, start_local_room, kObjectPayloadParam, "lanChat.startLocalRoom", "lan_chat.start_local_room", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(LANChat, start_room, kObjectPayloadParam, "lanChat.startRoom", "lan_chat.start_room", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(LANChat, stop_local_room, kNoParams, "lanChat.stopLocalRoom", "lan_chat.stop_local_room", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(LANChat, stop_room, kNoParams, "lanChat.stopRoom", "lan_chat.stop_room", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(MainView, get_menu_data, kNoParams, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(MainView, import_resource_file, kMainViewImportResourceFileParams, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(MainView, on_init, kPathOptionalParam, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(MainView, run_project, kPathOptionalParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(MainView, scene_save, kSceneNameParam, EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(MainView, scene_save, kSceneNameParam, "main.sceneSave", "main.scene_save", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(MainView, update_view_tool_state, kMainViewUpdateViewToolStateParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, broadcast_actor_create, kNetworkBroadcastActorCreateParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, broadcast_actor_delete, kNetworkBroadcastActorDeleteParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, broadcast_actor_scene_snapshot, kNetworkBroadcastSceneSnapshotParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, broadcast_actor_state_update, kNetworkActorStateUpdateParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, broadcast_actor_transform, kNetworkActorStateUpdateParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, claim_actor_ownership, kActorGuidParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, connect_to_peer, kNetworkConnectToPeerParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, get_peer_count, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, get_session_info, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, poll_pending_actor_create, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, poll_pending_actor_delete, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, poll_pending_actor_scene_snapshot, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, poll_pending_actor_scene_snapshot_request, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, poll_pending_actor_state_update, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, poll_pending_actor_transform, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, register_actor_identity, kNetworkRegisterActorIdentityParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, request_actor_scene_snapshot, kSceneNameParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, set_project_root, kProjectRootParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, set_sync_paused, kPausedParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, start_session, kNetworkStartSessionParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(Network, stop_session, kNoParams, EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, broadcast_actor_create, kNetworkBroadcastActorCreateParams, "network.broadcastActorCreate", "network.broadcast_actor_create", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, broadcast_actor_delete, kNetworkBroadcastActorDeleteParams, "network.broadcastActorDelete", "network.broadcast_actor_delete", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, broadcast_actor_scene_snapshot, kNetworkBroadcastSceneSnapshotParams, "network.broadcastSceneSnapshot", "network.broadcast_scene_snapshot", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, broadcast_actor_state_update, kNetworkActorStateUpdateParams, "network.broadcastActorStateUpdate", "network.broadcast_actor_state_update", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, broadcast_actor_transform, kNetworkActorStateUpdateParams, "network.broadcastActorTransform", "network.broadcast_actor_transform", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, claim_actor_ownership, kActorGuidParam, "network.claimActorOwnership", "network.claim_actor_ownership", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, connect_to_peer, kNetworkConnectToPeerParams, "network.connectToPeer", "network.connect_to_peer", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, get_peer_count, kNoParams, "network.getPeerCount", "network.get_peer_count", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, get_session_info, kNoParams, "network.getSessionInfo", "network.get_session_info", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, poll_pending_actor_create, kNoParams, "network.pollPendingActorCreate", "network.poll_pending_actor_create", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, poll_pending_actor_delete, kNoParams, "network.pollPendingActorDelete", "network.poll_pending_actor_delete", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, poll_pending_actor_scene_snapshot, kNoParams, "network.pollPendingSceneSnapshot", "network.poll_pending_scene_snapshot", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, poll_pending_actor_scene_snapshot_request, kNoParams, "network.pollPendingSceneSnapshotRequest", "network.poll_pending_scene_snapshot_request", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, poll_pending_actor_state_update, kNoParams, "network.pollPendingActorStateUpdate", "network.poll_pending_actor_state_update", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, poll_pending_actor_transform, kNoParams, "network.pollPendingActorTransform", "network.poll_pending_actor_transform", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, register_actor_identity, kNetworkRegisterActorIdentityParams, "network.registerActorIdentity", "network.register_actor_identity", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, request_actor_scene_snapshot, kSceneNameParam, "network.requestSceneSnapshot", "network.request_scene_snapshot", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, set_project_root, kProjectRootParam, "network.setProjectRoot", "network.set_project_root", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, set_sync_paused, kPausedParam, "network.setSyncPaused", "network.set_sync_paused", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, start_session, kNetworkStartSessionParams, "network.startSession", "network.start_session", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, stop_session, kNoParams, "network.stopSession", "network.stop_session", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, browse_folder, kPathOptionalParam, EditorApiValueType::String),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, create_multiplayer_project, kObjectPayloadParam, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, create_project, kObjectPayloadParam, EditorApiValueType::String),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, create_world_project, kObjectPayloadParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD0(ProjectLauncher, get_app_version, EditorApiValueType::String),
+    EDITOR_API_METHOD0_WRAPPED(ProjectLauncher, get_app_version, "project.getAppVersion", "project.get_app_version", EditorApiValueType::String),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, get_default_project_path, kNoParams, EditorApiValueType::String),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, get_recent_projects, kNoParams, EditorApiValueType::Array),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, open_project, kPathParam, EditorApiValueType::Object),
@@ -435,71 +463,93 @@ constexpr std::array<EditorApiMethodSpec, 130> kEditorApiMethods = {{
     EDITOR_API_METHOD_SCHEMA(SceneDatas, get_scene, kSceneNameOptionalParam, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(SceneDatas, save_actor, kSceneActorParams, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(SceneDatas, select_model_file, kSceneDatasSelectModelFileParams, EditorApiValueType::String),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, actor_play_audio, kSceneToolsActorPlayAudioParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, actor_stop_audio, kActorNameParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, close_camera_view, kSceneCameraParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, create_actor, kSceneToolsCreateActorParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, create_camera_view, kSceneToolsCreateCameraViewParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, create_scene, kSceneNameParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, delete_camera, kSceneCameraParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, floor_grid, kSceneToolsFloorGridParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, focus_actor, kSceneToolsFocusActorParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, get_output_mode, kSceneToolsCameraOptionalParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, get_physics_params, kSceneNameParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, get_render_backend, kSceneToolsCameraOptionalParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, get_shadow_cascade_debug, kSceneToolsCameraOptionalParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, get_ssao_enabled, kSceneToolsCameraOptionalParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, get_vision_render_mode, kSceneToolsCameraOptionalParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, is_vision_available, kNoParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD1(SceneTools, list_actor_tree, "scene_name", EditorApiValueType::String, EditorApiValueType::Array),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, list_camera_views, kSceneNameParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, list_scene_tree, kSceneNameParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, load_vision_scene, kPathParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, open_actor, kSceneActorParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, open_camera_view, kSceneCameraParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, pick_actor_at_pixel, kSceneToolsPickActorParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, play_audio, kSceneToolsPlayAudioParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, reload_scene, kSceneToolsReloadSceneParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, remove_actor, kSceneActorParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, rename_actor, kSceneToolsRenameActorParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, rename_camera_view, kSceneToolsRenameCameraViewParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, save_screenshot, kSceneToolsSaveScreenshotParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, select_screenshot_path, kSceneToolsCameraOptionalParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, set_output_mode, kSceneToolsSetOutputModeParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, set_physics_params, kSceneToolsSetPhysicsParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, set_render_backend, kSceneToolsSetRenderBackendParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, set_shadow_cascade_debug, kSceneToolsSetCameraBoolParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, set_ssao_enabled, kSceneToolsSetCameraBoolParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, set_vision_render_mode, kSceneToolsSetVisionRenderModeParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, stop_audio, kResourceIdParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, sun_direction, kSceneToolsSunDirectionParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneTools, update_camera_view, kSceneToolsUpdateCameraViewParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(ScratchTool, execute_python_code, kScratchExecutePythonCodeParams, EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA(ScratchTool, get_game_preview_status, kNoParams, EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA(ScratchTool, get_script_status, kNoParams, EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA(ScratchTool, key_event, kScratchKeyEventParams, EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA(ScratchTool, key_release, kScratchKeyReleaseParams, EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA(ScratchTool, load_blockly_target, kObjectPayloadParam, EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA(ScratchTool, mouse_event, kScratchMouseEventParams, EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA(ScratchTool, save_blockly_target, kObjectPayloadParam, EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA(ScratchTool, start_game_preview, kObjectPayloadParam, EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA(ScratchTool, stop_game_preview, kNoParams, EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA(ScratchTool, stop_script_execution, kNoParams, EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, actor_play_audio, kSceneToolsActorPlayAudioParams, "sceneTools.actorPlayAudio", "scene_tools.actor_play_audio", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, actor_stop_audio, kActorNameParam, "sceneTools.actorStopAudio", "scene_tools.actor_stop_audio", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, close_camera_view, kSceneCameraParams, "sceneTools.closeCameraView", "scene_tools.close_camera_view", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, create_actor, kSceneToolsCreateActorParams, "sceneTools.createActor", "scene_tools.create_actor", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, create_camera_view, kSceneToolsCreateCameraViewParams, "sceneTools.createCameraView", "scene_tools.create_camera_view", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, create_scene, kSceneNameParam, "sceneTools.createScene", "scene_tools.create_scene", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, delete_camera, kSceneCameraParams, "sceneTools.deleteCamera", "scene_tools.delete_camera", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, floor_grid, kSceneToolsFloorGridParams, "sceneTools.floorGrid", "scene_tools.floor_grid", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, focus_actor, kSceneToolsFocusActorParams, "sceneTools.focusActor", "scene_tools.focus_actor", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, get_output_mode, kSceneToolsCameraOptionalParams, "sceneTools.getOutputMode", "scene_tools.get_output_mode", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, get_physics_params, kSceneNameParam, "sceneTools.getPhysicsParams", "scene_tools.get_physics_params", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, get_render_backend, kSceneToolsCameraOptionalParams, "sceneTools.getRenderBackend", "scene_tools.get_render_backend", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, get_shadow_cascade_debug, kSceneToolsCameraOptionalParams, "sceneTools.getShadowCascadeDebug", "scene_tools.get_shadow_cascade_debug", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, get_ssao_enabled, kSceneToolsCameraOptionalParams, "sceneTools.getSsaoEnabled", "scene_tools.get_ssao_enabled", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, get_vision_render_mode, kSceneToolsCameraOptionalParams, "sceneTools.getVisionRenderMode", "scene_tools.get_vision_render_mode", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, is_vision_available, kNoParams, "sceneTools.isVisionAvailable", "scene_tools.is_vision_available", EditorApiValueType::Object),
+    EDITOR_API_METHOD1_WRAPPED(SceneTools, list_actor_tree, "scene.listActorTree", "scene.list_actor_tree", "scene_name", EditorApiValueType::String, EditorApiValueType::Array),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, list_camera_views, kSceneNameParam, "sceneTools.listCameraViews", "scene_tools.list_camera_views", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, list_scene_tree, kSceneNameParam, "sceneTools.listSceneTree", "scene_tools.list_scene_tree", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, load_vision_scene, kPathParam, "sceneTools.loadVisionScene", "scene_tools.load_vision_scene", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, open_actor, kSceneActorParams, "sceneTools.openActor", "scene_tools.open_actor", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, open_camera_view, kSceneCameraParams, "sceneTools.openCameraView", "scene_tools.open_camera_view", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, pick_actor_at_pixel, kSceneToolsPickActorParams, "sceneTools.pickActor", "scene_tools.pick_actor", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, play_audio, kSceneToolsPlayAudioParams, "sceneTools.playAudio", "scene_tools.play_audio", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, reload_scene, kSceneToolsReloadSceneParams, "sceneTools.reloadScene", "scene_tools.reload_scene", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, remove_actor, kSceneActorParams, "sceneTools.removeActor", "scene_tools.remove_actor", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, rename_actor, kSceneToolsRenameActorParams, "sceneTools.renameActor", "scene_tools.rename_actor", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, rename_camera_view, kSceneToolsRenameCameraViewParams, "sceneTools.renameCameraView", "scene_tools.rename_camera_view", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, save_screenshot, kSceneToolsSaveScreenshotParams, "sceneTools.saveScreenshot", "scene_tools.save_screenshot", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, select_actor, kSceneToolsSelectActorParams, "sceneTools.selectActor", "scene.select_actor", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, select_screenshot_path, kSceneToolsCameraOptionalParams, "sceneTools.selectScreenshotPath", "scene_tools.select_screenshot_path", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, set_output_mode, kSceneToolsSetOutputModeParams, "sceneTools.setOutputMode", "scene_tools.set_output_mode", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, set_physics_params, kSceneToolsSetPhysicsParams, "sceneTools.setPhysicsParams", "scene_tools.set_physics_params", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, set_render_backend, kSceneToolsSetRenderBackendParams, "sceneTools.setRenderBackend", "scene_tools.set_render_backend", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, set_shadow_cascade_debug, kSceneToolsSetCameraBoolParams, "sceneTools.setShadowCascadeDebug", "scene_tools.set_shadow_cascade_debug", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, set_ssao_enabled, kSceneToolsSetCameraBoolParams, "sceneTools.setSsaoEnabled", "scene_tools.set_ssao_enabled", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, set_vision_render_mode, kSceneToolsSetVisionRenderModeParams, "sceneTools.setVisionRenderMode", "scene_tools.set_vision_render_mode", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, stop_audio, kResourceIdParam, "sceneTools.stopAudio", "scene_tools.stop_audio", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, sun_direction, kSceneToolsSunDirectionParams, "sceneTools.sunDirection", "scene_tools.sun_direction", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, update_camera_view, kSceneToolsUpdateCameraViewParams, "sceneTools.updateCameraView", "scene_tools.update_camera_view", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, execute_python_code, kScratchExecutePythonCodeParams, "scratch.executePythonCode", "scratch.execute_python_code", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, get_game_preview_status, kNoParams, "scratch.getGamePreviewStatus", "scratch.get_game_preview_status", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, get_script_status, kNoParams, "scratch.getScriptStatus", "scratch.get_script_status", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, key_event, kScratchKeyEventParams, "scratch.sendKeyEvent", "scratch.send_key_event", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, key_release, kScratchKeyReleaseParams, "scratch.sendKeyUpEvent", "scratch.send_key_up_event", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, load_blockly_target, kObjectPayloadParam, "scratch.loadBlocklyTarget", "scratch.load_blockly_target", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, mouse_event, kScratchMouseEventParams, "scratch.sendMouseEvent", "scratch.send_mouse_event", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, save_blockly_target, kObjectPayloadParam, "scratch.saveBlocklyTarget", "scratch.save_blockly_target", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, start_game_preview, kObjectPayloadParam, "scratch.startGamePreview", "scratch.start_game_preview", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, stop_game_preview, kNoParams, "scratch.stopGamePreview", "scratch.stop_game_preview", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, stop_script_execution, kNoParams, "scratch.stopScriptExecution", "scratch.stop_script_execution", EditorApiValueType::Any),
 }};
 
 #undef EDITOR_API_METHOD_SCHEMA
+#undef EDITOR_API_METHOD_SCHEMA_WRAPPED
 #undef EDITOR_API_METHOD1
+#undef EDITOR_API_METHOD1_WRAPPED
 #undef EDITOR_API_METHOD0
+#undef EDITOR_API_METHOD0_WRAPPED
 
-constexpr std::array<EditorApiEventSpec, 2> kEditorApiEvents = {{
-    {"SceneTools.actorChanged", EditorApiValueType::Object, all_callers()},
-    {"ProjectLauncher.projectOpened", EditorApiValueType::Object, all_callers()},
+constexpr std::array<EditorApiEventSpec, 20> kEditorApiEvents = {{
+    {"AI.chunk", EditorApiValueType::String, all_callers(), "events.onAiChunk", "events.on_ai_chunk"},
+    {"Editor.logBatch", EditorApiValueType::Array, all_callers(), "events.onLogBatch", "events.on_log_batch"},
+    {"LANChat.event", EditorApiValueType::Object, all_callers(), "events.onLanChatEvent", "events.on_lan_chat_event"},
+    {"Network.actorDeleteSyncBroadcastRequested", EditorApiValueType::Object, all_callers(), "events.onNetworkActorDeleteSyncBroadcastRequested", "events.on_network_actor_delete_sync_broadcast_requested"},
+    {"Network.actorOwnershipClaimed", EditorApiValueType::Object, all_callers(), "events.onNetworkActorOwnershipClaimed", "events.on_network_actor_ownership_claimed"},
+    {"Network.actorStateSyncBroadcastRequested", EditorApiValueType::Object, all_callers(), "events.onNetworkActorStateSyncBroadcastRequested", "events.on_network_actor_state_sync_broadcast_requested"},
+    {"Network.actorSyncBroadcastRequested", EditorApiValueType::Object, all_callers(), "events.onNetworkActorSyncBroadcastRequested", "events.on_network_actor_sync_broadcast_requested"},
+    {"Network.actorTransformSyncBroadcastRequested", EditorApiValueType::Object, all_callers(), "events.onNetworkActorTransformSyncBroadcastRequested", "events.on_network_actor_transform_sync_broadcast_requested"},
+    {"Network.assetImportCompleted", EditorApiValueType::Object, all_callers(), "events.onNetworkAssetImportCompleted", "events.on_network_asset_import_completed"},
+    {"Network.fileSyncStatusChanged", EditorApiValueType::Object, all_callers(), "events.onNetworkFileSyncStatusChanged", "events.on_network_file_sync_status_changed"},
+    {"Network.syncPauseRequested", EditorApiValueType::Object, all_callers(), "events.onNetworkSyncPauseRequested", "events.on_network_sync_pause_requested"},
+    {"SceneTools.actorPickResult", EditorApiValueType::Object, all_callers(), "events.onActorPickResult", "events.on_actor_pick_result"},
+    {"SceneTools.actorChanged", EditorApiValueType::Object, all_callers(), "events.onActorChanged", "events.on_actor_changed"},
+    {"SceneTools.actorSelectionChanged", EditorApiValueType::Object, all_callers(), "events.onActorSelectionChanged", "events.on_actor_selection_changed"},
+    {"SceneTools.actorTransformUpdated", EditorApiValueType::Object, all_callers(), "events.onActorTransformUpdated", "events.on_actor_transform_updated"},
+    {"SceneTools.focusPoseResult", EditorApiValueType::Object, all_callers(), "events.onFocusPoseResult", "events.on_focus_pose_result"},
+    {"SceneTools.sceneAdded", EditorApiValueType::Object, all_callers(), "events.onSceneAdded", "events.on_scene_added"},
+    {"SceneTools.sceneRenamed", EditorApiValueType::Object, all_callers(), "events.onSceneRenamed", "events.on_scene_renamed"},
+    {"SceneTools.sceneTreeChanged", EditorApiValueType::Object, all_callers(), "events.onSceneTreeChanged", "events.on_scene_tree_changed"},
+    {"ProjectLauncher.projectOpened", EditorApiValueType::Object, all_callers(), "events.onProjectOpened", "events.on_project_opened"},
 }};
 
 std::atomic<std::uint64_t> g_next_callback_token{1};
 std::mutex g_callback_mutex;
-std::mutex g_python_script_dispatcher_mutex;
-PyObject* g_python_script_dispatcher = nullptr;
+std::mutex g_python_script_service_dispatcher_mutex;
+PyObject* g_python_script_service_dispatcher = nullptr;
 
 struct CallbackRecord {
     std::uint64_t token = 0;
@@ -507,6 +557,7 @@ struct CallbackRecord {
     nlohmann::json callback_spec = nlohmann::json::object();
     NativeContext context;
     bool python_script = false;
+    PyObject* python_callable = nullptr;
 };
 
 std::unordered_map<std::uint64_t, CallbackRecord> g_callbacks;
@@ -633,8 +684,8 @@ NativeResult invoke_native_api_method(const EditorApiMethodSpec& spec,
                                       const nlohmann::json& args,
                                       const NativeContext& context) {
     NativeRequest native_request;
-    native_request.module = spec.legacy_module;
-    native_request.function = spec.legacy_function;
+    native_request.module = spec.native_module;
+    native_request.function = spec.native_function;
     native_request.args = args.is_null() ? nlohmann::json::array() : args;
 
     auto result = NativeApiRegistry::instance().dispatch(native_request, context);
@@ -654,14 +705,66 @@ std::optional<int> browser_identifier(const NativeContext& context) {
     return context.browser->GetIdentifier();
 }
 
+void release_python_callback(PyObject* callback) {
+    if (!callback) {
+        return;
+    }
+    if (!Py_IsInitialized()) {
+        return;
+    }
+    PyGILState_STATE state = PyGILState_Ensure();
+    Py_XDECREF(callback);
+    PyGILState_Release(state);
+}
+
 std::size_t emit_callbacks(std::string_view event_name,
                            const nlohmann::json& payload,
                            bool python_script) {
+    if (python_script) {
+        if (!Py_IsInitialized()) {
+            return 0;
+        }
+        PyGILState_STATE state = PyGILState_Ensure();
+        std::vector<std::pair<std::uint64_t, PyObject*>> callbacks;
+        {
+            std::lock_guard<std::mutex> lock(g_callback_mutex);
+            for (const auto& [_, record] : g_callbacks) {
+                if (record.python_script && record.event_name == event_name && record.python_callable) {
+                    Py_XINCREF(record.python_callable);
+                    callbacks.emplace_back(record.token, record.python_callable);
+                }
+            }
+        }
+
+        std::size_t emitted = 0;
+        const auto payload_text = payload.dump();
+        const auto event_text = std::string(event_name);
+        for (const auto& [_, callback] : callbacks) {
+            PyObject* py_payload = PyUnicode_FromString(payload_text.c_str());
+            PyObject* py_event = PyUnicode_FromString(event_text.c_str());
+            PyObject* py_args = (py_payload && py_event) ? PyTuple_Pack(2, py_payload, py_event) : nullptr;
+            Py_XDECREF(py_payload);
+            Py_XDECREF(py_event);
+
+            PyObject* result = py_args ? PyObject_CallObject(callback, py_args) : nullptr;
+            Py_XDECREF(py_args);
+            Py_XDECREF(callback);
+            if (!result) {
+                PyErr_Print();
+                continue;
+            }
+            Py_DECREF(result);
+            ++emitted;
+        }
+        PyGILState_Release(state);
+        return emitted;
+    }
+
     std::vector<CallbackRecord> records;
     {
         std::lock_guard<std::mutex> lock(g_callback_mutex);
         for (const auto& [_, record] : g_callbacks) {
-            if (record.python_script == python_script && record.event_name == event_name) {
+            if (!record.python_script && record.event_name == event_name) {
                 records.push_back(record);
             }
         }
@@ -669,7 +772,7 @@ std::size_t emit_callbacks(std::string_view event_name,
 
     std::size_t emitted = 0;
     for (const auto& record : records) {
-        if (!python_script && record.context.frame) {
+        if (record.context.frame) {
             nlohmann::json event_payload;
             event_payload["event"] = record.event_name;
             event_payload["payload"] = payload;
@@ -678,8 +781,8 @@ std::size_t emit_callbacks(std::string_view event_name,
                                 "window.__coronaEditorApiDispatch(" +
                                 event_payload.dump() + ");";
             record.context.frame->ExecuteJavaScript(script, record.context.frame->GetURL(), 0);
+            ++emitted;
         }
-        ++emitted;
     }
     return emitted;
 }
@@ -722,6 +825,10 @@ std::vector<EditorApiMethodSpec> EditorApiRegistry::list_methods() const {
     return {kEditorApiMethods.begin(), kEditorApiMethods.end()};
 }
 
+std::vector<EditorApiEventSpec> EditorApiRegistry::list_events() const {
+    return {kEditorApiEvents.begin(), kEditorApiEvents.end()};
+}
+
 NativeResult EditorApiRegistry::invoke(const EditorApiRequest& request,
                                        const NativeContext& context) const {
     const auto* spec = find(request.api_name);
@@ -756,34 +863,10 @@ NativeResult CefEditorApiEndpoint::invoke(const std::string& api_name,
     return EditorApiRegistry::instance().invoke({api_name, args, EditorApiCaller::Cef}, context);
 }
 
-std::uint64_t CefEditorApiEndpoint::register_callback(const std::string& event_name,
-                                                      const nlohmann::json& callback_spec,
-                                                      const NativeContext& context) {
-    return EditorApiCallbackRegistry::instance().register_cef_callback(event_name,
-                                                                       callback_spec,
-                                                                       context);
-}
-
-bool CefEditorApiEndpoint::unregister_callback(std::uint64_t callback_token) {
-    return EditorApiCallbackRegistry::instance().unregister(callback_token);
-}
-
-NativeResult PythonEditorApiEndpoint::invoke(const std::string& api_name,
-                                             const nlohmann::json& args,
-                                             const NativeContext& context) {
-    return EditorApiRegistry::instance().invoke({api_name, args, EditorApiCaller::Python}, context);
-}
-
-std::uint64_t PythonEditorApiEndpoint::register_callback(const std::string& event_name,
-                                                         const nlohmann::json& callback_spec,
-                                                         const NativeContext& context) {
-    return EditorApiCallbackRegistry::instance().register_python_script_callback(event_name,
-                                                                                callback_spec,
-                                                                                context);
-}
-
-bool PythonEditorApiEndpoint::unregister_callback(std::uint64_t callback_token) {
-    return EditorApiCallbackRegistry::instance().unregister(callback_token);
+NativeResult PythonScriptApiClientEndpoint::invoke(const std::string& api_name,
+                                                   const nlohmann::json& args,
+                                                   const NativeContext& context) {
+    return EditorApiRegistry::instance().invoke({api_name, args, EditorApiCaller::PythonScript}, context);
 }
 
 std::optional<EditorApiRequest> parse_editor_api_request(const nlohmann::json& payload,
@@ -835,7 +918,7 @@ std::uint64_t EditorApiCallbackRegistry::register_python_script_callback(
     const nlohmann::json& callback_spec,
     const NativeContext& context) {
     const auto event_spec = find_editor_api_event(event_name);
-    if (!event_spec || !event_caller_allowed(*event_spec, EditorApiCaller::Python)) {
+    if (!event_spec || !event_caller_allowed(*event_spec, EditorApiCaller::PythonScript)) {
         return 0;
     }
     const auto token = g_next_callback_token.fetch_add(1);
@@ -850,9 +933,45 @@ std::uint64_t EditorApiCallbackRegistry::register_python_script_callback(
     return token;
 }
 
-bool EditorApiCallbackRegistry::unregister(std::uint64_t callback_token) {
+std::uint64_t EditorApiCallbackRegistry::register_python_script_callback_callable(
+    const std::string& event_name,
+    PyObject* callback) {
+    const auto event_spec = find_editor_api_event(event_name);
+    if (!event_spec || !event_caller_allowed(*event_spec, EditorApiCaller::PythonScript)) {
+        return 0;
+    }
+    if (!Py_IsInitialized() || !PyCallable_Check(callback)) {
+        return 0;
+    }
+
+    Py_XINCREF(callback);
+    const auto token = g_next_callback_token.fetch_add(1);
+    CallbackRecord record;
+    record.token = token;
+    record.event_name = event_name;
+    record.callback_spec = {{"transport", "python-script"}};
+    record.python_script = true;
+    record.python_callable = callback;
     std::lock_guard<std::mutex> lock(g_callback_mutex);
-    return g_callbacks.erase(callback_token) > 0;
+    g_callbacks[token] = std::move(record);
+    return token;
+}
+
+bool EditorApiCallbackRegistry::unregister(std::uint64_t callback_token) {
+    PyObject* python_callable = nullptr;
+    bool removed = false;
+    {
+        std::lock_guard<std::mutex> lock(g_callback_mutex);
+        const auto it = g_callbacks.find(callback_token);
+        if (it == g_callbacks.end()) {
+            return false;
+        }
+        python_callable = it->second.python_callable;
+        g_callbacks.erase(it);
+        removed = true;
+    }
+    release_python_callback(python_callable);
+    return removed;
 }
 
 void EditorApiCallbackRegistry::clear_cef_callbacks_for_browser(int browser_id) {
@@ -864,6 +983,24 @@ void EditorApiCallbackRegistry::clear_cef_callbacks_for_browser(int browser_id) 
         } else {
             ++it;
         }
+    }
+}
+
+void EditorApiCallbackRegistry::clear_python_script_callbacks() {
+    std::vector<PyObject*> callbacks;
+    {
+        std::lock_guard<std::mutex> lock(g_callback_mutex);
+        for (auto it = g_callbacks.begin(); it != g_callbacks.end();) {
+            if (it->second.python_script) {
+                callbacks.push_back(it->second.python_callable);
+                it = g_callbacks.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (auto* callback : callbacks) {
+        release_python_callback(callback);
     }
 }
 
@@ -880,7 +1017,7 @@ std::size_t EditorApiCallbackRegistry::emit_editor_api_event(std::string_view ev
 std::size_t EditorApiCallbackRegistry::emit_python_script_event(std::string_view event_name,
                                                                 const nlohmann::json& payload) {
     const auto event_spec = find_editor_api_event(event_name);
-    if (!event_spec || !event_caller_allowed(*event_spec, EditorApiCaller::Python) ||
+    if (!event_spec || !event_caller_allowed(*event_spec, EditorApiCaller::PythonScript) ||
         !validate_editor_api_event_payload(*event_spec, payload)) {
         return 0;
     }
@@ -904,7 +1041,7 @@ std::size_t emit_python_script_event(std::string_view event_name, const nlohmann
     return EditorApiCallbackRegistry::instance().emit_python_script_event(event_name, payload);
 }
 
-void register_python_script_dispatcher(PyObject* dispatcher) {
+void register_python_script_service_dispatcher(PyObject* dispatcher) {
     if (!Py_IsInitialized()) {
         return;
     }
@@ -912,33 +1049,44 @@ void register_python_script_dispatcher(PyObject* dispatcher) {
     PyGILState_STATE state = PyGILState_Ensure();
     PyObject* old_dispatcher = nullptr;
     {
-        std::lock_guard<std::mutex> lock(g_python_script_dispatcher_mutex);
+        std::lock_guard<std::mutex> lock(g_python_script_service_dispatcher_mutex);
         if (dispatcher && PyCallable_Check(dispatcher)) {
             Py_INCREF(dispatcher);
-            old_dispatcher = g_python_script_dispatcher;
-            g_python_script_dispatcher = dispatcher;
+            old_dispatcher = g_python_script_service_dispatcher;
+            g_python_script_service_dispatcher = dispatcher;
         }
     }
     Py_XDECREF(old_dispatcher);
     PyGILState_Release(state);
 }
 
-void unregister_python_script_dispatcher() {
+void unregister_python_script_service_dispatcher() {
+    clear_python_script_callbacks();
     if (!Py_IsInitialized()) {
-        std::lock_guard<std::mutex> lock(g_python_script_dispatcher_mutex);
-        g_python_script_dispatcher = nullptr;
+        std::lock_guard<std::mutex> lock(g_python_script_service_dispatcher_mutex);
+        g_python_script_service_dispatcher = nullptr;
         return;
     }
 
     PyGILState_STATE state = PyGILState_Ensure();
     PyObject* old_dispatcher = nullptr;
     {
-        std::lock_guard<std::mutex> lock(g_python_script_dispatcher_mutex);
-        old_dispatcher = g_python_script_dispatcher;
-        g_python_script_dispatcher = nullptr;
+        std::lock_guard<std::mutex> lock(g_python_script_service_dispatcher_mutex);
+        old_dispatcher = g_python_script_service_dispatcher;
+        g_python_script_service_dispatcher = nullptr;
     }
     Py_XDECREF(old_dispatcher);
     PyGILState_Release(state);
+}
+
+std::uint64_t register_python_script_callback_callable(const std::string& event_name,
+                                                       PyObject* callback) {
+    return EditorApiCallbackRegistry::instance().register_python_script_callback_callable(event_name,
+                                                                                        callback);
+}
+
+void clear_python_script_callbacks() {
+    EditorApiCallbackRegistry::instance().clear_python_script_callbacks();
 }
 
 NativeResult invoke_python_script_service(const NativeRequest& request, const char* route) {
@@ -952,13 +1100,13 @@ NativeResult invoke_python_script_service(const NativeRequest& request, const ch
     PyGILState_STATE state = PyGILState_Ensure();
     PyObject* dispatcher = nullptr;
     {
-        std::lock_guard<std::mutex> lock(g_python_script_dispatcher_mutex);
-        dispatcher = g_python_script_dispatcher;
+        std::lock_guard<std::mutex> lock(g_python_script_service_dispatcher_mutex);
+        dispatcher = g_python_script_service_dispatcher;
         Py_XINCREF(dispatcher);
     }
     if (!dispatcher) {
         PyGILState_Release(state);
-        return native_failure("Python script dispatcher is not registered",
+        return native_failure("Python script service dispatcher is not registered",
                               503,
                               route_name);
     }

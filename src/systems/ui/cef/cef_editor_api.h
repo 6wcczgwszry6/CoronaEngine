@@ -15,7 +15,7 @@ namespace Corona::Systems::UI {
 
 enum class EditorApiCaller : std::uint32_t {
     Cef = 1u << 0u,
-    Python = 1u << 1u,
+    PythonScript = 1u << 1u,
 };
 
 enum class EditorApiValueType : std::uint32_t {
@@ -41,11 +41,13 @@ struct EditorApiReturnSpec {
 
 struct EditorApiMethodSpec {
     const char* api_name;
-    const char* legacy_module;
-    const char* legacy_function;
+    const char* native_module;
+    const char* native_function;
     const EditorApiParamSpec* params;
     std::size_t param_count;
     EditorApiReturnSpec return_spec;
+    const char* js_wrapper;
+    const char* python_wrapper;
     bool async;
     std::uint32_t allowed_callers;
 };
@@ -54,6 +56,8 @@ struct EditorApiEventSpec {
     const char* event_name;
     EditorApiValueType payload_type;
     std::uint32_t allowed_callers;
+    const char* js_wrapper;
+    const char* python_wrapper;
 };
 
 struct EditorApiRequest {
@@ -68,6 +72,7 @@ public:
 
     const EditorApiMethodSpec* find(std::string_view api_name) const;
     std::vector<EditorApiMethodSpec> list_methods() const;
+    std::vector<EditorApiEventSpec> list_events() const;
     NativeResult invoke(const EditorApiRequest& request, const NativeContext& context) const;
 
 private:
@@ -84,8 +89,11 @@ public:
     std::uint64_t register_python_script_callback(const std::string& event_name,
                                                   const nlohmann::json& callback_spec,
                                                   const NativeContext& context);
+    std::uint64_t register_python_script_callback_callable(const std::string& event_name,
+                                                           PyObject* callback);
     bool unregister(std::uint64_t callback_token);
     void clear_cef_callbacks_for_browser(int browser_id);
+    void clear_python_script_callbacks();
     std::size_t emit_editor_api_event(std::string_view event_name,
                                       const nlohmann::json& payload);
     std::size_t emit_python_script_event(std::string_view event_name,
@@ -102,10 +110,6 @@ public:
     virtual NativeResult invoke(const std::string& api_name,
                                 const nlohmann::json& args,
                                 const NativeContext& context) = 0;
-    virtual std::uint64_t register_callback(const std::string& event_name,
-                                            const nlohmann::json& callback_spec,
-                                            const NativeContext& context) = 0;
-    virtual bool unregister_callback(std::uint64_t callback_token) = 0;
 };
 
 class CefEditorApiEndpoint final : public EditorApiEndpointBase {
@@ -113,22 +117,14 @@ public:
     NativeResult invoke(const std::string& api_name,
                         const nlohmann::json& args,
                         const NativeContext& context) override;
-    std::uint64_t register_callback(const std::string& event_name,
-                                    const nlohmann::json& callback_spec,
-                                    const NativeContext& context) override;
-    bool unregister_callback(std::uint64_t callback_token) override;
 
 };
 
-class PythonEditorApiEndpoint final : public EditorApiEndpointBase {
+class PythonScriptApiClientEndpoint final : public EditorApiEndpointBase {
 public:
     NativeResult invoke(const std::string& api_name,
                         const nlohmann::json& args,
                         const NativeContext& context) override;
-    std::uint64_t register_callback(const std::string& event_name,
-                                    const nlohmann::json& callback_spec,
-                                    const NativeContext& context) override;
-    bool unregister_callback(std::uint64_t callback_token) override;
 };
 
 std::optional<EditorApiRequest> parse_editor_api_request(const nlohmann::json& payload,
@@ -137,8 +133,11 @@ std::optional<EditorApiEventSpec> find_editor_api_event(std::string_view event_n
 std::size_t emit_editor_api_event(std::string_view event_name, const nlohmann::json& payload);
 std::size_t emit_python_script_event(std::string_view event_name, const nlohmann::json& payload);
 
-void register_python_script_dispatcher(PyObject* dispatcher);
-void unregister_python_script_dispatcher();
+void register_python_script_service_dispatcher(PyObject* dispatcher);
+void unregister_python_script_service_dispatcher();
+std::uint64_t register_python_script_callback_callable(const std::string& event_name,
+                                                       PyObject* callback);
+void clear_python_script_callbacks();
 NativeResult invoke_python_script_service(const NativeRequest& request,
                                           const char* route = "python-script");
 

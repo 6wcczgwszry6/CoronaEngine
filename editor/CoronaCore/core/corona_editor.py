@@ -25,7 +25,7 @@ class CoronaEditor:
             request = json.loads(json_str)
             if 'api' in request:
                 return create_error_response(
-                    "Editor API payload is not accepted by Python script dispatcher"
+                    "Editor API payload is not accepted by Python script service dispatcher"
                 )
             module_name = request.get('module', None)
             func_name = request.get('function', None)
@@ -53,22 +53,77 @@ class CoronaEditor:
 
     @classmethod
     def register_script_dispatcher(cls):
-        register = getattr(cls.CoronaEngine, "register_python_script_dispatcher", None)
+        register = getattr(cls.CoronaEngine, "register_python_script_service_dispatcher", None)
         if callable(register):
             register(cls.dispatch_script_request_from_cpp)
 
     @classmethod
     def unregister_script_dispatcher(cls):
-        unregister = getattr(cls.CoronaEngine, "unregister_python_script_dispatcher", None)
+        unregister = getattr(cls.CoronaEngine, "unregister_python_script_service_dispatcher", None)
         if callable(unregister):
             unregister()
 
     @classmethod
     def emit_editor_event(cls, event_name, args=None):
-        """记录 Python 脚本事件；前端投递由 C++ 明确事件通道负责。"""
+        """把历史 Python 脚本事件收口到 C++ 定义的 Editor API 事件。"""
         if args is None:
             args = []
+        args = list(args) if isinstance(args, (list, tuple)) else [args]
         logger.debug("Python editor event emitted: %s args=%s", event_name, args)
+
+        event_mapping = {
+            "ai-chunk": ("events.on_ai_chunk", lambda values: values[0] if len(values) > 0 else ""),
+            "log-batch": ("events.on_log_batch", lambda values: values[0] if len(values) > 0 else []),
+            "scene-add": ("events.on_scene_added", lambda values: {
+                "name": values[0] if len(values) > 0 else "",
+                "route": values[1] if len(values) > 1 else "",
+            }),
+            "scene-rename": ("events.on_scene_renamed", lambda values: {
+                "old_path": values[0] if len(values) > 0 else "",
+                "new_path": values[1] if len(values) > 1 else "",
+                "name": values[2] if len(values) > 2 else "",
+            }),
+            "scene-tree-changed": ("events.on_scene_tree_changed", lambda values: {
+                "scene": values[0] if len(values) > 0 else "",
+            }),
+            "actor-change": ("events.on_actor_changed", lambda values: {
+                "actor_type": values[0] if len(values) > 0 else "",
+                "scene": values[1] if len(values) > 1 else "",
+                "actor": values[2] if len(values) > 2 else "",
+                "previous": values[3] if len(values) > 3 else "",
+            }),
+            "transform-update": ("events.on_actor_transform_updated", lambda values: {
+                "scene": values[0] if len(values) > 0 else "",
+                "actor": values[1] if len(values) > 1 else "",
+                "position": values[2] if len(values) > 2 else {},
+                "rotation": values[3] if len(values) > 3 else {},
+                "scale": values[4] if len(values) > 4 else {},
+                "actor_type": values[5] if len(values) > 5 else "",
+            }),
+            "actor-ownership-claim": ("events.on_network_actor_ownership_claimed", lambda values: {
+                "actor_guid": (values[0] if len(values) > 0 else {}).get("actor_guid", "")
+                if isinstance(values[0] if len(values) > 0 else {}, dict)
+                else "",
+            }),
+            "actor-sync-broadcast": ("events.on_network_actor_sync_broadcast_requested", lambda values: values[0] if len(values) > 0 else {}),
+            "actor-transform-sync-broadcast": ("events.on_network_actor_transform_sync_broadcast_requested", lambda values: values[0] if len(values) > 0 else {}),
+            "actor-state-sync-broadcast": ("events.on_network_actor_state_sync_broadcast_requested", lambda values: values[0] if len(values) > 0 else {}),
+            "actor-delete-sync-broadcast": ("events.on_network_actor_delete_sync_broadcast_requested", lambda values: values[0] if len(values) > 0 else {}),
+            "network-sync-pause-request": ("events.on_network_sync_pause_requested", lambda values: {
+                "paused": bool((values[0] if len(values) > 0 else {}).get("paused", False))
+            }),
+            "file-sync-status": ("events.on_network_file_sync_status_changed", lambda values: {
+                "status": (values[0] if len(values) > 0 else {}).get("status", ""),
+                "model_path": (values[0] if len(values) > 0 else {}).get("model_path", ""),
+                "progress": (values[0] if len(values) > 0 else {}).get("progress", 0),
+            }),
+            "import-asset-complete": ("events.on_network_asset_import_completed", lambda values: values[0] if len(values) > 0 else {}),
+        }
+        mapped_event = event_mapping.get(event_name)
+        if mapped_event:
+            event_wrapper, payload_factory = mapped_event
+            from CoronaCore.core.editor_api import _emit_manifest_cpp_editor_api_event
+            _emit_manifest_cpp_editor_api_event(event_wrapper, payload_factory(args))
         return f"Editor event emitted: {event_name}"
 
     @classmethod
