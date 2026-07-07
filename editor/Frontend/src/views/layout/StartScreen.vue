@@ -16,11 +16,7 @@
       >
         {{ t(item.label) }}
       </button>
-      <div v-if="showPanel" class="nav-back-wrapper">
-        <button class="nav-back-btn" @click="handleBack">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
-        </button>
-      </div>
+      
     </div>
 
     <!-- 右侧面板 -->
@@ -32,17 +28,12 @@
           </div>
           <h2 class="exit-panel-title">断开连接</h2>
           <p class="exit-panel-desc">切断与 Corona 系统的连接后，所有未保存的宇宙演化进程将在后台处于休眠状态。</p>
-          <div class="exit-panel-stats">
-            <div class="exit-stat"><span class="exit-stat-label">进行中任务</span><span class="exit-stat-value">0</span></div>
-            <div class="exit-stat"><span class="exit-stat-label">活跃宇宙</span><span class="exit-stat-value">1</span></div>
-          </div>
           <div class="exit-panel-actions">
             <button class="exit-action cancel" @click="handleBack">取消</button>
             <button class="exit-action confirm" @click="confirmExit">确认离开</button>
           </div>
         </div>
-        <Transition v-else name="page-fade" mode="out-in">
-          <component :is="pageComponent" :key="activePage" />
+        <Transition v-else name="page-fade" mode="out-in"><component :is="pageComponent" :key="activePage" />
         </Transition>
       </div>
     </div>
@@ -94,19 +85,23 @@ const animateParticles = (id) => {
   switch (id) {
     case 'panel-new':
       gsap.to(particleSystem.material.color, { r: 0.4, g: 0.66, b: 1, duration: d, force3D: true });
+      gsap.to(particleSystem.scale, { x: 1, y: 1, z: 1, duration: d, force3D: true });
       gsap.to(camera.position, { z: 80, duration: d, ease: 'power2.out', force3D: true });
       break;
     case 'panel-continue':
       gsap.to(particleSystem.material.color, { r: 0.1, g: 0.8, b: 0.4, duration: d, force3D: true });
+      gsap.to(particleSystem.scale, { x: 1, y: 1, z: 1, duration: d, force3D: true });
       gsap.to(camera.position, { z: 42, duration: d, ease: 'power2.inOut', force3D: true });
       break;
     case 'panel-multi':
       gsap.to(particleSystem.material.color, { r: 1.0, g: 0.4, b: 0.1, duration: d, force3D: true });
+      gsap.to(particleSystem.scale, { x: 1, y: 1, z: 1, duration: d, force3D: true });
       gsap.to(camera.position, { z: 65, duration: d, ease: 'power2.out', force3D: true });
       break;
     case 'panel-exit':
       gsap.to(particleSystem.material.color, { r: 0.8, g: 0.1, b: 0.2, duration: d, force3D: true });
-      gsap.to(camera.position, { z: 140, duration: d, ease: 'power3.inOut', force3D: true });
+      gsap.to(particleSystem.scale, { x: 0.4, y: 0.4, z: 0.4, duration: d, ease: 'power3.inOut', force3D: true });
+      gsap.to(camera.position, { z: 100, duration: d, ease: 'power3.inOut', force3D: true });
       break;
   }
 };
@@ -202,7 +197,7 @@ const initThree = () => {
   container.appendChild(renderer.domElement);
 
   const geometry = new THREE.BufferGeometry();
-  const count = 5000;
+  const count = 10000;
   const positions = new Float32Array(count * 3);
   for (let i = 0; i < count * 3; i += 3) {
     const r = 100 * Math.cbrt(Math.random());
@@ -373,30 +368,6 @@ onUnmounted(() => {
   background: linear-gradient(90deg, rgba(102, 170, 255, 0.12) 0%, transparent 100%);
   text-shadow: 0 0 14px rgba(102, 170, 255, 0.4);
 }
-
-.nav-back-wrapper {
-  margin-top: 4px;
-}
-
-.nav-back-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.04);
-  color: #aaa;
-  cursor: pointer;
-  transition: background 0.2s ease, color 0.2s ease;
-}
-
-.nav-back-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
-}
-
 /* ——— 右侧面板 ——— */
 .page-panel {
   position: fixed;
@@ -462,7 +433,7 @@ onUnmounted(() => {
 }
 
 .exit-panel-title {
-  font-size: 2rem;
+font-size: 2.8rem;
   font-weight: 700;
   color: #fff;
   letter-spacing: 4px;
@@ -470,41 +441,20 @@ onUnmounted(() => {
 }
 
 .exit-panel-desc {
-  font-size: 1.05rem;
+font-size: 1.3rem;
   line-height: 1.6;
   color: #999;
   max-width: 420px;
   margin: 0;
 }
 
-.exit-panel-stats {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 24px;
-  margin: 12px 0 4px;
-  padding: 14px 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-}
 
-.exit-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
 
-.exit-stat-label {
-  font-size: 0.8rem;
-  color: #666;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-}
 
-.exit-stat-value {
-  font-size: 1.2rem;
-  font-weight: 700;
-  color: #fff;
-}
+
+
+
+
 
 .exit-panel-actions {
   display: flex;
@@ -513,9 +463,9 @@ onUnmounted(() => {
 }
 
 .exit-action {
-  padding: 11px 34px;
-  border-radius: 8px;
-  font-size: 1rem;
+padding: 14px 40px;
+border-radius: 8px;
+font-size: 1.15rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
@@ -540,10 +490,21 @@ onUnmounted(() => {
   border: 1px solid rgba(255, 68, 68, 0.25);
 }
 
-.exit-action.confirm:hover {
+
+  .exit-action.confirm:hover {
   background: rgba(255, 68, 68, 0.22);
   box-shadow: 0 0 18px rgba(255, 68, 68, 0.1);
 }
 </style>
+
+
+
+
+
+
+
+
+
+
 
 
