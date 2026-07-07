@@ -1,11 +1,10 @@
 ﻿<template>
   <div class="start-screen-root">
-    <!-- Three.js 3D 粒子背景 -->
     <div ref="canvasContainer" class="canvas-container"></div>
 
-    <!-- 标题 + 导航按钮（用 GSAP 定位，初始居中，点击后左移） -->
+    <!-- 标题 + 导航按钮 -->
     <div ref="contentWrapper" class="start-screen-content">
-      <div class="main-title">CORONA ENGINE</div>
+      <div class="main-title">CORONA<br>ENGINE</div>
       <div ref="navContainer" class="nav-container">
         <button
           v-for="item in navItems"
@@ -25,9 +24,28 @@
     </div>
 
     <!-- 右侧页面面板 -->
-    <div v-if="showPanel" class="page-panel" :class="{ visible: panelVisible }">
+    <div v-if="showPanel" ref="panelRef" class="page-panel" :class="{ visible: panelVisible }">
       <div class="page-panel-body">
-        <component :is="pageComponent" />
+        <!-- 退出确认 -->
+        <div v-if="activePage === 'panel-exit'" key="panel-exit" class="exit-panel-content">
+          <div class="exit-panel-icon">
+            <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          </div>
+          <h2 class="exit-panel-title">断开连接</h2>
+          <p class="exit-panel-desc">切断与 Corona 系统的连接后，所有未保存的宇宙演化进程将在后台处于休眠状态。</p>
+          <div class="exit-panel-stats">
+            <div class="exit-stat"><span class="exit-stat-label">进行中任务</span><span class="exit-stat-value">0</span></div>
+            <div class="exit-stat"><span class="exit-stat-label">活跃宇宙</span><span class="exit-stat-value">1</span></div>
+          </div>
+          <div class="exit-panel-actions">
+            <button class="exit-action cancel" @click="handleBack">取消</button>
+            <button class="exit-action confirm" @click="confirmExit">确认离开</button>
+          </div>
+        </div>
+        <!-- 其他页面内容切换带淡入淡出 -->
+        <Transition v-else name="page-fade" mode="out-in">
+          <component :is="pageComponent" :key="activePage" />
+        </Transition>
       </div>
     </div>
   </div>
@@ -48,6 +66,7 @@ const { t } = useI18n();
 const canvasContainer = ref(null);
 const contentWrapper = ref(null);
 const navContainer = ref(null);
+const panelRef = ref(null);
 const activeNav = ref(null);
 
 const showPanel = ref(false);
@@ -76,7 +95,7 @@ let hasInteracted = false;
 
 // ——— 粒子颜色/相机动画 ———
 const animateParticles = (id) => {
-  const d = 0.8;
+  const d = 0.7;
   switch (id) {
     case 'panel-new':
       gsap.to(particleSystem.material.color, { r: 0.4, g: 0.66, b: 1, duration: d });
@@ -98,16 +117,39 @@ const animateParticles = (id) => {
 };
 
 // ——— 导航处理 ———
-const handleNavClick = (id) => {
-  // 退出按钮
+const openPanelWithAnimation = async (id, component) => {
+  activePage.value = id;
+  pageComponent.value = component;
+  showPanel.value = true;
+  panelVisible.value = true;
+
+  await nextTick();
+  // GSAP 驱动面板滑入，与菜单动画重叠
+  gsap.fromTo(
+    panelRef.value,
+    { x: '105%' },
+    { x: '0%', duration: 0.5, ease: 'power3.out', delay: 0.15 }
+  );
+};
+
+const handleNavClick = async (id) => {
+  // 退出：跟其他页面一样展开面板
   if (id === 'panel-exit') {
     animateParticles(id);
     activeNav.value = id;
-    setTimeout(() => appService.closeProcess(), 1000);
+
+    if (!hasInteracted) {
+      hasInteracted = true;
+      gsap.to(contentWrapper.value, {
+        left: '2vw', xPercent: 0, scale: 0.72,
+        duration: 0.8, ease: 'power3.inOut',
+      });
+    }
+    await openPanelWithAnimation('panel-exit', null);
     return;
   }
 
-  // 点击已激活的面板 → 关闭
+  // 再次点击已激活的页面 → 关闭
   if (activePage.value === id && showPanel.value) {
     handleBack();
     return;
@@ -116,51 +158,51 @@ const handleNavClick = (id) => {
   activeNav.value = id;
   animateParticles(id);
 
-  // **首次点击**：菜单从中央滑到左侧（模仿 HTML 效果）
   if (!hasInteracted) {
     hasInteracted = true;
     gsap.to(contentWrapper.value, {
-      left: '2vw',
-      xPercent: 0,
-      scale: 0.75,
-      duration: 1.2,
-      ease: 'power3.inOut',
+      left: '2vw', xPercent: 0, scale: 0.72,
+      duration: 0.8, ease: 'power3.inOut',
     });
   }
 
-  // 展开右侧面板
-  setTimeout(() => {
-    activePage.value = id;
-    pageComponent.value = pageMap[id].component;
-    showPanel.value = true;
-    nextTick(() => {
-      requestAnimationFrame(() => {
-        panelVisible.value = true;
-      });
-    });
-  }, hasInteracted ? 0 : 500);
+  await openPanelWithAnimation(id, pageMap[id].component);
 };
 
 const handleBack = () => {
+  if (!panelRef.value) return;
   panelVisible.value = false;
 
-  // 面板收起后才显示返回箭头并重置状态
-  setTimeout(() => {
-    showPanel.value = false;
-    activePage.value = null;
-    activeNav.value = null;
-    pageComponent.value = null;
+  gsap.to(panelRef.value, {
+    x: '105%',
+    duration: 0.3,
+    ease: 'power2.in',
+    onComplete: () => {
+      showPanel.value = false;
+      activePage.value = null;
+      activeNav.value = null;
+      pageComponent.value = null;
 
-    gsap.to(contentWrapper.value, {
-      left: '50%',
-      xPercent: -50,
-      scale: 1,
-      duration: 0.8,
-      ease: 'power3.inOut',
-    });
+      gsap.to(contentWrapper.value, {
+        left: '50%', xPercent: -50, scale: 1,
+        duration: 0.55, ease: 'power3.inOut',
+      });
+      hasInteracted = false;
+    },
+  });
+};
 
-    hasInteracted = false;
-  }, 400);
+const confirmExit = () => {
+  if (!panelRef.value) return;
+  panelVisible.value = false;
+
+  gsap.to(panelRef.value, {
+    x: '105%', duration: 0.3, ease: 'power2.in',
+    onComplete: () => {
+      showPanel.value = false;
+      appService.closeProcess();
+    },
+  });
 };
 
 // ——— Three.js 初始化 ———
@@ -180,7 +222,7 @@ const initThree = () => {
   container.appendChild(renderer.domElement);
 
   const geometry = new THREE.BufferGeometry();
-  const count = 10000;
+  const count = 8000;
   const positions = new Float32Array(count * 3);
   for (let i = 0; i < count * 3; i += 3) {
     const r = 100 * Math.cbrt(Math.random());
@@ -202,12 +244,12 @@ const initThree = () => {
   const texture = new THREE.CanvasTexture(cvs);
 
   const material = new THREE.PointsMaterial({
-    size: 0.6,
+    size: 0.55,
     color: 0x66aaff,
     map: texture,
     blending: THREE.AdditiveBlending,
     transparent: true,
-    opacity: 0.8,
+    opacity: 0.7,
     depthWrite: false,
   });
 
@@ -232,11 +274,11 @@ const initThree = () => {
   const animate = () => {
     animationFrameId = requestAnimationFrame(animate);
     const elapsed = clock.getElapsedTime();
-    particleSystem.rotation.y += 0.0008;
-    camera.position.x += (mouseX * 0.015 - camera.position.x) * 0.05;
-    camera.position.y += (-mouseY * 0.015 - camera.position.y) * 0.05;
+    particleSystem.rotation.y += 0.0006;
+    camera.position.x += (mouseX * 0.012 - camera.position.x) * 0.04;
+    camera.position.y += (-mouseY * 0.012 - camera.position.y) * 0.04;
     camera.lookAt(scene.position);
-    particleSystem.position.y = Math.sin(elapsed * 0.4) * 2.5;
+    particleSystem.position.y = Math.sin(elapsed * 0.3) * 2;
     renderer.render(scene, camera);
   };
   animate();
@@ -256,13 +298,8 @@ let cleanupThree = null;
 
 onMounted(() => {
   cleanupThree = initThree();
-  // GSAP 初始居中定位
   gsap.set(contentWrapper.value, {
-    left: '50%',
-    top: '50%',
-    xPercent: -50,
-    yPercent: -50,
-    scale: 1,
+    left: '50%', top: '50%', xPercent: -50, yPercent: -50, scale: 1,
   });
 });
 
@@ -296,29 +333,30 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 40px;
+  gap: 32px;
   z-index: 10;
   pointer-events: none;
   transform-origin: center center;
+  will-change: transform;
 }
 
 .main-title {
-  font-size: 4.5rem;
+  font-size: 3.2rem;
   letter-spacing: 12px;
   font-weight: 800;
   text-transform: uppercase;
-  white-space: nowrap;
+  line-height: 1.15;
   background: linear-gradient(90deg, #ffffff, #66aaff);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  text-shadow: 0 0 40px rgba(102, 170, 255, 0.3);
+  text-shadow: 0 0 36px rgba(102, 170, 255, 0.25);
 }
 
 .nav-container {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  min-width: 300px;
+  gap: 16px;
+  min-width: 260px;
   pointer-events: auto;
 }
 
@@ -327,12 +365,12 @@ onUnmounted(() => {
   border: none;
   border-left: 4px solid rgba(255, 255, 255, 0.08);
   color: #999;
-  font-size: 1.5rem;
+  font-size: 1.2rem;
   text-align: left;
-  padding: 18px 30px;
+  padding: 14px 24px;
   cursor: pointer;
-  transition: all 0.3s ease;
-  letter-spacing: 3px;
+  transition: all 0.25s ease;
+  letter-spacing: 2px;
   backdrop-filter: blur(5px);
   border-radius: 0 6px 6px 0;
 }
@@ -350,54 +388,170 @@ onUnmounted(() => {
   text-shadow: 0 0 12px rgba(102, 170, 255, 0.4);
 }
 
-/* 左侧返回箭头 */
 .nav-back-wrapper {
   pointer-events: auto;
-  margin-top: 8px;
+  margin-top: 4px;
 }
 
 .nav-back-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
   color: #aaa;
   cursor: pointer;
-  transition: all 0.25s ease;
+  transition: all 0.2s ease;
 }
 
 .nav-back-btn:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.1);
   color: #fff;
 }
 
-/* ——— 右侧页面面板 ——— */
+/* ——— 右侧页面面板（更小，浮出效果） ——— */
 .page-panel {
   position: fixed;
-  top: 0;
-  right: 0;
-  width: 78vw;
-  height: 100vh;
+  top: 12vh;
+  right: 3vw;
+  width: 56vw;
+  height: 76vh;
   z-index: 30;
   background: rgba(5, 5, 5, 0.92);
   backdrop-filter: blur(4px);
-  transform: translateX(100%);
-  transition: transform 0.6s cubic-bezier(0.25, 1, 0.5, 1);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-
-.page-panel.visible {
-  transform: translateX(0);
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: -8px 0 40px rgba(0, 0, 0, 0.4);
+  will-change: transform;
 }
 
 .page-panel-body {
   flex: 1;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* 页面内容切换淡入淡出 */
+.page-fade-enter-active,
+.page-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+.page-fade-enter-from,
+.page-fade-leave-to {
+  opacity: 0;
+}
+
+/* ——— 退出确认面板内容 ——— */
+.exit-panel-content {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 32px;
+  text-align: center;
+}
+
+.exit-panel-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: rgba(255, 68, 68, 0.08);
+  color: #ff4444;
+  margin-bottom: 6px;
+}
+
+.exit-panel-title {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 3px;
+  margin: 0;
+}
+
+.exit-panel-desc {
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: #999;
+  max-width: 420px;
+  margin: 0;
+}
+
+.exit-panel-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin: 12px 0 4px;
+  padding: 14px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.exit-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.exit-stat-label {
+  font-size: 0.7rem;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.exit-stat-value {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #fff;
+}
+
+.exit-panel-actions {
+  display: flex;
+  gap: 14px;
+  margin-top: 8px;
+}
+
+.exit-action {
+  padding: 10px 32px;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  letter-spacing: 1px;
+  border: none;
+}
+
+.exit-action.cancel {
+  background: rgba(255, 255, 255, 0.06);
+  color: #aaa;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.exit-action.cancel:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.exit-action.confirm {
+  background: rgba(255, 68, 68, 0.12);
+  color: #ff4444;
+  border: 1px solid rgba(255, 68, 68, 0.25);
+}
+
+.exit-action.confirm:hover {
+  background: rgba(255, 68, 68, 0.22);
+  box-shadow: 0 0 20px rgba(255, 68, 68, 0.1);
 }
 </style>
