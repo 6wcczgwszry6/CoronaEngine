@@ -1,5 +1,8 @@
 # CoronaEngine 数据流总览
 
+> **接口说明更新（2026-07-07）**
+> 本文的 Editor 业务接口说明已按现行架构更新。当前接口设计以 [C++ 统一 Editor API 设计与接入指南](../editor/UNIFIED_EDITOR_API_cn.md) 为准：Vue/CEF 调用进入 C++ `EditorApiRegistry`，Python 只作为 C++ 控制下的脚本运行层。
+
 ## 1. 文档目的
 
 本文档整理 CoronaEngine 当前代码中的核心数据流，重点回答三个问题：
@@ -199,16 +202,16 @@ Python 侧对象操作并不是维护独立副本，而是直接读写 `SharedDa
 
 1. `ScriptSystem` 持有 `PythonAPI`。
 2. `ScriptSystem::update()` 中调用 `python_api_->runPythonScript()`。
-3. Python 初始化成功后，`PythonAPI` 会缓存 Python 侧 `run` 和 `deal_func_from_js` 回调。
+3. Python 初始化成功后注册脚本服务 dispatcher，用于 C++ 显式调用 Python 脚本服务。
 4. 初始化后立即触发一次 `run()`，然后发布 `ScriptFinishStartEvent`。
 5. `ImguiSystem` 订阅 `ScriptFinishStartEvent`，收到后显示 SDL 窗口。
-6. `ScriptSystem` 订阅 `ImguiToPythonEvent` 和 `ImguiCallPythonEvent`，收到后获取 GIL 并调用 Python 回调。
+6. Editor 业务接口由 C++ `EditorApiRegistry` 统一处理；如需 Python 参与，由 C++ handler 通过脚本服务 dispatcher 显式调度。
 
 这条链路说明：
 
 - Python 启动会影响 UI 显示时机。
-- UI 和脚本之间当前通过事件总线桥接。
-- 这部分仍是过渡架构，未来大概率会进一步解耦。
+- UI 业务接口不再直接落到 Python fallback。
+- Python 是脚本运行层，不是 Editor API backend。
 
 ## 11. 截图数据流
 
