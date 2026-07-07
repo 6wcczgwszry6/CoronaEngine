@@ -2,19 +2,20 @@
   <div class="start-screen-root">
     <div ref="canvasContainer" class="canvas-container"></div>
 
-    <div ref="contentWrapper" class="start-screen-content">
-      <div class="main-title">CORONA<br>ENGINE</div>
-      <div ref="navContainer" class="nav-container">
-        <button
-          v-for="item in navItems"
-          :key="item.id"
-          class="nav-btn"
-          :class="{ active: activeNav === item.id }"
-          @click="handleNavClick(item.id)"
-        >
-          {{ t(item.label) }}
-        </button>
-      </div>
+    <!-- 标题固定居中不动 -->
+    <div class="main-title">CORONA<br>ENGINE</div>
+
+    <!-- 导航按钮（GSAP 控制居中/左移） -->
+    <div ref="navContainer" class="nav-container">
+      <button
+        v-for="item in navItems"
+        :key="item.id"
+        class="nav-btn"
+        :class="{ active: activeNav === item.id }"
+        @click="handleNavClick(item.id)"
+      >
+        {{ t(item.label) }}
+      </button>
       <div v-if="showPanel" class="nav-back-wrapper">
         <button class="nav-back-btn" @click="handleBack">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
@@ -22,11 +23,12 @@
       </div>
     </div>
 
+    <!-- 右侧面板 -->
     <div v-if="showPanel" ref="panelRef" class="page-panel">
       <div class="page-panel-body">
         <div v-if="activePage === 'panel-exit'" key="panel-exit" class="exit-panel-content">
           <div class="exit-panel-icon">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
           </div>
           <h2 class="exit-panel-title">断开连接</h2>
           <p class="exit-panel-desc">切断与 Corona 系统的连接后，所有未保存的宇宙演化进程将在后台处于休眠状态。</p>
@@ -60,15 +62,14 @@ import JoinGame from './JoinGame.vue';
 
 const { t } = useI18n();
 const canvasContainer = ref(null);
-const contentWrapper = ref(null);
 const navContainer = ref(null);
 const panelRef = ref(null);
 const activeNav = ref(null);
 
 const showPanel = ref(false);
-const panelVisible = ref(false);
 const activePage = ref(null);
 const pageComponent = shallowRef(null);
+const hasMoved = ref(false);
 
 const pageMap = {
   'panel-new':      { component: NewGame,     name: 'start.newGame' },
@@ -86,10 +87,8 @@ const navItems = [
 let scene, camera, renderer, particleSystem, clock;
 let mouseX = 0, mouseY = 0;
 let animationFrameId = null;
-let hasInteracted = false;
 let resizeTimer = null;
 
-// ——— 粒子动画（精简） ———
 const animateParticles = (id) => {
   const d = 0.6;
   switch (id) {
@@ -112,12 +111,10 @@ const animateParticles = (id) => {
   }
 };
 
-// ——— 导航（全部使用 transform，GPU 合成） ———
-const openPanelWithAnimation = async (id, component) => {
+const showAndSlidePanel = async (id, component) => {
   activePage.value = id;
   pageComponent.value = component;
   showPanel.value = true;
-
   await nextTick();
   gsap.fromTo(panelRef.value,
     { x: '105%' },
@@ -129,14 +126,14 @@ const handleNavClick = async (id) => {
   if (id === 'panel-exit') {
     animateParticles(id);
     activeNav.value = id;
-    if (!hasInteracted) {
-      hasInteracted = true;
-      gsap.to(contentWrapper.value, {
-        x: '2vw', xPercent: 0, scale: 0.72,
+    if (!hasMoved.value) {
+      hasMoved.value = true;
+      gsap.to(navContainer.value, {
+        x: '6vw', xPercent: 0,
         duration: 0.7, ease: 'power3.inOut', force3D: true,
       });
     }
-    await openPanelWithAnimation('panel-exit', null);
+    await showAndSlidePanel('panel-exit', null);
     return;
   }
 
@@ -148,15 +145,15 @@ const handleNavClick = async (id) => {
   activeNav.value = id;
   animateParticles(id);
 
-  if (!hasInteracted) {
-    hasInteracted = true;
-    gsap.to(contentWrapper.value, {
-      x: '2vw', xPercent: 0, scale: 0.72,
+  if (!hasMoved.value) {
+    hasMoved.value = true;
+    gsap.to(navContainer.value, {
+      x: '6vw', xPercent: 0,
       duration: 0.7, ease: 'power3.inOut', force3D: true,
     });
   }
 
-  await openPanelWithAnimation(id, pageMap[id].component);
+  await showAndSlidePanel(id, pageMap[id].component);
 };
 
 const handleBack = () => {
@@ -169,11 +166,11 @@ const handleBack = () => {
       activeNav.value = null;
       pageComponent.value = null;
 
-      gsap.to(contentWrapper.value, {
-        x: '50vw', xPercent: -50, scale: 1,
+      gsap.to(navContainer.value, {
+        x: '50vw', xPercent: -50,
         duration: 0.5, ease: 'power3.inOut', force3D: true,
       });
-      hasInteracted = false;
+      hasMoved.value = false;
     },
   });
 };
@@ -189,7 +186,6 @@ const confirmExit = () => {
   });
 };
 
-// ——— Three.js（性能优化：低粒子数 + 低分辨率 + 精简动画） ———
 const initThree = () => {
   const container = canvasContainer.value;
   if (!container) return;
@@ -205,7 +201,6 @@ const initThree = () => {
   renderer.setPixelRatio(1);
   container.appendChild(renderer.domElement);
 
-  // 5000 个粒子（减少 GPU 负载）
   const geometry = new THREE.BufferGeometry();
   const count = 5000;
   const positions = new Float32Array(count * 3);
@@ -259,7 +254,6 @@ const initThree = () => {
   };
   window.addEventListener('resize', onResize);
 
-  // 精简动画循环
   const animate = () => {
     animationFrameId = requestAnimationFrame(animate);
     const elapsed = clock.getElapsedTime();
@@ -288,9 +282,8 @@ let cleanupThree = null;
 
 onMounted(() => {
   cleanupThree = initThree();
-  gsap.set(contentWrapper.value, {
-    x: '50vw', xPercent: -50, yPercent: -50, scale: 1,
-    transformOrigin: 'center center',
+  gsap.set(navContainer.value, {
+    x: '50vw', xPercent: -50, yPercent: -50,
   });
 });
 
@@ -319,38 +312,38 @@ onUnmounted(() => {
   contain: strict;
 }
 
-/* ——— 内容区，完全由 GSAP transform 驱动（GPU 合成） ——— */
-.start-screen-content {
-  position: fixed;
-  left: 0;
-  top: 50%;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 28px;
-  z-index: 10;
-  pointer-events: none;
-  contain: layout style;
-}
-
+/* ——— 标题固定居中，不动 ——— */
 .main-title {
+  position: fixed;
+  top: 8vh;
+  left: 50%;
+  transform: translateX(-50%);
   font-size: 6.5rem;
   letter-spacing: 16px;
   font-weight: 800;
   text-transform: uppercase;
   line-height: 1.12;
+  text-align: center;
   background: linear-gradient(90deg, #ffffff, #66aaff);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   text-shadow: 0 0 40px rgba(102, 170, 255, 0.2);
+  z-index: 40;
+  pointer-events: none;
 }
 
+/* ——— 导航按钮，GSAP 驱动位置（初始居中，点击左移） ——— */
 .nav-container {
+  position: fixed;
+  top: 50%;
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 22px;
   min-width: 320px;
   pointer-events: auto;
+  will-change: transform;
+  z-index: 10;
 }
 
 .nav-btn {
@@ -382,7 +375,6 @@ onUnmounted(() => {
 }
 
 .nav-back-wrapper {
-  pointer-events: auto;
   margin-top: 4px;
 }
 
@@ -405,13 +397,13 @@ onUnmounted(() => {
   color: #fff;
 }
 
-/* ——— 右侧面板（更小，GPU 合成） ——— */
+/* ——— 右侧面板 ——— */
 .page-panel {
   position: fixed;
-  top: 16vh;
-  right: 4vw;
-  width: 42vw;
-  height: 68vh;
+  top: 28vh;
+  right: 3vw;
+  width: 44vw;
+  height: 70vh;
   z-index: 30;
   background: rgba(5, 5, 5, 0.92);
   backdrop-filter: blur(4px);
@@ -419,24 +411,23 @@ onUnmounted(() => {
   flex-direction: column;
   overflow: hidden;
   border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  border: 2px solid #84a65b;
   box-shadow: -8px 0 40px rgba(0, 0, 0, 0.4);
   contain: layout style paint;
 }
 
 .page-panel-body {
   flex: 1;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
-/* 覆盖子页面 full-screen 类 → 撑满面板不溢出 */
 .page-panel-body :deep(.min-h-screen),
 .page-panel-body :deep(.h-screen) {
   min-height: 100% !important;
   height: 100% !important;
 }
 
-/* 页面切换过渡 */
 .page-fade-enter-active,
 .page-fade-leave-active {
   transition: opacity 0.18s ease;
@@ -446,15 +437,15 @@ onUnmounted(() => {
   opacity: 0;
 }
 
-/* ——— 退出确认 ——— */
+/* ——— 退出确认面板（字体放大） ——— */
 .exit-panel-content {
   height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 28px;
+  gap: 16px;
+  padding: 36px;
   text-align: center;
 }
 
@@ -462,36 +453,36 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 64px;
-  height: 64px;
+  width: 80px;
+  height: 80px;
   border-radius: 50%;
   background: rgba(255, 68, 68, 0.08);
   color: #ff4444;
-  margin-bottom: 4px;
+  margin-bottom: 8px;
 }
 
 .exit-panel-title {
-  font-size: 1.4rem;
+  font-size: 2rem;
   font-weight: 700;
   color: #fff;
-  letter-spacing: 3px;
+  letter-spacing: 4px;
   margin: 0;
 }
 
 .exit-panel-desc {
-  font-size: 0.85rem;
-  line-height: 1.5;
+  font-size: 1.05rem;
+  line-height: 1.6;
   color: #999;
-  max-width: 380px;
+  max-width: 420px;
   margin: 0;
 }
 
 .exit-panel-stats {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  margin: 8px 0 2px;
-  padding: 10px 0;
+  gap: 24px;
+  margin: 12px 0 4px;
+  padding: 14px 0;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
@@ -499,32 +490,32 @@ onUnmounted(() => {
 .exit-stat {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
 .exit-stat-label {
-  font-size: 0.65rem;
+  font-size: 0.8rem;
   color: #666;
   text-transform: uppercase;
   letter-spacing: 1px;
 }
 
 .exit-stat-value {
-  font-size: 1rem;
+  font-size: 1.2rem;
   font-weight: 700;
   color: #fff;
 }
 
 .exit-panel-actions {
   display: flex;
-  gap: 12px;
-  margin-top: 6px;
+  gap: 16px;
+  margin-top: 12px;
 }
 
 .exit-action {
-  padding: 9px 28px;
+  padding: 11px 34px;
   border-radius: 8px;
-  font-size: 0.9rem;
+  font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
@@ -554,3 +545,5 @@ onUnmounted(() => {
   box-shadow: 0 0 18px rgba(255, 68, 68, 0.1);
 }
 </style>
+
+
