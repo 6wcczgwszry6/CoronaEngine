@@ -294,11 +294,15 @@ def make_model_resource_provider(
         model_items = [str(item) for item in (payload.get("model_items") or []) if str(item or "")]
         resources: dict[str, dict[str, Any]] = {}
         for index, name in enumerate(model_items, start=1):
+            prompt_text = str(_item_value(payload, name, "prompt_text") or name)
+            image_url = str(_item_value(payload, name, "image_url") or _image_resource_value(payload, name) or "")
             tool_payload = {
-                "object_name": name,
-                "object_id": f"{batch_id}-model-{index:02d}" if batch_id else f"runtime-model-{index:02d}",
-                "image_url": str(_item_value(payload, name, "image_url") or _image_resource_value(payload, name) or ""),
-                "prompt_text": str(_item_value(payload, name, "prompt_text") or name),
+                # Hunyuan3D's narrow tool schema is mode/images/prompt.  Keep no
+                # provider-private object/path fields here; RuntimeState receives
+                # sanitized resource facts after the tool returns.
+                "mode": "image_to_3d" if image_url else "text_to_3d",
+                "images": [image_url] if image_url else None,
+                "prompt": prompt_text,
             }
             try:
                 raw = _invoke_tool_safely(model_tool, tool_payload, fallback="model resource failed")
@@ -509,6 +513,27 @@ def make_engine_environment_component_import_provider(
                 "object_id": component_id,
                 "scene_name": str(component.get("scene_name") or effective_scene_name),
             }
+            asset_id = _safe_component_token(
+                _first_present(component.get("asset_id"), component_id),
+                fallback=component_id,
+            )
+            model_ref = _safe_component_text(
+                _first_present(component.get("model_ref"), component.get("resource_id"), asset_id),
+                fallback=asset_id,
+            )
+            import_payload["asset_id"] = asset_id
+            import_payload["model_ref"] = model_ref
+            for field in ("position", "rotation", "scale"):
+                vector = _vector3(component.get(field))
+                if vector:
+                    import_payload[field] = vector
+            bounds = _normalized_bounds_from(component.get("aabb"), component.get("bounds"), component)
+            if bounds:
+                import_payload["aabb"] = bounds
+            for field in ("surface", "terrain_profile", "sky_mode", "boundary_style"):
+                value = _safe_component_text(component.get(field), fallback="", allow_empty=True)
+                if value:
+                    import_payload[field] = value
             if plan_id:
                 import_payload["plan_id"] = plan_id
             if batch_id:
@@ -729,20 +754,42 @@ def _normalize_environment_component_import_result(
     *,
     fallback: dict[str, Any],
 ) -> dict[str, Any]:
+    actor = parsed.get("actor") if isinstance(parsed.get("actor"), dict) else {}
+    actor_data = parsed.get("actor_data") if isinstance(parsed.get("actor_data"), dict) else {}
+    geometry = actor.get("geometry") if isinstance(actor.get("geometry"), dict) else {}
+    actor_data_geometry = actor_data.get("geometry") if isinstance(actor_data.get("geometry"), dict) else {}
     component_id = _safe_component_token(
-        _first_present(parsed.get("component_id"), parsed.get("object_id"), fallback.get("component_id")),
+        _first_present(
+            parsed.get("component_id"),
+            actor_data.get("component_id"),
+            actor.get("component_id") if isinstance(actor, dict) else None,
+            parsed.get("object_id"),
+            fallback.get("component_id"),
+        ),
         fallback=str(fallback.get("component_id") or fallback.get("object_id") or "runtime-env-import"),
     )
     name = _safe_component_text(
-        _first_present(fallback.get("name"), parsed.get("name"), parsed.get("actor_name")),
+        _first_present(
+            fallback.get("name"),
+            parsed.get("name"),
+            actor_data.get("name"),
+            actor.get("name") if isinstance(actor, dict) else None,
+            parsed.get("actor_name"),
+        ),
         fallback=component_id,
     )
     component_type = _safe_component_token(
-        _first_present(fallback.get("component_type"), parsed.get("component_type"), parsed.get("type")),
+        _first_present(
+            fallback.get("component_type"),
+            parsed.get("component_type"),
+            actor_data.get("component_type"),
+            actor.get("component_type") if isinstance(actor, dict) else None,
+            parsed.get("type"),
+        ),
         fallback=str(fallback.get("component_type") or "environment"),
     )
     handler = _safe_component_token(
-        _first_present(fallback.get("handler"), parsed.get("handler")),
+        _first_present(fallback.get("handler"), parsed.get("handler"), actor_data.get("handler")),
         fallback="",
         allow_empty=True,
     )
@@ -752,12 +799,62 @@ def _normalize_environment_component_import_result(
         allow_empty=True,
     )
     actor_id = _safe_component_token(
-        _first_present(parsed.get("actor_id"), parsed.get("actor_guid"), parsed.get("guid")),
+        _first_present(
+            parsed.get("actor_id"),
+            parsed.get("actor_guid"),
+            parsed.get("guid"),
+            actor_data.get("actor_id"),
+            actor_data.get("actor_guid"),
+            actor_data.get("guid"),
+            actor.get("actor_id") if isinstance(actor, dict) else None,
+            actor.get("actor_guid") if isinstance(actor, dict) else None,
+            actor.get("guid") if isinstance(actor, dict) else None,
+        ),
         fallback="",
         allow_empty=True,
     )
+    asset_id = _safe_component_token(
+        _first_present(
+            parsed.get("asset_id"),
+            actor_data.get("asset_id"),
+            actor.get("asset_id") if isinstance(actor, dict) else None,
+            fallback.get("asset_id"),
+            component_id,
+        ),
+        fallback=component_id,
+    )
+    model_ref = _safe_component_text(
+        _first_present(
+            parsed.get("model_ref"),
+            parsed.get("model_id"),
+            parsed.get("resource_id"),
+            actor_data.get("model_ref"),
+            actor_data.get("model_id"),
+            actor_data.get("resource_id"),
+            actor.get("model_ref") if isinstance(actor, dict) else None,
+            actor.get("model_id") if isinstance(actor, dict) else None,
+            actor.get("resource_id") if isinstance(actor, dict) else None,
+            fallback.get("model_ref"),
+            fallback.get("asset_id"),
+            asset_id,
+        ),
+        fallback=asset_id,
+    )
+    sync_status = _safe_component_token(
+        _first_present(
+            parsed.get("sync_status"),
+            actor_data.get("sync_status"),
+            actor.get("sync_status") if isinstance(actor, dict) else None,
+            parsed.get("last_sync_status"),
+            actor_data.get("last_sync_status"),
+            "engine_imported",
+        ),
+        fallback="engine_imported",
+    )
     update = {
         "component_id": component_id,
+        "asset_id": asset_id,
+        "model_ref": model_ref,
         "name": name,
         "component_type": component_type,
         "handler": handler,
@@ -765,9 +862,54 @@ def _normalize_environment_component_import_result(
         "source": "engine_environment_import",
         "scene_name": scene_name,
         "requires_engine_write": False,
+        "sync_status": sync_status,
     }
     if actor_id:
         update["actor_id"] = actor_id
+    position = _first_present(
+        geometry.get("position"),
+        actor_data_geometry.get("position"),
+        actor_data.get("position"),
+        parsed.get("position"),
+        fallback.get("position"),
+    )
+    rotation = _first_present(
+        geometry.get("rotation"),
+        actor_data_geometry.get("rotation"),
+        actor_data.get("rotation"),
+        parsed.get("rotation"),
+        fallback.get("rotation"),
+    )
+    scale = _first_present(
+        geometry.get("scale"),
+        actor_data_geometry.get("scale"),
+        actor_data.get("scale"),
+        parsed.get("scale"),
+        fallback.get("scale"),
+    )
+    if position is not None:
+        vector = _vector3(position)
+        if vector:
+            update["position"] = vector
+    if rotation is not None:
+        vector = _vector3(rotation)
+        if vector:
+            update["rotation"] = vector
+    if scale is not None:
+        vector = _vector3(scale)
+        if vector:
+            update["scale"] = vector
+    bounds = _normalized_bounds_from(geometry, actor_data_geometry, actor, actor_data, parsed, fallback)
+    if bounds:
+        update["aabb"] = bounds
+    for field in ("surface", "terrain_profile", "sky_mode", "boundary_style"):
+        value = _safe_component_text(
+            _first_present(parsed.get(field), actor_data.get(field), actor.get(field) if isinstance(actor, dict) else None, fallback.get(field)),
+            fallback="",
+            allow_empty=True,
+        )
+        if value:
+            update[field] = value
     return update
 
 
@@ -884,10 +1026,20 @@ def _normalize_snapshot_actor(actor: Any, *, scene_name: str, index: int = 0) ->
     )
     if effective_scene_name:
         safe["scene_name"] = effective_scene_name
-    for field in ("position", "rotation", "scale", "aabb"):
+    for field in ("position", "rotation", "scale"):
         value = _first_present(actor.get(field), geometry.get(field))
         if value is not None:
             safe[field] = value
+    aabb = _first_present(
+        actor.get("aabb"),
+        actor.get("world_aabb"),
+        actor.get("bounds"),
+        geometry.get("aabb"),
+        geometry.get("world_aabb"),
+        geometry.get("bounds"),
+    )
+    if aabb is not None:
+        safe["aabb"] = aabb
     if "version" in actor and isinstance(actor.get("version"), int):
         safe["version"] = actor.get("version")
     return safe
@@ -1073,10 +1225,26 @@ def make_engine_actor_import_provider(
                 })
                 continue
             placement = dict(placements.get(name) or {})
+            asset_id = _safe_component_text(
+                _first_present(resource.get("asset_id"), resource.get("name"), name),
+                fallback=name,
+            )
+            model_ref = _safe_component_text(
+                _first_present(
+                    resource.get("model_ref"),
+                    resource.get("model_id"),
+                    resource.get("resource_id"),
+                    resource.get("model_request_id"),
+                    asset_id,
+                ),
+                fallback=asset_id,
+            )
             import_payload = {
                 "model_path": model_path,
                 "actor_name": name,
                 "model_name": name,
+                "asset_id": asset_id,
+                "model_ref": model_ref,
                 "object_id": f"{batch_id}-{index:02d}" if batch_id else f"runtime-{index:02d}",
                 "target": name,
                 "position": list(placement.get("position") or [0.0, 0.0, 0.0]),
@@ -1115,6 +1283,8 @@ def make_engine_actor_import_provider(
                     plan_id=plan_id,
                     scene_name=effective_scene_name,
                     placement=placement,
+                    asset_id=asset_id,
+                    model_ref=model_ref,
                 )
             except Exception as exc:  # noqa: BLE001
                 import_results.append({
@@ -1476,11 +1646,23 @@ def _safe_cpp_success_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "actor_id",
         "actor_name",
         "aabb",
+        "asset_id",
         "bounds",
+        "bounds_ready",
+        "boundary_style",
+        "component_id",
+        "component_type",
         "event_type",
         "geometry",
         "ground_snapped",
         "guid",
+        "handler",
+        "last_sync_event",
+        "last_sync_status",
+        "max",
+        "min",
+        "model_id",
+        "model_ref",
         "name",
         "observed_position",
         "overlap_resolved",
@@ -1493,9 +1675,17 @@ def _safe_cpp_success_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "status",
         "status_info",
         "success",
+        "surface",
+        "sync_lifecycle_status",
+        "sync_status",
+        "sky_mode",
+        "terrain_profile",
         "type",
         "world_aabb",
         "world_bounds",
+        "x",
+        "y",
+        "z",
     }
     return {
         str(key): safe_value
@@ -1616,6 +1806,37 @@ def _normalized_bounds_from(*sources: Any) -> dict[str, list[float]]:
     return {}
 
 
+def _estimated_actor_aabb_from_transform(*, position: Any, scale: Any) -> dict[str, list[float]]:
+    """Return a Runtime-estimated actor AABB when the engine omits bounds.
+
+    This is not an observed engine geometry result.  It is a minimal Runtime
+    geometry estimate so scene_entity_registry and layout adjustment have a
+    bounded fact to work with until the engine/C++ side reports authoritative
+    bounds.
+    """
+
+    pos = _vector3(position) or [0.0, 0.0, 0.0]
+    raw_scale = _vector3(scale) or [1.0, 1.0, 1.0]
+    sx = max(0.2, abs(float(raw_scale[0] or 1.0)))
+    sy = max(0.2, abs(float(raw_scale[1] or 1.0)))
+    sz = max(0.2, abs(float(raw_scale[2] or 1.0)))
+    half_x = sx * 0.5
+    half_y = sy * 0.5
+    half_z = sz * 0.5
+    return {
+        "min": [
+            round(float(pos[0]) - half_x, 4),
+            round(float(pos[1]) - half_y, 4),
+            round(float(pos[2]) - half_z, 4),
+        ],
+        "max": [
+            round(float(pos[0]) + half_x, 4),
+            round(float(pos[1]) + half_y, 4),
+            round(float(pos[2]) + half_z, 4),
+        ],
+    }
+
+
 def _vector3(value: Any) -> list[float]:
     if isinstance(value, dict):
         raw = [value.get("x"), value.get("y"), value.get("z")]
@@ -1640,16 +1861,20 @@ def _normalize_import_result(
     plan_id: str,
     scene_name: str,
     placement: dict[str, Any],
+    asset_id: str = "",
+    model_ref: str = "",
 ) -> dict[str, Any]:
     status = str(parsed.get("status") or "").strip().lower()
     success = _coerce_adapter_bool(parsed.get("success"), default=True)
     if status in {"error", "failed", "failure", "fail"} or not success or parsed.get("error"):
         raise RuntimeError(_safe_adapter_error_message(parsed, fallback="actor import failed"))
     actor = parsed.get("actor") if isinstance(parsed.get("actor"), dict) else {}
+    actor_data = parsed.get("actor_data") if isinstance(parsed.get("actor_data"), dict) else {}
     actor_name = _safe_component_text(
         _first_present(
             fallback_name,
             actor.get("name") if isinstance(actor, dict) else None,
+            actor_data.get("name") if isinstance(actor_data, dict) else None,
             parsed.get("actor_name"),
             parsed.get("actor_id"),
             parsed.get("name"),
@@ -1662,8 +1887,13 @@ def _normalize_import_result(
             actor.get("guid") if isinstance(actor, dict) else None,
             actor.get("actor_id") if isinstance(actor, dict) else None,
             actor.get("name") if isinstance(actor, dict) else None,
+            actor_data.get("actor_guid") if isinstance(actor_data, dict) else None,
+            actor_data.get("guid") if isinstance(actor_data, dict) else None,
+            actor_data.get("actor_id") if isinstance(actor_data, dict) else None,
+            actor_data.get("name") if isinstance(actor_data, dict) else None,
             parsed.get("actor_guid"),
             parsed.get("actor_id"),
+            parsed.get("guid"),
             parsed.get("actor_name"),
         )
         or ""
@@ -1671,21 +1901,103 @@ def _normalize_import_result(
     if not actor_id.strip():
         raise RuntimeError(f"{fallback_name}: actor import returned no actor id")
     geometry = actor.get("geometry") if isinstance(actor.get("geometry"), dict) else {}
+    actor_data_geometry = actor_data.get("geometry") if isinstance(actor_data.get("geometry"), dict) else {}
+    position = _first_present(
+        geometry.get("position"),
+        actor_data_geometry.get("position"),
+        actor_data.get("position"),
+        parsed.get("position"),
+        placement.get("position"),
+        [0.0, 0.0, 0.0],
+    )
+    rotation = _first_present(
+        geometry.get("rotation"),
+        actor_data_geometry.get("rotation"),
+        actor_data.get("rotation"),
+        parsed.get("rotation"),
+        placement.get("rotation"),
+        [0.0, 0.0, 0.0],
+    )
+    scale = _first_present(
+        geometry.get("scale"),
+        actor_data_geometry.get("scale"),
+        actor_data.get("scale"),
+        parsed.get("scale"),
+        placement.get("scale"),
+        [1.0, 1.0, 1.0],
+    )
+    sync_status = _safe_component_token(
+        _first_present(
+            parsed.get("sync_status"),
+            actor_data.get("sync_status"),
+            actor.get("sync_status") if isinstance(actor, dict) else None,
+            parsed.get("last_sync_status"),
+            actor_data.get("last_sync_status"),
+        ),
+        fallback="engine_imported",
+    )
+    sync_lifecycle_status = _safe_component_token(
+        _first_present(
+            parsed.get("sync_lifecycle_status"),
+            actor_data.get("sync_lifecycle_status"),
+            actor.get("sync_lifecycle_status") if isinstance(actor, dict) else None,
+            parsed.get("last_sync_event"),
+            actor_data.get("last_sync_event"),
+            sync_status,
+        ),
+        fallback=sync_status,
+    )
     result = {
         "actor_id": actor_id,
         "name": actor_name,
+        "asset_id": _safe_component_text(
+            _first_present(
+                parsed.get("asset_id"),
+                actor_data.get("asset_id") if isinstance(actor_data, dict) else None,
+                actor.get("asset_id") if isinstance(actor, dict) else None,
+                asset_id,
+            ),
+            fallback=asset_id or actor_name,
+        ),
+        "model_ref": _safe_component_text(
+            _first_present(
+                parsed.get("model_ref"),
+                parsed.get("model_id"),
+                parsed.get("resource_id"),
+                actor_data.get("model_ref") if isinstance(actor_data, dict) else None,
+                actor_data.get("model_id") if isinstance(actor_data, dict) else None,
+                actor_data.get("resource_id") if isinstance(actor_data, dict) else None,
+                actor.get("model_ref") if isinstance(actor, dict) else None,
+                actor.get("model_id") if isinstance(actor, dict) else None,
+                actor.get("resource_id") if isinstance(actor, dict) else None,
+                model_ref,
+                asset_id,
+            ),
+            fallback=model_ref or asset_id or actor_name,
+        ),
         "plan_id": plan_id,
         "batch_id": batch_id,
         "scene_name": str(scene_name or ""),
         "model_path": str(model_path),
         "source": "engine_import",
-        "position": list(geometry.get("position") or placement.get("position") or [0.0, 0.0, 0.0]),
-        "rotation": list(geometry.get("rotation") or placement.get("rotation") or [0.0, 0.0, 0.0]),
-        "scale": list(geometry.get("scale") or placement.get("scale") or [1.0, 1.0, 1.0]),
+        "position": list(position),
+        "rotation": list(rotation),
+        "scale": list(scale),
+        "sync_status": sync_status,
+        "sync_lifecycle_status": sync_lifecycle_status,
+        "last_sync_event": _safe_component_text(
+            _first_present(parsed.get("last_sync_event"), actor_data.get("last_sync_event"), sync_lifecycle_status),
+            fallback=sync_lifecycle_status,
+        ),
     }
-    bounds = _normalized_bounds_from(geometry, actor, parsed)
+    bounds = _normalized_bounds_from(geometry, actor_data_geometry, actor, actor_data, parsed)
     if bounds:
         result["aabb"] = bounds
+    else:
+        result["aabb"] = _estimated_actor_aabb_from_transform(position=position, scale=scale)
+        result["source"] = "engine_import_runtime_estimated_bounds"
+        result["review_status"] = "needs_geometry_review"
+        result["grounding_status"] = "needs_review"
     return result
 
 
@@ -1845,14 +2157,22 @@ def _normalize_model_tool_result(
     success = _coerce_adapter_bool(parsed.get("success"), default=True)
     if status in {"error", "failed", "failure", "fail"} or not success or parsed.get("error"):
         raise RuntimeError(_safe_adapter_error_message(parsed, fallback="model resource failed"))
+    metadata = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else {}
     local_path = str(
         _first_present(
             parsed.get("local_path"),
             parsed.get("model_path"),
             parsed.get("path"),
+            parsed.get("model_folder"),
+            parsed.get("model_dir"),
+            metadata.get("local_path") if isinstance(metadata, dict) else None,
+            metadata.get("model_path") if isinstance(metadata, dict) else None,
+            metadata.get("path") if isinstance(metadata, dict) else None,
+            metadata.get("model_folder") if isinstance(metadata, dict) else None,
         )
         or ""
     )
+    local_path = _resolve_ready_model_local_path(local_path, metadata=metadata)
     if not local_path:
         raise RuntimeError(f"{name}: model tool returned no local_path")
     preview_images = [
@@ -1887,6 +2207,99 @@ def _failed_model_resource(
         "source": _safe_model_resource_source(source),
         "failure_code": _safe_model_failure_code(failure_code),
     }
+
+
+def _resolve_ready_model_local_path(local_path: str, *, metadata: dict[str, Any]) -> str:
+    """Resolve Hunyuan's returned model folder to a concrete mesh when visible.
+
+    Hunyuan may return quickly with ``metadata.model_folder`` while the mesh
+    download is still being written in the background.  Actor import can accept
+    a directory, but importing before any mesh exists fails.  This adapter waits
+    briefly only when the folder is visible from this Python process; otherwise
+    it preserves the path for the engine-side active-project resolver.
+    """
+
+    text = str(local_path or "").strip()
+    if not text:
+        return ""
+    candidates = _visible_model_path_candidates(text)
+    if not candidates:
+        return text
+    has_mesh_pending = bool(metadata.get("has_mesh_pending")) or str(metadata.get("mesh_download_status") or "").lower() in {
+        "scheduled",
+        "running",
+        "pending",
+        "queued",
+    }
+    wait_seconds = _model_folder_wait_seconds() if has_mesh_pending else 0.0
+    deadline = _monotonic_now() + wait_seconds
+    while True:
+        for candidate in candidates:
+            mesh = _first_supported_mesh(candidate)
+            if mesh:
+                return str(mesh)
+        if _monotonic_now() >= deadline:
+            break
+        _sleep_for_model_folder(0.5)
+    # If we can inspect the directory and no mesh exists after the wait window,
+    # return empty so the model resource is marked failed rather than pretending
+    # a ready model exists.
+    return ""
+
+
+def _visible_model_path_candidates(path_text: str) -> list[Any]:
+    from pathlib import Path
+
+    raw = Path(path_text)
+    candidates = [raw]
+    if not raw.is_absolute():
+        candidates.append(Path.cwd() / raw)
+    visible = []
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                visible.append(candidate)
+        except OSError:
+            continue
+    return visible
+
+
+def _first_supported_mesh(path: Any) -> Any:
+    from pathlib import Path
+
+    supported = {".obj", ".dae", ".glb", ".gltf", ".fbx", ".stl", ".usdz"}
+    candidate = Path(path)
+    try:
+        if candidate.is_file() and candidate.suffix.lower() in supported:
+            return candidate
+        if candidate.is_dir():
+            for child in sorted(candidate.iterdir()):
+                if child.is_file() and child.suffix.lower() in supported:
+                    return child
+    except OSError:
+        return None
+    return None
+
+
+def _model_folder_wait_seconds() -> float:
+    import os
+
+    try:
+        return max(0.0, min(90.0, float(os.getenv("AGENT_RUNTIME_MODEL_FOLDER_WAIT_SECONDS", "30"))))
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _monotonic_now() -> float:
+    import time
+
+    return time.monotonic()
+
+
+def _sleep_for_model_folder(seconds: float) -> None:
+    import time
+
+    time.sleep(max(0.0, float(seconds)))
 
 
 def _item_value(payload: dict[str, Any], name: str, key: str) -> Any:

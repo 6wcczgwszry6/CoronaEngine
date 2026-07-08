@@ -2989,6 +2989,7 @@ class EnvironmentComponentValidator:
 
     _ALLOWED_FIELDS = {
         "actor_id",
+        "asset_id",
         "aabb",
         "audio_profile",
         "boundary_style",
@@ -3014,6 +3015,7 @@ class EnvironmentComponentValidator:
         "source",
         "status",
         "surface",
+        "sync_status",
         "sky_mode",
         "terrain_profile",
     }
@@ -3094,6 +3096,7 @@ class EnvironmentComponentValidator:
             "source",
             "status",
             "surface",
+            "sync_status",
             "sky_mode",
             "terrain_profile",
         ):
@@ -3137,6 +3140,7 @@ class EnvironmentComponentValidator:
             "source",
             "status",
             "surface",
+            "sync_status",
             "sky_mode",
             "terrain_profile",
         ):
@@ -3225,6 +3229,7 @@ class ReportRecordValidator:
         "state_patch_summary",
         "state_version",
         "sync_health_digest",
+        "sync_readiness_summary",
         "sync_summary",
         "tool_queue_health_summary",
         "tool_graph_summary",
@@ -6016,13 +6021,27 @@ class ToolCallGraphExecutor:
                     graph.status = "failed"
                     self._persist_graph(graph, room_id=room_id)
                     return graph
+                started_requires_write = bool(
+                    call.requires_write or (definition.requires_write if definition is not None else False)
+                )
+                started_effective_risk = max(
+                    call.risk_level,
+                    definition.default_risk_level if definition is not None else call.risk_level,
+                    key=lambda risk: (RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH).index(risk),
+                )
                 self.operation_log.append(
                     "tool_call_started",
                     room_id=room_id,
                     plan_id=graph.plan_id,
                     batch_id=graph.batch_id,
                     tool_call_id=call.tool_call_id,
-                    payload={"tool_name": call.tool_name},
+                    payload={
+                        "tool_name": call.tool_name,
+                        "runtime_guard": "authorized",
+                        "requires_write": started_requires_write,
+                        "risk_level": started_effective_risk.value,
+                        "confirmed": bool(call.confirmed),
+                    },
                 )
                 self._emit_tool_started_runtime_event(
                     room_id=room_id,
@@ -6165,6 +6184,9 @@ class ToolCallGraphExecutor:
                     result.tool_call_id = call.tool_call_id
 
                 if result.success:
+                    state_patch_applied_for_log = False
+                    state_patch_change_keys_for_log: list[str] = []
+                    state_patch_operation_count_for_log = 0
                     if result.graph_generation is not None and result.graph_generation != graph.generation:
                         call.status = ToolCallStatus.SKIPPED
                         call.error = "abandoned late result"
@@ -6298,6 +6320,11 @@ class ToolCallGraphExecutor:
                                 payload={"expected_version": result.state_patch.expected_version},
                             )
                         applied, apply_reason = self.state.apply_patch(result.state_patch)
+                        state_patch_applied_for_log = bool(applied)
+                        state_patch_change_keys_for_log = sorted(str(key) for key in result.state_patch.changes)
+                        state_patch_operation_count_for_log = len(
+                            result.state_patch.operations or result.state_patch.changes
+                        )
                         if not applied and apply_reason == "state version conflict":
                             conflict_id = ""
                             for conflict in reversed(self.state.conflicts):
@@ -6373,6 +6400,10 @@ class ToolCallGraphExecutor:
                         payload={
                             "tool_result_id": result.tool_call_id,
                             "user_visible_message": result.user_visible_message,
+                            "state_patch_applied": state_patch_applied_for_log,
+                            "state_patch_change_key_count": len(state_patch_change_keys_for_log),
+                            "state_patch_change_keys": state_patch_change_keys_for_log,
+                            "state_patch_operation_count": state_patch_operation_count_for_log,
                             **self._safe_tool_operation_payload(result.payload),
                         },
                     )
@@ -7346,7 +7377,7 @@ class AgentRuntime:
             "image_resource": self._provider_mode(self._image_resource_provider, "mock_planned"),
             "model_resource": self._provider_mode(self._model_resource_provider, "mock_provider_model"),
             "environment_component": self._provider_mode(self._environment_component_provider, "runtime_component_facts"),
-            "environment_import": self._provider_mode(self._environment_import_provider, "disabled"),
+            "environment_import": self._provider_mode(self._environment_import_provider, "runtime_state_only"),
             "actor_import": self._provider_mode(self._actor_import_provider, "mock_actor_import"),
             "actor_delete": self._provider_mode(self._actor_delete_provider, "runtime_state_only"),
             "review": self._provider_mode(self._review_provider, "runtime_geometry_rules"),
@@ -7514,6 +7545,39 @@ class AgentRuntime:
         bridge_failed_count = int(boundary.get("bridge_failed_count") or 0)
         bridge_call_count = int(boundary.get("bridge_call_count") or 0)
         bridge_success_count = int(boundary.get("bridge_success_count") or 0)
+        boundary_status_by_kind: dict[str, dict[str, int]] = {}
+        for item in list(boundary.get("latest_boundaries") or []):
+            if not isinstance(item, Mapping):
+                continue
+            kind = str(item.get("kind") or "").strip().replace("-", "_")
+            if not kind:
+                continue
+            counts = AgentRuntime._safe_status_count_map(item.get("status_counts") or {})
+            if not counts:
+                continue
+            merged = boundary_status_by_kind.setdefault(kind, {})
+            for status_key, status_count in counts.items():
+                merged[status_key] = int(merged.get(status_key) or 0) + int(status_count or 0)
+
+        def _status_counts_are_runtime_state_only(counts: Mapping[str, Any]) -> bool:
+            normalized = AgentRuntime._safe_status_count_map(counts)
+            if not normalized:
+                return False
+            total = sum(int(value or 0) for value in normalized.values())
+            if total <= 0:
+                return False
+            allowed = {"runtime_state_only", "noop", "no_op", "skipped"}
+            return all(str(status or "").strip().lower() in allowed for status in normalized)
+
+        def _status_counts_have_failure(counts: Mapping[str, Any]) -> bool:
+            normalized = AgentRuntime._safe_status_count_map(counts)
+            failure_markers = ("failed", "failure", "error", "blocked", "unavailable", "missing", "rejected")
+            return any(
+                any(marker in str(status or "").strip().lower() for marker in failure_markers)
+                and int(count or 0) > 0
+                for status, count in normalized.items()
+            )
+
         channels: dict[str, dict[str, Any]] = {}
         native_ready_count = 0
         runtime_state_only_count = 0
@@ -7528,6 +7592,17 @@ class AgentRuntime:
             status_counts = AgentRuntime._safe_status_count_map(
                 replay.get(spec["status_counts"])
             )
+            boundary_kind = {
+                "environment_import": "environment_import",
+                "actor_import": "actor_import",
+                "actor_delete": "actor_delete",
+                "layout_transform": "layout_transform",
+            }.get(channel, channel)
+            for status_key, status_count in boundary_status_by_kind.get(boundary_kind, {}).items():
+                status_counts[status_key] = max(
+                    int(status_counts.get(status_key) or 0),
+                    int(status_count or 0),
+                )
             if channel == "layout_transform":
                 result_count = max(
                     result_count,
@@ -7560,7 +7635,21 @@ class AgentRuntime:
                 unavailable_count += 1
             else:
                 readiness_status = "unknown"
-            mismatch = bool(channel in replay_mismatch_channels or (attempted and channel not in native_channels))
+            runtime_state_only_observed = (
+                attempted
+                and _status_counts_are_runtime_state_only(status_counts)
+                and not _status_counts_have_failure(status_counts)
+            )
+            native_bridge_required = bool(attempted and not runtime_state_only_observed)
+            mismatch = bool(
+                channel in replay_mismatch_channels
+                or (
+                    attempted
+                    and channel not in native_channels
+                    and not runtime_state_only_observed
+                )
+                or (attempted and _status_counts_have_failure(status_counts))
+            )
             mismatch_count += 1 if mismatch else 0
             channels[channel] = {
                 "requested": channel in requested_channels,
@@ -7569,7 +7658,7 @@ class AgentRuntime:
                 "boundary_count": boundary_count,
                 "result_count": result_count,
                 "status_counts": status_counts,
-                "native_bridge_required": attempted,
+                "native_bridge_required": native_bridge_required,
                 "native_ready": channel in native_channels,
                 "readiness_mismatch": mismatch,
             }
@@ -12131,12 +12220,37 @@ class AgentRuntime:
                 "message": summary["message"],
             }
         if normalized_action in self._WORKER_DRAIN_ACTIONS:
-            drain_plan_id = self._resolve_runtime_plan_id_from_state(
-                room,
-                external_plan_id=external_plan_id,
-                allow_active=not bool(external_plan_id),
-            )
-            drain_plan = self._runtime_plan_from_state(room, drain_plan_id)
+            try:
+                drain_plan_id = self._resolve_runtime_plan_id_from_state(
+                    room,
+                    external_plan_id=external_plan_id,
+                    allow_active=not bool(external_plan_id),
+                )
+                drain_plan = self._runtime_plan_from_state(room, drain_plan_id)
+            except Exception as exc:  # noqa: BLE001
+                self.operation_log.append(
+                    "runtime_worker_drain_plan_resolve_failed",
+                    room_id=room,
+                    payload={
+                        "action": normalized_action,
+                        "external_plan_id": str(external_plan_id or ""),
+                        "exc_type": type(exc).__name__,
+                        "reason": "RuntimeState plan resolution failed",
+                    },
+                )
+                return {
+                    "handled": True,
+                    "action": normalized_action,
+                    "drain": {
+                        "room_id": room,
+                        "plan_id": "",
+                        "status": "failed",
+                        "reason": "RuntimeState plan resolution failed",
+                        "drained_count": 0,
+                        "graphs": [],
+                    },
+                    "message": "AgentRuntime worker drain 未完成；RuntimeState plan resolution failed。",
+                }
             if drain_plan is None:
                 self.operation_log.append(
                     "runtime_worker_drain_requested",
@@ -12167,7 +12281,7 @@ class AgentRuntime:
                     plan_id=drain_plan.plan_id,
                     max_graphs=drain_limit,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 self.operation_log.append(
                     "runtime_worker_drain_failed",
                     room_id=room,
@@ -12175,9 +12289,29 @@ class AgentRuntime:
                     payload={
                         "action": normalized_action,
                         "drained_count": 0,
+                        "exc_type": type(exc).__name__,
                         "reason": "RuntimeState persistence failed",
                     },
                 )
+                try:
+                    status = self.status_summary(room_id=room, plan_id=drain_plan.plan_id)
+                except Exception as status_exc:  # noqa: BLE001
+                    self.operation_log.append(
+                        "runtime_worker_drain_status_failed",
+                        room_id=room,
+                        plan_id=drain_plan.plan_id,
+                        payload={
+                            "action": normalized_action,
+                            "exc_type": type(status_exc).__name__,
+                            "reason": "RuntimeState persistence failed",
+                        },
+                    )
+                    status = {
+                        "room_id": room,
+                        "plan_id": drain_plan.plan_id,
+                        "active_plan_id": drain_plan.plan_id,
+                        "message": "AgentRuntime 状态摘要不可用；RuntimeState persistence failed。",
+                    }
                 return {
                     "handled": True,
                     "action": normalized_action,
@@ -12185,10 +12319,12 @@ class AgentRuntime:
                     "drain": {
                         "room_id": room,
                         "plan_id": drain_plan.plan_id,
+                        "status": "failed",
+                        "reason": "RuntimeState persistence failed",
                         "drained_count": 0,
                         "graphs": [],
                     },
-                    "status": self.status_summary(room_id=room, plan_id=drain_plan.plan_id),
+                    "status": status,
                     "message": "AgentRuntime worker drain 未完成；RuntimeState persistence failed。",
                 }
             self.operation_log.append(
@@ -12205,12 +12341,31 @@ class AgentRuntime:
                 },
             )
             safe_drain = self._safe_drain_result_for_user(drain_result)
+            try:
+                status = self.status_summary(room_id=room, plan_id=drain_plan.plan_id)
+            except Exception as status_exc:  # noqa: BLE001
+                self.operation_log.append(
+                    "runtime_worker_drain_status_failed",
+                    room_id=room,
+                    plan_id=drain_plan.plan_id,
+                    payload={
+                        "action": normalized_action,
+                        "exc_type": type(status_exc).__name__,
+                        "reason": "RuntimeState persistence failed",
+                    },
+                )
+                status = {
+                    "room_id": room,
+                    "plan_id": drain_plan.plan_id,
+                    "active_plan_id": drain_plan.plan_id,
+                    "message": "AgentRuntime worker drain 已完成；状态摘要暂不可用。",
+                }
             return {
                 "handled": True,
                 "action": normalized_action,
                 "plan": drain_plan.as_dict(),
                 "drain": safe_drain,
-                "status": self.status_summary(room_id=room, plan_id=drain_plan.plan_id),
+                "status": status,
                 "message": f"AgentRuntime worker 已 drain {safe_drain.get('drained_count', 0)} 个执行图。",
             }
         if normalized_action in self._RUNTIME_COMMAND_ACTIONS:
@@ -12939,6 +13094,37 @@ class AgentRuntime:
             "direct_generate",
         }:
             try:
+                if active_runtime_plan.status == ScenePlanStatus.COMPLETED:
+                    execution = self._existing_execution_result_from_runtime_state(active_runtime_plan)
+                    if execution.get("batches") or execution.get("graphs"):
+                        self.operation_log.append(
+                            "runtime_message_execute_replayed_existing_result",
+                            room_id=room,
+                            plan_id=active_runtime_plan.plan_id,
+                            message=str(text or ""),
+                            payload={
+                                "sender_id": sender_id,
+                                "sender_name": sender_name,
+                                "external_plan_id": external_plan_id,
+                                "action": normalized_action,
+                                "batch_count": len(execution.get("batches") or []),
+                                "graph_count": len(execution.get("graphs") or []),
+                            },
+                        )
+                        safe_graphs = self._safe_graphs_for_user(execution.get("graphs", []))
+                        return {
+                            "handled": True,
+                            "action": normalized_action,
+                            "recorded": True,
+                            "plan": execution["plan"],
+                            "batches": execution["batches"],
+                            "graphs": safe_graphs,
+                            "report": execution["report"],
+                            "message": (
+                                f"AgentRuntime 已返回 ScenePlan {active_runtime_plan.plan_id} 的既有执行结果，"
+                                f"批次数 {len(execution['batches'])}。"
+                            ),
+                        }
                 if active_runtime_plan.status != ScenePlanStatus.CONFIRMED:
                     active_runtime_plan = self.confirm_scene_plan(
                         active_runtime_plan.plan_id,
@@ -12959,6 +13145,10 @@ class AgentRuntime:
                     max_items_per_batch=effective_max_items,
                     scene_name=scene_name,
                 )
+                if not execution.get("batches") or not execution.get("graphs"):
+                    existing_execution = self._existing_execution_result_from_runtime_state(active_runtime_plan)
+                    if existing_execution.get("batches") or existing_execution.get("graphs"):
+                        execution = existing_execution
             except Exception:  # noqa: BLE001
                 self.operation_log.append(
                     "runtime_message_execute_failed",
@@ -13418,6 +13608,8 @@ class AgentRuntime:
             graph_result["nodes"] = {key: call.as_dict() for key, call in graph.nodes.items()} if graph else {}
         return {
             "plan": plan.as_dict(),
+            "batches": [batch.as_dict()],
+            "graphs": [graph_result],
             "batch": batch.as_dict(),
             "graph": graph_result,
             "report": report,
@@ -14570,6 +14762,41 @@ class AgentRuntime:
         ]
         graphs = [graph for graph in drained_graphs if graph is not None]
         batches = self._planned_batches_for_plan(plan.plan_id)
+        graph_results: list[dict[str, Any]] = []
+        seen_graph_ids: set[str] = set()
+        for graph in graphs:
+            seen_graph_ids.add(graph.graph_id)
+            graph_results.append({
+                "graph_id": graph.graph_id,
+                "status": graph.status,
+                "batch_id": graph.batch_id,
+                "nodes": {key: call.as_dict() for key, call in graph.nodes.items()},
+            })
+        if not graph_results and batches:
+            graph_facts = dict(self.state.room(plan.room_id).get("tool_graphs") or {})
+            for batch in batches:
+                graph_id = str(batch.tool_graph_id or "").strip()
+                if not graph_id or graph_id in seen_graph_ids:
+                    continue
+                seen_graph_ids.add(graph_id)
+                graph = self._queued_tool_graphs.get(graph_id)
+                if graph is not None:
+                    graph_results.append({
+                        "graph_id": graph.graph_id,
+                        "status": graph.status,
+                        "batch_id": graph.batch_id,
+                        "nodes": {key: call.as_dict() for key, call in graph.nodes.items()},
+                    })
+                    continue
+                graph_fact = dict(graph_facts.get(graph_id) or {})
+                if graph_fact:
+                    nodes = dict(graph_fact.get("nodes") or {})
+                    graph_results.append({
+                        "graph_id": graph_id,
+                        "status": str(graph_fact.get("status") or ""),
+                        "batch_id": str(graph_fact.get("batch_id") or batch.batch_id),
+                        "nodes": nodes,
+                    })
         if plan.status in {ScenePlanStatus.PAUSED, ScenePlanStatus.CANCELLED}:
             next_status = plan.status
         elif batches and any(batch.status == BatchPlanStatus.FAILED for batch in batches):
@@ -14605,17 +14832,65 @@ class AgentRuntime:
         return {
             "plan": plan.as_dict(),
             "batches": [batch.as_dict() for batch in batches],
-            "graphs": [
-                {
-                    "graph_id": graph.graph_id,
-                    "status": graph.status,
-                    "batch_id": graph.batch_id,
-                    "nodes": {key: call.as_dict() for key, call in graph.nodes.items()},
-                }
-                for graph in graphs
-            ],
+            "graphs": graph_results,
             "report": report,
             "queued": queued,
+        }
+
+    def _existing_execution_result_from_runtime_state(self, plan: ScenePlan) -> dict[str, Any]:
+        latest_plan = self._runtime_plan_by_id_from_state(plan.plan_id) or plan
+        self.scene_plans[latest_plan.plan_id] = latest_plan
+        room_state = self.state.room(latest_plan.room_id)
+        batches = [batch.as_dict() for batch in self._planned_batches_for_plan(latest_plan.plan_id)]
+        graph_facts = dict(room_state.get("tool_graphs") or {})
+        queue_facts = dict(room_state.get("tool_graph_queue") or {})
+        graph_results: list[dict[str, Any]] = []
+        seen_graph_ids: set[str] = set()
+
+        def append_graph_result(graph_id: str, *, batch_id: str = "") -> None:
+            safe_graph_id = str(graph_id or "").strip()
+            if not safe_graph_id or safe_graph_id in seen_graph_ids:
+                return
+            graph = self._queued_tool_graphs.get(safe_graph_id)
+            graph_fact = dict(graph_facts.get(safe_graph_id) or {})
+            queue_fact = dict(queue_facts.get(safe_graph_id) or {})
+            if graph is None and not graph_fact and not queue_fact:
+                return
+            seen_graph_ids.add(safe_graph_id)
+            if graph is not None:
+                graph_results.append({
+                    "graph_id": graph.graph_id,
+                    "plan_id": graph.plan_id,
+                    "batch_id": graph.batch_id,
+                    "status": graph.status,
+                    "nodes": {key: call.as_dict() for key, call in graph.nodes.items()},
+                })
+                return
+            nodes = graph_fact.get("nodes")
+            graph_results.append({
+                "graph_id": safe_graph_id,
+                "plan_id": str(graph_fact.get("plan_id") or queue_fact.get("plan_id") or latest_plan.plan_id),
+                "batch_id": str(graph_fact.get("batch_id") or queue_fact.get("batch_id") or batch_id),
+                "status": str(graph_fact.get("status") or queue_fact.get("status") or ""),
+                "nodes": dict(nodes) if isinstance(nodes, Mapping) else {},
+            })
+
+        for batch in batches:
+            append_graph_result(
+                str(batch.get("tool_graph_id") or ""),
+                batch_id=str(batch.get("batch_id") or ""),
+            )
+        report = self.generate_report(latest_plan.room_id, plan_id=latest_plan.plan_id)
+        return {
+            "plan": latest_plan.as_dict(),
+            "batches": batches,
+            "graphs": graph_results,
+            "report": report,
+            "queued": self._safe_queue_result_for_user({
+                "batches": batches,
+                "graphs": graph_results,
+                "message": "existing execution result replayed from RuntimeState",
+            }),
         }
 
     def _auto_propose_layout_adjustment_for_completed_plan(self, room_id: str, plan_id: str) -> None:
@@ -14865,6 +15140,13 @@ class AgentRuntime:
         first_plan = dict(room.get("scene_plans", {}).get(first_plan_id, {}) or {})
         if str(first_plan.get("status") or "") in {ScenePlanStatus.PAUSED.value, ScenePlanStatus.CANCELLED.value}:
             if first_graph is None:
+                missing_graph = self._mark_missing_queued_tool_graph_failed(
+                    room_id=room_key,
+                    graph_id=first_graph_id,
+                    plan_id=first_plan_id,
+                    batch_id=str(first_item.get("batch_id") or ""),
+                    reason="missing in-memory graph while runtime plan is stopped",
+                )
                 self.operation_log.append(
                     "tool_graph_queue_missing_graph",
                     room_id=room_key,
@@ -14872,7 +15154,7 @@ class AgentRuntime:
                     batch_id=str(first_item.get("batch_id") or ""),
                     payload={"graph_id": first_graph_id, "status": "missing"},
                 )
-                return None
+                return missing_graph
             return self._drain_queued_tool_graph(first_graph, room_id=room_key, executor=executor)
         selection_graph = ToolCallGraph(
             graph_id=_id("graph"),
@@ -14898,6 +15180,13 @@ class AgentRuntime:
         graph_id = str(selected_fact.get("selected_graph_ref") or "")
         graph = self._queued_tool_graphs.get(graph_id)
         if graph is None:
+            missing_graph = self._mark_missing_queued_tool_graph_failed(
+                room_id=room_key,
+                graph_id=graph_id,
+                plan_id=str(selected_fact.get("plan_id") or plan_id or ""),
+                batch_id=str(selected_fact.get("batch_id") or ""),
+                reason="missing in-memory graph during queue drain",
+            )
             self.operation_log.append(
                 "tool_graph_queue_missing_graph",
                 room_id=room_key,
@@ -14905,8 +15194,84 @@ class AgentRuntime:
                 batch_id=str(selected_fact.get("batch_id") or ""),
                 payload={"graph_id": graph_id, "status": "missing"},
             )
-            return None
+            return missing_graph
         return self._drain_queued_tool_graph(graph, room_id=room_key, executor=executor)
+
+    def _mark_missing_queued_tool_graph_failed(
+        self,
+        *,
+        room_id: str,
+        graph_id: str,
+        plan_id: str,
+        batch_id: str = "",
+        reason: str = "",
+    ) -> ToolCallGraph | None:
+        safe_graph_id = str(graph_id or "").strip()
+        if not safe_graph_id:
+            return None
+        missing_graph = ToolCallGraph(
+            graph_id=safe_graph_id,
+            plan_id=str(plan_id or "runtime-missing-graph"),
+            batch_id=str(batch_id or ""),
+        )
+        missing_graph.status = "failed"
+        queue_applied = False
+        graph_applied = False
+        batch_finalized = False
+        failure_reasons: list[str] = []
+        try:
+            self._persist_tool_graph_state(
+                missing_graph,
+                room_id=str(room_id),
+                reason=str(reason or "missing queued tool graph"),
+            )
+            graph_applied = True
+        except Exception as exc:  # noqa: BLE001
+            failure_reasons.append(f"graph_state:{type(exc).__name__}")
+        try:
+            self._mark_tool_graph_queue_item(missing_graph, room_id=str(room_id), status="failed")
+        except Exception as exc:  # noqa: BLE001
+            failure_reasons.append(f"queue_state:{type(exc).__name__}")
+        else:
+            queue_applied = True
+        if missing_graph.batch_id:
+            try:
+                self._finalize_batch_after_drained_graph(missing_graph, room_id=str(room_id))
+                batch_finalized = True
+            except Exception as exc:  # noqa: BLE001
+                failure_reasons.append(f"batch_terminal:{type(exc).__name__}")
+        self.operation_log.append(
+            "tool_graph_missing_queue_item_failed" if queue_applied else "tool_graph_missing_queue_item_fail_failed",
+            room_id=str(room_id),
+            plan_id=missing_graph.plan_id,
+            batch_id=missing_graph.batch_id,
+            message=str(reason or "missing queued tool graph"),
+            payload={
+                "graph_id": safe_graph_id,
+                "status": "failed",
+                "applied": queue_applied,
+                "graph_state_applied": graph_applied,
+                "batch_finalized": batch_finalized,
+                "reason": str(reason or "missing queued tool graph"),
+                "failure_reason": ";".join(failure_reasons),
+            },
+        )
+        self.emit_runtime_event(
+            room_id=str(room_id),
+            plan_id=missing_graph.plan_id,
+            batch_id=missing_graph.batch_id,
+            event_type="tool_graph_queue_missing_graph",
+            phase="tool_graph_queue",
+            title="执行图状态缺失",
+            message="Runtime 队列中的执行图缺少内存实例，已标记为失败以避免队列卡住。",
+            level="warning",
+            progress=100,
+            payload={
+                "graph_id": safe_graph_id,
+                "status": "failed" if queue_applied or graph_applied else "unknown",
+            },
+        )
+        return missing_graph
 
     def drain_tool_graph_queue(
         self,
@@ -14997,6 +15362,45 @@ class AgentRuntime:
         return executed
 
     def _persist_tool_graph_state(self, graph: ToolCallGraph, *, room_id: str, reason: str) -> None:
+        graph_fact = ToolCallGraphValidator.safe_graph_fact(graph) if graph.nodes else {}
+        if not graph_fact:
+            existing_graph_fact = dict(
+                dict(self.state.room(str(room_id)).get("tool_graphs") or {}).get(graph.graph_id) or {}
+            )
+            if existing_graph_fact:
+                graph_fact = existing_graph_fact
+                graph_fact["graph_id"] = graph.graph_id
+                graph_fact["plan_id"] = graph.plan_id
+                graph_fact["batch_id"] = graph.batch_id
+                graph_fact["status"] = graph.status
+                graph_fact["generation"] = int(getattr(graph, "generation", 0) or 0)
+            else:
+                placeholder_call_id = f"{graph.graph_id}-missing"
+                graph_fact = {
+                    "graph_id": graph.graph_id,
+                    "plan_id": graph.plan_id,
+                    "batch_id": graph.batch_id,
+                    "status": graph.status,
+                    "generation": int(getattr(graph, "generation", 0) or 0),
+                    "edges": [],
+                    "nodes": {
+                        placeholder_call_id: {
+                            "tool_call_id": placeholder_call_id,
+                            "tool_name": "runtime.missing_graph",
+                            "args": {"reason": str(reason or "missing queued tool graph")},
+                            "consumes": {},
+                            "risk_level": RiskLevel.LOW.value,
+                            "requires_write": False,
+                            "confirmed": True,
+                            "status": ToolCallStatus.FAILED.value,
+                            "depends_on": [],
+                            "retry_count": 0,
+                            "max_retries": 0,
+                            "error": str(reason or "missing queued tool graph"),
+                        },
+                    },
+                }
+        ToolCallGraphValidator.validate_graph_fact(graph_fact, fallback_graph_id=graph.graph_id)
         record_graph = ToolCallGraph(
             graph_id=_id("graph-queue-record-state"),
             plan_id="runtime-queue-control",
@@ -15009,7 +15413,7 @@ class AgentRuntime:
                 args={
                     "room_id": str(room_id),
                     "target_graph_ref": graph.graph_id,
-                    "graph_fact": ToolCallGraphValidator.safe_graph_fact(graph),
+                    "graph_fact": graph_fact,
                     "reason": str(reason or ""),
                 },
                 risk_level=RiskLevel.MEDIUM,
@@ -16417,7 +16821,7 @@ class AgentRuntime:
             actor_count = int(fact.get("actor_count") or 0)
             skipped_count = int(fact.get("skipped_count") or 0)
             issue_count = int(fact.get("issue_count") or 0)
-            if fact_type == "runtime_geometry_aabb":
+            if fact_type in {"runtime_geometry_aabb", "runtime_geometry_ground_snap"}:
                 aabb_actor_count += actor_count
                 aabb_skipped_count += skipped_count
             if fact_type == "runtime_geometry_overlap":
@@ -16477,8 +16881,16 @@ class AgentRuntime:
             fact_count += 1
             fact_type_counts[fact_type] = fact_type_counts.get(fact_type, 0) + 1
             status_counts[status] = status_counts.get(status, 0) + 1
-            aabb_actor_count += int(fact.get("actor_count") or 0) if fact_type == "runtime_geometry_aabb" else 0
-            aabb_skipped_count += int(fact.get("skipped_count") or 0) if fact_type == "runtime_geometry_aabb" else 0
+            aabb_actor_count += (
+                int(fact.get("actor_count") or 0)
+                if fact_type in {"runtime_geometry_aabb", "runtime_geometry_ground_snap"}
+                else 0
+            )
+            aabb_skipped_count += (
+                int(fact.get("skipped_count") or 0)
+                if fact_type in {"runtime_geometry_aabb", "runtime_geometry_ground_snap"}
+                else 0
+            )
             overlap_issue_count += int(fact.get("issue_count") or 0) if fact_type == "runtime_geometry_overlap" else 0
             latest_facts.append(
                 {
@@ -17129,6 +17541,7 @@ class AgentRuntime:
         environment_component_summary: Mapping[str, Any] | None = None,
         engine_write_summary: Mapping[str, Any] | None = None,
         scene_entity_registry: Mapping[str, Any] | None = None,
+        worker_drain_replay_summary: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         batch_flow = dict(batch_resource_flow_summary or {})
         import_state = dict(import_summary or {})
@@ -17137,6 +17550,7 @@ class AgentRuntime:
         environment_state = dict(environment_component_summary or {})
         engine_write_state = dict(engine_write_summary or {})
         registry_state = dict(scene_entity_registry or {})
+        worker_drain_state = dict(worker_drain_replay_summary or {})
         batch_failed_count = int(batch_flow.get("failed_count") or 0)
         batch_partial_count = int(batch_flow.get("partial_count") or 0)
         batch_waiting_count = int(batch_flow.get("waiting_count") or 0)
@@ -17173,10 +17587,45 @@ class AgentRuntime:
             for item in list(engine_write_state.get("readiness_mismatch_channels") or [])[:8]
             if str(item).strip()
         ]
+        engine_write_runtime_state_only_count = int(
+            engine_write_state.get("runtime_state_only_write_attempt_count") or 0
+        )
+        engine_write_bridge_failed_count = int(
+            engine_write_state.get("engine_write_bridge_failed_count")
+            or engine_write_state.get("bridge_failed_count")
+            or 0
+        )
+        engine_write_bridge_error_code_counts = {
+            str(key): int(value)
+            for key, value in dict(engine_write_state.get("engine_write_bridge_error_code_counts") or {}).items()
+            if str(key or "").strip()
+        }
+        latest_engine_write_status_export = (
+            engine_write_state.get("latest_status_export")
+            if isinstance(engine_write_state.get("latest_status_export"), Mapping)
+            else {}
+        )
+        engine_write_runtime_state_only_channels = [
+            str(item).strip().replace("_", "-")[:48]
+            for item in list(
+                latest_engine_write_status_export.get(
+                    "engine_write_readiness_runtime_state_only_channels"
+                )
+                or []
+            )[:8]
+            if str(item).strip()
+        ]
         actor_registry_readiness_status = str(registry_state.get("readiness_status") or "").strip()
         actor_registry_count = int(registry_state.get("actor_count") or 0)
         actor_registry_missing_transform_count = int(registry_state.get("missing_transform_count") or 0)
         actor_registry_missing_aabb_count = int(registry_state.get("missing_aabb_count") or 0)
+        actor_registry_estimated_aabb_count = int(registry_state.get("estimated_actor_bounds_count") or 0)
+        worker_drain_failed_count = int(worker_drain_state.get("failed_count") or 0)
+        worker_drain_exception_count = int(worker_drain_state.get("exception_count") or 0)
+        worker_drain_status_failed_count = int(worker_drain_state.get("status_failed_count") or 0)
+        worker_drain_plan_resolve_failed_count = int(
+            worker_drain_state.get("plan_resolve_failed_count") or 0
+        )
         actor_registry_incomplete = (
             import_imported_count > 0
             and (
@@ -17269,8 +17718,20 @@ class AgentRuntime:
             reasons.append("sync_failed")
         if engine_write_readiness_mismatch_count:
             reasons.append("engine_write_readiness_mismatch")
+        if engine_write_runtime_state_only_count:
+            reasons.append("engine_write_runtime_state_only")
+        if engine_write_bridge_failed_count or engine_write_bridge_error_code_counts:
+            reasons.append("engine_write_bridge_failed")
         if actor_registry_incomplete:
             reasons.append("actor_registry_incomplete")
+        if worker_drain_failed_count:
+            reasons.append("worker_drain_failed")
+        if worker_drain_exception_count:
+            reasons.append("worker_drain_exception")
+        if worker_drain_status_failed_count:
+            reasons.append("worker_drain_status_failed")
+        if worker_drain_plan_resolve_failed_count:
+            reasons.append("worker_drain_plan_resolve_failed")
         if batch_waiting_count:
             reasons.append("batch_waiting")
         if resource_phase_waiting_count:
@@ -17304,6 +17765,13 @@ class AgentRuntime:
             or sync_failure_count
             or latest_sync_failure_code
             or engine_write_readiness_mismatch_count
+            or engine_write_runtime_state_only_count
+            or engine_write_bridge_failed_count
+            or engine_write_bridge_error_code_counts
+            or worker_drain_failed_count
+            or worker_drain_exception_count
+            or worker_drain_status_failed_count
+            or worker_drain_plan_resolve_failed_count
         ):
             status = "needs_attention"
         elif batch_flow.get("batch_count") or import_requested_count or sync_status:
@@ -17342,10 +17810,19 @@ class AgentRuntime:
             "latest_sync_failure_code": latest_sync_failure_code,
             "engine_write_readiness_mismatch_count": engine_write_readiness_mismatch_count,
             "engine_write_readiness_mismatch_channels": engine_write_readiness_mismatch_channels,
+            "engine_write_runtime_state_only_count": engine_write_runtime_state_only_count,
+            "engine_write_runtime_state_only_channels": engine_write_runtime_state_only_channels,
+            "engine_write_bridge_failed_count": engine_write_bridge_failed_count,
+            "engine_write_bridge_error_code_counts": dict(sorted(engine_write_bridge_error_code_counts.items())),
             "actor_registry_readiness_status": actor_registry_readiness_status,
             "actor_registry_actor_count": actor_registry_count,
             "actor_registry_missing_transform_count": actor_registry_missing_transform_count,
             "actor_registry_missing_aabb_count": actor_registry_missing_aabb_count,
+            "actor_registry_estimated_aabb_count": actor_registry_estimated_aabb_count,
+            "worker_drain_failed_count": worker_drain_failed_count,
+            "worker_drain_exception_count": worker_drain_exception_count,
+            "worker_drain_status_failed_count": worker_drain_status_failed_count,
+            "worker_drain_plan_resolve_failed_count": worker_drain_plan_resolve_failed_count,
             "asset_incomplete_count": asset_incomplete_count,
             "asset_failed_count": asset_failed_count,
             "asset_transferring_count": asset_transferring_count,
@@ -17728,6 +18205,56 @@ class AgentRuntime:
                     return "unknown"
             return "unknown"
 
+        def reviewed_ok_targets() -> set[str]:
+            targets: set[str] = set()
+            active_batch_ids = set(candidate_batch_ids)
+            for key, review in {
+                **dict(room.get("geometry_reviews") or {}),
+                **dict(room.get("custom_vlm_checkpoint_facts") or {}),
+            }.items():
+                if not isinstance(review, Mapping):
+                    continue
+                key_text = str(key or "")
+                key_parts = key_text.split(":")
+                review_plan_id = str(review.get("plan_id") or (key_parts[0] if key_parts else ""))
+                review_batch_id = str(review.get("batch_id") or (key_parts[1] if len(key_parts) > 1 else ""))
+                if active_plan_id and review_plan_id and review_plan_id != active_plan_id:
+                    if not (review_batch_id and review_batch_id in active_batch_ids):
+                        continue
+                if active_batch_id and review_batch_id != active_batch_id:
+                    continue
+                status = str(review.get("status") or "").strip().lower()
+                if status not in {"ok", "pass", "passed", "completed", "success"}:
+                    continue
+                issue_count = int(review.get("issue_count") or 0)
+                advisory_items = review.get("advisory_items")
+                advisory_count = int(
+                    review.get("advisory_item_count")
+                    or (len(advisory_items) if isinstance(advisory_items, list) else 0)
+                )
+                if issue_count > 0 or advisory_count > 0:
+                    continue
+                for target in list(review.get("reviewed_targets") or []):
+                    text = str(target or "").strip()
+                    if text:
+                        targets.add(text)
+            return targets
+
+        reviewed_targets_ok = reviewed_ok_targets()
+
+        def review_status_for(row: Mapping[str, Any], fallback_name: str) -> str:
+            explicit = str(row.get("review_status") or "").strip()
+            candidate_names = {
+                str(fallback_name or "").strip(),
+                str(row.get("name") or "").strip(),
+                str(row.get("semantic_role") or "").strip(),
+                str(row.get("actor_id") or "").strip(),
+                str(row.get("component_id") or "").strip(),
+            }
+            if any(name and name in reviewed_targets_ok for name in candidate_names):
+                return "reviewed_ok"
+            return explicit or "pending_review"
+
         def add_count(target: dict[str, int], key: str) -> None:
             normalized = str(key or "unknown").strip() or "unknown"
             target[normalized] = target.get(normalized, 0) + 1
@@ -17747,6 +18274,12 @@ class AgentRuntime:
                         merged[key] = value
             asset_id = actor_asset_id(merged)
             bounds = bounds_from(merged)
+            actor_source = str(merged.get("source") or "").strip()
+            geometry_source = (
+                "runtime_estimated_bounds"
+                if actor_source == "engine_import_runtime_estimated_bounds"
+                else "runtime_state"
+            )
             entity = {
                 "entity_id": str(actor_id),
                 "actor_id": str(actor_id),
@@ -17762,6 +18295,7 @@ class AgentRuntime:
                 "transform": transform_from(merged),
                 "bounds": bounds,
                 "aabb": dict(bounds),
+                "geometry_source": geometry_source,
                 "grounding_status": actor_grounding_status(merged),
                 "interaction_capability": list_field(merged, "interaction_capability"),
                 "gameplay_tags": list_field(merged, "gameplay_tags"),
@@ -17771,7 +18305,7 @@ class AgentRuntime:
                 "script_bindings": list_field(merged, "script_bindings"),
                 "sync_status": actor_sync_status(merged, asset_id),
                 "asset_transfer_status": asset_transfer_status(asset_id),
-                "review_status": str(merged.get("review_status") or "pending_review"),
+                "review_status": review_status_for(merged, str(merged.get("name") or actor_id)),
                 "plan_id": str(merged.get("plan_id") or active_plan_id),
                 "batch_id": str(merged.get("batch_id") or ""),
             }
@@ -17792,9 +18326,11 @@ class AgentRuntime:
                 if entity_id in seen_entity_ids:
                     continue
                 bounds = bounds_from(component)
+                component_actor_id = str(component.get("actor_id") or "").strip()
                 entity = {
                     "entity_id": entity_id,
-                    "actor_id": "",
+                    "actor_id": component_actor_id,
+                    "component_id": str(component.get("component_id") or component_id),
                     "asset_id": str(component.get("asset_id") or ""),
                     "model_ref": str(component.get("model_ref") or component.get("handler") or component_type),
                     "semantic_role": str(component.get("name") or component_id),
@@ -17812,7 +18348,7 @@ class AgentRuntime:
                     "script_bindings": list_field(component, "script_bindings"),
                     "sync_status": str(component.get("sync_status") or component.get("status") or "runtime_state"),
                     "asset_transfer_status": asset_transfer_status(str(component.get("asset_id") or "")),
-                    "review_status": str(component.get("review_status") or "pending_review"),
+                    "review_status": review_status_for(component, str(component.get("name") or component_id)),
                     "plan_id": active_plan_id,
                     "batch_id": str(current_batch_id),
                 }
@@ -17858,6 +18394,7 @@ class AgentRuntime:
         sync_status_counts: dict[str, int] = {}
         asset_transfer_status_counts: dict[str, int] = {}
         review_status_counts: dict[str, int] = {}
+        geometry_source_counts: dict[str, int] = {}
         transform_available_count = 0
         aabb_available_count = 0
         actor_transform_available_count = 0
@@ -17889,9 +18426,12 @@ class AgentRuntime:
             else:
                 add_count(asset_transfer_status_counts, "unknown")
             add_count(review_status_counts, str(entity.get("review_status") or "unknown"))
+            if is_actor_entity:
+                add_count(geometry_source_counts, str(entity.get("geometry_source") or "unknown"))
         actor_count = sum(1 for entity in entities if entity.get("entity_type") == "actor")
         missing_transform_count = max(0, actor_count - actor_transform_available_count)
         missing_aabb_count = max(0, actor_count - actor_aabb_available_count)
+        estimated_actor_bounds_count = int(geometry_source_counts.get("runtime_estimated_bounds") or 0)
         if not actor_count:
             readiness_status = "no_actors"
         elif missing_transform_count or missing_aabb_count:
@@ -17918,7 +18458,128 @@ class AgentRuntime:
             "sync_status_counts": dict(sorted(sync_status_counts.items())),
             "asset_transfer_status_counts": dict(sorted(asset_transfer_status_counts.items())),
             "review_status_counts": dict(sorted(review_status_counts.items())),
+            "geometry_source_counts": dict(sorted(geometry_source_counts.items())),
+            "estimated_actor_bounds_count": estimated_actor_bounds_count,
             "entities": entities,
+        }
+
+    @staticmethod
+    def _sync_readiness_summary(
+        *,
+        scene_entity_registry: Mapping[str, Any],
+        sync_summary: Mapping[str, Any],
+        asset_transfer_summary: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        entities = [
+            dict(entity)
+            for entity in (scene_entity_registry.get("entities") or [])
+            if isinstance(entity, Mapping)
+        ]
+        actor_entities = [
+            entity
+            for entity in entities
+            if str(entity.get("entity_type") or "") == "actor"
+        ]
+        environment_entities = [
+            entity
+            for entity in entities
+            if str(entity.get("entity_type") or "") != "actor"
+        ]
+        actor_count = len(actor_entities)
+        actor_ready_for_sync_count = 0
+        runtime_state_actor_count = 0
+        missing_actor_identity_count = 0
+        missing_actor_geometry_count = 0
+        runtime_ready_statuses = {
+            "runtime_state",
+            "planned",
+            "ready",
+            "active",
+            "created",
+            "imported",
+            "synced",
+            "synchronized",
+        }
+        for entity in actor_entities:
+            if str(entity.get("sync_status") or "").strip().lower() in runtime_ready_statuses:
+                runtime_state_actor_count += 1
+            has_identity = bool(str(entity.get("actor_id") or "").strip())
+            has_transform = bool(entity.get("transform"))
+            has_bounds = bool(entity.get("aabb") or entity.get("bounds"))
+            if not has_identity:
+                missing_actor_identity_count += 1
+            if not has_transform or not has_bounds:
+                missing_actor_geometry_count += 1
+            if has_identity and has_transform and has_bounds:
+                actor_ready_for_sync_count += 1
+        environment_count = len(environment_entities)
+        environment_ready_for_sync_count = 0
+        runtime_state_environment_count = 0
+        missing_environment_identity_count = 0
+        missing_environment_geometry_count = 0
+        for entity in environment_entities:
+            if str(entity.get("sync_status") or "").strip().lower() in runtime_ready_statuses:
+                runtime_state_environment_count += 1
+            has_identity = bool(
+                str(
+                    entity.get("actor_id")
+                    or entity.get("component_id")
+                    or entity.get("asset_id")
+                    or ""
+                ).strip()
+            )
+            has_transform = bool(entity.get("transform"))
+            has_bounds = bool(entity.get("aabb") or entity.get("bounds"))
+            if not has_identity:
+                missing_environment_identity_count += 1
+            if not has_transform or not has_bounds:
+                missing_environment_geometry_count += 1
+            if has_identity and has_transform and has_bounds:
+                environment_ready_for_sync_count += 1
+        real_sync_event_count = int(sync_summary.get("event_count") or 0)
+        real_actor_sync_event_count = int(sync_summary.get("actor_event_count") or 0)
+        asset_count = int(asset_transfer_summary.get("asset_count") or 0)
+        asset_ready_count = int(asset_transfer_summary.get("ready_count") or 0)
+        asset_completed_count = int(asset_transfer_summary.get("completed_count") or 0)
+        asset_failed_count = int(asset_transfer_summary.get("failed_count") or 0)
+        asset_transferring_count = int(asset_transfer_summary.get("transferring_count") or 0)
+        asset_overall_progress = int(asset_transfer_summary.get("overall_progress") or 0)
+        status = "no_actors"
+        if actor_count:
+            if real_sync_event_count > 0:
+                status = "sync_events_recorded"
+            elif actor_ready_for_sync_count == actor_count:
+                status = "runtime_state_ready_pending_f5"
+            else:
+                status = "incomplete_runtime_actor_state"
+        return {
+            "status": status,
+            "actor_count": actor_count,
+            "actor_ready_for_sync_count": actor_ready_for_sync_count,
+            "runtime_state_actor_count": runtime_state_actor_count,
+            "missing_actor_identity_count": missing_actor_identity_count,
+            "missing_actor_geometry_count": missing_actor_geometry_count,
+            "environment_count": environment_count,
+            "environment_ready_for_sync_count": environment_ready_for_sync_count,
+            "runtime_state_environment_count": runtime_state_environment_count,
+            "missing_environment_identity_count": missing_environment_identity_count,
+            "missing_environment_geometry_count": missing_environment_geometry_count,
+            "real_sync_event_count": real_sync_event_count,
+            "real_actor_sync_event_count": real_actor_sync_event_count,
+            "real_sync_verified": real_sync_event_count > 0,
+            "native_sync_verification": "pending_f5",
+            "asset_count": asset_count,
+            "asset_ready_count": asset_ready_count,
+            "asset_completed_count": asset_completed_count,
+            "asset_failed_count": asset_failed_count,
+            "asset_transferring_count": asset_transferring_count,
+            "asset_overall_progress": max(0, min(100, asset_overall_progress)),
+            "asset_transfer_native_verification": "pending_f5",
+            "asset_transfer_status_counts": dict(
+                asset_transfer_summary.get("status_counts")
+                or scene_entity_registry.get("asset_transfer_status_counts")
+                or {}
+            ),
         }
 
     @staticmethod
@@ -18803,6 +19464,11 @@ class AgentRuntime:
             active_plan_id,
             batch_id=batch_id,
         )
+        operation_replay_summary = dict(operation_replay_summary)
+        operation_replay_summary["engine_write_summary"] = self._merge_engine_write_boundary_attempts(
+            operation_replay_summary.get("engine_write_summary"),
+            engine_write_boundary_summary,
+        )
         engine_write_readiness_summary = self._engine_write_readiness_summary(self._provider_summary)
         state_patch_conflict_summary = self._state_patch_conflict_summary(room)
         layout_adjustment_summary = self._layout_adjustment_summary_for_plan(
@@ -18961,6 +19627,11 @@ class AgentRuntime:
             active_plan_id,
             batch_id=batch_id,
         )
+        sync_readiness_summary = self._sync_readiness_summary(
+            scene_entity_registry=scene_entity_registry,
+            sync_summary=sync_summary,
+            asset_transfer_summary=asset_transfer_summary,
+        )
         report_health_summary = self._report_health_summary(
             batch_resource_flow_summary=batch_resource_flow_summary,
             import_summary=import_summary,
@@ -18969,6 +19640,9 @@ class AgentRuntime:
             environment_component_summary=environment_component_summary,
             engine_write_summary=dict(operation_replay_summary.get("engine_write_summary") or {}),
             scene_entity_registry=scene_entity_registry,
+            worker_drain_replay_summary=dict(
+                operation_replay_summary.get("worker_drain_replay_summary") or {}
+            ),
         )
         scoped_actor_facts = self._actor_facts_for_plan(room, active_plan_id, batch_id=batch_id)
         intervention_digest = self._intervention_digest_for_report(
@@ -19007,6 +19681,33 @@ class AgentRuntime:
             operation_replay_summary=operation_replay_summary,
             report_generated=True,
         )
+        self.operation_log.append(
+            "runtime_scene_flow_checkpoint",
+            room_id=str(room_id),
+            plan_id=active_plan_id,
+            batch_id=batch_id,
+            payload={
+                "status": str(runtime_scene_flow_summary.get("status") or "unknown"),
+                "steps": [
+                    {
+                        "step": str(step.get("step") or ""),
+                        "status": str(step.get("status") or "unknown"),
+                    }
+                    for step in list(runtime_scene_flow_summary.get("steps") or [])[:8]
+                    if isinstance(step, Mapping)
+                ],
+                "actor_readiness_status": str(
+                    runtime_scene_flow_summary.get("actor_readiness_status") or ""
+                ),
+                "actor_missing_transform_count": int(
+                    runtime_scene_flow_summary.get("actor_missing_transform_count") or 0
+                ),
+                "actor_missing_aabb_count": int(
+                    runtime_scene_flow_summary.get("actor_missing_aabb_count") or 0
+                ),
+                "report_generated": True,
+            },
+        )
         report = {
             "room_id": str(room_id),
             "plan_id": active_plan_id,
@@ -19042,6 +19743,7 @@ class AgentRuntime:
             "scene_design_contract_summary": scene_design_contract_summary,
             "semantic_arbitration_summary": semantic_arbitration_summary,
             "scene_entity_registry": scene_entity_registry,
+            "sync_readiness_summary": sync_readiness_summary,
             "scene_snapshot_summary": scene_snapshot_summary,
             "environment_component_summary": environment_component_summary,
             "resource_summary": resource_summary,
@@ -19526,6 +20228,7 @@ class AgentRuntime:
         )
         message_delivery_summary = self._message_delivery_replay_summary(entries)
         engine_write_summary = self._engine_write_replay_summary(raw_entries)
+        worker_drain_replay_summary = self._worker_drain_replay_summary(entries)
         report_health_summary = self._report_health_summary(
             batch_resource_flow_summary=self._batch_resource_flow_summary_for_plan(
                 room_state,
@@ -19551,6 +20254,7 @@ class AgentRuntime:
                 str(plan_id or ""),
                 batch_id=str(batch_id or ""),
             ),
+            worker_drain_replay_summary=worker_drain_replay_summary,
         )
         return {
             "entry_count": int(replay.get("entry_count") or 0),
@@ -19579,6 +20283,7 @@ class AgentRuntime:
             "batch_resource_lifecycle_summary": self._batch_resource_lifecycle_replay_summary(raw_entries),
             "tool_execution_summary": self._tool_execution_replay_summary(entries),
             "tool_graph_queue_summary": self._tool_graph_queue_replay_summary(entries),
+            "worker_drain_replay_summary": worker_drain_replay_summary,
             "resource_readiness_replay_summary": self._resource_readiness_replay_summary(raw_entries),
             "state_patch_summary": self._state_patch_replay_summary(raw_entries),
             "intervention_batch_replay_summary": self._intervention_batch_replay_summary(raw_entries),
@@ -20668,6 +21373,7 @@ class AgentRuntime:
         ]
         batch_execution_replay_summary = self._batch_execution_replay_summary(safe_execution_replay_entries)
         tool_graph_queue_replay_summary = self._tool_graph_queue_replay_summary(safe_execution_replay_entries)
+        worker_drain_replay_summary = self._worker_drain_replay_summary(safe_execution_replay_entries)
         runtime_guard_replay_summary = self._runtime_guard_replay_summary(sync_replay_entries)
         scene_plan_lifecycle_summary = self._scene_plan_lifecycle_replay_summary(scene_plan_lifecycle_entries)
         vlm_checkpoint_summary = self._vlm_checkpoint_replay_summary(sync_replay_entries)
@@ -20753,11 +21459,20 @@ class AgentRuntime:
             active_plan_id,
             batch_id=active_batch_id,
         )
+        sync_readiness_summary = self._sync_readiness_summary(
+            scene_entity_registry=scene_entity_registry,
+            sync_summary=sync_summary,
+            asset_transfer_summary=asset_transfer_summary,
+        )
         import_summary = self._import_summary_for_plan(room, active_plan_id, batch_id=active_batch_id)
         engine_write_boundary_summary = self._engine_write_boundary_summary_for_plan(
             room,
             active_plan_id,
             batch_id=active_batch_id,
+        )
+        engine_write_summary = self._merge_engine_write_boundary_attempts(
+            engine_write_summary,
+            engine_write_boundary_summary,
         )
         engine_write_readiness_summary = self._engine_write_readiness_summary(self._provider_summary)
         layout_adjustment_summary = self._layout_adjustment_summary_for_plan(
@@ -20786,6 +21501,7 @@ class AgentRuntime:
             environment_component_summary=environment_component_summary,
             engine_write_summary=engine_write_summary,
             scene_entity_registry=scene_entity_registry,
+            worker_drain_replay_summary=worker_drain_replay_summary,
         )
         context_type_counts: dict[str, int] = {}
         speaker_type_counts: dict[str, int] = {}
@@ -21036,6 +21752,7 @@ class AgentRuntime:
                 },
                 "tool_execution_digest": tool_execution_digest,
                     "sync_summary": sync_summary,
+                    "sync_readiness_summary": sync_readiness_summary,
                 "asset_transfer_summary": asset_transfer_summary,
                 "sync_health_digest": sync_health_digest,
                 "fact_source_boundary_summary": self._fact_source_boundary_summary(
@@ -21059,6 +21776,7 @@ class AgentRuntime:
             "gm_summary_replay_summary": gm_summary_replay_summary,
             "batch_execution_replay_summary": batch_execution_replay_summary,
             "tool_graph_queue_replay_summary": tool_graph_queue_replay_summary,
+            "worker_drain_replay_summary": worker_drain_replay_summary,
             "runtime_guard_replay_summary": runtime_guard_replay_summary,
             "scene_plan_lifecycle_summary": scene_plan_lifecycle_summary,
             "vlm_checkpoint_summary": vlm_checkpoint_summary,
@@ -22339,6 +23057,7 @@ class AgentRuntime:
         )
         replay["tool_execution_summary"] = self._tool_execution_replay_summary(replay.get("entries", []))
         replay["tool_graph_queue_summary"] = self._tool_graph_queue_replay_summary(replay.get("entries", []))
+        replay["worker_drain_replay_summary"] = self._worker_drain_replay_summary(replay.get("entries", []))
         replay["resource_readiness_replay_summary"] = self._resource_readiness_replay_summary(raw_entries)
         replay["state_patch_summary"] = self._state_patch_replay_summary(raw_entries)
         replay["intervention_batch_replay_summary"] = self._intervention_batch_replay_summary(raw_entries)
@@ -22391,7 +23110,12 @@ class AgentRuntime:
                 continue
             patch_event_count += 1
             fact_count += int(summary.get("fact_count") or 0)
-            aabb_actor_count += int(summary.get("aabb_actor_count") or 0)
+            aabb_from_summary = int(summary.get("aabb_actor_count") or 0)
+            if not aabb_from_summary:
+                latest_fact = summary.get("latest_fact") if isinstance(summary.get("latest_fact"), Mapping) else {}
+                if str(latest_fact.get("fact_type") or "") == "runtime_geometry_ground_snap":
+                    aabb_from_summary = int(latest_fact.get("actor_count") or 0)
+            aabb_actor_count += aabb_from_summary
             aabb_skipped_count += int(summary.get("aabb_skipped_count") or 0)
             overlap_issue_count += int(summary.get("overlap_issue_count") or 0)
             for status, count in dict(summary.get("status_counts") or {}).items():
@@ -22602,6 +23326,60 @@ class AgentRuntime:
             "queue_status_counts": dict(sorted(queue_status_counts.items())),
             "queue_event_counts": dict(sorted(queue_event_counts.items())),
             "latest_queue_event": latest_queue_event,
+        }
+
+    @staticmethod
+    def _worker_drain_replay_summary(entries: Any) -> dict[str, Any]:
+        default = {
+            "requested_count": 0,
+            "message_drained_count": 0,
+            "failed_count": 0,
+            "exception_count": 0,
+            "status_failed_count": 0,
+            "plan_resolve_failed_count": 0,
+            "drained_graph_total": 0,
+            "event_counts": {},
+            "latest_drain_event": {},
+        }
+        if not isinstance(entries, list):
+            return default
+        tracked = {
+            "runtime_worker_drain_requested",
+            "runtime_message_drained",
+            "runtime_worker_drain_failed",
+            "runtime_worker_drain_exception",
+            "runtime_worker_drain_status_failed",
+            "runtime_worker_drain_plan_resolve_failed",
+        }
+        event_counts: dict[str, int] = {}
+        drained_graph_total = 0
+        latest_drain_event: dict[str, Any] = {}
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            event = str(entry.get("event") or "")
+            if event not in tracked:
+                continue
+            event_counts[event] = event_counts.get(event, 0) + 1
+            payload = entry.get("payload") if isinstance(entry.get("payload"), Mapping) else {}
+            drained_graph_total += int(payload.get("drained_count") or 0)
+            latest_drain_event = {
+                "event": event,
+                "plan_id": str(entry.get("plan_id") or ""),
+                "batch_id": str(entry.get("batch_id") or ""),
+                "drained_count": int(payload.get("drained_count") or 0),
+                "reason": str(payload.get("reason") or "")[:160],
+            }
+        return {
+            "requested_count": event_counts.get("runtime_worker_drain_requested", 0),
+            "message_drained_count": event_counts.get("runtime_message_drained", 0),
+            "failed_count": event_counts.get("runtime_worker_drain_failed", 0),
+            "exception_count": event_counts.get("runtime_worker_drain_exception", 0),
+            "status_failed_count": event_counts.get("runtime_worker_drain_status_failed", 0),
+            "plan_resolve_failed_count": event_counts.get("runtime_worker_drain_plan_resolve_failed", 0),
+            "drained_graph_total": drained_graph_total,
+            "event_counts": dict(sorted(event_counts.items())),
+            "latest_drain_event": latest_drain_event,
         }
 
     @staticmethod
@@ -22942,6 +23720,11 @@ class AgentRuntime:
                 "transform_result_count": 0,
                 "delete_result_count": 0,
                 "environment_import_result_count": 0,
+                "import_boundary_attempt_count": 0,
+                "transform_boundary_attempt_count": 0,
+                "delete_boundary_attempt_count": 0,
+                "environment_import_boundary_attempt_count": 0,
+                "runtime_state_only_write_attempt_count": 0,
                 "import_status_counts": {},
                 "transform_status_counts": {},
                 "delete_status_counts": {},
@@ -23082,6 +23865,17 @@ class AgentRuntime:
             for item in list(latest_status_export.get("engine_write_readiness_native_enabled_channels") or [])
             if str(item or "").strip()
         }
+        runtime_state_only_statuses = {"runtime_state_only", "noop", "no_op", "skipped"}
+
+        def rows_are_runtime_state_only(rows: list[dict[str, Any]]) -> bool:
+            if not rows:
+                return False
+            for row in rows:
+                status = str(row.get("status") or "").strip().lower()
+                if status not in runtime_state_only_statuses:
+                    return False
+            return True
+
         mismatch_channels: list[str] = []
         for channel, rows in (
             ("actor-import", import_rows),
@@ -23089,13 +23883,28 @@ class AgentRuntime:
             ("actor-delete", delete_rows),
             ("environment-import", environment_import_rows),
         ):
-            if rows and channel not in native_channels:
+            if rows and channel not in native_channels and not rows_are_runtime_state_only(rows):
                 mismatch_channels.append(channel)
         return {
             "import_result_count": len(import_rows),
             "transform_result_count": len(transform_rows),
             "delete_result_count": len(delete_rows),
             "environment_import_result_count": len(environment_import_rows),
+            "import_boundary_attempt_count": int(
+                latest_status_export.get("engine_write_import_boundary_count") or 0
+            ),
+            "transform_boundary_attempt_count": int(
+                latest_status_export.get("engine_write_transform_boundary_count") or 0
+            ),
+            "delete_boundary_attempt_count": int(
+                latest_status_export.get("engine_write_delete_boundary_count") or 0
+            ),
+            "environment_import_boundary_attempt_count": int(
+                latest_status_export.get("engine_write_environment_import_boundary_count") or 0
+            ),
+            "runtime_state_only_write_attempt_count": int(
+                latest_status_export.get("engine_write_readiness_runtime_state_only_count") or 0
+            ) + int(latest_status_export.get("engine_write_readiness_fallback_count") or 0),
             "readiness_mismatch_count": len(mismatch_channels),
             "readiness_mismatch_channels": mismatch_channels,
             "import_status_counts": dict(sorted(import_status_counts.items())),
@@ -23109,6 +23918,54 @@ class AgentRuntime:
             "status_export_count": status_export_count,
             "latest_status_export": latest_status_export,
         }
+
+    @staticmethod
+    def _merge_engine_write_boundary_attempts(
+        engine_write_summary: Mapping[str, Any] | None,
+        engine_write_boundary_summary: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        summary = dict(engine_write_summary or {})
+        boundary = dict(engine_write_boundary_summary or {})
+        boundary_status_counts = AgentRuntime._safe_status_count_map(boundary.get("status_counts"))
+
+        def set_max(key: str, value: Any) -> None:
+            summary[key] = max(int(summary.get(key) or 0), int(value or 0))
+
+        set_max("import_boundary_attempt_count", boundary.get("import_boundary_count"))
+        set_max("transform_boundary_attempt_count", boundary.get("transform_boundary_count"))
+        set_max("delete_boundary_attempt_count", boundary.get("delete_boundary_count"))
+        set_max(
+            "environment_import_boundary_attempt_count",
+            boundary.get("environment_import_boundary_count"),
+        )
+        set_max(
+            "runtime_state_only_write_attempt_count",
+            boundary_status_counts.get("runtime_state_only"),
+        )
+        set_max("engine_write_bridge_call_count", boundary.get("bridge_call_count"))
+        set_max("engine_write_bridge_success_count", boundary.get("bridge_success_count"))
+        set_max("engine_write_bridge_failed_count", boundary.get("bridge_failed_count"))
+        bridge_error_code_counts = AgentRuntime._safe_status_count_map(
+            boundary.get("bridge_error_code_counts")
+        )
+        if bridge_error_code_counts:
+            existing_bridge_errors = AgentRuntime._safe_status_count_map(
+                summary.get("engine_write_bridge_error_code_counts")
+            )
+            for error_code, count in bridge_error_code_counts.items():
+                existing_bridge_errors[error_code] = max(
+                    int(existing_bridge_errors.get(error_code) or 0),
+                    int(count or 0),
+                )
+            summary["engine_write_bridge_error_code_counts"] = dict(sorted(existing_bridge_errors.items()))
+        if boundary_status_counts:
+            existing = AgentRuntime._safe_status_count_map(
+                summary.get("engine_write_boundary_status_counts")
+            )
+            for status, count in boundary_status_counts.items():
+                existing[status] = max(int(existing.get(status) or 0), int(count or 0))
+            summary["engine_write_boundary_status_counts"] = dict(sorted(existing.items()))
+        return summary
 
     @staticmethod
     def _engine_write_boundary_summary_for_plan(
@@ -26276,6 +27133,7 @@ class AgentRuntime:
             limit=None,
         )
         engine_write_summary = self._engine_write_replay_summary(engine_write_entries)
+        worker_drain_replay_summary = self._worker_drain_replay_summary(engine_write_entries)
         batch_resource_flow_summary = self._batch_resource_flow_summary_for_plan(
             room,
             active_plan_id,
@@ -26289,6 +27147,7 @@ class AgentRuntime:
             environment_component_summary=environment_component_summary,
             engine_write_summary=engine_write_summary,
             scene_entity_registry=scene_entity_registry,
+            worker_drain_replay_summary=worker_drain_replay_summary,
         )
         engine_write_adapter_summary = self._engine_write_adapter_summary(
             readiness_summary=engine_write_readiness_summary,
@@ -26319,6 +27178,11 @@ class AgentRuntime:
             plan_id=active_plan_id,
             batch_id=active_batch_id,
         )
+        sync_readiness_summary = self._sync_readiness_summary(
+            scene_entity_registry=scene_entity_registry,
+            sync_summary=sync_summary,
+            asset_transfer_summary=asset_transfer_summary,
+        )
         snapshot["summary"] = {
             "room_id": str(room_id),
             "plan_id": active_plan_id,
@@ -26334,11 +27198,14 @@ class AgentRuntime:
             "image_resources": dict(dict(room.get("image_resource_plans") or {}).get(active_batch_id) or {}),
             "model_resources": dict(dict(room.get("model_resource_plans") or {}).get(active_batch_id) or {}),
             "classification_summary": classification_summary,
+            "environment_component_summary": environment_component_summary,
             "resource_summary": resource_summary,
             "batch_resource_flow_summary": batch_resource_flow_summary,
             "report_health_summary": report_health_summary,
             "import_summary": import_summary,
             "sync_summary": sync_summary,
+            "sync_status_summary": sync_summary,
+            "sync_readiness_summary": sync_readiness_summary,
             "asset_transfer_summary": asset_transfer_summary,
             "sync_health_digest": sync_health_digest,
             "engine_write_boundary_summary": engine_write_boundary_summary,
@@ -26349,6 +27216,7 @@ class AgentRuntime:
             "scene_snapshot_summary": scene_snapshot_summary,
             "actors": dict(self._actor_facts_for_plan(room, active_plan_id, batch_id=active_batch_id)),
             "geometry_summary": geometry_summary,
+            "geometry_review_summary": geometry_summary,
             "review_summary": review_summary,
             "scene_entity_registry": scene_entity_registry,
             "runtime_scene_flow_summary": self._runtime_scene_flow_summary(
@@ -29614,7 +30482,7 @@ class AgentRuntime:
         substrate_plan_id = _id("tool")
         substrate_resolve_id = _id("tool")
         environment_components_id = _id("tool")
-        environment_import_id = _id("tool") if self._environment_import_provider is not None else ""
+        environment_import_id = _id("tool")
         asset_plan_id = _id("tool")
         image_prepare_id = _id("tool")
         model_prepare_id = _id("tool")
@@ -29728,26 +30596,24 @@ class AgentRuntime:
                 consumes=self._tool_consumes("runtime.environment.create_components", "substrate_resolutions"),
             )
         )
-        environment_dependency_id = environment_components_id
-        if environment_import_id:
-            graph.add(
-                ToolCall(
-                    tool_call_id=environment_import_id,
-                    tool_name="runtime.environment.import_components",
-                    args={
-                        "room_id": plan.room_id,
-                        "batch_id": batch.batch_id,
-                        "plan_id": plan.plan_id,
-                        "scene_name": str(scene_name or ""),
-                    },
-                    risk_level=RiskLevel.LOW,
-                    requires_write=True,
-                    confirmed=True,
-                    depends_on=[environment_components_id],
-                    consumes=self._tool_consumes("runtime.environment.import_components", "environment_components"),
-                )
+        graph.add(
+            ToolCall(
+                tool_call_id=environment_import_id,
+                tool_name="runtime.environment.import_components",
+                args={
+                    "room_id": plan.room_id,
+                    "batch_id": batch.batch_id,
+                    "plan_id": plan.plan_id,
+                    "scene_name": str(scene_name or ""),
+                },
+                risk_level=RiskLevel.LOW,
+                requires_write=True,
+                confirmed=True,
+                depends_on=[environment_components_id],
+                consumes=self._tool_consumes("runtime.environment.import_components", "environment_components"),
             )
-            environment_dependency_id = environment_import_id
+        )
+        environment_dependency_id = environment_import_id
         graph.add(
             ToolCall(
                 tool_call_id=image_prepare_id,
@@ -30371,6 +31237,8 @@ class AgentRuntime:
             "engine_actor_import_provider",
             "environment_import_provider",
             "engine_environment_import_provider",
+            "runtime_default_environment_import",
+            "runtime_default_environment_import_provider",
             "actor_delete_provider",
             "engine_actor_delete_provider",
             "runtime_actor_import_precheck",
@@ -30387,6 +31255,8 @@ class AgentRuntime:
             "engine_actor_import_provider": "engine_actor_import",
             "environment_import_provider": "runtime_environment_import",
             "engine_environment_import_provider": "engine_environment_import",
+            "runtime_default_environment_import": "runtime_environment_import",
+            "runtime_default_environment_import_provider": "runtime_environment_import",
             "runtime_actor_import_precheck": "runtime_actor_import_precheck",
             "layout_transform_provider": "runtime_layout_transform",
             "engine_layout_transform_provider": "engine_layout_transform",

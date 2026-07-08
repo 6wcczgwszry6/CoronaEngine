@@ -17,6 +17,7 @@ import uuid
 
 from .core import (
     ActorFactValidator,
+    AssetFactValidator,
     EnvironmentComponentValidator,
     GeometryReviewValidator,
     ResourcePlanValidator,
@@ -356,7 +357,7 @@ def register_agent_runtime_planning_tools(
                     "scope": "batch",
                 }
             },
-            produces_state=("environment_components",),
+            produces_state=("environment_components", "assets"),
             requires_user_visible_failure=True,
             description="Create Runtime environment component facts from resolved substrate requests without engine writes.",
         )
@@ -419,7 +420,7 @@ def register_agent_runtime_planning_tools(
                     "scope": "batch",
                 }
             },
-            produces_state=("model_resource_plans", "custom_resource_phase_facts"),
+            produces_state=("model_resource_plans", "assets", "custom_resource_phase_facts"),
             description="Prepare per-batch model resource facts through the configured provider or Runtime fallback.",
         )
     if not registry.has("runtime.placement.propose"):
@@ -794,7 +795,7 @@ def _is_scene_container_phrase(value: str) -> bool:
 
 
 def _explicit_substrate_candidates_from_text(text: str) -> list[str]:
-    substrate_terms = {
+    substrate_terms = (
         "天空",
         "天幕",
         "草地",
@@ -814,8 +815,14 @@ def _explicit_substrate_candidates_from_text(text: str) -> list[str]:
         "ground",
         "hill",
         "road",
-    }
+    )
     out: list[str] = []
+    clean = str(text or "")
+    lowered_text = clean.lower()
+    for term in substrate_terms:
+        term_text = str(term)
+        if term_text and (term_text in clean or term_text.lower() in lowered_text):
+            out.append(term_text)
     for item in _explicit_item_candidates_from_text(text):
         normalized = str(item or "").strip()
         lowered = normalized.lower()
@@ -1961,6 +1968,12 @@ def _make_environment_components_tool(provider: ResourceProvider | None) -> Call
                 error_code="environment_component_provider_empty",
                 user_visible_message="环境组件准备没有返回可用结果，系统会保留模型批次并等待后续处理。",
             )
+        _normalize_environment_components_for_runtime(
+            components,
+            batch_id=batch_id,
+            plan_id=str(call.args.get("plan_id") or ""),
+            scene_name=str(call.args.get("scene_name") or ""),
+        )
         try:
             EnvironmentComponentValidator.validate_component_batches({batch_id: components})
         except Exception as exc:  # noqa: BLE001
@@ -1969,18 +1982,28 @@ def _make_environment_components_tool(provider: ResourceProvider | None) -> Call
                 exc,
                 user_visible_message="环境组件结果不符合系统协议，系统会保留模型批次并等待后续处理。",
             )
+        assets = _assets_from_environment_components(
+            components,
+            batch_id=batch_id,
+            plan_id=str(call.args.get("plan_id") or ""),
+            scene_name=str(call.args.get("scene_name") or ""),
+        )
         return ToolResult(
             True,
             "environment components created",
             state_patch=StatePatch(
                 room_id=room_id,
-                changes={"environment_components": {batch_id: components}},
+                changes={
+                    "environment_components": {batch_id: components},
+                    "assets": assets,
+                },
             ),
             payload={
                 "environment_components": components,
                 "requested_count": requested_count,
                 "ready_count": len(components),
                 "failed_count": max(0, requested_count - len(components)),
+                "assets": assets,
             },
         )
 
@@ -2062,15 +2085,81 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
             if str(component_id or "").strip() and isinstance(component, dict)
         }
         if provider is None:
-            return _failed_component_patch_result(
-                call=call,
-                room_id=room_id,
-                batch_id=batch_id,
-                components=components,
-                message="environment import provider unavailable",
-                error_code="environment_import_provider_missing",
-                source="runtime_environment_import_missing",
-                user_visible_message="环境组件导入工具不可用，Runtime 不会伪装为已写入地形或边界。",
+            imported_components: dict[str, dict[str, Any]] = {}
+            for component_id, component_raw in components.items():
+                component = dict(component_raw)
+                component["component_id"] = str(component.get("component_id") or component_id)
+                component["status"] = "runtime_state_only"
+                component["source"] = "runtime_default_environment_import"
+                component["requires_engine_write"] = False
+                imported_components[str(component["component_id"])] = component
+            EnvironmentComponentValidator.validate_component_batches({batch_id: imported_components})
+            import_results = [
+                {
+                    "component_id": component_id,
+                    "name": str(component.get("name") or component_id),
+                    "component_type": str(component.get("component_type") or "environment"),
+                    "status": "runtime_state_only",
+                    "reason": "environment import provider unavailable; RuntimeState-only component retained",
+                }
+                for component_id, component in imported_components.items()
+            ]
+            provider_result = {
+                "environment_components": imported_components,
+                "environment_import_results": import_results,
+                "source": "runtime_default_environment_import",
+                "engine_write_result": {
+                    "provider_source": "runtime_default_environment_import",
+                    "requested_count": len(components),
+                    "identity_result_count": len(imported_components),
+                    "missing_identity_count": 0,
+                    "status_counts": {"runtime_state_only": len(imported_components)} if imported_components else {},
+                    "bridge_call_count": 0,
+                    "bridge_success_count": 0,
+                    "bridge_failed_count": 0,
+                    "bridge_method_counts": {},
+                    "bridge_error_code_counts": {},
+                },
+            }
+            return ToolResult(
+                True,
+                "environment components retained as RuntimeState-only facts",
+                state_patch=StatePatch(
+                    room_id=room_id,
+                    changes={
+                        "environment_components": {batch_id: imported_components},
+                        "custom_import_facts": {
+                            f"{batch_id}:environment_import_result": _environment_import_result_fact(
+                                {
+                                    "plan_id": str(call.args.get("plan_id") or ""),
+                                    "batch_id": batch_id,
+                                },
+                                requested_count=len(components),
+                                imported_count=len(imported_components),
+                                failed_count=0,
+                                status="runtime_state_only",
+                                import_results=import_results,
+                                engine_write_boundary=_environment_import_boundary_fact(
+                                    provider_result,
+                                    requested_count=len(components),
+                                    imported_count=len(imported_components),
+                                    import_results=import_results,
+                                    imported_component_ids=list(imported_components),
+                                ),
+                            ),
+                        },
+                    },
+                    source_tool_call_id=call.tool_call_id,
+                ),
+                payload={
+                    "environment_components": imported_components,
+                    "environment_import_results": import_results,
+                    "engine_write_result": dict(provider_result["engine_write_result"]),
+                    "requested_count": len(components),
+                    "ready_count": len(imported_components),
+                    "failed_count": 0,
+                },
+                user_visible_message="Environment components are tracked in RuntimeState and still require F5 engine verification.",
             )
         payload = {
             "room_id": room_id,
@@ -2383,6 +2472,119 @@ def _default_environment_component_provider(payload: dict[str, Any]) -> dict[str
         }
     _add_default_framework_components(payload, components)
     return components
+
+
+def _normalize_environment_components_for_runtime(
+    components: dict[str, Any],
+    *,
+    batch_id: str,
+    plan_id: str = "",
+    scene_name: str = "",
+) -> None:
+    """Attach RuntimeState identity/geometry defaults without claiming engine success."""
+
+    for key, raw_component in list(components.items()):
+        if not isinstance(raw_component, dict):
+            continue
+        component_id = str(raw_component.get("component_id") or key or "").strip()
+        if not component_id:
+            component_id = f"{batch_id}-environment-{len(components) + 1:02d}" if batch_id else "runtime-environment"
+        component_type = str(raw_component.get("component_type") or "environment").strip() or "environment"
+        raw_component["component_id"] = component_id
+        raw_component.setdefault("asset_id", component_id)
+        raw_component.setdefault("status", "planned")
+        raw_component.setdefault("source", "runtime_environment_component")
+        raw_component.setdefault("requires_engine_write", False)
+        raw_component.setdefault("sync_status", "runtime_state")
+        if scene_name:
+            raw_component.setdefault("scene_name", scene_name)
+        raw_component.setdefault("position", [0.0, 0.0, 0.0])
+        raw_component.setdefault("rotation", [0.0, 0.0, 0.0])
+        raw_component.setdefault("scale", _default_environment_component_scale(component_type))
+        if not any(isinstance(raw_component.get(field), (dict, list, tuple)) for field in ("aabb", "bounds", "scene_aabb")):
+            raw_component["aabb"] = _default_environment_component_aabb(component_type)
+        raw_component.setdefault("interaction_capability", _default_environment_interaction_capability(raw_component))
+        raw_component.setdefault("gameplay_tags", _default_environment_component_tags(raw_component))
+        raw_component.setdefault("script_bindings", ["runtime_environment_component"])
+        raw_component.setdefault("physics_profile", _default_environment_physics_profile(raw_component))
+        raw_component.setdefault("review_status", "pending_review")
+
+
+def _default_environment_component_scale(component_type: str) -> list[float]:
+    normalized = str(component_type or "").strip().lower()
+    if normalized == "room_box":
+        return [6.0, 3.0, 6.0]
+    if normalized == "room_floor":
+        return [6.0, 0.05, 6.0]
+    if normalized in {"terrain", "ground"}:
+        return [12.0, 0.05, 12.0]
+    if normalized in {"skybox", "sky"}:
+        return [20.0, 10.0, 20.0]
+    if normalized in {"boundary", "terrain_boundary"}:
+        return [12.0, 1.0, 12.0]
+    return [1.0, 1.0, 1.0]
+
+
+def _default_environment_component_aabb(component_type: str) -> dict[str, list[float]]:
+    scale = _default_environment_component_scale(component_type)
+    width = max(0.1, float(scale[0]))
+    height = max(0.01, float(scale[1]))
+    depth = max(0.1, float(scale[2]))
+    return {
+        "min": [round(-width / 2.0, 4), 0.0, round(-depth / 2.0, 4)],
+        "max": [round(width / 2.0, 4), round(height, 4), round(depth / 2.0, 4)],
+    }
+
+
+def _default_environment_interaction_capability(component: Mapping[str, Any]) -> list[str]:
+    text = _environment_component_text(component)
+    component_type = str(component.get("component_type") or "").strip().lower()
+    surface = str(component.get("surface") or "").strip().lower()
+    if component_type == "room_floor" or "walkable" in surface or any(term in text for term in ("grass", "草地", "floor", "地面")):
+        return ["walk_on"]
+    return ["inspect"]
+
+
+def _default_environment_physics_profile(component: Mapping[str, Any]) -> dict[str, Any]:
+    capability = _default_environment_interaction_capability(component)
+    component_type = str(component.get("component_type") or "").strip().lower()
+    if "walk_on" in capability:
+        return {
+            "collision": "walkable_static",
+            "grounding": "walkable_surface",
+            "engine_write_required": False,
+        }
+    if component_type in {"terrain", "room_box", "boundary", "terrain_boundary"}:
+        return {
+            "collision": "static",
+            "engine_write_required": False,
+        }
+    return {
+        "collision": "none",
+        "engine_write_required": False,
+    }
+
+
+def _default_environment_component_tags(component: Mapping[str, Any]) -> list[str]:
+    normalized = str(component.get("component_type") or "").strip().lower()
+    tags = ["environment", "runtime_generated"]
+    if normalized:
+        tags.append(normalized)
+    if normalized in {"terrain", "room_floor", "room_box", "boundary", "terrain_boundary"}:
+        tags.append("scene_substrate")
+    text = _environment_component_text(component)
+    if "walk_on" in _default_environment_interaction_capability(component):
+        tags.append("walkable")
+    if normalized == "skybox" or "sky" in text or "天空" in text:
+        tags.append("sky")
+    return tags
+
+
+def _environment_component_text(component: Mapping[str, Any]) -> str:
+    return " ".join(
+        str(component.get(key) or "")
+        for key in ("name", "component_type", "handler", "surface", "terrain_profile", "sky_mode")
+    ).lower()
 
 
 def _add_default_framework_components(payload: dict[str, Any], components: dict[str, Any]) -> None:
@@ -2725,6 +2927,12 @@ def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[To
                 },
                 user_visible_message="模型资源准备失败，本批不会继续导入虚假的场景物体。",
             )
+        assets = _assets_from_model_resources(
+            model_resources,
+            batch_id=batch_id,
+            plan_id=plan_id,
+            scene_name=str(payload.get("scene_name") or ""),
+        )
         return ToolResult(
             True,
             "batch model resources prepared",
@@ -2732,6 +2940,7 @@ def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[To
                 room_id=room_id,
                 changes={
                     "model_resource_plans": {batch_id: model_resources},
+                    "assets": assets,
                     "custom_resource_phase_facts": {
                         _resource_phase_fact_key(batch_id, "model"): _resource_phase_fact(
                             batch_id=batch_id,
@@ -2748,6 +2957,7 @@ def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[To
                 "requested_count": requested_count,
                 "ready_count": ready_count,
                 "failed_count": max(0, requested_count - ready_count),
+                "assets": assets,
             },
             user_visible_message=_resource_ready_user_message(
                 "模型资源",
@@ -2869,6 +3079,76 @@ def _ready_resource_count(resources: dict[str, Any]) -> int:
         if isinstance(resource, dict)
         and str(resource.get("status") or "").strip().lower() not in {"failed", "failure", "error", "missing"}
     )
+
+
+def _assets_from_model_resources(
+    resources: Mapping[str, Any],
+    *,
+    batch_id: str,
+    plan_id: str,
+    scene_name: str = "",
+) -> dict[str, dict[str, Any]]:
+    assets: dict[str, dict[str, Any]] = {}
+    for key, raw_resource in dict(resources or {}).items():
+        if not isinstance(raw_resource, Mapping):
+            continue
+        name = str(raw_resource.get("name") or key or "").strip()
+        if not name:
+            continue
+        status = str(raw_resource.get("status") or "").strip().lower()
+        failed = status in {"failed", "failure", "error", "missing"}
+        local_path = str(raw_resource.get("local_path") or raw_resource.get("model_path") or "")
+        assets[name] = {
+            "asset_id": name,
+            "name": name,
+            "asset_type": "model",
+            "batch_id": str(batch_id or ""),
+            "plan_id": str(plan_id or ""),
+            "scene_name": str(scene_name or ""),
+            "status": "failed" if failed else "ready",
+            "ready": not failed,
+            "failed": failed,
+            "transfer_status": "failed" if failed else "runtime_state_only",
+            "progress": 0 if failed else 100,
+            "source": str(raw_resource.get("source") or "runtime_model_resource"),
+        }
+        if local_path:
+            assets[name]["model_path"] = local_path
+            assets[name]["local_path"] = local_path
+    return AssetFactValidator.safe_asset_map(assets)
+
+
+def _assets_from_environment_components(
+    components: Mapping[str, Any],
+    *,
+    batch_id: str,
+    plan_id: str,
+    scene_name: str = "",
+) -> dict[str, dict[str, Any]]:
+    assets: dict[str, dict[str, Any]] = {}
+    for key, raw_component in dict(components or {}).items():
+        if not isinstance(raw_component, Mapping):
+            continue
+        component_id = str(raw_component.get("component_id") or key or "").strip()
+        if not component_id:
+            continue
+        component_type = str(raw_component.get("component_type") or "environment").strip() or "environment"
+        name = str(raw_component.get("name") or component_id).strip() or component_id
+        assets[component_id] = {
+            "asset_id": component_id,
+            "name": name,
+            "asset_type": component_type,
+            "batch_id": str(batch_id or ""),
+            "plan_id": str(plan_id or ""),
+            "scene_name": str(scene_name or raw_component.get("scene_name") or ""),
+            "status": "ready",
+            "ready": True,
+            "failed": False,
+            "transfer_status": "runtime_state_only",
+            "progress": 100,
+            "source": str(raw_component.get("source") or "runtime_environment_component"),
+        }
+    return AssetFactValidator.safe_asset_map(assets)
 
 
 def _propose_placement_tool(call: ToolCall) -> ToolResult:
@@ -3174,9 +3454,52 @@ def _make_actor_import_tool(provider: ResourceProvider | None) -> Callable[[Tool
         try:
             actors = ActorFactValidator.safe_actor_map(raw_actors)
         except Exception as exc:  # noqa: BLE001
-            return _provider_failure_tool_result(
-                "actor_import",
-                exc,
+            _ = exc
+            import_results = [
+                {
+                    "actor_name": name,
+                    "status": "failed",
+                    "failure_code": "actor_import_adapter_failed",
+                    "reason": "actor import result schema mismatch",
+                }
+                for name in requested_items
+            ]
+            requested_count = len(requested_items) if requested_items else max(1, len(import_results))
+            import_result_fact = _actor_import_result_fact(
+                payload,
+                requested_count=requested_count,
+                imported_count=0,
+                failed_count=requested_count,
+                status="failed",
+                import_results=import_results,
+                engine_write_boundary=_actor_import_boundary_fact(
+                    provider_result,
+                    requested_count=requested_count,
+                    imported_count=0,
+                    import_results=import_results,
+                ),
+            )
+            return ToolResult(
+                False,
+                "actor_import provider returned invalid actor facts; recorded failed import fact",
+                retryable=True,
+                error_code="actor_import_adapter_failed",
+                state_patch=StatePatch(
+                    room_id=room_id,
+                    changes={
+                        "custom_import_facts": {
+                            f"{payload['batch_id']}:actor_import_result": import_result_fact,
+                        },
+                    },
+                ),
+                payload={
+                    "actor_ids": [],
+                    "batch_id": payload["batch_id"],
+                    "requested_count": requested_count,
+                    "imported_count": 0,
+                    "failed_count": requested_count,
+                    "import_results": import_results,
+                },
                 user_visible_message="场景导入结果不符合系统协议，系统会稍后重试或等待进一步处理。",
             )
         imported_count = len(actors)
@@ -4429,6 +4752,7 @@ def _default_actor_import_provider(payload: dict[str, Any]) -> dict[str, Any]:
         actors[actor_id] = {
             "actor_id": actor_id,
             "asset_id": str(name),
+            "model_ref": str(name),
             "name": name,
             "plan_id": plan_id,
             "batch_id": batch_id,
@@ -4436,13 +4760,46 @@ def _default_actor_import_provider(payload: dict[str, Any]) -> dict[str, Any]:
             "rotation": rotation,
             "scale": scale,
             "aabb": aabb,
+            "semantic_role": str(name),
+            "entity_type": "actor",
             "grounding_status": "grounded",
             "support_type": "floor_supported",
+            "interaction_capability": ["inspect", "move"],
+            "gameplay_tags": ["scene_actor", "runtime_generated"],
+            "physics_profile": {
+                "collision": "static",
+                "grounding": "floor_supported",
+            },
+            "audio_profile": {
+                "surface": "generic",
+            },
+            "lighting_profile": {
+                "receives_light": True,
+                "casts_shadow": True,
+            },
+            "script_bindings": ["runtime_scene_entity"],
+            "sync_status": "runtime_state",
             "sync_lifecycle_status": "runtime_state",
+            "review_status": "pending_review",
             "zone_hint": str(placement.get("zone_hint") or ""),
             "source": "runtime_default_import",
         }
-    return actors
+    return {
+        "actors": actors,
+        "source": "runtime_default_import_provider",
+        "engine_write_result": {
+            "provider_source": "runtime_default_import_provider",
+            "requested_count": len(model_items),
+            "identity_result_count": len(actors),
+            "missing_identity_count": 0,
+            "status_counts": {"runtime_state_only": len(actors)} if actors else {},
+            "bridge_call_count": 0,
+            "bridge_success_count": 0,
+            "bridge_failed_count": 0,
+            "bridge_method_counts": {},
+            "bridge_error_code_counts": {},
+        },
+    }
 
 
 def _default_actor_aabb(*, position: Sequence[Any], scale: Sequence[Any]) -> dict[str, list[float]]:
@@ -4603,7 +4960,14 @@ def _normalize_snapshot_actors(snapshot: dict[str, Any]) -> dict[str, dict[str, 
     for index, item in enumerate(raw_iter):
         if not isinstance(item, dict):
             continue
-        actor_id = str(item.get("actor_id") or item.get("id") or item.get("name") or f"observed-{index}")
+        actor_id = str(
+            item.get("actor_id")
+            or item.get("actor_guid")
+            or item.get("guid")
+            or item.get("id")
+            or item.get("name")
+            or f"observed-{index}"
+        )
         if not actor_id:
             continue
         actor = {
@@ -4615,8 +4979,9 @@ def _normalize_snapshot_actors(snapshot: dict[str, Any]) -> dict[str, dict[str, 
             "version": item.get("version"),
             "source": str(snapshot.get("source") or "scene_snapshot_provider"),
         }
-        if isinstance(item.get("aabb"), dict):
-            actor["aabb"] = dict(item.get("aabb") or {})
+        aabb = item.get("aabb") or item.get("world_aabb") or item.get("bounds")
+        if isinstance(aabb, dict):
+            actor["aabb"] = dict(aabb or {})
         actors[actor_id] = actor
     return actors
 

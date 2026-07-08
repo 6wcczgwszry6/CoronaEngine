@@ -31,6 +31,7 @@ from .services.media_ingress import MediaIngress
 from .services.request_service import AIRequestService
 from .services.stream_dispatcher import StreamDispatcher
 from .services.ai_hint_service import get_hint_service
+from .services.agent_runtime.flags import install_f5_runtime_provider_env_defaults
 from .services.lanchat_agent_worker import LANChatAgentWorker
 
 try:
@@ -43,6 +44,9 @@ def _create_lanchat_scene_composer():
     from .cai_extensions.agent.scene_composer import SceneComposer
 
     return SceneComposer(scene_name="Scene/default.scene")
+
+
+install_f5_runtime_provider_env_defaults()
 
 
 @PluginBase.register_web("AITool")

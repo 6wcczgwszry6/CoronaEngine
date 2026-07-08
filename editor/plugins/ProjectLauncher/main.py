@@ -71,22 +71,35 @@ class ProjectLauncher(PluginBase):
         mode = world_data.get("mode", "creative")
         prompt = world_data.get("prompt", "") or ""
 
-        # 引擎 data 目录（不存在则创建）
-        base_dir = os.path.join(str(core_path.repo_root), "data")
+        # 使用用户配置的默认路径，回退到引擎 data 目录
+        base_dir = settings_manager.get_default_path().strip()
+        if not base_dir or not os.path.isabs(base_dir):
+            base_dir = os.path.join(str(core_path.repo_root), "data")
         os.makedirs(base_dir, exist_ok=True)
 
-        # 模式 + 递增编号，防重名。磁盘目录使用 ASCII，避免原生/引擎侧处理中文路径时崩溃；
-        # project.ini 和返回 name 仍保留中文展示名。
-        label = "剧情世界" if mode == "story" else "创造世界"
-        path_prefix = "story_world" if mode == "story" else "creative_world"
-        index = 1
-        while (
-            os.path.exists(os.path.join(base_dir, f"{path_prefix}_{index}"))
-            or os.path.exists(os.path.join(base_dir, f"{label}_{index}"))
-        ):
-            index += 1
-        display_name = f"{label}_{index}"
-        dir_name = f"{path_prefix}_{index}"
+        # 优先使用前端传入的项目名，否则按模式自动递增编号
+        requested_name = (world_data.get("name") or "").strip()
+        if requested_name:
+            display_name = requested_name
+            dir_name = _safe_project_dir_name(requested_name, display_name)
+            target_full_path = os.path.join(base_dir, dir_name)
+            if os.path.exists(target_full_path):
+                index = 1
+                while os.path.exists(os.path.join(base_dir, f"{dir_name}_{index}")):
+                    index += 1
+                dir_name = f"{dir_name}_{index}"
+                display_name = f"{requested_name}_{index}"
+        else:
+            label = "剧情世界" if mode == "story" else "创造世界"
+            path_prefix = "story_world" if mode == "story" else "creative_world"
+            index = 1
+            while (
+                os.path.exists(os.path.join(base_dir, f"{path_prefix}_{index}"))
+                or os.path.exists(os.path.join(base_dir, f"{label}_{index}"))
+            ):
+                index += 1
+            display_name = f"{label}_{index}"
+            dir_name = f"{path_prefix}_{index}"
         target_full_path = os.path.join(base_dir, dir_name)
 
         # 复制模板并初始化 project.ini
@@ -117,7 +130,9 @@ class ProjectLauncher(PluginBase):
         label = "联机房主" if role == "host" else "联机加入"
         path_prefix = "multiplayer_host" if role == "host" else "multiplayer_guest"
 
-        base_dir = os.path.join(str(core_path.repo_root), "data")
+        base_dir = settings_manager.get_default_path().strip()
+        if not base_dir or not os.path.isabs(base_dir):
+            base_dir = os.path.join(str(core_path.repo_root), "data")
         os.makedirs(base_dir, exist_ok=True)
 
         index = 1

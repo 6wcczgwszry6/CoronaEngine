@@ -75,7 +75,7 @@ from .adapters import (
     make_engine_layout_transform_provider,
     make_legacy_model_resource_provider,
 )
-from .flags import AgentRuntimeFlags
+from .flags import AgentRuntimeFlags, install_f5_runtime_provider_env_defaults
 
 __all__ = [
     "AgentRuntime",
@@ -144,4 +144,5 @@ __all__ = [
     "make_engine_actor_delete_provider",
     "make_engine_layout_transform_provider",
     "AgentRuntimeFlags",
+    "install_f5_runtime_provider_env_defaults",
 ]

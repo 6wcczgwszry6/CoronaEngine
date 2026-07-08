@@ -24,6 +24,21 @@ DEFAULT_SCENE_NAME = ""
 SUPPORTED_EXTS = {".obj", ".dae", ".glb", ".gltf", ".fbx"}
 
 
+class _LazySceneManager:
+    """Delay CoronaCore scene_manager import until a tool is invoked."""
+
+    def _manager(self):
+        from CoronaCore.core.managers import scene_manager
+
+        return scene_manager
+
+    def get(self, *args, **kwargs):
+        return self._manager().get(*args, **kwargs)
+
+    def list_all(self, *args, **kwargs):
+        return self._manager().list_all(*args, **kwargs)
+
+
 def _resolve_scene(scene_manager, scene_name: str):
     """根据名称获取场景，若为空则自动获取当前已加载的场景。"""
     if scene_name:
@@ -113,6 +128,27 @@ class RemoveModelInput(BaseModel):
         default=DEFAULT_SCENE_NAME,
         description="目标场景名称，为空则使用当前场景",
     )
+
+
+class ImportEnvironmentComponentInput(BaseModel):
+    """Create a runtime-owned environment/substrate placeholder actor."""
+
+    component_id: str = Field(description="Runtime environment component id")
+    name: Optional[str] = Field(default=None, description="User-facing component name")
+    component_type: str = Field(default="environment", description="terrain/room_box/room_floor/skybox/boundary")
+    handler: Optional[str] = Field(default=None, description="Runtime handler hint")
+    object_id: Optional[str] = Field(default=None, description="Runtime object id")
+    asset_id: Optional[str] = Field(default=None, description="Runtime asset id")
+    model_ref: Optional[str] = Field(default=None, description="Optional environment asset/model reference")
+    position: Optional[List[float]] = Field(default=None, description="Initial position [x,y,z]")
+    rotation: Optional[List[float]] = Field(default=None, description="Initial rotation [x,y,z]")
+    scale: Optional[List[float]] = Field(default=None, description="Initial scale [x,y,z]")
+    aabb: Optional[dict] = Field(default=None, description="Runtime AABB {min:[x,y,z], max:[x,y,z]}")
+    surface: Optional[str] = Field(default=None, description="Surface semantic hint")
+    terrain_profile: Optional[str] = Field(default=None, description="Terrain semantic hint")
+    sky_mode: Optional[str] = Field(default=None, description="Sky semantic hint")
+    boundary_style: Optional[str] = Field(default=None, description="Boundary semantic hint")
+    scene_name: str = Field(default=DEFAULT_SCENE_NAME, description="Target scene name")
 
 
 # ---------------------------------------------------------------------------
@@ -214,16 +250,37 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
             actor = native_result.get("actor") if isinstance(native_result.get("actor"), dict) else {}
             scene_out = native_result.get("scene") or scene_name or ""
             geometry = actor.get("geometry") if isinstance(actor.get("geometry"), dict) else {}
+            actor_id = actor.get("actor_guid") or actor.get("actor_id") or actor.get("guid") or ""
+            actor_aabb = actor.get("world_aabb") or actor.get("aabb") or actor.get("bounds")
             result_data = {
                 "status": "success",
+                "actor_id": actor_id,
                 "actor_name": actor.get("name", preferred_name),
+                "asset_id": object_id or model_name or preferred_name,
+                "model_ref": model_name or object_id or preferred_name,
                 "model_path": final_path,
                 "position": geometry.get("position", position or [0, 0, 0]),
                 "rotation": geometry.get("rotation", rotation or [0, 0, 0]),
                 "scale": geometry.get("scale", scale or [1, 1, 1]),
                 "scene": scene_out,
                 "bounds_ready": bool(actor.get("bounds_ready")),
-                "world_aabb": actor.get("world_aabb"),
+                "world_aabb": actor_aabb,
+                "sync_status": "engine_imported",
+                "sync_lifecycle_status": "engine_imported",
+                "actor_data": {
+                    "actor_id": actor_id,
+                    "name": actor.get("name") or preferred_name,
+                    "asset_id": object_id or model_name or preferred_name,
+                    "model_ref": model_name or object_id or preferred_name,
+                    "sync_status": "engine_imported",
+                    "sync_lifecycle_status": "engine_imported",
+                    "geometry": {
+                        "position": geometry.get("position", position or [0, 0, 0]),
+                        "rotation": geometry.get("rotation", rotation or [0, 0, 0]),
+                        "scale": geometry.get("scale", scale or [1, 1, 1]),
+                        "aabb": actor_aabb,
+                    },
+                },
                 "actor": actor,
             }
             part = build_part(
@@ -251,6 +308,157 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
                     "也可传入包含模型文件的目录路径，会自动选取其中的模型文件。",
         args_schema=ImportModelInput,
         func=_import_model,
+    )
+
+
+def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
+    """Build the minimal Runtime environment import tool.
+
+    This is intentionally a small native bridge adapter, not a legacy workflow.
+    It creates a lightweight engine actor so Runtime can receive actor_id /
+    transform / sync facts. Visual primitive fidelity remains a later C++/F5
+    concern.
+    """
+
+    def _import_environment_component(
+        *,
+        component_id: str,
+        name: str | None = None,
+        component_type: str = "environment",
+        handler: str | None = None,
+        object_id: str | None = None,
+        asset_id: str | None = None,
+        model_ref: str | None = None,
+        position: List[float] | None = None,
+        rotation: List[float] | None = None,
+        scale: List[float] | None = None,
+        aabb: dict | None = None,
+        surface: str | None = None,
+        terrain_profile: str | None = None,
+        sky_mode: str | None = None,
+        boundary_style: str | None = None,
+        scene_name: str = DEFAULT_SCENE_NAME,
+    ) -> str:
+        try:
+            from CoronaCore.core.corona_editor import CoronaEditor
+            CoronaEngine = CoronaEditor.CoronaEngine
+
+            create_editor_actor = getattr(CoronaEngine, "create_editor_actor", None)
+            if not callable(create_editor_actor):
+                return build_error_result(
+                    error_message="当前引擎缺少 create_editor_actor native 接口"
+                ).to_envelope(interface_type="scene")
+
+            safe_component_id = str(component_id or "").strip()
+            if not safe_component_id:
+                return build_error_result(
+                    error_message="environment component_id is required"
+                ).to_envelope(interface_type="scene")
+
+            component_name = str(name or safe_component_id).strip()
+            component_type_value = str(component_type or "environment").strip() or "environment"
+            asset_ref = str(model_ref or asset_id or safe_component_id).strip()
+            source_path = asset_ref or f"runtime/environment/{safe_component_id}.component"
+            actor_data = {
+                "actor_name": component_name,
+                "name": component_name,
+                "model_name": component_name,
+                "object_id": object_id or safe_component_id,
+                "target": component_name,
+                "component_id": safe_component_id,
+                "component_type": component_type_value,
+                "handler": handler or "",
+                "asset_id": asset_id or safe_component_id,
+                "model_ref": model_ref or asset_ref,
+                "surface": surface or "",
+                "terrain_profile": terrain_profile or "",
+                "sky_mode": sky_mode or "",
+                "boundary_style": boundary_style or "",
+                "geometry": {},
+                "mechanics": {"physics_enabled": False},
+                "skip_if_exists": True,
+                "update_if_exists": True,
+            }
+            if position is not None:
+                actor_data["geometry"]["position"] = position
+            if rotation is not None:
+                actor_data["geometry"]["rotation"] = rotation
+            if scale is not None:
+                actor_data["geometry"]["scale"] = scale
+
+            # Use a non-rendering native actor placeholder for now. Runtime keeps
+            # the authoritative semantic AABB/transform facts, while F5 validates
+            # whether C++ later maps this to a visible terrain/room primitive.
+            native_result_raw = create_editor_actor(
+                scene_name,
+                source_path,
+                "audio",
+                json.dumps(actor_data, ensure_ascii=False),
+            )
+            native_result = (
+                json.loads(native_result_raw)
+                if isinstance(native_result_raw, str)
+                else native_result_raw
+            )
+            if not isinstance(native_result, dict):
+                return build_error_result(
+                    error_message=f"native environment actor 返回无效: {native_result_raw!r}"
+                ).to_envelope(interface_type="scene")
+            if native_result.get("status") == "error":
+                return build_error_result(
+                    error_message=native_result.get("message") or native_result.get("error") or "native environment actor 创建失败"
+                ).to_envelope(interface_type="scene")
+
+            actor = native_result.get("actor") if isinstance(native_result.get("actor"), dict) else {}
+            geometry = actor.get("geometry") if isinstance(actor.get("geometry"), dict) else {}
+            result_data = {
+                "status": "success",
+                "component_id": safe_component_id,
+                "component_type": component_type_value,
+                "handler": handler or "",
+                "name": component_name,
+                "asset_id": asset_id or safe_component_id,
+                "model_ref": model_ref or asset_ref,
+                "surface": surface or "",
+                "terrain_profile": terrain_profile or "",
+                "sky_mode": sky_mode or "",
+                "boundary_style": boundary_style or "",
+                "scene_name": native_result.get("scene") or scene_name or "",
+                "actor_id": actor.get("actor_guid") or actor.get("actor_id") or actor.get("guid") or "",
+                "actor_data": {
+                    "actor_id": actor.get("actor_guid") or actor.get("actor_id") or actor.get("guid") or "",
+                    "name": actor.get("name") or component_name,
+                    "component_id": safe_component_id,
+                    "component_type": component_type_value,
+                    "asset_id": asset_id or safe_component_id,
+                    "model_ref": model_ref or asset_ref,
+                    "sync_status": "engine_imported",
+                    "geometry": {
+                        "position": geometry.get("position", position or [0, 0, 0]),
+                        "rotation": geometry.get("rotation", rotation or [0, 0, 0]),
+                        "scale": geometry.get("scale", scale or [1, 1, 1]),
+                        "aabb": aabb or actor.get("world_aabb") or actor.get("aabb"),
+                    },
+                },
+                "actor": actor,
+                "sync_status": "engine_imported",
+            }
+            part = build_part(
+                content_type="text",
+                content_text=json.dumps(result_data, ensure_ascii=False),
+            )
+            return build_success_result(parts=[part]).to_envelope(interface_type="scene")
+
+        except Exception as e:
+            return build_error_result(
+                error_message=f"environment component import failed: {e}"
+            ).to_envelope(interface_type="scene")
+
+    return StructuredTool(
+        name="import_environment_component",
+        description="Create a minimal native placeholder actor for Runtime terrain/room/sky/boundary components.",
+        args_schema=ImportEnvironmentComponentInput,
+        func=_import_environment_component,
     )
 
 
@@ -320,9 +528,10 @@ def _build_remove_model_tool(scene_manager) -> StructuredTool:
 # ---------------------------------------------------------------------------
 
 def load_model_import_tools() -> List[StructuredTool]:
-    from CoronaCore.core.managers import scene_manager
+    scene_manager = _LazySceneManager()
     return [
         _build_import_model_tool(scene_manager),
+        _build_import_environment_component_tool(scene_manager),
         _build_remove_model_tool(scene_manager),
     ]
 

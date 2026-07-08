@@ -17,7 +17,12 @@ EDITOR_ROOT = REPO_ROOT / "editor"
 if str(EDITOR_ROOT) not in sys.path:
     sys.path.insert(0, str(EDITOR_ROOT))
 
-from plugins.AITool.services.agent_runtime import AgentRuntime, AgentRuntimeFlags, StatePatch  # noqa: E402
+from plugins.AITool.services.agent_runtime import (  # noqa: E402
+    AgentRuntime,
+    AgentRuntimeFlags,
+    StatePatch,
+    install_f5_runtime_provider_env_defaults,
+)
 from plugins.AITool.services.agent_runtime.adapters import RuntimeCppBridge  # noqa: E402
 from plugins.AITool.services.disclosure_policy import DisclosureEvent  # noqa: E402
 from plugins.AITool.services.intent_understanding import IntentUnderstandingService  # noqa: E402
@@ -612,7 +617,18 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             "latest_sync_failure_code": "sync_event_record_failed",
             "engine_write_readiness_mismatch_count": 1,
             "engine_write_readiness_mismatch_channels": ["layout_transform"],
-            "reasons": ["resource_phase_failed", "provider_raw_url_hidden"],
+            "engine_write_runtime_state_only_count": 2,
+            "engine_write_runtime_state_only_channels": ["actor_import", "environment_import"],
+            "worker_drain_failed_count": 10,
+            "worker_drain_status_failed_count": 11,
+            "worker_drain_exception_count": 12,
+            "worker_drain_plan_resolve_failed_count": 13,
+            "reasons": [
+                "resource_phase_failed",
+                "engine_write_runtime_state_only",
+                "worker_drain_failed",
+                "provider_raw_url_hidden",
+            ],
         })
         self.assertIn("failed", report_health_text)
         self.assertIn("attention yes", report_health_text)
@@ -626,7 +642,14 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("sync-event-record-failed", report_health_text)
         self.assertIn("latest sync failure sync-event-record-failed", report_health_text)
         self.assertIn("engine-write mismatch 1(layout-transform)", report_health_text)
+        self.assertIn(
+            "engine-write runtime-state-only 2(actor-import/environment-import)",
+            report_health_text,
+        )
+        self.assertIn("worker-drain failed/status-failed/exception/plan-resolve 10/11/12/13", report_health_text)
         self.assertIn("reasons resource-phase-failed", report_health_text)
+        self.assertIn("engine-write-runtime-state-only", report_health_text)
+        self.assertIn("worker-drain-failed", report_health_text)
         self.assertNotIn("provider", report_health_text)
         self.assertNotIn("url", report_health_text)
 
@@ -848,15 +871,10 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         flags = AgentRuntimeFlags.from_env({
             "AGENT_RUNTIME_USE_SCENE_SNAPSHOT_PROVIDER": "1",
         })
-        workflow_module = types.ModuleType("plugins.AITool.cai_extensions.flows.scene_composition_workflow")
-        helpers_module = types.ModuleType("plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers")
-        helpers_module.get_tool = lambda name: snapshot_tool if name == "get_scene_snapshot" else None
-        with patch.dict(
-            sys.modules,
-            {
-                "plugins.AITool.cai_extensions.flows.scene_composition_workflow": workflow_module,
-                "plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers": helpers_module,
-            },
+        with patch.object(
+            LANChatAgentWorker,
+            "_get_runtime_tool",
+            lambda self, name: snapshot_tool if name == "get_scene_snapshot" else None,
         ):
             worker = _TestWorker(
                 corona_engine=object(),
@@ -900,7 +918,7 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(provider_summary["actor_import"]["reason"], "missing_engine")
         self.assertEqual(provider_summary["actor_delete"]["mode"], "runtime_state_only")
         self.assertEqual(provider_summary["actor_delete"]["reason"], "missing_engine")
-        self.assertEqual(provider_summary["environment_import"]["mode"], "disabled")
+        self.assertEqual(provider_summary["environment_import"]["mode"], "runtime_state_only")
         self.assertEqual(provider_summary["environment_import"]["reason"], "missing_engine")
         self.assertEqual(provider_summary["layout_transform"]["mode"], "runtime_state_only")
         self.assertEqual(provider_summary["layout_transform"]["reason"], "missing_engine")
@@ -914,18 +932,17 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             "AGENT_RUNTIME_USE_ENGINE_ENVIRONMENT_IMPORT_PROVIDER": "1",
             "AGENT_RUNTIME_USE_ENGINE_DELETE_PROVIDER": "1",
         })
-        workflow_module = types.ModuleType("plugins.AITool.cai_extensions.flows.scene_composition_workflow")
-        helpers_module = types.ModuleType("plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers")
-        helpers_module.get_tool = lambda name: None
         gate_module = types.ModuleType("plugins.AITool.cai_extensions.agent.engine_write_gate")
         gate_module.get_engine_write_gate = lambda: object()
         with patch.dict(
             sys.modules,
             {
-                "plugins.AITool.cai_extensions.flows.scene_composition_workflow": workflow_module,
-                "plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers": helpers_module,
                 "plugins.AITool.cai_extensions.agent.engine_write_gate": gate_module,
             },
+        ), patch.object(
+            LANChatAgentWorker,
+            "_get_runtime_tool",
+            lambda self, name: None,
         ):
             worker = _TestWorker(corona_engine=object(), agent_runtime_flags=flags)
 
@@ -949,7 +966,7 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             provider_summary["environment_component"]["reason"],
             "missing_tool:create_environment_component",
         )
-        self.assertEqual(provider_summary["environment_import"]["mode"], "disabled")
+        self.assertEqual(provider_summary["environment_import"]["mode"], "runtime_state_only")
         self.assertTrue(provider_summary["environment_import"]["requested"])
         self.assertEqual(provider_summary["environment_import"]["status"], "unavailable")
         self.assertEqual(
@@ -960,6 +977,328 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertTrue(provider_summary["actor_delete"]["requested"])
         self.assertEqual(provider_summary["actor_delete"]["status"], "unavailable")
         self.assertEqual(provider_summary["actor_delete"]["reason"], "missing_tool:remove_actor")
+
+    def test_runtime_direct_tool_loader_registers_p0_model_and_import_tools(self) -> None:
+        class FakeTool:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+        class FakeRegistry:
+            def __init__(self) -> None:
+                self.tools: dict[str, Any] = {}
+
+            def get(self, name: str):
+                return self.tools.get(name)
+
+            def register(self, tool, *, overwrite: bool = False) -> None:  # noqa: ANN001
+                if not overwrite and tool.name in self.tools:
+                    raise ValueError(tool.name)
+                self.tools[tool.name] = tool
+
+        registry = FakeRegistry()
+        worker = object.__new__(LANChatAgentWorker)
+        worker._logger = __import__("logging").getLogger("test-runtime-direct-tool-loader")
+        config = types.SimpleNamespace(
+            hunyuan3d=types.SimpleNamespace(enable=True, api_keys=["test-key"])
+        )
+        model_import_module = types.ModuleType(
+            "plugins.AITool.cai_extensions.mcp.tools.model_import_tools"
+        )
+        model_import_module.load_model_import_tools = lambda: [
+            FakeTool("import_model"),
+            FakeTool("import_environment_component"),
+            FakeTool("remove_model"),
+        ]
+        hunyuan_module = types.ModuleType(
+            "Quasar.ai_modules.three_d_generate.tools.model_tools"
+        )
+        hunyuan_module.load_hunyuan3d_tools = lambda cfg: [
+            FakeTool("hunyuan_generate_3d")
+        ] if getattr(getattr(cfg, "hunyuan3d", None), "enable", False) else []
+
+        with patch.dict(
+            sys.modules,
+            {
+                "plugins.AITool.cai_extensions.mcp.tools.model_import_tools": model_import_module,
+                "Quasar.ai_modules.three_d_generate.tools.model_tools": hunyuan_module,
+            },
+        ):
+            self.assertEqual(
+                worker._load_runtime_tool_direct(registry, config, "import_environment_component").name,
+                "import_environment_component",
+            )
+            self.assertEqual(
+                worker._load_runtime_tool_direct(registry, config, "import_model").name,
+                "import_model",
+            )
+            self.assertEqual(
+                worker._load_runtime_tool_direct(registry, config, "hunyuan_generate_3d").name,
+                "hunyuan_generate_3d",
+            )
+
+    def test_hunyuan3d_tool_loader_accepts_dict_settings(self) -> None:
+        from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import model_tools
+
+        class FakeClient:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = dict(kwargs)
+
+        class FakeRegistry:
+            def resolve(self, file_id: str) -> str:
+                return f"mock://{file_id}"
+
+            def register(self, **kwargs) -> str:
+                return "fileid://mock"
+
+        config = types.SimpleNamespace(
+            hunyuan3d={
+                "enable": True,
+                "api_keys": ["runtime-test-key-123"],
+                "max_concurrent_generations": 1,
+            }
+        )
+        with patch.object(model_tools, "Hunyuan3DClient", FakeClient), patch.object(
+            model_tools,
+            "get_media_registry",
+            lambda: FakeRegistry(),
+        ):
+            tools = model_tools.load_hunyuan3d_tools(config)
+
+        self.assertTrue(tools)
+        self.assertIn("hunyuan_generate_3d", {getattr(tool, "name", "") for tool in tools})
+
+    def test_f5_runtime_provider_env_defaults_enable_minimum_engine_bridge_flags(self) -> None:
+        env: dict[str, str] = {
+            "AGENT_RUNTIME_USE_ENGINE_TRANSFORM_PROVIDER": "0",
+        }
+
+        install_f5_runtime_provider_env_defaults(env)
+
+        self.assertEqual(env["AGENT_RUNTIME_ENABLED"], "1")
+        self.assertEqual(env["OLD_WORKFLOW_DIRECT_ENTRY_DISABLED"], "1")
+        self.assertEqual(env["ALLOW_LEGACY_FUNCTION_ADAPTER"], "1")
+        self.assertEqual(env["ALLOW_LEGACY_MAIN_WORKFLOW"], "0")
+        self.assertEqual(env["AGENT_RUNTIME_USE_MODEL_PROVIDER"], "1")
+        self.assertEqual(env["AGENT_RUNTIME_USE_ENGINE_IMPORT_PROVIDER"], "1")
+        self.assertEqual(env["AGENT_RUNTIME_USE_ENGINE_ENVIRONMENT_IMPORT_PROVIDER"], "1")
+        self.assertEqual(env["AGENT_RUNTIME_USE_SCENE_SNAPSHOT_PROVIDER"], "1")
+        self.assertEqual(env["AGENT_RUNTIME_USE_ENGINE_TRANSFORM_PROVIDER"], "0")
+
+    def test_aitool_installs_f5_runtime_provider_defaults_before_worker_creation(self) -> None:
+        main_path = REPO_ROOT / "editor" / "plugins" / "AITool" / "main.py"
+        source = main_path.read_text(encoding="utf-8")
+        module = ast.parse(source)
+        install_line = 0
+        worker_line = 0
+        imported_install = False
+        for node in module.body:
+            if isinstance(node, ast.ImportFrom) and node.module == "services.agent_runtime.flags":
+                imported_install = any(
+                    alias.name == "install_f5_runtime_provider_env_defaults"
+                    for alias in node.names
+                )
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                func = node.value.func
+                if isinstance(func, ast.Name) and func.id == "install_f5_runtime_provider_env_defaults":
+                    install_line = int(getattr(node, "lineno", 0) or 0)
+            if isinstance(node, ast.ClassDef) and node.name == "AITool":
+                for stmt in node.body:
+                    if not isinstance(stmt, ast.Assign):
+                        continue
+                    if not any(isinstance(target, ast.Name) and target.id == "_lanchat_agent_worker" for target in stmt.targets):
+                        continue
+                    call = stmt.value
+                    if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "LANChatAgentWorker":
+                        worker_line = int(getattr(stmt, "lineno", 0) or 0)
+
+        self.assertTrue(imported_install)
+        self.assertGreater(install_line, 0)
+        self.assertGreater(worker_line, 0)
+        self.assertLess(install_line, worker_line)
+
+    def test_f5_runtime_provider_env_defaults_reach_worker_provider_summary(self) -> None:
+        class FakeTool:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.calls: list[dict[str, Any]] = []
+
+            def invoke(self, payload: dict) -> dict:
+                self.calls.append(dict(payload))
+                if self.name == "get_scene_snapshot":
+                    return {"scene_name": "Scene/f5.scene", "actors": []}
+                if self.name == "hunyuan_generate_3d":
+                    return {"local_path": f"E:/models/{payload.get('prompt') or 'object'}.glb"}
+                if self.name == "import_environment_component":
+                    return {
+                        "status": "success",
+                        "component_id": payload.get("component_id") or "env-1",
+                        "component_type": payload.get("component_type") or "terrain",
+                    }
+                if self.name == "set_actor_transform":
+                    return {"status": "success", "position": list(payload.get("position") or [0.0, 0.0, 0.0])}
+                return {
+                    "status": "success",
+                    "actor": {
+                        "actor_guid": "actor-f5",
+                        "name": payload.get("actor_name") or payload.get("name") or "actor",
+                    },
+                }
+
+        class FakeEngineWriteGate:
+            def invoke_tool(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+            def set_transform(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+        env: dict[str, str] = {}
+        install_f5_runtime_provider_env_defaults(env)
+        flags = AgentRuntimeFlags.from_env(env)
+        tools = {
+            name: FakeTool(name)
+            for name in (
+                "get_scene_snapshot",
+                "hunyuan_generate_3d",
+                "import_model",
+                "import_environment_component",
+                "set_actor_transform",
+            )
+        }
+        gate_module = types.ModuleType("plugins.AITool.cai_extensions.agent.engine_write_gate")
+        gate_module.get_engine_write_gate = lambda: FakeEngineWriteGate()
+        with patch.dict(
+            sys.modules,
+            {
+                "plugins.AITool.cai_extensions.agent.engine_write_gate": gate_module,
+            },
+        ), patch.object(
+            LANChatAgentWorker,
+            "_get_runtime_tool",
+            lambda self, name: tools.get(name),
+        ):
+            worker = _TestWorker(corona_engine=object(), agent_runtime_flags=flags)
+
+        provider_summary = worker._agent_runtime.status_summary("room-f5-defaults")["provider_summary"]
+        self.assertEqual(provider_summary["scene_snapshot"]["mode"], "adapter")
+        self.assertEqual(provider_summary["model_resource"]["mode"], "adapter")
+        self.assertEqual(provider_summary["environment_component"]["mode"], "runtime_component_facts")
+        self.assertEqual(provider_summary["actor_import"]["mode"], "adapter")
+        self.assertEqual(provider_summary["environment_import"]["mode"], "adapter")
+        self.assertEqual(provider_summary["layout_transform"]["mode"], "adapter")
+        self.assertEqual(provider_summary["actor_import"]["status"], "enabled")
+        self.assertEqual(provider_summary["actor_import"]["reason"], "import_model")
+
+    def test_f5_runtime_provider_env_defaults_execute_graph_through_engine_bridge(self) -> None:
+        class FakeTool:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.calls: list[dict[str, Any]] = []
+
+            def invoke(self, payload: dict) -> dict:
+                self.calls.append(dict(payload))
+                if self.name == "get_scene_snapshot":
+                    return {"scene_name": "Scene/f5.scene", "actors": []}
+                if self.name == "hunyuan_generate_3d":
+                    return {
+                        "local_path": f"E:/models/{payload.get('prompt') or payload.get('object_name') or 'object'}.glb",
+                        "model_id": f"model-{len(self.calls)}",
+                    }
+                if self.name == "import_environment_component":
+                    return {
+                        "status": "success",
+                        "component_id": payload.get("component_id") or payload.get("object_id") or "env-1",
+                        "name": payload.get("name") or "environment",
+                        "component_type": payload.get("component_type") or "environment",
+                        "position": list(payload.get("position") or [0.0, 0.0, 0.0]),
+                        "rotation": list(payload.get("rotation") or [0.0, 0.0, 0.0]),
+                        "scale": list(payload.get("scale") or [1.0, 1.0, 1.0]),
+                        "aabb": {"min": [-8.0, 0.0, -8.0], "max": [8.0, 0.05, 8.0]},
+                        "sync_status": "engine_imported",
+                    }
+                if self.name == "set_actor_transform":
+                    return {
+                        "status": "success",
+                        "actor_id": payload.get("actor_id") or payload.get("target") or "actor-transform",
+                        "position": list(payload.get("position") or [0.0, 0.0, 0.0]),
+                        "rotation": list(payload.get("rotation") or [0.0, 0.0, 0.0]),
+                        "scale": list(payload.get("scale") or [1.0, 1.0, 1.0]),
+                    }
+                return {
+                    "status": "success",
+                    "actor": {
+                        "actor_guid": f"actor-{len(self.calls)}",
+                        "name": payload.get("actor_name") or payload.get("name") or "actor",
+                        "position": list(payload.get("position") or [0.0, 0.0, 0.0]),
+                        "rotation": list(payload.get("rotation") or [0.0, 0.0, 0.0]),
+                        "scale": list(payload.get("scale") or [1.0, 1.0, 1.0]),
+                        "world_aabb": {"min": [-0.5, 0.0, -0.5], "max": [0.5, 1.0, 0.5]},
+                        "sync_status": "created",
+                    },
+                }
+
+        class FakeEngineWriteGate:
+            def invoke_tool(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+            def set_transform(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+        env: dict[str, str] = {}
+        install_f5_runtime_provider_env_defaults(env)
+        flags = AgentRuntimeFlags.from_env(env)
+        tools = {
+            name: FakeTool(name)
+            for name in (
+                "get_scene_snapshot",
+                "hunyuan_generate_3d",
+                "import_model",
+                "import_environment_component",
+                "set_actor_transform",
+            )
+        }
+        gate_module = types.ModuleType("plugins.AITool.cai_extensions.agent.engine_write_gate")
+        gate_module.get_engine_write_gate = lambda: FakeEngineWriteGate()
+        with patch.dict(
+            sys.modules,
+            {
+                "plugins.AITool.cai_extensions.agent.engine_write_gate": gate_module,
+            },
+        ), patch.object(
+            LANChatAgentWorker,
+            "_get_runtime_tool",
+            lambda self, name: tools.get(name),
+        ):
+            worker = _TestWorker(corona_engine=object(), agent_runtime_flags=flags)
+
+        plan = worker._agent_runtime.propose_scene_plan(
+            room_id="room-f5-execute",
+            text="生成一个小营地，有草地、天空、帐篷、小木桌。",
+            owner_agent="小女孩",
+        )
+        worker._agent_runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
+        result = worker._agent_runtime.execute_scene_plan(plan.plan_id)
+        report = worker._agent_runtime.generate_report("room-f5-execute", plan_id=plan.plan_id)
+
+        self.assertTrue(tools["hunyuan_generate_3d"].calls)
+        self.assertTrue(tools["import_model"].calls)
+        self.assertTrue(tools["import_environment_component"].calls)
+        self.assertTrue(result["graphs"])
+        self.assertEqual(result["graphs"][0]["status"], "completed")
+        bridge_summary = report["engine_write_boundary_summary"]
+        self.assertGreaterEqual(bridge_summary["bridge_call_count"], 2)
+        self.assertGreaterEqual(bridge_summary["bridge_success_count"], 2)
+        self.assertEqual(bridge_summary["bridge_failed_count"], 0)
+        self.assertIn("engine_actor_import", bridge_summary["write_source_counts"])
+        self.assertIn("engine_environment_import", bridge_summary["write_source_counts"])
+        registry = report["scene_entity_registry"]
+        self.assertGreaterEqual(registry["actor_count"], 1)
+        self.assertEqual(registry["missing_transform_count"], 0)
+        self.assertEqual(registry["missing_aabb_count"], 0)
+        self.assertGreaterEqual(registry["actor_aabb_available_count"], 1)
+        self.assertGreaterEqual(registry["aabb_available_count"], 2)
+        self.assertGreaterEqual(registry["entity_type_counts"].get("terrain", 0), 1)
+        self.assertGreaterEqual(registry["sync_status_counts"].get("created", 0), 1)
+        self.assertGreaterEqual(registry["sync_status_counts"].get("engine_imported", 0), 1)
 
     def test_worker_preflight_all_runtime_provider_flags_use_narrow_adapters(self) -> None:
         class FakeTool:
@@ -974,7 +1313,7 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                 if self.name == "generate_image":
                     return {"image_url": "mock://provider.png"}
                 if self.name == "hunyuan_generate_3d":
-                    return {"local_path": f"E:/models/{payload.get('object_name')}.glb"}
+                    return {"local_path": f"E:/models/{payload.get('prompt')}.glb"}
                 if self.name == "scene_rationality_review":
                     return {"overall": "PASS", "issues": []}
                 if self.name == "create_environment_component":
@@ -1030,18 +1369,17 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             "ALLOW_LEGACY_MAIN_WORKFLOW": "1",
             "OLD_WORKFLOW_DIRECT_ENTRY_DISABLED": "1",
         })
-        workflow_module = types.ModuleType("plugins.AITool.cai_extensions.flows.scene_composition_workflow")
-        helpers_module = types.ModuleType("plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers")
-        helpers_module.get_tool = lambda name: tools.get(name)
         gate_module = types.ModuleType("plugins.AITool.cai_extensions.agent.engine_write_gate")
         gate_module.get_engine_write_gate = lambda: FakeEngineWriteGate()
         with patch.dict(
             sys.modules,
             {
-                "plugins.AITool.cai_extensions.flows.scene_composition_workflow": workflow_module,
-                "plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers": helpers_module,
                 "plugins.AITool.cai_extensions.agent.engine_write_gate": gate_module,
             },
+        ), patch.object(
+            LANChatAgentWorker,
+            "_get_runtime_tool",
+            lambda self, name: tools.get(name),
         ):
             worker = _TestWorker(
                 corona_engine=object(),
@@ -1077,6 +1415,149 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             self.assertEqual(provider_summary[key]["status"], "enabled", key)
         self.assertNotIn("legacy_workflow", str(provider_summary))
 
+    def test_worker_enables_engine_actor_import_provider_by_default_when_tool_exists(self) -> None:
+        class FakeTool:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.calls: list[dict] = []
+
+            def invoke(self, payload: dict) -> dict:
+                self.calls.append(dict(payload))
+                if self.name == "hunyuan_generate_3d":
+                    return {"local_path": f"E:/models/{payload.get('prompt') or 'object'}.glb"}
+                if self.name == "import_environment_component":
+                    return {
+                        "status": "success",
+                        "component_id": payload.get("component_id") or payload.get("object_id") or "env-1",
+                        "name": payload.get("name") or "environment",
+                        "component_type": payload.get("component_type") or "environment",
+                    }
+                return {
+                    "status": "success",
+                    "actor": {
+                        "actor_guid": f"actor-{len(self.calls)}",
+                        "name": payload.get("actor_name") or payload.get("name") or "actor",
+                        "position": list(payload.get("position") or [0.0, 0.0, 0.0]),
+                        "rotation": list(payload.get("rotation") or [0.0, 0.0, 0.0]),
+                        "scale": list(payload.get("scale") or [1.0, 1.0, 1.0]),
+                    },
+                }
+
+        class FakeEngineWriteGate:
+            def invoke_tool(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+        import_tool = FakeTool("import_model")
+        environment_import_tool = FakeTool("import_environment_component")
+        model_tool = FakeTool("hunyuan_generate_3d")
+        runtime_tools = {
+            "import_model": import_tool,
+            "import_environment_component": environment_import_tool,
+            "hunyuan_generate_3d": model_tool,
+        }
+        gate_module = types.ModuleType("plugins.AITool.cai_extensions.agent.engine_write_gate")
+        gate_module.get_engine_write_gate = lambda: FakeEngineWriteGate()
+
+        with patch.dict(
+            sys.modules,
+            {
+                "plugins.AITool.cai_extensions.agent.engine_write_gate": gate_module,
+            },
+        ), patch.object(
+            LANChatAgentWorker,
+            "_get_runtime_tool",
+            lambda self, name: runtime_tools.get(name),
+        ):
+            worker = _TestWorker(
+                corona_engine=object(),
+                agent_runtime_flags=AgentRuntimeFlags.from_env({
+                    "AGENT_RUNTIME_USE_MODEL_PROVIDER": "1",
+                }),
+            )
+
+        provider_summary = worker._agent_runtime.status_summary("room-default-engine-import")["provider_summary"]
+        self.assertEqual(provider_summary["actor_import"]["mode"], "adapter")
+        self.assertTrue(provider_summary["actor_import"]["requested"])
+        self.assertEqual(provider_summary["actor_import"]["status"], "enabled")
+        self.assertEqual(provider_summary["actor_import"]["reason"], "import_model")
+        self.assertEqual(provider_summary["environment_import"]["mode"], "runtime_state_only")
+        self.assertNotIn("requested", provider_summary["environment_import"])
+        self.assertEqual(provider_summary["model_resource"]["mode"], "adapter")
+
+        plan = worker._agent_runtime.propose_scene_plan(
+            room_id="room-default-engine-import",
+            text="做一个简单森林营地，有草地、天空、帐篷、小木桌",
+            owner_agent="小女孩",
+        )
+        worker._agent_runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
+        result = worker._agent_runtime.execute_scene_plan(plan.plan_id)
+
+        self.assertTrue(import_tool.calls)
+        self.assertFalse(environment_import_tool.calls)
+        self.assertTrue(result["graphs"])
+        self.assertEqual(result["graphs"][0]["status"], "completed")
+        report = worker._agent_runtime.generate_report("room-default-engine-import", plan_id=plan.plan_id)
+        bridge_summary = report["engine_write_boundary_summary"]
+        self.assertGreaterEqual(bridge_summary["bridge_call_count"], 1)
+        self.assertGreaterEqual(bridge_summary["bridge_success_count"], 1)
+        self.assertEqual(bridge_summary["bridge_failed_count"], 0)
+        self.assertIn("engine_actor_import", bridge_summary["write_source_counts"])
+        self.assertGreaterEqual(bridge_summary["environment_import_boundary_count"], 1)
+
+    def test_worker_does_not_enable_engine_actor_import_without_model_resource_provider(self) -> None:
+        class FakeImportTool:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def invoke(self, payload: dict) -> dict:
+                self.calls.append(dict(payload))
+                return {
+                    "status": "success",
+                    "actor": {
+                        "actor_guid": f"actor-{len(self.calls)}",
+                        "name": payload.get("actor_name") or "actor",
+                    },
+                }
+
+        import_tool = FakeImportTool()
+        flags = AgentRuntimeFlags.from_env({
+            "AGENT_RUNTIME_ENABLED": "1",
+            "AGENT_RUNTIME_USE_MODEL_PROVIDER": "1",
+        })
+        with patch.object(
+            LANChatAgentWorker,
+            "_get_runtime_tool",
+            lambda self, name: import_tool if name == "import_model" else None,
+        ):
+            worker = _TestWorker(
+                corona_engine=object(),
+                agent_runtime_flags=flags,
+            )
+
+        provider_summary = worker._agent_runtime.status_summary("room-import-without-model-provider")["provider_summary"]
+        self.assertNotEqual(provider_summary["actor_import"]["mode"], "adapter")
+        self.assertFalse(import_tool.calls)
+
+        plan = worker._agent_runtime.propose_scene_plan(
+            room_id="room-import-without-model-provider",
+            text="做一个简单营地，有帐篷、小木桌",
+            owner_agent="小女孩",
+        )
+        worker._agent_runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
+        result = worker._agent_runtime.execute_scene_plan(plan.plan_id)
+
+        self.assertFalse(import_tool.calls)
+        self.assertTrue(result["graphs"])
+        self.assertEqual(result["graphs"][0]["status"], "completed")
+        report = worker._agent_runtime.generate_report(
+            "room-import-without-model-provider",
+            plan_id=plan.plan_id,
+        )
+        bridge_summary = report["engine_write_boundary_summary"]
+        self.assertEqual(bridge_summary["bridge_call_count"], 0)
+        self.assertGreaterEqual(bridge_summary["status_counts"].get("runtime_state_only", 0), 1)
+        self.assertGreaterEqual(report["scene_entity_registry"]["actor_count"], 1)
+
     def test_worker_can_build_runtime_with_image_provider_flag_without_main_workflow(self) -> None:
         class FakeImageTool:
             def __init__(self) -> None:
@@ -1090,15 +1571,10 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         flags = AgentRuntimeFlags.from_env({
             "AGENT_RUNTIME_USE_IMAGE_PROVIDER": "1",
         })
-        workflow_module = types.ModuleType("plugins.AITool.cai_extensions.flows.scene_composition_workflow")
-        helpers_module = types.ModuleType("plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers")
-        helpers_module.get_tool = lambda name: image_tool if name == "generate_image" else None
-        with patch.dict(
-            sys.modules,
-            {
-                "plugins.AITool.cai_extensions.flows.scene_composition_workflow": workflow_module,
-                "plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers": helpers_module,
-            },
+        with patch.object(
+            LANChatAgentWorker,
+            "_get_runtime_tool",
+            lambda self, name: image_tool if name == "generate_image" else None,
         ):
             worker = _TestWorker(agent_runtime_flags=flags)
 
@@ -1128,15 +1604,10 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         flags = AgentRuntimeFlags.from_env({
             "AGENT_RUNTIME_USE_SCENE_REVIEW_PROVIDER": "1",
         })
-        workflow_module = types.ModuleType("plugins.AITool.cai_extensions.flows.scene_composition_workflow")
-        helpers_module = types.ModuleType("plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers")
-        helpers_module.get_tool = lambda name: review_tool if name == "scene_rationality_review" else None
-        with patch.dict(
-            sys.modules,
-            {
-                "plugins.AITool.cai_extensions.flows.scene_composition_workflow": workflow_module,
-                "plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers": helpers_module,
-            },
+        with patch.object(
+            LANChatAgentWorker,
+            "_get_runtime_tool",
+            lambda self, name: review_tool if name == "scene_rationality_review" else None,
         ):
             worker = _TestWorker(agent_runtime_flags=flags)
 
@@ -2575,7 +3046,7 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("reconcile 1/0", reply or "")
         self.assertIn("failure codes sync-event-record-failed:1", reply or "")
         self.assertIn("latest failure sync-event-record-failed", reply or "")
-        self.assertIn("模型同传：assets 1", reply or "")
+        self.assertIn("模型同传：assets 2", reply or "")
         self.assertIn("progress 60%", reply or "")
         self.assertIn("Engine write:", reply or "")
         self.assertNotIn("readiness-mismatch", reply or "")
@@ -2821,6 +3292,9 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                 "secret_provider_raw": 1,
             },
             "status_counts": {"success": 2, "failed": 1},
+            "bridge_call_count": 2,
+            "bridge_success_count": 2,
+            "bridge_failed_count": 0,
         })
 
         self.assertIn("boundary 3", text)
@@ -2828,8 +3302,21 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("engine_actor_import:1", text)
         self.assertIn("runtime_layout_transform:1", text)
         self.assertIn("success:2", text)
+        self.assertIn("native verified", text)
         self.assertNotIn("provider", text)
         self.assertNotIn("secret_provider_raw", text)
+
+        runtime_state_only_text = LANChatAgentWorker._format_agent_runtime_engine_write_boundary_report({
+            "boundary_fact_count": 1,
+            "import_boundary_count": 1,
+            "status_counts": {"runtime_state_only": 1},
+            "bridge_call_count": 0,
+            "bridge_success_count": 0,
+            "bridge_failed_count": 0,
+        })
+        self.assertIn("runtime_state_only:1", runtime_state_only_text)
+        self.assertIn("bridge 0/0/0", runtime_state_only_text)
+        self.assertIn("native pending F5", runtime_state_only_text)
 
     def test_gm_summary_includes_runtime_sync_summary(self) -> None:
         coordinator = _ExplodingCoordinator()
@@ -3460,15 +3947,10 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         flags = AgentRuntimeFlags.from_env({
             "AGENT_RUNTIME_USE_SCENE_SNAPSHOT_PROVIDER": "1",
         })
-        workflow_module = types.ModuleType("plugins.AITool.cai_extensions.flows.scene_composition_workflow")
-        helpers_module = types.ModuleType("plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers")
-        helpers_module.get_tool = lambda name: snapshot_tool if name == "get_scene_snapshot" else None
-        with patch.dict(
-            sys.modules,
-            {
-                "plugins.AITool.cai_extensions.flows.scene_composition_workflow": workflow_module,
-                "plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers": helpers_module,
-            },
+        with patch.object(
+            LANChatAgentWorker,
+            "_get_runtime_tool",
+            lambda self, name: snapshot_tool if name == "get_scene_snapshot" else None,
         ):
             worker = _TestWorker(
                 corona_engine=object(),
@@ -3641,6 +4123,16 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                 "prompt": "hidden",
             },
         )
+        worker._agent_runtime.operation_log.append(
+            "runtime_worker_drain_failed",
+            room_id="room-runtime-replay",
+            payload={
+                "drained_count": 0,
+                "reason": "synthetic queue drain failure",
+                "provider": "hidden",
+                "url": "https://example.invalid/drain",
+            },
+        )
 
         reply = worker._handle_agent_runtime_operation_replay_query({
             "room_id": "room-runtime-replay",
@@ -3668,6 +4160,8 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("conflicts 2", reply or "")
         self.assertIn("engine_write:", reply or "")
         self.assertNotIn("readiness-mismatch", reply or "")
+        self.assertIn("worker_drain:", reply or "")
+        self.assertIn("failed 1", reply or "")
         self.assertIn("import 2", reply or "")
         self.assertIn("success:1", reply or "")
         self.assertIn("failed:1", reply or "")
@@ -4441,6 +4935,17 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                 "prompt": "secret-prompt",
             },
         )
+        worker._agent_runtime.operation_log.append(
+            "runtime_worker_drain_failed",
+            room_id="room-runtime-report",
+            plan_id=created["plan"]["plan_id"],
+            payload={
+                "drained_count": 0,
+                "reason": "synthetic queue drain failure",
+                "provider": "hidden-provider",
+                "url": "https://example.invalid/drain",
+            },
+        )
 
         reply = worker._handle_agent_runtime_report_query({
             "room_id": "room-runtime-report",
@@ -4457,11 +4962,20 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
 
         self.assertIn("Runtime Report", reply or "")
         self.assertIn("objects:", reply or "")
+        self.assertIn("classification:", reply or "")
+        self.assertIn("model/substrate", reply or "")
         self.assertIn("models:", reply or "")
         self.assertIn("substrate:", reply or "")
+        self.assertIn("scene registry:", reply or "")
+        self.assertIn("entities", reply or "")
+        self.assertIn("actor", reply or "")
+        self.assertIn("actor import:", reply or "")
+        self.assertIn("registered actor", reply or "")
         self.assertIn("scene contract:", reply or "")
         self.assertIn("outdoor-scene", reply or "")
         self.assertIn("outdoor-ground", reply or "")
+        self.assertIn("closure:", reply or "")
+        self.assertIn("patch applied/conflict/invalid", reply or "")
         self.assertIn("semantic arbitration:", reply or "")
         self.assertIn("ready-for-next-runtime-step", reply or "")
         self.assertIn("scene snapshot:", reply or "")
@@ -4470,6 +4984,8 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("image", reply or "")
         self.assertIn("model", reply or "")
         self.assertIn("report health:", reply or "")
+        self.assertIn("needs-attention", reply or "")
+        self.assertIn("worker-drain", reply or "")
         self.assertIn("import:", reply or "")
         self.assertIn("imported", reply or "")
         self.assertIn("environment:", reply or "")
@@ -4496,6 +5012,8 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("latest failure sync-event-record-failed", reply or "")
         self.assertIn("asset transfer replay:", reply or "")
         self.assertIn("peer-ready 1", reply or "")
+        self.assertIn("worker drain replay:", reply or "")
+        self.assertIn("failed 1", reply or "")
         self.assertIn("peer sync replay:", reply or "")
         self.assertIn("join 1", reply or "")
         self.assertIn("reconcile 1/0", reply or "")
@@ -4565,9 +5083,14 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             external_plan_id="seed-runtime-report",
         )
         self.assertIn("几何事实：", status_reply)
+        self.assertIn("场景实体：", status_reply)
+        self.assertIn("entities", status_reply)
+        self.assertIn("actor", status_reply)
         self.assertIn("写入边界：", status_reply)
         self.assertIn("报告健康：", status_reply)
         self.assertIn("Engine write readiness:", status_reply)
+        self.assertIn("Worker drain replay:", status_reply)
+        self.assertIn("failed 1", status_reply)
         self.assertIn("runtime-state", status_reply)
         self.assertIn("fallback", status_reply)
         self.assertIn("disabled", status_reply)
@@ -5814,6 +6337,36 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(len(state["planning_context_events"]), 1)
         self.assertIn("强盗藏宝室", state["planning_context_events"][0]["text_preview"])
 
+    def test_agent_trigger_generate_one_scene_seeds_runtime_plan_without_legacy_compose(self) -> None:
+        worker = _TestWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))
+
+        with patch.object(
+            worker._agent_runtime,
+            "query_state",
+            side_effect=AssertionError("planning seed bridge must not pre-read RuntimeState"),
+        ):
+            result = worker._seed_agent_trigger_planning_context_in_runtime({
+                "room_id": "room-agent-generate-one",
+                "message_id": "msg-generate-one",
+                "text": "生成一个儿童卧室，有小木马、玩具、小木桌。",
+                "sender_id": "host-1",
+                "sender_name": "房主",
+                "sender_type": "host",
+                "message_kind": "chat",
+                "agent_id": "girl",
+                "agent_name": "小女孩",
+            })
+
+        self.assertTrue(result["recorded"])
+        self.assertEqual(result["action"], "plan_context")
+        state = worker._agent_runtime.state.snapshot("room-agent-generate-one")["room"]
+        self.assertTrue(state["active_plan_id"])
+        runtime_plan = state["scene_plans"][state["active_plan_id"]]
+        self.assertEqual(runtime_plan["owner_agent"], "小女孩")
+        self.assertEqual(self._non_planning_tool_graphs(state), [])
+        self.assertEqual(len(state["planning_context_events"]), 1)
+        self.assertIn("儿童卧室", state["planning_context_events"][0]["text_preview"])
+
     def test_agent_trigger_basis_revision_records_target_and_source_agents(self) -> None:
         worker = _TestWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))
 
@@ -5879,6 +6432,98 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(runtime_plan["status"], "completed")
         self.assertTrue(state["tool_graphs"])
         self.assertIn("runtime_message_executed", worker._agent_runtime.operation_log.events())
+
+    def test_agent_reply_plan_context_survives_followup_confirm_generation(self) -> None:
+        coordinator = _FakeNoActiveCoordinator()
+        worker = _TestWorker(
+            interaction_coordinator=coordinator,
+            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+        )
+        trigger = {
+            "room_id": "room-agent-reply-confirm-context",
+            "message_id": "msg-user-bedroom",
+            "text": "@小女孩 生成一个儿童卧室，有小木马、玩具、小木桌。",
+            "sender_id": "host-1",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "agent_id": "girl",
+            "agent_name": "小女孩",
+        }
+        reply_text = (
+            "小女孩先帮你整理一个温柔、好落地的版本。\n\n"
+            "我理解你的目标是：生成一个儿童卧室，有小木马、玩具、小木桌。\n\n"
+            "方案内容：\n"
+            "1. 风格定位：可爱、柔和、安全的儿童房。\n"
+            "2. 空间布局：床边留出玩具区，小木桌靠窗，中央保留活动区。\n"
+            "3. 核心物件：小木马、玩具、小木桌、儿童床、地毯。\n"
+            "建议先做：确认空间边界，再生成核心家具和玩具。"
+        )
+
+        self.assertTrue(worker._should_promote_agent_reply_to_runtime_plan(trigger, reply_text))
+        recorded = worker._mirror_agent_reply_context_in_agent_runtime(
+            room_id="room-agent-reply-confirm-context",
+            text=reply_text,
+            trigger=trigger,
+            agent_id="girl",
+            agent_name="小女孩",
+        )
+
+        self.assertTrue(recorded["recorded"])
+        reply = worker._handle_coordinator_generation_start({
+            "room_id": "room-agent-reply-confirm-context",
+            "message_id": "msg-confirm-agent-reply-plan",
+            "text": "确认生成",
+            "sender_id": "host-1",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "agent_id": "girl",
+            "agent_name": "小女孩",
+        })
+
+        self.assertIn("【AgentRuntime 执行结果】ScenePlan", reply or "")
+        self.assertEqual(coordinator.execute_calls, [])
+        state = worker._agent_runtime.query_state("room-agent-reply-confirm-context")["room"]
+        runtime_plan = state["scene_plans"][state["active_plan_id"]]
+        self.assertEqual(runtime_plan["status"], "completed")
+        self.assertIn("儿童卧室", runtime_plan["design_brief"])
+        self.assertIn("小木马", runtime_plan["design_brief"])
+        self.assertNotEqual(runtime_plan["design_brief"].strip(), "确认生成")
+        self.assertTrue(state["tool_graphs"])
+
+    def test_agent_reply_design_opinion_does_not_create_runtime_plan(self) -> None:
+        worker = _TestWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))
+        trigger = {
+            "room_id": "room-agent-opinion-context",
+            "message_id": "msg-opinion",
+            "text": "评价一下长者方案",
+            "sender_id": "host-1",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "agent_id": "merchant",
+            "agent_name": "商人",
+        }
+        reply_text = (
+            "长者方案整体清楚，布局有层次。"
+            "我的建议是保留中央藏宝区和入口火把，但后续仍需要房主确认具体生成方案。"
+        )
+
+        self.assertFalse(worker._should_promote_agent_reply_to_runtime_plan(trigger, reply_text))
+        recorded = worker._mirror_agent_reply_context_in_agent_runtime(
+            room_id="room-agent-opinion-context",
+            text=reply_text,
+            trigger=trigger,
+            agent_id="merchant",
+            agent_name="商人",
+        )
+
+        self.assertTrue(recorded["recorded"])
+        self.assertFalse(recorded["runtime_plan_id"])
+        state = worker._agent_runtime.query_state("room-agent-opinion-context")["room"]
+        self.assertFalse(state["active_plan_id"])
+        self.assertEqual(state["scene_plans"], {})
 
     def test_generation_start_uses_runtime_active_plan_without_coordinator_active_lookup(self) -> None:
         coordinator = _ExplodingCoordinator()
@@ -7486,9 +8131,21 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
 
         worker._broadcast_confirmed_action(prepared)
 
-        self.assertEqual(len(engine.intent_broadcasts), 4)
+        self.assertEqual(len(engine.intent_broadcasts), 1)
+        self.assertTrue(engine.system_messages)
+        self.assertIn("AgentRuntime", engine.system_messages[-1]["text"])
+        self.assertIn("ScenePlan", engine.system_messages[-1]["text"])
+        self.assertEqual(engine.system_messages[-1]["message_kind"], "action_status")
         state = worker._agent_runtime.query_state("room-runtime-approved")["room"]
         self.assertEqual(state["external_plan_links"]["planning:msg-runtime-approved"], state["active_plan_id"])
+        self.assertTrue(state["tool_graphs"])
+        result_entries = worker._agent_runtime.operation_log.query(event="tool_call_started")
+        self.assertTrue([
+            entry
+            for entry in result_entries
+            if entry.payload.get("tool_name") == "runtime.actor.import_batch"
+            and entry.payload.get("runtime_guard") == "authorized"
+        ])
 
     def test_explicit_legacy_flags_keep_host_action_structured_handler_for_transition(self) -> None:
         coordinator = _FakeCoordinator()
@@ -8678,6 +9335,87 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertNotIn("prompt", visible_text)
         self.assertNotIn("patch_id", visible_text)
 
+    def test_process_once_auto_drain_completed_graph_does_not_log_exception(self) -> None:
+        engine = _FakeIdleEngine()
+        worker = _TestWorker(
+            corona_engine=engine,
+            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+        )
+        plan = worker._agent_runtime.sync_external_plan_context(
+            room_id="room-auto-drain-completed",
+            external_plan_id="seed-auto-drain-completed",
+            text="生成一个简单森林营地，有草地、天空、帐篷、小木桌。",
+            owner_agent="长者",
+        )
+        result = worker._agent_runtime.handle_message(
+            room_id="room-auto-drain-completed",
+            text="确认生成",
+            sender_id="host-1",
+            sender_name="房主",
+            action="confirm_and_execute",
+            external_plan_id=plan.plan_id,
+            max_items_per_batch=8,
+        )
+        self.assertEqual(len(result["graphs"]), 1)
+        self.assertEqual(result["graphs"][0]["status"], "completed")
+        worker._remember_room_id("room-auto-drain-completed")
+        before_state = worker._agent_runtime.query_state("room-auto-drain-completed")["room"]
+        before_graph_count = len(before_state["tool_graphs"])
+
+        processed = worker.process_once()
+
+        self.assertFalse(processed)
+        events = worker._agent_runtime.operation_log.events()
+        self.assertIn("runtime_message_drained", events)
+        self.assertNotIn("runtime_worker_drain_exception", events)
+        self.assertNotIn("runtime_worker_drain_failed", events)
+        state = worker._agent_runtime.query_state("room-auto-drain-completed")["room"]
+        self.assertEqual(state["active_plan_id"], plan.plan_id)
+        self.assertEqual(len(state["batch_plans"]), 1)
+        self.assertEqual(len(state["tool_graphs"]), before_graph_count)
+
+    def test_process_once_records_worker_drain_failed_status_as_audit_event(self) -> None:
+        class _DrainFailedRuntime:
+            def __init__(self) -> None:
+                self.audit_events: list[dict[str, Any]] = []
+
+            def handle_message(self, *, action: str, sync_event: dict[str, Any] | None = None, **kwargs):  # noqa: ANN001
+                if action == "worker_drain":
+                    return {
+                        "drain": {
+                            "status": "failed",
+                            "reason": "synthetic queue drain failure",
+                            "drained_count": 0,
+                        }
+                    }
+                if action == "runtime_audit_event":
+                    self.audit_events.append(dict(sync_event or {}))
+                    return {
+                        "recorded": True,
+                        "event": str((sync_event or {}).get("event") or ""),
+                        "runtime_plan_id": "",
+                    }
+                return {}
+
+        engine = _FakeIdleEngine()
+        worker = _TestWorker(
+            corona_engine=engine,
+            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+        )
+        runtime = _DrainFailedRuntime()
+        worker._agent_runtime = runtime
+        worker._remember_room_id("room-drain-failed")
+
+        processed = worker.process_once()
+
+        self.assertFalse(processed)
+        self.assertEqual(len(runtime.audit_events), 1)
+        audit_event = runtime.audit_events[0]
+        self.assertEqual(audit_event["event"], "runtime_worker_drain_failed")
+        self.assertEqual(audit_event["payload"]["phase"], "agent_runtime_worker_drain")
+        self.assertEqual(audit_event["payload"]["drained_count"], 0)
+        self.assertIn("synthetic queue drain failure", audit_event["payload"]["reason"])
+
     def test_runtime_confirmed_seedplan_execution_remembers_room_for_worker_drain(self) -> None:
         worker = _TestWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))
 
@@ -8695,6 +9433,20 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("room-confirm-remembers", worker._active_room_ids)
         state = worker._agent_runtime.query_state("room-confirm-remembers")["room"]
         self.assertTrue(state["tool_graph_queue"])
+
+    def test_single_default_local_player_is_treated_as_host(self) -> None:
+        self.assertTrue(LANChatAgentWorker._message_sender_is_host({
+            "room_id": "single-default",
+            "sender_id": "local-single-player",
+            "sender_name": "房主",
+            "sender_type": "user",
+        }))
+        self.assertFalse(LANChatAgentWorker._message_sender_is_host({
+            "room_id": "room-remote",
+            "sender_id": "user-2",
+            "sender_name": "普通用户",
+            "sender_type": "user",
+        }))
 
     def test_active_runtime_plan_generation_remembers_room_for_worker_drain(self) -> None:
         worker = _TestWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))
@@ -8724,6 +9476,318 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         state = worker._agent_runtime.query_state("room-active-remembers")["room"]
         self.assertEqual(state["active_plan_id"], plan.plan_id)
         self.assertTrue(state["tool_graph_queue"])
+
+    def test_agent_runtime_execution_reply_accepts_single_graph_shape(self) -> None:
+        result = {
+            "plan": {"plan_id": "plan-single-graph"},
+            "batch": {"batch_id": "batch-single"},
+            "graph": {"graph_id": "graph-single", "status": "completed"},
+            "report": {
+                "report_health_summary": {
+                    "status": "needs_attention",
+                    "attention_required": True,
+                    "engine_write_runtime_state_only_count": 1,
+                    "engine_write_runtime_state_only_channels": ["actor_import"],
+                    "reasons": ["engine_write_runtime_state_only"],
+                },
+                "scene_entity_registry": {
+                    "entity_count": 3,
+                    "entity_type_counts": {
+                        "actor": 1,
+                        "terrain": 1,
+                        "skybox": 1,
+                    },
+                },
+                "runtime_scene_flow_summary": {
+                    "status": "ok",
+                    "steps": [
+                        {"step": "plan"},
+                        {"step": "terrain"},
+                        {"step": "asset"},
+                        {"step": "actor"},
+                        {"step": "review"},
+                        {"step": "report"},
+                    ],
+                },
+                "classification_summary": {
+                    "model_items": ["帐篷"],
+                    "substrate_items": ["草地", "天空"],
+                },
+                "tool_execution_digest": {
+                    "available": True,
+                    "succeeded_count": 6,
+                    "failed_count": 0,
+                    "blocked_count": 0,
+                },
+                "state_patch_summary": {
+                    "applied": 5,
+                    "conflict": 0,
+                    "invalid": 0,
+                },
+                "tool_queue_health_summary": {
+                    "queue_count": 2,
+                    "queued_count": 0,
+                    "running_count": 0,
+                    "blocked_count": 0,
+                    "terminal_count": 2,
+                    "active_count": 0,
+                    "queue_pressure": 0.0,
+                },
+                "batch_tooling_summary": {
+                    "fact_count": 4,
+                    "created_batch_fact_count": 1,
+                    "created_batch_count": 1,
+                    "prioritized_item_count": 3,
+                    "merged_intervention_fact_count": 1,
+                    "merged_intervention_item_count": 2,
+                    "absorbed_intervention_count": 2,
+                },
+                "runtime_guard_replay_summary": {
+                    "blocked_count": 2,
+                    "requires_write_blocked_count": 1,
+                    "system_actor_write_blocked_count": 1,
+                    "high_risk_confirmation_required_count": 1,
+                    "write_confirmation_required_count": 2,
+                    "confirmed_blocked_count": 1,
+                    "unconfirmed_blocked_count": 1,
+                },
+                "operation_count": 12,
+                "operation_total_count": 15,
+                "fact_source_boundary_summary": {
+                    "runtime_state_source": "RuntimeState",
+                },
+                "engine_write_boundary_summary": {
+                    "boundary_fact_count": 1,
+                    "import_boundary_count": 1,
+                    "bridge_call_count": 0,
+                    "bridge_success_count": 0,
+                    "bridge_failed_count": 0,
+                    "bridge_error_code_counts": {"cpp_actor_import_failed": 1},
+                    "status_counts": {"runtime_state_only": 1},
+                    "write_source_counts": {"runtime_default_import_provider": 1},
+                },
+                "import_summary": {
+                    "import_failure_code_counts": {"missing_ready_model_resource": 1},
+                    "environment_import_failure_code_counts": {"terrain_import_unavailable": 1},
+                },
+                "operation_replay_summary": {
+                    "resource_summary": {
+                        "by_phase": {
+                            "image": {"requested_count": 1, "failed_count": 0},
+                            "model": {"requested_count": 1, "failed_count": 0},
+                        },
+                    },
+                    "geometry_fact_replay_summary": {
+                        "fact_count": 1,
+                        "aabb_actor_count": 1,
+                        "overlap_issue_count": 0,
+                    },
+                    "vlm_checkpoint_summary": {
+                        "checkpoint_count": 1,
+                        "advisory_count": 0,
+                    },
+                    "sync_replay_summary": {
+                        "recorded_count": 1,
+                        "failed_count": 0,
+                    },
+                    "asset_transfer_replay_summary": {
+                        "asset_transfer_progress_count": 1,
+                        "asset_transfer_failed_count": 0,
+                    },
+                    "batch_execution_summary": {
+                        "completed_count": 1,
+                    },
+                },
+            }
+        }
+        reply = LANChatAgentWorker._format_agent_runtime_execution_reply(result)
+        evidence = LANChatAgentWorker._agent_runtime_evidence_summary(result)
+
+        self.assertIn("已执行 Runtime 批次 1 个", reply)
+        self.assertIn("执行图 completed:1", reply)
+        self.assertNotIn("执行图 none", reply)
+        self.assertIn("实体注册：3 个", reply)
+        self.assertIn("actor 1", reply)
+        self.assertIn("needs-attention", reply)
+        self.assertIn("terrain 1", reply)
+        self.assertIn("skybox 1", reply)
+        self.assertIn("Classification", reply)
+        self.assertIn("model/substrate 1/2", reply)
+        self.assertIn("Flow：ok", reply)
+        self.assertIn("plan>terrain>asset>actor>review>report", reply)
+        self.assertIn("Tool/State：tools ok/fail/block 6/0/0", reply)
+        self.assertIn("patch applied/conflict/invalid 5/0/0", reply)
+        self.assertIn("OperationLog 15", reply)
+        self.assertIn("Guard", reply)
+        self.assertIn("block/write/system 2/1/1", reply)
+        self.assertIn("confirm high/write 1/2", reply)
+        self.assertIn("Queue", reply)
+        self.assertIn("total/queued/running/active/block 2/0/0/0/0", reply)
+        self.assertIn("pressure 0%", reply)
+        self.assertIn("BatchTooling", reply)
+        self.assertIn("facts/created/prioritized/merged/absorbed 4/1/3/2/2", reply)
+        self.assertIn("ReportSource", reply)
+        self.assertIn("state RuntimeState", reply)
+        self.assertIn("operation 12/15", reply)
+        self.assertIn("Engine写入：RuntimeState-only 1 项", reply)
+        self.assertIn("真实引擎写入待 F5/实机验证", reply)
+        self.assertEqual(evidence["batch_count"], 1)
+        self.assertEqual(evidence["graph_count"], 1)
+        self.assertEqual(evidence["flow_steps"], "plan>terrain>asset>actor>review>report")
+        self.assertEqual(evidence["entity_count"], 3)
+        self.assertEqual(evidence["model_items"], 1)
+        self.assertEqual(evidence["substrate_items"], 2)
+        self.assertEqual(evidence["operation_count"], 12)
+        self.assertEqual(evidence["operation_total_count"], 15)
+        self.assertEqual(evidence["tool_execution_succeeded_count"], 6)
+        self.assertEqual(evidence["tool_execution_failed_count"], 0)
+        self.assertEqual(evidence["tool_execution_blocked_count"], 0)
+        self.assertEqual(evidence["state_patch_applied_count"], 5)
+        self.assertEqual(evidence["state_patch_conflict_count"], 0)
+        self.assertEqual(evidence["state_patch_invalid_count"], 0)
+        self.assertEqual(evidence["runtime_guard_blocked_count"], 2)
+        self.assertEqual(evidence["runtime_guard_requires_write_blocked_count"], 1)
+        self.assertEqual(evidence["runtime_guard_system_actor_write_blocked_count"], 1)
+        self.assertEqual(evidence["runtime_guard_high_risk_confirmation_required_count"], 1)
+        self.assertEqual(evidence["runtime_guard_write_confirmation_required_count"], 2)
+        self.assertEqual(evidence["runtime_guard_confirmed_blocked_count"], 1)
+        self.assertEqual(evidence["runtime_guard_unconfirmed_blocked_count"], 1)
+        self.assertEqual(evidence["tool_queue_count"], 2)
+        self.assertEqual(evidence["tool_queue_queued_count"], 0)
+        self.assertEqual(evidence["tool_queue_running_count"], 0)
+        self.assertEqual(evidence["tool_queue_blocked_count"], 0)
+        self.assertEqual(evidence["tool_queue_terminal_count"], 2)
+        self.assertEqual(evidence["tool_queue_active_count"], 0)
+        self.assertEqual(evidence["tool_queue_pressure"], 0.0)
+        self.assertEqual(evidence["batch_tooling_fact_count"], 4)
+        self.assertEqual(evidence["batch_tooling_created_batch_fact_count"], 1)
+        self.assertEqual(evidence["batch_tooling_created_batch_count"], 1)
+        self.assertEqual(evidence["batch_tooling_prioritized_item_count"], 3)
+        self.assertEqual(evidence["batch_tooling_merged_intervention_fact_count"], 1)
+        self.assertEqual(evidence["batch_tooling_merged_intervention_item_count"], 2)
+        self.assertEqual(evidence["batch_tooling_absorbed_intervention_count"], 2)
+        self.assertEqual(evidence["runtime_state_source"], "RuntimeState")
+        self.assertEqual(evidence["engine_write_boundary_count"], 1)
+        self.assertEqual(evidence["engine_write_import_boundary_count"], 1)
+        self.assertEqual(evidence["engine_write_bridge_call_count"], 0)
+        self.assertEqual(evidence["engine_write_bridge_success_count"], 0)
+        self.assertEqual(evidence["engine_write_bridge_failed_count"], 0)
+        self.assertEqual(evidence["engine_write_bridge_error_code_counts"], {"cpp_actor_import_failed": 1})
+        self.assertEqual(evidence["engine_write_status_counts"], {"runtime_state_only": 1})
+        self.assertEqual(evidence["engine_write_source_counts"], {"runtime_default_import_provider": 1})
+        self.assertEqual(evidence["import_failure_code_counts"], {"missing_ready_model_resource": 1})
+        self.assertEqual(evidence["environment_import_failure_code_counts"], {"terrain_import_unavailable": 1})
+        self.assertEqual(evidence["resource_image_requested_count"], 1)
+        self.assertEqual(evidence["resource_model_requested_count"], 1)
+        self.assertEqual(evidence["geometry_fact_count"], 1)
+        self.assertEqual(evidence["geometry_aabb_actor_count"], 1)
+        self.assertEqual(evidence["vlm_checkpoint_count"], 1)
+        self.assertEqual(evidence["sync_recorded_count"], 1)
+        self.assertEqual(evidence["asset_transfer_progress_count"], 1)
+        self.assertEqual(evidence["batch_execution_completed_count"], 1)
+
+    def test_scene_registry_report_uses_entity_type_counts_for_environment_entities(self) -> None:
+        text = LANChatAgentWorker._format_agent_runtime_scene_registry_report({
+            "entity_count": 3,
+            "entity_type_counts": {
+                "actor": 1,
+                "terrain": 1,
+                "skybox": 1,
+            },
+            "entities": [
+                {"entity_type": "terrain", "semantic_role": "ground"},
+                {"entity_type": "skybox", "semantic_role": "sky"},
+                {"entity_type": "actor", "semantic_role": "tent"},
+            ],
+        })
+
+        self.assertIn("entities 3", text)
+        self.assertIn("actor 1", text)
+        self.assertIn("terrain 1", text)
+        self.assertIn("skybox 1", text)
+
+        actor_import_text = LANChatAgentWorker._format_agent_runtime_actor_import_boundary_report(
+            {"requested_count": 1, "imported_count": 1, "failed_count": 0},
+            {"entity_type_counts": {"actor": 1}},
+            {"bridge_call_count": 1, "bridge_success_count": 1, "bridge_failed_count": 0},
+        )
+        self.assertIn("registered actor 1", actor_import_text)
+
+    def test_active_runtime_plan_generation_repeated_agent_confirm_reports_completed_graph(self) -> None:
+        worker = _TestWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))
+        plan = worker._agent_runtime.propose_scene_plan(
+            room_id="room-active-repeat-confirm",
+            text="生成一个简单森林营地，有草地、天空、帐篷、小木桌。",
+            owner_agent="小女孩",
+            external_plan_id="seed-active-repeat-confirm",
+        )
+
+        first_reply = worker._execute_active_runtime_plan_generation(
+            {
+                "room_id": "room-active-repeat-confirm",
+                "sender_name": "房主",
+                "text": "确认生成",
+                "agent_name": "",
+            },
+            room_id="room-active-repeat-confirm",
+            host_id="local-single-player",
+        )
+        second_reply = worker._execute_active_runtime_plan_generation(
+            {
+                "room_id": "room-active-repeat-confirm",
+                "sender_name": "房主",
+                "text": "@小女孩 确认生成",
+                "agent_name": "小女孩",
+            },
+            room_id="room-active-repeat-confirm",
+            host_id="local-single-player",
+        )
+
+        for reply in (first_reply, second_reply):
+            self.assertIn("AgentRuntime 执行结果", reply or "")
+            self.assertIn("已执行 Runtime 批次 1 个", reply or "")
+            self.assertIn("执行图 completed:1", reply or "")
+            self.assertNotIn("Runtime 批次 0 个", reply or "")
+            self.assertNotIn("执行图 none", reply or "")
+        state = worker._agent_runtime.query_state("room-active-repeat-confirm")["room"]
+        self.assertEqual(state["active_plan_id"], plan.plan_id)
+        self.assertEqual(len(state["batch_plans"]), 1)
+        self.assertGreaterEqual(len(state["tool_graphs"]), 1)
+        query_summary = worker._agent_runtime.query_state("room-active-repeat-confirm")["summary"]
+        roles = {
+            entity["semantic_role"]: entity
+            for entity in query_summary["scene_entity_registry"]["entities"]
+        }
+        self.assertTrue({"草地", "天空", "森林", "帐篷", "小木桌"}.issubset(roles))
+        self.assertEqual(roles["草地"]["entity_type"], "terrain")
+        self.assertEqual(roles["天空"]["entity_type"], "skybox")
+        self.assertEqual(roles["森林"]["entity_type"], "terrain")
+        for role in ("帐篷", "小木桌"):
+            self.assertEqual(roles[role]["entity_type"], "actor")
+            self.assertTrue(roles[role]["actor_id"])
+            self.assertTrue(roles[role]["transform"])
+            self.assertTrue(roles[role].get("aabb") or roles[role].get("bounds"))
+            self.assertIn("grounding_status", roles[role])
+        self.assertEqual(query_summary["runtime_scene_flow_summary"]["status"], "ok")
+        flow_steps = [
+            step["step"]
+            for step in query_summary["runtime_scene_flow_summary"]["steps"]
+        ]
+        self.assertEqual(flow_steps, ["plan", "terrain", "asset", "actor", "review", "report"])
+        checkpoints = worker._agent_runtime.operation_log.query(
+            event="runtime_scene_flow_checkpoint",
+            room_id="room-active-repeat-confirm",
+            plan_id=plan.plan_id,
+        )
+        self.assertTrue(checkpoints)
+        report = worker._agent_runtime.generate_report("room-active-repeat-confirm", plan_id=plan.plan_id)
+        report_roles = {
+            entity["semantic_role"]: entity
+            for entity in report["scene_entity_registry"]["entities"]
+        }
+        self.assertEqual(report_roles["帐篷"]["entity_type"], "actor")
+        self.assertEqual(report_roles["小木桌"]["entity_type"], "actor")
+        self.assertEqual(report["runtime_scene_flow_summary"]["status"], "ok")
 
     def test_agent_runtime_execution_failures_do_not_leak_internal_exception_text(self) -> None:
         worker = _TestWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))
@@ -8895,11 +9959,16 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("小木桌", reply)
         self.assertIn("帐篷", reply)
         self.assertIn("环境/地形", reply)
+        self.assertIn("model/substrate", reply)
         self.assertIn("天空", reply)
         self.assertIn("草地", reply)
         self.assertIn("环境组件", reply)
         self.assertIn("skybox", reply)
         self.assertIn("terrain", reply)
+        self.assertIn("ActorImport", reply)
+        self.assertIn("registered actor", reply)
+        self.assertIn("Closure", reply)
+        self.assertIn("patch applied/conflict/invalid", reply)
         self.assertIn("审查", reply)
         self.assertIn("structure-review", reply)
         self.assertIn("审查建议", reply)

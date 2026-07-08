@@ -23,6 +23,7 @@ PYCACHE_PREFIX = REPO_ROOT / ".tmp" / "ultimate_plan_pycache"
 PYTHON_TESTS = [
     "editor/plugins/AITool/services/test_agent_runtime_phase1.py",
     "editor/plugins/AITool/services/test_lanchat_runtime_guard.py",
+    "editor/plugins/AITool/services/test_model_retrieval_provider_helpers.py",
     "docs/probes/test_v3_f5_log_check.py",
     "docs/probes/test_v3_f5_quick_gate.py",
 ]
@@ -46,7 +47,9 @@ PY_COMPILE_TARGETS = [
     "editor/plugins/AITool/services/workflow_command_policy.py",
     "editor/plugins/AITool/services/test_agent_runtime_phase1.py",
     "editor/plugins/AITool/services/test_lanchat_runtime_guard.py",
+    "editor/plugins/AITool/services/test_model_retrieval_provider_helpers.py",
     "editor/plugins/AITool/cai_extensions/register.py",
+    "editor/plugins/AITool/cai_extensions/flows/model_retrieval_workflow/helpers.py",
     "editor/plugins/AITool/cai_extensions/agent/agent_adapter.py",
     "editor/plugins/AITool/cai_extensions/agent/engine_write_gate.py",
     "editor/plugins/AITool/cai_extensions/agent/scene_composer.py",
@@ -1247,7 +1250,8 @@ def _agent_runtime_flag_boundary_gate() -> bool:
         for required in (
             "_failed_environment_import_components",
             "runtime_environment_import_failed",
-            "runtime_environment_import_missing",
+            "runtime_default_environment_import",
+            "runtime_state_only",
             '"environment_components": {batch_id: failed_components}',
             '"custom_import_facts"',
             'f"{batch_id}:environment_import_result"',

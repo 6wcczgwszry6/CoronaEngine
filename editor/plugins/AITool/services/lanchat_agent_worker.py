@@ -94,6 +94,165 @@ class LANChatAgentWorker:
         if self._generation_scheduler is not None:
             self._install_generation_scheduler_hooks(self._generation_scheduler)
 
+    def _get_runtime_tool(self, name: str) -> Any:
+        """Resolve a Quasar tool without importing legacy workflow packages."""
+
+        tool_name = str(name or "").strip()
+        if not tool_name:
+            return None
+        try:
+            from Quasar.ai_config.ai_config import get_ai_config, reload_ai_config
+            from Quasar.ai_tools.load_tools import load_tools
+            from Quasar.ai_tools.registry import get_tool_registry
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug(
+                "AgentRuntime tool registry unavailable for %s: %s",
+                tool_name,
+                type(exc).__name__,
+            )
+            return None
+
+        self._ensure_runtime_ai_config_loaded()
+        config = getattr(self, "_runtime_ai_config_override", None)
+        if config is None:
+            try:
+                config = get_ai_config()
+            except Exception:  # noqa: BLE001
+                config = None
+        registry = get_tool_registry()
+        self._ensure_runtime_engine_tool_loaders(registry)
+        tool = registry.get(tool_name)
+        if tool is not None:
+            return tool
+        tool = self._load_runtime_tool_direct(registry, config, tool_name)
+        if tool is not None:
+            return tool
+        try:
+            load_tools(config)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                config = reload_ai_config()
+                load_tools(config)
+            except Exception:  # noqa: BLE001
+                pass
+            self._logger.debug(
+                "AgentRuntime tool load failed for %s: %s",
+                tool_name,
+                type(exc).__name__,
+            )
+        tool = registry.get(tool_name)
+        if tool is not None:
+            return tool
+        try:
+            registry.discover(config, force=True)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug(
+                "AgentRuntime tool discovery failed for %s: %s",
+                tool_name,
+                type(exc).__name__,
+            )
+        return registry.get(tool_name)
+
+    def _load_runtime_tool_direct(self, registry: Any, config: Any, tool_name: str) -> Any:
+        """Directly register narrow Runtime tools without loading all workflows."""
+
+        try:
+            if tool_name in {"import_model", "import_environment_component", "remove_model"}:
+                from plugins.AITool.cai_extensions.mcp.tools.model_import_tools import load_model_import_tools
+
+                for tool in load_model_import_tools():
+                    if not registry.get(getattr(tool, "name", "")):
+                        registry.register(tool, overwrite=False)
+                return registry.get(tool_name)
+            if tool_name == "hunyuan_generate_3d":
+                from Quasar.ai_modules.three_d_generate.tools.model_tools import load_hunyuan3d_tools
+
+                for tool in load_hunyuan3d_tools(config):
+                    if not registry.get(getattr(tool, "name", "")):
+                        registry.register(tool, overwrite=False)
+                return registry.get(tool_name)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug(
+                "AgentRuntime direct tool load failed for %s: %s",
+                tool_name,
+                type(exc).__name__,
+            )
+        return None
+
+    def _ensure_runtime_ai_config_loaded(self) -> None:
+        """Load narrow AI config modules needed by Runtime providers."""
+
+        if getattr(self, "_runtime_ai_config_loaded", False):
+            return
+        try:
+            from Quasar.ai_modules.three_d_generate.tools import loader as _hunyuan_loader  # noqa: F401
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug(
+                "AgentRuntime Hunyuan config loader unavailable: %s",
+                type(exc).__name__,
+            )
+        try:
+            from plugins.AITool import utils as _aitool_utils  # noqa: F401
+            from plugins.AITool.utils import ai_setting as _ai_setting  # noqa: F401
+            self._mirror_plugin_ai_settings_to_runtime_namespace()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug(
+                "AgentRuntime local AI setting module unavailable: %s",
+                type(exc).__name__,
+            )
+        self._runtime_ai_config_loaded = True
+
+    def _mirror_plugin_ai_settings_to_runtime_namespace(self) -> None:
+        """Bridge plugin-qualified Quasar settings into the Runtime Quasar namespace."""
+
+        try:
+            from plugins.AITool.Quasar.ai_service.entrance import ai_entrance as plugin_entrance
+            from Quasar.ai_service.entrance import ai_entrance as runtime_entrance
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug(
+                "AgentRuntime AI setting namespace bridge unavailable: %s",
+                type(exc).__name__,
+            )
+            return
+        plugin_settings = plugin_entrance.collector.AI_SETTINGS
+        if not isinstance(plugin_settings, dict) or not plugin_settings:
+            return
+        runtime_collector = runtime_entrance.collector
+        try:
+            runtime_collector._ai_settings.update(plugin_settings)
+            for key, value in plugin_settings.items():
+                loader = runtime_collector._ai_load.get(key)
+                if loader is not None:
+                    setattr(runtime_collector._ai_config, key, loader(value))
+            self._runtime_ai_config_override = runtime_collector.AIConfig
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug(
+                "AgentRuntime AI setting namespace bridge failed: %s",
+                type(exc).__name__,
+            )
+
+    def _ensure_runtime_engine_tool_loaders(self, registry: Any) -> None:
+        """Ensure host engine tools are visible before Runtime provider lookup."""
+
+        try:
+            loaders = list(getattr(registry, "_loaders", []) or [])
+            if any(
+                str(getattr(spec, "source", "")) == "cai_extensions.mcp.model_import"
+                for spec in loaders
+            ):
+                return
+            from Quasar.ai_tools.load_tools import register_extra_builtin_registrar
+            from plugins.AITool.cai_extensions.engine_tools import register_engine_loaders
+
+            register_extra_builtin_registrar(register_engine_loaders)
+            register_engine_loaders(registry)
+            setattr(registry, "_discovered", False)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug(
+                "AgentRuntime engine tool loader registration unavailable: %s",
+                type(exc).__name__,
+            )
+
     def _create_agent_runtime(self) -> AgentRuntime:
         """Create the Runtime control plane with optional narrow legacy adapters.
 
@@ -117,9 +276,8 @@ class LANChatAgentWorker:
         ):
             try:
                 from .agent_runtime import make_scene_snapshot_provider
-                from plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers import get_tool
 
-                snapshot_tool = get_tool("get_scene_snapshot")
+                snapshot_tool = self._get_runtime_tool("get_scene_snapshot")
                 if snapshot_tool is not None:
                     kwargs["scene_snapshot_provider"] = make_scene_snapshot_provider(
                         snapshot_tool=snapshot_tool,
@@ -135,9 +293,8 @@ class LANChatAgentWorker:
         if self._agent_runtime_flags.can_use_image_resource_provider():
             try:
                 from .agent_runtime import make_image_resource_provider
-                from plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers import get_tool
 
-                image_tool = get_tool("generate_image")
+                image_tool = self._get_runtime_tool("generate_image")
                 if image_tool is not None:
                     kwargs["image_resource_provider"] = make_image_resource_provider(
                         image_tool=image_tool,
@@ -151,9 +308,8 @@ class LANChatAgentWorker:
         if self._agent_runtime_flags.can_use_scene_review_provider():
             try:
                 from .agent_runtime import make_scene_review_provider
-                from plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers import get_tool
 
-                review_tool = get_tool("scene_rationality_review")
+                review_tool = self._get_runtime_tool("scene_rationality_review")
                 if review_tool is not None:
                     review_provider = make_scene_review_provider(
                         review_tool=review_tool,
@@ -178,7 +334,6 @@ class LANChatAgentWorker:
             )
             try:
                 from .agent_runtime import make_environment_component_provider
-                from plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers import get_tool
 
                 environment_tool = None
                 environment_tool_name = ""
@@ -187,7 +342,7 @@ class LANChatAgentWorker:
                     "create_terrain_component",
                     "create_scene_substrate",
                 ):
-                    environment_tool = get_tool(candidate)
+                    environment_tool = self._get_runtime_tool(candidate)
                     if environment_tool is not None:
                         environment_tool_name = candidate
                         break
@@ -206,14 +361,14 @@ class LANChatAgentWorker:
             except Exception as exc:  # noqa: BLE001
                 logging.getLogger(__name__).debug("AgentRuntime environment component provider disabled: %s", type(exc).__name__)
                 note_provider("environment_component", requested=True, status="unavailable", reason="adapter_load_failed")
-        if (
+        use_engine_environment_import_provider = (
             self._corona_engine is not None
             and self._agent_runtime_flags.can_use_engine_environment_import_provider()
-        ):
+        )
+        if use_engine_environment_import_provider:
             try:
                 from .agent_runtime import make_engine_environment_component_import_provider
                 from plugins.AITool.cai_extensions.agent.engine_write_gate import get_engine_write_gate
-                from plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers import get_tool
 
                 environment_import_tool = None
                 environment_import_tool_name = ""
@@ -224,7 +379,7 @@ class LANChatAgentWorker:
                     "create_terrain_component",
                     "create_scene_substrate",
                 ):
-                    environment_import_tool = get_tool(candidate)
+                    environment_import_tool = self._get_runtime_tool(candidate)
                     if environment_import_tool is not None:
                         environment_import_tool_name = candidate
                         break
@@ -246,16 +401,17 @@ class LANChatAgentWorker:
                 note_provider("environment_import", requested=True, status="unavailable", reason="adapter_load_failed")
         elif self._agent_runtime_flags.can_use_engine_environment_import_provider():
             note_provider("environment_import", requested=True, status="unavailable", reason="missing_engine")
+        model_resource_provider_enabled = False
         if self._agent_runtime_flags.can_use_model_resource_provider():
             try:
                 from .agent_runtime import make_model_resource_provider
-                from plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers import get_tool
 
-                model_tool = get_tool("hunyuan_generate_3d")
+                model_tool = self._get_runtime_tool("hunyuan_generate_3d")
                 if model_tool is not None:
                     kwargs["model_resource_provider"] = make_model_resource_provider(
                         model_tool=model_tool,
                     )
+                    model_resource_provider_enabled = True
                     note_provider("model_resource", requested=True, status="enabled")
                 else:
                     note_provider("model_resource", requested=True, status="unavailable", reason="missing_tool:hunyuan_generate_3d")
@@ -268,33 +424,41 @@ class LANChatAgentWorker:
 
                 if "model_resource_provider" not in kwargs:
                     kwargs["model_resource_provider"] = make_legacy_model_resource_provider()
+                    model_resource_provider_enabled = True
                     note_provider("model_resource", requested=True, status="enabled", reason="legacy_model_provider")
             except Exception as exc:  # noqa: BLE001
                 logging.getLogger(__name__).debug("AgentRuntime legacy model provider disabled: %s", type(exc).__name__)
                 note_provider("model_resource", requested=True, status="unavailable", reason="adapter_load_failed")
-        if (
+        use_engine_actor_import_provider = (
             self._corona_engine is not None
-            and self._agent_runtime_flags.can_use_engine_actor_import_provider()
-        ):
+            and model_resource_provider_enabled
+            and (
+                self._agent_runtime_flags.agent_runtime_enabled
+                or self._agent_runtime_flags.can_use_engine_actor_import_provider()
+            )
+        )
+        if use_engine_actor_import_provider:
             try:
                 from .agent_runtime import make_engine_actor_import_provider
                 from plugins.AITool.cai_extensions.agent.engine_write_gate import get_engine_write_gate
-                from plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers import get_tool
 
-                import_tool = get_tool("import_model")
+                import_tool = self._get_runtime_tool("import_model")
                 if import_tool is not None:
                     kwargs["actor_import_provider"] = make_engine_actor_import_provider(
                         import_tool=import_tool,
                         engine_gate=get_engine_write_gate(),
                     )
-                    note_provider("actor_import", requested=True, status="enabled")
+                    note_provider("actor_import", requested=True, status="enabled", reason="import_model")
                 else:
                     note_provider("actor_import", requested=True, status="unavailable", reason="missing_tool:import_model")
             except Exception as exc:  # noqa: BLE001
                 logging.getLogger(__name__).debug("AgentRuntime engine import provider disabled: %s", type(exc).__name__)
                 note_provider("actor_import", requested=True, status="unavailable", reason="adapter_load_failed")
         elif self._agent_runtime_flags.can_use_engine_actor_import_provider():
-            note_provider("actor_import", requested=True, status="unavailable", reason="missing_engine")
+            reason = "missing_engine"
+            if self._corona_engine is not None and not model_resource_provider_enabled:
+                reason = "missing_model_resource_provider"
+            note_provider("actor_import", requested=True, status="unavailable", reason=reason)
         if (
             self._corona_engine is not None
             and self._agent_runtime_flags.can_use_engine_actor_delete_provider()
@@ -302,7 +466,6 @@ class LANChatAgentWorker:
             try:
                 from .agent_runtime import make_engine_actor_delete_provider
                 from plugins.AITool.cai_extensions.agent.engine_write_gate import get_engine_write_gate
-                from plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers import get_tool
 
                 delete_tool = None
                 delete_tool_name = ""
@@ -311,7 +474,7 @@ class LANChatAgentWorker:
                     "delete_actor",
                     "destroy_actor",
                 ):
-                    delete_tool = get_tool(candidate)
+                    delete_tool = self._get_runtime_tool(candidate)
                     if delete_tool is not None:
                         delete_tool_name = candidate
                         break
@@ -335,9 +498,8 @@ class LANChatAgentWorker:
             try:
                 from .agent_runtime import make_engine_layout_transform_provider
                 from plugins.AITool.cai_extensions.agent.engine_write_gate import get_engine_write_gate
-                from plugins.AITool.cai_extensions.flows.scene_composition_workflow.helpers import get_tool
 
-                transform_tool = get_tool("set_actor_transform")
+                transform_tool = self._get_runtime_tool("set_actor_transform")
                 if transform_tool is not None:
                     kwargs["layout_transform_provider"] = make_engine_layout_transform_provider(
                         transform_tool=transform_tool,
@@ -716,13 +878,14 @@ class LANChatAgentWorker:
             )
             authoritative_synced = False
             if self._should_sync_metadata_scene_message_to_seed_plan(coordinator, room_id, text, metadata):
+                sender_is_host = self._message_sender_is_host(message, sender_type=sender_type)
                 self._logger.info(
                     "[LANChatSyncTrace] phase=authoritative_ingest source=%s dedupe=%s room=%s sender=%s host=%s text=%s",
                     source,
                     dedupe_key,
                     room_id,
                     message.get("sender_id") or message.get("from") or "",
-                    bool(message.get("is_host") or sender_type == "host"),
+                    sender_is_host,
                     _trace_preview(text),
                 )
                 coordinator.ingest_message(ChatMessage(
@@ -730,7 +893,7 @@ class LANChatAgentWorker:
                     sender_id=str(message.get("sender_id") or message.get("from") or ""),
                     sender_name=str(message.get("sender_name") or message.get("from") or ""),
                     text=text,
-                    is_host=bool(message.get("is_host") or sender_type == "host"),
+                    is_host=sender_is_host,
                     agent_id=str(metadata.get("target_agent_id") or ""),
                     agent_name=str(metadata.get("target_agent_name") or ""),
                     metadata=metadata,
@@ -870,7 +1033,7 @@ class LANChatAgentWorker:
                 sender_id=str(message.get("sender_id") or message.get("from") or ""),
                 sender_name=str(message.get("sender_name") or message.get("from") or ""),
                 text=text,
-                is_host=bool(message.get("is_host") or sender_type == "host"),
+                is_host=self._message_sender_is_host(message, sender_type=sender_type),
                 agent_id=str(metadata.get("target_agent_id") or ""),
                 agent_name=str(metadata.get("target_agent_name") or ""),
                 metadata=metadata,
@@ -1055,6 +1218,36 @@ class LANChatAgentWorker:
                 external_plan_id = ""
         try:
             should_promote = self._should_promote_agent_reply_to_runtime_plan(trigger, reply_text)
+            if should_promote and not external_plan_id:
+                handled = runtime.handle_message(
+                    room_id=room,
+                    external_plan_id="",
+                    text=reply_text,
+                    sender_id=str(agent_id or ""),
+                    sender_name=str(agent_name or ""),
+                    owner_agent=str(agent_name or ""),
+                    reply_to=str(trigger.get("message_id") or ""),
+                    action="plan",
+                )
+                plan = dict(handled.get("plan", {}) or {}) if isinstance(handled, dict) else {}
+                runtime_plan_id = str(plan.get("plan_id") or "")
+                recorded = bool(runtime_plan_id)
+                if recorded:
+                    self._logger.info(
+                        "[LANChatRuntimeTrace] phase=agent_reply_plan_promoted room=%s runtime_plan=%s agent=%s/%s reply_to=%s text=%s",
+                        room,
+                        runtime_plan_id,
+                        agent_id,
+                        agent_name,
+                        trigger.get("message_id") or "",
+                        _trace_preview(reply_text),
+                    )
+                return {
+                    "recorded": recorded,
+                    "runtime_plan_id": runtime_plan_id,
+                    "context_id": "",
+                    "updated_plan_brief": recorded,
+                }
             handled = runtime.handle_message(
                 room_id=room,
                 external_plan_id=external_plan_id,
@@ -1203,12 +1396,16 @@ class LANChatAgentWorker:
                 )
                 if decision.intent in {"plan_drafting", "plan_revision"}:
                     return True
+                if decision.intent in {"status_query", "discussion"}:
+                    return False
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug("AgentRuntime reply promotion intent skipped: %s", type(exc).__name__)
         reply = str(reply_text or "").strip()
         if not reply:
             return False
         plan_markers = (
+            "方案内容", "方案展开", "布局", "核心物件", "物品清单",
+            "风格定位", "空间布局", "建议先做", "设计方案",
             "鏂规鍐呭", "鏂规灞曞紑", "甯冨眬", "鏍稿績鐗╀欢", "鐗╁搧娓呭崟",
             "椋庢牸瀹氫綅", "绌洪棿甯冨眬", "寤鸿鍏堝仛", "璁捐鏂规",
         )
@@ -1880,13 +2077,61 @@ class LANChatAgentWorker:
         return ""
 
     @staticmethod
+    def _agent_runtime_graphs_from_result(result: dict[str, Any]) -> list[dict[str, Any]]:
+        if not isinstance(result, dict):
+            return []
+        graphs = result.get("graphs")
+        if isinstance(graphs, list):
+            normalized = [dict(graph) for graph in graphs if isinstance(graph, dict)]
+            if normalized:
+                return normalized
+        graph = result.get("graph")
+        if isinstance(graph, dict) and graph:
+            return [dict(graph)]
+        queued = result.get("queued")
+        if isinstance(queued, dict):
+            queued_graphs = queued.get("graphs")
+            if isinstance(queued_graphs, list):
+                normalized = [dict(graph) for graph in queued_graphs if isinstance(graph, dict)]
+                if normalized:
+                    return normalized
+            queued_graph = queued.get("graph")
+            if isinstance(queued_graph, dict) and queued_graph:
+                return [dict(queued_graph)]
+        return []
+
+    @staticmethod
+    def _agent_runtime_batches_from_result(result: dict[str, Any]) -> list[dict[str, Any]]:
+        if not isinstance(result, dict):
+            return []
+        batches = result.get("batches")
+        if isinstance(batches, list):
+            normalized = [dict(batch) for batch in batches if isinstance(batch, dict)]
+            if normalized:
+                return normalized
+        batch = result.get("batch")
+        if isinstance(batch, dict) and batch:
+            return [dict(batch)]
+        queued = result.get("queued")
+        if isinstance(queued, dict):
+            queued_batches = queued.get("batches")
+            if isinstance(queued_batches, list):
+                normalized = [dict(batch) for batch in queued_batches if isinstance(batch, dict)]
+                if normalized:
+                    return normalized
+            queued_batch = queued.get("batch")
+            if isinstance(queued_batch, dict) and queued_batch:
+                return [dict(queued_batch)]
+        return []
+
+    @staticmethod
     def _format_agent_runtime_execution_reply(result: dict[str, Any]) -> str:
         if not isinstance(result, dict):
             return "【AgentRuntime 执行结果】Runtime 未返回执行结果。"
         runtime_plan = result.get("plan", {}) if isinstance(result, dict) else {}
         runtime_plan_id = str(runtime_plan.get("plan_id") or "")
-        batches = result.get("batches", []) if isinstance(result, dict) else []
-        graphs = result.get("graphs", []) if isinstance(result, dict) else []
+        batches = LANChatAgentWorker._agent_runtime_batches_from_result(result)
+        graphs = LANChatAgentWorker._agent_runtime_graphs_from_result(result)
         graph_statuses = [str(graph.get("status") or "") for graph in graphs if isinstance(graph, dict)]
         status_counts: dict[str, int] = {}
         for status in graph_statuses:
@@ -1901,14 +2146,333 @@ class LANChatAgentWorker:
         health_status = str(health.get("status") or "unknown").strip().replace("_", "-") if health else "unknown"
         attention = bool(health.get("attention_required")) if health else False
         health_text = f"{health_status}，需关注" if attention else health_status
+        evidence = LANChatAgentWorker._agent_runtime_evidence_summary(result)
+        registry_text = (
+            f"实体注册：{int(evidence.get('entity_count') or 0)} 个"
+            f"（actor {int(evidence.get('actor_count') or 0)}，"
+            f"terrain {int(evidence.get('terrain_count') or 0)}，"
+            f"skybox {int(evidence.get('skybox_count') or 0)}）"
+        )
+        classification_text = (
+            f"Classification：model/substrate "
+            f"{int(evidence.get('model_items') or 0)}/"
+            f"{int(evidence.get('substrate_items') or 0)}"
+        )
+        flow_text = (
+            f"Flow：{str(evidence.get('flow_status') or 'unknown')} "
+            f"{str(evidence.get('flow_steps') or 'none')}"
+        )
+        tool_state_text = (
+            f"Tool/State：tools ok/fail/block "
+            f"{int(evidence.get('tool_execution_succeeded_count') or 0)}/"
+            f"{int(evidence.get('tool_execution_failed_count') or 0)}/"
+            f"{int(evidence.get('tool_execution_blocked_count') or 0)}，"
+            f"patch applied/conflict/invalid "
+            f"{int(evidence.get('state_patch_applied_count') or 0)}/"
+            f"{int(evidence.get('state_patch_conflict_count') or 0)}/"
+            f"{int(evidence.get('state_patch_invalid_count') or 0)}，"
+            f"OperationLog {int(evidence.get('operation_total_count') or evidence.get('operation_count') or 0)}"
+        )
+        guard_text = (
+            f"Guard：block/write/system "
+            f"{int(evidence.get('runtime_guard_blocked_count') or 0)}/"
+            f"{int(evidence.get('runtime_guard_requires_write_blocked_count') or 0)}/"
+            f"{int(evidence.get('runtime_guard_system_actor_write_blocked_count') or 0)}，"
+            f"confirm high/write "
+            f"{int(evidence.get('runtime_guard_high_risk_confirmation_required_count') or 0)}/"
+            f"{int(evidence.get('runtime_guard_write_confirmation_required_count') or 0)}"
+        )
+        queue_text = (
+            f"Queue：total/queued/running/active/block "
+            f"{int(evidence.get('tool_queue_count') or 0)}/"
+            f"{int(evidence.get('tool_queue_queued_count') or 0)}/"
+            f"{int(evidence.get('tool_queue_running_count') or 0)}/"
+            f"{int(evidence.get('tool_queue_active_count') or 0)}/"
+            f"{int(evidence.get('tool_queue_blocked_count') or 0)}，"
+            f"pressure {int(float(evidence.get('tool_queue_pressure') or 0.0) * 100)}%"
+        )
+        batch_tooling_text = (
+            f"BatchTooling：facts/created/prioritized/merged/absorbed "
+            f"{int(evidence.get('batch_tooling_fact_count') or 0)}/"
+            f"{int(evidence.get('batch_tooling_created_batch_count') or 0)}/"
+            f"{int(evidence.get('batch_tooling_prioritized_item_count') or 0)}/"
+            f"{int(evidence.get('batch_tooling_merged_intervention_item_count') or 0)}/"
+            f"{int(evidence.get('batch_tooling_absorbed_intervention_count') or 0)}"
+        )
+        report_source_text = (
+            f"ReportSource：state {str(evidence.get('runtime_state_source') or 'unknown')}，"
+            f"operation {int(evidence.get('operation_count') or 0)}/"
+            f"{int(evidence.get('operation_total_count') or 0)}"
+        )
+        bridge_calls = int(evidence.get("engine_write_bridge_call_count") or 0)
+        bridge_success = int(evidence.get("engine_write_bridge_success_count") or 0)
+        bridge_failed = int(evidence.get("engine_write_bridge_failed_count") or 0)
+        status_counts = evidence.get("engine_write_status_counts")
+        runtime_state_only = 0
+        if isinstance(status_counts, dict):
+            runtime_state_only = int(status_counts.get("runtime_state_only") or 0)
+        if bridge_calls > 0:
+            engine_text = (
+                f"Engine写入：bridge {bridge_success}/{bridge_calls} 成功"
+                + (f"，失败 {bridge_failed}" if bridge_failed else "")
+            )
+        elif runtime_state_only > 0:
+            engine_text = (
+                f"Engine写入：RuntimeState-only {runtime_state_only} 项，"
+                "真实引擎写入待 F5/实机验证"
+            )
+        else:
+            engine_text = "Engine写入：未发现 bridge 写入证据，待 F5/实机验证"
         if any(status == "failed" for status in graph_statuses):
             return (
                 f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 执行未完成，"
                 f"批次 {len(batches)} 个，执行图 {graph_status_text}，报告健康：{health_text}。"
+                f"{registry_text}；{classification_text}；{flow_text}；{tool_state_text}；{guard_text}；{queue_text}；"
+                f"{batch_tooling_text}；{report_source_text}；{engine_text}。"
             )
         return (
             f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 已执行 Runtime 批次 {len(batches)} 个，"
             f"执行图 {graph_status_text}，报告健康：{health_text}。"
+            f"{registry_text}；{classification_text}；{flow_text}；{tool_state_text}；{guard_text}；{queue_text}；"
+            f"{batch_tooling_text}；{report_source_text}；{engine_text}。"
+        )
+
+    @staticmethod
+    def _agent_runtime_evidence_summary(result: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            return {}
+        report = result.get("report") if isinstance(result.get("report"), dict) else {}
+        registry = report.get("scene_entity_registry") if isinstance(report.get("scene_entity_registry"), dict) else {}
+        flow = report.get("runtime_scene_flow_summary") if isinstance(report.get("runtime_scene_flow_summary"), dict) else {}
+        classification = report.get("classification_summary") if isinstance(report.get("classification_summary"), dict) else {}
+        state_patch = report.get("state_patch_summary") if isinstance(report.get("state_patch_summary"), dict) else {}
+        tool_execution = report.get("tool_execution_digest") if isinstance(report.get("tool_execution_digest"), dict) else {}
+        import_summary = (
+            report.get("import_summary")
+            if isinstance(report.get("import_summary"), dict)
+            else {}
+        )
+        report_health = (
+            report.get("report_health_summary")
+            if isinstance(report.get("report_health_summary"), dict)
+            else {}
+        )
+        tool_queue_health = (
+            report.get("tool_queue_health_summary")
+            if isinstance(report.get("tool_queue_health_summary"), dict)
+            else {}
+        )
+        batch_tooling = (
+            report.get("batch_tooling_summary")
+            if isinstance(report.get("batch_tooling_summary"), dict)
+            else {}
+        )
+        fact_source = (
+            report.get("fact_source_boundary_summary")
+            if isinstance(report.get("fact_source_boundary_summary"), dict)
+            else {}
+        )
+        engine_write_boundary = (
+            report.get("engine_write_boundary_summary")
+            if isinstance(report.get("engine_write_boundary_summary"), dict)
+            else {}
+        )
+        replay = (
+            report.get("operation_replay_summary")
+            if isinstance(report.get("operation_replay_summary"), dict)
+            else {}
+        )
+        guard_summary = (
+            report.get("runtime_guard_replay_summary")
+            if isinstance(report.get("runtime_guard_replay_summary"), dict)
+            else replay.get("runtime_guard_replay_summary")
+            if isinstance(replay.get("runtime_guard_replay_summary"), dict)
+            else {}
+        )
+        resource_summary = dict(replay.get("resource_summary") or {})
+        resource_by_phase = dict(resource_summary.get("by_phase") or {})
+        image_resource = dict(resource_by_phase.get("image") or {})
+        model_resource = dict(resource_by_phase.get("model") or {})
+        geometry_summary = dict(replay.get("geometry_fact_replay_summary") or {})
+        vlm_summary = dict(replay.get("vlm_checkpoint_summary") or {})
+        sync_summary = dict(replay.get("sync_replay_summary") or {})
+        asset_transfer_summary = dict(replay.get("asset_transfer_replay_summary") or {})
+        batch_execution_summary = dict(replay.get("batch_execution_summary") or {})
+        graphs = LANChatAgentWorker._agent_runtime_graphs_from_result(result)
+        graph_statuses = [str(graph.get("status") or "") for graph in graphs if isinstance(graph, dict)]
+        entity_type_counts = dict(registry.get("entity_type_counts") or {})
+        steps = []
+        for step in flow.get("steps") or []:
+            if isinstance(step, dict):
+                text = str(step.get("step") or "").strip()
+                if text:
+                    steps.append(text)
+            elif str(step or "").strip():
+                steps.append(str(step).strip())
+        return {
+            "batch_count": len(LANChatAgentWorker._agent_runtime_batches_from_result(result)),
+            "graph_count": len(graphs),
+            "graph_statuses": ",".join(graph_statuses),
+            "flow_steps": ">".join(steps),
+            "flow_status": str(flow.get("status") or ""),
+            "entity_count": int(registry.get("entity_count") or 0),
+            "actor_count": int(registry.get("actor_count") or entity_type_counts.get("actor") or 0),
+            "terrain_count": int(registry.get("terrain_count") or entity_type_counts.get("terrain") or 0),
+            "skybox_count": int(registry.get("skybox_count") or entity_type_counts.get("skybox") or 0),
+            "model_items": len(classification.get("model_items") or []),
+            "substrate_items": len(classification.get("substrate_items") or []),
+            "operation_count": int(report.get("operation_count") or 0),
+            "operation_total_count": int(report.get("operation_total_count") or 0),
+            "state_patch_applied_count": int(state_patch.get("applied") or 0),
+            "state_patch_conflict_count": int(state_patch.get("conflict") or 0),
+            "state_patch_invalid_count": int(state_patch.get("invalid") or 0),
+            "tool_execution_succeeded_count": int(tool_execution.get("succeeded_count") or 0),
+            "tool_execution_failed_count": int(tool_execution.get("failed_count") or 0),
+            "tool_execution_blocked_count": int(tool_execution.get("blocked_count") or 0),
+            "runtime_guard_blocked_count": int(guard_summary.get("blocked_count") or 0),
+            "runtime_guard_high_risk_confirmation_required_count": int(
+                guard_summary.get("high_risk_confirmation_required_count") or 0
+            ),
+            "runtime_guard_write_confirmation_required_count": int(
+                guard_summary.get("write_confirmation_required_count") or 0
+            ),
+            "runtime_guard_system_actor_write_blocked_count": int(
+                guard_summary.get("system_actor_write_blocked_count") or 0
+            ),
+            "runtime_guard_requires_write_blocked_count": int(
+                guard_summary.get("requires_write_blocked_count") or 0
+            ),
+            "runtime_guard_confirmed_blocked_count": int(guard_summary.get("confirmed_blocked_count") or 0),
+            "runtime_guard_unconfirmed_blocked_count": int(guard_summary.get("unconfirmed_blocked_count") or 0),
+            "tool_queue_count": int(tool_queue_health.get("queue_count") or 0),
+            "tool_queue_queued_count": int(tool_queue_health.get("queued_count") or 0),
+            "tool_queue_running_count": int(tool_queue_health.get("running_count") or 0),
+            "tool_queue_blocked_count": int(tool_queue_health.get("blocked_count") or 0),
+            "tool_queue_terminal_count": int(tool_queue_health.get("terminal_count") or 0),
+            "tool_queue_active_count": int(tool_queue_health.get("active_count") or 0),
+            "tool_queue_pressure": float(tool_queue_health.get("queue_pressure") or 0.0),
+            "batch_tooling_fact_count": int(batch_tooling.get("fact_count") or 0),
+            "batch_tooling_created_batch_fact_count": int(batch_tooling.get("created_batch_fact_count") or 0),
+            "batch_tooling_created_batch_count": int(batch_tooling.get("created_batch_count") or 0),
+            "batch_tooling_prioritized_item_count": int(batch_tooling.get("prioritized_item_count") or 0),
+            "batch_tooling_merged_intervention_fact_count": int(batch_tooling.get("merged_intervention_fact_count") or 0),
+            "batch_tooling_merged_intervention_item_count": int(batch_tooling.get("merged_intervention_item_count") or 0),
+            "batch_tooling_absorbed_intervention_count": int(batch_tooling.get("absorbed_intervention_count") or 0),
+            "runtime_state_source": str(fact_source.get("runtime_state_source") or ""),
+            "engine_write_boundary_count": int(engine_write_boundary.get("boundary_fact_count") or 0),
+            "engine_write_import_boundary_count": int(engine_write_boundary.get("import_boundary_count") or 0),
+            "engine_write_bridge_call_count": int(engine_write_boundary.get("bridge_call_count") or 0),
+            "engine_write_bridge_success_count": int(engine_write_boundary.get("bridge_success_count") or 0),
+            "engine_write_bridge_failed_count": int(engine_write_boundary.get("bridge_failed_count") or 0),
+            "engine_write_bridge_error_code_counts": dict(engine_write_boundary.get("bridge_error_code_counts") or {}),
+            "engine_write_status_counts": dict(engine_write_boundary.get("status_counts") or {}),
+            "engine_write_source_counts": dict(engine_write_boundary.get("write_source_counts") or {}),
+            "import_failure_code_counts": dict(
+                import_summary.get("import_failure_code_counts")
+                or report_health.get("import_failure_code_counts")
+                or {}
+            ),
+            "environment_import_failure_code_counts": dict(
+                import_summary.get("environment_import_failure_code_counts")
+                or report_health.get("environment_import_failure_code_counts")
+                or {}
+            ),
+            "resource_image_requested_count": int(image_resource.get("requested_count") or 0),
+            "resource_image_failed_count": int(image_resource.get("failed_count") or 0),
+            "resource_model_requested_count": int(model_resource.get("requested_count") or 0),
+            "resource_model_failed_count": int(model_resource.get("failed_count") or 0),
+            "geometry_fact_count": int(geometry_summary.get("fact_count") or 0),
+            "geometry_aabb_actor_count": int(geometry_summary.get("aabb_actor_count") or 0),
+            "geometry_overlap_issue_count": int(geometry_summary.get("overlap_issue_count") or 0),
+            "vlm_checkpoint_count": int(vlm_summary.get("checkpoint_count") or 0),
+            "vlm_advisory_count": int(vlm_summary.get("advisory_count") or 0),
+            "sync_recorded_count": int(sync_summary.get("recorded_count") or 0),
+            "sync_failed_count": int(sync_summary.get("failed_count") or 0),
+            "asset_transfer_progress_count": int(asset_transfer_summary.get("asset_transfer_progress_count") or 0),
+            "asset_transfer_failed_count": int(asset_transfer_summary.get("asset_transfer_failed_count") or 0),
+            "batch_execution_completed_count": int(batch_execution_summary.get("completed_count") or 0),
+        }
+
+    def _log_agent_runtime_evidence(
+        self,
+        *,
+        phase: str,
+        room_id: str,
+        runtime_plan_id: str,
+        result: dict[str, Any],
+    ) -> None:
+        summary = self._agent_runtime_evidence_summary(result)
+        if not summary:
+            return
+        self._logger.info(
+            "[LANChatRuntimeEvidence] phase=%s room=%s runtime_plan=%s batches=%s graphs=%s graph_statuses=%s "
+            "flow=%s flow_status=%s entities=%s actors=%s terrain=%s skybox=%s model_items=%s substrate_items=%s "
+            "operations=%s operation_total=%s state_source=%s engine_boundary=%s engine_imports=%s "
+            "guard=block:%s,write:%s,system:%s,confirm_high:%s,confirm_write:%s "
+            "queue=total:%s,queued:%s,running:%s,active:%s,block:%s,pressure:%s "
+            "batch_tooling=facts:%s,created:%s,prioritized:%s,merged:%s,absorbed:%s "
+            "engine_bridge=%s/%s/%s engine_statuses=%s engine_sources=%s "
+            "import_failures=%s env_import_failures=%s bridge_errors=%s "
+            "resources=image:%s/%s,model:%s/%s geometry=facts:%s,aabb:%s,overlap:%s "
+            "vlm=checkpoints:%s,advisories:%s sync=recorded:%s,failed:%s "
+            "asset_transfer=progress:%s,failed:%s batch_completed=%s",
+            phase,
+            room_id or "default",
+            runtime_plan_id or "",
+            summary.get("batch_count", 0),
+            summary.get("graph_count", 0),
+            summary.get("graph_statuses", ""),
+            summary.get("flow_steps", ""),
+            summary.get("flow_status", ""),
+            summary.get("entity_count", 0),
+            summary.get("actor_count", 0),
+            summary.get("terrain_count", 0),
+            summary.get("skybox_count", 0),
+            summary.get("model_items", 0),
+            summary.get("substrate_items", 0),
+            summary.get("operation_count", 0),
+            summary.get("operation_total_count", 0),
+            summary.get("runtime_state_source", ""),
+            summary.get("engine_write_boundary_count", 0),
+            summary.get("engine_write_import_boundary_count", 0),
+            summary.get("runtime_guard_blocked_count", 0),
+            summary.get("runtime_guard_requires_write_blocked_count", 0),
+            summary.get("runtime_guard_system_actor_write_blocked_count", 0),
+            summary.get("runtime_guard_high_risk_confirmation_required_count", 0),
+            summary.get("runtime_guard_write_confirmation_required_count", 0),
+            summary.get("tool_queue_count", 0),
+            summary.get("tool_queue_queued_count", 0),
+            summary.get("tool_queue_running_count", 0),
+            summary.get("tool_queue_active_count", 0),
+            summary.get("tool_queue_blocked_count", 0),
+            summary.get("tool_queue_pressure", 0.0),
+            summary.get("batch_tooling_fact_count", 0),
+            summary.get("batch_tooling_created_batch_count", 0),
+            summary.get("batch_tooling_prioritized_item_count", 0),
+            summary.get("batch_tooling_merged_intervention_item_count", 0),
+            summary.get("batch_tooling_absorbed_intervention_count", 0),
+            summary.get("engine_write_bridge_call_count", 0),
+            summary.get("engine_write_bridge_success_count", 0),
+            summary.get("engine_write_bridge_failed_count", 0),
+            summary.get("engine_write_status_counts", {}),
+            summary.get("engine_write_source_counts", {}),
+            summary.get("import_failure_code_counts", {}),
+            summary.get("environment_import_failure_code_counts", {}),
+            summary.get("engine_write_bridge_error_code_counts", {}),
+            summary.get("resource_image_requested_count", 0),
+            summary.get("resource_image_failed_count", 0),
+            summary.get("resource_model_requested_count", 0),
+            summary.get("resource_model_failed_count", 0),
+            summary.get("geometry_fact_count", 0),
+            summary.get("geometry_aabb_actor_count", 0),
+            summary.get("geometry_overlap_issue_count", 0),
+            summary.get("vlm_checkpoint_count", 0),
+            summary.get("vlm_advisory_count", 0),
+            summary.get("sync_recorded_count", 0),
+            summary.get("sync_failed_count", 0),
+            summary.get("asset_transfer_progress_count", 0),
+            summary.get("asset_transfer_failed_count", 0),
+            summary.get("batch_execution_completed_count", 0),
         )
 
     @staticmethod
@@ -2036,6 +2600,24 @@ class LANChatAgentWorker:
             return False
         return intent in {"compose", "edit"}
 
+    @staticmethod
+    def _message_sender_is_host(message: dict[str, Any], *, sender_type: str = "") -> bool:
+        if bool((message or {}).get("is_host")):
+            return True
+        normalized_sender_type = str(sender_type or (message or {}).get("sender_type") or "").strip().lower()
+        if normalized_sender_type == "host":
+            return True
+        room_id = str((message or {}).get("room_id") or "").strip()
+        sender_id = str((message or {}).get("sender_id") or (message or {}).get("from") or "").strip()
+        sender_name = str((message or {}).get("sender_name") or "").strip()
+        # The single-player LANChat bridge may emit sender_type=user with no is_host flag.
+        # Treat the local single-player owner as host without relaxing multiplayer rooms.
+        if room_id in {"single-default", "single", "default"} and (
+            sender_id == "local-single-player" or sender_name == "房主"
+        ):
+            return True
+        return False
+
     def process_once(self) -> bool:
         if not self._has_engine_api():
             return False
@@ -2099,8 +2681,8 @@ class LANChatAgentWorker:
         room_limit = max(1, int(max_rooms or 1))
         graph_limit = max(1, int(max_graphs_per_room or 1))
         for room_id in room_snapshot[:room_limit]:
+            before_timestamp = self._latest_agent_runtime_event_timestamp(str(room_id))
             try:
-                before_timestamp = self._latest_agent_runtime_event_timestamp(str(room_id))
                 runtime_result = self._agent_runtime.handle_message(
                     room_id=str(room_id),
                     text="runtime worker drain",
@@ -2109,10 +2691,41 @@ class LANChatAgentWorker:
                 )
                 result = dict(runtime_result.get("drain") or {})
             except Exception as exc:  # noqa: BLE001
-                self._logger.debug("AgentRuntime queue drain skipped for room %s: %s", room_id, type(exc).__name__)
+                self._logger.warning(
+                    "AgentRuntime queue drain failed for room %s: error_type=%s",
+                    room_id,
+                    type(exc).__name__,
+                )
+                self._record_runtime_audit_event(
+                    event="runtime_worker_drain_exception",
+                    room_id=str(room_id),
+                    message="AgentRuntime worker drain raised an exception.",
+                    payload={
+                        "error_type": type(exc).__name__,
+                        "phase": "agent_runtime_worker_drain",
+                    },
+                )
                 continue
             drained_count = int(result.get("drained_count") or 0)
             if drained_count <= 0:
+                if str(result.get("status") or "").strip().lower() == "failed":
+                    reason = str(result.get("reason") or "").strip()
+                    self._logger.warning(
+                        "[LANChatRuntimeDrain] room=%s failed reason=%s",
+                        room_id,
+                        _trace_preview(reason, limit=120),
+                    )
+                    self._record_runtime_audit_event(
+                        event="runtime_worker_drain_failed",
+                        room_id=str(room_id),
+                        message="AgentRuntime worker drain returned failed status.",
+                        payload={
+                            "reason": reason[:240],
+                            "status": str(result.get("status") or ""),
+                            "phase": "agent_runtime_worker_drain",
+                            "drained_count": drained_count,
+                        },
+                    )
                 continue
             self._remember_room_id(str(room_id))
             self._logger.info(
@@ -2929,7 +3542,10 @@ class LANChatAgentWorker:
                 sender_id=str(trigger.get("sender_id") or trigger.get("from") or ""),
                 sender_name=str(trigger.get("sender_name") or trigger.get("from") or ""),
                 text=text,
-                is_host=bool(trigger.get("is_host") or str(trigger.get("sender_type") or "").lower() == "host"),
+                is_host=self._message_sender_is_host(
+                    trigger,
+                    sender_type=str(trigger.get("sender_type") or ""),
+                ),
                 metadata=self._coordinator_sync_metadata(trigger, source="lanchat_agent_trigger"),
             ))
             if getattr(event, "event_type", "") != "status_query":
@@ -3694,6 +4310,11 @@ class LANChatAgentWorker:
             if isinstance(replay.get("asset_transfer_replay_summary"), dict)
             else {}
         )
+        worker_drain_replay = (
+            replay.get("worker_drain_replay_summary", {})
+            if isinstance(replay.get("worker_drain_replay_summary"), dict)
+            else {}
+        )
         peer_sync_replay = (
             replay.get("peer_sync_replay_summary", {})
             if isinstance(replay.get("peer_sync_replay_summary"), dict)
@@ -3763,6 +4384,7 @@ class LANChatAgentWorker:
         resource_readiness_text = self._format_agent_runtime_replay_resource_readiness_report(resource_readiness)
         sync_replay_text = self._format_agent_runtime_sync_replay_report(sync_replay)
         asset_transfer_replay_text = self._format_agent_runtime_replay_asset_transfer_report(asset_transfer_replay)
+        worker_drain_replay_text = self._format_agent_runtime_worker_drain_replay_report(worker_drain_replay)
         peer_sync_replay_text = self._format_agent_runtime_replay_peer_sync_report(peer_sync_replay)
         engine_write_text = self._format_agent_runtime_engine_write_report(engine_write)
         engine_write_boundary_text = self._format_agent_runtime_engine_write_boundary_report(engine_write_boundary)
@@ -3792,6 +4414,7 @@ class LANChatAgentWorker:
             f"- resource_readiness: {resource_readiness_text}\n"
             f"- sync: {sync_replay_text}\n"
             f"- asset_transfer: {asset_transfer_replay_text}\n"
+            f"- worker_drain: {worker_drain_replay_text}\n"
             f"- peer_sync: {peer_sync_replay_text}\n"
             f"- review_advisory: {review_advisory_text}\n"
             f"- final_adjustment: {final_adjustment_text}\n"
@@ -3855,6 +4478,7 @@ class LANChatAgentWorker:
             return None
         plan_summary = report.get("plan_summary", {}) if isinstance(report.get("plan_summary"), dict) else {}
         classification = report.get("classification_summary", {}) if isinstance(report.get("classification_summary"), dict) else {}
+        scene_registry = report.get("scene_entity_registry", {}) if isinstance(report.get("scene_entity_registry"), dict) else {}
         scene_design_contract = report.get("scene_design_contract_summary", {}) if isinstance(report.get("scene_design_contract_summary"), dict) else {}
         semantic_arbitration = report.get("semantic_arbitration_summary", {}) if isinstance(report.get("semantic_arbitration_summary"), dict) else {}
         scene_snapshot = report.get("scene_snapshot_summary", {}) if isinstance(report.get("scene_snapshot_summary"), dict) else {}
@@ -3939,6 +4563,13 @@ class LANChatAgentWorker:
             if isinstance(replay_summary.get("asset_transfer_replay_summary"), dict)
             else {}
         )
+        worker_drain_replay = (
+            report.get("worker_drain_replay_summary", {})
+            if isinstance(report.get("worker_drain_replay_summary"), dict)
+            else replay_summary.get("worker_drain_replay_summary", {})
+            if isinstance(replay_summary.get("worker_drain_replay_summary"), dict)
+            else {}
+        )
         peer_sync_replay = (
             replay_summary.get("peer_sync_replay_summary", {})
             if isinstance(replay_summary.get("peer_sync_replay_summary"), dict)
@@ -3955,6 +4586,16 @@ class LANChatAgentWorker:
         model_items = self._format_agent_runtime_short_list(classification.get("model_items"), fallback="none")
         substrate_items = self._format_agent_runtime_short_list(classification.get("substrate_items"), fallback="none")
         guarded_items = self._format_agent_runtime_short_list(classification.get("guarded_items"), fallback="none")
+        raw_model_items = classification.get("model_items") if isinstance(classification.get("model_items"), list) else []
+        raw_substrate_items = (
+            classification.get("substrate_items") if isinstance(classification.get("substrate_items"), list) else []
+        )
+        classification_counts_text = (
+            f"model/substrate "
+            f"{len(raw_model_items)}/"
+            f"{len(raw_substrate_items)}"
+        )
+        scene_registry_text = self._format_agent_runtime_scene_registry_report(scene_registry)
         scene_contract_text = self._format_agent_runtime_scene_contract_report(scene_design_contract)
         semantic_arbitration_text = self._format_agent_runtime_semantic_arbitration_report(semantic_arbitration)
         scene_snapshot_text = self._format_agent_runtime_scene_snapshot_report(scene_snapshot)
@@ -3963,7 +4604,18 @@ class LANChatAgentWorker:
         fact_source_text = self._format_agent_runtime_fact_source_boundary_report(
             report.get("fact_source_boundary_summary")
         )
+        closure_text = self._format_agent_runtime_closure_report(
+            report.get("fact_source_boundary_summary"),
+            state_patch,
+            operation_count=report.get("operation_count"),
+            operation_total_count=report.get("operation_total_count"),
+        )
         import_text = self._format_agent_runtime_import_stage_report(import_summary)
+        actor_import_text = self._format_agent_runtime_actor_import_boundary_report(
+            import_summary,
+            scene_registry,
+            engine_write_boundary,
+        )
         environment_text = self._format_agent_runtime_environment_report(environment)
         review_text = self._format_agent_runtime_review_report(review_summary)
         geometry_text = self._format_agent_runtime_geometry_fact_report(geometry_summary)
@@ -3975,6 +4627,7 @@ class LANChatAgentWorker:
         asset_transfer_text = self._format_agent_runtime_asset_transfer_report(asset_transfer_summary)
         sync_replay_text = self._format_agent_runtime_sync_replay_report(sync_replay)
         asset_transfer_replay_text = self._format_agent_runtime_replay_asset_transfer_report(asset_transfer_replay)
+        worker_drain_replay_text = self._format_agent_runtime_worker_drain_replay_report(worker_drain_replay)
         peer_sync_replay_text = self._format_agent_runtime_replay_peer_sync_report(peer_sync_replay)
         batch_tooling_text = self._format_agent_runtime_batch_tooling_report(batch_tooling)
         state_patch_text = self._format_agent_runtime_replay_state_patch_report(state_patch)
@@ -4003,16 +4656,20 @@ class LANChatAgentWorker:
             f"- plan: {str(plan_summary.get('title') or report.get('plan_id') or 'unknown')}\n"
             f"- status: {str(plan_summary.get('status') or 'unknown')}\n"
             f"- objects: {len(plan_summary.get('concrete_object_items') or [])}\n"
+            f"- classification: {classification_counts_text}\n"
             f"- models: {model_items}\n"
             f"- substrate: {substrate_items}\n"
+            f"- scene registry: {scene_registry_text}\n"
             f"- scene contract: {scene_contract_text}\n"
             f"- semantic arbitration: {semantic_arbitration_text}\n"
             f"- scene snapshot: {scene_snapshot_text}\n"
             f"- fact source: {fact_source_text}\n"
+            f"- closure: {closure_text}\n"
             f"- environment: {environment_text}\n"
             f"- runtime resources: {runtime_resource_text}\n"
             f"- report health: {report_health_text}\n"
             f"- import: {import_text}\n"
+            f"- actor import: {actor_import_text}\n"
             f"- review: {review_text}\n"
             f"- geometry facts: {geometry_text}\n"
             f"- review proposals: {review_proposal_text}\n"
@@ -4036,6 +4693,7 @@ class LANChatAgentWorker:
             f"- asset transfer: {asset_transfer_text}\n"
             f"- sync replay: {sync_replay_text}\n"
             f"- asset transfer replay: {asset_transfer_replay_text}\n"
+            f"- worker drain replay: {worker_drain_replay_text}\n"
             f"- peer sync replay: {peer_sync_replay_text}\n"
             f"- resources: {resource_text}\n"
             f"- resource readiness: {resource_readiness_text}\n"
@@ -4059,6 +4717,37 @@ class LANChatAgentWorker:
         if len(items) > max(1, int(limit or 1)):
             preview += f" 等 {len(items)} 项"
         return preview
+
+    @staticmethod
+    def _format_agent_runtime_scene_registry_report(summary: Any) -> str:
+        if not isinstance(summary, dict) or not summary:
+            return "none"
+        entity_type_counts = dict(summary.get("entity_type_counts") or {})
+        entity_count = int(summary.get("entity_count") or 0)
+        actor_count = int(summary.get("actor_count") or entity_type_counts.get("actor") or 0)
+        terrain_count = int(summary.get("terrain_count") or entity_type_counts.get("terrain") or 0)
+        skybox_count = int(summary.get("skybox_count") or entity_type_counts.get("skybox") or 0)
+        entities = summary.get("entities") if isinstance(summary.get("entities"), list) else []
+        roles: list[str] = []
+        for entity in entities:
+            if not isinstance(entity, dict):
+                continue
+            role = str(entity.get("semantic_role") or entity.get("name") or "").strip()
+            if role and role not in roles:
+                roles.append(role)
+            if len(roles) >= 4:
+                break
+        if entity_count <= 0 and actor_count <= 0 and terrain_count <= 0 and skybox_count <= 0:
+            return "none"
+        parts = [
+            f"entities {entity_count}",
+            f"actor {actor_count}",
+            f"terrain {terrain_count}",
+            f"skybox {skybox_count}",
+        ]
+        if roles:
+            parts.append("roles " + "、".join(roles))
+        return ", ".join(parts)
 
     @staticmethod
     def _format_agent_runtime_environment_report(summary: Any) -> str:
@@ -5299,6 +5988,25 @@ class LANChatAgentWorker:
             for item in raw_engine_write_readiness_mismatch_channels[:4]
             if safe_label(item)
         )
+        engine_write_runtime_state_only_count = int(
+            summary.get("engine_write_runtime_state_only_count") or 0
+        )
+        raw_engine_write_runtime_state_only_channels = (
+            summary.get("engine_write_runtime_state_only_channels")
+            if isinstance(summary.get("engine_write_runtime_state_only_channels"), list)
+            else []
+        )
+        engine_write_runtime_state_only_channels = "/".join(
+            safe_label(item)
+            for item in raw_engine_write_runtime_state_only_channels[:4]
+            if safe_label(item)
+        )
+        worker_drain_failed = int(summary.get("worker_drain_failed_count") or 0)
+        worker_drain_exception = int(summary.get("worker_drain_exception_count") or 0)
+        worker_drain_status_failed = int(summary.get("worker_drain_status_failed_count") or 0)
+        worker_drain_plan_resolve_failed = int(
+            summary.get("worker_drain_plan_resolve_failed_count") or 0
+        )
         raw_reasons = summary.get("reasons") if isinstance(summary.get("reasons"), list) else []
         reasons = ", ".join(
             safe_label(reason)
@@ -5328,6 +6036,25 @@ class LANChatAgentWorker:
                 )
             else:
                 parts.append(f"engine-write mismatch {engine_write_readiness_mismatch_count}")
+        if engine_write_runtime_state_only_count:
+            if engine_write_runtime_state_only_channels:
+                parts.append(
+                    f"engine-write runtime-state-only {engine_write_runtime_state_only_count}"
+                    f"({engine_write_runtime_state_only_channels})"
+                )
+            else:
+                parts.append(f"engine-write runtime-state-only {engine_write_runtime_state_only_count}")
+        if (
+            worker_drain_failed
+            or worker_drain_exception
+            or worker_drain_status_failed
+            or worker_drain_plan_resolve_failed
+        ):
+            parts.append(
+                "worker-drain failed/status-failed/exception/plan-resolve "
+                f"{worker_drain_failed}/{worker_drain_status_failed}/"
+                f"{worker_drain_exception}/{worker_drain_plan_resolve_failed}"
+            )
         if reasons != "none":
             parts.append(f"reasons {reasons}")
         return ", ".join(parts)
@@ -5366,6 +6093,35 @@ class LANChatAgentWorker:
         return ", ".join(parts)
 
     @staticmethod
+    def _format_agent_runtime_closure_report(
+        fact_source: Any,
+        state_patch: Any,
+        *,
+        operation_count: Any = 0,
+        operation_total_count: Any = 0,
+    ) -> str:
+        fact_data = fact_source if isinstance(fact_source, dict) else {}
+        patch_data = state_patch if isinstance(state_patch, dict) else {}
+        source = str(fact_data.get("runtime_state_source") or "unknown").strip() or "unknown"
+        write_boundary = int(fact_data.get("engine_write_boundary_fact_count") or 0)
+        try:
+            operations = int(operation_count or 0)
+        except (TypeError, ValueError):
+            operations = 0
+        try:
+            operation_total = int(operation_total_count or 0)
+        except (TypeError, ValueError):
+            operation_total = 0
+        return (
+            f"state {source}, operation {operations}/{operation_total}, "
+            f"patch applied/conflict/invalid "
+            f"{int(patch_data.get('applied') or 0)}/"
+            f"{int(patch_data.get('conflict') or 0)}/"
+            f"{int(patch_data.get('invalid') or 0)}, "
+            f"write-boundary {write_boundary}"
+        )
+
+    @staticmethod
     def _format_agent_runtime_import_stage_report(summary: Any) -> str:
         if not isinstance(summary, dict) or not summary:
             return "events 0, imported 0/0, failed 0"
@@ -5381,6 +6137,38 @@ class LANChatAgentWorker:
         if latest_status:
             parts.append(f"latest {latest_status}")
         return ", ".join(parts)
+
+    @staticmethod
+    def _format_agent_runtime_actor_import_boundary_report(
+        import_summary: Any,
+        scene_registry: Any,
+        engine_write_boundary: Any,
+    ) -> str:
+        import_data = import_summary if isinstance(import_summary, dict) else {}
+        registry_data = scene_registry if isinstance(scene_registry, dict) else {}
+        boundary_data = engine_write_boundary if isinstance(engine_write_boundary, dict) else {}
+        entity_type_counts = dict(registry_data.get("entity_type_counts") or {})
+        requested = int(import_data.get("requested_count") or 0)
+        imported = int(import_data.get("imported_count") or 0)
+        failed = int(import_data.get("failed_count") or 0)
+        actor_count = int(registry_data.get("actor_count") or entity_type_counts.get("actor") or 0)
+        bridge_calls = int(boundary_data.get("bridge_call_count") or 0)
+        bridge_success = int(boundary_data.get("bridge_success_count") or 0)
+        bridge_failed = int(boundary_data.get("bridge_failed_count") or 0)
+        status_counts = boundary_data.get("status_counts") if isinstance(boundary_data.get("status_counts"), dict) else {}
+        runtime_state_only = int(status_counts.get("runtime_state_only") or 0)
+        if bridge_calls > 0:
+            native_state = f"bridge {bridge_success}/{bridge_calls}"
+            if bridge_failed:
+                native_state += f", failed {bridge_failed}"
+        elif runtime_state_only > 0:
+            native_state = f"RuntimeState-only {runtime_state_only}, native pending F5"
+        else:
+            native_state = "native not-observed"
+        return (
+            f"requested/imported/failed {requested}/{imported}/{failed}, "
+            f"registered actor {actor_count}, {native_state}"
+        )
 
     @staticmethod
     def _format_agent_runtime_tool_queue_health_report(summary: Any) -> str:
@@ -5694,6 +6482,11 @@ class LANChatAgentWorker:
             if isinstance(summary.get("runtime_event_replay_summary"), dict)
             else {}
         )
+        worker_drain_replay = (
+            summary.get("worker_drain_replay_summary")
+            if isinstance(summary.get("worker_drain_replay_summary"), dict)
+            else {}
+        )
         engine_write_boundary = (
             summary.get("engine_write_boundary_summary")
             if isinstance(summary.get("engine_write_boundary_summary"), dict)
@@ -5750,6 +6543,22 @@ class LANChatAgentWorker:
                 "runtime-events "
                 + LANChatAgentWorker._format_agent_runtime_replay_runtime_event_report(runtime_event_replay)
             )
+        drain_failed = int(worker_drain_replay.get("failed_count") or event_counts.get("runtime_worker_drain_failed") or 0)
+        drain_exception = int(worker_drain_replay.get("exception_count") or event_counts.get("runtime_worker_drain_exception") or 0)
+        drain_status_failed = int(
+            worker_drain_replay.get("status_failed_count")
+            or event_counts.get("runtime_worker_drain_status_failed")
+            or 0
+        )
+        if drain_failed or drain_exception or drain_status_failed:
+            parts.append(
+                "worker-drain "
+                + LANChatAgentWorker._format_agent_runtime_worker_drain_replay_report(worker_drain_replay or {
+                    "failed_count": drain_failed,
+                    "exception_count": drain_exception,
+                    "status_failed_count": drain_status_failed,
+                })
+            )
         if int(engine_write_boundary.get("boundary_fact_count") or 0) > 0:
             parts.append(
                 "engine_write_boundary "
@@ -5758,6 +6567,33 @@ class LANChatAgentWorker:
         if recent:
             parts.append("recent " + ",".join(recent[:3]))
         return "；".join(parts)
+
+    @staticmethod
+    def _format_agent_runtime_worker_drain_replay_report(summary: Any) -> str:
+        if not isinstance(summary, dict) or not summary:
+            return "requested 0, drained 0, failed 0, exception 0"
+        requested = int(summary.get("requested_count") or 0)
+        drained_messages = int(summary.get("message_drained_count") or 0)
+        failed = int(summary.get("failed_count") or 0)
+        exception = int(summary.get("exception_count") or 0)
+        status_failed = int(summary.get("status_failed_count") or 0)
+        plan_resolve_failed = int(summary.get("plan_resolve_failed_count") or 0)
+        drained_graph_total = int(summary.get("drained_graph_total") or 0)
+        parts = [
+            f"requested {requested}",
+            f"drained {drained_messages}/{drained_graph_total}",
+            f"failed {failed}",
+            f"exception {exception}",
+        ]
+        if status_failed:
+            parts.append(f"status-failed {status_failed}")
+        if plan_resolve_failed:
+            parts.append(f"plan-resolve-failed {plan_resolve_failed}")
+        latest = summary.get("latest_drain_event") if isinstance(summary.get("latest_drain_event"), dict) else {}
+        latest_event = str(latest.get("event") or "").strip().replace("_", "-")
+        if latest_event:
+            parts.append(f"latest {latest_event[:48]}")
+        return ", ".join(parts)
 
     @staticmethod
     def _format_agent_runtime_context_report(summary: Any) -> str:
@@ -5967,11 +6803,20 @@ class LANChatAgentWorker:
         bridge_success = int(summary.get("bridge_success_count") or 0)
         bridge_failed = int(summary.get("bridge_failed_count") or 0)
         bridge_error_text = count_rows(summary.get("bridge_error_code_counts"))
+        raw_status_counts = summary.get("status_counts") if isinstance(summary.get("status_counts"), dict) else {}
+        runtime_state_only_count = int(raw_status_counts.get("runtime_state_only") or 0)
+        if bridge_calls > 0:
+            native_text = "native verified" if bridge_success > 0 and bridge_failed <= 0 else "native needs-attention"
+        elif runtime_state_only_count > 0:
+            native_text = "native pending F5"
+        else:
+            native_text = "native not-observed"
         return (
             f"boundary {boundary_count}, "
             f"import/transform/delete {import_count}/{transform_count}/{delete_count}, "
             f"sources {source_text}, statuses {status_text}, "
-            f"bridge {bridge_calls}/{bridge_success}/{bridge_failed}, errors {bridge_error_text}"
+            f"bridge {bridge_calls}/{bridge_success}/{bridge_failed}, errors {bridge_error_text}, "
+            f"{native_text}"
         )
 
     @staticmethod
@@ -6367,6 +7212,7 @@ class LANChatAgentWorker:
         context = status.get("planning_context_summary", {}) if isinstance(status.get("planning_context_summary"), dict) else {}
         interventions = status.get("intervention_summary", {}) if isinstance(status.get("intervention_summary"), dict) else {}
         classification = status.get("classification_summary", {}) if isinstance(status.get("classification_summary"), dict) else {}
+        scene_registry = status.get("scene_entity_registry", {}) if isinstance(status.get("scene_entity_registry"), dict) else {}
         scene_design_contract = status.get("scene_design_contract_summary", {}) if isinstance(status.get("scene_design_contract_summary"), dict) else {}
         semantic_arbitration = status.get("semantic_arbitration_summary", {}) if isinstance(status.get("semantic_arbitration_summary"), dict) else {}
         scene_snapshot = status.get("scene_snapshot_summary", {}) if isinstance(status.get("scene_snapshot_summary"), dict) else {}
@@ -6426,6 +7272,11 @@ class LANChatAgentWorker:
             if isinstance(status.get("tool_graph_queue_replay_summary"), dict)
             else {}
         )
+        worker_drain_replay = (
+            status.get("worker_drain_replay_summary", {})
+            if isinstance(status.get("worker_drain_replay_summary"), dict)
+            else {}
+        )
         runtime_guard = (
             status.get("runtime_guard_replay_summary", {})
             if isinstance(status.get("runtime_guard_replay_summary"), dict)
@@ -6480,8 +7331,15 @@ class LANChatAgentWorker:
         guarded_text = "、".join(guarded_items[:5]) if guarded_items else "暂无"
         if len(guarded_items) > 5:
             guarded_text += f" 等 {len(guarded_items)} 项"
+        classification_model_count = (
+            len(batch_model_items)
+            if batch_model_items
+            else len([str(item) for item in (classification.get("model_items") or []) if str(item)])
+        )
+        classification_counts_text = f"model/substrate {classification_model_count}/{len(substrate_items)}"
         batch_status = batch.get("status_counts", {}) if isinstance(batch.get("status_counts"), dict) else {}
         graph_status = graphs.get("status_counts", {}) if isinstance(graphs.get("status_counts"), dict) else {}
+        scene_registry_text = self._format_agent_runtime_scene_registry_report(scene_registry)
         scene_contract_text = self._format_agent_runtime_scene_contract_report(scene_design_contract)
         semantic_arbitration_text = self._format_agent_runtime_semantic_arbitration_report(semantic_arbitration)
         scene_snapshot_text = self._format_agent_runtime_scene_snapshot_report(scene_snapshot)
@@ -6489,7 +7347,18 @@ class LANChatAgentWorker:
         fact_source_text = self._format_agent_runtime_fact_source_boundary_report(
             status.get("fact_source_boundary_summary")
         )
+        closure_text = self._format_agent_runtime_closure_report(
+            status.get("fact_source_boundary_summary"),
+            state_patch,
+            operation_count=status.get("operation_count"),
+            operation_total_count=status.get("operation_total_count"),
+        )
         import_text = self._format_agent_runtime_import_stage_report(import_summary)
+        actor_import_text = self._format_agent_runtime_actor_import_boundary_report(
+            import_summary,
+            scene_registry,
+            engine_write_boundary,
+        )
         report_health_text = self._format_agent_runtime_report_health_report(report_health)
         resource_text = self._format_agent_runtime_resource_report(provider)
         resource_readiness_text = self._format_agent_runtime_resource_readiness_report(provider_readiness)
@@ -6515,6 +7384,7 @@ class LANChatAgentWorker:
             batch_execution_replay,
             tool_graph_queue_replay,
         )
+        worker_drain_replay_text = self._format_agent_runtime_worker_drain_replay_report(worker_drain_replay)
         engine_write_text = self._format_agent_runtime_engine_write_report(engine_write)
         engine_write_boundary_text = self._format_agent_runtime_engine_write_boundary_report(engine_write_boundary)
         message_delivery_text = self._format_agent_runtime_message_delivery_report(message_delivery)
@@ -6553,15 +7423,19 @@ class LANChatAgentWorker:
             reply_lines.append(f"- 方案摘要：{brief_text}")
         reply_lines.extend([
             f"- 介入：{intervention_line}",
+            f"- 分类计数：{classification_counts_text}",
             f"- 主要模型：{item_text}",
             f"- 环境/地形：{substrate_text}",
+            f"- 场景实体：{scene_registry_text}",
             f"- 场景契约：{scene_contract_text}",
             f"- 语义仲裁：{semantic_arbitration_text}",
             f"- 场景快照：{scene_snapshot_text}",
             f"- 事实来源：{fact_source_text}",
+            f"- Closure：{closure_text}",
             f"- 环境组件：{environment_text}",
             f"- Runtime 资源：{runtime_resource_text}",
             f"- 导入：{import_text}",
+            f"- ActorImport：{actor_import_text}",
             f"- 报告健康：{report_health_text}",
             f"- 审查：{review_text}",
             f"- 几何事实：{geometry_text}",
@@ -6588,6 +7462,7 @@ class LANChatAgentWorker:
             f"- Review advisory replay: {review_advisory_replay_text}",
             f"- GM replay: {gm_summary_replay_text}",
             f"- ToolGraph replay: {tool_graph_replay_text}",
+            f"- Worker drain replay: {worker_drain_replay_text}",
             f"- 介入批次：{intervention_batch_line}",
             f"- ToolCallGraph：{graphs.get('graph_count', 0)} 个，状态 {graph_status or '暂无'}",
             f"- Tool execution：{tool_execution_text}",
@@ -7471,8 +8346,8 @@ class LANChatAgentWorker:
 
         runtime_plan = result.get("plan", {}) if isinstance(result, dict) else {}
         runtime_plan_id = str(runtime_plan.get("plan_id") or "")
-        batches = result.get("batches", []) if isinstance(result, dict) else []
-        graphs = result.get("graphs", []) if isinstance(result, dict) else []
+        batches = self._agent_runtime_batches_from_result(result) if isinstance(result, dict) else []
+        graphs = self._agent_runtime_graphs_from_result(result)
         graph_statuses = [str(graph.get("status") or "") for graph in graphs if isinstance(graph, dict)]
         if graphs:
             self._remember_room_id(room_id)
@@ -7483,6 +8358,12 @@ class LANChatAgentWorker:
             runtime_plan_id,
             len(batches),
             ",".join(graph_statuses),
+        )
+        self._log_agent_runtime_evidence(
+            phase="agent_runtime_execute_result",
+            room_id=room_id,
+            runtime_plan_id=runtime_plan_id,
+            result=result,
         )
         return self._format_agent_runtime_execution_reply(result)
 
@@ -7520,8 +8401,8 @@ class LANChatAgentWorker:
         if not runtime_plan:
             return None
         runtime_plan_id = str(runtime_plan.get("plan_id") or "")
-        batches = result.get("batches", []) if isinstance(result, dict) else []
-        graphs = result.get("graphs", []) if isinstance(result, dict) else []
+        batches = self._agent_runtime_batches_from_result(result) if isinstance(result, dict) else []
+        graphs = self._agent_runtime_graphs_from_result(result)
         graph_statuses = [str(graph.get("status") or "") for graph in graphs if isinstance(graph, dict)]
         if graphs:
             self._remember_room_id(room_id)
@@ -7531,6 +8412,12 @@ class LANChatAgentWorker:
             runtime_plan_id,
             len(batches),
             ",".join(graph_statuses),
+        )
+        self._log_agent_runtime_evidence(
+            phase="runtime_active_plan_execute_result",
+            room_id=room_id,
+            runtime_plan_id=runtime_plan_id,
+            result=result,
         )
         return self._format_agent_runtime_execution_reply(result)
 
@@ -7598,6 +8485,26 @@ class LANChatAgentWorker:
             return "内部执行异常已记录，当前 Runtime 执行未完成。"
         if runtime_action == "post_generation_add":
             return self._format_agent_runtime_intervention_reply(result if isinstance(result, dict) else {})
+        runtime_plan = result.get("plan", {}) if isinstance(result, dict) else {}
+        runtime_plan_id = str(runtime_plan.get("plan_id") or plan_id or "")
+        batches = self._agent_runtime_batches_from_result(result) if isinstance(result, dict) else []
+        graphs = self._agent_runtime_graphs_from_result(result)
+        graph_statuses = [str(graph.get("status") or "") for graph in graphs if isinstance(graph, dict)]
+        if graphs:
+            self._remember_room_id(room_id)
+        self._logger.info(
+            "[LANChatHostActionTrace] phase=agent_runtime_structured_action_result room=%s runtime_plan=%s batches=%s graph_statuses=%s",
+            room_id,
+            runtime_plan_id,
+            len(batches),
+            ",".join(graph_statuses),
+        )
+        self._log_agent_runtime_evidence(
+            phase="agent_runtime_structured_action_result",
+            room_id=room_id,
+            runtime_plan_id=runtime_plan_id,
+            result=result if isinstance(result, dict) else {},
+        )
         runtime_plan = result.get("plan", {}) if isinstance(result, dict) else {}
         if not runtime_plan:
             return self._format_agent_runtime_execution_reply(result if isinstance(result, dict) else {})
@@ -7759,7 +8666,10 @@ class LANChatAgentWorker:
                 sender_id=str(trigger.get("sender_id") or trigger.get("from") or ""),
                 sender_name=str(trigger.get("sender_name") or trigger.get("from") or ""),
                 text=text,
-                is_host=bool(trigger.get("is_host") or str(trigger.get("sender_type") or "").lower() == "host"),
+                is_host=self._message_sender_is_host(
+                    trigger,
+                    sender_type=str(trigger.get("sender_type") or ""),
+                ),
                 agent_id=str(trigger.get("agent_id") or ""),
                 agent_name=str(trigger.get("agent_name") or ""),
                 metadata=self._coordinator_sync_metadata(trigger, source="lanchat_agent_completed_intervention"),
@@ -7852,7 +8762,10 @@ class LANChatAgentWorker:
                 sender_id=str(trigger.get("sender_id") or trigger.get("from") or ""),
                 sender_name=str(trigger.get("sender_name") or trigger.get("from") or ""),
                 text=text,
-                is_host=bool(trigger.get("is_host") or str(trigger.get("sender_type") or "").lower() == "host"),
+                is_host=self._message_sender_is_host(
+                    trigger,
+                    sender_type=str(trigger.get("sender_type") or ""),
+                ),
                 agent_id=str(trigger.get("agent_id") or ""),
                 agent_name=str(trigger.get("agent_name") or ""),
                 metadata=self._coordinator_sync_metadata(trigger, source="lanchat_agent_executing_intervention"),
@@ -8758,10 +9671,11 @@ class LANChatAgentWorker:
         if not isinstance(options, dict):
             return
         is_host = bool(
-            message.get("is_host")
-            or str(message.get("sender_type") or "").lower() == "host"
+            self._message_sender_is_host(
+                message,
+                sender_type=str(message.get("sender_type") or metadata.get("sender_role") or ""),
+            )
             or metadata.get("is_host")
-            or str(metadata.get("sender_role") or "").lower() == "host"
         )
         if not is_host:
             return
@@ -9063,6 +9977,13 @@ class LANChatAgentWorker:
         self._start_coordinator_disclosure_watch(coordinator, disclosure_start + emitted)
 
     def _execute_confirmed_action(self, payload: dict[str, Any]) -> None:
+        if (
+            str(payload.get("execution") or "") == "agent_runtime_structured"
+            and str(payload.get("action_type") or "") in {"start_generation", "post_generation_add"}
+        ):
+            reply = self._execute_structured_host_action_via_agent_runtime(payload)
+            self._send_runtime_structured_action_reply(payload, reply)
+            return
         executor = self._get_host_action_executor()
         if executor is None or not hasattr(executor, "enqueue_and_process"):
             return
@@ -9077,6 +9998,36 @@ class LANChatAgentWorker:
                 emitted = self._emit_new_disclosure_events(coordinator, disclosure_start)
                 self._start_coordinator_disclosure_watch(coordinator, disclosure_start + emitted)
             self._emit_generation_scheduler_disclosure()
+
+    def _send_runtime_structured_action_reply(self, payload: dict[str, Any], text: str | None) -> bool:
+        if self._corona_engine is None:
+            return False
+        safe_text = self._safe_control_text(text or "")
+        if not safe_text:
+            return False
+        metadata = {
+            "action_type": str(payload.get("action_type") or ""),
+            "execution": "agent_runtime_structured",
+            "plan_id": str(payload.get("plan_id") or ""),
+            "room_id": str(payload.get("room_id") or "default"),
+            "phase": "agent_runtime_execution_result",
+        }
+        correlation_id = str(payload.get("proposal_id") or payload.get("plan_id") or "")
+        try:
+            if hasattr(self._corona_engine, "network_send_system_message_ex"):
+                return bool(self._corona_engine.network_send_system_message_ex(
+                    "gm-system",
+                    "GM",
+                    safe_text,
+                    "action_status",
+                    correlation_id,
+                    json.dumps(metadata, ensure_ascii=False),
+                ))
+            if hasattr(self._corona_engine, "network_send_system_message"):
+                return bool(self._corona_engine.network_send_system_message("gm-system", "GM", safe_text))
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Failed to send AgentRuntime structured action reply: %s", type(exc).__name__)
+        return False
 
     def _emit_new_disclosure_events(self, coordinator: InteractionCoordinator, start_index: int) -> int:
         if self._corona_engine is None:

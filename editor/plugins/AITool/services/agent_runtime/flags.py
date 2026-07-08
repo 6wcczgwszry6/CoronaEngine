@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
-from typing import Mapping
+from typing import MutableMapping, Mapping
 
 
 TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
@@ -103,6 +103,32 @@ class AgentRuntimeFlags:
 
     def can_use_engine_layout_transform_provider(self) -> bool:
         return self.can_call_legacy_function_adapter() and self.use_engine_layout_transform_provider
+
+
+def install_f5_runtime_provider_env_defaults(env: MutableMapping[str, str] | None = None) -> None:
+    """Install narrow Runtime provider defaults for the editor/F5 entrypoint.
+
+    Unit tests and CLI callers can still pass explicit environments to
+    ``AgentRuntimeFlags.from_env``.  This helper is intentionally opt-out via
+    existing environment variables: explicit ``0/off/false`` values are
+    preserved, while the editor plugin gets the minimum providers needed for
+    the F5 Runtime bridge to attempt real engine writes.
+    """
+
+    target = env if env is not None else os.environ
+    defaults = {
+        "AGENT_RUNTIME_ENABLED": "1",
+        "OLD_WORKFLOW_DIRECT_ENTRY_DISABLED": "1",
+        "ALLOW_LEGACY_FUNCTION_ADAPTER": "1",
+        "ALLOW_LEGACY_MAIN_WORKFLOW": "0",
+        "AGENT_RUNTIME_USE_MODEL_PROVIDER": "1",
+        "AGENT_RUNTIME_USE_ENGINE_IMPORT_PROVIDER": "1",
+        "AGENT_RUNTIME_USE_ENGINE_ENVIRONMENT_IMPORT_PROVIDER": "1",
+        "AGENT_RUNTIME_USE_SCENE_SNAPSHOT_PROVIDER": "1",
+        "AGENT_RUNTIME_USE_ENGINE_TRANSFORM_PROVIDER": "1",
+    }
+    for key, value in defaults.items():
+        target.setdefault(key, value)
 
 
 def _env_bool(env: Mapping[str, str], name: str, default: bool) -> bool:

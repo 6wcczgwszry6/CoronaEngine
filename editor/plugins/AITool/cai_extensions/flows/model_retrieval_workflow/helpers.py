@@ -156,10 +156,9 @@ def get_store_tool():
 
 def get_3d_generate_tool():
     """获取 3D 模型生成工具。当前只使用混元3D。"""
-    from Quasar.ai_config.ai_config import get_ai_config
     config = get_ai_config()
-    hunyuan_cfg = getattr(config, 'hunyuan3d', None)
-    if hunyuan_cfg is not None and getattr(hunyuan_cfg, 'enable', False):
+    hunyuan_cfg = _read_config_value(config, "hunyuan3d", None)
+    if hunyuan_cfg is not None and _as_bool(_read_config_value(hunyuan_cfg, "enable", False)):
         tool = get_tool("hunyuan_generate_3d")
         if tool is not None:
             return tool
