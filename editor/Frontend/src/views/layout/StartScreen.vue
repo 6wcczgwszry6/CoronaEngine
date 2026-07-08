@@ -1,9 +1,12 @@
-﻿<template>
+<template>
   <div class="start-screen-root">
     <div ref="canvasContainer" class="canvas-container"></div>
 
     <!-- 标题固定居中不动 -->
-    <div class="main-title">CORONA<br>ENGINE</div>
+    <div class="main-title">
+      <span class="title-word">Corona</span>
+      <span class="title-word">Engine</span>
+    </div>
 
     <!-- 导航按钮（GSAP 控制居中/左移） -->
     <div ref="navContainer" class="nav-container">
@@ -186,58 +189,161 @@ const initThree = () => {
   if (!container) return;
 
   scene = new THREE.Scene();
-  scene.fog = new THREE.FogExp2(0x050505, 0.003);
+  scene.fog = new THREE.FogExp2(0x030305, 0.012);
 
-  camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-  camera.position.z = 80;
+  camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+  camera.position.set(0, 30, 70);
 
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setClearColor(0x000000, 0);
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(1);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   container.appendChild(renderer.domElement);
 
+  const particleCount = 30000;
   const geometry = new THREE.BufferGeometry();
-  const count = 10000;
-  const positions = new Float32Array(count * 3);
-  for (let i = 0; i < count * 3; i += 3) {
-    const r = 100 * Math.cbrt(Math.random());
-    const theta = Math.random() * Math.PI * 2;
-    const phi = Math.acos(2 * Math.random() - 1);
-    positions[i]     = r * Math.sin(phi) * Math.cos(theta);
-    positions[i + 1] = r * Math.sin(phi) * Math.sin(theta);
-    positions[i + 2] = r * Math.cos(phi);
-  }
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const positions = new Float32Array(particleCount * 3);
+  const colors = new Float32Array(particleCount * 3);
+  const colorInside = new THREE.Color(0x00f3ff);
+  const colorOutside = new THREE.Color(0xff0066);
 
-  const cvs = document.createElement('canvas');
-  cvs.width = 24; cvs.height = 24;
-  const ctx = cvs.getContext('2d');
-  ctx.beginPath();
-  ctx.arc(12, 12, 10, 0, Math.PI * 2);
-  ctx.fillStyle = '#ffffff';
-  ctx.fill();
-  const texture = new THREE.CanvasTexture(cvs);
+  for (let i = 0; i < particleCount; i++) {
+    const i3 = i * 3;
+    const r0 = Math.random() * Math.random() * 55;
+    const branchAngle = (i % 3) * ((Math.PI * 2) / 3);
+    const spinAngle = r0 * 0.18;
+    const randX = Math.pow(Math.random(), 3) * (Math.random() < 0.5 ? 1 : -1) * 7 * (r0 * 0.09);
+    const randY = Math.pow(Math.random(), 3) * (Math.random() < 0.5 ? 1 : -1) * 7 * (r0 * 0.09);
+    const randZ = Math.pow(Math.random(), 3) * (Math.random() < 0.5 ? 1 : -1) * 7 * (r0 * 0.09);
+    positions[i3] = Math.cos(branchAngle + spinAngle) * r0 + randX;
+    positions[i3 + 1] = randY;
+    positions[i3 + 2] = Math.sin(branchAngle + spinAngle) * r0 + randZ;
+
+    let colorBlend = Math.random();
+    colorBlend = colorBlend < 0.5 ? Math.pow(colorBlend * 2, 2) / 2 : 1 - Math.pow((1 - colorBlend) * 2, 2) / 2;
+    const mixedColor = colorInside.clone().lerp(colorOutside, colorBlend);
+    colors[i3] = mixedColor.r; colors[i3 + 1] = mixedColor.g; colors[i3 + 2] = mixedColor.b;
+  }
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
   const material = new THREE.PointsMaterial({
-    size: 0.5,
-    color: 0x66aaff,
-    map: texture,
+    size: 0.25,
+    vertexColors: true,
     blending: THREE.AdditiveBlending,
-    transparent: true,
-    opacity: 0.65,
     depthWrite: false,
+    transparent: true,
+    opacity: 0.95,
+    color: 0xffffff,
   });
 
   particleSystem = new THREE.Points(geometry, material);
   scene.add(particleSystem);
 
+  const starCount = 3200;
+  const starRadiusMin = 160;
+  const starRadiusMax = 280;
+  const starGoldRatio = 0.08;
+  const starColorGold = [1.0, 0.8235, 0.5412];
+  const starColorBlue = [0.5882, 0.7843, 1.0];
+
+  const starPositions = new Float32Array(starCount * 3);
+  const starColorsArr = new Float32Array(starCount * 3);
+  const starSizesArr = new Float32Array(starCount);
+  const starPhasesArr = new Float32Array(starCount);
+  const starSpeedsArr = new Float32Array(starCount);
+  const starBasesArr = new Float32Array(starCount);
+  const starAmpsArr = new Float32Array(starCount);
+
+  for (let i = 0; i < starCount; i++) {
+    const i3 = i * 3;
+    const su = Math.random(), sv = Math.random();
+    const sTheta = 2 * Math.PI * su;
+    const sPhi = Math.acos(2 * sv - 1);
+    const sr = starRadiusMin + Math.random() * (starRadiusMax - starRadiusMin);
+    starPositions[i3] = sr * Math.sin(sPhi) * Math.cos(sTheta);
+    starPositions[i3 + 1] = sr * Math.sin(sPhi) * Math.sin(sTheta);
+    starPositions[i3 + 2] = sr * Math.cos(sPhi);
+
+    const isGold = Math.random() < starGoldRatio;
+    const sc = isGold ? starColorGold : starColorBlue;
+    starColorsArr[i3] = sc[0]; starColorsArr[i3 + 1] = sc[1]; starColorsArr[i3 + 2] = sc[2];
+    starSizesArr[i] = 1.1 + Math.pow(Math.random(), 3) * 2.8;
+    starPhasesArr[i] = Math.random() * Math.PI * 2;
+    starSpeedsArr[i] = 0.5 + Math.random() * 0.8;
+    starBasesArr[i] = 0.35 + Math.random() * 0.3;
+    starAmpsArr[i] = 0.3 + Math.random() * 0.3;
+  }
+
+  const starGeometry = new THREE.BufferGeometry();
+  starGeometry.setAttribute("position", new THREE.BufferAttribute(starPositions, 3));
+  starGeometry.setAttribute("aColor", new THREE.BufferAttribute(starColorsArr, 3));
+  starGeometry.setAttribute("aSize", new THREE.BufferAttribute(starSizesArr, 1));
+  starGeometry.setAttribute("aPhase", new THREE.BufferAttribute(starPhasesArr, 1));
+  starGeometry.setAttribute("aSpeed", new THREE.BufferAttribute(starSpeedsArr, 1));
+  starGeometry.setAttribute("aBase", new THREE.BufferAttribute(starBasesArr, 1));
+  starGeometry.setAttribute("aAmp", new THREE.BufferAttribute(starAmpsArr, 1));
+
+  const starVertexShader = [
+    "attribute vec3 aColor;",
+    "attribute float aSize;",
+    "attribute float aPhase;",
+    "attribute float aSpeed;",
+    "attribute float aBase;",
+    "attribute float aAmp;",
+    "uniform float uTime;",
+    "uniform float uPixelRatio;",
+    "varying vec3 vColor;",
+    "varying float vAlpha;",
+    "void main() {",
+    "  vColor = aColor;",
+    "  float tw = sin(uTime * aSpeed + aPhase) * 0.5 + 0.5;",
+    "  vAlpha = aBase + tw * aAmp;",
+    "  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);",
+    "  gl_Position = projectionMatrix * mvPosition;",
+    "  gl_PointSize = aSize * uPixelRatio * (150.0 / -mvPosition.z);",
+    "}",
+  ].join("\n");
+
+  const starFragmentShader = [
+    "precision mediump float;",
+    "varying vec3 vColor;",
+    "varying float vAlpha;",
+    "void main() {",
+    "  vec2 uv = gl_PointCoord - vec2(0.5);",
+    "  float d = length(uv) * 2.0;",
+    "  float core = exp(-d * d * 3.0);",
+    "  if (core < 0.02) discard;",
+    "  gl_FragColor = vec4(vColor, vAlpha * core);",
+    "}",
+  ].join("\n");
+
+  const starMaterial = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uPixelRatio: { value: Math.min(window.devicePixelRatio, 2) },
+    },
+    vertexShader: starVertexShader,
+    fragmentShader: starFragmentShader,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+
+  const starSystem = new THREE.Points(starGeometry, starMaterial);
+  starSystem.renderOrder = -1;
+  scene.add(starSystem);
+
   clock = new THREE.Clock();
 
+  let targetCamX = 0, targetCamY = 30, targetCamZ = 70;
   const onMouseMove = (e) => {
     mouseX = e.clientX - window.innerWidth / 2;
     mouseY = e.clientY - window.innerHeight / 2;
+    targetCamX = mouseX * 0.04;
+    targetCamY = 30 - mouseY * 0.04;
   };
-  document.addEventListener('mousemove', onMouseMove);
+  document.addEventListener("mousemove", onMouseMove);
 
   const onResize = () => {
     clearTimeout(resizeTimer);
@@ -245,34 +351,38 @@ const initThree = () => {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
+      starMaterial.uniforms.uPixelRatio.value = Math.min(window.devicePixelRatio, 2);
     }, 80);
   };
-  window.addEventListener('resize', onResize);
+  window.addEventListener("resize", onResize);
 
   const animate = () => {
     animationFrameId = requestAnimationFrame(animate);
     const elapsed = clock.getElapsedTime();
-    particleSystem.rotation.y += 0.0004;
-    particleSystem.rotation.x = Math.sin(elapsed * 0.08) * 0.015;
-    camera.position.x += (mouseX * 0.012 - camera.position.x) * 0.03;
-    camera.position.y += (-mouseY * 0.012 - camera.position.y) * 0.03;
+    starMaterial.uniforms.uTime.value = elapsed;
+    particleSystem.rotation.y += 0.0005;
+    particleSystem.rotation.x = Math.sin(elapsed * 0.06) * 0.012;
+    camera.position.x += (targetCamX - camera.position.x) * 0.03;
+    camera.position.y += (targetCamY - camera.position.y) * 0.03;
+    camera.position.z += (targetCamZ - camera.position.z) * 0.03;
     camera.lookAt(scene.position);
     renderer.render(scene, camera);
   };
   animate();
 
   return () => {
-    document.removeEventListener('mousemove', onMouseMove);
-    window.removeEventListener('resize', onResize);
+    document.removeEventListener("mousemove", onMouseMove);
+    window.removeEventListener("resize", onResize);
     clearTimeout(resizeTimer);
     if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    starMaterial.dispose();
+    starGeometry.dispose();
     renderer.dispose();
     if (container.contains(renderer.domElement)) {
       container.removeChild(renderer.domElement);
     }
   };
 };
-
 let cleanupThree = null;
 
 onMounted(() => {
@@ -310,19 +420,20 @@ onUnmounted(() => {
 /* ——— 标题固定居中，不动 ——— */
 .main-title {
   position: fixed;
-  top: 8vh;
+  top: 15vh;
   left: 50%;
   transform: translateX(-50%);
-  font-size: 6.5rem;
-  letter-spacing: 16px;
+  display: flex;
+  gap: 1.2rem;
+  font-size: 7rem;
+  letter-spacing: 12px;
   font-weight: 800;
   text-transform: uppercase;
-  line-height: 1.12;
   text-align: center;
-  background: linear-gradient(90deg, #ffffff, #66aaff);
+  background: linear-gradient(90deg, #ffcc33 0%, #ffffff 50%, #ffcc33 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  text-shadow: 0 0 40px rgba(102, 170, 255, 0.2);
+  filter: drop-shadow(0 2px 12px rgba(0,0,0,0.55)) drop-shadow(0 0 30px rgba(255,204,51,0.35));
   z-index: 40;
   pointer-events: none;
 }
