@@ -436,6 +436,11 @@ class _TestWorker(LANChatAgentWorker):
         return None
 
 
+class _RemoteGenerationWorker(_TestWorker):
+    def _can_execute_generation_locally(self) -> bool:
+        return False
+
+
 class _LayoutDirectExecutionTrackingWorker(_TestWorker):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -9476,6 +9481,51 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         state = worker._agent_runtime.query_state("room-active-remembers")["room"]
         self.assertEqual(state["active_plan_id"], plan.plan_id)
         self.assertTrue(state["tool_graph_queue"])
+
+    def test_active_runtime_plan_generation_logs_non_authoritative_skip(self) -> None:
+        worker = _RemoteGenerationWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))
+
+        with self.assertLogs("plugins.AITool.services.lanchat_agent_worker", level="INFO") as logs:
+            reply = worker._execute_active_runtime_plan_generation(
+                {
+                    "room_id": "room-remote-skip",
+                    "sender_name": "host",
+                    "text": "confirm generation",
+                    "agent_name": "merchant",
+                },
+                room_id="room-remote-skip",
+                host_id="host-1",
+            )
+
+        self.assertIsNone(reply)
+        joined = "\n".join(logs.output)
+        self.assertIn("phase=runtime_active_plan_execute_skipped", joined)
+        self.assertIn("reason=not_authoritative", joined)
+
+    def test_active_runtime_plan_generation_logs_no_plan_result(self) -> None:
+        worker = _TestWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))
+        with patch.object(
+            worker._agent_runtime,
+            "handle_message",
+            return_value={"handled": True, "action": "confirm_and_execute", "message": "no plan"},
+        ):
+            with self.assertLogs("plugins.AITool.services.lanchat_agent_worker", level="INFO") as logs:
+                reply = worker._execute_active_runtime_plan_generation(
+                    {
+                        "room_id": "room-no-runtime-plan-result",
+                        "sender_name": "host",
+                        "text": "confirm generation",
+                        "agent_name": "merchant",
+                    },
+                    room_id="room-no-runtime-plan-result",
+                    host_id="host-1",
+                )
+
+        self.assertIsNone(reply)
+        joined = "\n".join(logs.output)
+        self.assertIn("phase=runtime_active_plan_execute_no_plan", joined)
+        self.assertIn("action=confirm_and_execute", joined)
+        self.assertIn("handled=True", joined)
 
     def test_agent_runtime_execution_reply_accepts_single_graph_shape(self) -> None:
         result = {

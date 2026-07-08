@@ -8375,8 +8375,17 @@ class LANChatAgentWorker:
         host_id: str,
     ) -> str | None:
         if not self._can_execute_generation_locally():
+            self._logger.info(
+                "[LANChatGenerationTrace] phase=runtime_active_plan_execute_skipped room=%s reason=not_authoritative",
+                room_id,
+            )
             return None
         external_plan_id = self._active_runtime_external_plan_id(room_id)
+        if not external_plan_id:
+            self._logger.info(
+                "[LANChatGenerationTrace] phase=runtime_active_plan_execute_no_active_plan room=%s",
+                room_id,
+            )
         try:
             result = self._agent_runtime.handle_message(
                 room_id=room_id,
@@ -8399,6 +8408,15 @@ class LANChatAgentWorker:
 
         runtime_plan = result.get("plan", {}) if isinstance(result, dict) else {}
         if not runtime_plan:
+            action = str(result.get("action") or "") if isinstance(result, dict) else ""
+            handled = bool(result.get("handled")) if isinstance(result, dict) else False
+            self._logger.info(
+                "[LANChatGenerationTrace] phase=runtime_active_plan_execute_no_plan room=%s action=%s handled=%s external_plan=%s",
+                room_id,
+                action,
+                handled,
+                external_plan_id,
+            )
             return None
         runtime_plan_id = str(runtime_plan.get("plan_id") or "")
         batches = self._agent_runtime_batches_from_result(result) if isinstance(result, dict) else []
