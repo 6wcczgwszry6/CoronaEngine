@@ -18226,6 +18226,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         result = runtime.execute_planned_batches(plan.plan_id, scene_name="Scene/env-import-failed.scene")
 
         self.assertEqual(result["graphs"][0]["status"], "failed")
+        self.assertIn("batch_execution_failed", runtime.operation_log.events())
         events = runtime.user_visible_events("room-env-import-failed-graph", plan_id=plan.plan_id)
         failure_events = [
             event
@@ -18268,6 +18269,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             replay_environment_summary["latest_event_type"],
             "environment_components_import_failed",
         )
+        replay = runtime.operation_replay(
+            room_id="room-env-import-failed-graph",
+            plan_id=plan.plan_id,
+        )
+        self.assertEqual(replay["batch_execution_summary"]["completed_count"], 0)
+        self.assertEqual(replay["batch_execution_summary"]["failed_count"], 1)
+        self.assertEqual(replay["batch_execution_summary"]["terminal_count"], 1)
 
     def test_tool_graph_consumed_state_requires_dependency_on_graph_producer(self) -> None:
         state = RuntimeState()

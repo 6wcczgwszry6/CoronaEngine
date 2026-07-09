@@ -15927,8 +15927,14 @@ class AgentRuntime:
             batch_id=graph.batch_id,
             payload={"graph_id": graph.graph_id, "graph_status": graph.status, "batch_status": batch.status.value},
         )
+        terminal_event_by_status = {
+            BatchPlanStatus.COMPLETED.value: "batch_execution_completed",
+            BatchPlanStatus.PARTIAL.value: "batch_execution_partial",
+            BatchPlanStatus.FAILED.value: "batch_execution_failed",
+            BatchPlanStatus.CANCELLED.value: "batch_execution_cancelled",
+        }
         self.operation_log.append(
-            "batch_execution_completed",
+            terminal_event_by_status.get(batch.status.value, "batch_execution_terminal"),
             room_id=str(room_id),
             plan_id=graph.plan_id,
             batch_id=graph.batch_id,
@@ -22682,6 +22688,18 @@ class AgentRuntime:
                 "batch_execution_completed_count": int(
                     batch_execution_replay_summary.get("completed_count") or 0
                 ),
+                "batch_execution_partial_count": int(
+                    batch_execution_replay_summary.get("partial_count") or 0
+                ),
+                "batch_execution_failed_count": int(
+                    batch_execution_replay_summary.get("failed_count") or 0
+                ),
+                "batch_execution_cancelled_count": int(
+                    batch_execution_replay_summary.get("cancelled_count") or 0
+                ),
+                "batch_execution_terminal_count": int(
+                    batch_execution_replay_summary.get("terminal_count") or 0
+                ),
                 "batch_execution_finalized_count": int(
                     batch_execution_replay_summary.get("finalized_count") or 0
                 ),
@@ -24309,13 +24327,21 @@ class AgentRuntime:
             return {
                 "started_count": 0,
                 "completed_count": 0,
+                "partial_count": 0,
+                "failed_count": 0,
+                "cancelled_count": 0,
                 "finalized_count": 0,
+                "terminal_count": 0,
                 "status_counts": {},
                 "latest_batch": {},
             }
         status_counts: dict[str, int] = {}
         started_count = 0
         completed_count = 0
+        partial_count = 0
+        failed_count = 0
+        cancelled_count = 0
+        terminal_count = 0
         finalized_count = 0
         latest_batch: dict[str, Any] = {}
         for entry in entries:
@@ -24326,6 +24352,16 @@ class AgentRuntime:
                 started_count += 1
             elif event == "batch_execution_completed":
                 completed_count += 1
+                terminal_count += 1
+            elif event == "batch_execution_partial":
+                partial_count += 1
+                terminal_count += 1
+            elif event == "batch_execution_failed":
+                failed_count += 1
+                terminal_count += 1
+            elif event == "batch_execution_cancelled":
+                cancelled_count += 1
+                terminal_count += 1
             elif event == "batch_plan_finalized_by_tool_graph":
                 finalized_count += 1
             else:
@@ -24347,7 +24383,11 @@ class AgentRuntime:
         return {
             "started_count": started_count,
             "completed_count": completed_count,
+            "partial_count": partial_count,
+            "failed_count": failed_count,
+            "cancelled_count": cancelled_count,
             "finalized_count": finalized_count,
+            "terminal_count": terminal_count,
             "status_counts": dict(sorted(status_counts.items())),
             "latest_batch": latest_batch,
         }
