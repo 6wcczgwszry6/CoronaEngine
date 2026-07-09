@@ -5494,6 +5494,48 @@ class ToolCallGraphValidator:
         return ToolCallGraphValidator._safe_graph_text(value)
 
     @staticmethod
+    def _is_safe_internal_token(value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        return all(ch.isalnum() or ch in {"_", "-", "."} for ch in text)
+
+    @staticmethod
+    def _safe_consumes_fact(consumes: Any) -> dict[str, dict[str, Any]]:
+        if not isinstance(consumes, Mapping):
+            return {}
+        safe: dict[str, dict[str, Any]] = {}
+        for target_arg, spec_raw in consumes.items():
+            target = str(target_arg or "").strip()
+            if not ToolCallGraphValidator._is_safe_internal_token(target):
+                continue
+            if not isinstance(spec_raw, Mapping):
+                continue
+            spec: dict[str, Any] = {}
+            for key in ("state_key", "scope", "source_id", "source_arg"):
+                if key not in spec_raw or spec_raw.get(key) is None:
+                    continue
+                value = str(spec_raw.get(key) or "").strip()
+                spec[key] = value if ToolCallGraphValidator._is_safe_internal_token(value) else "[redacted]"
+            safe[target] = spec
+        return safe
+
+    @staticmethod
+    def _validate_safe_consumes_fact(consumes: Mapping[str, Any], *, context: str) -> None:
+        for target_arg, spec_raw in consumes.items():
+            target = str(target_arg or "").strip()
+            if not ToolCallGraphValidator._is_safe_internal_token(target):
+                raise ValueError(f"tool graph {context} has unsafe consumes target: {target_arg}")
+            if not isinstance(spec_raw, Mapping):
+                raise ValueError(f"tool graph {context} spec must be a mapping")
+            for key, value in spec_raw.items():
+                key_text = str(key or "").strip()
+                if key_text not in {"state_key", "scope", "source_id", "source_arg"}:
+                    raise ValueError(f"tool graph {context} has unsupported consumes field: {key_text}")
+                if value is not None and not ToolCallGraphValidator._is_safe_internal_token(value):
+                    raise ValueError(f"tool graph {context} has unsafe consumes value: {key_text}")
+
+    @staticmethod
     def _validate_safe_graph_value(value: Any, *, context: str) -> None:
         if isinstance(value, str):
             if value == "[redacted]":
@@ -5529,7 +5571,7 @@ class ToolCallGraphValidator:
                     node["args"] = ToolCallGraphValidator._safe_graph_value(args)
                 consumes = node.get("consumes")
                 if isinstance(consumes, dict):
-                    node["consumes"] = ToolCallGraphValidator._safe_graph_value(consumes)
+                    node["consumes"] = ToolCallGraphValidator._safe_consumes_fact(consumes)
                 if isinstance(node.get("error"), str):
                     node["error"] = ToolCallGraphValidator._safe_graph_text(node.get("error") or "")
         return fact
@@ -5673,7 +5715,7 @@ class ToolCallGraphValidator:
         ToolCallGraphValidator._validate_safe_graph_value(call.get("args") or {}, context="node args")
         if not isinstance(call.get("consumes"), dict):
             raise ValueError("tool graph node consumes must be a dict")
-        ToolCallGraphValidator._validate_safe_graph_value(call.get("consumes") or {}, context="node consumes")
+        ToolCallGraphValidator._validate_safe_consumes_fact(call.get("consumes") or {}, context="node consumes")
         ToolCallGraphValidator._validate_consumes_fact(call.get("consumes") or {}, args=call.get("args") or {})
         if str(call.get("risk_level") or "") not in {risk.value for risk in RiskLevel}:
             raise ValueError("tool graph node risk_level is invalid")
@@ -31570,7 +31612,6 @@ class AgentRuntime:
                     "scene_name": str(scene_name or ""),
                     "design_brief": plan.design_brief,
                     "layout_items": list(plan.layout_items),
-                    "requested_items": list(batch.requested_items),
                 },
                 risk_level=RiskLevel.LOW,
                 depends_on=[substrate_resolve_id],
