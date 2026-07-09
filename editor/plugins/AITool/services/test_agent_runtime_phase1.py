@@ -12713,6 +12713,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         ]
         self.assertEqual(len(report_persist_graphs), 1)
         self.assertEqual(report_persist_graphs[0]["status"], "completed")
+        self.assertNotIn("_runtime_report_persist_token", str(report_persist_graphs[0]))
+        self.assertNotIn("report-persist-token", str(report_persist_graphs[0]))
         ReportRecordValidator.validate(state_report)
 
     def test_user_report_persist_tool_rejects_external_report_payloads(self) -> None:

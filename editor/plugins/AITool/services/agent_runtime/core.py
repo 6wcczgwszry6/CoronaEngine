@@ -5413,6 +5413,26 @@ class ToolCallGraphValidator:
         "workflow",
         "workflow_name",
     }
+    _BLOCKED_FIELD_MARKERS = (
+        "api_key",
+        "asset_path",
+        "correlation_id",
+        "engine_result",
+        "headers",
+        "message_id",
+        "metadata",
+        "model_path",
+        "payload",
+        "prompt",
+        "provider",
+        "raw_result",
+        "request",
+        "response",
+        "session_id",
+        "token",
+        "url",
+        "workflow",
+    )
     _BLOCKED_TEXT_MARKERS = (
         "api_key",
         "asset_path",
@@ -5449,6 +5469,13 @@ class ToolCallGraphValidator:
         return text
 
     @staticmethod
+    def _is_blocked_graph_key(value: Any) -> bool:
+        normalized = str(value or "").strip().lower()
+        if normalized in ToolCallGraphValidator._BLOCKED_FIELDS:
+            return True
+        return any(marker in normalized for marker in ToolCallGraphValidator._BLOCKED_FIELD_MARKERS)
+
+    @staticmethod
     def _safe_graph_value(value: Any) -> Any:
         if isinstance(value, str):
             return ToolCallGraphValidator._safe_graph_text(value)
@@ -5460,7 +5487,7 @@ class ToolCallGraphValidator:
             safe: dict[str, Any] = {}
             for key, item in value.items():
                 normalized_key = str(key or "").strip()
-                if normalized_key.lower() in ToolCallGraphValidator._BLOCKED_FIELDS:
+                if ToolCallGraphValidator._is_blocked_graph_key(normalized_key):
                     continue
                 safe[normalized_key] = ToolCallGraphValidator._safe_graph_value(item)
             return safe
@@ -5482,8 +5509,7 @@ class ToolCallGraphValidator:
             return
         if isinstance(value, Mapping):
             for key, item in value.items():
-                normalized_key = str(key or "").strip().lower()
-                if normalized_key in ToolCallGraphValidator._BLOCKED_FIELDS:
+                if ToolCallGraphValidator._is_blocked_graph_key(key):
                     raise ValueError(f"tool graph {context} cannot expose field: {key}")
                 ToolCallGraphValidator._validate_safe_graph_value(item, context=context)
             return
