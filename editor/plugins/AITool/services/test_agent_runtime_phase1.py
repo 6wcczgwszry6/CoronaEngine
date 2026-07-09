@@ -16696,6 +16696,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(provider_summary["model_resource"]["mode"], "mock_adapter_model")
         self.assertEqual(provider_summary["actor_import"]["mode"], "mock_actor_import")
         self.assertNotIn("provider", str(provider_summary).lower())
+        runtime._provider_summary = {}
+        regenerated_report = runtime.generate_report("room-provider-mock", plan_id=plan.plan_id)
+        regenerated_provider_summary = regenerated_report["provider_summary"]
+        self.assertEqual(regenerated_provider_summary["image_resource"]["mode"], "mock_planned")
+        self.assertEqual(regenerated_provider_summary["model_resource"]["mode"], "mock_adapter_model")
+        self.assertEqual(regenerated_provider_summary["actor_import"]["mode"], "mock_actor_import")
+        self.assertEqual(regenerated_report["provider_readiness_summary"]["channel_count"], 10)
 
     def test_runtime_report_exposes_safe_provider_diagnostics(self) -> None:
         runtime = AgentRuntime(

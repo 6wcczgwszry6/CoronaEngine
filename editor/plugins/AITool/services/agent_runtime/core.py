@@ -7537,6 +7537,13 @@ class AgentRuntime:
         return ProviderReadinessValidator.safe_summary(provider_summary)
 
     @staticmethod
+    def _provider_readiness_from_state_room(room: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+        provider_readiness = room.get("provider_readiness") if isinstance(room, Mapping) else {}
+        if not isinstance(provider_readiness, Mapping):
+            return {}
+        return ProviderReadinessValidator.safe_summary(provider_readiness)
+
+    @staticmethod
     def _provider_readiness_summary(provider_summary: Mapping[str, Any]) -> dict[str, Any]:
         safe = AgentRuntime._safe_provider_summary(provider_summary)
         status_counts: dict[str, int] = {}
@@ -8091,7 +8098,9 @@ class AgentRuntime:
                 )
         readiness_publish = self._publish_provider_readiness(room, plan_id=active_plan_id)
         readiness_summary = self._provider_readiness_summary(self._provider_summary)
-        engine_write_readiness_summary = self._engine_write_readiness_summary(self._provider_summary)
+        provider_readiness_from_state = self._provider_readiness_from_state_room(room)
+        provider_readiness_summary = self._provider_readiness_summary(provider_readiness_from_state)
+        engine_write_readiness_summary = self._engine_write_readiness_summary(provider_readiness_from_state)
         safe_readiness_publish = {
             "persisted": bool(readiness_publish.get("persisted")),
             "reason": "ok" if readiness_publish.get("persisted") else "RuntimeState persistence failed",
@@ -19853,7 +19862,9 @@ class AgentRuntime:
             operation_replay_summary.get("engine_write_summary"),
             engine_write_boundary_summary,
         )
-        engine_write_readiness_summary = self._engine_write_readiness_summary(self._provider_summary)
+        provider_readiness_from_state = self._provider_readiness_from_state_room(room)
+        provider_readiness_summary = self._provider_readiness_summary(provider_readiness_from_state)
+        engine_write_readiness_summary = self._engine_write_readiness_summary(provider_readiness_from_state)
         state_patch_conflict_summary = self._state_patch_conflict_summary(room)
         layout_adjustment_summary = self._layout_adjustment_summary_for_plan(
             room,
@@ -20236,8 +20247,8 @@ class AgentRuntime:
                     ],
                 },
                 "tool_execution_digest": tool_execution_digest,
-            "provider_summary": self._safe_provider_summary(self._provider_summary),
-            "provider_readiness_summary": self._provider_readiness_summary(self._provider_summary),
+            "provider_summary": provider_readiness_from_state,
+            "provider_readiness_summary": provider_readiness_summary,
             "engine_write_readiness_summary": engine_write_readiness_summary,
             "latest_runtime_events": self.user_visible_events(
                 str(room_id),
