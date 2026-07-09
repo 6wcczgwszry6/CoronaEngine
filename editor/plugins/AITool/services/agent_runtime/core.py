@@ -11130,12 +11130,24 @@ class AgentRuntime:
     def _safe_drain_result_for_user(cls, drain: Mapping[str, Any] | None) -> dict[str, Any]:
         raw = dict(drain or {})
         safe_graphs = cls._safe_graphs_for_user(raw.get("graphs") if isinstance(raw.get("graphs"), list) else [])
-        return {
+        failed_graphs = [graph for graph in safe_graphs if str(graph.get("status") or "") not in {"", "completed"}]
+        status = str(raw.get("status") or "").strip().lower()
+        if not status and failed_graphs:
+            status = "failed"
+        reason = str(raw.get("reason") or "").strip()
+        if not reason and failed_graphs:
+            reason = "one or more tool graphs did not complete"
+        safe_result = {
             "room_id": str(raw.get("room_id") or ""),
             "plan_id": str(raw.get("plan_id") or ""),
             "drained_count": int(raw.get("drained_count") or 0),
             "graphs": safe_graphs,
         }
+        if status:
+            safe_result["status"] = status[:64]
+        if reason:
+            safe_result["reason"] = reason[:240]
+        return safe_result
 
     def handle_message(
         self,
@@ -15437,9 +15449,16 @@ class AgentRuntime:
             drained.append(graph)
             if stop_on_failure and graph.status not in {"completed"}:
                 break
+        failed_graphs = [graph for graph in drained if graph.status not in {"completed"}]
+        status = "failed" if failed_graphs else "drained"
+        reason = ""
+        if failed_graphs:
+            reason = "one or more tool graphs did not complete"
         return {
             "room_id": str(room_id),
             "plan_id": str(plan_id or ""),
+            "status": status,
+            "reason": reason,
             "drained_count": len(drained),
             "graphs": [
                 {

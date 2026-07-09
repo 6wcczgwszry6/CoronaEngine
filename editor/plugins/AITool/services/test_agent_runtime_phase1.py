@@ -2291,6 +2291,30 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(replay_health["worker_drain_failed_count"], 1)
         self.assertIn("worker_drain_failed", replay_health["reasons"])
 
+    def test_safe_drain_result_marks_failed_graph_without_internal_details(self) -> None:
+        safe = AgentRuntime._safe_drain_result_for_user(
+            {
+                "room_id": "room-drain-safe",
+                "plan_id": "plan-drain-safe",
+                "drained_count": 1,
+                "graphs": [
+                    {
+                        "graph_id": "graph-drain-safe",
+                        "plan_id": "plan-drain-safe",
+                        "batch_id": "batch-drain-safe",
+                        "status": "failed",
+                        "nodes": {"tool-1": {"error": "provider raw url https://internal.example"}},
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(safe["status"], "failed")
+        self.assertEqual(safe["reason"], "one or more tool graphs did not complete")
+        self.assertEqual(safe["graphs"][0]["status"], "failed")
+        self.assertNotIn("https://", str(safe))
+        self.assertNotIn("provider raw", str(safe).lower())
+
     def test_confirm_scene_plan_does_not_emit_confirmed_when_state_persist_fails(self) -> None:
         runtime = AgentRuntime()
         plan = runtime.propose_scene_plan(

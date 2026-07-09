@@ -2778,25 +2778,26 @@ class LANChatAgentWorker:
                 )
                 continue
             drained_count = int(result.get("drained_count") or 0)
+            drain_failed = str(result.get("status") or "").strip().lower() == "failed"
+            if drain_failed:
+                reason = str(result.get("reason") or "").strip()
+                self._logger.warning(
+                    "[LANChatRuntimeDrain] room=%s failed reason=%s",
+                    room_id,
+                    _trace_preview(reason, limit=120),
+                )
+                self._record_runtime_audit_event(
+                    event="runtime_worker_drain_failed",
+                    room_id=str(room_id),
+                    message="AgentRuntime worker drain returned failed status.",
+                    payload={
+                        "reason": reason[:240],
+                        "status": str(result.get("status") or ""),
+                        "phase": "agent_runtime_worker_drain",
+                        "drained_count": drained_count,
+                    },
+                )
             if drained_count <= 0:
-                if str(result.get("status") or "").strip().lower() == "failed":
-                    reason = str(result.get("reason") or "").strip()
-                    self._logger.warning(
-                        "[LANChatRuntimeDrain] room=%s failed reason=%s",
-                        room_id,
-                        _trace_preview(reason, limit=120),
-                    )
-                    self._record_runtime_audit_event(
-                        event="runtime_worker_drain_failed",
-                        room_id=str(room_id),
-                        message="AgentRuntime worker drain returned failed status.",
-                        payload={
-                            "reason": reason[:240],
-                            "status": str(result.get("status") or ""),
-                            "phase": "agent_runtime_worker_drain",
-                            "drained_count": drained_count,
-                        },
-                    )
                 continue
             self._remember_room_id(str(room_id))
             self._logger.info(

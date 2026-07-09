@@ -9775,6 +9775,51 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(audit_event["payload"]["drained_count"], 0)
         self.assertIn("synthetic queue drain failure", audit_event["payload"]["reason"])
 
+    def test_process_once_records_failed_drained_graph_as_audit_event(self) -> None:
+        class _DrainFailedGraphRuntime:
+            def __init__(self) -> None:
+                self.audit_events: list[dict[str, Any]] = []
+
+            def handle_message(self, *, action: str, sync_event: dict[str, Any] | None = None, **kwargs):  # noqa: ANN001
+                if action == "worker_drain":
+                    return {
+                        "drain": {
+                            "status": "failed",
+                            "reason": "one or more tool graphs did not complete",
+                            "drained_count": 1,
+                            "graphs": [{"graph_id": "graph-failed", "status": "failed"}],
+                        }
+                    }
+                if action == "runtime_audit_event":
+                    self.audit_events.append(dict(sync_event or {}))
+                    return {
+                        "recorded": True,
+                        "event": str((sync_event or {}).get("event") or ""),
+                        "runtime_plan_id": "",
+                    }
+                if action == "runtime_events":
+                    return {"runtime_events": []}
+                return {}
+
+        engine = _FakeIdleEngine()
+        worker = _TestWorker(
+            corona_engine=engine,
+            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+        )
+        runtime = _DrainFailedGraphRuntime()
+        worker._agent_runtime = runtime
+        worker._remember_room_id("room-drain-failed-graph")
+
+        processed = worker.process_once()
+
+        self.assertTrue(processed)
+        self.assertEqual(len(runtime.audit_events), 1)
+        audit_event = runtime.audit_events[0]
+        self.assertEqual(audit_event["event"], "runtime_worker_drain_failed")
+        self.assertEqual(audit_event["payload"]["phase"], "agent_runtime_worker_drain")
+        self.assertEqual(audit_event["payload"]["drained_count"], 1)
+        self.assertIn("one or more tool graphs", audit_event["payload"]["reason"])
+
     def test_runtime_confirmed_seedplan_execution_remembers_room_for_worker_drain(self) -> None:
         worker = _TestWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))
 
