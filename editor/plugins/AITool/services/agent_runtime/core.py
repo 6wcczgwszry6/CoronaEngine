@@ -24780,6 +24780,7 @@ class AgentRuntime:
         bridge_call_count = 0
         bridge_success_count = 0
         bridge_failed_count = 0
+        bridge_skipped_count = 0
         kind_counts = {"actor_import": 0, "environment_import": 0, "layout_transform": 0, "actor_delete": 0}
         for row in rows:
             kind = str(row.get("kind") or "")
@@ -24792,10 +24793,15 @@ class AgentRuntime:
             bridge_call_count += int(row.get("bridge_call_count") or 0)
             bridge_success_count += int(row.get("bridge_success_count") or 0)
             bridge_failed_count += int(row.get("bridge_failed_count") or 0)
+            bridge_skipped_count += int(row.get("bridge_skipped_count") or 0)
             for method, count in dict(row.get("bridge_method_counts") or {}).items():
                 method_text = str(method or "").strip()
                 if method_text:
                     bridge_method_counts[method_text] = bridge_method_counts.get(method_text, 0) + int(count)
+            for reason, count in dict(row.get("bridge_skip_reason_counts") or {}).items():
+                reason_text = str(reason or "").strip()
+                if reason_text:
+                    bridge_error_code_counts[reason_text] = bridge_error_code_counts.get(reason_text, 0) + int(count)
             for error_code, count in dict(row.get("bridge_error_code_counts") or {}).items():
                 error_text = str(error_code or "").strip()
                 if error_text:
@@ -24811,6 +24817,7 @@ class AgentRuntime:
             "bridge_call_count": bridge_call_count,
             "bridge_success_count": bridge_success_count,
             "bridge_failed_count": bridge_failed_count,
+            "bridge_skipped_count": bridge_skipped_count,
             "bridge_method_counts": dict(sorted(bridge_method_counts.items())),
             "bridge_error_code_counts": dict(sorted(bridge_error_code_counts.items())),
             "latest_boundaries": rows[-5:],
@@ -24856,6 +24863,10 @@ class AgentRuntime:
             "bridge_call_count": max(0, int(boundary.get("bridge_call_count") or 0)),
             "bridge_success_count": max(0, int(boundary.get("bridge_success_count") or 0)),
             "bridge_failed_count": max(0, int(boundary.get("bridge_failed_count") or 0)),
+            "bridge_skipped_count": max(0, int(boundary.get("bridge_skipped_count") or 0)),
+            "bridge_skip_reason_counts": AgentRuntime._safe_status_count_map(
+                boundary.get("bridge_skip_reason_counts")
+            ),
             "bridge_method_counts": AgentRuntime._safe_status_count_map(
                 boundary.get("bridge_method_counts")
             ),

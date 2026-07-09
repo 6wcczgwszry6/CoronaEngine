@@ -535,6 +535,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             missing_model_result["import_results"][0]["failure_code"],
             "missing_ready_model_resource",
         )
+        missing_boundary = missing_model_result["engine_write_result"]
+        self.assertEqual(missing_boundary["bridge_call_count"], 0)
+        self.assertEqual(missing_boundary["bridge_skipped_count"], 1)
+        self.assertEqual(
+            missing_boundary["bridge_skip_reason_counts"],
+            {"missing_ready_model_resource": 1},
+        )
 
         bridge_failure_result = provider({
             "plan_id": "plan-import-failure-code",
@@ -547,6 +554,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             bridge_failure_result["import_results"][0]["failure_code"],
             "cpp_actor_import_failed",
         )
+        self.assertEqual(bridge_failure_result["engine_write_result"]["bridge_call_count"], 1)
+        self.assertEqual(bridge_failure_result["engine_write_result"]["bridge_skipped_count"], 0)
+        self.assertEqual(bridge_failure_result["engine_write_result"]["bridge_skip_reason_counts"], {})
         self.assertEqual(bridge_failure_result["import_results"][0]["reason"], "actor import failed")
         self.assertNotIn("api_key", str(bridge_failure_result).lower())
         self.assertNotIn("internal.example", str(bridge_failure_result).lower())

@@ -6888,7 +6888,9 @@ class LANChatAgentWorker:
         bridge_calls = int(summary.get("bridge_call_count") or 0)
         bridge_success = int(summary.get("bridge_success_count") or 0)
         bridge_failed = int(summary.get("bridge_failed_count") or 0)
+        bridge_skipped = int(summary.get("bridge_skipped_count") or 0)
         bridge_error_text = count_rows(summary.get("bridge_error_code_counts"))
+        bridge_skip_text = count_rows(summary.get("bridge_skip_reason_counts"))
         raw_status_counts = summary.get("status_counts") if isinstance(summary.get("status_counts"), dict) else {}
         runtime_state_only_count = int(raw_status_counts.get("runtime_state_only") or 0)
         if bridge_calls > 0:
@@ -6901,7 +6903,8 @@ class LANChatAgentWorker:
             f"boundary {boundary_count}, "
             f"import/transform/delete {import_count}/{transform_count}/{delete_count}, "
             f"sources {source_text}, statuses {status_text}, "
-            f"bridge {bridge_calls}/{bridge_success}/{bridge_failed}, errors {bridge_error_text}, "
+            f"bridge {bridge_calls}/{bridge_success}/{bridge_failed}, skipped {bridge_skipped}({bridge_skip_text}), "
+            f"errors {bridge_error_text}, "
             f"{native_text}"
         )
 

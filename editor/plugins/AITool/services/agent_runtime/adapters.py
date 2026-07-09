@@ -1334,10 +1334,14 @@ def make_engine_actor_import_provider(
         actors: dict[str, dict[str, Any]] = {}
         import_results: list[dict[str, Any]] = []
         bridge_results: list[RuntimeCppBridgeResult] = []
+        bridge_skip_reason_counts: dict[str, int] = {}
         for index, name in enumerate(model_items, start=1):
             resource = model_resources.get(name)
             model_path = str(_resource_model_path(resource) or "")
             if not model_path:
+                bridge_skip_reason_counts["missing_ready_model_resource"] = (
+                    bridge_skip_reason_counts.get("missing_ready_model_resource", 0) + 1
+                )
                 import_results.append({
                     "actor_name": name,
                     "status": "failed",
@@ -1445,6 +1449,8 @@ def make_engine_actor_import_provider(
                 ),
                 "status_counts": status_counts,
                 **_merge_bridge_boundary_facts(bridge_results),
+                "bridge_skipped_count": sum(bridge_skip_reason_counts.values()),
+                "bridge_skip_reason_counts": dict(sorted(bridge_skip_reason_counts.items())),
             },
         }
 

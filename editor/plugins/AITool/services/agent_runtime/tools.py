@@ -4040,11 +4040,21 @@ def _actor_import_boundary_fact(
         or "actor_import_provider",
     )
     status_counts: dict[str, int] = {}
+    bridge_skip_reason_counts: dict[str, int] = {}
     for item in import_results:
         status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
         status_counts[status_key] = status_counts.get(status_key, 0) + 1
+        failure_code = _safe_import_text(item.get("failure_code"), fallback="")
+        if failure_code == "missing_ready_model_resource":
+            bridge_skip_reason_counts[failure_code] = bridge_skip_reason_counts.get(failure_code, 0) + 1
     if not status_counts and imported_count > 0:
         status_counts["success"] = int(imported_count)
+    engine_bridge_skip_reasons = _safe_import_count_map(engine_result.get("bridge_skip_reason_counts"))
+    if engine_bridge_skip_reasons:
+        bridge_skip_reason_counts = engine_bridge_skip_reasons
+    bridge_skipped_count = int(engine_result.get("bridge_skipped_count") or 0)
+    if bridge_skipped_count <= 0:
+        bridge_skipped_count = sum(bridge_skip_reason_counts.values())
     safe_actor_ids = [
         _safe_import_text(actor_id, fallback="")
         for actor_id in (imported_actor_ids or [])
@@ -4068,6 +4078,8 @@ def _actor_import_boundary_fact(
         "bridge_call_count": max(0, int(engine_result.get("bridge_call_count") or 0)),
         "bridge_success_count": max(0, int(engine_result.get("bridge_success_count") or 0)),
         "bridge_failed_count": max(0, int(engine_result.get("bridge_failed_count") or 0)),
+        "bridge_skipped_count": max(0, bridge_skipped_count),
+        "bridge_skip_reason_counts": dict(sorted(bridge_skip_reason_counts.items())),
         "bridge_method_counts": _safe_import_count_map(engine_result.get("bridge_method_counts")),
         "bridge_error_code_counts": _safe_import_count_map(engine_result.get("bridge_error_code_counts")),
     }
