@@ -19077,7 +19077,9 @@ class AgentRuntime:
         engine_write_verified_count = int(engine_write_verification_status_counts.get("engine_verified") or 0)
         failed_actor_requests = failed_actor_requests_for_plan()
         failed_actor_request_count = len(failed_actor_requests)
-        if not actor_count:
+        if not actor_count and failed_actor_request_count:
+            readiness_status = "failed_requests"
+        elif not actor_count:
             readiness_status = "no_actors"
         elif missing_transform_count or missing_aabb_count:
             readiness_status = "partial"

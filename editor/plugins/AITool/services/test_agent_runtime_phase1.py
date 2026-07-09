@@ -24098,7 +24098,15 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(result["report"]["runtime_scene_flow_summary"]["status"], "incomplete")
         self.assertEqual(
             result["report"]["runtime_scene_flow_summary"]["actor_readiness_status"],
-            "no_actors",
+            "failed_requests",
+        )
+        self.assertEqual(
+            result["report"]["scene_entity_registry"]["readiness_status"],
+            "failed_requests",
+        )
+        self.assertEqual(
+            result["report"]["scene_entity_registry"]["failed_actor_request_count"],
+            2,
         )
         self.assertEqual(result["report"]["report_health_summary"]["status"], "failed")
 
