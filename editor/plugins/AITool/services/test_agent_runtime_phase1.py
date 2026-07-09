@@ -15098,10 +15098,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         import_events = [
             event
             for event in events
-            if event["event_type"] == "actors_imported" and event["batch_id"] == batch["batch_id"]
+            if event["event_type"] == "actors_import_failed" and event["batch_id"] == batch["batch_id"]
         ]
         self.assertTrue(import_events)
         self.assertEqual(import_events[-1]["level"], "warning")
+        self.assertEqual(import_events[-1]["payload"]["status"], "failed")
         self.assertEqual(import_events[-1]["payload"]["requested_count"], 2)
         self.assertEqual(import_events[-1]["payload"]["imported_count"], 0)
         self.assertEqual(import_events[-1]["payload"]["failed_count"], 2)
@@ -15109,6 +15110,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertGreaterEqual(report_import_summary["requested_count"], 2)
         self.assertEqual(report_import_summary["imported_count"], 0)
         self.assertGreaterEqual(report_import_summary["failed_count"], 2)
+        self.assertEqual(report_import_summary["latest_events"][-1]["status"], "failed")
         boundary = import_result["engine_write_boundary"]
         self.assertEqual(boundary["provider_source"], "runtime_actor_import_precheck")
         self.assertEqual(boundary["bridge_call_count"], 0)

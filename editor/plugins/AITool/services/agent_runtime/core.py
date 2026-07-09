@@ -16288,12 +16288,34 @@ class AgentRuntime:
             if batch is not None and call.tool_name != "runtime.scene.snapshot":
                 payload["batch_index"] = int(batch.batch_index or 0)
                 payload["total_batches"] = int(batch.total_batches or 0)
-            partial_failure = int(payload.get("failed_count") or 0) > 0
+            try:
+                failed_count = max(0, int(payload.get("failed_count") or 0))
+            except (TypeError, ValueError):
+                failed_count = 0
+            try:
+                requested_count = max(0, int(payload.get("requested_count") or 0))
+            except (TypeError, ValueError):
+                requested_count = 0
+            delivered_count = 0
+            for delivered_key in ("imported_count", "actor_count", "component_count", "item_count"):
+                try:
+                    delivered_count = max(delivered_count, int(payload.get(delivered_key) or 0))
+                except (TypeError, ValueError):
+                    continue
+            full_failure = requested_count > 0 and failed_count >= requested_count and delivered_count <= 0
+            partial_failure = failed_count > 0 and not full_failure
             if call.status == ToolCallStatus.SUCCEEDED:
                 event_title = str(spec["success_title"])
                 event_message = str(spec["success_message"])
                 event_level = "info"
-                if partial_failure:
+                event_type = str(spec["success_type"])
+                if full_failure:
+                    payload["status"] = "failed"
+                    event_type = str(spec["failure_type"])
+                    event_title = str(spec["failure_title"])
+                    event_message = str(spec["failure_message"])
+                    event_level = "warning"
+                elif partial_failure:
                     event_level = "warning"
                     if call.tool_name == "runtime.actor.import_batch":
                         payload["status"] = "partial"
@@ -16324,7 +16346,7 @@ class AgentRuntime:
                     room_id=room_id,
                     plan_id=graph.plan_id,
                     batch_id=graph.batch_id,
-                    event_type=str(spec["success_type"]),
+                    event_type=event_type,
                     phase=str(spec["phase"]),
                     title=event_title,
                     message=event_message,
