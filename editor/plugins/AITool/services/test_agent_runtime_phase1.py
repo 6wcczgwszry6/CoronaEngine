@@ -15111,6 +15111,15 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(report_import_summary["imported_count"], 0)
         self.assertGreaterEqual(report_import_summary["failed_count"], 2)
         self.assertEqual(report_import_summary["latest_events"][-1]["status"], "failed")
+        report_registry = result["report"]["scene_entity_registry"]
+        self.assertTrue(report_registry["available"])
+        self.assertEqual(report_registry["entity_count"], 0)
+        self.assertEqual(report_registry["actor_count"], 0)
+        self.assertGreaterEqual(report_registry["failed_actor_request_count"], import_result["actor_count"])
+        self.assertEqual(
+            report_registry["failed_actor_requests"][0]["failure_code"],
+            "model_resource_tool_failed",
+        )
         boundary = import_result["engine_write_boundary"]
         self.assertEqual(boundary["provider_source"], "runtime_actor_import_precheck")
         self.assertEqual(boundary["bridge_call_count"], 0)

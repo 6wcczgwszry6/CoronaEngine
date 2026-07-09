@@ -19081,7 +19081,7 @@ class AgentRuntime:
             readiness_status = "ready"
 
         return {
-            "available": bool(entities),
+            "available": bool(entities) or bool(failed_actor_requests),
             "plan_id": active_plan_id,
             "batch_id": active_batch_id,
             "entity_count": len(entities),
