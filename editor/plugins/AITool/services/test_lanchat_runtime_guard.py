@@ -1244,6 +1244,52 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIsNotNone(tool)
         self.assertEqual(tool.name, "hunyuan_generate_3d")
 
+    def test_runtime_direct_engine_tool_overrides_stale_import_model(self) -> None:
+        class FakeTool:
+            def __init__(self, name: str, source: str) -> None:
+                self.name = name
+                self.source = source
+
+        class FakeRegistry:
+            def __init__(self) -> None:
+                self.tools: dict[str, Any] = {
+                    "import_model": FakeTool("import_model", "stale-mainview"),
+                }
+
+            def get(self, name: str):
+                return self.tools.get(name)
+
+            def register(self, tool, overwrite: bool = False) -> None:
+                if overwrite or tool.name not in self.tools:
+                    self.tools[tool.name] = tool
+
+        class FakeLogger:
+            def debug(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                return None
+
+        worker = LANChatAgentWorker.__new__(LANChatAgentWorker)
+        worker._logger = FakeLogger()
+        registry = FakeRegistry()
+        mcp_module = types.ModuleType(
+            "plugins.AITool.cai_extensions.mcp.tools.model_import_tools"
+        )
+        mcp_module.load_model_import_tools = lambda: [
+            FakeTool("import_model", "runtime-mcp-native"),
+            FakeTool("remove_model", "runtime-mcp-native"),
+        ]
+
+        with patch.dict(
+            sys.modules,
+            {
+                "plugins.AITool.cai_extensions.mcp.tools.model_import_tools": mcp_module,
+            },
+        ):
+            tool = worker._load_runtime_tool_direct(registry, None, "import_model")
+
+        self.assertIsNotNone(tool)
+        self.assertEqual(tool.name, "import_model")
+        self.assertEqual(tool.source, "runtime-mcp-native")
+
     def test_f5_runtime_provider_env_defaults_reach_worker_provider_summary(self) -> None:
         class FakeTool:
             def __init__(self, name: str) -> None:

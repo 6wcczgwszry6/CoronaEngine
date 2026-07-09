@@ -176,29 +176,30 @@ class LANChatAgentWorker:
                 from plugins.AITool.cai_extensions.mcp.tools.model_import_tools import load_model_import_tools
 
                 for tool in load_model_import_tools():
-                    if not registry.get(getattr(tool, "name", "")):
-                        registry.register(tool, overwrite=False)
+                    registered_name = str(getattr(tool, "name", "") or "")
+                    if registered_name in {"import_model", "import_environment_component", "remove_model"}:
+                        registry.register(tool, overwrite=True)
                 return registry.get(tool_name)
             if tool_name == "get_scene_snapshot":
                 from plugins.AITool.cai_extensions.mcp.tools.scene_snapshot import load_scene_snapshot_tools
 
                 for tool in load_scene_snapshot_tools():
-                    if not registry.get(getattr(tool, "name", "")):
-                        registry.register(tool, overwrite=False)
+                    if str(getattr(tool, "name", "") or "") == "get_scene_snapshot":
+                        registry.register(tool, overwrite=True)
                 return registry.get(tool_name)
             if tool_name == "scene_rationality_review":
                 from plugins.AITool.cai_extensions.mcp.tools.scene_review_tools import load_scene_review_tools
 
                 for tool in load_scene_review_tools():
-                    if not registry.get(getattr(tool, "name", "")):
-                        registry.register(tool, overwrite=False)
+                    if str(getattr(tool, "name", "") or "") == "scene_rationality_review":
+                        registry.register(tool, overwrite=True)
                 return registry.get(tool_name)
             if tool_name == "set_actor_transform":
                 from plugins.AITool.cai_extensions.mcp.tools.set_actor_transform import load_set_actor_transform_tools
 
                 for tool in load_set_actor_transform_tools():
-                    if not registry.get(getattr(tool, "name", "")):
-                        registry.register(tool, overwrite=False)
+                    if str(getattr(tool, "name", "") or "") == "set_actor_transform":
+                        registry.register(tool, overwrite=True)
                 return registry.get(tool_name)
             if tool_name == "hunyuan_generate_3d":
                 try:
