@@ -19456,10 +19456,20 @@ class AgentRuntime:
         actor_readiness_status = str(scene_entity_registry.get("readiness_status") or "").strip()
         actor_missing_transform_count = int(scene_entity_registry.get("missing_transform_count") or 0)
         actor_missing_aabb_count = int(scene_entity_registry.get("missing_aabb_count") or 0)
+        failed_actor_request_count = int(scene_entity_registry.get("failed_actor_request_count") or 0)
+        failed_environment_request_count = int(
+            scene_entity_registry.get("failed_environment_request_count") or 0
+        )
         imported_count = int(import_summary.get("imported_count") or 0)
         actor_step_status = "missing"
         if imported_count > 0:
-            actor_step_status = "ok" if actor_readiness_status in {"", "ready"} else "partial"
+            actor_step_status = (
+                "ok"
+                if actor_readiness_status in {"", "ready"} and failed_actor_request_count <= 0
+                else "partial"
+            )
+        elif failed_actor_request_count > 0:
+            actor_step_status = "failed"
         flow_steps = [
             {
                 "step": "plan",
@@ -19488,6 +19498,7 @@ class AgentRuntime:
                 "readiness_status": actor_readiness_status,
                 "actor_count": int(scene_entity_registry.get("actor_count") or entity_type_counts.get("actor") or 0),
                 "imported_count": imported_count,
+                "failed_request_count": failed_actor_request_count,
                 "missing_transform_count": actor_missing_transform_count,
                 "missing_aabb_count": actor_missing_aabb_count,
             },
@@ -19508,6 +19519,8 @@ class AgentRuntime:
             "actor_readiness_status": actor_readiness_status,
             "actor_missing_transform_count": actor_missing_transform_count,
             "actor_missing_aabb_count": actor_missing_aabb_count,
+            "failed_actor_request_count": failed_actor_request_count,
+            "failed_environment_request_count": failed_environment_request_count,
             "steps": flow_steps,
             "model_items": model_items,
             "substrate_items": substrate_items,

@@ -24286,6 +24286,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             {"actor_import_failed": 2},
         )
         self.assertEqual(result["report"]["runtime_scene_flow_summary"]["status"], "incomplete")
+        failed_flow = result["report"]["runtime_scene_flow_summary"]
+        failed_flow_steps = {step["step"]: step for step in failed_flow["steps"]}
+        self.assertEqual(failed_flow["failed_actor_request_count"], 2)
+        self.assertEqual(failed_flow_steps["actor"]["status"], "failed")
+        self.assertEqual(failed_flow_steps["actor"]["failed_request_count"], 2)
         self.assertEqual(
             result["report"]["runtime_scene_flow_summary"]["actor_readiness_status"],
             "failed_requests",
@@ -25734,7 +25739,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(query_flow["actor_readiness_status"], "ready")
         self.assertEqual(query_flow["actor_missing_transform_count"], 0)
         self.assertEqual(query_flow["actor_missing_aabb_count"], 0)
+        self.assertEqual(query_flow["failed_actor_request_count"], 0)
+        self.assertEqual(query_flow["failed_environment_request_count"], 0)
         self.assertEqual(query_flow_steps["actor"]["readiness_status"], "ready")
+        self.assertEqual(query_flow_steps["actor"]["failed_request_count"], 0)
         self.assertEqual(query_flow_steps["actor"]["missing_transform_count"], 0)
         self.assertEqual(query_flow_steps["actor"]["missing_aabb_count"], 0)
         self.assertEqual(query_flow["steps"][-1]["status"], "pending")
@@ -25889,7 +25897,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(report["runtime_scene_flow_summary"]["actor_readiness_status"], "ready")
         self.assertEqual(report["runtime_scene_flow_summary"]["actor_missing_transform_count"], 0)
         self.assertEqual(report["runtime_scene_flow_summary"]["actor_missing_aabb_count"], 0)
+        self.assertEqual(report["runtime_scene_flow_summary"]["failed_actor_request_count"], 0)
+        self.assertEqual(report["runtime_scene_flow_summary"]["failed_environment_request_count"], 0)
         self.assertEqual(report_flow_steps["actor"]["readiness_status"], "ready")
+        self.assertEqual(report_flow_steps["actor"]["failed_request_count"], 0)
         self.assertEqual(report_flow_steps["actor"]["missing_transform_count"], 0)
         self.assertEqual(report_flow_steps["actor"]["missing_aabb_count"], 0)
         self.assertEqual(report["runtime_scene_flow_summary"]["steps"][-1]["status"], "ok")
