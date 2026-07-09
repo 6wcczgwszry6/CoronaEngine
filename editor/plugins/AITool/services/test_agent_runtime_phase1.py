@@ -18239,6 +18239,18 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(failure_events[-1]["payload"]["failed_count"], 1)
         self.assertNotIn("provider raw", str(failure_events))
         self.assertNotIn("https://internal.example", str(failure_events))
+        report_ready_events = [
+            event
+            for event in events
+            if event["event_type"] == "report_ready"
+        ]
+        self.assertTrue(report_ready_events)
+        self.assertEqual(report_ready_events[-1]["level"], "warning")
+        self.assertEqual(
+            report_ready_events[-1]["payload"]["environment_import_failed_count"],
+            1,
+        )
+        self.assertIn("environment_import_failed", report_ready_events[-1]["payload"]["report_health_reasons"])
         environment_summary = runtime.status_summary(
             "room-env-import-failed-graph",
             plan_id=plan.plan_id,

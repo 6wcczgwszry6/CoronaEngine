@@ -20609,7 +20609,13 @@ class AgentRuntime:
         report_event_level = "info"
         report_event_title = "生成报告已完成"
         report_event_message = "已汇总当前计划、批次、介入、布局调整和导入状态。"
-        if batch_failed_count > 0 or import_failed_count > 0 or asset_failed_count > 0:
+        if (
+            batch_failed_count > 0
+            or import_failed_count > 0
+            or asset_failed_count > 0
+            or environment_failed_count > 0
+            or environment_import_failed_count > 0
+        ):
             report_event_level = "warning"
             report_event_title = "生成报告已完成（存在失败项）"
             report_event_message = (
@@ -20618,6 +20624,8 @@ class AgentRuntime:
             )
             if asset_failed_count > 0:
                 report_event_message += f" 模型同传失败 {asset_failed_count} 项。"
+            if environment_failed_count > 0:
+                report_event_message += f" 环境组件失败 {environment_failed_count} 项。"
             if environment_import_failed_count > 0:
                 report_event_message += f" 环境组件导入失败 {environment_import_failed_count} 项。"
         elif (
