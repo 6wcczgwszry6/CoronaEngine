@@ -2977,7 +2977,32 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertTrue(all(graph["status"] == "completed" for graph in mark_completed_graphs))
         self.assertIn("batch_terminal_status_state_persisted", runtime.operation_log.events())
 
-    def test_drain_tool_graph_queue_marks_missing_in_memory_graph_failed(self) -> None:
+    def test_drain_tool_graph_queue_restores_missing_in_memory_graph_from_state(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-drain-restore-graph",
+            text="强盗藏宝室，有藏宝箱、金币堆、木桌。",
+            owner_agent="山贼",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
+        batch = runtime.plan_batches(plan.plan_id, max_items_per_batch=3)[0]
+        graph = runtime._build_batch_execution_graph(plan, batch)
+        runtime._enqueue_tool_graph(graph, room_id="room-drain-restore-graph")
+        runtime._queued_tool_graphs.pop(graph.graph_id)
+
+        result = runtime.drain_tool_graph_queue("room-drain-restore-graph", plan_id=plan.plan_id)
+
+        self.assertEqual(result["drained_count"], 1)
+        self.assertEqual(result["graphs"][0]["graph_id"], graph.graph_id)
+        self.assertEqual(result["graphs"][0]["status"], "completed")
+        state = runtime.query_state("room-drain-restore-graph")["room"]
+        self.assertEqual(state["tool_graph_queue"][graph.graph_id]["status"], "completed")
+        self.assertEqual(state["tool_graphs"][graph.graph_id]["status"], "completed")
+        self.assertEqual(state["batch_plans"][batch.batch_id]["status"], BatchPlanStatus.COMPLETED.value)
+        self.assertIn("tool_graph_restored_from_state", runtime.operation_log.events())
+        self.assertIn("batch_plan_finalized_by_tool_graph", runtime.operation_log.events())
+
+    def test_drain_tool_graph_queue_marks_missing_state_graph_failed(self) -> None:
         runtime = AgentRuntime()
         plan = runtime.propose_scene_plan(
             room_id="room-drain-missing-graph",
@@ -2989,6 +3014,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         graph = runtime._build_batch_execution_graph(plan, batch)
         runtime._enqueue_tool_graph(graph, room_id="room-drain-missing-graph")
         runtime._queued_tool_graphs.pop(graph.graph_id)
+        runtime.state.room("room-drain-missing-graph")["tool_graphs"].pop(graph.graph_id)
 
         result = runtime.drain_tool_graph_queue("room-drain-missing-graph", plan_id=plan.plan_id)
 

@@ -15290,6 +15290,78 @@ class AgentRuntime:
             payload={"status": "queued"},
         )
 
+    def _restore_queued_tool_graph_from_state(
+        self,
+        room_id: str,
+        graph_id: str,
+        *,
+        plan_id: str = "",
+        batch_id: str = "",
+    ) -> ToolCallGraph | None:
+        safe_graph_id = str(graph_id or "").strip()
+        if not safe_graph_id:
+            return None
+        room_key = str(room_id)
+        room = self.state.snapshot(room_key)["room"]
+        graph_fact = dict(dict(room.get("tool_graphs") or {}).get(safe_graph_id) or {})
+        if not graph_fact:
+            return None
+        try:
+            ToolCallGraphValidator.validate_graph_fact(graph_fact, fallback_graph_id=safe_graph_id)
+            restored = ToolCallGraph(
+                graph_id=str(graph_fact.get("graph_id") or safe_graph_id),
+                plan_id=str(graph_fact.get("plan_id") or plan_id or ""),
+                batch_id=str(graph_fact.get("batch_id") or batch_id or ""),
+                status=str(graph_fact.get("status") or "queued"),
+                generation=int(graph_fact.get("generation") or 0),
+            )
+            for call_id, call_fact_raw in dict(graph_fact.get("nodes") or {}).items():
+                call_fact = dict(call_fact_raw or {})
+                call = ToolCall(
+                    tool_call_id=str(call_fact.get("tool_call_id") or call_id or ""),
+                    tool_name=str(call_fact.get("tool_name") or ""),
+                    args=dict(call_fact.get("args") or {}),
+                    consumes=dict(call_fact.get("consumes") or {}),
+                    risk_level=RiskLevel(str(call_fact.get("risk_level") or RiskLevel.LOW.value)),
+                    requires_write=bool(call_fact.get("requires_write")),
+                    confirmed=bool(call_fact.get("confirmed")),
+                    status=ToolCallStatus(str(call_fact.get("status") or ToolCallStatus.PLANNED.value)),
+                    depends_on=[
+                        str(dependency)
+                        for dependency in list(call_fact.get("depends_on") or [])
+                        if str(dependency or "").strip()
+                    ],
+                    retry_count=int(call_fact.get("retry_count") or 0),
+                    max_retries=int(call_fact.get("max_retries") or 0),
+                    error=str(call_fact.get("error") or ""),
+                )
+                restored.nodes[call.tool_call_id] = call
+            restored.edges = [
+                (str(edge[0] or ""), str(edge[1] or ""))
+                for edge in list(graph_fact.get("edges") or [])
+                if isinstance(edge, (list, tuple)) and len(edge) == 2
+            ]
+            ToolCallGraphValidator.validate(restored, self.registry)
+        except Exception as exc:  # noqa: BLE001
+            self.operation_log.append(
+                "tool_graph_restore_from_state_failed",
+                room_id=room_key,
+                plan_id=str(plan_id or graph_fact.get("plan_id") or ""),
+                batch_id=str(batch_id or graph_fact.get("batch_id") or ""),
+                message=type(exc).__name__,
+                payload={"graph_id": safe_graph_id, "reason": "invalid_state_graph_fact"},
+            )
+            return None
+        self._queued_tool_graphs[restored.graph_id] = restored
+        self.operation_log.append(
+            "tool_graph_restored_from_state",
+            room_id=room_key,
+            plan_id=restored.plan_id,
+            batch_id=restored.batch_id,
+            payload={"graph_id": restored.graph_id, "status": restored.status},
+        )
+        return restored
+
     def drain_next_tool_graph(self, room_id: str, *, plan_id: str = "") -> ToolCallGraph | None:
         room_key = str(room_id)
         room = self.state.snapshot(room_key)["room"]
@@ -15325,6 +15397,13 @@ class AgentRuntime:
         first_plan_id = str(first_item.get("plan_id") or "")
         first_plan = dict(room.get("scene_plans", {}).get(first_plan_id, {}) or {})
         if str(first_plan.get("status") or "") in {ScenePlanStatus.PAUSED.value, ScenePlanStatus.CANCELLED.value}:
+            if first_graph is None:
+                first_graph = self._restore_queued_tool_graph_from_state(
+                    room_key,
+                    first_graph_id,
+                    plan_id=first_plan_id,
+                    batch_id=str(first_item.get("batch_id") or ""),
+                )
             if first_graph is None:
                 missing_graph = self._mark_missing_queued_tool_graph_failed(
                     room_id=room_key,
@@ -15385,6 +15464,13 @@ class AgentRuntime:
                 },
             )
         graph = self._queued_tool_graphs.get(graph_id)
+        if graph is None:
+            graph = self._restore_queued_tool_graph_from_state(
+                room_key,
+                graph_id,
+                plan_id=str(selected_fact.get("plan_id") or plan_id or ""),
+                batch_id=str(selected_fact.get("batch_id") or ""),
+            )
         if graph is None:
             missing_graph = self._mark_missing_queued_tool_graph_failed(
                 room_id=room_key,
