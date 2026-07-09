@@ -23871,6 +23871,15 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(latest_import["display_name"], "Engine Table 01")
         self.assertEqual(latest_import["requested_name"], "长桌")
         self.assertIn("长桌", latest_import["aliases"])
+        self.assertEqual(latest_import["asset_id"], "engine-asset-table")
+        self.assertEqual(latest_import["model_ref"], "engine-model-table")
+        self.assertEqual(latest_import["position"], [1.25, 0.0, -2.5])
+        self.assertEqual(latest_import["rotation"], [0.0, 45.0, 0.0])
+        self.assertEqual(latest_import["scale"], [1.2, 1.0, 1.2])
+        self.assertEqual(latest_import["aabb"], {"min": [0.75, 0.0, -3.0], "max": [1.75, 0.8, -2.0]})
+        self.assertTrue(latest_import["bounds_ready"])
+        self.assertEqual(latest_import["sync_status"], "engine_imported")
+        self.assertEqual(latest_import["sync_lifecycle_status"], "engine_imported")
 
     def test_actor_import_provider_empty_actor_result_records_failed_import_fact(self) -> None:
         def ready_model_provider(payload: dict) -> dict:

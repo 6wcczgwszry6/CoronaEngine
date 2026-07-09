@@ -3868,10 +3868,16 @@ def _safe_actor_import_results(results: Any) -> list[dict[str, Any]]:
         for field in (
             "actor_id",
             "actor_name",
+            "asset_id",
             "display_name",
+            "grounding_status",
+            "model_ref",
             "native_name",
             "requested_name",
+            "review_status",
             "status",
+            "sync_lifecycle_status",
+            "sync_status",
             "reason",
             "failure_code",
         ):
@@ -3886,6 +3892,17 @@ def _safe_actor_import_results(results: Any) -> list[dict[str, Any]]:
                 safe[field] = value[:160]
             elif isinstance(value, (int, float, bool)):
                 safe[field] = value
+        for field in ("position", "rotation", "scale", "size"):
+            vector = _safe_import_vector3(item.get(field))
+            if vector is not None:
+                safe[field] = vector
+        for field in ("aabb", "bounds", "scene_aabb", "world_aabb", "world_bounds"):
+            bounds = _safe_import_aabb(item.get(field))
+            if bounds is not None:
+                safe["aabb" if field in {"world_aabb", "world_bounds"} else field] = bounds
+        bounds_ready = item.get("bounds_ready")
+        if isinstance(bounds_ready, bool):
+            safe["bounds_ready"] = bounds_ready
         aliases = item.get("aliases")
         if isinstance(aliases, list):
             safe_aliases: list[str] = []
@@ -3909,6 +3926,31 @@ def _safe_actor_import_results(results: Any) -> list[dict[str, Any]]:
         if safe:
             safe_results.append(safe)
     return safe_results
+
+
+def _safe_import_vector3(value: Any) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return None
+    try:
+        return [round(float(part or 0.0), 4) for part in list(value[:3])]
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_import_aabb(value: Any) -> dict[str, list[float]] | None:
+    if isinstance(value, Mapping):
+        min_value = _safe_import_vector3(value.get("min"))
+        max_value = _safe_import_vector3(value.get("max"))
+        if min_value is not None and max_value is not None:
+            return {"min": min_value, "max": max_value}
+        return None
+    if isinstance(value, (list, tuple)) and len(value) >= 6:
+        try:
+            numbers = [round(float(part or 0.0), 4) for part in list(value[:6])]
+        except (TypeError, ValueError):
+            return None
+        return {"min": numbers[:3], "max": numbers[3:6]}
+    return None
 
 
 def _enrich_actor_import_results(
@@ -3973,6 +4015,18 @@ def _enrich_actor_import_results(
                     "native_name": str(actor.get("native_name") or actor.get("name") or actor_id),
                     "requested_name": str(actor.get("requested_name") or ""),
                     "aliases": aliases,
+                    "asset_id": actor.get("asset_id"),
+                    "model_ref": actor.get("model_ref"),
+                    "position": actor.get("position"),
+                    "rotation": actor.get("rotation"),
+                    "scale": actor.get("scale"),
+                    "size": actor.get("size"),
+                    "aabb": actor.get("aabb"),
+                    "bounds_ready": actor.get("bounds_ready"),
+                    "grounding_status": actor.get("grounding_status"),
+                    "review_status": actor.get("review_status"),
+                    "sync_status": actor.get("sync_status"),
+                    "sync_lifecycle_status": actor.get("sync_lifecycle_status"),
                 }
             ])[0]
         )
