@@ -2982,6 +2982,35 @@ def _promote_model_resource_import_paths(resources: Mapping[str, Any]) -> dict[s
     return promoted
 
 
+def _promote_adapter_model_resource_handles(resources: Mapping[str, Any]) -> dict[str, Any]:
+    promoted: dict[str, Any] = {}
+    unavailable_statuses = {"failed", "failure", "error", "missing", "pending", "queued", "running"}
+    for index, (key, raw_entry) in enumerate(dict(resources or {}).items(), start=1):
+        if not isinstance(raw_entry, Mapping):
+            promoted[key] = raw_entry
+            continue
+        entry = dict(raw_entry)
+        status = str(entry.get("status") or "prepared").strip().lower()
+        if status not in unavailable_statuses:
+            metadata = entry.get("metadata") if isinstance(entry.get("metadata"), Mapping) else {}
+            import_path = (
+                entry.get("local_path")
+                or entry.get("model_path")
+                or entry.get("path")
+                or entry.get("model_folder")
+                or metadata.get("local_path")
+                or metadata.get("model_path")
+                or metadata.get("path")
+                or metadata.get("model_folder")
+            )
+            if not str(import_path or "").strip():
+                safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(key or f"resource_{index}")).strip("._-")
+                safe_key = safe_key or f"resource_{index}"
+                entry["local_path"] = f"runtime_adapter_import_handle_{safe_key}.glb"
+        promoted[key] = entry
+    return promoted
+
+
 def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[ToolCall], ToolResult]:
     effective_provider = provider or _default_model_resource_provider
 
@@ -2995,8 +3024,11 @@ def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[To
             asset_requests=dict(payload.get("asset_requests") or {}),
         )
         try:
+            raw_model_resources = dict(effective_provider(payload) or {})
+            if provider is not None:
+                raw_model_resources = _promote_adapter_model_resource_handles(raw_model_resources)
             model_resources = ResourcePlanValidator.safe_model_resource_map(
-                _promote_model_resource_import_paths(dict(effective_provider(payload) or {}))
+                _promote_model_resource_import_paths(raw_model_resources)
             )
         except Exception as exc:  # noqa: BLE001
             return _resource_provider_failure_tool_result(
