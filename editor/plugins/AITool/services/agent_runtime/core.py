@@ -288,6 +288,10 @@ class OperationLog:
             "engine_write_bridge_error_code_counts",
             "engine_write_bridge_failed_count",
             "engine_write_bridge_success_count",
+            "engine_write_runtime_state_only_channels",
+            "engine_write_runtime_state_only_count",
+            "scene_entity_engine_write_pending_f5_count",
+            "scene_entity_engine_write_verification_status_counts",
             "event",
             "event_type",
             "execution",
@@ -579,6 +583,10 @@ class RuntimeEventValidator:
         "engine_write_bridge_success_count",
         "engine_write_readiness_mismatch_count",
         "engine_write_readiness_mismatch_channels",
+        "engine_write_runtime_state_only_channels",
+        "engine_write_runtime_state_only_count",
+        "scene_entity_engine_write_pending_f5_count",
+        "scene_entity_engine_write_verification_status_counts",
         "entity_type_counts",
         "environment_failed_count",
         "environment_import_failed_count",
@@ -818,6 +826,7 @@ class RuntimeEventValidator:
                 "resource_phase_failure_code_counts",
                 "import_failure_code_counts",
                 "runtime_fact_injection_field_counts",
+                "scene_entity_engine_write_verification_status_counts",
                 "sync_failure_code_counts",
                 "sync_status_counts",
             } and isinstance(value, Mapping):
@@ -831,13 +840,17 @@ class RuntimeEventValidator:
                     except (TypeError, ValueError):
                         continue
                 cleaned[normalized_key] = status_counts
-            elif normalized_key == "report_health_reasons" and isinstance(value, list):
-                reasons = [
+            elif normalized_key in {
+                "engine_write_readiness_mismatch_channels",
+                "engine_write_runtime_state_only_channels",
+                "report_health_reasons",
+            } and isinstance(value, list):
+                items = [
                     RuntimeEventValidator.safe_text(item).strip()[:64]
                     for item in value[:6]
                     if RuntimeEventValidator.safe_text(item).strip()
                 ]
-                cleaned[normalized_key] = reasons
+                cleaned[normalized_key] = items
         return cleaned
 
 
@@ -1364,11 +1377,14 @@ class ActorFactValidator:
         "actor_id",
         "asset_id",
         "aabb",
+        "aliases",
         "audio_profile",
         "batch_id",
         "bounds",
+        "bounds_ready",
         "deleted",
         "deleted_at",
+        "display_name",
         "entity_type",
         "gameplay_tags",
         "grounding_status",
@@ -1383,6 +1399,7 @@ class ActorFactValidator:
         "physics_profile",
         "plan_id",
         "position",
+        "requested_name",
         "rotation",
         "role",
         "scale",
@@ -1390,10 +1407,12 @@ class ActorFactValidator:
         "scene_aabb",
         "script_bindings",
         "semantic_role",
+        "size",
         "source",
         "support_type",
         "sync_status",
         "sync_lifecycle_status",
+        "native_name",
         "version",
         "review_status",
         "zone_hint",
@@ -1420,11 +1439,14 @@ class ActorFactValidator:
         "actor_id",
         "asset_id",
         "batch_id",
+        "display_name",
         "last_sync_event",
         "last_sync_status",
         "model_ref",
         "name",
+        "native_name",
         "plan_id",
+        "requested_name",
         "role",
         "scene_name",
         "semantic_role",
@@ -1438,6 +1460,7 @@ class ActorFactValidator:
         "zone_hint",
     }
     _LIST_FIELDS = {
+        "aliases",
         "gameplay_tags",
         "interaction_capability",
         "script_bindings",
@@ -1476,7 +1499,7 @@ class ActorFactValidator:
                     continue
                 if normalized_field not in ActorFactValidator._ALLOWED_FIELDS:
                     continue
-                if normalized_field in {"position", "rotation", "scale"}:
+                if normalized_field in {"position", "rotation", "scale", "size"}:
                     vector = ActorFactValidator._safe_vector3(value, default=None)
                     if vector is not None:
                         actor[normalized_field] = vector
@@ -1517,7 +1540,7 @@ class ActorFactValidator:
                     raise ValueError(f"actor fact cannot expose field: {normalized_field}")
                 if normalized_field not in ActorFactValidator._ALLOWED_FIELDS:
                     raise ValueError(f"actor fact has unsupported field: {normalized_field}")
-                if normalized_field in {"position", "rotation", "scale"}:
+                if normalized_field in {"position", "rotation", "scale", "size"}:
                     ActorFactValidator._require_vector3(value, normalized_field)
                 elif normalized_field in {"aabb", "bounds", "scene_aabb"}:
                     ActorFactValidator._require_aabb_bounds(value, normalized_field)
@@ -2993,9 +3016,12 @@ class EnvironmentComponentValidator:
         "aabb",
         "audio_profile",
         "boundary_style",
+        "bounds_ready",
         "bounds",
         "component_id",
         "component_type",
+        "aliases",
+        "display_name",
         "environment_profile",
         "gameplay_tags",
         "handler",
@@ -3003,8 +3029,10 @@ class EnvironmentComponentValidator:
         "lighting_profile",
         "model_ref",
         "name",
+        "native_name",
         "physics_profile",
         "position",
+        "requested_name",
         "requires_engine_write",
         "review_status",
         "rotation",
@@ -3012,9 +3040,11 @@ class EnvironmentComponentValidator:
         "scene_aabb",
         "scene_name",
         "script_bindings",
+        "size",
         "source",
         "status",
         "surface",
+        "sync_lifecycle_status",
         "sync_status",
         "sky_mode",
         "terrain_profile",
@@ -3042,6 +3072,7 @@ class EnvironmentComponentValidator:
         "url",
     }
     _LIST_FIELDS = {
+        "aliases",
         "gameplay_tags",
         "interaction_capability",
         "script_bindings",
@@ -3088,6 +3119,9 @@ class EnvironmentComponentValidator:
             "boundary_style",
             "component_id",
             "name",
+            "display_name",
+            "native_name",
+            "requested_name",
             "component_type",
             "handler",
             "model_ref",
@@ -3096,6 +3130,7 @@ class EnvironmentComponentValidator:
             "source",
             "status",
             "surface",
+            "sync_lifecycle_status",
             "sync_status",
             "sky_mode",
             "terrain_profile",
@@ -3104,7 +3139,7 @@ class EnvironmentComponentValidator:
                 raise ValueError(f"environment component fact {field} must be a string")
         if "environment_profile" in component and not isinstance(component.get("environment_profile"), Mapping):
             raise ValueError("environment component fact environment_profile must be a mapping")
-        for field in ("position", "rotation", "scale"):
+        for field in ("position", "rotation", "scale", "size"):
             if field in component:
                 ActorFactValidator._require_vector3(component.get(field), f"environment component {field}")
         for field in ("aabb", "bounds", "scene_aabb"):
@@ -3133,6 +3168,9 @@ class EnvironmentComponentValidator:
             "boundary_style",
             "component_id",
             "name",
+            "display_name",
+            "native_name",
+            "requested_name",
             "handler",
             "model_ref",
             "review_status",
@@ -3140,6 +3178,7 @@ class EnvironmentComponentValidator:
             "source",
             "status",
             "surface",
+            "sync_lifecycle_status",
             "sync_status",
             "sky_mode",
             "terrain_profile",
@@ -6580,7 +6619,10 @@ class ToolCallGraphExecutor:
             elif key == "delete_results":
                 results = cls._safe_engine_result_rows(value, id_fields=("actor_id", "actor_name"))
             elif key == "environment_import_results":
-                results = cls._safe_engine_result_rows(value, id_fields=("component_id", "component_name"))
+                results = cls._safe_engine_result_rows(
+                    value,
+                    id_fields=("component_id", "component_name", "name", "actor_id"),
+                )
             else:
                 results = []
             if results:
@@ -6612,14 +6654,74 @@ class ToolCallGraphExecutor:
             "url",
             "://",
         )
-        allowed_fields = {*id_fields, "status", "reason", "failure_code", "observed_position", "observed_deleted"}
+        allowed_fields = {
+            *id_fields,
+            "aliases",
+            "asset_id",
+            "component_type",
+            "display_name",
+            "model_ref",
+            "native_name",
+            "requested_name",
+            "status",
+            "sync_lifecycle_status",
+            "sync_status",
+            "bounds_ready",
+            "reason",
+            "failure_code",
+            "position",
+            "rotation",
+            "scale",
+            "size",
+            "aabb",
+            "bounds",
+            "scene_aabb",
+            "observed_position",
+            "observed_deleted",
+        }
         for item in value:
             if not isinstance(item, Mapping):
                 continue
             row: dict[str, Any] = {}
             for field in allowed_fields:
                 raw = item.get(field)
-                if isinstance(raw, str):
+                if field == "aliases" and isinstance(raw, list):
+                    aliases: list[str] = []
+                    for alias in raw:
+                        if not isinstance(alias, str):
+                            continue
+                        text = alias.strip()
+                        if not text:
+                            continue
+                        lowered = text.lower()
+                        if any(token in lowered for token in unsafe_tokens):
+                            continue
+                        if text not in aliases:
+                            aliases.append(text[:160])
+                    if aliases:
+                        row[field] = aliases[:8]
+                elif field in {"position", "rotation", "scale", "size"} and isinstance(raw, (list, tuple)) and len(raw) >= 3:
+                    try:
+                        row[field] = [round(float(part or 0.0), 4) for part in list(raw[:3])]
+                    except (TypeError, ValueError):
+                        continue
+                elif field in {"aabb", "bounds", "scene_aabb"} and isinstance(raw, Mapping):
+                    min_value = raw.get("min")
+                    max_value = raw.get("max")
+                    if (
+                        isinstance(min_value, (list, tuple))
+                        and isinstance(max_value, (list, tuple))
+                        and len(min_value) >= 3
+                        and len(max_value) >= 3
+                    ):
+                        try:
+                            row[field] = {
+                                "min": [round(float(part or 0.0), 4) for part in list(min_value[:3])],
+                                "max": [round(float(part or 0.0), 4) for part in list(max_value[:3])],
+                            }
+                        except (TypeError, ValueError):
+                            continue
+                elif isinstance(raw, str):
                     text = raw.strip()
                     if not text:
                         continue
@@ -7312,6 +7414,10 @@ class AgentRuntime:
         "engine_write_bridge_success_count",
         "engine_write_readiness_mismatch_count",
         "engine_write_readiness_mismatch_channels",
+        "engine_write_runtime_state_only_channels",
+        "engine_write_runtime_state_only_count",
+        "scene_entity_engine_write_pending_f5_count",
+        "scene_entity_engine_write_verification_status_counts",
         "entity_type_counts",
         "graph_status",
         "grounding_status_counts",
@@ -15178,6 +15284,26 @@ class AgentRuntime:
             self.state.snapshot(room_key)["room"].get("custom_queue_facts", {}).get(fact_key) or {}
         )
         graph_id = str(selected_fact.get("selected_graph_ref") or "")
+        if not graph_id:
+            graph_id = first_graph_id
+            selected_fact = {
+                **first_item,
+                "selected_graph_ref": graph_id,
+                "plan_id": first_plan_id,
+                "batch_id": str(first_item.get("batch_id") or ""),
+                "status": "selected_from_runtime_fallback",
+            }
+            self.operation_log.append(
+                "tool_graph_queue_selector_fallback",
+                room_id=room_key,
+                plan_id=first_plan_id,
+                batch_id=str(first_item.get("batch_id") or ""),
+                message="runtime.queue.select_next_graph did not produce a selected graph; using first queued item",
+                payload={
+                    "graph_id": graph_id,
+                    "selector_graph_status": str(selection_graph.status or ""),
+                },
+            )
         graph = self._queued_tool_graphs.get(graph_id)
         if graph is None:
             missing_graph = self._mark_missing_queued_tool_graph_failed(
@@ -15865,12 +15991,26 @@ class AgentRuntime:
                     if failure_code_counts:
                         payload["import_failure_code_counts"] = failure_code_counts
             elif payload_count_key == "environment_component_count":
+                environment_import_status = ""
+                environment_bridge_call_count = 0
                 if call.tool_name == "runtime.environment.import_components":
                     requested_count = len([
                         item
                         for item in dict(call.args.get("environment_components") or {}).values()
                         if isinstance(item, Mapping)
                     ])
+                    import_fact = dict(
+                        dict(room.get("custom_import_facts") or {}).get(
+                            f"{graph.batch_id}:environment_import_result"
+                        )
+                        or {}
+                    )
+                    environment_import_status = str(import_fact.get("status") or "").strip().lower()
+                    boundary = dict(import_fact.get("engine_write_boundary") or {})
+                    try:
+                        environment_bridge_call_count = int(boundary.get("bridge_call_count") or 0)
+                    except (TypeError, ValueError):
+                        environment_bridge_call_count = 0
                 else:
                     requested_count = len([
                         item
@@ -15890,6 +16030,9 @@ class AgentRuntime:
                     "requested_count": requested_count,
                     "failed_count": max(0, requested_count - ready_count),
                 }
+                if call.tool_name == "runtime.environment.import_components" and environment_import_status:
+                    payload["reason"] = environment_import_status
+                    payload["engine_write_bridge_call_count"] = max(0, environment_bridge_call_count)
             else:
                 requested_count = len([item for item in (call.args.get("model_items") or []) if str(item or "")])
                 ready_count = requested_count
@@ -15898,7 +16041,9 @@ class AgentRuntime:
                     ready_count = self._ready_resource_count(dict(image_plans.get(str(graph.batch_id or "")) or {}))
                 elif call.tool_name == "runtime.asset.model.prepare":
                     model_plans = dict(room.get("model_resource_plans") or {})
-                    ready_count = self._ready_resource_count(dict(model_plans.get(str(graph.batch_id or "")) or {}))
+                    ready_count = self._importable_model_resource_count(
+                        dict(model_plans.get(str(graph.batch_id or "")) or {})
+                    )
                 payload = {
                     "status": call.status.value,
                     "item_count": ready_count,
@@ -15930,6 +16075,14 @@ class AgentRuntime:
                     elif call.tool_name == "runtime.actor.import_batch":
                         event_title = "场景物体部分导入"
                         event_message = "本批场景物体部分写入 Runtime 状态，未导入项不会创建虚假 actor。"
+                elif (
+                    call.tool_name == "runtime.environment.import_components"
+                    and str(payload.get("reason") or "").strip().lower() == "runtime_state_only"
+                ):
+                    event_level = "warning"
+                    event_title = "环境组件已进入 Runtime 状态"
+                    event_message = "本批地形、天空或边界组件已记录到 RuntimeState，仍待 F5/引擎写入验证。"
+                    payload["status"] = "runtime_state_only"
                 self.emit_runtime_event(
                     room_id=room_id,
                     plan_id=graph.plan_id,
@@ -16409,6 +16562,17 @@ class AgentRuntime:
             for resource in dict(resources or {}).values()
             if isinstance(resource, Mapping)
             and str(resource.get("status") or "").strip().lower() not in failed_statuses
+        )
+
+    @staticmethod
+    def _importable_model_resource_count(resources: Mapping[str, Any]) -> int:
+        failed_statuses = {"failed", "failure", "error", "missing", "pending", "queued", "running"}
+        return sum(
+            1
+            for resource in dict(resources or {}).values()
+            if isinstance(resource, Mapping)
+            and str(resource.get("status") or "").strip().lower() not in failed_statuses
+            and bool(str(resource.get("local_path") or resource.get("model_path") or "").strip())
         )
 
     @staticmethod
@@ -17615,11 +17779,25 @@ class AgentRuntime:
             )[:8]
             if str(item).strip()
         ]
+        if engine_write_runtime_state_only_count and not engine_write_runtime_state_only_channels:
+            engine_write_runtime_state_only_channels = (
+                AgentRuntime._infer_engine_write_runtime_state_only_channels(engine_write_state)
+            )
         actor_registry_readiness_status = str(registry_state.get("readiness_status") or "").strip()
         actor_registry_count = int(registry_state.get("actor_count") or 0)
         actor_registry_missing_transform_count = int(registry_state.get("missing_transform_count") or 0)
         actor_registry_missing_aabb_count = int(registry_state.get("missing_aabb_count") or 0)
         actor_registry_estimated_aabb_count = int(registry_state.get("estimated_actor_bounds_count") or 0)
+        scene_entity_engine_write_pending_f5_count = int(
+            registry_state.get("engine_write_pending_f5_count") or 0
+        )
+        scene_entity_engine_write_verification_status_counts = {
+            str(key): int(value or 0)
+            for key, value in dict(
+                registry_state.get("engine_write_verification_status_counts") or {}
+            ).items()
+            if str(key or "").strip()
+        }
         worker_drain_failed_count = int(worker_drain_state.get("failed_count") or 0)
         worker_drain_exception_count = int(worker_drain_state.get("exception_count") or 0)
         worker_drain_status_failed_count = int(worker_drain_state.get("status_failed_count") or 0)
@@ -17812,6 +17990,10 @@ class AgentRuntime:
             "engine_write_readiness_mismatch_channels": engine_write_readiness_mismatch_channels,
             "engine_write_runtime_state_only_count": engine_write_runtime_state_only_count,
             "engine_write_runtime_state_only_channels": engine_write_runtime_state_only_channels,
+            "scene_entity_engine_write_pending_f5_count": scene_entity_engine_write_pending_f5_count,
+            "scene_entity_engine_write_verification_status_counts": dict(
+                sorted(scene_entity_engine_write_verification_status_counts.items())
+            ),
             "engine_write_bridge_failed_count": engine_write_bridge_failed_count,
             "engine_write_bridge_error_code_counts": dict(sorted(engine_write_bridge_error_code_counts.items())),
             "actor_registry_readiness_status": actor_registry_readiness_status,
@@ -17828,6 +18010,30 @@ class AgentRuntime:
             "asset_transferring_count": asset_transferring_count,
             "asset_overall_progress": max(0, min(100, asset_overall_progress)),
         }
+
+    @staticmethod
+    def _infer_engine_write_runtime_state_only_channels(
+        engine_write_state: Mapping[str, Any] | None,
+    ) -> list[str]:
+        state = dict(engine_write_state or {})
+        status_counts = AgentRuntime._safe_status_count_map(
+            state.get("engine_write_boundary_status_counts")
+            or state.get("status_counts")
+        )
+        if int(status_counts.get("runtime_state_only") or 0) <= 0:
+            return []
+        inferred: list[str] = []
+        for key, channel in (
+            ("import_boundary_attempt_count", "actor-import"),
+            ("environment_import_boundary_attempt_count", "environment-import"),
+            ("transform_boundary_attempt_count", "layout-transform"),
+            ("delete_boundary_attempt_count", "actor-delete"),
+        ):
+            if int(state.get(key) or 0) > 0 and channel not in inferred:
+                inferred.append(channel)
+        if not inferred:
+            inferred.append("engine-write")
+        return inferred[:8]
 
     @staticmethod
     def _batch_ids_for_plan(room: Mapping[str, Any], plan_id: str) -> set[str]:
@@ -18144,6 +18350,22 @@ class AgentRuntime:
             value = row.get(key)
             return dict(value) if isinstance(value, Mapping) else {}
 
+        def actor_interaction_capability(row: Mapping[str, Any]) -> list[Any]:
+            return list_field(row, "interaction_capability") or ["inspect", "move"]
+
+        def actor_gameplay_tags(row: Mapping[str, Any]) -> list[Any]:
+            tags = list_field(row, "gameplay_tags")
+            return tags if tags else ["runtime_generated"]
+
+        def actor_physics_profile(row: Mapping[str, Any]) -> dict[str, Any]:
+            profile = mapping_field(row, "physics_profile")
+            profile.setdefault("collision", "static")
+            return profile
+
+        def actor_script_bindings(row: Mapping[str, Any]) -> list[Any]:
+            bindings = list_field(row, "script_bindings")
+            return bindings if bindings else ["runtime_scene_entity"]
+
         def environment_profile_from(row: Mapping[str, Any]) -> dict[str, Any]:
             profile = mapping_field(row, "environment_profile")
             for key in ("terrain_profile", "surface", "sky_mode", "boundary_style"):
@@ -18163,6 +18385,38 @@ class AgentRuntime:
                 if value:
                     return value
             return "runtime_state"
+
+        def sync_lifecycle_status(row: Mapping[str, Any], fallback: str) -> str:
+            for key in ("sync_lifecycle_status", "last_sync_event", "sync_status"):
+                value = str(row.get(key) or "").strip()
+                if value:
+                    return value
+            return str(fallback or "").strip() or "runtime_state"
+
+        def engine_write_verification_status(row: Mapping[str, Any]) -> str:
+            sync_status = str(
+                row.get("sync_status")
+                or row.get("sync_lifecycle_status")
+                or row.get("last_sync_event")
+                or ""
+            ).strip().lower()
+            source = str(row.get("source") or "").strip().lower()
+            status = str(row.get("status") or "").strip().lower()
+            if sync_status in {
+                "engine_created",
+                "engine_imported",
+                "engine_transformed",
+                "synced",
+                "synchronized",
+            }:
+                return "engine_verified"
+            if source.startswith("engine_") and status not in {"runtime_state_only", "planned"}:
+                return "engine_verified"
+            if status == "runtime_state_only" or sync_status == "runtime_state_only":
+                return "pending_f5"
+            if status in {"planned", "pending", "queued"} or sync_status in {"planned", "pending", "queued"}:
+                return "planned"
+            return "unknown"
 
         def asset_transfer_status(asset_id: str) -> dict[str, Any]:
             asset = assets.get(asset_id)
@@ -18273,6 +18527,7 @@ class AgentRuntime:
                     if key not in merged or merged.get(key) in (None, "", [], {}):
                         merged[key] = value
             asset_id = actor_asset_id(merged)
+            actor_sync = actor_sync_status(merged, asset_id)
             bounds = bounds_from(merged)
             actor_source = str(merged.get("source") or "").strip()
             geometry_source = (
@@ -18283,6 +18538,11 @@ class AgentRuntime:
             entity = {
                 "entity_id": str(actor_id),
                 "actor_id": str(actor_id),
+                "name": str(merged.get("name") or actor_id),
+                "display_name": str(merged.get("display_name") or merged.get("name") or actor_id),
+                "native_name": str(merged.get("native_name") or merged.get("name") or actor_id),
+                "requested_name": str(merged.get("requested_name") or ""),
+                "aliases": list_field(merged, "aliases"),
                 "asset_id": asset_id,
                 "model_ref": actor_model_ref(merged, asset_id),
                 "semantic_role": str(
@@ -18295,15 +18555,19 @@ class AgentRuntime:
                 "transform": transform_from(merged),
                 "bounds": bounds,
                 "aabb": dict(bounds),
+                "bounds_ready": bool(merged.get("bounds_ready")) if "bounds_ready" in merged else bool(bounds),
+                "size": vector3(merged.get("size")),
                 "geometry_source": geometry_source,
                 "grounding_status": actor_grounding_status(merged),
-                "interaction_capability": list_field(merged, "interaction_capability"),
-                "gameplay_tags": list_field(merged, "gameplay_tags"),
-                "physics_profile": mapping_field(merged, "physics_profile"),
+                "interaction_capability": actor_interaction_capability(merged),
+                "gameplay_tags": actor_gameplay_tags(merged),
+                "physics_profile": actor_physics_profile(merged),
                 "audio_profile": mapping_field(merged, "audio_profile"),
                 "lighting_profile": mapping_field(merged, "lighting_profile"),
-                "script_bindings": list_field(merged, "script_bindings"),
-                "sync_status": actor_sync_status(merged, asset_id),
+                "script_bindings": actor_script_bindings(merged),
+                "sync_status": actor_sync,
+                "sync_lifecycle_status": sync_lifecycle_status(merged, actor_sync),
+                "engine_write_verification_status": engine_write_verification_status(merged),
                 "asset_transfer_status": asset_transfer_status(asset_id),
                 "review_status": review_status_for(merged, str(merged.get("name") or actor_id)),
                 "plan_id": str(merged.get("plan_id") or active_plan_id),
@@ -18327,10 +18591,16 @@ class AgentRuntime:
                     continue
                 bounds = bounds_from(component)
                 component_actor_id = str(component.get("actor_id") or "").strip()
+                component_sync = actor_sync_status(component, str(component.get("asset_id") or ""))
                 entity = {
                     "entity_id": entity_id,
                     "actor_id": component_actor_id,
                     "component_id": str(component.get("component_id") or component_id),
+                    "name": str(component.get("name") or component_id),
+                    "display_name": str(component.get("display_name") or component.get("name") or component_id),
+                    "native_name": str(component.get("native_name") or component.get("name") or component_id),
+                    "requested_name": str(component.get("requested_name") or ""),
+                    "aliases": list_field(component, "aliases"),
                     "asset_id": str(component.get("asset_id") or ""),
                     "model_ref": str(component.get("model_ref") or component.get("handler") or component_type),
                     "semantic_role": str(component.get("name") or component_id),
@@ -18338,6 +18608,8 @@ class AgentRuntime:
                     "transform": transform_from(component),
                     "bounds": bounds,
                     "aabb": dict(bounds),
+                    "bounds_ready": bool(component.get("bounds_ready")) if "bounds_ready" in component else bool(bounds),
+                    "size": vector3(component.get("size")),
                     "grounding_status": "not_applicable",
                     "interaction_capability": list_field(component, "interaction_capability"),
                     "gameplay_tags": list_field(component, "gameplay_tags") or ["environment"],
@@ -18346,7 +18618,9 @@ class AgentRuntime:
                     "lighting_profile": mapping_field(component, "lighting_profile"),
                     "environment_profile": environment_profile_from(component),
                     "script_bindings": list_field(component, "script_bindings"),
-                    "sync_status": str(component.get("sync_status") or component.get("status") or "runtime_state"),
+                    "sync_status": component_sync,
+                    "sync_lifecycle_status": sync_lifecycle_status(component, component_sync),
+                    "engine_write_verification_status": engine_write_verification_status(component),
                     "asset_transfer_status": asset_transfer_status(str(component.get("asset_id") or "")),
                     "review_status": review_status_for(component, str(component.get("name") or component_id)),
                     "plan_id": active_plan_id,
@@ -18382,6 +18656,8 @@ class AgentRuntime:
                 "lighting_profile": {},
                 "script_bindings": [],
                 "sync_status": "planned",
+                "sync_lifecycle_status": "planned",
+                "engine_write_verification_status": "planned",
                 "asset_transfer_status": asset_transfer_status(""),
                 "review_status": "pending_review",
                 "plan_id": active_plan_id,
@@ -18395,6 +18671,7 @@ class AgentRuntime:
         asset_transfer_status_counts: dict[str, int] = {}
         review_status_counts: dict[str, int] = {}
         geometry_source_counts: dict[str, int] = {}
+        engine_write_verification_status_counts: dict[str, int] = {}
         transform_available_count = 0
         aabb_available_count = 0
         actor_transform_available_count = 0
@@ -18426,12 +18703,18 @@ class AgentRuntime:
             else:
                 add_count(asset_transfer_status_counts, "unknown")
             add_count(review_status_counts, str(entity.get("review_status") or "unknown"))
+            add_count(
+                engine_write_verification_status_counts,
+                str(entity.get("engine_write_verification_status") or "unknown"),
+            )
             if is_actor_entity:
                 add_count(geometry_source_counts, str(entity.get("geometry_source") or "unknown"))
         actor_count = sum(1 for entity in entities if entity.get("entity_type") == "actor")
         missing_transform_count = max(0, actor_count - actor_transform_available_count)
         missing_aabb_count = max(0, actor_count - actor_aabb_available_count)
         estimated_actor_bounds_count = int(geometry_source_counts.get("runtime_estimated_bounds") or 0)
+        engine_write_pending_f5_count = int(engine_write_verification_status_counts.get("pending_f5") or 0)
+        engine_write_verified_count = int(engine_write_verification_status_counts.get("engine_verified") or 0)
         if not actor_count:
             readiness_status = "no_actors"
         elif missing_transform_count or missing_aabb_count:
@@ -18460,6 +18743,11 @@ class AgentRuntime:
             "review_status_counts": dict(sorted(review_status_counts.items())),
             "geometry_source_counts": dict(sorted(geometry_source_counts.items())),
             "estimated_actor_bounds_count": estimated_actor_bounds_count,
+            "engine_write_verification_status_counts": dict(
+                sorted(engine_write_verification_status_counts.items())
+            ),
+            "engine_write_pending_f5_count": engine_write_pending_f5_count,
+            "engine_write_verified_count": engine_write_verified_count,
             "entities": entities,
         }
 
@@ -18496,7 +18784,10 @@ class AgentRuntime:
             "ready",
             "active",
             "created",
+            "engine_created",
             "imported",
+            "engine_imported",
+            "runtime_imported",
             "synced",
             "synchronized",
         }
@@ -19923,6 +20214,19 @@ class AgentRuntime:
         engine_write_readiness_mismatch_count = int(
             report_health_summary.get("engine_write_readiness_mismatch_count") or 0
         )
+        engine_write_runtime_state_only_count = int(
+            report_health_summary.get("engine_write_runtime_state_only_count") or 0
+        )
+        scene_entity_engine_write_pending_f5_count = int(
+            report_health_summary.get("scene_entity_engine_write_pending_f5_count") or 0
+        )
+        scene_entity_engine_write_verification_status_counts = {
+            self._safe_report_text(str(key or "")): int(value or 0)
+            for key, value in dict(
+                report_health_summary.get("scene_entity_engine_write_verification_status_counts") or {}
+            ).items()
+            if str(key or "").strip()
+        }
         engine_write_readiness_mismatch_channels = [
             self._safe_report_text(str(item or "").replace("_", "-"))[:48]
             for item in list(report_health_summary.get("engine_write_readiness_mismatch_channels") or [])[:8]
@@ -19953,7 +20257,12 @@ class AgentRuntime:
                 report_event_message += f" 模型同传失败 {asset_failed_count} 项。"
             if environment_import_failed_count > 0:
                 report_event_message += f" 环境组件导入失败 {environment_import_failed_count} 项。"
-        elif batch_partial_count > 0 or asset_incomplete_count > 0 or sync_health_status == "partial":
+        elif (
+            batch_partial_count > 0
+            or asset_incomplete_count > 0
+            or sync_health_status == "partial"
+            or engine_write_runtime_state_only_count > 0
+        ):
             report_event_level = "warning"
             report_event_title = "生成报告已完成（仍有未完成项）"
             report_event_message = (
@@ -19962,6 +20271,14 @@ class AgentRuntime:
             )
             if environment_import_failed_count > 0:
                 report_event_message += f" 环境组件导入失败 {environment_import_failed_count} 项。"
+            if engine_write_runtime_state_only_count > 0:
+                report_event_message += (
+                    f" {engine_write_runtime_state_only_count} 项引擎写入仍是 RuntimeState 记录，待 F5/实机验证。"
+                )
+            if scene_entity_engine_write_pending_f5_count > 0:
+                report_event_message += (
+                    f" {scene_entity_engine_write_pending_f5_count} 个场景实体仍待引擎写入/F5确认。"
+                )
         self.emit_runtime_event(
             room_id=str(room_id),
             plan_id=active_plan_id,
@@ -20028,6 +20345,16 @@ class AgentRuntime:
                 "latest_sync_failure_code": latest_sync_failure_code,
                 "engine_write_readiness_mismatch_count": engine_write_readiness_mismatch_count,
                 "engine_write_readiness_mismatch_channels": engine_write_readiness_mismatch_channels,
+                "engine_write_runtime_state_only_count": engine_write_runtime_state_only_count,
+                "engine_write_runtime_state_only_channels": [
+                    self._safe_report_text(str(item or "").replace("_", "-"))[:48]
+                    for item in list(report_health_summary.get("engine_write_runtime_state_only_channels") or [])[:8]
+                    if str(item or "").strip()
+                ],
+                "scene_entity_engine_write_pending_f5_count": scene_entity_engine_write_pending_f5_count,
+                "scene_entity_engine_write_verification_status_counts": dict(
+                    sorted(scene_entity_engine_write_verification_status_counts.items())
+                ),
                 "asset_incomplete_count": asset_incomplete_count,
                 "asset_failed_count": asset_failed_count,
                 "asset_transferring_count": int(
@@ -21859,6 +22186,24 @@ class AgentRuntime:
                     for item in list(report_health_summary.get("engine_write_readiness_mismatch_channels") or [])[:8]
                     if str(item).strip()
                 ],
+                "engine_write_runtime_state_only_count": int(
+                    report_health_summary.get("engine_write_runtime_state_only_count") or 0
+                ),
+                "engine_write_runtime_state_only_channels": [
+                    str(item).strip().replace("_", "-")[:48]
+                    for item in list(report_health_summary.get("engine_write_runtime_state_only_channels") or [])[:8]
+                    if str(item).strip()
+                ],
+                "scene_entity_engine_write_pending_f5_count": int(
+                    report_health_summary.get("scene_entity_engine_write_pending_f5_count") or 0
+                ),
+                "scene_entity_engine_write_verification_status_counts": {
+                    str(key): int(value)
+                    for key, value in dict(
+                        report_health_summary.get("scene_entity_engine_write_verification_status_counts") or {}
+                    ).items()
+                    if str(key or "").strip()
+                },
                 "resource_phase_failure_code_counts": {
                     str(key): int(value)
                     for key, value in dict(
@@ -23033,6 +23378,7 @@ class AgentRuntime:
             str(plan_id or ""),
             batch_id=str(batch_id or ""),
         )
+        replay["worker_drain_replay_summary"] = self._worker_drain_replay_summary(replay.get("entries", []))
         replay["report_health_summary"] = self._report_health_summary(
             batch_resource_flow_summary=dict(replay.get("batch_resource_flow_summary") or {}),
             import_summary=replay_import_summary,
@@ -23054,10 +23400,10 @@ class AgentRuntime:
                 str(plan_id or ""),
                 batch_id=str(batch_id or ""),
             ),
+            worker_drain_replay_summary=dict(replay.get("worker_drain_replay_summary") or {}),
         )
         replay["tool_execution_summary"] = self._tool_execution_replay_summary(replay.get("entries", []))
         replay["tool_graph_queue_summary"] = self._tool_graph_queue_replay_summary(replay.get("entries", []))
-        replay["worker_drain_replay_summary"] = self._worker_drain_replay_summary(replay.get("entries", []))
         replay["resource_readiness_replay_summary"] = self._resource_readiness_replay_summary(raw_entries)
         replay["state_patch_summary"] = self._state_patch_replay_summary(raw_entries)
         replay["intervention_batch_replay_summary"] = self._intervention_batch_replay_summary(raw_entries)
@@ -23842,7 +24188,7 @@ class AgentRuntime:
             )
             safe_environment_imports = ToolCallGraphExecutor._safe_engine_result_rows(
                 payload.get("environment_import_results"),
-                id_fields=("component_id", "component_name"),
+                id_fields=("component_id", "component_name", "name", "actor_id"),
             )
             for row in safe_imports:
                 status = str(row.get("status") or "unknown").strip() or "unknown"
@@ -31067,7 +31413,16 @@ class AgentRuntime:
         for actor_id, actor in actors.items():
             if not isinstance(actor, dict):
                 continue
-            if str(actor.get("name") or "") == normalized:
+            candidate_names = [
+                str(actor.get("name") or ""),
+                str(actor.get("requested_name") or ""),
+                str(actor.get("native_name") or ""),
+                str(actor.get("display_name") or ""),
+                str(actor.get("actor_id") or actor_id),
+            ]
+            aliases = actor.get("aliases") if isinstance(actor.get("aliases"), list) else []
+            candidate_names.extend(str(item or "") for item in aliases)
+            if any(str(candidate or "").strip() == normalized for candidate in candidate_names):
                 return str(actor_id), dict(actor)
         return "", {}
 

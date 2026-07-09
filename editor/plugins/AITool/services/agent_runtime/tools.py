@@ -2092,6 +2092,8 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
                 component["status"] = "runtime_state_only"
                 component["source"] = "runtime_default_environment_import"
                 component["requires_engine_write"] = False
+                component.setdefault("sync_status", "runtime_state_only")
+                component.setdefault("sync_lifecycle_status", component.get("sync_status") or "runtime_state_only")
                 imported_components[str(component["component_id"])] = component
             EnvironmentComponentValidator.validate_component_batches({batch_id: imported_components})
             import_results = [
@@ -2183,6 +2185,39 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
                 user_visible_message="环境组件导入失败，系统不会伪装为已写入地形或边界。",
             )
         imported_components = dict(result.get("environment_components") or {})
+        imported_components = {
+            str(component_id): {
+                **dict(component),
+                "sync_lifecycle_status": str(
+                    dict(component).get("sync_lifecycle_status")
+                    or dict(component).get("last_sync_event")
+                    or dict(component).get("sync_status")
+                    or dict(component).get("status")
+                    or "runtime_state"
+                ),
+            }
+            for component_id, component in imported_components.items()
+            if isinstance(component, Mapping)
+        }
+        import_results = []
+        for raw_result in list(result.get("environment_import_results") or []):
+            if not isinstance(raw_result, Mapping):
+                continue
+            row = dict(raw_result)
+            component_id = str(row.get("component_id") or "").strip()
+            component = imported_components.get(component_id, {})
+            if "sync_status" not in row and isinstance(component, Mapping) and component.get("sync_status"):
+                row["sync_status"] = component.get("sync_status")
+            if "sync_lifecycle_status" not in row:
+                row["sync_lifecycle_status"] = str(
+                    row.get("last_sync_event")
+                    or row.get("sync_status")
+                    or (component.get("sync_lifecycle_status") if isinstance(component, Mapping) else "")
+                    or (component.get("sync_status") if isinstance(component, Mapping) else "")
+                    or row.get("status")
+                    or "runtime_state"
+                )
+            import_results.append(row)
         requested_count = len(components)
         if requested_count and not imported_components:
             return _failed_component_patch_result(
@@ -2227,7 +2262,7 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
                             status="imported"
                             if requested_count <= 0 or len(imported_components) >= requested_count
                             else "partial",
-                            import_results=list(result.get("environment_import_results") or []),
+                            import_results=import_results,
                             engine_write_boundary=_environment_import_boundary_fact(
                                 result,
                                 requested_count=requested_count,
@@ -2241,7 +2276,7 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
             ),
             payload={
                 "environment_components": imported_components,
-                "environment_import_results": list(result.get("environment_import_results") or []),
+                    "environment_import_results": import_results,
                 "engine_write_result": dict(result.get("engine_write_result") or {}),
                 "requested_count": requested_count,
                 "ready_count": len(imported_components),
@@ -2303,7 +2338,23 @@ def _safe_environment_import_results(results: Any) -> list[dict[str, Any]]:
         if not isinstance(item, Mapping):
             continue
         safe: dict[str, Any] = {}
-        for field in ("component_id", "name", "component_type", "status", "reason", "failure_code"):
+        for field in (
+            "actor_id",
+            "asset_id",
+            "component_id",
+            "component_name",
+            "component_type",
+            "display_name",
+            "model_ref",
+            "name",
+            "native_name",
+            "requested_name",
+            "status",
+            "sync_lifecycle_status",
+            "sync_status",
+            "reason",
+            "failure_code",
+        ):
             value = item.get(field)
             if isinstance(value, str):
                 lowered = value.lower()
@@ -2315,6 +2366,46 @@ def _safe_environment_import_results(results: Any) -> list[dict[str, Any]]:
                 safe[field] = value[:160]
             elif isinstance(value, (int, float, bool)):
                 safe[field] = value
+        aliases = item.get("aliases")
+        if isinstance(aliases, list):
+            safe_aliases: list[str] = []
+            for alias in aliases:
+                if not isinstance(alias, str):
+                    continue
+                lowered = alias.lower()
+                if any(token in lowered for token in unsafe_tokens):
+                    continue
+                text = alias.strip()[:160]
+                if text and text not in safe_aliases:
+                    safe_aliases.append(text)
+            if safe_aliases:
+                safe["aliases"] = safe_aliases[:8]
+        for field in ("position", "rotation", "scale"):
+            vector = item.get(field)
+            if isinstance(vector, (list, tuple)) and len(vector) >= 3:
+                try:
+                    safe[field] = [round(float(part or 0.0), 4) for part in list(vector[:3])]
+                except (TypeError, ValueError):
+                    pass
+        for field in ("aabb", "bounds", "scene_aabb"):
+            bounds = item.get(field)
+            if not isinstance(bounds, Mapping):
+                continue
+            min_value = bounds.get("min")
+            max_value = bounds.get("max")
+            if (
+                isinstance(min_value, (list, tuple))
+                and isinstance(max_value, (list, tuple))
+                and len(min_value) >= 3
+                and len(max_value) >= 3
+            ):
+                try:
+                    safe[field] = {
+                        "min": [round(float(part or 0.0), 4) for part in list(min_value[:3])],
+                        "max": [round(float(part or 0.0), 4) for part in list(max_value[:3])],
+                    }
+                except (TypeError, ValueError):
+                    pass
         if safe:
             safe_results.append(safe)
     return safe_results
@@ -2491,11 +2582,27 @@ def _normalize_environment_components_for_runtime(
             component_id = f"{batch_id}-environment-{len(components) + 1:02d}" if batch_id else "runtime-environment"
         component_type = str(raw_component.get("component_type") or "environment").strip() or "environment"
         raw_component["component_id"] = component_id
+        raw_component.setdefault("display_name", str(raw_component.get("name") or component_id))
+        raw_component.setdefault("native_name", str(raw_component.get("name") or component_id))
+        raw_component.setdefault("requested_name", str(raw_component.get("name") or component_id))
+        aliases = raw_component.get("aliases")
+        if not isinstance(aliases, list) or not aliases:
+            raw_component["aliases"] = [
+                value
+                for value in (
+                    str(raw_component.get("requested_name") or ""),
+                    str(raw_component.get("native_name") or ""),
+                    str(raw_component.get("name") or ""),
+                    component_id,
+                )
+                if value
+            ][:8]
         raw_component.setdefault("asset_id", component_id)
         raw_component.setdefault("status", "planned")
         raw_component.setdefault("source", "runtime_environment_component")
         raw_component.setdefault("requires_engine_write", False)
         raw_component.setdefault("sync_status", "runtime_state")
+        raw_component.setdefault("sync_lifecycle_status", raw_component.get("sync_status") or "runtime_state")
         if scene_name:
             raw_component.setdefault("scene_name", scene_name)
         raw_component.setdefault("position", [0.0, 0.0, 0.0])
@@ -2887,7 +2994,7 @@ def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[To
                 },
                 user_visible_message="模型资源准备没有返回可用结果，系统会稍后重试或降级处理。",
             )
-        ready_count = _ready_resource_count(model_resources)
+        ready_count = _importable_model_resource_count(model_resources)
         legacy_hard_failed = (
             requested_count > 0
             and ready_count <= 0
@@ -3028,7 +3135,11 @@ def _resource_phase_fact(
         for key, value in dict(resources or {}).items()
         if isinstance(value, Mapping) and str(key or "").strip()
     }
-    ready_count = _ready_resource_count(resource_rows)
+    ready_count = (
+        _ready_resource_count(resource_rows)
+        if safe_phase == "image"
+        else _importable_model_resource_count(resource_rows)
+    )
     requested = max(0, int(requested_count or 0))
     failed_count = max(0, requested - ready_count)
     if requested > 0 and ready_count <= 0 and failed_count >= requested:
@@ -3078,6 +3189,23 @@ def _ready_resource_count(resources: dict[str, Any]) -> int:
         for resource in resources.values()
         if isinstance(resource, dict)
         and str(resource.get("status") or "").strip().lower() not in {"failed", "failure", "error", "missing"}
+    )
+
+
+def _model_resource_has_importable_path(resource: Mapping[str, Any] | None) -> bool:
+    if not isinstance(resource, Mapping):
+        return False
+    status = str(resource.get("status") or "").strip().lower()
+    if status in {"failed", "failure", "error", "missing", "pending", "queued", "running"}:
+        return False
+    return bool(str(resource.get("local_path") or resource.get("model_path") or "").strip())
+
+
+def _importable_model_resource_count(resources: Mapping[str, Any]) -> int:
+    return sum(
+        1
+        for resource in dict(resources or {}).values()
+        if _model_resource_has_importable_path(resource)
     )
 
 
@@ -3258,10 +3386,15 @@ def _plan_actor_import_batch_tool(call: ToolCall) -> ToolResult:
         resource = dict(model_resources.get(name) or {})
         placement = dict(placements.get(name) or {})
         status = str(resource.get("status") or "").strip().lower()
-        model_ready = bool(resource) and status not in {"failed", "error", "missing"}
+        has_importable_model = _model_resource_has_importable_path(resource)
+        model_ready = (
+            bool(resource)
+            and status not in {"failed", "error", "missing"}
+            and has_importable_model
+        )
         failure_code = ""
         if not model_ready:
-            if not resource:
+            if not resource or not has_importable_model:
                 failure_code = "missing_ready_model_resource"
             else:
                 failure_code = _safe_import_text(
@@ -3344,7 +3477,7 @@ def _make_actor_import_tool(provider: ResourceProvider | None) -> Callable[[Tool
             ready_items = [
                 name
                 for name in requested_items
-                if name in model_resources and str(model_resources[name].get("status") or "").lower() not in {"failed", "error"}
+                if _model_resource_has_importable_path(model_resources.get(name))
             ]
             payload["model_items"] = ready_items
         elif requested_items and explicit_model_resources:
@@ -3504,6 +3637,7 @@ def _make_actor_import_tool(provider: ResourceProvider | None) -> Callable[[Tool
             )
         imported_count = len(actors)
         requested_count = len(requested_items) if requested_items else max(imported_count, len(import_results))
+        import_results = _enrich_actor_import_results(import_results, actors)
         if not actors and import_results:
             import_result_fact = _actor_import_result_fact(
                 payload,
@@ -3520,8 +3654,10 @@ def _make_actor_import_tool(provider: ResourceProvider | None) -> Callable[[Tool
                 ),
             )
             return ToolResult(
-                True,
+                False,
                 "actor import failed and result fact recorded",
+                retryable=True,
+                error_code="actor_import_failed",
                 state_patch=StatePatch(
                     room_id=room_id,
                     changes={
@@ -3659,7 +3795,16 @@ def _safe_actor_import_results(results: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         safe: dict[str, Any] = {}
-        for field in ("actor_id", "actor_name", "status", "reason", "failure_code"):
+        for field in (
+            "actor_id",
+            "actor_name",
+            "display_name",
+            "native_name",
+            "requested_name",
+            "status",
+            "reason",
+            "failure_code",
+        ):
             value = item.get(field)
             if isinstance(value, str):
                 lowered = value.lower()
@@ -3671,9 +3816,98 @@ def _safe_actor_import_results(results: Any) -> list[dict[str, Any]]:
                 safe[field] = value[:160]
             elif isinstance(value, (int, float, bool)):
                 safe[field] = value
+        aliases = item.get("aliases")
+        if isinstance(aliases, list):
+            safe_aliases: list[str] = []
+            for alias in aliases:
+                if not isinstance(alias, str):
+                    continue
+                lowered = alias.lower()
+                if any(token in lowered for token in unsafe_tokens):
+                    continue
+                text = alias.strip()[:160]
+                if text and text not in safe_aliases:
+                    safe_aliases.append(text)
+            if safe_aliases:
+                safe["aliases"] = safe_aliases[:8]
+        status_value = str(safe.get("status") or "").strip().lower()
+        if (
+            status_value in {"failed", "failure", "error", "missing"}
+            and not str(safe.get("failure_code") or "").strip()
+        ):
+            safe["failure_code"] = "actor_import_failed"
         if safe:
             safe_results.append(safe)
     return safe_results
+
+
+def _enrich_actor_import_results(
+    import_results: list[dict[str, Any]],
+    actors: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    safe_results = _safe_actor_import_results(import_results)
+    if not safe_results:
+        return []
+    actor_rows = {
+        str(actor_id): dict(actor)
+        for actor_id, actor in dict(actors or {}).items()
+        if isinstance(actor, Mapping) and str(actor_id or "").strip()
+    }
+    if not actor_rows:
+        return safe_results
+
+    def names_for(actor_id: str, actor: Mapping[str, Any]) -> set[str]:
+        names = {
+            str(actor_id or "").strip(),
+            str(actor.get("name") or "").strip(),
+            str(actor.get("requested_name") or "").strip(),
+            str(actor.get("native_name") or "").strip(),
+            str(actor.get("display_name") or "").strip(),
+        }
+        aliases = actor.get("aliases") if isinstance(actor.get("aliases"), list) else []
+        names.update(str(alias or "").strip() for alias in aliases)
+        return {name for name in names if name}
+
+    used_actor_ids: set[str] = set()
+    enriched: list[dict[str, Any]] = []
+    for row in safe_results:
+        if not isinstance(row, dict):
+            continue
+        actor_id = str(row.get("actor_id") or "").strip()
+        actor = actor_rows.get(actor_id) if actor_id else None
+        if actor is None:
+            actor_name = str(row.get("actor_name") or "").strip()
+            for candidate_id, candidate in actor_rows.items():
+                if candidate_id in used_actor_ids:
+                    continue
+                if actor_name and actor_name in names_for(candidate_id, candidate):
+                    actor_id = candidate_id
+                    actor = candidate
+                    break
+        if actor is None or str(row.get("status") or "").strip().lower() != "success":
+            enriched.append(row)
+            continue
+        used_actor_ids.add(actor_id)
+        aliases = [
+            str(alias or "").strip()
+            for alias in (actor.get("aliases") if isinstance(actor.get("aliases"), list) else [])
+            if str(alias or "").strip()
+        ]
+        enriched.append(
+            _safe_actor_import_results([
+                {
+                    **row,
+                    "actor_id": actor_id,
+                    "actor_name": str(actor.get("name") or row.get("actor_name") or actor_id),
+                    "display_name": str(actor.get("display_name") or actor.get("name") or actor_id),
+                    "native_name": str(actor.get("native_name") or actor.get("name") or actor_id),
+                    "requested_name": str(actor.get("requested_name") or ""),
+                    "aliases": aliases,
+                }
+            ])[0]
+        )
+
+    return enriched
 
 
 def _actor_import_boundary_fact(
@@ -3753,6 +3987,8 @@ def _safe_actor_import_provider_source(value: Any) -> str:
         "engine_environment_import_provider",
         "runtime_actor_import_precheck",
         "runtime_default_import_provider",
+        "runtime_default_environment_import",
+        "runtime_default_environment_import_provider",
     }
     if text in allowed:
         return text
@@ -4730,6 +4966,7 @@ def _default_model_resource_provider(payload: dict[str, Any]) -> dict[str, Any]:
             "model_request_id": f"model-req-{batch_id}-{index + 1:02d}",
             "name": name,
             "status": "prepared",
+            "local_path": f"runtime/default_models/{batch_id or 'batch'}/{index + 1:02d}.glb",
             "source": _preferred_asset_source(name),
         }
         for index, name in enumerate(model_items)
@@ -4752,10 +4989,14 @@ def _default_actor_import_provider(payload: dict[str, Any]) -> dict[str, Any]:
         actors[actor_id] = {
             "actor_id": actor_id,
             "asset_id": str(name),
+            "aliases": [str(name)],
+            "display_name": str(name),
             "model_ref": str(name),
             "name": name,
+            "native_name": str(name),
             "plan_id": plan_id,
             "batch_id": batch_id,
+            "requested_name": str(name),
             "position": position,
             "rotation": rotation,
             "scale": scale,

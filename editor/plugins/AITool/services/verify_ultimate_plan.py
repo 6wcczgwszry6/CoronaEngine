@@ -24,6 +24,7 @@ PYTHON_TESTS = [
     "editor/plugins/AITool/services/test_agent_runtime_phase1.py",
     "editor/plugins/AITool/services/test_lanchat_runtime_guard.py",
     "editor/plugins/AITool/services/test_model_retrieval_provider_helpers.py",
+    "editor/plugins/AITool/cai_extensions/mcp/tools/tests/test_set_actor_transform_tool.py",
     "docs/probes/test_v3_f5_log_check.py",
     "docs/probes/test_v3_f5_quick_gate.py",
 ]
@@ -55,6 +56,9 @@ PY_COMPILE_TARGETS = [
     "editor/plugins/AITool/cai_extensions/agent/scene_composer.py",
     "editor/plugins/AITool/cai_extensions/agent/scene_composer_progressive.py",
     "editor/plugins/AITool/cai_extensions/agent/scene_element_classifier.py",
+    "editor/plugins/AITool/cai_extensions/mcp/tools/model_import_tools.py",
+    "editor/plugins/AITool/cai_extensions/mcp/tools/set_actor_transform.py",
+    "editor/plugins/AITool/cai_extensions/mcp/tools/tests/test_set_actor_transform_tool.py",
     "docs/probes/v3_f5_log_check.py",
     "docs/probes/v3_f5_quick_gate.py",
 ]
@@ -123,6 +127,37 @@ DIRECT_ENGINE_WRITE_GUARDED_CALLS = {
         ("def _handle_edit(", "scene_manager.get"),
     ],
 }
+
+RUNTIME_ADAPTER_ENGINE_WRITE_BOUNDARY_FILE = (
+    "editor/plugins/AITool/services/agent_runtime/adapters.py"
+)
+
+RUNTIME_ADAPTER_ENGINE_WRITE_REQUIRED_MARKERS = (
+    "class RuntimeCppBridge",
+    "engine_gate is required",
+    "raw = invoke_tool(tool, payload)",
+    "raw = set_transform(tool, payload)",
+    "raw = remove_actor(tool, payload)",
+    "make_engine_actor_import_provider",
+    "bridge.invoke_tool(import_tool",
+    "make_engine_environment_component_import_provider",
+    "environment_import_tool,",
+    "cpp_environment_component_import_failed",
+    "make_engine_layout_transform_provider",
+    "bridge.set_transform(transform_tool",
+    "make_engine_actor_delete_provider",
+    "bridge.remove_actor(delete_tool",
+)
+
+RUNTIME_ADAPTER_FORBIDDEN_DIRECT_WRITE_MARKERS = (
+    ".invoke(",
+    "CoronaEditor.CoronaEngine",
+    "create_editor_actor(",
+    "set_editor_actor_transform(",
+    "remove_editor_actor(",
+    "get_tool_registry(",
+    "get_tool(",
+)
 
 DIRECT_PROGRESSIVE_WORKFLOW_SCAN_ROOTS = [
     "editor/plugins/AITool/services",
@@ -290,6 +325,24 @@ DIRECT_HOST_ACTION_EXECUTOR_REQUIRED_SCOPE_TOKENS = {
                 "if not self._is_confirmed_action_payload_runtime_approved(payload):",
                 "return\n        if hasattr(self._corona_engine, \"network_broadcast_intent\"):",
                 "self._execute_confirmed_action(payload)",
+            ),
+        ),
+        (
+            "    def _filter_confirmed_action_payload_for_runtime(",
+            (
+                "def _filter_confirmed_action_payload_for_runtime(",
+                "if self._is_confirmed_action_payload_runtime_approved(payload):",
+                "self._record_unapproved_confirmed_action_block(payload, phase=\"reply_metadata\")",
+                "return None",
+            ),
+        ),
+        (
+            "    def _is_confirmed_action_payload_runtime_approved(",
+            (
+                "def _is_confirmed_action_payload_runtime_approved(",
+                "if self._agent_runtime_flags.can_call_legacy_main_workflow():",
+                "execution not in {\"agent_runtime_structured\", \"coordinator_structured\"}",
+                "return bool(payload.get(\"runtime_payload_prepared_by_worker\"))",
             ),
         ),
         (
@@ -543,6 +596,42 @@ def _direct_engine_write_entry_gate() -> bool:
             _print_violation(item)
         return False
     print("[OK]  static direct engine-write entry gate")
+    return True
+
+
+def _runtime_adapter_engine_write_boundary_gate() -> bool:
+    print("[RUN] static Runtime adapter engine-write boundary gate")
+    violations: list[str] = []
+    rel = RUNTIME_ADAPTER_ENGINE_WRITE_BOUNDARY_FILE
+    path = REPO_ROOT / rel
+    try:
+        source = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        source = path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        violations.append(f"{rel}: missing Runtime adapter file")
+        source = ""
+
+    for marker in RUNTIME_ADAPTER_ENGINE_WRITE_REQUIRED_MARKERS:
+        if marker not in source:
+            violations.append(f"{rel}: missing Runtime bridge boundary marker {marker!r}")
+
+    for lineno, line in enumerate(source.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        for marker in RUNTIME_ADAPTER_FORBIDDEN_DIRECT_WRITE_MARKERS:
+            if marker in stripped:
+                violations.append(
+                    f"{rel}:{lineno}: Runtime adapter bypasses EngineWriteGate with {marker!r}"
+                )
+
+    if violations:
+        print("[FAIL] static Runtime adapter engine-write boundary gate")
+        for item in violations:
+            _print_violation(item)
+        return False
+    print("[OK]  static Runtime adapter engine-write boundary gate")
     return True
 
 
@@ -1020,8 +1109,9 @@ def _legacy_role_agent_scene_write_policy_gate() -> bool:
         violations.append("LANChatAgentWorker._process_trigger not found")
     else:
         required_order = (
+            "planning_seed = self._seed_agent_trigger_planning_context_in_runtime(trigger)",
             "if self._handle_agent_trigger_planning_gate(trigger):",
-            "if self._handle_agent_trigger_runtime_write_gate(trigger):",
+            "if self._handle_agent_trigger_runtime_write_gate(trigger, planning_seed=planning_seed):",
             "result = self._run_agent(trigger)",
         )
         last_index = -1
@@ -2764,6 +2854,11 @@ def _runtime_report_fact_source_gate() -> bool:
             '"resource_summary": resource_summary',
             "import_summary = self._import_summary_for_plan",
             '"import_summary": import_summary',
+            "scene_entity_registry = self._scene_entity_registry_for_plan",
+            '"scene_entity_registry": scene_entity_registry',
+            "sync_readiness_summary = self._sync_readiness_summary",
+            '"sync_readiness_summary": sync_readiness_summary',
+            "scene_entity_registry=scene_entity_registry",
             "environment_component_summary = self._environment_component_summary_for_plan",
             '"environment_component_summary": environment_component_summary',
             "environment_component_summary=environment_component_summary",
@@ -2785,6 +2880,12 @@ def _runtime_report_fact_source_gate() -> bool:
             if required not in generate_report:
                 violations.append(f"AgentRuntime.generate_report missing runtime report token: {required}")
         for required in (
+            '"engine_write_pending_f5_count": engine_write_pending_f5_count',
+            '"engine_write_verified_count": engine_write_verified_count',
+            '"engine_write_verification_status_counts": dict(',
+            '"missing_transform_count": missing_transform_count',
+            '"missing_aabb_count": missing_aabb_count',
+            '"estimated_actor_bounds_count": estimated_actor_bounds_count',
             "environment_component_summary: Mapping[str, Any] | None = None",
             '"environment_import_failed_count": environment_import_failed_count',
             '"environment_import_failure_code_counts": dict(',
@@ -3785,6 +3886,21 @@ def _runtime_report_fact_source_gate() -> bool:
         for forbidden in forbidden_handle_returns:
             if forbidden in handle_message:
                 violations.append(f"AgentRuntime.handle_message must not return raw graph payloads: found {forbidden}")
+        for required in (
+            "execution = self.execute_planned_batches(",
+            '"action": normalized_action',
+            '"batches": execution["batches"]',
+            '"report": execution["report"]',
+            '"message": (',
+        ):
+            if required not in handle_message:
+                violations.append(
+                    f"AgentRuntime.handle_message confirm/execute path missing planned-batch Runtime token: {required}"
+                )
+        if "self.execute_scene_plan(" in handle_message:
+            violations.append(
+                "AgentRuntime.handle_message confirm/execute path must not bypass planned BatchPlan execution via execute_scene_plan"
+            )
 
     if not execute_scene_plan:
         violations.append("AgentRuntime.execute_scene_plan not found")
@@ -3849,6 +3965,15 @@ def _runtime_report_fact_source_gate() -> bool:
             if required not in build_batch_execution_graph:
                 violations.append(
                     f"AgentRuntime._build_batch_execution_graph missing asset request batch-boundary token: {required}"
+                )
+        for required in (
+            'tool_name="runtime.environment.import_components"',
+            'tool_name="runtime.actor.import_batch"',
+            'tool_name="runtime.review.summarize_batch"',
+        ):
+            if required not in build_batch_execution_graph:
+                violations.append(
+                    f"AgentRuntime._build_batch_execution_graph missing F5 minimal Runtime write/review node: {required}"
                 )
     for forbidden in (
         "def _register_default_mock_tools(",
@@ -4908,6 +5033,9 @@ def main() -> int:
         failed += 1
 
     if not _direct_engine_write_entry_gate():
+        failed += 1
+
+    if not _runtime_adapter_engine_write_boundary_gate():
         failed += 1
 
     if not _master_agent_legacy_compose_route_gate():

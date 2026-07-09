@@ -4,9 +4,11 @@ import logging
 import json
 import os
 import re
+import sys
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any, Callable
 
 from .interaction_coordinator import ChatMessage, InteractionCoordinator
@@ -71,6 +73,7 @@ class LANChatAgentWorker:
         self._interaction_coordinator = interaction_coordinator
         self._generation_scheduler = generation_scheduler
         self._composer_factory = composer_factory
+        self._logger = logging.getLogger(__name__)
         self._agent_runtime_flags = agent_runtime_flags or AgentRuntimeFlags.from_env()
         self._agent_runtime = agent_runtime or self._create_agent_runtime()
         self._owns_generation_scheduler = generation_scheduler is None and interaction_coordinator is None
@@ -90,7 +93,6 @@ class LANChatAgentWorker:
         self._active_room_order: deque[str] = deque()
         self._progress_disclosure_lock = threading.RLock()
         self._progress_disclosure_last_by_room: dict[str, tuple[str, float]] = {}
-        self._logger = logging.getLogger(__name__)
         if self._generation_scheduler is not None:
             self._install_generation_scheduler_hooks(self._generation_scheduler)
 
@@ -100,17 +102,23 @@ class LANChatAgentWorker:
         tool_name = str(name or "").strip()
         if not tool_name:
             return None
+        self._ensure_runtime_quasar_import_path()
         try:
-            from Quasar.ai_config.ai_config import get_ai_config, reload_ai_config
-            from Quasar.ai_tools.load_tools import load_tools
-            from Quasar.ai_tools.registry import get_tool_registry
+            from plugins.AITool.Quasar.ai_config.ai_config import get_ai_config, reload_ai_config
+            from plugins.AITool.Quasar.ai_tools.load_tools import load_tools
+            from plugins.AITool.Quasar.ai_tools.registry import get_tool_registry
         except Exception as exc:  # noqa: BLE001
-            self._logger.debug(
-                "AgentRuntime tool registry unavailable for %s: %s",
-                tool_name,
-                type(exc).__name__,
-            )
-            return None
+            try:
+                from Quasar.ai_config.ai_config import get_ai_config, reload_ai_config
+                from Quasar.ai_tools.load_tools import load_tools
+                from Quasar.ai_tools.registry import get_tool_registry
+            except Exception:
+                self._logger.debug(
+                    "AgentRuntime tool registry unavailable for %s: %s",
+                    tool_name,
+                    type(exc).__name__,
+                )
+                return None
 
         self._ensure_runtime_ai_config_loaded()
         config = getattr(self, "_runtime_ai_config_override", None)
@@ -153,6 +161,13 @@ class LANChatAgentWorker:
             )
         return registry.get(tool_name)
 
+    @staticmethod
+    def _ensure_runtime_quasar_import_path() -> None:
+        aitool_root = Path(__file__).resolve().parents[1]
+        root_text = str(aitool_root)
+        if root_text not in sys.path:
+            sys.path.insert(0, root_text)
+
     def _load_runtime_tool_direct(self, registry: Any, config: Any, tool_name: str) -> Any:
         """Directly register narrow Runtime tools without loading all workflows."""
 
@@ -164,8 +179,32 @@ class LANChatAgentWorker:
                     if not registry.get(getattr(tool, "name", "")):
                         registry.register(tool, overwrite=False)
                 return registry.get(tool_name)
+            if tool_name == "get_scene_snapshot":
+                from plugins.AITool.cai_extensions.mcp.tools.scene_snapshot import load_scene_snapshot_tools
+
+                for tool in load_scene_snapshot_tools():
+                    if not registry.get(getattr(tool, "name", "")):
+                        registry.register(tool, overwrite=False)
+                return registry.get(tool_name)
+            if tool_name == "scene_rationality_review":
+                from plugins.AITool.cai_extensions.mcp.tools.scene_review_tools import load_scene_review_tools
+
+                for tool in load_scene_review_tools():
+                    if not registry.get(getattr(tool, "name", "")):
+                        registry.register(tool, overwrite=False)
+                return registry.get(tool_name)
+            if tool_name == "set_actor_transform":
+                from plugins.AITool.cai_extensions.mcp.tools.set_actor_transform import load_set_actor_transform_tools
+
+                for tool in load_set_actor_transform_tools():
+                    if not registry.get(getattr(tool, "name", "")):
+                        registry.register(tool, overwrite=False)
+                return registry.get(tool_name)
             if tool_name == "hunyuan_generate_3d":
-                from Quasar.ai_modules.three_d_generate.tools.model_tools import load_hunyuan3d_tools
+                try:
+                    from plugins.AITool.Quasar.ai_modules.three_d_generate.tools.model_tools import load_hunyuan3d_tools
+                except Exception:
+                    from Quasar.ai_modules.three_d_generate.tools.model_tools import load_hunyuan3d_tools
 
                 for tool in load_hunyuan3d_tools(config):
                     if not registry.get(getattr(tool, "name", "")):
@@ -185,12 +224,15 @@ class LANChatAgentWorker:
         if getattr(self, "_runtime_ai_config_loaded", False):
             return
         try:
-            from Quasar.ai_modules.three_d_generate.tools import loader as _hunyuan_loader  # noqa: F401
+            from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import loader as _hunyuan_loader  # noqa: F401
         except Exception as exc:  # noqa: BLE001
-            self._logger.debug(
-                "AgentRuntime Hunyuan config loader unavailable: %s",
-                type(exc).__name__,
-            )
+            try:
+                from Quasar.ai_modules.three_d_generate.tools import loader as _hunyuan_loader  # noqa: F401
+            except Exception:
+                self._logger.debug(
+                    "AgentRuntime Hunyuan config loader unavailable: %s",
+                    type(exc).__name__,
+                )
         try:
             from plugins.AITool import utils as _aitool_utils  # noqa: F401
             from plugins.AITool.utils import ai_setting as _ai_setting  # noqa: F401
@@ -236,12 +278,19 @@ class LANChatAgentWorker:
 
         try:
             loaders = list(getattr(registry, "_loaders", []) or [])
-            if any(
-                str(getattr(spec, "source", "")) == "cai_extensions.mcp.model_import"
-                for spec in loaders
-            ):
+            existing_sources = {str(getattr(spec, "source", "") or "") for spec in loaders}
+            required_sources = {
+                "cai_extensions.mcp.model_import",
+                "cai_extensions.mcp.scene_review",
+                "cai_extensions.mcp.scene_snapshot",
+                "cai_extensions.mcp.set_actor_transform",
+            }
+            if required_sources.issubset(existing_sources):
                 return
-            from Quasar.ai_tools.load_tools import register_extra_builtin_registrar
+            try:
+                from Quasar.ai_tools.load_tools import register_extra_builtin_registrar
+            except Exception:
+                from plugins.AITool.Quasar.ai_tools.load_tools import register_extra_builtin_registrar
             from plugins.AITool.cai_extensions.engine_tools import register_engine_loaders
 
             register_extra_builtin_registrar(register_engine_loaders)
@@ -1877,7 +1926,12 @@ class LANChatAgentWorker:
             self._logger.debug("AgentRuntime planning seed failed: %s", type(exc).__name__)
             return {"recorded": False, "reason": "internal_exception", "error_type": type(exc).__name__}
 
-    def _handle_agent_trigger_runtime_write_gate(self, trigger: dict[str, Any]) -> bool:
+    def _handle_agent_trigger_runtime_write_gate(
+        self,
+        trigger: dict[str, Any],
+        *,
+        planning_seed: dict[str, Any] | None = None,
+    ) -> bool:
         if self._agent_runtime_flags.can_call_legacy_main_workflow():
             return False
         text = str(trigger.get("text") or "").strip()
@@ -1902,6 +1956,7 @@ class LANChatAgentWorker:
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("AgentRuntime write-gate intent skipped: %s", type(exc).__name__)
             return False
+        runtime_draft_recorded = isinstance(planning_seed, dict) and bool(planning_seed.get("recorded"))
         if decision.intent not in {
             "generation_start",
             "intervention_add",
@@ -1909,7 +1964,7 @@ class LANChatAgentWorker:
             "intervention_delete",
             "post_generation_add",
             "final_adjustment_request",
-        }:
+        } and not (decision.intent == "plan_drafting" and runtime_draft_recorded):
             return False
         self._record_runtime_audit_event(
             event="legacy_role_agent_scene_write_blocked",
@@ -1923,6 +1978,21 @@ class LANChatAgentWorker:
             },
             external_plan_id=self._active_runtime_external_plan_id(room_id),
         )
+        if (
+            decision.intent in {"generation_start", "plan_drafting"}
+            and runtime_draft_recorded
+        ):
+            runtime_result = planning_seed.get("runtime")
+            runtime_result = runtime_result if isinstance(runtime_result, dict) else {}
+            runtime_plan = runtime_result.get("plan")
+            runtime_plan = runtime_plan if isinstance(runtime_plan, dict) else {}
+            runtime_plan_id = str(runtime_plan.get("plan_id") or "").strip()
+            plan_ref = f" {runtime_plan_id}" if runtime_plan_id else ""
+            reply = (
+                f"AgentRuntime 方案草案{plan_ref}已记录，尚未执行生成。"
+                "请房主回复“确认生成”，确认后会通过 Runtime 生成队列执行。"
+            )
+            return bool(self._send_final_reply("gm-system", "GM", reply, trigger))
         reply = (
             "这是生成/场景写入类请求。当前已由 AgentRuntime 接管，"
             "旧 RoleAgent 直接执行链路已关闭；请通过确认方案、生成队列或完成态调整链路执行。"
@@ -3111,10 +3181,10 @@ class LANChatAgentWorker:
         executing_intervention_reply = self._handle_coordinator_executing_intervention(trigger)
         if executing_intervention_reply is not None:
             return bool(self._send_final_reply(agent_id, agent_name, executing_intervention_reply, trigger))
-        self._seed_agent_trigger_planning_context_in_runtime(trigger)
+        planning_seed = self._seed_agent_trigger_planning_context_in_runtime(trigger)
         if self._handle_agent_trigger_planning_gate(trigger):
             return True
-        if self._handle_agent_trigger_runtime_write_gate(trigger):
+        if self._handle_agent_trigger_runtime_write_gate(trigger, planning_seed=planning_seed):
             return True
 
         try:
@@ -3687,7 +3757,7 @@ class LANChatAgentWorker:
             status,
             _trace_preview(text),
         )
-        label = {"pause": "鏆傚仠", "cancel": "鍙栨秷", "resume": "鎭㈠"}.get(command, command)
+        label = {"pause": "暂停", "cancel": "取消", "resume": "恢复"}.get(command, command)
         return f"【Runtime {label}】{message}"
 
     def _handle_agent_runtime_worker_drain_query(self, trigger: dict[str, Any]) -> str | None:
@@ -3826,7 +3896,7 @@ class LANChatAgentWorker:
         engine_write_text = self._format_agent_runtime_engine_write_report(engine_write)
         engine_write_boundary_text = self._format_agent_runtime_engine_write_boundary_report(engine_write_boundary)
         return (
-            "銆怰untime Resources 棰勬銆慭n"
+            "【Runtime Resources 预检】\n"
             + "\n".join(lines)
             + f"\n- readiness: {readiness_text}"
             + f"\n- engine_write: {engine_write_text}"
@@ -3945,13 +4015,13 @@ class LANChatAgentWorker:
             "runtime preflight",
             "runtime provider",
             "provider status",
-            "鐪熷疄provider",
-            "鐪熷疄 provider",
+            "真实provider",
+            "真实 provider",
             "适配器",
-            "棰勬",
-            "閫氶亾",
-            "鐪熷疄閫氶亾",
-            "鎺ヤ笂",
+            "预检",
+            "通道",
+            "真实通道",
+            "接上",
         )
         runtime_markers = ("runtime", "agentruntime", "agent runtime")
         return any(marker in normalized for marker in provider_markers) and any(
@@ -4025,7 +4095,7 @@ class LANChatAgentWorker:
         lines.append(
             f"- engine boundary: {self._format_agent_runtime_engine_write_boundary_report(boundary_summary)}"
         )
-        return "銆怰untime Engine Write 棰勬銆慭n" + "\n".join(lines)
+        return "【Runtime Engine Write 预检】\n" + "\n".join(lines)
 
     @staticmethod
     def _is_runtime_engine_write_status_query(text: str) -> bool:
@@ -4082,7 +4152,7 @@ class LANChatAgentWorker:
         source = str(summary.get("source") or "runtime_state")
         graph_status = str(graph.get("status") or "unknown")
         return (
-            "銆怰untime Scene Snapshot銆慭n"
+            "【Runtime Scene Snapshot】\n"
             f"- graph: {graph_status}\n"
             f"- actor_count: {actor_count}\n"
             f"- source: {source}"
@@ -4159,7 +4229,7 @@ class LANChatAgentWorker:
                 preview_names.append(key_tool)
         preview = ", ".join(preview_names) or "none"
         return (
-            "銆怰untime Tool 鑳藉姏娓呭崟銆慭n"
+            "【Runtime Tool 能力清单】\n"
             f"- tool_count: {int(summary.get('tool_count') or len(tools))}\n"
             f"- categories: {category_text}\n"
             f"- preview: {preview}"
@@ -4175,12 +4245,12 @@ class LANChatAgentWorker:
             "tool capabilities",
             "runtime tools",
             "runtime tool",
-            "宸ュ叿娓呭崟",
-            "宸ュ叿鑳藉姏",
-            "鍙敤宸ュ叿",
-            "鑳藉姏娓呭崟",
+            "工具清单",
+            "工具能力",
+            "可用工具",
+            "能力清单",
         )
-        runtime_markers = ("runtime", "agentruntime", "agent runtime", "宸ュ叿", "tool")
+        runtime_markers = ("runtime", "agentruntime", "agent runtime", "工具", "tool")
         return any(marker in normalized for marker in manifest_markers) and any(
             marker in normalized for marker in runtime_markers
         )
@@ -4393,7 +4463,7 @@ class LANChatAgentWorker:
         )
         planning_context_text = self._format_agent_runtime_context_report(planning_context)
         return (
-            "銆怰untime Operation Replay銆慭n"
+            "【Runtime Operation Replay】\n"
             f"- entry_count: {int(replay.get('entry_count') or 0)}\n"
             f"- event_counts: {count_text}\n"
             f"- context: {planning_context_text}\n"
@@ -6961,7 +7031,7 @@ class LANChatAgentWorker:
         latest_actor_text = self._format_agent_runtime_sync_actor_rows(latest_actors)
         latest_asset_text = self._format_agent_runtime_sync_asset_rows(latest_assets)
         return (
-            "銆怰untime Sync 鐘舵€併€慭n"
+            "【Runtime Sync 状态】\n"
             f"- room_status: {str(sync_status.get('room_status') or 'unknown')}\n"
             f"- event_count: {int(sync_status.get('event_count') or 0)}\n"
             f"- actor_events: {int(sync_status.get('actor_event_count') or 0)}\n"
@@ -9536,7 +9606,7 @@ class LANChatAgentWorker:
             return ""
         if any(word in text for word in ("暂停", "先停", "等一下")):
             return "pause"
-        if any(word in text for word in ("缁х画", "鎭㈠")):
+        if any(word in text for word in ("继续", "恢复")):
             return "resume"
         if False:
             return "discuss"

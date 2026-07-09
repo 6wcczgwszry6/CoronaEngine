@@ -60,7 +60,8 @@ logger = logging.getLogger(__name__)
 
 AGENT_RUNTIME_REQUIRED_MESSAGE = (
     "这是生成/场景写入类请求。当前已切换到 AgentRuntime 主控，"
-    "请先在聊天室形成并确认方案，再由 Runtime 生成队列执行。"
+    "我不会走旧 SceneComposer 直接生成。请先在聊天室形成并确认方案，"
+    "等待 GM 提案或由房主回复“确认生成”，再由 Runtime 生成队列执行。"
 )
 
 

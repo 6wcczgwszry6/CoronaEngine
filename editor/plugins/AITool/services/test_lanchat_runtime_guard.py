@@ -462,6 +462,34 @@ class _LayoutDirectExecutionTrackingWorker(_TestWorker):
 
 
 class LANChatRuntimeGuardTests(unittest.TestCase):
+    def test_worker_logger_exists_before_runtime_provider_initialization(self) -> None:
+        class ProbeWorker(LANChatAgentWorker):
+            logger_seen_during_runtime_create = False
+
+            def _create_agent_runtime(self) -> AgentRuntime:
+                self.logger_seen_during_runtime_create = hasattr(self, "_logger")
+                return AgentRuntime()
+
+        worker = ProbeWorker()
+
+        self.assertTrue(worker.logger_seen_during_runtime_create)
+
+    def test_worker_runtime_quasar_import_path_points_to_aitool_root(self) -> None:
+        aitool_root = str((REPO_ROOT / "editor" / "plugins" / "AITool").resolve())
+        original_path = list(sys.path)
+        try:
+            sys.path = [
+                entry
+                for entry in sys.path
+                if str(Path(entry).resolve()) != aitool_root
+            ]
+
+            LANChatAgentWorker._ensure_runtime_quasar_import_path()
+
+            self.assertEqual(str(Path(sys.path[0]).resolve()), aitool_root)
+        finally:
+            sys.path = original_path
+
     @staticmethod
     def _non_planning_tool_graphs(room_state: dict) -> list[dict]:
         planning_tools = {
@@ -1015,7 +1043,7 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             FakeTool("remove_model"),
         ]
         hunyuan_module = types.ModuleType(
-            "Quasar.ai_modules.three_d_generate.tools.model_tools"
+            "plugins.AITool.Quasar.ai_modules.three_d_generate.tools.model_tools"
         )
         hunyuan_module.load_hunyuan3d_tools = lambda cfg: [
             FakeTool("hunyuan_generate_3d")
@@ -1025,7 +1053,7 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             sys.modules,
             {
                 "plugins.AITool.cai_extensions.mcp.tools.model_import_tools": model_import_module,
-                "Quasar.ai_modules.three_d_generate.tools.model_tools": hunyuan_module,
+                "plugins.AITool.Quasar.ai_modules.three_d_generate.tools.model_tools": hunyuan_module,
             },
         ):
             self.assertEqual(
@@ -1120,6 +1148,101 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertGreater(install_line, 0)
         self.assertGreater(worker_line, 0)
         self.assertLess(install_line, worker_line)
+
+    def test_runtime_engine_tool_loader_does_not_stop_after_model_import_only(self) -> None:
+        class FakeRegistry:
+            def __init__(self) -> None:
+                self._loaders = [types.SimpleNamespace(source="cai_extensions.mcp.model_import")]
+                self._discovered = True
+
+        class FakeLogger:
+            def debug(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                return None
+
+        worker = LANChatAgentWorker.__new__(LANChatAgentWorker)
+        worker._logger = FakeLogger()
+        registry = FakeRegistry()
+        calls: list[str] = []
+
+        def fake_register_extra(registrar) -> None:
+            calls.append("extra")
+
+        def fake_register_engine_loaders(target_registry) -> None:
+            calls.append("engine")
+            target_registry._loaders.extend([
+                types.SimpleNamespace(source="cai_extensions.mcp.scene_review"),
+                types.SimpleNamespace(source="cai_extensions.mcp.scene_snapshot"),
+                types.SimpleNamespace(source="cai_extensions.mcp.set_actor_transform"),
+            ])
+
+        quasar_module = types.ModuleType("Quasar")
+        ai_tools_module = types.ModuleType("Quasar.ai_tools")
+        load_tools_module = types.ModuleType("Quasar.ai_tools.load_tools")
+        load_tools_module.register_extra_builtin_registrar = fake_register_extra
+        engine_tools_module = types.ModuleType("plugins.AITool.cai_extensions.engine_tools")
+        engine_tools_module.register_engine_loaders = fake_register_engine_loaders
+        with patch.dict(
+            sys.modules,
+            {
+                "Quasar": quasar_module,
+                "Quasar.ai_tools": ai_tools_module,
+                "Quasar.ai_tools.load_tools": load_tools_module,
+                "plugins.AITool.cai_extensions.engine_tools": engine_tools_module,
+            },
+        ):
+            worker._ensure_runtime_engine_tool_loaders(registry)
+
+        self.assertEqual(calls, ["extra", "engine"])
+        self.assertFalse(registry._discovered)
+        self.assertIn(
+            "cai_extensions.mcp.set_actor_transform",
+            {spec.source for spec in registry._loaders},
+        )
+
+    def test_runtime_hunyuan_direct_loader_prefers_plugin_namespace(self) -> None:
+        class FakeTool:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+        class FakeRegistry:
+            def __init__(self) -> None:
+                self.tools: dict[str, Any] = {}
+
+            def get(self, name: str):
+                return self.tools.get(name)
+
+            def register(self, tool, overwrite: bool = False) -> None:
+                if overwrite or tool.name not in self.tools:
+                    self.tools[tool.name] = tool
+
+        class FakeLogger:
+            def debug(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                return None
+
+        worker = LANChatAgentWorker.__new__(LANChatAgentWorker)
+        worker._logger = FakeLogger()
+        registry = FakeRegistry()
+        config = types.SimpleNamespace(hunyuan3d=types.SimpleNamespace(enable=True))
+        plugin_module = types.ModuleType(
+            "plugins.AITool.Quasar.ai_modules.three_d_generate.tools.model_tools"
+        )
+        top_level_module = types.ModuleType(
+            "Quasar.ai_modules.three_d_generate.tools.model_tools"
+        )
+        plugin_module.load_hunyuan3d_tools = lambda cfg: [FakeTool("hunyuan_generate_3d")]
+        top_level_module.load_hunyuan3d_tools = lambda cfg: []
+
+        with patch.dict(
+            sys.modules,
+            {
+                "plugins.AITool.Quasar.ai_modules.three_d_generate.tools.model_tools": plugin_module,
+                "Quasar.ai_modules.three_d_generate.tools.model_tools": top_level_module,
+            },
+        ):
+            tool = worker._load_runtime_tool_direct(registry, config, "hunyuan_generate_3d")
+
+        self.assertIsNotNone(tool)
+        self.assertEqual(tool.name, "hunyuan_generate_3d")
 
     def test_f5_runtime_provider_env_defaults_reach_worker_provider_summary(self) -> None:
         class FakeTool:
@@ -3513,11 +3636,16 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(coordinator.ingest_calls, [])
 
     def test_model_provider_flag_does_not_fallback_to_legacy_model_provider(self) -> None:
-        worker = _TestWorker(
-            agent_runtime_flags=AgentRuntimeFlags.from_env({
-                "AGENT_RUNTIME_USE_MODEL_PROVIDER": "1",
-            }),
-        )
+        with patch.object(
+            LANChatAgentWorker,
+            "_get_runtime_tool",
+            lambda self, name: None,
+        ):
+            worker = _TestWorker(
+                agent_runtime_flags=AgentRuntimeFlags.from_env({
+                    "AGENT_RUNTIME_USE_MODEL_PROVIDER": "1",
+                }),
+            )
 
         result = worker._agent_runtime.handle_message(
             room_id="room-model-provider-no-legacy-fallback",
@@ -6343,16 +6471,84 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("强盗藏宝室", state["planning_context_events"][0]["text_preview"])
 
     def test_agent_trigger_generate_one_scene_seeds_runtime_plan_without_legacy_compose(self) -> None:
-        worker = _TestWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))
+        cases = (
+            (
+                "room-agent-generate-bedroom",
+                "生成一个儿童卧室，有小木马、玩具、小木桌。",
+                "儿童卧室",
+                "girl",
+                "小女孩",
+            ),
+            (
+                "room-agent-generate-forest",
+                "生成一个简单森林营地，有草地、帐篷、小木桌。",
+                "森林营地",
+                "girl",
+                "小女孩",
+            ),
+        )
+        for room_id, text, expected_preview, agent_id, agent_name in cases:
+            with self.subTest(room_id=room_id):
+                worker = _TestWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))
+
+                with patch.object(
+                    worker._agent_runtime,
+                    "query_state",
+                    side_effect=AssertionError("planning seed bridge must not pre-read RuntimeState"),
+                ):
+                    result = worker._seed_agent_trigger_planning_context_in_runtime({
+                        "room_id": room_id,
+                        "message_id": f"msg-{room_id}",
+                        "text": text,
+                        "sender_id": "host-1",
+                        "sender_name": "房主",
+                        "sender_type": "host",
+                        "message_kind": "chat",
+                        "agent_id": agent_id,
+                        "agent_name": agent_name,
+                    })
+
+                self.assertTrue(result["recorded"])
+                self.assertEqual(result["action"], "plan_context")
+                state = worker._agent_runtime.state.snapshot(room_id)["room"]
+                self.assertTrue(state["active_plan_id"])
+                runtime_plan = state["scene_plans"][state["active_plan_id"]]
+                self.assertEqual(runtime_plan["owner_agent"], agent_name)
+                self.assertEqual(self._non_planning_tool_graphs(state), [])
+                self.assertEqual(len(state["planning_context_events"]), 1)
+                self.assertIn(expected_preview, state["planning_context_events"][0]["text_preview"])
+
+    def test_agent_trigger_generation_seed_reports_confirmable_runtime_draft(self) -> None:
+        engine = _FakeReplyEngine()
+        worker = _TestWorker(
+            corona_engine=engine,
+            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+        )
 
         with patch.object(
-            worker._agent_runtime,
-            "query_state",
-            side_effect=AssertionError("planning seed bridge must not pre-read RuntimeState"),
+            worker,
+            "_handle_coordinator_generation_start",
+            return_value=None,
+        ), patch.object(
+            worker,
+            "_handle_coordinator_completed_intervention",
+            return_value=None,
+        ), patch.object(
+            worker,
+            "_handle_coordinator_executing_intervention",
+            return_value=None,
+        ), patch.object(
+            worker,
+            "_handle_agent_trigger_planning_gate",
+            return_value=False,
+        ), patch.object(
+            worker,
+            "_run_agent",
+            side_effect=AssertionError("Runtime-seeded generation request must not fall through to RoleAgent compose"),
         ):
-            result = worker._seed_agent_trigger_planning_context_in_runtime({
-                "room_id": "room-agent-generate-one",
-                "message_id": "msg-generate-one",
+            handled = worker._process_trigger({
+                "room_id": "room-agent-generate-draft-visible",
+                "message_id": "msg-generate-draft-visible",
                 "text": "生成一个儿童卧室，有小木马、玩具、小木桌。",
                 "sender_id": "host-1",
                 "sender_name": "房主",
@@ -6362,15 +6558,127 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                 "agent_name": "小女孩",
             })
 
-        self.assertTrue(result["recorded"])
-        self.assertEqual(result["action"], "plan_context")
-        state = worker._agent_runtime.state.snapshot("room-agent-generate-one")["room"]
+        self.assertTrue(handled)
+        self.assertTrue(engine.replies)
+        visible_text = "\n".join(str(reply.get("text") or "") for reply in engine.replies)
+        self.assertIn("AgentRuntime 方案草案", visible_text)
+        self.assertIn("确认生成", visible_text)
+        self.assertNotIn("RoleAgent", visible_text)
+        state = worker._agent_runtime.query_state("room-agent-generate-draft-visible")["room"]
         self.assertTrue(state["active_plan_id"])
-        runtime_plan = state["scene_plans"][state["active_plan_id"]]
-        self.assertEqual(runtime_plan["owner_agent"], "小女孩")
         self.assertEqual(self._non_planning_tool_graphs(state), [])
-        self.assertEqual(len(state["planning_context_events"]), 1)
-        self.assertIn("儿童卧室", state["planning_context_events"][0]["text_preview"])
+        self.assertIn("legacy_role_agent_scene_write_blocked", worker._agent_runtime.operation_log.events())
+
+    def test_process_trigger_direct_scene_requests_use_same_runtime_planning_gate(self) -> None:
+        cases = (
+            (
+                "room-process-direct-bedroom",
+                "\u751f\u6210\u4e00\u4e2a\u513f\u7ae5\u5367\u5ba4\uff0c\u6709\u5c0f\u6728\u9a6c\u3001\u73a9\u5177\u3001\u5c0f\u6728\u684c\u3002",
+                "\u513f\u7ae5\u5367\u5ba4",
+            ),
+            (
+                "room-process-direct-forest",
+                "\u751f\u6210\u4e00\u4e2a\u7b80\u5355\u68ee\u6797\u8425\u5730\uff0c\u6709\u8349\u5730\u3001\u5e10\u7bf7\u3001\u5c0f\u6728\u684c\u3002",
+                "\u68ee\u6797\u8425\u5730",
+            ),
+        )
+        for room_id, text, expected_goal in cases:
+            with self.subTest(room_id=room_id):
+                engine = _FakeReplyEngine()
+                worker = _TestWorker(
+                    corona_engine=engine,
+                    agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+                )
+
+                with patch.object(
+                    worker,
+                    "_run_agent",
+                    side_effect=AssertionError("direct scene request must be handled before RoleAgent compose"),
+                ):
+                    handled = worker._process_trigger({
+                        "room_id": room_id,
+                        "message_id": f"msg-{room_id}",
+                        "text": text,
+                        "sender_id": "host-1",
+                        "sender_name": "\u623f\u4e3b",
+                        "sender_type": "host",
+                        "message_kind": "chat",
+                        "agent_id": "girl",
+                        "agent_name": "\u5c0f\u5973\u5b69",
+                    })
+
+                self.assertTrue(handled)
+                self.assertTrue(engine.replies)
+                visible_text = "\n".join(str(reply.get("text") or "") for reply in engine.replies)
+                self.assertIn(expected_goal, visible_text)
+                self.assertNotIn("AgentRuntime \u63a5\u7ba1", visible_text)
+                self.assertNotIn("RoleAgent", visible_text)
+                state = worker._agent_runtime.query_state(room_id)["room"]
+                self.assertTrue(state["active_plan_id"])
+                runtime_plan = state["scene_plans"][state["active_plan_id"]]
+                self.assertEqual(runtime_plan["owner_agent"], "\u5c0f\u5973\u5b69")
+                self.assertIn(expected_goal, runtime_plan["design_brief"])
+                self.assertEqual(self._non_planning_tool_graphs(state), [])
+
+    def test_agent_trigger_seed_then_confirm_executes_runtime_graph(self) -> None:
+        engine = _FakeReplyEngine()
+        worker = _TestWorker(
+            corona_engine=engine,
+            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+        )
+
+        with patch.object(
+            worker,
+            "_handle_agent_trigger_planning_gate",
+            return_value=False,
+        ), patch.object(
+            worker,
+            "_run_agent",
+            side_effect=AssertionError("seed/confirm Runtime flow must not fall through to RoleAgent compose"),
+        ):
+            seeded = worker._process_trigger({
+                "room_id": "room-agent-seed-confirm",
+                "message_id": "msg-seed-confirm-draft",
+                "text": "生成一个儿童卧室，有小木马、玩具、小木桌。",
+                "sender_id": "host-1",
+                "sender_name": "房主",
+                "sender_type": "host",
+                "message_kind": "chat",
+                "agent_id": "girl",
+                "agent_name": "小女孩",
+            })
+            confirmed = worker._process_trigger({
+                "room_id": "room-agent-seed-confirm",
+                "message_id": "msg-seed-confirm-confirm",
+                "text": "确认生成",
+                "sender_id": "host-1",
+                "sender_name": "房主",
+                "sender_type": "host",
+                "message_kind": "chat",
+                "agent_id": "girl",
+                "agent_name": "小女孩",
+            })
+
+        self.assertTrue(seeded)
+        self.assertTrue(confirmed)
+        visible_text = "\n".join(str(reply.get("text") or "") for reply in engine.replies)
+        self.assertIn("AgentRuntime 方案草案", visible_text)
+        self.assertIn("AgentRuntime 执行结果", visible_text)
+        self.assertIn("已执行 Runtime 批次", visible_text)
+        self.assertIn("执行图", visible_text)
+        self.assertIn("报告健康", visible_text)
+        self.assertNotIn("RoleAgent", visible_text)
+        self.assertIn("room-agent-seed-confirm", worker._active_room_ids)
+        state = worker._agent_runtime.query_state("room-agent-seed-confirm")["room"]
+        self.assertTrue(state["active_plan_id"])
+        self.assertGreaterEqual(len(state["batch_plans"]), 1)
+        self.assertGreaterEqual(len(state["tool_graphs"]), 1)
+        self.assertEqual(self._non_planning_tool_graphs(state)[0]["status"], "completed")
+        events = worker._agent_runtime.operation_log.events()
+        self.assertIn("scene_plan_confirmed", events)
+        self.assertIn("runtime_message_executed", events)
+        self.assertIn("user_report_generated", events)
+        self.assertIn("user_report_state_persisted", events)
 
     def test_agent_trigger_basis_revision_records_target_and_source_agents(self) -> None:
         worker = _TestWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))

@@ -3,17 +3,23 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import sys
 import tempfile
 import types
+import uuid
 from typing import Any
 import unittest
 from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+
+
 EDITOR_ROOT = REPO_ROOT / "editor"
 AITOOL_ROOT = EDITOR_ROOT / "plugins" / "AITool"
 if str(EDITOR_ROOT) not in sys.path:
@@ -2191,6 +2197,34 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(health["engine_write_runtime_state_only_channels"], ["actor-import"])
         self.assertIn("engine_write_runtime_state_only", health["reasons"])
 
+    def test_report_health_marks_worker_drain_failed_from_operation_log(self) -> None:
+        runtime = AgentRuntime()
+        runtime.operation_log.append(
+            "runtime_worker_drain_failed",
+            room_id="room-drain-health",
+            payload={
+                "drained_count": 0,
+                "reason": "synthetic queue drain failure",
+            },
+        )
+
+        report = runtime.generate_report("room-drain-health")
+
+        worker_drain = report["operation_replay_summary"]["worker_drain_replay_summary"]
+        self.assertEqual(worker_drain["failed_count"], 1)
+        self.assertEqual(worker_drain["latest_drain_event"]["event"], "runtime_worker_drain_failed")
+        health = report["report_health_summary"]
+        self.assertEqual(health["status"], "needs_attention")
+        self.assertTrue(health["attention_required"])
+        self.assertEqual(health["worker_drain_failed_count"], 1)
+        self.assertIn("worker_drain_failed", health["reasons"])
+        replay = runtime.operation_replay(room_id="room-drain-health")
+        replay_health = replay["report_health_summary"]
+        self.assertEqual(replay_health["status"], "needs_attention")
+        self.assertTrue(replay_health["attention_required"])
+        self.assertEqual(replay_health["worker_drain_failed_count"], 1)
+        self.assertIn("worker_drain_failed", replay_health["reasons"])
+
     def test_confirm_scene_plan_does_not_emit_confirmed_when_state_persist_fails(self) -> None:
         runtime = AgentRuntime()
         plan = runtime.propose_scene_plan(
@@ -2522,6 +2556,38 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         )
         self.assertIsNone(runtime.drain_next_tool_graph("room-drain-next", plan_id=plan.plan_id))
         self.assertIn("tool_graph_queue_empty", runtime.operation_log.events())
+
+    def test_drain_next_tool_graph_falls_back_when_selector_fact_is_not_recorded(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-drain-selector-fallback",
+            text="强盗藏宝室，有藏宝箱、金币堆、木桌。",
+            owner_agent="山贼",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
+        batch = runtime.plan_batches(plan.plan_id, max_items_per_batch=3)[0]
+        graph = runtime._build_batch_execution_graph(plan, batch)
+        runtime._enqueue_tool_graph(graph, room_id="room-drain-selector-fallback")
+        original_apply_patch = runtime.state.apply_patch
+        failed_once = {"value": False}
+
+        def fail_selector_fact_once(patch: StatePatch) -> tuple[bool, str]:
+            if not failed_once["value"] and "custom_queue_facts" in set((patch.changes or {}).keys()):
+                failed_once["value"] = True
+                return False, "simulated selector fact persist failure"
+            return original_apply_patch(patch)
+
+        runtime.state.apply_patch = fail_selector_fact_once  # type: ignore[method-assign]
+
+        executed = runtime.drain_next_tool_graph("room-drain-selector-fallback", plan_id=plan.plan_id)
+
+        self.assertIsNotNone(executed)
+        self.assertEqual(executed.graph_id, graph.graph_id)
+        self.assertEqual(executed.status, "completed")
+        state = runtime.query_state("room-drain-selector-fallback")["room"]
+        self.assertEqual(state["tool_graph_queue"][graph.graph_id]["status"], "completed")
+        self.assertIn("tool_graph_queue_selector_fallback", runtime.operation_log.events())
+        self.assertIn("tool_graph_dequeued", runtime.operation_log.events())
 
     def test_drain_next_tool_graph_respects_paused_plan_before_dequeue(self) -> None:
         runtime = AgentRuntime()
@@ -6279,6 +6345,44 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertTrue(all(item.get("actor_name") for item in summary["latest_transform_results"]))
         self.assertNotIn("provider raw", str(summary))
         self.assertNotIn("https://", str(summary))
+
+    def test_operation_replay_preserves_safe_engine_transform_geometry_and_sync(self) -> None:
+        runtime = AgentRuntime()
+        runtime.operation_log.append(
+            "tool_call_succeeded",
+            room_id="room-transform-geometry-replay",
+            plan_id="plan-transform-geometry-replay",
+            batch_id="batch-transform-geometry-replay",
+            payload={
+                "transform_results": [
+                    {
+                        "actor_id": "actor-box",
+                        "actor_name": "box",
+                        "status": "success",
+                        "observed_position": True,
+                        "sync_status": "engine_transformed",
+                        "rotation": [0.0, 90.0, 0.0],
+                        "scale": [1.0, 1.0, 1.0],
+                        "aabb": {"min": [-0.4, 0.0, -0.4], "max": [0.4, 0.9, 0.4]},
+                        "path": "E:/secret/native-transform",
+                    },
+                ],
+            },
+        )
+
+        replay = runtime.operation_replay(
+            room_id="room-transform-geometry-replay",
+            plan_id="plan-transform-geometry-replay",
+        )
+        latest = replay["engine_write_summary"]["latest_transform_results"][-1]
+
+        self.assertEqual(latest["actor_id"], "actor-box")
+        self.assertEqual(latest["sync_status"], "engine_transformed")
+        self.assertEqual(latest["rotation"], [0.0, 90.0, 0.0])
+        self.assertEqual(latest["scale"], [1.0, 1.0, 1.0])
+        self.assertEqual(latest["aabb"]["min"], [-0.4, 0.0, -0.4])
+        self.assertNotIn("secret", str(latest).lower())
+        self.assertNotIn("path", str(latest).lower())
 
     def test_tool_manifest_redacts_internal_provider_fields(self) -> None:
         runtime = AgentRuntime()
@@ -14738,10 +14842,74 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertGreaterEqual(report_import_summary["requested_count"], 2)
         self.assertEqual(report_import_summary["imported_count"], 0)
         self.assertGreaterEqual(report_import_summary["failed_count"], 2)
+        boundary = import_result["engine_write_boundary"]
+        self.assertEqual(boundary["provider_source"], "runtime_actor_import_precheck")
+        self.assertEqual(boundary["bridge_call_count"], 0)
+        write_sources = runtime.status_summary("room-missing-model-import", plan_id=plan.plan_id)[
+            "engine_write_boundary_summary"
+        ]["write_source_counts"]
+        self.assertGreaterEqual(write_sources.get("runtime_actor_import_precheck", 0), 1)
+        self.assertNotIn("runtime_actor_import", write_sources)
         status_import_summary = runtime.status_summary("room-missing-model-import", plan_id=plan.plan_id)["import_summary"]
         self.assertGreaterEqual(status_import_summary["requested_count"], 2)
         self.assertEqual(status_import_summary["imported_count"], 0)
         self.assertGreaterEqual(status_import_summary["failed_count"], 2)
+
+    def test_actor_import_precheck_rejects_ready_resource_without_model_path(self) -> None:
+        def model_provider(payload: dict) -> dict:
+            return {
+                name: {
+                    "name": name,
+                    "status": "ready",
+                }
+                for name in payload["model_items"]
+            }
+
+        def actor_import_provider(payload: dict) -> dict:
+            raise AssertionError("actor_import_provider must not run without an importable model path")
+
+        runtime = AgentRuntime(
+            model_resource_provider=model_provider,
+            actor_import_provider=actor_import_provider,
+        )
+        plan = runtime.propose_scene_plan(
+            room_id="room-ready-no-path-import",
+            text="生成一个简单藏宝室，有藏宝箱和木桌。",
+            owner_agent="商人",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
+
+        result = runtime.execute_planned_batches(plan.plan_id, max_items_per_batch=2)
+
+        batch = result["batches"][0]
+        state = runtime.query_state("room-ready-no-path-import")["room"]
+        model_phase = state["custom_resource_phase_facts"][f"{batch['batch_id']}:model"]
+        self.assertEqual(model_phase["ready_count"], 0)
+        self.assertEqual(model_phase["status"], "failed")
+        import_plan = state["custom_import_facts"][f"{batch['batch_id']}:actor_import_plan"]
+        self.assertEqual(import_plan["status"], "failed")
+        self.assertEqual(import_plan["ready_count"], 0)
+        self.assertEqual(import_plan["failure_code_counts"], {"missing_ready_model_resource": 2})
+        import_result = state["custom_import_facts"][f"{batch['batch_id']}:actor_import_result"]
+        self.assertEqual(result["graphs"][0]["status"], "completed")
+        self.assertEqual(state["actors"], {})
+        self.assertEqual(import_result["status"], "failed")
+        self.assertEqual(import_result["failure_code_counts"], {"missing_ready_model_resource": 2})
+        boundary = import_result["engine_write_boundary"]
+        self.assertEqual(boundary["provider_source"], "runtime_actor_import_precheck")
+        self.assertEqual(boundary["bridge_call_count"], 0)
+        self.assertEqual(boundary["status_counts"], {"failed": 2})
+        report_boundary = result["report"]["engine_write_boundary_summary"]
+        model_resource_summary = result["report"]["operation_replay_summary"]["resource_summary"]["by_phase"]["model"]
+        self.assertEqual(model_resource_summary["item_count"], 0)
+        self.assertGreaterEqual(model_resource_summary["failed_count"], 2)
+        self.assertGreaterEqual(
+            report_boundary["write_source_counts"].get("runtime_actor_import_precheck", 0),
+            1,
+        )
+        self.assertNotIn("runtime_actor_import", report_boundary["write_source_counts"])
+        self.assertEqual(report_boundary["bridge_call_count"], 0)
+        self.assertGreaterEqual(report_boundary["status_counts"].get("failed", 0), 2)
 
     def test_empty_resource_provider_result_records_failed_resource_facts(self) -> None:
         runtime = AgentRuntime(image_resource_provider=lambda payload: {})
@@ -14996,13 +15164,42 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(resources["台灯"]["status"], "ready")
         self.assertEqual(resources["台灯"]["local_path"], "assets/model/runtime_lamp")
 
-    def test_hunyuan_model_provider_resolves_visible_model_folder_to_mesh_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            model_dir = Path(tmp) / "runtime_torch"
-            model_dir.mkdir()
-            mesh_path = model_dir / "base.glb"
-            mesh_path.write_bytes(b"glb")
+    def test_hunyuan_model_provider_uses_text_to_3d_when_image_resource_failed(self) -> None:
+        model_payloads: list[dict[str, Any]] = []
 
+        def fake_hunyuan_tool(payload: dict[str, Any]) -> dict[str, Any]:
+            model_payloads.append(dict(payload))
+            return {"model_folder": "assets/model/runtime_chair"}
+
+        model_provider = make_model_resource_provider(model_tool=fake_hunyuan_tool)
+        resources = model_provider({
+            "batch_id": "batch-hunyuan-image-failed",
+            "model_items": ["椅子"],
+            "image_resources": {
+                "椅子": {
+                    "status": "failed",
+                    "image_url": "fileid://failed-reference-image",
+                    "failure_code": "image_resource_unavailable",
+                }
+            },
+        })
+
+        self.assertEqual(model_payloads[0]["mode"], "text_to_3d")
+        self.assertIsNone(model_payloads[0]["images"])
+        self.assertEqual(model_payloads[0]["prompt"], "椅子")
+        self.assertEqual(resources["椅子"]["status"], "ready")
+        self.assertEqual(resources["椅子"]["local_path"], "assets/model/runtime_chair")
+
+    def test_hunyuan_model_provider_resolves_visible_model_folder_to_mesh_file(self) -> None:
+        model_dir = Path("C:/runtime_tests/runtime_torch")
+        mesh_path = model_dir / "base.glb"
+        with patch(
+            "plugins.AITool.services.agent_runtime.adapters._visible_model_path_candidates",
+            return_value=[model_dir],
+        ), patch(
+            "plugins.AITool.services.agent_runtime.adapters._first_supported_mesh",
+            return_value=mesh_path,
+        ):
             model_provider = make_model_resource_provider(
                 model_tool=lambda payload: {
                     "metadata": {
@@ -15018,18 +15215,22 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 "model_items": ["火把"],
             })
 
-            self.assertEqual(resources["火把"]["status"], "ready")
-            self.assertEqual(resources["火把"]["local_path"], str(mesh_path))
+        self.assertEqual(resources["火把"]["status"], "ready")
+        self.assertEqual(resources["火把"]["local_path"], str(mesh_path))
 
     def test_hunyuan_model_provider_does_not_mark_visible_empty_model_folder_ready(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+        model_dir = Path("C:/runtime_tests/runtime_empty")
+        with patch.dict(
             "os.environ",
             {"AGENT_RUNTIME_MODEL_FOLDER_WAIT_SECONDS": "0"},
             clear=False,
+        ), patch(
+            "plugins.AITool.services.agent_runtime.adapters._visible_model_path_candidates",
+            return_value=[model_dir],
+        ), patch(
+            "plugins.AITool.services.agent_runtime.adapters._first_supported_mesh",
+            return_value=None,
         ):
-            model_dir = Path(tmp) / "runtime_empty"
-            model_dir.mkdir()
-
             model_provider = make_model_resource_provider(
                 model_tool=lambda payload: {
                     "metadata": {
@@ -15045,8 +15246,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 "model_items": ["空目录模型"],
             })
 
-            self.assertEqual(resources["空目录模型"]["status"], "failed")
-            self.assertNotIn("local_path", resources["空目录模型"])
+        self.assertEqual(resources["空目录模型"]["status"], "failed")
+        self.assertNotIn("local_path", resources["空目录模型"])
 
         snapshot_provider = make_scene_snapshot_provider(
             snapshot_tool=lambda payload: {
@@ -17477,6 +17678,115 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(
             replay_environment_summary["latest_event_type"],
             "environment_components_imported",
+        )
+
+    def test_runtime_state_only_environment_import_event_requires_f5_verification(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-env-runtime-state-only-event",
+            text="生成一个森林营地，有草地、帐篷、小木桌。",
+            owner_agent="长者",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
+
+        result = runtime.execute_planned_batches(plan.plan_id, max_items_per_batch=3)
+
+        self.assertTrue(result["graphs"])
+        events = runtime.user_visible_events("room-env-runtime-state-only-event", plan_id=plan.plan_id)
+        import_events = [
+            event
+            for event in events
+            if event["event_type"] == "environment_components_imported"
+        ]
+        self.assertTrue(import_events)
+        latest = import_events[-1]
+        self.assertEqual(latest["phase"], "environment_import")
+        self.assertEqual(latest["level"], "warning")
+        self.assertEqual(latest["title"], "环境组件已进入 Runtime 状态")
+        self.assertIn("仍待 F5", latest["message"])
+        self.assertEqual(latest["payload"]["status"], "runtime_state_only")
+        self.assertEqual(latest["payload"]["engine_write_bridge_call_count"], 0)
+        self.assertNotIn("已通过引擎写入", latest["message"])
+        report_ready_events = [
+            event
+            for event in events
+            if event["event_type"] == "report_ready"
+        ]
+        self.assertTrue(report_ready_events)
+        report_ready = report_ready_events[-1]
+        self.assertEqual(report_ready["level"], "warning")
+        self.assertIn("待 F5", report_ready["message"])
+        self.assertEqual(
+            report_ready["payload"]["report_health_status"],
+            "needs_attention",
+        )
+        self.assertGreater(
+            report_ready["payload"]["engine_write_runtime_state_only_count"],
+            0,
+        )
+        self.assertIn(
+            "environment-import",
+            report_ready["payload"]["engine_write_runtime_state_only_channels"],
+        )
+        self.assertIn(
+            "engine_write_runtime_state_only",
+            report_ready["payload"]["report_health_reasons"],
+        )
+        self.assertGreater(
+            report_ready["payload"]["scene_entity_engine_write_pending_f5_count"],
+            0,
+        )
+        self.assertIn(
+            "pending_f5",
+            report_ready["payload"]["scene_entity_engine_write_verification_status_counts"],
+        )
+        status = runtime.status_summary(
+            "room-env-runtime-state-only-event",
+            plan_id=plan.plan_id,
+        )
+        self.assertEqual(status["report_health_summary"]["status"], "needs_attention")
+        self.assertGreater(
+            status["report_health_summary"]["engine_write_runtime_state_only_count"],
+            0,
+        )
+        self.assertIn(
+            "environment-import",
+            status["report_health_summary"]["engine_write_runtime_state_only_channels"],
+        )
+        self.assertGreater(
+            status["scene_entity_registry"]["engine_write_pending_f5_count"],
+            0,
+        )
+        self.assertIn(
+            "pending_f5",
+            status["scene_entity_registry"]["engine_write_verification_status_counts"],
+        )
+        self.assertGreater(
+            status["report_health_summary"]["scene_entity_engine_write_pending_f5_count"],
+            0,
+        )
+        status_logs = [
+            entry
+            for entry in runtime.operation_log.entries()
+            if entry.event == "runtime_status_queried"
+            and entry.plan_id == plan.plan_id
+        ]
+        self.assertTrue(status_logs)
+        self.assertGreater(
+            status_logs[-1].payload["engine_write_runtime_state_only_count"],
+            0,
+        )
+        self.assertIn(
+            "environment-import",
+            status_logs[-1].payload["engine_write_runtime_state_only_channels"],
+        )
+        self.assertIn(
+            "engine_write_runtime_state_only",
+            status_logs[-1].payload["report_health_reasons"],
+        )
+        self.assertGreater(
+            status_logs[-1].payload["scene_entity_engine_write_pending_f5_count"],
+            0,
         )
 
     def test_runtime_environment_import_failure_does_not_count_planned_components_as_imported(self) -> None:
@@ -20010,7 +20320,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(environment_summary["requested_count"], 3)
         self.assertEqual(environment_summary["ready_count"], 3)
         self.assertEqual(environment_summary["failed_count"], 0)
-        self.assertEqual(environment_summary["status_counts"], {"succeeded": 2})
+        self.assertEqual(environment_summary["status_counts"], {"runtime_state_only": 1, "succeeded": 1})
         self.assertTrue(all(
             item["status"] in {"created", "imported", "runtime_state_only"}
             for item in environment_summary["latest_components"]
@@ -20486,6 +20796,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                     "actor_data": {
                         "actor_id": f"actor-{payload['component_id']}",
                         "sync_status": "active",
+                        "bounds_ready": True,
+                        "size": [6.0, 0.1, 6.0],
                         "geometry": {
                             "position": payload.get("position"),
                             "rotation": payload.get("rotation"),
@@ -20554,16 +20866,21 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(component["asset_id"], "asset-terrain-stone")
         self.assertEqual(component["model_ref"], "terrain-stone-runtime")
         self.assertEqual(component["sync_status"], "active")
+        self.assertEqual(component["sync_lifecycle_status"], "active")
         self.assertEqual(component["surface"], "stone_floor")
         self.assertEqual(component["terrain_profile"], "indoor_floor")
         self.assertEqual(component["position"], [1.0, 0.0, 2.0])
         self.assertEqual(component["rotation"], [0.0, 15.0, 0.0])
         self.assertEqual(component["scale"], [6.0, 0.1, 6.0])
+        self.assertTrue(component["bounds_ready"])
+        self.assertEqual(component["size"], [6.0, 0.1, 6.0])
         self.assertEqual(component["aabb"]["min"], [-3.0, 0.0, -3.0])
         self.assertEqual(component["aabb"]["max"], [3.0, 0.1, 3.0])
         self.assertEqual(component["scene_name"], "Scene/runtime-env.scene")
         self.assertFalse(component["requires_engine_write"])
         self.assertEqual(result["environment_import_results"][0]["status"], "success")
+        self.assertTrue(result["environment_import_results"][0]["bounds_ready"])
+        self.assertEqual(result["environment_import_results"][0]["size"], [6.0, 0.1, 6.0])
         serialized = str(result).lower()
         self.assertNotIn("provider raw", serialized)
         self.assertNotIn("secret", serialized)
@@ -20661,6 +20978,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(component["aabb"]["min"], [-3.0, 0.0, -3.0])
         self.assertEqual(component["aabb"]["max"], [3.0, 0.1, 3.0])
         self.assertEqual(component["sync_status"], "engine_imported")
+        self.assertEqual(component["sync_lifecycle_status"], "engine_imported")
         self.assertEqual(result["engine_write_result"]["bridge_call_count"], 1)
         self.assertEqual(result["engine_write_result"]["bridge_success_count"], 1)
 
@@ -20744,6 +21062,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(payload["component_id"], "component-terrain")
         self.assertEqual(payload["actor_id"], "native-env-terrain-1")
         self.assertEqual(payload["actor_data"]["sync_status"], "engine_imported")
+        self.assertEqual(payload["actor_data"]["sync_lifecycle_status"], "engine_imported")
+        self.assertEqual(payload["sync_lifecycle_status"], "engine_imported")
+        self.assertTrue(payload["bounds_ready"])
         self.assertEqual(payload["actor_data"]["geometry"]["aabb"]["min"], [-3.0, 0.0, -3.0])
         self.assertEqual(payload["surface"], "stone_floor")
         self.assertEqual(payload["terrain_profile"], "indoor_floor")
@@ -20793,12 +21114,16 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         fake_module = types.ModuleType("CoronaCore.core.corona_editor")
         fake_module.CoronaEditor = types.SimpleNamespace(CoronaEngine=FakeCoronaEngine)
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            model_path = Path(temp_dir) / "treasure_chest.obj"
-            model_path.write_text("# fake obj\n", encoding="utf-8")
-            with patch.dict("sys.modules", {"CoronaCore.core.corona_editor": fake_module}):
-                tool = _build_import_model_tool(scene_manager=None)
-                raw = tool.invoke({
+        model_path = Path("C:/runtime_tests/treasure_chest.obj")
+        with patch.dict("sys.modules", {"CoronaCore.core.corona_editor": fake_module}), patch(
+            "plugins.AITool.cai_extensions.mcp.tools.model_import_tools._pick_model_file",
+            return_value=str(model_path),
+        ), patch(
+            "plugins.AITool.cai_extensions.mcp.tools.model_import_tools.os.path.exists",
+            return_value=True,
+        ):
+            tool = _build_import_model_tool(scene_manager=None)
+            raw = tool.invoke({
                     "model_path": str(model_path),
                     "actor_name": "藏宝箱",
                     "model_name": "藏宝箱",
@@ -20909,9 +21234,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         ]
         self.assertTrue(import_log_entries)
         payload = import_log_entries[-1].payload
+        self.assertEqual(payload["environment_import_results"][0]["component_id"], "component-terrain")
+        self.assertEqual(payload["environment_import_results"][0]["status"], "success")
         self.assertEqual(
-            payload["environment_import_results"],
-            [{"component_id": "component-terrain", "status": "success"}],
+            payload["environment_import_results"][0]["sync_lifecycle_status"],
+            "imported",
         )
         self.assertNotIn("provider", str(payload).lower())
         self.assertNotIn("raw", str(payload).lower())
@@ -20921,12 +21248,135 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(engine_summary["environment_import_result_count"], 1)
         self.assertEqual(engine_summary["environment_import_status_counts"], {"success": 1})
         self.assertEqual(
-            engine_summary["latest_environment_import_results"],
-            [{"component_id": "component-terrain", "status": "success"}],
+            engine_summary["latest_environment_import_results"][0]["component_id"],
+            "component-terrain",
+        )
+        self.assertEqual(engine_summary["latest_environment_import_results"][0]["status"], "success")
+        self.assertEqual(
+            engine_summary["latest_environment_import_results"][0]["sync_lifecycle_status"],
+            "imported",
         )
         self.assertNotIn("provider", str(engine_summary).lower())
         self.assertNotIn("raw", str(engine_summary).lower())
         self.assertNotIn("secret", str(engine_summary).lower())
+
+    def test_runtime_environment_import_result_preserves_safe_engine_identity_and_geometry(self) -> None:
+        def provider(payload: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "environment_components": {
+                    "component-terrain": {
+                        "actor_id": "actor-terrain-native",
+                        "asset_id": "asset-terrain",
+                        "component_id": "component-terrain",
+                        "name": "stone floor",
+                        "display_name": "stone floor",
+                        "native_name": "__runtime_terrain_001",
+                        "requested_name": "stone floor",
+                        "aliases": ["stone floor", "__runtime_terrain_001"],
+                        "component_type": "terrain",
+                        "handler": "terrain_component",
+                        "model_ref": "terrain-stone-runtime",
+                        "status": "imported",
+                        "source": "engine_environment_import",
+                        "scene_name": "Scene/runtime-env.scene",
+                        "requires_engine_write": False,
+                        "sync_status": "engine_imported",
+                        "position": [1.0, 0.0, 2.0],
+                        "rotation": [0.0, 15.0, 0.0],
+                        "scale": [6.0, 0.1, 6.0],
+                        "bounds_ready": True,
+                        "size": [6.0, 0.1, 6.0],
+                        "aabb": {"min": [-3.0, 0.0, -3.0], "max": [3.0, 0.1, 3.0]},
+                    }
+                },
+                "environment_import_results": [
+                    {
+                        "status": "success",
+                        "component_id": "component-terrain",
+                        "actor_id": "actor-terrain-native",
+                        "asset_id": "asset-terrain",
+                        "component_type": "terrain",
+                        "model_ref": "terrain-stone-runtime",
+                        "sync_status": "engine_imported",
+                        "position": [1.0, 0.0, 2.0],
+                        "bounds_ready": True,
+                        "size": [6.0, 0.1, 6.0],
+                        "aabb": {"min": [-3.0, 0.0, -3.0], "max": [3.0, 0.1, 3.0]},
+                        "model_path": "E:/secret/terrain.glb",
+                    }
+                ],
+            }
+
+        runtime = AgentRuntime(environment_import_provider=provider)
+        graph = ToolCallGraph(graph_id="graph-env-import-identity", plan_id="plan-env-import", batch_id="batch-env-import")
+        graph.add(
+            ToolCall(
+                tool_call_id="tool-env-import-identity",
+                tool_name="runtime.environment.import_components",
+                args={
+                    "room_id": "room-env-import-identity",
+                    "plan_id": "plan-env-import",
+                    "batch_id": "batch-env-import",
+                    "scene_name": "Scene/runtime-env.scene",
+                    "environment_components": {
+                        "component-terrain": {
+                            "component_id": "component-terrain",
+                            "name": "stone floor",
+                            "component_type": "terrain",
+                            "handler": "terrain_component",
+                            "status": "planned",
+                            "source": "runtime_environment_component",
+                            "scene_name": "Scene/runtime-env.scene",
+                            "requires_engine_write": False,
+                        }
+                    },
+                },
+                risk_level=RiskLevel.LOW,
+                requires_write=True,
+                confirmed=True,
+            )
+        )
+
+        executed = ToolCallGraphExecutor(
+            registry=runtime.registry,
+            guard=runtime.guard,
+            state=runtime.state,
+            operation_log=runtime.operation_log,
+        ).execute(graph, room_id="room-env-import-identity")
+
+        self.assertEqual(executed.status, "completed")
+        room = runtime.query_state("room-env-import-identity")["room"]
+        component = room["environment_components"]["batch-env-import"]["component-terrain"]
+        self.assertEqual(component["actor_id"], "actor-terrain-native")
+        self.assertEqual(component["native_name"], "__runtime_terrain_001")
+        self.assertEqual(component["sync_status"], "engine_imported")
+        self.assertEqual(component["sync_lifecycle_status"], "engine_imported")
+        self.assertEqual(component["aabb"]["min"], [-3.0, 0.0, -3.0])
+        self.assertTrue(component["bounds_ready"])
+        self.assertEqual(component["size"], [6.0, 0.1, 6.0])
+
+        replay = runtime.operation_replay(room_id="room-env-import-identity", plan_id="plan-env-import")
+        latest = replay["engine_write_summary"]["latest_environment_import_results"][-1]
+        self.assertEqual(latest["component_id"], "component-terrain")
+        self.assertEqual(latest["actor_id"], "actor-terrain-native")
+        self.assertEqual(latest["sync_status"], "engine_imported")
+        self.assertEqual(latest["sync_lifecycle_status"], "engine_imported")
+        self.assertEqual(latest["position"], [1.0, 0.0, 2.0])
+        self.assertEqual(latest["aabb"]["min"], [-3.0, 0.0, -3.0])
+        self.assertTrue(latest["bounds_ready"])
+        self.assertEqual(latest["size"], [6.0, 0.1, 6.0])
+        self.assertNotIn("model_path", str(latest).lower())
+        self.assertNotIn("secret", str(latest).lower())
+
+        registry = runtime.status_summary("room-env-import-identity", plan_id="plan-env-import")["scene_entity_registry"]
+        entity = next(item for item in registry["entities"] if item.get("component_id") == "component-terrain")
+        self.assertEqual(entity["actor_id"], "actor-terrain-native")
+        self.assertEqual(entity["native_name"], "__runtime_terrain_001")
+        self.assertEqual(entity["sync_status"], "engine_imported")
+        self.assertEqual(entity["sync_lifecycle_status"], "engine_imported")
+        self.assertTrue(entity["aabb"])
+        self.assertTrue(entity["bounds_ready"])
+        self.assertEqual(entity["size"], [6.0, 0.1, 6.0])
 
     def test_runtime_environment_import_tool_uses_runtime_state_only_without_provider(self) -> None:
         runtime = AgentRuntime()
@@ -21762,14 +22212,19 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(gate.calls[0]["object_id"], "batch-1-01")
         self.assertIn("guid-钘忓疂绠?", actors)
         self.assertEqual(actors["guid-钘忓疂绠?"]["source"], "engine_import")
-        self.assertEqual(actors["guid-钘忓疂绠?"]["name"], "钘忓疂绠?")
+        self.assertEqual(actors["guid-钘忓疂绠?"]["name"], "native-safe-but-wrong-name")
         self.assertEqual(actors["guid-钘忓疂绠?"]["asset_id"], "钘忓疂绠?")
         self.assertEqual(actors["guid-钘忓疂绠?"]["model_ref"], "model-request-chest")
         self.assertEqual(actors["guid-钘忓疂绠?"]["scene_name"], "Scene/场景1.scene")
         self.assertEqual(actors["guid-钘忓疂绠?"]["position"], [1, 0, 2])
         self.assertEqual(actors["guid-钘忓疂绠?"]["aabb"]["min"], [-0.5, 0.0, -0.5])
         self.assertEqual(actors["guid-钘忓疂绠?"]["aabb"]["max"], [0.5, 1.0, 0.5])
-        self.assertNotIn("native-safe-but-wrong-name", str(actors))
+        import_result = result["import_results"][0]
+        self.assertEqual(import_result["actor_id"], next(iter(actors)))
+        self.assertEqual(import_result["actor_name"], "native-safe-but-wrong-name")
+        self.assertEqual(import_result["native_name"], "native-safe-but-wrong-name")
+        self.assertIn(import_result["requested_name"], import_result["aliases"])
+        self.assertIn("native-safe-but-wrong-name", import_result["aliases"])
         self.assertNotIn("native-old.scene", str(actors))
         self.assertNotIn("engine_result", actors["guid-钘忓疂绠?"])
         self.assertNotEqual(actors["guid-钘忓疂绠?"]["model_ref"], "E:/models/chest.glb")
@@ -22091,6 +22546,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                     "rotation": [0.0, 90.0, 0.0],
                     "scale": [1.0, 1.0, 1.0],
                     "aabb": [-0.4, 0.0, -0.4, 0.4, 0.9, 0.4],
+                    "sync_status": "engine_transformed",
+                    "sync_lifecycle_status": "engine_transformed",
                     "ground_snapped": False,
                     "overlap_resolved": False,
                 }
@@ -22136,11 +22593,85 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(result["actor_updates"]["actor-box"]["position"], [1.0, 0.0, 2.0])
         self.assertEqual(result["actor_updates"]["actor-box"]["aabb"]["min"], [-0.4, 0.0, -0.4])
         self.assertEqual(result["actor_updates"]["actor-box"]["aabb"]["max"], [0.4, 0.9, 0.4])
+        self.assertEqual(result["actor_updates"]["actor-box"]["sync_status"], "engine_transformed")
+        self.assertEqual(result["actor_updates"]["actor-box"]["sync_lifecycle_status"], "engine_transformed")
         self.assertNotIn("native-safe-but-wrong-name", str(result["actor_updates"]))
         self.assertNotIn("native-old.scene", str(result["actor_updates"]))
         self.assertNotIn("engine_transform_result", result["actor_updates"]["actor-box"])
         ActorFactValidator.validate_actor_map(result["actor_updates"])
         self.assertTrue(result["transform_results"][0]["observed_position"])
+        self.assertEqual(result["transform_results"][0]["sync_status"], "engine_transformed")
+        self.assertEqual(result["transform_results"][0]["sync_lifecycle_status"], "engine_transformed")
+        self.assertEqual(result["transform_results"][0]["aabb"]["min"], [-0.4, 0.0, -0.4])
+        self.assertEqual(result["transform_results"][0]["rotation"], [0.0, 90.0, 0.0])
+        self.assertEqual(result["transform_results"][0]["scale"], [1.0, 1.0, 1.0])
+        self.assertFalse(result["transform_results"][0]["ground_snapped"])
+        self.assertFalse(result["transform_results"][0]["overlap_resolved"])
+
+    def test_engine_layout_transform_provider_prefers_native_name_and_ground_snap_for_floor_delta(self) -> None:
+        class FakeGate:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def set_transform(self, tool, payload: dict) -> dict:
+                self.calls.append(dict(payload))
+                return tool.invoke(payload)
+
+        class FakeTransformTool:
+            def invoke(self, payload: dict) -> dict:
+                return {
+                    "status": "success",
+                    "actor": payload["actor_name"],
+                    "position": list(payload["position"]),
+                    "ground_snapped": bool(payload.get("snap_to_ground")),
+                    "actor_data": {
+                        "name": payload["actor_name"],
+                        "geometry": {
+                            "position": list(payload["position"]),
+                            "aabb": [-0.5, 0.0, -0.5, 0.5, 1.0, 0.5],
+                        },
+                    },
+                }
+
+        gate = FakeGate()
+        provider = make_engine_layout_transform_provider(
+            transform_tool=FakeTransformTool(),
+            engine_gate=gate,
+            scene_name="Scene/native.scene",
+        )
+        result = provider(
+            {
+                "applied_deltas": [
+                    {
+                        "actor_id": "actor-chest",
+                        "actor_name": "藏宝箱",
+                        "position": [2.0, 0.0, 3.0],
+                        "support_type": "floor_supported",
+                        "ground_snapped": True,
+                    }
+                ],
+                "actors": {
+                    "actor-chest": {
+                        "actor_id": "actor-chest",
+                        "name": "藏宝箱",
+                        "display_name": "藏宝箱",
+                        "requested_name": "藏宝箱",
+                        "native_name": "NativeChest_001",
+                        "position": [0.0, 0.5, 0.0],
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(gate.calls[0]["actor_name"], "NativeChest_001")
+        self.assertTrue(gate.calls[0]["snap_to_ground"])
+        self.assertEqual(result["actor_updates"]["actor-chest"]["name"], "藏宝箱")
+        self.assertEqual(result["actor_updates"]["actor-chest"]["position"], [2.0, 0.0, 3.0])
+        self.assertEqual(result["transform_results"][0]["actor_name"], "藏宝箱")
+        self.assertTrue(result["transform_results"][0]["observed_position"])
+        self.assertTrue(result["transform_results"][0]["ground_snapped"])
+        self.assertFalse(result["transform_results"][0]["overlap_resolved"])
+        ActorFactValidator.validate_actor_map(result["actor_updates"])
 
     def test_engine_layout_transform_provider_respects_status_and_success_failure(self) -> None:
         class FakeGate:
@@ -22584,8 +23115,20 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             def invoke(self, payload: dict) -> dict:
                 return {}
 
+        def missing_model_resource_provider(payload: dict) -> dict:
+            return {
+                name: {
+                    "name": name,
+                    "status": "ready",
+                }
+                for name in payload["model_items"]
+            }
+
         provider = make_engine_actor_import_provider(import_tool=FakeImportTool(), engine_gate=FakeGate())
-        runtime = AgentRuntime(actor_import_provider=provider)
+        runtime = AgentRuntime(
+            model_resource_provider=missing_model_resource_provider,
+            actor_import_provider=provider,
+        )
         plan = runtime.propose_scene_plan(
             room_id="room-import-bridge-fail",
             text="鍋氫竴涓己鐩楄棌瀹濆锛屽寘鍚疂绠卞拰閲戝竵",
@@ -22666,7 +23209,50 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(result["batches"][0]["status"], "failed")
         self.assertEqual(state["actors"], {})
         failed = runtime.operation_log.query(event="tool_call_failed")
-        self.assertEqual(failed[-1].payload["error_code"], "actor_import_provider_failed")
+        self.assertEqual(failed[-1].payload["error_code"], "actor_import_failed")
+
+    def test_engine_actor_import_provider_rejects_actor_name_only_identity(self) -> None:
+        class FakeGate:
+            def invoke_tool(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+        class NameOnlyImportTool:
+            def invoke(self, payload: dict) -> dict:
+                return {
+                    "status": "success",
+                    "actor_name": payload["actor_name"],
+                    "actor": {
+                        "name": payload["actor_name"],
+                        "geometry": {
+                            "position": payload.get("position", [0, 0, 0]),
+                            "rotation": payload.get("rotation", [0, 0, 0]),
+                            "scale": payload.get("scale", [1, 1, 1]),
+                        },
+                    },
+                }
+
+        provider = make_engine_actor_import_provider(
+            import_tool=NameOnlyImportTool(),
+            engine_gate=FakeGate(),
+        )
+        result = provider(
+            {
+                "batch_id": "batch-name-only",
+                "plan_id": "plan-name-only",
+                "model_items": ["test chest"],
+                "model_resources": {
+                    "test chest": {
+                        "status": "ready",
+                        "local_path": "E:/models/test_chest.glb",
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(result["actors"], {})
+        self.assertEqual(result["import_results"][0]["status"], "failed")
+        self.assertEqual(result["import_results"][0]["failure_code"], "actor_import_invalid_result")
+        self.assertIn("actor import returned no actor id", result["import_results"][0]["reason"])
 
     def test_runtime_actor_import_persists_partial_success_from_engine_provider(self) -> None:
         class FakeGate:
@@ -22822,6 +23408,104 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(report_ready_events[-1]["payload"]["imported_count"], 1)
         self.assertEqual(report_ready_events[-1]["payload"]["failed_count"], 1)
 
+    def test_engine_actor_import_result_prefers_native_identity_transform_and_bounds(self) -> None:
+        class FakeGate:
+            def invoke_tool(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+        class NativeIdentityImportTool:
+            def invoke(self, payload: dict) -> dict:
+                return {
+                    "status": "success",
+                    "actor": {
+                        "actor_guid": "engine-guid-table",
+                        "name": "Engine Table 01",
+                        "bounds_ready": True,
+                        "size": [1.0, 0.8, 1.0],
+                        "sync_status": "engine_imported",
+                        "geometry": {
+                            "position": [1.25, 0.0, -2.5],
+                            "rotation": [0.0, 45.0, 0.0],
+                            "scale": [1.2, 1.0, 1.2],
+                            "aabb": {
+                                "min": [0.75, 0.0, -3.0],
+                                "max": [1.75, 0.8, -2.0],
+                            },
+                        },
+                    },
+                    "asset_id": "engine-asset-table",
+                    "model_ref": "engine-model-table",
+                }
+
+        def ready_model_provider(payload: dict) -> dict:
+            return {
+                name: {
+                    "name": name,
+                    "status": "ready",
+                    "local_path": f"E:/models/{name}.glb",
+                }
+                for name in payload["model_items"]
+            }
+
+        runtime = AgentRuntime(
+            model_resource_provider=ready_model_provider,
+            actor_import_provider=make_engine_actor_import_provider(
+                import_tool=NativeIdentityImportTool(),
+                engine_gate=FakeGate(),
+            ),
+        )
+        plan = runtime.propose_scene_plan(
+            room_id="room-import-native-identity",
+            text="生成一个商会交易厅，有长桌。",
+            owner_agent="商人",
+        )
+        plan.concrete_object_items = ["长桌"]
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
+
+        result = runtime.execute_planned_batches(plan.plan_id, max_items_per_batch=1)
+
+        state = runtime.query_state("room-import-native-identity")["room"]
+        actor = state["actors"]["engine-guid-table"]
+        self.assertEqual(result["graphs"][0]["status"], "completed")
+        self.assertEqual(actor["name"], "Engine Table 01")
+        self.assertEqual(actor["display_name"], "Engine Table 01")
+        self.assertEqual(actor["native_name"], "Engine Table 01")
+        self.assertEqual(actor["requested_name"], "长桌")
+        self.assertIn("长桌", actor["aliases"])
+        self.assertIn("Engine Table 01", actor["aliases"])
+        self.assertEqual(actor["asset_id"], "engine-asset-table")
+        self.assertEqual(actor["model_ref"], "engine-model-table")
+        self.assertEqual(actor["position"], [1.25, 0.0, -2.5])
+        self.assertEqual(actor["rotation"], [0.0, 45.0, 0.0])
+        self.assertEqual(actor["scale"], [1.2, 1.0, 1.2])
+        self.assertEqual(actor["aabb"], {"min": [0.75, 0.0, -3.0], "max": [1.75, 0.8, -2.0]})
+        self.assertTrue(actor["bounds_ready"])
+        self.assertEqual(actor["size"], [1.0, 0.8, 1.0])
+        self.assertEqual(actor["sync_status"], "engine_imported")
+        self.assertEqual(actor["source"], "engine_import")
+        self.assertEqual(result["report"]["import_summary"]["imported_count"], 1)
+        write_sources = result["report"]["engine_write_boundary_summary"]["write_source_counts"]
+        self.assertEqual(write_sources.get("engine_actor_import"), 1)
+        registry_entity = next(
+            entity
+            for entity in result["report"]["scene_entity_registry"]["entities"]
+            if entity.get("actor_id") == "engine-guid-table"
+        )
+        self.assertTrue(registry_entity["bounds_ready"])
+        self.assertEqual(registry_entity["size"], [1.0, 0.8, 1.0])
+
+        resolved_id, resolved_actor = runtime._find_runtime_actor_for_delta(state["actors"], "长桌")
+        self.assertEqual(resolved_id, "engine-guid-table")
+        self.assertEqual(resolved_actor["name"], "Engine Table 01")
+        replay = runtime.operation_replay(room_id="room-import-native-identity", plan_id=plan.plan_id)
+        latest_import = replay["engine_write_summary"]["latest_import_results"][-1]
+        self.assertEqual(latest_import["actor_id"], "engine-guid-table")
+        self.assertEqual(latest_import["actor_name"], "Engine Table 01")
+        self.assertEqual(latest_import["native_name"], "Engine Table 01")
+        self.assertEqual(latest_import["display_name"], "Engine Table 01")
+        self.assertEqual(latest_import["requested_name"], "长桌")
+        self.assertIn("长桌", latest_import["aliases"])
+
     def test_actor_import_provider_empty_actor_result_records_failed_import_fact(self) -> None:
         def ready_model_provider(payload: dict) -> dict:
             return {
@@ -22880,7 +23564,12 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             if node["tool_name"] == "runtime.actor.import_batch"
         ]
         self.assertTrue(import_nodes)
-        self.assertEqual(import_nodes[0]["status"], "succeeded")
+        self.assertEqual(result["graphs"][0]["status"], "failed")
+        self.assertEqual(result["batches"][0]["status"], "failed")
+        self.assertEqual(import_nodes[0]["status"], "failed")
+        failed = runtime.operation_log.query(event="tool_call_failed")
+        self.assertTrue(failed)
+        self.assertEqual(failed[-1].payload["error_code"], "actor_import_failed")
         batch_resource_flow = result["report"]["batch_resource_flow_summary"]
         self.assertEqual(batch_resource_flow["failed_count"], 1)
         self.assertEqual(batch_resource_flow["latest_batches"][0]["status"], "failed")
@@ -22888,6 +23577,16 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(batch_resource_flow["latest_batches"][0]["import_failed_count"], 2)
         self.assertEqual(result["report"]["actor_count"], 0)
         self.assertEqual(result["report"]["import_summary"]["failed_count"], 2)
+        self.assertEqual(
+            result["report"]["import_summary"]["import_failure_code_counts"],
+            {"actor_import_failed": 2},
+        )
+        self.assertEqual(result["report"]["runtime_scene_flow_summary"]["status"], "incomplete")
+        self.assertEqual(
+            result["report"]["runtime_scene_flow_summary"]["actor_readiness_status"],
+            "no_actors",
+        )
+        self.assertEqual(result["report"]["report_health_summary"]["status"], "failed")
 
     def test_resource_and_import_summaries_use_batch_scope_when_plan_id_is_missing(self) -> None:
         runtime = AgentRuntime()
@@ -23765,14 +24464,14 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 {
                     "entity_type": "actor",
                     "actor_id": "actor-table",
-                    "sync_status": "created",
+                    "sync_status": "engine_imported",
                     "transform": {"position": [0, 0, 0]},
                     "aabb": {"min": [0, 0, 0], "max": [1, 1, 1]},
                 },
                 {
                     "entity_type": "terrain",
                     "component_id": "terrain-main",
-                    "sync_status": "imported",
+                    "sync_status": "engine_imported",
                     "transform": {"position": [0, 0, 0]},
                     "aabb": {"min": [-5, 0, -5], "max": [5, 0.1, 5]},
                 },
@@ -23812,9 +24511,14 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                     "plan_id": "plan-native-aabb",
                     "batch_id": "batch-native-aabb",
                     "name": "tent",
+                    "display_name": "Imported Tent",
+                    "native_name": "Imported Tent",
+                    "requested_name": "帐篷",
+                    "aliases": ["帐篷", "Imported Tent"],
                     "asset_id": "asset-tent",
                     "position": [1.0, 0.0, 2.0],
                     "aabb": [-1.5, 0.0, -1.0, 1.5, 2.2, 1.0],
+                    "sync_status": "engine_imported",
                 },
             },
             "observed_actors": {},
@@ -23850,6 +24554,17 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(tent["aabb"]["min"], [-1.5, 0.0, -1.0])
         self.assertEqual(tent["aabb"]["max"], [1.5, 2.2, 1.0])
         self.assertEqual(tent["grounding_status"], "grounded")
+        self.assertEqual(tent["sync_status"], "engine_imported")
+        self.assertEqual(tent["sync_lifecycle_status"], "engine_imported")
+        self.assertEqual(tent["name"], "tent")
+        self.assertEqual(tent["display_name"], "Imported Tent")
+        self.assertEqual(tent["native_name"], "Imported Tent")
+        self.assertEqual(tent["requested_name"], "帐篷")
+        self.assertEqual(tent["aliases"], ["帐篷", "Imported Tent"])
+        self.assertEqual(tent["interaction_capability"], ["inspect", "move"])
+        self.assertIn("runtime_generated", tent["gameplay_tags"])
+        self.assertEqual(tent["physics_profile"]["collision"], "static")
+        self.assertEqual(tent["script_bindings"], ["runtime_scene_entity"])
 
     def test_state_patch_accepts_native_six_value_actor_aabb(self) -> None:
         state = RuntimeState()
@@ -24243,6 +24958,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             self.assertIn("aabb", query_roles[role])
             self.assertEqual(query_roles[role]["grounding_status"], "not_applicable")
             self.assertIn("asset_transfer_status", query_roles[role])
+            self.assertEqual(query_roles[role]["sync_status"], "runtime_state")
+            self.assertEqual(query_roles[role]["sync_lifecycle_status"], "runtime_state")
         status_registry = status["scene_entity_registry"]
         status_entities = status_registry["entities"]
         status_roles = {entity["semantic_role"]: entity for entity in status_entities}
@@ -24289,8 +25006,12 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             self.assertIn("audio_profile", status_roles[role])
             self.assertIn("lighting_profile", status_roles[role])
             self.assertIn("script_bindings", status_roles[role])
+            self.assertIn("sync_status", status_roles[role])
+            self.assertIn("sync_lifecycle_status", status_roles[role])
             self.assertIn("asset_transfer_status", status_roles[role])
             self.assertEqual(status_roles[role]["grounding_status"], "not_applicable")
+            self.assertEqual(status_roles[role]["sync_status"], "runtime_state")
+            self.assertEqual(status_roles[role]["sync_lifecycle_status"], "runtime_state")
         self.assertEqual(status_roles["grass"]["interaction_capability"], ["walk_on"])
         self.assertEqual(status_roles["grass"]["physics_profile"]["collision"], "walkable_static")
         self.assertIn("walkable", status_roles["grass"]["gameplay_tags"])
@@ -24333,6 +25054,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         }
         for role in ("wooden table", "tent", "forest", "sky", "grass"):
             self.assertIn("asset_transfer_status", report_roles[role])
+        for role in ("forest", "sky", "grass"):
+            self.assertEqual(report_roles[role]["sync_status"], "runtime_state")
+            self.assertEqual(report_roles[role]["sync_lifecycle_status"], "runtime_state")
         self.assertEqual(report["runtime_scene_flow_summary"]["status"], "ok")
         self.assertEqual(report["sync_readiness_summary"]["status"], "runtime_state_ready_pending_f5")
         self.assertEqual(report["sync_readiness_summary"]["actor_ready_for_sync_count"], 2)

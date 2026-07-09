@@ -562,12 +562,32 @@ def make_engine_environment_component_import_provider(
                 fallback=import_payload,
             )
             component_updates[update["component_id"]] = update
-            import_results.append({
+            result_row = {
                 "component_id": update["component_id"],
                 "name": update["name"],
                 "component_type": update["component_type"],
                 "status": "success",
-            })
+            }
+            for field in (
+                "actor_id",
+                "asset_id",
+                "model_ref",
+                "display_name",
+                "native_name",
+                "requested_name",
+                "aliases",
+                "sync_status",
+                "sync_lifecycle_status",
+                "position",
+                "rotation",
+                "scale",
+                "aabb",
+                "bounds_ready",
+                "size",
+            ):
+                if field in update:
+                    result_row[field] = update[field]
+            import_results.append(result_row)
         status_counts: dict[str, int] = {}
         for item in import_results:
             status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
@@ -679,10 +699,15 @@ def _normalize_environment_component_result(
         ),
         fallback=str(fallback.get("component_type") or "environment"),
     )
-    name = _safe_component_text(
-        _first_present(fallback.get("name"), parsed.get("name"), parsed.get("actor_name")),
+    native_name = _safe_component_text(
+        _first_present(parsed.get("name"), parsed.get("actor_name"), fallback.get("name")),
         fallback=str(fallback.get("name") or component_id),
     )
+    requested_name = _safe_component_text(
+        fallback.get("name"),
+        fallback=str(fallback.get("name") or native_name or component_id),
+    )
+    name = native_name
     handler = _safe_component_token(
         _first_present(fallback.get("handler"), parsed.get("handler")),
         fallback=str(fallback.get("handler") or ""),
@@ -694,9 +719,12 @@ def _normalize_environment_component_result(
         fallback=str(fallback.get("scene_name") or ""),
         allow_empty=True,
     )
-    return {
+    result = {
         "component_id": component_id,
         "name": name,
+        "display_name": name,
+        "native_name": native_name,
+        "requested_name": requested_name,
         "component_type": component_type,
         "handler": handler,
         "status": status,
@@ -707,6 +735,14 @@ def _normalize_environment_component_result(
             default=False,
         ),
     }
+    aliases: list[str] = []
+    for alias in (requested_name, native_name, name, component_id):
+        safe_alias = _safe_component_text(alias, fallback="", allow_empty=True)
+        if safe_alias and safe_alias not in aliases:
+            aliases.append(safe_alias)
+    if aliases:
+        result["aliases"] = aliases[:8]
+    return result
 
 
 def _environment_components_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -768,16 +804,21 @@ def _normalize_environment_component_import_result(
         ),
         fallback=str(fallback.get("component_id") or fallback.get("object_id") or "runtime-env-import"),
     )
-    name = _safe_component_text(
+    native_name = _safe_component_text(
         _first_present(
-            fallback.get("name"),
             parsed.get("name"),
             actor_data.get("name"),
             actor.get("name") if isinstance(actor, dict) else None,
             parsed.get("actor_name"),
+            fallback.get("name"),
         ),
         fallback=component_id,
     )
+    requested_name = _safe_component_text(
+        fallback.get("name"),
+        fallback=str(fallback.get("name") or native_name or component_id),
+    )
+    name = native_name
     component_type = _safe_component_token(
         _first_present(
             fallback.get("component_type"),
@@ -851,11 +892,25 @@ def _normalize_environment_component_import_result(
         ),
         fallback="engine_imported",
     )
+    sync_lifecycle_status = _safe_component_token(
+        _first_present(
+            parsed.get("sync_lifecycle_status"),
+            actor_data.get("sync_lifecycle_status"),
+            actor.get("sync_lifecycle_status") if isinstance(actor, dict) else None,
+            parsed.get("last_sync_event"),
+            actor_data.get("last_sync_event"),
+            sync_status,
+        ),
+        fallback=sync_status,
+    )
     update = {
         "component_id": component_id,
         "asset_id": asset_id,
         "model_ref": model_ref,
         "name": name,
+        "display_name": name,
+        "native_name": native_name,
+        "requested_name": requested_name,
         "component_type": component_type,
         "handler": handler,
         "status": "imported",
@@ -863,9 +918,24 @@ def _normalize_environment_component_import_result(
         "scene_name": scene_name,
         "requires_engine_write": False,
         "sync_status": sync_status,
+        "sync_lifecycle_status": sync_lifecycle_status,
     }
     if actor_id:
         update["actor_id"] = actor_id
+    aliases: list[str] = []
+    for alias in (
+        requested_name,
+        native_name,
+        name,
+        component_id,
+        actor_id,
+        asset_id,
+    ):
+        safe_alias = _safe_component_text(alias, fallback="", allow_empty=True)
+        if safe_alias and safe_alias not in aliases:
+            aliases.append(safe_alias)
+    if aliases:
+        update["aliases"] = aliases[:8]
     position = _first_present(
         geometry.get("position"),
         actor_data_geometry.get("position"),
@@ -902,6 +972,22 @@ def _normalize_environment_component_import_result(
     bounds = _normalized_bounds_from(geometry, actor_data_geometry, actor, actor_data, parsed, fallback)
     if bounds:
         update["aabb"] = bounds
+    bounds_ready_value = _first_present(
+        actor.get("bounds_ready") if isinstance(actor, dict) else None,
+        actor_data.get("bounds_ready") if isinstance(actor_data, dict) else None,
+        parsed.get("bounds_ready"),
+        fallback.get("bounds_ready"),
+    )
+    if bounds_ready_value is not None:
+        update["bounds_ready"] = _coerce_adapter_bool(bounds_ready_value, default=False)
+    size = _vector3(_first_present(
+        actor.get("size") if isinstance(actor, dict) else None,
+        actor_data.get("size") if isinstance(actor_data, dict) else None,
+        parsed.get("size"),
+        fallback.get("size"),
+    ))
+    if size:
+        update["size"] = size
     for field in ("surface", "terrain_profile", "sky_mode", "boundary_style"):
         value = _safe_component_text(
             _first_present(parsed.get(field), actor_data.get(field), actor.get(field) if isinstance(actor, dict) else None, fallback.get(field)),
@@ -933,6 +1019,41 @@ def _safe_component_text(raw: Any, *, fallback: str, allow_empty: bool = False) 
     if _adapter_text_has_unsafe_token(text):
         return "" if allow_empty and not fallback_text else fallback_text
     return text[:160]
+
+
+def _engine_actor_name_for_transform(actor: Mapping[str, Any], delta: Mapping[str, Any], actor_id: str) -> str:
+    """Pick the engine-facing actor name for set_actor_transform."""
+
+    fallback = _safe_component_text(
+        _first_present(delta.get("actor_name"), actor.get("requested_name"), actor.get("display_name"), actor_id),
+        fallback=str(actor_id or ""),
+    )
+    for candidate in (
+        actor.get("native_name"),
+        actor.get("name"),
+        delta.get("actor_name"),
+        actor.get("requested_name"),
+        actor.get("display_name"),
+        actor_id,
+    ):
+        safe = _safe_component_text(candidate, fallback="", allow_empty=True)
+        if safe:
+            return safe
+    return fallback
+
+
+def _runtime_actor_display_name_for_transform(actor: Mapping[str, Any], delta: Mapping[str, Any], actor_id: str) -> str:
+    return _safe_component_text(
+        _first_present(
+            actor.get("display_name"),
+            actor.get("requested_name"),
+            delta.get("actor_name"),
+            actor.get("name"),
+            actor.get("native_name"),
+            actor_id,
+        ),
+        fallback=str(actor_id or ""),
+    )
 
 
 def _coerce_adapter_bool(raw: Any, *, default: bool = False) -> bool:
@@ -1291,13 +1412,17 @@ def make_engine_actor_import_provider(
                     "actor_name": name,
                     "status": "failed",
                     "failure_code": "actor_import_invalid_result",
-                    "reason": _safe_adapter_error_message(exc, fallback="actor import failed"),
+                    "reason": _safe_adapter_error_message({"message": str(exc)}, fallback="actor import failed"),
                 })
                 continue
             actors[actor["actor_id"]] = actor
             import_results.append({
                 "actor_id": actor["actor_id"],
                 "actor_name": actor["name"],
+                "display_name": actor.get("display_name") or actor["name"],
+                "native_name": actor.get("native_name") or actor["name"],
+                "requested_name": actor.get("requested_name") or name,
+                "aliases": list(actor.get("aliases") or []),
                 "status": "success",
             })
         status_counts: dict[str, int] = {}
@@ -1358,9 +1483,10 @@ def make_engine_layout_transform_provider(
         for item in applied:
             actor_id = str(item.get("actor_id") or "")
             actor = dict(actors.get(actor_id) or {})
-            actor_name = str(actor.get("name") or item.get("actor_name") or actor_id)
+            actor_name = _runtime_actor_display_name_for_transform(actor, item, actor_id)
+            engine_actor_name = _engine_actor_name_for_transform(actor, item, actor_id)
             position = item.get("position")
-            if not actor_id or not actor_name or not isinstance(position, list) or len(position) < 3:
+            if not actor_id or not engine_actor_name or not isinstance(position, list) or len(position) < 3:
                 transform_results.append({
                     "actor_id": actor_id,
                     "actor_name": actor_name,
@@ -1371,14 +1497,22 @@ def make_engine_layout_transform_provider(
                 continue
             transform_payload = {
                 "actor_id": actor_id,
-                "actor_name": actor_name,
+                "actor_name": engine_actor_name,
                 "position": tuple(float(value) for value in position[:3]),
-                "snap_to_ground": False,
+                "snap_to_ground": bool(
+                    item.get("snap_to_ground")
+                    or item.get("ground_snapped")
+                    or str(item.get("support_type") or "").strip().lower() == "floor_supported"
+                ),
             }
             if plan_id:
                 transform_payload["plan_id"] = plan_id
             if batch_id:
                 transform_payload["batch_id"] = batch_id
+            if "ground_y" in item:
+                transform_payload["ground_y"] = float(item.get("ground_y") or 0.0)
+            if "ground_clearance" in item:
+                transform_payload["ground_clearance"] = float(item.get("ground_clearance") or 0.02)
             effective_scene_name = str(actor.get("scene_name") or payload.get("scene_name") or scene_name or "")
             if effective_scene_name:
                 transform_payload["scene_name"] = effective_scene_name
@@ -1413,7 +1547,23 @@ def make_engine_layout_transform_provider(
                 "status": "success",
                 "position": list(update.get("position") or position),
                 "observed_position": bool(engine_result.get("observed_position")),
+                "ground_snapped": bool(engine_result.get("ground_snapped")),
+                "overlap_resolved": bool(engine_result.get("overlap_resolved")),
             })
+            if engine_result.get("skipped_reason"):
+                transform_results[-1]["skipped_reason"] = _safe_transform_skip_reason(
+                    engine_result.get("skipped_reason")
+                )
+            if update.get("aabb"):
+                transform_results[-1]["aabb"] = dict(update.get("aabb") or {})
+            if update.get("sync_status"):
+                transform_results[-1]["sync_status"] = str(update.get("sync_status") or "")
+            if update.get("sync_lifecycle_status"):
+                transform_results[-1]["sync_lifecycle_status"] = str(update.get("sync_lifecycle_status") or "")
+            if update.get("rotation"):
+                transform_results[-1]["rotation"] = list(update.get("rotation") or [])
+            if update.get("scale"):
+                transform_results[-1]["scale"] = list(update.get("scale") or [])
         status_counts: dict[str, int] = {}
         observed_position_count = 0
         for item in transform_results:
@@ -1671,6 +1821,7 @@ def _safe_cpp_success_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "scale",
         "scene_aabb",
         "scene_name",
+        "size",
         "skipped_reason",
         "status",
         "status_info",
@@ -1872,29 +2023,27 @@ def _normalize_import_result(
     actor_data = parsed.get("actor_data") if isinstance(parsed.get("actor_data"), dict) else {}
     actor_name = _safe_component_text(
         _first_present(
-            fallback_name,
             actor.get("name") if isinstance(actor, dict) else None,
             actor_data.get("name") if isinstance(actor_data, dict) else None,
             parsed.get("actor_name"),
-            parsed.get("actor_id"),
             parsed.get("name"),
+            fallback_name,
+            parsed.get("actor_id"),
         ),
         fallback=fallback_name,
     )
+    requested_name = _safe_component_text(fallback_name, fallback=fallback_name)
     actor_id = str(
         _first_present(
             actor.get("actor_guid") if isinstance(actor, dict) else None,
             actor.get("guid") if isinstance(actor, dict) else None,
             actor.get("actor_id") if isinstance(actor, dict) else None,
-            actor.get("name") if isinstance(actor, dict) else None,
             actor_data.get("actor_guid") if isinstance(actor_data, dict) else None,
             actor_data.get("guid") if isinstance(actor_data, dict) else None,
             actor_data.get("actor_id") if isinstance(actor_data, dict) else None,
-            actor_data.get("name") if isinstance(actor_data, dict) else None,
             parsed.get("actor_guid"),
             parsed.get("actor_id"),
             parsed.get("guid"),
-            parsed.get("actor_name"),
         )
         or ""
     )
@@ -1950,6 +2099,9 @@ def _normalize_import_result(
     result = {
         "actor_id": actor_id,
         "name": actor_name,
+        "display_name": actor_name,
+        "native_name": actor_name,
+        "requested_name": requested_name,
         "asset_id": _safe_component_text(
             _first_present(
                 parsed.get("asset_id"),
@@ -1990,6 +2142,20 @@ def _normalize_import_result(
             fallback=sync_lifecycle_status,
         ),
     }
+    aliases: list[str] = []
+    for alias in (
+        requested_name,
+        actor_name,
+        str(parsed.get("actor_name") or ""),
+        str(actor_data.get("name") if isinstance(actor_data, dict) else ""),
+        str(actor.get("name") if isinstance(actor, dict) else ""),
+        str(asset_id or ""),
+    ):
+        safe_alias = _safe_component_text(alias, fallback="")
+        if safe_alias and safe_alias not in aliases:
+            aliases.append(safe_alias)
+    if aliases:
+        result["aliases"] = aliases[:8]
     bounds = _normalized_bounds_from(geometry, actor_data_geometry, actor, actor_data, parsed)
     if bounds:
         result["aabb"] = bounds
@@ -1998,6 +2164,21 @@ def _normalize_import_result(
         result["source"] = "engine_import_runtime_estimated_bounds"
         result["review_status"] = "needs_geometry_review"
         result["grounding_status"] = "needs_review"
+    bounds_ready_value = _first_present(
+        actor.get("bounds_ready") if isinstance(actor, dict) else None,
+        actor_data.get("bounds_ready") if isinstance(actor_data, dict) else None,
+        parsed.get("bounds_ready"),
+    )
+    if bounds_ready_value is not None:
+        result["bounds_ready"] = _coerce_adapter_bool(bounds_ready_value, default=False)
+    size_value = _first_present(
+        actor.get("size") if isinstance(actor, dict) else None,
+        actor_data.get("size") if isinstance(actor_data, dict) else None,
+        parsed.get("size"),
+    )
+    size = _vector3(size_value)
+    if size:
+        result["size"] = size
     return result
 
 
@@ -2030,6 +2211,27 @@ def _normalize_transform_result(
         parsed.get("scale"),
         actor_data.get("scale") if isinstance(actor_data, dict) else None,
     )
+    sync_status = _safe_component_token(
+        _first_present(
+            parsed.get("sync_status"),
+            actor_data.get("sync_status") if isinstance(actor_data, dict) else None,
+            parsed.get("last_sync_status"),
+            actor_data.get("last_sync_status") if isinstance(actor_data, dict) else None,
+        ),
+        fallback="",
+        allow_empty=True,
+    )
+    sync_lifecycle_status = _safe_component_token(
+        _first_present(
+            parsed.get("sync_lifecycle_status"),
+            actor_data.get("sync_lifecycle_status") if isinstance(actor_data, dict) else None,
+            parsed.get("last_sync_event"),
+            actor_data.get("last_sync_event") if isinstance(actor_data, dict) else None,
+            sync_status,
+        ),
+        fallback=sync_status,
+        allow_empty=True,
+    )
     update: dict[str, Any] = {
         "actor_id": actor_id,
         "name": _safe_component_text(
@@ -2057,6 +2259,24 @@ def _normalize_transform_result(
     bounds = _normalized_bounds_from(actor_data, parsed)
     if bounds:
         update["aabb"] = bounds
+    bounds_ready_value = _first_present(
+        actor_data.get("bounds_ready") if isinstance(actor_data, dict) else None,
+        parsed.get("bounds_ready"),
+    )
+    if bounds_ready_value is not None:
+        update["bounds_ready"] = _coerce_adapter_bool(bounds_ready_value, default=False)
+    size = _vector3(_first_present(
+        actor_data.get("size") if isinstance(actor_data, dict) else None,
+        parsed.get("size"),
+    ))
+    if size:
+        update["size"] = size
+    if sync_status:
+        update["sync_status"] = sync_status
+        update["last_sync_status"] = sync_status
+    if sync_lifecycle_status:
+        update["sync_lifecycle_status"] = sync_lifecycle_status
+        update["last_sync_event"] = sync_lifecycle_status
     return update
 
 

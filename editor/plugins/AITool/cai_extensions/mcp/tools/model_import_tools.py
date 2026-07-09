@@ -411,6 +411,10 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
 
             actor = native_result.get("actor") if isinstance(native_result.get("actor"), dict) else {}
             geometry = actor.get("geometry") if isinstance(actor.get("geometry"), dict) else {}
+            actor_id = actor.get("actor_guid") or actor.get("actor_id") or actor.get("guid") or ""
+            actor_aabb = aabb or actor.get("world_aabb") or actor.get("aabb") or actor.get("bounds")
+            bounds_ready = bool(actor.get("bounds_ready") or actor_aabb)
+            actor_size = actor.get("size") or actor.get("dimensions") or actor.get("aabb_size")
             result_data = {
                 "status": "success",
                 "component_id": safe_component_id,
@@ -424,24 +428,32 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
                 "sky_mode": sky_mode or "",
                 "boundary_style": boundary_style or "",
                 "scene_name": native_result.get("scene") or scene_name or "",
-                "actor_id": actor.get("actor_guid") or actor.get("actor_id") or actor.get("guid") or "",
+                "actor_id": actor_id,
+                "bounds_ready": bounds_ready,
+                "world_aabb": actor_aabb,
+                "size": actor_size,
                 "actor_data": {
-                    "actor_id": actor.get("actor_guid") or actor.get("actor_id") or actor.get("guid") or "",
+                    "actor_id": actor_id,
+                    "actor_guid": actor_id,
                     "name": actor.get("name") or component_name,
                     "component_id": safe_component_id,
                     "component_type": component_type_value,
                     "asset_id": asset_id or safe_component_id,
                     "model_ref": model_ref or asset_ref,
                     "sync_status": "engine_imported",
+                    "sync_lifecycle_status": "engine_imported",
+                    "bounds_ready": bounds_ready,
+                    "size": actor_size,
                     "geometry": {
                         "position": geometry.get("position", position or [0, 0, 0]),
                         "rotation": geometry.get("rotation", rotation or [0, 0, 0]),
                         "scale": geometry.get("scale", scale or [1, 1, 1]),
-                        "aabb": aabb or actor.get("world_aabb") or actor.get("aabb"),
+                        "aabb": actor_aabb,
                     },
                 },
                 "actor": actor,
                 "sync_status": "engine_imported",
+                "sync_lifecycle_status": "engine_imported",
             }
             part = build_part(
                 content_type="text",
