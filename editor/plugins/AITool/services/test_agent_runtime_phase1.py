@@ -14984,6 +14984,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             ]
             self.assertTrue(registry_entities)
             self.assertTrue(all(entity.get("model_ref") == "mesh.glb" for entity in registry_entities))
+            self.assertTrue(all(entity.get("asset_id") == "mesh.glb" for entity in registry_entities))
             self.assertNotIn(str(model_dir), str(registry_entities))
             self.assertNotIn(str(mesh_path), str(registry_entities))
 
