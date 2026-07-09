@@ -2229,6 +2229,31 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
                 )
             import_results.append(row)
         requested_count = len(components)
+        if requested_count and imported_components:
+            reported_component_ids = {
+                str(row.get("component_id") or "").strip()
+                for row in import_results
+                if str(row.get("component_id") or "").strip()
+            }
+            for component_id, component in components.items():
+                safe_component_id = str(component_id or "").strip()
+                if (
+                    not safe_component_id
+                    or safe_component_id in imported_components
+                    or safe_component_id in reported_component_ids
+                ):
+                    continue
+                import_results.append(
+                    {
+                        "component_id": safe_component_id,
+                        "name": str(component.get("name") or safe_component_id),
+                        "component_type": str(component.get("component_type") or "environment"),
+                        "status": "failed",
+                        "failure_code": "environment_import_missing_component",
+                        "reason": "environment import provider did not return this requested component",
+                        "sync_lifecycle_status": "failed",
+                    }
+                )
         if requested_count and not imported_components:
             return _failed_component_patch_result(
                 call=call,
@@ -2286,7 +2311,7 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
             ),
             payload={
                 "environment_components": imported_components,
-                    "environment_import_results": import_results,
+                "environment_import_results": import_results,
                 "engine_write_result": dict(result.get("engine_write_result") or {}),
                 "requested_count": requested_count,
                 "ready_count": len(imported_components),

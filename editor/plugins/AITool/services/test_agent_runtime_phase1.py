@@ -21690,6 +21690,105 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertNotIn("raw", str(engine_summary).lower())
         self.assertNotIn("secret", str(engine_summary).lower())
 
+    def test_runtime_environment_import_partial_provider_result_records_missing_components(self) -> None:
+        def provider(payload: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "environment_components": {
+                    "component-terrain": {
+                        "actor_id": "actor-terrain",
+                        "component_id": "component-terrain",
+                        "name": "石板地面",
+                        "component_type": "terrain",
+                        "handler": "terrain_component",
+                        "status": "imported",
+                        "source": "engine_environment_import",
+                        "scene_name": "Scene/runtime-env-partial.scene",
+                        "requires_engine_write": False,
+                    }
+                },
+                "environment_import_results": [
+                    {"status": "success", "component_id": "component-terrain"}
+                ],
+            }
+
+        runtime = AgentRuntime(environment_import_provider=provider)
+        graph = ToolCallGraph(
+            graph_id="graph-env-import-partial",
+            plan_id="plan-env-import-partial",
+            batch_id="batch-env-import-partial",
+        )
+        graph.add(
+            ToolCall(
+                tool_call_id="tool-env-import-partial",
+                tool_name="runtime.environment.import_components",
+                args={
+                    "room_id": "room-env-import-partial",
+                    "plan_id": "plan-env-import-partial",
+                    "batch_id": "batch-env-import-partial",
+                    "scene_name": "Scene/runtime-env-partial.scene",
+                    "environment_components": {
+                        "component-terrain": {
+                            "component_id": "component-terrain",
+                            "name": "石板地面",
+                            "component_type": "terrain",
+                            "handler": "terrain_component",
+                            "status": "planned",
+                            "source": "runtime_environment_component",
+                            "scene_name": "Scene/runtime-env-partial.scene",
+                            "requires_engine_write": False,
+                        },
+                        "component-boundary": {
+                            "component_id": "component-boundary",
+                            "name": "低矮边界",
+                            "component_type": "boundary",
+                            "handler": "terrain_component",
+                            "status": "planned",
+                            "source": "runtime_environment_component",
+                            "scene_name": "Scene/runtime-env-partial.scene",
+                            "requires_engine_write": False,
+                        },
+                    },
+                },
+                risk_level=RiskLevel.LOW,
+                requires_write=True,
+                confirmed=True,
+            )
+        )
+
+        executed = ToolCallGraphExecutor(
+            registry=runtime.registry,
+            guard=runtime.guard,
+            state=runtime.state,
+            operation_log=runtime.operation_log,
+        ).execute(graph, room_id="room-env-import-partial")
+
+        self.assertEqual(executed.status, "completed")
+        room = runtime.query_state("room-env-import-partial")["room"]
+        import_fact = room["custom_import_facts"]["batch-env-import-partial:environment_import_result"]
+        self.assertEqual(import_fact["status"], "partial")
+        self.assertEqual(import_fact["imported_count"], 1)
+        self.assertEqual(import_fact["failed_count"], 1)
+        missing_rows = [
+            row
+            for row in import_fact["environment_import_results"]
+            if row.get("component_id") == "component-boundary"
+        ]
+        self.assertEqual(len(missing_rows), 1)
+        self.assertEqual(missing_rows[0]["status"], "failed")
+        self.assertEqual(
+            missing_rows[0]["failure_code"],
+            "environment_import_missing_component",
+        )
+        replay = runtime.operation_replay(
+            room_id="room-env-import-partial",
+            plan_id="plan-env-import-partial",
+        )
+        engine_summary = replay["engine_write_summary"]
+        self.assertEqual(engine_summary["environment_import_status_counts"], {"failed": 1, "success": 1})
+        self.assertNotIn("provider", str(engine_summary).lower())
+        self.assertNotIn("raw", str(engine_summary).lower())
+        self.assertNotIn("secret", str(engine_summary).lower())
+
     def test_runtime_environment_import_result_preserves_safe_engine_identity_and_geometry(self) -> None:
         def provider(payload: dict[str, Any]) -> dict[str, Any]:
             return {
