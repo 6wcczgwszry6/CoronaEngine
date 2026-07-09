@@ -26828,6 +26828,24 @@ class AgentRuntime:
                 aggregate_import_failure_code_counts[safe_code] = (
                     aggregate_import_failure_code_counts.get(safe_code, 0) + 1
                 )
+            if results:
+                return
+            row_status = str(row.get("status") or "").strip().lower()
+            if row_status not in {"failed", "error", "blocked", "skipped"}:
+                return
+            fallback_code = AgentRuntime._safe_user_visible_failure_code(
+                row.get("failure_code")
+                or row.get("reason")
+                or row.get("error_code")
+                or row_status
+                or "actor_import_failed"
+            )
+            if not fallback_code:
+                return
+            failure_count = max(1, int(row.get("failed_count") or row.get("requested_count") or 1))
+            aggregate_import_failure_code_counts[fallback_code] = (
+                aggregate_import_failure_code_counts.get(fallback_code, 0) + failure_count
+            )
 
         for key, fact in dict(room.get("custom_import_facts") or {}).items():
             if not isinstance(fact, Mapping):
@@ -27137,6 +27155,20 @@ class AgentRuntime:
                 if not failure_code:
                     continue
                 counts[failure_code] = counts.get(failure_code, 0) + 1
+            if counts or results:
+                return dict(sorted(counts.items()))
+            row_status = str(row.get("status") or "").strip().lower()
+            if row_status in {"failed", "error", "blocked", "skipped"}:
+                fallback_code = AgentRuntime._safe_user_visible_failure_code(
+                    row.get("failure_code")
+                    or row.get("reason")
+                    or row.get("error_code")
+                    or row_status
+                    or "actor_import_failed"
+                )
+                if fallback_code:
+                    failure_count = max(1, int(row.get("failed_count") or row.get("requested_count") or 1))
+                    counts[fallback_code] = counts.get(fallback_code, 0) + failure_count
             return dict(sorted(counts.items()))
 
         def ready_count(rows: Mapping[str, Any]) -> int:

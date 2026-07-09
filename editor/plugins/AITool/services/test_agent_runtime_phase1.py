@@ -24109,6 +24109,56 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         )
         self.assertIn("engine_write_bridge_failed", report["report_health_summary"]["reasons"])
 
+    def test_runtime_report_counts_actor_import_pre_bridge_failure_reason(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-import-pre-bridge-failure-reason",
+            text="生成一个儿童卧室，有小木马和小木桌。",
+            owner_agent="小女孩",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
+        result = runtime.execute_planned_batches(plan.plan_id, max_items_per_batch=2)
+        batch_id = result["batches"][0]["batch_id"]
+        runtime.state.apply_patch(
+            StatePatch(
+                room_id="room-import-pre-bridge-failure-reason",
+                changes={
+                    "custom_import_facts": {
+                        f"{batch_id}:actor_import_result": {
+                            "plan_id": plan.plan_id,
+                            "batch_id": batch_id,
+                            "status": "failed",
+                            "actor_count": 2,
+                            "requested_count": 2,
+                            "imported_count": 0,
+                            "failed_count": 2,
+                            "reason": "missing_ready_model_resource",
+                            "engine_write_boundary": {
+                                "provider_source": "engine_actor_import_provider",
+                                "requested_count": 2,
+                                "identity_result_count": 0,
+                                "missing_identity_count": 2,
+                                "status_counts": {"failed": 2},
+                            },
+                        },
+                    },
+                },
+                expected_version=runtime.state.version,
+            )
+        )
+
+        report = runtime.generate_report(
+            "room-import-pre-bridge-failure-reason",
+            plan_id=plan.plan_id,
+        )
+
+        self.assertEqual(
+            report["report_health_summary"]["import_failure_code_counts"],
+            {"missing_ready_model_resource": 2},
+        )
+        self.assertEqual(report["engine_write_boundary_summary"]["bridge_call_count"], 0)
+        self.assertIn("batch_failed", report["report_health_summary"]["reasons"])
+
     def test_actor_import_provider_receives_environment_components_from_runtime_state(self) -> None:
         captured_import_payloads: list[dict[str, Any]] = []
 
