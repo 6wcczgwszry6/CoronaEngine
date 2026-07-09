@@ -25040,6 +25040,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                     "bounds": [-0.5, 0.0, -0.5, 0.5, 0.8, 0.5],
                     "scene_aabb": [-0.7, 0.0, -0.7, 0.7, 1.0, 0.7],
                 },
+                "actor-chair": {
+                    "actor_id": "actor-chair",
+                    "name": "chair",
+                    "world_aabb": [-0.3, 0.0, -0.3, 0.3, 0.9, 0.3],
+                },
             }
         )
 
@@ -25047,6 +25052,60 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(actors["actor-table"]["bounds"]["max"], [0.5, 0.8, 0.5])
         self.assertEqual(actors["actor-table"]["scene_aabb"]["min"], [-0.7, 0.0, -0.7])
         self.assertEqual(actors["actor-table"]["scene_aabb"]["max"], [0.7, 1.0, 0.7])
+        self.assertEqual(actors["actor-chair"]["aabb"]["min"], [-0.3, 0.0, -0.3])
+        self.assertEqual(actors["actor-chair"]["aabb"]["max"], [0.3, 0.9, 0.3])
+        self.assertNotIn("world_aabb", actors["actor-chair"])
+
+    def test_state_patch_registry_accepts_native_world_bounds_aliases(self) -> None:
+        state = RuntimeState()
+
+        applied, reason = state.apply_patch(
+            StatePatch(
+                room_id="room-native-world-bounds",
+                changes={
+                    "actors": {
+                        "actor-chair": {
+                            "actor_id": "actor-chair",
+                            "plan_id": "plan-native-world-bounds",
+                            "batch_id": "batch-native-world-bounds",
+                            "name": "chair",
+                            "asset_id": "asset-chair",
+                            "position": [0.0, 0.0, 0.0],
+                            "world_aabb": [-0.3, 0.0, -0.3, 0.3, 0.9, 0.3],
+                            "sync_status": "engine_imported",
+                        },
+                    },
+                    "assets": {
+                        "asset-chair": {
+                            "asset_id": "asset-chair",
+                            "transfer_status": "ready",
+                            "ready": True,
+                            "progress": 100,
+                        },
+                    },
+                    "batch_plans": {
+                        "batch-native-world-bounds": {
+                            "batch_id": "batch-native-world-bounds",
+                            "room_id": "room-native-world-bounds",
+                            "plan_id": "plan-native-world-bounds",
+                            "batch_index": 1,
+                            "total_batches": 1,
+                            "status": "completed",
+                        },
+                    },
+                },
+            )
+        )
+
+        self.assertTrue(applied, reason)
+        room = state.room("room-native-world-bounds")
+        registry = AgentRuntime._scene_entity_registry_for_plan(room, "plan-native-world-bounds")
+        chair = registry["entities"][0]
+        self.assertEqual(registry["actor_aabb_available_count"], 1)
+        self.assertEqual(registry["missing_aabb_count"], 0)
+        self.assertEqual(chair["aabb"]["min"], [-0.3, 0.0, -0.3])
+        self.assertEqual(chair["aabb"]["max"], [0.3, 0.9, 0.3])
+        self.assertEqual(chair["sync_status"], "engine_imported")
 
     def test_state_patch_preserves_game_ready_actor_fields_in_registry(self) -> None:
         state = RuntimeState()

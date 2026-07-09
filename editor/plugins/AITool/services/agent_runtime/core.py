@@ -1417,6 +1417,8 @@ class ActorFactValidator:
         "native_name",
         "version",
         "review_status",
+        "world_aabb",
+        "world_bounds",
         "zone_hint",
     }
     _BLOCKED_FIELDS = {
@@ -1506,10 +1508,10 @@ class ActorFactValidator:
                     if vector is not None:
                         actor[normalized_field] = vector
                     continue
-                if normalized_field in {"aabb", "bounds", "scene_aabb"}:
+                if normalized_field in {"aabb", "bounds", "scene_aabb", "world_aabb", "world_bounds"}:
                     bounds = ActorFactValidator._safe_aabb_bounds(value)
                     if bounds is not None:
-                        actor[normalized_field] = bounds
+                        actor["aabb" if normalized_field in {"world_aabb", "world_bounds"} else normalized_field] = bounds
                     continue
                 if normalized_field in ActorFactValidator._LIST_FIELDS:
                     actor[normalized_field] = ActorFactValidator._safe_text_list(value)
@@ -1544,7 +1546,7 @@ class ActorFactValidator:
                     raise ValueError(f"actor fact has unsupported field: {normalized_field}")
                 if normalized_field in {"position", "rotation", "scale", "size"}:
                     ActorFactValidator._require_vector3(value, normalized_field)
-                elif normalized_field in {"aabb", "bounds", "scene_aabb"}:
+                elif normalized_field in {"aabb", "bounds", "scene_aabb", "world_aabb", "world_bounds"}:
                     ActorFactValidator._require_aabb_bounds(value, normalized_field)
                 elif normalized_field in ActorFactValidator._LIST_FIELDS:
                     ActorFactValidator._require_safe_text_list(value, normalized_field)
@@ -18510,7 +18512,7 @@ class AgentRuntime:
             return transform
 
         def bounds_from(row: Mapping[str, Any]) -> dict[str, Any]:
-            for key in ("aabb", "bounds", "scene_aabb"):
+            for key in ("aabb", "bounds", "scene_aabb", "world_aabb", "world_bounds"):
                 value = row.get(key)
                 if isinstance(value, Mapping):
                     return dict(value)
