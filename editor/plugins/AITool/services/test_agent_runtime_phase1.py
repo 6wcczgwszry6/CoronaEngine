@@ -21788,6 +21788,24 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertNotIn("provider", str(engine_summary).lower())
         self.assertNotIn("raw", str(engine_summary).lower())
         self.assertNotIn("secret", str(engine_summary).lower())
+        registry = AgentRuntime._scene_entity_registry_for_plan(
+            room,
+            "plan-env-import-partial",
+            batch_id="batch-env-import-partial",
+        )
+        self.assertTrue(registry["available"])
+        self.assertEqual(registry["failed_environment_request_count"], 1)
+        self.assertEqual(
+            registry["failed_environment_requests"][0]["component_id"],
+            "component-boundary",
+        )
+        self.assertEqual(
+            registry["failed_environment_requests"][0]["failure_code"],
+            "environment_import_missing_component",
+        )
+        self.assertNotIn("provider", str(registry).lower())
+        self.assertNotIn("raw", str(registry).lower())
+        self.assertNotIn("secret", str(registry).lower())
 
     def test_runtime_environment_import_result_preserves_safe_engine_identity_and_geometry(self) -> None:
         def provider(payload: dict[str, Any]) -> dict[str, Any]:

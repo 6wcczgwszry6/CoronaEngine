@@ -18897,6 +18897,56 @@ class AgentRuntime:
                     failures.append(safe_row)
             return failures
 
+        def failed_environment_requests_for_plan() -> list[dict[str, Any]]:
+            failures: list[dict[str, Any]] = []
+            active_batch_ids = set(candidate_batch_ids)
+            for fact_key, fact in sorted(dict(room.get("custom_import_facts") or {}).items()):
+                if not str(fact_key or "").endswith(":environment_import_result"):
+                    continue
+                if not isinstance(fact, Mapping):
+                    continue
+                fact_batch_id = str(fact.get("batch_id") or str(fact_key).split(":")[0] or "")
+                if active_batch_id and fact_batch_id != active_batch_id:
+                    continue
+                if active_plan_id and active_batch_ids and fact_batch_id and fact_batch_id not in active_batch_ids:
+                    continue
+                for row in fact.get("environment_import_results") or []:
+                    if not isinstance(row, Mapping):
+                        continue
+                    if str(row.get("status") or "").strip().lower() != "failed":
+                        continue
+                    component_id = AgentRuntime._safe_report_text(
+                        str(row.get("component_id") or "").strip()
+                    )
+                    name = AgentRuntime._safe_report_text(
+                        str(row.get("name") or component_id or "").strip()
+                    )
+                    component_type = AgentRuntime._safe_report_text(
+                        str(row.get("component_type") or "environment").strip()
+                    )
+                    failure_code = AgentRuntime._safe_report_text(
+                        str(
+                            row.get("failure_code")
+                            or row.get("error_code")
+                            or "environment_import_failed"
+                        ).strip()
+                    )
+                    reason = AgentRuntime._safe_report_text(
+                        str(row.get("reason") or row.get("message") or "").strip()
+                    )
+                    safe_row = {
+                        "batch_id": fact_batch_id,
+                        "component_id": component_id[:120],
+                        "name": name[:120],
+                        "component_type": component_type[:80],
+                        "status": "failed",
+                        "failure_code": failure_code[:120],
+                    }
+                    if reason:
+                        safe_row["reason"] = reason[:200]
+                    failures.append(safe_row)
+            return failures
+
         entities: list[dict[str, Any]] = []
         seen_entity_ids: set[str] = set()
         seen_semantic_roles: set[str] = set()
@@ -19103,6 +19153,8 @@ class AgentRuntime:
         engine_write_verified_count = int(engine_write_verification_status_counts.get("engine_verified") or 0)
         failed_actor_requests = failed_actor_requests_for_plan()
         failed_actor_request_count = len(failed_actor_requests)
+        failed_environment_requests = failed_environment_requests_for_plan()
+        failed_environment_request_count = len(failed_environment_requests)
         if not actor_count and failed_actor_request_count:
             readiness_status = "failed_requests"
         elif not actor_count:
@@ -19115,7 +19167,7 @@ class AgentRuntime:
             readiness_status = "ready"
 
         return {
-            "available": bool(entities) or bool(failed_actor_requests),
+            "available": bool(entities) or bool(failed_actor_requests) or bool(failed_environment_requests),
             "plan_id": active_plan_id,
             "batch_id": active_batch_id,
             "entity_count": len(entities),
@@ -19142,6 +19194,8 @@ class AgentRuntime:
             "engine_write_verified_count": engine_write_verified_count,
             "failed_actor_request_count": failed_actor_request_count,
             "failed_actor_requests": failed_actor_requests[-10:],
+            "failed_environment_request_count": failed_environment_request_count,
+            "failed_environment_requests": failed_environment_requests[-10:],
             "entities": entities,
         }
 
