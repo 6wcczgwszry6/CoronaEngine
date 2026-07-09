@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
@@ -76,6 +76,34 @@ def _pick_model_file(path: str) -> Optional[str]:
                     if f.lower().endswith(ext):
                         return os.path.join(root, f)
     return None
+
+
+def _actor_identity_from_native_result(native_result: dict[str, Any]) -> str:
+    """Return the native actor identity required by AgentRuntime.
+
+    A native import success without an actor id/guid is not usable for the
+    RuntimeState/scene_entity_registry chain, so callers must treat an empty
+    result as a tool failure instead of reporting a partial success.
+    """
+
+    actor = native_result.get("actor") if isinstance(native_result.get("actor"), dict) else {}
+    actor_data = native_result.get("actor_data") if isinstance(native_result.get("actor_data"), dict) else {}
+    for source in (actor, actor_data, native_result):
+        for key in (
+            "actor_guid",
+            "actor_id",
+            "guid",
+            "actor_handle",
+            "native_handle",
+            "native_actor_id",
+            "handle",
+            "entity_id",
+        ):
+            value = source.get(key) if isinstance(source, dict) else None
+            text = str(value or "").strip()
+            if text:
+                return text
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -252,10 +280,15 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
                     error_message=native_result.get("message") or native_result.get("error") or "native actor 创建失败"
                 ).to_envelope(interface_type="scene")
 
+            actor_id = _actor_identity_from_native_result(native_result)
+            if not actor_id:
+                return build_error_result(
+                    error_message="native actor 创建成功但未返回 actor identity"
+                ).to_envelope(interface_type="scene")
+
             actor = native_result.get("actor") if isinstance(native_result.get("actor"), dict) else {}
             scene_out = native_result.get("scene") or scene_name or ""
             geometry = actor.get("geometry") if isinstance(actor.get("geometry"), dict) else {}
-            actor_id = actor.get("actor_guid") or actor.get("actor_id") or actor.get("guid") or ""
             actor_aabb = actor.get("world_aabb") or actor.get("aabb") or actor.get("bounds")
             result_data = {
                 "status": "success",
@@ -414,9 +447,14 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
                     error_message=native_result.get("message") or native_result.get("error") or "native environment actor 创建失败"
                 ).to_envelope(interface_type="scene")
 
+            actor_id = _actor_identity_from_native_result(native_result)
+            if not actor_id:
+                return build_error_result(
+                    error_message="native environment actor 创建成功但未返回 actor identity"
+                ).to_envelope(interface_type="scene")
+
             actor = native_result.get("actor") if isinstance(native_result.get("actor"), dict) else {}
             geometry = actor.get("geometry") if isinstance(actor.get("geometry"), dict) else {}
-            actor_id = actor.get("actor_guid") or actor.get("actor_id") or actor.get("guid") or ""
             actor_aabb = aabb or actor.get("world_aabb") or actor.get("aabb") or actor.get("bounds")
             bounds_ready = bool(actor.get("bounds_ready") or actor_aabb)
             actor_size = actor.get("size") or actor.get("dimensions") or actor.get("aabb_size")
