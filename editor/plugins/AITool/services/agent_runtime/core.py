@@ -15959,13 +15959,22 @@ class AgentRuntime:
     ) -> BatchPlanStatus | None:
         room = self.state.room(str(room_id))
         facts = dict(room.get("custom_import_facts") or {})
-        result_fact = dict(facts.get(f"{batch_id}:actor_import_result") or {})
-        plan_fact = dict(facts.get(f"{batch_id}:actor_import_plan") or {})
-        for fact in (result_fact, plan_fact):
+        candidate_statuses: list[BatchPlanStatus] = []
+        for fact_key in (
+            f"{batch_id}:actor_import_result",
+            f"{batch_id}:actor_import_plan",
+            f"{batch_id}:environment_import_result",
+        ):
+            fact = dict(facts.get(fact_key) or {})
             if not fact:
                 continue
             status = str(fact.get("status") or "").strip().lower()
-            actor_count = int(fact.get("actor_count") or fact.get("requested_count") or 0)
+            actor_count = int(
+                fact.get("actor_count")
+                or fact.get("component_count")
+                or fact.get("requested_count")
+                or 0
+            )
             ready_count = int(fact.get("ready_count") or fact.get("imported_count") or 0)
             failed_count = int(fact.get("failed_count") or 0)
             if status in {"failed", "error", "missing"}:
@@ -15973,9 +15982,11 @@ class AgentRuntime:
             if actor_count > 0 and ready_count <= 0 and failed_count >= actor_count:
                 return BatchPlanStatus.FAILED
             if ready_count > 0 and (failed_count > 0 or (actor_count > 0 and ready_count < actor_count)):
-                return BatchPlanStatus.PARTIAL
+                candidate_statuses.append(BatchPlanStatus.PARTIAL)
             if status in {"partial", "partially_succeeded", "partial_success"}:
-                return BatchPlanStatus.PARTIAL
+                candidate_statuses.append(BatchPlanStatus.PARTIAL)
+        if candidate_statuses:
+            return BatchPlanStatus.PARTIAL
         return None
 
     def _mark_batch_terminal_status_via_tool_graph(

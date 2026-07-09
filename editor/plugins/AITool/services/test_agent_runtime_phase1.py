@@ -2977,6 +2977,44 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertTrue(all(graph["status"] == "completed" for graph in mark_completed_graphs))
         self.assertIn("batch_terminal_status_state_persisted", runtime.operation_log.events())
 
+    def test_completed_graph_with_partial_environment_import_marks_batch_partial(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-drain-env-partial",
+            text="做一个森林营地，有草地、天空和帐篷。",
+            owner_agent="长者",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
+        batch = runtime.plan_batches(plan.plan_id, max_items_per_batch=3)[0]
+        graph = runtime._build_batch_execution_graph(plan, batch)
+        graph.status = "completed"
+        applied, reason = runtime.state.apply_patch(
+            StatePatch(
+                room_id="room-drain-env-partial",
+                changes={
+                    "custom_import_facts": {
+                        f"{batch.batch_id}:environment_import_result": {
+                            "plan_id": plan.plan_id,
+                            "batch_id": batch.batch_id,
+                            "component_count": 2,
+                            "ready_count": 1,
+                            "imported_count": 1,
+                            "failed_count": 1,
+                            "status": "partial",
+                            "source": "runtime_environment_import_result",
+                        }
+                    }
+                },
+            )
+        )
+        self.assertTrue(applied, reason)
+
+        runtime._finalize_batch_after_drained_graph(graph, room_id="room-drain-env-partial")
+
+        state = runtime.query_state("room-drain-env-partial")["room"]
+        self.assertEqual(state["batch_plans"][batch.batch_id]["status"], BatchPlanStatus.PARTIAL.value)
+        self.assertIn("batch_terminal_status_from_runtime_facts", runtime.operation_log.events())
+
     def test_drain_tool_graph_queue_restores_missing_in_memory_graph_from_state(self) -> None:
         runtime = AgentRuntime()
         plan = runtime.propose_scene_plan(
