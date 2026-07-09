@@ -13956,6 +13956,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         batch_id = queued["batches"][0]["batch_id"]
 
         runtime._queued_tool_graphs.pop(graph_id, None)
+        runtime.state.room("room-missing-queued-graph")["tool_graphs"].pop(graph_id, None)
         drained = runtime.drain_tool_graph_queue(
             "room-missing-queued-graph",
             plan_id=plan.plan_id,
