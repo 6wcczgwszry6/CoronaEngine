@@ -3259,6 +3259,20 @@ def _model_resource_has_importable_path(resource: Mapping[str, Any] | None) -> b
         return True
 
 
+def _model_resource_import_failure_code(resource: Mapping[str, Any] | None) -> str:
+    if not isinstance(resource, Mapping) or not resource:
+        return "missing_ready_model_resource"
+    status = str(resource.get("status") or "").strip().lower()
+    if status in {"failed", "failure", "error", "missing"}:
+        return _safe_import_text(
+            resource.get("failure_code")
+            or resource.get("source")
+            or f"model_resource_{status or 'failed'}",
+            fallback="missing_ready_model_resource",
+        )
+    return "missing_ready_model_resource"
+
+
 def _importable_model_resource_count(resources: Mapping[str, Any]) -> int:
     return sum(
         1
@@ -3452,15 +3466,7 @@ def _plan_actor_import_batch_tool(call: ToolCall) -> ToolResult:
         )
         failure_code = ""
         if not model_ready:
-            if not resource or not has_importable_model:
-                failure_code = "missing_ready_model_resource"
-            else:
-                failure_code = _safe_import_text(
-                    resource.get("failure_code")
-                    or resource.get("source")
-                    or f"model_resource_{status or 'unavailable'}",
-                    fallback="missing_ready_model_resource",
-                )
+            failure_code = _model_resource_import_failure_code(resource)
             failure_code_counts[failure_code] = failure_code_counts.get(failure_code, 0) + 1
         planned_actors.append({
             "actor_name": name,
@@ -3545,7 +3551,7 @@ def _make_actor_import_tool(provider: ResourceProvider | None) -> Callable[[Tool
                 {
                     "actor_name": name,
                     "status": "failed",
-                    "failure_code": "missing_ready_model_resource",
+                    "failure_code": _model_resource_import_failure_code(model_resources.get(name)),
                     "reason": "missing ready model resource",
                 }
                 for name in requested_items
@@ -4045,7 +4051,7 @@ def _actor_import_boundary_fact(
         status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
         status_counts[status_key] = status_counts.get(status_key, 0) + 1
         failure_code = _safe_import_text(item.get("failure_code"), fallback="")
-        if failure_code == "missing_ready_model_resource":
+        if status_key == "failed" and failure_code:
             bridge_skip_reason_counts[failure_code] = bridge_skip_reason_counts.get(failure_code, 0) + 1
     if not status_counts and imported_count > 0:
         status_counts["success"] = int(imported_count)

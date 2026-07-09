@@ -15050,6 +15050,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 name: {
                     "name": name,
                     "status": "failed",
+                    "failure_code": "model_resource_tool_failed",
+                    "source": "model_resource",
                 }
                 for name in payload["model_items"]
             }
@@ -15074,6 +15076,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(import_result["ready_count"], 0)
         self.assertEqual(import_result["imported_count"], 0)
         self.assertEqual(import_result["failed_count"], import_result["actor_count"])
+        self.assertEqual(import_result["failure_code_counts"], {"model_resource_tool_failed": 2})
+        self.assertEqual(
+            import_result["engine_write_boundary"]["bridge_skip_reason_counts"],
+            {"model_resource_tool_failed": 2},
+        )
         self.assertNotIn("tool_call_failed", runtime.operation_log.events())
         import_log_entries = [
             entry

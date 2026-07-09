@@ -319,6 +319,7 @@ def make_model_resource_provider(
                     batch_id=batch_id,
                     index=index,
                     source="model_resource",
+                    failure_code="model_resource_tool_failed",
                 )
         return resources
 
