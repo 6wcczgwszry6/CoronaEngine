@@ -8098,7 +8098,7 @@ class AgentRuntime:
                 )
         readiness_publish = self._publish_provider_readiness(room, plan_id=active_plan_id)
         readiness_summary = self._provider_readiness_summary(self._provider_summary)
-        provider_readiness_from_state = self._provider_readiness_from_state_room(room)
+        provider_readiness_from_state = self._provider_readiness_from_state_room(self.state.room(room))
         provider_readiness_summary = self._provider_readiness_summary(provider_readiness_from_state)
         engine_write_readiness_summary = self._engine_write_readiness_summary(provider_readiness_from_state)
         safe_readiness_publish = {

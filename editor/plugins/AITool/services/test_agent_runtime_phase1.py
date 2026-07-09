@@ -16143,6 +16143,14 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(provider_summary["image_resource"]["status"], "enabled")
         self.assertEqual(provider_readiness["requested_count"], 1)
         self.assertEqual(provider_readiness["enabled_count"], 1)
+        runtime._provider_summary = {}
+        restored_status = runtime.provider_status("room-provider-status")
+        self.assertEqual(restored_status["provider_readiness_summary"]["channel_count"], 10)
+        self.assertEqual(restored_status["engine_write_readiness_summary"]["channel_count"], 4)
+        self.assertEqual(
+            restored_status["engine_write_readiness_summary"]["runtime_state_only_channels"],
+            ["environment_import", "actor_delete", "layout_transform"],
+        )
         self.assertEqual(delivery["failed_count"], 1)
         self.assertEqual(delivery["message_kind_counts"]["runtime_status"], 1)
         self.assertNotIn("provider", provider_summary["image_resource"])
