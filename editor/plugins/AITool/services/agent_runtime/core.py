@@ -18089,6 +18089,10 @@ class AgentRuntime:
         missing_batch_graph_ref_count = int(queue_health_state.get("missing_batch_graph_ref_count") or 0)
         missing_graph_fact_count = int(queue_health_state.get("missing_graph_fact_count") or 0)
         orphan_queue_item_count = int(queue_health_state.get("orphan_queue_item_count") or 0)
+        tool_queue_failed_count = int(queue_health_state.get("failed_count") or 0)
+        tool_queue_cancelled_count = int(queue_health_state.get("cancelled_count") or 0)
+        tool_queue_incomplete_count = int(queue_health_state.get("incomplete_count") or 0)
+        tool_queue_blocked_count = int(queue_health_state.get("blocked_count") or 0)
         actor_registry_incomplete = (
             import_imported_count > 0
             and (
@@ -18203,6 +18207,14 @@ class AgentRuntime:
             reasons.append("tool_graph_fact_missing")
         if orphan_queue_item_count:
             reasons.append("tool_graph_queue_orphan")
+        if tool_queue_failed_count:
+            reasons.append("tool_graph_failed")
+        if tool_queue_cancelled_count:
+            reasons.append("tool_graph_cancelled")
+        if tool_queue_incomplete_count:
+            reasons.append("tool_graph_incomplete")
+        if tool_queue_blocked_count:
+            reasons.append("tool_graph_blocked")
         if batch_waiting_count:
             reasons.append("batch_waiting")
         if resource_phase_waiting_count:
@@ -18215,7 +18227,13 @@ class AgentRuntime:
             and environment_import_requested_count > 0
             and environment_imported_count <= 0
         )
-        if batch_failed_count or import_all_failed or asset_failed_count or resource_phase_failed_count:
+        if (
+            batch_failed_count
+            or import_all_failed
+            or asset_failed_count
+            or resource_phase_failed_count
+            or tool_queue_failed_count
+        ):
             status = "failed"
         elif (
             batch_partial_count
@@ -18246,6 +18264,10 @@ class AgentRuntime:
             or missing_batch_graph_ref_count
             or missing_graph_fact_count
             or orphan_queue_item_count
+            or tool_queue_failed_count
+            or tool_queue_cancelled_count
+            or tool_queue_incomplete_count
+            or tool_queue_blocked_count
         ):
             status = "needs_attention"
         elif batch_flow.get("batch_count") or import_requested_count or sync_status:
@@ -18306,6 +18328,10 @@ class AgentRuntime:
             "missing_batch_graph_ref_count": missing_batch_graph_ref_count,
             "missing_graph_fact_count": missing_graph_fact_count,
             "orphan_queue_item_count": orphan_queue_item_count,
+            "tool_queue_failed_count": tool_queue_failed_count,
+            "tool_queue_cancelled_count": tool_queue_cancelled_count,
+            "tool_queue_incomplete_count": tool_queue_incomplete_count,
+            "tool_queue_blocked_count": tool_queue_blocked_count,
             "asset_incomplete_count": asset_incomplete_count,
             "asset_failed_count": asset_failed_count,
             "asset_transferring_count": asset_transferring_count,
@@ -27233,6 +27259,18 @@ class AgentRuntime:
             + int(graph_status_counts.get("blocked") or 0)
             + int(graph_status_counts.get("paused") or 0)
         )
+        failed_count = max(
+            int(queue_status_counts.get("failed") or 0),
+            int(graph_status_counts.get("failed") or 0),
+        )
+        cancelled_count = max(
+            int(queue_status_counts.get("cancelled") or 0),
+            int(graph_status_counts.get("cancelled") or 0),
+        )
+        incomplete_count = max(
+            int(queue_status_counts.get("incomplete") or 0),
+            int(graph_status_counts.get("incomplete") or 0),
+        )
         terminal_count = sum(
             int(queue_status_counts.get(status) or 0)
             for status in ("completed", "cancelled", "failed", "skipped")
@@ -27255,6 +27293,9 @@ class AgentRuntime:
             "queued_count": queued_count,
             "running_count": running_count,
             "blocked_count": blocked_count,
+            "failed_count": failed_count,
+            "cancelled_count": cancelled_count,
+            "incomplete_count": incomplete_count,
             "terminal_count": terminal_count,
             "active_count": active_count,
             "queue_pressure": queue_pressure,

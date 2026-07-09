@@ -13978,6 +13978,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             report["tool_queue_health_summary"]["queue_status_counts"],
             {"failed": 1},
         )
+        self.assertEqual(report["tool_queue_health_summary"]["failed_count"], 1)
+        self.assertEqual(report["report_health_summary"]["status"], "failed")
+        self.assertIn("tool_graph_failed", report["report_health_summary"]["reasons"])
+        self.assertEqual(report["report_health_summary"]["tool_queue_failed_count"], 1)
         self.assertIn("tool_graph_queue_missing_graph", runtime.operation_log.events())
         self.assertIn("batch_plan_finalized_by_tool_graph", runtime.operation_log.events())
 
