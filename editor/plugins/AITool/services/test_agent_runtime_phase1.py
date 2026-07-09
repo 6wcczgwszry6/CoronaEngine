@@ -23736,11 +23736,17 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         status_registry = status_summary["scene_entity_registry"]
         self.assertEqual(status_registry["failed_actor_request_count"], 1)
         self.assertEqual(status_registry["failed_actor_requests"], report_registry["failed_actor_requests"])
+        self.assertEqual(result["report"]["report_health_summary"]["actor_registry_failed_request_count"], 1)
+        self.assertIn(
+            "actor_registry_failed_request",
+            result["report"]["report_health_summary"]["reasons"],
+        )
         report_ready_events = [event for event in events if event["event_type"] == "report_ready"]
         self.assertTrue(report_ready_events)
         self.assertEqual(report_ready_events[-1]["payload"]["requested_count"], 2)
         self.assertEqual(report_ready_events[-1]["payload"]["imported_count"], 1)
         self.assertEqual(report_ready_events[-1]["payload"]["failed_count"], 1)
+        self.assertEqual(report_ready_events[-1]["payload"]["actor_registry_failed_request_count"], 1)
 
     def test_engine_actor_import_result_prefers_native_identity_transform_and_bounds(self) -> None:
         class FakeGate:

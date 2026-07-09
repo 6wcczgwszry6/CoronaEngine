@@ -264,6 +264,7 @@ class OperationLog:
             "actor_id",
             "asset_event_count",
             "asset_id",
+            "actor_registry_failed_request_count",
             "batch_count",
             "cancelled_batches",
             "cancelled_graphs",
@@ -534,6 +535,7 @@ class RuntimeEventValidator:
         "applied_count",
         "applied_version",
         "actor_registry_actor_count",
+        "actor_registry_failed_request_count",
         "actor_registry_missing_aabb_count",
         "actor_registry_missing_transform_count",
         "actor_registry_readiness_status",
@@ -7417,6 +7419,7 @@ class AgentRuntime:
     _SAFE_RUNTIME_EVENT_PAYLOAD_KEYS = {
         "actor_count",
         "actor_registry_actor_count",
+        "actor_registry_failed_request_count",
         "actor_registry_missing_aabb_count",
         "actor_registry_missing_transform_count",
         "actor_registry_readiness_status",
@@ -7964,8 +7967,23 @@ class AgentRuntime:
 
     def _publish_provider_readiness(self, room_id: str, *, plan_id: str = "") -> dict[str, Any]:
         room = str(room_id or "default")
+        event_key = f"{room}:{str(plan_id or '')}"
+        state_provider_readiness = self._provider_readiness_from_state_room(self.state.room(room))
+        if event_key in self._provider_readiness_event_rooms and state_provider_readiness:
+            requested_event_count = sum(
+                1
+                for summary in state_provider_readiness.values()
+                if isinstance(summary, Mapping) and bool(summary.get("requested"))
+            )
+            return {
+                "persisted": True,
+                "reason": "already_published",
+                "event_count": requested_event_count,
+            }
         provider_readiness = self._safe_provider_summary(self._provider_summary)
-        readiness_summary = self._provider_readiness_summary(self._provider_summary)
+        if not provider_readiness:
+            provider_readiness = state_provider_readiness
+        readiness_summary = self._provider_readiness_summary(provider_readiness)
         graph = ToolCallGraph(
             graph_id=_id("graph-provider-readiness-publish"),
             plan_id=str(plan_id or "").strip() or "room-provider-readiness",
@@ -8009,12 +8027,11 @@ class AgentRuntime:
         )
         if not applied:
             return {"persisted": False, "reason": reason, "event_count": 0}
-        event_key = f"{room}:{str(plan_id or '')}"
         if event_key in self._provider_readiness_event_rooms:
             return {"persisted": True, "reason": reason, "event_count": 0}
         self._provider_readiness_event_rooms.add(event_key)
         event_count = 0
-        for provider_key, summary in self._provider_summary.items():
+        for provider_key, summary in provider_readiness.items():
             if not isinstance(summary, dict) or not summary.get("requested"):
                 continue
             display_key = self._provider_display_name(provider_key)
@@ -8097,7 +8114,6 @@ class AgentRuntime:
                     provider_status=status,
                 )
         readiness_publish = self._publish_provider_readiness(room, plan_id=active_plan_id)
-        readiness_summary = self._provider_readiness_summary(self._provider_summary)
         provider_readiness_from_state = self._provider_readiness_from_state_room(self.state.room(room))
         provider_readiness_summary = self._provider_readiness_summary(provider_readiness_from_state)
         engine_write_readiness_summary = self._engine_write_readiness_summary(provider_readiness_from_state)
@@ -8127,8 +8143,8 @@ class AgentRuntime:
             "external_plan_id": str(external_plan_id or ""),
             "readiness_published": bool(safe_readiness_publish.get("persisted")),
             "readiness_publish": safe_readiness_publish,
-            "provider_summary": self._safe_provider_summary(self._provider_summary),
-            "provider_readiness_summary": readiness_summary,
+            "provider_summary": provider_readiness_from_state,
+            "provider_readiness_summary": provider_readiness_summary,
             "engine_write_readiness_summary": engine_write_readiness_summary,
             "engine_write_summary": self._engine_write_replay_summary(replay_entries),
             "engine_write_boundary_summary": self._engine_write_boundary_summary_for_plan(
@@ -8142,21 +8158,27 @@ class AgentRuntime:
                 limit=5,
             ),
         }
-        self.operation_log.append(
-            "runtime_provider_status_queried",
-            room_id=room,
-            plan_id=active_plan_id,
-            payload={
-                "provider_count": len(self._provider_summary),
-                "external_plan_id": str(external_plan_id or ""),
-                "recorded": True,
-                "readiness_channel_count": int(readiness_summary.get("channel_count") or 0),
-                "readiness_requested_count": int(readiness_summary.get("requested_count") or 0),
-                "readiness_enabled_count": int(readiness_summary.get("enabled_count") or 0),
-                "readiness_unavailable_count": int(readiness_summary.get("unavailable_count") or 0),
-                "readiness_status_counts": dict(readiness_summary.get("status_counts") or {}),
-            },
+        duplicate_room_readiness_query = (
+            str(readiness_publish.get("reason") or "") == "already_published"
+            and not active_plan_id
+            and not external_plan_id
         )
+        if not duplicate_room_readiness_query:
+            self.operation_log.append(
+                "runtime_provider_status_queried",
+                room_id=room,
+                plan_id=active_plan_id,
+                payload={
+                    "provider_count": len(provider_readiness_from_state),
+                    "external_plan_id": str(external_plan_id or ""),
+                    "recorded": True,
+                    "readiness_channel_count": int(provider_readiness_summary.get("channel_count") or 0),
+                    "readiness_requested_count": int(provider_readiness_summary.get("requested_count") or 0),
+                    "readiness_enabled_count": int(provider_readiness_summary.get("enabled_count") or 0),
+                    "readiness_unavailable_count": int(provider_readiness_summary.get("unavailable_count") or 0),
+                    "readiness_status_counts": dict(provider_readiness_summary.get("status_counts") or {}),
+                },
+            )
         return self._provider_status_snapshot_via_tool_graph(
             room_id=room,
             plan_id=active_plan_id,
@@ -17857,6 +17879,7 @@ class AgentRuntime:
         actor_registry_missing_transform_count = int(registry_state.get("missing_transform_count") or 0)
         actor_registry_missing_aabb_count = int(registry_state.get("missing_aabb_count") or 0)
         actor_registry_estimated_aabb_count = int(registry_state.get("estimated_actor_bounds_count") or 0)
+        actor_registry_failed_request_count = int(registry_state.get("failed_actor_request_count") or 0)
         scene_entity_engine_write_pending_f5_count = int(
             registry_state.get("engine_write_pending_f5_count") or 0
         )
@@ -17988,6 +18011,8 @@ class AgentRuntime:
             reasons.append("engine_write_bridge_failed")
         if actor_registry_incomplete:
             reasons.append("actor_registry_incomplete")
+        if actor_registry_failed_request_count:
+            reasons.append("actor_registry_failed_request")
         if worker_drain_failed_count:
             reasons.append("worker_drain_failed")
         if worker_drain_exception_count:
@@ -18096,6 +18121,7 @@ class AgentRuntime:
             "actor_registry_missing_transform_count": actor_registry_missing_transform_count,
             "actor_registry_missing_aabb_count": actor_registry_missing_aabb_count,
             "actor_registry_estimated_aabb_count": actor_registry_estimated_aabb_count,
+            "actor_registry_failed_request_count": actor_registry_failed_request_count,
             "worker_drain_failed_count": worker_drain_failed_count,
             "worker_drain_exception_count": worker_drain_exception_count,
             "worker_drain_status_failed_count": worker_drain_status_failed_count,
@@ -18874,7 +18900,7 @@ class AgentRuntime:
         failed_actor_requests = failed_actor_requests_for_plan()
         failed_actor_request_count = len(failed_actor_requests)
         if not actor_count:
-            readiness_status = "failed" if failed_actor_request_count else "no_actors"
+            readiness_status = "no_actors"
         elif missing_transform_count or missing_aabb_count:
             readiness_status = "partial"
         elif failed_actor_request_count:
@@ -20540,6 +20566,9 @@ class AgentRuntime:
                 "actor_registry_missing_aabb_count": int(
                     report_health_summary.get("actor_registry_missing_aabb_count") or 0
                 ),
+                "actor_registry_failed_request_count": int(
+                    report_health_summary.get("actor_registry_failed_request_count") or 0
+                ),
                 "entity_type_counts": AgentRuntime._safe_status_count_map(
                     scene_entity_registry.get("entity_type_counts")
                 ),
@@ -21864,7 +21893,8 @@ class AgentRuntime:
             for entry in sync_replay_entries
         ])
         runtime_event_replay_summary = self._runtime_event_replay_summary(sync_replay_entries)
-        resource_readiness_replay_summary = self._resource_readiness_replay_summary(sync_replay_entries)
+        resource_readiness_entries = self.operation_log.query(room_id=room_key, limit=50)
+        resource_readiness_replay_summary = self._resource_readiness_replay_summary(resource_readiness_entries)
         gm_summary_replay_summary = self._gm_summary_replay_summary(sync_replay_entries)
         safe_execution_replay_entries = [
             OperationLog._safe_entry(entry)
@@ -21973,7 +22003,12 @@ class AgentRuntime:
             engine_write_summary,
             engine_write_boundary_summary,
         )
-        engine_write_readiness_summary = self._engine_write_readiness_summary(self._provider_summary)
+        provider_readiness_from_state = (
+            self._provider_readiness_from_state_room(room)
+            or self._safe_provider_summary(self._provider_summary)
+        )
+        provider_readiness_summary = self._provider_readiness_summary(provider_readiness_from_state)
+        engine_write_readiness_summary = self._engine_write_readiness_summary(provider_readiness_from_state)
         layout_adjustment_summary = self._layout_adjustment_summary_for_plan(
             room,
             active_plan_id,
@@ -22118,8 +22153,8 @@ class AgentRuntime:
             "operation_count": int(operation_scope.get("entry_count") or 0),
             "operation_total_count": len(self.operation_log.entries()),
             "actor_count": len(scoped_actor_facts),
-            "provider_summary": self._safe_provider_summary(self._provider_summary),
-            "provider_readiness_summary": self._provider_readiness_summary(self._provider_summary),
+            "provider_summary": provider_readiness_from_state,
+            "provider_readiness_summary": provider_readiness_summary,
             "engine_write_readiness_summary": engine_write_readiness_summary,
             "engine_write_adapter_summary": engine_write_adapter_summary,
             "runtime_scene_flow_summary": runtime_scene_flow_summary,
@@ -23072,6 +23107,28 @@ class AgentRuntime:
                 "unavailable_count": int(latest_readiness_event.get("unavailable_count") or 0),
             },
         }
+        provider_readiness_summary = (
+            summary.get("provider_readiness_summary", {})
+            if isinstance(summary.get("provider_readiness_summary"), Mapping)
+            else {}
+        )
+        if (
+            int(resource_readiness_replay_digest.get("published_count") or 0) <= 0
+            and int(provider_readiness_summary.get("channel_count") or 0) > 0
+        ):
+            resource_readiness_replay_digest["published_count"] = 1
+            resource_readiness_replay_digest["publish_requested_total"] = int(
+                provider_readiness_summary.get("requested_count") or 0
+            )
+            resource_readiness_replay_digest["publish_enabled_total"] = int(
+                provider_readiness_summary.get("enabled_count") or 0
+            )
+            resource_readiness_replay_digest["publish_unavailable_total"] = int(
+                provider_readiness_summary.get("unavailable_count") or 0
+            )
+            resource_readiness_replay_digest["publish_status_counts"] = dict(
+                provider_readiness_summary.get("status_counts") or {}
+            )
         classification = (
             summary.get("classification_summary", {})
             if isinstance(summary.get("classification_summary"), Mapping)
