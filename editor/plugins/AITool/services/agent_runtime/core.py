@@ -6847,7 +6847,23 @@ class ToolCallGraphExecutor:
             return
         level = "info" if result.success and status == "succeeded" else "warning"
         title = "执行步骤已完成" if level == "info" else "执行步骤需要处理"
-        payload = {"status": status}
+        payload_status = status
+        if (
+            call.tool_name == "runtime.actor.import_batch"
+            and status == "succeeded"
+            and isinstance(result.payload, Mapping)
+        ):
+            try:
+                failed_count = int(result.payload.get("failed_count") or 0)
+                imported_count = int(result.payload.get("imported_count") or 0)
+                requested_count = int(result.payload.get("requested_count") or 0)
+            except (TypeError, ValueError):
+                failed_count = 0
+                imported_count = 0
+                requested_count = 0
+            if failed_count > 0 and imported_count > 0 and requested_count > imported_count:
+                payload_status = "partial"
+        payload = {"status": payload_status}
         if status == "retry_scheduled":
             payload["retry_count"] = call.retry_count
             payload["max_retries"] = call.max_retries
@@ -16100,6 +16116,8 @@ class AgentRuntime:
                 event_level = "info"
                 if partial_failure:
                     event_level = "warning"
+                    if call.tool_name == "runtime.actor.import_batch":
+                        payload["status"] = "partial"
                     if call.tool_name == "runtime.asset.image.prepare":
                         event_title = "图片参考部分准备完成"
                         event_message = "本批图片参考资源部分准备完成，缺失项会在后续资源摘要中标记。"

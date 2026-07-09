@@ -23638,7 +23638,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 "imported_count": 1,
                 "import_failure_code_counts": {"cpp_actor_import_failed": 1},
                 "requested_count": 2,
-                "status": "succeeded",
+                "status": "partial",
                 "total_batches": 1,
             },
         )
@@ -23656,7 +23656,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 "failed_count": 1,
                 "imported_count": 1,
                 "requested_count": 2,
-                "status": "succeeded",
+                "status": "partial",
             },
         )
         self.assertNotIn("model_path", str(import_messages[-1]))
@@ -23674,12 +23674,12 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                     "batch_index": 1,
                     "failed_count": 1,
                     "requested_count": 2,
-                    "status": "succeeded",
+                    "status": "partial",
                     "total_batches": 1,
                 }
             ],
             "requested_count": 2,
-            "status_counts": {"succeeded": 1},
+            "status_counts": {"partial": 1},
         }
         self.assertEqual(result["report"]["import_summary"], expected_import_summary)
         status_summary = runtime.status_summary("room-import-partial", plan_id=plan.plan_id)
