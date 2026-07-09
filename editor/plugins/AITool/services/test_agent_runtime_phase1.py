@@ -13746,6 +13746,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(queue_health["terminal_count"], 0)
         self.assertEqual(queue_health["queue_pressure"], 1.0)
         self.assertEqual(queue_health["queue_status_counts"], {"queued": len(queued["graphs"])})
+        self.assertEqual(queue_health["missing_batch_graph_ref_count"], 0)
+        self.assertEqual(queue_health["missing_graph_fact_count"], 0)
+        self.assertEqual(queue_health["orphan_queue_item_count"], 0)
         self.assertTrue(all("graph_id" not in item for item in queue_health["latest_queue"]))
         report = runtime.generate_report("room-enqueue-only", plan_id=plan.plan_id)
         report_queue_health = report["tool_queue_health_summary"]
@@ -13756,6 +13759,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             "terminal_count",
             "queue_pressure",
             "queue_status_counts",
+            "missing_batch_graph_ref_count",
+            "missing_graph_fact_count",
+            "orphan_queue_item_count",
         ):
             self.assertEqual(report_queue_health[field], queue_health[field])
         self.assertNotIn("graph_id", str(report["tool_queue_health_summary"]))
@@ -13772,6 +13778,43 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
 
         self.assertEqual(drained["drained_count"], len(queued["graphs"]))
         self.assertGreaterEqual(len(runtime.query_state("room-enqueue-only")["room"]["actors"]), 1)
+
+    def test_tool_queue_health_flags_batch_graph_consistency_breaks(self) -> None:
+        room = {
+            "batch_plans": {
+                "batch-missing-ref": {"plan_id": "plan-queue-break", "batch_id": "batch-missing-ref"},
+                "batch-missing-graph": {
+                    "plan_id": "plan-queue-break",
+                    "batch_id": "batch-missing-graph",
+                    "tool_graph_id": "graph-missing",
+                },
+            },
+            "tool_graph_queue": {
+                "graph-orphan": {
+                    "plan_id": "plan-queue-break",
+                    "batch_id": "batch-orphan",
+                    "graph_id": "graph-orphan",
+                    "status": "queued",
+                },
+            },
+            "tool_graphs": {},
+        }
+
+        queue_health = AgentRuntime._tool_queue_health_summary_for_plan(room, "plan-queue-break")
+
+        self.assertEqual(queue_health["missing_batch_graph_ref_count"], 1)
+        self.assertEqual(queue_health["missing_graph_fact_count"], 2)
+        self.assertEqual(queue_health["orphan_queue_item_count"], 1)
+        health = AgentRuntime._report_health_summary(
+            batch_resource_flow_summary={},
+            import_summary={},
+            sync_health_digest={},
+            tool_queue_health_summary=queue_health,
+        )
+        self.assertEqual(health["status"], "needs_attention")
+        self.assertIn("batch_missing_tool_graph", health["reasons"])
+        self.assertIn("tool_graph_fact_missing", health["reasons"])
+        self.assertIn("tool_graph_queue_orphan", health["reasons"])
 
     def test_missing_queued_tool_graph_becomes_terminal_failed_fact(self) -> None:
         runtime = AgentRuntime()

@@ -17746,6 +17746,7 @@ class AgentRuntime:
         engine_write_summary: Mapping[str, Any] | None = None,
         scene_entity_registry: Mapping[str, Any] | None = None,
         worker_drain_replay_summary: Mapping[str, Any] | None = None,
+        tool_queue_health_summary: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         batch_flow = dict(batch_resource_flow_summary or {})
         import_state = dict(import_summary or {})
@@ -17755,6 +17756,7 @@ class AgentRuntime:
         engine_write_state = dict(engine_write_summary or {})
         registry_state = dict(scene_entity_registry or {})
         worker_drain_state = dict(worker_drain_replay_summary or {})
+        queue_health_state = dict(tool_queue_health_summary or {})
         batch_failed_count = int(batch_flow.get("failed_count") or 0)
         batch_partial_count = int(batch_flow.get("partial_count") or 0)
         batch_waiting_count = int(batch_flow.get("waiting_count") or 0)
@@ -17844,6 +17846,9 @@ class AgentRuntime:
         worker_drain_plan_resolve_failed_count = int(
             worker_drain_state.get("plan_resolve_failed_count") or 0
         )
+        missing_batch_graph_ref_count = int(queue_health_state.get("missing_batch_graph_ref_count") or 0)
+        missing_graph_fact_count = int(queue_health_state.get("missing_graph_fact_count") or 0)
+        orphan_queue_item_count = int(queue_health_state.get("orphan_queue_item_count") or 0)
         actor_registry_incomplete = (
             import_imported_count > 0
             and (
@@ -17950,6 +17955,12 @@ class AgentRuntime:
             reasons.append("worker_drain_status_failed")
         if worker_drain_plan_resolve_failed_count:
             reasons.append("worker_drain_plan_resolve_failed")
+        if missing_batch_graph_ref_count:
+            reasons.append("batch_missing_tool_graph")
+        if missing_graph_fact_count:
+            reasons.append("tool_graph_fact_missing")
+        if orphan_queue_item_count:
+            reasons.append("tool_graph_queue_orphan")
         if batch_waiting_count:
             reasons.append("batch_waiting")
         if resource_phase_waiting_count:
@@ -17990,6 +18001,9 @@ class AgentRuntime:
             or worker_drain_exception_count
             or worker_drain_status_failed_count
             or worker_drain_plan_resolve_failed_count
+            or missing_batch_graph_ref_count
+            or missing_graph_fact_count
+            or orphan_queue_item_count
         ):
             status = "needs_attention"
         elif batch_flow.get("batch_count") or import_requested_count or sync_status:
@@ -18045,6 +18059,9 @@ class AgentRuntime:
             "worker_drain_exception_count": worker_drain_exception_count,
             "worker_drain_status_failed_count": worker_drain_status_failed_count,
             "worker_drain_plan_resolve_failed_count": worker_drain_plan_resolve_failed_count,
+            "missing_batch_graph_ref_count": missing_batch_graph_ref_count,
+            "missing_graph_fact_count": missing_graph_fact_count,
+            "orphan_queue_item_count": orphan_queue_item_count,
             "asset_incomplete_count": asset_incomplete_count,
             "asset_failed_count": asset_failed_count,
             "asset_transferring_count": asset_transferring_count,
@@ -19992,6 +20009,7 @@ class AgentRuntime:
             worker_drain_replay_summary=dict(
                 operation_replay_summary.get("worker_drain_replay_summary") or {}
             ),
+            tool_queue_health_summary=tool_queue_health_summary,
         )
         scoped_actor_facts = self._actor_facts_for_plan(room, active_plan_id, batch_id=batch_id)
         intervention_digest = self._intervention_digest_for_report(
@@ -20611,6 +20629,11 @@ class AgentRuntime:
             str(plan_id or ""),
             batch_id=str(batch_id or ""),
         )
+        tool_queue_health_summary = self._tool_queue_health_summary_for_plan(
+            room_state,
+            str(plan_id or ""),
+            batch_id=str(batch_id or ""),
+        )
         message_delivery_summary = self._message_delivery_replay_summary(entries)
         engine_write_summary = self._engine_write_replay_summary(raw_entries)
         worker_drain_replay_summary = self._worker_drain_replay_summary(entries)
@@ -20640,6 +20663,7 @@ class AgentRuntime:
                 batch_id=str(batch_id or ""),
             ),
             worker_drain_replay_summary=worker_drain_replay_summary,
+            tool_queue_health_summary=tool_queue_health_summary,
         )
         return {
             "entry_count": int(replay.get("entry_count") or 0),
@@ -20649,6 +20673,7 @@ class AgentRuntime:
             "import_summary": import_summary,
             "asset_transfer_summary": asset_transfer_summary,
             "engine_write_boundary_summary": engine_write_boundary_summary,
+            "tool_queue_health_summary": tool_queue_health_summary,
             "engine_write_summary": engine_write_summary,
             "report_health_summary": report_health_summary,
             "planning_context_summary": self._planning_context_replay_summary(entries),
@@ -21877,6 +21902,11 @@ class AgentRuntime:
             active_plan_id,
             batch_id=active_batch_id,
         )
+        tool_queue_health_summary = self._tool_queue_health_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
         semantic_status_by_batch = dict(batch_resource_flow_summary.get("status_by_batch_id") or {})
         report_health_summary = self._report_health_summary(
             batch_resource_flow_summary=batch_resource_flow_summary,
@@ -21887,6 +21917,7 @@ class AgentRuntime:
             engine_write_summary=engine_write_summary,
             scene_entity_registry=scene_entity_registry,
             worker_drain_replay_summary=worker_drain_replay_summary,
+            tool_queue_health_summary=tool_queue_health_summary,
         )
         context_type_counts: dict[str, int] = {}
         speaker_type_counts: dict[str, int] = {}
@@ -23436,6 +23467,11 @@ class AgentRuntime:
             str(plan_id or ""),
             batch_id=str(batch_id or ""),
         )
+        replay["tool_queue_health_summary"] = self._tool_queue_health_summary_for_plan(
+            room_state,
+            str(plan_id or ""),
+            batch_id=str(batch_id or ""),
+        )
         replay["worker_drain_replay_summary"] = self._worker_drain_replay_summary(replay.get("entries", []))
         replay["report_health_summary"] = self._report_health_summary(
             batch_resource_flow_summary=dict(replay.get("batch_resource_flow_summary") or {}),
@@ -23459,6 +23495,7 @@ class AgentRuntime:
                 batch_id=str(batch_id or ""),
             ),
             worker_drain_replay_summary=dict(replay.get("worker_drain_replay_summary") or {}),
+            tool_queue_health_summary=dict(replay.get("tool_queue_health_summary") or {}),
         )
         replay["tool_execution_summary"] = self._tool_execution_replay_summary(replay.get("entries", []))
         replay["tool_graph_queue_summary"] = self._tool_graph_queue_replay_summary(replay.get("entries", []))
@@ -26787,6 +26824,28 @@ class AgentRuntime:
                     continue
                 node_status = str(node.get("status") or "unknown")
                 node_status_counts[node_status] = node_status_counts.get(node_status, 0) + 1
+        graph_ids = {
+            str(graph.get("graph_id") or "")
+            for graph in graphs
+            if str(graph.get("graph_id") or "")
+        }
+        queue_graph_ids = {
+            str(item.get("graph_id") or "")
+            for item in queue_items
+            if str(item.get("graph_id") or "")
+        }
+        batch_graph_ids = {
+            str(item.get("tool_graph_id") or "")
+            for item in batches
+            if str(item.get("tool_graph_id") or "")
+        }
+        missing_batch_graph_ref_count = len([
+            item for item in batches if not str(item.get("tool_graph_id") or "").strip()
+        ])
+        missing_graph_fact_count = len(
+            (batch_graph_ids | queue_graph_ids) - graph_ids
+        )
+        orphan_queue_item_count = len(queue_graph_ids - batch_graph_ids)
         queued_count = int(queue_status_counts.get("queued") or 0)
         running_count = int(queue_status_counts.get("running") or 0) + int(graph_status_counts.get("running") or 0)
         blocked_count = (
@@ -26823,6 +26882,9 @@ class AgentRuntime:
             "queue_status_counts": dict(sorted(queue_status_counts.items())),
             "graph_status_counts": dict(sorted(graph_status_counts.items())),
             "node_status_counts": dict(sorted(node_status_counts.items())),
+            "missing_batch_graph_ref_count": missing_batch_graph_ref_count,
+            "missing_graph_fact_count": missing_graph_fact_count,
+            "orphan_queue_item_count": orphan_queue_item_count,
             "latest_queue": latest_queue,
         }
 
@@ -27575,6 +27637,11 @@ class AgentRuntime:
             active_plan_id,
             batch_id=active_batch_id,
         )
+        tool_queue_health_summary = self._tool_queue_health_summary_for_plan(
+            room,
+            active_plan_id,
+            batch_id=active_batch_id,
+        )
         report_health_summary = self._report_health_summary(
             batch_resource_flow_summary=batch_resource_flow_summary,
             import_summary=import_summary,
@@ -27584,6 +27651,7 @@ class AgentRuntime:
             engine_write_summary=engine_write_summary,
             scene_entity_registry=scene_entity_registry,
             worker_drain_replay_summary=worker_drain_replay_summary,
+            tool_queue_health_summary=tool_queue_health_summary,
         )
         engine_write_adapter_summary = self._engine_write_adapter_summary(
             readiness_summary=engine_write_readiness_summary,
