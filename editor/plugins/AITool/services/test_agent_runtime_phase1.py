@@ -18027,6 +18027,17 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             "room-env-import-graph",
             plan_id=plan.plan_id,
         )["environment_component_summary"]
+        registry = runtime.status_summary(
+            "room-env-import-graph",
+            plan_id=plan.plan_id,
+        )["scene_entity_registry"]
+        registry_roles = {entity["semantic_role"]: entity for entity in registry["entities"]}
+        room_box_entity = registry_roles["__room_box"]
+        self.assertEqual(room_box_entity["entity_type"], "terrain")
+        self.assertEqual(room_box_entity["component_type"], "room_box")
+        self.assertEqual(room_box_entity["environment_component_type"], "room_box")
+        self.assertEqual(room_box_entity["component_id"], "component-room-box")
+        self.assertTrue(str(room_box_entity["actor_id"]).startswith("actor-"))
         self.assertEqual(environment_summary["import_event_count"], len(provider_calls))
         self.assertEqual(environment_summary["imported_count"], total_components)
         self.assertEqual(environment_summary["import_requested_count"], total_requested)

@@ -18935,6 +18935,8 @@ class AgentRuntime:
                     "model_ref": str(component.get("model_ref") or component.get("handler") or component_type),
                     "semantic_role": str(component.get("name") or component_id),
                     "entity_type": "terrain" if component_type in {"terrain", "room_floor", "room_box"} else component_type,
+                    "component_type": component_type,
+                    "environment_component_type": component_type,
                     "transform": transform_from(component),
                     "bounds": bounds,
                     "aabb": dict(bounds),
