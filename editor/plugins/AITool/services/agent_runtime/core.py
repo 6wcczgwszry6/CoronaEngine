@@ -5459,6 +5459,9 @@ class ToolCallGraphValidator:
         ":\\",
         ":/",
     )
+    _SAFE_GRAPH_FIELD_EXCEPTIONS = {
+        "requested_name",
+    }
 
     @staticmethod
     def _safe_graph_text(value: Any) -> str:
@@ -5471,6 +5474,8 @@ class ToolCallGraphValidator:
     @staticmethod
     def _is_blocked_graph_key(value: Any) -> bool:
         normalized = str(value or "").strip().lower()
+        if normalized in ToolCallGraphValidator._SAFE_GRAPH_FIELD_EXCEPTIONS:
+            return False
         if normalized in ToolCallGraphValidator._BLOCKED_FIELDS:
             return True
         return any(marker in normalized for marker in ToolCallGraphValidator._BLOCKED_FIELD_MARKERS)
@@ -5521,6 +5526,64 @@ class ToolCallGraphValidator:
         return safe
 
     @staticmethod
+    def _safe_tool_args_fact(args: Any, consumes: Any) -> dict[str, Any]:
+        if not isinstance(args, Mapping):
+            return {}
+        consumed_targets = {
+            str(target or "").strip()
+            for target in (consumes or {})
+            if ToolCallGraphValidator._is_safe_internal_token(target)
+        } if isinstance(consumes, Mapping) else set()
+        safe: dict[str, Any] = {}
+        for key, item in args.items():
+            normalized_key = str(key or "").strip()
+            if normalized_key in consumed_targets:
+                safe[normalized_key] = ToolCallGraphValidator._safe_runtime_fact_value(item)
+                continue
+            if ToolCallGraphValidator._is_blocked_graph_key(normalized_key):
+                continue
+            safe[normalized_key] = ToolCallGraphValidator._safe_graph_value(item)
+        return safe
+
+    @staticmethod
+    def _safe_runtime_fact_value(value: Any) -> Any:
+        if isinstance(value, str):
+            return ToolCallGraphValidator._safe_graph_text(value)
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        if isinstance(value, (list, tuple)):
+            return [ToolCallGraphValidator._safe_runtime_fact_value(item) for item in value]
+        if isinstance(value, Mapping):
+            safe: dict[str, Any] = {}
+            for key, item in value.items():
+                normalized_key = str(key or "").strip()
+                if normalized_key.lower() in ToolCallValidator._BLOCKED_RUNTIME_FACT_FIELDS:
+                    continue
+                safe[normalized_key] = ToolCallGraphValidator._safe_runtime_fact_value(item)
+            return safe
+        return ToolCallGraphValidator._safe_graph_text(value)
+
+    @staticmethod
+    def _validate_safe_tool_args_fact(args: Mapping[str, Any], consumes: Mapping[str, Any], *, context: str) -> None:
+        consumed_targets = {
+            str(target or "").strip()
+            for target in (consumes or {})
+            if ToolCallGraphValidator._is_safe_internal_token(target)
+        }
+        for field, value in args.items():
+            normalized_field = str(field or "").strip()
+            if normalized_field in consumed_targets:
+                ToolCallValidator._validate_runtime_fact_arg_tree(
+                    value,
+                    tool_name="tool_graph_fact",
+                    context=f"{context}.{normalized_field}",
+                )
+                continue
+            if ToolCallGraphValidator._is_blocked_graph_key(normalized_field):
+                raise ValueError(f"tool graph {context} cannot expose field: {field}")
+            ToolCallGraphValidator._validate_safe_graph_value(value, context=context)
+
+    @staticmethod
     def _validate_safe_consumes_fact(consumes: Mapping[str, Any], *, context: str) -> None:
         for target_arg, spec_raw in consumes.items():
             target = str(target_arg or "").strip()
@@ -5568,7 +5631,7 @@ class ToolCallGraphValidator:
                     continue
                 args = node.get("args")
                 if isinstance(args, dict):
-                    node["args"] = ToolCallGraphValidator._safe_graph_value(args)
+                    node["args"] = ToolCallGraphValidator._safe_tool_args_fact(args, node.get("consumes") or {})
                 consumes = node.get("consumes")
                 if isinstance(consumes, dict):
                     node["consumes"] = ToolCallGraphValidator._safe_consumes_fact(consumes)
@@ -5708,13 +5771,13 @@ class ToolCallGraphValidator:
             raise ValueError(f"tool graph node cannot target legacy workflow main control: {legacy_token}")
         if not isinstance(call.get("args"), dict):
             raise ValueError("tool graph node args must be a dict")
-        for field in call.get("args", {}).keys():
-            normalized_field = str(field or "").strip().lower()
-            if normalized_field in ToolCallGraphValidator._BLOCKED_FIELDS:
-                raise ValueError(f"tool graph node args cannot expose field: {field}")
-        ToolCallGraphValidator._validate_safe_graph_value(call.get("args") or {}, context="node args")
         if not isinstance(call.get("consumes"), dict):
             raise ValueError("tool graph node consumes must be a dict")
+        ToolCallGraphValidator._validate_safe_tool_args_fact(
+            call.get("args") or {},
+            call.get("consumes") or {},
+            context="node args",
+        )
         ToolCallGraphValidator._validate_safe_consumes_fact(call.get("consumes") or {}, context="node consumes")
         ToolCallGraphValidator._validate_consumes_fact(call.get("consumes") or {}, args=call.get("args") or {})
         if str(call.get("risk_level") or "") not in {risk.value for risk in RiskLevel}:
@@ -16359,7 +16422,11 @@ class AgentRuntime:
                 event_type = str(spec["success_type"])
                 if full_failure:
                     payload["status"] = "failed"
-                    event_type = str(spec["failure_type"])
+                    if call.tool_name not in {
+                        "runtime.asset.image.prepare",
+                        "runtime.asset.model.prepare",
+                    }:
+                        event_type = str(spec["failure_type"])
                     event_title = str(spec["failure_title"])
                     event_message = str(spec["failure_message"])
                     event_level = "warning"
