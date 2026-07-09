@@ -2985,6 +2985,7 @@ def _promote_model_resource_import_paths(resources: Mapping[str, Any]) -> dict[s
 def _promote_adapter_model_resource_handles(resources: Mapping[str, Any]) -> dict[str, Any]:
     promoted: dict[str, Any] = {}
     unavailable_statuses = {"failed", "failure", "error", "missing", "pending", "queued", "running"}
+    adapter_markers = ("adapter", "provider")
     for index, (key, raw_entry) in enumerate(dict(resources or {}).items(), start=1):
         if not isinstance(raw_entry, Mapping):
             promoted[key] = raw_entry
@@ -2992,6 +2993,10 @@ def _promote_adapter_model_resource_handles(resources: Mapping[str, Any]) -> dic
         entry = dict(raw_entry)
         status = str(entry.get("status") or "prepared").strip().lower()
         if status not in unavailable_statuses:
+            adapter_signal = " ".join(
+                str(entry.get(field) or "").strip().lower()
+                for field in ("source", "mode", "status")
+            )
             metadata = entry.get("metadata") if isinstance(entry.get("metadata"), Mapping) else {}
             import_path = (
                 entry.get("local_path")
@@ -3003,7 +3008,7 @@ def _promote_adapter_model_resource_handles(resources: Mapping[str, Any]) -> dic
                 or metadata.get("path")
                 or metadata.get("model_folder")
             )
-            if not str(import_path or "").strip():
+            if not str(import_path or "").strip() and any(marker in adapter_signal for marker in adapter_markers):
                 safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(key or f"resource_{index}")).strip("._-")
                 safe_key = safe_key or f"resource_{index}"
                 entry["local_path"] = f"runtime_adapter_import_handle_{safe_key}.glb"
