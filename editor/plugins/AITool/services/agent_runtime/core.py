@@ -15071,6 +15071,7 @@ class AgentRuntime:
             "graphs": graph_results,
             "report": report,
             "queued": queued,
+            "drain": self._safe_drain_result_for_user(drain_result),
         }
 
     def _existing_execution_result_from_runtime_state(self, plan: ScenePlan) -> dict[str, Any]:

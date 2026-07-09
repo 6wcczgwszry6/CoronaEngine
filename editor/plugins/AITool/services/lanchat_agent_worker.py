@@ -2262,6 +2262,12 @@ class LANChatAgentWorker:
             f"{int(evidence.get('tool_queue_blocked_count') or 0)}，"
             f"pressure {int(float(evidence.get('tool_queue_pressure') or 0.0) * 100)}%"
         )
+        drain_reason = str(evidence.get("drain_reason") or "").strip()
+        drain_text = (
+            f"Drain：{str(evidence.get('drain_status') or 'unknown')}，"
+            f"drained {int(evidence.get('drain_drained_count') or 0)}"
+            + (f"，reason {drain_reason}" if drain_reason else "")
+        )
         batch_tooling_text = (
             f"BatchTooling：facts/created/prioritized/merged/absorbed "
             f"{int(evidence.get('batch_tooling_fact_count') or 0)}/"
@@ -2298,13 +2304,13 @@ class LANChatAgentWorker:
             return (
                 f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 执行未完成，"
                 f"批次 {len(batches)} 个，执行图 {graph_status_text}，报告健康：{health_text}。"
-                f"{registry_text}；{classification_text}；{flow_text}；{tool_state_text}；{guard_text}；{queue_text}；"
+                f"{registry_text}；{classification_text}；{flow_text}；{tool_state_text}；{guard_text}；{queue_text}；{drain_text}；"
                 f"{batch_tooling_text}；{report_source_text}；{engine_text}。"
             )
         return (
             f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 已执行 Runtime 批次 {len(batches)} 个，"
             f"执行图 {graph_status_text}，报告健康：{health_text}。"
-            f"{registry_text}；{classification_text}；{flow_text}；{tool_state_text}；{guard_text}；{queue_text}；"
+            f"{registry_text}；{classification_text}；{flow_text}；{tool_state_text}；{guard_text}；{queue_text}；{drain_text}；"
             f"{batch_tooling_text}；{report_source_text}；{engine_text}。"
         )
 
@@ -2369,6 +2375,7 @@ class LANChatAgentWorker:
         sync_summary = dict(replay.get("sync_replay_summary") or {})
         asset_transfer_summary = dict(replay.get("asset_transfer_replay_summary") or {})
         batch_execution_summary = dict(replay.get("batch_execution_summary") or {})
+        drain_result = result.get("drain") if isinstance(result.get("drain"), dict) else {}
         graphs = LANChatAgentWorker._agent_runtime_graphs_from_result(result)
         graph_statuses = [str(graph.get("status") or "") for graph in graphs if isinstance(graph, dict)]
         entity_type_counts = dict(registry.get("entity_type_counts") or {})
@@ -2422,6 +2429,9 @@ class LANChatAgentWorker:
             "tool_queue_terminal_count": int(tool_queue_health.get("terminal_count") or 0),
             "tool_queue_active_count": int(tool_queue_health.get("active_count") or 0),
             "tool_queue_pressure": float(tool_queue_health.get("queue_pressure") or 0.0),
+            "drain_status": str(drain_result.get("status") or ""),
+            "drain_reason": str(drain_result.get("reason") or ""),
+            "drain_drained_count": int(drain_result.get("drained_count") or 0),
             "batch_tooling_fact_count": int(batch_tooling.get("fact_count") or 0),
             "batch_tooling_created_batch_fact_count": int(batch_tooling.get("created_batch_fact_count") or 0),
             "batch_tooling_created_batch_count": int(batch_tooling.get("created_batch_count") or 0),
@@ -2481,6 +2491,7 @@ class LANChatAgentWorker:
             "operations=%s operation_total=%s state_source=%s engine_boundary=%s engine_imports=%s "
             "guard=block:%s,write:%s,system:%s,confirm_high:%s,confirm_write:%s "
             "queue=total:%s,queued:%s,running:%s,active:%s,block:%s,pressure:%s "
+            "drain=status:%s,drained:%s,reason:%s "
             "batch_tooling=facts:%s,created:%s,prioritized:%s,merged:%s,absorbed:%s "
             "engine_bridge=%s/%s/%s engine_statuses=%s engine_sources=%s "
             "import_failures=%s env_import_failures=%s bridge_errors=%s "
@@ -2517,6 +2528,9 @@ class LANChatAgentWorker:
             summary.get("tool_queue_active_count", 0),
             summary.get("tool_queue_blocked_count", 0),
             summary.get("tool_queue_pressure", 0.0),
+            summary.get("drain_status", ""),
+            summary.get("drain_drained_count", 0),
+            _trace_preview(summary.get("drain_reason", ""), limit=80),
             summary.get("batch_tooling_fact_count", 0),
             summary.get("batch_tooling_created_batch_count", 0),
             summary.get("batch_tooling_prioritized_item_count", 0),

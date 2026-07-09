@@ -10047,7 +10047,12 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                         "completed_count": 1,
                     },
                 },
-            }
+            },
+            "drain": {
+                "status": "drained",
+                "drained_count": 1,
+                "graphs": [{"graph_id": "graph-single", "status": "completed"}],
+            },
         }
         reply = LANChatAgentWorker._format_agent_runtime_execution_reply(result)
         evidence = LANChatAgentWorker._agent_runtime_evidence_summary(result)
@@ -10073,6 +10078,8 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertIn("Queue", reply)
         self.assertIn("total/queued/running/active/block 2/0/0/0/0", reply)
         self.assertIn("pressure 0%", reply)
+        self.assertIn("Drain：drained", reply)
+        self.assertIn("drained 1", reply)
         self.assertIn("BatchTooling", reply)
         self.assertIn("facts/created/prioritized/merged/absorbed 4/1/3/2/2", reply)
         self.assertIn("ReportSource", reply)
@@ -10108,6 +10115,9 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(evidence["tool_queue_terminal_count"], 2)
         self.assertEqual(evidence["tool_queue_active_count"], 0)
         self.assertEqual(evidence["tool_queue_pressure"], 0.0)
+        self.assertEqual(evidence["drain_status"], "drained")
+        self.assertEqual(evidence["drain_drained_count"], 1)
+        self.assertEqual(evidence["drain_reason"], "")
         self.assertEqual(evidence["batch_tooling_fact_count"], 4)
         self.assertEqual(evidence["batch_tooling_created_batch_fact_count"], 1)
         self.assertEqual(evidence["batch_tooling_created_batch_count"], 1)

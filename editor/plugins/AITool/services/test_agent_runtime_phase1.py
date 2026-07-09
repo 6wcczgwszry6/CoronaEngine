@@ -11750,6 +11750,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
 
         state = runtime.query_state("room-snapshot-placement")["room"]
         self.assertEqual(result["graphs"][0]["status"], "completed")
+        self.assertEqual(result["drain"]["status"], "drained")
+        self.assertEqual(result["drain"]["drained_count"], 1)
+        self.assertEqual(result["drain"]["graphs"][0]["status"], "completed")
         batch_id = result["batches"][0]["batch_id"]
         placement = state["placement_proposals"][batch_id]["box"]
         self.assertTrue(placement["observed_actor_avoidance"])
