@@ -2496,6 +2496,12 @@ def _first_supported_mesh(path: Any) -> Any:
             for child in sorted(candidate.iterdir()):
                 if child.is_file() and child.suffix.lower() in supported:
                     return child
+            for child in sorted(candidate.rglob("*")):
+                try:
+                    if child.is_file() and child.suffix.lower() in supported:
+                        return child
+                except OSError:
+                    continue
     except OSError:
         return None
     return None

@@ -15218,6 +15218,31 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(resources["火把"]["status"], "ready")
         self.assertEqual(resources["火把"]["local_path"], str(mesh_path))
 
+    def test_hunyuan_model_provider_resolves_nested_model_folder_mesh_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "runtime_nested_chest"
+            nested_dir = model_dir / "mesh" / "export"
+            nested_dir.mkdir(parents=True)
+            mesh_path = nested_dir / "base.glb"
+            mesh_path.write_bytes(b"glb")
+
+            model_provider = make_model_resource_provider(
+                model_tool=lambda payload: {
+                    "metadata": {
+                        "model_folder": str(model_dir),
+                        "has_mesh_pending": True,
+                        "mesh_download_status": "scheduled",
+                    }
+                }
+            )
+            resources = model_provider({
+                "batch_id": "batch-nested-model-folder",
+                "model_items": ["藏宝箱"],
+            })
+
+        self.assertEqual(resources["藏宝箱"]["status"], "ready")
+        self.assertEqual(resources["藏宝箱"]["local_path"], str(mesh_path))
+
     def test_hunyuan_model_provider_does_not_mark_visible_empty_model_folder_ready(self) -> None:
         model_dir = Path("C:/runtime_tests/runtime_empty")
         with patch.dict(
