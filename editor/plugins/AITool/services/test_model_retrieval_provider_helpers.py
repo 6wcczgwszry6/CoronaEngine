@@ -4,6 +4,7 @@ import sys
 import types
 import unittest
 import importlib.util
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -22,6 +23,20 @@ _SPEC = importlib.util.spec_from_file_location("model_retrieval_workflow_helpers
 assert _SPEC is not None and _SPEC.loader is not None
 helpers = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(helpers)
+
+_MODEL_PROVIDER_PATH = (
+    _AITOOL_ROOT
+    / "cai_extensions"
+    / "agent"
+    / "model_provider.py"
+)
+_MODEL_PROVIDER_SPEC = importlib.util.spec_from_file_location(
+    "agent_model_provider_under_test",
+    _MODEL_PROVIDER_PATH,
+)
+assert _MODEL_PROVIDER_SPEC is not None and _MODEL_PROVIDER_SPEC.loader is not None
+model_provider = importlib.util.module_from_spec(_MODEL_PROVIDER_SPEC)
+_MODEL_PROVIDER_SPEC.loader.exec_module(model_provider)
 
 
 class ModelRetrievalProviderHelperTests(unittest.TestCase):
@@ -54,6 +69,18 @@ class ModelRetrievalProviderHelperTests(unittest.TestCase):
         helpers.get_tool = lambda name: object()
 
         self.assertIsNone(helpers.get_3d_generate_tool())
+
+    def test_agent_model_provider_accepts_dict_hunyuan_settings(self) -> None:
+        sentinel_tool = object()
+        config_module = types.ModuleType("Quasar.ai_config.ai_config")
+        config_module.get_ai_config = lambda: types.SimpleNamespace(
+            hunyuan3d={"enable": True, "api_keys": ["test-key"]},
+        )
+        provider = model_provider.ModelProvider()
+        provider._get_tool = lambda name: sentinel_tool if name == "hunyuan_generate_3d" else None
+
+        with patch.dict("sys.modules", {"Quasar.ai_config.ai_config": config_module}):
+            self.assertIs(provider._get_3d_generate_tool(), sentinel_tool)
 
 
 if __name__ == "__main__":

@@ -44,6 +44,12 @@ def _with_generation_prompt_guardrail(prompt: str, name: str = "") -> str:
     return f"{base}. {_GENERATION_PROMPT_GUARDRAIL}."
 
 
+def _config_get(config: Any, key: str, default: Any = None) -> Any:
+    if isinstance(config, dict):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
 def _resolve_model_file(path: str) -> str:
     """从目录或文件路径中提取第一个支持的 3D 模型文件。"""
     path_text = str(path or "").strip()
@@ -324,8 +330,8 @@ class ModelProvider:
         try:
             from Quasar.ai_config.ai_config import get_ai_config
             config = get_ai_config()
-            hunyuan_cfg = getattr(config, 'hunyuan3d', None)
-            if hunyuan_cfg is not None and getattr(hunyuan_cfg, 'enable', False):
+            hunyuan_cfg = _config_get(config, 'hunyuan3d', None)
+            if hunyuan_cfg is not None and bool(_config_get(hunyuan_cfg, 'enable', False)):
                 tool = self._get_tool("hunyuan_generate_3d")
                 if tool:
                     return tool
