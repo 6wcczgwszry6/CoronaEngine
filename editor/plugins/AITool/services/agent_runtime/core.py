@@ -3456,6 +3456,27 @@ class RuntimeState:
 
         target = self.room(patch.room_id)
         for key, value in patch.changes.items():
+            if str(key) == "actors" and isinstance(value, dict) and isinstance(target.get(key), dict):
+                for actor_id, incoming in value.items():
+                    existing = target[key].get(actor_id)
+                    if not isinstance(existing, Mapping) or not isinstance(incoming, Mapping):
+                        continue
+                    existing_batch_id = str(existing.get("batch_id") or "").strip()
+                    incoming_batch_id = str(incoming.get("batch_id") or "").strip()
+                    if not existing_batch_id or not incoming_batch_id or existing_batch_id == incoming_batch_id:
+                        continue
+                    conflict_id = _id("state-conflict")
+                    target.setdefault("state_patch_conflicts", {})[conflict_id] = {
+                        "conflict_id": conflict_id,
+                        "room_id": str(patch.room_id or ""),
+                        "actor_id": str(actor_id or ""),
+                        "existing_batch_id": existing_batch_id,
+                        "incoming_batch_id": incoming_batch_id,
+                        "change_keys": ["actors"],
+                        "operation_count": 1,
+                        "status": "needs_reconcile",
+                        "source": "actor_identity_collision",
+                    }
             if isinstance(value, dict) and isinstance(target.get(key), dict):
                 target[key].update(value)
             elif isinstance(value, list) and isinstance(target.get(key), list):

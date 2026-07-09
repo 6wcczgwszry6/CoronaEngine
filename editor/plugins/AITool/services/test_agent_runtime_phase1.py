@@ -1670,6 +1670,72 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsafe text"):
             ReviewAdvisoryProposalValidator.validate(unsafe_text)
 
+    def test_runtime_state_records_cross_batch_actor_identity_collision(self) -> None:
+        state = RuntimeState()
+        ok, reason = state.apply_patch(
+            StatePatch(
+                room_id="room-actor-collision",
+                changes={
+                    "actors": {
+                        "actor-duplicate": {
+                            "actor_id": "actor-duplicate",
+                            "name": "Chest",
+                            "batch_id": "batch-1",
+                        }
+                    }
+                },
+                expected_version=state.version,
+            )
+        )
+        self.assertTrue(ok, reason)
+
+        ok, reason = state.apply_patch(
+            StatePatch(
+                room_id="room-actor-collision",
+                changes={
+                    "actors": {
+                        "actor-duplicate": {
+                            "actor_id": "actor-duplicate",
+                            "name": "Chest adjusted",
+                            "batch_id": "batch-1",
+                        }
+                    }
+                },
+                expected_version=state.version,
+            )
+        )
+        self.assertTrue(ok, reason)
+        self.assertEqual(state.room("room-actor-collision")["state_patch_conflicts"], {})
+
+        ok, reason = state.apply_patch(
+            StatePatch(
+                room_id="room-actor-collision",
+                changes={
+                    "actors": {
+                        "actor-duplicate": {
+                            "actor_id": "actor-duplicate",
+                            "name": "Other batch actor",
+                            "batch_id": "batch-2",
+                        }
+                    }
+                },
+                expected_version=state.version,
+            )
+        )
+        self.assertTrue(ok, reason)
+        conflicts = state.room("room-actor-collision")["state_patch_conflicts"]
+        self.assertEqual(len(conflicts), 1)
+        conflict = next(iter(conflicts.values()))
+        self.assertEqual(conflict["source"], "actor_identity_collision")
+        self.assertEqual(conflict["actor_id"], "actor-duplicate")
+        self.assertEqual(conflict["existing_batch_id"], "batch-1")
+        self.assertEqual(conflict["incoming_batch_id"], "batch-2")
+        self.assertEqual(conflict["status"], "needs_reconcile")
+        self.assertEqual(
+            state.room("room-actor-collision")["actors"]["actor-duplicate"]["batch_id"],
+            "batch-2",
+        )
+
     def test_state_patch_validator_rejects_bad_review_advisory_proposal_patch(self) -> None:
         state = RuntimeState()
         bad_proposal = {
