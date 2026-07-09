@@ -2397,25 +2397,10 @@ def _safe_environment_import_results(results: Any) -> list[dict[str, Any]]:
                     safe[field] = [round(float(part or 0.0), 4) for part in list(vector[:3])]
                 except (TypeError, ValueError):
                     pass
-        for field in ("aabb", "bounds", "scene_aabb"):
-            bounds = item.get(field)
-            if not isinstance(bounds, Mapping):
-                continue
-            min_value = bounds.get("min")
-            max_value = bounds.get("max")
-            if (
-                isinstance(min_value, (list, tuple))
-                and isinstance(max_value, (list, tuple))
-                and len(min_value) >= 3
-                and len(max_value) >= 3
-            ):
-                try:
-                    safe[field] = {
-                        "min": [round(float(part or 0.0), 4) for part in list(min_value[:3])],
-                        "max": [round(float(part or 0.0), 4) for part in list(max_value[:3])],
-                    }
-                except (TypeError, ValueError):
-                    pass
+        for field in ("aabb", "bounds", "scene_aabb", "world_aabb", "world_bounds"):
+            bounds = _safe_import_aabb(item.get(field))
+            if bounds is not None:
+                safe["aabb" if field in {"world_aabb", "world_bounds"} else field] = bounds
         if safe:
             safe_results.append(safe)
     return safe_results
@@ -2618,7 +2603,10 @@ def _normalize_environment_components_for_runtime(
         raw_component.setdefault("position", [0.0, 0.0, 0.0])
         raw_component.setdefault("rotation", [0.0, 0.0, 0.0])
         raw_component.setdefault("scale", _default_environment_component_scale(component_type))
-        if not any(isinstance(raw_component.get(field), (dict, list, tuple)) for field in ("aabb", "bounds", "scene_aabb")):
+        if not any(
+            isinstance(raw_component.get(field), (dict, list, tuple))
+            for field in ("aabb", "bounds", "scene_aabb", "world_aabb", "world_bounds")
+        ):
             raw_component["aabb"] = _default_environment_component_aabb(component_type)
         raw_component.setdefault("interaction_capability", _default_environment_interaction_capability(raw_component))
         raw_component.setdefault("gameplay_tags", _default_environment_component_tags(raw_component))

@@ -21574,7 +21574,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                         "scale": [6.0, 0.1, 6.0],
                         "bounds_ready": True,
                         "size": [6.0, 0.1, 6.0],
-                        "aabb": {"min": [-3.0, 0.0, -3.0], "max": [3.0, 0.1, 3.0]},
+                        "world_aabb": {"min": [-2.5, 0.0, -2.5], "max": [2.5, 0.1, 2.5]},
                     }
                 },
                 "environment_import_results": [
@@ -21589,7 +21589,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                         "position": [1.0, 0.0, 2.0],
                         "bounds_ready": True,
                         "size": [6.0, 0.1, 6.0],
-                        "aabb": {"min": [-3.0, 0.0, -3.0], "max": [3.0, 0.1, 3.0]},
+                        "world_aabb": {"min": [-2.5, 0.0, -2.5], "max": [2.5, 0.1, 2.5]},
                         "model_path": "E:/secret/terrain.glb",
                     }
                 ],
@@ -21639,7 +21639,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(component["native_name"], "__runtime_terrain_001")
         self.assertEqual(component["sync_status"], "engine_imported")
         self.assertEqual(component["sync_lifecycle_status"], "engine_imported")
-        self.assertEqual(component["aabb"]["min"], [-3.0, 0.0, -3.0])
+        self.assertNotIn("aabb", component)
+        self.assertEqual(component["world_aabb"]["min"], [-2.5, 0.0, -2.5])
         self.assertTrue(component["bounds_ready"])
         self.assertEqual(component["size"], [6.0, 0.1, 6.0])
 
@@ -21650,7 +21651,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(latest["sync_status"], "engine_imported")
         self.assertEqual(latest["sync_lifecycle_status"], "engine_imported")
         self.assertEqual(latest["position"], [1.0, 0.0, 2.0])
-        self.assertEqual(latest["aabb"]["min"], [-3.0, 0.0, -3.0])
+        self.assertEqual(latest["aabb"]["min"], [-2.5, 0.0, -2.5])
         self.assertTrue(latest["bounds_ready"])
         self.assertEqual(latest["size"], [6.0, 0.1, 6.0])
         self.assertNotIn("model_path", str(latest).lower())
@@ -21662,7 +21663,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(entity["native_name"], "__runtime_terrain_001")
         self.assertEqual(entity["sync_status"], "engine_imported")
         self.assertEqual(entity["sync_lifecycle_status"], "engine_imported")
-        self.assertTrue(entity["aabb"])
+        self.assertEqual(entity["aabb"]["min"], [-2.5, 0.0, -2.5])
         self.assertTrue(entity["bounds_ready"])
         self.assertEqual(entity["size"], [6.0, 0.1, 6.0])
 

@@ -3052,6 +3052,8 @@ class EnvironmentComponentValidator:
         "sync_status",
         "sky_mode",
         "terrain_profile",
+        "world_aabb",
+        "world_bounds",
     }
     _BLOCKED_FIELDS = {
         "api_key",
@@ -3146,7 +3148,7 @@ class EnvironmentComponentValidator:
         for field in ("position", "rotation", "scale", "size"):
             if field in component:
                 ActorFactValidator._require_vector3(component.get(field), f"environment component {field}")
-        for field in ("aabb", "bounds", "scene_aabb"):
+        for field in ("aabb", "bounds", "scene_aabb", "world_aabb", "world_bounds"):
             if field in component:
                 ActorFactValidator._require_aabb_bounds(component.get(field), f"environment component {field}")
         for field in EnvironmentComponentValidator._LIST_FIELDS:
@@ -6701,6 +6703,8 @@ class ToolCallGraphExecutor:
             "aabb",
             "bounds",
             "scene_aabb",
+            "world_aabb",
+            "world_bounds",
             "observed_position",
             "observed_deleted",
         }
@@ -6730,22 +6734,30 @@ class ToolCallGraphExecutor:
                         row[field] = [round(float(part or 0.0), 4) for part in list(raw[:3])]
                     except (TypeError, ValueError):
                         continue
-                elif field in {"aabb", "bounds", "scene_aabb"} and isinstance(raw, Mapping):
-                    min_value = raw.get("min")
-                    max_value = raw.get("max")
-                    if (
-                        isinstance(min_value, (list, tuple))
-                        and isinstance(max_value, (list, tuple))
-                        and len(min_value) >= 3
-                        and len(max_value) >= 3
-                    ):
+                elif field in {"aabb", "bounds", "scene_aabb", "world_aabb", "world_bounds"}:
+                    target_field = "aabb" if field in {"world_aabb", "world_bounds"} else field
+                    if isinstance(raw, Mapping):
+                        min_value = raw.get("min")
+                        max_value = raw.get("max")
+                        if (
+                            isinstance(min_value, (list, tuple))
+                            and isinstance(max_value, (list, tuple))
+                            and len(min_value) >= 3
+                            and len(max_value) >= 3
+                        ):
+                            try:
+                                row[target_field] = {
+                                    "min": [round(float(part or 0.0), 4) for part in list(min_value[:3])],
+                                    "max": [round(float(part or 0.0), 4) for part in list(max_value[:3])],
+                                }
+                            except (TypeError, ValueError):
+                                continue
+                    elif isinstance(raw, (list, tuple)) and len(raw) >= 6:
                         try:
-                            row[field] = {
-                                "min": [round(float(part or 0.0), 4) for part in list(min_value[:3])],
-                                "max": [round(float(part or 0.0), 4) for part in list(max_value[:3])],
-                            }
+                            numbers = [round(float(part or 0.0), 4) for part in list(raw[:6])]
                         except (TypeError, ValueError):
                             continue
+                        row[target_field] = {"min": numbers[:3], "max": numbers[3:6]}
                 elif isinstance(raw, str):
                     text = raw.strip()
                     if not text:
