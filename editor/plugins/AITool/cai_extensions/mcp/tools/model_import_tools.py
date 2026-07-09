@@ -70,6 +70,11 @@ def _pick_model_file(path: str) -> Optional[str]:
             for f in sorted(os.listdir(path)):
                 if f.lower().endswith(ext):
                     return os.path.join(path, f)
+        for root, _dirs, files in os.walk(path):
+            for ext in SUPPORTED_EXTS:
+                for f in sorted(files):
+                    if f.lower().endswith(ext):
+                        return os.path.join(root, f)
     return None
 
 
