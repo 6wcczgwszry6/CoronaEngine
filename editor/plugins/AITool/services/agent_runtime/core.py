@@ -7421,6 +7421,7 @@ class AgentRuntime:
         self._max_queued_tool_graphs = max(1, int(max_queued_tool_graphs))
         self._queued_tool_graphs: dict[str, ToolCallGraph] = {}
         self._pending_sync_event_patches: dict[str, dict[str, Any]] = {}
+        self._report_persist_tokens: set[str] = set()
         self.scene_plans: dict[str, ScenePlan] = {}
         self.batch_plans: dict[str, BatchPlan] = {}
         self.plan_patches: dict[str, PlanPatch] = {}
@@ -9222,6 +9223,15 @@ class AgentRuntime:
 
     def _persist_user_report_tool(self, call: ToolCall) -> ToolResult:
         room = str(call.args.get("room_id") or "default")
+        persist_token = str(call.args.get("_runtime_report_persist_token") or "").strip()
+        if not persist_token or persist_token not in self._report_persist_tokens:
+            return ToolResult(
+                False,
+                "unauthorized user report persist request",
+                error_code="unauthorized_persist",
+                user_visible_message="最终报告只能由 RuntimeState 与 OperationLog 生成后写入，已拒绝外部报告写入。",
+            )
+        self._report_persist_tokens.discard(persist_token)
         report = dict(call.args.get("report") or {})
         if not report:
             return ToolResult(
@@ -30268,6 +30278,8 @@ class AgentRuntime:
         room = str(room_id or "default")
         report_record = dict(report or {})
         graph_plan_id = str(plan_id or "").strip() or "room-report"
+        persist_token = _id("report-persist-token")
+        self._report_persist_tokens.add(persist_token)
         graph = ToolCallGraph(
             graph_id=_id("graph-user-report-persist"),
             plan_id=graph_plan_id,
@@ -30282,6 +30294,7 @@ class AgentRuntime:
                     "plan_id": str(plan_id or ""),
                     "batch_id": str(batch_id or ""),
                     "report": report_record,
+                    "_runtime_report_persist_token": persist_token,
                 },
                 risk_level=RiskLevel.LOW,
                 requires_write=True,

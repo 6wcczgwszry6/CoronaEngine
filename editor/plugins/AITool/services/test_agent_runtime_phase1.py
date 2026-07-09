@@ -12715,6 +12715,42 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(report_persist_graphs[0]["status"], "completed")
         ReportRecordValidator.validate(state_report)
 
+    def test_user_report_persist_tool_rejects_external_report_payloads(self) -> None:
+        runtime = AgentRuntime()
+        graph = ToolCallGraph(graph_id="graph-external-report-persist", plan_id="plan-external-report")
+        graph.add(
+            ToolCall(
+                tool_call_id="tool-external-report-persist",
+                tool_name="runtime.user_report.persist",
+                args={
+                    "room_id": "room-external-report",
+                    "plan_id": "plan-external-report",
+                    "report": {
+                        "room_id": "room-external-report",
+                        "plan_id": "plan-external-report",
+                        "operation_log_event": "forged",
+                        "operation_log_index": 999,
+                    },
+                },
+                risk_level=RiskLevel.LOW,
+                requires_write=True,
+                confirmed=True,
+            )
+        )
+
+        executed = ToolCallGraphExecutor(
+            registry=runtime.registry,
+            guard=runtime.guard,
+            state=runtime.state,
+            operation_log=runtime.operation_log,
+        ).execute(graph, room_id="room-external-report")
+
+        node = executed.nodes["tool-external-report-persist"]
+        self.assertEqual(executed.status, "failed")
+        self.assertEqual(node.status, ToolCallStatus.FAILED)
+        self.assertIn("unauthorized", node.error)
+        self.assertEqual(runtime.state.snapshot("room-external-report")["room"]["reports"], [])
+
     def test_generate_report_sanitizes_runtime_state_text_before_persisting(self) -> None:
         runtime = AgentRuntime()
         room = runtime.state.room("room-report-sanitize")
