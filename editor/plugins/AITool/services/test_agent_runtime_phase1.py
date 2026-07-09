@@ -14977,6 +14977,15 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 import_result["engine_write_boundary"]["provider_source"],
                 "runtime_actor_import_precheck",
             )
+            registry_entities = [
+                entity
+                for entity in result["report"]["scene_entity_registry"]["entities"]
+                if entity.get("entity_type") == "actor"
+            ]
+            self.assertTrue(registry_entities)
+            self.assertTrue(all(entity.get("model_ref") == "mesh.glb" for entity in registry_entities))
+            self.assertNotIn(str(model_dir), str(registry_entities))
+            self.assertNotIn(str(mesh_path), str(registry_entities))
 
     def test_empty_resource_provider_result_records_failed_resource_facts(self) -> None:
         runtime = AgentRuntime(image_resource_provider=lambda payload: {})

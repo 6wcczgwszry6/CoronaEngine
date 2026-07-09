@@ -18327,6 +18327,13 @@ class AgentRuntime:
                 if value:
                     if "://" not in value and ":\\" not in value and "/" not in value and "\\" not in value:
                         return value
+            for key in ("model_ref", "model_path", "local_path", "path"):
+                value = str(row.get(key) or "").strip()
+                if not value:
+                    continue
+                filename = re.split(r"[\\/]", value)[-1].strip()
+                if filename and "://" not in filename and ":\\" not in filename:
+                    return filename[:160]
             asset = assets.get(asset_id)
             if isinstance(asset, Mapping):
                 for key in ("model_ref", "model_id", "resource_id"):
@@ -18334,6 +18341,13 @@ class AgentRuntime:
                     if value:
                         if "://" not in value and ":\\" not in value and "/" not in value and "\\" not in value:
                             return value
+                for key in ("model_path", "local_path", "path"):
+                    value = str(asset.get(key) or "").strip()
+                    if not value:
+                        continue
+                    filename = re.split(r"[\\/]", value)[-1].strip()
+                    if filename and "://" not in filename and ":\\" not in filename:
+                        return filename[:160]
             return asset_id
 
         def list_field(row: Mapping[str, Any], key: str) -> list[Any]:
