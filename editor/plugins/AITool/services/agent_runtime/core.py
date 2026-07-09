@@ -7530,6 +7530,7 @@ class AgentRuntime:
         vlm_review_provider: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         layout_transform_provider: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         provider_diagnostics: Mapping[str, Any] | None = None,
+        require_engine_actor_import: bool = False,
         max_queued_tool_graphs: int = 32,
     ) -> None:
         self.state = state or RuntimeState()
@@ -7547,6 +7548,7 @@ class AgentRuntime:
         self._vlm_review_provider = vlm_review_provider
         self._layout_transform_provider = layout_transform_provider
         self._provider_diagnostics = self._normalize_provider_diagnostics(provider_diagnostics)
+        self._require_engine_actor_import = bool(require_engine_actor_import)
         self._provider_summary = self._build_provider_summary()
         self._provider_readiness_event_rooms: set[str] = set()
         self._max_queued_tool_graphs = max(1, int(max_queued_tool_graphs))
@@ -7670,7 +7672,11 @@ class AgentRuntime:
             "model_resource": self._provider_mode(self._model_resource_provider, "mock_provider_model"),
             "environment_component": self._provider_mode(self._environment_component_provider, "runtime_component_facts"),
             "environment_import": self._provider_mode(self._environment_import_provider, "runtime_state_only"),
-            "actor_import": self._provider_mode(self._actor_import_provider, "mock_actor_import"),
+            "actor_import": (
+                self._provider_mode(self._actor_import_provider, "engine_actor_import_required_unavailable")
+                if self._require_engine_actor_import
+                else self._provider_mode(self._actor_import_provider, "mock_actor_import")
+            ),
             "actor_delete": self._provider_mode(self._actor_delete_provider, "runtime_state_only"),
             "review": self._provider_mode(self._review_provider, "runtime_geometry_rules"),
             "vlm_review": self._provider_mode(self._vlm_review_provider, "disabled"),
@@ -30753,6 +30759,7 @@ class AgentRuntime:
             actor_import_provider=self._actor_import_provider,
             review_provider=self._review_provider,
             vlm_review_provider=self._vlm_review_provider,
+            require_engine_actor_import=self._require_engine_actor_import,
         )
         register_agent_runtime_scene_read_tools(self.registry, self._scene_snapshot_provider)
         if not self.registry.has("runtime.layout.apply_delta"):

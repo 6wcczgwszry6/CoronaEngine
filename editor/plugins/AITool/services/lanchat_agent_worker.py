@@ -487,6 +487,9 @@ class LANChatAgentWorker:
                 or self._agent_runtime_flags.can_use_engine_actor_import_provider()
             )
         )
+        kwargs["require_engine_actor_import"] = bool(
+            self._agent_runtime_flags.can_use_engine_actor_import_provider()
+        )
         if use_engine_actor_import_provider:
             try:
                 from .agent_runtime import make_engine_actor_import_provider

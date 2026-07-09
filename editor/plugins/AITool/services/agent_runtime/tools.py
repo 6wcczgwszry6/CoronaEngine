@@ -97,6 +97,7 @@ def register_agent_runtime_planning_tools(
     actor_import_provider: ResourceProvider | None = None,
     review_provider: ResourceProvider | None = None,
     vlm_review_provider: ResourceProvider | None = None,
+    require_engine_actor_import: bool = False,
 ) -> None:
     """Register no-side-effect planning/classification tools."""
 
@@ -478,7 +479,10 @@ def register_agent_runtime_planning_tools(
     if not registry.has("runtime.actor.import_batch"):
         registry.register(
             "runtime.actor.import_batch",
-            _make_actor_import_tool(actor_import_provider),
+            _make_actor_import_tool(
+                actor_import_provider,
+                require_engine_actor_import=bool(require_engine_actor_import),
+            ),
             category=ToolCategory.IMPORT,
             default_risk_level=RiskLevel.LOW,
             requires_write=True,
@@ -3586,7 +3590,11 @@ def _plan_actor_import_batch_tool(call: ToolCall) -> ToolResult:
     )
 
 
-def _make_actor_import_tool(provider: ResourceProvider | None) -> Callable[[ToolCall], ToolResult]:
+def _make_actor_import_tool(
+    provider: ResourceProvider | None,
+    *,
+    require_engine_actor_import: bool = False,
+) -> Callable[[ToolCall], ToolResult]:
     effective_provider = provider or _default_actor_import_provider
 
     def _tool(call: ToolCall) -> ToolResult:
@@ -3653,6 +3661,55 @@ def _make_actor_import_tool(provider: ResourceProvider | None) -> Callable[[Tool
                     "import_results": import_results,
                 },
                 user_visible_message="模型资源尚未准备完成，本批导入不会创建虚假的场景物体。",
+            )
+        if require_engine_actor_import and provider is None:
+            import_results = [
+                {
+                    "actor_name": name,
+                    "status": "failed",
+                    "failure_code": "engine_import_unavailable",
+                    "reason": "engine actor import provider unavailable",
+                }
+                for name in requested_items
+            ]
+            requested_count = len(requested_items)
+            import_result_fact = _actor_import_result_fact(
+                payload,
+                requested_count=requested_count,
+                imported_count=0,
+                failed_count=requested_count,
+                status="failed",
+                import_results=import_results,
+                engine_write_boundary=_actor_import_boundary_fact(
+                    {},
+                    requested_count=requested_count,
+                    imported_count=0,
+                    import_results=import_results,
+                    provider_source="engine_actor_import_provider",
+                ),
+            )
+            return ToolResult(
+                False,
+                "engine actor import provider unavailable; recorded failed import fact",
+                retryable=True,
+                error_code="engine_import_unavailable",
+                state_patch=StatePatch(
+                    room_id=room_id,
+                    changes={
+                        "custom_import_facts": {
+                            f"{payload['batch_id']}:actor_import_result": import_result_fact,
+                        },
+                    },
+                ),
+                payload={
+                    "actor_ids": [],
+                    "batch_id": payload["batch_id"],
+                    "requested_count": requested_count,
+                    "imported_count": 0,
+                    "failed_count": requested_count,
+                    "import_results": import_results,
+                },
+                user_visible_message="真实引擎导入通道不可用，本批不会创建虚假的场景物体。",
             )
         try:
             provider_result = dict(effective_provider(payload) or {})

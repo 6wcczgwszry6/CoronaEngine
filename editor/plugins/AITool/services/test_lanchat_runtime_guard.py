@@ -474,6 +474,15 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
 
         self.assertTrue(worker.logger_seen_during_runtime_create)
 
+    def test_f5_worker_marks_engine_actor_import_as_required(self) -> None:
+        env: dict[str, str] = {}
+        install_f5_runtime_provider_env_defaults(env)
+        flags = AgentRuntimeFlags.from_env(env)
+
+        worker = _TestWorker(corona_engine=object(), agent_runtime_flags=flags)
+
+        self.assertTrue(worker._agent_runtime._require_engine_actor_import)
+
     def test_worker_runtime_quasar_import_path_points_to_aitool_root(self) -> None:
         aitool_root = str((REPO_ROOT / "editor" / "plugins" / "AITool").resolve())
         original_path = list(sys.path)
@@ -947,7 +956,8 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertTrue(provider_summary["scene_snapshot"]["requested"])
         self.assertEqual(provider_summary["scene_snapshot"]["status"], "unavailable")
         self.assertEqual(provider_summary["scene_snapshot"]["reason"], "missing_engine")
-        self.assertEqual(provider_summary["actor_import"]["mode"], "mock_actor_import")
+        self.assertEqual(provider_summary["actor_import"]["mode"], "engine_actor_import_required_unavailable")
+        self.assertEqual(provider_summary["actor_import"]["status"], "unavailable")
         self.assertEqual(provider_summary["actor_import"]["reason"], "missing_engine")
         self.assertEqual(provider_summary["actor_delete"]["mode"], "runtime_state_only")
         self.assertEqual(provider_summary["actor_delete"]["reason"], "missing_engine")

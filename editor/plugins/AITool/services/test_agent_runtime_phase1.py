@@ -24305,6 +24305,51 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         )
         self.assertEqual(result["report"]["report_health_summary"]["status"], "failed")
 
+    def test_required_engine_actor_import_does_not_fallback_to_default_runtime_actors(self) -> None:
+        def ready_model_provider(payload: dict) -> dict:
+            return {
+                name: {
+                    "name": name,
+                    "status": "ready",
+                    "local_path": f"E:/models/{name}.glb",
+                }
+                for name in payload["model_items"]
+            }
+
+        runtime = AgentRuntime(
+            model_resource_provider=ready_model_provider,
+            require_engine_actor_import=True,
+        )
+        plan = runtime.propose_scene_plan(
+            room_id="room-required-engine-import",
+            text="make a treasure room with a chest and coins",
+            owner_agent="agent",
+        )
+        plan.concrete_object_items = ["chest", "coins"]
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+
+        result = runtime.execute_planned_batches(plan.plan_id, max_items_per_batch=2)
+
+        state = runtime.query_state("room-required-engine-import")["room"]
+        self.assertEqual(state["actors"], {})
+        self.assertEqual(result["graphs"][0]["status"], "failed")
+        self.assertEqual(result["batches"][0]["status"], "failed")
+        import_result = state["custom_import_facts"][f"{result['batches'][0]['batch_id']}:actor_import_result"]
+        self.assertEqual(import_result["status"], "failed")
+        self.assertEqual(import_result["failed_count"], 2)
+        self.assertEqual(
+            import_result["failure_code_counts"],
+            {"engine_import_unavailable": 2},
+        )
+        self.assertEqual(
+            import_result["engine_write_boundary"]["provider_source"],
+            "engine_actor_import_provider",
+        )
+        self.assertEqual(import_result["engine_write_boundary"]["bridge_call_count"], 0)
+        self.assertEqual(import_result["engine_write_boundary"]["bridge_skipped_count"], 2)
+        self.assertEqual(result["report"]["actor_count"], 0)
+        self.assertEqual(result["report"]["runtime_scene_flow_summary"]["failed_actor_request_count"], 2)
+
     def test_resource_and_import_summaries_use_batch_scope_when_plan_id_is_missing(self) -> None:
         runtime = AgentRuntime()
         first_plan = runtime.propose_scene_plan(
