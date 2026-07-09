@@ -25912,6 +25912,18 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 set(report["classification_summary"]["substrate_items"])
             )
         )
+        self.assertEqual(report["environment_component_summary"]["type_counts"]["terrain"], 3)
+        registry = report["scene_entity_registry"]
+        self.assertEqual(registry["entity_type_counts"]["actor"], 2)
+        self.assertEqual(registry["entity_type_counts"]["terrain"], 3)
+        terrain_roles = {
+            entity["semantic_role"]
+            for entity in registry["entities"]
+            if entity.get("entity_type") == "terrain"
+        }
+        self.assertTrue({"小河", "湖面"}.issubset(terrain_roles))
+        self.assertEqual(report["runtime_scene_flow_summary"]["status"], "ok")
+        self.assertEqual(report["runtime_scene_flow_summary"]["actor_readiness_status"], "ready")
 
 
     def test_layout_terms_are_classified_but_not_imported_as_actors(self) -> None:
