@@ -2284,12 +2284,24 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertTrue(health["attention_required"])
         self.assertEqual(health["worker_drain_failed_count"], 1)
         self.assertIn("worker_drain_failed", health["reasons"])
+        self.assertEqual(
+            health["latest_worker_drain_event"],
+            {
+                "event": "runtime_worker_drain_failed",
+                "plan_id": "",
+                "batch_id": "",
+                "drained_count": 0,
+                "reason": "synthetic queue drain failure",
+            },
+        )
         replay = runtime.operation_replay(room_id="room-drain-health")
         replay_health = replay["report_health_summary"]
         self.assertEqual(replay_health["status"], "needs_attention")
         self.assertTrue(replay_health["attention_required"])
         self.assertEqual(replay_health["worker_drain_failed_count"], 1)
         self.assertIn("worker_drain_failed", replay_health["reasons"])
+        self.assertEqual(replay_health["latest_worker_drain_event"]["event"], "runtime_worker_drain_failed")
+        self.assertEqual(replay_health["latest_worker_drain_event"]["reason"], "synthetic queue drain failure")
 
     def test_safe_drain_result_marks_failed_graph_without_internal_details(self) -> None:
         safe = AgentRuntime._safe_drain_result_for_user(

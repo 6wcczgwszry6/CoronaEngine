@@ -17873,6 +17873,20 @@ class AgentRuntime:
         worker_drain_plan_resolve_failed_count = int(
             worker_drain_state.get("plan_resolve_failed_count") or 0
         )
+        latest_worker_drain_event_raw = (
+            worker_drain_state.get("latest_drain_event")
+            if isinstance(worker_drain_state.get("latest_drain_event"), Mapping)
+            else {}
+        )
+        latest_worker_drain_event = {
+            "event": str(latest_worker_drain_event_raw.get("event") or "")[:80],
+            "plan_id": str(latest_worker_drain_event_raw.get("plan_id") or "")[:80],
+            "batch_id": str(latest_worker_drain_event_raw.get("batch_id") or "")[:80],
+            "drained_count": int(latest_worker_drain_event_raw.get("drained_count") or 0),
+            "reason": str(latest_worker_drain_event_raw.get("reason") or "")[:160],
+        }
+        if not any(value for value in latest_worker_drain_event.values()):
+            latest_worker_drain_event = {}
         missing_batch_graph_ref_count = int(queue_health_state.get("missing_batch_graph_ref_count") or 0)
         missing_graph_fact_count = int(queue_health_state.get("missing_graph_fact_count") or 0)
         orphan_queue_item_count = int(queue_health_state.get("orphan_queue_item_count") or 0)
@@ -18086,6 +18100,7 @@ class AgentRuntime:
             "worker_drain_exception_count": worker_drain_exception_count,
             "worker_drain_status_failed_count": worker_drain_status_failed_count,
             "worker_drain_plan_resolve_failed_count": worker_drain_plan_resolve_failed_count,
+            "latest_worker_drain_event": latest_worker_drain_event,
             "missing_batch_graph_ref_count": missing_batch_graph_ref_count,
             "missing_graph_fact_count": missing_graph_fact_count,
             "orphan_queue_item_count": orphan_queue_item_count,
