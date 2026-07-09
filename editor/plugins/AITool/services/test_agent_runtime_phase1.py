@@ -23650,6 +23650,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         ]
         self.assertTrue(import_messages)
         self.assertTrue(str(import_messages[-1].get("message") or ""))
+        self.assertEqual(import_messages[-1]["level"], "warning")
+        self.assertEqual(import_messages[-1]["title"], "执行步骤需要处理")
         self.assertEqual(
             import_messages[-1]["payload"],
             {

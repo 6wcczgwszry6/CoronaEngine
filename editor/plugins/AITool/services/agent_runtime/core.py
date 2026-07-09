@@ -6845,8 +6845,6 @@ class ToolCallGraphExecutor:
         message = str(result.user_visible_message or "").strip()
         if not message:
             return
-        level = "info" if result.success and status == "succeeded" else "warning"
-        title = "执行步骤已完成" if level == "info" else "执行步骤需要处理"
         payload_status = status
         if (
             call.tool_name == "runtime.actor.import_batch"
@@ -6864,6 +6862,8 @@ class ToolCallGraphExecutor:
             if failed_count > 0 and imported_count > 0 and requested_count > imported_count:
                 payload_status = "partial"
         payload = {"status": payload_status}
+        level = "info" if result.success and payload_status == "succeeded" else "warning"
+        title = "执行步骤已完成" if level == "info" else "执行步骤需要处理"
         if status == "retry_scheduled":
             payload["retry_count"] = call.retry_count
             payload["max_retries"] = call.max_retries
