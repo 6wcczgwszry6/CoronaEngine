@@ -24020,6 +24020,74 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(latest_import["sync_status"], "engine_imported")
         self.assertEqual(latest_import["sync_lifecycle_status"], "engine_imported")
 
+    def test_engine_actor_import_result_accepts_native_handle_identity(self) -> None:
+        class FakeGate:
+            def invoke_tool(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+        class NativeHandleImportTool:
+            def invoke(self, payload: dict) -> dict:
+                return {
+                    "success": True,
+                    "actor_handle": 4242,
+                    "actor_name": "Engine Crate 01",
+                    "position": [0.5, 0.0, 1.5],
+                    "rotation": [0.0, 0.0, 0.0],
+                    "scale": [1.0, 1.0, 1.0],
+                    "bounds_ready": True,
+                    "world_aabb": [-0.25, 0.0, 0.75, 1.25, 1.0, 2.25],
+                    "sync_status": "engine_imported",
+                }
+
+        def ready_model_provider(payload: dict) -> dict:
+            return {
+                name: {
+                    "name": name,
+                    "status": "ready",
+                    "local_path": f"E:/models/{name}.glb",
+                }
+                for name in payload["model_items"]
+            }
+
+        runtime = AgentRuntime(
+            model_resource_provider=ready_model_provider,
+            actor_import_provider=make_engine_actor_import_provider(
+                import_tool=NativeHandleImportTool(),
+                engine_gate=FakeGate(),
+            ),
+        )
+        plan = runtime.propose_scene_plan(
+            room_id="room-import-native-handle",
+            text="生成一个藏宝室，有木箱。",
+            owner_agent="商人",
+        )
+        plan.concrete_object_items = ["木箱"]
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
+
+        result = runtime.execute_planned_batches(plan.plan_id, max_items_per_batch=1)
+
+        state = runtime.query_state("room-import-native-handle")["room"]
+        actor = state["actors"]["4242"]
+        self.assertEqual(result["graphs"][0]["status"], "completed")
+        self.assertEqual(actor["actor_id"], "4242")
+        self.assertEqual(actor["name"], "Engine Crate 01")
+        self.assertEqual(actor["requested_name"], "木箱")
+        self.assertEqual(actor["position"], [0.5, 0.0, 1.5])
+        self.assertEqual(actor["aabb"], {"min": [-0.25, 0.0, 0.75], "max": [1.25, 1.0, 2.25]})
+        self.assertTrue(actor["bounds_ready"])
+        self.assertEqual(result["report"]["import_summary"]["imported_count"], 1)
+        registry_entity = next(
+            entity
+            for entity in result["report"]["scene_entity_registry"]["entities"]
+            if entity.get("actor_id") == "4242"
+        )
+        self.assertEqual(registry_entity["entity_id"], "4242")
+        replay = runtime.operation_replay(room_id="room-import-native-handle", plan_id=plan.plan_id)
+        latest_import = replay["engine_write_summary"]["latest_import_results"][-1]
+        self.assertEqual(latest_import["actor_id"], "4242")
+        self.assertEqual(latest_import["actor_name"], "Engine Crate 01")
+        self.assertEqual(latest_import["requested_name"], "木箱")
+
     def test_actor_import_provider_empty_actor_result_records_failed_import_fact(self) -> None:
         def ready_model_provider(payload: dict) -> dict:
             return {
