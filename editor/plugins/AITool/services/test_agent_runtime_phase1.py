@@ -23636,6 +23636,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         ]
         self.assertTrue(import_log_entries)
         payload = import_log_entries[-1].payload
+        failed_import_name = next(
+            item["actor_name"]
+            for item in payload["import_results"]
+            if item["status"] == "failed"
+        )
         self.assertEqual(
             {item["actor_name"]: item["status"] for item in payload["import_results"]},
             {"钘忓疂绠?": "success", "閲戝竵鍫?": "failed"},
@@ -23718,6 +23723,19 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         )
         self.assertEqual(status_summary["engine_write_summary"]["import_result_count"], 2)
         self.assertEqual(status_summary["engine_write_summary"]["import_status_counts"], {"failed": 1, "success": 1})
+        report_registry = result["report"]["scene_entity_registry"]
+        self.assertEqual(report_registry["actor_count"], 1)
+        self.assertEqual(report_registry["readiness_status"], "partial")
+        self.assertEqual(report_registry["failed_actor_request_count"], 1)
+        self.assertEqual(report_registry["failed_actor_requests"][0]["status"], "failed")
+        self.assertEqual(report_registry["failed_actor_requests"][0]["actor_name"], failed_import_name)
+        self.assertEqual(report_registry["failed_actor_requests"][0]["failure_code"], "cpp_actor_import_failed")
+        self.assertNotIn("actor_id", report_registry["failed_actor_requests"][0])
+        self.assertNotIn("provider raw", str(report_registry))
+        self.assertNotIn("secret", str(report_registry))
+        status_registry = status_summary["scene_entity_registry"]
+        self.assertEqual(status_registry["failed_actor_request_count"], 1)
+        self.assertEqual(status_registry["failed_actor_requests"], report_registry["failed_actor_requests"])
         report_ready_events = [event for event in events if event["event_type"] == "report_ready"]
         self.assertTrue(report_ready_events)
         self.assertEqual(report_ready_events[-1]["payload"]["requested_count"], 2)

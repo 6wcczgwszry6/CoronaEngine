@@ -18630,6 +18630,45 @@ class AgentRuntime:
             normalized = str(key or "unknown").strip() or "unknown"
             target[normalized] = target.get(normalized, 0) + 1
 
+        def failed_actor_requests_for_plan() -> list[dict[str, Any]]:
+            failures: list[dict[str, Any]] = []
+            active_batch_ids = set(candidate_batch_ids)
+            for fact_key, fact in sorted(dict(room.get("custom_import_facts") or {}).items()):
+                if not str(fact_key or "").endswith(":actor_import_result"):
+                    continue
+                if not isinstance(fact, Mapping):
+                    continue
+                fact_batch_id = str(fact.get("batch_id") or str(fact_key).split(":")[0] or "")
+                if active_batch_id and fact_batch_id != active_batch_id:
+                    continue
+                if active_plan_id and active_batch_ids and fact_batch_id and fact_batch_id not in active_batch_ids:
+                    continue
+                for row in fact.get("import_results") or []:
+                    if not isinstance(row, Mapping):
+                        continue
+                    if str(row.get("status") or "").strip().lower() != "failed":
+                        continue
+                    actor_name = AgentRuntime._safe_report_text(
+                        str(row.get("actor_name") or row.get("requested_name") or "").strip()
+                    )
+                    failure_code = AgentRuntime._safe_report_text(
+                        str(row.get("failure_code") or row.get("error_code") or "actor_import_failed").strip()
+                    )
+                    reason = AgentRuntime._safe_report_text(
+                        str(row.get("reason") or row.get("message") or "").strip()
+                    )
+                    safe_row = {
+                        "batch_id": fact_batch_id,
+                        "actor_name": actor_name[:120],
+                        "requested_name": actor_name[:120],
+                        "status": "failed",
+                        "failure_code": failure_code[:120],
+                    }
+                    if reason:
+                        safe_row["reason"] = reason[:200]
+                    failures.append(safe_row)
+            return failures
+
         entities: list[dict[str, Any]] = []
         seen_entity_ids: set[str] = set()
         seen_semantic_roles: set[str] = set()
@@ -18832,9 +18871,13 @@ class AgentRuntime:
         estimated_actor_bounds_count = int(geometry_source_counts.get("runtime_estimated_bounds") or 0)
         engine_write_pending_f5_count = int(engine_write_verification_status_counts.get("pending_f5") or 0)
         engine_write_verified_count = int(engine_write_verification_status_counts.get("engine_verified") or 0)
+        failed_actor_requests = failed_actor_requests_for_plan()
+        failed_actor_request_count = len(failed_actor_requests)
         if not actor_count:
-            readiness_status = "no_actors"
+            readiness_status = "failed" if failed_actor_request_count else "no_actors"
         elif missing_transform_count or missing_aabb_count:
+            readiness_status = "partial"
+        elif failed_actor_request_count:
             readiness_status = "partial"
         else:
             readiness_status = "ready"
@@ -18865,6 +18908,8 @@ class AgentRuntime:
             ),
             "engine_write_pending_f5_count": engine_write_pending_f5_count,
             "engine_write_verified_count": engine_write_verified_count,
+            "failed_actor_request_count": failed_actor_request_count,
+            "failed_actor_requests": failed_actor_requests[-10:],
             "entities": entities,
         }
 
