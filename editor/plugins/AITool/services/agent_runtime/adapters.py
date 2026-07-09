@@ -1735,14 +1735,21 @@ def _resource_model_path(resource: dict[str, Any] | None) -> str:
         return ""
     if str(resource.get("status") or "").lower() not in {"ready", "prepared", "provider-model"}:
         return ""
-    return str(
+    metadata = resource.get("metadata") if isinstance(resource.get("metadata"), dict) else {}
+    path = str(
         _first_present(
             resource.get("local_path"),
             resource.get("model_path"),
             resource.get("path"),
+            resource.get("model_folder"),
+            metadata.get("local_path"),
+            metadata.get("model_path"),
+            metadata.get("path"),
+            metadata.get("model_folder"),
         )
         or ""
     )
+    return _resolve_ready_model_local_path(path, metadata=metadata)
 
 
 def _parse_tool_result(raw: Any) -> dict[str, Any]:

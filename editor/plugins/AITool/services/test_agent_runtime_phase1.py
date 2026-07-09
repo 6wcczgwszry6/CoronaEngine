@@ -22359,6 +22359,58 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertNotIn("secret", serialized)
         ActorFactValidator.validate_actor_map(actors)
 
+    def test_engine_actor_import_provider_resolves_metadata_model_folder_mesh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "hunyuan_model"
+            nested_dir = model_dir / "model"
+            nested_dir.mkdir(parents=True)
+            mesh_path = nested_dir / "mesh.glb"
+            mesh_path.write_text("glb", encoding="utf-8")
+
+            class FakeGate:
+                def __init__(self) -> None:
+                    self.calls: list[dict[str, Any]] = []
+
+                def invoke_tool(self, tool, payload: dict) -> dict:
+                    self.calls.append(dict(payload))
+                    return tool.invoke(payload)
+
+            class ImportTool:
+                def invoke(self, payload: dict) -> dict:
+                    return {
+                        "status": "success",
+                        "actor_id": "actor-folder-42",
+                        "actor_name": payload["actor_name"],
+                        "model_path": payload["model_path"],
+                        "actor": {
+                            "actor_id": "actor-folder-42",
+                            "name": payload["actor_name"],
+                            "geometry": {"position": payload["position"]},
+                        },
+                    }
+
+            gate = FakeGate()
+            provider = make_engine_actor_import_provider(import_tool=ImportTool(), engine_gate=gate)
+
+            result = provider(
+                {
+                    "batch_id": "batch-metadata-folder",
+                    "plan_id": "plan-metadata-folder",
+                    "model_items": ["treasure chest"],
+                    "model_resources": {
+                        "treasure chest": {
+                            "status": "ready",
+                            "metadata": {"model_folder": str(model_dir)},
+                        }
+                    },
+                    "placements": {"treasure chest": {"position": [0.0, 0.0, 0.0]}},
+                }
+            )
+
+            self.assertEqual(gate.calls[0]["model_path"], str(mesh_path))
+            self.assertIn("actor-folder-42", result["actors"])
+            self.assertEqual(result["import_results"][0]["status"], "success")
+
     def test_engine_actor_import_provider_accepts_actor_data_geometry_and_sync_status(self) -> None:
         class FakeGate:
             def invoke_tool(self, tool, payload: dict) -> dict:
