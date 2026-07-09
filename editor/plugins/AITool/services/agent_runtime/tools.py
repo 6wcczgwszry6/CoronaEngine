@@ -2935,6 +2935,30 @@ def _make_image_resource_tool(provider: ResourceProvider | None) -> Callable[[To
     return _tool
 
 
+def _promote_model_resource_import_paths(resources: Mapping[str, Any]) -> dict[str, Any]:
+    promoted: dict[str, Any] = {}
+    for key, raw_entry in dict(resources or {}).items():
+        if not isinstance(raw_entry, Mapping):
+            promoted[key] = raw_entry
+            continue
+        entry = dict(raw_entry)
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), Mapping) else {}
+        import_path = (
+            entry.get("local_path")
+            or entry.get("model_path")
+            or entry.get("path")
+            or entry.get("model_folder")
+            or metadata.get("local_path")
+            or metadata.get("model_path")
+            or metadata.get("path")
+            or metadata.get("model_folder")
+        )
+        if import_path and not str(entry.get("local_path") or entry.get("model_path") or "").strip():
+            entry["local_path"] = str(import_path)
+        promoted[key] = entry
+    return promoted
+
+
 def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[ToolCall], ToolResult]:
     effective_provider = provider or _default_model_resource_provider
 
@@ -2948,7 +2972,9 @@ def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[To
             asset_requests=dict(payload.get("asset_requests") or {}),
         )
         try:
-            model_resources = ResourcePlanValidator.safe_model_resource_map(dict(effective_provider(payload) or {}))
+            model_resources = ResourcePlanValidator.safe_model_resource_map(
+                _promote_model_resource_import_paths(dict(effective_provider(payload) or {}))
+            )
         except Exception as exc:  # noqa: BLE001
             return _resource_provider_failure_tool_result(
                 "model",
@@ -3198,7 +3224,41 @@ def _model_resource_has_importable_path(resource: Mapping[str, Any] | None) -> b
     status = str(resource.get("status") or "").strip().lower()
     if status in {"failed", "failure", "error", "missing", "pending", "queued", "running"}:
         return False
-    return bool(str(resource.get("local_path") or resource.get("model_path") or "").strip())
+    metadata = resource.get("metadata") if isinstance(resource.get("metadata"), Mapping) else {}
+    path_text = str(
+        resource.get("local_path")
+        or resource.get("model_path")
+        or resource.get("path")
+        or resource.get("model_folder")
+        or metadata.get("local_path")
+        or metadata.get("model_path")
+        or metadata.get("path")
+        or metadata.get("model_folder")
+        or ""
+    ).strip()
+    if not path_text:
+        return False
+    try:
+        candidates = [Path(path_text)]
+        if not candidates[0].is_absolute():
+            candidates.append(Path.cwd() / path_text)
+        supported = {".obj", ".dae", ".glb", ".gltf", ".fbx", ".stl", ".usdz"}
+        visible = [candidate for candidate in candidates if candidate.exists()]
+        if not visible:
+            return True
+        for candidate in visible:
+            if candidate.is_file() and candidate.suffix.lower() in supported:
+                return True
+            if candidate.is_dir():
+                for child in candidate.rglob("*"):
+                    try:
+                        if child.is_file() and child.suffix.lower() in supported:
+                            return True
+                    except OSError:
+                        continue
+        return False
+    except OSError:
+        return True
 
 
 def _importable_model_resource_count(resources: Mapping[str, Any]) -> int:

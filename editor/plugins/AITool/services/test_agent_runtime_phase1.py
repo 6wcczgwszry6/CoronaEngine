@@ -14911,6 +14911,73 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(report_boundary["bridge_call_count"], 0)
         self.assertGreaterEqual(report_boundary["status_counts"].get("failed", 0), 2)
 
+    def test_actor_import_precheck_accepts_metadata_model_folder_mesh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "hunyuan_model"
+            nested_dir = model_dir / "model"
+            nested_dir.mkdir(parents=True)
+            mesh_path = nested_dir / "mesh.glb"
+            mesh_path.write_text("glb", encoding="utf-8")
+
+            def model_provider(payload: dict) -> dict:
+                return {
+                    name: {
+                        "name": name,
+                        "status": "ready",
+                        "metadata": {"model_folder": str(model_dir)},
+                    }
+                    for name in payload["model_items"]
+                }
+
+            import_payloads: list[dict] = []
+
+            def actor_import_provider(payload: dict) -> dict:
+                import_payloads.append(dict(payload))
+                return {
+                    f"engine-{index}": {
+                        "actor_id": f"engine-{index}",
+                        "name": name,
+                        "batch_id": payload["batch_id"],
+                        "model_path": str(mesh_path),
+                        "position": [float(index), 0.0, 0.0],
+                        "rotation": [0.0, 0.0, 0.0],
+                        "scale": [1.0, 1.0, 1.0],
+                        "aabb": {
+                            "min": [float(index), 0.0, 0.0],
+                            "max": [float(index) + 1.0, 1.0, 1.0],
+                        },
+                    }
+                    for index, name in enumerate(payload["model_items"], start=1)
+                }
+
+            runtime = AgentRuntime(
+                model_resource_provider=model_provider,
+                actor_import_provider=actor_import_provider,
+            )
+            plan = runtime.propose_scene_plan(
+                room_id="room-folder-case",
+                text="generate a treasure room with a treasure chest and a wooden table",
+                owner_agent="Merchant",
+            )
+            runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+
+            result = runtime.execute_planned_batches(plan.plan_id, max_items_per_batch=2)
+
+            batch = result["batches"][0]
+            state = runtime.query_state("room-folder-case")["room"]
+            model_phase = state["custom_resource_phase_facts"][f"{batch['batch_id']}:model"]
+            self.assertGreaterEqual(model_phase["ready_count"], 1)
+            self.assertTrue(import_payloads)
+            import_plan = state["custom_import_facts"][f"{batch['batch_id']}:actor_import_plan"]
+            self.assertGreaterEqual(import_plan["ready_count"], 1)
+            import_result = state["custom_import_facts"][f"{batch['batch_id']}:actor_import_result"]
+            self.assertEqual(import_result["status"], "imported")
+            self.assertGreaterEqual(len(state["actors"]), 1)
+            self.assertNotEqual(
+                import_result["engine_write_boundary"]["provider_source"],
+                "runtime_actor_import_precheck",
+            )
+
     def test_empty_resource_provider_result_records_failed_resource_facts(self) -> None:
         runtime = AgentRuntime(image_resource_provider=lambda payload: {})
         plan = runtime.propose_scene_plan(
