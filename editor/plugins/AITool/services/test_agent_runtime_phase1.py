@@ -25880,6 +25880,39 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             )
         )
 
+    def test_river_and_lake_terms_route_to_substrate_not_model_items(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-water-substrate",
+            text="做一个森林营地，有小河、湖面、帐篷和小木桌",
+            owner_agent="长者",
+        )
+
+        self.assertEqual(plan.concrete_object_items, ["帐篷", "小木桌"])
+        self.assertNotIn("小河", plan.concrete_object_items)
+        self.assertNotIn("湖面", plan.concrete_object_items)
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
+        result = runtime.execute_scene_plan(plan.plan_id, include_debug_graph_nodes=True)
+        batch_id = result["batch"]["batch_id"]
+        state = runtime.query_state("room-water-substrate")["room"]
+
+        self.assertEqual(state["model_item_lists"][batch_id], ["帐篷", "小木桌"])
+        substrate_plan = {item["name"]: item for item in state["substrate_plans"][batch_id]}
+        self.assertTrue({"小河", "湖面"}.issubset(substrate_plan))
+        self.assertEqual(substrate_plan["小河"]["preferred_handler"], "terrain_component")
+        self.assertEqual(substrate_plan["湖面"]["preferred_handler"], "terrain_component")
+        actor_names = {actor.get("name") for actor in state["actors"].values()}
+        self.assertTrue({"帐篷", "小木桌"}.issubset(actor_names))
+        self.assertNotIn("小河", actor_names)
+        self.assertNotIn("湖面", actor_names)
+        report = runtime.generate_report("room-water-substrate", plan_id=plan.plan_id)
+        self.assertEqual(report["classification_summary"]["model_items"], ["帐篷", "小木桌"])
+        self.assertTrue(
+            {"小河", "湖面"}.issubset(
+                set(report["classification_summary"]["substrate_items"])
+            )
+        )
+
 
     def test_layout_terms_are_classified_but_not_imported_as_actors(self) -> None:
         runtime = AgentRuntime()

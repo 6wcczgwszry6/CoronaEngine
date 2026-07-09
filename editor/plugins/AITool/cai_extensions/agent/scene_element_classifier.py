@@ -17,10 +17,11 @@ TEXT_TO_3D_PREFERRED = "text_to_3d_preferred"
 
 _SUBSTRATE_TERMS = (
     "草原", "草地", "天空", "森林", "树林", "地形", "地面", "地板", "木地板", "石板地面",
-    "墙面", "墙壁", "天花板", "夜空", "云", "河流", "湖面", "海面", "雪地",
+    "墙面", "墙壁", "天花板", "夜空", "云", "河流", "小河", "溪流", "湖泊", "湖面", "水面", "海面", "雪地",
     "沙地", "道路", "路面", "庭院", "户外庭院", "雾", "光照", "灯光氛围",
     "grassland", "grass", "sky", "forest", "woods", "terrain", "ground", "floor",
     "wall", "ceiling", "road", "path", "courtyard", "fog", "mist", "lighting",
+    "river", "stream", "lake", "water",
 )
 _LAYOUT_TERMS = (
     "入口", "出口", "通道", "动线", "主路", "主街", "区域", "边界", "围合",
@@ -135,7 +136,7 @@ def _classify_via_llm(prompt_text: str, items: list[dict[str, Any]]) -> list[Rou
         "asset/model=需要生成或检索3D物体；"
         "environment/scene_substrate=地形、地面、天空、森林、墙面、光照等场景基底；"
         "layout/layout_structure=入口、动线、区域、边界等布局结构。"
-        "注意：草原、天空、森林、地面、墙面、天花板不能作为普通物体模型生成；"
+        "注意：草原、天空、森林、地面、墙面、天花板、河流、小河、溪流、湖泊、水面不能作为普通物体模型生成；"
         "但台灯、灯笼、地毯、雕像、床、桌椅、摊位等具体物体应归为 asset。"
         "铁丝网、栅栏、围栏、栏杆等薄片/网状物仍可作为 asset，但必须加 generation_mode_hint=text_to_3d_preferred。"
         "海报、贴图、壁画、窗景、背景墙等作为 scene_substrate/surface，不作为 3D 模型。"

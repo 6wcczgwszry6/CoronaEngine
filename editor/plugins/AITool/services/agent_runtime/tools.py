@@ -806,6 +806,12 @@ def _explicit_substrate_candidates_from_text(text: str) -> list[str]:
         "地面",
         "山坡",
         "道路",
+        "河流",
+        "小河",
+        "溪流",
+        "湖泊",
+        "湖面",
+        "水面",
         "sky",
         "grassland",
         "grass",
@@ -815,6 +821,10 @@ def _explicit_substrate_candidates_from_text(text: str) -> list[str]:
         "ground",
         "hill",
         "road",
+        "river",
+        "stream",
+        "lake",
+        "water",
     )
     out: list[str] = []
     clean = str(text or "")
@@ -935,8 +945,8 @@ def _infer_scene_type(text: str) -> dict[str, str]:
             "environment_type": "room_box",
             "reason": "indoor keywords",
         }
-    if any(term in clean for term in ("森林", "草原", "营地", "天空", "山坡", "室外", "集市", "夜市")) or any(
-        term in lowered for term in ("forest", "grassland", "camp", "sky", "outdoor", "market")
+    if any(term in clean for term in ("森林", "草原", "营地", "天空", "山坡", "河流", "小河", "溪流", "湖泊", "水面", "室外", "集市", "夜市")) or any(
+        term in lowered for term in ("forest", "grassland", "camp", "sky", "outdoor", "market", "river", "stream", "lake", "water")
     ):
         return {
             "scene_type": "outdoor",
@@ -5315,8 +5325,8 @@ def _preferred_substrate_handler(name: str, pipeline: str = "") -> str:
         term in text for term in ("boundary", "fence", "entrance")
     ):
         return "boundary_component"
-    if any(term in name for term in ("森林", "树林", "草地", "草原", "地形", "山坡", "道路", "地面")) or any(
-        term in text for term in ("terrain", "ground", "forest", "grass", "road")
+    if any(term in name for term in ("森林", "树林", "草地", "草原", "地形", "山坡", "道路", "地面", "河流", "小河", "溪流", "湖泊", "湖面", "水面")) or any(
+        term in text for term in ("terrain", "ground", "forest", "grass", "road", "river", "stream", "lake", "water")
     ):
         return "terrain_component"
     return "environment_component"
