@@ -82,6 +82,26 @@ class ModelRetrievalProviderHelperTests(unittest.TestCase):
         with patch.dict("sys.modules", {"Quasar.ai_config.ai_config": config_module}):
             self.assertIs(provider._get_3d_generate_tool(), sentinel_tool)
 
+    def test_agent_model_provider_falls_back_to_plugin_quasar_namespace(self) -> None:
+        sentinel_tool = object()
+        config_module = types.SimpleNamespace(
+            get_ai_config=lambda: types.SimpleNamespace(
+                hunyuan3d={"enable": True, "api_keys": ["test-key"]},
+            )
+        )
+        provider = model_provider.ModelProvider()
+        provider._get_tool = lambda name: sentinel_tool if name == "hunyuan_generate_3d" else None
+
+        def fake_import(name: str):
+            if name == "Quasar.ai_config.ai_config":
+                raise ImportError("bare Quasar unavailable")
+            if name == "plugins.AITool.Quasar.ai_config.ai_config":
+                return config_module
+            raise AssertionError(f"unexpected import: {name}")
+
+        with patch.object(model_provider.importlib, "import_module", side_effect=fake_import):
+            self.assertIs(provider._get_3d_generate_tool(), sentinel_tool)
+
 
 if __name__ == "__main__":
     unittest.main()
