@@ -13,6 +13,7 @@
 #include "cef_client.h"
 #include "cef_editor_api.h"
 #include "cef_editor_native_api_registry.h"
+#include "vision_actor_material_bridge.h"
 
 #include <corona/events/acoustics_system_events.h>
 #include <corona/kernel/core/kernel_context.h>
@@ -526,6 +527,8 @@ std::string fnv1a_hex12(std::string_view text);
 std::string encode_vision_document_data(const nlohmann::json& document);
 nlohmann::json decode_vision_document_data(const std::string& data);
 nlohmann::json vision_document_for_render(nlohmann::json document);
+void bind_missing_native_actor_materials(NativeEditorScene& scene,
+                                         nlohmann::json& document);
 void cleanup_vision_document_editor_transform_overrides(nlohmann::json& document);
 std::string embedded_vision_scene_key(const NativeEditorScene& scene);
 void clear_embedded_vision_actor_bindings(NativeEditorScene& scene);
@@ -1058,7 +1061,8 @@ void apply_native_scene_vision_source(NativeEditorScene& scene) {
             return;
         }
         try {
-            const auto document = decode_vision_document_data(scene.vision_document_data);
+            auto document = decode_vision_document_data(scene.vision_document_data);
+            bind_missing_native_actor_materials(scene, document);
             const auto render_document = vision_document_for_render(document);
             const auto scene_key = embedded_vision_scene_key(scene);
             register_embedded_vision_actor_bindings(scene, render_document, scene_key);
@@ -3404,6 +3408,69 @@ nlohmann::json make_vision_shape_from_actor(const NativeEditorActor& actor) {
     return shape;
 }
 
+VisionActorMaterialState vision_material_state_from_actor(const NativeEditorActor& actor) {
+    VisionActorMaterialState state;
+    if (actor.persisted_optics.diffuse) {
+        state.diffuse = *actor.persisted_optics.diffuse;
+    }
+    if (actor.persisted_optics.metallic) {
+        state.metallic = *actor.persisted_optics.metallic;
+    }
+    if (actor.persisted_optics.roughness) {
+        state.roughness = *actor.persisted_optics.roughness;
+    }
+    if (actor.optics) {
+        state.diffuse = actor.optics->get_diffuse();
+        state.metallic = actor.optics->get_metallic();
+        state.roughness = actor.optics->get_roughness();
+    }
+    return state;
+}
+
+std::string vision_actor_material_identity(const NativeEditorActor& actor) {
+    return actor.actor_guid.empty() ? actor.name : actor.actor_guid;
+}
+
+bool vision_shape_has_named_material(const nlohmann::json& shape) {
+    const auto params = shape.find("param");
+    if (params == shape.end() || !params->is_object()) {
+        return false;
+    }
+    const auto material = params->find("material");
+    return material != params->end() && material->is_string() &&
+           !trim_ascii(material->get<std::string>()).empty();
+}
+
+bool vision_shape_uses_generated_actor_material(const nlohmann::json& shape) {
+    if (!vision_shape_has_named_material(shape)) {
+        return false;
+    }
+    const auto& name = shape.at("param").at("material").get_ref<const std::string&>();
+    return name.starts_with("corona_actor_material_");
+}
+
+void bind_native_actor_material(nlohmann::json& document,
+                                nlohmann::json& shape,
+                                const NativeEditorActor& actor) {
+    if (auto* scene_data = mutable_vision_scene_data(document)) {
+        (void)bind_vision_actor_material(*scene_data,
+                                         shape,
+                                         vision_actor_material_identity(actor),
+                                         vision_material_state_from_actor(actor));
+    }
+}
+
+void bind_missing_native_actor_materials(NativeEditorScene& scene,
+                                         nlohmann::json& document) {
+    ensure_vision_shape_guids(document);
+    for (const auto& actor : scene.actors) {
+        auto* shape = find_vision_shape_for_actor(document, actor);
+        if (shape && !vision_shape_has_named_material(*shape)) {
+            bind_native_actor_material(document, *shape, actor);
+        }
+    }
+}
+
 void write_actor_visibility_to_vision_shape(const NativeEditorActor& actor,
                                             nlohmann::json& shape) {
     const bool visible = actor.optics ? actor.optics->get_visible() : true;
@@ -3470,7 +3537,9 @@ bool refresh_embedded_vision_view(NativeEditorScene& scene,
         return false;
     }
     try {
-        const auto render_document = vision_document_for_render(document);
+        auto render_document = document;
+        bind_missing_native_actor_materials(scene, render_document);
+        render_document = vision_document_for_render(std::move(render_document));
         const auto scene_key = embedded_vision_scene_key(scene);
 
         std::size_t shape_count = 0;
@@ -3550,6 +3619,10 @@ bool sync_native_actor_to_embedded_vision_document(NativeEditorScene& scene,
         }
         if (!shape) {
             return false;
+        }
+        if (created_shape || !vision_shape_has_named_material(*shape) ||
+            vision_shape_uses_generated_actor_material(*shape)) {
+            bind_native_actor_material(document, *shape, actor);
         }
         write_actor_state_to_vision_shape(actor, *shape, sync_transform);
         const bool persisted = persist_embedded_vision_document(scene, document);
