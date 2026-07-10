@@ -2303,9 +2303,35 @@ class LANChatAgentWorker:
             )
         else:
             engine_text = "Engine写入：未发现 bridge 写入证据，待 F5/实机验证"
-        if any(status == "failed" for status in graph_statuses):
+        normalized_graph_statuses = {str(status or "").strip().lower() for status in graph_statuses}
+        drain_status = str(evidence.get("drain_status") or "").strip().lower()
+        drained_count = int(evidence.get("drain_drained_count") or 0)
+        has_active_queue = bool(
+            int(evidence.get("tool_queue_queued_count") or 0)
+            or int(evidence.get("tool_queue_running_count") or 0)
+            or int(evidence.get("tool_queue_active_count") or 0)
+        )
+        if any(status == "failed" for status in normalized_graph_statuses):
             return (
                 f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 执行未完成，"
+                f"批次 {len(batches)} 个，执行图 {graph_status_text}，报告健康：{health_text}。"
+                f"{registry_text}；{classification_text}；{flow_text}；{tool_state_text}；{guard_text}；{queue_text}；{drain_text}；"
+                f"{batch_tooling_text}；{report_source_text}；{engine_text}。"
+            )
+        if normalized_graph_statuses and normalized_graph_statuses <= {"queued", "planned"}:
+            return (
+                f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 已进入 Runtime 执行队列，"
+                f"待 worker drain 执行；批次 {len(batches)} 个，执行图 {graph_status_text}，报告健康：{health_text}。"
+                f"{registry_text}；{classification_text}；{flow_text}；{tool_state_text}；{guard_text}；{queue_text}；{drain_text}；"
+                f"{batch_tooling_text}；{report_source_text}；{engine_text}。"
+            )
+        if (
+            "running" in normalized_graph_statuses
+            or has_active_queue
+            or (drain_status and drain_status not in {"drained", "empty"} and drained_count <= 0)
+        ):
+            return (
+                f"【AgentRuntime 执行结果】ScenePlan {runtime_plan_id} 正在 Runtime 执行中，"
                 f"批次 {len(batches)} 个，执行图 {graph_status_text}，报告健康：{health_text}。"
                 f"{registry_text}；{classification_text}；{flow_text}；{tool_state_text}；{guard_text}；{queue_text}；{drain_text}；"
                 f"{batch_tooling_text}；{report_source_text}；{engine_text}。"
