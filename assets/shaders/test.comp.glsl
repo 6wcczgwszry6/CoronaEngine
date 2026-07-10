@@ -218,7 +218,7 @@ bool ScreenSpaceShadows(vec3 worldSpaceOrigin, vec3 worldSpaceTarget)
         if (ray_uv.x > 0.0 && ray_uv.y > 0.0 && ray_uv.x < 1.0 && ray_uv.y < 1.0)
         {
             // Compute the difference between the ray's and the camera's depth
-            float depth_z = linearize_depth(texture(textures[pushConsts.gbufferDepthImage], ray_uv).r);
+            float depth_z = linearize_depth(textureLod(textures[nonuniformEXT(pushConsts.gbufferDepthImage)], ray_uv, 0.0).r);
             if (ray_pos.z > depth_z + 1e-3)
             {
                 return true;
@@ -238,7 +238,7 @@ float performPCF(sampler2D shadowMap, vec2 projCoords, float currentDepth, float
     float shadow = 0.0;
     vec2 texelSize = 1.0 / textureSize(shadowMap, 0); // 获取纹理单元大小
 
-    float pcfDepth = texture(shadowMap, projCoords).r;
+    float pcfDepth = textureLod(shadowMap, projCoords, 0.0).r;
     shadow = ((currentDepth - bias > pcfDepth) ? 1.0 : 0.0);
 
     return 1.0f - shadow;
@@ -252,7 +252,7 @@ float performPCF(sampler2D shadowMap, vec2 projCoords, float currentDepth, float
     for (int x = -1; x <= 1; ++x) {
         for (int y = -1; y <= 1; ++y) {
             // 获取偏移后的深度值
-            float pcfDepth = texture(shadowMap, projCoords + vec2(x, y) * texelSize).r;
+            float pcfDepth = textureLod(shadowMap, projCoords + vec2(x, y) * texelSize, 0.0).r;
             // 比较深度，累加阴影贡献
             shadow += ((currentDepth - bias > pcfDepth) ? 1.0 : 0.0) * GaussKernel[x+1][y+1];
         }
@@ -469,7 +469,7 @@ float grid_line(float coord, float scale)
 void main()
 {
 	vec2 screenUV = vec2(float(gl_GlobalInvocationID.x)/float(pushConsts.gbufferSize.x), float(gl_GlobalInvocationID.y)/float(pushConsts.gbufferSize.y));
-	float gbufferDepth = texture(textures[pushConsts.gbufferDepthImage], screenUV).r;
+	float gbufferDepth = textureLod(textures[nonuniformEXT(pushConsts.gbufferDepthImage)], screenUV, 0.0).r;
 
 	vec3 renderResult = vec3(0.0f, 0.0f, 0.0f);
 

@@ -150,6 +150,40 @@ if((BUILD_CORONA_TESTING OR BUILD_TESTING) AND CORONA_BUILD_VISION)
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
 endif()
 
+if(BUILD_CORONA_TESTING OR BUILD_TESTING)
+    add_executable(corona_optics_native_frame_throttle_tests
+        tests/test_native_frame_throttle.cpp
+    )
+    target_include_directories(corona_optics_native_frame_throttle_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_optics_native_frame_throttle_tests PRIVATE Horizon)
+    add_test(NAME OpticsNativeFrameThrottleTests
+             COMMAND corona_optics_native_frame_throttle_tests)
+
+    add_executable(corona_optics_storage_snapshot_tests
+        tests/test_storage_snapshot.cpp
+    )
+    target_include_directories(corona_optics_storage_snapshot_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_optics_storage_snapshot_tests PRIVATE Horizon)
+    add_test(NAME OpticsStorageSnapshotTests
+             COMMAND corona_optics_storage_snapshot_tests)
+
+    add_executable(corona_optics_debug_label_tests
+        tests/test_optics_debug_labels.cpp
+    )
+    target_include_directories(corona_optics_debug_label_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(NAME OpticsDebugLabelTests
+             COMMAND corona_optics_debug_label_tests)
+endif()
+
 # ------------------------------------------------------------------------------
 # Vision import-scene verification demo (OFF by default)
 # When enabled (and Vision is built), the optics system loads a known-good scene

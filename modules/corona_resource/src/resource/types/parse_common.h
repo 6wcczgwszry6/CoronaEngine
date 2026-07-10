@@ -11,6 +11,8 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -1094,8 +1096,40 @@ inline MeshOptimizeResult optimize_mesh_pipeline(
     return result;
 }
 
-/// 将 uint32 索引转换为 uint16
-inline std::vector<std::uint16_t> convert_indices_to_uint16(const std::vector<std::uint32_t>& indices) {
+/// 将 uint32 索引转换为 uint16，并在 CPU 侧拒绝会截断或越界的 mesh。
+inline std::vector<std::uint16_t> convert_indices_to_uint16(const std::vector<std::uint32_t>& indices,
+                                                            size_t vertex_count = 0,
+                                                            const std::string& mesh_name = "<unnamed>") {
+    constexpr std::uint32_t kMaxUint16Index = std::numeric_limits<std::uint16_t>::max();
+    constexpr size_t kMaxUint16AddressableVertices =
+        static_cast<size_t>(std::numeric_limits<std::uint16_t>::max()) + 1u;
+
+    for (size_t i = 0; i < indices.size(); ++i) {
+        const std::uint32_t idx = indices[i];
+        if (idx > kMaxUint16Index) {
+            CFW_LOG_ERROR("[MeshOpt] Mesh '{}': index {} at element {} exceeds uint16 max {}",
+                          mesh_name, idx, i, kMaxUint16Index);
+            throw std::runtime_error("[MeshOpt] Mesh '" + mesh_name +
+                                     "' has index " + std::to_string(idx) +
+                                     " above uint16 range");
+        }
+        if (vertex_count > 0 && static_cast<size_t>(idx) >= vertex_count) {
+            CFW_LOG_ERROR("[MeshOpt] Mesh '{}': index {} at element {} exceeds vertex count {}",
+                          mesh_name, idx, i, vertex_count);
+            throw std::runtime_error("[MeshOpt] Mesh '" + mesh_name +
+                                     "' has index " + std::to_string(idx) +
+                                     " outside vertex count " + std::to_string(vertex_count));
+        }
+    }
+
+    if (vertex_count > kMaxUint16AddressableVertices) {
+        CFW_LOG_ERROR("[MeshOpt] Mesh '{}': vertex count {} exceeds uint16 addressable vertex count {}",
+                      mesh_name, vertex_count, kMaxUint16AddressableVertices);
+        throw std::runtime_error("[MeshOpt] Mesh '" + mesh_name +
+                                 "' has vertex count " + std::to_string(vertex_count) +
+                                 " above uint16 addressable range");
+    }
+
     std::vector<std::uint16_t> result;
     result.reserve(indices.size());
     for (auto idx : indices) {
@@ -1194,11 +1228,8 @@ inline LODLevel build_lod_level_from_simplified(
                           has_bones ? &compact_weights : nullptr);
 
     // 转换索引为 uint16
-    std::vector<std::uint16_t> final_indices;
-    final_indices.reserve(remapped_indices.size());
-    for (auto idx : remapped_indices) {
-        final_indices.push_back(static_cast<std::uint16_t>(idx));
-    }
+    std::vector<std::uint16_t> final_indices =
+        convert_indices_to_uint16(remapped_indices, compact_vertices.size(), lod_label);
 
     LODLevel level;
     level.vertices = std::move(compact_vertices);

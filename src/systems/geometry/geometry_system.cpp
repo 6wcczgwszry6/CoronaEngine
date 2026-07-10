@@ -36,6 +36,9 @@ using namespace GeometryInternal;
 
 namespace {
 
+std::mutex g_invalid_mesh_slot_log_mutex;
+std::unordered_set<std::string> g_invalid_mesh_slot_logs;
+
 template <typename T>
 Horizon::HardwareBuffer make_geometry_buffer(const std::vector<T>& data,
                                              Horizon::BufferUsageFlags usage,
@@ -1739,6 +1742,9 @@ GeometrySystem::RenderMeshBuffers GeometrySystem::select_render_buffers(
     out.index          = level.index_buffer;
     out.vertex_storage = level.vertex_storage ? level.vertex_storage : fallback.vertex_storage;
     out.index_storage  = level.index_storage  ? level.index_storage  : fallback.index_storage;
+    out.vertex_count   = level.vertex_count;
+    out.index_count    = level.index_count;
+    out.max_index      = level.max_index;
     return out;
 }
 
@@ -1779,6 +1785,9 @@ GeometrySystem::RenderMeshBuffers GeometrySystem::resident_render_buffers(
         out.index          = level.index_buffer;
         out.vertex_storage = level.vertex_storage ? level.vertex_storage : fallback.vertex_storage;
         out.index_storage  = level.index_storage  ? level.index_storage  : fallback.index_storage;
+        out.vertex_count   = level.vertex_count;
+        out.index_count    = level.index_count;
+        out.max_index      = level.max_index;
         return out;
     }
 
@@ -2238,6 +2247,7 @@ void GeometrySystem::upload_lod_from_scene_data() {
             lod0.ready            = true;
             lod0.vertex_count     = static_cast<std::uint32_t>(mesh.vertices.size());
             lod0.index_count      = static_cast<std::uint32_t>(mesh.indices.size());
+            lod0.max_index        = mesh_dev.max_index;
             entry.levels.push_back(std::move(lod0));
 
             // LOD 1..N：仅登记元数据，**不**在此创建 GPU 缓冲 / BVH（Step 3a 按需驻留）。
@@ -2264,6 +2274,7 @@ void GeometrySystem::upload_lod_from_scene_data() {
                 }
                 lod_buf.vertex_count     = static_cast<std::uint32_t>(lod_data.vertices.size());
                 lod_buf.index_count      = static_cast<std::uint32_t>(lod_data.indices.size());
+                lod_buf.max_index        = lod_buf.vertex_count > 0 ? lod_buf.vertex_count - 1u : 0u;
                 lod_buf.source_lod_index = static_cast<std::uint32_t>(lod_idx);
                 entry.levels.push_back(std::move(lod_buf));
             }
@@ -2862,6 +2873,36 @@ void GeometrySystem::reconcile_cpu_residency() {
 
 namespace {
 
+[[nodiscard]] bool render_mesh_buffers_valid(const GeometrySystem::RenderMeshBuffers& geo) {
+    return static_cast<bool>(geo.vertex) &&
+           static_cast<bool>(geo.index) &&
+           static_cast<bool>(geo.vertex_storage) &&
+           static_cast<bool>(geo.index_storage);
+}
+
+void log_invalid_mesh_slot_once(std::uintptr_t geometry_handle,
+                                std::uint32_t mesh_index,
+                                const GeometrySystem::RenderMeshBuffers& geo,
+                                const Horizon::HardwareImage& texture) {
+    const std::string key = std::to_string(geometry_handle) + ":" + std::to_string(mesh_index);
+    {
+        std::lock_guard lock(g_invalid_mesh_slot_log_mutex);
+        if (!g_invalid_mesh_slot_logs.insert(key).second) return;
+    }
+
+    CFW_LOG_WARNING("GeometrySystem: invalid mesh slot skipped "
+                    "(geometry={}, mesh={}, vertex={}, index={}, vertex_storage={}, index_storage={}, texture={}, vertices={}, indices={}, max_index={})",
+                    geometry_handle, mesh_index,
+                    static_cast<bool>(geo.vertex),
+                    static_cast<bool>(geo.index),
+                    static_cast<bool>(geo.vertex_storage),
+                    static_cast<bool>(geo.index_storage),
+                    static_cast<bool>(texture),
+                    geo.vertex_count,
+                    geo.index_count,
+                    geo.max_index);
+}
+
 /// 内部辅助：共享 LOD 路由 + MeshSlot 构建逻辑（有/无相机两条路径共用）
 [[nodiscard]] std::vector<GeometrySystem::MeshSlot>
 build_mesh_slots(const GeometrySystem*        gs,
@@ -2881,7 +2922,8 @@ build_mesh_slots(const GeometrySystem*        gs,
         // LOD 路由：构建 fallback，然后经 GeometrySystem 解析当前常驻级
         GeometrySystem::RenderMeshBuffers fallback{
             m.vertexBuffer, m.indexBuffer,
-            m.vertexStorageBuffer, m.indexStorageBuffer};
+            m.vertexStorageBuffer, m.indexStorageBuffer,
+            m.vertex_count, m.index_count, m.max_index};
 
         GeometrySystem::RenderMeshBuffers geo = use_camera
             ? gs->select_render_buffers(
@@ -2895,9 +2937,15 @@ build_mesh_slots(const GeometrySystem*        gs,
         slot.geo            = geo;
         slot.texture        = m.textureBuffer;        // 引用计数值拷贝
         slot.material_color = m.materialColor;
-        // valid=true：mesh_handles 非空说明 GPU 资源已建立，geo 一定有效
-        // （LOD 切换期间 swap model 保证始终有 ready 级，不会返回空缓冲）
-        slot.valid = true;
+        slot.texture_ready  = static_cast<bool>(slot.texture);
+        slot.vertex_count   = slot.geo.vertex_count;
+        slot.index_count    = slot.geo.index_count;
+        slot.max_index      = slot.geo.max_index;
+        slot.valid          = render_mesh_buffers_valid(slot.geo) &&
+                              static_cast<bool>(slot.texture);
+        if (!slot.valid) {
+            log_invalid_mesh_slot_once(geometry_handle, i, slot.geo, slot.texture);
+        }
         result.push_back(std::move(slot));
     }
     return result;

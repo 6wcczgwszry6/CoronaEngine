@@ -36,6 +36,11 @@ struct MeshDevice {
     // 材质颜色 (RGBA)
     std::array<float, 4> materialColor{1.0f, 1.0f, 1.0f, 1.0f};
 
+    // CPU/import-side bounds for GPU visibility/deferred decode diagnostics.
+    uint32_t vertex_count = 0;
+    uint32_t index_count = 0;
+    uint32_t max_index = 0;
+
     // ---- GPU 显存记账令牌（P0：mesh/texture 计量）----
     // mesh_mem 覆盖本 MeshDevice 的 4 个 GPU 缓冲（vertex/index/storage）；
     // tex_mem 覆盖 textureBuffer（仅真实纹理时非空，占位/共享纹理计 0）。

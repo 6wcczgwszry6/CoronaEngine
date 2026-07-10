@@ -43,3 +43,26 @@ corona_copy_tbb_runtime_artifacts(corona_animation_pose_tests)
 
 add_test(NAME AnimationPoseTests COMMAND corona_animation_pose_tests)
 
+# ----------------------------------------------------------------------------
+# Mesh import safety tests: CPU-side guards for uint16 index conversion.
+# ----------------------------------------------------------------------------
+add_executable(corona_mesh_index_tests
+    test_mesh_index_validation.cpp
+)
+
+target_link_libraries(corona_mesh_index_tests
+    PRIVATE
+        corona::resource::manager
+        meshoptimizer
+)
+
+target_include_directories(corona_mesh_index_tests
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+
+corona_copy_tbb_runtime_artifacts(corona_mesh_index_tests)
+
+add_test(NAME MeshIndexValidationTests COMMAND corona_mesh_index_tests)
+

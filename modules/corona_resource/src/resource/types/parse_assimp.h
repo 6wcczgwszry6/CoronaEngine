@@ -244,6 +244,8 @@ inline void process_assimp_materials(const aiScene* ai_scene, Scene& scene,
         if (ai_mat->Get(AI_MATKEY_NAME, name) == AI_SUCCESS) {
             mat_data.name = name.C_Str();
         }
+        const bool is_assimp_default_material =
+            mat_data.name.empty() || mat_data.name == AI_DEFAULT_MATERIAL_NAME;
 
         // 尝试读取颜色：优先使用 PBR 的 BASE_COLOR，然后回退到传统的 DIFFUSE
         aiColor4D color;
@@ -258,6 +260,22 @@ inline void process_assimp_materials(const aiScene* ai_scene, Scene& scene,
         else if (ai_mat->Get(AI_MATKEY_COLOR_DIFFUSE, color) == AI_SUCCESS) {
             mat_data.base_color = {color.r, color.g, color.b, color.a};
             color_found = true;
+        }
+
+        // OBJ files without an MTL still get an Assimp-generated material
+        // whose diffuse color is the library default, not authored content.
+        // Keep Corona's default white material for those proxy/simple meshes.
+        if (color_found && is_assimp_default_material) {
+            constexpr float kAssimpDefaultDiffuse = 0.6f;
+            constexpr float kEpsilon = 1e-4f;
+            const bool default_diffuse =
+                std::abs(mat_data.base_color[0] - kAssimpDefaultDiffuse) < kEpsilon &&
+                std::abs(mat_data.base_color[1] - kAssimpDefaultDiffuse) < kEpsilon &&
+                std::abs(mat_data.base_color[2] - kAssimpDefaultDiffuse) < kEpsilon;
+            if (default_diffuse) {
+                mat_data.base_color = MaterialData{}.base_color;
+                color_found = false;
+            }
         }
 
         // 如果没有找到任何颜色，记录警告
@@ -645,7 +663,8 @@ inline void process_assimp_mesh(aiMesh* ai_mesh, Scene& scene, std::uint32_t nod
         }
 
         // 转换索引为 uint16
-        std::vector<std::uint16_t> final_indices = convert_indices_to_uint16(mesh_indices);
+        std::vector<std::uint16_t> final_indices =
+            convert_indices_to_uint16(mesh_indices, vertices.size(), sub_mesh_name);
 
         (void)sub_mesh_name;
 
