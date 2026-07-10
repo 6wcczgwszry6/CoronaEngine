@@ -29,7 +29,7 @@ class AIPluginController:
         if isinstance(request_id, str):
             self.request_service.mark_accepted(request_id, session_id)
         logger.info(
-            "[AI RPC] 接收旧入口请求 [request=%s, session=%s, operation=legacy.stream]",
+            "[AI Request] 接收旧入口请求 [request=%s, session=%s, operation=legacy.stream]",
             request_id or "N/A",
             session_id or "N/A",
         )
@@ -39,7 +39,7 @@ class AIPluginController:
             self.request_service,
         )
 
-    def ai_rpc(self, request) -> dict:
+    def submit_request(self, request) -> dict:
         try:
             if isinstance(request, str):
                 request = json.loads(request)
@@ -64,7 +64,7 @@ class AIPluginController:
 
             ai_message = json.dumps(payload, ensure_ascii=False)
             logger.info(
-                "[AI RPC] 接收请求 [request=%s, session=%s, operation=%s]",
+                "[AI Request] 接收请求 [request=%s, session=%s, operation=%s]",
                 request_id or "N/A",
                 session_id or "N/A",
                 operation,
@@ -76,8 +76,9 @@ class AIPluginController:
             )
             return {"success": True, "request_id": request_id, "status": "accepted"}
         except Exception as exc:
-            logger.exception("[AI RPC] 处理请求失败: %s", exc)
+            logger.exception("[AI Request] 处理请求失败: %s", exc)
             return {"success": False, "error": str(exc)}
+
 
     def cleanup(self, executor):
         self._event_loop_runner.shutdown()

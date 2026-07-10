@@ -1,4 +1,4 @@
-#ifdef _WIN32
+﻿#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -11,17 +11,22 @@
 
 #include "browser_manager.h"
 #include "cef_client.h"
-#include "cef_native_rpc.h"
+#include "cef_editor_api.h"
+#include "cef_editor_native_api_registry.h"
 
 #include <corona/events/acoustics_system_events.h>
 #include <corona/kernel/core/kernel_context.h>
+#include <corona/shared_data_hub.h>
 #include <corona/systems/network/network_system.h>
 #include <corona/systems/script/corona_engine_api.h>
 #include <corona/utils/path_utils.h>
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <ctime>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -41,6 +46,15 @@
 namespace Corona::Systems::UI {
 
 namespace {
+
+constexpr const char* VISION_DOCUMENT_ENCODING = "zlib_base64_json";
+constexpr const char* VISION_DOCUMENT_VERSION = "1";
+
+struct EmbeddedVisionDocument {
+    nlohmann::json document;
+    std::string data;
+    std::string asset_root;
+};
 
 std::shared_ptr<Corona::Systems::NetworkSystem> get_network_system() {
     auto sys_mgr = Corona::Kernel::KernelContext::instance().system_manager();
@@ -64,6 +78,195 @@ Corona::Systems::NetworkSystem::SessionRole parse_network_session_role(
         return Corona::Systems::NetworkSystem::SessionRole::None;
     }
     return Corona::Systems::NetworkSystem::SessionRole::Host;
+}
+
+const char* editor_api_value_type_name(EditorApiValueType type) {
+    switch (type) {
+        case EditorApiValueType::Any:
+            return "any";
+        case EditorApiValueType::Null:
+            return "null";
+        case EditorApiValueType::Boolean:
+            return "boolean";
+        case EditorApiValueType::Integer:
+            return "integer";
+        case EditorApiValueType::Number:
+            return "number";
+        case EditorApiValueType::String:
+            return "string";
+        case EditorApiValueType::Object:
+            return "object";
+        case EditorApiValueType::Array:
+            return "array";
+    }
+    return "unknown";
+}
+
+std::string snake_to_lower_camel(const char* value) {
+    if (!value) {
+        return {};
+    }
+    std::string result;
+    bool upper_next = false;
+    for (const char ch : std::string(value)) {
+        if (ch == '_') {
+            upper_next = true;
+            continue;
+        }
+        if (upper_next) {
+            result.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
+            upper_next = false;
+        } else {
+            result.push_back(ch);
+        }
+    }
+    return result;
+}
+
+const char* editor_api_module_js_wrapper_alias(const char* module) {
+    const std::string_view name = module ? std::string_view(module) : std::string_view();
+    if (name == "AITool") {
+        return "ai";
+    }
+    if (name == "CoronaEditor") {
+        return "app";
+    }
+    if (name == "EditorApi") {
+        return "editor";
+    }
+    if (name == "FileManager") {
+        return "files";
+    }
+    if (name == "LANChat") {
+        return "lanChat";
+    }
+    if (name == "MainView") {
+        return "main";
+    }
+    if (name == "Network") {
+        return "network";
+    }
+    if (name == "ProjectLauncher") {
+        return "project";
+    }
+    if (name == "ProjectSettings") {
+        return "projectSettings";
+    }
+    if (name == "ResourceSearch") {
+        return "resourceSearch";
+    }
+    if (name == "SceneDatas") {
+        return "sceneDatas";
+    }
+    if (name == "SceneTools") {
+        return "sceneTools";
+    }
+    if (name == "ScratchTool") {
+        return "scratch";
+    }
+    return "";
+}
+
+const char* editor_api_module_python_wrapper_alias(const char* module) {
+    const std::string_view name = module ? std::string_view(module) : std::string_view();
+    if (name == "AITool") {
+        return "ai";
+    }
+    if (name == "CoronaEditor") {
+        return "app";
+    }
+    if (name == "EditorApi") {
+        return "editor";
+    }
+    if (name == "FileManager") {
+        return "files";
+    }
+    if (name == "LANChat") {
+        return "lan_chat";
+    }
+    if (name == "MainView") {
+        return "main";
+    }
+    if (name == "Network") {
+        return "network";
+    }
+    if (name == "ProjectLauncher") {
+        return "project";
+    }
+    if (name == "ProjectSettings") {
+        return "project_settings";
+    }
+    if (name == "ResourceSearch") {
+        return "resource_search";
+    }
+    if (name == "SceneDatas") {
+        return "scene_datas";
+    }
+    if (name == "SceneTools") {
+        return "scene_tools";
+    }
+    if (name == "ScratchTool") {
+        return "scratch";
+    }
+    return "";
+}
+
+std::string editor_api_js_wrapper_path(const EditorApiMethodSpec& spec) {
+    if (spec.js_wrapper && *spec.js_wrapper) {
+        return spec.js_wrapper;
+    }
+    const std::string module_alias = editor_api_module_js_wrapper_alias(spec.native_module);
+    const std::string function_name = snake_to_lower_camel(spec.native_function);
+    if (module_alias.empty() || function_name.empty()) {
+        return {};
+    }
+    return module_alias + "." + function_name;
+}
+
+std::string editor_api_python_wrapper_path(const EditorApiMethodSpec& spec) {
+    if (spec.python_wrapper && *spec.python_wrapper) {
+        return spec.python_wrapper;
+    }
+    const std::string module_alias = editor_api_module_python_wrapper_alias(spec.native_module);
+    const std::string function_name = spec.native_function ? spec.native_function : "";
+    if (module_alias.empty() || function_name.empty()) {
+        return {};
+    }
+    return module_alias + "." + function_name;
+}
+
+nlohmann::json editor_api_method_to_json(const EditorApiMethodSpec& spec) {
+    nlohmann::json params = nlohmann::json::array();
+    for (std::size_t index = 0; index < spec.param_count; ++index) {
+        const auto& param = spec.params[index];
+        params.push_back({
+            {"name", param.name ? param.name : ""},
+            {"type", editor_api_value_type_name(param.type)},
+            {"optional", param.optional},
+        });
+    }
+
+    return {
+        {"api", spec.api_name ? spec.api_name : ""},
+        {"native_module", spec.native_module ? spec.native_module : ""},
+        {"native_function", spec.native_function ? spec.native_function : ""},
+        {"params", params},
+        {"return", editor_api_value_type_name(spec.return_spec.type)},
+        {"js_wrapper", editor_api_js_wrapper_path(spec)},
+        {"python_wrapper", editor_api_python_wrapper_path(spec)},
+        {"async", spec.async},
+        {"allowed_callers", spec.allowed_callers},
+    };
+}
+
+nlohmann::json editor_api_event_to_json(const EditorApiEventSpec& spec) {
+    return {
+        {"event", spec.event_name ? spec.event_name : ""},
+        {"payload", editor_api_value_type_name(spec.payload_type)},
+        {"allowed_callers", spec.allowed_callers},
+        {"js_wrapper", spec.js_wrapper ? spec.js_wrapper : ""},
+        {"python_wrapper", spec.python_wrapper ? spec.python_wrapper : ""},
+    };
 }
 
 std::string to_lower_ascii(std::string value) {
@@ -237,6 +440,9 @@ struct NativeEditorCamera {
     std::string camera_id;
     std::string name;
     bool deletable{true};
+    std::string vision_spp;
+    std::string vision_max_depth;
+    std::string vision_denoise;
     int width{1920};
     int height{1080};
     bool view_open{false};
@@ -246,6 +452,16 @@ struct NativeEditorCamera {
     int view_height{540};
     float move_speed{1.0f};
     std::unique_ptr<Corona::API::Camera> engine_camera;
+};
+
+struct NativeEditorActorOpticsState {
+    std::optional<std::array<float, 3>> diffuse;
+    std::optional<float> metallic;
+    std::optional<float> roughness;
+    std::optional<float> specular;
+    std::optional<float> shininess;
+    std::optional<std::array<float, 3>> emission;
+    std::string texture;
 };
 
 struct NativeEditorActor {
@@ -258,6 +474,7 @@ struct NativeEditorActor {
     std::array<float, 3> position{0.0f, 0.0f, 0.0f};
     std::array<float, 3> rotation{0.0f, 0.0f, 0.0f};
     std::array<float, 3> scale{1.0f, 1.0f, 1.0f};
+    NativeEditorActorOpticsState persisted_optics;
     std::unique_ptr<Corona::API::Geometry> geometry;
     std::unique_ptr<Corona::API::Optics> optics;
     std::unique_ptr<Corona::API::Mechanics> mechanics;
@@ -272,8 +489,14 @@ struct NativeEditorScene {
     std::string script_path;
     std::string terrain_type;
     std::string terrain_path;
+    std::string vision_storage;
+    std::string vision_source_id;
     std::string vision_source_path;
     std::string vision_import_mode;
+    std::string vision_document_version;
+    std::string vision_document_encoding;
+    std::string vision_document_data;
+    std::string vision_document_asset_root;
     std::array<float, 3> sun_direction{1.0f, 1.0f, 1.0f};
     bool sun_enabled{true};
     bool floor_grid_enabled{true};
@@ -294,20 +517,65 @@ NativeEditorState& native_editor_state() {
     return state;
 }
 
+bool is_valid_project_dir(const std::filesystem::path& project_dir);
+std::filesystem::path canonical_project_dir_for_settings(const std::filesystem::path& project_dir);
+std::string safe_project_dir_name(std::string name, const std::string& fallback);
+std::string sanitize_vision_source_id(std::string source_id);
+std::string fnv1a_hex12(std::string_view text);
+std::string encode_vision_document_data(const nlohmann::json& document);
+nlohmann::json decode_vision_document_data(const std::string& data);
+nlohmann::json vision_document_for_render(nlohmann::json document);
+void cleanup_vision_document_editor_transform_overrides(nlohmann::json& document);
+std::string embedded_vision_scene_key(const NativeEditorScene& scene);
+void clear_embedded_vision_actor_bindings(NativeEditorScene& scene);
+void register_embedded_vision_actor_bindings(NativeEditorScene& scene,
+                                             const nlohmann::json& document,
+                                             const std::string& scene_key);
+bool refresh_embedded_vision_view(NativeEditorScene& scene,
+                                  const nlohmann::json& document);
+bool persist_embedded_vision_document(NativeEditorScene& scene, nlohmann::json& document);
+bool sync_native_actor_to_embedded_vision_document(NativeEditorScene& scene,
+                                                   const NativeEditorActor& actor,
+                                                   bool create_if_missing = false,
+                                                   bool sync_transform = true);
+bool remove_native_actor_from_embedded_vision_document(NativeEditorScene& scene,
+                                                       const std::string& actor_guid);
+void replace_ini_section_from_map(const std::filesystem::path& file_path,
+                                  const std::string& section_name,
+                                  const std::map<std::string, std::string>& values);
+EmbeddedVisionDocument create_embedded_vision_document(const std::filesystem::path& project_dir,
+                                                       const std::filesystem::path& json_path,
+                                                       const nlohmann::json& source_document);
+void persist_vision_proxy_actors_from_document(const std::filesystem::path& project_dir,
+                                               const std::filesystem::path& scene_file,
+                                               const nlohmann::json& document,
+                                               const std::filesystem::path& source_dir);
+std::map<std::string, std::string> vision_camera_section(const nlohmann::json& document);
+
 std::string read_last_project_from_editor_ini() {
     const auto cwd_ini = std::filesystem::current_path() / "CoronaEditor.ini";
     const auto ini = read_ini_file(cwd_ini);
-    return normalize_route(ini_value(ini, "General", "last_project"));
+    const auto raw = ini_value(ini, "General", "last_project");
+    if (raw.empty()) {
+        return {};
+    }
+    return normalize_route(path_to_utf8(canonical_project_dir_for_settings(path_from_utf8(raw))));
 }
 
 std::string resolve_active_project_path(const nlohmann::json& args) {
     auto project_path = normalize_route(arg_string(args, 0));
     if (!project_path.empty()) {
-        return project_path;
+        const auto canonical = canonical_project_dir_for_settings(path_from_utf8(project_path));
+        if (is_valid_project_dir(canonical)) {
+            return path_to_utf8(canonical);
+        }
     }
     auto& state = native_editor_state();
     if (!state.project_path.empty()) {
-        return state.project_path;
+        const auto canonical = canonical_project_dir_for_settings(path_from_utf8(state.project_path));
+        if (is_valid_project_dir(canonical)) {
+            return path_to_utf8(canonical);
+        }
     }
     return read_last_project_from_editor_ini();
 }
@@ -449,6 +717,21 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
         lines.push_back(key + ".geometry.position = " + format_float3(actor.geometry ? actor.geometry->get_position() : actor.position));
         lines.push_back(key + ".geometry.rotation = " + format_float3(actor.geometry ? actor.geometry->get_rotation() : actor.rotation));
         lines.push_back(key + ".geometry.scale = " + format_float3(actor.geometry ? actor.geometry->get_scale() : actor.scale));
+        if (actor.optics) {
+            lines.push_back(key + ".optics.visible = " +
+                            std::string(actor.optics->get_visible() ? "true" : "false"));
+            lines.push_back(key + ".optics.diffuse = " + format_float3(actor.optics->get_diffuse()));
+            lines.push_back(key + ".optics.metallic = " + std::to_string(actor.optics->get_metallic()));
+            lines.push_back(key + ".optics.roughness = " + std::to_string(actor.optics->get_roughness()));
+            lines.push_back(key + ".optics.specular = " + std::to_string(actor.optics->get_specular()));
+            lines.push_back(key + ".optics.shininess = " + std::to_string(actor.optics->get_shininess()));
+        }
+        if (actor.persisted_optics.emission) {
+            lines.push_back(key + ".optics.emission = " + format_float3(*actor.persisted_optics.emission));
+        }
+        if (!actor.persisted_optics.texture.empty()) {
+            lines.push_back(key + ".material.texture = " + actor.persisted_optics.texture);
+        }
     }
     return lines;
 }
@@ -466,6 +749,58 @@ std::vector<std::string> build_grid_section_lines(const NativeEditorScene& scene
         "[grid]",
         "enabled = " + std::string(scene.floor_grid_enabled ? "true" : "false"),
     };
+}
+
+std::string format_bool(bool value) {
+    return value ? "true" : "false";
+}
+
+std::vector<std::string> build_camera_section_lines(const NativeEditorScene& scene) {
+    std::vector<std::string> lines;
+    lines.emplace_back("[camera]");
+    lines.push_back("count = " + std::to_string(scene.cameras.size()));
+    if (scene.cameras.empty()) {
+        lines.emplace_back("active_id = ");
+        return lines;
+    }
+
+    const auto active_index = std::min(scene.active_camera_index, scene.cameras.size() - 1);
+    lines.push_back("active_id = " + scene.cameras[active_index].camera_id);
+    for (size_t index = 0; index < scene.cameras.size(); ++index) {
+        const auto& camera = scene.cameras[index];
+        const auto prefix = "camera" + std::to_string(index);
+        lines.push_back(prefix + ".id = " + camera.camera_id);
+        lines.push_back(prefix + ".name = " + camera.name);
+        lines.push_back(prefix + ".deletable = " + format_bool(camera.deletable));
+        if (camera.engine_camera) {
+            lines.push_back(prefix + ".position = " + format_float3(camera.engine_camera->get_position()));
+            lines.push_back(prefix + ".forward = " + format_float3(camera.engine_camera->get_forward()));
+            lines.push_back(prefix + ".world_up = " + format_float3(camera.engine_camera->get_world_up()));
+            lines.push_back(prefix + ".fov = " + std::to_string(camera.engine_camera->get_fov()));
+            lines.push_back(prefix + ".output_mode = " + camera.engine_camera->get_output_mode());
+            lines.push_back(prefix + ".ssao_enabled = " + format_bool(camera.engine_camera->get_ssao_enabled()));
+            lines.push_back(prefix + ".render_backend = " + camera.engine_camera->get_render_backend());
+            lines.push_back(prefix + ".vision_render_mode = " + camera.engine_camera->get_vision_render_mode());
+        }
+        if (!camera.vision_spp.empty()) {
+            lines.push_back(prefix + ".vision_spp = " + camera.vision_spp);
+        }
+        if (!camera.vision_max_depth.empty()) {
+            lines.push_back(prefix + ".vision_max_depth = " + camera.vision_max_depth);
+        }
+        if (!camera.vision_denoise.empty()) {
+            lines.push_back(prefix + ".vision_denoise = " + camera.vision_denoise);
+        }
+        lines.push_back(prefix + ".width = " + std::to_string(camera.width));
+        lines.push_back(prefix + ".height = " + std::to_string(camera.height));
+        lines.push_back(prefix + ".move_speed = " + std::to_string(camera.move_speed));
+        lines.push_back(prefix + ".view_open = " + format_bool(camera.view_open));
+        lines.push_back(prefix + ".view_x = " + std::to_string(camera.view_x));
+        lines.push_back(prefix + ".view_y = " + std::to_string(camera.view_y));
+        lines.push_back(prefix + ".view_width = " + std::to_string(camera.view_width));
+        lines.push_back(prefix + ".view_height = " + std::to_string(camera.view_height));
+    }
+    return lines;
 }
 
 void replace_ini_section(const std::filesystem::path& file_path,
@@ -528,6 +863,55 @@ void replace_ini_section(const std::filesystem::path& file_path,
     }
 }
 
+void remove_ini_section(const std::filesystem::path& file_path,
+                        const std::string& section_name) {
+    std::vector<std::string> lines;
+    {
+        std::ifstream input(file_path);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            lines.push_back(line);
+        }
+    }
+
+    const auto target = to_lower_ascii(section_name);
+    auto is_target_section = [&](const std::string& line) {
+        const auto trimmed = trim_ascii(line);
+        if (trimmed.size() < 3 || trimmed.front() != '[' || trimmed.back() != ']') {
+            return false;
+        }
+        return to_lower_ascii(trim_ascii(trimmed.substr(1, trimmed.size() - 2))) == target;
+    };
+    auto is_any_section = [](const std::string& line) {
+        const auto trimmed = trim_ascii(line);
+        return trimmed.size() >= 3 && trimmed.front() == '[' && trimmed.back() == ']';
+    };
+
+    auto begin = lines.end();
+    for (auto it = lines.begin(); it != lines.end(); ++it) {
+        if (is_target_section(*it)) {
+            begin = it;
+            break;
+        }
+    }
+    if (begin == lines.end()) {
+        return;
+    }
+    auto end = std::next(begin);
+    while (end != lines.end() && !is_any_section(*end)) {
+        ++end;
+    }
+    lines.erase(begin, end);
+
+    std::ofstream output(file_path, std::ios::trunc);
+    for (const auto& line : lines) {
+        output << line << '\n';
+    }
+}
+
 void persist_native_scene_actors(const NativeEditorScene& scene) {
     const auto scene_file = resolve_project_path(scene.project_root, scene.route);
     replace_ini_section(scene_file, "actors", build_actors_section_lines(scene));
@@ -539,6 +923,118 @@ void persist_native_scene_environment(const NativeEditorScene& scene) {
     replace_ini_section(scene_file, "grid", build_grid_section_lines(scene));
 }
 
+void persist_native_scene_cameras(const NativeEditorScene& scene) {
+    const auto scene_file = resolve_project_path(scene.project_root, scene.route);
+    replace_ini_section(scene_file, "camera", build_camera_section_lines(scene));
+}
+
+std::filesystem::path resolve_project_sidecar_vision_json(const NativeEditorScene& scene) {
+    const auto source_id = sanitize_vision_source_id(scene.vision_source_id);
+    if (source_id.empty()) {
+        return {};
+    }
+    return scene.project_root / ".corona" / "vision_sources" / source_id / "vision.json";
+}
+
+void persist_native_scene_vision_metadata(const NativeEditorScene& scene) {
+    const auto scene_file = resolve_project_path(scene.project_root, scene.route);
+    const auto storage = normalize_route(scene.vision_storage);
+    const auto source_id = sanitize_vision_source_id(scene.vision_source_id);
+    if (storage == "embedded" && !scene.vision_document_data.empty()) {
+        replace_ini_section(scene_file,
+                            "vision",
+                            {"[vision]",
+                             "import_mode = external",
+                             "storage = embedded"});
+        return;
+    }
+    if (storage == "project_sidecar" && !source_id.empty()) {
+        replace_ini_section(scene_file,
+                            "vision",
+                            {"[vision]",
+                             "import_mode = external",
+                             "source_id = " + source_id,
+                             "storage = project_sidecar"});
+        return;
+    }
+
+    const std::string vision_section = "vision";
+    remove_ini_section(scene_file, vision_section);
+}
+
+void persist_native_scene_vision_document(const NativeEditorScene& scene) {
+    const auto scene_file = resolve_project_path(scene.project_root, scene.route);
+    if (normalize_route(scene.vision_storage) != "embedded" ||
+        scene.vision_document_data.empty()) {
+        return;
+    }
+    replace_ini_section(scene_file,
+                        "vision_document",
+                        {"[vision_document]",
+                         "version = " + (scene.vision_document_version.empty()
+                                             ? std::string(VISION_DOCUMENT_VERSION)
+                                             : scene.vision_document_version),
+                         "encoding = " + (scene.vision_document_encoding.empty()
+                                              ? std::string(VISION_DOCUMENT_ENCODING)
+                                              : scene.vision_document_encoding),
+                         "asset_root = " + scene.vision_document_asset_root,
+                         "data = " + scene.vision_document_data});
+}
+
+void persist_native_scene_common(const NativeEditorScene& scene) {
+    const auto scene_file = resolve_project_path(scene.project_root, scene.route);
+    persist_native_scene_actors(scene);
+    persist_native_scene_environment(scene);
+    persist_native_scene_cameras(scene);
+    persist_native_scene_vision_metadata(scene);
+    persist_native_scene_vision_document(scene);
+    remove_ini_section(scene_file, "vision_bindings");
+    remove_ini_section(scene_file, "vision_unsupported_shapes");
+}
+
+bool migrate_project_sidecar_scene_to_embedded(NativeEditorScene& scene,
+                                               const std::filesystem::path& scene_file) {
+    if (scene.vision_storage != "project_sidecar" ||
+        !scene.vision_document_data.empty()) {
+        return false;
+    }
+
+    const auto sidecar_json = resolve_project_sidecar_vision_json(scene);
+    if (sidecar_json.empty() || !std::filesystem::is_regular_file(sidecar_json)) {
+        return false;
+    }
+
+    try {
+        std::ifstream input(sidecar_json);
+        if (!input) {
+            return false;
+        }
+        const auto document = nlohmann::json::parse(input);
+        const auto embedded = create_embedded_vision_document(scene.project_root, sidecar_json, document);
+
+        scene.vision_storage = "embedded";
+        scene.vision_source_id.clear();
+        scene.vision_source_path.clear();
+        scene.vision_import_mode = "external";
+        scene.vision_document_version = VISION_DOCUMENT_VERSION;
+        scene.vision_document_encoding = VISION_DOCUMENT_ENCODING;
+        scene.vision_document_asset_root = embedded.asset_root;
+        scene.vision_document_data = embedded.data;
+
+        replace_ini_section_from_map(scene_file, "camera", vision_camera_section(embedded.document));
+        persist_vision_proxy_actors_from_document(scene.project_root, scene_file, embedded.document, scene.project_root);
+        persist_native_scene_vision_metadata(scene);
+        persist_native_scene_vision_document(scene);
+        return true;
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("Vision sidecar migration failed: project={}, scene={}, error={}",
+                      scene.project_root.string(),
+                      scene.route,
+                      e.what());
+        return false;
+    }
+}
+
 void apply_native_scene_environment(NativeEditorScene& scene) {
     if (!scene.environment) {
         return;
@@ -548,6 +1044,71 @@ void apply_native_scene_environment(NativeEditorScene& scene) {
     scene.environment->set_floor_grid(scene.floor_grid_enabled);
     scene.environment->set_sun_intensity(scene.sun_enabled ? 10.0f : 0.0f);
     scene.environment->set_sky_intensity(scene.sun_enabled ? 20.0f : 0.0f);
+}
+
+void apply_native_scene_vision_source(NativeEditorScene& scene) {
+    if (scene.vision_storage == "embedded") {
+        if (scene.vision_document_data.empty()) {
+            CFW_LOG_ERROR("Vision embedded scene missing: project={}, scene={}",
+                          scene.project_root.string(),
+                          scene.route);
+            return;
+        }
+        try {
+            const auto document = decode_vision_document_data(scene.vision_document_data);
+            const auto render_document = vision_document_for_render(document);
+            const auto scene_key = embedded_vision_scene_key(scene);
+            register_embedded_vision_actor_bindings(scene, render_document, scene_key);
+            Corona::API::load_vision_scene_from_json(render_document.dump(),
+                                                     path_to_utf8(scene.project_root),
+                                                     scene_key,
+                                                     true);
+        } catch (const std::exception& e) {
+            CFW_LOG_ERROR("Vision embedded scene load failed: project={}, scene={}, error={}",
+                          scene.project_root.string(),
+                          scene.route,
+                          e.what());
+        }
+        return;
+    }
+
+    clear_embedded_vision_actor_bindings(scene);
+    if (scene.vision_storage == "project_sidecar") {
+        const auto sidecar_json = resolve_project_sidecar_vision_json(scene);
+        if (sidecar_json.empty() || !std::filesystem::is_regular_file(sidecar_json)) {
+            CFW_LOG_ERROR("Vision sidecar scene missing: project={}, source_id={}",
+                          scene.project_root.string(),
+                          scene.vision_source_id);
+            return;
+        }
+        Corona::API::load_vision_scene(path_to_utf8(sidecar_json));
+        return;
+    }
+
+    const auto source_path = normalize_route(scene.vision_source_path);
+    if (source_path.empty()) {
+        Corona::API::load_vision_scene("");
+        return;
+    }
+
+    const auto resolved = resolve_project_path(scene.project_root, source_path);
+    Corona::API::load_vision_scene(path_to_utf8(resolved));
+}
+
+void apply_native_scene_vision_camera_defaults(NativeEditorScene& scene) {
+    const bool has_sidecar = scene.vision_storage == "project_sidecar" &&
+                             !sanitize_vision_source_id(scene.vision_source_id).empty();
+    const bool has_embedded = scene.vision_storage == "embedded" &&
+                              !scene.vision_document_data.empty();
+    if ((!has_embedded && !has_sidecar && normalize_route(scene.vision_source_path).empty()) ||
+        scene.cameras.empty()) {
+        return;
+    }
+    auto& camera = scene.cameras[std::min(scene.active_camera_index, scene.cameras.size() - 1)];
+    if (camera.engine_camera) {
+        camera.engine_camera->set_render_backend("vision");
+        camera.engine_camera->set_output_mode("final_color");
+    }
 }
 
 std::filesystem::path resolve_native_actor_asset_path(const NativeEditorScene& scene,
@@ -574,6 +1135,69 @@ std::filesystem::path resolve_native_actor_asset_path(const NativeEditorScene& s
     return resolve_project_path(scene.project_root, model_route);
 }
 
+std::optional<std::string> optional_ini_string(const IniSection& section,
+                                               const std::string& key) {
+    const auto it = section.find(key);
+    if (it == section.end() || trim_ascii(it->second).empty()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+std::optional<float> optional_ini_float(const IniSection& section,
+                                        const std::string& key) {
+    const auto value = optional_ini_string(section, key);
+    if (!value) {
+        return std::nullopt;
+    }
+    return parse_float(*value, 0.0f);
+}
+
+std::optional<std::array<float, 3>> optional_ini_float3(const IniSection& section,
+                                                        const std::string& key) {
+    const auto value = optional_ini_string(section, key);
+    if (!value) {
+        return std::nullopt;
+    }
+    return parse_float3(*value, {0.0f, 0.0f, 0.0f});
+}
+
+NativeEditorActorOpticsState load_native_actor_optics_state(const IniSection& actors_section,
+                                                            const std::string& actor_key) {
+    NativeEditorActorOpticsState state;
+    state.diffuse = optional_ini_float3(actors_section, actor_key + ".optics.diffuse");
+    state.metallic = optional_ini_float(actors_section, actor_key + ".optics.metallic");
+    state.roughness = optional_ini_float(actors_section, actor_key + ".optics.roughness");
+    state.specular = optional_ini_float(actors_section, actor_key + ".optics.specular");
+    state.shininess = optional_ini_float(actors_section, actor_key + ".optics.shininess");
+    state.emission = optional_ini_float3(actors_section, actor_key + ".optics.emission");
+    if (auto texture = optional_ini_string(actors_section, actor_key + ".material.texture")) {
+        state.texture = *texture;
+    }
+    return state;
+}
+
+void apply_native_actor_optics_state(NativeEditorActor& item) {
+    if (!item.optics) {
+        return;
+    }
+    if (item.persisted_optics.diffuse) {
+        item.optics->set_diffuse(*item.persisted_optics.diffuse);
+    }
+    if (item.persisted_optics.metallic) {
+        item.optics->set_metallic(*item.persisted_optics.metallic);
+    }
+    if (item.persisted_optics.roughness) {
+        item.optics->set_roughness(*item.persisted_optics.roughness);
+    }
+    if (item.persisted_optics.specular) {
+        item.optics->set_specular(*item.persisted_optics.specular);
+    }
+    if (item.persisted_optics.shininess) {
+        item.optics->set_shininess(*item.persisted_optics.shininess);
+    }
+}
+
 NativeEditorActor& add_native_actor_to_scene(NativeEditorScene& scene,
                                              NativeEditorActor item,
                                              const std::filesystem::path& asset_path) {
@@ -593,6 +1217,7 @@ NativeEditorActor& add_native_actor_to_scene(NativeEditorScene& scene,
     item.optics = std::make_unique<Corona::API::Optics>(*item.geometry);
     item.mechanics = std::make_unique<Corona::API::Mechanics>(*item.geometry);
     item.acoustics = std::make_unique<Corona::API::Acoustics>(*item.geometry);
+    apply_native_actor_optics_state(item);
     if (item.actor_type == "ui_image") {
         item.optics->set_lighting_enabled(false);
         item.mechanics->set_physics_enabled(false);
@@ -655,6 +1280,7 @@ void load_native_actor(NativeEditorScene& scene,
             ? actors_section.at(actor_key + ".geometry.scale")
             : "1.0, 1.0, 1.0",
         {1.0f, 1.0f, 1.0f});
+    item.persisted_optics = load_native_actor_optics_state(actors_section, actor_key);
 
     if (item.route.empty()) {
         return;
@@ -665,6 +1291,10 @@ void load_native_actor(NativeEditorScene& scene,
         item.actor_guid = make_actor_guid(scene.route, item.name, index);
     }
     auto& actor = add_native_actor_to_scene(scene, std::move(item), asset_path);
+    if (actor.optics && actors_section.contains(actor_key + ".optics.visible")) {
+        actor.optics->set_visible(
+            parse_bool(actors_section.at(actor_key + ".optics.visible"), true));
+    }
     if (actor.actor_type != "ui_image" && actors_section.contains(actor_key + ".mechanics.physics_enabled")) {
         actor.mechanics->set_physics_enabled(
             parse_bool(actors_section.at(actor_key + ".mechanics.physics_enabled"), true));
@@ -699,6 +1329,9 @@ NativeEditorCamera make_native_camera(NativeEditorScene& scene,
     item.view_width = parse_int(section_value("view_width", "960"), 960);
     item.view_height = parse_int(section_value("view_height", "540"), 540);
     item.move_speed = parse_float(section_value("move_speed", "1.0"), 1.0f);
+    item.vision_spp = section_value("vision_spp", "");
+    item.vision_max_depth = section_value("vision_max_depth", "");
+    item.vision_denoise = section_value("vision_denoise", "");
 
     item.engine_camera = std::make_unique<Corona::API::Camera>(position, forward, world_up, fov);
     item.engine_camera->set_size(item.width, item.height);
@@ -717,7 +1350,7 @@ NativeEditorCamera make_native_camera(NativeEditorScene& scene,
 std::unique_ptr<NativeEditorScene> load_native_scene(const std::filesystem::path& project_root,
                                                      const std::string& scene_route) {
     const auto scene_file = resolve_project_path(project_root, scene_route);
-    const auto scene_ini = read_ini_file(scene_file);
+    auto scene_ini = read_ini_file(scene_file);
 
     auto scene = std::make_unique<NativeEditorScene>();
     scene->project_root = project_root;
@@ -726,8 +1359,17 @@ std::unique_ptr<NativeEditorScene> load_native_scene(const std::filesystem::path
     scene->script_path = ini_value(scene_ini, "scripts", "path");
     scene->terrain_type = ini_value(scene_ini, "terrain", "type");
     scene->terrain_path = ini_value(scene_ini, "terrain", "path");
+    scene->vision_storage = ini_value(scene_ini, "vision", "storage");
+    scene->vision_source_id = ini_value(scene_ini, "vision", "source_id");
     scene->vision_source_path = ini_value(scene_ini, "vision", "source_path");
     scene->vision_import_mode = ini_value(scene_ini, "vision", "import_mode");
+    scene->vision_document_version = ini_value(scene_ini, "vision_document", "version");
+    scene->vision_document_encoding = ini_value(scene_ini, "vision_document", "encoding");
+    scene->vision_document_data = ini_value(scene_ini, "vision_document", "data");
+    scene->vision_document_asset_root = ini_value(scene_ini, "vision_document", "asset_root");
+    if (migrate_project_sidecar_scene_to_embedded(*scene, scene_file)) {
+        scene_ini = read_ini_file(scene_file);
+    }
     scene->sun_direction = parse_float3(
         ini_value(scene_ini, "sun", "sun_direction", "1.0, 1.0, 1.0"),
         {1.0f, 1.0f, 1.0f});
@@ -796,8 +1438,10 @@ std::unique_ptr<NativeEditorScene> load_native_scene(const std::filesystem::path
     if (!scene->cameras.empty()) {
         scene->engine_scene->set_active_camera(scene->cameras[scene->active_camera_index].engine_camera.get());
     }
+    apply_native_scene_vision_camera_defaults(*scene);
     scene->engine_scene->set_simulation_enabled(true);
     scene->engine_scene->set_enabled(true);
+    apply_native_scene_vision_source(*scene);
     return scene;
 }
 
@@ -848,6 +1492,15 @@ NativeEditorScene* reload_native_editor_scene(const std::string& project_path_ar
     return state.scene.get();
 }
 
+NativeEditorScene* scene_for_request_route(const NativeRequest& request, std::size_t scene_arg_index = 0) {
+    auto* scene = ensure_native_editor_scene();
+    const auto scene_route = normalize_route(arg_string(request.args, scene_arg_index));
+    if (!scene_route.empty() && scene_route != scene->route) {
+        scene = reload_native_editor_scene("", scene_route);
+    }
+    return scene;
+}
+
 nlohmann::json make_on_init_payload(const NativeEditorScene& scene) {
     return {
         {"scenes", nlohmann::json::array({{
@@ -876,6 +1529,9 @@ nlohmann::json camera_to_json(const NativeEditorCamera& camera) {
     item["output_mode"] = camera.engine_camera ? camera.engine_camera->get_output_mode() : "final_color";
     item["render_backend"] = camera.engine_camera ? camera.engine_camera->get_render_backend() : "native";
     item["vision_render_mode"] = camera.engine_camera ? camera.engine_camera->get_vision_render_mode() : "path_tracing";
+    item["vision_spp"] = camera.vision_spp;
+    item["vision_max_depth"] = camera.vision_max_depth;
+    item["vision_denoise"] = camera.vision_denoise;
     item["shadow_cascade_debug"] = camera.engine_camera ? camera.engine_camera->get_shadow_cascade_debug() : false;
     item["ssao_enabled"] = camera.engine_camera ? camera.engine_camera->get_ssao_enabled() : true;
     item["move_speed"] = camera.move_speed;
@@ -942,6 +1598,21 @@ nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorA
             {"angular_lock", {angular_x, angular_y, angular_z}},
         };
     }
+    if (actor.optics) {
+        item["optics"] = {
+            {"diffuse", actor.optics->get_diffuse()},
+            {"metallic", actor.optics->get_metallic()},
+            {"roughness", actor.optics->get_roughness()},
+            {"specular", actor.optics->get_specular()},
+            {"shininess", actor.optics->get_shininess()},
+        };
+        if (actor.persisted_optics.emission) {
+            item["optics"]["emission"] = *actor.persisted_optics.emission;
+        }
+    }
+    if (!actor.persisted_optics.texture.empty()) {
+        item["material"] = {{"texture", actor.persisted_optics.texture}};
+    }
     item["camera_lock"] = {
         {"lock_to_camera", false},
         {"position_offset", {0.0f, 0.0f, 2.0f}},
@@ -977,6 +1648,8 @@ nlohmann::json scene_to_json(const NativeEditorScene& scene) {
         {"grid", {{"enabled", scene.floor_grid_enabled}}},
         {"terrain", {{"path", scene.terrain_path}, {"type", scene.terrain_type}}},
         {"vision", {
+            {"storage", scene.vision_storage},
+            {"source_id", scene.vision_source_id},
             {"source_path", scene.vision_source_path},
             {"import_mode", scene.vision_import_mode},
             {"bindings", nlohmann::json::array()},
@@ -1010,6 +1683,76 @@ NativeEditorCamera* find_native_camera(NativeEditorScene& scene, const std::stri
         }
     }
     return nullptr;
+}
+
+std::string unique_camera_name(const NativeEditorScene& scene, const std::string& preferred_name) {
+    const auto base = trim_ascii(preferred_name).empty() ? std::string("Camera") : trim_ascii(preferred_name);
+    auto exists = [&](const std::string& candidate) {
+        return std::any_of(scene.cameras.begin(), scene.cameras.end(), [&](const NativeEditorCamera& camera) {
+            return camera.name == candidate || camera.camera_id == candidate;
+        });
+    };
+    if (!exists(base)) {
+        return base;
+    }
+    for (int index = 1; index < 10000; ++index) {
+        const auto candidate = base + "_" + std::to_string(index);
+        if (!exists(candidate)) {
+            return candidate;
+        }
+    }
+    return base + "_" + std::to_string(scene.cameras.size() + 1);
+}
+
+NativeEditorCamera& create_native_camera_view(NativeEditorScene& scene, const std::string& requested_name) {
+    NativeEditorCamera item;
+    item.name = unique_camera_name(scene, requested_name);
+    item.camera_id = scene.route + "#" + item.name;
+    item.deletable = true;
+    item.width = 1920;
+    item.height = 1080;
+    item.view_open = true;
+    item.view_x = 120;
+    item.view_y = 120;
+    item.view_width = 960;
+    item.view_height = 540;
+    item.move_speed = 1.0f;
+
+    std::array<float, 3> position{0.0f, 0.0f, -5.0f};
+    std::array<float, 3> forward{0.0f, 0.0f, 1.0f};
+    std::array<float, 3> world_up{0.0f, 1.0f, 0.0f};
+    float fov = 45.0f;
+    if (auto* source = find_native_camera(scene, {}); source && source->engine_camera) {
+        position = source->engine_camera->get_position();
+        forward = source->engine_camera->get_forward();
+        world_up = source->engine_camera->get_world_up();
+        fov = source->engine_camera->get_fov();
+        item.width = source->width;
+        item.height = source->height;
+        item.move_speed = source->move_speed;
+    }
+
+    item.engine_camera = std::make_unique<Corona::API::Camera>(position, forward, world_up, fov);
+    item.engine_camera->set_size(item.width, item.height);
+    item.engine_camera->set_output_mode("final_color");
+    item.engine_camera->set_render_backend("native");
+    item.engine_camera->set_vision_render_mode("path_tracing");
+    item.engine_camera->set_ssao_enabled(true);
+    item.engine_camera->set_view_state(item.view_open, item.view_x, item.view_y,
+                                       item.view_width, item.view_height, item.move_speed);
+    item.engine_camera->set_offscreen_capture_mode(true);
+    item.engine_camera->set_surface(0);
+
+    scene.cameras.push_back(std::move(item));
+    auto& camera = scene.cameras.back();
+    if (scene.engine_scene && camera.engine_camera) {
+        scene.engine_scene->add_camera(camera.engine_camera.get());
+    }
+    return camera;
+}
+
+NativeResult camera_not_found_result(const std::string& camera_name) {
+    return native_failure("Camera not found: " + camera_name, 2);
 }
 
 bool aabb_has_usable_extent(const std::array<float, 6>& aabb) {
@@ -1523,6 +2266,7 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
             actor.mechanics->set_physics_enabled(*physics_enabled);
         }
     }
+    sync_native_actor_to_embedded_vision_document(*scene, actor, true);
     persist_native_scene_actors(*scene);
     emit_scene_tree_changed(scene->route);
     return native_success({
@@ -1592,6 +2336,7 @@ NativeResult remove_native_editor_actor(const std::string& scene_route_arg,
         scene->engine_scene->remove_actor(it->engine_actor.get());
     }
     scene->actors.erase(it);
+    remove_native_actor_from_embedded_vision_document(*scene, removed_guid);
     persist_native_scene_actors(*scene);
     emit_scene_tree_changed(scene->route);
 
@@ -1648,6 +2393,7 @@ NativeResult set_native_editor_actor_transform(const std::string& scene_route_ar
             actor->geometry->set_scale(*scale);
         }
     }
+    sync_native_actor_to_embedded_vision_document(*scene, *actor);
     persist_native_scene_actors(*scene);
     return native_success({
         {"status", "success"},
@@ -1692,12 +2438,17 @@ NativeResult apply_actor_operation(NativeEditorScene& scene,
     } else if (operation == "SetCameraLock" ||
                operation == "SetCameraLockOffset" ||
                operation == "SetCameraLockRotation") {
-        // Camera-lock metadata is not yet stored natively; keep the RPC shape
+        // Camera-lock metadata is not yet stored natively; keep the existing payload shape
         // alive so the details panel remains usable while native persistence catches up.
     } else {
         return native_failure("Unsupported actor operation: " + operation, 2);
     }
 
+    sync_native_actor_to_embedded_vision_document(
+        scene,
+        actor,
+        false,
+        operation != "SetVisible");
     return native_success({
         {"scene", scene.route},
         {"actor", actor.name},
@@ -1709,41 +2460,1535 @@ NativeResult apply_actor_operation(NativeEditorScene& scene,
 void emit_actor_change(const NativeContext& context,
                        const NativeEditorScene& scene,
                        const NativeEditorActor& actor) {
-    if (!context.frame) {
-        return;
-    }
-    const std::string script =
-        "window.__coronaEmit&&window.__coronaEmit(" +
-        nlohmann::json("actor-change").dump() + "," +
-        nlohmann::json(actor.actor_type).dump() + "," +
-        nlohmann::json(scene.route).dump() + "," +
-        nlohmann::json(actor.name).dump() + ");";
-    context.frame->ExecuteJavaScript(script, context.frame->GetURL(), 0);
+    (void)context;
+    emit_editor_api_event("SceneTools.actorChanged",
+                          {{"actor_type", actor.actor_type},
+                           {"scene", scene.route},
+                           {"actor", actor.name}});
 }
 
-void emit_editor_event_to_all_tabs(const std::string& event_name,
-                                   const nlohmann::json& args = nlohmann::json::array()) {
-    if (event_name.empty()) {
+void emit_scene_tree_changed(const std::string& scene_route) {
+    emit_editor_api_event("SceneTools.sceneTreeChanged", {{"scene", scene_route}});
+}
+
+std::string current_time_string() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t raw = std::chrono::system_clock::to_time_t(now);
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &raw);
+#else
+    localtime_r(&raw, &local);
+#endif
+    std::ostringstream out;
+    out << std::put_time(&local, "%Y-%m-%d %H:%M:%S");
+    return out.str();
+}
+
+std::filesystem::path editor_root_path() {
+    const auto cwd = std::filesystem::current_path();
+    const auto installed = cwd / "CabbageEditor";
+    if (std::filesystem::is_directory(installed)) {
+        return installed;
+    }
+    const auto source = cwd / "editor";
+    if (std::filesystem::is_directory(source)) {
+        return source;
+    }
+    return cwd;
+}
+
+std::filesystem::path editor_ini_path() {
+    return std::filesystem::current_path() / "CoronaEditor.ini";
+}
+
+std::filesystem::path project_template_path() {
+    const auto editor_root = editor_root_path();
+    const auto corona_core_template = editor_root / "CoronaCore" / "demo" / "project";
+    if (std::filesystem::is_directory(corona_core_template)) {
+        return corona_core_template;
+    }
+    return editor_root / "plugins" / "ProjectLauncher" / "demo" / "project";
+}
+
+std::filesystem::path runtime_data_dir() {
+    return editor_root_path() / "data";
+}
+
+std::filesystem::path absolute_normalized_path(const std::filesystem::path& path) {
+    std::error_code ec;
+    auto absolute = path.is_absolute() ? path : std::filesystem::absolute(path, ec);
+    if (ec) {
+        absolute = path;
+        ec.clear();
+    }
+    const auto canonical = std::filesystem::weakly_canonical(absolute, ec);
+    return ec ? absolute : canonical;
+}
+
+bool is_valid_project_dir(const std::filesystem::path& project_dir) {
+    std::error_code ec;
+    return std::filesystem::is_directory(project_dir, ec) &&
+           std::filesystem::is_regular_file(project_dir / "project.ini", ec);
+}
+
+std::filesystem::path canonical_project_dir_for_settings(const std::filesystem::path& project_dir) {
+    if (project_dir.empty()) {
+        return {};
+    }
+
+    std::vector<std::filesystem::path> candidates;
+    if (project_dir.is_absolute()) {
+        candidates.push_back(project_dir);
+    } else {
+        candidates.push_back(std::filesystem::current_path() / project_dir);
+        candidates.push_back(runtime_data_dir() / project_dir);
+        candidates.push_back(editor_root_path() / project_dir);
+    }
+
+    for (const auto& candidate : candidates) {
+        const auto absolute = absolute_normalized_path(candidate);
+        if (is_valid_project_dir(absolute)) {
+            return absolute;
+        }
+    }
+
+    return absolute_normalized_path(project_dir.is_absolute() ? project_dir : runtime_data_dir() / project_dir);
+}
+
+std::string safe_project_dir_name(std::string name, const std::string& fallback) {
+    name = trim_ascii(std::move(name));
+    if (name.empty()) {
+        name = fallback.empty() ? "project" : fallback;
+    }
+    for (char& c : name) {
+        if (std::string("<>:\"/\\|?*").find(c) != std::string::npos) {
+            c = '_';
+        }
+    }
+    while (!name.empty() && (name.back() == ' ' || name.back() == '.')) {
+        name.pop_back();
+    }
+    return name.empty() ? "project" : name;
+}
+
+std::string fnv1a_hex12(std::string_view text) {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const unsigned char c : text) {
+        hash ^= c;
+        hash *= 1099511628211ull;
+    }
+    std::ostringstream out;
+    out << std::hex << std::setw(16) << std::setfill('0') << hash;
+    return out.str().substr(0, 12);
+}
+
+std::string sanitize_vision_source_id(std::string source_id) {
+    source_id = trim_ascii(std::move(source_id));
+    if (source_id.empty()) {
+        return {};
+    }
+    return safe_project_dir_name(std::move(source_id), "vision");
+}
+
+std::string settings_value(const std::string& section,
+                           const std::string& key,
+                           const std::string& fallback = {}) {
+    return ini_value(read_ini_file(editor_ini_path()), section, key, fallback);
+}
+
+void replace_ini_section_from_map(const std::filesystem::path& file_path,
+                                  const std::string& section,
+                                  const std::map<std::string, std::string>& values) {
+    std::vector<std::string> lines;
+    lines.push_back("[" + section + "]");
+    for (const auto& [key, value] : values) {
+        lines.push_back(key + " = " + value);
+    }
+    replace_ini_section(file_path, section, lines);
+}
+
+void update_editor_settings_section(const std::string& section,
+                                    const std::map<std::string, std::string>& updates) {
+    const auto ini_path = editor_ini_path();
+    auto ini = read_ini_file(ini_path);
+    std::map<std::string, std::string> values;
+    const auto existing = ini.find(to_lower_ascii(section));
+    if (existing != ini.end()) {
+        for (const auto& [key, value] : existing->second) {
+            values[key] = value;
+        }
+    }
+    for (const auto& [key, value] : updates) {
+        values[key] = value;
+    }
+    replace_ini_section_from_map(ini_path, section, values);
+}
+
+void add_recent_project_native(const std::filesystem::path& project_dir) {
+    const auto path = path_to_utf8(canonical_project_dir_for_settings(project_dir));
+    auto recent_raw = settings_value("History", "recent_projects", "[]");
+    nlohmann::json recent = nlohmann::json::array();
+    try {
+        recent = nlohmann::json::parse(recent_raw);
+    } catch (...) {
+        recent = nlohmann::json::array();
+    }
+    if (!recent.is_array()) {
+        recent = nlohmann::json::array();
+    }
+    nlohmann::json next = nlohmann::json::array();
+    next.push_back(path);
+    for (const auto& item : recent) {
+        if (!item.is_string() || item.get<std::string>() == path) {
+            continue;
+        }
+        if (next.size() >= 10) {
+            break;
+        }
+        next.push_back(item.get<std::string>());
+    }
+    update_editor_settings_section("History", {{"recent_projects", next.dump()}});
+}
+
+void update_project_ini_native(const std::filesystem::path& project_ini,
+                               const std::map<std::string, std::string>& updates,
+                               bool update_only_time) {
+    auto ini = read_ini_file(project_ini);
+    std::map<std::string, std::string> values;
+    const auto existing = ini.find("project");
+    if (existing != ini.end()) {
+        for (const auto& [key, value] : existing->second) {
+            values[key] = value;
+        }
+    }
+    if (!update_only_time) {
+        for (const auto& [key, value] : updates) {
+            values[key] = value;
+        }
+        values["core_version"] = settings_value("General", "version", "1.2.0");
+        values["create_time"] = current_time_string();
+    }
+    values["last_opened"] = current_time_string();
+    replace_ini_section_from_map(project_ini, "Project", values);
+}
+
+void normalize_project_runtime_paths_native(const std::filesystem::path& project_dir) {
+    const auto scene_dir = project_dir / "Scene";
+    const auto old_scene = scene_dir / path_from_utf8("场景1.scene");
+    const auto new_scene = scene_dir / "default.scene";
+    std::error_code ec;
+    if (std::filesystem::exists(old_scene, ec) && !std::filesystem::exists(new_scene, ec)) {
+        std::filesystem::rename(old_scene, new_scene, ec);
+    }
+    const auto project_ini = project_dir / "project.ini";
+    if (!std::filesystem::is_regular_file(project_ini, ec)) {
         return;
     }
-    const nlohmann::json event_args = args.is_array() ? args : nlohmann::json::array({args});
-    std::string script = "if(window.__coronaEmit)window.__coronaEmit(" +
-                         nlohmann::json(event_name).dump();
-    for (const auto& arg : event_args) {
-        script += "," + arg.dump();
+    auto ini = read_ini_file(project_ini);
+    auto project = ini.contains("project") ? ini.at("project") : IniSection{};
+    bool changed = false;
+    for (const auto& key : {"entrance_scene", "active_scene"}) {
+        const auto it = project.find(key);
+        if (it != project.end() && it->second == "Scene/场景1.scene") {
+            project[key] = "Scene/default.scene";
+            changed = true;
+        }
     }
-    script += ",{\"_fromCross\":1});";
-    for (auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
-        if (tab && !tab->minimized && tab->client && tab->client->GetBrowser()) {
-            tab->client->GetBrowser()->GetMainFrame()->ExecuteJavaScript(script, "", 0);
+    const auto scenes_it = project.find("scenes");
+    if (scenes_it != project.end()) {
+        std::vector<std::string> scenes;
+        for (auto route : split_csv_routes(scenes_it->second)) {
+            scenes.push_back(route == "Scene/场景1.scene" ? "Scene/default.scene" : route);
+        }
+        std::ostringstream joined;
+        for (size_t i = 0; i < scenes.size(); ++i) {
+            if (i) joined << ",";
+            joined << scenes[i];
+        }
+        project["scenes"] = joined.str();
+        changed = true;
+    }
+    if (changed) {
+        std::map<std::string, std::string> values(project.begin(), project.end());
+        replace_ini_section_from_map(project_ini, "Project", values);
+    }
+}
+
+std::filesystem::path create_project_from_template_native(const std::filesystem::path& target_path,
+                                                          const std::string& project_name,
+                                                          const std::string& mode) {
+    const auto template_path = project_template_path();
+    if (!std::filesystem::is_directory(template_path)) {
+        throw std::runtime_error("Project template not found: " + path_to_utf8(template_path));
+    }
+    if (std::filesystem::exists(target_path)) {
+        throw std::runtime_error("Target project already exists: " + path_to_utf8(target_path));
+    }
+    std::filesystem::copy(
+        template_path,
+        target_path,
+        std::filesystem::copy_options::recursive);
+    normalize_project_runtime_paths_native(target_path);
+    const auto project_ini = target_path / "project.ini";
+    update_project_ini_native(project_ini, {{"name", project_name}, {"mode", mode}}, false);
+    return project_ini;
+}
+
+std::filesystem::path unique_project_target(const std::filesystem::path& base_dir,
+                                            const std::string& base_name) {
+    std::filesystem::path target = base_dir / path_from_utf8(base_name);
+    int counter = 1;
+    while (std::filesystem::exists(target)) {
+        target = base_dir / path_from_utf8(base_name + "_" + std::to_string(counter++));
+    }
+    return target;
+}
+
+std::array<float, 3> json_float3_or(const nlohmann::json& value,
+                                    std::array<float, 3> fallback) {
+    if (!value.is_array() || value.size() < 3) {
+        return fallback;
+    }
+    return {
+        json_float_at(value, 0, fallback[0]),
+        json_float_at(value, 1, fallback[1]),
+        json_float_at(value, 2, fallback[2]),
+    };
+}
+
+std::array<float, 3> vision_vec_to_corona(const nlohmann::json& value,
+                                          std::array<float, 3> fallback) {
+    const auto vec = json_float3_or(value, fallback);
+    return {vec[0], vec[1], -vec[2]};
+}
+
+std::string format_float(float value) {
+    std::ostringstream out;
+    out << std::setprecision(9) << value;
+    return out.str();
+}
+
+const nlohmann::json& json_object_or_empty(const nlohmann::json& object, const char* key) {
+    static const nlohmann::json empty = nlohmann::json::object();
+    if (!object.is_object()) {
+        return empty;
+    }
+    const auto it = object.find(key);
+    return it != object.end() && it->is_object() ? *it : empty;
+}
+
+const nlohmann::json& json_member_or(const nlohmann::json& object,
+                                     const char* key,
+                                     const nlohmann::json& fallback) {
+    if (!object.is_object()) {
+        return fallback;
+    }
+    const auto it = object.find(key);
+    return it != object.end() ? *it : fallback;
+}
+
+const nlohmann::json& vision_param_object(const nlohmann::json& object) {
+    return json_object_or_empty(object, "param");
+}
+
+std::string vision_shape_type(const nlohmann::json& shape) {
+    return to_lower_ascii(json_string_value(shape, {"type", "shape_type"}));
+}
+
+std::string vision_shape_name(const nlohmann::json& shape,
+                              const std::filesystem::path& source_model,
+                              size_t index) {
+    const auto name = json_string_value(shape, {"name"});
+    if (!name.empty()) {
+        return name;
+    }
+    if (!source_model.empty()) {
+        return path_to_utf8(source_model.stem());
+    }
+    return "vision_shape_" + std::to_string(index);
+}
+
+std::string vision_shape_guid(const nlohmann::json& shape, size_t index) {
+    const auto guid = json_string_value(shape, {"shape_guid", "guid", "id"});
+    if (!guid.empty()) {
+        return guid;
+    }
+    return "vision-shape-" + std::to_string(index);
+}
+
+std::filesystem::path resolve_vision_model_path_from_dir(const std::filesystem::path& source_dir,
+                                                         const nlohmann::json& shape) {
+    const auto& params = vision_param_object(shape);
+    std::string model = json_string_value(params, {"fn", "path"});
+    if (model.empty()) {
+        model = json_string_value(shape, {"fn", "path"});
+    }
+    model = trim_ascii(model);
+    if (model.empty()) {
+        return {};
+    }
+    auto path = path_from_utf8(model);
+    if (path.is_absolute()) {
+        return path;
+    }
+    return source_dir / path;
+}
+
+std::filesystem::path resolve_vision_model_path(const std::filesystem::path& json_path,
+                                                const nlohmann::json& shape) {
+    return resolve_vision_model_path_from_dir(json_path.parent_path(), shape);
+}
+
+std::filesystem::path copy_vision_model_into_project(const std::filesystem::path& project_dir,
+                                                     const std::filesystem::path& source_model) {
+    std::error_code rel_ec;
+    const auto existing_rel = std::filesystem::relative(source_model, project_dir, rel_ec);
+    if (!rel_ec && path_is_inside_project(existing_rel)) {
+        const auto existing_route = normalize_route(path_to_utf8(existing_rel));
+        if (existing_route.rfind("Resource/vision_imports/", 0) == 0 ||
+            existing_route == "Resource/vision_imports") {
+            return existing_rel;
+        }
+    }
+
+    const auto rel_dir = std::filesystem::path("Resource") / "vision_imports";
+    const auto dst_dir = project_dir / rel_dir;
+    std::filesystem::create_directories(dst_dir);
+    const auto hash_text = std::to_string(std::hash<std::string>{}(path_to_utf8(source_model)));
+    const auto file_name = source_model.stem().string() + "_" + hash_text.substr(0, 8) + source_model.extension().string();
+    const auto dst = dst_dir / file_name;
+    std::filesystem::copy_file(source_model, dst, std::filesystem::copy_options::overwrite_existing);
+    return rel_dir / file_name;
+}
+
+std::filesystem::path write_vision_primitive_proxy(const std::filesystem::path& project_dir,
+                                                   const nlohmann::json& shape,
+                                                   const std::string& shape_type,
+                                                   size_t index) {
+    std::vector<std::array<float, 3>> vertices;
+    std::vector<std::vector<int>> faces;
+    const auto& params = vision_param_object(shape);
+    if (shape_type == "quad") {
+        const float width = json_float_value(params, "width", 1.0f);
+        const float height = json_float_value(params, "height", 1.0f);
+        const float hw = width * 0.5f;
+        const float hh = height * 0.5f;
+        vertices = {{{hw, 0.0f, -hh}, {hw, 0.0f, hh}, {-hw, 0.0f, -hh}, {-hw, 0.0f, hh}}};
+        faces = {{1, 2, 4}, {4, 3, 1}};
+    } else if (shape_type == "cube") {
+        const float x = json_float_value(params, "x", json_float_value(params, "width", 1.0f));
+        const float y = json_float_value(params, "y", json_float_value(params, "height", x));
+        const float z = json_float_value(params, "z", json_float_value(params, "depth", y));
+        const float sx = x * 0.5f, sy = y * 0.5f, sz = z * 0.5f;
+        vertices = {{{-sx,-sy,-sz},{sx,-sy,-sz},{sx,sy,-sz},{-sx,sy,-sz},
+                     {-sx,-sy,sz},{sx,-sy,sz},{sx,sy,sz},{-sx,sy,sz}}};
+        faces = {{1,2,3,4},{5,8,7,6},{1,5,6,2},{2,6,7,3},{3,7,8,4},{4,8,5,1}};
+    } else if (shape_type == "sphere") {
+        const float r = json_float_value(params, "radius", 1.0f);
+        vertices = {{{0,r,0},{r,0,0},{0,0,r},{-r,0,0},{0,0,-r},{0,-r,0}}};
+        faces = {{1,2,3},{1,3,4},{1,4,5},{1,5,2},{6,3,2},{6,4,3},{6,5,4},{6,2,5}};
+    }
+    if (vertices.empty()) {
+        return {};
+    }
+    const auto rel_dir = std::filesystem::path("Resource") / "vision_proxies";
+    const auto dst_dir = project_dir / rel_dir;
+    std::filesystem::create_directories(dst_dir);
+    const auto file_name = safe_project_dir_name(json_string_value(shape, {"name"}), shape_type) +
+                           "_" + std::to_string(index) + ".obj";
+    const auto dst = dst_dir / file_name;
+    std::ofstream output(dst);
+    output << "# Corona proxy for Vision " << shape_type << "\n";
+    for (const auto& v : vertices) {
+        output << "v " << format_float(v[0]) << " " << format_float(v[1]) << " " << format_float(v[2]) << "\n";
+    }
+    for (const auto& face : faces) {
+        output << "f";
+        for (int vertex : face) output << " " << vertex;
+        output << "\n";
+    }
+    return rel_dir / file_name;
+}
+
+nlohmann::json extract_scene_data(const nlohmann::json& document) {
+    if (document.is_object() && document.contains("scene") && document["scene"].is_object()) {
+        return document["scene"];
+    }
+    return document;
+}
+
+std::map<std::string, std::string> vision_camera_section(const nlohmann::json& document) {
+    std::map<std::string, std::string> camera;
+    camera["count"] = "1";
+    camera["active_id"] = "";
+    camera["camera0.render_backend"] = "vision";
+    camera["camera0.vision_render_mode"] = "path_tracing";
+    camera["camera0.output_mode"] = "final_color";
+    const auto scene_data = extract_scene_data(document);
+    nlohmann::json camera_json = nlohmann::json::object();
+    if (scene_data.contains("cameras") && scene_data["cameras"].is_array() && !scene_data["cameras"].empty()) {
+        camera_json = scene_data["cameras"][0];
+    } else if (scene_data.contains("camera")) {
+        camera_json = scene_data["camera"];
+    }
+    const auto& params = camera_json.contains("param") && camera_json["param"].is_object()
+                             ? camera_json["param"]
+                             : camera_json;
+    const auto& transform = json_object_or_empty(params, "transform");
+    const auto& transform_params = transform.contains("param") && transform["param"].is_object()
+                                       ? transform["param"]
+                                       : transform;
+    if (!camera_json.empty()) {
+        const auto empty_vector = nlohmann::json::array();
+        const auto default_direction = nlohmann::json::array({0.0f, 0.0f, -1.0f});
+        const auto default_up = nlohmann::json::array({0.0f, 1.0f, 0.0f});
+        const auto position = vision_vec_to_corona(
+            transform_params.contains("position") ? transform_params["position"] :
+            transform_params.contains("t") ? transform_params["t"] : json_member_or(params, "position", empty_vector),
+            {0.0f, 0.0f, 5.0f});
+        const auto forward = vision_vec_to_corona(
+            transform_params.contains("forward") ? transform_params["forward"] :
+            transform_params.contains("direction") ? transform_params["direction"] : json_member_or(params, "direction", default_direction),
+            {0.0f, 0.0f, 1.0f});
+        const auto up = vision_vec_to_corona(
+            transform_params.contains("up") ? transform_params["up"] : json_member_or(params, "up", default_up),
+            {0.0f, 1.0f, 0.0f});
+        auto camera_name = json_string_value(params, {"name"});
+        if (camera_name.empty()) {
+            camera_name = json_string_value(camera_json, {"name"});
+        }
+        camera["camera0.name"] = camera_name.empty() ? "VisionCamera" : camera_name;
+        camera["camera0.position"] = format_float3(position);
+        camera["camera0.forward"] = format_float3(forward);
+        camera["camera0.world_up"] = format_float3(up);
+        camera["camera0.fov"] = format_float(json_float_value(params, "fov", json_float_value(params, "fov_y", 45.0f)));
+    }
+    const auto render = json_object_or_empty(document, "render");
+    const auto& integrator = json_object_or_empty(render, "integrator");
+    const auto& integrator_params = vision_param_object(integrator);
+    if (integrator_params.contains("spp")) camera["camera0.vision_spp"] = integrator_params["spp"].dump();
+    if (integrator_params.contains("max_depth")) camera["camera0.vision_max_depth"] = integrator_params["max_depth"].dump();
+    const auto output = json_object_or_empty(document, "output");
+    if (output.contains("denoise")) camera["camera0.vision_denoise"] = json_bool_value(output, "denoise", false) ? "true" : "false";
+    return camera;
+}
+
+bool is_vision_resource_path_key(std::string key) {
+    key = to_lower_ascii(std::move(key));
+    return key == "fn" ||
+           key == "path" ||
+           key == "file" ||
+           key == "filename" ||
+           key == "texture" ||
+           key == "image";
+}
+
+bool is_external_resource_reference(const std::string& value) {
+    const auto lower = to_lower_ascii(value);
+    return lower.find("://") != std::string::npos ||
+           lower.rfind("data:", 0) == 0;
+}
+
+std::string read_text_file(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return {};
+    }
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
+
+std::uint32_t adler32_bytes(const std::string& payload) {
+    constexpr std::uint32_t mod_adler = 65521;
+    std::uint32_t a = 1;
+    std::uint32_t b = 0;
+    for (unsigned char ch : payload) {
+        a = (a + ch) % mod_adler;
+        b = (b + a) % mod_adler;
+    }
+    return (b << 16) | a;
+}
+
+std::string base64_encode(const std::string& input) {
+    static constexpr char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string output;
+    output.reserve(((input.size() + 2) / 3) * 4);
+    for (size_t index = 0; index < input.size(); index += 3) {
+        const auto b0 = static_cast<unsigned char>(input[index]);
+        const auto b1 = index + 1 < input.size() ? static_cast<unsigned char>(input[index + 1]) : 0;
+        const auto b2 = index + 2 < input.size() ? static_cast<unsigned char>(input[index + 2]) : 0;
+        output.push_back(alphabet[b0 >> 2]);
+        output.push_back(alphabet[((b0 & 0x03) << 4) | (b1 >> 4)]);
+        output.push_back(index + 1 < input.size() ? alphabet[((b1 & 0x0f) << 2) | (b2 >> 6)] : '=');
+        output.push_back(index + 2 < input.size() ? alphabet[b2 & 0x3f] : '=');
+    }
+    return output;
+}
+
+int base64_value(unsigned char ch) {
+    if (ch >= 'A' && ch <= 'Z') return ch - 'A';
+    if (ch >= 'a' && ch <= 'z') return ch - 'a' + 26;
+    if (ch >= '0' && ch <= '9') return ch - '0' + 52;
+    if (ch == '+') return 62;
+    if (ch == '/') return 63;
+    return -1;
+}
+
+std::string base64_decode(const std::string& input) {
+    std::string output;
+    int value = 0;
+    int bits = -8;
+    for (unsigned char ch : input) {
+        if (std::isspace(ch) || ch == '=') {
+            continue;
+        }
+        const int decoded = base64_value(ch);
+        if (decoded < 0) {
+            throw std::runtime_error("Invalid base64 data in embedded Vision document");
+        }
+        value = (value << 6) | decoded;
+        bits += 6;
+        if (bits >= 0) {
+            output.push_back(static_cast<char>((value >> bits) & 0xff));
+            bits -= 8;
+        }
+    }
+    return output;
+}
+
+std::string zlib_store_blocks(const std::string& payload) {
+    std::string output;
+    output.reserve(payload.size() + payload.size() / 65535 * 5 + 16);
+    output.push_back(static_cast<char>(0x78));
+    output.push_back(static_cast<char>(0x01));
+
+    size_t offset = 0;
+    do {
+        const auto remaining = payload.size() - offset;
+        const auto chunk_size = std::min<size_t>(remaining, 65535);
+        const bool final_block = offset + chunk_size >= payload.size();
+        output.push_back(static_cast<char>(final_block ? 0x01 : 0x00));
+        const auto len = static_cast<std::uint16_t>(chunk_size);
+        const auto nlen = static_cast<std::uint16_t>(~len);
+        output.push_back(static_cast<char>(len & 0xff));
+        output.push_back(static_cast<char>((len >> 8) & 0xff));
+        output.push_back(static_cast<char>(nlen & 0xff));
+        output.push_back(static_cast<char>((nlen >> 8) & 0xff));
+        output.append(payload.data() + offset, chunk_size);
+        offset += chunk_size;
+    } while (offset < payload.size());
+
+    const auto checksum = adler32_bytes(payload);
+    output.push_back(static_cast<char>((checksum >> 24) & 0xff));
+    output.push_back(static_cast<char>((checksum >> 16) & 0xff));
+    output.push_back(static_cast<char>((checksum >> 8) & 0xff));
+    output.push_back(static_cast<char>(checksum & 0xff));
+    return output;
+}
+
+std::string zlib_unstore_blocks(const std::string& payload) {
+    if (payload.size() < 6) {
+        throw std::runtime_error("Embedded Vision document zlib payload is truncated");
+    }
+    size_t offset = 2;
+    const size_t checksum_offset = payload.size() - 4;
+    std::string output;
+    while (offset < checksum_offset) {
+        const auto header = static_cast<unsigned char>(payload[offset++]);
+        const bool final_block = (header & 0x01) != 0;
+        const auto block_type = (header >> 1) & 0x03;
+        if (block_type != 0) {
+            throw std::runtime_error("Embedded Vision document uses unsupported compressed deflate blocks");
+        }
+        if (offset + 4 > checksum_offset) {
+            throw std::runtime_error("Embedded Vision document stored block is truncated");
+        }
+        const auto len = static_cast<std::uint16_t>(
+            static_cast<unsigned char>(payload[offset]) |
+            (static_cast<unsigned char>(payload[offset + 1]) << 8));
+        const auto nlen = static_cast<std::uint16_t>(
+            static_cast<unsigned char>(payload[offset + 2]) |
+            (static_cast<unsigned char>(payload[offset + 3]) << 8));
+        offset += 4;
+        if (static_cast<std::uint16_t>(~len) != nlen) {
+            throw std::runtime_error("Embedded Vision document stored block length check failed");
+        }
+        if (offset + len > checksum_offset) {
+            throw std::runtime_error("Embedded Vision document stored block exceeds payload");
+        }
+        output.append(payload.data() + offset, len);
+        offset += len;
+        if (final_block) {
+            break;
+        }
+    }
+    const auto expected = (static_cast<std::uint32_t>(static_cast<unsigned char>(payload[checksum_offset])) << 24) |
+                          (static_cast<std::uint32_t>(static_cast<unsigned char>(payload[checksum_offset + 1])) << 16) |
+                          (static_cast<std::uint32_t>(static_cast<unsigned char>(payload[checksum_offset + 2])) << 8) |
+                          static_cast<std::uint32_t>(static_cast<unsigned char>(payload[checksum_offset + 3]));
+    if (adler32_bytes(output) != expected) {
+        throw std::runtime_error("Embedded Vision document checksum mismatch");
+    }
+    return output;
+}
+
+std::string encode_vision_document_data(const nlohmann::json& document) {
+    return base64_encode(zlib_store_blocks(document.dump()));
+}
+
+nlohmann::json decode_vision_document_data(const std::string& data) {
+    const auto json_text = zlib_unstore_blocks(base64_decode(data));
+    auto document = nlohmann::json::parse(json_text);
+    if (!document.is_object()) {
+        throw std::runtime_error("Embedded Vision document must be a JSON object");
+    }
+    return document;
+}
+
+nlohmann::json* mutable_vision_scene_data(nlohmann::json& document) {
+    if (document.is_object() && document.contains("scene") && document["scene"].is_object()) {
+        return &document["scene"];
+    }
+    return document.is_object() ? &document : nullptr;
+}
+
+nlohmann::json* mutable_vision_shapes(nlohmann::json& document) {
+    auto* scene_data = mutable_vision_scene_data(document);
+    if (!scene_data) {
+        return nullptr;
+    }
+    auto it = scene_data->find("shapes");
+    if (it == scene_data->end() || (!it->is_array() && !it->is_object())) {
+        return nullptr;
+    }
+    return &*it;
+}
+
+bool vision_shape_visible(const nlohmann::json& shape) {
+    if (!shape.is_object()) {
+        return true;
+    }
+    if (shape.contains("visible") && shape["visible"].is_boolean()) {
+        return shape["visible"].get<bool>();
+    }
+    const auto params_it = shape.find("param");
+    if (params_it != shape.end() && params_it->is_object() &&
+        params_it->contains("visible") && (*params_it)["visible"].is_boolean()) {
+        return (*params_it)["visible"].get<bool>();
+    }
+    return true;
+}
+
+void cleanup_editor_trs_overrides_for_non_trs_transform(nlohmann::json& shape) {
+    if (!shape.is_object()) {
+        return;
+    }
+    auto params_it = shape.find("param");
+    if (params_it == shape.end() || !params_it->is_object()) {
+        return;
+    }
+    auto transform_it = params_it->find("transform");
+    if (transform_it == params_it->end() || !transform_it->is_object()) {
+        return;
+    }
+    const auto transform_type = json_string_value(*transform_it, {"type"});
+    if (transform_type == "trs") {
+        return;
+    }
+    auto transform_params_it = transform_it->find("param");
+    if (transform_params_it == transform_it->end() || !transform_params_it->is_object()) {
+        return;
+    }
+    transform_params_it->erase("t");
+    transform_params_it->erase("s");
+    transform_params_it->erase("r");
+}
+
+void cleanup_vision_document_editor_transform_overrides(nlohmann::json& document) {
+    auto* shapes = mutable_vision_shapes(document);
+    if (!shapes) {
+        return;
+    }
+    if (shapes->is_array()) {
+        for (auto& shape : *shapes) {
+            cleanup_editor_trs_overrides_for_non_trs_transform(shape);
+        }
+        return;
+    }
+    if (shapes->is_object()) {
+        for (auto& item : shapes->items()) {
+            cleanup_editor_trs_overrides_for_non_trs_transform(item.value());
         }
     }
 }
 
-void emit_scene_tree_changed(const std::string& scene_route) {
-    emit_editor_event_to_all_tabs(
-        "scene-tree-changed",
-        nlohmann::json::array({scene_route}));
+nlohmann::json vision_document_for_render(nlohmann::json document) {
+    cleanup_vision_document_editor_transform_overrides(document);
+    return document;
+}
+
+std::array<float, 3> corona_vec_to_vision(const std::array<float, 3>& value) {
+    return {value[0], value[1], -value[2]};
+}
+
+std::string vision_shape_match_guid(const nlohmann::json& shape, size_t index) {
+    return vision_shape_guid(shape, index);
+}
+
+nlohmann::json* find_vision_shape_for_actor(nlohmann::json& document,
+                                            const NativeEditorActor& actor) {
+    auto* shapes = mutable_vision_shapes(document);
+    if (!shapes) {
+        return nullptr;
+    }
+    const auto actor_guid = trim_ascii(actor.actor_guid);
+    const auto actor_name = trim_ascii(actor.name);
+    auto matches = [&](const nlohmann::json& shape, size_t index) {
+        if (!actor_guid.empty() && vision_shape_match_guid(shape, index) == actor_guid) {
+            return true;
+        }
+        return !actor_name.empty() && vision_shape_name(shape, {}, index) == actor_name;
+    };
+    if (shapes->is_array()) {
+        for (size_t index = 0; index < shapes->size(); ++index) {
+            if (matches((*shapes)[index], index)) {
+                return &(*shapes)[index];
+            }
+        }
+    } else if (shapes->is_object()) {
+        size_t index = 0;
+        for (auto& item : shapes->items()) {
+            if (matches(item.value(), index++)) {
+                return &item.value();
+            }
+        }
+    }
+    return nullptr;
+}
+
+std::string embedded_vision_scene_key(const NativeEditorScene& scene) {
+    return path_to_utf8(resolve_project_path(scene.project_root, scene.route)) + ".embedded";
+}
+
+void clear_embedded_vision_actor_bindings(NativeEditorScene& scene) {
+    for (auto& actor : scene.actors) {
+        if (actor.engine_actor) {
+            actor.engine_actor->clear_external_vision_binding();
+        }
+    }
+}
+
+NativeEditorActor* find_native_actor_by_guid(NativeEditorScene& scene,
+                                             const std::string& actor_guid) {
+    if (actor_guid.empty()) {
+        return nullptr;
+    }
+    for (auto& actor : scene.actors) {
+        if (actor.actor_guid == actor_guid) {
+            return &actor;
+        }
+    }
+    return nullptr;
+}
+
+void register_embedded_vision_actor_binding(NativeEditorScene& scene,
+                                            const nlohmann::json& shape,
+                                            const std::string& scene_key,
+                                            size_t index,
+                                            const std::string& json_path) {
+    const auto shape_guid = vision_shape_guid(shape, index);
+    auto* actor = find_native_actor_by_guid(scene, shape_guid);
+    if (!actor || !actor->engine_actor) {
+        return;
+    }
+    const bool visible = actor->optics ? actor->optics->get_visible() : true;
+
+    actor->engine_actor->set_external_vision_binding(
+        scene_key,
+        shape_guid,
+        static_cast<int>(index),
+        json_path,
+        vision_shape_type(shape),
+        shape_guid,
+        normalize_route(actor->route),
+        visible);
+}
+
+void register_embedded_vision_actor_bindings(NativeEditorScene& scene,
+                                             const nlohmann::json& document,
+                                             const std::string& scene_key) {
+    clear_embedded_vision_actor_bindings(scene);
+    const auto scene_data = extract_scene_data(document);
+    const auto shapes_it = scene_data.find("shapes");
+    if (shapes_it == scene_data.end()) {
+        return;
+    }
+    if (shapes_it->is_array()) {
+        for (size_t index = 0; index < shapes_it->size(); ++index) {
+            const auto& shape = (*shapes_it)[index];
+            register_embedded_vision_actor_binding(
+                scene,
+                shape,
+                scene_key,
+                index,
+                "shapes[" + std::to_string(index) + "]");
+        }
+        return;
+    }
+    if (shapes_it->is_object()) {
+        size_t index = 0;
+        for (const auto& item : shapes_it->items()) {
+            register_embedded_vision_actor_binding(
+                scene,
+                item.value(),
+                scene_key,
+                index++,
+                "shapes." + item.key());
+        }
+    }
+}
+
+void ensure_vision_shape_guids(nlohmann::json& document) {
+    auto* shapes = mutable_vision_shapes(document);
+    if (!shapes) {
+        return;
+    }
+    auto ensure_guid = [](nlohmann::json& shape, size_t index) {
+        if (!shape.is_object()) {
+            return;
+        }
+        if (!shape.contains("guid") &&
+            !shape.contains("id") &&
+            !shape.contains("shape_guid")) {
+            shape["guid"] = vision_shape_match_guid(shape, index);
+        }
+    };
+    if (shapes->is_array()) {
+        for (size_t index = 0; index < shapes->size(); ++index) {
+            ensure_guid((*shapes)[index], index);
+        }
+    } else if (shapes->is_object()) {
+        size_t index = 0;
+        for (auto& item : shapes->items()) {
+            ensure_guid(item.value(), index++);
+        }
+    }
+}
+
+nlohmann::json& ensure_vision_shape_param(nlohmann::json& shape) {
+    if (!shape.is_object()) {
+        shape = nlohmann::json::object();
+    }
+    auto& params = shape["param"];
+    if (!params.is_object()) {
+        params = nlohmann::json::object();
+    }
+    return params;
+}
+
+nlohmann::json make_vision_shape_from_actor(const NativeEditorActor& actor) {
+    nlohmann::json shape = nlohmann::json::object();
+    shape["type"] = "model";
+    shape["name"] = actor.name;
+    if (!actor.actor_guid.empty()) {
+        shape["guid"] = actor.actor_guid;
+    }
+    auto& params = ensure_vision_shape_param(shape);
+    params["fn"] = normalize_route(actor.route);
+    return shape;
+}
+
+void write_actor_visibility_to_vision_shape(const NativeEditorActor& actor,
+                                            nlohmann::json& shape) {
+    const bool visible = actor.optics ? actor.optics->get_visible() : true;
+    shape["visible"] = visible;
+    auto& params = ensure_vision_shape_param(shape);
+    params["visible"] = visible;
+    cleanup_editor_trs_overrides_for_non_trs_transform(shape);
+    if (actor.engine_actor) {
+        const auto actor_handle = actor.engine_actor->get_handle();
+        auto binding = Corona::SharedDataHub::instance().external_vision_binding(actor_handle);
+        if (binding) {
+            binding->visible = visible;
+            Corona::SharedDataHub::instance().set_external_vision_binding(actor_handle,
+                                                                          std::move(*binding));
+        }
+    }
+}
+
+void write_actor_state_to_vision_shape(const NativeEditorActor& actor,
+                                       nlohmann::json& shape,
+                                       bool sync_transform) {
+    if (!actor.name.empty()) {
+        shape["name"] = actor.name;
+    }
+    if (!actor.actor_guid.empty() &&
+        !shape.contains("guid") &&
+        !shape.contains("id") &&
+        !shape.contains("shape_guid")) {
+        shape["guid"] = actor.actor_guid;
+    }
+    auto& params = ensure_vision_shape_param(shape);
+    if (sync_transform) {
+        auto& transform = params["transform"];
+        if (!transform.is_object()) {
+            transform = nlohmann::json::object();
+        }
+        transform["type"] = "trs";
+        auto& transform_params = transform["param"];
+        if (!transform_params.is_object()) {
+            transform_params = nlohmann::json::object();
+        }
+        const auto position = actor.geometry ? actor.geometry->get_position() : actor.position;
+        const auto scale = actor.geometry ? actor.geometry->get_scale() : actor.scale;
+        transform_params["t"] = corona_vec_to_vision(position);
+        transform_params["s"] = scale;
+    }
+    write_actor_visibility_to_vision_shape(actor, shape);
+}
+
+bool persist_embedded_vision_document(NativeEditorScene& scene, nlohmann::json& document) {
+    if (scene.vision_storage != "embedded") {
+        return false;
+    }
+    scene.vision_document_data = encode_vision_document_data(document);
+    scene.vision_document_version = VISION_DOCUMENT_VERSION;
+    scene.vision_document_encoding = VISION_DOCUMENT_ENCODING;
+    persist_native_scene_vision_document(scene);
+    return true;
+}
+
+bool refresh_embedded_vision_view(NativeEditorScene& scene,
+                                  const nlohmann::json& document) {
+    if (scene.vision_storage != "embedded") {
+        return false;
+    }
+    try {
+        const auto render_document = vision_document_for_render(document);
+        const auto scene_key = embedded_vision_scene_key(scene);
+        register_embedded_vision_actor_bindings(scene, render_document, scene_key);
+        Corona::API::load_vision_scene_from_json(render_document.dump(),
+                                                 path_to_utf8(scene.project_root),
+                                                 scene_key,
+                                                 true);
+        return true;
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("Vision embedded view refresh failed: project={}, scene={}, error={}",
+                      scene.project_root.string(),
+                      scene.route,
+                      e.what());
+        return false;
+    }
+}
+
+bool sync_native_actor_to_embedded_vision_document(NativeEditorScene& scene,
+                                                   const NativeEditorActor& actor,
+                                                   bool create_if_missing,
+                                                   bool sync_transform) {
+    if (scene.vision_storage != "embedded" || scene.vision_document_data.empty()) {
+        return false;
+    }
+    try {
+        auto document = decode_vision_document_data(scene.vision_document_data);
+        ensure_vision_shape_guids(document);
+        auto* shape = find_vision_shape_for_actor(document, actor);
+        bool created_shape = false;
+        if (!shape && create_if_missing) {
+            auto* scene_data = mutable_vision_scene_data(document);
+            if (!scene_data) {
+                return false;
+            }
+            auto& shapes = (*scene_data)["shapes"];
+            if (!shapes.is_array()) {
+                shapes = nlohmann::json::array();
+            }
+            shapes.push_back(make_vision_shape_from_actor(actor));
+            shape = &shapes.back();
+            created_shape = true;
+        }
+        if (!shape) {
+            return false;
+        }
+        write_actor_state_to_vision_shape(actor, *shape, sync_transform);
+        const bool persisted = persist_embedded_vision_document(scene, document);
+        if (persisted && created_shape) {
+            refresh_embedded_vision_view(scene, document);
+        }
+        return persisted;
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("Vision embedded actor sync failed: actor={}, guid={}, error={}",
+                      actor.name,
+                      actor.actor_guid,
+                      e.what());
+        return false;
+    }
+}
+
+bool remove_native_actor_from_embedded_vision_document(NativeEditorScene& scene,
+                                                       const std::string& actor_guid) {
+    if (scene.vision_storage != "embedded" || scene.vision_document_data.empty() ||
+        trim_ascii(actor_guid).empty()) {
+        return false;
+    }
+    try {
+        auto document = decode_vision_document_data(scene.vision_document_data);
+        ensure_vision_shape_guids(document);
+        auto* shapes = mutable_vision_shapes(document);
+        if (!shapes) {
+            return false;
+        }
+        bool removed = false;
+        if (shapes->is_array()) {
+            for (size_t index = 0; index < shapes->size(); ++index) {
+                if (vision_shape_match_guid((*shapes)[index], index) == actor_guid) {
+                    shapes->erase(shapes->begin() + static_cast<nlohmann::json::difference_type>(index));
+                    removed = true;
+                    break;
+                }
+            }
+        } else if (shapes->is_object()) {
+            size_t index = 0;
+            for (auto it = shapes->begin(); it != shapes->end(); ++index) {
+                if (vision_shape_match_guid(it.value(), index) == actor_guid) {
+                    it = shapes->erase(it);
+                    removed = true;
+                    break;
+                }
+                ++it;
+            }
+        }
+        const bool persisted = removed && persist_embedded_vision_document(scene, document);
+        if (persisted) {
+            refresh_embedded_vision_view(scene, document);
+        }
+        return persisted;
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("Vision embedded actor remove failed: guid={}, error={}",
+                      actor_guid,
+                      e.what());
+        return false;
+    }
+}
+
+std::filesystem::path relative_path_if_safe(const std::filesystem::path& path,
+                                            const std::filesystem::path& base_dir) {
+    std::error_code ec;
+    auto relative = std::filesystem::relative(path, base_dir, ec);
+    if (ec || relative.empty()) {
+        return path.filename();
+    }
+    for (const auto& part : relative) {
+        if (part == "..") {
+            return path.filename();
+        }
+    }
+    return relative;
+}
+
+void copy_file_creating_directories(const std::filesystem::path& source,
+                                    const std::filesystem::path& destination) {
+    std::filesystem::create_directories(destination.parent_path());
+    std::error_code ec;
+    std::filesystem::copy_file(source,
+                               destination,
+                               std::filesystem::copy_options::overwrite_existing,
+                               ec);
+    if (ec) {
+        CFW_LOG_WARNING("Vision asset copy failed: {} -> {} ({})",
+                        source.string(),
+                        destination.string(),
+                        ec.message());
+    }
+}
+
+void copy_mtl_texture_dependencies(const std::filesystem::path& source_mtl,
+                                   const std::filesystem::path& sidecar_dir,
+                                   const std::filesystem::path& copied_mtl_rel) {
+    std::ifstream input(source_mtl);
+    if (!input) {
+        return;
+    }
+
+    static const std::unordered_set<std::string> texture_keys = {
+        "map_ka", "map_kd", "map_ks", "map_ke", "map_ns", "map_bump",
+        "bump", "disp", "decal", "refl", "norm"};
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream line_stream(line);
+        std::string key;
+        line_stream >> key;
+        key = to_lower_ascii(key);
+        if (!texture_keys.contains(key)) {
+            continue;
+        }
+
+        std::string token;
+        std::string texture;
+        while (line_stream >> token) {
+            if (!token.empty() && token.front() == '-') {
+                std::string ignored;
+                line_stream >> ignored;
+                continue;
+            }
+            texture = token;
+        }
+        if (texture.empty() || is_external_resource_reference(texture)) {
+            continue;
+        }
+
+        const auto source_texture = source_mtl.parent_path() / path_from_utf8(texture);
+        if (!std::filesystem::is_regular_file(source_texture)) {
+            continue;
+        }
+        const auto destination =
+            sidecar_dir / copied_mtl_rel.parent_path() / path_from_utf8(texture);
+        copy_file_creating_directories(source_texture, destination);
+    }
+}
+
+void copy_obj_dependencies(const std::filesystem::path& source_obj,
+                           const std::filesystem::path& sidecar_dir,
+                           const std::filesystem::path& copied_obj_rel) {
+    std::ifstream input(source_obj);
+    if (!input) {
+        return;
+    }
+
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream line_stream(line);
+        std::string key;
+        line_stream >> key;
+        if (to_lower_ascii(key) != "mtllib") {
+            continue;
+        }
+
+        std::string mtl_name;
+        while (line_stream >> mtl_name) {
+            if (mtl_name.empty() || is_external_resource_reference(mtl_name)) {
+                continue;
+            }
+            const auto source_mtl = source_obj.parent_path() / path_from_utf8(mtl_name);
+            if (!std::filesystem::is_regular_file(source_mtl)) {
+                continue;
+            }
+            const auto copied_mtl_rel = copied_obj_rel.parent_path() / path_from_utf8(mtl_name);
+            copy_file_creating_directories(source_mtl, sidecar_dir / copied_mtl_rel);
+            copy_mtl_texture_dependencies(source_mtl, sidecar_dir, copied_mtl_rel);
+        }
+    }
+}
+
+void copy_gltf_dependencies(const std::filesystem::path& source_gltf,
+                            const std::filesystem::path& sidecar_dir,
+                            const std::filesystem::path& copied_gltf_rel) {
+    std::ifstream input(source_gltf);
+    if (!input) {
+        return;
+    }
+
+    nlohmann::json document;
+    try {
+        document = nlohmann::json::parse(input);
+    } catch (...) {
+        return;
+    }
+
+    auto copy_uri_array = [&](const char* section) {
+        if (!document.contains(section) || !document[section].is_array()) {
+            return;
+        }
+        for (const auto& item : document[section]) {
+            if (!item.is_object() || !item.contains("uri") || !item["uri"].is_string()) {
+                continue;
+            }
+            const auto uri = item["uri"].get<std::string>();
+            if (uri.empty() || is_external_resource_reference(uri)) {
+                continue;
+            }
+            const auto source_dep = source_gltf.parent_path() / path_from_utf8(uri);
+            if (!std::filesystem::is_regular_file(source_dep)) {
+                continue;
+            }
+            const auto destination =
+                sidecar_dir / copied_gltf_rel.parent_path() / path_from_utf8(uri);
+            copy_file_creating_directories(source_dep, destination);
+        }
+    };
+
+    copy_uri_array("buffers");
+    copy_uri_array("images");
+}
+
+std::string copy_vision_archive_asset(const std::filesystem::path& source,
+                                      const std::filesystem::path& project_dir,
+                                      const std::filesystem::path& archive_root_rel,
+                                      const std::filesystem::path& original_scene_dir) {
+    if (!std::filesystem::is_regular_file(source)) {
+        return {};
+    }
+
+    const auto source_rel = relative_path_if_safe(source, original_scene_dir);
+    const auto copied_rel = archive_root_rel / source_rel;
+    copy_file_creating_directories(source, project_dir / copied_rel);
+
+    const auto ext = to_lower_ascii(source.extension().string());
+    if (ext == ".obj") {
+        copy_obj_dependencies(source, project_dir, copied_rel);
+    } else if (ext == ".gltf") {
+        copy_gltf_dependencies(source, project_dir, copied_rel);
+    }
+
+    return normalize_route(path_to_utf8(copied_rel));
+}
+
+void rewrite_vision_resource_paths_for_project_archive(nlohmann::json& value,
+                                                       const std::filesystem::path& source_dir,
+                                                       const std::filesystem::path& project_dir,
+                                                       const std::filesystem::path& archive_root_rel) {
+    if (value.is_object()) {
+        for (auto& item : value.items()) {
+            auto& child = item.value();
+            if (is_vision_resource_path_key(item.key()) && child.is_string()) {
+                const auto text = trim_ascii(child.get<std::string>());
+                if (!text.empty() && !is_external_resource_reference(text)) {
+                    const auto candidate_path = path_from_utf8(text);
+                    const auto source_path =
+                        candidate_path.is_absolute() ? candidate_path : source_dir / candidate_path;
+                    const auto copied = copy_vision_archive_asset(
+                        source_path, project_dir, archive_root_rel, source_dir);
+                    if (!copied.empty()) {
+                        child = copied;
+                        continue;
+                    }
+                }
+            }
+            rewrite_vision_resource_paths_for_project_archive(child, source_dir, project_dir, archive_root_rel);
+        }
+        return;
+    }
+
+    if (value.is_array()) {
+        for (auto& child : value) {
+            rewrite_vision_resource_paths_for_project_archive(child, source_dir, project_dir, archive_root_rel);
+        }
+    }
+}
+
+EmbeddedVisionDocument create_embedded_vision_document(const std::filesystem::path& project_dir,
+                                                       const std::filesystem::path& json_path,
+                                                       const nlohmann::json& source_document) {
+    const auto raw = read_text_file(json_path);
+    const auto import_id = safe_project_dir_name(path_to_utf8(json_path.stem()), "vision") +
+                         "_" + fnv1a_hex12(raw.empty() ? path_to_utf8(json_path) : raw);
+    const auto asset_root = std::filesystem::path("Resource") / "vision_imports" / import_id;
+    std::filesystem::create_directories(project_dir / asset_root);
+
+    auto embedded_document = source_document;
+    rewrite_vision_resource_paths_for_project_archive(
+        embedded_document, json_path.parent_path(), project_dir, asset_root);
+    ensure_vision_shape_guids(embedded_document);
+
+    return EmbeddedVisionDocument{
+        embedded_document,
+        encode_vision_document_data(embedded_document),
+        normalize_route(path_to_utf8(asset_root)),
+    };
+}
+
+void persist_vision_proxy_actors_from_document(const std::filesystem::path& project_dir,
+                                               const std::filesystem::path& scene_file,
+                                               const nlohmann::json& document,
+                                               const std::filesystem::path& source_dir) {
+    const auto scene_data = extract_scene_data(document);
+    std::map<std::string, std::string> actors;
+    size_t imported = 0;
+    const auto shapes = scene_data.contains("shapes") ? scene_data["shapes"] : nlohmann::json::array();
+    const auto import_shape = [&](size_t index, const nlohmann::json& shape) {
+        if (!shape.is_object()) {
+            return;
+        }
+        const auto shape_type = vision_shape_type(shape);
+        std::filesystem::path source_model;
+        std::filesystem::path route;
+        if (shape_type == "model") {
+            source_model = resolve_vision_model_path_from_dir(source_dir, shape);
+            if (source_model.empty() || !std::filesystem::is_regular_file(source_model)) {
+                return;
+            }
+            route = copy_vision_model_into_project(project_dir, source_model);
+        } else if (shape_type == "quad" || shape_type == "cube" || shape_type == "sphere") {
+            route = write_vision_primitive_proxy(project_dir, shape, shape_type, index);
+            if (route.empty()) {
+                return;
+            }
+        } else {
+            return;
+        }
+        const auto key = "actor" + std::to_string(imported++);
+        const auto& params = vision_param_object(shape);
+        const auto& transform = json_object_or_empty(params, "transform");
+        const auto& transform_params = transform.contains("param") && transform["param"].is_object()
+                                           ? transform["param"]
+                                           : transform;
+        const auto default_position = nlohmann::json::array({0.0f, 0.0f, 0.0f});
+        const auto default_scale = nlohmann::json::array({1.0f, 1.0f, 1.0f});
+        const auto position = vision_vec_to_corona(json_member_or(transform_params, "t", default_position), {0.0f, 0.0f, 0.0f});
+        const auto scale = json_float3_or(json_member_or(transform_params, "s", default_scale), {1.0f, 1.0f, 1.0f});
+        actors[key + ".actor_type"] = "model";
+        actors[key + ".name"] = vision_shape_name(shape, source_model, index);
+        actors[key + ".route"] = normalize_route(path_to_utf8(route));
+        actors[key + ".actor_guid"] = vision_shape_guid(shape, index);
+        actors[key + ".follow_camera"] = "false";
+        actors[key + ".mechanics.physics_enabled"] = "false";
+        actors[key + ".geometry.position"] = format_float3(position);
+        actors[key + ".geometry.rotation"] = "0, 0, 0";
+        actors[key + ".geometry.scale"] = format_float3(scale);
+        actors[key + ".optics.visible"] = vision_shape_visible(shape) ? "true" : "false";
+        const auto& material = json_object_or_empty(params, "material");
+        if (!material.empty()) {
+            if (material.contains("base_color")) actors[key + ".optics.diffuse"] = format_float3(json_float3_or(material["base_color"], {0.8f, 0.8f, 0.8f}));
+            if (material.contains("metallic")) actors[key + ".optics.metallic"] = material["metallic"].dump();
+            if (material.contains("roughness")) actors[key + ".optics.roughness"] = material["roughness"].dump();
+            if (material.contains("emission")) actors[key + ".optics.emission"] = format_float3(json_float3_or(material["emission"], {0.0f, 0.0f, 0.0f}));
+            if (material.contains("texture") && material["texture"].is_string()) actors[key + ".material.texture"] = material["texture"].get<std::string>();
+        }
+    };
+    if (shapes.is_array()) {
+        for (size_t index = 0; index < shapes.size(); ++index) {
+            import_shape(index, shapes[index]);
+        }
+    } else if (shapes.is_object()) {
+        size_t index = 0;
+        for (const auto& item : shapes.items()) {
+            import_shape(index++, item.value());
+        }
+    }
+    replace_ini_section_from_map(scene_file, "actors", actors);
+}
+
+void apply_vision_json_to_scene_native(const std::filesystem::path& project_dir,
+                                       const std::filesystem::path& scene_file,
+                                       const std::filesystem::path& json_path) {
+    std::ifstream input(json_path);
+    if (!input) {
+        throw std::runtime_error("Vision scene file not found: " + path_to_utf8(json_path));
+    }
+    nlohmann::json document = nlohmann::json::parse(input);
+    const std::string legacy_vision_section = "vision";
+    remove_ini_section(scene_file, legacy_vision_section);
+    remove_ini_section(scene_file, "vision_document");
+    remove_ini_section(scene_file, "vision_bindings");
+    remove_ini_section(scene_file, "vision_unsupported_shapes");
+    replace_ini_section_from_map(scene_file, "camera", vision_camera_section(document));
+    persist_vision_proxy_actors_from_document(project_dir, scene_file, document, json_path.parent_path());
+}
+
+std::filesystem::path create_vision_project_native(const std::filesystem::path& json_path) {
+    if (!Corona::API::is_vision_available()) {
+        throw std::runtime_error("Vision backend is not available in this build");
+    }
+    std::ifstream input(json_path);
+    if (!input) {
+        throw std::runtime_error("Vision scene file not found: " + path_to_utf8(json_path));
+    }
+    nlohmann::json document = nlohmann::json::parse(input);
+
+    const auto base_dir_text = settings_value("General", "default_path", path_to_utf8(runtime_data_dir()));
+    const auto base_dir = path_from_utf8(base_dir_text.empty() ? path_to_utf8(runtime_data_dir()) : base_dir_text);
+    std::filesystem::create_directories(base_dir);
+    const auto project_name = path_to_utf8(json_path.stem());
+    const auto target = unique_project_target(base_dir, project_name);
+    const auto final_name = path_to_utf8(target.filename());
+    const auto project_ini = create_project_from_template_native(target, final_name, "3d");
+    const auto project = read_ini_file(project_ini);
+    const auto entrance = ini_value(project, "Project", "entrance_scene", "Scene/default.scene");
+    const auto scene_file = resolve_project_path(target, entrance);
+    const auto embedded = create_embedded_vision_document(target, json_path, document);
+    remove_ini_section(scene_file, "vision_bindings");
+    remove_ini_section(scene_file, "vision_unsupported_shapes");
+    replace_ini_section_from_map(scene_file, "camera", vision_camera_section(embedded.document));
+    persist_vision_proxy_actors_from_document(target, scene_file, embedded.document, target);
+    replace_ini_section_from_map(scene_file,
+                                 "vision",
+                                 {{"storage", "embedded"},
+                                  {"import_mode", "external"}});
+    replace_ini_section_from_map(scene_file,
+                                 "vision_document",
+                                 {{"version", VISION_DOCUMENT_VERSION},
+                                  {"encoding", VISION_DOCUMENT_ENCODING},
+                                  {"asset_root", embedded.asset_root},
+                                  {"data", embedded.data}});
+    return target;
+}
+
+std::filesystem::path copy_existing_project_to_data_native(const std::filesystem::path& source_ini) {
+    const auto source_dir = source_ini.parent_path();
+    const auto source_project = read_ini_file(source_ini);
+    const auto project_name = safe_project_dir_name(
+        ini_value(source_project, "Project", "name", path_to_utf8(source_dir.filename())),
+        path_to_utf8(source_dir.filename()));
+    const auto data_dir = runtime_data_dir();
+    std::filesystem::create_directories(data_dir);
+    const auto target = unique_project_target(data_dir, project_name);
+    std::filesystem::copy(source_dir, target, std::filesystem::copy_options::recursive);
+    normalize_project_runtime_paths_native(target);
+    update_project_ini_native(target / "project.ini", {{"name", path_to_utf8(target.filename())}}, true);
+    return target;
+}
+
+std::filesystem::path open_project_native(const std::filesystem::path& raw_path) {
+    std::filesystem::path project_dir;
+    const auto ext = to_lower_ascii(raw_path.extension().string());
+    if (ext == ".json") {
+        project_dir = create_vision_project_native(raw_path);
+    } else if (ext == ".ini") {
+        project_dir = copy_existing_project_to_data_native(raw_path);
+    } else {
+        project_dir = raw_path;
+    }
+    project_dir = canonical_project_dir_for_settings(project_dir);
+    if (!std::filesystem::is_directory(project_dir) ||
+        !std::filesystem::is_regular_file(project_dir / "project.ini")) {
+        throw std::runtime_error("Invalid project path: " + path_to_utf8(project_dir));
+    }
+    normalize_project_runtime_paths_native(project_dir);
+    update_project_ini_native(project_dir / "project.ini", {}, true);
+    update_editor_settings_section("General", {{"last_project", path_to_utf8(project_dir)}});
+    add_recent_project_native(project_dir);
+    native_editor_state().project_path = path_to_utf8(project_dir);
+    native_editor_state().scene.reset();
+    return project_dir;
+}
+
+nlohmann::json recent_projects_native() {
+    auto recent_raw = settings_value("History", "recent_projects", "[]");
+    nlohmann::json recent = nlohmann::json::array();
+    try {
+        recent = nlohmann::json::parse(recent_raw);
+    } catch (...) {
+        recent = nlohmann::json::array();
+    }
+    nlohmann::json result = nlohmann::json::array();
+    for (const auto& item : recent) {
+        if (!item.is_string()) {
+            continue;
+        }
+        const auto project_dir = canonical_project_dir_for_settings(path_from_utf8(item.get<std::string>()));
+        const auto project_ini = project_dir / "project.ini";
+        const bool exists = is_valid_project_dir(project_dir);
+        auto ini = exists ? read_ini_file(project_ini) : IniFile{};
+        result.push_back({
+            {"name", exists ? ini_value(ini, "Project", "name", path_to_utf8(project_dir.filename())) : path_to_utf8(project_dir.filename())},
+            {"path", path_to_utf8(project_dir)},
+            {"if_exists", exists},
+            {"last_edited", exists ? ini_value(ini, "Project", "last_opened", "-") : "-"},
+        });
+    }
+    return result;
 }
 
 nlohmann::json active_project_info_json() {
@@ -1939,14 +4184,16 @@ void emit_lanchat_event_json(const std::string& event_json) {
     if (event_json.empty()) {
         return;
     }
-    std::string js = "if(window.__coronaEmit)window.__coronaEmit(" +
-                     nlohmann::json("lanchat-event").dump() + "," +
-                     event_json + ",{\"_fromCross\":1})";
-    for (auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
-        if (tab && !tab->minimized && tab->client && tab->client->GetBrowser()) {
-            tab->client->GetBrowser()->GetMainFrame()->ExecuteJavaScript(js, "", 0);
+    nlohmann::json event_payload = nlohmann::json::object();
+    try {
+        event_payload = nlohmann::json::parse(event_json);
+        if (!event_payload.is_object()) {
+            event_payload = {{"payload", event_payload}};
         }
+    } catch (...) {
+        event_payload = {{"raw", event_json}};
     }
+    emit_editor_api_event("LANChat.event", event_payload);
 }
 
 nlohmann::json build_lanchat_members(
@@ -2071,6 +4318,10 @@ NativeResult dispatch_method(const std::string& module,
     } catch (...) {
         return native_failure(module + " native handler error", 2);
     }
+}
+
+NativeResult script_method(const NativeRequest& request, const NativeContext&) {
+    return invoke_python_script_service(request);
 }
 
 std::shared_ptr<Corona::Systems::NetworkSystem> require_network_system() {
@@ -2400,26 +4651,139 @@ std::string capture_editor_camera_view_from_python(const std::string& scene_name
     }
 }
 
-void register_main_view_rpc_handlers(NativeRpcRegistry& registry) {
+void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
+        {"browse_folder", script_method},
+        {"get_default_project_path", [](const NativeRequest&, const NativeContext&) {
+            const auto value = settings_value("General", "default_path", path_to_utf8(runtime_data_dir()));
+            return native_success(value);
+        }},
+        {"get_app_version", [](const NativeRequest&, const NativeContext&) {
+            return native_success(settings_value("General", "version", "1.2.0"));
+        }},
+        {"get_recent_projects", [](const NativeRequest&, const NativeContext&) {
+            return native_success(recent_projects_native());
+        }},
+        {"create_project", [](const NativeRequest& request, const NativeContext&) {
+            const auto data = arg_object(request.args, 0);
+            const auto name = data.value("name", std::string{"New_Corona_Project"});
+            const auto base_text = data.value(
+                "path",
+                settings_value("General", "default_path", path_to_utf8(runtime_data_dir())));
+            const auto base_dir = path_from_utf8(base_text);
+            const auto mode = data.value("mode", std::string{"3d"});
+            const auto target = base_dir / path_from_utf8(name);
+            create_project_from_template_native(target, name, mode);
+            update_editor_settings_section("General", {{"default_path", path_to_utf8(base_dir)}});
+            return native_success(path_to_utf8(target));
+        }},
+        {"create_world_project", [](const NativeRequest& request, const NativeContext&) {
+            const auto data = arg_object(request.args, 0);
+            const auto mode = data.value("mode", std::string{"creative"});
+            const auto prompt = data.value("prompt", std::string{});
+            const bool story = mode == "story";
+            const std::string display_base = story ? "剧情世界" : "创造世界";
+            const std::string dir_base = story ? "story_world" : "creative_world";
+            const auto base_dir = runtime_data_dir();
+            std::filesystem::create_directories(base_dir);
+            int index = 1;
+            std::filesystem::path target;
+            do {
+                target = base_dir / (dir_base + "_" + std::to_string(index++));
+            } while (std::filesystem::exists(target));
+            const auto display_name = display_base + "_" + std::to_string(index - 1);
+            const auto project_ini = create_project_from_template_native(target, display_name, mode);
+            if (!prompt.empty()) {
+                auto ini = read_ini_file(project_ini);
+                std::map<std::string, std::string> values(ini["project"].begin(), ini["project"].end());
+                values["world_prompt"] = prompt;
+                replace_ini_section_from_map(project_ini, "Project", values);
+            }
+            return native_success({{"name", display_name}, {"path", path_to_utf8(target)}});
+        }},
+        {"create_multiplayer_project", [](const NativeRequest& request, const NativeContext&) {
+            const auto data = arg_object(request.args, 0);
+            const std::string role = data.value("role", std::string{"guest"}) == "host" ? "host" : "guest";
+            const std::string display_base = role == "host" ? "联机房主" : "联机加入";
+            const std::string dir_base = role == "host" ? "multiplayer_host" : "multiplayer_guest";
+            const auto base_dir = runtime_data_dir();
+            std::filesystem::create_directories(base_dir);
+            int index = 1;
+            std::filesystem::path target;
+            do {
+                target = base_dir / (dir_base + "_" + std::to_string(index++));
+            } while (std::filesystem::exists(target));
+            const auto display_name = display_base + "_" + std::to_string(index - 1);
+            const auto project_ini = create_project_from_template_native(target, display_name, "3d");
+            auto ini = read_ini_file(project_ini);
+            std::map<std::string, std::string> values(ini["project"].begin(), ini["project"].end());
+            values["multiplayer_role"] = role;
+            replace_ini_section_from_map(project_ini, "Project", values);
+            return native_success({{"name", display_name}, {"path", path_to_utf8(target)}, {"role", role}});
+        }},
+        {"open_project", [](const NativeRequest& request, const NativeContext&) {
+            const auto path = normalize_route(arg_string(request.args, 0));
+            CFW_LOG_INFO("[ProjectLauncher] open_project request path='{}'", path);
+            if (path.empty()) {
+                return native_success({{"ok", false}, {"path", std::string{}}, {"status", "cancelled"}});
+            }
+            const auto opened = open_project_native(path_from_utf8(path));
+            CFW_LOG_INFO("[ProjectLauncher] open_project opened path='{}'", path_to_utf8(opened));
+            emit_editor_api_event("ProjectLauncher.projectOpened", {{"path", path_to_utf8(opened)}});
+            return native_success({{"ok", true}, {"path", path_to_utf8(opened)}});
+        }},
+        {"open_project_file", script_method},
+        {"set_project_mode", [](const NativeRequest&, const NativeContext&) {
+            return native_success(true);
+        }},
+    };
+
+    registry.register_module("ProjectLauncher", [](const NativeRequest& request,
+                                                   const NativeContext& context) {
+        const auto it = methods.find(request.function);
+        if (it == methods.end()) {
+            return native_unhandled();
+        }
+        try {
+            return it->second(request, context);
+        } catch (const std::exception& e) {
+            if (request.function == "open_project") {
+                CFW_LOG_ERROR("[ProjectLauncher] open_project failed: {}", e.what());
+            }
+            return native_failure(e.what(), 2);
+        } catch (...) {
+            if (request.function == "open_project") {
+                CFW_LOG_ERROR("[ProjectLauncher] open_project failed: unknown error");
+            }
+            return native_failure("ProjectLauncher native handler error", 2);
+        }
+    });
+}
+
+void register_main_view_api_handlers(NativeApiRegistry& registry) {
+    static const NativeMethodTable methods = {
+        {"get_menu_data", script_method},
+        {"import_resource_file", script_method},
         {"on_init", [](const NativeRequest& request, const NativeContext&) {
             const auto project_path = resolve_active_project_path(request.args);
             auto* scene = ensure_native_editor_scene(project_path);
             return native_success(make_on_init_payload(*scene));
         }},
+        {"run_project", script_method},
         {"scene_save", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto scene_route = normalize_route(arg_string(request.args, 0));
             if (!scene_route.empty() && scene_route != scene->route) {
                 scene = reload_native_editor_scene("", scene_route);
             }
-            persist_native_scene_actors(*scene);
+            persist_native_scene_common(*scene);
             return native_success({
                 {"status", "success"},
                 {"filepath", path_to_utf8(resolve_project_path(scene->project_root, scene->route))},
                 {"format", "corona_scene"},
             });
         }},
+        {"update_view_tool_state", script_method},
     };
 
     registry.register_module("MainView", [](const NativeRequest& request,
@@ -2438,11 +4802,13 @@ void register_main_view_rpc_handlers(NativeRpcRegistry& registry) {
     });
 }
 
-void register_project_settings_rpc_handlers(NativeRpcRegistry& registry) {
+void register_project_settings_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
+        {"browse_scene_file", script_method},
         {"get_active_project_info", [](const NativeRequest&, const NativeContext&) {
             return native_success(active_project_info_json());
         }},
+        {"save_active_project_info", script_method},
     };
 
     registry.register_module("ProjectSettings", [](const NativeRequest& request,
@@ -2461,14 +4827,14 @@ void register_project_settings_rpc_handlers(NativeRpcRegistry& registry) {
     });
 }
 
-void register_scene_datas_rpc_handlers(NativeRpcRegistry& registry) {
+void register_scene_datas_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
-        {"get_scene", [](const NativeRequest&, const NativeContext&) {
-            auto* scene = ensure_native_editor_scene();
+        {"get_scene", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
             return native_success(scene_to_json(*scene));
         }},
         {"get_actor", [](const NativeRequest& request, const NativeContext&) {
-            auto* scene = ensure_native_editor_scene();
+            auto* scene = scene_for_request_route(request);
             const auto actor_name = arg_string(request.args, 1);
             auto* actor = find_native_actor(*scene, actor_name);
             if (!actor) {
@@ -2477,7 +4843,7 @@ void register_scene_datas_rpc_handlers(NativeRpcRegistry& registry) {
             return native_success(actor_to_json(*scene, *actor));
         }},
         {"actor_operation", [](const NativeRequest& request, const NativeContext&) {
-            auto* scene = ensure_native_editor_scene();
+            auto* scene = scene_for_request_route(request);
             const auto actor_name = arg_string(request.args, 1);
             const auto operation = arg_string(request.args, 2);
             const auto vector = request.args.is_array() && request.args.size() > 3
@@ -2494,11 +4860,7 @@ void register_scene_datas_rpc_handlers(NativeRpcRegistry& registry) {
             return result;
         }},
         {"save_actor", [](const NativeRequest& request, const NativeContext&) {
-            auto* scene = ensure_native_editor_scene();
-            const auto scene_route = normalize_route(arg_string(request.args, 0));
-            if (!scene_route.empty() && scene_route != scene->route) {
-                scene = reload_native_editor_scene("", scene_route);
-            }
+            auto* scene = scene_for_request_route(request);
             const auto actor_name = arg_string(request.args, 1);
             if (!actor_name.empty() && !find_native_actor(*scene, actor_name)) {
                 return native_failure("Actor not found: " + actor_name, 2);
@@ -2510,6 +4872,7 @@ void register_scene_datas_rpc_handlers(NativeRpcRegistry& registry) {
                 {"actor", actor_name},
             });
         }},
+        {"select_model_file", script_method},
     };
 
     registry.register_module("SceneDatas", [](const NativeRequest& request,
@@ -2528,14 +4891,77 @@ void register_scene_datas_rpc_handlers(NativeRpcRegistry& registry) {
     });
 }
 
-void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
+void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
-        {"list_scene_tree", [](const NativeRequest& request, const NativeContext&) {
-            auto* scene = ensure_native_editor_scene();
-            const auto scene_route = normalize_route(arg_string(request.args, 0));
-            if (!scene_route.empty() && scene_route != scene->route) {
-                scene = reload_native_editor_scene("", scene_route);
+        {"close_camera_view", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            const auto camera_name = arg_string(request.args, 1);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return camera_not_found_result(camera_name);
             }
+            camera->view_open = false;
+            camera->engine_camera->set_view_state(false, camera->view_x, camera->view_y,
+                                                  camera->view_width, camera->view_height,
+                                                  camera->move_speed);
+            camera->engine_camera->set_surface(0);
+            persist_native_scene_cameras(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
+        {"create_camera_view", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            auto& camera = create_native_camera_view(*scene, arg_string(request.args, 1));
+            persist_native_scene_cameras(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"camera", camera_to_json(camera)},
+            });
+        }},
+        {"create_scene", script_method},
+        {"delete_camera", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            const auto camera_name = arg_string(request.args, 1);
+            if (scene->cameras.size() <= 1) {
+                return native_failure("A scene must keep at least one camera", 2);
+            }
+            const auto it = std::find_if(scene->cameras.begin(), scene->cameras.end(), [&](const NativeEditorCamera& camera) {
+                return camera.name == camera_name || camera.camera_id == camera_name ||
+                       (camera.engine_camera && std::to_string(camera.engine_camera->get_handle()) == camera_name);
+            });
+            if (it == scene->cameras.end()) {
+                return camera_not_found_result(camera_name);
+            }
+            if (!it->deletable) {
+                return native_failure("The main camera cannot be deleted", 2);
+            }
+            const auto removed_id = it->camera_id;
+            if (it->engine_camera) {
+                it->engine_camera->set_surface(0);
+                if (scene->engine_scene) {
+                    scene->engine_scene->remove_camera(it->engine_camera.get());
+                }
+            }
+            const auto removed_index = static_cast<size_t>(std::distance(scene->cameras.begin(), it));
+            scene->cameras.erase(it);
+            if (scene->active_camera_index >= scene->cameras.size()) {
+                scene->active_camera_index = scene->cameras.empty() ? 0 : scene->cameras.size() - 1;
+            } else if (removed_index < scene->active_camera_index) {
+                --scene->active_camera_index;
+            }
+            persist_native_scene_cameras(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"camera_id", removed_id},
+            });
+        }},
+        {"list_scene_tree", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
             nlohmann::json actors = nlohmann::json::array();
             for (const auto& actor : scene->actors) {
                 actors.push_back({
@@ -2555,11 +4981,16 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             for (const auto& camera : scene->cameras) {
                 cameras.push_back(camera_to_json(camera));
             }
+            const bool has_project_sidecar =
+                scene->vision_storage == "project_sidecar" &&
+                !sanitize_vision_source_id(scene->vision_source_id).empty();
             return native_success({
                 {"actors", actors},
                 {"cameras", cameras},
                 {"vision", {
-                    {"enabled", !scene->vision_source_path.empty()},
+                    {"enabled", has_project_sidecar || !scene->vision_source_path.empty()},
+                    {"storage", scene->vision_storage},
+                    {"source_id", scene->vision_source_id},
                     {"source_path", scene->vision_source_path},
                     {"import_mode", scene->vision_import_mode},
                     {"binding_count", 0},
@@ -2567,8 +4998,8 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
                 }},
             });
         }},
-        {"list_actor_tree", [](const NativeRequest&, const NativeContext&) {
-            auto* scene = ensure_native_editor_scene();
+        {"list_actor_tree", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
             nlohmann::json actors = nlohmann::json::array();
             for (const auto& actor : scene->actors) {
                 actors.push_back(actor_to_json(*scene, actor));
@@ -2643,7 +5074,7 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             return create_native_editor_actor(scene_route, source_path, actor_type, actor_data);
         }},
         {"rename_actor", [](const NativeRequest& request, const NativeContext& context) {
-            auto* scene = ensure_native_editor_scene();
+            auto* scene = scene_for_request_route(request);
             const auto actor_name = arg_string(request.args, 1);
             const auto new_name = trim_ascii(arg_string(request.args, 2));
             if (new_name.empty()) {
@@ -2661,6 +5092,7 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             }
             const auto old_name = actor->name;
             actor->name = new_name;
+            sync_native_actor_to_embedded_vision_document(*scene, *actor);
             persist_native_scene_actors(*scene);
             emit_actor_change(context, *scene, *actor);
             return native_success({
@@ -2671,8 +5103,8 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
                 {"actor", actor_to_json(*scene, *actor)},
             });
         }},
-        {"list_camera_views", [](const NativeRequest&, const NativeContext&) {
-            auto* scene = ensure_native_editor_scene();
+        {"list_camera_views", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
             nlohmann::json cameras = nlohmann::json::array();
             for (const auto& camera : scene->cameras) {
                 cameras.push_back(camera_to_json(camera));
@@ -2686,6 +5118,121 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             Corona::API::load_vision_scene(arg_string(request.args, 0));
             return native_success({{"status", "success"}});
         }},
+        {"select_screenshot_path", script_method},
+        {"save_screenshot", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto scene_route = normalize_route(arg_string(request.args, 0));
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+
+            const auto output_path = arg_string(request.args, 1);
+            if (output_path.empty()) {
+                return native_failure("Screenshot path is required", 2);
+            }
+
+            const auto camera_name = arg_string(request.args, 2);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+
+            camera->engine_camera->set_size(std::max(camera->width, 1), std::max(camera->height, 1));
+            const bool saved = camera->engine_camera->save_screenshot_sync(output_path);
+            if (!saved) {
+                return native_failure("Screenshot save failed", 2);
+            }
+
+            return native_success({
+                {"status", "success"},
+                {"ok", true},
+                {"scene", scene->route},
+                {"path", output_path},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
+        {"set_render_backend", [](const NativeRequest& request, const NativeContext&) {
+            const auto mode = arg_string(request.args, 0, "native");
+            auto* scene = ensure_native_editor_scene();
+            const auto scene_route = normalize_route(arg_string(request.args, 1));
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+
+            const auto camera_name = arg_string(request.args, 2);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+
+            camera->engine_camera->set_render_backend(mode);
+            const auto actual = camera->engine_camera->get_render_backend();
+            return native_success({
+                {"status", "success"},
+                {"mode", actual},
+                {"fallback", mode == "vision" && actual != "vision"},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
+        {"get_render_backend", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto scene_route = normalize_route(arg_string(request.args, 0));
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+
+            const auto camera_name = arg_string(request.args, 1);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+
+            return native_success({
+                {"status", "success"},
+                {"mode", camera->engine_camera->get_render_backend()},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
+        {"set_vision_render_mode", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto scene_route = normalize_route(arg_string(request.args, 0));
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+
+            const auto camera_name = arg_string(request.args, 1);
+            const auto mode = arg_string(request.args, 2, "path_tracing");
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+
+            camera->engine_camera->set_vision_render_mode(mode);
+            return native_success({
+                {"status", "success"},
+                {"mode", camera->engine_camera->get_vision_render_mode()},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
+        {"get_vision_render_mode", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto scene_route = normalize_route(arg_string(request.args, 0));
+            if (!scene_route.empty() && scene_route != scene->route) {
+                scene = reload_native_editor_scene("", scene_route);
+            }
+
+            const auto camera_name = arg_string(request.args, 1);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return native_failure("Camera not found: " + camera_name, 2);
+            }
+
+            return native_success({
+                {"status", "success"},
+                {"mode", camera->engine_camera->get_vision_render_mode()},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
         {"set_output_mode", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto camera_name = arg_string(request.args, 1);
@@ -2697,6 +5244,7 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             camera->engine_camera->set_output_mode(mode);
             return native_success({{"status", "success"}, {"mode", camera->engine_camera->get_output_mode()}});
         }},
+        {"set_physics_params", script_method},
         {"get_output_mode", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto camera_name = arg_string(request.args, 1);
@@ -2706,6 +5254,7 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             }
             return native_success({{"status", "success"}, {"mode", camera->engine_camera->get_output_mode()}});
         }},
+        {"get_physics_params", script_method},
         {"set_shadow_cascade_debug", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto camera_name = arg_string(request.args, 1);
@@ -2768,6 +5317,41 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             emit_actor_change(context, *scene, *actor);
             return native_success({{"status", "success"}, {"actor", actor_to_json(*scene, *actor)}});
         }},
+        {"select_actor", [](const NativeRequest& request, const NativeContext&) {
+            const auto scene_name = arg_string(request.args, 0);
+            const auto actor_type = arg_string(request.args, 1, "actor");
+            const auto actor_name = arg_string(request.args, 2);
+            nlohmann::json payload = {
+                {"actor_type", actor_type},
+                {"scene", scene_name},
+                {"actor", actor_name},
+            };
+            emit_editor_api_event("SceneTools.actorSelectionChanged", payload);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene_name},
+                {"actor_type", actor_type},
+                {"actor", actor_name},
+            });
+        }},
+        {"open_camera_view", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            const auto camera_name = arg_string(request.args, 1);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return camera_not_found_result(camera_name);
+            }
+            camera->view_open = true;
+            camera->engine_camera->set_view_state(true, camera->view_x, camera->view_y,
+                                                  camera->view_width, camera->view_height,
+                                                  camera->move_speed);
+            persist_native_scene_cameras(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
         {"focus_actor", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto actor_name = arg_string(request.args, 1);
@@ -2809,6 +5393,34 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             const auto scene_route = arg_string(request.args, 0);
             const auto actor_name = arg_string(request.args, 1);
             return remove_native_editor_actor(scene_route, actor_name);
+        }},
+        {"rename_camera_view", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            const auto camera_name = arg_string(request.args, 1);
+            const auto new_name = trim_ascii(arg_string(request.args, 2));
+            if (new_name.empty()) {
+                return native_failure("Camera name cannot be empty", 2);
+            }
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return camera_not_found_result(camera_name);
+            }
+            const bool duplicate = std::any_of(scene->cameras.begin(), scene->cameras.end(), [&](const NativeEditorCamera& other) {
+                return &other != camera && other.name == new_name;
+            });
+            if (duplicate) {
+                return native_failure("Camera name already exists: " + new_name, 2);
+            }
+            camera->name = new_name;
+            if (camera->camera_id.empty() || camera->camera_id == scene->route + "#" + camera_name) {
+                camera->camera_id = scene->route + "#" + new_name;
+            }
+            persist_native_scene_cameras(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"camera", camera_to_json(*camera)},
+            });
         }},
         {"pick_actor_at_pixel", [](const NativeRequest& request, const NativeContext& context) {
             auto* scene = ensure_native_editor_scene();
@@ -2901,6 +5513,35 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
             payload["ok"] = true;
             return native_success(payload);
         }},
+        {"update_camera_view", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            const auto camera_name = arg_string(request.args, 1);
+            auto* camera = find_native_camera(*scene, camera_name);
+            if (!camera || !camera->engine_camera) {
+                return camera_not_found_result(camera_name);
+            }
+            const auto state = request.args.is_array() && request.args.size() > 2 && request.args[2].is_object()
+                                   ? request.args[2]
+                                   : nlohmann::json::object();
+            camera->view_open = json_bool_value(state, "view_open", camera->view_open);
+            camera->view_x = json_int_value(state, "view_x", camera->view_x);
+            camera->view_y = json_int_value(state, "view_y", camera->view_y);
+            camera->view_width = std::max(json_int_value(state, "view_width", camera->view_width), 1);
+            camera->view_height = std::max(json_int_value(state, "view_height", camera->view_height), 1);
+            camera->move_speed = json_float_value(state, "move_speed", camera->move_speed);
+            camera->width = std::max(json_int_value(state, "width", camera->width), 1);
+            camera->height = std::max(json_int_value(state, "height", camera->height), 1);
+            camera->engine_camera->set_size(camera->width, camera->height);
+            camera->engine_camera->set_view_state(camera->view_open, camera->view_x, camera->view_y,
+                                                  camera->view_width, camera->view_height,
+                                                  camera->move_speed);
+            persist_native_scene_cameras(*scene);
+            return native_success({
+                {"status", "success"},
+                {"scene", scene->route},
+                {"camera", camera_to_json(*camera)},
+            });
+        }},
     };
 
     registry.register_module("SceneTools", [](const NativeRequest& request,
@@ -2919,7 +5560,111 @@ void register_scene_tools_rpc_handlers(NativeRpcRegistry& registry) {
     });
 }
 
-void register_network_rpc_handlers(NativeRpcRegistry& registry) {
+void register_editor_api_handlers(NativeApiRegistry& registry) {
+    static const NativeMethodTable methods = {
+        {"register_callback", [](const NativeRequest& request, const NativeContext& context) {
+            const auto event_name = arg_string(request.args, 0);
+            const auto callback_spec = arg_object(request.args, 1);
+            const auto token = EditorApiCallbackRegistry::instance().register_cef_callback(
+                event_name,
+                callback_spec,
+                context);
+            if (token == 0) {
+                return native_failure(event_name + " is not a defined Editor API event", 404);
+            }
+            return native_success({{"callback_token", token}}, "editor-api-callback");
+        }},
+        {"unregister_callback", [](const NativeRequest& request, const NativeContext&) {
+            const auto token = arg_uint64(request.args, 0);
+            const auto removed = EditorApiCallbackRegistry::instance().unregister(token);
+            return native_success({{"removed", removed}}, "editor-api-callback");
+        }},
+        {"list_methods", [](const NativeRequest&, const NativeContext&) {
+            nlohmann::json methods_json = nlohmann::json::array();
+            for (const auto& spec : EditorApiRegistry::instance().list_methods()) {
+                methods_json.push_back(editor_api_method_to_json(spec));
+            }
+            return native_success({
+                {"methods", methods_json},
+            });
+        }},
+        {"list_events", [](const NativeRequest&, const NativeContext&) {
+            nlohmann::json events_json = nlohmann::json::array();
+            for (const auto& spec : EditorApiRegistry::instance().list_events()) {
+                events_json.push_back(editor_api_event_to_json(spec));
+            }
+            return native_success({
+                {"events", events_json},
+            });
+        }},
+    };
+
+    registry.register_module("EditorApi", [](const NativeRequest& request,
+                                             const NativeContext& context) {
+        return dispatch_method("EditorApi", methods, request, context);
+    });
+}
+
+void register_python_script_api_handlers(NativeApiRegistry& registry) {
+    static const NativeMethodTable ai_tool_methods = {
+        {"generate_hint", script_method},
+        {"read_local_file_as_base64", script_method},
+        {"send_message_to_ai_stream", script_method},
+        {"submit_request", script_method},
+    };
+    static const NativeMethodTable corona_editor_methods = {
+        {"close_process", script_method},
+    };
+    static const NativeMethodTable file_manager_methods = {
+        {"create_file", script_method},
+        {"create_folder", script_method},
+        {"delete_item", script_method},
+        {"get_file_tree", script_method},
+        {"get_files", script_method},
+        {"get_project_info", script_method},
+        {"open_file", script_method},
+        {"rename_item", script_method},
+    };
+    static const NativeMethodTable resource_search_methods = {
+        {"focus_actor", script_method},
+        {"fuzzy_search", script_method},
+        {"get_stats", script_method},
+        {"image_search", script_method},
+        {"list_types", script_method},
+        {"mark_index_dirty", script_method},
+        {"prepare_index", script_method},
+        {"rebuild_index", script_method},
+    };
+    static const NativeMethodTable scratch_tool_methods = {
+        {"execute_python_code", script_method},
+        {"get_game_preview_status", script_method},
+        {"get_script_status", script_method},
+        {"key_event", script_method},
+        {"key_release", script_method},
+        {"load_blockly_target", script_method},
+        {"mouse_event", script_method},
+        {"save_blockly_target", script_method},
+        {"start_game_preview", script_method},
+        {"stop_game_preview", script_method},
+        {"stop_script_execution", script_method},
+    };
+
+    auto register_script_module = [&](const char* module, const NativeMethodTable& methods) {
+        const auto* method_table = &methods;
+        registry.register_module(module, [module, method_table](const NativeRequest& request,
+                                                                const NativeContext& context) {
+            return dispatch_method(module, *method_table, request, context);
+        });
+    };
+
+    register_script_module("AITool", ai_tool_methods);
+    register_script_module("CoronaEditor", corona_editor_methods);
+    register_script_module("FileManager", file_manager_methods);
+    register_script_module("ResourceSearch", resource_search_methods);
+    register_script_module("ScratchTool", scratch_tool_methods);
+}
+
+void register_network_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
         {"start_session", [](const NativeRequest& request, const NativeContext&) {
             auto sys = require_network_system();
@@ -3279,7 +6024,7 @@ void register_network_rpc_handlers(NativeRpcRegistry& registry) {
     });
 }
 
-void register_lanchat_rpc_handlers(NativeRpcRegistry& registry) {
+void register_lanchat_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
         {"start_room", [](const NativeRequest& request, const NativeContext&) {
             auto sys = require_network_system();

@@ -195,7 +195,8 @@ struct CpuMeshData {
             continue;
         }
 
-        // 跳过 GPU 资源已释放的 actor（被 LRU evict / 距离卸载后 mesh_handles 为空）
+        // 跳过 GPU 资源未就绪的 actor（mesh_handles 为空 = Actor 首次加载中或已被卸载）。
+        // 等价于 MeshSlot.valid=false。
         if (geom->mesh_handles.empty()) {
             ++result.skipped_no_data;
             continue;

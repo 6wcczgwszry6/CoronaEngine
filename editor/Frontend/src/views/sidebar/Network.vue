@@ -168,9 +168,8 @@
 <script setup>
 import { computed, ref, onMounted, onUnmounted } from 'vue';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
-import { networkService } from '@/utils/bridge';
+import { editorApi, networkService } from '@/utils/bridge';
 import { useDockPanel } from '@/composables/useDockPanel.js';
-import { coronaEventBus } from '@/utils/eventBus';
 
 const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 const instanceName = ref('');
@@ -191,6 +190,15 @@ const fileStatus = ref(null); // null | { type: 'transferring'|'success'|'error'
 const remoteActorLog = ref(''); // latest remote actor creation log
 
 let pollTimer = null;
+let sceneTreeChangedCallbackToken = null;
+let actorOwnershipClaimCallbackToken = null;
+let networkActorDeleteSyncBroadcastCallbackToken = null;
+let networkActorStateSyncBroadcastCallbackToken = null;
+let networkActorSyncBroadcastCallbackToken = null;
+let networkActorTransformSyncBroadcastCallbackToken = null;
+let networkAssetImportCompletedCallbackToken = null;
+let networkFileSyncStatusCallbackToken = null;
+let networkSyncPauseCallbackToken = null;
 const CONNECT_TIMEOUT_MS = 5000;
 const PENDING_POLL_BATCH_LIMIT = 16;
 const connectionAttemptStartedAt = ref(0);
@@ -587,6 +595,96 @@ function rememberSceneName(sceneName) {
   return currentSceneName.value || 'Scene/default.scene';
 }
 
+function onSceneTreeChangedEvent(payload) {
+  const sceneName = payload?.scene ?? payload;
+  rememberSceneName(sceneName);
+}
+
+function onNetworkActorOwnershipClaimed(payload = {}) {
+  const actor_guid = payload?.actor_guid || '';
+  if (!sessionActive.value || !actor_guid) return;
+  const now = Date.now();
+  const lastClaim = ownershipClaimTimes.get(actor_guid) || 0;
+  if (now - lastClaim < 1000) return;
+  ownershipClaimTimes.set(actor_guid, now);
+  networkService.claimActorOwnership(actor_guid).catch(() => {});
+}
+
+function onNetworkSyncPauseRequested(payload = {}) {
+  networkService.setSyncPaused(Boolean(payload?.paused)).catch(() => {});
+}
+
+function onNetworkFileSyncStatusChanged(payload = {}) {
+  const { status, model_path, progress } = payload;
+  if (status === 'transferring') {
+    fileStatus.value = { type: 'transferring', path: model_path, progress };
+  } else if (status === 'complete') {
+    fileStatus.value = { type: 'success', path: model_path };
+    setTimeout(() => {
+      fileStatus.value = null;
+    }, 5000);
+  } else if (status === 'error') {
+    fileStatus.value = { type: 'error', path: model_path };
+    setTimeout(() => {
+      fileStatus.value = null;
+    }, 5000);
+  }
+}
+
+function onNetworkAssetImportCompleted(actorData = {}) {
+  registerActorIdentityFromData(actorData);
+  remoteActorLog.value = `远程 Actor 已创建: ${actorData.name || 'unknown'}`;
+  setTimeout(() => {
+    remoteActorLog.value = '';
+  }, 5000);
+}
+
+function onNetworkActorSyncBroadcastRequested(actorData = {}) {
+  if (!sessionActive.value) return;
+  if (!isActorSyncable(actorData)) return;
+  const modelPath = actorData.path || actorData.model || '';
+  if (!modelPath) return;
+  const sceneName = rememberSceneName(actorData.scene || 'Scene/default.scene');
+  const actorGuid =
+    actorData.actor_guid ||
+    `actor-${hashString(`${sceneName}|${modelPath}|${actorData.name || ''}`)}`;
+  actorData.actor_guid = actorGuid;
+  registerActorIdentityFromData(actorData);
+  networkService
+    .broadcastActorCreate(actorGuid, sceneName, modelPath, actorData)
+    .then(() => {
+      rememberActorCreateBroadcast(sceneName, actorGuid, modelPath);
+    })
+    .catch(() => {});
+}
+
+function onNetworkActorTransformSyncBroadcastRequested(actorData = {}) {
+  if (!sessionActive.value || !actorData) return;
+  const actorGuid = actorData.actor_guid || '';
+  if (!actorGuid) return;
+  const sceneName = rememberSceneName(actorData.scene || 'Scene/default.scene');
+  networkService.broadcastActorTransform(actorGuid, sceneName, actorData).catch(() => {});
+}
+
+function onNetworkActorStateSyncBroadcastRequested(actorData = {}) {
+  if (!sessionActive.value || !actorData) return;
+  if (actorData._suppress_network_broadcast) return;
+  const actorGuid = actorData.actor_guid || '';
+  if (!actorGuid) return;
+  const sceneName = rememberSceneName(actorData.scene || 'Scene/default.scene');
+  networkService.broadcastActorStateUpdate(actorGuid, sceneName, actorData).catch(() => {});
+}
+
+function onNetworkActorDeleteSyncBroadcastRequested(actorData = {}) {
+  if (!sessionActive.value || !actorData) return;
+  const actorGuid = actorData.actor_guid || '';
+  const actorName = actorData.actor_name || actorData.name || '';
+  if (!actorGuid && !actorName) return;
+  const sceneName = rememberSceneName(actorData.scene || 'Scene/default.scene');
+  forgetActorCreateBroadcast(sceneName, actorGuid);
+  networkService.broadcastActorDelete(actorGuid, sceneName, actorName).catch(() => {});
+}
+
 function actorCreateBroadcastKey(sceneName, actorGuid, modelPath) {
   return `${sceneName}:${actorGuid}:${modelPath}`;
 }
@@ -713,7 +811,7 @@ async function registerActorIdentityFromData(actorData, locallyOwned = true) {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   // Try to auto-fill a default name
   if (!instanceName.value) {
     instanceName.value = 'Editor-' + Math.random().toString(36).slice(2, 8);
@@ -721,113 +819,73 @@ onMounted(() => {
 
   attachExistingSession();
 
-  // Listen for actor-sync-broadcast from Python (Actor creation triggered locally,
-  // needs to be forwarded to remote peers)
-  coronaEventBus.on('actor-sync-broadcast', (actorData) => {
-    if (!sessionActive.value) return;
-    if (!isActorSyncable(actorData)) return;
-    const modelPath = actorData.path || actorData.model || '';
-    if (!modelPath) return;
-    // Get scene name from the actor's parent scene if available
-    const sceneName = rememberSceneName(actorData.scene || 'Scene/default.scene');
-    const actorGuid =
-      actorData.actor_guid ||
-      `actor-${hashString(`${sceneName}|${modelPath}|${actorData.name || ''}`)}`;
-    actorData.actor_guid = actorGuid;
-    registerActorIdentityFromData(actorData);
-    networkService
-      .broadcastActorCreate(actorGuid, sceneName, modelPath, actorData)
-      .then(() => {
-        rememberActorCreateBroadcast(sceneName, actorGuid, modelPath);
-      })
-      .catch(() => {});
-  });
-
-  coronaEventBus.on('actor-transform-sync-broadcast', (actorData) => {
-    if (!sessionActive.value || !actorData) return;
-    const actorGuid = actorData.actor_guid || '';
-    if (!actorGuid) return;
-    const sceneName = rememberSceneName(actorData.scene || 'Scene/default.scene');
-    networkService.broadcastActorTransform(actorGuid, sceneName, actorData).catch(() => {});
-  });
-
-  coronaEventBus.on('actor-state-sync-broadcast', (actorData) => {
-    if (!sessionActive.value || !actorData) return;
-    if (actorData._suppress_network_broadcast) return;
-    const actorGuid = actorData.actor_guid || '';
-    if (!actorGuid) return;
-    const sceneName = rememberSceneName(actorData.scene || 'Scene/default.scene');
-    networkService.broadcastActorStateUpdate(actorGuid, sceneName, actorData).catch(() => {});
-  });
-
-  coronaEventBus.on('actor-delete-sync-broadcast', (actorData) => {
-    if (!sessionActive.value || !actorData) return;
-    const actorGuid = actorData.actor_guid || '';
-    const actorName = actorData.actor_name || actorData.name || '';
-    if (!actorGuid && !actorName) return;
-    const sceneName = rememberSceneName(actorData.scene || 'Scene/default.scene');
-    forgetActorCreateBroadcast(sceneName, actorGuid);
-    networkService.broadcastActorDelete(actorGuid, sceneName, actorName).catch(() => {});
-  });
-
-  coronaEventBus.on('scene-tree-changed', (sceneName) => {
-    rememberSceneName(sceneName);
-  });
-
-  coronaEventBus.on('network-sync-pause-request', ({ paused } = {}) => {
-    networkService.setSyncPaused(Boolean(paused)).catch(() => {});
-  });
-
-  coronaEventBus.on('actor-ownership-claim', ({ actor_guid }) => {
-    if (!sessionActive.value || !actor_guid) return;
-    const now = Date.now();
-    const lastClaim = ownershipClaimTimes.get(actor_guid) || 0;
-    if (now - lastClaim < 1000) return;
-    ownershipClaimTimes.set(actor_guid, now);
-    networkService.claimActorOwnership(actor_guid).catch(() => {});
-  });
-
-  // Listen for file-sync-status from Python (C++ reports transfer progress)
-  coronaEventBus.on('file-sync-status', ({ status, model_path, progress }) => {
-    if (status === 'transferring') {
-      fileStatus.value = { type: 'transferring', path: model_path, progress };
-    } else if (status === 'complete') {
-      fileStatus.value = { type: 'success', path: model_path };
-      setTimeout(() => {
-        fileStatus.value = null;
-      }, 5000);
-    } else if (status === 'error') {
-      fileStatus.value = { type: 'error', path: model_path };
-      setTimeout(() => {
-        fileStatus.value = null;
-      }, 5000);
-    }
-  });
-
-  // Listen for import-asset-complete from Python (remote actor created)
-  coronaEventBus.on('import-asset-complete', (actorData) => {
-    // A remote actor was created (either via file transfer or direct creation).
-    // The actor data is available for UI update.
-    registerActorIdentityFromData(actorData);
-    remoteActorLog.value = `远程 Actor 已创建: ${actorData.name || 'unknown'}`;
-    setTimeout(() => {
-      remoteActorLog.value = '';
-    }, 5000);
-  });
+  sceneTreeChangedCallbackToken =
+    await editorApi.events.onSceneTreeChanged(onSceneTreeChangedEvent);
+  actorOwnershipClaimCallbackToken =
+    await editorApi.events.onNetworkActorOwnershipClaimed(onNetworkActorOwnershipClaimed);
+  networkActorDeleteSyncBroadcastCallbackToken =
+    await editorApi.events.onNetworkActorDeleteSyncBroadcastRequested(onNetworkActorDeleteSyncBroadcastRequested);
+  networkActorStateSyncBroadcastCallbackToken =
+    await editorApi.events.onNetworkActorStateSyncBroadcastRequested(onNetworkActorStateSyncBroadcastRequested);
+  networkActorSyncBroadcastCallbackToken =
+    await editorApi.events.onNetworkActorSyncBroadcastRequested(onNetworkActorSyncBroadcastRequested);
+  networkActorTransformSyncBroadcastCallbackToken =
+    await editorApi.events.onNetworkActorTransformSyncBroadcastRequested(onNetworkActorTransformSyncBroadcastRequested);
+  networkAssetImportCompletedCallbackToken =
+    await editorApi.events.onNetworkAssetImportCompleted(onNetworkAssetImportCompleted);
+  networkFileSyncStatusCallbackToken =
+    await editorApi.events.onNetworkFileSyncStatusChanged(onNetworkFileSyncStatusChanged);
+  networkSyncPauseCallbackToken =
+    await editorApi.events.onNetworkSyncPauseRequested(onNetworkSyncPauseRequested);
 });
 
 onUnmounted(() => {
   stopPolling();
   ownershipClaimTimes.clear();
-  // Clean up event listeners
-  coronaEventBus.off('actor-sync-broadcast');
-  coronaEventBus.off('actor-transform-sync-broadcast');
-  coronaEventBus.off('actor-state-sync-broadcast');
-  coronaEventBus.off('actor-delete-sync-broadcast');
-  coronaEventBus.off('scene-tree-changed');
-  coronaEventBus.off('network-sync-pause-request');
-  coronaEventBus.off('actor-ownership-claim');
-  coronaEventBus.off('file-sync-status');
-  coronaEventBus.off('import-asset-complete');
+  if (sceneTreeChangedCallbackToken) {
+    editorApi.off(sceneTreeChangedCallbackToken).finally(() => {
+      sceneTreeChangedCallbackToken = null;
+    });
+  }
+  if (actorOwnershipClaimCallbackToken) {
+    editorApi.off(actorOwnershipClaimCallbackToken).finally(() => {
+      actorOwnershipClaimCallbackToken = null;
+    });
+  }
+  if (networkActorDeleteSyncBroadcastCallbackToken) {
+    editorApi.off(networkActorDeleteSyncBroadcastCallbackToken).finally(() => {
+      networkActorDeleteSyncBroadcastCallbackToken = null;
+    });
+  }
+  if (networkActorStateSyncBroadcastCallbackToken) {
+    editorApi.off(networkActorStateSyncBroadcastCallbackToken).finally(() => {
+      networkActorStateSyncBroadcastCallbackToken = null;
+    });
+  }
+  if (networkActorSyncBroadcastCallbackToken) {
+    editorApi.off(networkActorSyncBroadcastCallbackToken).finally(() => {
+      networkActorSyncBroadcastCallbackToken = null;
+    });
+  }
+  if (networkActorTransformSyncBroadcastCallbackToken) {
+    editorApi.off(networkActorTransformSyncBroadcastCallbackToken).finally(() => {
+      networkActorTransformSyncBroadcastCallbackToken = null;
+    });
+  }
+  if (networkAssetImportCompletedCallbackToken) {
+    editorApi.off(networkAssetImportCompletedCallbackToken).finally(() => {
+      networkAssetImportCompletedCallbackToken = null;
+    });
+  }
+  if (networkFileSyncStatusCallbackToken) {
+    editorApi.off(networkFileSyncStatusCallbackToken).finally(() => {
+      networkFileSyncStatusCallbackToken = null;
+    });
+  }
+  if (networkSyncPauseCallbackToken) {
+    editorApi.off(networkSyncPauseCallbackToken).finally(() => {
+      networkSyncPauseCallbackToken = null;
+    });
+  }
 });
 </script>

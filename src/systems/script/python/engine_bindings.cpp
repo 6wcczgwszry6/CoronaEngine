@@ -320,7 +320,7 @@ void BindAll(nanobind::module_& m) {
         .def("set_external_vision_binding", &Actor::set_external_vision_binding,
              nb::arg("source_path"), nb::arg("shape_guid"), nb::arg("shape_index"),
              nb::arg("json_path"), nb::arg("shape_type"), nb::arg("shape_identity_key"),
-             nb::arg("model_path"))
+             nb::arg("model_path"), nb::arg("visible") = true)
         .def("clear_external_vision_binding", &Actor::clear_external_vision_binding)
         .def("has_external_vision_binding", &Actor::has_external_vision_binding)
         .def("get_handle", &Actor::get_handle, "Get the underlying handle of this actor");
@@ -824,6 +824,11 @@ void BindAll(nanobind::module_& m) {
           "Load an external Vision scene file (.json). Pass an empty string to "
           "unload and restore the engine-built scene. Only effective when Vision "
           "is available and the Vision backend is active.");
+    m.def("load_vision_scene_from_json", &load_vision_scene_from_json,
+          nb::arg("json_text"), nb::arg("base_dir"), nb::arg("scene_key"),
+          nb::arg("external_live") = false,
+          "Load an external Vision scene from in-memory JSON. base_dir resolves "
+          "relative resources and scene_key identifies the runtime cache entry.");
 
     // ============================================================================
     // Media (video/audio) import — standalone resources, not 3D actors

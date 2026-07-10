@@ -21,6 +21,44 @@ def _safe_project_dir_name(name, fallback):
     return safe_name or "project"
 
 
+def _ensure_vision_camera_defaults(scene_config):
+    if 'camera' not in scene_config:
+        scene_config['camera'] = {}
+    scene_config['camera'].setdefault('count', '1')
+    scene_config['camera'].setdefault('active_id', '')
+    scene_config['camera']['camera0.render_backend'] = 'vision'
+    scene_config['camera'].setdefault('camera0.vision_render_mode', 'path_tracing')
+    scene_config['camera'].setdefault('camera0.output_mode', 'final_color')
+
+
+def _ensure_native_vision_metadata(project_path):
+    project_ini = os.path.join(project_path, "project.ini")
+    project_config = configparser.ConfigParser()
+    project_config.read(project_ini, encoding='utf-8')
+    entrance = project_config.get('Project', 'entrance_scene', fallback='').strip()
+    if not entrance:
+        return
+
+    scene_file = os.path.join(project_path, *entrance.replace('\\', '/').split('/'))
+    if not os.path.isfile(scene_file):
+        return
+
+    scene_config = configparser.ConfigParser()
+    scene_config.read(scene_file, encoding='utf-8')
+    has_vision = 'vision' in scene_config
+    has_document = 'vision_document' in scene_config
+    if not has_vision and not has_document:
+        return
+
+    _ensure_vision_camera_defaults(scene_config)
+    scene_config.remove_section('vision')
+    scene_config.remove_section('vision_document')
+    scene_config.remove_section('vision_bindings')
+    scene_config.remove_section('vision_unsupported_shapes')
+    with open(scene_file, 'w', encoding='utf-8') as f:
+        scene_config.write(f)
+
+
 class ProjectCopy:
     @staticmethod
     def create_from_template(target_path, project_name, mode):
@@ -86,6 +124,7 @@ class ProjectCopy:
 
         try:
             normalize_project_runtime_paths(project_path)
+            _ensure_native_vision_metadata(project_path)
             project_ini = os.path.join(project_path, "project.ini")
             update_project_config(project_ini, update_only_time=True)
             settings_manager.set_active_project(project_path)

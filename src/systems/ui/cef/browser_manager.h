@@ -132,6 +132,7 @@ class BrowserManager {
     void update_texture(int tab_id);
     void resize_tab(int tab_id, int width, int height);
     [[nodiscard]] const Horizon::HardwareImage* get_texture_image(UiTextureId texture_id) const;
+    [[nodiscard]] Horizon::SubmitReceipt get_texture_upload_receipt(UiTextureId texture_id) const;
     void wait_for_texture_upload(UiTextureId texture_id);
 
     // 隐藏标签页（最小化）

@@ -538,6 +538,7 @@ class Actor:
                 self._external_vision_binding.get("shape_type", "") or "",
                 self._external_vision_binding.get("shape_identity_key", "") or "",
                 self._external_vision_binding.get("model_path", "") or "",
+                bool(self._external_vision_binding.get("visible", True)),
             )
         except Exception as exc:
             logging.warning("Failed to sync external Vision binding for actor %s: %s",

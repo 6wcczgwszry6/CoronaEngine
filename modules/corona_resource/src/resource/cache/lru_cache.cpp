@@ -180,6 +180,7 @@ DiskCache::DiskCache(size_t capacity_bytes, std::filesystem::path directory)
     }
     CFW_LOG_NOTICE("[DiskCache] Initialized {} ({} files, {} bytes used)",
                    dir_.string(), map_.size(), total);
+    used_ = total;  // 增量计数器初始化：等于初次扫描统计的真实磁盘用量。
 }
 
 DiskCache::~DiskCache() = default;
@@ -302,6 +303,8 @@ bool DiskCache::put(CacheRecord item) {
             // 删除旧文件（unlink 很快，远快于 write，安全在锁内执行）
             std::error_code ec;
             std::filesystem::remove(safe_path(key), ec);
+            // 增量计数器：先减去旧大小，写盘成功后再加新大小（Phase 2 后处理）
+            used_ -= it->second.first.data_size;
             // 逐字段更新元数据，保留 item 完整用于 Phase 2 write_file
             it->second.first.key = item.key;
             it->second.first.data.clear();
@@ -312,13 +315,11 @@ bool DiskCache::put(CacheRecord item) {
             list_.splice(list_.begin(), list_, it->second.second);
         } else {
             // ——— INSERT 路径 ———
-            // 确保磁盘容量（evict_one 做文件删除，相对轻量）
-            size_t current = calc_directory_size();
-            while (current + item_size > capacity_) {
+            // 增量计数器替代 calc_directory_size() 全目录扫描：O(1) 容量检查。
+            while (used_ + item_size > capacity_) {
                 if (!evict_one(key).ok()) break;
-                current = calc_directory_size();
             }
-            if (current + item_size > capacity_) {
+            if (used_ + item_size > capacity_) {
                 return false;
             }
 
@@ -328,6 +329,7 @@ bool DiskCache::put(CacheRecord item) {
             meta.last_access = std::chrono::system_clock::now();
             list_.push_front(key);
             map_[key] = {std::move(meta), list_.begin()};
+            used_ += item_size;  // 新条目已计入，write 失败时回滚
             is_new_entry = true;
         }
     }  // ——— 锁释放 ———
@@ -337,15 +339,27 @@ bool DiskCache::put(CacheRecord item) {
     // ====================================================================
     if (!write_file(item)) {
         CFW_LOG_ERROR("[LRU Disk] write failed key={} size={}KB", key, item_size / 1024);
-        if (is_new_entry) {
-            std::lock_guard lock(mtx_);
-            auto it = map_.find(key);
-            if (it != map_.end()) {
-                list_.erase(it->second.second);
-                map_.erase(it);
-            }
+        std::lock_guard lock(mtx_);
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            // 无论 INSERT 还是 UPDATE：写盘失败意味着磁盘上已无有效文件
+            // （INSERT 从未写成功；UPDATE 旧文件在 Phase 1 已删、新文件写失败）。
+            // 统一移除索引项以保持 used_ 与磁盘一致、避免悬挂条目指向已删文件。
+            // used_ 在 Phase 1 已扣减（UPDATE 减旧 / INSERT 加新后此处减新），
+            // 这里仅对 INSERT 还原其已加的 item_size；UPDATE 不需再动（旧已减、新未加）。
+            if (is_new_entry) used_ -= item_size;
+            list_.erase(it->second.second);
+            map_.erase(it);
         }
         return false;
+    }
+
+    // ====================================================================
+    // Phase 3: UPDATE 路径 — 写盘成功，加上新大小
+    // ====================================================================
+    if (!is_new_entry) {
+        std::lock_guard lock(mtx_);
+        used_ += item_size;
     }
 
     CFW_LOG_DEBUG("[LRU Disk] stored key={} size={}KB files={}", key, item_size / 1024, map_.size());
@@ -369,6 +383,7 @@ std::optional<CacheRecord> DiskCache::get(const std::string& key) {
         std::lock_guard lock(mtx_);
         auto it = map_.find(key);
         if (it != map_.end()) {
+            used_ -= it->second.first.data_size;  // 文件已不可读，同步扣减增量计数器
             list_.erase(it->second.second);
             map_.erase(it);
         }
@@ -397,6 +412,7 @@ void DiskCache::erase(const std::string& key) {
 
     std::error_code ec;
     std::filesystem::remove(safe_path(key), ec);
+    used_ -= it->second.first.data_size;  // 增量计数器：删除时同步扣减
     list_.erase(it->second.second);
     map_.erase(it);
 }
@@ -440,7 +456,7 @@ bool DiskCache::is_pinned(const std::string& key) const {
 
 size_t DiskCache::used_bytes() {
     std::lock_guard lock(mtx_);
-    return calc_directory_size();
+    return used_;  // O(1)：直接返回增量计数器，无需全目录 stat 扫描。
 }
 
 EvictResult DiskCache::evict_one(const std::string& skip_key) {
@@ -462,22 +478,11 @@ EvictResult DiskCache::evict_one(const std::string& skip_key) {
         std::filesystem::remove(safe_path(victim_key), ec);
         list_.erase(forward_it);
         map_.erase(map_it);
+        used_ -= victim_bytes;  // 增量计数器：淘汰时同步扣减
 
         return {EvictStatus::Success, victim_key, victim_bytes, std::nullopt};
     }
     return {EvictStatus::AllPinned};
-}
-
-size_t DiskCache::calc_directory_size() const {
-    size_t total = 0;
-    std::error_code ec;
-    for (auto& entry : std::filesystem::recursive_directory_iterator(dir_, ec)) {
-        if (ec) break;
-        if (entry.is_regular_file()) {
-            total += entry.file_size();
-        }
-    }
-    return total;
 }
 
 // ============================================================================

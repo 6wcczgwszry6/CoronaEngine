@@ -12,6 +12,7 @@
 
 #include "browser_manager.h"
 #include "cef_bridge_helpers.h"
+#include "cef_editor_api.h"
 
 namespace Corona::Systems::UI {
 
@@ -177,6 +178,10 @@ void OffscreenCefClient::OnLoadEnd(CefRefPtr<CefBrowser> browser,
 
 void OffscreenCefClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     CEF_REQUIRE_UI_THREAD();
+    if (browser) {
+        EditorApiCallbackRegistry::instance().clear_cef_callbacks_for_browser(
+            browser->GetIdentifier());
+    }
     if (browser_side_router_) {
         browser_side_router_->OnBeforeClose(browser);
     }

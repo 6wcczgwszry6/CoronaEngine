@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from plugins.ProjectLauncher import main as project_launcher
 from plugins.ProjectLauncher.utils import project_copy
 
 
@@ -55,6 +56,27 @@ class ProjectCopyTests(unittest.TestCase):
             copied_cfg = configparser.ConfigParser()
             copied_cfg.read(second_path / "project.ini", encoding="utf-8")
             self.assertEqual(copied_cfg.get("Project", "name"), "sample_save_1")
+
+    def test_open_project_file_only_returns_selected_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "vision_scene.json"
+            source.write_text("{}", encoding="utf-8")
+
+            original_open_file = project_launcher.FileHandler.open_file
+            project_launcher.FileHandler.open_file = staticmethod(
+                lambda **kwargs: ("", str(source))
+            )
+            try:
+                result = project_launcher.ProjectLauncher.open_project_file()
+            finally:
+                project_launcher.FileHandler.open_file = original_open_file
+
+            self.assertEqual(result, {"name": source.stem, "path": str(source.resolve())})
+
+    def test_project_launcher_python_does_not_import_project_copy_or_vision_import(self):
+        source = Path(project_launcher.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("ProjectCopy", source)
+        self.assertNotIn("vision_import", source)
 
 
 if __name__ == "__main__":

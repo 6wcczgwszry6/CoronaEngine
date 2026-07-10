@@ -143,28 +143,6 @@ ActorLoadState GeometrySystem::get_actor_load_state(std::uintptr_t actor,std::ui
 }
 
 // ============================================================================
-// LRU 协作（占位）
-// ============================================================================
-
-bool GeometrySystem::is_actor_offline(std::uintptr_t actor) const {
-    std::shared_lock lock(impl_->mtx);
-    auto it = impl_->offline_actors.find(actor);
-    return it != impl_->offline_actors.end() && it->second;
-}
-
-void GeometrySystem::mark_actor_restored(std::uintptr_t actor) {
-    std::unique_lock lock(impl_->mtx);
-    impl_->offline_actors[actor] = false;
-    // LRU恢复时，将所有包含该actor的场景中的状态设为已加载
-    for (auto& [scene, state] : impl_->scenes) {
-        auto it = state.actor_load_states.find(actor);
-        if (it != state.actor_load_states.end()) {
-            it->second = ActorLoadState::Loaded;
-        }
-    }
-}
-
-// ============================================================================
 // 统计
 // ============================================================================
 

@@ -772,7 +772,7 @@ class ScratchTool:
 
     @classmethod
     def _run_code_file(cls, code_path: Path, target: dict, single_exec: bool) -> None:
-        from CoronaCore.utils import corona_engine_fallback, corona_engine_scratch
+        from CoronaCore.utils import corona_engine_scratch
 
         context_id = target.get("id") or cls._target_id(
             target.get("target_type", "actor"),
@@ -786,7 +786,6 @@ class ScratchTool:
             actor_name=target.get("actor_name", ""),
         )
         corona_engine_scratch.bind_context(ctx)
-        corona_engine_fallback.set_quiet(True)
 
         module_name = f"blockly_runtime_{cls._target_digest(context_id)}_{int(time.time() * 1000)}"
         try:

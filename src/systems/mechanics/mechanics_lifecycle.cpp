@@ -73,6 +73,15 @@ void MechanicsSystem::update() {
         update_physics();
         impl_->time_accumulator -= fixed_dt;
     }
+
+    // ---- 骨骼动画 CPU 蒙皮（P2，自 GeometrySystem 迁入）----
+    // 每真实帧一次（自带 steady_clock dt），独立于上面的固定步进次数：
+    // 蒙皮模型即使未开物理（simulation_enabled=false）也应自动循环播放，故放在
+    // 物理步进之外、不受其门控。蒙皮结果写回 GeometryDevice（所有 GPU/CPU buffer
+    // 仍归 GeometrySystem 持有以便流式 LRU 管理），供 Native / Vision / 物理消费。
+    if (!impl_->shutdown_requested.load(std::memory_order_acquire)) {
+        update_skinned_geometry();
+    }
 }
 
 void MechanicsSystem::stop() {

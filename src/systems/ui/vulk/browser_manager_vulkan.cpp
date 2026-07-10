@@ -139,6 +139,14 @@ const Horizon::HardwareImage* BrowserManager::get_texture_image(UiTextureId text
     return &image_it->second.image;
 }
 
+Horizon::SubmitReceipt BrowserManager::get_texture_upload_receipt(UiTextureId texture_id) const {
+    auto image_it = owned_images_.find(texture_id);
+    if (image_it == owned_images_.end()) {
+        return {};
+    }
+    return image_it->second.upload_receipt;
+}
+
 void BrowserManager::wait_for_texture_upload(UiTextureId texture_id) {
     auto image_it = owned_images_.find(texture_id);
     if (image_it == owned_images_.end()) {

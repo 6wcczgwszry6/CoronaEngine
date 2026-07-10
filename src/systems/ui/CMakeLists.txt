@@ -15,8 +15,9 @@ set(UI_SYSTEM_SOURCES
     cef/browser_manager.cpp
     cef/browser_ui.cpp
     cef/cef_client.cpp
-    cef/cef_native_rpc.cpp
-    cef/cef_native_rpc_handlers.cpp
+    cef/cef_editor_api.cpp
+    cef/cef_editor_native_api_registry.cpp
+    cef/cef_editor_native_api_handlers.cpp
     cef/cef_query_bridge.cpp
     cef/cef_realtime_bridge.cpp
     cef/cef_py_bind.cpp
@@ -30,7 +31,7 @@ set(UI_SYSTEM_SOURCES
     cef/browser_ui.h
     cef/cef_bridge_helpers.h
     cef/cef_client.h
-    cef/cef_native_rpc.h
+    cef/cef_editor_native_api_registry.h
     sdl/sdl_utils.h
 
     ${PROJECT_SOURCE_DIR}/include/corona/systems/ui/vulkan_backend.h

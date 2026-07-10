@@ -472,8 +472,7 @@
 <script setup>
 import { reactive, ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
 import lanchat from '../../../stores/lanchat.js';
-import { networkService } from '../../../utils/bridge.js';
-import { coronaEventBus } from '../../../utils/eventBus.js';
+import { editorApi, networkService } from '../../../utils/bridge.js';
 import { getActorContext } from '../../../blockly/composables/useActorContext.js';
 import {
   buildGmDecisionMessage,
@@ -520,6 +519,7 @@ const nowMs = ref(Date.now());
 const pendingReply = ref(null);
 let waitClock = null;
 let modelTransferPollTimer = null;
+let actorSyncBroadcastCallbackToken = null;
 const DRAFT_MIN_ROWS = 2;
 const DRAFT_MAX_ROWS = 4;
 const PENDING_MODEL_TRANSFER_POLL_LIMIT = 16;
@@ -816,7 +816,12 @@ onMounted(() => {
     nowMs.value = Date.now();
   }, 1000);
   ensureModelTransferPolling();
-  coronaEventBus.on('actor-sync-broadcast', handleActorSyncBroadcast);
+  editorApi.events
+    .onNetworkActorSyncBroadcastRequested(handleActorSyncBroadcast)
+    .then((token) => {
+      actorSyncBroadcastCallbackToken = token;
+    })
+    .catch(() => {});
   document.addEventListener('pointerdown', onDocumentPointerDown);
 });
 
@@ -824,7 +829,11 @@ onBeforeUnmount(() => {
   if (waitClock) window.clearInterval(waitClock);
   waitClock = null;
   stopModelTransferPolling();
-  coronaEventBus.off('actor-sync-broadcast', handleActorSyncBroadcast);
+  if (actorSyncBroadcastCallbackToken) {
+    editorApi.off(actorSyncBroadcastCallbackToken).finally(() => {
+      actorSyncBroadcastCallbackToken = null;
+    });
+  }
   document.removeEventListener('pointerdown', onDocumentPointerDown);
 });
 

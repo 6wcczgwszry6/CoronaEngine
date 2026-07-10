@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cef_browser.h>
 #include <cef_frame.h>
@@ -37,9 +37,9 @@ struct NativeResult {
 using NativeHandlerFn = std::function<NativeResult(const NativeRequest&, const NativeContext&)>;
 using NativeMethodTable = std::unordered_map<std::string, NativeHandlerFn>;
 
-class NativeRpcRegistry {
+class NativeApiRegistry {
 public:
-    static NativeRpcRegistry& instance();
+    static NativeApiRegistry& instance();
 
     void register_module(std::string module, NativeHandlerFn handler);
     std::optional<NativeResult> dispatch(const NativeRequest& request,
@@ -56,12 +56,10 @@ NativeResult native_failure(std::string error,
                             std::string route = "native-cpp");
 NativeResult native_unhandled();
 
-NativeRequest parse_native_request(const std::string& request_json);
 std::string native_success_json(const NativeRequest& request, const NativeResult& result);
-std::string unsupported_python_route_json(const NativeRequest& request);
+std::string unsupported_editor_api_route_json(const NativeRequest& request);
 
-bool is_python_fallback_allowed(const std::string& module, const std::string& function);
-void register_builtin_native_rpc_handlers();
+void register_builtin_native_api_handlers();
 
 std::string arg_string(const nlohmann::json& args, size_t index, std::string fallback = "");
 bool arg_bool(const nlohmann::json& args, size_t index, bool fallback = false);

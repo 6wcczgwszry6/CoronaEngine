@@ -238,7 +238,8 @@ class Actor {
                                      const std::string& json_path,
                                      const std::string& shape_type,
                                      const std::string& shape_identity_key,
-                                     const std::string& model_path);
+                                     const std::string& model_path,
+                                     bool visible = true);
     void clear_external_vision_binding();
     [[nodiscard]] bool has_external_vision_binding() const;
 
@@ -442,6 +443,13 @@ void set_vision_render_mode(const std::string& mode, std::uintptr_t camera_handl
 /// @param path 外部 Vision 场景 .json 的绝对路径；传空字符串表示卸载外部场景、
 ///             恢复由引擎数据构建的场景。
 void load_vision_scene(const std::string& path);
+
+/// 请求从内存中的 Vision JSON 加载外部场景。base_dir 用于解析 JSON 内的相对
+/// 资源路径；scene_key 用于缓存、日志和运行时身份标识。
+void load_vision_scene_from_json(const std::string& json_text,
+                                 const std::string& base_dir,
+                                 const std::string& scene_key,
+                                 bool external_live = false);
 
 // ============================================================================
 // Media (video/audio) import

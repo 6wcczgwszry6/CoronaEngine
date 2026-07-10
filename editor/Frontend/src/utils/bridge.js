@@ -1,48 +1,183 @@
 /**
  * Bridge Utility for QWebChannel
- * 封装了与 Python 后端的通信，支持 Promise 调用
+ * 封装了与 C++ Editor API 的通信，支持 Promise 调用
  */
 
+let editorApiMethodSpecs = null;
+let editorApiManifestPromise = null;
+let editorApiEventSpecs = null;
+let editorApiEventManifestPromise = null;
+const EDITOR_API_CALLER_CEF = 1;
 export class Bridge {
-  static async callCEF(moduleName, methodName, args) {
-    const request = {
-      function: methodName,
-      module: moduleName,
-      args: args || [],
-    };
-
-    return new Promise((resolve, reject) => {
-      try {
-        window.cefQuery({
-          request: JSON.stringify(request),
-          persistent: false,
-          onSuccess: (response) => {
-            try {
-              const jsonResponse = typeof response === 'string' ? JSON.parse(response) : response;
-              console.log('CEF Response:', JSON.stringify(jsonResponse, null, 2));
-              if (
-                jsonResponse &&
-                (jsonResponse.success === false ||
-                  jsonResponse.status === 'error' ||
-                  jsonResponse.type === 'error' ||
-                  jsonResponse.error)
-              ) {
-                reject(new Error(jsonResponse.error || jsonResponse.message || 'Backend error'));
-              } else {
-                resolve(jsonResponse);
-              }
-            } catch (e) {
-              resolve(response);
-            }
-          },
-          onFailure: (error_code, error_message) => {
-            reject(new Error(`CEF Error (${error_code}): ${error_message}`));
-          },
-        });
-      } catch (error) {
-        reject(error);
+  static async ensureEditorApiManifest() {
+    if (!editorApiMethodSpecs) {
+      if (!editorApiManifestPromise) {
+        editorApiManifestPromise = call_editor_api('EditorApi.list_methods', [])
+          .then((response) => {
+            const methods = response?.data?.methods ?? response?.methods ?? [];
+            editorApiMethodSpecs = new Map(
+              methods
+                .filter((method) => typeof method?.api === 'string')
+                .map((method) => [method.api, method]),
+            );
+            Bridge.validateEditorApiWrapperMethods();
+            return editorApiMethodSpecs;
+          })
+          .finally(() => {
+            editorApiManifestPromise = null;
+          });
       }
-    });
+      await editorApiManifestPromise;
+    }
+    return editorApiMethodSpecs;
+  }
+
+  static async ensureEditorApiMethod(apiName) {
+    if (apiName === 'EditorApi.list_methods') {
+      return null;
+    }
+    await Bridge.ensureEditorApiManifest();
+    const spec = editorApiMethodSpecs?.get(apiName);
+    if (!spec) {
+      throw new Error(`Editor API method is not defined by C++ manifest: ${apiName}`);
+    }
+    return spec;
+  }
+
+  static editorApiValueMatchesType(value, type) {
+    if (type === 'any') return true;
+    if (type === 'null') return value === null;
+    if (type === 'boolean') return typeof value === 'boolean';
+    if (type === 'integer') return Number.isInteger(value);
+    if (type === 'number') return typeof value === 'number' && Number.isFinite(value);
+    if (type === 'string') return typeof value === 'string';
+    if (type === 'object') return value !== null && typeof value === 'object' && !Array.isArray(value);
+    if (type === 'array') return Array.isArray(value);
+    return false;
+  }
+
+  static resolveEditorApiWrapperPath(wrapperPath) {
+    if (!wrapperPath || typeof wrapperPath !== 'string') return null;
+    return wrapperPath
+      .split('.')
+      .reduce((current, segment) => (current ? current[segment] : null), editorApi);
+  }
+
+  static validateEditorApiWrapperMethods() {
+    if (!editorApiMethodSpecs) return;
+    const missing = [];
+    for (const spec of editorApiMethodSpecs.values()) {
+      const wrapperPath = spec?.js_wrapper;
+      if (!wrapperPath) continue;
+      if (typeof Bridge.resolveEditorApiWrapperPath(wrapperPath) !== 'function') {
+        missing.push(`${spec.api} -> ${wrapperPath}`);
+      }
+    }
+    if (missing.length > 0) {
+      throw new Error(`Frontend wrapper path is not implemented: ${missing.join(', ')}`);
+    }
+  }
+
+  static validateEditorApiEventWrapperMethods() {
+    if (!editorApiEventSpecs) return;
+    const missing = [];
+    for (const spec of editorApiEventSpecs.values()) {
+      const wrapperPath = spec?.js_wrapper;
+      if (!wrapperPath) continue;
+      if (typeof Bridge.resolveEditorApiWrapperPath(wrapperPath) !== 'function') {
+        missing.push(`${spec.event} -> ${wrapperPath}`);
+      }
+    }
+    if (missing.length > 0) {
+      throw new Error(`Frontend event wrapper path is not implemented: ${missing.join(', ')}`);
+    }
+  }
+
+  static validateEditorApiWrapperPath(apiName, spec, wrapperPath) {
+    if (spec?.js_wrapper && spec.js_wrapper !== wrapperPath) {
+      throw new Error(`Frontend wrapper path is not defined by C++ manifest: ${wrapperPath} for ${apiName}`);
+    }
+  }
+
+  static validateEditorApiCaller(apiName, spec, callerMask, callerName) {
+    const allowedCallers = Number(spec?.allowed_callers ?? 0);
+    if ((allowedCallers & callerMask) === 0) {
+      throw new Error(`Editor API caller is not allowed by C++ manifest: ${callerName} cannot call ${apiName}`);
+    }
+  }
+
+  static async validateEditorApiArgs(apiName, args) {
+    const spec = await Bridge.ensureEditorApiMethod(apiName);
+    if (!spec) return null;
+    Bridge.validateEditorApiCaller(apiName, spec, EDITOR_API_CALLER_CEF, 'CEF');
+    if (!Array.isArray(args)) {
+      throw new Error(`Editor API argument schema mismatch for ${apiName}: args must be an array`);
+    }
+    const params = Array.isArray(spec.params) ? spec.params : [];
+    if (args.length > params.length) {
+      throw new Error(`Editor API argument schema mismatch for ${apiName}: too many arguments`);
+    }
+    for (let index = 0; index < params.length; index += 1) {
+      const param = params[index] || {};
+      const value = args[index];
+      if (index >= args.length || value === undefined || value === null) {
+        if (param.optional) continue;
+        throw new Error(`Editor API argument schema mismatch for ${apiName}: missing ${param.name || index}`);
+      }
+      if (!Bridge.editorApiValueMatchesType(value, param.type)) {
+        throw new Error(`Editor API argument schema mismatch for ${apiName}: ${param.name || index} must be ${param.type}`);
+      }
+    }
+    return spec;
+  }
+
+  static validateEditorApiReturn(apiName, data, spec) {
+    if (!spec) return;
+    const returnType = spec.return || 'any';
+    if (!Bridge.editorApiValueMatchesType(data, returnType)) {
+      throw new Error(`Editor API return schema mismatch for ${apiName}: data must be ${returnType}`);
+    }
+  }
+
+  static async ensureEditorApiEventManifest() {
+    if (!editorApiEventSpecs) {
+      if (!editorApiEventManifestPromise) {
+        editorApiEventManifestPromise = call_editor_api('EditorApi.list_events', [])
+          .then((response) => {
+            const events = response?.data?.events ?? response?.events ?? [];
+            editorApiEventSpecs = new Map(
+              events
+                .filter((event) => typeof event?.event === 'string')
+                .map((event) => [event.event, event]),
+            );
+            Bridge.validateEditorApiEventWrapperMethods();
+            return editorApiEventSpecs;
+          })
+          .finally(() => {
+            editorApiEventManifestPromise = null;
+          });
+      }
+      await editorApiEventManifestPromise;
+    }
+    return editorApiEventSpecs;
+  }
+
+  static async ensureEditorApiEvent(eventName) {
+    await Bridge.ensureEditorApiEventManifest();
+    const eventSpec = editorApiEventSpecs?.get(eventName);
+    if (!eventSpec) {
+      throw new Error(`Editor API event is not defined by C++ manifest: ${eventName}`);
+    }
+    Bridge.validateEditorApiCaller(eventName, eventSpec, EDITOR_API_CALLER_CEF, 'CEF');
+    return eventSpec;
+  }
+
+  static validateEditorApiEventPayload(eventName, payload, eventSpec) {
+    if (!eventSpec) return;
+    const payloadType = eventSpec.payload || 'any';
+    if (!Bridge.editorApiValueMatchesType(payload, payloadType)) {
+      throw new Error(`Editor API event payload schema mismatch for ${eventName}: payload must be ${payloadType}`);
+    }
   }
 
   static async callDockCommand(params) {
@@ -85,128 +220,587 @@ export class Bridge {
   }
 }
 
+const call_editor_api = async (apiName, args) => {
+  const normalizedArgs = args || [];
+  const spec = await Bridge.validateEditorApiArgs(apiName, normalizedArgs);
+  const request = {
+    api: apiName,
+    args: normalizedArgs,
+  };
+
+  return new Promise((resolve, reject) => {
+    try {
+      window.cefQuery({
+        request: JSON.stringify(request),
+        persistent: false,
+        onSuccess: (response) => {
+          try {
+            const jsonResponse = typeof response === 'string' ? JSON.parse(response) : response;
+            if (
+              jsonResponse &&
+              (jsonResponse.success === false ||
+                jsonResponse.status === 'error' ||
+                jsonResponse.type === 'error' ||
+                jsonResponse.error)
+            ) {
+              reject(new Error(jsonResponse.error || jsonResponse.message || 'Editor API error'));
+            } else {
+              Bridge.validateEditorApiReturn(apiName, jsonResponse?.data, spec);
+              resolve(jsonResponse);
+            }
+          } catch (e) {
+            reject(e);
+          }
+        },
+        onFailure: (error_code, error_message) => {
+          reject(new Error(`Editor API Error (${error_code}): ${error_message}`));
+        },
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+};
+
+const call_typed_editor_api = async (apiName, wrapperPath, args) => {
+  const spec = await Bridge.ensureEditorApiMethod(apiName);
+  Bridge.validateEditorApiWrapperPath(apiName, spec, wrapperPath);
+  return call_editor_api(apiName, args);
+};
+
+const editorApiCallbacks = new Map();
+
+if (typeof window !== 'undefined') {
+  window.__coronaEditorApiDispatch = (event) => {
+    const envelope = typeof event === 'string' ? JSON.parse(event) : event;
+    const token = envelope?.token ?? envelope?.callback_token;
+    const entry = editorApiCallbacks.get(token);
+    const callback = entry?.callback;
+    if (typeof callback === 'function') {
+      Bridge.validateEditorApiEventPayload(envelope?.event, envelope?.payload, entry.eventSpec);
+      callback(envelope?.payload, envelope?.event);
+    }
+  };
+}
+
+const register_editor_api_callback = async (eventName, callback) => {
+  const eventSpec = await Bridge.ensureEditorApiEvent(eventName);
+  const response = await call_editor_api('EditorApi.register_callback', [
+    eventName,
+    { transport: 'cef-js' },
+  ]);
+  const callbackToken = response?.data?.callback_token ?? response?.callback_token;
+  if (!callbackToken) {
+    throw new Error(`Editor API event registration failed: ${eventName}`);
+  }
+  editorApiCallbacks.set(callbackToken, { callback, eventName, eventSpec });
+  return callbackToken;
+};
+
+const register_typed_editor_api_callback = async (eventName, wrapperName, callback) => {
+  const eventSpec = await Bridge.ensureEditorApiEvent(eventName);
+  if (eventSpec?.js_wrapper !== wrapperName) {
+    throw new Error(`Editor API event wrapper is not defined by C++ manifest: ${wrapperName}`);
+  }
+  return register_editor_api_callback(eventName, callback);
+};
+
+const unregister_callback = async (callbackToken) => {
+  return call_editor_api('EditorApi.unregister_callback', [callbackToken])
+    .then((response) => {
+      editorApiCallbacks.delete(callbackToken);
+      return response;
+    });
+};
+
+const find_editor_api_method_by_js_wrapper = async (wrapperPath) => {
+  const specs = await Bridge.ensureEditorApiManifest();
+  for (const spec of specs.values()) {
+    if (spec?.js_wrapper === wrapperPath) {
+      return spec;
+    }
+  }
+  return null;
+};
+
+const find_editor_api_event_by_js_wrapper = async (wrapperPath) => {
+  const specs = await Bridge.ensureEditorApiEventManifest();
+  for (const spec of specs.values()) {
+    if (spec?.js_wrapper === wrapperPath) {
+      return spec;
+    }
+  }
+  return null;
+};
+
+const register_manifest_editor_api_callback = async (wrapperPath, callback) => {
+  const eventSpec = await find_editor_api_event_by_js_wrapper(wrapperPath);
+  if (!eventSpec?.event) {
+    throw new Error(`Editor API event wrapper path is not defined by C++ manifest: ${wrapperPath}`);
+  }
+  return register_typed_editor_api_callback(eventSpec.event, wrapperPath, callback);
+};
+
+const call_manifest_editor_api = async (wrapperPath, args) => {
+  const methodSpec = await find_editor_api_method_by_js_wrapper(wrapperPath);
+  if (!methodSpec?.api) {
+    throw new Error(`Editor API wrapper path is not defined by C++ manifest: ${wrapperPath}`);
+  }
+  return call_typed_editor_api(methodSpec.api, wrapperPath, args || []);
+};
+
+const create_dynamic_editor_api_function = (wrapperPath) => async (...args) => {
+  const methodSpec = await find_editor_api_method_by_js_wrapper(wrapperPath);
+  if (methodSpec?.api) {
+    return call_typed_editor_api(methodSpec.api, wrapperPath, args);
+  }
+  const eventSpec = await find_editor_api_event_by_js_wrapper(wrapperPath);
+  if (eventSpec?.event) {
+    return register_typed_editor_api_callback(eventSpec.event, wrapperPath, args[0]);
+  }
+  throw new Error(`Editor API wrapper path is not defined by C++ manifest: ${wrapperPath}`);
+};
+
+const create_dynamic_editor_api_namespace = (wrapperPath, target = {}) => {
+  return new Proxy(target, {
+    get(current, property) {
+      if (typeof property !== 'string') {
+        return current[property];
+      }
+      if (property === 'then') {
+        return undefined;
+      }
+      if (property in current) {
+        return current[property];
+      }
+      const childPath = wrapperPath ? `${wrapperPath}.${property}` : property;
+      const dynamicMember = create_dynamic_editor_api_namespace(
+        childPath,
+        create_dynamic_editor_api_function(childPath),
+      );
+      current[property] = dynamicMember;
+      return dynamicMember;
+    },
+    apply(current, thisArg, args) {
+      return current.apply(thisArg, args);
+    },
+  });
+};
+
+const editorApiStatic = {
+  listMethods: () => call_editor_api('EditorApi.list_methods', []),
+  listEvents: () => call_editor_api('EditorApi.list_events', []),
+  off: (callbackToken) => unregister_callback(callbackToken),
+  editor: {
+    listMethods: () => call_editor_api('EditorApi.list_methods', []),
+    listEvents: () => call_editor_api('EditorApi.list_events', []),
+    registerCallback: (eventName, callbackSpec = {}) =>
+      call_editor_api('EditorApi.register_callback', [eventName, callbackSpec || {}]),
+    unregisterCallback: (callbackToken) => unregister_callback(callbackToken),
+  },
+  events: {
+    onAiChunk: (callback) => register_manifest_editor_api_callback('events.onAiChunk', callback),
+    onLogBatch: (callback) => register_manifest_editor_api_callback('events.onLogBatch', callback),
+    onActorChanged: (callback) => register_manifest_editor_api_callback('events.onActorChanged', callback),
+    onActorSelectionChanged: (callback) => register_manifest_editor_api_callback('events.onActorSelectionChanged', callback),
+    onActorTransformUpdated: (callback) => register_manifest_editor_api_callback('events.onActorTransformUpdated', callback),
+    onActorPickResult: (callback) => register_manifest_editor_api_callback('events.onActorPickResult', callback),
+    onFocusPoseResult: (callback) => register_manifest_editor_api_callback('events.onFocusPoseResult', callback),
+    onNetworkActorDeleteSyncBroadcastRequested: (callback) => register_manifest_editor_api_callback('events.onNetworkActorDeleteSyncBroadcastRequested', callback),
+    onNetworkActorOwnershipClaimed: (callback) => register_manifest_editor_api_callback('events.onNetworkActorOwnershipClaimed', callback),
+    onNetworkActorStateSyncBroadcastRequested: (callback) => register_manifest_editor_api_callback('events.onNetworkActorStateSyncBroadcastRequested', callback),
+    onNetworkActorSyncBroadcastRequested: (callback) => register_manifest_editor_api_callback('events.onNetworkActorSyncBroadcastRequested', callback),
+    onNetworkActorTransformSyncBroadcastRequested: (callback) => register_manifest_editor_api_callback('events.onNetworkActorTransformSyncBroadcastRequested', callback),
+    onNetworkAssetImportCompleted: (callback) => register_manifest_editor_api_callback('events.onNetworkAssetImportCompleted', callback),
+    onNetworkFileSyncStatusChanged: (callback) => register_manifest_editor_api_callback('events.onNetworkFileSyncStatusChanged', callback),
+    onNetworkSyncPauseRequested: (callback) => register_manifest_editor_api_callback('events.onNetworkSyncPauseRequested', callback),
+    onSceneAdded: (callback) => register_manifest_editor_api_callback('events.onSceneAdded', callback),
+    onSceneRenamed: (callback) => register_manifest_editor_api_callback('events.onSceneRenamed', callback),
+    onSceneTreeChanged: (callback) => register_manifest_editor_api_callback('events.onSceneTreeChanged', callback),
+    onProjectOpened: (callback) => register_manifest_editor_api_callback('events.onProjectOpened', callback),
+    onLanChatEvent: (callback) => register_manifest_editor_api_callback('events.onLanChatEvent', callback),
+  },
+  app: {
+    closeProcess: () => call_manifest_editor_api('app.closeProcess', []),
+  },
+  ai: {
+    sendMessageToAIStream: (payload) => call_manifest_editor_api('ai.sendMessageToAIStream', [payload]),
+    readLocalFileAsBase64: (filePath) => call_manifest_editor_api('ai.readLocalFileAsBase64', [filePath]),
+    generateHint: (elementType, context = {}) =>
+      call_manifest_editor_api('ai.generateHint', [elementType, context || {}]),
+    submitRequest: (payload) => call_manifest_editor_api('ai.submitRequest', [payload || {}]),
+    chatStream: (request) => editorApi.ai.submitRequest(request || {}),
+    cancelRequest: (requestId) =>
+      editorApi.ai.submitRequest(
+        {
+          operation: 'request.cancel',
+          request_id: requestId,
+        },
+      ),
+    getRequestStatus: (requestId) =>
+      editorApi.ai.submitRequest(
+        {
+          operation: 'request.status',
+          request_id: requestId,
+        },
+      ),
+  },
+  files: {
+    getProjectInfo: () => call_manifest_editor_api('files.getProjectInfo', []),
+    getFiles: (relPath = '') => call_manifest_editor_api('files.getFiles', [relPath || '']),
+    getFileTree: (relPath = '') => call_manifest_editor_api('files.getFileTree', [relPath || '']),
+    createFolder: (path, folderName) =>
+      call_manifest_editor_api('files.createFolder', [path, folderName]),
+    createFile: (path, fileName, type) =>
+      call_manifest_editor_api('files.createFile', [path, fileName, type]),
+    deleteItem: (path) => call_manifest_editor_api('files.deleteItem', [path]),
+    renameItem: (oldPath, newName) =>
+      call_manifest_editor_api('files.renameItem', [oldPath, newName]),
+    openFile: (filePath, fileType) =>
+      call_manifest_editor_api('files.openFile', [filePath, fileType]),
+  },
+  lanChat: {
+    startRoom: (payload) => call_manifest_editor_api('lanChat.startRoom', [payload || {}]),
+    startLocalRoom: (payload) => call_manifest_editor_api('lanChat.startLocalRoom', [payload || {}]),
+    stopRoom: () => call_manifest_editor_api('lanChat.stopRoom', []),
+    stopLocalRoom: () => call_manifest_editor_api('lanChat.stopLocalRoom', []),
+    joinRoom: (payload) => call_manifest_editor_api('lanChat.joinRoom', [payload || {}]),
+    getHistory: () => call_manifest_editor_api('lanChat.getHistory', []),
+    listHistoryRooms: () => call_manifest_editor_api('lanChat.listHistoryRooms', []),
+    loadHistoryRoom: (room) => call_manifest_editor_api('lanChat.loadHistoryRoom', [{ room }]),
+    leaveRoom: () => call_manifest_editor_api('lanChat.leaveRoom', []),
+    sendMessage: (text, options = {}) =>
+      call_manifest_editor_api('lanChat.sendMessage', [{ text, ...(options || {}) }]),
+    getLocalIp: () => call_manifest_editor_api('lanChat.getLocalIp', []),
+    addAgent: (payload) => call_manifest_editor_api('lanChat.addAgent', [payload || {}]),
+    removeAgent: (agentId) => call_manifest_editor_api('lanChat.removeAgent', [{ agent_id: agentId }]),
+    listAgents: () => call_manifest_editor_api('lanChat.listAgents', []),
+  },
+  network: {
+    startSession: (instanceName, projectId, port = 27960, role = 'host') =>
+      call_manifest_editor_api('network.startSession', [instanceName, projectId, port, role]),
+    stopSession: () => call_manifest_editor_api('network.stopSession', []),
+    getPeerCount: () => call_manifest_editor_api('network.getPeerCount', []),
+    getSessionInfo: () => call_manifest_editor_api('network.getSessionInfo', []),
+    connectToPeer: (ip, port, peerName) =>
+      call_manifest_editor_api('network.connectToPeer', [ip, port, peerName]),
+    setProjectRoot: (projectRoot) =>
+      call_manifest_editor_api('network.setProjectRoot', [projectRoot]),
+    broadcastActorCreate: (actorGuid, sceneName, modelPath, actorData) =>
+      call_manifest_editor_api('network.broadcastActorCreate', [actorGuid, sceneName, modelPath, actorData]),
+    broadcastActorTransform: (actorGuid, sceneName, actorData) =>
+      call_manifest_editor_api('network.broadcastActorTransform', [actorGuid, sceneName, actorData]),
+    broadcastActorDelete: (actorGuid, sceneName, actorName) =>
+      call_manifest_editor_api('network.broadcastActorDelete', [actorGuid, sceneName, actorName]),
+    requestSceneSnapshot: (sceneName) =>
+      call_manifest_editor_api('network.requestSceneSnapshot', [sceneName]),
+    broadcastSceneSnapshot: (sceneName, snapshot) =>
+      call_manifest_editor_api('network.broadcastSceneSnapshot', [sceneName, snapshot]),
+    broadcastActorStateUpdate: (actorGuid, sceneName, actorData) =>
+      call_manifest_editor_api('network.broadcastActorStateUpdate', [actorGuid, sceneName, actorData]),
+    pollPendingActorCreate: () => call_manifest_editor_api('network.pollPendingActorCreate', []),
+    pollPendingActorTransform: () => call_manifest_editor_api('network.pollPendingActorTransform', []),
+    pollPendingActorDelete: () => call_manifest_editor_api('network.pollPendingActorDelete', []),
+    pollPendingSceneSnapshotRequest: () =>
+      call_manifest_editor_api('network.pollPendingSceneSnapshotRequest', []),
+    pollPendingSceneSnapshot: () => call_manifest_editor_api('network.pollPendingSceneSnapshot', []),
+    pollPendingActorStateUpdate: () => call_manifest_editor_api('network.pollPendingActorStateUpdate', []),
+    setSyncPaused: (paused) => call_manifest_editor_api('network.setSyncPaused', [!!paused]),
+    registerActorIdentity: (actorGuid, actorHandle, locallyOwned = true) =>
+      call_manifest_editor_api('network.registerActorIdentity', [actorGuid, String(actorHandle || ''), !!locallyOwned]),
+    claimActorOwnership: (actorGuid) =>
+      call_manifest_editor_api('network.claimActorOwnership', [actorGuid]),
+  },
+  project: {
+    browseFolder: (defaultPath = '') =>
+      call_manifest_editor_api('project.browseFolder', defaultPath ? [defaultPath] : []),
+    createMultiplayerProject: (projectData) =>
+      call_manifest_editor_api('project.createMultiplayerProject', [projectData || {}]),
+    createProject: (projectData) =>
+      call_manifest_editor_api('project.createProject', [projectData || {}]),
+    createWorldProject: (worldData) =>
+      call_manifest_editor_api('project.createWorldProject', [worldData || {}]),
+    getAppVersion: () => call_manifest_editor_api('project.getAppVersion', []),
+    getDefaultProjectPath: () => call_manifest_editor_api('project.getDefaultProjectPath', []),
+    getRecentProjects: () => call_manifest_editor_api('project.getRecentProjects', []),
+    openProject: (projectPath) => call_manifest_editor_api('project.openProject', [projectPath]),
+    openProjectFile: () => call_manifest_editor_api('project.openProjectFile', []),
+    setProjectMode: (mode, settings) =>
+      call_manifest_editor_api('project.setProjectMode', [{ mode, settings }]),
+  },
+  scene: {
+    listActorTree: (sceneName) => call_manifest_editor_api('scene.listActorTree', [sceneName]),
+  },
+  scratch: {
+    executePythonCode: (code, mode, sceneName, actorName, targetType = 'actor') =>
+      call_manifest_editor_api('scratch.executePythonCode', [
+        code,
+        mode ?? 0,
+        sceneName ?? '',
+        actorName ?? '',
+        targetType || 'actor',
+      ]),
+    saveBlocklyTarget: (payload) => call_manifest_editor_api('scratch.saveBlocklyTarget', [payload || {}]),
+    loadBlocklyTarget: (payload) => call_manifest_editor_api('scratch.loadBlocklyTarget', [payload || {}]),
+    startGamePreview: (payload = { scope: 'project' }) =>
+      call_manifest_editor_api('scratch.startGamePreview', [payload || { scope: 'project' }]),
+    stopGamePreview: () => call_manifest_editor_api('scratch.stopGamePreview', []),
+    getGamePreviewStatus: () => call_manifest_editor_api('scratch.getGamePreviewStatus', []),
+    stopScriptExecution: () => call_manifest_editor_api('scratch.stopScriptExecution', []),
+    getScriptStatus: () => call_manifest_editor_api('scratch.getScriptStatus', []),
+    sendKeyEvent: (key, modifiers, displayKey) =>
+      call_manifest_editor_api('scratch.sendKeyEvent', [key, modifiers || '', displayKey || key]),
+    sendKeyUpEvent: (key, displayKey) =>
+      call_manifest_editor_api('scratch.sendKeyUpEvent', [key, displayKey || key]),
+    sendMouseEvent: (eventType, button, x, y) =>
+      call_manifest_editor_api('scratch.sendMouseEvent', [eventType, button || '', x || 0, y || 0]),
+  },
+  sceneTools: {
+    createScene: (sceneName) => call_manifest_editor_api('sceneTools.createScene', [sceneName]),
+    listSceneTree: (sceneName) => call_manifest_editor_api('sceneTools.listSceneTree', [sceneName]),
+    reloadScene: (sceneName, projectPath = '') =>
+      call_manifest_editor_api('sceneTools.reloadScene', projectPath ? [sceneName, projectPath] : [sceneName]),
+    createActor: (sceneName, objPath, actorType = 'model', actorData = null) =>
+      call_manifest_editor_api('sceneTools.createActor',
+        actorData ? [sceneName, objPath, actorType, actorData] : [sceneName, objPath, actorType],
+      ),
+    removeActor: (sceneName, actorName) =>
+      call_manifest_editor_api('sceneTools.removeActor', [sceneName, actorName]),
+    renameActor: (sceneName, actorName, name) =>
+      call_manifest_editor_api('sceneTools.renameActor', [sceneName, actorName, name]),
+    openActor: (sceneName, actorName) =>
+      call_manifest_editor_api('sceneTools.openActor', [sceneName, actorName]),
+    selectActor: (sceneName, actorType, actorName) =>
+      call_manifest_editor_api('sceneTools.selectActor', [sceneName, actorType, actorName]),
+    focusActor: (sceneName, actorName, cameraName) =>
+      call_manifest_editor_api('sceneTools.focusActor', [sceneName, actorName, cameraName]),
+    setRenderBackend: (mode, sceneName = null, cameraId = null) =>
+      call_manifest_editor_api('sceneTools.setRenderBackend', [mode, sceneName, cameraId]),
+    getRenderBackend: (sceneName = null, cameraId = null) =>
+      call_manifest_editor_api('sceneTools.getRenderBackend', [sceneName, cameraId]),
+    setVisionRenderMode: (sceneName, cameraId = null, mode = 'path_tracing') =>
+      call_manifest_editor_api('sceneTools.setVisionRenderMode', [sceneName, cameraId, mode]),
+    getVisionRenderMode: (sceneName, cameraId = null) =>
+      call_manifest_editor_api('sceneTools.getVisionRenderMode', [sceneName, cameraId]),
+    createCameraView: (sceneName, name = null) =>
+      call_manifest_editor_api('sceneTools.createCameraView', [sceneName, name]),
+    openCameraView: (sceneName, cameraId) =>
+      call_manifest_editor_api('sceneTools.openCameraView', [sceneName, cameraId]),
+    closeCameraView: (sceneName, cameraId) =>
+      call_manifest_editor_api('sceneTools.closeCameraView', [sceneName, cameraId]),
+    renameCameraView: (sceneName, cameraId, name) =>
+      call_manifest_editor_api('sceneTools.renameCameraView', [sceneName, cameraId, name]),
+    listCameraViews: (sceneName) =>
+      call_manifest_editor_api('sceneTools.listCameraViews', [sceneName]),
+    updateCameraView: (sceneName, cameraId, state) =>
+      call_manifest_editor_api('sceneTools.updateCameraView', [sceneName, cameraId, state]),
+    deleteCamera: (sceneName, cameraId) =>
+      call_manifest_editor_api('sceneTools.deleteCamera', [sceneName, cameraId]),
+    sunDirection: (sceneName, enable, direction) =>
+      call_manifest_editor_api('sceneTools.sunDirection', [sceneName, enable, direction]),
+    floorGrid: (sceneName, enabled) =>
+      call_manifest_editor_api('sceneTools.floorGrid', [sceneName, enabled]),
+    setPhysicsParams: (sceneName, params) =>
+      call_manifest_editor_api('sceneTools.setPhysicsParams', [
+        sceneName,
+        params.gravity,
+        params.floor_y,
+        params.floor_restitution,
+        params.fixed_dt,
+      ]),
+    getPhysicsParams: (sceneName) => call_manifest_editor_api('sceneTools.getPhysicsParams', [sceneName]),
+    selectScreenshotPath: (sceneName, cameraName) =>
+      call_manifest_editor_api('sceneTools.selectScreenshotPath', [sceneName, cameraName]),
+    saveScreenshot: (sceneName, path, cameraName) =>
+      call_manifest_editor_api('sceneTools.saveScreenshot', [sceneName, path, cameraName]),
+    setOutputMode: (sceneName, cameraName, mode) =>
+      call_manifest_editor_api('sceneTools.setOutputMode', [sceneName, cameraName, mode]),
+    getOutputMode: (sceneName, cameraName) =>
+      call_manifest_editor_api('sceneTools.getOutputMode', [sceneName, cameraName]),
+    setShadowCascadeDebug: (sceneName, cameraName, enabled) =>
+      call_manifest_editor_api('sceneTools.setShadowCascadeDebug', [sceneName, cameraName, !!enabled]),
+    getShadowCascadeDebug: (sceneName, cameraName) =>
+      call_manifest_editor_api('sceneTools.getShadowCascadeDebug', [sceneName, cameraName]),
+    setSsaoEnabled: (sceneName, cameraName, enabled) =>
+      call_manifest_editor_api('sceneTools.setSsaoEnabled', [sceneName, cameraName, !!enabled]),
+    getSsaoEnabled: (sceneName, cameraName) =>
+      call_manifest_editor_api('sceneTools.getSsaoEnabled', [sceneName, cameraName]),
+    isVisionAvailable: () => call_manifest_editor_api('sceneTools.isVisionAvailable', []),
+    loadVisionScene: (path) => call_manifest_editor_api('sceneTools.loadVisionScene', [path]),
+    pickActor: (sceneName, x, y, vpWidth, vpHeight) =>
+      call_manifest_editor_api('sceneTools.pickActor', [sceneName, x, y, vpWidth, vpHeight]),
+    playAudio: (resourceId, loop) =>
+      call_manifest_editor_api('sceneTools.playAudio', [resourceId, loop]),
+    stopAudio: (resourceId) =>
+      call_manifest_editor_api('sceneTools.stopAudio', [resourceId]),
+    actorPlayAudio: (actorName, loop = false) =>
+      call_manifest_editor_api('sceneTools.actorPlayAudio', [actorName, loop]),
+    actorStopAudio: (actorName) =>
+      call_manifest_editor_api('sceneTools.actorStopAudio', [actorName]),
+  },
+  main: {
+    getMenuData: () => call_manifest_editor_api('main.getMenuData', []),
+    importResourceFile: (sceneName, fileType) =>
+      call_manifest_editor_api('main.importResourceFile', [sceneName, fileType]),
+    onInit: (projectPath = '') =>
+      call_manifest_editor_api('main.onInit', projectPath ? [projectPath] : []),
+    runProject: (scenePath = '') =>
+      call_manifest_editor_api('main.runProject', scenePath ? [scenePath] : []),
+    sceneSave: (sceneName) => call_manifest_editor_api('main.sceneSave', [sceneName]),
+    updateViewToolState: (toolId, enabled) =>
+      call_manifest_editor_api('main.updateViewToolState', [toolId, !!enabled]),
+  },
+  projectSettings: {
+    getActiveProjectInfo: () => call_manifest_editor_api('projectSettings.getActiveProjectInfo', []),
+    saveActiveProjectInfo: (settings) =>
+      call_manifest_editor_api('projectSettings.saveActiveProjectInfo', [settings || {}]),
+    browseSceneFile: () => call_manifest_editor_api('projectSettings.browseSceneFile', []),
+  },
+  resourceSearch: {
+    prepareIndex: (caller = CURRENT_CALLER) =>
+      call_manifest_editor_api('resourceSearch.prepareIndex', [caller]),
+    fuzzySearch: (query, topK = 20, typeFilter = null, caller = CURRENT_CALLER) =>
+      call_manifest_editor_api('resourceSearch.fuzzySearch', [query, topK, typeFilter, caller]),
+    imageSearch: (imageB64, topK = 20, threshold = 10, caller = CURRENT_CALLER) =>
+      call_manifest_editor_api('resourceSearch.imageSearch', [imageB64, topK, threshold, caller]),
+    listTypes: (caller = CURRENT_CALLER) =>
+      call_manifest_editor_api('resourceSearch.listTypes', [caller]),
+    rebuildIndex: (caller = CURRENT_CALLER) =>
+      call_manifest_editor_api('resourceSearch.rebuildIndex', [caller]),
+    getStats: (caller = CURRENT_CALLER) =>
+      call_manifest_editor_api('resourceSearch.getStats', [caller]),
+    markIndexDirty: (reason = 'frontend', caller = CURRENT_CALLER) =>
+      call_manifest_editor_api('resourceSearch.markIndexDirty', [reason, caller]),
+    focusActor: (sceneName, actorName, caller = CURRENT_CALLER) =>
+      call_manifest_editor_api('resourceSearch.focusActor', [sceneName, actorName, caller]),
+  },
+  sceneDatas: {
+    getScene: (sceneId) => call_manifest_editor_api('sceneDatas.getScene', [sceneId]),
+    getActor: (sceneId, actorId) => call_manifest_editor_api('sceneDatas.getActor', [sceneId, actorId]),
+    actorOperation: (sceneName, actorName, operation, vector) =>
+      call_manifest_editor_api('sceneDatas.actorOperation', [sceneName, actorName, operation, vector]),
+    saveActor: (sceneName, actorName) =>
+      call_manifest_editor_api('sceneDatas.saveActor', [sceneName, actorName]),
+    selectModelFile: (sceneId, actorId, fileType) =>
+      call_manifest_editor_api('sceneDatas.selectModelFile', [sceneId, actorId, fileType]),
+  },
+};
+
+export const editorApi = create_dynamic_editor_api_namespace('', editorApiStatic);
+
 // 快捷访问
 export const sceneService = {
   createActor: (sceneName, objPath, actorType = 'model', actorData = null) =>
-    Bridge.callCEF(
-      'SceneTools',
-      'create_actor',
-      actorData ? [sceneName, objPath, actorType, actorData] : [sceneName, objPath, actorType],
-    ),
+    editorApi.sceneTools.createActor(sceneName, objPath, actorType, actorData),
   removeActor: (sceneName, actorName) =>
-    Bridge.callCEF('SceneTools', 'remove_actor', [sceneName, actorName]),
+    editorApi.sceneTools.removeActor(sceneName, actorName),
   renameActor: (sceneName, actorName, name) =>
-    Bridge.callCEF('SceneTools', 'rename_actor', [sceneName, actorName, name]),
-  createScene: (sceneName) => Bridge.callCEF('SceneTools', 'create_scene', [sceneName]),
+    editorApi.sceneTools.renameActor(sceneName, actorName, name),
+  createScene: (sceneName) =>
+    editorApi.sceneTools.createScene(sceneName),
 
   sunDirection: (sceneName, enable, direction) =>
-    Bridge.callCEF('SceneTools', 'sun_direction', [sceneName, enable, direction]),
+    editorApi.sceneTools.sunDirection(sceneName, enable, direction),
   floorGrid: (sceneName, enabled) =>
-    Bridge.callCEF('SceneTools', 'floor_grid', [sceneName, enabled]),
+    editorApi.sceneTools.floorGrid(sceneName, enabled),
   setPhysicsParams: (sceneName, params) =>
-    Bridge.callCEF('SceneTools', 'set_physics_params', [
-      sceneName,
-      params.gravity,
-      params.floor_y,
-      params.floor_restitution,
-      params.fixed_dt,
-    ]),
-  getPhysicsParams: (sceneName) => Bridge.callCEF('SceneTools', 'get_physics_params', [sceneName]),
+    editorApi.sceneTools.setPhysicsParams(sceneName, params),
+  getPhysicsParams: (sceneName) => editorApi.sceneTools.getPhysicsParams(sceneName),
   selectScreenshotPath: (sceneName, cameraName) =>
-    Bridge.callCEF('SceneTools', 'select_screenshot_path', [sceneName, cameraName]),
+    editorApi.sceneTools.selectScreenshotPath(sceneName, cameraName),
   saveScreenshot: (sceneName, path, cameraName) =>
-    Bridge.callCEF('SceneTools', 'save_screenshot', [sceneName, path, cameraName]),
+    editorApi.sceneTools.saveScreenshot(sceneName, path, cameraName),
   setOutputMode: (sceneName, cameraName, mode) =>
-    Bridge.callCEF('SceneTools', 'set_output_mode', [sceneName, cameraName, mode]),
+    editorApi.sceneTools.setOutputMode(sceneName, cameraName, mode),
   getOutputMode: (sceneName, cameraName) =>
-    Bridge.callCEF('SceneTools', 'get_output_mode', [sceneName, cameraName]),
+    editorApi.sceneTools.getOutputMode(sceneName, cameraName),
   setShadowCascadeDebug: (sceneName, cameraName, enabled) =>
-    Bridge.callCEF('SceneTools', 'set_shadow_cascade_debug', [sceneName, cameraName, !!enabled]),
+    editorApi.sceneTools.setShadowCascadeDebug(sceneName, cameraName, enabled),
   getShadowCascadeDebug: (sceneName, cameraName) =>
-    Bridge.callCEF('SceneTools', 'get_shadow_cascade_debug', [sceneName, cameraName]),
+    editorApi.sceneTools.getShadowCascadeDebug(sceneName, cameraName),
   setSsaoEnabled: (sceneName, cameraName, enabled) =>
-    Bridge.callCEF('SceneTools', 'set_ssao_enabled', [sceneName, cameraName, !!enabled]),
+    editorApi.sceneTools.setSsaoEnabled(sceneName, cameraName, enabled),
   getSsaoEnabled: (sceneName, cameraName) =>
-    Bridge.callCEF('SceneTools', 'get_ssao_enabled', [sceneName, cameraName]),
-  isVisionAvailable: () => Bridge.callCEF('SceneTools', 'is_vision_available', []),
+    editorApi.sceneTools.getSsaoEnabled(sceneName, cameraName),
+  isVisionAvailable: () => editorApi.sceneTools.isVisionAvailable(),
   setRenderBackend: (mode, sceneName = null, cameraId = null) =>
-    Bridge.callCEF('SceneTools', 'set_render_backend', [mode, sceneName, cameraId]),
+    editorApi.sceneTools.setRenderBackend(mode, sceneName, cameraId),
   getRenderBackend: (sceneName = null, cameraId = null) =>
-    Bridge.callCEF('SceneTools', 'get_render_backend', [sceneName, cameraId]),
+    editorApi.sceneTools.getRenderBackend(sceneName, cameraId),
   setVisionRenderMode: (sceneName, cameraId = null, mode = 'path_tracing') =>
-    Bridge.callCEF('SceneTools', 'set_vision_render_mode', [sceneName, cameraId, mode]),
+    editorApi.sceneTools.setVisionRenderMode(sceneName, cameraId, mode),
   getVisionRenderMode: (sceneName, cameraId = null) =>
-    Bridge.callCEF('SceneTools', 'get_vision_render_mode', [sceneName, cameraId]),
+    editorApi.sceneTools.getVisionRenderMode(sceneName, cameraId),
   createCameraView: (sceneName, name = null) =>
-    Bridge.callCEF('SceneTools', 'create_camera_view', [sceneName, name]),
+    editorApi.sceneTools.createCameraView(sceneName, name),
   openCameraView: (sceneName, cameraId) =>
-    Bridge.callCEF('SceneTools', 'open_camera_view', [sceneName, cameraId]),
+    editorApi.sceneTools.openCameraView(sceneName, cameraId),
   closeCameraView: (sceneName, cameraId) =>
-    Bridge.callCEF('SceneTools', 'close_camera_view', [sceneName, cameraId]),
+    editorApi.sceneTools.closeCameraView(sceneName, cameraId),
   renameCameraView: (sceneName, cameraId, name) =>
-    Bridge.callCEF('SceneTools', 'rename_camera_view', [sceneName, cameraId, name]),
+    editorApi.sceneTools.renameCameraView(sceneName, cameraId, name),
   listCameraViews: (sceneName) =>
-    Bridge.callCEF('SceneTools', 'list_camera_views', [sceneName]),
+    editorApi.sceneTools.listCameraViews(sceneName),
   updateCameraView: (sceneName, cameraId, state) =>
-    Bridge.callCEF('SceneTools', 'update_camera_view', [sceneName, cameraId, state]),
+    editorApi.sceneTools.updateCameraView(sceneName, cameraId, state),
   deleteCamera: (sceneName, cameraId) =>
-    Bridge.callCEF('SceneTools', 'delete_camera', [sceneName, cameraId]),
-  loadVisionScene: (path) => Bridge.callCEF('SceneTools', 'load_vision_scene', [path]),
+    editorApi.sceneTools.deleteCamera(sceneName, cameraId),
+  loadVisionScene: (path) => editorApi.sceneTools.loadVisionScene(path),
   reloadScene: (sceneName, projectPath = '') =>
-    Bridge.callCEF('SceneTools', 'reload_scene', projectPath ? [sceneName, projectPath] : [sceneName]),
-  listActorTree: (sceneName) => Bridge.callCEF('SceneTools', 'list_actor_tree', [sceneName]),
-  listSceneTree: (sceneName) => Bridge.callCEF('SceneTools', 'list_scene_tree', [sceneName]),
+    editorApi.sceneTools.reloadScene(sceneName, projectPath),
+  listActorTree: (sceneName) => editorApi.scene.listActorTree(sceneName),
+  listSceneTree: (sceneName) => editorApi.sceneTools.listSceneTree(sceneName),
   openSceneActor: (sceneName, actorName) =>
-    Bridge.callCEF('SceneTools', 'open_actor', [sceneName, actorName]),
+    editorApi.sceneTools.openActor(sceneName, actorName),
   focusActor: (sceneName, actorName, cameraName) =>
-    Bridge.callCEF('SceneTools', 'focus_actor', [sceneName, actorName, cameraName]),
+    editorApi.sceneTools.focusActor(sceneName, actorName, cameraName),
   /** 鼠标在3D视口中拾取物体（异步：首次调用设置拾取，~50ms后重试获取结果） */
   pickActor: (sceneName, x, y, vpWidth, vpHeight) =>
-    Bridge.callCEF('SceneTools', 'pick_actor_at_pixel', [sceneName, x, y, vpWidth, vpHeight]),
+    editorApi.sceneTools.pickActor(sceneName, x, y, vpWidth, vpHeight),
   /** 播放已导入的音频资源 */
   playAudio: (resourceId, loop) =>
-    Bridge.callCEF('SceneTools', 'play_audio', [resourceId, loop]),
+    editorApi.sceneTools.playAudio(resourceId, loop),
   /** 停止播放音频资源 */
   stopAudio: (resourceId) =>
-    Bridge.callCEF('SceneTools', 'stop_audio', [resourceId]),
+    editorApi.sceneTools.stopAudio(resourceId),
   /** 在 audio Actor 的世界位置播放其绑定音频（空间音频） */
   actorPlayAudio: (actorName, loop = false) =>
-    Bridge.callCEF('SceneTools', 'actor_play_audio', [actorName, loop]),
+    editorApi.sceneTools.actorPlayAudio(actorName, loop),
   /** 停止 audio Actor 的空间音频播放 */
   actorStopAudio: (actorName) =>
-    Bridge.callCEF('SceneTools', 'actor_stop_audio', [actorName]),
+    editorApi.sceneTools.actorStopAudio(actorName),
 
-  getScene: (sceneId) => Bridge.callCEF('SceneDatas', 'get_scene', [sceneId]),
-  getActor: (sceneId, actorId) => Bridge.callCEF('SceneDatas', 'get_actor', [sceneId, actorId]),
+  getScene: (sceneId) => editorApi.sceneDatas.getScene(sceneId),
+  getActor: (sceneId, actorId) => editorApi.sceneDatas.getActor(sceneId, actorId),
   actorOperation: (scene_name, actor_name, operation, vector) =>
-    Bridge.callCEF('SceneDatas', 'actor_operation', [scene_name, actor_name, operation, vector]),
+    editorApi.sceneDatas.actorOperation(scene_name, actor_name, operation, vector),
   /** 仅触发写盘：Transform 已由快速通道写入 SharedDataHub */
   saveActor: (sceneName, actorName) =>
-    Bridge.callCEF('SceneDatas', 'save_actor', [sceneName, actorName]),
+    editorApi.sceneDatas.saveActor(sceneName, actorName),
   selectModelFileDialog: (sceneId, actorId, fileType) =>
-    Bridge.callCEF('SceneDatas', 'select_model_file', [sceneId, actorId, fileType]),
+    editorApi.sceneDatas.selectModelFile(sceneId, actorId, fileType),
   setCameraLock: (sceneName, actorName, enabled) =>
-    Bridge.callCEF('SceneDatas', 'actor_operation', [sceneName, actorName, 'SetCameraLock', [enabled]]),
+    editorApi.sceneDatas.actorOperation(sceneName, actorName, 'SetCameraLock', [enabled]),
   setCameraLockOffset: (sceneName, actorName, offset) =>
-    Bridge.callCEF('SceneDatas', 'actor_operation', [sceneName, actorName, 'SetCameraLockOffset', offset]),
+    editorApi.sceneDatas.actorOperation(sceneName, actorName, 'SetCameraLockOffset', offset),
   setCameraLockRotation: (sceneName, actorName, rotation) =>
-    Bridge.callCEF('SceneDatas', 'actor_operation', [sceneName, actorName, 'SetCameraLockRotation', rotation]),
+    editorApi.sceneDatas.actorOperation(sceneName, actorName, 'SetCameraLockRotation', rotation),
 };
 
 export const projectService = {
   OnInit: (projectPath = window.localStorage?.getItem('corona.activeProjectPath') || '') =>
-    Bridge.callCEF('MainView', 'on_init', projectPath ? [projectPath] : []),
+    editorApi.main.onInit(projectPath),
   importResourceFileByDialog: (sceneName, fileType) =>
-    Bridge.callCEF('MainView', 'import_resource_file', [sceneName, fileType]),
-  sceneSave: (sceneName) => Bridge.callCEF('MainView', 'scene_save', [sceneName]),
+    editorApi.main.importResourceFile(sceneName, fileType),
+  sceneSave: (sceneName) => editorApi.main.sceneSave(sceneName),
 
   // 菜单数据接口
-  getMenuData: () => Bridge.callCEF('MainView', 'get_menu_data', []),
+  getMenuData: () => editorApi.main.getMenuData(),
   updateViewToolState: (toolId, enabled) =>
-    Bridge.callCEF('MainView', 'update_view_tool_state', [toolId, enabled]),
+    editorApi.main.updateViewToolState(toolId, enabled),
 
   runProject: (scenePath) =>
-    Bridge.callCEF('MainView', 'run_project', scenePath ? [scenePath] : []),
+    editorApi.main.runProject(scenePath),
 
   setDragRegions: (Path, x, y, w, h) =>
     Bridge.callDockCommand({
@@ -268,81 +862,59 @@ export const appService = {
     Bridge.callDockCommand({ cmd: 'suspendCameraViews', sceneId }),
   crossTabBroadcast: (event, payload) =>
     Bridge.callDockCommand({ cmd: 'broadcast', event, payload }),
-  closeProcess: () => Bridge.callCEF('CoronaEditor', 'close_process'),
+  closeProcess: () => editorApi.app.closeProcess(),
 };
 
 export const aiService = {
-  sendMessageToAIStream: (payload) =>
-    Bridge.callCEF('AITool', 'send_message_to_ai_stream', [payload]),
-  readLocalFileAsBase64: (filePath) =>
-    Bridge.callCEF('AITool', 'read_local_file_as_base64', [filePath]),
-  generateHint: (elementType, context = {}) =>
-    Bridge.callCEF('AITool', 'generate_hint', [elementType, context]),
+  sendMessageToAIStream: (payload) => editorApi.ai.sendMessageToAIStream(payload),
+  readLocalFileAsBase64: (filePath) => editorApi.ai.readLocalFileAsBase64(filePath),
+  generateHint: (elementType, context = {}) => editorApi.ai.generateHint(elementType, context),
 };
 
 export const aiClient = {
-  chatStream: (request) => Bridge.callCEF('AITool', 'ai_rpc', [request]),
-  cancelRequest: (requestId) =>
-    Bridge.callCEF('AITool', 'ai_rpc', [
-      {
-        operation: 'request.cancel',
-        request_id: requestId,
-      },
-    ]),
-  getRequestStatus: (requestId) =>
-    Bridge.callCEF('AITool', 'ai_rpc', [
-      {
-        operation: 'request.status',
-        request_id: requestId,
-      },
-    ]),
+  chatStream: (request) => editorApi.ai.chatStream(request),
+  cancelRequest: (requestId) => editorApi.ai.cancelRequest(requestId),
+  getRequestStatus: (requestId) => editorApi.ai.getRequestStatus(requestId),
 };
 
 // 局域网聊天室：所有跨机传输在 C++ NetworkSystem 完成，前端只通过 cefQuery 调用。
-// C++ 侧通过 __coronaEmit('lanchat-event', event) 把房间消息推回前端
-// （coronaEventBus.on('lanchat-event')），事件信封带 channel: 'lanchat'。
+// LANChat 主事件由 C++ Editor API registry 定义为 LANChat.event。
 //
-// 注意：deal_func_from_js 用 create_success_response 把返回值包成
+// 注意：C++ 脚本服务会用 create_success_response 把返回值包成
 // { success, data, timestamp }，业务结果在 .data 里。这里统一解包，
 // 让 store 直接拿到 { ok, ip, ... } 业务对象（约定同 SceneBar：result?.data ?? result）。
 const _unwrap = (res) => (res && res.data !== undefined ? res.data : res);
 
 export const lanChatService = {
   // 房主开房：{ room, password, port? } -> { ok, ip, port, room } | { ok:false, error }
-  startRoom: (payload) =>
-    Bridge.callCEF('LANChat', 'start_room', [payload]).then(_unwrap),
+  startRoom: (payload) => editorApi.lanChat.startRoom(payload).then(_unwrap),
   // 单人本地房：不启动 NetworkSystem 协作会话
-  startLocalRoom: (payload) =>
-    Bridge.callCEF('LANChat', 'start_local_room', [payload]).then(_unwrap),
+  startLocalRoom: (payload) => editorApi.lanChat.startLocalRoom(payload).then(_unwrap),
   // 房主关房 -> { ok }
-  stopRoom: () => Bridge.callCEF('LANChat', 'stop_room', [{}]).then(_unwrap),
+  stopRoom: () => editorApi.lanChat.stopRoom().then(_unwrap),
   // 关闭单人本地房，不停止 NetworkSystem 协作会话
-  stopLocalRoom: () => Bridge.callCEF('LANChat', 'stop_local_room', [{}]).then(_unwrap),
+  stopLocalRoom: () => editorApi.lanChat.stopLocalRoom().then(_unwrap),
   // 加入房间：{ ip, port, room, password, nickname } -> { ok, members, history } | { ok:false, code }
-  joinRoom: (payload) =>
-    Bridge.callCEF('LANChat', 'join_room', [payload]).then(_unwrap),
+  joinRoom: (payload) => editorApi.lanChat.joinRoom(payload).then(_unwrap),
   // 显式读取当前房间历史，用于开房后兜底恢复持久化记录
-  getHistory: () => Bridge.callCEF('LANChat', 'get_history', [{}]).then(_unwrap),
+  getHistory: () => editorApi.lanChat.getHistory().then(_unwrap),
   // 读取持久化历史房间列表，打开 Dock 时展示给用户选择
-  listHistoryRooms: () => Bridge.callCEF('LANChat', 'list_history_rooms', [{}]).then(_unwrap),
+  listHistoryRooms: () => editorApi.lanChat.listHistoryRooms().then(_unwrap),
   // 读取指定持久化房间历史，不自动进入该房间
-  loadHistoryRoom: (room) =>
-    Bridge.callCEF('LANChat', 'load_history_room', [{ room }]).then(_unwrap),
+  loadHistoryRoom: (room) => editorApi.lanChat.loadHistoryRoom(room).then(_unwrap),
   // 离开房间 -> { ok }
-  leaveRoom: () => Bridge.callCEF('LANChat', 'leave_room', [{}]).then(_unwrap),
+  leaveRoom: () => editorApi.lanChat.leaveRoom().then(_unwrap),
   // 发送消息：{ text } -> { ok } | { ok:false, error }
   sendMessage: (text, options = {}) =>
-    Bridge.callCEF('LANChat', 'send_message', [{ text, ...(options || {}) }]).then(_unwrap),
+    editorApi.lanChat.sendMessage(text, options).then(_unwrap),
   // 获取本机局域网 IP -> { ok, ip, port }
-  getLocalIp: () => Bridge.callCEF('LANChat', 'get_local_ip', [{}]).then(_unwrap),
+  getLocalIp: () => editorApi.lanChat.getLocalIp().then(_unwrap),
   // 添加 AI 助手：{ name, persona } -> { ok, agent_id, name } | { ok:false, error }
-  addAgent: (payload) =>
-    Bridge.callCEF('LANChat', 'add_agent', [payload]).then(_unwrap),
+  addAgent: (payload) => editorApi.lanChat.addAgent(payload).then(_unwrap),
   // 移除 AI 助手：{ agent_id } -> { ok }
-  removeAgent: (agentId) =>
-    Bridge.callCEF('LANChat', 'remove_agent', [{ agent_id: agentId }]).then(_unwrap),
+  removeAgent: (agentId) => editorApi.lanChat.removeAgent(agentId).then(_unwrap),
   // 列出 agent 名册 -> { ok, agents:[{agent_id,name,owner}] }
-  listAgents: () => Bridge.callCEF('LANChat', 'list_agents', [{}]).then(_unwrap),
+  listAgents: () => editorApi.lanChat.listAgents().then(_unwrap),
 };
 
 export const scriptingService = {
@@ -354,41 +926,28 @@ export const scriptingService = {
    * @param {string} actorName - 目标 Actor 名称（可选）
    */
   executePythonCode: (code, mode, sceneName, actorName, targetType = 'actor') =>
-    Bridge.callCEF('ScratchTool', 'execute_python_code', [
-      code,
-      mode ?? 0,
-      sceneName ?? '',
-      actorName ?? '',
-      targetType || 'actor',
-    ]),
+    editorApi.scratch.executePythonCode(code, mode, sceneName, actorName, targetType),
 
-  saveBlocklyTarget: (payload) =>
-    Bridge.callCEF('ScratchTool', 'save_blockly_target', [payload || {}]),
+  saveBlocklyTarget: (payload) => editorApi.scratch.saveBlocklyTarget(payload),
 
-  loadBlocklyTarget: (payload) =>
-    Bridge.callCEF('ScratchTool', 'load_blockly_target', [payload || {}]),
+  loadBlocklyTarget: (payload) => editorApi.scratch.loadBlocklyTarget(payload),
 
-  startGamePreview: (payload = { scope: 'project' }) =>
-    Bridge.callCEF('ScratchTool', 'start_game_preview', [payload]),
+  startGamePreview: (payload = { scope: 'project' }) => editorApi.scratch.startGamePreview(payload),
 
-  stopGamePreview: () =>
-    Bridge.callCEF('ScratchTool', 'stop_game_preview', []),
+  stopGamePreview: () => editorApi.scratch.stopGamePreview(),
 
-  getGamePreviewStatus: () =>
-    Bridge.callCEF('ScratchTool', 'get_game_preview_status', []),
+  getGamePreviewStatus: () => editorApi.scratch.getGamePreviewStatus(),
 
   /**
    * 停止当前正在执行的脚本
    */
-  stopScriptExecution: () =>
-    Bridge.callCEF('ScratchTool', 'stop_script_execution', []),
+  stopScriptExecution: () => editorApi.scratch.stopScriptExecution(),
 
   /**
    * 查询当前脚本执行状态
    * @returns {Promise<{status: 'running'|'idle'}>}
    */
-  getScriptStatus: () =>
-    Bridge.callCEF('ScratchTool', 'get_script_status', []),
+  getScriptStatus: () => editorApi.scratch.getScriptStatus(),
 
   /**
    * 发送键盘事件到积木脚本
@@ -396,70 +955,71 @@ export const scriptingService = {
    * @param {string} modifiers - 修饰键 (如 'Ctrl,Shift')
    */
   sendKeyEvent: (key, modifiers, displayKey) =>
-    Bridge.callCEF('ScratchTool', 'key_event', [key, modifiers || '', displayKey || key]),
+    editorApi.scratch.sendKeyEvent(key, modifiers, displayKey),
 
   /**
    * 发送键盘释放事件到积木脚本
    */
   sendKeyUpEvent: (key, displayKey) =>
-    Bridge.callCEF('ScratchTool', 'key_release', [key, displayKey || key]),
+    editorApi.scratch.sendKeyUpEvent(key, displayKey),
 
   /**
    * 发送鼠标事件到积木脚本
    */
   sendMouseEvent: (eventType, button, x, y) =>
-    Bridge.callCEF('ScratchTool', 'mouse_event', [eventType, button || '', x || 0, y || 0]),
+    editorApi.scratch.sendMouseEvent(eventType, button, x, y),
 };
 
 export const projectLauncherService = {
   // 获取默认项目路径
-  getDefaultProjectPath: () => Bridge.callCEF('ProjectLauncher', 'get_default_project_path', []),
+  getDefaultProjectPath: () => editorApi.project.getDefaultProjectPath(),
   // 浏览文件夹
   browseFolder: (default_path) =>
-    Bridge.callCEF('ProjectLauncher', 'browse_folder', [default_path]),
+    editorApi.project.browseFolder(default_path),
   // 浏览并选择项目文件 (.ini)
-  openProjectFile: () => Bridge.callCEF('ProjectLauncher', 'open_project_file', []),
+  openProjectFile: () => editorApi.project.openProjectFile(),
   // 创建项目
   createProject: (projectData) =>
-    Bridge.callCEF('ProjectLauncher', 'create_project', [projectData]),
+    editorApi.project.createProject(projectData),
   // 创建 AI 世界项目：自动命名 + 存到引擎 data 目录，无需 name/path
   // worldData: { mode: 'story'|'creative', prompt: string } -> { name, path }
   createWorldProject: (worldData) =>
-    Bridge.callCEF('ProjectLauncher', 'create_world_project', [worldData]),
+    editorApi.project.createWorldProject(worldData),
   // 创建首页联机入口使用的临时项目：{ role: 'host'|'guest' } -> { name, path, role }
   createMultiplayerProject: (projectData) =>
-    Bridge.callCEF('ProjectLauncher', 'create_multiplayer_project', [projectData]),
+    editorApi.project.createMultiplayerProject(projectData),
   // 打开项目（执行加载逻辑）
   openProject: (projectPath) =>
-    Bridge.callCEF('ProjectLauncher', 'open_project', [projectPath]).then((result) => {
+    editorApi.project.openProject(projectPath).then((result) => {
       const success = result?.data ?? result;
-      if (success && projectPath) {
-        window.localStorage?.setItem('corona.activeProjectPath', projectPath);
+      const activeProjectPath = success?.path || projectPath;
+      if (success && activeProjectPath) {
+        window.localStorage?.setItem('corona.activeProjectPath', activeProjectPath);
       }
       return result;
     }),
   // 设置项目模式 (2D/3D/渲染)
   setProjectMode: (mode, settings) =>
-    Bridge.callCEF('ProjectLauncher', 'set_project_mode', [{ mode, settings }]),
+    editorApi.project.setProjectMode(mode, settings),
   // 获取版本信息
-  getAppVersion: () => Bridge.callCEF('ProjectLauncher', 'get_app_version', []),
+  getAppVersion: () => editorApi.project.getAppVersion(),
   // 获取最近项目列表
-  getRecentProjects: () => Bridge.callCEF('ProjectLauncher', 'get_recent_projects', []),
+  getRecentProjects: () => editorApi.project.getRecentProjects(),
 };
 
 export const fileService = {
-  getProjectInfo: () => Bridge.callCEF('FileManager', 'get_project_info', []),
-  getFiles: (relPath) => Bridge.callCEF('FileManager', 'get_files', [relPath]),
-  getFileTree: (relPath) => Bridge.callCEF('FileManager', 'get_file_tree', [relPath]),
+  getProjectInfo: () => editorApi.files.getProjectInfo(),
+  getFiles: (relPath) => editorApi.files.getFiles(relPath),
+  getFileTree: (relPath) => editorApi.files.getFileTree(relPath),
   createFolder: (path, folderName) =>
-    Bridge.callCEF('FileManager', 'create_folder', [path, folderName]),
+    editorApi.files.createFolder(path, folderName),
   createFile: (path, fileName, type) =>
-    Bridge.callCEF('FileManager', 'create_file', [path, fileName, type]),
-  deleteItem: (path) => Bridge.callCEF('FileManager', 'delete_item', [path]),
+    editorApi.files.createFile(path, fileName, type),
+  deleteItem: (path) => editorApi.files.deleteItem(path),
   renameItem: (oldPath, newName) =>
-    Bridge.callCEF('FileManager', 'rename_item', [oldPath, newName]),
+    editorApi.files.renameItem(oldPath, newName),
   openFile: (filePath, fileType) =>
-    Bridge.callCEF('FileManager', 'open_file', [filePath, fileType]),
+    editorApi.files.openFile(filePath, fileType),
 };
 
 export const logService = {
@@ -492,96 +1052,90 @@ const resourceSearchDisabled = () => Promise.resolve({
 export const resourceService = {
   prepareIndex: () =>
     RESOURCE_SEARCH_ENABLED
-      ? Bridge.callCEF('ResourceSearch', 'prepare_index', [CURRENT_CALLER])
+      ? editorApi.resourceSearch.prepareIndex()
       : resourceSearchDisabled(),
   fuzzySearch: (query, topK = 20, typeFilter = null) =>
     RESOURCE_SEARCH_ENABLED
-      ? Bridge.callCEF('ResourceSearch', 'fuzzy_search',
-        [query, topK, typeFilter, CURRENT_CALLER])
+      ? editorApi.resourceSearch.fuzzySearch(query, topK, typeFilter)
       : resourceSearchDisabled(),
   imageSearch: (imageB64, topK = 20, threshold = 10) =>
     RESOURCE_SEARCH_ENABLED
-      ? Bridge.callCEF('ResourceSearch', 'image_search',
-        [imageB64, topK, threshold, CURRENT_CALLER])
+      ? editorApi.resourceSearch.imageSearch(imageB64, topK, threshold)
       : resourceSearchDisabled(),
   listTypes: () =>
     RESOURCE_SEARCH_ENABLED
-      ? Bridge.callCEF('ResourceSearch', 'list_types', [CURRENT_CALLER])
+      ? editorApi.resourceSearch.listTypes()
       : resourceSearchDisabled(),
   rebuildIndex: () =>
     RESOURCE_SEARCH_ENABLED
-      ? Bridge.callCEF('ResourceSearch', 'rebuild_index', [CURRENT_CALLER])
+      ? editorApi.resourceSearch.rebuildIndex()
       : resourceSearchDisabled(),
   getStats: () =>
     RESOURCE_SEARCH_ENABLED
-      ? Bridge.callCEF('ResourceSearch', 'get_stats', [CURRENT_CALLER])
+      ? editorApi.resourceSearch.getStats()
       : resourceSearchDisabled(),
   markIndexDirty: (reason = 'frontend') =>
     RESOURCE_SEARCH_ENABLED
-      ? Bridge.callCEF('ResourceSearch', 'mark_index_dirty',
-        [reason, CURRENT_CALLER])
+      ? editorApi.resourceSearch.markIndexDirty(reason)
       : resourceSearchDisabled(),
   focusActor: (sceneName, actorName) =>
     RESOURCE_SEARCH_ENABLED
-      ? Bridge.callCEF('ResourceSearch', 'focus_actor',
-        [sceneName, actorName, CURRENT_CALLER])
+      ? editorApi.resourceSearch.focusActor(sceneName, actorName)
       : resourceSearchDisabled(),
 };
 
 export const projectSettingsService = {
   // 获取当前激活项目的配置
-  getActiveProjectInfo: () => Bridge.callCEF('ProjectSettings', 'get_active_project_info', []),
+  getActiveProjectInfo: () => editorApi.projectSettings.getActiveProjectInfo(),
   // 保存当前激活项目的配置
   saveActiveProjectInfo: (settings) =>
-    Bridge.callCEF('ProjectSettings', 'save_active_project_info', [settings]),
+    editorApi.projectSettings.saveActiveProjectInfo(settings),
   // 浏览当前项目中的场景文件
-  browseSceneFile: () => Bridge.callCEF('ProjectSettings', 'browse_scene_file', []),
+  browseSceneFile: () => editorApi.projectSettings.browseSceneFile(),
 };
 
 export const networkService = {
   startSession: (instanceName, projectId, port = 27960, role = 'host') =>
-    Bridge.callCEF('Network', 'start_session', [instanceName, projectId, port, role]).then(_unwrap),
-  stopSession: () => Bridge.callCEF('Network', 'stop_session').then(_unwrap),
-  getPeerCount: () => Bridge.callCEF('Network', 'get_peer_count').then(_unwrap),
-  getSessionInfo: () => Bridge.callCEF('Network', 'get_session_info').then(_unwrap),
+    editorApi.network.startSession(instanceName, projectId, port, role).then(_unwrap),
+  stopSession: () => editorApi.network.stopSession().then(_unwrap),
+  getPeerCount: () => editorApi.network.getPeerCount().then(_unwrap),
+  getSessionInfo: () => editorApi.network.getSessionInfo().then(_unwrap),
   connectToPeer: (ip, port, peerName) =>
-    Bridge.callCEF('Network', 'connect_to_peer', [ip, port, peerName]).then(_unwrap),
+    editorApi.network.connectToPeer(ip, port, peerName).then(_unwrap),
   setProjectRoot: (projectRoot) =>
-    Bridge.callCEF('Network', 'set_project_root', [projectRoot]).then(_unwrap),
+    editorApi.network.setProjectRoot(projectRoot).then(_unwrap),
   broadcastActorCreate: (actorGuid, sceneName, modelPath, actorData) =>
-    Bridge.callCEF('Network', 'broadcast_actor_create', [actorGuid, sceneName, modelPath, actorData]).then(_unwrap),
+    editorApi.network.broadcastActorCreate(actorGuid, sceneName, modelPath, actorData).then(_unwrap),
   broadcastActorTransform: (actorGuid, sceneName, actorData) =>
-    Bridge.callCEF('Network', 'broadcast_actor_transform', [actorGuid, sceneName, actorData]).then(_unwrap),
+    editorApi.network.broadcastActorTransform(actorGuid, sceneName, actorData).then(_unwrap),
   broadcastActorDelete: (actorGuid, sceneName, actorName) =>
-    Bridge.callCEF('Network', 'broadcast_actor_delete', [actorGuid, sceneName, actorName]).then(_unwrap),
+    editorApi.network.broadcastActorDelete(actorGuid, sceneName, actorName).then(_unwrap),
   requestSceneSnapshot: (sceneName) =>
-    Bridge.callCEF('Network', 'request_actor_scene_snapshot', [sceneName]).then(_unwrap),
+    editorApi.network.requestSceneSnapshot(sceneName).then(_unwrap),
   broadcastSceneSnapshot: (sceneName, snapshot) =>
-    Bridge.callCEF('Network', 'broadcast_actor_scene_snapshot', [sceneName, snapshot]).then(_unwrap),
+    editorApi.network.broadcastSceneSnapshot(sceneName, snapshot).then(_unwrap),
   broadcastActorStateUpdate: (actorGuid, sceneName, actorData) =>
-    Bridge.callCEF('Network', 'broadcast_actor_state_update',
-      [actorGuid, sceneName, actorData]).then(_unwrap),
+    editorApi.network.broadcastActorStateUpdate(actorGuid, sceneName, actorData).then(_unwrap),
   /** 轮询待创建的远程 Actor（文件传输完成后触发创建） */
   pollPendingActorCreate: () =>
-    Bridge.callCEF('Network', 'poll_pending_actor_create', []).then(_unwrap),
+    editorApi.network.pollPendingActorCreate().then(_unwrap),
   /** 轮询远程 Actor transform delta */
   pollPendingActorTransform: () =>
-    Bridge.callCEF('Network', 'poll_pending_actor_transform', []).then(_unwrap),
+    editorApi.network.pollPendingActorTransform().then(_unwrap),
   pollPendingActorDelete: () =>
-    Bridge.callCEF('Network', 'poll_pending_actor_delete', []).then(_unwrap),
+    editorApi.network.pollPendingActorDelete().then(_unwrap),
   pollPendingSceneSnapshotRequest: () =>
-    Bridge.callCEF('Network', 'poll_pending_actor_scene_snapshot_request', []).then(_unwrap),
+    editorApi.network.pollPendingSceneSnapshotRequest().then(_unwrap),
   pollPendingSceneSnapshot: () =>
-    Bridge.callCEF('Network', 'poll_pending_actor_scene_snapshot', []).then(_unwrap),
+    editorApi.network.pollPendingSceneSnapshot().then(_unwrap),
   pollPendingActorStateUpdate: () =>
-    Bridge.callCEF('Network', 'poll_pending_actor_state_update', []).then(_unwrap),
+    editorApi.network.pollPendingActorStateUpdate().then(_unwrap),
   /** 暂停/恢复同步（Actor 创建期间避免 seq_id 碰撞） */
   setSyncPaused: (paused) =>
-    Bridge.callCEF('Network', 'set_sync_paused', [paused]).then(_unwrap),
+    editorApi.network.setSyncPaused(paused).then(_unwrap),
   /** 注册 actor_guid -> 本地 Actor handle 映射，作为后续稳定同步的锚点 */
   registerActorIdentity: (actorGuid, actorHandle, locallyOwned = true) =>
-    Bridge.callCEF('Network', 'register_actor_identity',
-      [actorGuid, String(actorHandle || ''), Boolean(locallyOwned)]).then(_unwrap),
+    editorApi.network.registerActorIdentity(actorGuid, actorHandle, locallyOwned).then(_unwrap),
   claimActorOwnership: (actorGuid) =>
-    Bridge.callCEF('Network', 'claim_actor_ownership', [actorGuid]).then(_unwrap),
+    editorApi.network.claimActorOwnership(actorGuid).then(_unwrap),
 };

@@ -64,8 +64,14 @@ struct BoneWeights {
 struct LODLevel {
     std::vector<Vertex> vertices;
     std::vector<std::uint16_t> indices;
-    float error = 0.0f;             // meshopt 计算的几何误差
-    float screen_threshold = 0.0f;  // 建议屏幕占比切换阈值
+    float error = 0.0f;             // meshopt 归一化几何误差（normalized deviation，原始返回值）
+    float screen_threshold = 0.0f;  // [legacy] 建议屏幕占比切换阈值（旧三角形比启发式，已被 geometric_error 取代，保留作回退）
+    // 物体空间几何误差（world/object-space）：= meshopt error × simplifyScale，单位为
+    // 归一化模型空间长度。这是 LOD 选级的物理量——运行时乘 actor 缩放得世界误差，
+    // 再除以相机到 mesh 的距离得"角误差"，与相机角预算比较即选级。
+    // README 标准用法：lod_ok = d·(2·tan(fov/2)/H_px) ≥ geometric_error。
+    // LOD0 恒为 0（无简化）。0 表示未计算 → 选级端回退到 screen_threshold。
+    float geometric_error = 0.0f;
 
     // 骨骼权重（仅蒙皮网格非空，与本级 vertices 等长并行）。
     // 蒙皮网格的 LOD 也需蒙皮（渲染选级 / 最简 LOD 碰撞），故随顶点同步 remap。

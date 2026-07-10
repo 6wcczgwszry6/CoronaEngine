@@ -31,7 +31,6 @@ PythonAPI::~PythonAPI() {
             shutdown();
         } else {
             (void)pStartFunc.release();
-            (void)pJsCallFunc.release();
             (void)messageFunc.release();
             (void)pModule.release();
             (void)pFunc.release();
@@ -53,7 +52,6 @@ void PythonAPI::shutdown() {
     CFW_LOG_INFO("PythonAPI: Shutting down Python interpreter...");
 
     (void)pStartFunc.release();
-    (void)pJsCallFunc.release();
     (void)messageFunc.release();
     (void)pModule.release();
     (void)pFunc.release();
@@ -197,10 +195,8 @@ bool PythonAPI::ensureInitialized() {
             nanobind::module_ entrance = nanobind::module_::import_("main");
             nanobind::object editor = nanobind::getattr(entrance, "editor");
             nanobind::object start_attr = nanobind::getattr(entrance, "run");
-            nanobind::object call_attr = nanobind::getattr(editor, "deal_func_from_js");
             nanobind::object log_attr = nanobind::getattr(editor, "show_log_on_js");
             pStartFunc = std::move(start_attr);
-            pJsCallFunc = std::move(call_attr);
             messageFunc = std::move(log_attr);
             pStartFunc();
             if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
@@ -214,7 +210,6 @@ bool PythonAPI::ensureInitialized() {
             // pFunc.reset();
             // messageFunc.reset();
             pStartFunc.reset();
-            pJsCallFunc.reset();
             messageFunc.reset();
             return false;
         }
@@ -249,10 +244,8 @@ bool PythonAPI::performHotReload() {
 
         nanobind::object editor = nanobind::getattr(mod, "editor");
         nanobind::object start_attr = nanobind::getattr(mod, "run");
-        nanobind::object call_attr = nanobind::getattr(editor, "deal_func_from_js");
         nanobind::object log_attr = nanobind::getattr(editor, "show_log_on_js");
         pStartFunc = std::move(start_attr);
-        pJsCallFunc = std::move(call_attr);
         messageFunc = std::move(log_attr);
         /*  nanobind::object newFunc = nanobind::getattr(mod, "run");
           if (!nanobind::callable::check_(newFunc)) {

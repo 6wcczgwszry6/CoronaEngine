@@ -1,4 +1,5 @@
 #include "cef_bridge_helpers.h"
+#include "cef_editor_api.h"
 
 #include <corona/kernel/core/i_logger.h>
 #include <corona/resource/resource_manager.h>
@@ -500,13 +501,16 @@ bool append_geometry_focus_bounds(const FocusGeometrySource& source, FocusBounds
 void send_focus_pose_result(const CefRefPtr<CefFrame>& frame,
                             const std::string& request_id,
                             const nlohmann::json& payload) {
-    if (!frame || request_id.empty()) {
+    (void)frame;
+    if (request_id.empty()) {
         return;
     }
 
-    const std::string js = "window.__coronaEmit&&window.__coronaEmit(\"focus-pose-result\"," +
-                           nlohmann::json(request_id).dump() + "," + payload.dump() + ")";
-    frame->ExecuteJavaScript(js, "", 0);
+    auto event_payload = payload.is_object()
+                             ? payload
+                             : nlohmann::json::object({{"payload", payload}});
+    event_payload["request_id"] = request_id;
+    emit_editor_api_event("SceneTools.focusPoseResult", event_payload);
 }
 
 bool get_numeric_arg(const CefRefPtr<CefListValue>& args, size_t index, double& out) {
@@ -653,13 +657,11 @@ bool handle_actor_transform_fast(const CefRefPtr<CefProcessMessage>& message) {
 
 void send_viewport_pick_result(const CefRefPtr<CefFrame>& frame,
                                const nlohmann::json& payload) {
-    if (!frame) {
-        return;
-    }
-
-    const std::string js = "window.__coronaEmit&&window.__coronaEmit(\"actor-pick-result\"," +
-                           payload.dump() + ")";
-    frame->ExecuteJavaScript(js, "", 0);
+    (void)frame;
+    auto event_payload = payload.is_object()
+                             ? payload
+                             : nlohmann::json::object({{"payload", payload}});
+    emit_editor_api_event("SceneTools.actorPickResult", event_payload);
 }
 
 bool handle_viewport_pick(const CefRefPtr<CefFrame>& frame,

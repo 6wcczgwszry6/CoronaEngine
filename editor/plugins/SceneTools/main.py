@@ -746,7 +746,7 @@ def _runtime_vision_scene_path(scene) -> str:
     scene_stem = _safe_filename_stem(getattr(scene, "name", "") or "scene")
     key = f"{os.path.abspath(route) if route else scene_stem}|embedded_vision"
     suffix = uuid.uuid5(uuid.NAMESPACE_URL, key).hex[:12]
-    return os.path.join(base_dir, ".corona", "vision_runtime",
+    return os.path.join(base_dir, ".corona", "vision_live",
                         f"{scene_stem}_{suffix}.json")
 
 

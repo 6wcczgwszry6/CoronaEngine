@@ -1,9 +1,10 @@
 #pragma once
 
-#include <corona/spatial/bvh.h>
 #include <corona/spatial/octree.h>
 #include <corona/systems/geometry/actor_cache.h>
 #include <corona/systems/geometry/geometry_system.h>
+
+#include <oneapi/tbb/task_group.h>
 
 #include <algorithm>
 #include <chrono>
@@ -88,7 +89,6 @@ struct GeometrySystem::Impl {
     struct SceneState {
         Spatial::Octree<Payload>                            tree;
         std::unordered_map<Payload,Spatial::AABB> actor_to_entry; //Actor到AABB映射
-        std::unordered_map<Payload, std::uint32_t>          invisible_frames;
         SceneVisibilityConfig                               cfg;
         SceneStats                                          stats;
         mutable std::mutex                                  stats_mutex;
@@ -112,13 +112,128 @@ struct GeometrySystem::Impl {
         std::vector<LODMeshBuffers> levels;
         std::uint64_t model_id = 0;  // 用于检测模型变更（比地址指针可靠，不受 slot 复用影响）
 
-        // 每个 LOD 级别一个 BVH（下标与 levels 一一对应）
-        // payload = 三角形下标（i/3），用于射线→三角形加速查询
-        std::vector<Spatial::BVH<uint32_t>> per_level_bvh;
+        // 滞回状态（方案 B）：reconcile 每帧用滞回死区更新本值；render 直接读取，
+        // 不再独立按屏占比选级。两者共用同一决策，保证 render 选中的级必然已驻留
+        // （reconcile 已为 {LOD0, committed_demand} 建好 GPU 缓冲），不会选到未驻留级
+        // 而被迫降级到 LOD0。0 = LOD0（最高精度）。
+        int committed_demand = 0;
+
+        // ---- swap 模型状态（替代旧冷却窗口）----
+        // 稳态：swap_in_progress=false，prev_committed=-1，lod_cache 在 LOD1..N 中
+        // 至多保有 committed_demand 这 1 套 GPU 缓冲（LOD0 永驻但只是 mesh_dev 的引用计数副本，
+        // 不占额外显存）。
+        // 切换中：demand 跳到新级但新级尚未 ready → swap_in_progress=true，
+        // prev_committed 记录旧级（保活供 select_render_buffers 降级使用）。
+        // 切换完成：process_pending_lod_builds 检测到新级 ready → 立即释放 prev_committed，
+        // swap_in_progress=false，VRAM 回到稳态 1 套简化缓冲。
+        int  prev_committed    = -1;    // ≥0 表示保活中的旧简化级；-1 表示无保活
+        bool swap_in_progress  = false; // true = 正在等待新级 build 完成
+
+        // 条目身份版本（方案 C 异步构建 ABA 守卫）：upload 每次 (重)建本条目时自增。
+        // 异步构建任务捕获发起时的 epoch；回写时比对，防止 evict→erase→重载同 model_id
+        // 后旧任务误填新条目（model_id 相同骗过 model_id 校验的极端情形）。
+        std::uint64_t residency_epoch = 0;
+
+        // 包围半径（Fix 1）：= 0.5·diag(Scene 局部 AABB)，模型空间恒定，upload 时算一次缓存。
+        // reconcile 每帧选级只需此标量，从而无需每帧每 geom 再 acquire_read<Scene> 重算 AABB
+        // （消除 diag 标注的"scene_acquires 每帧每 geom"卡顿源）；仅真正 build 时才取 Scene。
+        // [legacy] 旧屏占比选级用；screen-space-error 选级改用下方 per-mesh 局部 AABB。
+        float bounding_radius = 1.0f;
+
+        // per-mesh 局部空间 AABB（screen-space-error 选级用）。upload 时从 Scene 的
+        // mesh.aabb_min/max 缓存（归一化模型空间，与 geometric_error 同空间）。
+        // reconcile 每帧用 world_aabb_from_local_bounds(transform, ...) 经完整 R/S/T 变换得
+        // mesh 世界 AABB → 算相机到最近点距离。这比"轴心 + 外接球"正确：
+        //   (1) per-mesh 而非整场景，小 mesh 不被大场景半径误判；
+        //   (2) 保留各向异性（扁平/细长物体不被外接球高估）；
+        //   (3) 距离基于几何 AABB 而非轴心，相机环绕几何中心时距离恒定 → 不再无谓跳级。
+        ktm::fvec3 local_aabb_min{0.0f, 0.0f, 0.0f};
+        ktm::fvec3 local_aabb_max{0.0f, 0.0f, 0.0f};
     };
 
     mutable std::shared_mutex          lod_cache_mutex;
     std::unordered_map<uint64_t, LODCacheEntry> lod_cache;
+
+    // ========================================
+    // LOD 异步构建（方案 C）
+    // ========================================
+    // reconcile 不再在几何线程同帧 make_geometry_buffer（×4，阻塞帧）；改为发起一个
+    // TBB 任务在 worker 线程构建 GPU 缓冲（HardwareBuffer 构造走持久映射 memcpy+flush，
+    // 经 Horizon ResourceManager 单 mutex 全序列化，任意线程安全），完成后由
+    // process_pending_lod_builds() 在几何线程轮询回写。构建期间渲染端就近回退显示已驻级。
+    //
+    // GpuMemToken 不在 worker 构建（回避 ledger 线程安全问题）：worker 只产出缓冲 +
+    // 字节数，令牌在回写时于几何线程构建。
+    struct LODBuildResult {
+        Horizon::HardwareBuffer vertex_buffer;
+        Horizon::HardwareBuffer index_buffer;
+        Horizon::HardwareBuffer vertex_storage;
+        Horizon::HardwareBuffer index_storage;
+        std::size_t             gpu_bytes = 0;
+        bool ok = false;
+    };
+
+    // 每个 (geom,mesh) 至多一个在途任务（committed 是单值）。仅几何线程访问，无需加锁。
+    struct PendingLodBuild {
+        std::uint64_t               model_id        = 0;  // ABA 守卫（防 slot 复用）
+        std::uint64_t               residency_epoch = 0;  // ABA 守卫（防同 model_id 重建）
+        int                         level           = 0;  // 目标缓存级下标
+        std::future<LODBuildResult> future;
+    };
+    std::unordered_map<uint64_t /*lod_key*/, PendingLodBuild> pending_lod_builds;
+
+    // TBB 任务组（复用全局 worker 池，不新建线程）；shutdown 时 wait() 排空。
+    tbb::task_group lod_build_tasks;
+
+    // 条目身份版本分配器（几何线程单调递增，0 保留为"无"）。
+    std::uint64_t next_residency_epoch = 1;
+
+    // 在途构建并发上限：约束 VRAM 尖峰与 worker 争用；超出则本帧不发起（仍 !ready，
+    // 渲染就近回退），下帧 reconcile 再驱动。
+    // Fix 2：4→8。相机移动时多 mesh 同时跨级会积压粗级 build，上限过低使其错峰完成、
+    // 渲染回退窗口拉长 → 视觉上逐个 pop。提到 8 加快排空、缩短回退窗口（VRAM 尖峰可控：
+    // 粗级数据量小，且 reconcile 仍每 (geom,mesh) 至多一个在途任务）。
+    static constexpr size_t kMaxInflightLodBuilds = 8;
+
+    // 诊断（与现有 diag_* 一同每秒输出）：发起次数 / 丢弃次数（ABA 校验失败或构建失败）。
+    std::uint64_t diag_lod_build_launches = 0;
+    std::uint64_t diag_lod_build_discards = 0;
+
+    // ========================================
+    // LOD 释放冷却（方案 A）
+    // ========================================
+    // reconcile_lod_residency 每帧自增的帧计数器，作为 LODMeshBuffers::last_demand_frame
+    // 的时间基准。单调递增，永不回绕（uint64 @60fps 可跑约 97 亿年）。
+    std::uint64_t lod_frame_counter = 0;
+
+    // ===== 临时诊断计数器（定位每帧卡顿/LOD切换根因，定位后移除）=====
+    // reconcile_lod_residency 一秒内的行为画像：是否在 churn。
+    std::uint64_t diag_reconcile_mesh_visits = 0;  // 处理的 (geom,mesh) 次数
+    std::uint64_t diag_lod_builds           = 0;   // GPU 缓冲构建次数（make_geometry_buffer×4 + BVH）
+    std::uint64_t diag_lod_frees            = 0;   // 释放已就绪级次数
+    std::uint64_t diag_scene_acquires       = 0;   // acquire_read<Scene> 次数（每帧每 geom）
+    std::uint64_t diag_demand_changes       = 0;   // committed_demand 实际变更次数
+
+    // kLodReleaseCooldownFrames 已废弃（保留注释供历史参考）：
+    // 旧机制：demand 切换后旧级保留 90 帧（≈1.5s@60fps），防止阈值边界横跳反复重建。
+    // 新机制（swap 模型）：仅在新级 build 完成前保留旧级（通常 <5 帧），
+    // 切换完成后立即释放，无额外等待；阈值横跳由滞回死区（kLodHysteresis）吸收。
+    // static constexpr std::uint64_t kLodReleaseCooldownFrames = 90;  // 已废弃
+
+    // LOD 选级滞回死区（方案 B）：升/降级用不对称阈值，避免物体停在阈值边界微动时
+    // 需求级在相邻级反复横跳（视觉 pop）。当前驻留 L 级时：
+    //   降精度(L→L+1)：screen_ratio 必须 < threshold[L]   * (1 - h)
+    //   升精度(L→L-1)：screen_ratio 必须 > threshold[L-1] * (1 + h)
+    // h=0.15 给出约 ±15% 的死区，正常运动平滑切换、边界抖动被吸收。
+    static constexpr float kLodHysteresis = 0.15f;
+
+    // 屏幕空间像素误差预算（screen-space error 选级）：某级简化误差投影到主相机
+    // 屏幕后超过此像素数才弃用该级（选更精细级）。等价于"以相机为中心的角预算"
+    //   ε = 2·budget_px·tan(fov/2)/height_px
+    // 主相机用本预算 + 自身 fov/分辨率换算 ε；选级判据 geometric_error·scale / d ≤ ε，
+    // 全方向有定义（相机背后物体同样选级），故未来 GI 观察者可复用同一路径。
+    // 1.5px：误差小于约 1.5 像素即视觉无感，可安全切粗级。
+    static constexpr float kLodPixelErrorBudget = 1.5f;
 
     // ========================================
     // LRU ActorCache（M3 生产化）
@@ -156,14 +271,15 @@ struct GeometrySystem::Impl {
     /// import 任务 epoch 分配器（进程级单调递增，0 保留为"无任务"）。
     std::uint64_t next_import_epoch = 1;
 
-    /// 骨骼动画上一帧时间戳（用于 update_skinned_geometry 计算 dt）。
-    /// 未初始化时（首帧）取 dt=0。
-    std::optional<std::chrono::steady_clock::time_point> last_skin_update_time;
-
     // ========================================
     // 资源内存预算（MB），0 = 不限制（默认）
     // ========================================
-    std::size_t resource_memory_budget_mb = 512;  // 默认 512MB，0 表示不限制
+    // 注意：此前默认 512MB 会导致"巨物/大场景"每帧 used>budget → evict_until_under_budget
+    // 每帧淘汰最旧资源 → 相机移动时被淘汰资源反复 reload（import+GPU 构建）→ 卡顿 +
+    // LOD 缓存反复失效重建（快速 LOD 切换）。改为 0（不限制）= 关闭 B 轴资源预算淘汰，
+    // 仅保留 evict_under_memory_pressure（VRAM/RAM 90% 水位安全网）。
+    // 需要预算时由上层显式调用 set_resource_memory_budget_mb()。
+    std::size_t resource_memory_budget_mb = 0;  // 0 = 不限制（默认）
 
     // ========================================
     // mesh/texture CPU 资源账本（P0：与 GPU 账本配对）
@@ -180,6 +296,35 @@ struct GeometrySystem::Impl {
 
     /// VRAM 预算（字节），0 = 不限制（默认）。P0 仅用于 over/need_free 计算，不淘汰。
     std::size_t vram_budget_bytes = 0;
+
+    // ========================================
+    // 满载淘汰水位（容量取自 SDL 系统内存 / Horizon 显存，非固定 MB）
+    // ========================================
+    float    evict_high_ratio = 0.90f;  // used ≥ high*capacity 时触发淘汰
+    float    evict_low_ratio  = 0.80f;  // 淘汰目标：降到 low*capacity
+    int      pressure_eval_interval = 15;  // 每隔多少帧评估一次压力（避免每帧查 VMA/系统）
+    int      pressure_eval_counter  = 0;
+
+    // ========================================
+    // CPU LOD 驻留窗口（RAM 3层管理）
+    // ========================================
+    // 每 model_id 维护固定窗口 {lod_levels[0], lod_levels[demand_idx], lod_levels[coarsest_idx]}：
+    //   finest_idx    = 0（lod_levels[0] = 最精细简化级，始终保留）
+    //   demand_idx    = 所有实例 committed_demand 的中位数 - 1（对应 lod_levels[] 下标）
+    //   coarsest_idx  = lod_levels.size()-1（最粗级，始终保留）
+    // LOD0（MeshData::vertices/indices）永远保留，不在此管理。
+    // 窗口外的 LODLevel::vertices/indices/bone_weights 被清空以节省 RAM。
+    struct ModelCpuWindow {
+        int finest_idx   = 0;  // 始终为 0
+        int demand_idx   = 0;  // 中位数对应 lod_levels[] 下标（= median_committed_demand - 1，≥0）
+        int coarsest_idx = 0;  // lod_levels.size()-1
+    };
+    mutable std::mutex cpu_window_mutex;
+    std::unordered_map<uint64_t /*model_id*/, ModelCpuWindow> model_cpu_windows;
+
+    // CPU 协调帧间隔计数器（避免每帧 acquire_write<Scene>，每2秒@60fps 评估一次）
+    int cpu_window_eval_counter = 0;
+    static constexpr int kCpuWindowEvalInterval = 120;
 
     [[nodiscard]] static uint64_t make_lod_key(std::uintptr_t geometry_handle,
                                                uint32_t       mesh_index) {

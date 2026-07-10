@@ -157,6 +157,8 @@ public:
 
 private:
     size_t capacity_;
+    size_t used_ = 0;  // 增量维护的磁盘总字节，恒等于 sum(map_[*].data_size)。
+                       // 替代热路径上的 calc_directory_size() 全目录 stat 扫描。
     std::filesystem::path dir_;
     mutable std::mutex mtx_;  // 仅保护 list_ + map_ + 单次文件操作；CacheManager 的锁独立
     std::list<std::string> list_;
@@ -175,9 +177,6 @@ private:
     /// 淘汰最旧的文件以腾出空间。调用方需持有 mtx_。
     /// @param skip_key 跳过此 key（避免刚插入的项被立即淘汰）
     EvictResult evict_one(const std::string& skip_key = "");
-
-    /// 重新计算目录总大小
-    size_t calc_directory_size() const;
 };
 
 // ============================================================================

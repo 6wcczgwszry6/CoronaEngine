@@ -1,5 +1,6 @@
 import base64
 import configparser
+import base64
 import json
 import logging
 import os
@@ -38,7 +39,9 @@ def _format_float3(values) -> str:
 
 def _encode_vision_document(document: Dict[str, Any]) -> str:
     payload = json.dumps(document, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-    return base64.b64encode(zlib.compress(payload)).decode('ascii')
+    compressor = zlib.compressobj(level=0)
+    compressed = compressor.compress(payload) + compressor.flush()
+    return base64.b64encode(compressed).decode('ascii')
 
 
 def _decode_vision_document(data: str) -> Dict[str, Any]:
@@ -273,10 +276,13 @@ class Scene:
         self.terrain_type = ''
         self.terrain_path = ''
         self.script_path = ''
+        self.vision_storage = ''
+        self.vision_source_id = ''
         self.vision_source_path = ''
         self.vision_import_mode = ''
         self.vision_document: Optional[Dict[str, Any]] = None
         self.vision_document_encoding = VISION_DOCUMENT_ENCODING
+        self.vision_document_asset_root = ''
         self.vision_bindings: List[Dict[str, Any]] = []
         self.vision_unsupported_shapes: List[Dict[str, Any]] = []
 
@@ -379,6 +385,7 @@ class Scene:
                 section = self.file_data['vision_document']
                 encoding = section.get('encoding', '')
                 data = section.get('data', '')
+                self.vision_document_asset_root = section.get('asset_root', '')
                 if encoding == VISION_DOCUMENT_ENCODING and data:
                     try:
                         self.vision_document = _decode_vision_document(data)
@@ -387,6 +394,8 @@ class Scene:
                         logger.warning("Scene '%s': failed to decode embedded Vision document: %s",
                                        self.name, exc)
             if 'vision' in self.file_data:
+                self.vision_storage = self.file_data['vision'].get('storage', '')
+                self.vision_source_id = self.file_data['vision'].get('source_id', '')
                 self.vision_source_path = self.file_data['vision'].get('source_path', '')
                 self.vision_import_mode = self.file_data['vision'].get('import_mode', '')
             self.vision_bindings = self._read_indexed_section('vision_bindings')
@@ -529,21 +538,40 @@ class Scene:
         self.file_data['terrain']["path"] = getattr(self, 'terrain_path', '')
         self.file_data['terrain']["type"] = getattr(self, 'terrain_type', '')
 
-        if 'vision' in self.file_data:
-            self.file_data.remove_section('vision')
+        vision_storage = (getattr(self, 'vision_storage', '') or '').strip()
+        vision_source_id = (getattr(self, 'vision_source_id', '') or '').strip()
         vision_document = getattr(self, 'vision_document', None)
         if vision_document is not None:
-            self.file_data['vision_document'] = {
-                'encoding': VISION_DOCUMENT_ENCODING,
-                'version': VISION_DOCUMENT_VERSION,
-                'data': _encode_vision_document(vision_document),
-            }
-        elif 'vision_document' in self.file_data:
-            self.file_data.remove_section('vision_document')
-
-        self._write_indexed_section('vision_bindings', getattr(self, 'vision_bindings', []))
-        self._write_indexed_section('vision_unsupported_shapes',
-                                    getattr(self, 'vision_unsupported_shapes', []))
+            asset_root = getattr(self, 'vision_document_asset_root', '')
+            if 'vision' not in self.file_data:
+                self.file_data['vision'] = {}
+            self.file_data['vision'].clear()
+            self.file_data['vision']['storage'] = 'embedded'
+            self.file_data['vision']['import_mode'] = 'external'
+            if 'vision_document' not in self.file_data:
+                self.file_data['vision_document'] = {}
+            self.file_data['vision_document'].clear()
+            self.file_data['vision_document']['version'] = VISION_DOCUMENT_VERSION
+            self.file_data['vision_document']['encoding'] = VISION_DOCUMENT_ENCODING
+            self.file_data['vision_document']['asset_root'] = asset_root
+            self.file_data['vision_document']['data'] = _encode_vision_document(vision_document)
+        elif vision_storage == 'project_sidecar' and vision_source_id:
+            if 'vision' not in self.file_data:
+                self.file_data['vision'] = {}
+            self.file_data['vision'].clear()
+            self.file_data['vision']['storage'] = 'project_sidecar'
+            self.file_data['vision']['source_id'] = vision_source_id
+            self.file_data['vision']['import_mode'] = 'external'
+            if 'vision_document' in self.file_data:
+                self.file_data.remove_section('vision_document')
+        elif 'vision' in self.file_data:
+            self.file_data.remove_section('vision')
+            if 'vision_document' in self.file_data:
+                self.file_data.remove_section('vision_document')
+        if 'vision_bindings' in self.file_data:
+            self.file_data.remove_section('vision_bindings')
+        if 'vision_unsupported_shapes' in self.file_data:
+            self.file_data.remove_section('vision_unsupported_shapes')
 
         # 相机数据
         self.file_data['camera'] = {}
@@ -937,7 +965,9 @@ class Scene:
                 "type": self.terrain_type
             },
             "vision": {
-                "storage": "embedded" if self.vision_document is not None else "",
+                "storage": "embedded" if self.vision_document is not None else getattr(self, 'vision_storage', ''),
+                "source_id": getattr(self, 'vision_source_id', ''),
+                "import_mode": getattr(self, 'vision_import_mode', ''),
                 "embedded": self.vision_document is not None,
                 "bindings": list(getattr(self, 'vision_bindings', [])),
                 "unsupported_shapes": list(getattr(self, 'vision_unsupported_shapes', [])),
