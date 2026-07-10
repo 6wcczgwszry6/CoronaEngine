@@ -11,9 +11,10 @@
 // writes the engine's RGBA16F finalOutputImage. The final-color view_texture_ is
 // a cuArray and is intentionally NOT used (cuArray memory is not exportable).
 //
-// NOTE: no cross-API synchronization yet (no timeline semaphore). CUDA writes and
-// Vulkan reads are not ordered, so tearing/flicker is possible. This is the
-// "make it work first" path; a shared timeline semaphore is the follow-up.
+// NOTE: no external CUDA/Vulkan timeline semaphore yet. Optics currently waits
+// for the preceding Vulkan submit receipt before allowing CUDA to reuse or
+// release this allocation. This is correct but CPU-serialized; a shared timeline
+// semaphore is the performance follow-up.
 //
 // Only compiled when CORONA_ENABLE_VISION is defined.
 

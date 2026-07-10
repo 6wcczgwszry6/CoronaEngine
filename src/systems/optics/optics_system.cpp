@@ -53,6 +53,7 @@
 #include "vision/vision_camera_adapter.h"
 #include "vision/vision_light_adapter.h"
 #include "vision/vision_render_mode_config.h"
+#include "vision/vision_interop_lifetime.h"
 #include "vision/vision_zero_copy_bridge.h"
 #endif
 
@@ -1832,6 +1833,13 @@ struct OpticsSystem::UiViewResources {
 };
 
 #ifdef CORONA_ENABLE_VISION
+[[nodiscard]] bool vision_zero_copy_forced_disabled() {
+    static const bool disabled =
+        Vision::vision_zero_copy_disabled_from_value(
+            std::getenv("CORONA_VISION_DISABLE_ZERO_COPY"));
+    return disabled;
+}
+
 struct OpticsSystem::VisionPipelineRuntime {
     ocarina::SP<vision::Pipeline> pipeline;
     std::shared_ptr<VisionSceneResource> scene_resource;
@@ -1850,15 +1858,101 @@ struct OpticsSystem::VisionPipelineRuntime {
     std::unordered_map<std::uintptr_t, Horizon::HardwareBuffer> readback_buffers;
     std::unordered_map<std::uintptr_t, std::vector<ocarina::float4>> readback_pixels;
     std::unordered_set<std::uintptr_t> retained_contexts;
+    std::unordered_map<std::uintptr_t, Horizon::SubmitReceipt> interop_submissions;
+    Horizon::HardwareExecutor* interop_executor{nullptr};
+
+    void wait_for_interop_submission(std::uintptr_t camera_handle,
+                                     std::string_view reason,
+                                     bool log_wait = true) noexcept {
+        auto receipt_it = interop_submissions.find(camera_handle);
+        if (receipt_it == interop_submissions.end()) {
+            return;
+        }
+        if (receipt_it->second.empty()) {
+            interop_submissions.erase(receipt_it);
+            return;
+        }
+        if (interop_executor == nullptr) {
+            CFW_LOG_ERROR(
+                "OpticsSystem: cannot wait for Vision interop submission before {} "
+                "(camera={}, receipt_serial={})",
+                reason,
+                camera_handle,
+                receipt_it->second.serial);
+            return;
+        }
+
+        if (log_wait) {
+            CFW_LOG_INFO(
+                "OpticsSystem: waiting for Vision interop submission before {} "
+                "(camera={}, receipt_serial={})",
+                reason,
+                camera_handle,
+                receipt_it->second.serial);
+        }
+        try {
+            interop_executor->wait_idle(receipt_it->second);
+        } catch (const std::exception& e) {
+            CFW_LOG_ERROR(
+                "OpticsSystem: Vision interop wait failed before {} "
+                "(camera={}, receipt_serial={}, error={})",
+                reason,
+                camera_handle,
+                receipt_it->second.serial,
+                e.what());
+        }
+        interop_submissions.erase(receipt_it);
+    }
 
     void commit_and_clear_contexts() noexcept {
+        CFW_LOG_INFO(
+            "OpticsSystem: Vision runtime teardown begin "
+            "(scene={}, bridges={}, interop_submissions={}, contexts={})",
+            scene_path,
+            bridges.size(),
+            interop_submissions.size(),
+            retained_contexts.size());
         if (pipeline) {
+            CFW_LOG_INFO("OpticsSystem: Vision runtime teardown committing CUDA work");
             pipeline->commit_command();
+            CFW_LOG_INFO("OpticsSystem: Vision runtime teardown CUDA work committed");
         }
-        clear_camera_runtime_state();
+        Vision::drain_vision_interop_submissions(
+            interop_submissions,
+            [&](std::uintptr_t camera_handle, const Horizon::SubmitReceipt& receipt) {
+                if (interop_executor == nullptr) {
+                    CFW_LOG_ERROR(
+                        "OpticsSystem: missing executor while draining Vision interop submission "
+                        "(camera={}, receipt_serial={})",
+                        camera_handle,
+                        receipt.serial);
+                    return;
+                }
+                CFW_LOG_INFO(
+                    "OpticsSystem: draining Vision interop submission "
+                    "(camera={}, receipt_serial={})",
+                    camera_handle,
+                    receipt.serial);
+                try {
+                    interop_executor->wait_idle(receipt);
+                } catch (const std::exception& e) {
+                    CFW_LOG_ERROR(
+                        "OpticsSystem: failed to drain Vision interop submission "
+                        "(camera={}, receipt_serial={}, error={})",
+                        camera_handle,
+                        receipt.serial,
+                        e.what());
+                }
+            },
+            [&] {
+                CFW_LOG_INFO("OpticsSystem: releasing Vision camera interop resources");
+                clear_camera_runtime_state();
+            });
         if (pipeline) {
+            CFW_LOG_INFO("OpticsSystem: clearing Vision view contexts");
             pipeline->clear_view_contexts();
         }
+        CFW_LOG_INFO("OpticsSystem: Vision runtime teardown complete (scene={})", scene_path);
     }
 
     void clear_camera_runtime_state() noexcept {
@@ -1988,6 +2082,7 @@ OpticsSystem::VisionPipelineRuntime& OpticsSystem::get_or_create_runtime(
             make_vision_scene_resource_key(key.scene_path, key.source),
             key.scene_path);
     }
+    it->second->interop_executor = hardware_ ? &hardware_->executor : nullptr;
     return *it->second;
 }
 
@@ -4591,6 +4686,9 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
     bool geometry_changed = false;
     bool material_registry_changed = false;
     bool needs_compile = false;
+    bool removal_transform_changed = false;
+    std::size_t tombstoned_instance_count = 0;
+    const bool embedded_runtime = !runtime.scene_json.empty();
 
     auto remove_actor_shape = [&](std::uintptr_t actor_handle) {
         const auto* record = scene_resource->find_external_live_shape(actor_handle);
@@ -4598,17 +4696,73 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
             scene_resource->erase_external_live_shape(actor_handle);
             return;
         }
-        if (!record->dynamically_added) {
+
+        const auto record_copy = *record;
+        const auto removal_action =
+            Vision::external_live_shape_removal_action(record_copy, embedded_runtime);
+        if (removal_action == Vision::ExternalLiveShapeRemovalAction::ForgetTracking) {
             scene_resource->erase_external_live_shape(actor_handle);
             return;
         }
-        const auto shape_index = static_cast<unsigned int>(record->shape_index);
+
+        if (removal_action == Vision::ExternalLiveShapeRemovalAction::HideOriginal) {
+            const auto group_index = static_cast<std::size_t>(record_copy.shape_index);
+            if (group_index >= groups.size() || !groups[group_index]) {
+                scene_resource->erase_external_live_shape(actor_handle);
+                return;
+            }
+
+            const auto hidden_o2w = hidden_external_live_o2w();
+            const auto hidden_signature =
+                external_live_hidden_transform_signature(record_copy.shape_index);
+            auto& group = groups[group_index];
+            group->aabb = {};
+            group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
+                                std::uint32_t instance_index) {
+                if (!instance) {
+                    return;
+                }
+                instance->set_o2w(hidden_o2w);
+                instance->init_aabb();
+                group->aabb.extend(instance->aabb);
+                scene_resource->upsert_logical_instance({
+                    .key = {.shape_index = record_copy.shape_index,
+                            .instance_index = static_cast<int>(instance_index)},
+                    .actor_handle = 0,
+                    .transform_signature = hidden_signature,
+                    .object_to_world = flatten_vision_matrix(hidden_o2w),
+                });
+                removal_transform_changed = true;
+                ++tombstoned_instance_count;
+            });
+            scene_resource->erase_external_live_shape(actor_handle);
+
+            std::size_t mesh_count = 0;
+            if (auto* geometry_data = vision_scene.geometry().data()) {
+                geometry_data->for_each_mesh(
+                    [&](const ::vision::Mesh*, std::uint32_t) { ++mesh_count; });
+            }
+            CFW_LOG_INFO(
+                "OpticsSystem: embedded Vision shape removal action={} actor={} guid={} "
+                "shape_index={} groups={} instances={} materials={} meshes={}",
+                Vision::external_live_shape_removal_action_name(removal_action),
+                actor_handle,
+                record_copy.shape_guid,
+                record_copy.shape_index,
+                groups.size(),
+                vision_scene.instances().size(),
+                vision_scene.materials().all_instance_num(),
+                mesh_count);
+            return;
+        }
+
+        const auto shape_index = static_cast<unsigned int>(record_copy.shape_index);
         if (!Vision::remove_vision_shape_for_actor(vision_scene, shape_index)) {
             scene_resource->erase_external_live_shape(actor_handle);
             return;
         }
         auto actors_to_rewrite =
-            scene_resource->remap_external_live_shape_indices_after_remove(record->shape_index);
+            scene_resource->remap_external_live_shape_indices_after_remove(record_copy.shape_index);
         for (auto rewrite_actor : actors_to_rewrite) {
             if (const auto* rewritten = scene_resource->find_external_live_shape(rewrite_actor)) {
                 write_external_live_binding_shape_index(rewrite_actor, rewritten->shape_index);
@@ -4686,8 +4840,8 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
         }
     }
 
-    bool changed = false;
-    std::size_t updated_actors = 0;
+    bool changed = removal_transform_changed;
+    std::size_t updated_actors = tombstoned_instance_count;
 
     for (const auto& [actor_handle, active_binding] : active_bindings) {
         auto binding = active_binding;
@@ -5318,6 +5472,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 }
 
                 pipeline->commit_command();
+                runtime.wait_for_interop_submission(camera_handle, "inactive bridge release");
                 it = runtime.bridges.erase(it);
                 if (camera_exists) {
                     pipeline->invalidate_view_context(camera_handle);
@@ -5405,6 +5560,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                     }
                     if (recreate_context) {
                         pipeline->commit_command();
+                        runtime.wait_for_interop_submission(cam_handle, "view context recreation");
                         runtime.bridges.erase(cam_handle);
                         runtime.zero_copy_disabled.erase(cam_handle);
                         runtime.readback_buffers.erase(cam_handle);
@@ -5435,7 +5591,15 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
 
                 const uint64_t pixel_count = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
                 std::optional<uint32_t> vision_src_descriptor;
-                if (!runtime.zero_copy_disabled.contains(cam_handle)) {
+                bool used_zero_copy = false;
+                if (!vision_zero_copy_forced_disabled() &&
+                    !runtime.zero_copy_disabled.contains(cam_handle)) {
+                    // CUDA is about to write the shared allocation. The preceding Vulkan
+                    // resolve must finish first until external timeline semaphores replace
+                    // this conservative CPU-side synchronization.
+                    runtime.wait_for_interop_submission(cam_handle,
+                                                        "zero-copy buffer reuse",
+                                                        false);
                     auto& bridge = runtime.bridges[cam_handle];
                     if (!bridge) {
                         bridge = std::make_unique<Vision::VisionZeroCopyBridge>();
@@ -5443,7 +5607,9 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                     if (bridge->ensure(*pipeline, w, h) &&
                         bridge->copy_from_framebuffer(*pipeline)) {
                         vision_src_descriptor = bridge->imported().storeDescriptor();
+                        used_zero_copy = true;
                     } else {
+                        runtime.wait_for_interop_submission(cam_handle, "failed bridge release");
                         runtime.bridges.erase(cam_handle);
                         runtime.zero_copy_disabled.insert(cam_handle);
                     }
@@ -5513,6 +5679,10 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
 
                 const Horizon::SubmitReceipt vision_submit_receipt =
                     stream << Horizon::commit();
+                if (used_zero_copy) {
+                    runtime.interop_submissions.insert_or_assign(cam_handle,
+                                                                 vision_submit_receipt);
+                }
 
                 process_pending_screenshots(cam_handle, *presented);
 

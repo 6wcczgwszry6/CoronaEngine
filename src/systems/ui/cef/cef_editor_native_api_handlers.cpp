@@ -22,6 +22,7 @@
 #include <corona/utils/path_utils.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -669,9 +670,11 @@ std::string unique_actor_name(const NativeEditorScene& scene, const std::string&
 std::string make_actor_guid(const std::string& scene_route,
                             const std::string& actor_name,
                             size_t index) {
+    static std::atomic<std::uint64_t> sequence{0};
+    const auto nonce = sequence.fetch_add(1, std::memory_order_relaxed) + 1;
     std::ostringstream out;
     out << "native-" << std::hex << std::hash<std::string>{}(scene_route + ":" + actor_name)
-        << "-" << index;
+        << "-" << index << "-" << nonce;
     return out.str();
 }
 
@@ -3469,6 +3472,42 @@ bool refresh_embedded_vision_view(NativeEditorScene& scene,
     try {
         const auto render_document = vision_document_for_render(document);
         const auto scene_key = embedded_vision_scene_key(scene);
+
+        std::size_t shape_count = 0;
+        std::size_t duplicate_guid_count = 0;
+        std::unordered_set<std::string> unique_shape_guids;
+        const auto scene_data = extract_scene_data(render_document);
+        const auto shapes_it = scene_data.find("shapes");
+        auto inspect_shape = [&](const nlohmann::json& shape, std::size_t index) {
+            ++shape_count;
+            const auto guid = vision_shape_guid(shape, index);
+            if (!unique_shape_guids.insert(guid).second) {
+                ++duplicate_guid_count;
+            }
+        };
+        if (shapes_it != scene_data.end() && shapes_it->is_array()) {
+            for (std::size_t index = 0; index < shapes_it->size(); ++index) {
+                inspect_shape((*shapes_it)[index], index);
+            }
+        } else if (shapes_it != scene_data.end() && shapes_it->is_object()) {
+            std::size_t index = 0;
+            for (const auto& item : shapes_it->items()) {
+                inspect_shape(item.value(), index++);
+            }
+        }
+        CFW_LOG_INFO(
+            "Vision embedded reload snapshot: scene={} shapes={} unique_guids={} duplicate_guids={}",
+            scene_key,
+            shape_count,
+            unique_shape_guids.size(),
+            duplicate_guid_count);
+        if (duplicate_guid_count != 0) {
+            CFW_LOG_WARNING(
+                "Vision embedded reload contains duplicate shape GUIDs: scene={} duplicates={}",
+                scene_key,
+                duplicate_guid_count);
+        }
+
         register_embedded_vision_actor_bindings(scene, render_document, scene_key);
         Corona::API::load_vision_scene_from_json(render_document.dump(),
                                                  path_to_utf8(scene.project_root),
@@ -3560,11 +3599,7 @@ bool remove_native_actor_from_embedded_vision_document(NativeEditorScene& scene,
                 ++it;
             }
         }
-        const bool persisted = removed && persist_embedded_vision_document(scene, document);
-        if (persisted) {
-            refresh_embedded_vision_view(scene, document);
-        }
-        return persisted;
+        return removed && persist_embedded_vision_document(scene, document);
     } catch (const std::exception& e) {
         CFW_LOG_ERROR("Vision embedded actor remove failed: guid={}, error={}",
                       actor_guid,
