@@ -21,6 +21,10 @@ if(BUILD_CORONA_TESTING OR BUILD_TESTING)
     target_include_directories(corona_ui_surface_removal_race_tests
         PRIVATE ${PROJECT_SOURCE_DIR}/include
     )
+    target_link_libraries(corona_ui_surface_removal_race_tests
+        PRIVATE corona_display_system
+    )
     add_test(NAME UiSurfaceRemovalRaceTests
              COMMAND corona_ui_surface_removal_race_tests)
+    set_tests_properties(UiSurfaceRemovalRaceTests PROPERTIES TIMEOUT 15)
 endif()

@@ -3,6 +3,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -103,10 +104,21 @@ class SurfaceFrameGate {
         Retirement() = default;
 
         void wait() const {
+            wait([]() {});
+        }
+
+        template <typename WaitEntered>
+        void wait(WaitEntered&& wait_entered) const {
             if (!entry_) {
                 return;
             }
             std::unique_lock lock(entry_->mutex);
+            if (entry_->active_leases != 0) {
+                // The hook runs with the entry locked immediately before the
+                // condition-variable wait. Tests can therefore prove teardown
+                // has reached the real quiescence barrier without sleeping.
+                std::invoke(std::forward<WaitEntered>(wait_entered));
+            }
             entry_->quiescent.wait(
                 lock, [this]() { return entry_->active_leases == 0; });
         }

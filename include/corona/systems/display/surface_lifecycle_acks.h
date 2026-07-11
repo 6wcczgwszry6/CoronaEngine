@@ -15,6 +15,12 @@
 
 namespace Corona::Systems::Detail {
 
+enum class PresentOutcome : std::uint8_t {
+    Presented,
+    Skipped,
+    Failed,
+};
+
 /** Thread-safe acknowledgement state for one Display-owned surface. */
 class SurfaceLifecycleAcks {
    public:
@@ -69,9 +75,16 @@ class SurfaceLifecycleAcks {
         complete_all(first_present_tickets, outcome);
     }
 
-    /** A false value is a skipped/no-op compose and is not a first present. */
-    void present_completed(bool presented, FirstPresentBoundary boundary) {
-        if (!presented || boundary == 0) {
+    void present_completed(PresentOutcome outcome,
+                           FirstPresentBoundary boundary,
+                           std::string failure_message = {}) {
+        if (outcome == PresentOutcome::Failed) {
+            present_failed(failure_message.empty()
+                               ? "Display compose/present failed"
+                               : std::move(failure_message));
+            return;
+        }
+        if (outcome == PresentOutcome::Skipped || boundary == 0) {
             return;
         }
 

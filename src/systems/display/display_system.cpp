@@ -79,9 +79,178 @@ struct PixelExtent {
 }  // namespace
 
 namespace Corona::Systems {
+DisplaySystem::~DisplaySystem() {
+    stop();
+    shutdown();
+}
+
+void DisplaySystem::handle_surface_changed(
+    const Events::DisplaySurfaceChangedEvent& event) {
+    if (event.surface == nullptr) {
+        if (event.registration_ticket) {
+            event.registration_ticket->fail(
+                "Display surface registration failed: surface is null");
+        }
+        return;
+    }
+
+    const auto surface_id = reinterpret_cast<uint64_t>(event.surface);
+    std::shared_ptr<Detail::SurfaceLifecycleAcks> acknowledgements;
+    std::string rejection;
+    bool cancelled = false;
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        if (device_lost_.load(std::memory_order_acquire)) {
+            rejection =
+                "Display surface registration failed: Vulkan device is lost";
+        } else if (!surface_frame_coordinator_.activate(surface_id)) {
+            rejection =
+                "Display surface registration cancelled: removal is pending";
+            cancelled = true;
+        } else {
+            const bool begins_new_lifetime =
+                removed_surfaces_.erase(surface_id) != 0;
+            auto& stored = surface_acknowledgements_[surface_id];
+            if (begins_new_lifetime || !stored) {
+                stored = std::make_shared<Detail::SurfaceLifecycleAcks>();
+            }
+            acknowledgements = stored;
+            surfaces_[surface_id] = event.surface;
+            pending_surfaces_.push_back(event.surface);
+        }
+    }
+
+    if (acknowledgements) {
+        acknowledgements->add_registration(event.registration_ticket);
+    } else if (event.registration_ticket) {
+        if (cancelled) {
+            event.registration_ticket->cancel(std::move(rejection));
+        } else {
+            event.registration_ticket->fail(std::move(rejection));
+        }
+    }
+}
+
+void DisplaySystem::handle_surface_removed(
+    const Events::DisplaySurfaceRemovedEvent& event) {
+    if (event.surface == nullptr) {
+        Detail::SurfaceLifecycleAcks acknowledgements;
+        acknowledgements.removal_requested(event.removal_ticket, event.done);
+        acknowledgements.removal_succeeded();
+        return;
+    }
+
+    const auto surface_id = reinterpret_cast<uint64_t>(event.surface);
+    auto retirement = surface_frame_coordinator_.retire(surface_id);
+    std::shared_ptr<Detail::SurfaceLifecycleAcks> acknowledgements;
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        auto& stored = surface_acknowledgements_[surface_id];
+        if (!stored) {
+            stored = std::make_shared<Detail::SurfaceLifecycleAcks>();
+        }
+        acknowledgements = stored;
+        removed_surfaces_.insert(surface_id);
+        surfaces_.erase(surface_id);
+        surface_states_.erase(surface_id);
+        pending_surfaces_.erase(
+            std::remove_if(pending_surfaces_.begin(),
+                           pending_surfaces_.end(),
+                           [surface_id](void* surface) {
+                               return reinterpret_cast<uint64_t>(surface) ==
+                                      surface_id;
+                           }),
+            pending_surfaces_.end());
+        pending_removals_.push_back(
+            {event.surface, std::move(retirement), acknowledgements});
+    }
+    acknowledgements->removal_requested(event.removal_ticket, event.done);
+}
+
+void DisplaySystem::handle_optics_frame(
+    const Events::OpticsFrameReadyEvent& event) {
+    if (event.surface == nullptr || event.image_handle == 0) {
+        return;
+    }
+
+    const auto surface_id = reinterpret_cast<uint64_t>(event.surface);
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    if (removed_surfaces_.contains(surface_id)) {
+        return;
+    }
+    auto& layer = surface_states_[surface_id].optics;
+    if (event.frame_index >= layer.frame_index) {
+        layer.image_handle = event.image_handle;
+        layer.frame_index = event.frame_index;
+        layer.width = event.width;
+        layer.height = event.height;
+        layer.viewport_x = event.viewport_x;
+        layer.viewport_y = event.viewport_y;
+        layer.viewport_width = event.viewport_width;
+        layer.viewport_height = event.viewport_height;
+    }
+}
+
+void DisplaySystem::handle_ui_frame(const Events::UIFrameReadyEvent& event) {
+    if (event.surface == nullptr) {
+        if (event.first_present_ticket) {
+            event.first_present_ticket->fail(
+                "Display first present failed: surface is null");
+        }
+        return;
+    }
+
+    const auto surface_id = reinterpret_cast<uint64_t>(event.surface);
+    std::shared_ptr<Detail::SurfaceLifecycleAcks> acknowledgements;
+    bool removed = false;
+    bool device_lost = false;
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        removed = removed_surfaces_.contains(surface_id);
+        if (!removed) {
+            auto& stored = surface_acknowledgements_[surface_id];
+            if (!stored) {
+                stored = std::make_shared<Detail::SurfaceLifecycleAcks>();
+            }
+            acknowledgements = stored;
+            const auto first_present_boundary =
+                acknowledgements->add_first_present(
+                    event.first_present_ticket);
+            device_lost = device_lost_.load(std::memory_order_acquire);
+            if (!device_lost && event.image_handle != 0) {
+                auto& layer = surface_states_[surface_id].ui;
+                if (event.frame_index >= layer.frame_index) {
+                    layer.image_handle = event.image_handle;
+                    layer.frame_index = event.frame_index;
+                    layer.width = event.width;
+                    layer.height = event.height;
+                    layer.first_present_boundary = first_present_boundary;
+                }
+            }
+        }
+    }
+
+    if (removed) {
+        if (event.first_present_ticket) {
+            event.first_present_ticket->cancel(
+                "Display first present cancelled: surface is removed");
+        }
+        return;
+    }
+    if (device_lost) {
+        acknowledgements->fail_forward(
+            "Display first present failed: Vulkan device is lost");
+    }
+}
+
 bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
-    shutting_down_.store(false, std::memory_order_release);
-    shutdown_resources_destroyed_.store(false, std::memory_order_release);
+    if (callback_gate_) {
+        stop();
+        shutdown();
+    }
+    device_lost_.store(false, std::memory_order_release);
+    callback_gate_ = std::make_shared<CallbackGate>(*this);
+    const auto callback_gate = callback_gate_;
     auto* event_bus = ctx->event_bus();
     if (event_bus == nullptr) {
         CFW_LOG_WARNING("DisplaySystem: No event bus available");
@@ -89,295 +258,158 @@ bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
     }
 
     surface_changed_sub_id_ = event_bus->subscribe<Events::DisplaySurfaceChangedEvent>(
-        [this](const Events::DisplaySurfaceChangedEvent& event) {
-            if (event.surface == nullptr) {
-                if (event.registration_ticket) {
-                    event.registration_ticket->fail(
-                        "Display surface registration failed: surface is null");
-                }
+        [callback_gate](const Events::DisplaySurfaceChangedEvent& event) {
+            auto access = callback_gate->try_acquire();
+            if (!access) {
+                callback_gate->defer_registration(event.registration_ticket);
                 return;
             }
-
-            const auto surface_id = reinterpret_cast<uint64_t>(event.surface);
-            std::shared_ptr<Detail::SurfaceLifecycleAcks> acknowledgements;
-            std::string rejection;
-            bool cancelled = false;
-            {
-                std::lock_guard<std::mutex> lock(frame_mutex_);
-                if (shutting_down_.load(std::memory_order_acquire)) {
-                    rejection =
-                        "Display surface registration cancelled: Display is shutting down";
-                    cancelled = true;
-                } else if (device_lost_.load(std::memory_order_acquire)) {
-                    rejection =
-                        "Display surface registration failed: Vulkan device is lost";
-                } else if (!surface_frame_gate_.activate(surface_id)) {
-                    rejection =
-                        "Display surface registration cancelled: removal is pending";
-                    cancelled = true;
-                } else {
-                    const bool begins_new_lifetime =
-                        removed_surfaces_.erase(surface_id) != 0;
-                    auto& stored = surface_acknowledgements_[surface_id];
-                    if (begins_new_lifetime || !stored) {
-                        stored =
-                            std::make_shared<Detail::SurfaceLifecycleAcks>();
-                    }
-                    acknowledgements = stored;
-                    surfaces_[surface_id] = event.surface;
-                    pending_surfaces_.push_back(event.surface);
-                }
-            }
-
-            if (acknowledgements) {
-                acknowledgements->add_registration(event.registration_ticket);
-            } else if (event.registration_ticket) {
-                if (cancelled) {
-                    event.registration_ticket->cancel(std::move(rejection));
-                } else {
-                    event.registration_ticket->fail(std::move(rejection));
-                }
-            }
+            access.owner().handle_surface_changed(event);
         });
-
-    // Published synchronously on the MAIN thread when an ImGui secondary viewport window
-    // is being destroyed. We only buffer the request (+ promise) here and return; the
-    // actual GPU-idle + displayer teardown happens in update() on the Display thread,
-    // which then fulfills the promise. The publisher (main thread) blocks on that promise
-    // so the OS window is not destroyed until our swapchain is gone. Must NOT block here:
-    // this handler runs on the main thread, and blocking while holding frame_mutex_ would
-    // deadlock against update()'s own frame_mutex_ acquisition.
     surface_removed_sub_id_ = event_bus->subscribe<Events::DisplaySurfaceRemovedEvent>(
-        [this](const Events::DisplaySurfaceRemovedEvent& event) {
-            if (event.surface == nullptr) {
-                Detail::SurfaceLifecycleAcks acknowledgements;
-                acknowledgements.removal_requested(event.removal_ticket, event.done);
-                acknowledgements.removal_succeeded();
+        [callback_gate](const Events::DisplaySurfaceRemovedEvent& event) {
+            auto access = callback_gate->try_acquire();
+            if (!access) {
+                callback_gate->defer_removal(event.removal_ticket, event.done);
                 return;
             }
-
-            const auto surface_id = reinterpret_cast<uint64_t>(event.surface);
-            auto retirement = surface_frame_gate_.retire(surface_id);
-            std::shared_ptr<Detail::SurfaceLifecycleAcks> acknowledgements;
-            bool resources_already_destroyed = false;
-            {
-                std::lock_guard<std::mutex> lock(frame_mutex_);
-                resources_already_destroyed =
-                    shutdown_resources_destroyed_.load(
-                        std::memory_order_acquire);
-                if (!resources_already_destroyed) {
-                    auto& stored = surface_acknowledgements_[surface_id];
-                    if (!stored) {
-                        stored =
-                            std::make_shared<Detail::SurfaceLifecycleAcks>();
-                    }
-                    acknowledgements = stored;
-                    removed_surfaces_.insert(surface_id);
-                    surfaces_.erase(surface_id);
-                    surface_states_.erase(surface_id);
-                    pending_surfaces_.erase(
-                        std::remove_if(pending_surfaces_.begin(),
-                                       pending_surfaces_.end(),
-                                       [surface_id](void* s) {
-                                           return reinterpret_cast<uint64_t>(s) ==
-                                                  surface_id;
-                                       }),
-                        pending_surfaces_.end());
-                    pending_removals_.push_back(
-                        {event.surface,
-                         std::move(retirement),
-                         acknowledgements});
-                }
-            }
-
-            if (resources_already_destroyed) {
-                Detail::SurfaceLifecycleAcks completed;
-                completed.removal_requested(event.removal_ticket, event.done);
-                surface_frame_gate_.forget(surface_id);
-                completed.removal_succeeded();
-                return;
-            }
-            acknowledgements->removal_requested(event.removal_ticket, event.done);
+            access.owner().handle_surface_removed(event);
         });
-
     optics_frame_sub_id_ = event_bus->subscribe<Events::OpticsFrameReadyEvent>(
-        [this](const Events::OpticsFrameReadyEvent& event) {
-            if (event.surface == nullptr ||
-                event.image_handle == 0) {
-                return;
-            }
-
-            const auto surface_id = reinterpret_cast<uint64_t>(event.surface);
-            std::lock_guard<std::mutex> lock(frame_mutex_);
-            if (shutting_down_.load(std::memory_order_acquire) ||
-                removed_surfaces_.contains(surface_id)) {
-                return;
-            }
-            auto& layer = surface_states_[surface_id].optics;
-            if (event.frame_index >= layer.frame_index) {
-                layer.image_handle = event.image_handle;
-                layer.frame_index = event.frame_index;
-                layer.width = event.width;
-                layer.height = event.height;
-                layer.viewport_x = event.viewport_x;
-                layer.viewport_y = event.viewport_y;
-                layer.viewport_width = event.viewport_width;
-                layer.viewport_height = event.viewport_height;
+        [callback_gate](const Events::OpticsFrameReadyEvent& event) {
+            auto access = callback_gate->try_acquire();
+            if (access) {
+                access.owner().handle_optics_frame(event);
             }
         });
-
     ui_frame_sub_id_ = event_bus->subscribe<Events::UIFrameReadyEvent>(
-        [this](const Events::UIFrameReadyEvent& event) {
-            if (event.surface == nullptr) {
-                if (event.first_present_ticket) {
-                    event.first_present_ticket->fail(
-                        "Display first present failed: surface is null");
-                }
+        [callback_gate](const Events::UIFrameReadyEvent& event) {
+            auto access = callback_gate->try_acquire();
+            if (!access) {
+                callback_gate->defer_first_present(event.first_present_ticket);
                 return;
             }
-
-            const auto surface_id = reinterpret_cast<uint64_t>(event.surface);
-            std::shared_ptr<Detail::SurfaceLifecycleAcks> acknowledgements;
-            bool removed = false;
-            bool device_lost = false;
-            bool shutting_down = false;
-            Detail::SurfaceLifecycleAcks::FirstPresentBoundary
-                first_present_boundary = 0;
-            {
-                std::lock_guard<std::mutex> lock(frame_mutex_);
-                removed = removed_surfaces_.contains(surface_id);
-                shutting_down =
-                    shutting_down_.load(std::memory_order_acquire);
-                if (!removed && !shutting_down) {
-                    auto& stored = surface_acknowledgements_[surface_id];
-                    if (!stored) {
-                        stored =
-                            std::make_shared<Detail::SurfaceLifecycleAcks>();
-                    }
-                    acknowledgements = stored;
-                    first_present_boundary =
-                        acknowledgements->add_first_present(
-                            event.first_present_ticket);
-                    device_lost = device_lost_.load(std::memory_order_acquire);
-                    if (!device_lost && event.image_handle != 0) {
-                        auto& layer = surface_states_[surface_id].ui;
-                        if (event.frame_index >= layer.frame_index) {
-                            layer.image_handle = event.image_handle;
-                            layer.frame_index = event.frame_index;
-                            layer.width = event.width;
-                            layer.height = event.height;
-                            layer.first_present_boundary =
-                                first_present_boundary;
-                        }
-                    }
-                }
-            }
-
-            if (removed) {
-                if (event.first_present_ticket) {
-                    event.first_present_ticket->cancel(
-                        "Display first present cancelled: surface is removed");
-                }
-                return;
-            }
-
-            if (shutting_down) {
-                if (event.first_present_ticket) {
-                    event.first_present_ticket->cancel(
-                        "Display first present cancelled: Display is shutting down");
-                }
-                return;
-            }
-
-            if (device_lost) {
-                acknowledgements->fail_forward(
-                    "Display first present failed: Vulkan device is lost");
-            }
+            access.owner().handle_ui_frame(event);
         });
 
     const auto initialization_failed =
-        [this, event_bus](std::string message) {
-            shutting_down_.store(true, std::memory_order_release);
-            if (surface_changed_sub_id_ != 0) {
-                event_bus->unsubscribe(surface_changed_sub_id_);
-                surface_changed_sub_id_ = 0;
+        [this, event_bus, callback_gate](std::string message) {
+            callback_gate->close();
+            if (surface_changed_sub_id_) {
+                event_bus->unsubscribe(*surface_changed_sub_id_);
+                surface_changed_sub_id_.reset();
             }
-            if (surface_removed_sub_id_ != 0) {
-                event_bus->unsubscribe(surface_removed_sub_id_);
-                surface_removed_sub_id_ = 0;
+            if (surface_removed_sub_id_) {
+                event_bus->unsubscribe(*surface_removed_sub_id_);
+                surface_removed_sub_id_.reset();
             }
-            if (optics_frame_sub_id_ != 0) {
-                event_bus->unsubscribe(optics_frame_sub_id_);
-                optics_frame_sub_id_ = 0;
+            if (optics_frame_sub_id_) {
+                event_bus->unsubscribe(*optics_frame_sub_id_);
+                optics_frame_sub_id_.reset();
             }
-            if (ui_frame_sub_id_ != 0) {
-                event_bus->unsubscribe(ui_frame_sub_id_);
-                ui_frame_sub_id_ = 0;
+            if (ui_frame_sub_id_) {
+                event_bus->unsubscribe(*ui_frame_sub_id_);
+                ui_frame_sub_id_.reset();
+            }
+            callback_gate->wait_for_quiescence();
+
+            std::unordered_set<std::uint64_t> surface_ids;
+            std::vector<std::shared_ptr<Detail::SurfaceLifecycleAcks>>
+                acknowledgements;
+            const auto remember_acknowledgements =
+                [&acknowledgements](
+                    const std::shared_ptr<Detail::SurfaceLifecycleAcks>&
+                        pending) {
+                    if (pending &&
+                        std::find(acknowledgements.begin(),
+                                  acknowledgements.end(),
+                                  pending) == acknowledgements.end()) {
+                        acknowledgements.push_back(pending);
+                    }
+                };
+            {
+                std::lock_guard lock(frame_mutex_);
+                acknowledgements.reserve(surface_acknowledgements_.size() +
+                                         pending_removals_.size());
+                for (const auto& [surface_id, pending_acknowledgements] :
+                     surface_acknowledgements_) {
+                    surface_ids.insert(surface_id);
+                    remember_acknowledgements(pending_acknowledgements);
+                }
+                for (const auto& removal : pending_removals_) {
+                    surface_ids.insert(
+                        reinterpret_cast<std::uint64_t>(removal.surface));
+                    remember_acknowledgements(removal.acknowledgements);
+                }
+                for (const auto& [surface_id, surface] : surfaces_) {
+                    (void)surface;
+                    surface_ids.insert(surface_id);
+                }
+                for (const auto& [surface_id, state] : surface_states_) {
+                    (void)state;
+                    surface_ids.insert(surface_id);
+                }
+                for (const auto surface_id : removed_surfaces_) {
+                    surface_ids.insert(surface_id);
+                }
+                for (const auto* surface : pending_surfaces_) {
+                    surface_ids.insert(
+                        reinterpret_cast<std::uint64_t>(surface));
+                }
+                pending_surfaces_.clear();
+                pending_removals_.clear();
+            }
+
+            for (const auto& [surface_id, displayer] : displayers_) {
+                (void)displayer;
+                surface_ids.insert(surface_id);
+            }
+            for (const auto& [surface_id, resources] : composite_resources_) {
+                (void)resources;
+                surface_ids.insert(surface_id);
             }
 
             std::vector<std::pair<
                 std::uint64_t,
-                std::shared_ptr<Detail::SurfaceLifecycleAcks>>>
-                acknowledgements;
-            {
-                std::lock_guard lock(frame_mutex_);
-                acknowledgements.reserve(surface_acknowledgements_.size());
-                for (const auto& [surface_id, pending_acknowledgements] :
-                     surface_acknowledgements_) {
-                    acknowledgements.emplace_back(
-                        surface_id, pending_acknowledgements);
-                }
-                pending_surfaces_.clear();
-                pending_removals_.clear();
-                surface_states_.clear();
-                surfaces_.clear();
-                removed_surfaces_.clear();
-                surface_acknowledgements_.clear();
+                Detail::SurfaceFrameCoordinator::Retirement>>
+                retirements;
+            retirements.reserve(surface_ids.size());
+            for (const auto surface_id : surface_ids) {
+                retirements.emplace_back(
+                    surface_id,
+                    surface_frame_coordinator_.retire(surface_id));
             }
-
-            for (const auto& [surface_id, pending_acknowledgements] : acknowledgements) {
-                (void)pending_acknowledgements;
-                auto retirement = surface_frame_gate_.retire(surface_id);
-                retirement.wait();
-                surface_frame_gate_.forget(surface_id);
-            }
-            transparent_storage_ = Horizon::HardwareImage();
-
-            std::vector<PendingRemoval> late_removals;
-            {
-                std::lock_guard lock(frame_mutex_);
-                late_removals.swap(pending_removals_);
-                for (const auto& [surface_id, pending_acknowledgements] :
-                     surface_acknowledgements_) {
-                    acknowledgements.emplace_back(
-                        surface_id, pending_acknowledgements);
-                }
-                pending_surfaces_.clear();
-                surface_states_.clear();
-                surfaces_.clear();
-                removed_surfaces_.clear();
-                surface_acknowledgements_.clear();
-                shutdown_resources_destroyed_.store(
-                    true, std::memory_order_release);
-            }
-            for (auto& removal : late_removals) {
-                const auto surface_id =
-                    reinterpret_cast<std::uint64_t>(removal.surface);
-                removal.retirement.wait();
-                surface_frame_gate_.forget(surface_id);
-                if (removal.acknowledgements) {
-                    acknowledgements.emplace_back(
-                        surface_id, removal.acknowledgements);
-                }
-            }
-            for (const auto& [surface_id, pending_acknowledgements] :
-                 acknowledgements) {
+            for (const auto& [surface_id, retirement] : retirements) {
                 (void)surface_id;
+                retirement.wait();
+            }
+
+            displayers_.clear();
+            composite_resources_.clear();
+            composite_pipeline_.reset();
+            composite_pipeline_ready_ = false;
+            transparent_storage_ = Horizon::HardwareImage();
+            for (const auto& [surface_id, retirement] : retirements) {
+                (void)retirement;
+                surface_frame_coordinator_.forget(surface_id);
+            }
+            {
+                std::lock_guard lock(frame_mutex_);
+                surface_states_.clear();
+                surfaces_.clear();
+                removed_surfaces_.clear();
+                surface_acknowledgements_.clear();
+            }
+
+            for (const auto& pending_acknowledgements : acknowledgements) {
                 if (pending_acknowledgements) {
                     pending_acknowledgements->fail_forward(message);
                     pending_acknowledgements->removal_succeeded();
                 }
             }
+            callback_gate->complete_deferred_after_resources_destroyed(
+                UI::DisplaySurfaceResult::Status::Failed,
+                message);
             CFW_LOG_ERROR("DisplaySystem: {}", message);
             return false;
         };
@@ -421,7 +453,7 @@ void DisplaySystem::update() {
     // iterating it after the lock is safe.
     std::unordered_map<uint64_t, SurfaceState> states_snapshot;
     std::unordered_map<uint64_t, void*> surfaces_snapshot;
-    std::unordered_map<uint64_t, Detail::SurfaceFrameGate::Snapshot>
+    std::unordered_map<uint64_t, Detail::SurfaceFrameCoordinator::Snapshot>
         frame_gate_snapshot;
     std::unordered_map<uint64_t, std::shared_ptr<Detail::SurfaceLifecycleAcks>>
         acknowledgements_snapshot;
@@ -496,7 +528,7 @@ void DisplaySystem::update() {
                 removed_surfaces_.insert(surface_id);
                 surfaces_.erase(surface_id);
                 surface_states_.erase(surface_id);
-                (void)surface_frame_gate_.retire(surface_id);
+                (void)surface_frame_coordinator_.retire(surface_id);
                 if (acknowledgements) {
                     acknowledgements->registration_failed(
                         std::string("HardwareDisplayer construction failed: ") +
@@ -511,7 +543,7 @@ void DisplaySystem::update() {
                 removed_surfaces_.insert(surface_id);
                 surfaces_.erase(surface_id);
                 surface_states_.erase(surface_id);
-                (void)surface_frame_gate_.retire(surface_id);
+                (void)surface_frame_coordinator_.retire(surface_id);
                 if (acknowledgements) {
                     acknowledgements->registration_failed(
                         "HardwareDisplayer construction failed: unknown exception");
@@ -529,7 +561,7 @@ void DisplaySystem::update() {
         for (const auto& [surface_id, state] : states_snapshot) {
             (void)state;
             frame_gate_snapshot.emplace(
-                surface_id, surface_frame_gate_.capture(surface_id));
+                surface_id, surface_frame_coordinator_.capture(surface_id));
         }
     }
 
@@ -540,13 +572,16 @@ void DisplaySystem::update() {
     // main thread (the publisher of DisplaySurfaceRemovedEvent) to proceed with that.
     for (auto& r : removals) {
         const auto surface_id = reinterpret_cast<uint64_t>(r.surface);
-        r.retirement.wait();
-        displayers_.erase(surface_id);
-        composite_resources_.erase(surface_id);
-        surface_frame_gate_.forget(surface_id);
-        if (r.acknowledgements) {
-            r.acknowledgements->removal_succeeded();
-        }
+        surface_frame_coordinator_.teardown(
+            surface_id,
+            r.retirement,
+            [&]() { displayers_.erase(surface_id); },
+            [&]() { composite_resources_.erase(surface_id); },
+            [&]() {
+                if (r.acknowledgements) {
+                    r.acknowledgements->removal_succeeded();
+                }
+            });
     }
 
     if (device_lost_.load(std::memory_order_acquire)) {
@@ -563,11 +598,6 @@ void DisplaySystem::update() {
         if (gate_it == frame_gate_snapshot.end()) {
             continue;
         }
-        auto frame_lease = surface_frame_gate_.try_acquire(gate_it->second);
-        if (!frame_lease) {
-            continue;
-        }
-
         std::shared_ptr<Detail::SurfaceLifecycleAcks> acknowledgements;
         if (const auto acknowledgements_it =
                 acknowledgements_snapshot.find(surface_id);
@@ -583,15 +613,35 @@ void DisplaySystem::update() {
             continue;
         }
 
-        // Acquire write handles for available layers
-        SharedDataHub::ImageStorage::WriteHandle optics_frame;
-        SharedDataHub::ImageStorage::WriteHandle ui_frame;
-        if (has_optics) {
-            optics_frame = SharedDataHub::instance().image_storage().acquire_write(state.optics.image_handle);
+        // The coordinator owns the ordering boundary between the surface lease
+        // and image access. It also owns the handles with the lease so an
+        // acquisition exception destroys partial results before lease release.
+        struct FrameImages {
+            SharedDataHub::ImageStorage::WriteHandle optics;
+            SharedDataHub::ImageStorage::WriteHandle ui;
+        };
+        auto frame_access = surface_frame_coordinator_.begin_frame(
+            gate_it->second,
+            [&]() -> FrameImages {
+                FrameImages images;
+                if (has_optics) {
+                    images.optics = SharedDataHub::instance()
+                                        .image_storage()
+                                        .acquire_write(
+                                            state.optics.image_handle);
+                }
+                if (has_ui) {
+                    images.ui = SharedDataHub::instance()
+                                    .image_storage()
+                                    .acquire_write(state.ui.image_handle);
+                }
+                return images;
+            });
+        if (!frame_access) {
+            continue;
         }
-        if (has_ui) {
-            ui_frame = SharedDataHub::instance().image_storage().acquire_write(state.ui.image_handle);
-        }
+        auto& optics_frame = frame_access->images().optics;
+        auto& ui_frame = frame_access->images().ui;
 
         // Resolve images: use producer image if available, transparent fallback otherwise.
         Horizon::HardwareImage* optics_img_ptr = nullptr;
@@ -649,13 +699,20 @@ void DisplaySystem::update() {
         Horizon::HardwareImage& fg_image = use_ui_layer ? *ui_img_ptr : transparent_storage_;
 
         if (!bg_image || !fg_image) {
+            if (acknowledgements) {
+                acknowledgements->present_completed(
+                    Detail::PresentOutcome::Failed,
+                    state.ui.first_present_boundary,
+                    "Display compose/present failed: transparent fallback "
+                    "image is unavailable");
+            }
             continue;
         }
 
         auto& composite_resources = composite_resources_[surface_id];
-        bool composed = false;
+        auto present_outcome = Detail::PresentOutcome::Skipped;
         try {
-            composed = compose_and_present(
+            present_outcome = compose_and_present(
                 displayer,
                 surface,
                 state,
@@ -748,10 +805,18 @@ void DisplaySystem::update() {
             continue;
         }
         if (acknowledgements) {
+            const auto acknowledgement_outcome =
+                present_outcome == Detail::PresentOutcome::Presented &&
+                        !use_ui_layer
+                    ? Detail::PresentOutcome::Skipped
+                    : present_outcome;
             acknowledgements->present_completed(
-                composed && use_ui_layer, state.ui.first_present_boundary);
+                acknowledgement_outcome,
+                state.ui.first_present_boundary,
+                "Display compose/present failed: composite resources "
+                "unavailable");
         }
-        if (!composed) {
+        if (present_outcome != Detail::PresentOutcome::Presented) {
             continue;
         }
 
@@ -801,14 +866,15 @@ bool DisplaySystem::ensure_composite_resources(CompositeResources& resources,
     return true;
 }
 
-bool DisplaySystem::compose_and_present(Horizon::HardwareDisplayer& displayer,
-                                        void* surface,
-                                        SurfaceState& state,
-                                        CompositeResources& resources,
-                                        Horizon::HardwareImage& optics_image,
-                                        const Horizon::SubmitReceipt* optics_receipt,
-                                        Horizon::HardwareImage& ui_image,
-                                        const Horizon::SubmitReceipt* ui_receipt) {
+Detail::PresentOutcome DisplaySystem::compose_and_present(
+    Horizon::HardwareDisplayer& displayer,
+    void* surface,
+    SurfaceState& state,
+    CompositeResources& resources,
+    Horizon::HardwareImage& optics_image,
+    const Horizon::SubmitReceipt* optics_receipt,
+    Horizon::HardwareImage& ui_image,
+    const Horizon::SubmitReceipt* ui_receipt) {
     const PixelExtent optics_extent = hardware_image_extent(optics_image);
     const PixelExtent ui_extent = hardware_image_extent(ui_image);
 
@@ -822,7 +888,7 @@ bool DisplaySystem::compose_and_present(Horizon::HardwareDisplayer& displayer,
         output_extent = max_extent(state_optics_extent, state_ui_extent);
     }
     if (!output_extent) {
-        return false;
+        return Detail::PresentOutcome::Skipped;
     }
 
     const PixelExtent bg_extent = optics_extent ? optics_extent : state_optics_extent;
@@ -831,7 +897,7 @@ bool DisplaySystem::compose_and_present(Horizon::HardwareDisplayer& displayer,
     const uint32_t output_height = output_extent.height;
 
     if (!ensure_composite_resources(resources, output_width, output_height)) {
-        return false;
+        return Detail::PresentOutcome::Failed;
     }
 
     auto& composite_pipeline = *composite_pipeline_;
@@ -895,36 +961,62 @@ bool DisplaySystem::compose_and_present(Horizon::HardwareDisplayer& displayer,
            << composite_pipeline(dispatch_x, dispatch_y, 1)
            << Horizon::present(displayer, resources.output)
            << Horizon::commit());
-    return true;
+    return Detail::PresentOutcome::Presented;
 }
 
 void DisplaySystem::shutdown() {
-    shutting_down_.store(true, std::memory_order_release);
+    const auto callback_gate = callback_gate_;
+    if (callback_gate) {
+        callback_gate->close();
+    }
 
-    if (auto* system_context = context(); system_context != nullptr) {
-        auto* event_bus = system_context->event_bus();
-        if (event_bus != nullptr) {
-            if (surface_changed_sub_id_ != 0) {
-                event_bus->unsubscribe(surface_changed_sub_id_);
-            }
-            if (surface_removed_sub_id_ != 0) {
-                event_bus->unsubscribe(surface_removed_sub_id_);
-            }
-            if (optics_frame_sub_id_ != 0) {
-                event_bus->unsubscribe(optics_frame_sub_id_);
-            }
-            if (ui_frame_sub_id_ != 0) {
-                event_bus->unsubscribe(ui_frame_sub_id_);
+    const bool has_subscriptions = surface_changed_sub_id_ ||
+                                   surface_removed_sub_id_ ||
+                                   optics_frame_sub_id_ || ui_frame_sub_id_;
+    if (has_subscriptions) {
+        if (auto* system_context = context(); system_context != nullptr) {
+            auto* event_bus = system_context->event_bus();
+            if (event_bus != nullptr) {
+                if (surface_changed_sub_id_) {
+                    event_bus->unsubscribe(*surface_changed_sub_id_);
+                }
+                if (surface_removed_sub_id_) {
+                    event_bus->unsubscribe(*surface_removed_sub_id_);
+                }
+                if (optics_frame_sub_id_) {
+                    event_bus->unsubscribe(*optics_frame_sub_id_);
+                }
+                if (ui_frame_sub_id_) {
+                    event_bus->unsubscribe(*ui_frame_sub_id_);
+                }
             }
         }
     }
-    surface_changed_sub_id_ = 0;
-    surface_removed_sub_id_ = 0;
-    optics_frame_sub_id_ = 0;
-    ui_frame_sub_id_ = 0;
+    surface_changed_sub_id_.reset();
+    surface_removed_sub_id_.reset();
+    optics_frame_sub_id_.reset();
+    ui_frame_sub_id_.reset();
+
+    // Unsubscribe does not stop a handler already copied by EventBus. The
+    // owner-independent gate rejects callbacks that have not started and this
+    // wait lets callbacks already holding owner access finish. Never wait while
+    // holding frame_mutex_: active callbacks may need that mutex to exit.
+    if (callback_gate) {
+        callback_gate->wait_for_quiescence();
+    }
 
     std::unordered_set<std::uint64_t> surface_ids;
     std::vector<std::shared_ptr<Detail::SurfaceLifecycleAcks>> acknowledgements;
+    const auto remember_acknowledgements =
+        [&acknowledgements](
+            const std::shared_ptr<Detail::SurfaceLifecycleAcks>& pending) {
+            if (pending &&
+                std::find(acknowledgements.begin(),
+                          acknowledgements.end(),
+                          pending) == acknowledgements.end()) {
+                acknowledgements.push_back(pending);
+            }
+        };
     {
         std::lock_guard<std::mutex> lock(frame_mutex_);
         acknowledgements.reserve(surface_acknowledgements_.size() +
@@ -932,28 +1024,30 @@ void DisplaySystem::shutdown() {
         for (const auto& [surface_id, pending_acknowledgements] :
              surface_acknowledgements_) {
             surface_ids.insert(surface_id);
-            if (pending_acknowledgements) {
-                acknowledgements.push_back(pending_acknowledgements);
-            }
+            remember_acknowledgements(pending_acknowledgements);
         }
         for (const auto& removal : pending_removals_) {
             surface_ids.insert(
                 reinterpret_cast<std::uint64_t>(removal.surface));
-            if (removal.acknowledgements) {
-                acknowledgements.push_back(removal.acknowledgements);
-            }
+            remember_acknowledgements(removal.acknowledgements);
         }
         for (const auto& [surface_id, surface] : surfaces_) {
             (void)surface;
             surface_ids.insert(surface_id);
         }
+        for (const auto& [surface_id, state] : surface_states_) {
+            (void)state;
+            surface_ids.insert(surface_id);
+        }
+        for (const auto surface_id : removed_surfaces_) {
+            surface_ids.insert(surface_id);
+        }
+        for (const auto* surface : pending_surfaces_) {
+            surface_ids.insert(reinterpret_cast<std::uint64_t>(surface));
+        }
 
         pending_surfaces_.clear();
         pending_removals_.clear();
-        surface_states_.clear();
-        surfaces_.clear();
-        removed_surfaces_.clear();
-        surface_acknowledgements_.clear();
     }
 
     for (const auto& [surface_id, displayer] : displayers_) {
@@ -965,26 +1059,22 @@ void DisplaySystem::shutdown() {
         surface_ids.insert(surface_id);
     }
 
-    std::vector<std::pair<std::uint64_t,
-                          Detail::SurfaceFrameGate::Retirement>>
-        retirements;
+    std::vector<std::pair<
+        std::uint64_t,
+        Detail::SurfaceFrameCoordinator::Retirement>> retirements;
     retirements.reserve(surface_ids.size());
     for (const auto surface_id : surface_ids) {
         retirements.emplace_back(surface_id,
-                                 surface_frame_gate_.retire(surface_id));
-    }
-
-    for (const auto& pending_acknowledgements : acknowledgements) {
-        pending_acknowledgements->cancel_forward(
-            "Display shutdown before surface lifecycle completed");
+                                 surface_frame_coordinator_.retire(surface_id));
     }
     for (const auto& [surface_id, retirement] : retirements) {
         (void)surface_id;
         retirement.wait();
     }
 
+    // Lifecycle completions below certify that every frame lease is quiescent
+    // and every Display-owned resource has actually been destroyed.
     composite_pipeline_ready_ = false;
-    device_lost_.store(false, std::memory_order_release);
     displayers_.clear();
     composite_resources_.clear();
     composite_pipeline_.reset();
@@ -992,47 +1082,28 @@ void DisplaySystem::shutdown() {
 
     for (const auto& [surface_id, retirement] : retirements) {
         (void)retirement;
-        surface_frame_gate_.forget(surface_id);
+        surface_frame_coordinator_.forget(surface_id);
     }
-
-    // EventBus publish copies handlers before calling them, so unsubscribe does
-    // not wait for a callback already in flight. Collect removals that entered
-    // after the first snapshot, then close the late-callback window under the
-    // same mutex those handlers use.
-    std::vector<PendingRemoval> late_removals;
     {
         std::lock_guard<std::mutex> lock(frame_mutex_);
-        late_removals.swap(pending_removals_);
-        for (const auto& [surface_id, pending_acknowledgements] :
-             surface_acknowledgements_) {
-            (void)surface_id;
-            if (pending_acknowledgements) {
-                acknowledgements.push_back(pending_acknowledgements);
-            }
-        }
-        pending_surfaces_.clear();
         surface_states_.clear();
         surfaces_.clear();
         removed_surfaces_.clear();
         surface_acknowledgements_.clear();
-        shutdown_resources_destroyed_.store(true, std::memory_order_release);
     }
 
-    for (auto& removal : late_removals) {
-        const auto surface_id =
-            reinterpret_cast<std::uint64_t>(removal.surface);
-        removal.retirement.wait();
-        surface_frame_gate_.forget(surface_id);
-        if (removal.acknowledgements) {
-            acknowledgements.push_back(removal.acknowledgements);
-        }
-    }
-
-    // Only now are both per-surface displayer/swapchain and composite resources
-    // gone, so new removal tickets and every legacy promise may be completed.
+    constexpr auto shutdown_message =
+        "Display shutdown before surface lifecycle completed";
     for (const auto& pending_acknowledgements : acknowledgements) {
+        pending_acknowledgements->cancel_forward(shutdown_message);
         pending_acknowledgements->removal_succeeded();
     }
+    if (callback_gate) {
+        callback_gate->complete_deferred_after_resources_destroyed(
+            UI::DisplaySurfaceResult::Status::Cancelled,
+            shutdown_message);
+    }
+    device_lost_.store(false, std::memory_order_release);
 }
 
 }  // namespace Corona::Systems

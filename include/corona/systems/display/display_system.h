@@ -1,7 +1,8 @@
 ﻿#pragma once
 
 #include "horizon.h"
-#include "corona/systems/display/surface_frame_gate.h"
+#include "corona/systems/display/display_callback_gate.h"
+#include "corona/systems/display/surface_frame_coordinator.h"
 #include "corona/systems/display/surface_lifecycle_acks.h"
 #include <corona/events/display_system_events.h>
 #include <corona/kernel/event/i_event_bus.h>
@@ -35,7 +36,7 @@ class DisplaySystem : public Kernel::SystemBase {
         set_target_fps(120);
     }
 
-    ~DisplaySystem() override = default;
+    ~DisplaySystem() override;
 
     // ========================================
     // ISystem interface
@@ -54,6 +55,8 @@ class DisplaySystem : public Kernel::SystemBase {
     void shutdown() override;
 
    private:
+    using CallbackGate = Detail::OwnerCallbackGate<DisplaySystem>;
+
     struct PendingLayer {
         std::uintptr_t image_handle = 0;
         uint64_t frame_index = 0;
@@ -79,22 +82,28 @@ class DisplaySystem : public Kernel::SystemBase {
         uint32_t height = 0;
     };
 
-    bool compose_and_present(Horizon::HardwareDisplayer& displayer,
-                             void* surface,
-                             SurfaceState& state,
-                             CompositeResources& resources,
-                             Horizon::HardwareImage& optics_image,
-                             const Horizon::SubmitReceipt* optics_receipt,
-                             Horizon::HardwareImage& ui_image,
-                             const Horizon::SubmitReceipt* ui_receipt);
+    Detail::PresentOutcome compose_and_present(
+        Horizon::HardwareDisplayer& displayer,
+        void* surface,
+        SurfaceState& state,
+        CompositeResources& resources,
+        Horizon::HardwareImage& optics_image,
+        const Horizon::SubmitReceipt* optics_receipt,
+        Horizon::HardwareImage& ui_image,
+        const Horizon::SubmitReceipt* ui_receipt);
     bool ensure_composite_resources(CompositeResources& resources,
                                     uint32_t width,
                                     uint32_t height);
+    void handle_surface_changed(const Events::DisplaySurfaceChangedEvent& event);
+    void handle_surface_removed(const Events::DisplaySurfaceRemovedEvent& event);
+    void handle_optics_frame(const Events::OpticsFrameReadyEvent& event);
+    void handle_ui_frame(const Events::UIFrameReadyEvent& event);
 
-    Kernel::EventId surface_changed_sub_id_ = 0;
-    Kernel::EventId surface_removed_sub_id_ = 0;
-    Kernel::EventId optics_frame_sub_id_ = 0;
-    Kernel::EventId ui_frame_sub_id_ = 0;
+    std::optional<Kernel::EventId> surface_changed_sub_id_;
+    std::optional<Kernel::EventId> surface_removed_sub_id_;
+    std::optional<Kernel::EventId> optics_frame_sub_id_;
+    std::optional<Kernel::EventId> ui_frame_sub_id_;
+    std::shared_ptr<CallbackGate> callback_gate_;
 
     // Protects displayers_ and surface_states_ against concurrent access
     // from EventBus handlers (Optics thread, main thread) and update() (Display thread)
@@ -116,18 +125,16 @@ class DisplaySystem : public Kernel::SystemBase {
     // main thread can safely destroy the OS window. See DisplaySurfaceRemovedEvent.
     struct PendingRemoval {
         void* surface = nullptr;
-        Detail::SurfaceFrameGate::Retirement retirement;
+        Detail::SurfaceFrameCoordinator::Retirement retirement;
         std::shared_ptr<Detail::SurfaceLifecycleAcks> acknowledgements;
     };
     std::vector<PendingRemoval> pending_removals_;
-    Detail::SurfaceFrameGate surface_frame_gate_;
+    Detail::SurfaceFrameCoordinator surface_frame_coordinator_;
 
     // Compositing resources
     std::optional<Horizon::ComputePipeline<composite_comp_glsl_t>> composite_pipeline_;
     Horizon::HardwareImage transparent_storage_;  ///< 1x1 transparent StorageImage fallback for missing layers
     bool composite_pipeline_ready_ = false;
     std::atomic<bool> device_lost_ = false;
-    std::atomic<bool> shutting_down_ = false;
-    std::atomic<bool> shutdown_resources_destroyed_ = false;
 };
 }  // namespace Corona::Systems
