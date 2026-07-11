@@ -217,6 +217,51 @@ void removal_before_first_present_cancels_obsolete_work() {
            "early removal should end in Retired");
 }
 
+void cancelled_removal_is_not_safe_retirement() {
+    UiSurfaceLifecycle lifecycle;
+    lifecycle.registration_ticket().succeed();
+    lifecycle.first_present_ticket().succeed();
+    expect(lifecycle.state() == UiSurfaceState::Active,
+           "test setup should activate the surface");
+
+    auto removal = lifecycle.request_removal();
+    expect(removal.cancel("display teardown cancelled"),
+           "display should be able to report cancelled teardown");
+
+    expect(lifecycle.state() == UiSurfaceState::Failed,
+           "cancelled teardown must not certify safe retirement");
+    expect_result(lifecycle.terminal_result(),
+                  DisplaySurfaceResult::Status::Cancelled,
+                  "display teardown cancelled",
+                  "failed lifecycle should retain the cancellation result");
+}
+
+void removal_directly_from_registering_cancels_both_forward_tickets() {
+    UiSurfaceLifecycle lifecycle;
+    auto registration = lifecycle.registration_ticket();
+    auto first_present = lifecycle.first_present_ticket();
+
+    auto removal = lifecycle.request_removal();
+
+    expect(lifecycle.state() == UiSurfaceState::Removing,
+           "fresh lifecycle removal should enter Removing");
+    expect_result(registration.result(),
+                  DisplaySurfaceResult::Status::Cancelled,
+                  "surface removal requested",
+                  "fresh removal should cancel registration");
+    expect_result(first_present.result(),
+                  DisplaySurfaceResult::Status::Cancelled,
+                  "surface removal requested",
+                  "fresh removal should cancel first-present work");
+    expect(!registration.succeed(),
+           "late registration success must lose after removal starts");
+    expect(!first_present.succeed(),
+           "late first-present success must lose after removal starts");
+    expect(removal.succeed(), "removal acknowledgement should still complete");
+    expect(lifecycle.state() == UiSurfaceState::Retired,
+           "successful removal from Registering should retire safely");
+}
+
 void duplicate_requests_share_one_completion() {
     UiSurfaceLifecycle lifecycle;
     const auto trace_id = lifecycle.trace_id();
@@ -296,6 +341,60 @@ void main_and_three_secondary_surfaces_drain_by_one_deadline() {
            "trace ids should increase monotonically across surfaces");
 }
 
+void drain_rejects_a_failed_removal_participant() {
+    std::array<UiSurfaceLifecycle, 4> surfaces;
+    std::array<UiSurfaceLifecycle*, 4> surface_refs{
+        &surfaces[0], &surfaces[1], &surfaces[2], &surfaces[3]};
+
+    for (auto& surface : surfaces) {
+        surface.registration_ticket().succeed();
+        surface.first_present_ticket().succeed();
+        expect(surface.state() == UiSurfaceState::Active,
+               "failed-drain participants should begin active");
+    }
+    for (std::size_t index = 0; index < surfaces.size(); ++index) {
+        auto removal = surfaces[index].request_removal();
+        if (index == 2) {
+            removal.fail("display teardown failed");
+        } else {
+            removal.succeed();
+        }
+    }
+
+    expect(!drain_ui_surfaces(surface_refs,
+                              UiSurfaceLifecycle::Clock::now() + 1s),
+           "drain must reject a participant whose removal failed");
+    expect(surfaces[2].state() == UiSurfaceState::Failed,
+           "failed removal participant should remain visibly unsafe");
+}
+
+void drain_rejects_a_cancelled_removal_participant() {
+    std::array<UiSurfaceLifecycle, 4> surfaces;
+    std::array<UiSurfaceLifecycle*, 4> surface_refs{
+        &surfaces[0], &surfaces[1], &surfaces[2], &surfaces[3]};
+
+    for (auto& surface : surfaces) {
+        surface.registration_ticket().succeed();
+        surface.first_present_ticket().succeed();
+        expect(surface.state() == UiSurfaceState::Active,
+               "cancelled-drain participants should begin active");
+    }
+    for (std::size_t index = 0; index < surfaces.size(); ++index) {
+        auto removal = surfaces[index].request_removal();
+        if (index == 1) {
+            removal.cancel("display teardown cancelled");
+        } else {
+            removal.succeed();
+        }
+    }
+
+    expect(!drain_ui_surfaces(surface_refs,
+                              UiSurfaceLifecycle::Clock::now() + 1s),
+           "drain must reject a participant whose removal was cancelled");
+    expect(surfaces[1].state() == UiSurfaceState::Failed,
+           "cancelled removal participant should remain visibly unsafe");
+}
+
 void legacy_event_aggregate_publishers_remain_compatible() {
     void* surface = reinterpret_cast<void*>(0x1234);
     auto done = std::make_shared<std::promise<void>>();
@@ -324,9 +423,13 @@ int main() {
     delayed_acknowledgement_wakes_a_deadline_wait();
     precompleted_first_present_is_not_skipped();
     removal_before_first_present_cancels_obsolete_work();
+    cancelled_removal_is_not_safe_retirement();
+    removal_directly_from_registering_cancels_both_forward_tickets();
     duplicate_requests_share_one_completion();
     timed_out_wait_retains_the_pending_lifecycle();
     main_and_three_secondary_surfaces_drain_by_one_deadline();
+    drain_rejects_a_failed_removal_participant();
+    drain_rejects_a_cancelled_removal_participant();
     legacy_event_aggregate_publishers_remain_compatible();
     std::cout << "UI surface lifecycle tests passed\n";
     return 0;

@@ -113,7 +113,10 @@ class UiSurfaceLifecycle {
     mutable std::shared_ptr<const DisplaySurfaceResult> terminal_result_;
 };
 
-/** Requests removal for every nonterminal surface and waits on one deadline. */
+/**
+ * Requests removal for every nonterminal surface and waits on one deadline.
+ * Returns true only when every surface retires with a Succeeded result.
+ */
 [[nodiscard]] bool drain_ui_surfaces(
     std::span<UiSurfaceLifecycle* const> surfaces,
     UiSurfaceLifecycle::Deadline deadline);

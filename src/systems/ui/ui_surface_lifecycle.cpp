@@ -115,6 +115,7 @@ SurfaceCompletionTicket UiSurfaceLifecycle::request_removal() {
     } else if (started_removal) {
         if (previous == UiSurfaceState::Registering) {
             registration_ticket_.cancel(kRemovalCancellationMessage);
+            first_present_ticket_.cancel(kRemovalCancellationMessage);
         } else if (previous == UiSurfaceState::WaitingFirstPresent) {
             first_present_ticket_.cancel(kRemovalCancellationMessage);
         }
@@ -187,9 +188,9 @@ void UiSurfaceLifecycle::advance_locked() const {
                 return;
             }
             terminal_result_ = removal;
-            state_ = removal->status == DisplaySurfaceResult::Status::Failed
-                         ? UiSurfaceState::Failed
-                         : UiSurfaceState::Retired;
+            state_ = removal->status == DisplaySurfaceResult::Status::Succeeded
+                         ? UiSurfaceState::Retired
+                         : UiSurfaceState::Failed;
             state_changed_.notify_all();
         }
         return;
@@ -256,6 +257,11 @@ bool drain_ui_surfaces(std::span<UiSurfaceLifecycle* const> surfaces,
     }
     for (auto* surface : surfaces) {
         if (!surface->wait_until_terminal(deadline)) {
+            return false;
+        }
+        const auto terminal = surface->terminal_result();
+        if (surface->state() != UiSurfaceState::Retired || !terminal ||
+            terminal->status != DisplaySurfaceResult::Status::Succeeded) {
             return false;
         }
     }
