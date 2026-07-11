@@ -81,9 +81,9 @@ int run_smoke() {
     }
 
     // Exercise the real DisplaySystem lifecycle as part of the smoke target. The
-    // display event bus is intentionally absent here: this keeps the test CEF-free
-    // while still validating that a display instance can be initialized/shut down
-    // around the Vulkan surface owner.
+    // main surface uses the production KernelContext/EventBus path; secondary
+    // registration and removal acknowledgements remain a follow-up integration
+    // step, while this test stays CEF-free.
     display.update();
 
     const auto render_solid = [&](void* surface, uint32_t width, uint32_t height) {
