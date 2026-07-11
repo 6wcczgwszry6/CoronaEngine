@@ -11,6 +11,7 @@ namespace {
 
 using Corona::Systems::UI::VisionActorMaterialState;
 using Corona::Systems::UI::bind_vision_actor_material;
+using Corona::Systems::UI::ensure_native_actor_model_normalization;
 
 [[noreturn]] void fail(std::string_view message) {
     std::cerr << "FAIL: " << message << '\n';
@@ -96,11 +97,75 @@ void actor_material_values_are_clamped_and_upserted() {
                 "roughness should respect Vision's nonzero lower bound");
 }
 
+void native_actor_models_are_marked_for_unit_bounds_normalization() {
+    nlohmann::json newly_created = {
+        {"type", "model"},
+        {"guid", "custom-guid"},
+        {"param", {{"fn", "Ball.obj"}}},
+    };
+    expect(ensure_native_actor_model_normalization(newly_created, true),
+           "explicit native origin should add normalization marker");
+    expect(newly_created.at("param").at("normalize_to_unit_bounds") == true,
+           "native model should opt into Vision unit-bounds normalization");
+    expect(!ensure_native_actor_model_normalization(newly_created, true),
+           "normalization migration should be idempotent");
+
+    nlohmann::json legacy_guid = {
+        {"type", "model"},
+        {"guid", "native-legacy-guid"},
+        {"param", {{"fn", "Ball.obj"}}},
+    };
+    expect(ensure_native_actor_model_normalization(legacy_guid),
+           "legacy native GUID should be migrated");
+
+    nlohmann::json legacy_material = {
+        {"type", "model"},
+        {"guid", "older-guid"},
+        {"param",
+         {{"fn", "Ball.obj"},
+          {"material", "corona_actor_material_older-guid"}}},
+    };
+    expect(ensure_native_actor_model_normalization(legacy_material),
+           "generated actor material should identify legacy native model");
+}
+
+void original_vision_shapes_are_not_normalized() {
+    nlohmann::json authored_model = {
+        {"type", "model"},
+        {"guid", "vision-shape-3"},
+        {"param", {{"fn", "authored.obj"}, {"material", "AuthoredMaterial"}}},
+    };
+    expect(!ensure_native_actor_model_normalization(authored_model),
+           "authored Vision model should preserve source pivot and units");
+    expect(!authored_model.at("param").contains("normalize_to_unit_bounds"),
+           "authored Vision model should remain unchanged");
+
+    nlohmann::json bridged_vision_model = {
+        {"type", "model"},
+        {"guid", "vision-shape-9"},
+        {"param",
+         {{"fn", "authored.obj"},
+          {"material", "corona_actor_material_vision-shape-9"}}},
+    };
+    expect(!ensure_native_actor_model_normalization(bridged_vision_model),
+           "vision GUID should override a generated fallback material marker");
+
+    nlohmann::json native_primitive = {
+        {"type", "sphere"},
+        {"guid", "native-sphere"},
+        {"param", nlohmann::json::object()},
+    };
+    expect(!ensure_native_actor_model_normalization(native_primitive, true),
+           "normalization marker should apply only to model shapes");
+}
+
 }  // namespace
 
 int main() {
     imported_actor_gets_a_principled_material_binding();
     actor_material_values_are_clamped_and_upserted();
+    native_actor_models_are_marked_for_unit_bounds_normalization();
+    original_vision_shapes_are_not_normalized();
     std::cout << "Vision actor material bridge tests passed\n";
     return 0;
 }

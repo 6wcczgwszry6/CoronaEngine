@@ -20,4 +20,8 @@ struct VisionActorMaterialState {
     std::string_view actor_identity,
     const VisionActorMaterialState& state);
 
+[[nodiscard]] bool ensure_native_actor_model_normalization(
+    nlohmann::json& shape,
+    bool native_origin = false);
+
 }  // namespace Corona::Systems::UI
