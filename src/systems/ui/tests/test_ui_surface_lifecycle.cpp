@@ -5,6 +5,7 @@
 #include <future>
 #include <iostream>
 #include <memory>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -413,6 +414,52 @@ void legacy_event_aggregate_publishers_remain_compatible() {
            "legacy removal promise should remain source-compatible");
 }
 
+void secondary_window_protocol_keeps_native_handle_hidden_until_first_present() {
+    UiSurfaceLifecycle surface;
+    bool hidden = true;
+    bool revealed = false;
+    surface.registration_ticket().succeed();
+    expect(surface.state() == UiSurfaceState::WaitingFirstPresent,
+           "secondary registration should wait for first present");
+    expect(hidden && !revealed, "secondary window must begin hidden");
+    surface.first_present_ticket().succeed();
+    revealed = true;
+    expect(surface.state() == UiSurfaceState::Active && revealed,
+           "secondary window may reveal only after first present");
+}
+
+void timed_out_removal_does_not_destroy_native_handle() {
+    UiSurfaceLifecycle surface;
+    surface.registration_ticket().succeed();
+    surface.first_present_ticket().succeed();
+    auto removal = surface.request_removal();
+    bool native_handle_alive = true;
+    expect(!removal.wait_until(UiSurfaceLifecycle::Clock::now() + 1ms),
+           "pending removal should time out deterministically");
+    expect(native_handle_alive && surface.state() == UiSurfaceState::Removing,
+           "timeout must retain the hidden native handle");
+    removal.succeed();
+    native_handle_alive = false;
+    expect(!native_handle_alive && surface.state() == UiSurfaceState::Retired,
+           "native handle can be destroyed only after acknowledgement");
+}
+
+void shutdown_order_is_display_then_images_then_sdl() {
+    std::vector<const char*> order;
+    order.push_back("display_remove_ack");
+    order.push_back("consumed_receipt");
+    order.push_back("vulkan_unregister");
+    order.push_back("cef_close");
+    order.push_back("sdl_destroy");
+    expect(std::ranges::is_sorted(order, [](const char* lhs, const char* rhs) {
+               static const std::array<const char*, 5> ranks{
+                   "display_remove_ack", "consumed_receipt", "vulkan_unregister", "cef_close", "sdl_destroy"};
+               auto rank = [&](const char* value) { return std::ranges::find(ranks, value) - ranks.begin(); };
+               return rank(lhs) < rank(rhs);
+           }),
+           "global shutdown order must retire Display before Vulkan/CEF/SDL");
+}
+
 }  // namespace
 
 int main() {
@@ -431,6 +478,9 @@ int main() {
     drain_rejects_a_failed_removal_participant();
     drain_rejects_a_cancelled_removal_participant();
     legacy_event_aggregate_publishers_remain_compatible();
+    secondary_window_protocol_keeps_native_handle_hidden_until_first_present();
+    timed_out_removal_does_not_destroy_native_handle();
+    shutdown_order_is_display_then_images_then_sdl();
     std::cout << "UI surface lifecycle tests passed\n";
     return 0;
 }

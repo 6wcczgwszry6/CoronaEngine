@@ -2,6 +2,7 @@
 #include <corona/shared_data_hub.h>
 #include <corona/systems/script/script_system.h>
 #include <corona/systems/ui/camera_viewport_manager.h>
+#include <corona/systems/ui/sdl_window_manager.h>
 #include <corona/systems/ui/ui_system.h>
 
 #include <algorithm>
@@ -110,8 +111,31 @@ void UiSystem::start() {
 }
 
 void UiSystem::stop() {
-    // 主线程系统不需要停止线程
     CFW_LOG_INFO("UiSystem: Stop called (main thread mode)");
+    running_ = false;
+
+    // Drain every secondary surface while Display is still alive. A single deadline applies
+    // to the complete set so one stalled surface cannot trigger a cascade of per-window
+    // timeouts or premature SDL destruction.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    std::vector<void*> secondary_surfaces;
+    UI::SdlWindowManager::instance().for_each_window([&](const UI::ManagedWindow& managed) {
+        if (!managed.is_main && managed.surface != nullptr) {
+            secondary_surfaces.push_back(managed.surface);
+        }
+    });
+    for (void* surface : secondary_surfaces) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            break;
+        }
+        if (UI::SdlWindowManager::instance().request_remove_secondary_window(surface)) {
+            if (vulkan_backend_) {
+                vulkan_backend_->unregister_surface(surface);
+            }
+            UI::SdlWindowManager::instance().destroy_secondary_window(surface);
+        }
+    }
+
     auto& browser_manager = UI::BrowserManager::instance();
     std::vector<std::uintptr_t> camera_handles;
     for (const auto& [tab_id, tab] : browser_manager.get_tabs()) {
@@ -123,8 +147,8 @@ void UiSystem::stop() {
     }
     browser_manager.close_all_tabs();
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!camera_handles.empty() && std::chrono::steady_clock::now() < deadline) {
+    const auto camera_deadline = std::min(deadline, std::chrono::steady_clock::now() + std::chrono::seconds(2));
+    while (!camera_handles.empty() && std::chrono::steady_clock::now() < camera_deadline) {
         std::erase_if(camera_handles, [](const std::uintptr_t camera_handle) {
             auto camera =
                 SharedDataHub::instance().camera_storage().try_acquire_read(camera_handle);
@@ -136,7 +160,6 @@ void UiSystem::stop() {
     }
     // Phase 6: no ImGui platform windows to destroy (multi-viewport removed).
     // Secondary windows (detach) are owned by the SDL window manager in Phase 7.
-    running_ = false;
     state_ = Kernel::SystemState::stopped;
 }
 

@@ -30,6 +30,8 @@ struct ManagedWindow {
     // frame has been published to the DisplaySystem, to avoid a 1-frame white/black flash
     // on detach (mirrors the old ImGui deferred_platform_show_window trick).
     bool pending_show = false;
+    bool removal_acknowledged = false;
+    bool removal_failed = false;
 };
 
 // Client-area pixel rectangle of a window (origin at client top-left = 0,0).
@@ -80,7 +82,12 @@ class SdlWindowManager {
     // --- Secondary windows (detach). Stubs in Phase 4; implemented in Phase 7. ---
     // Returns the new window's surface handle, or nullptr if not yet implemented / failed.
     void* create_secondary_window(int x, int y, int width, int height);
-    void destroy_secondary_window(void* surface);
+    // Request Display retirement and hide the native window. Returns true only when the
+    // Display acknowledgement was received; a timeout leaves the hidden window tracked.
+    bool request_remove_secondary_window(void* surface);
+    // Final destruction after Vulkan image state has been unregistered. Refuses to destroy
+    // a window whose Display retirement was not acknowledged.
+    bool destroy_secondary_window(void* surface);
     void destroy_all_secondary();
 
     // Deferred show: if `surface`'s window is still hidden awaiting its first frame, show it

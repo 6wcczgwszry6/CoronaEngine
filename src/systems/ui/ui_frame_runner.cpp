@@ -101,10 +101,18 @@ bool initialize_sdl_ui(SDL_Window*& window, std::unique_ptr<VulkanBackend>& vulk
 }
 
 void shutdown_sdl_ui(SDL_Window*& window, std::unique_ptr<VulkanBackend>& vulkan_backend) {
-    // Tear down any detached (secondary) windows first: this publishes DisplaySurfaceRemovedEvent
-    // and blocks on the promise so the DisplaySystem destroys each swapchain before we proceed,
-    // matching the per-window teardown ordering used on redock.
-    SdlWindowManager::instance().destroy_all_secondary();
+    // Retire secondary Display surfaces first, then release Vulkan image state, then destroy
+    // their SDL windows. A failed acknowledgement leaves the window hidden and tracked.
+    std::vector<void*> secondary_surfaces;
+    SdlWindowManager::instance().for_each_window([&](const ManagedWindow& managed) {
+        if (!managed.is_main && managed.surface != nullptr) secondary_surfaces.push_back(managed.surface);
+    });
+    for (void* surface : secondary_surfaces) {
+        if (SdlWindowManager::instance().request_remove_secondary_window(surface)) {
+            if (vulkan_backend) vulkan_backend->unregister_surface(surface);
+            SdlWindowManager::instance().destroy_secondary_window(surface);
+        }
+    }
 
     if (vulkan_backend) {
         vulkan_backend->shutdown();
@@ -643,8 +651,10 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
             tab->platform_window_id = 0;
             tab->platform_handle_raw = nullptr;
             tab->detach_state = BrowserTab::DetachState::Docked;
-            context.vulkan_backend->unregister_surface(surface);
-            close_window_manager.destroy_secondary_window(surface);
+            if (close_window_manager.request_remove_secondary_window(surface)) {
+                context.vulkan_backend->unregister_surface(surface);
+                close_window_manager.destroy_secondary_window(surface);
+            }
         }
         BrowserManager::instance().remove_tab(tab_id);
         if (tab_id == *context.active_tab_id) {
@@ -699,6 +709,7 @@ void UiFrameRunner::reconcile_detach_states(UiFrameContext& context) {
         if (!context.vulkan_backend->register_surface(surface, sdl_window)) {
             CFW_LOG_ERROR("reconcile: failed to register surface for tab {}; tearing window back down",
                           tab_id);
+            window_manager.request_remove_secondary_window(surface);
             window_manager.destroy_secondary_window(surface);
             tab->detach_state = BrowserTab::DetachState::Docked;
             continue;
@@ -732,8 +743,10 @@ void UiFrameRunner::reconcile_detach_states(UiFrameContext& context) {
         tab->platform_handle_raw = nullptr;
 
         if (surface != nullptr) {
-            context.vulkan_backend->unregister_surface(surface);
-            window_manager.destroy_secondary_window(surface);
+            if (window_manager.request_remove_secondary_window(surface)) {
+                context.vulkan_backend->unregister_surface(surface);
+                window_manager.destroy_secondary_window(surface);
+            }
         }
 
         tab->detach_state = BrowserTab::DetachState::Docked;
@@ -889,7 +902,7 @@ void UiFrameRunner::render_window(UiFrameContext& context, const ManagedWindow& 
     context.vulkan_backend->present_surface(surface);
 
     // Deferred show: reveal a freshly-detached window once its first frame is published.
-    if (managed.pending_show) {
+    if (managed.pending_show && context.vulkan_backend->first_present_ready(surface)) {
         SdlWindowManager::instance().reveal_pending_window(surface);
     }
 }

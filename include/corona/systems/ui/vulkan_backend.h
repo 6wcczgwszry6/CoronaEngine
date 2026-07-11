@@ -4,6 +4,7 @@
 // ViewportRenderResources, QuadDraw, and QuadCompositor. Include it (not the reverse) to
 // avoid a circular dependency.
 #include <corona/systems/ui/quad_compositor.h>
+#include <corona/systems/ui/ui_surface_lifecycle.h>
 
 #include <SDL3/SDL.h>
 
@@ -54,6 +55,7 @@ class VulkanBackend {
 
     // Publish `surface`'s render target to DisplaySystem (UIFrameReadyEvent).
     void present_surface(void* surface);
+    [[nodiscard]] bool first_present_ready(void* surface) const;
 
     // Recreate `surface`'s render target at the given pixel size (on window resize).
     void rebuild(void* surface, uint32_t pixel_w, uint32_t pixel_h);
@@ -78,6 +80,8 @@ class VulkanBackend {
         ViewportRenderResources resources;
         std::uintptr_t image_handle = 0;
         uint64_t frame_index = 0;
+        SurfaceCompletionTicket first_present_ticket;
+        bool first_present_published = false;
     };
 
     // Lazily create the shared quad pipeline (reuses the ui_quad.vert/frag GLSL).
