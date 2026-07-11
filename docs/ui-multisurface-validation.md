@@ -22,3 +22,8 @@ The CEF three-panel regression remains a manual prerequisite and was not run in
 this environment. Therefore the native/GPU/CEF cleanup gate is **blocked** and
 legacy Vue/native docking cleanup must not begin until those checks produce
 validation, device-lost, resource-count, and teardown-timeout logs.
+
+An opt-in run was attempted with `CORONA_RUN_GPU_SMOKE=1`; the smoke process did
+not terminate within the configured CTest window and was terminated externally.
+No validation/device-lost/resource-count log was produced, so this is recorded
+as a failed/incomplete GPU gate rather than a pass.
