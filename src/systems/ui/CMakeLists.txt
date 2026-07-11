@@ -5,6 +5,7 @@
 set(UI_SYSTEM_SOURCES
     ui_system.cpp
     ui_frame_runner.cpp
+    ui_surface_lifecycle.cpp
     camera_viewport_manager.cpp
     panel_layout.cpp
 
@@ -81,6 +82,16 @@ helicon_compile_shaders(corona_ui_system
 )
 
 if(BUILD_CORONA_TESTING OR BUILD_TESTING)
+    add_executable(corona_ui_surface_lifecycle_tests
+        tests/test_ui_surface_lifecycle.cpp
+        ui_surface_lifecycle.cpp
+    )
+    target_include_directories(corona_ui_surface_lifecycle_tests
+        PRIVATE ${PROJECT_SOURCE_DIR}/include
+    )
+    add_test(NAME UiSurfaceLifecycleTests
+             COMMAND corona_ui_surface_lifecycle_tests)
+
     add_executable(corona_vision_actor_material_bridge_tests
         tests/test_vision_actor_material_bridge.cpp
         cef/vision_actor_material_bridge.cpp
