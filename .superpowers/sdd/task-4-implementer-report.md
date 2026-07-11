@@ -3,7 +3,14 @@
 Implemented `corona_ui_multisurface_smoke` and registered it as `UiMultiSurfaceSmoke`
 with `RUN_SERIAL`, a 180-second timeout, and skip return code 77. The executable
 uses real SDL3 windows, `VulkanBackend` registration/rebuild/presentation paths,
-and a `DisplaySystem` initialize/shutdown cycle without CEF.
+and a `DisplaySystem` initialize/shutdown cycle without CEF. It initializes the
+real `KernelContext` first, allowing DisplaySystem to subscribe to EventBus
+before VulkanBackend publishes main-surface registration, and drives
+`display.update()` after burst presentations.
+
+Secondary removal/ack choreography is not yet fully injected, so enabled runs
+remain best-effort infrastructure coverage rather than proof of every teardown
+path.
 
 The smoke now submits a solid `QuadDraw` on every exercised surface before
 `present_surface()`, so the presentation path is not a frame-ready no-op. The

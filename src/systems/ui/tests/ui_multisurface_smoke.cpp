@@ -1,6 +1,7 @@
 #include <SDL3/SDL.h>
 
 #include <corona/systems/display/display_system.h>
+#include <corona/kernel/core/kernel_context.h>
 #include <corona/systems/ui/quad_compositor.h>
 #include <corona/systems/ui/vulkan_backend.h>
 
@@ -15,10 +16,10 @@ namespace {
 
 constexpr int kSkip = 77;
 
-class NullSystemContext final : public Corona::Kernel::ISystemContext {
+class KernelSystemContext final : public Corona::Kernel::ISystemContext {
    public:
-    Corona::Kernel::IEventBus* event_bus() override { return nullptr; }
-    Corona::Kernel::IEventBusStream* event_stream() override { return nullptr; }
+    Corona::Kernel::IEventBus* event_bus() override { return Corona::Kernel::KernelContext::instance().event_bus(); }
+    Corona::Kernel::IEventBusStream* event_stream() override { return Corona::Kernel::KernelContext::instance().event_stream(); }
     Corona::Kernel::ISystem* get_system(std::string_view) override { return nullptr; }
     float get_delta_time() const override { return 1.0f / 120.0f; }
     uint64_t get_frame_number() const override { return frame_; }
@@ -43,6 +44,12 @@ int run_smoke() {
         std::cerr << "UiMultiSurfaceSmoke skipped: SDL_Init failed: " << SDL_GetError() << '\n';
         return kSkip;
     }
+    auto& kernel = Corona::Kernel::KernelContext::instance();
+    if (!kernel.initialize()) {
+        std::cerr << "UiMultiSurfaceSmoke skipped: KernelContext initialization failed\n";
+        SDL_Quit();
+        return kSkip;
+    }
 
     std::vector<SDL_Window*> windows;
     auto* main_window = SDL_CreateWindow("Corona UI multisurface smoke", 320, 240,
@@ -54,10 +61,21 @@ int run_smoke() {
     }
     windows.push_back(main_window);
 
+    Corona::Systems::DisplaySystem display;
+    KernelSystemContext context;
+    if (!display.initialize(&context)) {
+        std::cerr << "UiMultiSurfaceSmoke failed: DisplaySystem initialization failed\n";
+        destroy_windows(windows);
+        kernel.shutdown();
+        SDL_Quit();
+        return 1;
+    }
     Corona::Systems::VulkanBackend backend(main_window);
     if (!backend.initialize()) {
         std::cerr << "UiMultiSurfaceSmoke skipped: VulkanBackend initialization failed\n";
+        display.shutdown();
         destroy_windows(windows);
+        kernel.shutdown();
         SDL_Quit();
         return kSkip;
     }
@@ -66,15 +84,7 @@ int run_smoke() {
     // display event bus is intentionally absent here: this keeps the test CEF-free
     // while still validating that a display instance can be initialized/shut down
     // around the Vulkan surface owner.
-    Corona::Systems::DisplaySystem display;
-    NullSystemContext context;
-    if (!display.initialize(&context)) {
-        std::cerr << "UiMultiSurfaceSmoke failed: DisplaySystem initialization failed\n";
-        backend.shutdown();
-        destroy_windows(windows);
-        SDL_Quit();
-        return 1;
-    }
+    display.update();
 
     const auto render_solid = [&](void* surface, uint32_t width, uint32_t height) {
         Corona::Systems::QuadDraw quad;
@@ -127,6 +137,7 @@ int run_smoke() {
         backend.rebuild(backend.main_surface(), 320, 240);
         render_solid(backend.main_surface(), 320, 240);
         backend.present_surface(backend.main_surface());
+        display.update();
 
         for (void* surface : surfaces) backend.unregister_surface(surface);
         while (windows.size() > 1) {
@@ -180,6 +191,7 @@ int run_smoke() {
 
     display.shutdown();
     backend.shutdown();
+    kernel.shutdown();
     destroy_windows(windows);
     SDL_Quit();
     std::cout << "UiMultiSurfaceSmoke passed: 1/3/16, burst, resize/minimize/restore, 100 cycles, shutdown drain\n";
