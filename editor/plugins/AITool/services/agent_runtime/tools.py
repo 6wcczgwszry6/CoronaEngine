@@ -356,7 +356,12 @@ def register_agent_runtime_planning_tools(
                 "substrate_resolutions": {
                     "state_key": "substrate_resolutions",
                     "scope": "batch",
-                }
+                },
+                "room_bounds": {
+                    "state_key": "custom_scene_facts",
+                    "scope": "key",
+                    "source_arg": "bounds_fact_id",
+                },
             },
             produces_state=("environment_components", "assets"),
             requires_user_visible_failure=True,
@@ -1964,6 +1969,11 @@ def _make_environment_components_tool(provider: ResourceProvider | None) -> Call
                 if str(item or "").strip()
             ],
             "substrate_resolutions": substrate_resolutions,
+            "room_bounds": (
+                dict(call.args.get("room_bounds") or {})
+                if isinstance(call.args.get("room_bounds"), Mapping)
+                else {}
+            ),
         }
         try:
             components = dict(effective_provider(payload) or {})
@@ -2285,6 +2295,19 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
                 source="runtime_environment_import_invalid",
                 user_visible_message="环境组件导入结果不符合系统协议，系统不会伪装为已写入地形或边界。",
             )
+        ready_count = sum(
+            1
+            for component in imported_components.values()
+            if bool(component.get("bounds_ready"))
+            and str(component.get("engine_lifecycle_status") or "") == "bounds_ready"
+        )
+        environment_status = (
+            "imported"
+            if requested_count <= 0 or ready_count >= requested_count
+            else "engine_loading"
+            if len(imported_components) >= requested_count
+            else "partial"
+        )
         return ToolResult(
             True,
             "environment components imported",
@@ -2298,9 +2321,8 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
                             requested_count=requested_count,
                             imported_count=len(imported_components),
                             failed_count=max(0, requested_count - len(imported_components)),
-                            status="imported"
-                            if requested_count <= 0 or len(imported_components) >= requested_count
-                            else "partial",
+                            status=environment_status,
+                            ready_count=ready_count,
                             import_results=import_results,
                             engine_write_boundary=_environment_import_boundary_fact(
                                 result,
@@ -2318,7 +2340,7 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
                 "environment_import_results": import_results,
                 "engine_write_result": dict(result.get("engine_write_result") or {}),
                 "requested_count": requested_count,
-                "ready_count": len(imported_components),
+                "ready_count": ready_count,
                 "failed_count": max(0, requested_count - len(imported_components)),
             },
         )
@@ -2333,6 +2355,7 @@ def _environment_import_result_fact(
     imported_count: int,
     failed_count: int,
     status: str,
+    ready_count: int | None = None,
     import_results: list[dict[str, Any]],
     engine_write_boundary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -2340,7 +2363,7 @@ def _environment_import_result_fact(
         "plan_id": str(payload.get("plan_id") or ""),
         "batch_id": str(payload.get("batch_id") or ""),
         "component_count": int(requested_count),
-        "ready_count": int(imported_count),
+        "ready_count": int(imported_count if ready_count is None else ready_count),
         "imported_count": int(imported_count),
         "failed_count": int(failed_count),
         "status": str(status or "unknown"),
@@ -2383,7 +2406,10 @@ def _safe_environment_import_results(results: Any) -> list[dict[str, Any]]:
             "component_id",
             "component_name",
             "component_type",
+            "bounds_source",
             "display_name",
+            "engine_lifecycle_status",
+            "entity_type",
             "model_ref",
             "name",
             "native_name",
@@ -2629,9 +2655,15 @@ def _normalize_environment_components_for_runtime(
         raw_component.setdefault("sync_lifecycle_status", raw_component.get("sync_status") or "runtime_state")
         if scene_name:
             raw_component.setdefault("scene_name", scene_name)
-        raw_component.setdefault("position", [0.0, 0.0, 0.0])
-        raw_component.setdefault("rotation", [0.0, 0.0, 0.0])
         raw_component.setdefault("scale", _default_environment_component_scale(component_type))
+        component_scale = list(raw_component.get("scale") or _default_environment_component_scale(component_type))
+        raw_component.setdefault(
+            "position",
+            [0.0, float(component_scale[1]) / 2.0, 0.0]
+            if component_type in {"room_box", "room_floor"}
+            else [0.0, 0.0, 0.0],
+        )
+        raw_component.setdefault("rotation", [0.0, 0.0, 0.0])
         if not any(
             isinstance(raw_component.get(field), (dict, list, tuple))
             for field in ("aabb", "bounds", "scene_aabb", "world_aabb", "world_bounds")
@@ -2735,39 +2767,50 @@ def _add_default_framework_components(payload: dict[str, Any], components: dict[
         return
     if not _is_indoor_environment_text(text):
         return
+    room_bounds = payload.get("room_bounds") if isinstance(payload.get("room_bounds"), Mapping) else {}
+    width = min(8.5, max(5.5, float(room_bounds.get("width") or 6.0)))
+    depth = min(8.5, max(5.5, float(room_bounds.get("depth") or 6.0)))
+    height = min(3.8, max(2.6, float(room_bounds.get("height") or 3.0)))
+    identity_scope = str(payload.get("plan_id") or payload.get("batch_id") or "runtime")
     _ensure_environment_component(
         components,
-        batch_id=str(payload.get("batch_id") or ""),
+        identity_scope=identity_scope,
         suffix="framework-room-box",
         name="room_box",
         component_type="room_box",
         handler="runtime_room_box",
+        scale=[width, height, depth],
+        position=[0.0, height / 2.0, 0.0],
     )
     _ensure_environment_component(
         components,
-        batch_id=str(payload.get("batch_id") or ""),
+        identity_scope=identity_scope,
         suffix="framework-room-floor",
         name="room_floor",
         component_type="room_floor",
         handler="runtime_room_floor",
+        scale=[width, 0.05, depth],
+        position=[0.0, 0.025, 0.0],
     )
 
 
 def _ensure_environment_component(
     components: dict[str, Any],
     *,
-    batch_id: str,
+    identity_scope: str,
     suffix: str,
     name: str,
     component_type: str,
     handler: str,
+    scale: list[float] | None = None,
+    position: list[float] | None = None,
 ) -> None:
     for component in components.values():
         if not isinstance(component, dict):
             continue
         if str(component.get("name") or "") == name or str(component.get("component_type") or "") == component_type:
             return
-    component_id = f"{batch_id}-{suffix}" if batch_id else f"runtime-{suffix}"
+    component_id = f"{identity_scope}-{suffix}" if identity_scope else f"runtime-{suffix}"
     components[component_id] = {
         "component_id": component_id,
         "name": name,
@@ -2776,6 +2819,8 @@ def _ensure_environment_component(
         "status": "planned",
         "source": "runtime_environment_component",
         "requires_engine_write": False,
+        "scale": list(scale or _default_environment_component_scale(component_type)),
+        "position": list(position or [0.0, 0.0, 0.0]),
         **_environment_semantic_fields(name=name, component_type=component_type, handler=handler),
     }
 
@@ -3818,7 +3863,21 @@ def _make_actor_import_tool(
                 },
                 user_visible_message="场景导入结果不符合系统协议，系统会稍后重试或等待进一步处理。",
             )
+        for actor in actors.values():
+            has_actual_bounds = bool(_safe_import_aabb(actor.get("aabb") or actor.get("bounds")))
+            bounds_source = str(actor.get("bounds_source") or "").strip().lower()
+            if "bounds_ready" not in actor and has_actual_bounds and bounds_source != "estimated":
+                actor["bounds_ready"] = True
+                actor["bounds_source"] = "engine_actual"
+                actor["engine_lifecycle_status"] = "bounds_ready"
+                actor["status"] = "ready"
         imported_count = len(actors)
+        ready_count = sum(
+            1
+            for actor in actors.values()
+            if bool(actor.get("bounds_ready"))
+            and str(actor.get("engine_lifecycle_status") or "") == "bounds_ready"
+        )
         requested_count = len(requested_items) if requested_items else max(imported_count, len(import_results))
         import_results = _enrich_actor_import_results(import_results, actors)
         if not actors and import_results:
@@ -3864,12 +3923,15 @@ def _make_actor_import_tool(
             import_status = "failed"
         elif requested_count > 0 and imported_count < requested_count:
             import_status = "partial"
+        elif ready_count < imported_count:
+            import_status = "engine_loading"
         else:
             import_status = "imported"
         import_result_fact = _actor_import_result_fact(
             payload,
             requested_count=requested_count,
             imported_count=imported_count,
+            ready_count=ready_count,
             failed_count=failed_count,
             status=import_status,
             import_results=import_results,
@@ -3898,6 +3960,7 @@ def _make_actor_import_tool(
                 "batch_id": payload["batch_id"],
                 "requested_count": requested_count,
                 "imported_count": imported_count,
+                "ready_count": ready_count,
                 "failed_count": failed_count,
                 "import_results": import_results,
             },
@@ -3916,6 +3979,7 @@ def _actor_import_result_fact(
     *,
     requested_count: int,
     imported_count: int,
+    ready_count: int | None = None,
     failed_count: int,
     status: str,
     import_results: list[dict[str, Any]],
@@ -3932,7 +3996,7 @@ def _actor_import_result_fact(
         "plan_id": str(payload.get("plan_id") or ""),
         "batch_id": str(payload.get("batch_id") or ""),
         "actor_count": int(requested_count),
-        "ready_count": int(imported_count),
+        "ready_count": int(imported_count if ready_count is None else ready_count),
         "imported_count": int(imported_count),
         "failed_count": int(failed_count),
         "status": str(status or "unknown"),
@@ -3987,6 +4051,7 @@ def _safe_actor_import_results(results: Any) -> list[dict[str, Any]]:
             "model_ref",
             "native_name",
             "requested_name",
+            "semantic_role",
             "review_status",
             "status",
             "sync_lifecycle_status",

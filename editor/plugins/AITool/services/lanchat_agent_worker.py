@@ -104,14 +104,14 @@ class LANChatAgentWorker:
             return None
         self._ensure_runtime_quasar_import_path()
         try:
-            from plugins.AITool.Quasar.ai_config.ai_config import get_ai_config, reload_ai_config
-            from plugins.AITool.Quasar.ai_tools.load_tools import load_tools
-            from plugins.AITool.Quasar.ai_tools.registry import get_tool_registry
+            from Quasar.ai_config.ai_config import get_ai_config, reload_ai_config
+            from Quasar.ai_tools.load_tools import load_tools
+            from Quasar.ai_tools.registry import get_tool_registry
         except Exception as exc:  # noqa: BLE001
             try:
-                from Quasar.ai_config.ai_config import get_ai_config, reload_ai_config
-                from Quasar.ai_tools.load_tools import load_tools
-                from Quasar.ai_tools.registry import get_tool_registry
+                from plugins.AITool.Quasar.ai_config.ai_config import get_ai_config, reload_ai_config
+                from plugins.AITool.Quasar.ai_tools.load_tools import load_tools
+                from plugins.AITool.Quasar.ai_tools.registry import get_tool_registry
             except Exception:
                 self._logger.debug(
                     "AgentRuntime tool registry unavailable for %s: %s",
@@ -203,9 +203,9 @@ class LANChatAgentWorker:
                 return registry.get(tool_name)
             if tool_name == "hunyuan_generate_3d":
                 try:
-                    from plugins.AITool.Quasar.ai_modules.three_d_generate.tools.model_tools import load_hunyuan3d_tools
-                except Exception:
                     from Quasar.ai_modules.three_d_generate.tools.model_tools import load_hunyuan3d_tools
+                except Exception:
+                    from plugins.AITool.Quasar.ai_modules.three_d_generate.tools.model_tools import load_hunyuan3d_tools
 
                 for tool in load_hunyuan3d_tools(config):
                     if not registry.get(getattr(tool, "name", "")):
@@ -225,10 +225,10 @@ class LANChatAgentWorker:
         if getattr(self, "_runtime_ai_config_loaded", False):
             return
         try:
-            from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import loader as _hunyuan_loader  # noqa: F401
+            from Quasar.ai_modules.three_d_generate.tools import loader as _hunyuan_loader  # noqa: F401
         except Exception as exc:  # noqa: BLE001
             try:
-                from Quasar.ai_modules.three_d_generate.tools import loader as _hunyuan_loader  # noqa: F401
+                from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import loader as _hunyuan_loader  # noqa: F401
             except Exception:
                 self._logger.debug(
                     "AgentRuntime Hunyuan config loader unavailable: %s",
@@ -237,13 +237,30 @@ class LANChatAgentWorker:
         try:
             from plugins.AITool import utils as _aitool_utils  # noqa: F401
             from plugins.AITool.utils import ai_setting as _ai_setting  # noqa: F401
-            self._mirror_plugin_ai_settings_to_runtime_namespace()
+            self._bind_runtime_ai_config()
         except Exception as exc:  # noqa: BLE001
             self._logger.debug(
                 "AgentRuntime local AI setting module unavailable: %s",
                 type(exc).__name__,
             )
         self._runtime_ai_config_loaded = True
+
+    def _bind_runtime_ai_config(self) -> None:
+        """Bind providers to the canonical top-level Quasar configuration."""
+
+        try:
+            from Quasar.ai_config.ai_config import get_ai_config
+
+            self._runtime_ai_config_override = get_ai_config()
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug(
+                "AgentRuntime canonical AI config unavailable: %s",
+                type(exc).__name__,
+            )
+        # Compatibility for old editor builds which imported Quasar only as a
+        # plugin-qualified package.
+        self._mirror_plugin_ai_settings_to_runtime_namespace()
 
     def _mirror_plugin_ai_settings_to_runtime_namespace(self) -> None:
         """Bridge plugin-qualified Quasar settings into the Runtime Quasar namespace."""
@@ -437,6 +454,7 @@ class LANChatAgentWorker:
                     kwargs["environment_import_provider"] = make_engine_environment_component_import_provider(
                         environment_import_tool=environment_import_tool,
                         engine_gate=get_engine_write_gate(),
+                        scene_snapshot_provider=kwargs.get("scene_snapshot_provider"),
                     )
                     note_provider("environment_import", requested=True, status="enabled", reason=environment_import_tool_name)
                 else:
@@ -458,8 +476,24 @@ class LANChatAgentWorker:
 
                 model_tool = self._get_runtime_tool("hunyuan_generate_3d")
                 if model_tool is not None:
+                    try:
+                        model_concurrency = max(
+                            1,
+                            min(4, int(os.getenv("AGENT_RUNTIME_MODEL_BATCH_CONCURRENCY", "3"))),
+                        )
+                    except (TypeError, ValueError):
+                        model_concurrency = 3
+                    mesh_ready_waiter = None
+                    try:
+                        from Quasar.ai_modules.three_d_generate.tools import model_tools
+
+                        mesh_ready_waiter = getattr(model_tools, "wait_for_mesh_ready", None)
+                    except Exception:  # noqa: BLE001
+                        mesh_ready_waiter = None
                     kwargs["model_resource_provider"] = make_model_resource_provider(
                         model_tool=model_tool,
+                        max_concurrency=model_concurrency,
+                        wait_for_ready=mesh_ready_waiter if callable(mesh_ready_waiter) else None,
                     )
                     model_resource_provider_enabled = True
                     note_provider("model_resource", requested=True, status="enabled")
@@ -500,6 +534,7 @@ class LANChatAgentWorker:
                     kwargs["actor_import_provider"] = make_engine_actor_import_provider(
                         import_tool=import_tool,
                         engine_gate=get_engine_write_gate(),
+                        scene_snapshot_provider=kwargs.get("scene_snapshot_provider"),
                     )
                     note_provider("actor_import", requested=True, status="enabled", reason="import_model")
                 else:
@@ -855,25 +890,9 @@ class LANChatAgentWorker:
             return False
         room_id = str(message.get("room_id") or "default")
         self._remember_room_id(room_id)
-        if self._is_generation_start_text(text):
-            runtime_generation_reply = self._execute_active_runtime_plan_generation(
-                message,
-                room_id=room_id,
-                host_id=str(message.get("sender_id") or message.get("from") or ""),
-            )
-            if runtime_generation_reply is not None:
-                self._send_coordinator_sync_system_reply(message, runtime_generation_reply)
-                self._log_scene_route(
-                    room_id=room_id,
-                    sender=str(message.get("sender_name") or message.get("sender_id") or ""),
-                    target_agent=str(message.get("target_agent_name") or message.get("agent_name") or ""),
-                    room_state="runtime",
-                    intent="generation_start",
-                    action="confirm_and_execute",
-                    reason=f"runtime_first source={source}",
-                )
-                self._remember_coordinator_seen_message_id(dedupe_key)
-                return True
+        # Generation confirmation is authoritative control traffic. Resolve
+        # the Coordinator plan below before enqueueing Runtime graphs; running
+        # Runtime first races the parallel agent-trigger queue.
         if self._is_runtime_status_query_text(text):
             runtime_external_plan_id = self._active_runtime_external_plan_id(room_id)
             if runtime_external_plan_id:
@@ -1033,7 +1052,7 @@ class LANChatAgentWorker:
                         target_agent=str(message.get("target_agent_name") or message.get("agent_name") or ""),
                         room_state=str(coordinator.active_plan_for_room(room_id).status.value if coordinator.active_plan_for_room(room_id) is not None else "none"),
                         intent="generation_start",
-                        action="confirm_and_execute",
+                        action="confirm_and_enqueue",
                         reason=f"source={source}",
                     )
                     return True
@@ -2039,6 +2058,12 @@ class LANChatAgentWorker:
             return False
         room_id = str(trigger.get("room_id") or "default")
         host_id = str(trigger.get("sender_id") or trigger.get("from") or "host")
+        explicit_target_agent = str(
+            trigger.get("agent_name")
+            or trigger.get("target_agent_name")
+            or ""
+        ).strip()
+        effective_owner_agent = explicit_target_agent or str(agent_name or "")
         self._remember_room_id(room_id)
         try:
             result = self._agent_runtime.handle_message(
@@ -2046,8 +2071,8 @@ class LANChatAgentWorker:
                 text=text,
                 sender_id=host_id,
                 sender_name=str(trigger.get("sender_name") or trigger.get("from") or "host"),
-                owner_agent=str(agent_name or trigger.get("agent_name") or ""),
-                action="confirm_and_execute",
+                owner_agent=effective_owner_agent,
+                action="confirm_and_enqueue",
                 external_plan_id=self._runtime_planning_external_id(trigger, agent_name),
                 scene_name=self._runtime_scene_name_from_trigger(trigger),
             )
@@ -2056,7 +2081,7 @@ class LANChatAgentWorker:
                 "[LANChatGenerationTrace] phase=runtime_planning_compose_executed room=%s external_plan=%s agent=%s text=%s",
                 room_id,
                 self._runtime_planning_external_id(trigger, agent_name),
-                agent_name,
+                effective_owner_agent,
                 _trace_preview(text),
             )
             return bool(self._send_final_reply("gm-system", "绯荤粺", reply, trigger))
@@ -2096,18 +2121,31 @@ class LANChatAgentWorker:
             return False
         return bool(self._send_final_reply("gm-system", "绯荤粺", reply, trigger))
 
-    @staticmethod
-    def _runtime_planning_external_id(trigger: dict[str, Any], agent_name: str) -> str:
+    def _runtime_planning_external_id(self, trigger: dict[str, Any], agent_name: str) -> str:
         for value in (
             trigger.get("target_plan_id"),
             trigger.get("proposal_id"),
-            trigger.get("correlation_id"),
-            trigger.get("message_id"),
         ):
             text = str(value or "").strip()
             if text:
                 return f"planning:{text}"
         room_id = str(trigger.get("room_id") or "default").strip() or "default"
+        try:
+            room_state = self._agent_runtime.query_state(room_id).get("room", {})
+        except Exception:  # noqa: BLE001
+            room_state = {}
+        if isinstance(room_state, dict):
+            active_plan_id = str(room_state.get("active_plan_id") or "").strip()
+            active_plan = dict(room_state.get("scene_plans", {}).get(active_plan_id) or {})
+            active_status = str(active_plan.get("status") or "").strip().lower()
+            if active_plan_id and active_status not in {"completed", "failed", "cancelled"}:
+                for external_id, runtime_plan_id in dict(room_state.get("external_plan_links") or {}).items():
+                    if str(runtime_plan_id or "") == active_plan_id and str(external_id or "").strip():
+                        return str(external_id)
+        for value in (trigger.get("correlation_id"), trigger.get("message_id")):
+            text = str(value or "").strip()
+            if text:
+                return f"planning:{text}"
         agent = str(agent_name or trigger.get("agent_name") or trigger.get("agent_id") or "agent").strip() or "agent"
         return f"planning:{room_id}:{agent}"
 
@@ -2796,6 +2834,13 @@ class LANChatAgentWorker:
         graph_limit = max(1, int(max_graphs_per_room or 1))
         for room_id in room_snapshot[:room_limit]:
             before_timestamp = self._latest_agent_runtime_event_timestamp(str(room_id))
+            active_plan_id = self._active_runtime_external_plan_id(str(room_id))
+            heartbeat_stop = threading.Event()
+            heartbeat_thread = self._start_runtime_drain_heartbeat(
+                room_id=str(room_id),
+                plan_id=active_plan_id,
+                stop_event=heartbeat_stop,
+            )
             try:
                 runtime_result = self._agent_runtime.handle_message(
                     room_id=str(room_id),
@@ -2820,6 +2865,10 @@ class LANChatAgentWorker:
                     },
                 )
                 continue
+            finally:
+                heartbeat_stop.set()
+                if heartbeat_thread is not None and heartbeat_thread.is_alive():
+                    heartbeat_thread.join(timeout=0.1)
             drained_count = int(result.get("drained_count") or 0)
             drain_failed = str(result.get("status") or "").strip().lower() == "failed"
             if drain_failed:
@@ -2855,6 +2904,36 @@ class LANChatAgentWorker:
             )
             return True
         return False
+
+    def _start_runtime_drain_heartbeat(
+        self,
+        *,
+        room_id: str,
+        plan_id: str,
+        stop_event: threading.Event,
+    ) -> threading.Thread | None:
+        if self._corona_engine is None:
+            return None
+        try:
+            interval_s = max(5.0, min(60.0, float(os.getenv("AGENT_RUNTIME_HEARTBEAT_SECONDS", "30"))))
+        except (TypeError, ValueError):
+            interval_s = 30.0
+
+        def run() -> None:
+            while not stop_event.wait(interval_s):
+                self._emit_generation_progress_disclosure(
+                    "模型和环境组件仍在进入场景，你可以继续补充要求。",
+                    room_id=room_id,
+                    plan_id=plan_id,
+                )
+
+        thread = threading.Thread(
+            target=run,
+            name=f"AgentRuntimeHeartbeat-{room_id}",
+            daemon=True,
+        )
+        thread.start()
+        return thread
 
     def _latest_agent_runtime_event_timestamp(self, room_id: str) -> float:
         try:
@@ -3150,6 +3229,18 @@ class LANChatAgentWorker:
             trigger.get("message_kind") or "",
             _trace_preview(trigger.get("text")),
         )
+        if (
+            self._interaction_coordinator is not None
+            and str(trigger.get("message_id") or "").strip()
+            and self._is_generation_start_text(str(trigger.get("text") or ""))
+        ):
+            self._logger.info(
+                "[LANChatGenerationTrace] phase=agent_trigger_generation_deferred_to_authoritative_sync "
+                "room=%s message_id=%s",
+                trigger.get("room_id") or "",
+                trigger.get("message_id") or "",
+            )
+            return True
 
         def _send_progress(message: str) -> None:
             text = str(message or "").strip()
@@ -3982,6 +4073,8 @@ class LANChatAgentWorker:
         runtime_plan_id = str(runtime_plan.get("plan_id") or "")
         graphs = result.get("graphs", []) if isinstance(result, dict) else []
         queued_count = sum(1 for graph in graphs if isinstance(graph, dict) and str(graph.get("status") or "") == "queued")
+        if graphs:
+            self._remember_room_id(room_id)
         if runtime_plan_id and bool(result.get("recorded")):
             self._logger.info(
                 "[LANChatGenerationTrace] phase=agent_runtime_enqueue_result room=%s runtime_plan=%s queued_graphs=%s",
@@ -4037,6 +4130,8 @@ class LANChatAgentWorker:
         runtime_plan_id = str(runtime_plan.get("plan_id") or "")
         graphs = result.get("graphs", []) if isinstance(result, dict) else []
         queued_count = sum(1 for graph in graphs if isinstance(graph, dict) and str(graph.get("status") or "") == "queued")
+        if graphs:
+            self._remember_room_id(room_id)
         self._logger.info(
             "[LANChatGenerationTrace] phase=agent_runtime_enqueue_result room=%s external_plan=%s runtime_plan=%s queued_graphs=%s",
             room_id,
@@ -8449,7 +8544,7 @@ class LANChatAgentWorker:
                 sender_name=str(host_id or ""),
                 owner_agent=str(getattr(plan, "owner_agent_name", "") or getattr(plan, "owner_agent_id", "") or ""),
                 source_context_agents=list(getattr(plan, "source_context_agents", []) or []),
-                action="confirm_and_execute",
+                action="confirm_and_enqueue",
                 external_plan_id=str(getattr(plan, "plan_id", "") or ""),
                 scene_name=self._runtime_scene_name_from_plan(plan),
             )
@@ -8467,6 +8562,17 @@ class LANChatAgentWorker:
         batches = self._agent_runtime_batches_from_result(result) if isinstance(result, dict) else []
         graphs = self._agent_runtime_graphs_from_result(result)
         graph_statuses = [str(graph.get("status") or "") for graph in graphs if isinstance(graph, dict)]
+        if not batches or not graphs:
+            self._logger.warning(
+                "[LANChatGenerationTrace] phase=agent_runtime_enqueue_incomplete room=%s "
+                "external_plan=%s runtime_plan=%s batches=%s graphs=%s",
+                room_id,
+                getattr(plan, "plan_id", ""),
+                runtime_plan_id,
+                len(batches),
+                len(graphs),
+            )
+            return "当前方案尚未形成可执行批次，系统没有启动空生成；请继续完善方案后再确认。"
         if graphs:
             self._remember_room_id(room_id)
         self._logger.info(
@@ -8512,7 +8618,7 @@ class LANChatAgentWorker:
                 sender_name=str(trigger.get("sender_name") or host_id or ""),
                 owner_agent=str(trigger.get("agent_name") or ""),
                 source_context_agents=[],
-                action="confirm_and_execute",
+                action="confirm_and_enqueue",
                 external_plan_id=external_plan_id,
                 scene_name=self._runtime_scene_name_from_trigger(trigger),
             )
@@ -8540,6 +8646,16 @@ class LANChatAgentWorker:
         batches = self._agent_runtime_batches_from_result(result) if isinstance(result, dict) else []
         graphs = self._agent_runtime_graphs_from_result(result)
         graph_statuses = [str(graph.get("status") or "") for graph in graphs if isinstance(graph, dict)]
+        if not batches or not graphs:
+            self._logger.warning(
+                "[LANChatGenerationTrace] phase=runtime_active_plan_enqueue_incomplete room=%s "
+                "runtime_plan=%s batches=%s graphs=%s",
+                room_id,
+                runtime_plan_id,
+                len(batches),
+                len(graphs),
+            )
+            return "当前方案尚未形成可执行批次，系统没有启动空生成；请继续完善方案后再确认。"
         if graphs:
             self._remember_room_id(room_id)
         self._logger.info(
@@ -8597,7 +8713,7 @@ class LANChatAgentWorker:
         if action_type == "post_generation_add":
             runtime_action = "post_generation_add"
         else:
-            runtime_action = "confirm_and_execute"
+            runtime_action = "confirm_and_enqueue"
         try:
             result = self._agent_runtime.handle_message(
                 room_id=room_id,
@@ -10872,9 +10988,12 @@ class LANChatAgentWorker:
 
     def _install_deferred_download_scheduler(self, scheduler: Any) -> None:
         try:
-            from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import model_tools
+            from Quasar.ai_modules.three_d_generate.tools import model_tools
         except Exception:
-            return
+            try:
+                from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import model_tools
+            except Exception:
+                return
         setter = getattr(model_tools, "set_deferred_download_scheduler", None)
         if callable(setter):
             try:
@@ -10884,9 +11003,12 @@ class LANChatAgentWorker:
 
     def _clear_deferred_download_scheduler(self, scheduler: Any) -> None:
         try:
-            from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import model_tools
+            from Quasar.ai_modules.three_d_generate.tools import model_tools
         except Exception:
-            return
+            try:
+                from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import model_tools
+            except Exception:
+                return
         getter = getattr(model_tools, "get_deferred_download_scheduler", None)
         setter = getattr(model_tools, "set_deferred_download_scheduler", None)
         if not callable(getter) or not callable(setter):
@@ -10899,9 +11021,12 @@ class LANChatAgentWorker:
 
     def _install_media_task_scheduler(self, scheduler: Any) -> None:
         try:
-            from plugins.AITool.Quasar.ai_media_resource import registry
+            from Quasar.ai_media_resource import registry
         except Exception:
-            return
+            try:
+                from plugins.AITool.Quasar.ai_media_resource import registry
+            except Exception:
+                return
         setter = getattr(registry, "set_media_task_scheduler", None)
         if callable(setter):
             try:
@@ -10911,9 +11036,12 @@ class LANChatAgentWorker:
 
     def _clear_media_task_scheduler(self, scheduler: Any) -> None:
         try:
-            from plugins.AITool.Quasar.ai_media_resource import registry
+            from Quasar.ai_media_resource import registry
         except Exception:
-            return
+            try:
+                from plugins.AITool.Quasar.ai_media_resource import registry
+            except Exception:
+                return
         getter = getattr(registry, "get_media_task_scheduler", None)
         setter = getattr(registry, "set_media_task_scheduler", None)
         if not callable(getter) or not callable(setter):

@@ -1384,10 +1384,12 @@ class ActorFactValidator:
         "batch_id",
         "bounds",
         "bounds_ready",
+        "bounds_source",
         "deleted",
         "deleted_at",
         "display_name",
         "entity_type",
+        "engine_lifecycle_status",
         "gameplay_tags",
         "grounding_status",
         "interaction_capability",
@@ -1411,6 +1413,7 @@ class ActorFactValidator:
         "semantic_role",
         "size",
         "source",
+        "status",
         "support_type",
         "sync_status",
         "sync_lifecycle_status",
@@ -1443,6 +1446,7 @@ class ActorFactValidator:
         "actor_id",
         "asset_id",
         "batch_id",
+        "bounds_source",
         "display_name",
         "last_sync_event",
         "last_sync_status",
@@ -1458,6 +1462,7 @@ class ActorFactValidator:
         "grounding_status",
         "support_type",
         "entity_type",
+        "engine_lifecycle_status",
         "sync_status",
         "sync_lifecycle_status",
         "review_status",
@@ -1678,6 +1683,7 @@ class SceneSnapshotFactValidator:
         "scene_name",
         "snapshot_id",
         "source",
+        "status",
         "timestamp",
     }
     _BLOCKED_FIELDS = ActorFactValidator._BLOCKED_FIELDS | {
@@ -3021,12 +3027,15 @@ class EnvironmentComponentValidator:
         "audio_profile",
         "boundary_style",
         "bounds_ready",
+        "bounds_source",
         "bounds",
         "component_id",
         "component_type",
         "aliases",
         "display_name",
         "environment_profile",
+        "engine_lifecycle_status",
+        "entity_type",
         "gameplay_tags",
         "handler",
         "interaction_capability",
@@ -3043,6 +3052,7 @@ class EnvironmentComponentValidator:
         "scale",
         "scene_aabb",
         "scene_name",
+        "semantic_role",
         "script_bindings",
         "size",
         "source",
@@ -3123,16 +3133,20 @@ class EnvironmentComponentValidator:
         for field in (
             "actor_id",
             "boundary_style",
+            "bounds_source",
             "component_id",
             "name",
             "display_name",
             "native_name",
             "requested_name",
             "component_type",
+            "engine_lifecycle_status",
+            "entity_type",
             "handler",
             "model_ref",
             "review_status",
             "scene_name",
+            "semantic_role",
             "source",
             "status",
             "surface",
@@ -3172,15 +3186,19 @@ class EnvironmentComponentValidator:
         for field in (
             "actor_id",
             "boundary_style",
+            "bounds_source",
             "component_id",
             "name",
             "display_name",
             "native_name",
             "requested_name",
             "handler",
+            "engine_lifecycle_status",
+            "entity_type",
             "model_ref",
             "review_status",
             "scene_name",
+            "semantic_role",
             "source",
             "status",
             "surface",
@@ -13477,19 +13495,9 @@ class AgentRuntime:
                         active_runtime_plan.plan_id,
                         confirmed_by=sender_name or sender_id,
                     )
-                explicit_item_count = len([
-                    item
-                    for item in list(active_runtime_plan.concrete_object_items or [])
-                    if str(item or "").strip()
-                ])
-                effective_max_items = (
-                    max(max_items_per_batch, explicit_item_count or max_items_per_batch)
-                    if max_items_per_batch == 3
-                    else max_items_per_batch
-                )
                 execution = self.execute_planned_batches(
                     active_runtime_plan.plan_id,
-                    max_items_per_batch=effective_max_items,
+                    max_items_per_batch=max_items_per_batch,
                     scene_name=scene_name,
                 )
                 if not execution.get("batches") or not execution.get("graphs"):
@@ -13910,7 +13918,12 @@ class AgentRuntime:
         if plan is None:
             raise KeyError(f"scene plan not found: {plan_id}")
         self.scene_plans[plan.plan_id] = plan
-        drain_result = self.drain_tool_graph_queue(plan.room_id, plan_id=plan.plan_id, max_graphs=1)
+        drain_result = self.drain_tool_graph_queue(
+            plan.room_id,
+            plan_id=plan.plan_id,
+            max_graphs=1,
+            finalize_plans=False,
+        )
         graph_id = str(queued.get("graph", {}).get("graph_id") or "")
         graph = self._queued_tool_graphs.get(graph_id)
         batch_id = str(queued.get("batch", {}).get("batch_id") or "")
@@ -13921,7 +13934,7 @@ class AgentRuntime:
         if plan.status not in {ScenePlanStatus.PAUSED, ScenePlanStatus.CANCELLED}:
             plan.status = (
                 ScenePlanStatus.COMPLETED
-                if batch.status in {BatchPlanStatus.COMPLETED, BatchPlanStatus.PARTIAL}
+                if batch.status == BatchPlanStatus.COMPLETED
                 else ScenePlanStatus.FAILED
                 if batch.status == BatchPlanStatus.FAILED
                 else ScenePlanStatus.EXECUTING
@@ -14323,6 +14336,42 @@ class AgentRuntime:
                 absorbed_patch_ids=absorbed_patch_ids,
             )
             planned_batches_created = True
+        room_state = self.state.room(plan.room_id)
+        graph_facts = dict(room_state.get("tool_graphs") or {})
+        queue_facts = dict(room_state.get("tool_graph_queue") or {})
+        pending_batches = [
+            batch for batch in batches
+            if batch.status != BatchPlanStatus.COMPLETED
+        ]
+        existing_active_graphs: list[dict[str, Any]] = []
+        for batch in pending_batches:
+            graph_id = str(batch.tool_graph_id or "").strip()
+            graph_fact = dict(graph_facts.get(graph_id) or {}) if graph_id else {}
+            queue_fact = dict(queue_facts.get(graph_id) or {}) if graph_id else {}
+            status = str(queue_fact.get("status") or graph_fact.get("status") or "").strip().lower()
+            if graph_id and status in {"queued", "running"}:
+                existing_active_graphs.append({
+                    "graph_id": graph_id,
+                    "status": status,
+                    "batch_id": batch.batch_id,
+                    "nodes": dict(graph_fact.get("nodes") or {}),
+                })
+        if pending_batches and len(existing_active_graphs) == len(pending_batches):
+            self.operation_log.append(
+                "planned_batches_enqueue_reused",
+                room_id=plan.room_id,
+                plan_id=plan.plan_id,
+                payload={
+                    "batch_count": len(batches),
+                    "graph_count": len(existing_active_graphs),
+                    "statuses": [graph["status"] for graph in existing_active_graphs],
+                },
+            )
+            return {
+                "plan": plan.as_dict(),
+                "batches": [batch.as_dict() for batch in batches],
+                "graphs": existing_active_graphs,
+            }
         plan_state = dict(absorb_changes.get("scene_plans", {}).get(plan.plan_id) or plan.as_dict())
         if scene_name:
             plan_state["scene_name"] = str(scene_name)
@@ -15102,7 +15151,11 @@ class AgentRuntime:
         if plan is None:
             raise KeyError(f"scene plan not found: {plan_id}")
         self.scene_plans[plan.plan_id] = plan
-        drain_result = self.drain_tool_graph_queue(plan.room_id, plan_id=plan.plan_id)
+        drain_result = self.drain_tool_graph_queue(
+            plan.room_id,
+            plan_id=plan.plan_id,
+            finalize_plans=False,
+        )
         drained_graphs = [
             self._queued_tool_graphs.get(str(item.get("graph_id") or ""))
             for item in drain_result.get("graphs", [])
@@ -15148,7 +15201,7 @@ class AgentRuntime:
             next_status = plan.status
         elif batches and any(batch.status == BatchPlanStatus.FAILED for batch in batches):
             next_status = ScenePlanStatus.FAILED
-        elif batches and all(batch.status in {BatchPlanStatus.COMPLETED, BatchPlanStatus.PARTIAL} for batch in batches):
+        elif batches and all(batch.status == BatchPlanStatus.COMPLETED for batch in batches):
             next_status = ScenePlanStatus.COMPLETED
         else:
             next_status = ScenePlanStatus.EXECUTING
@@ -15734,6 +15787,7 @@ class AgentRuntime:
         plan_id: str = "",
         max_graphs: int | None = None,
         stop_on_failure: bool = True,
+        finalize_plans: bool = True,
     ) -> dict[str, Any]:
         drained: list[ToolCallGraph] = []
         safe_limit = None if max_graphs is None else max(0, int(max_graphs))
@@ -15749,12 +15803,30 @@ class AgentRuntime:
         reason = ""
         if failed_graphs:
             reason = "one or more tool graphs did not complete"
+        candidate_plan_ids = {
+            str(graph.plan_id or "")
+            for graph in drained
+            if str(graph.plan_id or "")
+        }
+        if str(plan_id or ""):
+            candidate_plan_ids.add(str(plan_id))
+        finalized_plans = []
+        if finalize_plans:
+            finalized_plans = [
+                result
+                for candidate_plan_id in sorted(candidate_plan_ids)
+                if (result := self._finalize_plan_after_queue_drain(
+                    room_id=str(room_id),
+                    plan_id=candidate_plan_id,
+                ))
+            ]
         return {
             "room_id": str(room_id),
             "plan_id": str(plan_id or ""),
             "status": status,
             "reason": reason,
             "drained_count": len(drained),
+            "finalized_plans": finalized_plans,
             "graphs": [
                 {
                     "graph_id": graph.graph_id,
@@ -15765,6 +15837,77 @@ class AgentRuntime:
                 for graph in drained
             ],
         }
+
+    def _finalize_plan_after_queue_drain(self, *, room_id: str, plan_id: str) -> dict[str, Any]:
+        """Finalize a plan only from persisted queue, batch, and import facts."""
+
+        plan = self._runtime_plan_by_id_from_state(plan_id)
+        if plan is None:
+            return {}
+        room = self.state.room(str(room_id))
+        queue = dict(room.get("tool_graph_queue") or {})
+        active_queue_rows = [
+            row
+            for row in queue.values()
+            if isinstance(row, Mapping)
+            and str(row.get("plan_id") or "") == plan_id
+            and str(row.get("status") or "") in {"queued", "running", "planned", "ready"}
+        ]
+        if active_queue_rows:
+            return {
+                "plan_id": plan_id,
+                "status": ScenePlanStatus.EXECUTING.value,
+                "reason": "tool_graphs_active",
+                "active_graph_count": len(active_queue_rows),
+            }
+        batches = self._planned_batches_for_plan(plan_id)
+        if not batches:
+            return {}
+        batch_statuses = [batch.status for batch in batches]
+        if any(status == BatchPlanStatus.FAILED for status in batch_statuses):
+            next_status = ScenePlanStatus.FAILED
+            reason = "batch_failed"
+        elif all(status == BatchPlanStatus.COMPLETED for status in batch_statuses):
+            next_status = ScenePlanStatus.COMPLETED
+            reason = "all_batches_engine_ready"
+        elif all(
+            status in {
+                BatchPlanStatus.COMPLETED,
+                BatchPlanStatus.PARTIAL,
+                BatchPlanStatus.CANCELLED,
+            }
+            for status in batch_statuses
+        ):
+            next_status = ScenePlanStatus.EXECUTING
+            reason = "engine_readiness_pending"
+        else:
+            return {}
+
+        previous_status = plan.status
+        if previous_status != next_status:
+            plan.status = next_status
+            plan.updated_at = _now()
+            self._persist_scene_plan_status(plan, reason=f"plan_finalizer:{reason}")
+            self.scene_plans[plan.plan_id] = plan
+        result = {
+            "plan_id": plan_id,
+            "status": next_status.value,
+            "reason": reason,
+            "batch_count": len(batches),
+            "completed_count": sum(status == BatchPlanStatus.COMPLETED for status in batch_statuses),
+            "partial_count": sum(status == BatchPlanStatus.PARTIAL for status in batch_statuses),
+            "failed_count": sum(status == BatchPlanStatus.FAILED for status in batch_statuses),
+        }
+        self.operation_log.append(
+            "scene_plan_finalized" if next_status in {ScenePlanStatus.COMPLETED, ScenePlanStatus.FAILED} else "scene_plan_finalization_pending",
+            room_id=str(room_id),
+            plan_id=plan_id,
+            message=reason,
+            payload=result,
+        )
+        if next_status in {ScenePlanStatus.COMPLETED, ScenePlanStatus.FAILED} and previous_status != next_status:
+            self.generate_report(str(room_id), plan_id=plan_id)
+        return result
 
     def _drain_queued_tool_graph(
         self,
@@ -16096,6 +16239,11 @@ class AgentRuntime:
             failed_count = int(fact.get("failed_count") or 0)
             if status in {"failed", "error", "missing"}:
                 return BatchPlanStatus.FAILED
+            imported_count = int(fact.get("imported_count") or 0)
+            if status in {"engine_loading", "engine_accepted", "import_requested"}:
+                candidate_statuses.append(BatchPlanStatus.PARTIAL)
+            if imported_count > 0 and ready_count < imported_count:
+                candidate_statuses.append(BatchPlanStatus.PARTIAL)
             if actor_count > 0 and ready_count <= 0 and failed_count >= actor_count:
                 return BatchPlanStatus.FAILED
             if ready_count > 0 and (failed_count > 0 or (actor_count > 0 and ready_count < actor_count)):
@@ -18773,7 +18921,11 @@ class AgentRuntime:
                 value = str(row.get(key) or "").strip()
                 if value:
                     return value
-            return safe_model_filename(row)
+            model_identity = str(row.get("model_ref") or "").strip() or safe_model_filename(row)
+            if model_identity:
+                digest = uuid.uuid5(uuid.NAMESPACE_URL, f"corona-runtime-asset:{model_identity}").hex[:24]
+                return f"asset-{digest}"
+            return ""
 
         def actor_model_ref(row: Mapping[str, Any], asset_id: str) -> str:
             for key in ("model_ref", "model_id", "resource_id"):
@@ -18794,7 +18946,7 @@ class AgentRuntime:
                 filename = safe_model_filename(asset)
                 if filename:
                     return filename
-            return asset_id
+            return ""
 
         def list_field(row: Mapping[str, Any], key: str) -> list[Any]:
             value = row.get(key)
@@ -18811,20 +18963,20 @@ class AgentRuntime:
             return dict(value) if isinstance(value, Mapping) else {}
 
         def actor_interaction_capability(row: Mapping[str, Any]) -> list[Any]:
-            return list_field(row, "interaction_capability") or ["inspect", "move"]
+            return list_field(row, "interaction_capability")
 
         def actor_gameplay_tags(row: Mapping[str, Any]) -> list[Any]:
-            tags = list_field(row, "gameplay_tags")
-            return tags if tags else ["runtime_generated"]
+            return list_field(row, "gameplay_tags")
 
         def actor_physics_profile(row: Mapping[str, Any]) -> dict[str, Any]:
-            profile = mapping_field(row, "physics_profile")
-            profile.setdefault("collision", "static")
-            return profile
+            return mapping_field(row, "physics_profile")
 
         def actor_script_bindings(row: Mapping[str, Any]) -> list[Any]:
-            bindings = list_field(row, "script_bindings")
-            return bindings if bindings else ["runtime_scene_entity"]
+            return list_field(row, "script_bindings")
+
+        def stable_entity_id(*parts: Any) -> str:
+            identity = "|".join(str(part or "").strip() for part in parts)
+            return f"entity-{uuid.uuid5(uuid.NAMESPACE_URL, 'corona-runtime:' + identity).hex}"
 
         def environment_profile_from(row: Mapping[str, Any]) -> dict[str, Any]:
             profile = mapping_field(row, "environment_profile")
@@ -18862,7 +19014,9 @@ class AgentRuntime:
             ).strip().lower()
             source = str(row.get("source") or "").strip().lower()
             status = str(row.get("status") or "").strip().lower()
-            if sync_status in {
+            bounds_ready = bool(row.get("bounds_ready"))
+            lifecycle = str(row.get("engine_lifecycle_status") or "").strip().lower()
+            if bounds_ready and lifecycle in {"bounds_ready", "engine_ready", "ready"} and sync_status in {
                 "engine_created",
                 "engine_imported",
                 "engine_transformed",
@@ -18870,8 +19024,10 @@ class AgentRuntime:
                 "synchronized",
             }:
                 return "engine_verified"
-            if source.startswith("engine_") and status not in {"runtime_state_only", "planned"}:
+            if bounds_ready and lifecycle in {"bounds_ready", "engine_ready", "ready"} and source.startswith("engine_") and status not in {"runtime_state_only", "planned"}:
                 return "engine_verified"
+            if lifecycle in {"engine_loading", "engine_accepted", "import_requested"}:
+                return "engine_loading"
             if status == "runtime_state_only" or sync_status == "runtime_state_only":
                 return "pending_f5"
             if status in {"planned", "pending", "queued"} or sync_status in {"planned", "pending", "queued"}:
@@ -19079,13 +19235,20 @@ class AgentRuntime:
             actor_sync = actor_sync_status(merged, asset_id)
             bounds = bounds_from(merged)
             actor_source = str(merged.get("source") or "").strip()
-            geometry_source = (
+            geometry_source = str(merged.get("bounds_source") or "") or (
                 "runtime_estimated_bounds"
                 if actor_source == "engine_import_runtime_estimated_bounds"
                 else "runtime_state"
             )
+            entity_id = str(merged.get("entity_id") or "").strip() or stable_entity_id(
+                active_plan_id,
+                merged.get("batch_id"),
+                asset_id,
+                merged.get("requested_name"),
+                actor_id,
+            )
             entity = {
-                "entity_id": str(actor_id),
+                "entity_id": entity_id,
                 "actor_id": str(actor_id),
                 "name": str(merged.get("name") or actor_id),
                 "display_name": str(merged.get("display_name") or merged.get("name") or actor_id),
@@ -19097,10 +19260,11 @@ class AgentRuntime:
                 "semantic_role": str(
                     merged.get("semantic_role")
                     or merged.get("role")
+                    or merged.get("requested_name")
                     or merged.get("name")
-                    or actor_id
+                    or ""
                 ),
-                "entity_type": "actor",
+                "entity_type": str(merged.get("entity_type") or "actor"),
                 "transform": transform_from(merged),
                 "bounds": bounds,
                 "aabb": dict(bounds),
@@ -19135,7 +19299,11 @@ class AgentRuntime:
                 if not isinstance(component, Mapping):
                     continue
                 component_type = str(component.get("component_type") or "environment").strip() or "environment"
-                entity_id = f"environment:{current_batch_id}:{component_id}"
+                entity_id = str(component.get("entity_id") or "").strip() or stable_entity_id(
+                    active_plan_id,
+                    "environment",
+                    component.get("component_id") or component_id,
+                )
                 if entity_id in seen_entity_ids:
                     continue
                 bounds = bounds_from(component)
@@ -19152,8 +19320,13 @@ class AgentRuntime:
                     "aliases": list_field(component, "aliases"),
                     "asset_id": str(component.get("asset_id") or ""),
                     "model_ref": str(component.get("model_ref") or component.get("handler") or component_type),
-                    "semantic_role": str(component.get("name") or component_id),
-                    "entity_type": "terrain" if component_type in {"terrain", "room_floor", "room_box"} else component_type,
+                    "semantic_role": str(
+                        component.get("semantic_role")
+                        or "indoor_enclosure" if component_type == "room_box"
+                        else "walkable_floor" if component_type == "room_floor"
+                        else "environment_component"
+                    ),
+                    "entity_type": "environment",
                     "component_type": component_type,
                     "environment_component_type": component_type,
                     "transform": transform_from(component),
@@ -19163,7 +19336,7 @@ class AgentRuntime:
                     "size": vector3(component.get("size")),
                     "grounding_status": "not_applicable",
                     "interaction_capability": list_field(component, "interaction_capability"),
-                    "gameplay_tags": list_field(component, "gameplay_tags") or ["environment"],
+                    "gameplay_tags": list_field(component, "gameplay_tags"),
                     "physics_profile": mapping_field(component, "physics_profile"),
                     "audio_profile": mapping_field(component, "audio_profile"),
                     "lighting_profile": mapping_field(component, "lighting_profile"),
@@ -19231,7 +19404,7 @@ class AgentRuntime:
             add_count(entity_type_counts, str(entity.get("entity_type") or "unknown"))
             add_count(grounding_status_counts, str(entity.get("grounding_status") or "unknown"))
             add_count(sync_status_counts, str(entity.get("sync_status") or "unknown"))
-            is_actor_entity = entity.get("entity_type") == "actor"
+            is_actor_entity = bool(entity.get("actor_id")) and not bool(entity.get("component_id"))
             has_transform = isinstance(entity.get("transform"), Mapping) and bool(entity.get("transform"))
             has_aabb = isinstance(entity.get("aabb"), Mapping) and bool(entity.get("aabb"))
             if has_transform:
@@ -19260,7 +19433,11 @@ class AgentRuntime:
             )
             if is_actor_entity:
                 add_count(geometry_source_counts, str(entity.get("geometry_source") or "unknown"))
-        actor_count = sum(1 for entity in entities if entity.get("entity_type") == "actor")
+        actor_count = sum(
+            1
+            for entity in entities
+            if bool(entity.get("actor_id")) and not bool(entity.get("component_id"))
+        )
         missing_transform_count = max(0, actor_count - actor_transform_available_count)
         missing_aabb_count = max(0, actor_count - actor_aabb_available_count)
         estimated_actor_bounds_count = int(geometry_source_counts.get("runtime_estimated_bounds") or 0)
@@ -20866,16 +21043,26 @@ class AgentRuntime:
                 report_event_message += (
                     f" {scene_entity_engine_write_pending_f5_count} 个场景实体仍待引擎写入/F5确认。"
                 )
+        plan_status_value = str(plan.get("status") or "")
+        report_terminal = plan_status_value in {
+            ScenePlanStatus.COMPLETED.value,
+            ScenePlanStatus.FAILED.value,
+            ScenePlanStatus.CANCELLED.value,
+        }
+        if not report_terminal:
+            report_event_title = "场景仍在等待引擎就绪"
+            report_event_message = "模型或环境组件仍在进入场景，当前仅提供阶段性状态。"
+            report_event_level = "info"
         self.emit_runtime_event(
             room_id=str(room_id),
             plan_id=active_plan_id,
             batch_id=batch_id,
-            event_type="report_ready",
+            event_type="report_ready" if report_terminal else "report_pending",
             phase="report",
             title=report_event_title,
             message=report_event_message,
             level=report_event_level,
-            progress=100,
+            progress=100 if report_terminal else 96,
             payload={
                 "status": str(plan.get("status") or ""),
                 "actor_count": len(scoped_actor_facts),
@@ -21980,8 +22167,7 @@ class AgentRuntime:
             "latest_conflicts": safe_conflicts[-5:],
         }
 
-    @staticmethod
-    def _derive_scene_design_contract_fact(plan: ScenePlan) -> dict[str, Any]:
+    def _derive_scene_design_contract_fact(self, plan: ScenePlan) -> dict[str, Any]:
         text = "；".join(
             part
             for part in (
@@ -22018,6 +22204,23 @@ class AgentRuntime:
             environment_type = "mixed"
             terrain_type = "mixed_transition_surface"
             boundary_type = "transition_boundary"
+
+        room_state = self.state.room(plan.room_id)
+        scene_type_fact = dict(
+            dict(room_state.get("custom_scene_facts") or {}).get(f"{plan.plan_id}:scene_type")
+            or {}
+        )
+        classified_environment = str(scene_type_fact.get("environment_type") or "")
+        if classified_environment == "room_box":
+            scene_type = "indoor_room"
+            environment_type = "indoor"
+            terrain_type = "room_floor"
+            boundary_type = "room_box"
+        elif classified_environment == "terrain_substrate":
+            scene_type = "outdoor_scene"
+            environment_type = "outdoor"
+            terrain_type = "outdoor_ground"
+            boundary_type = "low_open_boundary"
 
         mood: list[str] = []
         style_keywords: list[str] = []
@@ -22056,6 +22259,17 @@ class AgentRuntime:
             add_once(style_keywords, scene_type)
         if not mood:
             add_once(mood, "coherent")
+        bounds_fact = dict(
+            dict(room_state.get("custom_scene_facts") or {}).get(f"{plan.plan_id}:bounds")
+            or {}
+        )
+        required_environment_components = (
+            ["room_box", "room_floor"]
+            if environment_type == "indoor"
+            else ["terrain"]
+            if environment_type == "outdoor"
+            else []
+        )
         return {
             "contract_id": f"contract-{plan.plan_id}",
             "room_id": plan.room_id,
@@ -22070,6 +22284,12 @@ class AgentRuntime:
             "lighting": lighting[:6],
             "terrain": {"type": terrain_type},
             "boundary": {"type": boundary_type},
+            "required_environment_components": required_environment_components,
+            "room_bounds": {
+                key: bounds_fact.get(key)
+                for key in ("bounds_type", "width", "depth", "height", "size")
+                if bounds_fact.get(key) is not None
+            },
             "scale_rules": scale_rules[:6],
             "placement_rules": placement_rules[:8],
             "asset_style_summary": "; ".join(
@@ -22097,6 +22317,7 @@ class AgentRuntime:
             return {"available": False}
         terrain = contract.get("terrain") if isinstance(contract.get("terrain"), Mapping) else {}
         boundary = contract.get("boundary") if isinstance(contract.get("boundary"), Mapping) else {}
+        room_bounds = contract.get("room_bounds") if isinstance(contract.get("room_bounds"), Mapping) else {}
         return {
             "available": True,
             "status": str(contract.get("status") or ""),
@@ -22109,6 +22330,12 @@ class AgentRuntime:
             "lighting": [str(item) for item in list(contract.get("lighting") or [])[:4] if str(item)],
             "terrain_type": str(terrain.get("type") or ""),
             "boundary_type": str(boundary.get("type") or ""),
+            "required_environment_components": [
+                str(item)
+                for item in list(contract.get("required_environment_components") or [])
+                if str(item or "").strip()
+            ],
+            "room_bounds": dict(room_bounds),
             "scale_rule_count": len(list(contract.get("scale_rules") or [])),
             "placement_rule_count": len(list(contract.get("placement_rules") or [])),
             "version": int(contract.get("version") or 0),
@@ -26445,6 +26672,7 @@ class AgentRuntime:
         if peer_id:
             sync_state["peer_events"][peer_id] = dict(stored_event)
         actor_id = str(normalized.get("actor_id") or "")
+        affected_batch_id = explicit_batch_id
         if actor_id:
             sync_state["actor_events"][actor_id] = dict(stored_event)
             actors = dict(room_state.get("actors") or {})
@@ -26465,6 +26693,11 @@ class AgentRuntime:
                 actor_fact["scene_name"] = scene_name
             if event_bounds is not None:
                 actor_fact["aabb"] = event_bounds
+                actor_fact["bounds_ready"] = True
+                actor_fact["bounds_source"] = "engine_actual"
+                actor_fact["engine_lifecycle_status"] = "bounds_ready"
+                actor_fact["status"] = "ready"
+            affected_batch_id = str(actor_fact.get("batch_id") or affected_batch_id)
             transform_events = {
                 "actor_transform",
                 "actor_updated",
@@ -26555,12 +26788,81 @@ class AgentRuntime:
             assets = dict(room_state.get("assets") or {})
         assets = AssetFactValidator.safe_asset_map(assets)
 
+        environment_components = {
+            str(batch_key): {
+                str(component_id): dict(component)
+                for component_id, component in dict(components or {}).items()
+                if isinstance(component, Mapping)
+            }
+            for batch_key, components in dict(room_state.get("environment_components") or {}).items()
+            if isinstance(components, Mapping)
+        }
+        if actor_id and event_bounds is not None:
+            for batch_key, components in environment_components.items():
+                for component in components.values():
+                    if str(component.get("actor_id") or "") != actor_id:
+                        continue
+                    component["aabb"] = dict(event_bounds)
+                    component["bounds_ready"] = True
+                    component["bounds_source"] = "engine_actual"
+                    component["engine_lifecycle_status"] = "bounds_ready"
+                    component["status"] = "ready"
+                    affected_batch_id = affected_batch_id or batch_key
+
+        custom_import_facts = {
+            str(key): dict(value)
+            for key, value in dict(room_state.get("custom_import_facts") or {}).items()
+            if isinstance(value, Mapping)
+        }
+        if affected_batch_id:
+            for actor_fact_suffix in ("actor_import_plan", "actor_import_result"):
+                actor_result_key = f"{affected_batch_id}:{actor_fact_suffix}"
+                actor_result = dict(custom_import_facts.get(actor_result_key) or {})
+                if not actor_result:
+                    continue
+                imported_count = int(
+                    actor_result.get("imported_count")
+                    or actor_result.get("actor_count")
+                    or actor_result.get("requested_count")
+                    or 0
+                )
+                ready_count = sum(
+                    1
+                    for actor in actors.values()
+                    if str(actor.get("batch_id") or "") == affected_batch_id
+                    and bool(actor.get("bounds_ready"))
+                    and str(actor.get("engine_lifecycle_status") or "") == "bounds_ready"
+                )
+                actor_result["ready_count"] = min(imported_count, ready_count)
+                if imported_count > 0 and ready_count >= imported_count:
+                    actor_result["status"] = "imported"
+                custom_import_facts[actor_result_key] = actor_result
+
+            environment_result_key = f"{affected_batch_id}:environment_import_result"
+            environment_result = dict(custom_import_facts.get(environment_result_key) or {})
+            if environment_result:
+                components = environment_components.get(affected_batch_id, {})
+                imported_count = int(environment_result.get("imported_count") or 0)
+                ready_count = sum(
+                    1
+                    for component in components.values()
+                    if bool(component.get("bounds_ready"))
+                    and str(component.get("engine_lifecycle_status") or "") == "bounds_ready"
+                )
+                environment_result["ready_count"] = min(imported_count, ready_count)
+                if imported_count > 0 and ready_count >= imported_count:
+                    environment_result["status"] = "imported"
+                custom_import_facts[environment_result_key] = environment_result
+
         changes = {
             "sync_events": [dict(stored_event)],
             "sync_state": sync_state,
             "actors": actors,
             "assets": assets,
         }
+        if actor_id and event_bounds is not None:
+            changes["environment_components"] = environment_components
+            changes["custom_import_facts"] = custom_import_facts
         patch_ref = _id("sync-event-patch")
         self._pending_sync_event_patches[patch_ref] = changes
         graph = ToolCallGraph(
@@ -26642,10 +26944,37 @@ class AgentRuntime:
                     "total_bytes": int(normalized.get("total_bytes") or 0),
                 },
             )
+        readiness_recovery: dict[str, Any] = {}
+        if applied and affected_batch_id and effective_plan_id:
+            batch = self.batch_plans.get(affected_batch_id)
+            if batch is not None and batch.status == BatchPlanStatus.PARTIAL:
+                recovery_graph = ToolCallGraph(
+                    graph_id=_id("graph-engine-ready-recovery"),
+                    plan_id=effective_plan_id,
+                    batch_id=affected_batch_id,
+                )
+                recovery_graph.status = "completed"
+                self._finalize_batch_after_drained_graph(recovery_graph, room_id=room_key)
+                readiness_recovery = self._finalize_plan_after_queue_drain(
+                    room_id=room_key,
+                    plan_id=effective_plan_id,
+                )
+                self.operation_log.append(
+                    "engine_readiness_reconciled_from_sync",
+                    room_id=room_key,
+                    plan_id=effective_plan_id,
+                    batch_id=affected_batch_id,
+                    payload={
+                        "actor_id": actor_id,
+                        "batch_status": self.batch_plans[affected_batch_id].status.value,
+                        "plan_status": str(readiness_recovery.get("status") or ""),
+                    },
+                )
         return {
             "recorded": applied,
             "reason": reason,
             "event": self._safe_sync_event_summary(normalized),
+            "readiness_recovery": readiness_recovery,
             "sync_state": self._safe_sync_state_summary(
                 sync_state if applied else dict(self.state.room(room_key).get("sync_state") or {})
             ),
@@ -31114,7 +31443,14 @@ class AgentRuntime:
                 default_risk_level=RiskLevel.LOW,
                 requires_write=True,
                 required_args=("room_id", "event_type", "patch_ref"),
-                produces_state=("sync_events", "sync_state", "actors", "assets"),
+                produces_state=(
+                    "sync_events",
+                    "sync_state",
+                    "actors",
+                    "assets",
+                    "environment_components",
+                    "custom_import_facts",
+                ),
                 requires_user_visible_failure=True,
                 description="Record sanitized external sync facts through RuntimeState.",
             )
@@ -31699,10 +32035,15 @@ class AgentRuntime:
                     "scene_name": str(scene_name or ""),
                     "design_brief": plan.design_brief,
                     "layout_items": list(plan.layout_items),
+                    "bounds_fact_id": f"{plan.plan_id}:bounds",
                 },
                 risk_level=RiskLevel.LOW,
                 depends_on=[substrate_resolve_id],
-                consumes=self._tool_consumes("runtime.environment.create_components", "substrate_resolutions"),
+                consumes=self._tool_consumes(
+                    "runtime.environment.create_components",
+                    "substrate_resolutions",
+                    "room_bounds",
+                ),
             )
         )
         graph.add(

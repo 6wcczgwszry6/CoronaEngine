@@ -7,7 +7,12 @@ letting old SceneComposer/ProgressiveWorkflow regain control of the runtime.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+import hashlib
+import os
+from pathlib import Path
+import time
 from typing import Any, Callable
 
 from .tools import ResourceProvider
@@ -277,6 +282,8 @@ def make_model_resource_provider(
     *,
     model_tool: Any,
     parse_result: Callable[[Any], dict[str, Any]] | None = None,
+    max_concurrency: int = 3,
+    wait_for_ready: Callable[[str], Any] | None = None,
 ) -> ResourceProvider:
     """Create a Runtime model-resource provider from a function-sized model tool.
 
@@ -289,11 +296,13 @@ def make_model_resource_provider(
     if model_tool is None:
         raise ValueError("model_tool is required")
 
+    worker_limit = max(1, min(4, int(max_concurrency or 1)))
+
     def _provider(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         batch_id = str(payload.get("batch_id") or "")
         model_items = [str(item) for item in (payload.get("model_items") or []) if str(item or "")]
-        resources: dict[str, dict[str, Any]] = {}
-        for index, name in enumerate(model_items, start=1):
+
+        def _prepare_one(index: int, name: str) -> tuple[str, dict[str, Any]]:
             prompt_text = str(_item_value(payload, name, "prompt_text") or name)
             image_url = str(_item_value(payload, name, "image_url") or _image_resource_value(payload, name) or "")
             tool_payload = {
@@ -307,21 +316,49 @@ def make_model_resource_provider(
             try:
                 raw = _invoke_tool_safely(model_tool, tool_payload, fallback="model resource failed")
                 parsed = parse_result(raw) if parse_result is not None else _parse_tool_result(raw)
-                resources[name] = _normalize_model_tool_result(
+                metadata = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else {}
+                pending = bool(metadata.get("has_mesh_pending")) or str(
+                    metadata.get("mesh_download_status") or ""
+                ).strip().lower() in {"scheduled", "running", "pending", "queued"}
+                object_id = str(
+                    metadata.get("folder_object_id")
+                    or metadata.get("object_id")
+                    or ""
+                ).strip()
+                if pending and object_id and wait_for_ready is not None:
+                    wait_for_ready(object_id)
+                return name, _normalize_model_tool_result(
                     parsed,
                     name=name,
                     batch_id=batch_id,
                     index=index,
                 )
             except Exception:  # noqa: BLE001
-                resources[name] = _failed_model_resource(
+                return name, _failed_model_resource(
                     name=name,
                     batch_id=batch_id,
                     index=index,
                     source="model_resource",
                     failure_code="model_resource_tool_failed",
                 )
-        return resources
+
+        if len(model_items) <= 1 or worker_limit <= 1:
+            prepared = [_prepare_one(index, name) for index, name in enumerate(model_items, start=1)]
+        else:
+            prepared = []
+            with ThreadPoolExecutor(
+                max_workers=min(worker_limit, len(model_items)),
+                thread_name_prefix="AgentRuntimeModelBatch",
+            ) as executor:
+                futures = {
+                    executor.submit(_prepare_one, index, name): index
+                    for index, name in enumerate(model_items, start=1)
+                }
+                indexed_results: dict[int, tuple[str, dict[str, Any]]] = {}
+                for future in as_completed(futures):
+                    indexed_results[futures[future]] = future.result()
+                prepared = [indexed_results[index] for index in sorted(indexed_results)]
+        return {name: resource for name, resource in prepared}
 
     return _provider
 
@@ -473,6 +510,7 @@ def make_engine_environment_component_import_provider(
     environment_import_tool: Any,
     engine_gate: Any,
     scene_name: str = "",
+    scene_snapshot_provider: Callable[[Any], dict[str, Any]] | None = None,
     parse_result: Callable[[Any], dict[str, Any]] | None = None,
 ) -> ResourceProvider:
     """Create a Runtime environment-component import provider.
@@ -510,6 +548,14 @@ def make_engine_environment_component_import_provider(
                 "component_id": component_id,
                 "name": name,
                 "component_type": component_type,
+                "entity_type": "environment",
+                "semantic_role": (
+                    "indoor_enclosure"
+                    if component_type == "room_box"
+                    else "walkable_floor"
+                    if component_type == "room_floor"
+                    else "environment_component"
+                ),
                 "handler": _safe_component_token(component.get("handler"), fallback="", allow_empty=True),
                 "object_id": component_id,
                 "scene_name": str(component.get("scene_name") or effective_scene_name),
@@ -584,11 +630,31 @@ def make_engine_environment_component_import_provider(
                 "scale",
                 "aabb",
                 "bounds_ready",
+                "bounds_source",
+                "engine_lifecycle_status",
+                "entity_type",
+                "semantic_role",
                 "size",
             ):
                 if field in update:
                     result_row[field] = update[field]
             import_results.append(result_row)
+        if scene_snapshot_provider is not None and component_updates:
+            _reconcile_engine_ready_facts(
+                component_updates,
+                snapshot_provider=scene_snapshot_provider,
+                room_id=str(payload.get("room_id") or ""),
+                scene_name=effective_scene_name,
+            )
+            for row in import_results:
+                component = component_updates.get(str(row.get("component_id") or ""))
+                if not component:
+                    continue
+                row["bounds_ready"] = bool(component.get("bounds_ready"))
+                row["bounds_source"] = str(component.get("bounds_source") or "estimated")
+                row["engine_lifecycle_status"] = str(
+                    component.get("engine_lifecycle_status") or "engine_loading"
+                )
         status_counts: dict[str, int] = {}
         for item in import_results:
             status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
@@ -970,7 +1036,8 @@ def _normalize_environment_component_import_result(
         vector = _vector3(scale)
         if vector:
             update["scale"] = vector
-    bounds = _normalized_bounds_from(geometry, actor_data_geometry, actor, actor_data, parsed, fallback)
+    actual_bounds = _normalized_bounds_from(geometry, actor_data_geometry, actor, actor_data, parsed)
+    bounds = actual_bounds or _normalized_bounds_from(fallback)
     if bounds:
         update["aabb"] = bounds
     bounds_ready_value = _first_present(
@@ -981,6 +1048,22 @@ def _normalize_environment_component_import_result(
     )
     if bounds_ready_value is not None:
         update["bounds_ready"] = _coerce_adapter_bool(bounds_ready_value, default=False)
+    else:
+        update["bounds_ready"] = bool(actual_bounds)
+    bounds_ready = bool(update.get("bounds_ready"))
+    update["bounds_source"] = "engine_actual" if bounds_ready else "estimated"
+    update["engine_lifecycle_status"] = "bounds_ready" if bounds_ready else "engine_loading"
+    update["status"] = "ready" if bounds_ready else "engine_loading"
+    update["entity_type"] = "environment"
+    update["semantic_role"] = _safe_component_token(
+        _first_present(
+            parsed.get("semantic_role"),
+            actor_data.get("semantic_role"),
+            fallback.get("semantic_role"),
+            "indoor_enclosure" if component_type == "room_box" else "walkable_floor" if component_type == "room_floor" else "environment_component",
+        ),
+        fallback="environment_component",
+    )
     size = _vector3(_first_present(
         actor.get("size") if isinstance(actor, dict) else None,
         actor_data.get("size") if isinstance(actor_data, dict) else None,
@@ -1310,6 +1393,7 @@ def make_engine_actor_import_provider(
     import_tool: Any,
     engine_gate: Any,
     scene_name: str = "",
+    scene_snapshot_provider: Callable[[Any], dict[str, Any]] | None = None,
     parse_result: Callable[[Any], dict[str, Any]] | None = None,
 ) -> ResourceProvider:
     """Create a Runtime actor-import provider backed by EngineWriteGate.
@@ -1351,10 +1435,7 @@ def make_engine_actor_import_provider(
                 })
                 continue
             placement = dict(placements.get(name) or {})
-            asset_id = _safe_component_text(
-                _first_present(resource.get("asset_id"), resource.get("name"), name),
-                fallback=name,
-            )
+            asset_id = _stable_runtime_asset_id(resource, model_path=model_path)
             model_ref = _safe_component_text(
                 _first_present(
                     resource.get("model_ref"),
@@ -1430,6 +1511,22 @@ def make_engine_actor_import_provider(
                 "aliases": list(actor.get("aliases") or []),
                 "status": "success",
             })
+        if scene_snapshot_provider is not None and actors:
+            _reconcile_engine_ready_facts(
+                actors,
+                snapshot_provider=scene_snapshot_provider,
+                room_id=str(payload.get("room_id") or ""),
+                scene_name=str(payload.get("scene_name") or scene_name or ""),
+            )
+            for row in import_results:
+                actor = actors.get(str(row.get("actor_id") or ""))
+                if not actor:
+                    continue
+                row["bounds_ready"] = bool(actor.get("bounds_ready"))
+                row["bounds_source"] = str(actor.get("bounds_source") or "estimated")
+                row["engine_lifecycle_status"] = str(
+                    actor.get("engine_lifecycle_status") or "engine_loading"
+                )
         status_counts: dict[str, int] = {}
         for item in import_results:
             status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
@@ -1456,6 +1553,95 @@ def make_engine_actor_import_provider(
         }
 
     return _provider
+
+
+def _stable_runtime_asset_id(resource: dict[str, Any], *, model_path: str) -> str:
+    for key in ("asset_id", "model_id", "resource_id", "model_request_id", "request_id"):
+        value = _safe_component_token(resource.get(key), fallback="", allow_empty=True)
+        if value:
+            return value
+    path = Path(str(model_path or ""))
+    fingerprint_parts = [path.name]
+    try:
+        stat = path.stat()
+        fingerprint_parts.extend([str(stat.st_size), str(stat.st_mtime_ns)])
+    except OSError:
+        fingerprint_parts.append("unobserved")
+    digest = hashlib.sha256("|".join(fingerprint_parts).encode("utf-8")).hexdigest()[:24]
+    return f"asset-{digest}"
+
+
+def _reconcile_engine_ready_facts(
+    entities: dict[str, dict[str, Any]],
+    *,
+    snapshot_provider: Callable[[Any], dict[str, Any]],
+    room_id: str,
+    scene_name: str,
+) -> None:
+    """Poll authoritative native facts and merge only actual geometry bounds."""
+
+    try:
+        timeout_s = max(
+            0.0,
+            min(
+                180.0,
+                float(os.getenv("AGENT_RUNTIME_ENGINE_READY_TIMEOUT_S", str(ENGINE_READY_TIMEOUT_DEFAULT_S))),
+            ),
+        )
+    except (TypeError, ValueError):
+        timeout_s = ENGINE_READY_TIMEOUT_DEFAULT_S
+    try:
+        interval_s = max(
+            0.01,
+            min(
+                5.0,
+                float(os.getenv("AGENT_RUNTIME_ENGINE_READY_POLL_S", str(ENGINE_READY_POLL_DEFAULT_S))),
+            ),
+        )
+    except (TypeError, ValueError):
+        interval_s = ENGINE_READY_POLL_DEFAULT_S
+    deadline = time.monotonic() + timeout_s
+
+    while True:
+        try:
+            snapshot = snapshot_provider({"room_id": room_id, "scene_name": scene_name})
+        except Exception:  # noqa: BLE001
+            snapshot = {}
+        rows = [dict(item) for item in list(snapshot.get("actors") or []) if isinstance(item, dict)]
+        by_id = {str(item.get("actor_id") or ""): item for item in rows if str(item.get("actor_id") or "")}
+        by_name = {str(item.get("name") or ""): item for item in rows if str(item.get("name") or "")}
+        all_ready = True
+        for entity_id, entity in entities.items():
+            observed = by_id.get(str(entity.get("actor_id") or entity_id))
+            if observed is None:
+                for alias in (
+                    entity.get("native_name"),
+                    entity.get("name"),
+                    entity.get("requested_name"),
+                ):
+                    observed = by_name.get(str(alias or ""))
+                    if observed is not None:
+                        break
+            bounds = _normalized_bounds_from(observed or {}) if observed else None
+            if observed and bounds:
+                entity["aabb"] = bounds
+                entity["bounds_ready"] = True
+                entity["bounds_source"] = "engine_actual"
+                entity["engine_lifecycle_status"] = "bounds_ready"
+                entity["status"] = "ready"
+                for field in ("position", "rotation", "scale"):
+                    value = _vector3(observed.get(field))
+                    if value:
+                        entity[field] = value
+            else:
+                entity["bounds_ready"] = False
+                entity["bounds_source"] = "estimated"
+                entity["engine_lifecycle_status"] = "engine_loading"
+                entity["status"] = "engine_loading"
+                all_ready = False
+        if all_ready or time.monotonic() >= deadline:
+            return
+        time.sleep(interval_s)
 
 
 def make_engine_layout_transform_provider(
@@ -2205,6 +2391,12 @@ def _normalize_import_result(
     )
     if bounds_ready_value is not None:
         result["bounds_ready"] = _coerce_adapter_bool(bounds_ready_value, default=False)
+    else:
+        result["bounds_ready"] = bool(bounds)
+    bounds_ready = bool(result.get("bounds_ready"))
+    result["bounds_source"] = "engine_actual" if bounds_ready else "estimated"
+    result["engine_lifecycle_status"] = "bounds_ready" if bounds_ready else "engine_loading"
+    result["status"] = "ready" if bounds_ready else "engine_loading"
     size_value = _first_present(
         actor.get("size") if isinstance(actor, dict) else None,
         actor_data.get("size") if isinstance(actor_data, dict) else None,
@@ -2644,3 +2836,5 @@ def _image_prompt_for_item(name: str) -> str:
         "centered full object, plain white background, visible thickness and depth, "
         "no text, no labels, no watermark, not a flat poster, not a texture sheet"
     )
+ENGINE_READY_TIMEOUT_DEFAULT_S = 90.0
+ENGINE_READY_POLL_DEFAULT_S = 1.0

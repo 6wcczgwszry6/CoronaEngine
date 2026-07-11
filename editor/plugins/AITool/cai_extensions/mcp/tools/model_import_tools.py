@@ -106,6 +106,75 @@ def _actor_identity_from_native_result(native_result: dict[str, Any]) -> str:
     return ""
 
 
+def _normalize_native_result(native_result_raw: Any) -> dict[str, Any]:
+    """Normalize either manifest API data or the legacy JSON binding result."""
+
+    native_result = (
+        json.loads(native_result_raw)
+        if isinstance(native_result_raw, str)
+        else native_result_raw
+    )
+    if not isinstance(native_result, dict):
+        raise RuntimeError(f"native actor create returned invalid data: {native_result_raw!r}")
+    return native_result
+
+
+def _create_native_editor_actor(
+    *,
+    scene_name: str,
+    source_path: str,
+    actor_type: str,
+    actor_data: dict[str, Any],
+    legacy_engine: Any,
+) -> dict[str, Any]:
+    """Create an actor through the manifest API, with an old-engine fallback.
+
+    New editor builds expose ``SceneTools.create_actor`` through the C++
+    manifest. Older F5 builds and isolated Python tests only expose the direct
+    ``create_editor_actor`` binding, so that path remains a compatibility
+    fallback rather than a second production entry point.
+    """
+
+    try:
+        import CoronaEngine  # type: ignore
+    except ImportError:
+        CoronaEngine = None
+
+    manifest_invoker = getattr(CoronaEngine, "_invoke_cpp_editor_api", None)
+    if callable(manifest_invoker):
+        from CoronaCore.core import editor_api
+
+        try:
+            manifest_spec = editor_api._find_cpp_api_method_by_python_wrapper(
+                "scene_tools.create_actor"
+            )
+        except Exception:  # Old builds can expose the invoker without this method.
+            manifest_spec = None
+        if manifest_spec is not None:
+            return _normalize_native_result(
+                editor_api.CoronaEditorApi.scene_tools.create_actor(
+                    scene_name,
+                    source_path,
+                    actor_type,
+                    actor_data,
+                )
+            )
+
+    legacy_create = getattr(legacy_engine, "create_editor_actor", None)
+    if not callable(legacy_create):
+        raise RuntimeError(
+            "current engine exposes neither SceneTools.create_actor nor create_editor_actor"
+        )
+    return _normalize_native_result(
+        legacy_create(
+            scene_name,
+            source_path,
+            actor_type,
+            json.dumps(actor_data, ensure_ascii=False),
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input Schema
 # ---------------------------------------------------------------------------
@@ -169,6 +238,8 @@ class ImportEnvironmentComponentInput(BaseModel):
     component_id: str = Field(description="Runtime environment component id")
     name: Optional[str] = Field(default=None, description="User-facing component name")
     component_type: str = Field(default="environment", description="terrain/room_box/room_floor/skybox/boundary")
+    entity_type: str = Field(default="environment", description="Runtime entity domain")
+    semantic_role: Optional[str] = Field(default=None, description="Runtime semantic role")
     handler: Optional[str] = Field(default=None, description="Runtime handler hint")
     object_id: Optional[str] = Field(default=None, description="Runtime object id")
     asset_id: Optional[str] = Field(default=None, description="Runtime asset id")
@@ -247,34 +318,25 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
                 "target": target or preferred_name,
                 "geometry": {},
                 "mechanics": {"physics_enabled": False},
+                "physics_enabled": False,
             }
             if position is not None:
+                actor_data["position"] = position
                 actor_data["geometry"]["position"] = position
             if rotation is not None:
+                actor_data["rotation"] = rotation
                 actor_data["geometry"]["rotation"] = rotation
             if scale is not None:
+                actor_data["scale"] = scale
                 actor_data["geometry"]["scale"] = scale
 
-            if not hasattr(CoronaEngine, "create_editor_actor"):
-                return build_error_result(
-                    error_message="当前引擎缺少 create_editor_actor native 接口"
-                ).to_envelope(interface_type="scene")
-
-            native_result_raw = CoronaEngine.create_editor_actor(
-                scene_name,
-                final_path,
-                "model",
-                json.dumps(actor_data, ensure_ascii=False),
+            native_result = _create_native_editor_actor(
+                scene_name=scene_name,
+                source_path=final_path,
+                actor_type="model",
+                actor_data=actor_data,
+                legacy_engine=CoronaEngine,
             )
-            native_result = (
-                json.loads(native_result_raw)
-                if isinstance(native_result_raw, str)
-                else native_result_raw
-            )
-            if not isinstance(native_result, dict):
-                return build_error_result(
-                    error_message=f"native actor 创建返回无效: {native_result_raw!r}"
-                ).to_envelope(interface_type="scene")
             if native_result.get("status") == "error":
                 return build_error_result(
                     error_message=native_result.get("message") or native_result.get("error") or "native actor 创建失败"
@@ -363,6 +425,8 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
         component_id: str,
         name: str | None = None,
         component_type: str = "environment",
+        entity_type: str = "environment",
+        semantic_role: str | None = None,
         handler: str | None = None,
         object_id: str | None = None,
         asset_id: str | None = None,
@@ -381,12 +445,6 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
             from CoronaCore.core.corona_editor import CoronaEditor
             CoronaEngine = CoronaEditor.CoronaEngine
 
-            create_editor_actor = getattr(CoronaEngine, "create_editor_actor", None)
-            if not callable(create_editor_actor):
-                return build_error_result(
-                    error_message="当前引擎缺少 create_editor_actor native 接口"
-                ).to_envelope(interface_type="scene")
-
             safe_component_id = str(component_id or "").strip()
             if not safe_component_id:
                 return build_error_result(
@@ -397,6 +455,30 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
             component_type_value = str(component_type or "environment").strip() or "environment"
             asset_ref = str(model_ref or asset_id or safe_component_id).strip()
             source_path = asset_ref or f"runtime/environment/{safe_component_id}.component"
+            semantic_role_value = str(semantic_role or "environment_component").strip()
+            if component_type_value in {
+                "room_box",
+                "room_floor",
+                "terrain",
+                "ground",
+                "boundary",
+                "terrain_boundary",
+                "sky",
+                "skybox",
+            }:
+                from editor.plugins.AITool.services.agent_runtime.environment_primitives import (
+                    build_environment_primitive,
+                )
+
+                primitive = build_environment_primitive(
+                    component_type=component_type_value,
+                    component_id=safe_component_id,
+                    scale=scale,
+                )
+                source_path = primitive.model_path
+                position = list(position or primitive.position)
+                scale = list(primitive.scale)
+                semantic_role_value = primitive.semantic_role
             actor_data = {
                 "actor_name": component_name,
                 "name": component_name,
@@ -405,6 +487,8 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
                 "target": component_name,
                 "component_id": safe_component_id,
                 "component_type": component_type_value,
+                "entity_type": str(entity_type or "environment"),
+                "semantic_role": semantic_role_value,
                 "handler": handler or "",
                 "asset_id": asset_id or safe_component_id,
                 "model_ref": model_ref or asset_ref,
@@ -414,34 +498,29 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
                 "boundary_style": boundary_style or "",
                 "geometry": {},
                 "mechanics": {"physics_enabled": False},
+                "physics_enabled": False,
                 "skip_if_exists": True,
                 "update_if_exists": True,
             }
             if position is not None:
+                actor_data["position"] = position
                 actor_data["geometry"]["position"] = position
             if rotation is not None:
+                actor_data["rotation"] = rotation
                 actor_data["geometry"]["rotation"] = rotation
             if scale is not None:
+                actor_data["scale"] = scale
                 actor_data["geometry"]["scale"] = scale
 
-            # Use a non-rendering native actor placeholder for now. Runtime keeps
-            # the authoritative semantic AABB/transform facts, while F5 validates
-            # whether C++ later maps this to a visible terrain/room primitive.
-            native_result_raw = create_editor_actor(
-                scene_name,
-                source_path,
-                "audio",
-                json.dumps(actor_data, ensure_ascii=False),
+            # Room framework components are real model actors.  Their semantic
+            # identity remains environment-owned in RuntimeState.
+            native_result = _create_native_editor_actor(
+                scene_name=scene_name,
+                source_path=source_path,
+                actor_type="model",
+                actor_data=actor_data,
+                legacy_engine=CoronaEngine,
             )
-            native_result = (
-                json.loads(native_result_raw)
-                if isinstance(native_result_raw, str)
-                else native_result_raw
-            )
-            if not isinstance(native_result, dict):
-                return build_error_result(
-                    error_message=f"native environment actor 返回无效: {native_result_raw!r}"
-                ).to_envelope(interface_type="scene")
             if native_result.get("status") == "error":
                 return build_error_result(
                     error_message=native_result.get("message") or native_result.get("error") or "native environment actor 创建失败"
@@ -455,13 +534,18 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
 
             actor = native_result.get("actor") if isinstance(native_result.get("actor"), dict) else {}
             geometry = actor.get("geometry") if isinstance(actor.get("geometry"), dict) else {}
-            actor_aabb = aabb or actor.get("world_aabb") or actor.get("aabb") or actor.get("bounds")
-            bounds_ready = bool(actor.get("bounds_ready") or actor_aabb)
+            native_aabb = actor.get("world_aabb") or actor.get("aabb") or actor.get("bounds")
+            actor_aabb = native_aabb or aabb
+            bounds_ready = bool(actor.get("bounds_ready") and native_aabb)
+            bounds_source = "engine_actual" if bounds_ready else "estimated"
+            engine_lifecycle_status = "bounds_ready" if bounds_ready else "engine_loading"
             actor_size = actor.get("size") or actor.get("dimensions") or actor.get("aabb_size")
             result_data = {
                 "status": "success",
                 "component_id": safe_component_id,
                 "component_type": component_type_value,
+                "entity_type": str(entity_type or "environment"),
+                "semantic_role": semantic_role_value,
                 "handler": handler or "",
                 "name": component_name,
                 "asset_id": asset_id or safe_component_id,
@@ -473,6 +557,8 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
                 "scene_name": native_result.get("scene") or scene_name or "",
                 "actor_id": actor_id,
                 "bounds_ready": bounds_ready,
+                "bounds_source": bounds_source,
+                "engine_lifecycle_status": engine_lifecycle_status,
                 "world_aabb": actor_aabb,
                 "size": actor_size,
                 "actor_data": {
@@ -481,11 +567,15 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
                     "name": actor.get("name") or component_name,
                     "component_id": safe_component_id,
                     "component_type": component_type_value,
+                    "entity_type": str(entity_type or "environment"),
+                    "semantic_role": semantic_role_value,
                     "asset_id": asset_id or safe_component_id,
                     "model_ref": model_ref or asset_ref,
                     "sync_status": "engine_imported",
                     "sync_lifecycle_status": "engine_imported",
                     "bounds_ready": bounds_ready,
+                    "bounds_source": bounds_source,
+                    "engine_lifecycle_status": engine_lifecycle_status,
                     "size": actor_size,
                     "geometry": {
                         "position": geometry.get("position", position or [0, 0, 0]),
@@ -511,7 +601,7 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
 
     return StructuredTool(
         name="import_environment_component",
-        description="Create a minimal native placeholder actor for Runtime terrain/room/sky/boundary components.",
+        description="Create a native Runtime terrain/room/sky/boundary component actor.",
         args_schema=ImportEnvironmentComponentInput,
         func=_import_environment_component,
     )

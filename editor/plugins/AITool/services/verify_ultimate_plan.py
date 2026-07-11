@@ -439,6 +439,8 @@ def _run(label: str, command: list[str]) -> bool:
     if command and Path(command[0]).name.lower().startswith("python"):
         PYCACHE_PREFIX.mkdir(parents=True, exist_ok=True)
         env["PYTHONPYCACHEPREFIX"] = str(PYCACHE_PREFIX)
+        env.setdefault("AGENT_RUNTIME_ENGINE_READY_TIMEOUT_S", "0.2")
+        env.setdefault("AGENT_RUNTIME_ENGINE_READY_POLL_S", "0.05")
     completed = subprocess.run(command, cwd=REPO_ROOT, env=env)
     if completed.returncode == 0:
         print(f"[OK]  {label}")

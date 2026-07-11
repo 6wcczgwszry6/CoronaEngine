@@ -89,6 +89,10 @@ from plugins.AITool.services.agent_runtime import (  # noqa: E402
     make_scene_snapshot_provider,
     make_legacy_model_resource_provider,
 )
+from plugins.AITool.services.agent_runtime import adapters as runtime_adapters  # noqa: E402
+
+runtime_adapters.ENGINE_READY_TIMEOUT_DEFAULT_S = 0.2
+runtime_adapters.ENGINE_READY_POLL_DEFAULT_S = 0.01
 
 _PROGRESSIVE_SPEC = importlib.util.spec_from_file_location(
     "scene_composer_progressive_for_runtime_tests",
@@ -2102,7 +2106,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 r"^\s*(?:from|import)\s+.*generation_composer_adapter(?:\s|\.|$)",
                 re.MULTILINE,
             ),
-            "GenerationScheduler submit": re.compile(r"\.submit\s*\("),
+            "GenerationScheduler submit": re.compile(
+                r"\b(?:generation_scheduler|scheduler)\.submit\s*\(",
+                re.IGNORECASE,
+            ),
             "SceneComposer compose": re.compile(r"\.compose\s*\("),
             "legacy big workflow tool": re.compile(r"legacy\.(?:scene_compose|progressive_compose|workflow_orchestrator)"),
         }
@@ -3746,6 +3753,34 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(drained["drained_count"], len(result["graphs"]))
         self.assertGreaterEqual(len(runtime.query_state("room-message-enqueue")["room"]["actors"]), 1)
 
+    def test_handle_message_confirm_and_enqueue_preserves_default_three_item_batches(self) -> None:
+        runtime = AgentRuntime()
+
+        with patch.object(
+            runtime,
+            "_extract_scene_plan_fields_via_tool_graph",
+            return_value={
+                "concrete_object_items": [
+                    "bed", "desk", "chair", "lamp", "wardrobe", "rug", "bookshelf",
+                ],
+                "layout_items": ["room boundary", "walkway"],
+            },
+        ):
+            result = runtime.handle_message(
+                room_id="room-default-batch-size",
+                text="Generate a furnished room.",
+                sender_id="host-1",
+                sender_name="host",
+                action="confirm_and_enqueue",
+                external_plan_id="seed-default-batch-size",
+            )
+
+        batch_sizes = [len(batch["requested_items"]) for batch in result["batches"]]
+        self.assertGreaterEqual(len(batch_sizes), 3)
+        self.assertTrue(all(1 <= size <= 3 for size in batch_sizes))
+        self.assertEqual(len(result["graphs"]), len(result["batches"]))
+        self.assertTrue(all(graph["status"] == "queued" for graph in result["graphs"]))
+
     def test_handle_message_confirm_and_enqueue_without_plan_or_external_id_does_not_create_plan(self) -> None:
         runtime = AgentRuntime()
 
@@ -4480,9 +4515,14 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
 
         state = runtime.query_state("room-agent-promote-execute")["room"]
         batch = result["batches"][0]
+        requested_items = [
+            item
+            for current_batch in result["batches"]
+            for item in current_batch["requested_items"]
+        ]
         self.assertIn("沙发", result["plan"]["design_brief"])
-        self.assertEqual(batch["requested_items"], promoted_items)
-        self.assertNotEqual(batch["requested_items"], original_items)
+        self.assertEqual(requested_items, promoted_items)
+        self.assertNotEqual(requested_items, original_items)
         runtime_plan = state["scene_plans"][plan.plan_id]
         self.assertIn("沙发", runtime_plan["design_brief"])
         self.assertTrue(result["graphs"])
@@ -9555,10 +9595,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertIn("asset_transfer_in_progress", report_health["reasons"])
         self.assertEqual(report_health["asset_transferring_count"], 1)
         self.assertEqual(report_health["asset_overall_progress"], 50)
-        report_ready_event = runtime.user_visible_events("room-sync-asset-progress")[-1]
-        self.assertEqual(report_ready_event["event_type"], "report_ready")
-        self.assertEqual(report_ready_event["payload"]["asset_transferring_count"], 1)
-        self.assertEqual(report_ready_event["payload"]["asset_overall_progress"], 50)
+        report_event = runtime.user_visible_events("room-sync-asset-progress")[-1]
+        self.assertEqual(report_event["event_type"], "report_pending")
+        self.assertEqual(report_event["payload"]["asset_transferring_count"], 1)
+        self.assertEqual(report_event["payload"]["asset_overall_progress"], 50)
         report_registry_roles = {
             entity["semantic_role"]: entity
             for entity in report["scene_entity_registry"]["entities"]
@@ -15267,7 +15307,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             ]
             self.assertTrue(registry_entities)
             self.assertTrue(all(entity.get("model_ref") == "mesh.glb" for entity in registry_entities))
-            self.assertTrue(all(entity.get("asset_id") == "mesh.glb" for entity in registry_entities))
+            self.assertTrue(all(str(entity.get("asset_id") or "").strip() for entity in registry_entities))
+            self.assertTrue(all(entity.get("asset_id") != entity.get("actor_name") for entity in registry_entities))
             self.assertNotIn(str(model_dir), str(registry_entities))
             self.assertNotIn(str(mesh_path), str(registry_entities))
 
@@ -15577,6 +15618,75 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
 
         self.assertEqual(resources["火把"]["status"], "ready")
         self.assertEqual(resources["火把"]["local_path"], str(mesh_path))
+
+    def test_hunyuan_model_provider_waits_for_pending_mesh_before_ready(self) -> None:
+        model_dir = Path("C:/runtime_tests/runtime_pending")
+        mesh_path = model_dir / "base.glb"
+        waiter_calls: list[str] = []
+        ready = {"value": False}
+
+        def wait_for_ready(object_id: str) -> bool:
+            waiter_calls.append(object_id)
+            ready["value"] = True
+            return True
+
+        with patch(
+            "plugins.AITool.services.agent_runtime.adapters._visible_model_path_candidates",
+            return_value=[model_dir],
+        ), patch(
+            "plugins.AITool.services.agent_runtime.adapters._first_supported_mesh",
+            side_effect=lambda _path: mesh_path if ready["value"] else None,
+        ):
+            provider = make_model_resource_provider(
+                model_tool=lambda _payload: {
+                    "metadata": {
+                        "model_folder": str(model_dir),
+                        "folder_object_id": "runtime-pending-object",
+                        "has_mesh_pending": True,
+                        "mesh_download_status": "scheduled",
+                    }
+                },
+                wait_for_ready=wait_for_ready,
+            )
+            resources = provider({
+                "batch_id": "batch-pending-model-folder",
+                "model_items": ["bookshelf"],
+            })
+
+        self.assertEqual(waiter_calls, ["runtime-pending-object"])
+        self.assertEqual(resources["bookshelf"]["status"], "ready")
+        self.assertEqual(resources["bookshelf"]["local_path"], str(mesh_path))
+
+    def test_model_resource_provider_runs_batch_items_with_bounded_concurrency(self) -> None:
+        import threading
+
+        lock = threading.Lock()
+        release = threading.Event()
+        active = {"count": 0, "peak": 0}
+
+        def model_tool(payload: dict[str, Any]) -> dict[str, Any]:
+            with lock:
+                active["count"] += 1
+                active["peak"] = max(active["peak"], active["count"])
+                if active["peak"] >= 2:
+                    release.set()
+            release.wait(timeout=2.0)
+            with lock:
+                active["count"] -= 1
+            return {"model_folder": f"assets/model/{payload['prompt']}"}
+
+        provider = make_model_resource_provider(
+            model_tool=model_tool,
+            max_concurrency=3,
+        )
+        resources = provider({
+            "batch_id": "batch-concurrent-models",
+            "model_items": ["desk", "wardrobe", "lamp"],
+        })
+
+        self.assertGreaterEqual(active["peak"], 2)
+        self.assertEqual(list(resources), ["desk", "wardrobe", "lamp"])
+        self.assertTrue(all(item["status"] == "ready" for item in resources.values()))
 
     def test_hunyuan_model_provider_resolves_nested_model_folder_mesh_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -21291,7 +21401,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         components = result["environment_components"]
         component = components["component-terrain"]
         EnvironmentComponentValidator.validate(component)
-        self.assertEqual(component["status"], "imported")
+        self.assertEqual(component["status"], "ready")
+        self.assertEqual(component["engine_lifecycle_status"], "bounds_ready")
+        self.assertEqual(component["bounds_source"], "engine_actual")
+        self.assertEqual(component["entity_type"], "environment")
         self.assertEqual(component["source"], "engine_environment_import")
         self.assertEqual(component["actor_id"], "actor-component-terrain")
         self.assertEqual(component["asset_id"], "asset-terrain-stone")
@@ -21486,6 +21599,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(actor_data["model_ref"], "terrain-stone-runtime")
         self.assertEqual(actor_data["surface"], "stone_floor")
         self.assertEqual(actor_data["terrain_profile"], "indoor_floor")
+        self.assertEqual(actor_data["position"], [1.0, 0.0, 2.0])
+        self.assertEqual(actor_data["rotation"], [0.0, 15.0, 0.0])
+        self.assertEqual(actor_data["scale"], [6.0, 0.1, 6.0])
+        self.assertFalse(actor_data["physics_enabled"])
         self.assertEqual(actor_data["geometry"]["position"], [1.0, 0.0, 2.0])
         self.assertEqual(actor_data["geometry"]["rotation"], [0.0, 15.0, 0.0])
         self.assertEqual(actor_data["geometry"]["scale"], [6.0, 0.1, 6.0])
@@ -21579,6 +21696,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(actor_data["actor_name"], "藏宝箱")
         self.assertEqual(actor_data["model_name"], "藏宝箱")
         self.assertEqual(actor_data["object_id"], "object-chest")
+        self.assertEqual(actor_data["position"], [1.0, 0.0, 2.0])
+        self.assertEqual(actor_data["rotation"], [0.0, 45.0, 0.0])
+        self.assertEqual(actor_data["scale"], [1.2, 1.2, 1.2])
+        self.assertFalse(actor_data["physics_enabled"])
         self.assertEqual(actor_data["geometry"]["position"], [1.0, 0.0, 2.0])
         self.assertEqual(payload["status"], "success")
         self.assertEqual(payload["actor_id"], "native-actor-chest-1")
@@ -22756,13 +22877,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(gate.calls[0]["scene_name"], "Scene/场景1.scene")
         self.assertEqual(gate.calls[0]["plan_id"], "plan-1")
         self.assertEqual(gate.calls[0]["batch_id"], "batch-1")
-        self.assertEqual(gate.calls[0]["asset_id"], "钘忓疂绠?")
+        self.assertEqual(gate.calls[0]["asset_id"], "model-request-chest")
         self.assertEqual(gate.calls[0]["model_ref"], "model-request-chest")
         self.assertEqual(gate.calls[0]["object_id"], "batch-1-01")
         self.assertIn("guid-钘忓疂绠?", actors)
         self.assertEqual(actors["guid-钘忓疂绠?"]["source"], "engine_import")
         self.assertEqual(actors["guid-钘忓疂绠?"]["name"], "native-safe-but-wrong-name")
-        self.assertEqual(actors["guid-钘忓疂绠?"]["asset_id"], "钘忓疂绠?")
+        self.assertEqual(actors["guid-钘忓疂绠?"]["asset_id"], "model-request-chest")
         self.assertEqual(actors["guid-钘忓疂绠?"]["model_ref"], "model-request-chest")
         self.assertEqual(actors["guid-钘忓疂绠?"]["scene_name"], "Scene/场景1.scene")
         self.assertEqual(actors["guid-钘忓疂绠?"]["position"], [1, 0, 2])
@@ -22778,6 +22899,90 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertNotIn("engine_result", actors["guid-钘忓疂绠?"])
         self.assertNotEqual(actors["guid-钘忓疂绠?"]["model_ref"], "E:/models/chest.glb")
         ActorFactValidator.validate_actor_map(actors)
+
+    def test_engine_actor_import_provider_waits_for_actual_native_bounds(self) -> None:
+        class FakeGate:
+            def invoke_tool(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+        class ImportTool:
+            def invoke(self, payload: dict) -> dict:
+                return {
+                    "status": "success",
+                    "actor": {
+                        "actor_guid": "actor-ready",
+                        "name": payload["actor_name"],
+                        "geometry": {
+                            "position": payload["position"],
+                            "rotation": payload["rotation"],
+                            "scale": payload["scale"],
+                        },
+                    },
+                }
+
+        def snapshot_provider(_request: dict) -> dict:
+            return {
+                "actors": [{
+                    "actor_id": "actor-ready",
+                    "name": "bed",
+                    "position": [1.0, 0.5, 2.0],
+                    "rotation": [0.0, 0.0, 0.0],
+                    "scale": [1.0, 1.0, 1.0],
+                    "aabb": {"min": [0.0, 0.0, 1.0], "max": [2.0, 1.0, 3.0]},
+                }],
+            }
+
+        provider = make_engine_actor_import_provider(
+            import_tool=ImportTool(),
+            engine_gate=FakeGate(),
+            scene_snapshot_provider=snapshot_provider,
+        )
+        result = provider({
+            "room_id": "room-ready",
+            "batch_id": "batch-ready",
+            "plan_id": "plan-ready",
+            "model_items": ["bed"],
+            "model_resources": {"bed": {"status": "ready", "local_path": "E:/models/bed.glb"}},
+            "placements": {"bed": {"position": [1.0, 0.0, 2.0]}},
+        })
+
+        actor = result["actors"]["actor-ready"]
+        self.assertTrue(actor["bounds_ready"])
+        self.assertEqual(actor["bounds_source"], "engine_actual")
+        self.assertEqual(actor["engine_lifecycle_status"], "bounds_ready")
+        self.assertEqual(actor["aabb"]["max"], [2.0, 1.0, 3.0])
+
+    def test_engine_actor_import_provider_keeps_loading_without_native_bounds(self) -> None:
+        class FakeGate:
+            def invoke_tool(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+        class ImportTool:
+            def invoke(self, payload: dict) -> dict:
+                return {
+                    "status": "success",
+                    "actor": {"actor_guid": "actor-loading", "name": payload["actor_name"]},
+                }
+
+        provider = make_engine_actor_import_provider(
+            import_tool=ImportTool(),
+            engine_gate=FakeGate(),
+            scene_snapshot_provider=lambda _request: {"actors": []},
+        )
+        with patch.dict(os.environ, {"AGENT_RUNTIME_ENGINE_READY_TIMEOUT_S": "0"}):
+            result = provider({
+                "room_id": "room-loading",
+                "batch_id": "batch-loading",
+                "plan_id": "plan-loading",
+                "model_items": ["bed"],
+                "model_resources": {"bed": {"status": "ready", "local_path": "E:/models/bed.glb"}},
+                "placements": {"bed": {"position": [0.0, 0.0, 0.0]}},
+            })
+
+        actor = result["actors"]["actor-loading"]
+        self.assertFalse(actor["bounds_ready"])
+        self.assertEqual(actor["bounds_source"], "estimated")
+        self.assertEqual(actor["engine_lifecycle_status"], "engine_loading")
 
     def test_engine_actor_import_provider_respects_status_and_success_failure(self) -> None:
         class FakeGate:
@@ -25213,6 +25418,201 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         summary = result["report"]["environment_component_summary"]
         self.assertEqual(summary["type_counts"]["room_box"], 1)
         self.assertEqual(summary["type_counts"]["room_floor"], 1)
+        contract = result["report"]["scene_design_contract_summary"]
+        self.assertEqual(contract["scene_type"], "indoor_room")
+        self.assertEqual(contract["environment_type"], "indoor")
+        self.assertEqual(
+            contract["required_environment_components"],
+            ["room_box", "room_floor"],
+        )
+        self.assertEqual(contract["room_bounds"]["bounds_type"], "room_box")
+
+    def test_indoor_framework_uses_shared_plan_bounds_and_stable_component_ids(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-runtime-shared-bounds",
+            text="children bedroom with bed, wardrobe, desk and bookshelf",
+            owner_agent="designer",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+
+        result = runtime.execute_planned_batches(plan.plan_id, max_items_per_batch=1)
+
+        room = runtime.query_state("room-runtime-shared-bounds")["room"]
+        batches = result["batches"]
+        self.assertGreaterEqual(len(batches), 2)
+        component_sets = []
+        for batch in batches:
+            components = room["environment_components"][batch["batch_id"]]
+            room_box = next(
+                item for item in components.values() if item["component_type"] == "room_box"
+            )
+            room_floor = next(
+                item for item in components.values() if item["component_type"] == "room_floor"
+            )
+            self.assertEqual(room_box["scale"][0], room_floor["scale"][0])
+            self.assertEqual(room_box["scale"][2], room_floor["scale"][2])
+            self.assertEqual(room_box["position"][1], room_box["scale"][1] / 2.0)
+            self.assertEqual(room_floor["position"][1], 0.025)
+            component_sets.append(set(components))
+        self.assertTrue(all(ids == component_sets[0] for ids in component_sets[1:]))
+
+    def test_plan_finalizer_waits_for_all_queued_batches_before_report_ready(self) -> None:
+        def actor_import_provider(payload: dict[str, Any]) -> dict[str, Any]:
+            actors = {}
+            for index, name in enumerate(payload.get("model_items") or [], start=1):
+                actor_id = f"actor-{payload['batch_id']}-{index}"
+                actors[actor_id] = {
+                    "actor_id": actor_id,
+                    "name": name,
+                    "plan_id": payload["plan_id"],
+                    "batch_id": payload["batch_id"],
+                    "asset_id": f"asset-{payload['batch_id']}-{index}",
+                    "position": [float(index), 0.5, 0.0],
+                    "rotation": [0.0, 0.0, 0.0],
+                    "scale": [1.0, 1.0, 1.0],
+                    "aabb": {"min": [index - 0.5, 0.0, -0.5], "max": [index + 0.5, 1.0, 0.5]},
+                    "bounds_ready": True,
+                    "bounds_source": "engine_actual",
+                    "engine_lifecycle_status": "bounds_ready",
+                    "sync_status": "engine_imported",
+                }
+            return {"actors": actors, "import_results": []}
+
+        def environment_import_provider(payload: dict[str, Any]) -> dict[str, Any]:
+            components = {}
+            rows = []
+            for component_id, item in dict(payload.get("environment_components") or {}).items():
+                component = {
+                    **dict(item),
+                    "actor_id": f"actor-{component_id}",
+                    "status": "ready",
+                    "bounds_ready": True,
+                    "bounds_source": "engine_actual",
+                    "engine_lifecycle_status": "bounds_ready",
+                    "sync_status": "engine_imported",
+                }
+                components[component_id] = component
+                rows.append({"component_id": component_id, "status": "success", "bounds_ready": True})
+            return {"environment_components": components, "environment_import_results": rows}
+
+        runtime = AgentRuntime(
+            actor_import_provider=actor_import_provider,
+            environment_import_provider=environment_import_provider,
+        )
+        plan = runtime.propose_scene_plan(
+            room_id="room-plan-finalizer",
+            text="bedroom with bed and desk",
+            owner_agent="designer",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+        queued = runtime.enqueue_planned_batches(plan.plan_id, max_items_per_batch=1)
+        self.assertGreaterEqual(len(queued["batches"]), 2)
+
+        first = runtime.drain_tool_graph_queue(
+            "room-plan-finalizer",
+            plan_id=plan.plan_id,
+            max_graphs=1,
+        )
+        self.assertEqual(first["drained_count"], 1)
+        self.assertEqual(first["finalized_plans"][0]["reason"], "tool_graphs_active")
+        self.assertFalse(
+            any(event["event_type"] == "report_ready" for event in runtime.user_visible_events("room-plan-finalizer"))
+        )
+
+        final = runtime.drain_tool_graph_queue(
+            "room-plan-finalizer",
+            plan_id=plan.plan_id,
+        )
+        self.assertGreaterEqual(final["drained_count"], 1)
+        self.assertEqual(final["finalized_plans"][0]["status"], ScenePlanStatus.COMPLETED.value)
+        self.assertTrue(
+            any(event["event_type"] == "report_ready" for event in runtime.user_visible_events("room-plan-finalizer"))
+        )
+
+    def test_late_engine_bounds_sync_reconciles_partial_batch_and_finalizes_plan(self) -> None:
+        def actor_import_provider(payload: dict[str, Any]) -> dict[str, Any]:
+            actors = {}
+            rows = []
+            for index, name in enumerate(payload.get("model_items") or ["wooden table"], start=1):
+                actor_id = f"actor-{payload['batch_id']}-{index}"
+                actors[actor_id] = {
+                    "actor_id": actor_id,
+                    "name": str(name),
+                    "plan_id": payload["plan_id"],
+                    "batch_id": payload["batch_id"],
+                    "asset_id": f"asset-{payload['batch_id']}-{index}",
+                    "position": [0.0, 0.5, 0.0],
+                    "rotation": [0.0, 0.0, 0.0],
+                    "scale": [1.0, 1.0, 1.0],
+                    "bounds_ready": False,
+                    "bounds_source": "estimated",
+                    "engine_lifecycle_status": "engine_loading",
+                }
+                rows.append({"actor_id": actor_id, "actor_name": str(name), "status": "success"})
+            return {
+                "actors": actors,
+                "import_results": rows,
+            }
+
+        def environment_import_provider(payload: dict[str, Any]) -> dict[str, Any]:
+            components = {}
+            rows = []
+            for component_id, item in dict(payload.get("environment_components") or {}).items():
+                component = {
+                    **dict(item),
+                    "actor_id": f"actor-{component_id}",
+                    "status": "ready",
+                    "bounds_ready": True,
+                    "bounds_source": "engine_actual",
+                    "engine_lifecycle_status": "bounds_ready",
+                }
+                components[component_id] = component
+                rows.append({"component_id": component_id, "status": "success", "bounds_ready": True})
+            return {"environment_components": components, "environment_import_results": rows}
+
+        runtime = AgentRuntime(
+            actor_import_provider=actor_import_provider,
+            environment_import_provider=environment_import_provider,
+        )
+        plan = runtime.propose_scene_plan(
+            room_id="room-late-engine-ready",
+            text="outdoor display with one wooden table",
+            owner_agent="designer",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+        result = runtime.execute_planned_batches(plan.plan_id, max_items_per_batch=10)
+        batch_id = result["batches"][0]["batch_id"]
+        actor_ids = list(runtime.query_state("room-late-engine-ready")["room"]["actors"])
+        self.assertEqual(runtime.batch_plans[batch_id].status, BatchPlanStatus.PARTIAL)
+        self.assertEqual(runtime.scene_plans[plan.plan_id].status, ScenePlanStatus.EXECUTING)
+
+        recorded = {}
+        for actor_id in actor_ids:
+            recorded = runtime.record_sync_event(
+                room_id="room-late-engine-ready",
+                event={
+                    "event_type": "actor_updated",
+                    "plan_id": plan.plan_id,
+                    "batch_id": batch_id,
+                    "actor_id": actor_id,
+                    "aabb": {"min": [-0.5, 0.0, -0.5], "max": [0.5, 1.0, 0.5]},
+                },
+                source="engine_snapshot",
+            )
+
+        self.assertTrue(recorded["recorded"], recorded)
+        self.assertEqual(recorded["readiness_recovery"]["status"], ScenePlanStatus.COMPLETED.value)
+        self.assertEqual(runtime.batch_plans[batch_id].status, BatchPlanStatus.COMPLETED)
+        self.assertEqual(runtime.scene_plans[plan.plan_id].status, ScenePlanStatus.COMPLETED)
+        room = runtime.query_state("room-late-engine-ready")["room"]
+        import_fact = room["custom_import_facts"][f"{batch_id}:actor_import_result"]
+        self.assertEqual(import_fact["status"], "imported")
+        self.assertEqual(import_fact["ready_count"], import_fact["imported_count"])
+        self.assertIn("engine_readiness_reconciled_from_sync", runtime.operation_log.events())
+        self.assertTrue(
+            any(event["event_type"] == "report_ready" for event in runtime.user_visible_events("room-late-engine-ready"))
+        )
 
     def test_scene_entity_registry_actor_readiness_ignores_environment_geometry(self) -> None:
         room = {
@@ -25373,10 +25773,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(tent["native_name"], "Imported Tent")
         self.assertEqual(tent["requested_name"], "帐篷")
         self.assertEqual(tent["aliases"], ["帐篷", "Imported Tent"])
-        self.assertEqual(tent["interaction_capability"], ["inspect", "move"])
-        self.assertIn("runtime_generated", tent["gameplay_tags"])
-        self.assertEqual(tent["physics_profile"]["collision"], "static")
-        self.assertEqual(tent["script_bindings"], ["runtime_scene_entity"])
+        self.assertEqual(tent["interaction_capability"], [])
+        self.assertEqual(tent["gameplay_tags"], [])
+        self.assertEqual(tent["physics_profile"], {})
+        self.assertEqual(tent["script_bindings"], [])
+        self.assertNotEqual(tent["entity_id"], tent["actor_id"])
 
     def test_state_patch_accepts_native_six_value_actor_aabb(self) -> None:
         state = RuntimeState()
@@ -25622,7 +26023,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         )
         entity = registry["entities"][0]
         self.assertEqual(entity["actor_id"], "actor-terrain-grass")
-        self.assertEqual(entity["entity_type"], "terrain")
+        self.assertEqual(entity["entity_type"], "environment")
+        self.assertEqual(entity["component_type"], "terrain")
         self.assertEqual(entity["model_ref"], "terrain_runtime")
         self.assertEqual(entity["aabb"]["min"], [-5.0, 0.0, -5.0])
         self.assertEqual(entity["aabb"]["max"], [5.0, 0.1, 5.0])
