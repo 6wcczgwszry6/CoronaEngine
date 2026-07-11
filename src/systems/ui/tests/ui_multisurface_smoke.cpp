@@ -5,6 +5,7 @@
 #include <corona/systems/ui/vulkan_backend.h>
 
 #include <cstdlib>
+#include <array>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -75,6 +76,15 @@ int run_smoke() {
         return 1;
     }
 
+    const auto render_solid = [&](void* surface, uint32_t width, uint32_t height) {
+        Corona::Systems::QuadDraw quad;
+        quad.dest_min = ktm::fvec2(0.0f, 0.0f);
+        quad.dest_max = ktm::fvec2(static_cast<float>(width), static_cast<float>(height));
+        quad.color = ktm::fvec4(0.12f, 0.28f, 0.72f, 1.0f);
+        const std::array<Corona::Systems::QuadDraw, 1> quads{quad};
+        backend.render_quads(surface, quads, width, height);
+    };
+
     // Cover 1, 3 and 16 windows, including a same-frame registration burst.
     for (int requested = 1; requested <= 16; requested = requested == 1 ? 3 : 16) {
         std::vector<void*> surfaces;
@@ -110,10 +120,12 @@ int run_smoke() {
         for (void* surface : surfaces) {
             backend.new_frame(surface);
             backend.rebuild(surface, 160, 120);
+            render_solid(surface, 160, 120);
             backend.present_surface(surface);
         }
         backend.new_frame(backend.main_surface());
         backend.rebuild(backend.main_surface(), 320, 240);
+        render_solid(backend.main_surface(), 320, 240);
         backend.present_surface(backend.main_surface());
 
         for (void* surface : surfaces) backend.unregister_surface(surface);
@@ -126,9 +138,11 @@ int run_smoke() {
     // Resize/minimize/restore path on the main window.
     SDL_SetWindowSize(main_window, 640, 480);
     backend.rebuild(backend.main_surface(), 640, 480);
+    render_solid(backend.main_surface(), 640, 480);
     SDL_MinimizeWindow(main_window);
     SDL_RestoreWindow(main_window);
     backend.rebuild(backend.main_surface(), 320, 240);
+    render_solid(backend.main_surface(), 320, 240);
 
     // Repeated create/destroy catches stale surface/image handles.
     for (int cycle = 0; cycle < 100; ++cycle) {
@@ -143,6 +157,7 @@ int run_smoke() {
         if (!backend.register_surface(native_surface, window)) break;
         backend.new_frame(native_surface);
         backend.rebuild(native_surface, 96, 96);
+        render_solid(native_surface, 96, 96);
         backend.unregister_surface(native_surface);
         SDL_DestroyWindow(window);
         windows.pop_back();

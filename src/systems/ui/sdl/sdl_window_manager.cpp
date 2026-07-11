@@ -103,7 +103,9 @@ bool SdlWindowManager::adopt_main_window(SDL_Window* window) {
         CFW_LOG_ERROR("SdlWindowManager: adopt_main_window called with null window");
         return false;
     }
-    if (windows_[main_window_id_].removal_acknowledged) {
+    const SDL_WindowID window_id = SDL_GetWindowID(window);
+    if (const auto it = windows_.find(window_id);
+        it != windows_.end() && it->second.removal_acknowledged) {
         return true;
     }
 
@@ -114,7 +116,7 @@ bool SdlWindowManager::adopt_main_window(SDL_Window* window) {
     }
 
     main_window_ = window;
-    main_window_id_ = SDL_GetWindowID(window);
+    main_window_id_ = window_id;
 
     ManagedWindow managed;
     managed.window = window;
