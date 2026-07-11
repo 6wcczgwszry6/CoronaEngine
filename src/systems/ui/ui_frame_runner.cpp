@@ -107,16 +107,24 @@ void shutdown_sdl_ui(SDL_Window*& window, std::unique_ptr<VulkanBackend>& vulkan
     SdlWindowManager::instance().for_each_window([&](const ManagedWindow& managed) {
         if (!managed.is_main && managed.surface != nullptr) secondary_surfaces.push_back(managed.surface);
     });
+    bool all_drained = true;
     for (void* surface : secondary_surfaces) {
         if (SdlWindowManager::instance().request_remove_secondary_window(surface)) {
             if (vulkan_backend) vulkan_backend->unregister_surface(surface);
-            SdlWindowManager::instance().destroy_secondary_window(surface);
+            all_drained = SdlWindowManager::instance().destroy_secondary_window(surface) && all_drained;
+        } else {
+            all_drained = false;
         }
     }
     void* main_surface = SdlWindowManager::instance().main_surface();
     if (main_surface != nullptr) {
-        SdlWindowManager::instance().request_remove_surface(main_surface);
-        if (vulkan_backend) vulkan_backend->unregister_surface(main_surface);
+        const bool ack = SdlWindowManager::instance().request_remove_surface(main_surface);
+        all_drained = all_drained && ack;
+        if (ack && vulkan_backend) vulkan_backend->unregister_surface(main_surface);
+    }
+    if (!all_drained) {
+        CFW_LOG_ERROR("shutdown_sdl_ui: surface drain failed; retaining hidden windows and Vulkan resources");
+        return;
     }
 
     if (vulkan_backend) {
