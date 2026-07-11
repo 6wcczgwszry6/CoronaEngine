@@ -1,6 +1,8 @@
 ﻿#pragma once
 
 #include "horizon.h"
+#include "corona/systems/display/surface_frame_gate.h"
+#include "corona/systems/display/surface_lifecycle_acks.h"
 #include <corona/events/display_system_events.h>
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/kernel/event/i_event_stream.h>
@@ -10,6 +12,7 @@
 #include GLSL(../../../assets/shaders/composite.comp.glsl)
 // clang-format on
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -60,6 +63,8 @@ class DisplaySystem : public Kernel::SystemBase {
         uint32_t viewport_y = 0;
         uint32_t viewport_width = 0;
         uint32_t viewport_height = 0;
+        Detail::SurfaceLifecycleAcks::FirstPresentBoundary
+            first_present_boundary = 0;
     };
 
     struct SurfaceState {
@@ -99,6 +104,8 @@ class DisplaySystem : public Kernel::SystemBase {
     std::unordered_map<uint64_t, void*> surfaces_;
     std::unordered_map<uint64_t, SurfaceState> surface_states_;
     std::unordered_map<uint64_t, CompositeResources> composite_resources_;
+    std::unordered_map<uint64_t, std::shared_ptr<Detail::SurfaceLifecycleAcks>>
+        surface_acknowledgements_;
     std::unordered_set<uint64_t> removed_surfaces_;
     std::vector<void*> pending_surfaces_;  ///< Surfaces awaiting displayer creation (deferred to update thread)
 
@@ -109,14 +116,18 @@ class DisplaySystem : public Kernel::SystemBase {
     // main thread can safely destroy the OS window. See DisplaySurfaceRemovedEvent.
     struct PendingRemoval {
         void* surface = nullptr;
-        std::shared_ptr<std::promise<void>> done;
+        Detail::SurfaceFrameGate::Retirement retirement;
+        std::shared_ptr<Detail::SurfaceLifecycleAcks> acknowledgements;
     };
     std::vector<PendingRemoval> pending_removals_;
+    Detail::SurfaceFrameGate surface_frame_gate_;
 
     // Compositing resources
     std::optional<Horizon::ComputePipeline<composite_comp_glsl_t>> composite_pipeline_;
     Horizon::HardwareImage transparent_storage_;  ///< 1x1 transparent StorageImage fallback for missing layers
     bool composite_pipeline_ready_ = false;
-    bool device_lost_ = false;
+    std::atomic<bool> device_lost_ = false;
+    std::atomic<bool> shutting_down_ = false;
+    std::atomic<bool> shutdown_resources_destroyed_ = false;
 };
 }  // namespace Corona::Systems
