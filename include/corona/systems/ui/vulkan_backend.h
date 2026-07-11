@@ -80,7 +80,7 @@ class VulkanBackend {
         ViewportRenderResources resources;
         std::uintptr_t image_handle = 0;
         uint64_t frame_index = 0;
-        SurfaceCompletionTicket first_present_ticket;
+        UI::SurfaceCompletionTicket first_present_ticket;
         bool first_present_published = false;
     };
 

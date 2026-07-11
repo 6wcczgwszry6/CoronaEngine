@@ -103,7 +103,7 @@ bool SdlWindowManager::adopt_main_window(SDL_Window* window) {
         CFW_LOG_ERROR("SdlWindowManager: adopt_main_window called with null window");
         return false;
     }
-    if (windows_[window_id].removal_acknowledged) {
+    if (windows_[main_window_id_].removal_acknowledged) {
         return true;
     }
 
