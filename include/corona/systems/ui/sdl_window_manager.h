@@ -13,6 +13,7 @@
 #include <SDL3/SDL.h>
 
 #include <cstdint>
+#include <chrono>
 #include <functional>
 #include <unordered_map>
 #include <vector>
@@ -84,7 +85,8 @@ class SdlWindowManager {
     void* create_secondary_window(int x, int y, int width, int height);
     // Request Display retirement and hide the native window. Returns true only when the
     // Display acknowledgement was received; a timeout leaves the hidden window tracked.
-    bool request_remove_secondary_window(void* surface);
+    bool request_remove_secondary_window(void* surface, std::chrono::milliseconds timeout = std::chrono::seconds(5));
+    bool request_remove_surface(void* surface, std::chrono::milliseconds timeout = std::chrono::seconds(5));
     // Final destruction after Vulkan image state has been unregistered. Refuses to destroy
     // a window whose Display retirement was not acknowledged.
     bool destroy_secondary_window(void* surface);

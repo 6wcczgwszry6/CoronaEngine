@@ -328,7 +328,9 @@ void VulkanBackend::present_surface(void* surface) {
 
 bool VulkanBackend::first_present_ready(void* surface) const {
     const auto it = surfaces_.find(surface);
-    return it != surfaces_.end() && it->second->first_present_ticket.is_ready();
+    if (it == surfaces_.end()) return false;
+    const auto result = it->second->first_present_ticket.result();
+    return result && result->status == DisplaySurfaceResult::Status::Succeeded;
 }
 
 void VulkanBackend::rebuild(void* surface, uint32_t pixel_w, uint32_t pixel_h) {

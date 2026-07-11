@@ -128,7 +128,8 @@ void UiSystem::stop() {
         if (std::chrono::steady_clock::now() >= deadline) {
             break;
         }
-        if (UI::SdlWindowManager::instance().request_remove_secondary_window(surface)) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        if (remaining.count() > 0 && UI::SdlWindowManager::instance().request_remove_secondary_window(surface, remaining)) {
             if (vulkan_backend_) {
                 vulkan_backend_->unregister_surface(surface);
             }

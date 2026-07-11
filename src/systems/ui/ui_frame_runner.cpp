@@ -113,6 +113,11 @@ void shutdown_sdl_ui(SDL_Window*& window, std::unique_ptr<VulkanBackend>& vulkan
             SdlWindowManager::instance().destroy_secondary_window(surface);
         }
     }
+    void* main_surface = SdlWindowManager::instance().main_surface();
+    if (main_surface != nullptr) {
+        SdlWindowManager::instance().request_remove_surface(main_surface);
+        if (vulkan_backend) vulkan_backend->unregister_surface(main_surface);
+    }
 
     if (vulkan_backend) {
         vulkan_backend->shutdown();

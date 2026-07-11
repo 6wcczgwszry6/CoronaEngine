@@ -103,6 +103,9 @@ bool SdlWindowManager::adopt_main_window(SDL_Window* window) {
         CFW_LOG_ERROR("SdlWindowManager: adopt_main_window called with null window");
         return false;
     }
+    if (windows_[window_id].removal_acknowledged) {
+        return true;
+    }
 
     void* surface = native_surface_from_sdl_window(window);
     if (surface == nullptr) {
@@ -227,15 +230,15 @@ void* SdlWindowManager::create_secondary_window(int x, int y, int width, int hei
                 Corona::Systems::UI::SurfaceCompletionTicket::Clock::now() +
                     std::chrono::seconds(5))) {
             CFW_LOG_ERROR("SdlWindowManager: registration timed out for surface {}", surface);
-            SDL_DestroyWindow(window);
-            windows_.erase(window_id);
+            SDL_HideWindow(window);
+            windows_[window_id].removal_failed = true;
             return nullptr;
         }
         const auto registration = changed.registration_ticket->result();
         if (!registration || registration->status != DisplaySurfaceResult::Status::Succeeded) {
             CFW_LOG_ERROR("SdlWindowManager: registration failed for surface {}", surface);
-            SDL_DestroyWindow(window);
-            windows_.erase(window_id);
+            SDL_HideWindow(window);
+            windows_[window_id].removal_failed = true;
             return nullptr;
         }
     }
@@ -262,7 +265,7 @@ void SdlWindowManager::enable_drag_hit_test(void* surface, int tab_id) {
     }
 }
 
-bool SdlWindowManager::request_remove_secondary_window(void* surface) {
+bool SdlWindowManager::request_remove_surface(void* surface, std::chrono::milliseconds timeout) {
     if (surface == nullptr) {
         return false;
     }
@@ -270,7 +273,7 @@ bool SdlWindowManager::request_remove_secondary_window(void* surface) {
     SDL_Window* window = nullptr;
     SDL_WindowID window_id = 0;
     for (const auto& [id, managed] : windows_) {
-        if (managed.surface == surface && !managed.is_main) {
+        if (managed.surface == surface) {
             window = managed.window;
             window_id = id;
             break;
@@ -280,6 +283,7 @@ bool SdlWindowManager::request_remove_secondary_window(void* surface) {
         CFW_LOG_WARNING("SdlWindowManager: destroy_secondary_window: surface {} not found", surface);
         return false;
     }
+    if (windows_[window_id].removal_acknowledged) return true;
 
     // DisplaySystem owns the swapchain + VkSurfaceKHR for this surface. It must tear that down
     // (GPU idle + destroy) BEFORE we destroy the OS window, or the Display thread could present
@@ -291,7 +295,7 @@ bool SdlWindowManager::request_remove_secondary_window(void* surface) {
         auto done = std::make_shared<std::promise<void>>();
         auto fut = done->get_future();
         event_bus->publish<Events::DisplaySurfaceRemovedEvent>({surface, done});
-        if (fut.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        if (fut.wait_for(timeout) != std::future_status::ready) {
             CFW_LOG_WARNING(
                 "SdlWindowManager: surface {} teardown timed out; keeping window hidden",
                 surface);
@@ -304,6 +308,12 @@ bool SdlWindowManager::request_remove_secondary_window(void* surface) {
     SDL_HideWindow(window);
     windows_[window_id].removal_acknowledged = true;
     return true;
+}
+
+bool SdlWindowManager::request_remove_secondary_window(void* surface, std::chrono::milliseconds timeout) {
+    const auto* managed = find_by_surface(surface);
+    if (managed == nullptr || managed->is_main) return false;
+    return request_remove_surface(surface, timeout);
 }
 
 bool SdlWindowManager::destroy_secondary_window(void* surface) {
