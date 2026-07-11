@@ -3231,7 +3231,9 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             re.S,
         )
         self.assertIsNotNone(remove_body)
-        self.assertIn("!record->dynamically_added", remove_body.group(0))
+        self.assertIn("external_live_shape_removal_action", remove_body.group(0))
+        self.assertIn("ExternalLiveShapeRemovalAction::HideOriginal", remove_body.group(0))
+        self.assertIn("embedded_runtime", remove_body.group(0))
         self.assertIn("scene_resource->erase_external_live_shape(actor_handle)", remove_body.group(0))
 
         transform_body = re.search(
@@ -3353,6 +3355,40 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         )
         self.assertIsNotNone(remove_body)
         self.assertIn("remove_native_actor_from_embedded_vision_document(*scene, removed_guid)", remove_body.group(0))
+
+        document_remove_body = re.search(
+            r"bool remove_native_actor_from_embedded_vision_document\(NativeEditorScene& scene,\s+"
+            r"const std::string& actor_guid\) \{.*?\n\}",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(document_remove_body)
+        self.assertIn("persist_embedded_vision_document", document_remove_body.group(0))
+        self.assertNotIn("refresh_embedded_vision_view", document_remove_body.group(0))
+        self.assertNotIn("load_vision_scene_from_json", document_remove_body.group(0))
+
+    def test_native_actor_guid_changes_when_same_name_and_index_are_reused(self):
+        source = self._handler_source()
+        guid_body = re.search(
+            r"std::string make_actor_guid\(.*?\n\}",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(guid_body)
+        self.assertIn("std::atomic<std::uint64_t>", guid_body.group(0))
+        self.assertIn("fetch_add", guid_body.group(0))
+
+    def test_embedded_vision_reload_logs_shape_guid_uniqueness(self):
+        source = self._handler_source()
+        refresh_body = re.search(
+            r"bool refresh_embedded_vision_view\(NativeEditorScene& scene,\s+"
+            r"const nlohmann::json& document\) \{.*?\n\}",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(refresh_body)
+        self.assertIn("duplicate_guid_count", refresh_body.group(0))
+        self.assertIn("Vision embedded reload snapshot", refresh_body.group(0))
 
     def test_native_camera_save_load_preserves_vision_render_settings(self):
         source = self._handler_source()

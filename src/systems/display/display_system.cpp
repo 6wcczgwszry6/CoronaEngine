@@ -11,6 +11,8 @@
 #include <exception>
 #include <ranges>
 #include <span>
+#include <sstream>
+#include <string_view>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -62,6 +64,14 @@ struct PixelExtent {
     (void)surface;
     return {};
 #endif
+}
+
+[[nodiscard]] bool is_vulkan_device_lost_message(std::string_view message) {
+    return message.find("VK_ERROR_DEVICE_LOST") != std::string_view::npos ||
+           message.find("VkResult=-4") != std::string_view::npos ||
+           message.find("Vulkan device is lost") != std::string_view::npos ||
+           message.find("Queue acquire skipped because the Vulkan device is lost") != std::string_view::npos ||
+           message.find("vkGetSemaphoreCounterValue returned UINT64_MAX") != std::string_view::npos;
 }
 }  // namespace
 
@@ -216,11 +226,13 @@ void DisplaySystem::update() {
                 pending_surfaces_.end());
         }
 
-        for (auto* surface : pending_surfaces_) {
-            const auto surface_id = reinterpret_cast<uint64_t>(surface);
-            surfaces_[surface_id] = surface;
-            if (!displayers_.contains(surface_id)) {
-                displayers_.emplace(surface_id, Horizon::HardwareDisplayer(surface));
+        if (!device_lost_) {
+            for (auto* surface : pending_surfaces_) {
+                const auto surface_id = reinterpret_cast<uint64_t>(surface);
+                surfaces_[surface_id] = surface;
+                if (!displayers_.contains(surface_id)) {
+                    displayers_.emplace(surface_id, Horizon::HardwareDisplayer(surface));
+                }
             }
         }
         pending_surfaces_.clear();
@@ -240,6 +252,10 @@ void DisplaySystem::update() {
         if (r.done) {
             r.done->set_value();
         }
+    }
+
+    if (device_lost_) {
+        return;
     }
 
     for (auto& [surface_id, displayer] : displayers_) {
@@ -338,6 +354,30 @@ void DisplaySystem::update() {
                 fg_image,
                 use_ui_layer ? ui_receipt_ptr : nullptr);
         } catch (const std::exception& error) {
+            if (is_vulkan_device_lost_message(error.what())) {
+                if (!device_lost_) {
+                    device_lost_ = true;
+                    CFW_LOG_CRITICAL(
+                        "DisplaySystem: Vulkan device lost during compose/present; "
+                        "disabling further display submits and requesting engine shutdown "
+                        "(surface={}, optics_handle={}, optics_frame={}, optics_receipt_empty={}, "
+                        "ui_handle={}, ui_frame={}, ui_receipt_empty={}, output={}x{}, error={})",
+                        surface,
+                        state.optics.image_handle,
+                        state.optics.frame_index,
+                        optics_receipt_ptr == nullptr || optics_receipt_ptr->empty(),
+                        state.ui.image_handle,
+                        state.ui.frame_index,
+                        ui_receipt_ptr == nullptr || ui_receipt_ptr->empty(),
+                        composite_resources.width,
+                        composite_resources.height,
+                        error.what());
+                    if (auto* stream = context()->event_stream()) {
+                        stream->get_stream<Events::EngineShutdownEvent>()->publish(Events::EngineShutdownEvent{});
+                    }
+                }
+                continue;
+            }
             CFW_LOG_ERROR(
                 "DisplaySystem: compose/present failed "
                 "(surface={}, optics_handle={}, optics_frame={}, optics_receipt_empty={}, "
@@ -446,9 +486,12 @@ bool DisplaySystem::compose_and_present(Horizon::HardwareDisplayer& displayer,
     }
 
     auto& composite_pipeline = *composite_pipeline_;
-    composite_pipeline.pushConsts.bgImage = optics_image.storeStorageDescriptor();
-    composite_pipeline.pushConsts.fgImage = ui_image.storeStorageDescriptor();
-    composite_pipeline.pushConsts.outputImage = resources.output.storeStorageDescriptor();
+    const uint32_t bg_descriptor = optics_image.storeStorageDescriptor();
+    const uint32_t fg_descriptor = ui_image.storeStorageDescriptor();
+    const uint32_t output_descriptor = resources.output.storeStorageDescriptor();
+    composite_pipeline.pushConsts.bgImage = bg_descriptor;
+    composite_pipeline.pushConsts.fgImage = fg_descriptor;
+    composite_pipeline.pushConsts.outputImage = output_descriptor;
     composite_pipeline.pushConsts.outputWidth = output_width;
     composite_pipeline.pushConsts.outputHeight = output_height;
     composite_pipeline.pushConsts.bgWidth = std::max(bg_extent.width, 1u);
@@ -469,6 +512,27 @@ bool DisplaySystem::compose_and_present(Horizon::HardwareDisplayer& displayer,
 
     const uint32_t dispatch_x = (output_width + 7u) / 8u;
     const uint32_t dispatch_y = (output_height + 7u) / 8u;
+    {
+        std::ostringstream label;
+        label << "Display/composite"
+              << " surface=" << surface
+              << " bg_desc=" << bg_descriptor
+              << " fg_desc=" << fg_descriptor
+              << " output_desc=" << output_descriptor
+              << " bg_image=" << optics_image.get_image_id()
+              << " fg_image=" << ui_image.get_image_id()
+              << " output_image=" << resources.output.get_image_id()
+              << " bg_extent=" << bg_extent.width << "x" << bg_extent.height
+              << " fg_extent=" << fg_extent.width << "x" << fg_extent.height
+              << " output_extent=" << output_width << "x" << output_height
+              << " optics_frame=" << state.optics.frame_index
+              << " optics_receipt_empty="
+              << (optics_receipt == nullptr || optics_receipt->empty())
+              << " ui_frame=" << state.ui.frame_index
+              << " ui_receipt_empty="
+              << (ui_receipt == nullptr || ui_receipt->empty());
+        composite_pipeline.set_debug_label(label.str());
+    }
 
     // GPU sync: wait for each producer's rendering to finish before reading their images
     if (optics_receipt != nullptr && !optics_receipt->empty()) {
@@ -514,6 +578,7 @@ void DisplaySystem::shutdown() {
     }
 
     composite_pipeline_ready_ = false;
+    device_lost_ = false;
     composite_pipeline_.reset();
     surface_states_.clear();
     removed_surfaces_.clear();

@@ -877,6 +877,9 @@ Corona::API::Geometry Corona::API::Geometry::from_image(const std::string& image
         "script.image.index_storage");
     dev.materialIndex = 0;
     dev.materialColor = {1.0f, 1.0f, 1.0f, 1.0f};
+    dev.vertex_count = static_cast<std::uint32_t>(vertices.size());
+    dev.index_count = static_cast<std::uint32_t>(indices.size());
+    dev.max_index = 3;
 
     if (!upload_image_to_texture(image_id, dev.textureBuffer)) {
         // 上传失败：回退 1x1 白占位，几何仍可显示（白底），避免整体导入失败。

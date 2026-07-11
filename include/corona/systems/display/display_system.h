@@ -117,5 +117,6 @@ class DisplaySystem : public Kernel::SystemBase {
     std::optional<Horizon::ComputePipeline<composite_comp_glsl_t>> composite_pipeline_;
     Horizon::HardwareImage transparent_storage_;  ///< 1x1 transparent StorageImage fallback for missing layers
     bool composite_pipeline_ready_ = false;
+    bool device_lost_ = false;
 };
 }  // namespace Corona::Systems

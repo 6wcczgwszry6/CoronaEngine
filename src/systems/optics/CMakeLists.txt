@@ -18,6 +18,7 @@ corona_add_system(optics
         $<$<BOOL:${CORONA_BUILD_VISION}>:vision/vision_render_mode_config.h>
         $<$<BOOL:${CORONA_BUILD_VISION}>:${PROJECT_SOURCE_DIR}/include/corona/systems/optics/vision_pipeline_key.h>
         $<$<BOOL:${CORONA_BUILD_VISION}>:${PROJECT_SOURCE_DIR}/include/corona/systems/optics/vision_scene_resource.h>
+        $<$<BOOL:${CORONA_BUILD_VISION}>:vision/vision_interop_lifetime.h>
         $<$<BOOL:${CORONA_BUILD_VISION}>:vision/vision_zero_copy_bridge.cpp>
         $<$<BOOL:${CORONA_BUILD_VISION}>:vision/vision_zero_copy_bridge.h>
     DEPENDENCIES
@@ -113,6 +114,23 @@ if((BUILD_CORONA_TESTING OR BUILD_TESTING) AND CORONA_BUILD_VISION)
     set_tests_properties(VisionSceneResourceTests PROPERTIES
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
 
+    add_executable(corona_vision_interop_lifetime_tests
+        tests/test_vision_interop_lifetime.cpp
+    )
+    target_include_directories(corona_vision_interop_lifetime_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_vision_interop_lifetime_tests
+        PRIVATE
+            corona::system::optics
+    )
+    add_test(NAME VisionInteropLifetimeTests
+             COMMAND corona_vision_interop_lifetime_tests)
+    set_tests_properties(VisionInteropLifetimeTests PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
+
     add_executable(corona_vision_geometry_gpu_resource_tests
         tests/test_vision_geometry_gpu_resource.cpp
     )
@@ -130,6 +148,40 @@ if((BUILD_CORONA_TESTING OR BUILD_TESTING) AND CORONA_BUILD_VISION)
              COMMAND corona_vision_geometry_gpu_resource_tests)
     set_tests_properties(VisionGeometryGpuResourceTests PROPERTIES
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
+endif()
+
+if(BUILD_CORONA_TESTING OR BUILD_TESTING)
+    add_executable(corona_optics_native_frame_throttle_tests
+        tests/test_native_frame_throttle.cpp
+    )
+    target_include_directories(corona_optics_native_frame_throttle_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_optics_native_frame_throttle_tests PRIVATE Horizon)
+    add_test(NAME OpticsNativeFrameThrottleTests
+             COMMAND corona_optics_native_frame_throttle_tests)
+
+    add_executable(corona_optics_storage_snapshot_tests
+        tests/test_storage_snapshot.cpp
+    )
+    target_include_directories(corona_optics_storage_snapshot_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_optics_storage_snapshot_tests PRIVATE Horizon)
+    add_test(NAME OpticsStorageSnapshotTests
+             COMMAND corona_optics_storage_snapshot_tests)
+
+    add_executable(corona_optics_debug_label_tests
+        tests/test_optics_debug_labels.cpp
+    )
+    target_include_directories(corona_optics_debug_label_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(NAME OpticsDebugLabelTests
+             COMMAND corona_optics_debug_label_tests)
 endif()
 
 # ------------------------------------------------------------------------------

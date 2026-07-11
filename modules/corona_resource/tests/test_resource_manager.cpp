@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "corona/resource/resource_manager.h"
+#include "corona/resource/types/scene.h"
 
 using namespace Corona::Resource;
 
@@ -584,6 +585,51 @@ bool test_invalid_path() {
     }
 }
 
+bool test_obj_without_material_defaults_to_white() {
+    std::cout << "\n[TEST] OBJ Without Material Defaults To White" << std::endl;
+    try {
+        const auto path = std::filesystem::path("obj_without_material.obj");
+        {
+            std::ofstream obj(path);
+            obj << "o ProxyQuad\n"
+                << "v 0 0 0\n"
+                << "v 1 0 0\n"
+                << "v 0 1 0\n"
+                << "f 1 2 3\n";
+        }
+
+        auto& manager = ResourceManager::get_instance();
+        const auto id = manager.import_sync(path);
+        if (id == IResource::INVALID_UID) {
+            std::cerr << "  FAILED: OBJ import returned invalid UID" << std::endl;
+            return false;
+        }
+
+        auto scene = manager.acquire_read<Scene>(id);
+        if (!scene || !scene.valid() || scene->data.materials.empty()) {
+            std::cerr << "  FAILED: imported OBJ did not produce a material" << std::endl;
+            return false;
+        }
+
+        const auto& color = scene->data.materials.front().base_color;
+        const bool is_white =
+            color[0] > 0.99f && color[1] > 0.99f &&
+            color[2] > 0.99f && color[3] > 0.99f;
+        if (!is_white) {
+            std::cerr << "  FAILED: expected default white material, got ("
+                      << color[0] << ", " << color[1] << ", "
+                      << color[2] << ", " << color[3] << ")" << std::endl;
+            return false;
+        }
+
+        std::cout << "  PASSED" << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "  FAILED: Exception: " << e.what() << std::endl;
+        return false;
+    }
+}
+
 bool test_export_functionality() {
     std::cout << "\n[TEST] Export Functionality" << std::endl;
     try {
@@ -1058,7 +1104,8 @@ void create_test_files() {
         "parser_fail.mock",
         "parser_recovery.mock",
         "async_parser_fail.mock",
-        "extreme_concurrency.mock"};
+        "extreme_concurrency.mock",
+        "obj_without_material.obj"};
 
     for (const auto& file : files) {
         std::ofstream(file).close();
@@ -1109,6 +1156,7 @@ int main() {
     // Initialize manager (singleton)
     auto& manager = ResourceManager::get_instance();
     manager.register_parser<MockParser>();
+    manager.register_parser<SceneParser>();
 
     // Run all tests
     auto start_time = std::chrono::steady_clock::now();
@@ -1155,6 +1203,10 @@ int main() {
     else
         g_stats.record_fail();
     if (test_invalid_path())
+        g_stats.record_pass();
+    else
+        g_stats.record_fail();
+    if (test_obj_without_material_defaults_to_white())
         g_stats.record_pass();
     else
         g_stats.record_fail();
