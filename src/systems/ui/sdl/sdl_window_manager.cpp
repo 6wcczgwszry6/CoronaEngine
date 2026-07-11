@@ -51,6 +51,16 @@ SDL_HitTestResult SDLCALL secondary_window_hit_test(SDL_Window* win, const SDL_P
         if (bottom) return SDL_HITTEST_RESIZE_BOTTOM;
         if (left) return SDL_HITTEST_RESIZE_LEFT;
         if (right) return SDL_HITTEST_RESIZE_RIGHT;
+
+        // The Vue title bar reports its whole header as draggable, but the right-side
+        // float/close buttons must remain normal client hit-test targets so SDL/CEF receive
+        // their mouse events instead of Windows consuming them as a native drag.
+        constexpr int kTitlebarHeight = 32;
+        constexpr int kTitlebarActionReserve = 80;
+        if (area->y >= kResizeBorder && area->y < kTitlebarHeight &&
+            area->x >= w - kTitlebarActionReserve) {
+            return SDL_HITTEST_NORMAL;
+        }
     }
 
     const int tab_id = static_cast<int>(reinterpret_cast<std::intptr_t>(data));

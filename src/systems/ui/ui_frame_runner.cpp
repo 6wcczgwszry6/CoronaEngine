@@ -393,6 +393,9 @@ void UiFrameRunner::route_mouse_to_panels(SDL_WindowID window_id,
 
     const HitResult hit = input_router_.hit_test(window_id, targets);
     const InputState st = input_router_.state(window_id);
+    SDL_Window* main_sdl_window = SdlWindowManager::instance().main_window();
+    const bool is_main_window =
+        main_sdl_window != nullptr && SDL_GetWindowID(main_sdl_window) == window_id;
 
     // Drain button transitions regardless of hit, so a release outside the panel still
     // closes a click that began inside it (mirrors the old was_down/is_active handling).
@@ -408,7 +411,7 @@ void UiFrameRunner::route_mouse_to_panels(SDL_WindowID window_id,
     bool ended_resize_this_frame = false;
     bool ended_drag_this_frame = false;
     for (const ButtonEvent& be : button_events) {
-        if (be.button != MouseButton::Left) {
+        if (!is_main_window || be.button != MouseButton::Left) {
             continue;
         }
 
@@ -452,7 +455,16 @@ void UiFrameRunner::route_mouse_to_panels(SDL_WindowID window_id,
             continue;
         }
 
-        if (hit.in_drag_region) {
+        // The default in-main floating drag region covers the whole title bar.  Keep the
+        // native move gesture away from the Vue title-bar actions, otherwise the native
+        // handler consumes the button-down/up pair before CEF can deliver the click.
+        constexpr float kTitlebarHeight = 32.0f;
+        constexpr float kTitlebarActionReserve = 80.0f;
+        const float panel_width = static_cast<float>(std::max(dtab->width, dtab->dock_width));
+        const bool over_titlebar_actions =
+            hit.local_y >= 0.0f && hit.local_y <= kTitlebarHeight &&
+            hit.local_x >= panel_width - kTitlebarActionReserve && hit.local_x <= panel_width;
+        if (hit.in_drag_region && !over_titlebar_actions) {
             active_tab_id = hit.tab_id;
             url_input_active_tab_ = -1;
             focus_browser_tab_exclusively(hit.tab_id);
@@ -467,9 +479,9 @@ void UiFrameRunner::route_mouse_to_panels(SDL_WindowID window_id,
     }
 
     int cursor_edges = 0;
-    if (resizing_tab_id_ != -1) {
+    if (is_main_window && resizing_tab_id_ != -1) {
         cursor_edges = resize_edges_;
-    } else if (dragging_tab_id_ == -1 && hit.hit && !hit.is_main) {
+    } else if (is_main_window && dragging_tab_id_ == -1 && hit.hit && !hit.is_main) {
         auto* hover_tab = BrowserManager::instance().get_tab(hit.tab_id);
         if (hover_tab && hover_tab->floating) {
             cursor_edges = floating_resize_edges(*hover_tab, hit);
@@ -477,7 +489,7 @@ void UiFrameRunner::route_mouse_to_panels(SDL_WindowID window_id,
     }
     set_system_cursor(cursor_for_resize_edges(cursor_edges));
 
-    if (resizing_tab_id_ != -1) {
+    if (is_main_window && resizing_tab_id_ != -1) {
         auto* dtab = BrowserManager::instance().get_tab(resizing_tab_id_);
         if (!dtab || !dtab->floating) {
             resizing_tab_id_ = -1;
@@ -501,7 +513,7 @@ void UiFrameRunner::route_mouse_to_panels(SDL_WindowID window_id,
     }
 
     // While dragging: move the panel and consume all input (no CEF forwarding this frame).
-    if (dragging_tab_id_ != -1) {
+    if (is_main_window && dragging_tab_id_ != -1) {
         auto* dtab = BrowserManager::instance().get_tab(dragging_tab_id_);
         if (!dtab || !dtab->floating) {
             dragging_tab_id_ = -1;
@@ -652,6 +664,16 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         render_window(context, managed);
     }
 
+    // Upload CEF paint buffers after all windows have routed this frame's input. The upload
+    // executor may wait on the previous receipt; doing that before route_mouse_to_panels makes
+    // Vue drag/click latency scale with the number of secondary surfaces.
+    for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
+        if (!tab || !tab->open || tab->minimized) {
+            continue;
+        }
+        BrowserManager::instance().update_texture(tab_id);
+    }
+
     // 6) Close tabs flagged closed. A closed tab that is currently detached owns an OS window
     //    + a registered surface; those must be torn down (promise-synced, same order as redock)
     //    BEFORE remove_tab destroys the tab, or we leak the window / present to a dead surface.
@@ -708,6 +730,19 @@ void UiFrameRunner::reconcile_detach_states(UiFrameContext& context) {
             continue;
         }
 
+        if (tab->cef_creation_failed) {
+            CFW_LOG_ERROR("reconcile: tab {} cannot detach because CEF creation failed", tab_id);
+            tab->detach_state = BrowserTab::DetachState::Docked;
+            tab->open = false;
+            continue;
+        }
+        if (tab->client == nullptr || tab->client->GetBrowser() == nullptr) {
+            // CEF creation is asynchronous. Keep Detaching pending until OnAfterCreated;
+            // creating a secondary surface without a browser would produce an empty window.
+            CFW_LOG_DEBUG("reconcile: tab {} waiting for CEF browser before detach", tab_id);
+            continue;
+        }
+
         void* surface = window_manager.create_secondary_window(
             tab->detach_x, tab->detach_y, tab->detach_w, tab->detach_h);
         if (surface == nullptr) {
@@ -716,6 +751,9 @@ void UiFrameRunner::reconcile_detach_states(UiFrameContext& context) {
             tab->detach_state = BrowserTab::DetachState::Docked;
             continue;
         }
+
+        CFW_LOG_INFO("reconcile: tab {} secondary SDL window created (surface={}, size={}x{}, pos=({}, {}))",
+                     tab_id, surface, tab->detach_w, tab->detach_h, tab->detach_x, tab->detach_y);
 
         const ManagedWindow* mw = window_manager.find_by_surface(surface);
         SDL_Window* sdl_window = mw ? mw->window : nullptr;
@@ -728,6 +766,8 @@ void UiFrameRunner::reconcile_detach_states(UiFrameContext& context) {
             continue;
         }
 
+        CFW_LOG_INFO("reconcile: tab {} Vulkan surface registered (surface={})", tab_id, surface);
+
         tab->host_surface = surface;
         tab->platform_window_id = mw ? mw->window_id : 0;
         tab->platform_handle_raw = surface;
@@ -737,7 +777,7 @@ void UiFrameRunner::reconcile_detach_states(UiFrameContext& context) {
         // tab->drag_regions (the Vue-reported title-bar rects) keyed by this tab id.
         window_manager.enable_drag_hit_test(surface, tab_id);
 
-        CFW_LOG_INFO("reconcile: tab {} detached to surface {}", tab_id, surface);
+        CFW_LOG_INFO("reconcile: tab {} detached to surface {} (state=Detached)", tab_id, surface);
     }
 
     // --- Redocking: Detached->Redocking (by bridge) -> clear host + unregister + destroy -> Docked.
