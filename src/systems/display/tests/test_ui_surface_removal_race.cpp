@@ -17,6 +17,7 @@
 #include <utility>
 
 #include "corona/systems/display/display_callback_gate.h"
+#include "corona/systems/display/display_system.h"
 #include "corona/systems/display/surface_frame_coordinator.h"
 #include "corona/systems/display/surface_lifecycle_acks.h"
 #include "corona/systems/ui/ui_surface_lifecycle.h"
@@ -24,6 +25,8 @@
 namespace {
 
 using namespace std::chrono_literals;
+using Corona::Systems::DisplaySystem;
+using Corona::Systems::Detail::ForwardCompletionFence;
 using Corona::Systems::Detail::OwnerCallbackGate;
 using Corona::Systems::Detail::PresentOutcome;
 using Corona::Systems::Detail::SurfaceFrameCoordinator;
@@ -264,6 +267,51 @@ void shutdown_cancels_impossible_forward_work_without_certifying_removal_early()
     expect(removal.is_ready() &&
                done_future.wait_for(0ms) == std::future_status::ready,
            "shutdown should acknowledge removal after resource destruction");
+}
+
+void closed_forward_fence_defers_admitted_removal_completions() {
+    auto fence = std::make_shared<ForwardCompletionFence>();
+    SurfaceLifecycleAcks acknowledgements{fence};
+    SurfaceCompletionTicket registration;
+    SurfaceCompletionTicket first_present;
+    SurfaceCompletionTicket removal;
+    auto done = std::make_shared<std::promise<void>>();
+    auto done_future = done->get_future();
+
+    acknowledgements.add_registration(registration);
+    (void)acknowledgements.add_first_present(first_present);
+    fence->close();
+
+    const bool ran_after_close = fence->run([&]() {
+        acknowledgements.removal_requested(removal, done);
+    });
+    expect(!ran_after_close,
+           "the shutdown fence must reject an admitted completion after close");
+    acknowledgements.removal_requested(removal, done);
+
+    expect(!registration.is_ready() && !first_present.is_ready() &&
+               !removal.is_ready(),
+           "closed-fence lifecycle tickets must wait for resource destruction");
+    expect(done_future.wait_for(0ms) == std::future_status::timeout,
+           "closed-fence legacy removal must wait for resource destruction");
+
+    acknowledgements.cancel_forward(
+        "Display shutdown before surface lifecycle completed");
+    acknowledgements.removal_succeeded();
+    expect_result(registration,
+                  DisplaySurfaceResult::Status::Cancelled,
+                  "Display shutdown before surface lifecycle completed",
+                  "registration should cancel only after resource destruction");
+    expect_result(first_present,
+                  DisplaySurfaceResult::Status::Cancelled,
+                  "Display shutdown before surface lifecycle completed",
+                  "first present should cancel only after resource destruction");
+    expect_result(removal,
+                  DisplaySurfaceResult::Status::Succeeded,
+                  {},
+                  "removal should succeed only after resource destruction");
+    expect(done_future.wait_for(0ms) == std::future_status::ready,
+           "legacy removal should complete only after resource destruction");
 }
 
 void copied_callback_rejects_owner_access_and_defers_acknowledgements() {
@@ -718,6 +766,12 @@ void acquisition_failure_destroys_images_before_releasing_the_lease() {
            "before acknowledgement");
 }
 
+void production_display_empty_update_is_linked() {
+    DisplaySystem display;
+    display.update();
+    display.shutdown();
+}
+
 }  // namespace
 
 int main() {
@@ -729,6 +783,7 @@ int main() {
     removal_cancels_forward_work_and_waits_for_the_safe_point();
     duplicate_and_late_removals_complete_idempotently();
     shutdown_cancels_impossible_forward_work_without_certifying_removal_early();
+    closed_forward_fence_defers_admitted_removal_completions();
     copied_callback_rejects_owner_access_and_defers_acknowledgements();
     callback_deferred_after_resource_drain_completes_immediately();
     initialization_failure_is_preserved_for_late_callbacks();
@@ -737,6 +792,7 @@ int main() {
     removal_invalidates_a_snapshot_captured_before_retirement();
     removal_acknowledgement_waits_for_an_acquired_frame_lease();
     acquisition_failure_destroys_images_before_releasing_the_lease();
+    production_display_empty_update_is_linked();
     std::cout << "UI surface removal race tests passed\n";
     return 0;
 }

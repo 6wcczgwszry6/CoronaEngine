@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <future>
 #include <iterator>
 #include <memory>
@@ -21,12 +22,44 @@ enum class PresentOutcome : std::uint8_t {
     Failed,
 };
 
+/** Linearizes forward ticket completion against Display shutdown. */
+class ForwardCompletionFence {
+   public:
+    void close() {
+        std::lock_guard lock(mutex_);
+        closed_ = true;
+    }
+
+    template <typename Completion>
+    bool run(Completion&& completion) {
+        std::lock_guard lock(mutex_);
+        if (closed_) {
+            return false;
+        }
+        std::invoke(std::forward<Completion>(completion));
+        return true;
+    }
+
+   private:
+    // Display handlers hold the fence while SurfaceLifecycleAcks enters it
+    // again for removal_requested(). The recursive mutex makes that one
+    // intentional nesting explicit while still serializing close().
+    std::recursive_mutex mutex_;
+    bool closed_ = false;
+};
+
 /** Thread-safe acknowledgement state for one Display-owned surface. */
 class SurfaceLifecycleAcks {
    public:
     using Result = UI::DisplaySurfaceResult;
     using Ticket = UI::SurfaceCompletionTicket;
     using FirstPresentBoundary = std::uint64_t;
+
+    explicit SurfaceLifecycleAcks(
+        std::shared_ptr<ForwardCompletionFence> forward_fence = {})
+        : forward_fence_(forward_fence ? std::move(forward_fence)
+                                       : std::make_shared<
+                                             ForwardCompletionFence>()) {}
 
     void add_registration(const std::optional<Ticket>& ticket) {
         add_ticket(ticket, registration_outcome_, registration_tickets_);
@@ -126,6 +159,60 @@ class SurfaceLifecycleAcks {
     void removal_requested(
         const std::optional<Ticket>& ticket,
         std::shared_ptr<std::promise<void>> done) {
+        if (forward_fence_->run([&]() {
+                removal_requested_while_open(ticket, done);
+            })) {
+            return;
+        }
+
+        // Shutdown won the fence. Record only the removal completion; forward
+        // tickets remain pending until Display destroys every resource and
+        // calls cancel_forward()/fail_forward().
+        record_removal(ticket, std::move(done));
+    }
+
+    void fail_forward(std::string message) {
+        complete_forward(Result::Status::Failed, std::move(message));
+    }
+
+    void cancel_forward(std::string message) {
+        complete_forward(Result::Status::Cancelled, std::move(message));
+    }
+
+    /** Called only after the displayer and composite resources are erased. */
+    void removal_succeeded() {
+        std::vector<Ticket> tickets;
+        std::vector<std::shared_ptr<std::promise<void>>> promises;
+        const Outcome outcome{Result::Status::Succeeded, {}};
+        {
+            std::lock_guard lock(mutex_);
+            if (removal_outcome_) {
+                return;
+            }
+            removal_outcome_ = outcome;
+            tickets.swap(removal_tickets_);
+            promises.swap(removal_promises_);
+        }
+        complete_all(tickets, outcome);
+        for (const auto& promise : promises) {
+            fulfill(promise);
+        }
+    }
+
+   private:
+    struct Outcome {
+        Result::Status status;
+        std::string message;
+    };
+
+    struct SequencedTicket {
+        FirstPresentBoundary boundary;
+        Ticket ticket;
+    };
+
+    void removal_requested_while_open(
+        const std::optional<Ticket>& ticket,
+        const std::shared_ptr<std::promise<void>>& done) {
         std::optional<Outcome> completed_removal;
         std::vector<Ticket> registration_tickets;
         std::vector<Ticket> first_present_tickets;
@@ -167,44 +254,32 @@ class SurfaceLifecycleAcks {
         }
     }
 
-    void fail_forward(std::string message) {
-        complete_forward(Result::Status::Failed, std::move(message));
-    }
-
-    void cancel_forward(std::string message) {
-        complete_forward(Result::Status::Cancelled, std::move(message));
-    }
-
-    /** Called only after the displayer and composite resources are erased. */
-    void removal_succeeded() {
-        std::vector<Ticket> tickets;
-        std::vector<std::shared_ptr<std::promise<void>>> promises;
-        const Outcome outcome{Result::Status::Succeeded, {}};
+    void record_removal(const std::optional<Ticket>& ticket,
+                        std::shared_ptr<std::promise<void>> done) {
+        std::optional<Outcome> completed_removal;
         {
             std::lock_guard lock(mutex_);
             if (removal_outcome_) {
-                return;
+                completed_removal = removal_outcome_;
+            } else {
+                if (ticket) {
+                    removal_tickets_.push_back(*ticket);
+                }
+                if (done &&
+                    std::find(removal_promises_.begin(),
+                              removal_promises_.end(),
+                              done) == removal_promises_.end()) {
+                    removal_promises_.push_back(done);
+                }
             }
-            removal_outcome_ = outcome;
-            tickets.swap(removal_tickets_);
-            promises.swap(removal_promises_);
         }
-        complete_all(tickets, outcome);
-        for (const auto& promise : promises) {
-            fulfill(promise);
+        if (completed_removal) {
+            if (ticket) {
+                complete(*ticket, *completed_removal);
+            }
+            fulfill(done);
         }
     }
-
-   private:
-    struct Outcome {
-        Result::Status status;
-        std::string message;
-    };
-
-    struct SequencedTicket {
-        FirstPresentBoundary boundary;
-        Ticket ticket;
-    };
 
     void take_first_present_tickets(std::vector<Ticket>& destination) {
         destination.reserve(destination.size() + first_present_tickets_.size());
@@ -305,6 +380,7 @@ class SurfaceLifecycleAcks {
     }
 
     std::mutex mutex_;
+    std::shared_ptr<ForwardCompletionFence> forward_fence_;
     std::optional<Outcome> registration_outcome_;
     std::optional<Outcome> first_present_terminal_outcome_;
     std::optional<Outcome> removal_outcome_;

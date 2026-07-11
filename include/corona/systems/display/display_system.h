@@ -104,6 +104,8 @@ class DisplaySystem : public Kernel::SystemBase {
     std::optional<Kernel::EventId> optics_frame_sub_id_;
     std::optional<Kernel::EventId> ui_frame_sub_id_;
     std::shared_ptr<CallbackGate> callback_gate_;
+    std::shared_ptr<Detail::ForwardCompletionFence>
+        forward_completion_fence_;
 
     // Protects displayers_ and surface_states_ against concurrent access
     // from EventBus handlers (Optics thread, main thread) and update() (Display thread)

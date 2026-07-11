@@ -112,7 +112,8 @@ void DisplaySystem::handle_surface_changed(
                 removed_surfaces_.erase(surface_id) != 0;
             auto& stored = surface_acknowledgements_[surface_id];
             if (begins_new_lifetime || !stored) {
-                stored = std::make_shared<Detail::SurfaceLifecycleAcks>();
+                stored = std::make_shared<Detail::SurfaceLifecycleAcks>(
+                    forward_completion_fence_);
             }
             acknowledgements = stored;
             surfaces_[surface_id] = event.surface;
@@ -134,7 +135,8 @@ void DisplaySystem::handle_surface_changed(
 void DisplaySystem::handle_surface_removed(
     const Events::DisplaySurfaceRemovedEvent& event) {
     if (event.surface == nullptr) {
-        Detail::SurfaceLifecycleAcks acknowledgements;
+        Detail::SurfaceLifecycleAcks acknowledgements{
+            forward_completion_fence_};
         acknowledgements.removal_requested(event.removal_ticket, event.done);
         acknowledgements.removal_succeeded();
         return;
@@ -147,7 +149,8 @@ void DisplaySystem::handle_surface_removed(
         std::lock_guard<std::mutex> lock(frame_mutex_);
         auto& stored = surface_acknowledgements_[surface_id];
         if (!stored) {
-            stored = std::make_shared<Detail::SurfaceLifecycleAcks>();
+            stored = std::make_shared<Detail::SurfaceLifecycleAcks>(
+                forward_completion_fence_);
         }
         acknowledgements = stored;
         removed_surfaces_.insert(surface_id);
@@ -210,7 +213,8 @@ void DisplaySystem::handle_ui_frame(const Events::UIFrameReadyEvent& event) {
         if (!removed) {
             auto& stored = surface_acknowledgements_[surface_id];
             if (!stored) {
-                stored = std::make_shared<Detail::SurfaceLifecycleAcks>();
+                stored = std::make_shared<Detail::SurfaceLifecycleAcks>(
+                    forward_completion_fence_);
             }
             acknowledgements = stored;
             const auto first_present_boundary =
@@ -249,6 +253,9 @@ bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
         shutdown();
     }
     device_lost_.store(false, std::memory_order_release);
+    forward_completion_fence_ =
+        std::make_shared<Detail::ForwardCompletionFence>();
+    const auto forward_completion_fence = forward_completion_fence_;
     callback_gate_ = std::make_shared<CallbackGate>(*this);
     const auto callback_gate = callback_gate_;
     auto* event_bus = ctx->event_bus();
@@ -258,42 +265,52 @@ bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
     }
 
     surface_changed_sub_id_ = event_bus->subscribe<Events::DisplaySurfaceChangedEvent>(
-        [callback_gate](const Events::DisplaySurfaceChangedEvent& event) {
+        [callback_gate, forward_completion_fence](
+            const Events::DisplaySurfaceChangedEvent& event) {
             auto access = callback_gate->try_acquire();
-            if (!access) {
+            if (!access || !forward_completion_fence->run([&]() {
+                    access.owner().handle_surface_changed(event);
+                })) {
                 callback_gate->defer_registration(event.registration_ticket);
-                return;
             }
-            access.owner().handle_surface_changed(event);
         });
     surface_removed_sub_id_ = event_bus->subscribe<Events::DisplaySurfaceRemovedEvent>(
-        [callback_gate](const Events::DisplaySurfaceRemovedEvent& event) {
+        [callback_gate, forward_completion_fence](
+            const Events::DisplaySurfaceRemovedEvent& event) {
             auto access = callback_gate->try_acquire();
-            if (!access) {
+            if (!access || !forward_completion_fence->run([&]() {
+                    access.owner().handle_surface_removed(event);
+                })) {
                 callback_gate->defer_removal(event.removal_ticket, event.done);
-                return;
             }
-            access.owner().handle_surface_removed(event);
         });
     optics_frame_sub_id_ = event_bus->subscribe<Events::OpticsFrameReadyEvent>(
-        [callback_gate](const Events::OpticsFrameReadyEvent& event) {
+        [callback_gate, forward_completion_fence](
+            const Events::OpticsFrameReadyEvent& event) {
             auto access = callback_gate->try_acquire();
             if (access) {
-                access.owner().handle_optics_frame(event);
+                (void)forward_completion_fence->run([&]() {
+                    access.owner().handle_optics_frame(event);
+                });
             }
         });
     ui_frame_sub_id_ = event_bus->subscribe<Events::UIFrameReadyEvent>(
-        [callback_gate](const Events::UIFrameReadyEvent& event) {
+        [callback_gate, forward_completion_fence](
+            const Events::UIFrameReadyEvent& event) {
             auto access = callback_gate->try_acquire();
-            if (!access) {
+            if (!access || !forward_completion_fence->run([&]() {
+                    access.owner().handle_ui_frame(event);
+                })) {
                 callback_gate->defer_first_present(event.first_present_ticket);
-                return;
             }
-            access.owner().handle_ui_frame(event);
         });
 
     const auto initialization_failed =
-        [this, event_bus, callback_gate](std::string message) {
+        [this,
+         event_bus,
+         callback_gate,
+         forward_completion_fence](std::string message) {
+            forward_completion_fence->close();
             callback_gate->close();
             if (surface_changed_sub_id_) {
                 event_bus->unsubscribe(*surface_changed_sub_id_);
@@ -965,6 +982,10 @@ Detail::PresentOutcome DisplaySystem::compose_and_present(
 }
 
 void DisplaySystem::shutdown() {
+    const auto forward_completion_fence = forward_completion_fence_;
+    if (forward_completion_fence) {
+        forward_completion_fence->close();
+    }
     const auto callback_gate = callback_gate_;
     if (callback_gate) {
         callback_gate->close();
