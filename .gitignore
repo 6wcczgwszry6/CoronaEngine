@@ -28,6 +28,7 @@ TaskSplitting.md
 # Tool caches
 **/.cache/
 __pycache__/
+/.worktrees/
 
 # third-party libraries (manually added)
 /third_party/*
