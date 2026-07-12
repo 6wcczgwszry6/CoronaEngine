@@ -79,6 +79,10 @@ bool CameraViewportManager::bind_surface(int tab_id, void* surface, int x, int y
         CFW_LOG_INFO("CameraViewport: bound tab={} handle={} surface={} rect={}x{}+{},{} render={}x{}",
                      tab_id, record.camera_handle, record.surface, record.width, record.height,
                      record.x, record.y, record.render_width, record.render_height);
+    } else {
+        enqueue_update(record, false);
+        CFW_LOG_INFO("CameraViewport: unbound tab={} handle={} (surface retired)",
+                     tab_id, record.camera_handle);
     }
     return true;
 }

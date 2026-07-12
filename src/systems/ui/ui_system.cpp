@@ -130,10 +130,19 @@ void UiSystem::stop() {
         }
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
         if (remaining.count() > 0 && UI::SdlWindowManager::instance().request_remove_secondary_window(surface, remaining)) {
-            if (vulkan_backend_) {
-                vulkan_backend_->unregister_surface(surface);
-            }
-            UI::SdlWindowManager::instance().destroy_secondary_window(surface);
+            // Keep the hidden SDL window tracked until DisplaySystem has stopped.
+            // Vulkan unregister and HWND destruction are performed by shutdown_sdl_ui
+            // after SystemManager has joined the Display worker.
+        }
+    }
+    if (void* main_surface = UI::SdlWindowManager::instance().main_surface();
+        main_surface != nullptr) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+        if (remaining.count() > 0 &&
+            !UI::SdlWindowManager::instance().request_remove_surface(main_surface,
+                                                                       remaining)) {
+            CFW_LOG_ERROR("UiSystem: main surface removal did not acknowledge before Display stop");
         }
     }
 
@@ -148,8 +157,7 @@ void UiSystem::stop() {
     }
     browser_manager.close_all_tabs();
 
-    const auto camera_deadline = std::min(deadline, std::chrono::steady_clock::now() + std::chrono::seconds(2));
-    while (!camera_handles.empty() && std::chrono::steady_clock::now() < camera_deadline) {
+    while (!camera_handles.empty() && std::chrono::steady_clock::now() < deadline) {
         std::erase_if(camera_handles, [](const std::uintptr_t camera_handle) {
             auto camera =
                 SharedDataHub::instance().camera_storage().try_acquire_read(camera_handle);
@@ -158,6 +166,10 @@ void UiSystem::stop() {
         if (!camera_handles.empty()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+    }
+    if (!camera_handles.empty()) {
+        CFW_LOG_ERROR("UiSystem: camera shutdown deadline expired; remaining handles={}",
+                      camera_handles.size());
     }
     // Phase 6: no ImGui platform windows to destroy (multi-viewport removed).
     // Secondary windows (detach) are owned by the SDL window manager in Phase 7.

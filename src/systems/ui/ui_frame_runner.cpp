@@ -160,6 +160,12 @@ std::vector<PanelLayoutInput> collect_layout_inputs(void* host_filter) {
         if (tab->host_surface != host_filter) {
             continue;
         }
+        if (host_filter == nullptr && tab->camera_view &&
+            tab->detach_state != BrowserTab::DetachState::Docked) {
+            CFW_LOG_DEBUG("CameraViewport: skip main layout tab={} while detach_state={}",
+                          tab_id, static_cast<int>(tab->detach_state));
+            continue;
+        }
         PanelLayoutInput in;
         in.tab_id = tab_id;
         // A detached tab fills its own window regardless of its original docking_pos.
@@ -794,6 +800,10 @@ void UiFrameRunner::reconcile_detach_states(UiFrameContext& context) {
         tab->host_surface = nullptr;
         tab->platform_window_id = 0;
         tab->platform_handle_raw = nullptr;
+        if (tab->camera_view) {
+            CameraViewportManager::instance().bind_surface(tab_id, nullptr, 0, 0,
+                                                            tab->width, tab->height);
+        }
 
         if (surface != nullptr) {
             if (window_manager.request_remove_secondary_window(surface)) {
@@ -869,7 +879,8 @@ void UiFrameRunner::render_window(UiFrameContext& context, const ManagedWindow& 
     } else {
         // Secondary window: the single tab hosted here fills the whole client area.
         for (const auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
-            if (!tab || !tab->open || tab->minimized || tab->host_surface != surface) {
+            if (!tab || !tab->open || tab->minimized || tab->host_surface != surface ||
+                tab->detach_state != BrowserTab::DetachState::Detached) {
                 continue;
             }
             PanelPlacement p;
@@ -896,6 +907,19 @@ void UiFrameRunner::render_window(UiFrameContext& context, const ManagedWindow& 
         }
 
         if (!tab->camera_view) {
+            continue;
+        }
+
+        const bool valid_camera_binding =
+            (main_window && tab->detach_state == BrowserTab::DetachState::Docked &&
+             tab->host_surface == nullptr) ||
+            (!main_window && tab->detach_state == BrowserTab::DetachState::Detached &&
+             tab->host_surface == surface);
+        if (!valid_camera_binding) {
+            CFW_LOG_DEBUG(
+                "CameraViewport: skip bind tab={} detach_state={} host_surface={} target_surface={}",
+                placement.tab_id, static_cast<int>(tab->detach_state), tab->host_surface,
+                surface);
             continue;
         }
 

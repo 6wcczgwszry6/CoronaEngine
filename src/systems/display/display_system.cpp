@@ -461,10 +461,25 @@ bool DisplaySystem::initialize(Kernel::ISystemContext* ctx) {
             "initialization failed while creating fallback image: unknown exception");
     }
 
+    frame_submission_enabled_.store(true, std::memory_order_release);
     return true;
 }
 
+void DisplaySystem::stop() {
+    CFW_LOG_INFO("DisplaySystem: stop requested");
+    frame_submission_enabled_.store(false, std::memory_order_release);
+    Kernel::SystemBase::stop();
+    CFW_LOG_INFO("DisplaySystem: all frame leases retired");
+}
+
+void DisplaySystem::on_thread_stopped() {
+    CFW_LOG_INFO("DisplaySystem: update loop exited");
+}
+
 void DisplaySystem::update() {
+    if (!frame_submission_enabled_.load(std::memory_order_acquire)) {
+        return;
+    }
     // Snapshot shared state and process pending displayer creation under lock,
     // then release before GPU work. displayers_ is only modified here, so
     // iterating it after the lock is safe.
@@ -989,6 +1004,8 @@ Detail::PresentOutcome DisplaySystem::compose_and_present(
 }
 
 void DisplaySystem::shutdown() {
+    CFW_LOG_INFO("DisplaySystem: destroying display resources");
+    frame_submission_enabled_.store(false, std::memory_order_release);
     const auto forward_completion_fence = forward_completion_fence_;
     if (forward_completion_fence) {
         forward_completion_fence->close();
@@ -1132,6 +1149,7 @@ void DisplaySystem::shutdown() {
             shutdown_message);
     }
     device_lost_.store(false, std::memory_order_release);
+    CFW_LOG_INFO("DisplaySystem: display resources destroyed");
 }
 
 }  // namespace Corona::Systems

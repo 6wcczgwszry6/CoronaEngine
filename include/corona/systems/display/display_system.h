@@ -52,6 +52,7 @@ class DisplaySystem : public Kernel::SystemBase {
 
     bool initialize(Kernel::ISystemContext* ctx) override;
     void update() override;
+    void stop() override;
     void shutdown() override;
 
    private:
@@ -98,6 +99,7 @@ class DisplaySystem : public Kernel::SystemBase {
     void handle_surface_removed(const Events::DisplaySurfaceRemovedEvent& event);
     void handle_optics_frame(const Events::OpticsFrameReadyEvent& event);
     void handle_ui_frame(const Events::UIFrameReadyEvent& event);
+    void on_thread_stopped() override;
 
     std::optional<Kernel::EventId> surface_changed_sub_id_;
     std::optional<Kernel::EventId> surface_removed_sub_id_;
@@ -138,5 +140,6 @@ class DisplaySystem : public Kernel::SystemBase {
     Horizon::HardwareImage transparent_storage_;  ///< 1x1 transparent StorageImage fallback for missing layers
     bool composite_pipeline_ready_ = false;
     std::atomic<bool> device_lost_ = false;
+    std::atomic<bool> frame_submission_enabled_ = false;
 };
 }  // namespace Corona::Systems
