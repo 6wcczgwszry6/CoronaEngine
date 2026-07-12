@@ -65,6 +65,9 @@ class ScratchTool:
     _preview_warnings: list[str] = []
     _preview_state_snapshot: Optional[dict[str, Any]] = None
     _preview_input_locked = False
+    _preview_restart_generation = 0
+    _preview_restart_in_progress = False
+    _preview_restart_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Project Blockly persistence
@@ -391,6 +394,8 @@ class ScratchTool:
             return {"status": "error", "message": f"unsupported preview scope: {scope}"}
 
         cls.stop_game_preview()
+        from CoronaCore.utils import corona_engine_scratch
+        corona_engine_scratch.clear_runtime_state_snapshots()
 
         try:
             flush_pending_auto_saves()
@@ -427,6 +432,8 @@ class ScratchTool:
             cls._preview_threads = []
             cls._preview_status = "running" if targets else "idle"
             cls._preview_state_snapshot = state_snapshot
+            cls._preview_restart_generation = 0
+            cls._preview_restart_in_progress = False
         cls._set_preview_input_locked(True)
 
         for target in targets:
@@ -487,6 +494,7 @@ class ScratchTool:
             }
 
         restored, restore_error = cls._restore_preview_state_snapshot()
+        corona_engine_scratch.clear_runtime_state_snapshots()
         cls._set_preview_input_locked(False)
         with cls._preview_lock:
             if restore_error:
@@ -504,17 +512,22 @@ class ScratchTool:
 
     @classmethod
     def get_game_preview_status(cls) -> dict:
+        from CoronaCore.utils import corona_engine_scratch
+
         with cls._preview_lock:
             cls._prune_preview_locked()
             live = [info for info in cls._preview_threads if info["thread"].is_alive()]
-            return {
+            status = {
                 "status": cls._preview_status,
                 "running_count": len(live),
                 "has_snapshot": cls._preview_state_snapshot is not None,
                 "errors": list(cls._preview_errors),
                 "warnings": list(cls._preview_warnings),
                 "input_locked": cls._preview_input_locked,
+                "restart_generation": cls._preview_restart_generation,
             }
+        status["runtime_states"] = corona_engine_scratch.runtime_state_snapshots()
+        return status
 
     @classmethod
     def _prepare_preview_targets(cls) -> tuple[list[dict], list[str]]:
@@ -629,7 +642,9 @@ class ScratchTool:
         return snapshot
 
     @classmethod
-    def _restore_preview_state_snapshot(cls) -> tuple[bool, str | None]:
+    def _restore_preview_state_snapshot(
+        cls, clear_snapshot: bool = True
+    ) -> tuple[bool, str | None]:
         with cls._preview_lock:
             snapshot = cls._preview_state_snapshot
 
@@ -653,8 +668,9 @@ class ScratchTool:
                 except Exception:
                     logger.exception("[ScratchTool] failed to save restored scene: %s", route)
 
-            with cls._preview_lock:
-                cls._preview_state_snapshot = None
+            if clear_snapshot:
+                with cls._preview_lock:
+                    cls._preview_state_snapshot = None
 
             cls._notify_preview_state_restored(restored_scenes)
             logger.info("[ScratchTool] preview state restored: %d scenes", len(restored_scenes))
@@ -766,12 +782,57 @@ class ScratchTool:
 
     @classmethod
     def _run_preview_target(cls, code_path: Path, target: dict) -> None:
-        cls._run_code_file(code_path, target, single_exec=False)
+        with cls._preview_lock:
+            observed_generation = cls._preview_restart_generation
+
+        while True:
+            outcome = cls._run_code_file(code_path, target, single_exec=False)
+            if outcome == "restart":
+                with cls._preview_restart_lock:
+                    with cls._preview_lock:
+                        if cls._preview_restart_generation == observed_generation:
+                            cls._preview_restart_in_progress = True
+                            cls._preview_restart_generation += 1
+                            cls._preview_status = "running"
+                            should_restore = True
+                        else:
+                            should_restore = False
+                    if should_restore:
+                        from CoronaCore.utils import corona_engine_scratch
+
+                        corona_engine_scratch.request_stop_all()
+                        restored, error = cls._restore_preview_state_snapshot(clear_snapshot=False)
+                        if error:
+                            with cls._preview_lock:
+                                cls._preview_errors.append(f"restart: {error}")
+                                cls._preview_status = "error"
+                        elif not restored:
+                            logger.warning("[ScratchTool] restart requested without preview snapshot")
+                        with cls._preview_lock:
+                            cls._preview_restart_in_progress = False
+                with cls._preview_lock:
+                    observed_generation = cls._preview_restart_generation
+                continue
+
+            while True:
+                with cls._preview_lock:
+                    generation = cls._preview_restart_generation
+                    restarting = cls._preview_restart_in_progress
+                    status = cls._preview_status
+                if restarting:
+                    time.sleep(0.02)
+                    continue
+                break
+            if generation != observed_generation and status in ("running", "error"):
+                observed_generation = generation
+                continue
+            break
+
         with cls._preview_lock:
             cls._prune_preview_locked()
 
     @classmethod
-    def _run_code_file(cls, code_path: Path, target: dict, single_exec: bool) -> None:
+    def _run_code_file(cls, code_path: Path, target: dict, single_exec: bool) -> str:
         from CoronaCore.utils import corona_engine_scratch
 
         context_id = target.get("id") or cls._target_id(
@@ -788,6 +849,7 @@ class ScratchTool:
         corona_engine_scratch.bind_context(ctx)
 
         module_name = f"blockly_runtime_{cls._target_digest(context_id)}_{int(time.time() * 1000)}"
+        outcome = "completed"
         try:
             spec = importlib.util.spec_from_file_location(module_name, code_path)
             if spec is None or spec.loader is None:
@@ -797,12 +859,18 @@ class ScratchTool:
             spec.loader.exec_module(module)
             if hasattr(module, "run"):
                 module.run()
-            if (ctx.key_handler is not None or ctx.mouse_handler is not None) and not ctx.stop_requested:
+            if corona_engine_scratch.has_runtime_handlers(ctx) and not ctx.stop_requested:
                 while not ctx.stop_requested:
-                    time.sleep(0.1)
+                    corona_engine_scratch.wait(0.1)
         except SystemExit:
-            logger.info("[ScratchTool] script stopped: %s", context_id)
+            if ctx.game_state == "restart" or ctx.variables.get("game_state") == "restart":
+                outcome = "restart"
+                logger.info("[ScratchTool] level restart requested: %s", context_id)
+            else:
+                outcome = "stopped"
+                logger.info("[ScratchTool] script stopped: %s", context_id)
         except Exception as exc:
+            outcome = "error"
             logger.exception("[ScratchTool] script failed: %s", context_id)
             if not single_exec:
                 with cls._preview_lock:
@@ -811,6 +879,7 @@ class ScratchTool:
         finally:
             sys.modules.pop(module_name, None)
             corona_engine_scratch.release_context(ctx)
+        return outcome
 
     @classmethod
     def _prune_preview_locked(cls) -> None:

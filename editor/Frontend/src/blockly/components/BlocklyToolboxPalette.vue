@@ -13,8 +13,7 @@
       </button>
     </div>
     <div class="palette-shelf">
-      <div ref="blockdiv" class="palette-block-canvas" @mouseup.capture="handleBlockPick"></div>
-      <div class="palette-hint">积木库：这里只展示可用积木，点击积木添加到右侧当前编辑区</div>
+      <div ref="blockdiv" class="palette-block-canvas" @pointerdown.capture="beginExternalDrag"></div>
       <div v-if="loadingLabel" class="palette-overlay">{{ loadingLabel }}</div>
     </div>
   </div>
@@ -26,7 +25,13 @@ import { useI18n } from 'vue-i18n';
 import { TOOLBOX_CONFIG } from '@/blockly/configs/toolboxConfig.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 
-const emit = defineEmits(['pick', 'ready']);
+const emit = defineEmits([
+  'pick',
+  'ready',
+  'external-drag-start',
+  'external-drag-move',
+  'external-drag-end',
+]);
 
 const { t, locale } = useI18n();
 const { error: logError } = useErrorHandler('BlocklyToolboxPalette');
@@ -42,6 +47,8 @@ let blocklyEN = null;
 let resizeObserver = null;
 let isRenderingPalette = false;
 let blocksRegistered = false;
+let externalDrag = null;
+const DRAG_THRESHOLD = 5;
 
 const categories = computed(() =>
   (TOOLBOX_CONFIG.contents || [])
@@ -80,6 +87,8 @@ async function registerBlocks() {
     { defineMathBlocks },
     { defineVariableBlocks },
     { defineListBlocks },
+    { defineObjectBlocks },
+    { defineUiBlocks },
   ] = await Promise.all([
     import('@/blockly/blocks/audio.js'),
     import('@/blockly/blocks/camera.js'),
@@ -91,6 +100,8 @@ async function registerBlocks() {
     import('@/blockly/blocks/math.js'),
     import('@/blockly/blocks/variable.js'),
     import('@/blockly/blocks/list.js'),
+    import('@/blockly/blocks/object.js'),
+    import('@/blockly/blocks/ui.js'),
   ]);
 
   await import('blockly/blocks');
@@ -104,6 +115,8 @@ async function registerBlocks() {
   defineMathBlocks();
   defineVariableBlocks();
   defineListBlocks();
+  defineObjectBlocks();
+  defineUiBlocks();
   blocksRegistered = true;
 }
 
@@ -159,20 +172,105 @@ function renderPaletteBlocks() {
   }
 }
 
-function handleBlockPick(event) {
-  if (!workspace || !BlocklyLib || isRenderingPalette) return;
-  const blockElement = event.target?.closest?.('.blocklyDraggable');
-  const blockId = blockElement?.getAttribute?.('data-id');
-  let block = blockId ? workspace.getBlockById?.(blockId) : null;
-  if (block?.type) {
-    emit('pick', block.type);
-    return;
+function paletteBlockFromEvent(event) {
+  if (!workspace || !BlocklyLib || isRenderingPalette) return null;
+
+  // Palette blocks are deliberately non-movable, so Blockly may remove the
+  // `blocklyDraggable` class. Resolve the block from any SVG root carrying a
+  // data-id first, then fall back to checking every rendered block root.
+  const path = event.composedPath?.() || [];
+  for (const element of path) {
+    const blockId = element?.getAttribute?.('data-id');
+    const block = blockId ? workspace.getBlockById?.(blockId) : null;
+    if (block) return block;
   }
-  window.setTimeout(() => {
-    const selected = BlocklyLib.common?.getSelected?.() || BlocklyLib.getSelected?.();
-    block = selected?.workspace === workspace ? selected : null;
-    if (block?.type) emit('pick', block.type);
-  }, 0);
+
+  const target = event.target;
+  return (
+    workspace
+      .getAllBlocks?.(false)
+      .find((block) => block.getSvgRoot?.()?.contains?.(target)) || null
+  );
+}
+
+function removeExternalDragListeners() {
+  window.removeEventListener('pointermove', moveExternalDrag, true);
+  window.removeEventListener('pointerup', finishExternalDrag, true);
+  window.removeEventListener('pointercancel', cancelExternalDrag, true);
+}
+
+function beginExternalDrag(event) {
+  if (event.button !== 0) return;
+  const block = paletteBlockFromEvent(event);
+  if (!block?.type) return;
+  externalDrag = {
+    blockType: block.type,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    started: false,
+  };
+  event.preventDefault();
+  event.stopPropagation();
+  window.addEventListener('pointermove', moveExternalDrag, true);
+  window.addEventListener('pointerup', finishExternalDrag, true);
+  window.addEventListener('pointercancel', cancelExternalDrag, true);
+}
+
+function moveExternalDrag(event) {
+  if (!externalDrag || event.pointerId !== externalDrag.pointerId) return;
+  const distance = Math.hypot(
+    event.clientX - externalDrag.startX,
+    event.clientY - externalDrag.startY,
+  );
+  if (!externalDrag.started && distance >= DRAG_THRESHOLD) {
+    externalDrag.started = true;
+    emit('external-drag-start', {
+      blockType: externalDrag.blockType,
+      clientX: event.clientX,
+      clientY: event.clientY,
+    });
+  }
+  if (!externalDrag.started) return;
+  event.preventDefault();
+  emit('external-drag-move', {
+    blockType: externalDrag.blockType,
+    clientX: event.clientX,
+    clientY: event.clientY,
+  });
+}
+
+function finishExternalDrag(event) {
+  if (!externalDrag || event.pointerId !== externalDrag.pointerId) return;
+  const drag = externalDrag;
+  externalDrag = null;
+  removeExternalDragListeners();
+  if (drag.started) {
+    event.preventDefault();
+    emit('external-drag-end', {
+      blockType: drag.blockType,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      cancelled: false,
+    });
+  } else {
+    emit('pick', drag.blockType);
+  }
+}
+
+function cancelExternalDrag(event) {
+  if (!externalDrag || (event?.pointerId != null && event.pointerId !== externalDrag.pointerId)) return;
+  const drag = externalDrag;
+  externalDrag = null;
+  removeExternalDragListeners();
+  if (drag.started) {
+    emit('external-drag-end', {
+      blockType: drag.blockType,
+      clientX: event?.clientX ?? drag.startX,
+      clientY: event?.clientY ?? drag.startY,
+      cancelled: true,
+    });
+  }
 }
 
 async function initBlockly() {
@@ -223,6 +321,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  cancelExternalDrag();
   try {
     resizeObserver?.disconnect?.();
     workspace?.dispose?.();
@@ -279,23 +378,13 @@ defineExpose({ resizeBlockly });
 .palette-block-canvas {
   position: absolute;
   inset: 0;
+  touch-action: none;
 }
 
-.palette-hint {
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: 8px;
-  z-index: 2;
-  padding: 6px 8px;
-  border-radius: 8px;
-  color: #cbd5e1;
-  background: rgba(15, 23, 42, 0.82);
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  font-size: 10px;
-  line-height: 1.35;
-  pointer-events: none;
+:deep(.blocklyBlockCanvas > g[data-id]) {
+  cursor: grab !important;
 }
+
 
 .palette-overlay {
   position: absolute;

@@ -114,7 +114,29 @@
       @mousedown="beginLook"
       @mousemove="updateLook"
       @mouseup="endLook"
+      @click="forwardScratchMouse('click', $event)"
+      @wheel="forwardScratchMouse('wheel', $event)"
+      @contextmenu.prevent="forwardScratchMouse('contextmenu', $event)"
     />
+    <div v-if="previewHudStates.length" class="preview-hud">
+      <section v-for="state in previewHudStates" :key="state.context_id" class="preview-hud-card">
+        <div class="preview-hud-title">{{ state.actor_name || '项目全局' }}</div>
+        <div class="preview-hud-stats">
+          <span>分数 <b>{{ formatHudValue(state.score) }}</b></span>
+          <span>生命 <b>{{ formatHudValue(state.lives) }}</b></span>
+          <span v-if="state.countdown_active">倒计时 <b>{{ formatCountdown(state.countdown) }}</b></span>
+        </div>
+        <div v-if="state.game_state" class="preview-hud-state" :class="`state-${state.game_state}`">
+          {{ gameStateLabel(state.game_state) }}
+        </div>
+        <div v-for="([name, value]) in objectEntries(state.variables)" :key="`v-${name}`" class="preview-hud-row">
+          <span>{{ name }}</span><b>{{ formatHudValue(value) }}</b>
+        </div>
+        <div v-for="([name, value]) in objectEntries(state.lists)" :key="`l-${name}`" class="preview-hud-row list">
+          <span>{{ name }}</span><b>{{ formatHudValue(value) }}</b>
+        </div>
+      </section>
+    </div>
     <div v-if="errorText" class="error">{{ errorText }}</div>
   </div>
 </template>
@@ -122,7 +144,7 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
-import { appService, projectService, sceneService } from '@/utils/bridge.js';
+import { appService, projectService, sceneService, scriptingService } from '@/utils/bridge.js';
 import { buildDragRegions, dragRegionsSignature } from '@/utils/cameraDragRegions.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import {
@@ -149,6 +171,7 @@ const renderHeight = ref(540);
 const viewportUiMode = ref('flat2d');
 const visionAvailable = ref(false);
 const errorText = ref('');
+const previewHudStates = ref([]);
 const toolbarRef = ref(null);
 const inputLayerRef = ref(null);
 const backendMenuOpen = ref(false);
@@ -156,6 +179,9 @@ const visionModeMenuOpen = ref(false);
 const outputMenuOpen = ref(false);
 const borderlessFullscreen = ref(false);
 let borderlessTogglePending = false;
+let previewHudTimer = 0;
+let scratchMouseMoveFrame = 0;
+let pendingScratchMouseMove = null;
 
 const outputModes = [
   { value: 'final_color', label: 'Final' },
@@ -600,6 +626,16 @@ const movementCode = (event) => {
   }[key] || '';
 };
 
+const keyModifiers = (event) => [
+  event.ctrlKey ? 'Ctrl' : '',
+  event.altKey ? 'Alt' : '',
+  event.shiftKey ? 'Shift' : '',
+  event.metaKey ? 'Meta' : '',
+].filter(Boolean).join(',');
+const isTextInputEvent = (event) => {
+  const target = event.target;
+  return Boolean(target?.closest?.('input, textarea, select, [contenteditable="true"]'));
+};
 const onKeyDown = (event) => {
   if (event.key === 'F11' || event.code === 'F11') {
     event.preventDefault();
@@ -608,6 +644,12 @@ const onKeyDown = (event) => {
     }
     return;
   }
+  if (isTextInputEvent(event)) return;
+  scriptingService.sendKeyEvent(
+    event.code || event.key || '',
+    keyModifiers(event),
+    event.key || event.code || '',
+  ).catch(() => {});
   const code = movementCode(event);
   if ([
     'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE',
@@ -622,14 +664,50 @@ const onKeyDown = (event) => {
     event.preventDefault();
   }
 };
-const onKeyUp = (event) => keys.delete(movementCode(event));
+const onKeyUp = (event) => {
+  if (isTextInputEvent(event)) return;
+  keys.delete(movementCode(event));
+  scriptingService.sendKeyUpEvent(
+    event.code || event.key || '',
+    event.key || event.code || '',
+  ).catch(() => {});
+};
+const scratchMouseButton = (button) => ({
+  0: 'LeftButton',
+  1: 'MiddleButton',
+  2: 'RightButton',
+}[button] || '');
+const sendScratchMouse = (eventType, button, x, y) => {
+  scriptingService.sendMouseEvent(eventType, button, x, y).catch(() => {});
+};
+const forwardScratchMouse = (eventType, event) => {
+  const button = scratchMouseButton(event.button);
+  const x = event.clientX || 0;
+  const y = event.clientY || 0;
+  if (eventType !== 'move') {
+    sendScratchMouse(eventType, button, x, y);
+    return;
+  }
+  pendingScratchMouseMove = { button, x, y };
+  if (scratchMouseMoveFrame) return;
+  scratchMouseMoveFrame = window.requestAnimationFrame(() => {
+    scratchMouseMoveFrame = 0;
+    const pending = pendingScratchMouseMove;
+    pendingScratchMouseMove = null;
+    if (pending) sendScratchMouse('move', pending.button, pending.x, pending.y);
+  });
+};
 const beginLook = (event) => {
+  forwardScratchMouse('mousedown', event);
   if (event.button !== 2) return;
   looking = true;
   lastMouseX = event.clientX;
   lastMouseY = event.clientY;
 };
-const endLook = () => { looking = false; };
+const endLook = (event) => {
+  looking = false;
+  forwardScratchMouse('mouseup', event);
+};
 
 const viewportCursorShape = () => (looking ? 'grabbing' : 'arrow');
 
@@ -650,6 +728,7 @@ const handleViewportPointerLeave = () => {
 };
 
 const updateLook = (event) => {
+  forwardScratchMouse('move', event);
   if (!looking || !camera.value) return;
   const dx = event.clientX - lastMouseX;
   const dy = event.clientY - lastMouseY;
@@ -698,6 +777,28 @@ const scheduleDragRegionSync = () => {
   });
 };
 
+const objectEntries = (value) => Object.entries(value || {});
+const formatHudValue = (value) => {
+  if (Array.isArray(value)) return `[${value.join(', ')}]`;
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(1);
+  if (value && typeof value === 'object') return JSON.stringify(value);
+  return String(value ?? '');
+};
+const formatCountdown = (value) => `${Math.max(0, Number(value) || 0).toFixed(1)}s`;
+const gameStateLabel = (state) => ({
+  win: '游戏胜利',
+  over: '游戏失败',
+  restart: '正在重新开始',
+}[state] || state);
+const pollPreviewHud = async () => {
+  try {
+    const payload = unwrap(await scriptingService.getGamePreviewStatus()) || {};
+    previewHudStates.value = payload.has_snapshot ? (payload.runtime_states || []) : [];
+  } catch {
+    previewHudStates.value = [];
+  }
+};
+
 onMounted(async () => {
   document.documentElement.style.background = 'transparent';
   document.body.style.background = 'transparent';
@@ -716,12 +817,18 @@ onMounted(async () => {
   window.addEventListener('storage', handleViewportUiCalibrationStorage);
   coronaEventBus.on('viewport-ui-calibration-changed', handleViewportUiCalibrationChanged);
   animationFrame = requestAnimationFrame(movementFrame);
+  await pollPreviewHud();
+  previewHudTimer = window.setInterval(pollPreviewHud, 250);
 });
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(animationFrame);
   if (dragRegionFrame) window.cancelAnimationFrame(dragRegionFrame);
+  if (scratchMouseMoveFrame) window.cancelAnimationFrame(scratchMouseMoveFrame);
+  scratchMouseMoveFrame = 0;
+  pendingScratchMouseMove = null;
   window.clearTimeout(resizeTimer);
+  window.clearInterval(previewHudTimer);
   window.removeEventListener('resize', scheduleWindowSizeSync);
   window.removeEventListener('resize', scheduleDragRegionSync);
   window.removeEventListener('keydown', onKeyDown);
@@ -866,6 +973,64 @@ onBeforeUnmount(() => {
 .window-action { width: 24px; cursor: pointer; }
 .maximize { margin-left: auto; }
 .close { color: #ffb4b4; }
+.preview-hud {
+  position: absolute;
+  z-index: 3;
+  top: 76px;
+  right: 12px;
+  width: min(280px, 42vw);
+  display: grid;
+  gap: 8px;
+  pointer-events: none;
+}
+.camera-overlay.borderless .preview-hud { top: 44px; }
+.preview-hud-card {
+  padding: 10px 12px;
+  border: 1px solid rgba(147, 197, 253, 0.38);
+  border-radius: 8px;
+  background: rgba(9, 16, 27, 0.78);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(5px);
+}
+.preview-hud-title {
+  margin-bottom: 7px;
+  color: #bfdbfe;
+  font-size: 12px;
+  font-weight: 800;
+}
+.preview-hud-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 12px;
+}
+.preview-hud-stats b { color: #fef08a; font-size: 15px; }
+.preview-hud-state {
+  margin-top: 8px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: rgba(59, 130, 246, 0.35);
+  text-align: center;
+  font-weight: 800;
+}
+.preview-hud-state.state-win { background: rgba(22, 163, 74, 0.48); }
+.preview-hud-state.state-over { background: rgba(185, 28, 28, 0.55); }
+.preview-hud-state.state-restart { background: rgba(217, 119, 6, 0.5); }
+.preview-hud-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 5px;
+  color: #cbd5e1;
+  font-size: 11px;
+}
+.preview-hud-row b {
+  max-width: 65%;
+  overflow: hidden;
+  color: #fff;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .error {
   position: absolute;
   z-index: 3;

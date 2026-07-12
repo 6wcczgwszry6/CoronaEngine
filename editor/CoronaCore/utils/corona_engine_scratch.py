@@ -14,7 +14,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+import json as _json
 import logging
+import os as _os
+from pathlib import Path as _Path
 import random as _random
 import threading as _threading
 import time as _time
@@ -74,12 +77,26 @@ class ScratchRuntimeContext:
     mouse_pressed: bool = False
     mouse_x: float = 0.0
     mouse_y: float = 0.0
+    mouse_delta_x: float = 0.0
+    mouse_delta_y: float = 0.0
     key_handler: Optional[Callable] = None
     mouse_handler: Optional[Callable] = None
+    broadcast_handlers: dict = field(default_factory=dict)
+    clone_start_handler: Optional[Callable] = None
+    current_clone_name: str = ""
+    visible_variables: set = field(default_factory=set)
+    visible_lists: set = field(default_factory=set)
+    list_values: dict = field(default_factory=dict)
+    mouse_locked: bool = False
+    alpha: float = 1.0
 
 
 _default_context = ScratchRuntimeContext("default", target_type="internal")
 _contexts: dict[str, ScratchRuntimeContext] = {"default": _default_context}
+_completed_state_snapshots: dict[str, dict] = {}
+_scene_virtual_objects: dict[str, dict[str, object]] = {}
+_scene_deleted_objects: dict[str, set[str]] = {}
+_scene_object_tags: dict[str, dict[str, str]] = {}
 
 
 def _current_context() -> ScratchRuntimeContext:
@@ -109,6 +126,7 @@ def create_context(
         ctx.external_target = True
     with _context_lock:
         _contexts[ctx.context_id] = ctx
+        _completed_state_snapshots.pop(ctx.context_id, None)
     return ctx
 
 
@@ -123,6 +141,23 @@ def release_context(ctx: ScratchRuntimeContext | None = None):
     if ctx is None:
         ctx = getattr(_tls, "ctx", None)
     if ctx is not None and ctx.context_id != "default":
+        if ctx.game_state or ctx.variables.get('game_state'):
+            with _context_lock:
+                _completed_state_snapshots[ctx.context_id] = runtime_state_snapshot(ctx)
+        ctx.key_handler = None
+        ctx.mouse_handler = None
+        ctx.broadcast_handlers.clear()
+        ctx.clone_start_handler = None
+        globals().get('_velocity_cache', {}).pop(ctx.context_id, None)
+        globals().get('_raycast_cache', {}).pop(ctx.context_id, None)
+        globals().get('_native_velocity_contexts', set()).discard(ctx.context_id)
+        globals().get('_native_gravity_contexts', set()).discard(ctx.context_id)
+        ctx.virtual_objects.clear()
+        ctx.deleted_objects.clear()
+        ctx.object_tags.clear()
+        ctx.visible_variables.clear()
+        ctx.visible_lists.clear()
+        ctx.list_values.clear()
         with _context_lock:
             _contexts.pop(ctx.context_id, None)
     if getattr(_tls, "ctx", None) is ctx:
@@ -162,6 +197,36 @@ def unregister_mouse_handler():
     _current_context().mouse_handler = None
 
 
+def register_broadcast_handler(message, handler):
+    if not callable(handler):
+        return False
+    key = str(message or "")
+    ctx = _current_context()
+    ctx.broadcast_handlers.setdefault(key, []).append(handler)
+    return True
+
+
+def unregister_broadcast_handlers():
+    _current_context().broadcast_handlers.clear()
+
+
+def register_clone_start_handler(handler):
+    if not callable(handler):
+        return False
+    _current_context().clone_start_handler = handler
+    return True
+
+
+def has_runtime_handlers(ctx=None):
+    ctx = ctx or _current_context()
+    return bool(
+        ctx.key_handler is not None
+        or ctx.mouse_handler is not None
+        or ctx.clone_start_handler is not None
+        or any(ctx.broadcast_handlers.values())
+    )
+
+
 def handle_key_event(key, mods=None, display_key=None):
     if display_key is None:
         display_key = key
@@ -199,8 +264,12 @@ def handle_mouse_event(event_type, button, x, y):
             ctx.mouse_pressed = True
         elif event_type == "mouseup":
             ctx.mouse_pressed = False
-        ctx.mouse_x = float(x)
-        ctx.mouse_y = float(y)
+        next_x = float(x)
+        next_y = float(y)
+        ctx.mouse_delta_x = next_x - ctx.mouse_x
+        ctx.mouse_delta_y = next_y - ctx.mouse_y
+        ctx.mouse_x = next_x
+        ctx.mouse_y = next_y
         if ctx.mouse_handler is None or ctx.stop_requested:
             continue
         try:
@@ -462,7 +531,22 @@ def moveto(position):
 
 
 def movetoXYZ(position):
-    _logger.debug("[ScratchWrapper] movetoXYZ(%s)", position)
+    if _actor_only("movetoXYZ"):
+        return False
+    _init_engine()
+    try:
+        values = position
+        if isinstance(position, str):
+            values = [item.strip() for item in position.split(',')]
+        if len(values) < 3:
+            return False
+        ctx = _current_context()
+        ctx.x, ctx.y, ctx.z = (float(values[0]), float(values[1]), float(values[2]))
+        _sync_position()
+        return True
+    except (TypeError, ValueError):
+        _logger.warning("[ScratchWrapper] invalid movetoXYZ position: %r", position)
+        return False
 
 
 def movetoXYZtime(t, x1, x2, x3):
@@ -540,27 +624,33 @@ def Z():
 # ── Camera / FPS controls ──
 
 def lock_mouse():
-    """锁定鼠标到窗口中心，隐藏光标，启用 FPS 相对模式"""
+    """Lock the preview mouse when native support exists; always retain runtime state."""
+    ctx = _current_context()
+    ctx.mouse_locked = True
     try:
         import corona_engine as _ce
-        if hasattr(_ce, 'set_mouse_locked'):
-            _ce.set_mouse_locked(True)
-            return
-    except Exception:
-        pass
-    _logger.debug("[ScratchWrapper] lock_mouse: engine API not available")
+        method = getattr(_ce, 'set_mouse_locked', None)
+        if callable(method):
+            result = method(True)
+            return result is not False
+    except Exception as exc:
+        _logger.warning("[ScratchWrapper] native lock_mouse failed; using runtime state: %s", exc)
+    return False
 
 
 def unlock_mouse():
-    """解锁鼠标，显示光标"""
+    """Unlock the preview mouse when native support exists; always retain runtime state."""
+    ctx = _current_context()
+    ctx.mouse_locked = False
     try:
         import corona_engine as _ce
-        if hasattr(_ce, 'set_mouse_locked'):
-            _ce.set_mouse_locked(False)
-            return
-    except Exception:
-        pass
-    _logger.debug("[ScratchWrapper] unlock_mouse: engine API not available")
+        method = getattr(_ce, 'set_mouse_locked', None)
+        if callable(method):
+            result = method(False)
+            return result is not False
+    except Exception as exc:
+        _logger.warning("[ScratchWrapper] native unlock_mouse failed; using runtime state: %s", exc)
+    return False
 
 
 def mouse_dx():
@@ -572,7 +662,7 @@ def mouse_dx():
             return float(dx)
     except Exception:
         pass
-    return 0.0
+    return float(_current_context().mouse_delta_x)
 
 
 def mouse_dy():
@@ -584,22 +674,36 @@ def mouse_dy():
             return float(dy)
     except Exception:
         pass
-    return 0.0
+    return float(_current_context().mouse_delta_y)
 
 
 def set_fov(fov_degrees):
-    """设置摄像机视场角（用于瞄准镜缩放效果）"""
-    try:
-        import corona_engine as _ce
-        if hasattr(_ce, 'Camera'):
-            cam = _ce.Camera()
-            if hasattr(cam, 'set_fov'):
-                cam.set_fov(float(fov_degrees))
-                return
-    except Exception:
-        pass
-    _logger.debug("[ScratchWrapper] set_fov: engine API not available")
-
+    """设置当前场景 active camera 的视野角度。"""
+    value = _safe_float(fov_degrees, 45.0)
+    camera, scene = _active_camera_with_scene()
+    if camera is not None:
+        try:
+            if hasattr(camera, 'set_fov'):
+                camera.set_fov(value)
+                return True
+            if hasattr(camera, 'set'):
+                camera.set(
+                    _camera_vec(camera, 'get_position', [0.0, 0.0, 0.0]),
+                    _camera_vec(camera, 'get_forward', [0.0, 0.0, 1.0]),
+                    _camera_vec(camera, 'get_world_up', [0.0, 1.0, 0.0]),
+                    value,
+                )
+                return True
+            if scene is not None and hasattr(scene, 'set_camera'):
+                return bool(scene.set_camera(
+                    _camera_vec(camera, 'get_position', [0.0, 0.0, 0.0]),
+                    _camera_vec(camera, 'get_forward', [0.0, 0.0, 1.0]),
+                    _camera_vec(camera, 'get_world_up', [0.0, 1.0, 0.0]),
+                    value,
+                ))
+        except Exception as exc:
+            _logger.warning("[ScratchWrapper] set_fov camera call failed: %s", exc)
+    return False
 
 
 
@@ -637,13 +741,13 @@ def camera_follow_object(name, ox, oy, oz):
     """Move active camera to object position plus offset; call once per update."""
     actor = _resolve_actor(name)
     if actor is None:
-        return
+        return False
     target_pos = _actor_position(actor)
     if target_pos is None:
-        return
+        return False
     camera, scene = _active_camera_with_scene()
     if camera is None:
-        return
+        return False
     new_pos = [
         float(target_pos[0]) + float(ox),
         float(target_pos[1]) + float(oy),
@@ -654,17 +758,20 @@ def camera_follow_object(name, ox, oy, oz):
     fov = _camera_fov(camera)
     try:
         if scene is not None and hasattr(scene, 'set_camera'):
-            scene.set_camera(new_pos, forward, up, fov)
-            return
+            result = scene.set_camera(new_pos, forward, up, fov)
+            return result is not False
     except Exception as exc:
         _logger.debug("[ScratchWrapper] scene.set_camera failed: %s", exc)
     try:
         if hasattr(camera, 'set'):
-            camera.set(new_pos, forward, up, fov)
-        elif hasattr(camera, 'set_position'):
-            camera.set_position(new_pos)
+            result = camera.set(new_pos, forward, up, fov)
+            return result is not False
+        if hasattr(camera, 'set_position'):
+            result = camera.set_position(new_pos)
+            return result is not False
     except Exception as exc:
         _logger.debug("[ScratchWrapper] camera_follow_object failed: %s", exc)
+    return False
 
 
 def camera_raycast(max_dist):
@@ -689,58 +796,83 @@ def camera_raycast_object():
 # ── Physics extension (velocity / impulse) ──
 
 _velocity_cache = {}  # context_id → [vx, vy, vz]
+_native_velocity_contexts = set()
+_native_gravity_contexts = set()
 
 
 def set_velocity(vx, vy, vz):
-    """设置当前 Actor 的线速度"""
+    """设置当前 Actor 的线速度；无原生接口时由 wait/check 循环推进。"""
     if _actor_only("set_velocity"):
-        return
+        return False
     _init_engine()
     ctx = _current_context()
     vel = [float(vx), float(vy), float(vz)]
     _velocity_cache[ctx.context_id] = list(vel)
     for target in (ctx.mechanics, ctx.actor):
-        if target is not None and hasattr(target, 'set_velocity'):
+        method = getattr(target, 'set_velocity', None) if target is not None else None
+        if callable(method):
             try:
-                target.set_velocity(vel)
-                return
+                method(vel)
+                _native_velocity_contexts.add(ctx.context_id)
+                return True
+            except TypeError:
+                try:
+                    method(*vel)
+                    _native_velocity_contexts.add(ctx.context_id)
+                    return True
+                except Exception:
+                    pass
             except Exception:
                 pass
-    # fallback: 每帧偏移位置模拟速度（假设 ~60fps）
-    ctx.x += float(vx) * 0.016
-    ctx.y += float(vy) * 0.016
-    ctx.z += float(vz) * 0.016
-    _sync_position()
+    _native_velocity_contexts.discard(ctx.context_id)
+    return True
 
 
 def apply_impulse(ix, iy, iz):
-    """施加瞬时冲量（子弹命中反馈）"""
+    """施加瞬时冲量；无原生物理时累加到运行时速度。"""
     if _actor_only("apply_impulse"):
-        return
+        return False
     _init_engine()
     ctx = _current_context()
     imp = [float(ix), float(iy), float(iz)]
     for target in (ctx.mechanics, ctx.actor):
-        if target is not None and hasattr(target, 'apply_impulse'):
+        method = getattr(target, 'apply_impulse', None) if target is not None else None
+        if callable(method):
             try:
-                target.apply_impulse(imp)
-                return
+                method(imp)
+                _native_velocity_contexts.add(ctx.context_id)
+                return True
+            except TypeError:
+                try:
+                    method(*imp)
+                    _native_velocity_contexts.add(ctx.context_id)
+                    return True
+                except Exception:
+                    pass
             except Exception:
                 pass
-    # fallback: 直接偏移位置
-    ctx.x += float(ix) * 0.1
-    ctx.y += float(iy) * 0.1
-    ctx.z += float(iz) * 0.1
-    _sync_position()
-
+    vel = _velocity_list(ctx)
+    _velocity_cache[ctx.context_id] = [vel[i] + imp[i] for i in range(3)]
+    _native_velocity_contexts.discard(ctx.context_id)
+    return True
 
 def _velocity_list(ctx=None):
     ctx = ctx or _current_context()
+    for target in (ctx.mechanics, ctx.actor):
+        getter = getattr(target, 'get_velocity', None) if target is not None else None
+        if callable(getter):
+            try:
+                native = getter()
+                if isinstance(native, (list, tuple)) and len(native) >= 3:
+                    vel = [_safe_float(native[0]), _safe_float(native[1]), _safe_float(native[2])]
+                    _velocity_cache[ctx.context_id] = vel
+                    return vel
+            except Exception:
+                pass
     vel = _velocity_cache.get(ctx.context_id)
     if not isinstance(vel, (list, tuple)) or len(vel) < 3:
         vel = [0.0, 0.0, 0.0]
     return [_safe_float(vel[0]), _safe_float(vel[1]), _safe_float(vel[2])]
-
 
 def get_velocity(axis='X'):
     """Get the cached current velocity component."""
@@ -757,8 +889,10 @@ def _tick_runtime_physics(dt):
     if dt <= 0:
         return
     vel = _velocity_list(ctx)
-    if ctx.gravity_enabled:
+    if ctx.gravity_enabled and ctx.context_id not in _native_gravity_contexts:
         vel[1] -= _safe_float(ctx.gravity_strength, 9.8) * dt
+    if ctx.context_id in _native_velocity_contexts:
+        return
     if ctx.gravity_enabled or any(abs(v) > 1e-9 for v in vel):
         _velocity_cache[ctx.context_id] = vel
         ctx.x += vel[0] * dt
@@ -772,6 +906,7 @@ def set_gravity(enabled, strength=9.8):
     ctx.gravity_enabled = str(enabled).strip().lower() not in ('0', 'false', 'off', 'no', 'none', '')
     ctx.gravity_strength = _safe_float(strength, 9.8)
     _init_engine()
+    native_applied = False
     for target in (ctx.mechanics, ctx.actor):
         if target is None:
             continue
@@ -780,29 +915,37 @@ def set_gravity(enabled, strength=9.8):
             if callable(method):
                 try:
                     method(ctx.gravity_enabled)
+                    native_applied = True
                 except Exception as exc:
                     _logger.debug("[ScratchWrapper] %s failed: %s", method_name, exc)
         method = getattr(target, 'set_gravity', None)
         if callable(method):
             try:
                 method(ctx.gravity_enabled, ctx.gravity_strength)
+                native_applied = True
             except TypeError:
                 try:
                     method(ctx.gravity_strength if ctx.gravity_enabled else 0.0)
+                    native_applied = True
                 except Exception as exc:
                     _logger.debug("[ScratchWrapper] set_gravity fallback failed: %s", exc)
             except Exception as exc:
                 _logger.debug("[ScratchWrapper] set_gravity failed: %s", exc)
-
+    if native_applied:
+        _native_gravity_contexts.add(ctx.context_id)
+    else:
+        _native_gravity_contexts.discard(ctx.context_id)
+    return True
 
 def jump(power):
-    ctx = _current_context()
     power = _safe_float(power)
+    ctx = _current_context()
+    # Native impulse is preferred. Fallback apply_impulse updates the velocity cache.
+    if ctx.context_id in _native_velocity_contexts:
+        return apply_impulse(0.0, power, 0.0)
     vel = _velocity_list(ctx)
-    vel[1] = max(vel[1], power)
-    _velocity_cache[ctx.context_id] = vel
-    apply_impulse(0.0, power, 0.0)
-
+    vel[1] = max(0.0, vel[1]) + power
+    return set_velocity(vel[0], vel[1], vel[2])
 
 def bounce_axis(axis, factor=1.0):
     ctx = _current_context()
@@ -960,20 +1103,25 @@ def set_color(r, g, b):
 
 
 def set_alpha(alpha):
-    """设置物体透明度（1.0=不透明，0.0=全透明）"""
     if _actor_only("set_alpha"):
-        return
+        return False
     _init_engine()
     ctx = _current_context()
-    a = float(alpha)
+    value = max(0.0, min(1.0, _safe_float(alpha, 1.0)))
+    ctx.alpha = value
     for target in (ctx.optics, ctx.actor):
-        if target is not None and hasattr(target, 'set_opacity'):
-            try:
-                target.set_opacity(a)
-                return
-            except Exception:
-                pass
-    _logger.debug("[ScratchWrapper] set_alpha: engine API not available")
+        if target is None:
+            continue
+        for method_name in ('set_alpha', 'set_opacity'):
+            method = getattr(target, method_name, None)
+            if callable(method):
+                try:
+                    method(value)
+                    return True
+                except Exception:
+                    pass
+    return False
+
 
 
 # Detect
@@ -1076,6 +1224,30 @@ def _runtime_scene():
     return None
 
 
+def _runtime_scene_key(ctx=None):
+    ctx = ctx or _current_context()
+    scene = getattr(ctx, 'scene', None) or getattr(ctx, 'target_scene', None)
+    return str(getattr(scene, 'route', '') or ctx.scene_name or '__default__')
+
+
+def _shared_virtual_objects(ctx=None):
+    key = _runtime_scene_key(ctx)
+    with _context_lock:
+        return _scene_virtual_objects.setdefault(key, {})
+
+
+def _shared_deleted_objects(ctx=None):
+    key = _runtime_scene_key(ctx)
+    with _context_lock:
+        return _scene_deleted_objects.setdefault(key, set())
+
+
+def _shared_object_tags(ctx=None):
+    key = _runtime_scene_key(ctx)
+    with _context_lock:
+        return _scene_object_tags.setdefault(key, {})
+
+
 def _iter_scene_actors(scene=None):
     if scene is None:
         scene = _runtime_scene()
@@ -1103,6 +1275,7 @@ def _iter_known_actors():
     except Exception:
         pass
     result.extend(getattr(ctx, 'virtual_objects', {}).values())
+    result.extend(_shared_virtual_objects(ctx).values())
     if not result:
         try:
             from CoronaCore.core.managers import scene_manager
@@ -1125,7 +1298,9 @@ def _iter_known_actors():
 
 def _deleted_names(ctx=None):
     ctx = ctx or _current_context()
-    return {_norm_name(item) for item in getattr(ctx, 'deleted_objects', set())}
+    names = {_norm_name(item) for item in getattr(ctx, 'deleted_objects', set())}
+    names.update(_shared_deleted_objects(ctx))
+    return names
 
 
 def _is_actor_deleted(actor=None, name=None) -> bool:
@@ -1143,6 +1318,8 @@ def _mark_deleted(actor=None, name=None):
         norm = _norm_name(candidate)
         if norm:
             ctx.deleted_objects.add(norm)
+            _shared_deleted_objects(ctx).add(norm)
+            _shared_virtual_objects(ctx).pop(norm, None)
 
 
 def _resolve_actor(name):
@@ -1151,7 +1328,10 @@ def _resolve_actor(name):
         return None
     _init_engine()
     ctx = _current_context()
-    virtual = getattr(ctx, 'virtual_objects', {}).get(_norm_name(target))
+    virtual = (
+        getattr(ctx, 'virtual_objects', {}).get(_norm_name(target))
+        or _shared_virtual_objects(ctx).get(_norm_name(target))
+    )
     if virtual is not None:
         return None if _is_actor_deleted(virtual, target) else virtual
     current_name = ctx.actor_name or _object_name(ctx.actor)
@@ -1294,7 +1474,10 @@ def _actor_matches_tag(actor, tag) -> bool:
         return False
     ctx = _current_context()
     name = _object_name(actor)
-    explicit = ctx.object_tags.get(name) or ctx.object_tags.get(_norm_name(name)) or getattr(actor, 'tag', None)
+    shared_tags = _shared_object_tags(ctx)
+    explicit = (ctx.object_tags.get(name) or ctx.object_tags.get(_norm_name(name))
+                or shared_tags.get(name) or shared_tags.get(_norm_name(name))
+                or getattr(actor, 'tag', None))
     if explicit is not None:
         return _norm_name(explicit) == tag_norm
     # Fallback tag match: object-name prefix, e.g. coin_01 matches coin.
@@ -1339,51 +1522,78 @@ def distance(target):
 def object_hide(name):
     actor = _resolve_actor(name)
     if actor is None:
-        return
+        return False
     try:
         if hasattr(actor, 'set_visible'):
             actor.set_visible(False)
+            return True
     except Exception as exc:
         _logger.debug("[ScratchWrapper] object_hide failed: %s", exc)
+    return False
 
 
 def object_show(name):
     actor = _resolve_actor(name)
     if actor is None:
-        return
+        return False
     try:
         if hasattr(actor, 'set_visible'):
             actor.set_visible(True)
+            return True
     except Exception as exc:
         _logger.debug("[ScratchWrapper] object_show failed: %s", exc)
+    return False
 
 
 def object_delete(name):
     actor = _resolve_actor(name)
-    _mark_deleted(actor, name)
+    actor_name = _object_name(actor) if actor is not None else str(name or '').strip()
+    if not actor_name:
+        return False
+    native_deleted = False
+    scene = _runtime_scene()
+    try:
+        from CoronaCore.core.corona_editor import CoronaEditor
+        remove_actor = getattr(CoronaEditor.CoronaEngine, 'remove_editor_actor', None)
+        if callable(remove_actor) and scene is not None:
+            raw = remove_actor(getattr(scene, 'route', ''), actor_name)
+            result = _json.loads(raw) if isinstance(raw, str) else raw
+            native_deleted = not isinstance(result, dict) or result.get('status') in ('success', 'ok')
+            if not native_deleted:
+                _logger.warning("[ScratchWrapper] native delete rejected %s: %r", actor_name, result)
+    except Exception as exc:
+        _logger.warning("[ScratchWrapper] native delete failed for %s: %s", actor_name, exc)
+
+    _mark_deleted(actor, actor_name)
     if actor is not None:
         try:
             if hasattr(actor, 'set_visible'):
                 actor.set_visible(False)
         except Exception:
             pass
+    if scene is not None and native_deleted and hasattr(scene, '_notify_scene_tree_changed'):
+        try:
+            scene._notify_scene_tree_changed()
+        except Exception:
+            pass
+    return bool(native_deleted or actor is not None)
 
 
 def object_delete_last_touched():
     name = last_touch_object()
-    if name:
-        object_delete(name)
+    return object_delete(name) if name else False
 
 
 def object_set_position(name, x, y, z):
     actor = _resolve_actor(name)
     if actor is None:
-        return
+        return False
     pos = [_safe_float(x), _safe_float(y), _safe_float(z)]
-    _set_actor_position(actor, pos)
+    moved = _set_actor_position(actor, pos)
     ctx = _current_context()
     if actor is ctx.actor:
         ctx.x, ctx.y, ctx.z = pos
+    return moved
 
 
 def _object_axis(name, axis):
@@ -1421,6 +1631,9 @@ def object_set_tag(name, tag):
         return
     ctx.object_tags[actor_name] = str(tag or "")
     ctx.object_tags[_norm_name(actor_name)] = str(tag or "")
+    shared_tags = _shared_object_tags(ctx)
+    shared_tags[actor_name] = str(tag or "")
+    shared_tags[_norm_name(actor_name)] = str(tag or "")
 
 
 def object_count_tag(tag):
@@ -1444,17 +1657,15 @@ def _try_native_spawn(scene, template, name, pos):
     if scene is None:
         return None
     template_actor = _resolve_actor(template)
+
+    # First use any explicit Python scene factory exposed by the runtime.
     method_names = ('spawn_actor', 'create_actor', 'clone_actor', 'instantiate_actor', 'spawn', 'create', 'clone')
     for method_name in method_names:
         method = getattr(scene, method_name, None)
         if not callable(method):
             continue
-        variants = [
-            (template, name, pos), (template, name), (template, pos), (template,),
-            (template_actor, name, pos), (template_actor, name), (template_actor,),
-        ]
-        for args in variants:
-            if args and args[0] is None:
+        for args in ((template, name, pos), (template, name), (template_actor, name, pos), (template_actor, name)):
+            if args[0] is None:
                 continue
             try:
                 actor = method(*args)
@@ -1464,14 +1675,59 @@ def _try_native_spawn(scene, template, name, pos):
                 _logger.debug("[ScratchWrapper] native spawn %s failed: %s", method_name, exc)
                 continue
             if actor is not None:
-                try:
-                    if name and not getattr(actor, 'name', None):
-                        setattr(actor, 'name', name)
-                except Exception:
-                    pass
                 _set_actor_position(actor, pos)
                 return actor
-    return None
+
+    # The editor already exposes native actor creation even though Scene has no create_actor method.
+    try:
+        from CoronaCore.core.corona_editor import CoronaEditor
+        create_actor = getattr(CoronaEditor.CoronaEngine, 'create_editor_actor', None)
+        if not callable(create_actor):
+            return None
+        route = getattr(template_actor, 'route', '') or str(template or '')
+        actor_type = getattr(template_actor, 'actor_type', 'model') or 'model'
+        if not route:
+            return None
+        actor_data = {
+            'actor_name': name,
+            'name': name,
+            'actor_guid': '',
+            'position': list(pos),
+            'geometry': {'position': list(pos)},
+            'skip_if_exists': False,
+        }
+        if template_actor is not None:
+            try:
+                source = template_actor.to_dict()
+                geometry = dict(source.get('geometry') or {})
+                geometry['position'] = list(pos)
+                actor_data['geometry'] = geometry
+                for key in ('collision', 'visible', 'mechanics'):
+                    if key in source:
+                        actor_data[key] = source[key]
+            except Exception:
+                pass
+        raw = create_actor(
+            getattr(scene, 'route', ''), route, actor_type,
+            _json.dumps(actor_data, ensure_ascii=False),
+        )
+        result = _json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(result, dict) and result.get('status') not in ('success', 'ok'):
+            _logger.warning("[ScratchWrapper] native spawn rejected %s: %r", name, result)
+            return None
+        if hasattr(scene, '_notify_scene_tree_changed'):
+            scene._notify_scene_tree_changed()
+        resolved = scene.find_actor(name) if hasattr(scene, 'find_actor') else None
+        if resolved is not None:
+            return resolved
+        # Native object is visible, while this proxy keeps Blockly collision/tag logic usable
+        # until the Python scene cache refreshes.
+        proxy = _VirtualActor(name, pos, template=route)
+        setattr(proxy, 'native_created', True)
+        return proxy
+    except Exception as exc:
+        _logger.warning("[ScratchWrapper] create_editor_actor failed for %s: %s", name, exc)
+        return None
 
 
 def object_spawn(template, name, x, y, z):
@@ -1480,11 +1736,17 @@ def object_spawn(template, name, x, y, z):
     name = str(name or '').strip() or _unique_object_name(template)
     pos = [_safe_float(x), _safe_float(y), _safe_float(z)]
     ctx.deleted_objects.discard(_norm_name(name))
+    _shared_deleted_objects(ctx).discard(_norm_name(name))
     actor = _try_native_spawn(_runtime_scene(), template, name, pos)
     if actor is not None:
-        return _object_name(actor) or name
+        actor_name = _object_name(actor) or name
+        if isinstance(actor, _VirtualActor):
+            ctx.virtual_objects[_norm_name(actor_name)] = actor
+            _shared_virtual_objects(ctx)[_norm_name(actor_name)] = actor
+        return actor_name
     virtual = _VirtualActor(name, pos, template=template)
     ctx.virtual_objects[_norm_name(name)] = virtual
+    _shared_virtual_objects(ctx)[_norm_name(name)] = virtual
     return name
 
 
@@ -1505,8 +1767,7 @@ def object_spawn_tag(template, tag, count, x, y, z, dx, dy, dz):
 
 def object_delete_raycast_hit():
     name = raycast_hit_object()
-    if name:
-        object_delete(name)
+    return object_delete(name) if name else False
 
 
 def object_move_tag(tag, dx, dy, dz):
@@ -1617,6 +1878,50 @@ def countdown_left():
 def countdown_finished():
     end_time = _safe_float(_current_context().countdown_end_time, 0.0)
     return bool(end_time > 0 and countdown_left() <= 0.0)
+
+
+def runtime_state_snapshot(ctx=None):
+    ctx = ctx or _current_context()
+    end_time = _safe_float(ctx.countdown_end_time, 0.0)
+    countdown = max(0.0, end_time - _time.monotonic()) if end_time > 0 else 0.0
+    variables = {
+        name: ctx.variables.get(name, 0.0)
+        for name in sorted(ctx.visible_variables)
+    }
+    lists = {
+        name: ctx.list_values.get(name, [])
+        for name in sorted(ctx.visible_lists)
+    }
+    return {
+        'context_id': ctx.context_id,
+        'target_type': ctx.target_type,
+        'scene_name': ctx.scene_name,
+        'actor_name': ctx.actor_name,
+        'score': _safe_float(ctx.variables.get('score', 0.0)),
+        'lives': _safe_float(ctx.variables.get('lives', 0.0)),
+        'countdown': countdown,
+        'countdown_active': end_time > 0,
+        'game_state': ctx.variables.get('game_state', ctx.game_state or ''),
+        'variables': variables,
+        'lists': lists,
+        'mouse_locked': bool(ctx.mouse_locked),
+    }
+
+
+def runtime_state_snapshots():
+    live = {ctx.context_id: runtime_state_snapshot(ctx) for ctx in _live_contexts()}
+    with _context_lock:
+        completed = dict(_completed_state_snapshots)
+    completed.update(live)
+    return list(completed.values())
+
+
+def clear_runtime_state_snapshots():
+    with _context_lock:
+        _completed_state_snapshots.clear()
+        _scene_virtual_objects.clear()
+        _scene_deleted_objects.clear()
+        _scene_object_tags.clear()
 
 
 def game_win():
@@ -1802,9 +2107,28 @@ def raycast_hit_point_z():
 
 
 # Control
+def _tick_runtime_physics_auto():
+    if getattr(_tls, 'physics_ticking', False):
+        return
+    ctx = _current_context()
+    now = _time.monotonic()
+    if ctx.last_physics_time <= 0:
+        ctx.last_physics_time = now
+        return
+    dt = min(0.1, max(0.0, now - ctx.last_physics_time))
+    ctx.last_physics_time = now
+    if dt > 0:
+        _tls.physics_ticking = True
+        try:
+            _tick_runtime_physics(dt)
+        finally:
+            _tls.physics_ticking = False
+
+
 def check_stop():
     if _current_context().stop_requested:
         raise SystemExit(0)
+    _tick_runtime_physics_auto()
 
 
 def wait(seconds):
@@ -1813,70 +2137,207 @@ def wait(seconds):
         check_stop()
         step = min(0.1, remaining)
         _time.sleep(step)
-        _tick_runtime_physics(step)
         remaining -= step
     check_stop()
 
 
 def stop(option):
-    if option in ("ALL_SCRIPTS", "all"):
+    ctx = _current_context()
+    normalized = str(option or 'CURRENT_SCRIPT').upper()
+    if normalized in ('ALL_SCRIPTS', 'ALL'):
         request_stop_all()
+    elif normalized == 'OTHER_SCRIPTS_OF_ACTOR':
+        with _context_lock:
+            peers = list(_contexts.values())
+        for peer in peers:
+            if peer is ctx or peer.context_id == 'default':
+                continue
+            if peer.scene_name == ctx.scene_name and peer.actor_name == ctx.actor_name:
+                peer.stop_requested = True
+        return True
+    ctx.stop_requested = True
     raise SystemExit(0)
 
 
 def restart_level():
     ctx = _current_context()
-    scene = _runtime_scene()
-    if scene is not None:
-        for method_name in ('restart', 'reset', 'reload'):
-            method = getattr(scene, method_name, None)
-            if callable(method):
-                try:
-                    method()
-                    return
-                except Exception as exc:
-                    _logger.debug("[ScratchWrapper] scene.%s failed: %s", method_name, exc)
     ctx.game_state = 'restart'
     ctx.variables['game_state'] = 'restart'
     ctx.stop_requested = True
     raise SystemExit(0)
 
 
+def _run_bound_handler(ctx, handler, label):
+    try:
+        with using_context(ctx):
+            handler()
+    except SystemExit:
+        pass
+    except Exception:
+        _logger.exception("[ScratchWrapper] %s handler failed in %s", label, ctx.context_id)
+
+
 def cloneStart():
-    _logger.debug("[ScratchWrapper] cloneStart")
+    """Compatibility marker. Generated code registers a clone handler directly."""
+    return bool(_current_context().current_clone_name)
+
+
+def _run_clone_context(child, handler):
+    try:
+        _run_bound_handler(child, handler, 'clone')
+    finally:
+        release_context(child)
 
 
 def clone(name):
-    _logger.debug("[ScratchWrapper] clone(%s)", name)
+    parent = _current_context()
+    template = str(name or '').strip() or parent.actor_name
+    template_actor = _resolve_actor(template)
+    pos = _actor_position(template_actor or _current_actor()) or [parent.x, parent.y, parent.z]
+    clone_name = _unique_object_name(f"{_object_name(template_actor) or template or 'clone'}_clone")
+    created_name = object_spawn(template, clone_name, pos[0], pos[1], pos[2])
+    handler = parent.clone_start_handler
+    if callable(handler):
+        child = create_context(
+            context_id=f"{parent.context_id}:clone:{created_name}",
+            target_type='actor',
+            scene_name=parent.scene_name,
+            actor_name=created_name,
+        )
+        child.current_clone_name = created_name
+        actor = _resolve_actor(created_name)
+        if actor is not None:
+            child.actor = actor
+            child.target_actor = actor
+            child.scene = _runtime_scene()
+            child.target_scene = child.scene
+            child.initialized = True
+        thread = _threading.Thread(
+            target=_run_clone_context,
+            args=(child, handler),
+            daemon=True,
+            name=f"scratch-clone-{created_name}",
+        )
+        thread.start()
+    return created_name
 
 
 def deleteClone():
-    _logger.debug("[ScratchWrapper] deleteClone")
+    ctx = _current_context()
+    if not ctx.current_clone_name:
+        return False
+    deleted = object_delete(ctx.current_clone_name)
+    ctx.stop_requested = True
+    raise SystemExit(0)
+
+
+def _project_scene_routes():
+    try:
+        from CoronaCore.utils.proejct_utils import get_project_scenes
+        from utils.settings import settings_manager
+        root = settings_manager.active_project_path
+        if root:
+            routes = get_project_scenes(str(_Path(root) / 'project.ini'))
+            if routes:
+                return routes
+    except Exception:
+        pass
+    try:
+        from CoronaCore.core.managers import scene_manager
+        return list(scene_manager.list_all())
+    except Exception:
+        return []
+
+
+def _resolve_scene_route(name):
+    target = str(name or '').strip().replace('\\', '/')
+    if not target:
+        return ''
+    target_stem = _Path(target).stem.lower()
+    for route in _project_scene_routes():
+        normalized = str(route).replace('\\', '/')
+        if normalized.lower() == target.lower() or _Path(normalized).stem.lower() == target_stem:
+            return route
+    return target
 
 
 def setScene(name):
-    _logger.debug("[ScratchWrapper] setScene(%s)", name)
+    route = _resolve_scene_route(name)
+    if not route:
+        return False
+    try:
+        from CoronaCore.core.managers import scene_manager
+        ctx = _current_context()
+        current = _runtime_scene()
+        if current is not None and getattr(current, 'route', '') != route:
+            if hasattr(current, 'set_enabled'):
+                current.set_enabled(False)
+        scene = scene_manager.get_or_create(route)
+        if scene is None:
+            return False
+        if hasattr(scene, 'set_enabled'):
+            scene.set_enabled(True)
+        ctx.scene_name = getattr(scene, 'route', route)
+        ctx.target_scene_name = ctx.scene_name
+        ctx.scene = scene
+        ctx.target_scene = scene
+        ctx.actor = None
+        ctx.target_actor = None
+        ctx.initialized = ctx.target_type == 'project'
+        return True
+    except Exception as exc:
+        _logger.warning("[ScratchWrapper] setScene failed for %s: %s", route, exc)
+        return False
 
 
 def nextScene():
-    _logger.debug("[ScratchWrapper] nextScene")
+    routes = _project_scene_routes()
+    if not routes:
+        return False
+    current = getattr(_runtime_scene(), 'route', '') or _current_context().scene_name
+    try:
+        index = routes.index(current)
+    except ValueError:
+        index = -1
+    return setScene(routes[(index + 1) % len(routes)])
 
 
 # Event
 def gameStart():
-    _logger.debug("[ScratchWrapper] gameStart")
+    _current_context().variables['game_started'] = True
+    return True
 
 
 def RB(message):
-    _logger.debug("[ScratchWrapper] RB: %s", message)
+    """Compatibility query for hand-written scripts."""
+    return str(message or '') in _current_context().broadcast_handlers
+
+
+def _broadcast(message, wait_for_handlers):
+    key = str(message or '')
+    calls = []
+    for ctx in _live_contexts():
+        for handler in list(ctx.broadcast_handlers.get(key, [])):
+            thread = _threading.Thread(
+                target=_run_bound_handler,
+                args=(ctx, handler, f"broadcast:{key}"),
+                daemon=True,
+                name=f"scratch-broadcast-{ctx.context_id}",
+            )
+            calls.append(thread)
+            thread.start()
+    if wait_for_handlers:
+        for thread in calls:
+            thread.join()
+    return len(calls)
 
 
 def broadcast(message):
-    _logger.debug("[ScratchWrapper] broadcast: %s", message)
+    return _broadcast(message, False)
 
 
 def broadcastWait(message):
-    _logger.debug("[ScratchWrapper] broadcastWait: %s", message)
+    return _broadcast(message, True)
 
 
 # Math / variables / lists
@@ -1894,20 +2355,33 @@ def var_set(name, value):
 
 
 def var_show(name):
-    ctx = _current_context()
-    _logger.info("[ScratchWrapper] var_show: %s = %s", name, ctx.variables.get(name, 0.0))
+    _current_context().visible_variables.add(str(name or ''))
+    return True
 
 
 def var_hide(name):
-    _logger.debug("[ScratchWrapper] var_hide: %s", name)
+    _current_context().visible_variables.discard(str(name or ''))
+    return True
 
 
-def list_show(name):
-    _logger.debug("[ScratchWrapper] list_show: %s", name)
+def list_show(name, value=None):
+    ctx = _current_context()
+    key = str(name or '')
+    ctx.visible_lists.add(key)
+    if value is not None:
+        if isinstance(value, list):
+            ctx.list_values[key] = value
+        else:
+            try:
+                ctx.list_values[key] = list(value)
+            except TypeError:
+                ctx.list_values[key] = [value]
+    return True
 
 
 def list_hide(name):
-    _logger.debug("[ScratchWrapper] list_hide: %s", name)
+    _current_context().visible_lists.discard(str(name or ''))
+    return True
 
 
 # ── Audio ──
@@ -1916,35 +2390,42 @@ _audio_cache = {}  # name → resource_id (str)
 
 
 def _ensure_audio(name):
-    """确保音效已加载到引擎，返回 resource_id；失败返回 None"""
-    if name in _audio_cache:
-        return _audio_cache[name]
-    import os as _os
-    # 从 CoronaCore/utils 向上两级到项目根，再进入 assets/audio
-    audio_dir = _os.path.join(
-        _os.path.dirname(_os.path.abspath(__file__)), '..', '..', 'assets', 'audio'
-    )
-    for ext in ('.wav', '.mp3', '.ogg'):
-        path = _os.path.join(audio_dir, name + ext)
-        if _os.path.exists(path):
-            try:
-                import corona_engine as _ce
-                media = _ce.import_media(path)
-                _audio_cache[name] = media.resource_id
-                _logger.debug("[ScratchWrapper] loaded audio: %s → %s", name, media.resource_id)
-                return media.resource_id
-            except Exception as exc:
-                _logger.warning("[ScratchWrapper] audio load failed: %s %s", name, exc)
-                return None
-    # 如果文件不存在，尝试直接用名称作为 resource_id（引擎可能已预加载）
+    """Resolve project audio first, then editor bundled audio, returning a resource id."""
+    key = str(name or '').strip()
+    if key in _audio_cache:
+        return _audio_cache[key]
+    candidates = []
+    raw_path = _Path(key)
+    if raw_path.is_file():
+        candidates.append(raw_path)
+    try:
+        from utils.settings import settings_manager
+        project_root = settings_manager.active_project_path
+    except Exception:
+        project_root = None
+    roots = []
+    if project_root:
+        project = _Path(project_root)
+        roots.extend((project / 'Resource' / 'audio', project / 'assets' / 'audio', project / 'Audio'))
+    roots.append(_Path(__file__).resolve().parents[2] / 'assets' / 'audio')
+    suffixes = ('',) if raw_path.suffix else ('.wav', '.mp3', '.ogg')
+    for root in roots:
+        for suffix in suffixes:
+            candidates.append(root / f"{key}{suffix}")
     try:
         import corona_engine as _ce
-        _audio_cache[name] = name
-        return name
-    except Exception:
-        pass
-    _logger.debug("[ScratchWrapper] audio not found: %s", name)
-    return None
+        for path in candidates:
+            if path.is_file():
+                media = _ce.import_media(str(path))
+                rid = media.resource_id
+                _audio_cache[key] = rid
+                return rid
+        # The engine may already know a resource id/string name.
+        _audio_cache[key] = key
+        return key
+    except Exception as exc:
+        _logger.warning("[ScratchWrapper] audio resolve failed for %s: %s", key, exc)
+        return None
 
 
 def play_sound(name):
@@ -1954,9 +2435,10 @@ def play_sound(name):
         try:
             import corona_engine as _ce
             _ce.play_audio(rid, loop=False)
-            _logger.debug("[ScratchWrapper] play_sound: %s", name)
+            return True
         except Exception as exc:
             _logger.warning("[ScratchWrapper] play_sound failed: %s", exc)
+    return False
 
 
 def loop_sound(name):
@@ -1966,9 +2448,10 @@ def loop_sound(name):
         try:
             import corona_engine as _ce
             _ce.play_audio(rid, loop=True)
-            _logger.debug("[ScratchWrapper] loop_sound: %s", name)
+            return True
         except Exception as exc:
             _logger.warning("[ScratchWrapper] loop_sound failed: %s", exc)
+    return False
 
 
 def stop_sound(name):
@@ -1978,26 +2461,42 @@ def stop_sound(name):
         try:
             import corona_engine as _ce
             _ce.stop_audio(rid)
-        except Exception:
-            pass
+            return True
+        except Exception as exc:
+            _logger.warning("[ScratchWrapper] stop_sound failed: %s", exc)
+    return False
 
 
 def stop_all_sounds():
-    """停止所有已加载音效"""
-    import corona_engine as _ce
-    for name, rid in list(_audio_cache.items()):
+    """停止当前运行时已加载的全部音效。"""
+    stopped = 0
+    try:
+        import corona_engine as _ce
+    except Exception:
+        return False
+    for rid in list(_audio_cache.values()):
         if rid is not None:
             try:
                 _ce.stop_audio(rid)
+                stopped += 1
             except Exception:
                 pass
     _audio_cache.clear()
+    return stopped > 0
 
 
 # Stop/reset compatibility
 def reset_state():
     global _run_count
     ctx = _current_context()
+    ctx.key_handler = None
+    ctx.mouse_handler = None
+    ctx.broadcast_handlers.clear()
+    ctx.clone_start_handler = None
+    globals().get('_velocity_cache', {}).pop(ctx.context_id, None)
+    globals().get('_raycast_cache', {}).pop(ctx.context_id, None)
+    globals().get('_native_velocity_contexts', set()).discard(ctx.context_id)
+    globals().get('_native_gravity_contexts', set()).discard(ctx.context_id)
     fresh = ScratchRuntimeContext(ctx.context_id, target_type=ctx.target_type)
     fresh.scene_name = ctx.scene_name
     fresh.actor_name = ctx.actor_name

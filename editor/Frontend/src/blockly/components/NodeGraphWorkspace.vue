@@ -7,6 +7,16 @@
         <span class="ng-save">{{ saveLabel }}</span>
       </div>
       <div class="ng-modes">
+        <button
+          type="button"
+          class="ng-run"
+          :class="{ running: codeRunning }"
+          :disabled="runBusy"
+          @click="handleToggleRun"
+        >
+          {{ codeRunning ? '停止' : '运行' }}
+        </button>
+        <span v-if="runStatus" class="ng-run-status">{{ runStatus }}</span>
         <button class="ng-mode" :class="{ active: mode === 'select' }" @click="setMode('select')">
           选择
         </button>
@@ -29,6 +39,7 @@
         <div
           class="ng-tool-card macro"
           draggable="true"
+          @pointerdown.left="beginMacroPointerDrag($event, 'state')"
           @dragstart="startMacroDrag($event, 'state')"
         >
           <div class="ng-tool-icon">态</div>
@@ -41,23 +52,37 @@
           微观积木
           <small>Blockly 原生形状</small>
         </div>
-        <BlocklyToolboxPalette class="ng-native-palette" @pick="handlePalettePick" />
+        <BlocklyToolboxPalette
+          class="ng-native-palette"
+          @pick="handlePalettePick"
+          @external-drag-start="handlePaletteDragStart"
+          @external-drag-move="handlePaletteDragMove"
+          @external-drag-end="handlePaletteDragEnd"
+        />
       </aside>
       <main
         ref="canvasRef"
-        class="ng-panel ng-canvas"
+        class="ng-panel ng-canvas" :class="{ 'drop-active': macroDropActive }"
         @dragover.prevent
         @drop.prevent="handleCanvasDrop"
+        @wheel.prevent="handleCanvasWheel"
+        @pointermove="handleCanvasPointerMove"
+        @pointerleave="handleCanvasPointerLeave"
         @click="handleCanvasClick"
       >
         <div class="ng-canvas-head">
           <div>
             <strong>节点编辑区</strong>
-            <span>只接受宏观节点；点击节点后使用黄色点连接</span>
           </div>
-          <span class="ng-pill">{{ nodes.length }} 节点 / {{ edges.length }} 连线</span>
+          <div class="ng-canvas-actions">
+            <span class="ng-pill">{{ nodes.length }} 节点 / {{ edges.length }} 连线</span>
+            <span class="ng-zoom-value">{{ zoomText }}</span>
+            <button type="button" class="ng-zoom-reset" @click.stop="resetZoom">恢复 100%</button>
+          </div>
         </div>
-        <svg class="ng-edges" :width="canvasSize.width" :height="canvasSize.height">
+        <div class="ng-world" :style="worldStyle">
+          <div class="ng-grid"></div>
+          <svg class="ng-edges" :width="canvasSize.width" :height="canvasSize.height">
           <defs>
             <marker
               id="ng-arrow"
@@ -71,6 +96,11 @@
               <path d="M0,0 L0,6 L9,3 z" fill="#60a5fa" />
             </marker>
           </defs>
+          <path
+            v-if="pendingEdgePath"
+            class="ng-edge-preview"
+            :d="pendingEdgePath"
+          />
           <g v-for="edge in edges" :key="edge.id">
             <path
               class="ng-edge-hit"
@@ -96,7 +126,7 @@
           :class="{ selected: selectedKind === 'edge' && selectedId === edge.id }"
           :style="conditionStyle(edge)"
           @click.stop="selectEdge(edge)"
-          @dblclick.stop="selectEdge(edge)"
+          @dblclick.stop="renameEdge(edge)"
         >
           {{ edge.name || '条件' }}
         </div>
@@ -163,12 +193,26 @@
             ></button>
           </template>
         </div>
+        </div>
       </main>
       <aside class="ng-panel ng-inspector">
         <section class="ng-vars">
           <div class="ng-section-title">
             全局变量池
-            <small>只放变量积木</small>
+            <small>变量和列表在节点图启动时初始化</small>
+          </div>
+          <MiniBlocklyWorkspace
+            ref="variablesBlocklyRef"
+            :workspace-key="`${targetKey}:globals`"
+            :initial-state="graph.globalVariablesWorkspace"
+            :delete-mode="mode === 'delete'"
+            @change="onGlobalWorkspaceChange"
+          />
+        </section>
+        <section class="ng-editor">
+          <div class="ng-section-title">
+            {{ activeEditorTitle }}
+            <small>{{ activeEditorSubtitle }}</small>
           </div>
           <MiniBlocklyWorkspace
             v-if="activeEditorKey"
@@ -179,22 +223,16 @@
             :delete-mode="mode === 'delete'"
             @change="onActiveWorkspaceChange"
           />
-          <div v-else class="ng-editor-empty">选择一个节点或连线条件块后编辑内部积木</div>
-        </section>
-        <section class="ng-editor">
-          <div class="ng-section-title">
-            {{ activeEditorTitle }}
-            <small>{{ activeEditorSubtitle }}</small>
-          </div>
-          <MiniBlocklyWorkspace
-            ref="variablesBlocklyRef"
-            :workspace-key="`${targetKey}:globals`"
-            :initial-state="graph.globalVariablesWorkspace"
-            :delete-mode="mode === 'delete'"
-            @change="onGlobalWorkspaceChange"
-          />
+          <div v-else class="ng-editor-empty">选择节点或连线后可编辑内部积木</div>
         </section>
       </aside>
+    </div>
+    <div
+      v-if="externalDrag.active"
+      class="ng-drag-ghost"
+      :style="dragGhostStyle"
+    >
+      {{ externalDrag.label }}
     </div>
   </div>
 </template>
@@ -204,6 +242,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import MiniBlocklyWorkspace from '@/blockly/components/MiniBlocklyWorkspace.vue';
 import BlocklyToolboxPalette from '@/blockly/components/BlocklyToolboxPalette.vue';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
+import { scriptingService } from '@/utils/bridge.js';
+import { nodeGraphToCode } from '@/blockly/generators/index.js';
 
 const props = defineProps({
   actorName: { type: String, default: '' },
@@ -224,11 +264,41 @@ const canvasRef = ref(null),
   variablesBlocklyRef = ref(null),
   activeBlocklyRef = ref(null);
 const canvasSize = reactive({ width: 900, height: 520 });
+const viewport = reactive({ scale: 1, offsetX: 0, offsetY: 0 });
+const connectionPointer = reactive({ active: false, x: 0, y: 0 });
 const graph = reactive({ version: 1, nodes: [], edges: [], globalVariablesWorkspace: {} });
+const codeRunning = ref(false);
+const runBusy = ref(false);
+const runStatus = ref('');
+const macroDropActive = ref(false);
+const externalDrag = reactive({
+  active: false,
+  kind: '',
+  blockType: '',
+  macroType: '',
+  label: '',
+  clientX: 0,
+  clientY: 0,
+  pointerId: null,
+});
+const zoomText = computed(() => `${Math.round(viewport.scale * 100)}%`);
+const dragGhostStyle = computed(() => ({
+  left: `${externalDrag.clientX + 14}px`,
+  top: `${externalDrag.clientY + 14}px`,
+}));
+const worldStyle = computed(() => ({
+  width: `${canvasSize.width}px`,
+  height: `${canvasSize.height}px`,
+  transform: `translate(${viewport.offsetX}px, ${viewport.offsetY}px) scale(${viewport.scale})`,
+  transformOrigin: '0 0',
+}));
 let isLoading = false,
   saveTimer = null,
   resizeObserver = null,
-  dragState = null;
+  dragState = null,
+  macroPointerDrag = null,
+  runPollTimer = null,
+  startedRunForTarget = false;
 const targetKey = computed(
   () => `${props.targetType || 'actor'}:${props.sceneName || ''}:${props.actorName || ''}`
 );
@@ -243,6 +313,13 @@ const selectedNode = computed(() =>
 const selectedEdge = computed(() =>
   selectedKind.value === 'edge' ? graph.edges.find((e) => e.id === selectedId.value) : null
 );
+const pendingEdgePath = computed(() => {
+  if (!pendingPort.value || !connectionPointer.active) return '';
+  const node = graph.nodes.find((item) => item.id === pendingPort.value.nodeId);
+  if (!node) return '';
+  const source = portPoint(node, pendingPort.value);
+  return previewEdgePath(source, connectionPointer, pendingPort.value.side);
+});
 const activeEditorKey = computed(() =>
   selectedNode.value
     ? `${targetKey.value}:node:${selectedNode.value.id}`
@@ -274,6 +351,7 @@ const activeEditorSubtitle = computed(() =>
 function setMode(v) {
   mode.value = v;
   pendingPort.value = null;
+  connectionPointer.active = false;
 }
 function dragData(event, payload, text) {
   event.dataTransfer?.setData('application/x-corona-nodegraph', JSON.stringify(payload));
@@ -283,46 +361,209 @@ function dragData(event, payload, text) {
 function startMacroDrag(e, macroType) {
   dragData(e, { kind: 'macro-node', macroType }, `macro-node:${macroType}`);
 }
+function pointInCanvas(clientX, clientY) {
+  const rect = canvasRef.value?.getBoundingClientRect?.();
+  return Boolean(
+    rect &&
+      clientX >= rect.left &&
+      clientX <= rect.right &&
+      clientY >= rect.top &&
+      clientY <= rect.bottom
+  );
+}
+function addMacroNodeAt(macroType, clientX, clientY) {
+  if (!pointInCanvas(clientX, clientY)) return false;
+  const world = screenToWorld(clientX, clientY);
+  const node = {
+    id: makeId('node'),
+    macroType: macroType || 'state',
+    nodeType: graph.nodes.length === 0 ? 'start' : 'custom',
+    name: graph.nodes.length === 0 ? '开始' : `状态${graph.nodes.length + 1}`,
+    x: Math.max(20, world.x - NODE_WIDTH / 2),
+    y: Math.max(54, world.y - 32),
+    workspace: {},
+  };
+  graph.nodes.push(node);
+  selectNode(node);
+  scheduleSave();
+  return true;
+}
+function clearMacroPointerListeners() {
+  window.removeEventListener('pointermove', moveMacroPointerDrag, true);
+  window.removeEventListener('pointerup', finishMacroPointerDrag, true);
+  window.removeEventListener('pointercancel', cancelMacroPointerDrag, true);
+}
+function beginMacroPointerDrag(event, macroType) {
+  if (event.button !== 0) return;
+  macroPointerDrag = {
+    pointerId: event.pointerId,
+    macroType,
+    startX: event.clientX,
+    startY: event.clientY,
+    started: false,
+  };
+  event.preventDefault();
+  window.addEventListener('pointermove', moveMacroPointerDrag, true);
+  window.addEventListener('pointerup', finishMacroPointerDrag, true);
+  window.addEventListener('pointercancel', cancelMacroPointerDrag, true);
+}
+function moveMacroPointerDrag(event) {
+  if (!macroPointerDrag || event.pointerId !== macroPointerDrag.pointerId) return;
+  const distance = Math.hypot(
+    event.clientX - macroPointerDrag.startX,
+    event.clientY - macroPointerDrag.startY
+  );
+  if (!macroPointerDrag.started && distance < 5) return;
+  macroPointerDrag.started = true;
+  externalDrag.active = true;
+  externalDrag.kind = 'macro';
+  externalDrag.macroType = macroPointerDrag.macroType;
+  externalDrag.label = '状态节点';
+  externalDrag.clientX = event.clientX;
+  externalDrag.clientY = event.clientY;
+  externalDrag.pointerId = event.pointerId;
+  macroDropActive.value = pointInCanvas(event.clientX, event.clientY);
+  event.preventDefault();
+}
+function finishMacroPointerDrag(event) {
+  if (!macroPointerDrag || event.pointerId !== macroPointerDrag.pointerId) return;
+  const drag = macroPointerDrag;
+  macroPointerDrag = null;
+  clearMacroPointerListeners();
+  if (drag.started) addMacroNodeAt(drag.macroType, event.clientX, event.clientY);
+  clearExternalDrag();
+}
+function cancelMacroPointerDrag(event) {
+  if (!macroPointerDrag || (event?.pointerId != null && event.pointerId !== macroPointerDrag.pointerId)) return;
+  macroPointerDrag = null;
+  clearMacroPointerListeners();
+  clearExternalDrag();
+}
+function clearWorkspaceDropHighlights() {
+  activeBlocklyRef.value?.setDropActive?.(false);
+  variablesBlocklyRef.value?.setDropActive?.(false);
+}
+function clearExternalDrag() {
+  clearWorkspaceDropHighlights();
+  macroDropActive.value = false;
+  externalDrag.active = false;
+  externalDrag.kind = '';
+  externalDrag.blockType = '';
+  externalDrag.macroType = '';
+  externalDrag.label = '';
+  externalDrag.pointerId = null;
+}
+function isGlobalWorkspaceBlock(blockType) {
+  return (
+    blockType === 'math_change' ||
+    blockType.startsWith('variable') ||
+    blockType.startsWith('variables_') ||
+    blockType.startsWith('list_') ||
+    blockType.startsWith('lists_')
+  );
+}
+function updatePaletteDropTarget(clientX, clientY) {
+  const activeHit = Boolean(activeBlocklyRef.value?.hitTest?.(clientX, clientY));
+  const globalsHit = Boolean(
+    isGlobalWorkspaceBlock(externalDrag.blockType) &&
+      variablesBlocklyRef.value?.hitTest?.(clientX, clientY)
+  );
+  activeBlocklyRef.value?.setDropActive?.(activeHit);
+  variablesBlocklyRef.value?.setDropActive?.(!activeHit && globalsHit);
+  return activeHit ? activeBlocklyRef.value : globalsHit ? variablesBlocklyRef.value : null;
+}
+function handlePaletteDragStart(payload) {
+  if (!payload?.blockType) return;
+  externalDrag.active = true;
+  externalDrag.kind = 'micro';
+  externalDrag.blockType = payload.blockType;
+  externalDrag.label = payload.blockType;
+  externalDrag.clientX = payload.clientX;
+  externalDrag.clientY = payload.clientY;
+  updatePaletteDropTarget(payload.clientX, payload.clientY);
+}
+function handlePaletteDragMove(payload) {
+  if (!externalDrag.active || externalDrag.kind !== 'micro') return;
+  externalDrag.clientX = payload.clientX;
+  externalDrag.clientY = payload.clientY;
+  updatePaletteDropTarget(payload.clientX, payload.clientY);
+}
+function handlePaletteDragEnd(payload) {
+  if (!externalDrag.active || externalDrag.kind !== 'micro') return;
+  const target = payload?.cancelled ? null : updatePaletteDropTarget(payload.clientX, payload.clientY);
+  if (target?.addBlock?.(payload.blockType, payload.clientX, payload.clientY)) {
+    refreshEmbeddedWorkspaceStates();
+    scheduleSave();
+  }
+  clearExternalDrag();
+}
 function handlePalettePick(blockType) {
   if (!blockType) return;
-  const targetWorkspace = activeBlocklyRef.value || variablesBlocklyRef.value;
+  const targetWorkspace = activeBlocklyRef.value ||
+    (isGlobalWorkspaceBlock(blockType) ? variablesBlocklyRef.value : null);
   if (!targetWorkspace?.addBlock) {
-    saveLabel.value = '\u8bf7\u5148\u9009\u62e9\u8282\u70b9\u6216\u8fde\u7ebf';
+    saveLabel.value = '\u8bf7\u5148\u9009\u62e9\u8282\u70b9\u6216\u8fde\u7ebf\uff1b\u5168\u5c40\u53d8\u91cf\u6c60\u53ea\u63a5\u53d7\u53d8\u91cf\u548c\u5217\u8868\u79ef\u6728';
     return;
   }
-  targetWorkspace.addBlock(blockType, 48, 48);
+  targetWorkspace.addBlock(blockType);
   refreshEmbeddedWorkspaceStates();
   scheduleSave();
 }
 function makeId(p) {
   return `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
+function screenToWorld(clientX, clientY) {
+  const r = canvasRef.value?.getBoundingClientRect?.();
+  if (!r) return { x: 0, y: 0 };
+  return {
+    x: (clientX - r.left - viewport.offsetX) / viewport.scale,
+    y: (clientY - r.top - viewport.offsetY) / viewport.scale,
+  };
+}
+function handleCanvasWheel(e) {
+  if (!canvasRef.value) return;
+  const r = canvasRef.value.getBoundingClientRect();
+  const localX = e.clientX - r.left;
+  const localY = e.clientY - r.top;
+  const world = screenToWorld(e.clientX, e.clientY);
+  const factor = e.deltaY < 0 ? 1.1 : 0.9;
+  const nextScale = Math.min(2, Math.max(0.4, viewport.scale * factor));
+  if (Math.abs(nextScale - viewport.scale) < 0.0001) return;
+  viewport.scale = nextScale;
+  viewport.offsetX = localX - world.x * nextScale;
+  viewport.offsetY = localY - world.y * nextScale;
+}
+function resetZoom() {
+  viewport.scale = 1;
+  viewport.offsetX = 0;
+  viewport.offsetY = 0;
+}
 function handleCanvasDrop(e) {
   const raw = e.dataTransfer?.getData('application/x-corona-nodegraph');
   if (!raw) return;
-  let p;
+  let payload;
   try {
-    p = JSON.parse(raw);
+    payload = JSON.parse(raw);
   } catch {
     return;
   }
-  if (p?.kind !== 'macro-node') return;
-  const r = canvasRef.value.getBoundingClientRect();
-  const node = {
-    id: makeId('node'),
-    macroType: p.macroType || 'state',
-    nodeType: graph.nodes.length === 0 ? 'start' : 'custom',
-    name: graph.nodes.length === 0 ? '开始' : `状态${graph.nodes.length + 1}`,
-    x: Math.max(20, e.clientX - r.left - NODE_WIDTH / 2),
-    y: Math.max(54, e.clientY - r.top - 32),
-    workspace: {},
-  };
-  graph.nodes.push(node);
-  selectNode(node);
-  scheduleSave();
+  if (payload?.kind === 'macro-node') addMacroNodeAt(payload.macroType, e.clientX, e.clientY);
+}
+function handleCanvasPointerMove(event) {
+  if (!pendingPort.value) return;
+  const world = screenToWorld(event.clientX, event.clientY);
+  connectionPointer.x = world.x;
+  connectionPointer.y = world.y;
+  connectionPointer.active = true;
+}
+function handleCanvasPointerLeave() {
+  connectionPointer.active = false;
 }
 function handleCanvasClick() {
-  if (mode.value !== 'delete') pendingPort.value = null;
+  if (mode.value !== 'delete') {
+    pendingPort.value = null;
+    connectionPointer.active = false;
+  }
 }
 function handleNodeClick(node) {
   if (mode.value === 'delete') {
@@ -344,6 +585,7 @@ function selectNode(node) {
   selectedKind.value = 'node';
   selectedId.value = node.id;
   pendingPort.value = null;
+  connectionPointer.active = false;
   nextTick(() => activeBlocklyRef.value?.resizeBlockly?.());
 }
 function selectEdge(edge) {
@@ -355,6 +597,7 @@ function selectEdge(edge) {
   selectedKind.value = 'edge';
   selectedId.value = edge.id;
   pendingPort.value = null;
+  connectionPointer.active = false;
   nextTick(() => activeBlocklyRef.value?.resizeBlockly?.());
 }
 function handleEdgeClick(edge) {
@@ -409,13 +652,13 @@ function displayNodeName(n) {
   return n ? (n.nodeType === 'custom' ? n.name || '自定义节点' : nodeTypeLabel(n.nodeType)) : '';
 }
 function nodeHeight(node) {
-  const max = Math.max(
-    ...['left', 'right', 'bottom'].map(
-      (s) => visiblePorts(node).filter((p) => p.side === s).length
+  const sidePortCount = Math.max(
+    ...['left', 'right'].map(
+      (side) => visiblePorts(node).filter((port) => port.side === side).length
     ),
     1
   );
-  return Math.max(NODE_BASE_HEIGHT, 70 + max * NODE_PORT_GAP);
+  return Math.max(NODE_BASE_HEIGHT, 70 + sidePortCount * NODE_PORT_GAP);
 }
 function nodeStyle(n) {
   return {
@@ -429,21 +672,21 @@ function startNodeDrag(e, node) {
   if (mode.value !== 'select') return;
   if (e.target?.closest?.('input,select,button,.ng-port')) return;
   selectNode(node);
-  const r = canvasRef.value.getBoundingClientRect();
-  dragState = { node, offsetX: e.clientX - r.left - node.x, offsetY: e.clientY - r.top - node.y };
+  const world = screenToWorld(e.clientX, e.clientY);
+  dragState = { node, offsetX: world.x - node.x, offsetY: world.y - node.y };
   window.addEventListener('mousemove', onDragMove);
   window.addEventListener('mouseup', stopNodeDrag, { once: true });
 }
 function onDragMove(e) {
   if (!dragState || !canvasRef.value) return;
-  const r = canvasRef.value.getBoundingClientRect();
+  const world = screenToWorld(e.clientX, e.clientY);
   dragState.node.x = Math.max(
     8,
-    Math.min(canvasSize.width - NODE_WIDTH - 8, e.clientX - r.left - dragState.offsetX)
+    Math.min(canvasSize.width - NODE_WIDTH - 8, world.x - dragState.offsetX)
   );
   dragState.node.y = Math.max(
     48,
-    Math.min(canvasSize.height - NODE_BASE_HEIGHT - 8, e.clientY - r.top - dragState.offsetY)
+    Math.min(canvasSize.height - NODE_BASE_HEIGHT - 8, world.y - dragState.offsetY)
   );
 }
 function stopNodeDrag() {
@@ -492,6 +735,10 @@ function handlePortClick(node, p) {
   const clicked = { nodeId: node.id, side: p.side, index: p.index };
   if (!pendingPort.value) {
     pendingPort.value = clicked;
+    const point = portPoint(node, p);
+    connectionPointer.x = point.x;
+    connectionPointer.y = point.y;
+    connectionPointer.active = true;
     return;
   }
   if (
@@ -500,16 +747,18 @@ function handlePortClick(node, p) {
     pendingPort.value.index === clicked.index
   ) {
     pendingPort.value = null;
+    connectionPointer.active = false;
     return;
   }
   graph.edges.push({
     id: makeId('edge'),
-    source: pendingPort.value,
+    source: { ...pendingPort.value },
     target: clicked,
     name: '',
     conditionWorkspace: {},
   });
   pendingPort.value = null;
+  connectionPointer.active = false;
   scheduleSave();
 }
 function getNode(id) {
@@ -521,17 +770,78 @@ function edgeEndpoints(e) {
   if (!s || !t) return null;
   return { source: portPoint(s, e.source), target: portPoint(t, e.target) };
 }
-function edgePath(e) {
+function portVector(side) {
+  if (side === 'left') return { x: -1, y: 0 };
+  if (side === 'right') return { x: 1, y: 0 };
+  return { x: 0, y: 1 };
+}
+function edgeCurve(source, target, sourceSide, targetSide) {
+  const distance = Math.hypot(target.x - source.x, target.y - source.y);
+  const handle = Math.max(52, Math.min(220, distance * 0.42));
+  const sourceVector = portVector(sourceSide);
+  const targetVector = portVector(targetSide);
+  return {
+    source,
+    target,
+    control1: {
+      x: source.x + sourceVector.x * handle,
+      y: source.y + sourceVector.y * handle,
+    },
+    control2: {
+      x: target.x + targetVector.x * handle,
+      y: target.y + targetVector.y * handle,
+    },
+  };
+}
+function curvePath(curve) {
+  return `M ${curve.source.x} ${curve.source.y} C ${curve.control1.x} ${curve.control1.y}, ${curve.control2.x} ${curve.control2.y}, ${curve.target.x} ${curve.target.y}`;
+}
+function cubicPoint(curve, t = 0.5) {
+  const mt = 1 - t;
+  return {
+    x:
+      mt * mt * mt * curve.source.x +
+      3 * mt * mt * t * curve.control1.x +
+      3 * mt * t * t * curve.control2.x +
+      t * t * t * curve.target.x,
+    y:
+      mt * mt * mt * curve.source.y +
+      3 * mt * mt * t * curve.control1.y +
+      3 * mt * t * t * curve.control2.y +
+      t * t * t * curve.target.y,
+  };
+}
+function edgeCurveFor(e) {
   const p = edgeEndpoints(e);
-  if (!p) return '';
-  const dx = Math.max(60, Math.abs(p.target.x - p.source.x) * 0.45);
-  return `M ${p.source.x} ${p.source.y} C ${p.source.x + dx} ${p.source.y}, ${p.target.x - dx} ${p.target.y}, ${p.target.x} ${p.target.y}`;
+  return p ? edgeCurve(p.source, p.target, e.source.side, e.target.side) : null;
+}
+function edgePath(e) {
+  const curve = edgeCurveFor(e);
+  return curve ? curvePath(curve) : '';
+}
+function previewEdgePath(source, target, sourceSide) {
+  const distance = Math.hypot(target.x - source.x, target.y - source.y);
+  const handle = Math.max(48, Math.min(180, distance * 0.4));
+  const sourceVector = portVector(sourceSide);
+  const dx = target.x - source.x;
+  const dy = target.y - source.y;
+  const length = Math.max(1, Math.hypot(dx, dy));
+  return curvePath({
+    source,
+    target,
+    control1: {
+      x: source.x + sourceVector.x * handle,
+      y: source.y + sourceVector.y * handle,
+    },
+    control2: {
+      x: target.x - (dx / length) * handle,
+      y: target.y - (dy / length) * handle,
+    },
+  });
 }
 function edgeMidpoint(e) {
-  const p = edgeEndpoints(e);
-  return p
-    ? { x: (p.source.x + p.target.x) / 2, y: (p.source.y + p.target.y) / 2 }
-    : { x: 0, y: 0 };
+  const curve = edgeCurveFor(e);
+  return curve ? cubicPoint(curve, 0.5) : { x: 0, y: 0 };
 }
 function conditionStyle(e) {
   const p = edgeMidpoint(e);
@@ -670,6 +980,7 @@ async function saveNow(targetOverride = null) {
   }
 }
 async function loadGraphForCurrentTarget() {
+  resetZoom();
   if (!props.actorName) {
     applyGraph(normalizeGraph({}));
     return;
@@ -692,6 +1003,96 @@ async function loadGraphForCurrentTarget() {
     updateCanvasSize();
   }
 }
+function bridgeResult(response) {
+  return response?.data?.data ?? response?.data ?? response ?? {};
+}
+function clearRunPoll() {
+  if (runPollTimer) window.clearInterval(runPollTimer);
+  runPollTimer = null;
+}
+function startRunPoll() {
+  clearRunPoll();
+  runPollTimer = window.setInterval(async () => {
+    if (!codeRunning.value) return;
+    try {
+      const status = bridgeResult(await scriptingService.getScriptStatus());
+      if (status?.status !== 'running') {
+        clearRunPoll();
+        codeRunning.value = false;
+        startedRunForTarget = false;
+        runStatus.value = status?.status === 'error' ? '执行失败' : '已结束';
+      }
+    } catch (error) {
+      clearRunPoll();
+      codeRunning.value = false;
+      startedRunForTarget = false;
+      runStatus.value = '状态查询失败';
+      logError('查询节点图运行状态失败', error);
+    }
+  }, 500);
+}
+async function stopNodeGraphRun(statusText = '已停止') {
+  clearRunPoll();
+  if (!startedRunForTarget && !codeRunning.value) return;
+  try {
+    await scriptingService.stopScriptExecution();
+  } catch (error) {
+    logError('停止节点图失败', error);
+  } finally {
+    startedRunForTarget = false;
+    codeRunning.value = false;
+    runStatus.value = statusText;
+  }
+}
+async function handleToggleRun() {
+  if (runBusy.value) return;
+  runBusy.value = true;
+  try {
+    if (codeRunning.value) {
+      await stopNodeGraphRun('已停止');
+      return;
+    }
+    if (!props.actorName) {
+      runStatus.value = '请先选择运行目标';
+      return;
+    }
+    refreshEmbeddedWorkspaceStates();
+    await saveNow();
+    let code;
+    try {
+      code = nodeGraphToCode(graphSnapshot());
+    } catch (error) {
+      runStatus.value = `生成失败：${error?.message || error}`;
+      logError('生成节点图代码失败', error);
+      return;
+    }
+    runStatus.value = '启动中...';
+    const response = bridgeResult(
+      await scriptingService.executePythonCode(
+        code,
+        0,
+        props.sceneName || '',
+        props.actorName,
+        props.targetType || 'actor'
+      )
+    );
+    if (response?.status === 'error' || response?.success === false) {
+      throw new Error(response?.message || '后端拒绝执行节点图');
+    }
+    startedRunForTarget = true;
+    codeRunning.value = true;
+    runStatus.value = '运行中';
+    startRunPoll();
+  } catch (error) {
+    startedRunForTarget = false;
+    codeRunning.value = false;
+    clearRunPoll();
+    runStatus.value = `执行失败：${error?.message || error}`;
+    logError('执行节点图失败', error);
+  } finally {
+    runBusy.value = false;
+  }
+}
 function updateCanvasSize() {
   const r = canvasRef.value?.getBoundingClientRect?.();
   if (!r) return;
@@ -706,7 +1107,11 @@ watch(
       sceneName: old?.[0] || '',
       actorName: old?.[1] || '',
     };
+    if (startedRunForTarget || codeRunning.value) await stopNodeGraphRun('已停止');
+    clearExternalDrag();
+    cancelMacroPointerDrag();
     if (oldTarget.actorName && !isLoading) await saveNow(oldTarget);
+    runStatus.value = '';
     await loadGraphForCurrentTarget();
   },
   { immediate: true }
@@ -720,7 +1125,12 @@ onBeforeUnmount(() => {
   if (saveTimer) clearTimeout(saveTimer);
   saveNow();
   resizeObserver?.disconnect?.();
+  clearRunPoll();
+  clearExternalDrag();
+  cancelMacroPointerDrag();
+  if (startedRunForTarget || codeRunning.value) scriptingService.stopScriptExecution().catch(() => {});
   window.removeEventListener('mousemove', onDragMove);
+  window.removeEventListener('mouseup', stopNodeDrag);
 });
 </script>
 
@@ -772,7 +1182,38 @@ onBeforeUnmount(() => {
 }
 .ng-modes {
   display: flex;
+  align-items: center;
   gap: 6px;
+}
+.ng-run {
+  height: 28px;
+  min-width: 58px;
+  padding: 0 13px;
+  border: 1px solid #22c55e;
+  border-radius: 8px;
+  background: #166534;
+  color: #f0fdf4;
+  font-weight: 800;
+  cursor: pointer;
+}
+.ng-run:hover:not(:disabled) {
+  background: #15803d;
+}
+.ng-run.running {
+  border-color: #fb7185;
+  background: #9f1239;
+}
+.ng-run:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+.ng-run-status {
+  max-width: 240px;
+  overflow: hidden;
+  color: #cbd5e1;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ng-mode {
   height: 28px;
@@ -947,9 +1388,33 @@ onBeforeUnmount(() => {
   position: relative;
   overflow: hidden;
   background: #0d131b;
+  transition: box-shadow 120ms ease, border-color 120ms ease;
 }
-.ng-canvas:before {
-  content: '';
+.ng-canvas.drop-active {
+  border-color: #60a5fa;
+  box-shadow: inset 0 0 0 3px rgba(96, 165, 250, 0.25);
+}
+.ng-drag-ghost {
+  position: fixed;
+  z-index: 10000;
+  max-width: 220px;
+  padding: 8px 12px;
+  border: 1px solid rgba(147, 197, 253, 0.8);
+  border-radius: 9px;
+  background: rgba(30, 64, 175, 0.88);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+  color: #eff6ff;
+  font-size: 12px;
+  font-weight: 800;
+  pointer-events: none;
+  transform: translateZ(0);
+}
+.ng-world {
+  position: absolute;
+  inset: 0 auto auto 0;
+  will-change: transform;
+}
+.ng-grid {
   position: absolute;
   inset: 0;
   pointer-events: none;
@@ -978,6 +1443,31 @@ onBeforeUnmount(() => {
   color: #94a3b8;
   font-size: 11px;
   margin-top: 2px;
+}
+.ng-canvas-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: auto;
+}
+.ng-zoom-value {
+  margin-top: 0 !important;
+  min-width: 42px;
+  text-align: center;
+  color: #dbeafe !important;
+}
+.ng-zoom-reset {
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid #3b4b64;
+  border-radius: 7px;
+  background: #172033;
+  color: #dbeafe;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ng-zoom-reset:hover {
+  border-color: #60a5fa;
 }
 .ng-pill {
   max-width: 44%;
@@ -1010,6 +1500,20 @@ onBeforeUnmount(() => {
 }
 .ng-edge-line.selected {
   stroke: #facc15;
+  stroke-width: 3;
+  filter: drop-shadow(0 0 4px rgba(250, 204, 21, 0.45));
+}
+.ng-edge-hit:hover + .ng-edge-line {
+  stroke: #93c5fd;
+  stroke-width: 3;
+}
+.ng-edge-preview {
+  fill: none;
+  stroke: #facc15;
+  stroke-width: 2.4;
+  stroke-dasharray: 8 6;
+  pointer-events: none;
+  filter: drop-shadow(0 0 4px rgba(250, 204, 21, 0.35));
 }
 .ng-edge-line.delete {
   stroke: #fb7185;
@@ -1120,6 +1624,10 @@ onBeforeUnmount(() => {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+.ng-condition-block:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.06) drop-shadow(0 5px 8px rgba(0, 0, 0, 0.24));
 }
 .ng-condition-block.selected {
   background: #fde047;

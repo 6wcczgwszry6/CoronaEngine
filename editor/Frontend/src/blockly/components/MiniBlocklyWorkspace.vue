@@ -1,6 +1,6 @@
 <template>
   <div
-    class="mini-blockly-shell"
+    :class="['mini-blockly-shell', { 'drop-active': dropActive }]"
     @dragover.prevent
     @drop.prevent="handleDrop"
     @mouseup.capture="handleDeleteModePointer"
@@ -30,6 +30,7 @@ const { error: logError } = useErrorHandler('MiniBlocklyWorkspace');
 
 const blockdiv = ref(null);
 const loadingLabel = ref('');
+const dropActive = ref(false);
 
 let workspace = null;
 let BlocklyLib = null;
@@ -83,6 +84,8 @@ async function registerBlocks() {
     { defineMathBlocks },
     { defineVariableBlocks },
     { defineListBlocks },
+    { defineObjectBlocks },
+    { defineUiBlocks },
   ] = await Promise.all([
     import('@/blockly/blocks/audio.js'),
     import('@/blockly/blocks/camera.js'),
@@ -94,6 +97,8 @@ async function registerBlocks() {
     import('@/blockly/blocks/math.js'),
     import('@/blockly/blocks/variable.js'),
     import('@/blockly/blocks/list.js'),
+    import('@/blockly/blocks/object.js'),
+    import('@/blockly/blocks/ui.js'),
   ]);
 
   await import('blockly/blocks');
@@ -107,6 +112,8 @@ async function registerBlocks() {
   defineMathBlocks();
   defineVariableBlocks();
   defineListBlocks();
+  defineObjectBlocks();
+  defineUiBlocks();
   blocksRegistered = true;
 }
 
@@ -190,6 +197,17 @@ function resizeBlockly() {
   } catch {}
 }
 
+
+function hitTest(clientX, clientY) {
+  const rect = blockdiv.value?.getBoundingClientRect?.();
+  if (!rect) return false;
+  return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+}
+
+function setDropActive(active) {
+  dropActive.value = Boolean(active);
+}
+
 function addBlock(blockType, clientX, clientY) {
   if (!workspace || !BlocklyLib || !blockType) return false;
   try {
@@ -200,8 +218,9 @@ function addBlock(blockType, clientX, clientY) {
     const rect = blockdiv.value?.getBoundingClientRect?.();
     const metrics = workspace.getMetrics?.();
     const scale = workspace.scale || 1;
-    const x = rect && metrics ? metrics.viewLeft + (clientX - rect.left) / scale : 24;
-    const y = rect && metrics ? metrics.viewTop + (clientY - rect.top) / scale : 24;
+    const hasScreenPoint = Number.isFinite(clientX) && Number.isFinite(clientY) && rect;
+    const x = hasScreenPoint && metrics ? metrics.viewLeft + (clientX - rect.left) / scale : (metrics?.viewLeft || 0) + 24;
+    const y = hasScreenPoint && metrics ? metrics.viewTop + (clientY - rect.top) / scale : (metrics?.viewTop || 0) + 24;
     block.moveBy(Math.max(0, x), Math.max(0, y));
     workspace.setSelected?.(block);
     emitChange();
@@ -283,6 +302,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  dropActive.value = false;
   try {
     if (workspace && changeListener) workspace.removeChangeListener(changeListener);
     resizeObserver?.disconnect?.();
@@ -296,6 +316,8 @@ defineExpose({
   loadState,
   addBlock,
   addBlockFromDrop,
+  hitTest,
+  setDropActive,
   deleteBlockById,
   resizeBlockly,
 });
@@ -311,6 +333,12 @@ defineExpose({
   border-radius: 10px;
   background: #111827;
   border: 1px solid rgba(148, 163, 184, 0.25);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.mini-blockly-shell.drop-active {
+  border-color: #60a5fa;
+  box-shadow: inset 0 0 0 2px rgba(96, 165, 250, 0.28), 0 0 14px rgba(59, 130, 246, 0.22);
 }
 
 .mini-blockly-canvas {
