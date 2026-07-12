@@ -1,10 +1,11 @@
 #pragma once
 
-#include "horizon.h"
-
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <optional>
+
+#include "corona/systems/ui/ui_surface_lifecycle.h"
 
 namespace Corona::Events {
 /**
@@ -33,6 +34,7 @@ struct DisplayToEngineDemoEvent {
  */
 struct DisplaySurfaceChangedEvent {
     void* surface;
+    std::optional<Corona::Systems::UI::SurfaceCompletionTicket> registration_ticket;  ///< Display 注册完成确认
 };
 
 /**
@@ -48,7 +50,8 @@ struct DisplaySurfaceChangedEvent {
  */
 struct DisplaySurfaceRemovedEvent {
     void* surface = nullptr;
-    std::shared_ptr<std::promise<void>> done;  ///< Display 线程拆除完成后 set_value()
+    std::shared_ptr<std::promise<void>> done;                                    ///< Display 线程拆除完成后 set_value()
+    std::optional<Corona::Systems::UI::SurfaceCompletionTicket> removal_ticket;  ///< 新生命周期协议的拆除确认
 };
 
 /**
@@ -75,6 +78,7 @@ struct UIFrameReadyEvent {
     uint64_t frame_index = 0;
     uint32_t width = 0;
     uint32_t height = 0;
+    std::optional<Corona::Systems::UI::SurfaceCompletionTicket> first_present_ticket;  ///< 首帧呈现确认
 };
 
 }  // namespace Corona::Events

@@ -397,6 +397,77 @@ void logical_instance_identity_is_shared_per_scene_resource() {
            "upserting identical logical instance data should report no change");
 }
 
+void external_live_shape_removal_policy_preserves_embedded_topology() {
+    ExternalLiveShapeRecord original{.dynamically_added = false};
+    ExternalLiveShapeRecord appended{.dynamically_added = true};
+
+    using Action = Corona::Systems::Vision::ExternalLiveShapeRemovalAction;
+    expect(Corona::Systems::Vision::external_live_shape_removal_action(original, true) ==
+               Action::HideOriginal,
+           "embedded original shapes should be hidden without topology compaction");
+    expect(Corona::Systems::Vision::external_live_shape_removal_action(original, false) ==
+               Action::ForgetTracking,
+           "ordinary external-live original shapes must remain untouched");
+    expect(Corona::Systems::Vision::external_live_shape_removal_action(appended, false) ==
+               Action::RemoveTopology,
+           "dynamically appended shapes should remain physically removable");
+}
+
+void embedded_tombstones_preserve_indices_until_clean_reload() {
+    VisionSceneResource resource;
+    resource.upsert_external_live_shape({
+        .actor_handle = 16u,
+        .shape_index = 6,
+        .shape_guid = "shape-6",
+        .shape_identity_key = "shape-6",
+        .dynamically_added = false,
+    });
+    resource.upsert_external_live_shape({
+        .actor_handle = 17u,
+        .shape_index = 7,
+        .shape_guid = "shape-7",
+        .shape_identity_key = "shape-7",
+        .dynamically_added = false,
+    });
+    resource.upsert_external_live_shape({
+        .actor_handle = 18u,
+        .shape_index = 8,
+        .shape_guid = "ball-old",
+        .shape_identity_key = "ball-old",
+        .dynamically_added = false,
+    });
+
+    resource.erase_external_live_shape(16u);
+    expect(resource.find_external_live_shape(17u)->shape_index == 7,
+           "tombstoning a middle embedded shape must not remap later shapes");
+    expect(resource.find_external_live_shape(18u)->shape_index == 8,
+           "tombstoning shape_6 must preserve the old Ball topology slot");
+
+    resource.erase_external_live_shape(18u);
+    resource.reset_loaded_scene();
+    resource.upsert_external_live_shape({
+        .actor_handle = 17u,
+        .shape_index = 6,
+        .shape_guid = "shape-7",
+        .shape_identity_key = "shape-7",
+        .dynamically_added = false,
+    });
+    resource.upsert_external_live_shape({
+        .actor_handle = 19u,
+        .shape_index = 7,
+        .shape_guid = "ball-new",
+        .shape_identity_key = "ball-new",
+        .dynamically_added = false,
+    });
+
+    expect(resource.find_external_live_shape(17u)->shape_index == 6,
+           "clean reload should adopt the compacted JSON index for shape_7");
+    const auto* new_ball = resource.find_external_live_shape(19u);
+    expect(new_ball != nullptr && new_ball->shape_index == 7 &&
+               new_ball->shape_guid == "ball-new",
+           "clean reload should register the new Ball with a fresh identity");
+}
+
 void ownership_names_are_stable() {
     expect(Corona::Systems::Vision::vision_resource_ownership_name(
                VisionResourceOwnership::SharedLogicalScene) == "shared_logical_scene",
@@ -424,6 +495,8 @@ int main() {
     external_live_shape_mapping_tracks_actor_membership();
     external_live_shape_remap_updates_indices_after_remove();
     logical_instance_identity_is_shared_per_scene_resource();
+    external_live_shape_removal_policy_preserves_embedded_topology();
+    embedded_tombstones_preserve_indices_until_clean_reload();
     ownership_names_are_stable();
     return 0;
 }

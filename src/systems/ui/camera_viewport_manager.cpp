@@ -1,4 +1,5 @@
 #include <corona/shared_data_hub.h>
+#include <corona/kernel/core/i_logger.h>
 #include <corona/systems/ui/camera_viewport_manager.h>
 
 #include <algorithm>
@@ -44,6 +45,8 @@ bool CameraViewportManager::register_view(std::string scene_id, std::string came
         std::lock_guard lock(mutex_);
         views_[tab_id] = record;
     }
+    CFW_LOG_INFO("CameraViewport: registered tab={} camera={} scene={} handle={}",
+                 tab_id, camera_id, record.scene_id, camera_handle);
     return true;
 }
 
@@ -73,6 +76,13 @@ bool CameraViewportManager::bind_surface(int tab_id, void* surface, int x, int y
 
     if (record.surface) {
         enqueue_update(record, true);
+        CFW_LOG_INFO("CameraViewport: bound tab={} handle={} surface={} rect={}x{}+{},{} render={}x{}",
+                     tab_id, record.camera_handle, record.surface, record.width, record.height,
+                     record.x, record.y, record.render_width, record.render_height);
+    } else {
+        enqueue_update(record, false);
+        CFW_LOG_INFO("CameraViewport: unbound tab={} handle={} (surface retired)",
+                     tab_id, record.camera_handle);
     }
     return true;
 }

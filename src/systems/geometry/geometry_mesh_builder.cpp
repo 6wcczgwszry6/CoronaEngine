@@ -27,6 +27,11 @@ template <typename T>
 Horizon::HardwareBuffer make_geometry_buffer(const std::vector<T>& data,
                                              Horizon::BufferUsageFlags usage,
                                              std::string name = {}) {
+    if (data.empty()) {
+        CFW_LOG_WARNING("[GeometryMeshBuilder] Buffer creation skipped for empty data (name={})",
+                        name);
+        return {};
+    }
     Horizon::HardwareBufferDesc desc;
     desc.element_count = data.size();
     desc.element_size = static_cast<uint32_t>(sizeof(T));
@@ -139,26 +144,47 @@ std::vector<MeshDevice> build_mesh_devices_from_scene(
     // ---- 第一阶段：遍历所有 mesh，创建 GPU 缓冲 ----
     for (std::uint32_t mesh_idx = 0; mesh_idx < scene.data.meshes.size(); ++mesh_idx) {
         const auto& mesh = scene.data.meshes[mesh_idx];  // 当前 mesh 的 CPU 端数据
+        const auto& vertices = scene.get_mesh_vertices(mesh_idx);
+        const auto& indices = scene.get_mesh_indices(mesh_idx);
+
+        if (vertices.empty() || indices.empty()) {
+            CFW_LOG_WARNING("[GeometryMeshBuilder] Skipping empty mesh (mesh={}, vertices={}, indices={})",
+                            mesh_idx, vertices.size(), indices.size());
+            continue;
+        }
+        const auto max_index_it = std::max_element(indices.begin(), indices.end());
+        const std::uint16_t max_index = (max_index_it != indices.end()) ? *max_index_it : 0;
+        if (static_cast<std::size_t>(max_index) >= vertices.size()) {
+            CFW_LOG_ERROR("[GeometryMeshBuilder] Skipping mesh with invalid index range "
+                          "(mesh={}, vertices={}, indices={}, max_index={})",
+                          mesh_idx, vertices.size(), indices.size(), max_index);
+            continue;
+        }
+
+        const std::uint32_t device_idx = static_cast<std::uint32_t>(mesh_devices.size());
         MeshDevice dev{};  // 零初始化 MeshDevice（所有句柄为 0/null）
+        dev.vertex_count = static_cast<std::uint32_t>(vertices.size());
+        dev.index_count = static_cast<std::uint32_t>(indices.size());
+        dev.max_index = max_index;
 
         // ---- 创建顶点/索引缓冲（4 个）----
         // vertexBuffer / indexBuffer：渲染管线使用（Vertex Shader 读取）
         // vertexStorageBuffer / indexStorageBuffer：Compute Shader 使用（可读写）
         dev.vertexBuffer = make_geometry_buffer(
-            scene.get_mesh_vertices(mesh_idx),
+            vertices,
             Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Vertex,
             "geometry.vertex");
         dev.indexBuffer = make_geometry_buffer(
-            scene.get_mesh_indices(mesh_idx),
+            indices,
             Horizon::BufferUsageFlags::TransferDst | Horizon::BufferUsageFlags::Index,
             "geometry.index");
         dev.vertexStorageBuffer = make_geometry_buffer(
-            scene.get_mesh_vertices(mesh_idx),
+            vertices,
             Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst |
                 Horizon::BufferUsageFlags::Storage,
             "geometry.vertex_storage");
         dev.indexStorageBuffer = make_geometry_buffer(
-            scene.get_mesh_indices(mesh_idx),
+            indices,
             Horizon::BufferUsageFlags::TransferSrc | Horizon::BufferUsageFlags::TransferDst |
                 Horizon::BufferUsageFlags::Storage,
             "geometry.index_storage");
@@ -167,8 +193,8 @@ std::vector<MeshDevice> build_mesh_devices_from_scene(
         // 顶点/索引各上传两份（普通 + storage），故 ×2。
         {
             const std::size_t mesh_gpu_bytes =
-                2u * scene.get_mesh_vertices(mesh_idx).size() * sizeof(Resource::Vertex) +
-                2u * scene.get_mesh_indices(mesh_idx).size()  * sizeof(std::uint16_t);
+                2u * vertices.size() * sizeof(Resource::Vertex) +
+                2u * indices.size()  * sizeof(std::uint16_t);
             dev.mesh_mem = Corona::Memory::GpuMemToken(Corona::Memory::ResKind::Mesh, mesh_gpu_bytes);
         }
 
@@ -228,7 +254,7 @@ std::vector<MeshDevice> build_mesh_devices_from_scene(
 
                             // 将压缩数据加入待上传队列
                             if (supported_format) {
-                                PendingTextureUpload upload{mesh_idx, {}, nullptr};
+                                PendingTextureUpload upload{device_idx, {}, nullptr};
                                 upload.rgba_data.assign(compressed.data.begin(), compressed.data.end());
                                 upload.data_ptr = upload.rgba_data.data();
 
@@ -284,6 +310,7 @@ std::vector<MeshDevice> build_mesh_devices_from_scene(
                                 dev.textureBuffer = make_geometry_texture(
                                     texture_width, texture_height, texture_format,
                                     "geometry.material_texture");   // 创建 GPU 纹理对象
+                                upload.mesh_idx = device_idx;
                                 pending_uploads.push_back(std::move(upload));    // 入队等待批量上传
                                 texture_created = true;
                             }
@@ -304,6 +331,25 @@ std::vector<MeshDevice> build_mesh_devices_from_scene(
                 Corona::Memory::ResKind::Texture,
                 gpu_texture_bytes(texture_format, texture_width, texture_height));
         }
+
+        if (!dev.vertexBuffer || !dev.indexBuffer ||
+            !dev.vertexStorageBuffer || !dev.indexStorageBuffer ||
+            !dev.textureBuffer) {
+            CFW_LOG_ERROR("[GeometryMeshBuilder] Skipping mesh with invalid GPU resources "
+                          "(mesh={}, vertices={}, indices={}, max_index={}, vb={}, ib={}, vsb={}, isb={}, tex={})",
+                          mesh_idx, vertices.size(), indices.size(), max_index,
+                          static_cast<bool>(dev.vertexBuffer),
+                          static_cast<bool>(dev.indexBuffer),
+                          static_cast<bool>(dev.vertexStorageBuffer),
+                          static_cast<bool>(dev.indexStorageBuffer),
+                          static_cast<bool>(dev.textureBuffer));
+            continue;
+        }
+
+        CFW_LOG_DEBUG("[GeometryMeshBuilder] Mesh GPU resources ready "
+                      "(mesh={}, device={}, vertices={}, indices={}, max_index={}, texture_created={}, tex={})",
+                      mesh_idx, device_idx, vertices.size(), indices.size(), max_index,
+                      texture_created, static_cast<bool>(dev.textureBuffer));
 
         // ---- 将构建好的 MeshDevice 加入数组 ----
         mesh_devices.emplace_back(std::move(dev));
@@ -328,9 +374,11 @@ std::vector<MeshDevice> build_mesh_devices_from_scene(
                 if (!texture_upload_ok) {
                     const auto extent = tex.extent();
                     CFW_LOG_WARNING("[GeometryMeshBuilder] Failed to upload material texture "
-                                    "(mesh={}, bytes={}, extent={}x{}x{})",
+                                    "(mesh={}, bytes={}, extent={}x{}x{}); using placeholder",
                                     upload.mesh_idx, upload.rgba_data.size(),
                                     extent.width, extent.height, extent.depth);
+                    tex = placeholder_texture;
+                    mesh_devices[upload.mesh_idx].tex_mem = Corona::Memory::GpuMemToken{};
                 }
             }
         }

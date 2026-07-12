@@ -136,6 +136,10 @@ void VulkanBackend::shutdown() {
     // Release every surface's image handle and GPU resources.
     for (auto& [surface, render] : surfaces_) {
         if (render && render->image_handle != 0) {
+            if (auto image = SharedDataHub::instance().image_storage().acquire_write(render->image_handle)) {
+                render->resources.executor.wait(image->consumed_receipt);
+            }
+            render->resources.executor.wait_idle(render->resources.executor.last_receipt());
             SharedDataHub::instance().image_storage().deallocate(render->image_handle);
             render->image_handle = 0;
         }
@@ -191,10 +195,14 @@ void VulkanBackend::unregister_surface(void* surface) {
         return;
     }
 
-    // Drain GPU work referencing this surface's render target before releasing it. The
-    // DisplaySystem teardown (promise-synced in SdlWindowManager) has already idled the
-    // device for the swapchain; this waits on our own last submit for safety.
+    // Drain both Display's consumed receipt and our producer executor before releasing the
+    // image handle. This is the same producer/consumer ordering used by resize/rebuild.
     auto& render = *it->second;
+    if (render.image_handle != 0) {
+        if (auto image = SharedDataHub::instance().image_storage().acquire_write(render.image_handle)) {
+            render.resources.executor.wait(image->consumed_receipt);
+        }
+    }
     render.resources.executor.wait_idle(render.resources.executor.last_receipt());
 
     if (render.image_handle != 0) {
@@ -303,14 +311,26 @@ void VulkanBackend::present_surface(void* surface) {
 
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
         ++render->frame_index;
-        event_bus->publish<Events::UIFrameReadyEvent>({surface,
-                                                       render->image_handle,
-                                                       render->frame_index,
-                                                       render->resources.width,
-                                                       render->resources.height});
+        Events::UIFrameReadyEvent frame{surface,
+                                        render->image_handle,
+                                        render->frame_index,
+                                        render->resources.width,
+                                        render->resources.height};
+        if (!render->first_present_published) {
+            frame.first_present_ticket = render->first_present_ticket;
+            render->first_present_published = true;
+        }
+        event_bus->publish<Events::UIFrameReadyEvent>(frame);
     }
 
     render->resources.frame_ready = false;
+}
+
+bool VulkanBackend::first_present_ready(void* surface) const {
+    const auto it = surfaces_.find(surface);
+    if (it == surfaces_.end()) return false;
+    const auto result = it->second->first_present_ticket.result();
+    return result && result->status == UI::DisplaySurfaceResult::Status::Succeeded;
 }
 
 void VulkanBackend::rebuild(void* surface, uint32_t pixel_w, uint32_t pixel_h) {

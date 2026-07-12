@@ -6,6 +6,7 @@
 #include "Codegen/ControlFlows.h"
 #include "Codegen/CustomLibrary.h"
 #include "Codegen/TypeAlias.h"
+#include "native_frame_throttle.h"
 
 #include <array>
 #include <cstdint>
@@ -102,6 +103,7 @@ private:
 };
 
 struct Hardware {
+    Corona::Systems::OpticsDetail::NativeFrameThrottle native_frame_throttle;
     // === Visibility Buffer (replaces GBuffer rasterization output) ===
     Corona::Horizon::HardwareImage visibilityImage;  // RGBA32_UINT: R=instanceID, G=primitiveID
     Corona::Horizon::HardwareImage depthImage;       // D32_FLOAT: depth (kept from GBuffer)
@@ -198,19 +200,33 @@ struct Hardware {
     } shadowInfoBufferObjects{};
 
     // === GPU-side instance info table (matches GLSL InstanceInfo layout) ===
-    // 80 bytes = 20 uints per entry:
+    // 96 bytes = 24 uints per entry:
     //   [0..15]  mat4 modelMatrix
     //   [16]     vertexBufferIndex
     //   [17]     indexBufferIndex
     //   [18]     materialID
     //   [19]     objectID
+    //   [20]     indexCount
+    //   [21]     vertexCount
+    //   [22]     maxIndex
+    //   [23]     flags
     struct InstanceInfo {
         ktm::fmat4x4 modelMatrix;
         uint32_t vertexBufferIndex;
         uint32_t indexBufferIndex;
         uint32_t materialID;
         uint32_t objectID;
+        uint32_t indexCount;
+        uint32_t vertexCount;
+        uint32_t maxIndex;
+        uint32_t flags;
     };
+    static_assert(sizeof(InstanceInfo) == 24u * sizeof(uint32_t),
+                  "InstanceInfo must match the 24-uint shader layout");
+    static_assert(offsetof(InstanceInfo, vertexBufferIndex) == 16u * sizeof(uint32_t),
+                  "InstanceInfo vertexBufferIndex offset must match shaders");
+    static_assert(offsetof(InstanceInfo, flags) == 23u * sizeof(uint32_t),
+                  "InstanceInfo flags offset must match shaders");
 
     // === GPU-side material table (matches GLSL MaterialInfo layout) ===
     // 64 bytes = 16 uints per entry:
@@ -242,6 +258,10 @@ struct Hardware {
         float lightingEnabled;  // 光照开关：1.0=接收光照, 0.0=不受光（始终使用基础颜色）
         ktm::fvec4 materialColor;
     };
+    static_assert(sizeof(MaterialInfo) == 16u * sizeof(uint32_t),
+                  "MaterialInfo must match the 16-uint shader layout");
+    static_assert(offsetof(MaterialInfo, materialColor) == 12u * sizeof(uint32_t),
+                  "MaterialInfo materialColor offset must match shaders");
 
     // === Render dimensions ===
     ktm::uvec2 gbufferSize{};

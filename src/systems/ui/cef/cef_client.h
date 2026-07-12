@@ -156,6 +156,7 @@ class OffscreenCefClient : public CefClient,
                                 CefRefPtr<CefFrame> frame) override;
 
    private:
+    int tab_id_ = -1;
     std::mutex browser_mutex_;
     std::condition_variable browser_closed_cv_;
     CefRefPtr<CefBrowser> browser_;

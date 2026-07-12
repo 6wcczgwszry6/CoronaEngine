@@ -37,7 +37,7 @@ vec4 sampleCursor(vec2 local)
     }
 
     vec2 uv = (local + vec2(0.5)) / vec2(pushConsts.cursorSize);
-    vec4 texel = texture(textures[nonuniformEXT(pushConsts.cursorImage)], uv);
+    vec4 texel = textureLod(textures[nonuniformEXT(pushConsts.cursorImage)], uv, 0.0);
     texel = clamp(texel, vec4(0.0), vec4(1.0));
     return vec4(texel.rgb * texel.a, texel.a);
 }

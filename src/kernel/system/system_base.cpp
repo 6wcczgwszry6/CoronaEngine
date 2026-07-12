@@ -1,7 +1,12 @@
 #include "corona/kernel/system/system_base.h"
 
 #include <chrono>
+#include <exception>
 #include <thread>
+
+#include "corona/events/engine_events.h"
+#include "corona/kernel/core/i_logger.h"
+#include "corona/kernel/event/i_event_stream.h"
 
 namespace Corona::Kernel {
 
@@ -191,7 +196,30 @@ void SystemBase::thread_loop() {
         last_time = current_time;
 
         // 调用子类的更新逻辑
-        update();
+        try {
+            update();
+        } catch (const std::exception& error) {
+            CFW_LOG_CRITICAL(
+                "System '{}' update threw an exception; requesting engine shutdown: {}",
+                get_name(),
+                error.what());
+            if (auto* stream = context_ ? context_->event_stream() : nullptr) {
+                stream->get_stream<Events::EngineShutdownEvent>()->publish(Events::EngineShutdownEvent{});
+            }
+            should_run_.store(false, std::memory_order_release);
+            state_.store(SystemState::stopping, std::memory_order_release);
+            break;
+        } catch (...) {
+            CFW_LOG_CRITICAL(
+                "System '{}' update threw an unknown exception; requesting engine shutdown",
+                get_name());
+            if (auto* stream = context_ ? context_->event_stream() : nullptr) {
+                stream->get_stream<Events::EngineShutdownEvent>()->publish(Events::EngineShutdownEvent{});
+            }
+            should_run_.store(false, std::memory_order_release);
+            state_.store(SystemState::stopping, std::memory_order_release);
+            break;
+        }
 
         ++frame_number_;
 

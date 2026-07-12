@@ -125,6 +125,7 @@ struct LODMeshBuffers {
     bool   ready            = false; // GPU 缓冲是否已创建完毕（创建前不能用于渲染）
     std::uint32_t vertex_count = 0;  // 该级别顶点数（调试/诊断用）
     std::uint32_t index_count  = 0;  // 该级别索引数（调试/诊断用）
+    std::uint32_t max_index    = 0;  // 该级别最大索引（调试/诊断用）
 
     // 按需驻留（Step 3a）：本级在 Scene::data.meshes[mesh].lod_levels 中的源下标。
     // upload 会跳过空 LOD 级，故缓存级序与源级序不一一对应；reconcile 重建某级时
@@ -329,6 +330,9 @@ class GeometrySystem : public Kernel::SystemBase {
         Horizon::HardwareBuffer index;
         Horizon::HardwareBuffer vertex_storage;
         Horizon::HardwareBuffer index_storage;
+        std::uint32_t vertex_count = 0;
+        std::uint32_t index_count = 0;
+        std::uint32_t max_index = 0;
     };
 
     /// 单个 mesh 的当前 GPU 状态快照（LOD 已由 GeometrySystem 内部解析）。
@@ -345,6 +349,10 @@ class GeometrySystem : public Kernel::SystemBase {
         Horizon::HardwareImage texture;          ///< 贴图句柄（null = 无贴图）
         std::array<float, 4>   material_color = {1.f, 1.f, 1.f, 1.f}; ///< 材质颜色 RGBA
         bool                   valid = false;    ///< false = 首次加载中，唯一合法的跳过原因
+        bool                   texture_ready = false;
+        std::uint32_t          vertex_count = 0;
+        std::uint32_t          index_count = 0;
+        std::uint32_t          max_index = 0;
     };
 
     /// 查询一个 geometry 的所有 MeshSlot（常驻路由，无相机上下文）。
