@@ -933,9 +933,15 @@ void apply_pending_camera_viewport_updates() {
         return;
     }
 
+    CFW_LOG_INFO("Optics: applying {} camera viewport update(s)", updates.size());
+
     auto& camera_storage = hub.camera_storage();
     for (const auto& update : updates) {
         if (auto camera = camera_storage.acquire_write(update.camera_handle)) {
+            CFW_LOG_INFO("Optics: camera viewport handle={} surface={} open={} rect={}x{}+{},{} render={}x{}",
+                         update.camera_handle, update.surface, update.view_open, update.width,
+                         update.height, update.x, update.y, update.render_width,
+                         update.render_height);
             camera->surface = update.surface;
             camera->follows_default_surface = false;
             camera->view_open = update.view_open;
