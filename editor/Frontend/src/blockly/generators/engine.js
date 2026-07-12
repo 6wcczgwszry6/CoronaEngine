@@ -108,4 +108,29 @@ export const defineEngineGenerators = () => {
     const axis = block.getFieldValue('AXIS');
     return [`CoronaEngine.get_velocity('${axis}')`, pythonGenerator.ORDER_ATOMIC];
   };
+
+  pythonGenerator.forBlock['engine_set_gravity'] = function (block) {
+    const enabled = block.getFieldValue('ENABLED') === 'TRUE' ? 'True' : 'False';
+    const strength = block.getFieldValue('STRENGTH');
+    return `CoronaEngine.set_gravity(${enabled}, ${strength})\n`;
+  };
+
+  pythonGenerator.forBlock['engine_jump'] = function (block) {
+    return `CoronaEngine.jump(${block.getFieldValue('POWER')})\n`;
+  };
+
+  pythonGenerator.forBlock['engine_bounce_axis'] = function (block) {
+    const axis = block.getFieldValue('AXIS');
+    const factor = block.getFieldValue('FACTOR');
+    return `CoronaEngine.bounce_axis('${axis}', ${factor})\n`;
+  };
+
+  pythonGenerator.forBlock['engine_set_game_speed'] = function (block) {
+    return `CoronaEngine.set_game_speed(${block.getFieldValue('VALUE')})\n`;
+  };
+
+  pythonGenerator.forBlock['engine_get_game_speed'] = function () {
+    return ['CoronaEngine.game_speed()', pythonGenerator.ORDER_FUNCTION_CALL];
+  };
+
 };

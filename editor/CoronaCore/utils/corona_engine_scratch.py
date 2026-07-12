@@ -45,6 +45,15 @@ class ScratchRuntimeContext:
     cartoon_index: int = 0
     visible: bool = True
     variables: dict = field(default_factory=dict)
+    last_touch_object: str = ""
+    deleted_objects: set = field(default_factory=set)
+    object_tags: dict = field(default_factory=dict)
+    virtual_objects: dict = field(default_factory=dict)
+    game_state: str = ""
+    gravity_enabled: bool = False
+    gravity_strength: float = 9.8
+    last_physics_time: float = 0.0
+    countdown_end_time: float = 0.0
 
     target_scene_name: Optional[str] = None
     target_actor_name: Optional[str] = None
@@ -592,6 +601,91 @@ def set_fov(fov_degrees):
     _logger.debug("[ScratchWrapper] set_fov: engine API not available")
 
 
+
+
+def _active_camera_with_scene():
+    scene = _runtime_scene()
+    if scene is None or not hasattr(scene, 'get_active_camera'):
+        return None, scene
+    try:
+        return scene.get_active_camera(), scene
+    except Exception as exc:
+        _logger.debug("[ScratchWrapper] active camera unavailable: %s", exc)
+        return None, scene
+
+
+def _camera_vec(camera, method_name, fallback):
+    if camera is None or not hasattr(camera, method_name):
+        return list(fallback)
+    try:
+        value = getattr(camera, method_name)()
+        return [float(value[0]), float(value[1]), float(value[2])]
+    except Exception:
+        return list(fallback)
+
+
+def _camera_fov(camera, fallback=45.0):
+    if camera is None or not hasattr(camera, 'get_fov'):
+        return float(fallback)
+    try:
+        return float(camera.get_fov())
+    except Exception:
+        return float(fallback)
+
+
+def camera_follow_object(name, ox, oy, oz):
+    """Move active camera to object position plus offset; call once per update."""
+    actor = _resolve_actor(name)
+    if actor is None:
+        return
+    target_pos = _actor_position(actor)
+    if target_pos is None:
+        return
+    camera, scene = _active_camera_with_scene()
+    if camera is None:
+        return
+    new_pos = [
+        float(target_pos[0]) + float(ox),
+        float(target_pos[1]) + float(oy),
+        float(target_pos[2]) + float(oz),
+    ]
+    forward = _camera_vec(camera, 'get_forward', [0.0, 0.0, 1.0])
+    up = _camera_vec(camera, 'get_world_up', [0.0, 1.0, 0.0])
+    fov = _camera_fov(camera)
+    try:
+        if scene is not None and hasattr(scene, 'set_camera'):
+            scene.set_camera(new_pos, forward, up, fov)
+            return
+    except Exception as exc:
+        _logger.debug("[ScratchWrapper] scene.set_camera failed: %s", exc)
+    try:
+        if hasattr(camera, 'set'):
+            camera.set(new_pos, forward, up, fov)
+        elif hasattr(camera, 'set_position'):
+            camera.set_position(new_pos)
+    except Exception as exc:
+        _logger.debug("[ScratchWrapper] camera_follow_object failed: %s", exc)
+
+
+def camera_raycast(max_dist):
+    """Raycast from active camera position along its forward vector."""
+    camera, _scene = _active_camera_with_scene()
+    if camera is None:
+        cache = _get_raycast_cache()
+        cache['hit'] = False
+        cache['distance'] = float(max_dist)
+        cache['object'] = ''
+        cache['point'] = (0.0, 0.0, 0.0)
+        return False
+    origin = _camera_vec(camera, 'get_position', [0.0, 0.0, 0.0])
+    direction = _camera_vec(camera, 'get_forward', [0.0, 0.0, 1.0])
+    return raycast_hit(origin, direction, float(max_dist))
+
+
+def camera_raycast_object():
+    return raycast_hit_object()
+
+
 # ── Physics extension (velocity / impulse) ──
 
 _velocity_cache = {}  # context_id → [vx, vy, vz]
@@ -640,11 +734,92 @@ def apply_impulse(ix, iy, iz):
     _sync_position()
 
 
+def _velocity_list(ctx=None):
+    ctx = ctx or _current_context()
+    vel = _velocity_cache.get(ctx.context_id)
+    if not isinstance(vel, (list, tuple)) or len(vel) < 3:
+        vel = [0.0, 0.0, 0.0]
+    return [_safe_float(vel[0]), _safe_float(vel[1]), _safe_float(vel[2])]
+
+
 def get_velocity(axis='X'):
-    """获取当前速度分量"""
-    cache = _velocity_cache.get(_current_context().context_id, [0.0, 0.0, 0.0])
+    """Get the cached current velocity component."""
+    cache = _velocity_list()
     mapping = {'X': 0, 'Y': 1, 'Z': 2}
-    return cache.get(mapping.get(axis, 0), 0.0)
+    return float(cache[mapping.get(str(axis or 'X').upper(), 0)])
+
+
+def _tick_runtime_physics(dt):
+    ctx = _current_context()
+    if ctx.target_type == "project":
+        return
+    dt = max(0.0, _safe_float(dt)) * game_speed()
+    if dt <= 0:
+        return
+    vel = _velocity_list(ctx)
+    if ctx.gravity_enabled:
+        vel[1] -= _safe_float(ctx.gravity_strength, 9.8) * dt
+    if ctx.gravity_enabled or any(abs(v) > 1e-9 for v in vel):
+        _velocity_cache[ctx.context_id] = vel
+        ctx.x += vel[0] * dt
+        ctx.y += vel[1] * dt
+        ctx.z += vel[2] * dt
+        _sync_position()
+
+
+def set_gravity(enabled, strength=9.8):
+    ctx = _current_context()
+    ctx.gravity_enabled = str(enabled).strip().lower() not in ('0', 'false', 'off', 'no', 'none', '')
+    ctx.gravity_strength = _safe_float(strength, 9.8)
+    _init_engine()
+    for target in (ctx.mechanics, ctx.actor):
+        if target is None:
+            continue
+        for method_name in ('set_gravity_enabled', 'enable_gravity'):
+            method = getattr(target, method_name, None)
+            if callable(method):
+                try:
+                    method(ctx.gravity_enabled)
+                except Exception as exc:
+                    _logger.debug("[ScratchWrapper] %s failed: %s", method_name, exc)
+        method = getattr(target, 'set_gravity', None)
+        if callable(method):
+            try:
+                method(ctx.gravity_enabled, ctx.gravity_strength)
+            except TypeError:
+                try:
+                    method(ctx.gravity_strength if ctx.gravity_enabled else 0.0)
+                except Exception as exc:
+                    _logger.debug("[ScratchWrapper] set_gravity fallback failed: %s", exc)
+            except Exception as exc:
+                _logger.debug("[ScratchWrapper] set_gravity failed: %s", exc)
+
+
+def jump(power):
+    ctx = _current_context()
+    power = _safe_float(power)
+    vel = _velocity_list(ctx)
+    vel[1] = max(vel[1], power)
+    _velocity_cache[ctx.context_id] = vel
+    apply_impulse(0.0, power, 0.0)
+
+
+def bounce_axis(axis, factor=1.0):
+    ctx = _current_context()
+    axis = str(axis or 'X').upper()
+    mapping = {'X': 0, 'Y': 1, 'Z': 2}
+    idx = mapping.get(axis, 0)
+    vel = _velocity_list(ctx)
+    vel[idx] = -vel[idx] * _safe_float(factor, 1.0)
+    set_velocity(vel[0], vel[1], vel[2])
+
+
+def set_game_speed(value):
+    _current_context().variables['game_speed'] = _safe_float(value, 1.0)
+
+
+def game_speed():
+    return _safe_float(_current_context().variables.get('game_speed', 1.0), 1.0)
 
 
 # Appearance
@@ -813,12 +988,653 @@ def update_mouse_state(pressed, x, y):
     ctx.mouse_y = float(y)
 
 
-def touch(target):
+def _norm_name(name) -> str:
+    return str(name or "").strip().lower()
+
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _safe_int(value, default=0):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+class _VirtualActor:
+    """Small Python-side actor used when the native engine has no spawn/delete API."""
+
+    def __init__(self, name, position=None, tag="", template=""):
+        self.name = str(name or "")
+        self.actor_name = self.name
+        self.template = str(template or "")
+        self.tag = str(tag or "")
+        self.visible = True
+        pos = position or [0.0, 0.0, 0.0]
+        self._position = [
+            _safe_float(pos[0] if len(pos) > 0 else 0.0),
+            _safe_float(pos[1] if len(pos) > 1 else 0.0),
+            _safe_float(pos[2] if len(pos) > 2 else 0.0),
+        ]
+
+    def get_name(self):
+        return self.name
+
+    def get_position(self):
+        return list(self._position)
+
+    def set_position(self, *args):
+        pos = args[0] if len(args) == 1 and isinstance(args[0], (list, tuple)) else args
+        if len(pos) >= 3:
+            self._position = [_safe_float(pos[0]), _safe_float(pos[1]), _safe_float(pos[2])]
+
+    def set_visible(self, value):
+        self.visible = bool(value)
+
+    def get_aabb(self):
+        x, y, z = self._position
+        return (x - 0.5, y - 0.5, z - 0.5, x + 0.5, y + 0.5, z + 0.5)
+
+
+def _object_name(actor) -> str:
+    if actor is None:
+        return ""
+    for attr in ('name', 'actor_name', 'route'):
+        value = getattr(actor, attr, None)
+        if value:
+            return str(value)
+    getter = getattr(actor, 'get_name', None)
+    if callable(getter):
+        try:
+            return str(getter() or "")
+        except Exception:
+            pass
+    return ""
+
+
+def _runtime_scene():
+    _init_engine()
+    ctx = _current_context()
+    if ctx.scene is not None:
+        return ctx.scene
+    try:
+        from CoronaCore.core.managers import scene_manager
+        if ctx.scene_name:
+            scene = scene_manager.get(ctx.scene_name)
+            if scene is not None:
+                return scene
+        names = scene_manager.list_all()
+        if names:
+            return scene_manager.get(names[0])
+    except Exception:
+        pass
+    return None
+
+
+def _iter_scene_actors(scene=None):
+    if scene is None:
+        scene = _runtime_scene()
+    if scene is None:
+        return []
+    for method_name in ('get_actors', 'get_all_actors'):
+        method = getattr(scene, method_name, None)
+        if callable(method):
+            try:
+                actors = method()
+                return list(actors or [])
+            except Exception:
+                pass
+    return list(getattr(scene, '_actors', []) or [])
+
+
+def _iter_known_actors():
+    ctx = _current_context()
+    result = []
+    scene = _runtime_scene()
+    result.extend(_iter_scene_actors(scene))
+    try:
+        if ctx.actor is not None:
+            result.append(ctx.actor)
+    except Exception:
+        pass
+    result.extend(getattr(ctx, 'virtual_objects', {}).values())
+    if not result:
+        try:
+            from CoronaCore.core.managers import scene_manager
+            for item in scene_manager.get_all().values():
+                result.extend(_iter_scene_actors(item))
+        except Exception:
+            pass
+    deduped = []
+    seen = set()
+    for actor in result:
+        if actor is None:
+            continue
+        key = _norm_name(_object_name(actor)) or str(id(actor))
+        if key in seen or _is_actor_deleted(actor):
+            continue
+        seen.add(key)
+        deduped.append(actor)
+    return deduped
+
+
+def _deleted_names(ctx=None):
+    ctx = ctx or _current_context()
+    return {_norm_name(item) for item in getattr(ctx, 'deleted_objects', set())}
+
+
+def _is_actor_deleted(actor=None, name=None) -> bool:
+    ctx = _current_context()
+    names = _deleted_names(ctx)
+    for candidate in (name, _object_name(actor)):
+        if candidate and _norm_name(candidate) in names:
+            return True
     return False
 
 
+def _mark_deleted(actor=None, name=None):
+    ctx = _current_context()
+    for candidate in (name, _object_name(actor)):
+        norm = _norm_name(candidate)
+        if norm:
+            ctx.deleted_objects.add(norm)
+
+
+def _resolve_actor(name):
+    target = str(name or "").strip()
+    if not target:
+        return None
+    _init_engine()
+    ctx = _current_context()
+    virtual = getattr(ctx, 'virtual_objects', {}).get(_norm_name(target))
+    if virtual is not None:
+        return None if _is_actor_deleted(virtual, target) else virtual
+    current_name = ctx.actor_name or _object_name(ctx.actor)
+    if ctx.actor is not None and _norm_name(current_name) == _norm_name(target):
+        return None if _is_actor_deleted(ctx.actor, target) else ctx.actor
+    scene = _runtime_scene()
+    if scene is not None and hasattr(scene, 'find_actor'):
+        try:
+            actor = scene.find_actor(target)
+            if actor is not None:
+                return None if _is_actor_deleted(actor, target) else actor
+        except Exception:
+            pass
+    try:
+        from CoronaCore.core.managers import scene_manager
+        actor = scene_manager.find_actor(target)
+        if actor is not None:
+            return None if _is_actor_deleted(actor, target) else actor
+    except Exception:
+        pass
+    for actor in _iter_known_actors():
+        if _norm_name(_object_name(actor)) == _norm_name(target):
+            return None if _is_actor_deleted(actor, target) else actor
+    return None
+
+
+def _current_actor():
+    _init_engine()
+    ctx = _current_context()
+    if ctx.actor is None or _is_actor_deleted(ctx.actor, ctx.actor_name):
+        return None
+    return ctx.actor
+
+
+def _aabb_tuple(raw):
+    if raw is None:
+        return None
+    try:
+        if isinstance(raw, dict):
+            if 'min' in raw and 'max' in raw:
+                mn, mx = raw['min'], raw['max']
+                return tuple(float(v) for v in (mn[0], mn[1], mn[2], mx[0], mx[1], mx[2]))
+            keys = ('min_x', 'min_y', 'min_z', 'max_x', 'max_y', 'max_z')
+            if all(k in raw for k in keys):
+                return tuple(float(raw[k]) for k in keys)
+        if len(raw) >= 6:
+            return tuple(float(raw[i]) for i in range(6))
+    except Exception:
+        return None
+    return None
+
+
+def _actor_aabb(actor):
+    if actor is None or not hasattr(actor, 'get_aabb'):
+        return None
+    try:
+        return _aabb_tuple(actor.get_aabb())
+    except Exception:
+        return None
+
+
+def _set_actor_position(actor, pos):
+    if actor is None:
+        return False
+    pos = [_safe_float(pos[0]), _safe_float(pos[1]), _safe_float(pos[2])]
+    try:
+        if hasattr(actor, 'set_position'):
+            actor.set_position(pos)
+            return True
+        geom = getattr(actor, '_geometry', None)
+        if geom is not None and hasattr(geom, 'set_position'):
+            geom.set_position(pos)
+            return True
+    except Exception as exc:
+        _logger.debug("[ScratchWrapper] set actor position failed: %s", exc)
+    return False
+
+
+def _actor_position(actor):
+    if actor is None:
+        return None
+    for target in (actor, getattr(actor, '_geometry', None)):
+        if target is not None and hasattr(target, 'get_position'):
+            try:
+                pos = target.get_position()
+                return [float(pos[0]), float(pos[1]), float(pos[2])]
+            except Exception:
+                pass
+    aabb = _actor_aabb(actor)
+    if aabb is not None:
+        return [
+            (aabb[0] + aabb[3]) * 0.5,
+            (aabb[1] + aabb[4]) * 0.5,
+            (aabb[2] + aabb[5]) * 0.5,
+        ]
+    return None
+
+
+def _aabb_overlap(a, b):
+    return not (
+        a[3] < b[0] or a[0] > b[3] or
+        a[4] < b[1] or a[1] > b[4] or
+        a[5] < b[2] or a[2] > b[5]
+    )
+
+
+def _position_distance(a, b):
+    pa = _actor_position(a)
+    pb = _actor_position(b)
+    if pa is None or pb is None:
+        return None
+    import math as _math
+    return _math.sqrt(
+        (pa[0] - pb[0]) ** 2 +
+        (pa[1] - pb[1]) ** 2 +
+        (pa[2] - pb[2]) ** 2
+    )
+
+
+def _actors_touch(a, b) -> bool:
+    if a is None or b is None or a is b or _is_actor_deleted(a) or _is_actor_deleted(b):
+        return False
+    aabb_a = _actor_aabb(a)
+    aabb_b = _actor_aabb(b)
+    if aabb_a is not None and aabb_b is not None:
+        return _aabb_overlap(aabb_a, aabb_b)
+    dist = _position_distance(a, b)
+    return bool(dist is not None and dist <= 1.0)
+
+
+def _record_touch(actor):
+    name = _object_name(actor)
+    if name:
+        _current_context().last_touch_object = name
+
+
+def _actor_matches_tag(actor, tag) -> bool:
+    tag_norm = _norm_name(tag)
+    if not tag_norm or actor is None or _is_actor_deleted(actor):
+        return False
+    ctx = _current_context()
+    name = _object_name(actor)
+    explicit = ctx.object_tags.get(name) or ctx.object_tags.get(_norm_name(name)) or getattr(actor, 'tag', None)
+    if explicit is not None:
+        return _norm_name(explicit) == tag_norm
+    # Fallback tag match: object-name prefix, e.g. coin_01 matches coin.
+    return _norm_name(name).startswith(tag_norm)
+
+
+def touch(target):
+    source = _current_actor()
+    actor = _resolve_actor(target)
+    hit = _actors_touch(source, actor)
+    if hit:
+        _record_touch(actor)
+    return hit
+
+
+def touch_tag(tag):
+    source = _current_actor()
+    if source is None:
+        return False
+    for actor in _iter_known_actors():
+        if actor is source or not _actor_matches_tag(actor, tag):
+            continue
+        if _actors_touch(source, actor):
+            _record_touch(actor)
+            return True
+    return False
+
+
+def last_touch_object():
+    return _current_context().last_touch_object or ""
+
+
 def distance(target):
-    return 0.0
+    source = _current_actor()
+    actor = _resolve_actor(target)
+    dist = _position_distance(source, actor)
+    return float(dist) if dist is not None else 0.0
+
+
+# Object blocks backend
+
+def object_hide(name):
+    actor = _resolve_actor(name)
+    if actor is None:
+        return
+    try:
+        if hasattr(actor, 'set_visible'):
+            actor.set_visible(False)
+    except Exception as exc:
+        _logger.debug("[ScratchWrapper] object_hide failed: %s", exc)
+
+
+def object_show(name):
+    actor = _resolve_actor(name)
+    if actor is None:
+        return
+    try:
+        if hasattr(actor, 'set_visible'):
+            actor.set_visible(True)
+    except Exception as exc:
+        _logger.debug("[ScratchWrapper] object_show failed: %s", exc)
+
+
+def object_delete(name):
+    actor = _resolve_actor(name)
+    _mark_deleted(actor, name)
+    if actor is not None:
+        try:
+            if hasattr(actor, 'set_visible'):
+                actor.set_visible(False)
+        except Exception:
+            pass
+
+
+def object_delete_last_touched():
+    name = last_touch_object()
+    if name:
+        object_delete(name)
+
+
+def object_set_position(name, x, y, z):
+    actor = _resolve_actor(name)
+    if actor is None:
+        return
+    pos = [_safe_float(x), _safe_float(y), _safe_float(z)]
+    _set_actor_position(actor, pos)
+    ctx = _current_context()
+    if actor is ctx.actor:
+        ctx.x, ctx.y, ctx.z = pos
+
+
+def _object_axis(name, axis):
+    actor = _resolve_actor(name)
+    pos = _actor_position(actor)
+    if pos is None:
+        return 0.0
+    return float(pos[axis])
+
+
+def object_x(name):
+    return _object_axis(name, 0)
+
+
+def object_y(name):
+    return _object_axis(name, 1)
+
+
+def object_z(name):
+    return _object_axis(name, 2)
+
+
+def object_exists(name):
+    target = str(name or "").strip()
+    if not target or _norm_name(target) in _deleted_names():
+        return False
+    return _resolve_actor(target) is not None
+
+
+def object_set_tag(name, tag):
+    ctx = _current_context()
+    actor = _resolve_actor(name)
+    actor_name = _object_name(actor) if actor is not None else str(name or "").strip()
+    if not actor_name:
+        return
+    ctx.object_tags[actor_name] = str(tag or "")
+    ctx.object_tags[_norm_name(actor_name)] = str(tag or "")
+
+
+def object_count_tag(tag):
+    return sum(1 for actor in _iter_known_actors() if _actor_matches_tag(actor, tag))
+
+
+def _unique_object_name(base):
+    ctx = _current_context()
+    base = str(base or 'object').strip() or 'object'
+    if not object_exists(base) and _norm_name(base) not in getattr(ctx, 'virtual_objects', {}):
+        return base
+    index = 1
+    while True:
+        candidate = f"{base}_{index:02d}"
+        if not object_exists(candidate) and _norm_name(candidate) not in getattr(ctx, 'virtual_objects', {}):
+            return candidate
+        index += 1
+
+
+def _try_native_spawn(scene, template, name, pos):
+    if scene is None:
+        return None
+    template_actor = _resolve_actor(template)
+    method_names = ('spawn_actor', 'create_actor', 'clone_actor', 'instantiate_actor', 'spawn', 'create', 'clone')
+    for method_name in method_names:
+        method = getattr(scene, method_name, None)
+        if not callable(method):
+            continue
+        variants = [
+            (template, name, pos), (template, name), (template, pos), (template,),
+            (template_actor, name, pos), (template_actor, name), (template_actor,),
+        ]
+        for args in variants:
+            if args and args[0] is None:
+                continue
+            try:
+                actor = method(*args)
+            except TypeError:
+                continue
+            except Exception as exc:
+                _logger.debug("[ScratchWrapper] native spawn %s failed: %s", method_name, exc)
+                continue
+            if actor is not None:
+                try:
+                    if name and not getattr(actor, 'name', None):
+                        setattr(actor, 'name', name)
+                except Exception:
+                    pass
+                _set_actor_position(actor, pos)
+                return actor
+    return None
+
+
+def object_spawn(template, name, x, y, z):
+    ctx = _current_context()
+    template = str(template or '').strip() or 'object'
+    name = str(name or '').strip() or _unique_object_name(template)
+    pos = [_safe_float(x), _safe_float(y), _safe_float(z)]
+    ctx.deleted_objects.discard(_norm_name(name))
+    actor = _try_native_spawn(_runtime_scene(), template, name, pos)
+    if actor is not None:
+        return _object_name(actor) or name
+    virtual = _VirtualActor(name, pos, template=template)
+    ctx.virtual_objects[_norm_name(name)] = virtual
+    return name
+
+
+def object_spawn_tag(template, tag, count, x, y, z, dx, dy, dz):
+    count = max(0, _safe_int(count, 0))
+    tag = str(tag or '').strip() or 'object'
+    created = 0
+    for index in range(count):
+        name = _unique_object_name(f"{tag}_{index + 1:02d}")
+        object_spawn(template, name,
+                     _safe_float(x) + _safe_float(dx) * index,
+                     _safe_float(y) + _safe_float(dy) * index,
+                     _safe_float(z) + _safe_float(dz) * index)
+        object_set_tag(name, tag)
+        created += 1
+    return created
+
+
+def object_delete_raycast_hit():
+    name = raycast_hit_object()
+    if name:
+        object_delete(name)
+
+
+def object_move_tag(tag, dx, dy, dz):
+    moved = 0
+    offset = [_safe_float(dx), _safe_float(dy), _safe_float(dz)]
+    for actor in list(_iter_known_actors()):
+        if not _actor_matches_tag(actor, tag):
+            continue
+        pos = _actor_position(actor)
+        if pos is None:
+            continue
+        new_pos = [pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]]
+        if _set_actor_position(actor, new_pos):
+            ctx = _current_context()
+            if actor is ctx.actor:
+                ctx.x, ctx.y, ctx.z = new_pos
+            moved += 1
+    return moved
+
+
+def raycast_hit_tag(tag):
+    name = raycast_hit_object()
+    if not name:
+        return False
+    actor = _resolve_actor(name)
+    if actor is not None:
+        return _actor_matches_tag(actor, tag)
+    tag_norm = _norm_name(tag)
+    return bool(tag_norm and _norm_name(name).startswith(tag_norm))
+
+
+def _object_passed_axis(name, threshold, axis):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    pos = _actor_position(actor)
+    if pos is None:
+        return False
+    return float(pos[axis]) >= _safe_float(threshold)
+
+
+def object_passed_x(name, x):
+    return _object_passed_axis(name, x, 0)
+
+
+def object_passed_z(name, z):
+    return _object_passed_axis(name, z, 2)
+
+
+def ground_below(distance):
+    actor = _current_actor()
+    pos = _actor_position(actor) if actor is not None else [_current_context().x, _current_context().y, _current_context().z]
+    if pos is None:
+        return False
+    dist = max(0.0, _safe_float(distance, 1.0))
+    cache = _get_raycast_cache().copy()
+    try:
+        hit = raycast_hit(pos, [0.0, -1.0, 0.0], dist)
+        hit_name = raycast_hit_object()
+        self_name = _object_name(actor)
+        if hit and hit_name and _norm_name(hit_name) != _norm_name(self_name):
+            return True
+    finally:
+        _get_raycast_cache().update(cache)
+    return pos[1] <= dist
+
+
+# UI / demo state backend
+
+def set_score(value):
+    ctx = _current_context()
+    ctx.variables['score'] = _safe_float(value)
+    _logger.info("[ScratchWrapper] score = %s", ctx.variables['score'])
+
+
+def add_score(delta):
+    ctx = _current_context()
+    ctx.variables['score'] = _safe_float(ctx.variables.get('score', 0.0)) + _safe_float(delta)
+    _logger.info("[ScratchWrapper] score = %s", ctx.variables['score'])
+
+
+def set_lives(value):
+    ctx = _current_context()
+    ctx.variables['lives'] = _safe_float(value)
+    _logger.info("[ScratchWrapper] lives = %s", ctx.variables['lives'])
+
+
+def add_lives(delta):
+    ctx = _current_context()
+    ctx.variables['lives'] = _safe_float(ctx.variables.get('lives', 0.0)) + _safe_float(delta)
+    _logger.info("[ScratchWrapper] lives = %s", ctx.variables['lives'])
+
+
+def lives():
+    return _safe_float(_current_context().variables.get('lives', 0.0))
+
+
+def set_countdown(seconds):
+    ctx = _current_context()
+    ctx.countdown_end_time = _time.monotonic() + max(0.0, _safe_float(seconds))
+
+
+def countdown_left():
+    end_time = _safe_float(_current_context().countdown_end_time, 0.0)
+    if end_time <= 0:
+        return 0.0
+    return max(0.0, end_time - _time.monotonic())
+
+
+def countdown_finished():
+    end_time = _safe_float(_current_context().countdown_end_time, 0.0)
+    return bool(end_time > 0 and countdown_left() <= 0.0)
+
+
+def game_win():
+    ctx = _current_context()
+    ctx.game_state = 'win'
+    ctx.variables['game_state'] = 'win'
+    _logger.info("[ScratchWrapper] game win; score=%s", ctx.variables.get('score', 0.0))
+    ctx.stop_requested = True
+    raise SystemExit(0)
+
+
+def game_over():
+    ctx = _current_context()
+    ctx.game_state = 'over'
+    ctx.variables['game_state'] = 'over'
+    _logger.info("[ScratchWrapper] game over; score=%s", ctx.variables.get('score', 0.0))
+    ctx.stop_requested = True
+    raise SystemExit(0)
 
 
 def ask(question):
@@ -902,43 +1718,41 @@ def raycast_hit(origin, direction, max_dist=100.0):
     except Exception as exc:
         _logger.debug("[ScratchWrapper] raycast engine fallback: %s", exc)
 
-    # Fallback: 手动 AABB 遍历当前场景所有 Actor
+    # Fallback: manually test all known actors, including Python virtual objects.
     cache['hit'] = False
     cache['distance'] = float(max_dist)
     cache['object'] = ''
     cache['point'] = (0.0, 0.0, 0.0)
-    ctx = _current_context()
-    if ctx.scene is not None and hasattr(ctx.scene, 'get_all_actors'):
-        try:
-            actors = ctx.scene.get_all_actors()
-            origin_vec = [float(origin[0]), float(origin[1]), float(origin[2])]
-            dir_vec = [float(direction[0]), float(direction[1]), float(direction[2])]
-            # 归一化方向
-            import math as _math
-            mag = _math.sqrt(dir_vec[0]**2 + dir_vec[1]**2 + dir_vec[2]**2)
-            if mag > 0:
-                dir_vec = [d / mag for d in dir_vec]
-            closest = float(max_dist)
-            for actor in actors:
-                if not hasattr(actor, 'get_aabb'):
-                    continue
-                try:
-                    aabb = actor.get_aabb()
-                except Exception:
-                    continue
-                t = _ray_aabb_intersect(origin_vec, dir_vec, aabb)
-                if t is not None and 0 < t < closest:
-                    closest = t
-                    cache['hit'] = True
-                    cache['distance'] = closest
-                    cache['object'] = str(getattr(actor, 'name', ''))
-                    cache['point'] = (
-                        origin_vec[0] + dir_vec[0] * closest,
-                        origin_vec[1] + dir_vec[1] * closest,
-                        origin_vec[2] + dir_vec[2] * closest,
-                    )
-        except Exception as exc:
-            _logger.debug("[ScratchWrapper] raycast fallback failed: %s", exc)
+    try:
+        actors = _iter_known_actors()
+        origin_vec = [float(origin[0]), float(origin[1]), float(origin[2])]
+        dir_vec = [float(direction[0]), float(direction[1]), float(direction[2])]
+        import math as _math
+        mag = _math.sqrt(dir_vec[0]**2 + dir_vec[1]**2 + dir_vec[2]**2)
+        if mag > 0:
+            dir_vec = [d / mag for d in dir_vec]
+        closest = float(max_dist)
+        for actor in actors:
+            if _is_actor_deleted(actor):
+                continue
+            aabb = _actor_aabb(actor)
+            if aabb is None:
+                continue
+            if actor is _current_context().actor and all(aabb[i] <= origin_vec[i] <= aabb[i + 3] for i in range(3)):
+                continue
+            t = _ray_aabb_intersect(origin_vec, dir_vec, aabb)
+            if t is not None and 0 < t < closest:
+                closest = t
+                cache['hit'] = True
+                cache['distance'] = closest
+                cache['object'] = _object_name(actor)
+                cache['point'] = (
+                    origin_vec[0] + dir_vec[0] * closest,
+                    origin_vec[1] + dir_vec[1] * closest,
+                    origin_vec[2] + dir_vec[2] * closest,
+                )
+    except Exception as exc:
+        _logger.debug("[ScratchWrapper] raycast fallback failed: %s", exc)
     return cache['hit']
 
 
@@ -994,17 +1808,37 @@ def check_stop():
 
 
 def wait(seconds):
-    remaining = float(seconds)
+    remaining = max(0.0, _safe_float(seconds))
     while remaining > 0:
         check_stop()
         step = min(0.1, remaining)
         _time.sleep(step)
+        _tick_runtime_physics(step)
         remaining -= step
+    check_stop()
 
 
 def stop(option):
     if option in ("ALL_SCRIPTS", "all"):
         request_stop_all()
+    raise SystemExit(0)
+
+
+def restart_level():
+    ctx = _current_context()
+    scene = _runtime_scene()
+    if scene is not None:
+        for method_name in ('restart', 'reset', 'reload'):
+            method = getattr(scene, method_name, None)
+            if callable(method):
+                try:
+                    method()
+                    return
+                except Exception as exc:
+                    _logger.debug("[ScratchWrapper] scene.%s failed: %s", method_name, exc)
+    ctx.game_state = 'restart'
+    ctx.variables['game_state'] = 'restart'
+    ctx.stop_requested = True
     raise SystemExit(0)
 
 

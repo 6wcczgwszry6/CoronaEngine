@@ -11,6 +11,8 @@ import { defineDetectGenerators } from './detect';
 import { defineEngineGenerators } from './engine';
 import { defineEventGenerators } from './event';
 import { defineListGenerators } from './list';
+import { defineObjectGenerators } from './object';
+import { defineUiGenerators } from './ui';
 import { defineMathGenerators } from './math';
 import { defineVariableGenerators } from './variable';
 
@@ -23,6 +25,8 @@ try { defineDetectGenerators?.(); } catch {}
 try { defineEngineGenerators?.(); } catch {}
 try { defineEventGenerators?.(); } catch {}
 try { defineListGenerators?.(); } catch {}
+try { defineObjectGenerators?.(); } catch {}
+try { defineUiGenerators?.(); } catch {}
 try { defineMathGenerators?.(); } catch {}
 try { defineVariableGenerators?.(); } catch {}
 

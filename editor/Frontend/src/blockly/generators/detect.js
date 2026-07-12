@@ -1,14 +1,26 @@
 import { pythonGenerator } from 'blockly/python';
 
+const pyString = (value) => JSON.stringify(String(value ?? ''));
+
 export const defineDetectGenerators = () => {
   pythonGenerator.forBlock['detect_touch'] = function (block) {
     const x = block.getFieldValue('x');
-    return [`CoronaEngine.touch("${x}")`, pythonGenerator.ORDER_ATOMIC];
+    return [`CoronaEngine.touch(${pyString(x)})`, pythonGenerator.ORDER_FUNCTION_CALL];
   };
 
   pythonGenerator.forBlock['detect_distance'] = function (block) {
     const x = block.getFieldValue('x');
-    return [`CoronaEngine.distance("${x}")`, pythonGenerator.ORDER_ATOMIC];
+    return [`CoronaEngine.distance(${pyString(x)})`, pythonGenerator.ORDER_FUNCTION_CALL];
+  };
+
+
+  pythonGenerator.forBlock['detect_touch_tag'] = function (block) {
+    const tag = block.getFieldValue('TAG');
+    return [`CoronaEngine.touch_tag(${pyString(tag)})`, pythonGenerator.ORDER_FUNCTION_CALL];
+  };
+
+  pythonGenerator.forBlock['detect_last_touch_object'] = function () {
+    return ['CoronaEngine.last_touch_object()', pythonGenerator.ORDER_FUNCTION_CALL];
   };
 
   pythonGenerator.forBlock['detect_ask'] = function (block) {
@@ -67,4 +79,21 @@ export const defineDetectGenerators = () => {
     const fn = axis === 'X' ? 'raycast_hit_point_x' : axis === 'Y' ? 'raycast_hit_point_y' : 'raycast_hit_point_z';
     return [`CoronaEngine.${fn}()`, pythonGenerator.ORDER_ATOMIC];
   };
+
+  pythonGenerator.forBlock['detect_ground_below'] = function (block) {
+    return [`CoronaEngine.ground_below(${block.getFieldValue('DISTANCE')})`, pythonGenerator.ORDER_FUNCTION_CALL];
+  };
+
+  pythonGenerator.forBlock['detect_raycast_hit_tag'] = function (block) {
+    return [`CoronaEngine.raycast_hit_tag(${pyString(block.getFieldValue('TAG'))})`, pythonGenerator.ORDER_FUNCTION_CALL];
+  };
+
+  pythonGenerator.forBlock['detect_passed_x'] = function (block) {
+    return [`CoronaEngine.object_passed_x(${pyString(block.getFieldValue('NAME'))}, ${block.getFieldValue('X')})`, pythonGenerator.ORDER_FUNCTION_CALL];
+  };
+
+  pythonGenerator.forBlock['detect_passed_z'] = function (block) {
+    return [`CoronaEngine.object_passed_z(${pyString(block.getFieldValue('NAME'))}, ${block.getFieldValue('Z')})`, pythonGenerator.ORDER_FUNCTION_CALL];
+  };
+
 };

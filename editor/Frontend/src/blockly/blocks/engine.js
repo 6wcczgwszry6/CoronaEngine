@@ -292,4 +292,65 @@ export const defineEngineBlocks = () => {
       this.setTooltip('获取物体当前速度分量');
     },
   };
+  Blockly.Blocks['engine_set_gravity'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('设置重力')
+        .appendField(new Blockly.FieldDropdown([['启用', 'TRUE'], ['关闭', 'FALSE']]), 'ENABLED')
+        .appendField('强度')
+        .appendField(new Blockly.FieldNumber(9.8), 'STRENGTH');
+      this.setInputsInline(true);
+      this.setPreviousStatement(true, null);
+      this.setNextStatement(true, null);
+      this.setStyle('engine_blocks');
+      this.setTooltip('设置当前脚本运行时重力；无原生物理接口时用 Python 速度缓存降级模拟');
+    },
+  };
+  Blockly.Blocks['engine_jump'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('向上跳 力度')
+        .appendField(new Blockly.FieldNumber(8), 'POWER');
+      this.setInputsInline(true);
+      this.setPreviousStatement(true, null);
+      this.setNextStatement(true, null);
+      this.setStyle('engine_blocks');
+      this.setTooltip('给当前对象施加向上的跳跃冲量；无原生接口时更新速度缓存');
+    },
+  };
+  Blockly.Blocks['engine_bounce_axis'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('反弹')
+        .appendField(new Blockly.FieldDropdown([['X', 'X'], ['Y', 'Y'], ['Z', 'Z']]), 'AXIS')
+        .appendField('方向 系数')
+        .appendField(new Blockly.FieldNumber(1), 'FACTOR');
+      this.setInputsInline(true);
+      this.setPreviousStatement(true, null);
+      this.setNextStatement(true, null);
+      this.setStyle('engine_blocks');
+      this.setTooltip('按指定轴反转当前速度并乘以系数，用于打砖块/弹跳/滚动天空');
+    },
+  };
+  Blockly.Blocks['engine_set_game_speed'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('设置游戏速度')
+        .appendField(new Blockly.FieldNumber(1), 'VALUE');
+      this.setInputsInline(true);
+      this.setPreviousStatement(true, null);
+      this.setNextStatement(true, null);
+      this.setStyle('engine_blocks');
+      this.setTooltip('把 demo 逻辑用游戏速度保存到当前运行时变量');
+    },
+  };
+  Blockly.Blocks['engine_get_game_speed'] = {
+    init: function () {
+      this.appendDummyInput().appendField('游戏速度');
+      this.setOutput(true, 'Number');
+      this.setStyle('engine_blocks');
+      this.setTooltip('读取当前运行时游戏速度，默认 1');
+    },
+  };
+
 };

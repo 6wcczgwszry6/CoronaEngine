@@ -183,4 +183,15 @@ export const defineControlBlocks = () => {
       this.setHelpUrl('');
     },
   };
+  Blockly.Blocks['control_restart_level'] = {
+    init: function () {
+      this.appendDummyInput().appendField('重新开始当前关卡');
+      this.setInputsInline(true);
+      this.setPreviousStatement(true, null);
+      this.setNextStatement(false, null);
+      this.setStyle('control_blocks');
+      this.setTooltip('请求重新开始当前关卡；无原生接口时标记 restart 并停止当前脚本');
+    },
+  };
+
 };

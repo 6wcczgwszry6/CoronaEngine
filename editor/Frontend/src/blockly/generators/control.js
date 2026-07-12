@@ -107,4 +107,9 @@ export const defineControlGenerators = () => {
   pythonGenerator.forBlock['control_nextSence'] = function () {
     return `CoronaEngine.nextScene()\n`;
   };
+
+  pythonGenerator.forBlock['control_restart_level'] = function () {
+    return 'CoronaEngine.restart_level()\n';
+  };
+
 };

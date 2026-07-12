@@ -31,6 +31,11 @@ export const TOOLBOX_CONFIG = {
         { kind: 'block', type: 'engine_set_velocity' },
         { kind: 'block', type: 'engine_apply_impulse' },
         { kind: 'block', type: 'engine_get_velocity' },
+        { kind: 'block', type: 'engine_set_gravity' },
+        { kind: 'block', type: 'engine_jump' },
+        { kind: 'block', type: 'engine_bounce_axis' },
+        { kind: 'block', type: 'engine_set_game_speed' },
+        { kind: 'block', type: 'engine_get_game_speed' },
       ],
     },
 
@@ -47,6 +52,9 @@ export const TOOLBOX_CONFIG = {
         { kind: 'block', type: 'camera_mouse_dx' },
         { kind: 'block', type: 'camera_mouse_dy' },
         { kind: 'block', type: 'camera_set_fov' },
+        { kind: 'block', type: 'camera_follow_object' },
+        { kind: 'block', type: 'camera_raycast' },
+        { kind: 'block', type: 'camera_raycast_object' },
       ],
     },
 
@@ -76,6 +84,54 @@ export const TOOLBOX_CONFIG = {
 
     // ===================================================================
     // 3. 事件 —— CoronaEngine 自定义事件积木
+
+    // ===================================================================
+    // Objects - common 3D demo object management blocks
+    // ===================================================================
+    {
+      kind: 'category',
+      name: '对象',
+      categorystyle: 'object_category',
+      contents: [
+        { kind: 'block', type: 'object_hide' },
+        { kind: 'block', type: 'object_show' },
+        { kind: 'block', type: 'object_delete' },
+        { kind: 'block', type: 'object_delete_last_touched' },
+        { kind: 'block', type: 'object_set_position' },
+        { kind: 'block', type: 'object_get_x' },
+        { kind: 'block', type: 'object_get_y' },
+        { kind: 'block', type: 'object_get_z' },
+        { kind: 'block', type: 'object_exists' },
+        { kind: 'block', type: 'object_set_tag' },
+        { kind: 'block', type: 'object_count_tag' },
+        { kind: 'block', type: 'object_spawn' },
+        { kind: 'block', type: 'object_spawn_tag' },
+        { kind: 'block', type: 'object_delete_raycast_hit' },
+        { kind: 'block', type: 'object_move_tag' },
+      ],
+    },
+
+    // ===================================================================
+    // UI - demo score and end-state blocks
+    // ===================================================================
+    {
+      kind: 'category',
+      name: '界面',
+      categorystyle: 'ui_category',
+      contents: [
+        { kind: 'block', type: 'ui_set_score' },
+        { kind: 'block', type: 'ui_add_score' },
+        { kind: 'block', type: 'ui_game_win' },
+        { kind: 'block', type: 'ui_game_over' },
+        { kind: 'block', type: 'ui_set_lives' },
+        { kind: 'block', type: 'ui_add_lives' },
+        { kind: 'block', type: 'ui_lives' },
+        { kind: 'block', type: 'ui_set_countdown' },
+        { kind: 'block', type: 'ui_countdown_left' },
+        { kind: 'block', type: 'ui_countdown_finished' },
+      ],
+    },
+
     // ===================================================================
     {
       kind: 'category',
@@ -117,6 +173,7 @@ export const TOOLBOX_CONFIG = {
         { kind: 'block', type: 'control_cloneDEL' },
         { kind: 'block', type: 'control_senceSet' },
         { kind: 'block', type: 'control_nextSence' },
+        { kind: 'block', type: 'control_restart_level' },
         // ── 标准逻辑积木 ──
         { kind: 'block', type: 'logic_boolean' },
         { kind: 'block', type: 'logic_compare' },
@@ -146,6 +203,8 @@ export const TOOLBOX_CONFIG = {
       contents: [
         { kind: 'block', type: 'detect_touch' },
         { kind: 'block', type: 'detect_distance' },
+        { kind: 'block', type: 'detect_touch_tag' },
+        { kind: 'block', type: 'detect_last_touch_object' },
         { kind: 'block', type: 'detect_ask' },
         { kind: 'block', type: 'detect_keyboard1' },
         { kind: 'block', type: 'detect_keyboard0' },
@@ -156,6 +215,10 @@ export const TOOLBOX_CONFIG = {
         { kind: 'block', type: 'detect_raycast_distance' },
         { kind: 'block', type: 'detect_raycast_object' },
         { kind: 'block', type: 'detect_raycast_point' },
+        { kind: 'block', type: 'detect_ground_below' },
+        { kind: 'block', type: 'detect_raycast_hit_tag' },
+        { kind: 'block', type: 'detect_passed_x' },
+        { kind: 'block', type: 'detect_passed_z' },
       ],
     },
 
@@ -309,6 +372,8 @@ const CATEGORY_KEYS = {
   引擎: 'blocklyToolbox.engine',
   摄像机: 'blocklyToolbox.camera',
   外观: 'blocklyToolbox.appearance',
+  对象: 'blocklyToolbox.object',
+  界面: 'blocklyToolbox.ui',
   事件: 'blocklyToolbox.event',
   控制: 'blocklyToolbox.control',
   侦测: 'blocklyToolbox.detect',

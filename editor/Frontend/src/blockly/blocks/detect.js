@@ -166,4 +166,79 @@ export const defineDetectBlocks = () => {
       this.setTooltip('获取最近一次射线检测命中点的坐标分量');
     },
   };
+
+  Blockly.Blocks['detect_touch_tag'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('碰到标签')
+        .appendField(new Blockly.FieldTextInput('tag'), 'TAG')
+        .appendField('？');
+      this.setOutput(true, 'Boolean');
+      this.setInputsInline(true);
+      this.setStyle('detect_blocks');
+      this.setHelpUrl('');
+      this.setTooltip('检测当前对象是否碰到指定标签的对象。');
+    },
+  };
+
+  Blockly.Blocks['detect_last_touch_object'] = {
+    init: function () {
+      this.appendDummyInput().appendField('最近碰到的对象');
+      this.setOutput(true, null);
+      this.setStyle('detect_blocks');
+      this.setTooltip('返回最近一次碰撞检测命中的对象名称。');
+    },
+  };
+  Blockly.Blocks['detect_ground_below'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('脚下有地面？距离')
+        .appendField(new Blockly.FieldNumber(1, 0), 'DISTANCE');
+      this.setOutput(true, 'Boolean');
+      this.setInputsInline(true);
+      this.setStyle('detect_blocks');
+      this.setTooltip('检测当前对象下方指定距离内是否有地面；无射线接口时用 Y 坐标降级');
+    },
+  };
+  Blockly.Blocks['detect_raycast_hit_tag'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('射线命中标签')
+        .appendField(new Blockly.FieldTextInput('tag'), 'TAG')
+        .appendField('？');
+      this.setOutput(true, 'Boolean');
+      this.setInputsInline(true);
+      this.setStyle('detect_blocks');
+      this.setTooltip('判断最近一次射线命中的对象是否匹配指定标签');
+    },
+  };
+  Blockly.Blocks['detect_passed_x'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('对象')
+        .appendField(new Blockly.FieldTextInput(''), 'NAME')
+        .appendField('通过 X')
+        .appendField(new Blockly.FieldNumber(0), 'X')
+        .appendField('？');
+      this.setOutput(true, 'Boolean');
+      this.setInputsInline(true);
+      this.setStyle('detect_blocks');
+      this.setTooltip('判断对象 X 坐标是否已经达到或超过指定值');
+    },
+  };
+  Blockly.Blocks['detect_passed_z'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('对象')
+        .appendField(new Blockly.FieldTextInput(''), 'NAME')
+        .appendField('通过 Z')
+        .appendField(new Blockly.FieldNumber(0), 'Z')
+        .appendField('？');
+      this.setOutput(true, 'Boolean');
+      this.setInputsInline(true);
+      this.setStyle('detect_blocks');
+      this.setTooltip('判断对象 Z 坐标是否已经达到或超过指定值');
+    },
+  };
+
 };

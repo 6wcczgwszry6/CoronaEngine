@@ -710,6 +710,8 @@ const initBlocklyAndGenerators = async () => {
       { defineMathBlocks },
       { defineVariableBlocks },
       { defineListBlocks },
+      { defineObjectBlocks },
+      { defineUiBlocks },
     ] = await Promise.all([
       import('@/blockly/blocks/audio.js'),
       import('@/blockly/blocks/camera.js'),
@@ -721,6 +723,8 @@ const initBlocklyAndGenerators = async () => {
       import('@/blockly/blocks/math.js'),
       import('@/blockly/blocks/variable.js'),
       import('@/blockly/blocks/list.js'),
+      import('@/blockly/blocks/object.js'),
+      import('@/blockly/blocks/ui.js'),
     ]);
 
     try {
@@ -734,6 +738,8 @@ const initBlocklyAndGenerators = async () => {
       defineMathBlocks();
       defineVariableBlocks();
       defineListBlocks();
+      defineObjectBlocks();
+      defineUiBlocks();
 
       // 加载自定义 workspaceToCode（hat过滤、handler路由、prelude等）
       // 该模块内部已包含所有分类生成器的注册，无需在此重复调用 define*Generators()

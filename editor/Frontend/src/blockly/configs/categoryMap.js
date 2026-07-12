@@ -23,6 +23,11 @@ export const BLOCK_CATEGORY_MAP = {
   engine_set_velocity: '引擎',
   engine_apply_impulse: '引擎',
   engine_get_velocity: '引擎',
+  engine_set_gravity: '引擎',
+  engine_jump: '引擎',
+  engine_bounce_axis: '引擎',
+  engine_set_game_speed: '引擎',
+  engine_get_game_speed: '引擎',
 
   // ── 摄像机 (5) ──
   camera_lock_mouse: '摄像机',
@@ -30,6 +35,9 @@ export const BLOCK_CATEGORY_MAP = {
   camera_mouse_dx: '摄像机',
   camera_mouse_dy: '摄像机',
   camera_set_fov: '摄像机',
+  camera_follow_object: '摄像机',
+  camera_raycast: '摄像机',
+  camera_raycast_object: '摄像机',
 
   // ── 外观 (11) ──
   appearance_cartoonSet: '外观',
@@ -46,6 +54,36 @@ export const BLOCK_CATEGORY_MAP = {
   // 外观扩展
   appearance_set_color: '外观',
   appearance_set_alpha: '外观',
+
+
+  // Objects (11)
+  object_hide: '对象',
+  object_show: '对象',
+  object_delete: '对象',
+  object_delete_last_touched: '对象',
+  object_set_position: '对象',
+  object_get_x: '对象',
+  object_get_y: '对象',
+  object_get_z: '对象',
+  object_exists: '对象',
+  object_set_tag: '对象',
+  object_count_tag: '对象',
+  object_spawn: '对象',
+  object_spawn_tag: '对象',
+  object_delete_raycast_hit: '对象',
+  object_move_tag: '对象',
+
+  // UI (4)
+  ui_set_score: '界面',
+  ui_add_score: '界面',
+  ui_game_win: '界面',
+  ui_game_over: '界面',
+  ui_set_lives: '界面',
+  ui_add_lives: '界面',
+  ui_lives: '界面',
+  ui_set_countdown: '界面',
+  ui_countdown_left: '界面',
+  ui_countdown_finished: '界面',
 
   // ── 事件 (10) ──
   event_gameStart: '事件',
@@ -73,6 +111,7 @@ export const BLOCK_CATEGORY_MAP = {
   control_cloneDEL: '控制',
   control_senceSet: '控制',
   control_nextSence: '控制',
+  control_restart_level: '控制',
   // 标准逻辑
   logic_boolean: '控制',
   logic_compare: '控制',
@@ -93,6 +132,8 @@ export const BLOCK_CATEGORY_MAP = {
   // ── 侦测 (8) ──
   detect_touch: '侦测',
   detect_distance: '侦测',
+  detect_touch_tag: '侦测',
+  detect_last_touch_object: '侦测',
   detect_ask: '侦测',
   detect_keyboard1: '侦测',
   detect_keyboard0: '侦测',
@@ -104,6 +145,10 @@ export const BLOCK_CATEGORY_MAP = {
   detect_raycast_distance: '侦测',
   detect_raycast_object: '侦测',
   detect_raycast_point: '侦测',
+  detect_ground_below: '侦测',
+  detect_raycast_hit_tag: '侦测',
+  detect_passed_x: '侦测',
+  detect_passed_z: '侦测',
 
   // ── 运算 (12 自定义 + 14 标准数学 = 26) ──
   math_add: '运算',
