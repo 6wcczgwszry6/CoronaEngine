@@ -96,7 +96,7 @@ int run_smoke() {
     };
 
     // Cover 1, 3 and 16 windows, including a same-frame registration burst.
-    for (int requested = 1; requested <= 16; requested = requested == 1 ? 3 : 16) {
+    for (const int requested : {1, 3, 16}) {
         std::vector<void*> surfaces;
         for (int i = 1; i < requested; ++i) {
             auto* window = SDL_CreateWindow("Corona UI secondary", 160, 120,
