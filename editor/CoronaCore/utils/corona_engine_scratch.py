@@ -89,6 +89,11 @@ class ScratchRuntimeContext:
     list_values: dict = field(default_factory=dict)
     mouse_locked: bool = False
     alpha: float = 1.0
+    binding_error: str = ""
+    current_node_id: str = ""
+    current_node_name: str = ""
+    waiting_edge_id: str = ""
+    waiting_edge_name: str = ""
 
 
 _default_context = ScratchRuntimeContext("default", target_type="internal")
@@ -97,6 +102,7 @@ _completed_state_snapshots: dict[str, dict] = {}
 _scene_virtual_objects: dict[str, dict[str, object]] = {}
 _scene_deleted_objects: dict[str, set[str]] = {}
 _scene_object_tags: dict[str, dict[str, str]] = {}
+_clone_threads: dict[str, list[_threading.Thread]] = {}
 
 
 def _current_context() -> ScratchRuntimeContext:
@@ -114,7 +120,7 @@ def create_context(
         context_id = f"scratch-{_threading.get_ident()}-{int(_time.time() * 1000)}"
     ctx = ScratchRuntimeContext(
         context_id=context_id,
-        target_type=target_type or "actor",
+        target_type="actor" if (target_type or "actor") == "model" else (target_type or "actor"),
         scene_name=scene_name or "",
         actor_name=actor_name or "",
     )
@@ -308,35 +314,539 @@ def _actor_only(api_name: str) -> bool:
     return False
 
 
+def _target_token(value):
+    text = str(value or "").strip().replace("\\", "/")
+    return text.casefold()
+
+
+def _target_variants(value):
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return set()
+    path = _Path(text)
+    values = {text, path.name, path.stem}
+    return {_target_token(item) for item in values if item}
+
+
+def _scene_matches(key, scene, requested):
+    requested_values = _target_variants(requested)
+    if not requested_values:
+        return False
+    candidates = {key, getattr(scene, "route", ""), getattr(scene, "name", "")}
+    return any(_target_variants(candidate) & requested_values for candidate in candidates if candidate)
+
+
+def _actor_matches(actor, requested):
+    requested_values = _target_variants(requested)
+    if not requested_values:
+        return False
+    candidates = {
+        getattr(actor, "name", ""),
+        getattr(actor, "route", ""),
+        getattr(actor, "path", ""),
+        getattr(actor, "actor_guid", ""),
+        str(getattr(actor, "handle", "") or ""),
+    }
+    return any(_target_variants(candidate) & requested_values for candidate in candidates if candidate)
+
+
+
+def _native_payload(value):
+    if isinstance(value, str):
+        try:
+            value = _json.loads(value)
+        except Exception:
+            return None
+    if not isinstance(value, dict):
+        return None
+    if value.get("success") is False or value.get("status") == "error":
+        return None
+    data = value.get("data") if isinstance(value.get("data"), dict) else value
+    return data
+
+
+def _native_actor_matches(data, requested):
+    requested_values = _target_variants(requested)
+    if not requested_values or not isinstance(data, dict):
+        return False
+    candidates = {
+        data.get("name", ""), data.get("route", ""), data.get("path", ""),
+        data.get("actor_guid", ""), str(data.get("handle", "") or ""),
+    }
+    return any(_target_variants(value) & requested_values for value in candidates if value)
+
+
+def _native_scene_matches(data, requested):
+    requested_values = _target_variants(requested)
+    if not requested_values or not isinstance(data, dict):
+        return False
+    candidates = {
+        data.get("scene", ""), data.get("scene_name", ""), data.get("name", ""),
+        data.get("id", ""), data.get("scene_id", ""), data.get("route", ""),
+    }
+    return any(_target_variants(value) & requested_values for value in candidates if value)
+
+
+def _native_scene_snapshot(scene_name):
+    errors = []
+    try:
+        from CoronaCore.core.corona_editor import CoronaEditor
+        engine = CoronaEditor.CoronaEngine
+        getter = getattr(engine, "get_editor_scene_snapshot", None) if engine is not None else None
+        if callable(getter):
+            payload = _native_payload(getter(scene_name or ""))
+            if payload is not None:
+                return payload, errors
+    except Exception as exc:
+        errors.append(str(exc))
+    try:
+        from CoronaCore.core.editor_api import CoronaEditorApi
+        payload = _native_payload(CoronaEditorApi.scene_datas.get_scene(scene_name or ""))
+        if payload is not None:
+            if "scene" not in payload:
+                payload["scene"] = payload.get("scene_id") or payload.get("id") or scene_name
+            if "scene_name" not in payload:
+                payload["scene_name"] = payload.get("name") or ""
+            return payload, errors
+    except Exception as exc:
+        errors.append(str(exc))
+    return None, errors
+
+
+class _NativeEditorActorProxy:
+    def __init__(self, scene, data):
+        self.scene = scene
+        self.scene_route = scene.route
+        self._data = dict(data or {})
+        self.name = str(self._data.get("name") or self._data.get("route") or "")
+        self.route = str(self._data.get("route") or self._data.get("path") or self.name)
+        self.path = self.route
+        self.actor_guid = str(self._data.get("actor_guid") or "")
+        self.handle = self._data.get("handle")
+        self.actor_type = str(self._data.get("actor_type") or self._data.get("type") or "model")
+        geometry = self._data.get("geometry") if isinstance(self._data.get("geometry"), dict) else {}
+        self._position = list(geometry.get("position") or [0.0, 0.0, 0.0])[:3]
+        self._rotation = list(geometry.get("rotation") or [0.0, 0.0, 0.0])[:3]
+        self._scale = list(geometry.get("scale") or [1.0, 1.0, 1.0])[:3]
+        while len(self._position) < 3: self._position.append(0.0)
+        while len(self._rotation) < 3: self._rotation.append(0.0)
+        while len(self._scale) < 3: self._scale.append(1.0)
+        self._visible = bool(self._data.get("visible", True))
+        self._aabb = self._data.get("world_aabb") or self._data.get("aabb")
+        mechanics = self._data.get("mechanics") if isinstance(self._data.get("mechanics"), dict) else {}
+        self._mass = float(mechanics.get("mass", 1.0) or 1.0)
+        self._restitution = float(mechanics.get("restitution", 0.8) or 0.0)
+        self._damping = float(mechanics.get("damping", 0.99) or 0.0)
+        self._physics_enabled = bool(mechanics.get("physics_enabled", False))
+        self._geometry = self
+        self._kinematics = self
+        self._optics = self
+        self._mechanics = self
+
+    def _set_transform(self, key, value):
+        values = [float(value[0]), float(value[1]), float(value[2])]
+        from CoronaCore.core.corona_editor import CoronaEditor
+        engine = CoronaEditor.CoronaEngine
+        setter = getattr(engine, "set_editor_actor_transform", None) if engine is not None else None
+        if not callable(setter):
+            raise RuntimeError("native set_editor_actor_transform is unavailable")
+        payload = _native_payload(setter(self.scene_route, self.name, _json.dumps({key: values})))
+        if payload is None:
+            raise RuntimeError(f"native transform update failed: {self.scene_route}/{self.name}")
+        setattr(self, "_" + key, values)
+        actor_data = payload.get("actor") if isinstance(payload.get("actor"), dict) else None
+        if actor_data:
+            self._data.update(actor_data)
+            self._aabb = actor_data.get("world_aabb") or actor_data.get("aabb") or self._aabb
+        return True
+
+    def _operation(self, operation, values):
+        try:
+            from CoronaCore.core.editor_api import CoronaEditorApi
+            CoronaEditorApi.scene_datas.actor_operation(self.scene_route, self.name, operation, list(values))
+            return True
+        except Exception as exc:
+            raise RuntimeError(f"native actor operation {operation} failed: {exc}") from exc
+
+    def to_dict(self): return dict(self._data)
+    def get_position(self): return list(self._position)
+    def set_position(self, value, *_): return self._set_transform("position", value)
+    def get_rotation(self): return list(self._rotation)
+    def set_rotation(self, value, *_): return self._set_transform("rotation", value)
+    def get_scale(self): return list(self._scale)
+    def set_scale(self, value, *_): return self._set_transform("scale", value)
+    def get_visible(self): return self._visible
+    def set_visible(self, value):
+        result = self._operation("SetVisible", [bool(value)])
+        self._visible = bool(value)
+        return result
+    def get_aabb(self):
+        try:
+            from CoronaCore.core.corona_editor import CoronaEditor
+            getter = getattr(CoronaEditor.CoronaEngine, "get_editor_actor_bounds", None)
+            payload = _native_payload(getter(self.scene_route, self.name)) if callable(getter) else None
+            if payload and payload.get("aabb"):
+                self._aabb = payload["aabb"]
+        except Exception:
+            pass
+        return self._aabb
+    def set_mass(self, value): self._mass = float(value); return self._operation("SetMass", [self._mass])
+    def get_mass(self): return self._mass
+    def set_restitution(self, value): self._restitution = float(value); return self._operation("SetRestitution", [self._restitution])
+    def get_restitution(self): return self._restitution
+    def set_damping(self, value): self._damping = float(value); return self._operation("SetDamping", [self._damping])
+    def get_damping(self): return self._damping
+    def set_physics_enabled(self, value): self._physics_enabled = bool(value); return self._operation("SetPhysicsEnabled", [self._physics_enabled])
+    def get_physics_enabled(self): return self._physics_enabled
+    def set_collision_enabled(self, value): return self._operation("SetCollision", [bool(value)])
+    def set_linear_lock(self, x, y, z): return self._operation("SetLinearLock", [bool(x), bool(y), bool(z)])
+    def set_angular_lock(self, x, y, z): return self._operation("SetAngularLock", [bool(x), bool(y), bool(z)])
+
+
+class _NativeEditorSceneProxy:
+    def __init__(self, route, name, actor_payloads):
+        self.route = str(route or "")
+        self.name = str(name or self.route)
+        self._actors = [_NativeEditorActorProxy(self, item) for item in actor_payloads if isinstance(item, dict)]
+
+    def get_actors(self): return list(self._actors)
+    def find_actor(self, name):
+        matches = [actor for actor in self._actors if _actor_matches(actor, name) or actor.actor_guid == str(name) or str(actor.handle) == str(name)]
+        return matches[0] if len(matches) == 1 else None
+    def find_actor_by_route(self, route): return self.find_actor(route)
+    def refresh(self):
+        payload, _errors = _native_scene_snapshot(self.route)
+        if payload is None:
+            return False
+        actor_payloads = payload.get("actors") if isinstance(payload.get("actors"), list) else []
+        self.name = str(payload.get("scene_name") or payload.get("name") or self.name)
+        self._actors = [_NativeEditorActorProxy(self, item) for item in actor_payloads if isinstance(item, dict)]
+        return True
+
+
+def resolve_runtime_target(target_type="actor", scene_name="", actor_name=""):
+    normalized_type = "actor" if str(target_type or "actor").lower() == "model" else str(target_type or "actor").lower()
+    base_diag = {
+        "requested_scene": scene_name or "", "requested_actor": actor_name or "",
+        "python_scenes": [], "native_scene": "", "actor_candidates": [], "binding_mode": "",
+    }
+    if normalized_type == "project":
+        return {"status": "ok", "target_type": "project", "scene_name": "", "actor_name": "", **base_diag}
+    if normalized_type != "actor":
+        return {"status": "error", "message": f"\u4e0d\u652f\u6301\u7684\u8fd0\u884c\u76ee\u6807\u7c7b\u578b: {target_type}", **base_diag}
+    if not actor_name:
+        return {"status": "error", "message": "\u8fd0\u884c\u8282\u70b9\u56fe\u524d\u5fc5\u987b\u9009\u62e9\u4e00\u4e2a\u7269\u4f53", **base_diag}
+
+    scenes = {}
+    try:
+        from CoronaCore.core.managers import scene_manager
+        scenes = scene_manager.get_all() or {}
+    except Exception as exc:
+        base_diag["python_scene_error"] = str(exc)
+    base_diag["python_scenes"] = [str(getattr(scene, "route", key) or key) for key, scene in scenes.items()]
+    selected_scene = None
+    selected_key = ""
+    try:
+        from CoronaCore.core.managers import scene_manager
+        selected_scene = scene_manager.get(scene_name) if scene_name else None
+        selected_key = scene_name if selected_scene is not None else ""
+    except Exception:
+        pass
+    if selected_scene is None and scene_name:
+        matched_scenes = [(key, scene) for key, scene in scenes.items() if _scene_matches(key, scene, scene_name)]
+        if len(matched_scenes) == 1:
+            selected_key, selected_scene = matched_scenes[0]
+        elif len(matched_scenes) > 1:
+            names = [str(getattr(scene, "route", key) or key) for key, scene in matched_scenes]
+            return {"status": "error", "message": f"\u573a\u666f\u6807\u8bc6\u300c{scene_name}\u300d\u5339\u914d\u5230\u591a\u4e2a Python \u573a\u666f: {', '.join(names)}", **base_diag}
+
+    def actors_in(scene):
+        try: return list(scene.get_actors())
+        except Exception: return list(getattr(scene, "_actors", []) or [])
+
+    if selected_scene is not None:
+        matches = [candidate for candidate in actors_in(selected_scene) if _actor_matches(candidate, actor_name)]
+        if len(matches) > 1:
+            base_diag["actor_candidates"] = [str(getattr(item, "name", actor_name)) for item in matches]
+            return {"status": "error", "message": f"\u573a\u666f\u300c{scene_name}\u300d\u4e2d\u5b58\u5728\u591a\u4e2a\u5339\u914d\u7269\u4f53\u300c{actor_name}\u300d", **base_diag}
+        actor = matches[0] if matches else None
+        if actor is None and hasattr(selected_scene, "find_actor"): actor = selected_scene.find_actor(actor_name)
+        if actor is None and hasattr(selected_scene, "find_actor_by_route"): actor = selected_scene.find_actor_by_route(actor_name)
+        if actor is not None:
+            route = str(getattr(selected_scene, "route", selected_key or scene_name) or selected_key or scene_name)
+            return {"status": "ok", "target_type": "actor", "scene_name": route,
+                    "actor_name": str(getattr(actor, "name", actor_name) or actor_name),
+                    "scene": selected_scene, "actor": actor, **base_diag, "binding_mode": "python_scene"}
+
+    cross_matches = []
+    for key, scene in scenes.items():
+        for actor in actors_in(scene):
+            if _actor_matches(actor, actor_name): cross_matches.append((key, scene, actor))
+    if len(cross_matches) == 1:
+        key, scene, actor = cross_matches[0]
+        return {"status": "ok", "target_type": "actor", "scene_name": str(getattr(scene, "route", key) or key),
+                "actor_name": str(getattr(actor, "name", actor_name) or actor_name),
+                "scene": scene, "actor": actor, **base_diag, "binding_mode": "python_scene"}
+    if len(cross_matches) > 1:
+        base_diag["actor_candidates"] = [f"{getattr(scene, 'name', key)}/{getattr(actor, 'name', actor_name)}" for key, scene, actor in cross_matches]
+        return {"status": "error", "message": f"\u7269\u4f53\u300c{actor_name}\u300d\u5728\u591a\u4e2a Python \u573a\u666f\u4e2d\u5b58\u5728\uff0c\u8bf7\u6307\u5b9a\u51c6\u786e\u573a\u666f", **base_diag}
+
+    native_payload, native_errors = _native_scene_snapshot(scene_name)
+    if native_payload is not None:
+        native_route = str(native_payload.get("scene") or native_payload.get("scene_id") or native_payload.get("id") or scene_name or "")
+        native_name = str(native_payload.get("scene_name") or native_payload.get("name") or native_route)
+        base_diag["native_scene"] = native_route or native_name
+        actor_payloads = native_payload.get("actors") if isinstance(native_payload.get("actors"), list) else []
+        matches = [item for item in actor_payloads if _native_actor_matches(item, actor_name)]
+        base_diag["actor_candidates"] = [str(item.get("name") or item.get("route") or "") for item in matches]
+        if scene_name and not _native_scene_matches(native_payload, scene_name):
+            return {"status": "error", "message": f"\u539f\u751f\u573a\u666f\u8fd4\u56de\u300c{native_route or native_name}\u300d\uff0c\u4e0e\u8bf7\u6c42\u573a\u666f\u300c{scene_name}\u300d\u4e0d\u4e00\u81f4", **base_diag}
+        if len(matches) == 1:
+            scene_proxy = _NativeEditorSceneProxy(native_route, native_name, actor_payloads)
+            actor_proxy = scene_proxy.find_actor(matches[0].get("actor_guid") or matches[0].get("handle") or matches[0].get("name"))
+            return {"status": "ok", "target_type": "actor", "scene_name": native_route,
+                    "actor_name": actor_proxy.name, "scene": scene_proxy, "actor": actor_proxy,
+                    **base_diag, "binding_mode": "native_editor"}
+        if len(matches) > 1:
+            return {"status": "error", "message": f"\u539f\u751f\u573a\u666f\u300c{native_name}\u300d\u4e2d\u5b58\u5728\u591a\u4e2a\u5339\u914d\u7269\u4f53\u300c{actor_name}\u300d", **base_diag}
+        return {"status": "error", "message": f"\u539f\u751f\u573a\u666f\u300c{native_name}\u300d\u4e2d\u672a\u627e\u5230\u7269\u4f53\u300c{actor_name}\u300d", **base_diag}
+
+    if native_errors:
+        base_diag["native_errors"] = native_errors
+    if selected_scene is None:
+        return {"status": "error", "message": f"\u672a\u627e\u5230\u573a\u666f\u300c{scene_name}\u300d\uff0c\u4e5f\u672a\u5728 Python \u6216\u539f\u751f\u7f16\u8f91\u573a\u666f\u4e2d\u627e\u5230\u7269\u4f53\u300c{actor_name}\u300d", **base_diag}
+    return {"status": "error", "message": f"\u573a\u666f\u300c{scene_name}\u300d\u4e2d\u672a\u627e\u5230\u7269\u4f53\u300c{actor_name}\u300d", **base_diag}
+
+
+def capture_runtime_scene_state(scene_name="", scene=None, binding_mode=""):
+    """Capture the current scene for single node-graph execution restoration."""
+    scene = scene or _runtime_scene()
+    if binding_mode == "native_editor" or isinstance(scene, _NativeEditorSceneProxy):
+        route = str(getattr(scene, "route", "") or scene_name or "")
+        payload, errors = _native_scene_snapshot(route)
+        if payload is None:
+            raise RuntimeError("\u65e0\u6cd5\u8bfb\u53d6\u539f\u751f\u573a\u666f\u5feb\u7167" + (f": {'; '.join(errors)}" if errors else ""))
+        return {"binding_mode": "native_editor", "scene_name": route, "payload": payload}
+
+    if scene is None:
+        raise RuntimeError(f"\u672a\u627e\u5230\u53ef\u6062\u590d\u7684 Python \u573a\u666f\u300c{scene_name}\u300d")
+    actors = []
+    for actor in _iter_scene_actors(scene):
+        actors.append({
+            "name": _object_name(actor),
+            "route": str(getattr(actor, "route", "") or ""),
+            "actor_type": str(getattr(actor, "actor_type", "model") or "model"),
+            "geometry": {
+                "position": list(getattr(actor, "get_position", lambda: [0, 0, 0])()),
+                "rotation": list(getattr(actor, "get_rotation", lambda: [0, 0, 0])()),
+                "scale": list(getattr(actor, "get_scale", lambda: [1, 1, 1])()),
+            },
+            "visible": getattr(actor, "get_visible", lambda: True)(),
+            "collision": getattr(actor, "get_collision_enabled", lambda: True)(),
+            "mechanics": {
+                "mass": getattr(actor, "get_mass", lambda: 1.0)(),
+                "restitution": getattr(actor, "get_restitution", lambda: 0.0)(),
+                "damping": getattr(actor, "get_damping", lambda: 0.0)(),
+                "physics_enabled": getattr(actor, "get_physics_enabled", lambda: False)(),
+            },
+        })
+    return {
+        "binding_mode": "python_scene",
+        "scene_name": str(getattr(scene, "route", "") or scene_name or ""),
+        "scene": scene,
+        "payload": {"actors": actors},
+    }
+
+
+def _snapshot_actor_key(data):
+    guid = str((data or {}).get("actor_guid") or "").strip()
+    if guid:
+        return "guid:" + guid.casefold()
+    return "name:" + _target_token((data or {}).get("name") or (data or {}).get("route") or "")
+
+
+def _native_restore_operation(scene_route, actor_name, operation, values):
+    from CoronaCore.core.editor_api import CoronaEditorApi
+    return CoronaEditorApi.scene_datas.actor_operation(scene_route, actor_name, operation, list(values))
+
+
+def _restore_native_actor_state(scene_route, actor_data):
+    from CoronaCore.core.corona_editor import CoronaEditor
+    actor_name = str(actor_data.get("name") or actor_data.get("route") or "")
+    if not actor_name:
+        raise RuntimeError("\u573a\u666f\u5feb\u7167\u4e2d\u7684\u7269\u4f53\u7f3a\u5c11\u540d\u79f0")
+    engine = CoronaEditor.CoronaEngine
+    geometry = actor_data.get("geometry") if isinstance(actor_data.get("geometry"), dict) else {}
+    setter = getattr(engine, "set_editor_actor_transform", None) if engine is not None else None
+    if not callable(setter):
+        raise RuntimeError("native set_editor_actor_transform is unavailable")
+    transform = {key: list(geometry[key]) for key in ("position", "rotation", "scale") if isinstance(geometry.get(key), (list, tuple))}
+    if transform:
+        result = _native_payload(setter(scene_route, actor_name, _json.dumps(transform, ensure_ascii=False)))
+        if result is None:
+            raise RuntimeError(f"\u6062\u590d\u7269\u4f53\u300c{actor_name}\u300d\u7684\u53d8\u6362\u5931\u8d25")
+    _native_restore_operation(scene_route, actor_name, "SetVisible", [bool(actor_data.get("visible", True))])
+    _native_restore_operation(scene_route, actor_name, "SetCollision", [bool(actor_data.get("collision", True))])
+    mechanics = actor_data.get("mechanics") if isinstance(actor_data.get("mechanics"), dict) else {}
+    if "mass" in mechanics:
+        _native_restore_operation(scene_route, actor_name, "SetMass", [mechanics.get("mass")])
+    if "restitution" in mechanics:
+        _native_restore_operation(scene_route, actor_name, "SetRestitution", [mechanics.get("restitution")])
+    if "damping" in mechanics:
+        _native_restore_operation(scene_route, actor_name, "SetDamping", [mechanics.get("damping")])
+    if "physics_enabled" in mechanics:
+        _native_restore_operation(scene_route, actor_name, "SetPhysicsEnabled", [bool(mechanics.get("physics_enabled"))])
+    linear = mechanics.get("linear_lock")
+    if isinstance(linear, (list, tuple)) and len(linear) >= 3:
+        _native_restore_operation(scene_route, actor_name, "SetLinearLock", [bool(linear[0]), bool(linear[1]), bool(linear[2])])
+    angular = mechanics.get("angular_lock")
+    if isinstance(angular, (list, tuple)) and len(angular) >= 3:
+        _native_restore_operation(scene_route, actor_name, "SetAngularLock", [bool(angular[0]), bool(angular[1]), bool(angular[2])])
+
+
+def _clear_scene_runtime_state(scene_name):
+    requested = _target_variants(scene_name)
+    with _context_lock:
+        cache_maps = (_scene_virtual_objects, _scene_deleted_objects, _scene_object_tags)
+        for cache in cache_maps:
+            for key in list(cache):
+                if key == "__default__" and not requested:
+                    cache.pop(key, None)
+                elif _target_variants(key) & requested:
+                    cache.pop(key, None)
+        for ctx in list(_contexts.values()):
+            if _target_variants(ctx.scene_name) & _target_variants(scene_name):
+                ctx.virtual_objects.clear()
+                ctx.deleted_objects.clear()
+                ctx.object_tags.clear()
+                globals().get('_velocity_cache', {}).pop(ctx.context_id, None)
+                globals().get('_raycast_cache', {}).pop(ctx.context_id, None)
+
+
+def restore_runtime_scene_state(snapshot):
+    if not isinstance(snapshot, dict):
+        raise RuntimeError("\u65e0\u6548\u7684\u573a\u666f\u6062\u590d\u5feb\u7167")
+    mode = snapshot.get("binding_mode")
+    scene_route = str(snapshot.get("scene_name") or "")
+    payload = snapshot.get("payload") if isinstance(snapshot.get("payload"), dict) else {}
+    original = [item for item in payload.get("actors", []) if isinstance(item, dict)]
+
+    if mode == "native_editor":
+        from CoronaCore.core.corona_editor import CoronaEditor
+        engine = CoronaEditor.CoronaEngine
+        current_payload, errors = _native_scene_snapshot(scene_route)
+        if current_payload is None:
+            raise RuntimeError("\u505c\u6b62\u65f6\u65e0\u6cd5\u8bfb\u53d6\u5f53\u524d\u539f\u751f\u573a\u666f" + (f": {'; '.join(errors)}" if errors else ""))
+        current = [item for item in current_payload.get("actors", []) if isinstance(item, dict)]
+        original_map = {_snapshot_actor_key(item): item for item in original}
+        current_map = {_snapshot_actor_key(item): item for item in current}
+
+        remover = getattr(engine, "remove_editor_actor", None) if engine is not None else None
+        creator = getattr(engine, "create_editor_actor", None) if engine is not None else None
+        if not callable(remover) or not callable(creator):
+            raise RuntimeError("\u539f\u751f\u573a\u666f\u7f3a\u5c11\u521b\u5efa\u6216\u5220\u9664\u7269\u4f53\u63a5\u53e3")
+
+        for key, item in current_map.items():
+            if key in original_map:
+                continue
+            actor_name = str(item.get("name") or item.get("route") or "")
+            result = _native_payload(remover(scene_route, actor_name))
+            if result is None:
+                raise RuntimeError(f"\u6062\u590d\u573a\u666f\u65f6\u5220\u9664\u65b0\u589e\u7269\u4f53\u300c{actor_name}\u300d\u5931\u8d25")
+
+        for key, item in original_map.items():
+            if key in current_map:
+                continue
+            route = str(item.get("route") or item.get("path") or item.get("model") or "")
+            actor_type = str(item.get("actor_type") or "model")
+            actor_name = str(item.get("name") or _Path(route).stem or "actor")
+            actor_data = dict(item)
+            actor_data.update(actor_name=actor_name, name=actor_name, skip_if_exists=False)
+            result = _native_payload(creator(
+                scene_route, route, actor_type, _json.dumps(actor_data, ensure_ascii=False)
+            ))
+            if result is None:
+                raise RuntimeError(f"\u6062\u590d\u573a\u666f\u65f6\u91cd\u5efa\u539f\u59cb\u7269\u4f53\u300c{actor_name}\u300d\u5931\u8d25")
+
+        refreshed, errors = _native_scene_snapshot(scene_route)
+        if refreshed is None:
+            raise RuntimeError("\u91cd\u5efa\u7269\u4f53\u540e\u65e0\u6cd5\u5237\u65b0\u539f\u751f\u573a\u666f\u5feb\u7167" + (f": {'; '.join(errors)}" if errors else ""))
+        available_names = {str(item.get("name") or "").casefold() for item in refreshed.get("actors", []) if isinstance(item, dict)}
+        for item in original:
+            actor_name = str(item.get("name") or item.get("route") or "")
+            if actor_name.casefold() not in available_names:
+                raise RuntimeError(f"\u6062\u590d\u540e\u4ecd\u672a\u627e\u5230\u7269\u4f53\u300c{actor_name}\u300d")
+            _restore_native_actor_state(scene_route, item)
+
+        _clear_scene_runtime_state(scene_route)
+        try:
+            CoronaEditor.emit_editor_event("scene-tree-changed", [scene_route])
+            if CoronaEditor._selected_scene == scene_route and CoronaEditor._selected_actor:
+                CoronaEditor.emit_editor_event("actor-change", ["actor", scene_route, CoronaEditor._selected_actor])
+        except Exception:
+            _logger.debug("[ScratchWrapper] failed to notify restored native scene", exc_info=True)
+        return True
+
+    scene = snapshot.get("scene")
+    if scene is None:
+        raise RuntimeError("Python \u573a\u666f\u6062\u590d\u5feb\u7167\u5df2\u5931\u6548")
+    original_names = {_target_token(item.get("name")): item for item in original}
+    for actor in list(_iter_scene_actors(scene)):
+        name = _object_name(actor)
+        if _target_token(name) not in original_names:
+            remover = getattr(scene, "remove_actor", None)
+            if callable(remover):
+                remover(name)
+    for name_key, item in original_names.items():
+        actor = scene.find_actor(item.get("name")) if hasattr(scene, "find_actor") else None
+        if actor is None:
+            created = _try_native_spawn(scene, item.get("route"), item.get("name"), item.get("geometry", {}).get("position", [0, 0, 0]))
+            actor = created
+        if actor is None:
+            raise RuntimeError(f"\u65e0\u6cd5\u5728 Python \u573a\u666f\u4e2d\u91cd\u5efa\u7269\u4f53\u300c{item.get('name')}\u300d")
+        geometry = item.get("geometry") or {}
+        for method_name, key in (("set_position", "position"), ("set_rotation", "rotation"), ("set_scale", "scale")):
+            method = getattr(actor, method_name, None)
+            if callable(method) and key in geometry:
+                method(geometry[key])
+        if hasattr(actor, "set_visible"):
+            actor.set_visible(item.get("visible", True))
+    _clear_scene_runtime_state(scene_route)
+    return True
+
+
 def _init_engine():
     ctx = _current_context()
     if ctx.initialized:
+        if ctx.binding_error:
+            raise RuntimeError(ctx.binding_error)
         return
     ctx.initialized = True
     if ctx.target_type == "project":
         return
     if ctx.external_target:
         _init_external_target(ctx)
+        if ctx.binding_error:
+            raise RuntimeError(ctx.binding_error)
     else:
         _init_internal_actor(ctx)
 
 
 def _init_external_target(ctx: ScratchRuntimeContext):
     try:
-        from CoronaCore.core.managers import scene_manager
-
-        ctx.target_scene = scene_manager.get(ctx.target_scene_name)
-        if ctx.target_scene is None:
-            _logger.warning("[ScratchWrapper] scene not found, fallback internal: %s", ctx.target_scene_name)
-            _init_internal_actor(ctx)
+        resolved = resolve_runtime_target(ctx.target_type, ctx.target_scene_name, ctx.target_actor_name)
+        if resolved.get("status") != "ok":
+            ctx.binding_error = str(resolved.get("message") or "\u65e0\u6cd5\u7ed1\u5b9a\u8fd0\u884c\u76ee\u6807")
             return
 
-        ctx.target_actor = ctx.target_scene.find_actor(ctx.target_actor_name)
-        if ctx.target_actor is None:
-            _logger.warning("[ScratchWrapper] actor not found, fallback internal: %s", ctx.target_actor_name)
-            _init_internal_actor(ctx)
-            return
-
+        ctx.target_type = resolved["target_type"]
+        ctx.scene_name = resolved["scene_name"]
+        ctx.actor_name = resolved["actor_name"]
+        ctx.target_scene_name = resolved["scene_name"]
+        ctx.target_actor_name = resolved["actor_name"]
+        ctx.target_scene = resolved.get("scene")
+        ctx.target_actor = resolved.get("actor")
+        ctx.binding_error = ""
         ctx.actor = ctx.target_actor
         ctx.scene = ctx.target_scene
         ctx.geometry = getattr(ctx.target_actor, "_geometry", None)
@@ -360,8 +870,8 @@ def _init_external_target(ctx: ScratchRuntimeContext):
         except Exception:
             pass
     except Exception as exc:
+        ctx.binding_error = f"\u7ed1\u5b9a\u7269\u4f53\u5931\u8d25: {exc}"
         _logger.exception("[ScratchWrapper] bind actor failed: %s", exc)
-        _init_internal_actor(ctx)
 
 
 def _init_internal_actor(ctx: ScratchRuntimeContext):
@@ -376,36 +886,54 @@ def _init_internal_actor(ctx: ScratchRuntimeContext):
 def _sync_position():
     ctx = _current_context()
     check_stop()
+    failures = []
+    attempted = False
     with _engine_lock:
-        if ctx.geometry is not None:
+        if ctx.geometry is not None and hasattr(ctx.geometry, "set_position"):
+            attempted = True
             try:
                 ctx.geometry.set_position([ctx.x, ctx.y, ctx.z])
-                return
+                return True
             except Exception as exc:
-                _logger.debug("_sync_position geometry failed: %s", exc)
+                failures.append(f"geometry.set_position: {exc}")
         if ctx.actor is not None and hasattr(ctx.actor, "set_position"):
+            attempted = True
             try:
                 ctx.actor.set_position([ctx.x, ctx.y, ctx.z])
+                return True
             except Exception as exc:
-                _logger.debug("_sync_position actor failed: %s", exc)
+                failures.append(f"actor.set_position: {exc}")
+    if ctx.external_target:
+        detail = "; ".join(failures) if failures else "target exposes no set_position interface"
+        raise RuntimeError(f"Failed to move bound Actor '{ctx.actor_name}': {detail}")
+    return not attempted
 
 
 def _sync_scale():
     ctx = _current_context()
     check_stop()
     scale = ctx.size_val / 100.0
+    failures = []
+    attempted = False
     with _engine_lock:
-        if ctx.geometry is not None:
+        if ctx.geometry is not None and hasattr(ctx.geometry, "set_scale"):
+            attempted = True
             try:
                 ctx.geometry.set_scale([scale, scale, scale])
-                return
+                return True
             except Exception as exc:
-                _logger.debug("_sync_scale geometry failed: %s", exc)
+                failures.append(f"geometry.set_scale: {exc}")
         if ctx.actor is not None and hasattr(ctx.actor, "set_scale"):
+            attempted = True
             try:
                 ctx.actor.set_scale([scale, scale, scale])
+                return True
             except Exception as exc:
-                _logger.debug("_sync_scale actor failed: %s", exc)
+                failures.append(f"actor.set_scale: {exc}")
+    if ctx.external_target:
+        detail = "; ".join(failures) if failures else "target exposes no set_scale interface"
+        raise RuntimeError(f"Failed to scale bound Actor '{ctx.actor_name}': {detail}")
+    return not attempted
 
 
 def _apply_rotation():
@@ -413,6 +941,9 @@ def _apply_rotation():
     check_stop()
     rot = [ctx.rot_x, ctx.rot_y, ctx.rot_z]
     mech_was_enabled = False
+    failures = []
+    attempted = False
+    success = False
     with _engine_lock:
         if ctx.mechanics is not None and hasattr(ctx.mechanics, "set_physics_enabled"):
             try:
@@ -427,15 +958,24 @@ def _apply_rotation():
             (ctx.actor, "set_rotation"),
         ):
             if target is not None and hasattr(target, method):
+                attempted = True
                 try:
                     getattr(target, method)(rot)
+                    success = True
+                    break
                 except Exception as exc:
-                    _logger.debug("_apply_rotation %s failed: %s", method, exc)
+                    failures.append(f"{type(target).__name__}.{method}: {exc}")
         if mech_was_enabled and ctx.mechanics is not None:
             try:
                 ctx.mechanics.set_physics_enabled(True)
             except Exception:
                 pass
+    if success:
+        return True
+    if ctx.external_target:
+        detail = "; ".join(failures) if failures else "target exposes no set_rotation interface"
+        raise RuntimeError(f"Failed to rotate bound Actor '{ctx.actor_name}': {detail}")
+    return not attempted
 
 
 # Engine / motion
@@ -1341,6 +1881,8 @@ def _resolve_actor(name):
     if scene is not None and hasattr(scene, 'find_actor'):
         try:
             actor = scene.find_actor(target)
+            if actor is None and isinstance(scene, _NativeEditorSceneProxy) and scene.refresh():
+                actor = scene.find_actor(target)
             if actor is not None:
                 return None if _is_actor_deleted(actor, target) else actor
         except Exception:
@@ -1653,10 +2195,10 @@ def _unique_object_name(base):
         index += 1
 
 
-def _try_native_spawn(scene, template, name, pos):
+def _try_native_spawn(scene, template, name, pos, template_actor=None):
     if scene is None:
         return None
-    template_actor = _resolve_actor(template)
+    template_actor = template_actor or _resolve_actor(template)
 
     # First use any explicit Python scene factory exposed by the runtime.
     method_names = ('spawn_actor', 'create_actor', 'clone_actor', 'instantiate_actor', 'spawn', 'create', 'clone')
@@ -1712,16 +2254,37 @@ def _try_native_spawn(scene, template, name, pos):
             _json.dumps(actor_data, ensure_ascii=False),
         )
         result = _json.loads(raw) if isinstance(raw, str) else raw
-        if isinstance(result, dict) and result.get('status') not in ('success', 'ok'):
+        if isinstance(result, dict) and result.get("status") == "error":
             _logger.warning("[ScratchWrapper] native spawn rejected %s: %r", name, result)
             return None
         if hasattr(scene, '_notify_scene_tree_changed'):
             scene._notify_scene_tree_changed()
+        result_actor = result.get("actor") if isinstance(result, dict) and isinstance(result.get("actor"), dict) else None
+        if isinstance(scene, _NativeEditorSceneProxy):
+            scene.refresh()
         resolved = scene.find_actor(name) if hasattr(scene, 'find_actor') else None
         if resolved is not None:
             return resolved
-        # Native object is visible, while this proxy keeps Blockly collision/tag logic usable
-        # until the Python scene cache refreshes.
+        if isinstance(scene, _NativeEditorSceneProxy):
+            # Native creation succeeded even if the refreshed tree has not propagated yet.
+            source = template_actor.to_dict() if template_actor is not None and hasattr(template_actor, "to_dict") else {}
+            proxy_data = dict(source)
+            # A clone must never inherit the template's native identity.  The
+            # create result may provide the new GUID/handle; otherwise leave
+            # them empty until the next native scene refresh supplies them.
+            proxy_data.pop("actor_guid", None)
+            proxy_data.pop("handle", None)
+            if result_actor:
+                proxy_data.update(result_actor)
+            proxy_data.update(name=name, actor_name=name, route=route, actor_type=actor_type)
+            geometry = dict(proxy_data.get("geometry") or {})
+            geometry["position"] = list(pos)
+            proxy_data["geometry"] = geometry
+            proxy = _NativeEditorActorProxy(scene, proxy_data)
+            if not any(_object_name(item).casefold() == name.casefold() for item in scene.get_actors()):
+                scene._actors.append(proxy)
+            return proxy
+        # Python scene fallback keeps generated objects usable when native scene sync is unavailable.
         proxy = _VirtualActor(name, pos, template=route)
         setattr(proxy, 'native_created', True)
         return proxy
@@ -1880,6 +2443,31 @@ def countdown_finished():
     return bool(end_time > 0 and countdown_left() <= 0.0)
 
 
+def node_graph_enter(node_id, node_name=""):
+    ctx = _current_context()
+    ctx.current_node_id = str(node_id or "")
+    ctx.current_node_name = str(node_name or "")
+    ctx.waiting_edge_id = ""
+    ctx.waiting_edge_name = ""
+    return True
+
+
+def node_graph_waiting(edge_id="", edge_name=""):
+    ctx = _current_context()
+    ctx.waiting_edge_id = str(edge_id or "")
+    ctx.waiting_edge_name = str(edge_name or "")
+    return True
+
+
+def runtime_context_snapshot(context_id):
+    with _context_lock:
+        ctx = _contexts.get(str(context_id or ""))
+        completed = _completed_state_snapshots.get(str(context_id or ""))
+    if ctx is not None:
+        return runtime_state_snapshot(ctx)
+    return dict(completed) if completed else None
+
+
 def runtime_state_snapshot(ctx=None):
     ctx = ctx or _current_context()
     end_time = _safe_float(ctx.countdown_end_time, 0.0)
@@ -1905,6 +2493,11 @@ def runtime_state_snapshot(ctx=None):
         'variables': variables,
         'lists': lists,
         'mouse_locked': bool(ctx.mouse_locked),
+        'binding_error': ctx.binding_error,
+        'current_node_id': ctx.current_node_id,
+        'current_node_name': ctx.current_node_name,
+        'waiting_edge_id': ctx.waiting_edge_id,
+        'waiting_edge_name': ctx.waiting_edge_name,
     }
 
 
@@ -2182,42 +2775,100 @@ def cloneStart():
     return bool(_current_context().current_clone_name)
 
 
-def _run_clone_context(child, handler):
+def _run_clone_context(child, handler, parent_context_id):
     try:
         _run_bound_handler(child, handler, 'clone')
     finally:
         release_context(child)
+        current = _threading.current_thread()
+        with _context_lock:
+            threads = _clone_threads.get(parent_context_id, [])
+            _clone_threads[parent_context_id] = [thread for thread in threads if thread is not current]
+            if not _clone_threads[parent_context_id]:
+                _clone_threads.pop(parent_context_id, None)
 
 
 def clone(name):
     parent = _current_context()
-    template = str(name or '').strip() or parent.actor_name
+    template = str(name or "").strip() or str(parent.actor_name or "").strip()
+    if not template:
+        raise RuntimeError("\u514b\u9686\u5931\u8d25\uff1a\u8bf7\u8f93\u5165\u6a21\u677f\u7269\u4f53\u540d\u79f0")
+
+    scene = _runtime_scene()
+    native_scene = isinstance(scene, _NativeEditorSceneProxy)
     template_actor = _resolve_actor(template)
-    pos = _actor_position(template_actor or _current_actor()) or [parent.x, parent.y, parent.z]
-    clone_name = _unique_object_name(f"{_object_name(template_actor) or template or 'clone'}_clone")
-    created_name = object_spawn(template, clone_name, pos[0], pos[1], pos[2])
+    if native_scene:
+        scene.refresh()
+        candidates = [actor for actor in scene.get_actors() if _actor_matches(actor, template)]
+        if len(candidates) > 1:
+            names = ", ".join(_object_name(actor) for actor in candidates)
+            raise RuntimeError(
+                f"\u514b\u9686\u5931\u8d25\uff1a\u6a21\u677f\u300c{template}\u300d\u5339\u914d\u5230\u591a\u4e2a\u7269\u4f53\uff1a{names}"
+            )
+        template_actor = candidates[0] if candidates else None
+        if template_actor is None:
+            scene_name = getattr(scene, "route", "") or parent.scene_name or "(\u672a\u77e5\u573a\u666f)"
+            raise RuntimeError(
+                f"\u514b\u9686\u5931\u8d25\uff1a\u573a\u666f\u300c{scene_name}\u300d\u4e2d\u672a\u627e\u5230\u6a21\u677f\u7269\u4f53\u300c{template}\u300d"
+            )
+
+    pos = _actor_position(template_actor) if template_actor is not None else None
+    pos = pos or [parent.x, parent.y, parent.z]
+    template_name = _object_name(template_actor) if template_actor is not None else template
+    template_name = template_name or template
+    clone_name = _unique_object_name(f"{template_name}_clone")
+
+    if native_scene:
+        source = template_actor.to_dict() if hasattr(template_actor, "to_dict") else {}
+        template_route = str(
+            source.get("route") or source.get("path") or source.get("model") or ""
+        ).strip()
+        if not template_route:
+            raise RuntimeError(
+                f"\u514b\u9686\u5931\u8d25\uff1a\u5df2\u627e\u5230\u300c{template_name}\u300d\uff0c\u4f46\u8d44\u6e90\u8def\u5f84\u4e3a\u7a7a"
+            )
+        created_actor = _try_native_spawn(
+            scene, template_route, clone_name, pos, template_actor=template_actor
+        )
+        if created_actor is None or isinstance(created_actor, _VirtualActor):
+            raise RuntimeError(
+                f"\u514b\u9686\u5931\u8d25\uff1a\u5df2\u627e\u5230\u300c{template_name}\u300d\uff0c\u4f46\u539f\u751f\u5bf9\u8c61\u521b\u5efa\u5931\u8d25\uff0c\u8d44\u6e90\u8def\u5f84\u4e3a\u300c{template_route}\u300d"
+            )
+        created_name = _object_name(created_actor) or clone_name
+    else:
+        template_route = str(
+            getattr(template_actor, "route", "") or getattr(template_actor, "path", "") or template
+        ).strip()
+        created_name = object_spawn(template_route, clone_name, pos[0], pos[1], pos[2])
+
     handler = parent.clone_start_handler
     if callable(handler):
         child = create_context(
             context_id=f"{parent.context_id}:clone:{created_name}",
-            target_type='actor',
+            target_type="actor",
             scene_name=parent.scene_name,
             actor_name=created_name,
         )
         child.current_clone_name = created_name
-        actor = _resolve_actor(created_name)
+        if native_scene:
+            scene.refresh()
+        actor = scene.find_actor(created_name) if hasattr(scene, "find_actor") else _resolve_actor(created_name)
+        if actor is None and _object_name(created_actor).casefold() == created_name.casefold():
+            actor = created_actor
         if actor is not None:
             child.actor = actor
             child.target_actor = actor
-            child.scene = _runtime_scene()
+            child.scene = scene or _runtime_scene()
             child.target_scene = child.scene
             child.initialized = True
         thread = _threading.Thread(
             target=_run_clone_context,
-            args=(child, handler),
+            args=(child, handler, parent.context_id),
             daemon=True,
             name=f"scratch-clone-{created_name}",
         )
+        with _context_lock:
+            _clone_threads.setdefault(parent.context_id, []).append(thread)
         thread.start()
     return created_name
 
@@ -2512,10 +3163,21 @@ def reset_state():
 
 def request_stop(context_id: str | None = None):
     if context_id:
+        prefix = f"{context_id}:clone:"
         with _context_lock:
-            ctx = _contexts.get(context_id)
-        if ctx is not None:
+            matches = [
+                ctx for key, ctx in _contexts.items()
+                if key == context_id or key.startswith(prefix)
+            ]
+        for ctx in matches:
             ctx.stop_requested = True
+        with _context_lock:
+            clone_threads = list(_clone_threads.get(context_id, []))
+        for thread in clone_threads:
+            if thread is not _threading.current_thread():
+                thread.join(timeout=0.5)
+        with _context_lock:
+            _clone_threads.pop(context_id, None)
         return
 
     ctx = getattr(_tls, "ctx", None)

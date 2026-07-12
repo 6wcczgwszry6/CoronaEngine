@@ -91,8 +91,8 @@ export const defineControlGenerators = () => {
   };
 
   pythonGenerator.forBlock['control_clone'] = function (block) {
-    const x = block.getFieldValue('x');
-    return `CoronaEngine.clone("${x}")\n`;
+    const x = String(block.getFieldValue('x') || '');
+    return `CoronaEngine.clone(${JSON.stringify(x)})\n`;
   };
 
   pythonGenerator.forBlock['control_cloneDEL'] = function () {

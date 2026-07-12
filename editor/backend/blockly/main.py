@@ -56,7 +56,36 @@ class ScratchTool:
 
     _exec_thread: Optional[threading.Thread] = None
     _exec_context_id: Optional[str] = None
-    _exec_lock = threading.Lock()
+    _exec_lock = threading.RLock()
+    _exec_state: dict[str, Any] = {
+        "status": "idle",
+        "outcome": "",
+        "error": "",
+        "contextId": "",
+        "sceneName": "",
+        "actorName": "",
+        "targetType": "",
+        "requestedScene": "",
+        "requestedActor": "",
+        "resolvedSceneName": "",
+        "resolvedActorName": "",
+        "bindingMode": "",
+        "pythonScenes": [],
+        "nativeScene": "",
+        "actorCandidates": [],
+        "currentNodeId": "",
+        "currentNodeName": "",
+        "waitingEdgeId": "",
+        "waitingEdgeName": "",
+        "startedAt": 0.0,
+        "finishedAt": 0.0,
+        "inputLocked": False,
+        "snapshotCaptured": False,
+        "restoreStatus": "idle",
+        "restoreError": "",
+    }
+    _exec_state_snapshot: Optional[dict[str, Any]] = None
+    _exec_input_locked = False
 
     _preview_lock = threading.RLock()
     _preview_threads: list[dict[str, Any]] = []
@@ -117,7 +146,8 @@ class ScratchTool:
 
     @staticmethod
     def _target_id(target_type: str, scene_name: str = "", actor_name: str = "") -> str:
-        if target_type == "project":
+        normalized_type = "actor" if target_type == "model" else target_type
+        if normalized_type == "project":
             return "project:global"
         return f"actor:{scene_name}:{actor_name}"
 
@@ -137,6 +167,7 @@ class ScratchTool:
 
     @staticmethod
     def _with_context_prelude(code: str, target_type: str, scene_name: str, actor_name: str) -> str:
+        target_type = "actor" if target_type == "model" else target_type
         prelude = "from CoronaCore.utils import corona_engine_scratch as _CE\n"
         if target_type == "project":
             prelude += "_CE.set_project_global()\n"
@@ -272,6 +303,62 @@ class ScratchTool:
     # Legacy single-code execution
     # ------------------------------------------------------------------
     @classmethod
+    def _replace_exec_state(cls, **updates) -> dict:
+        with cls._exec_lock:
+            cls._exec_state.update(updates)
+            return dict(cls._exec_state)
+
+    @classmethod
+    def _set_exec_input_locked(cls, locked: bool) -> None:
+        locked = bool(locked)
+        with cls._exec_lock:
+            cls._exec_input_locked = locked
+            cls._exec_state["inputLocked"] = locked
+        try:
+            CoronaEditor.set_editor_camera_input_enabled(not locked, reason="node_graph")
+        except Exception:
+            logger.debug("[ScratchTool] node graph editor camera input gate unavailable", exc_info=True)
+
+    @classmethod
+    def _capture_exec_snapshot(cls, resolved: dict[str, Any]) -> tuple[Optional[dict[str, Any]], str | None]:
+        try:
+            from CoronaCore.utils import corona_engine_scratch
+            snapshot = corona_engine_scratch.capture_runtime_scene_state(
+                resolved.get("scene_name", ""),
+                resolved.get("scene"),
+                resolved.get("binding_mode", ""),
+            )
+            return snapshot, None
+        except Exception as exc:
+            logger.exception("[ScratchTool] node graph state snapshot failed")
+            return None, str(exc)
+
+    @classmethod
+    def _restore_exec_snapshot(cls) -> tuple[bool, str | None]:
+        with cls._exec_lock:
+            snapshot = cls._exec_state_snapshot
+            cls._exec_state.update(restoreStatus="restoring", restoreError="")
+        if not snapshot:
+            error = "\u6ca1\u6709\u53ef\u7528\u4e8e\u6062\u590d\u7684\u8282\u70b9\u56fe\u8fd0\u884c\u5feb\u7167"
+            cls._replace_exec_state(restoreStatus="error", restoreError=error)
+            return False, error
+        try:
+            cancel_pending_auto_saves()
+            from CoronaCore.utils import corona_engine_scratch
+            corona_engine_scratch.restore_runtime_scene_state(snapshot)
+            with cls._exec_lock:
+                cls._exec_state_snapshot = None
+                cls._exec_state.update(
+                    snapshotCaptured=False, restoreStatus="restored", restoreError=""
+                )
+            return True, None
+        except Exception as exc:
+            logger.exception("[ScratchTool] node graph state restore failed")
+            error = str(exc)
+            cls._replace_exec_state(restoreStatus="error", restoreError=error)
+            return False, error
+
+    @classmethod
     def execute_python_code(
         cls,
         code: str,
@@ -281,6 +368,69 @@ class ScratchTool:
         target_type: str = "actor",
     ) -> dict:
         try:
+            from CoronaCore.utils import corona_engine_scratch
+
+            requested_scene = scene_name or ""
+            requested_actor = actor_name or ""
+            target_type = "actor" if str(target_type or "actor").lower() == "model" else str(target_type or "actor").lower()
+            resolved = corona_engine_scratch.resolve_runtime_target(target_type, scene_name, actor_name)
+            if resolved.get("status") != "ok":
+                message = str(resolved.get("message") or "\u65e0\u6cd5\u7ed1\u5b9a\u8fd0\u884c\u76ee\u6807")
+                cls._replace_exec_state(
+                    status="error",
+                    outcome="binding_error",
+                    error=message,
+                    contextId="",
+                    sceneName=scene_name or "",
+                    actorName=actor_name or "",
+                    targetType=target_type,
+                    requestedScene=requested_scene,
+                    requestedActor=requested_actor,
+                    resolvedSceneName="",
+                    resolvedActorName="",
+                    bindingMode=resolved.get("binding_mode", ""),
+                    pythonScenes=resolved.get("python_scenes", []),
+                    nativeScene=resolved.get("native_scene", ""),
+                    actorCandidates=resolved.get("actor_candidates", []),
+                    currentNodeId="",
+                    currentNodeName="",
+                    waitingEdgeId="",
+                    waitingEdgeName="",
+                    startedAt=time.time(),
+                    finishedAt=time.time(),
+                )
+                return {
+                    "status": "error", "message": message, "outcome": "binding_error",
+                    "requestedScene": requested_scene, "requestedActor": requested_actor,
+                    "pythonScenes": resolved.get("python_scenes", []),
+                    "nativeScene": resolved.get("native_scene", ""),
+                    "actorCandidates": resolved.get("actor_candidates", []),
+                    "bindingMode": resolved.get("binding_mode", ""),
+                }
+
+            target_type = resolved.get("target_type", target_type)
+            scene_name = resolved.get("scene_name", scene_name)
+            actor_name = resolved.get("actor_name", actor_name)
+
+            with cls._exec_lock:
+                if cls._exec_state_snapshot is not None:
+                    return {
+                        "status": "error",
+                        "message": "\u4e0a\u4e00\u6b21\u8282\u70b9\u56fe\u8fd0\u884c\u4ecd\u4fdd\u7559\u53ef\u6062\u590d\u5feb\u7167\uff0c\u8bf7\u5148\u505c\u6b62\u5e76\u6062\u590d\u6216\u91cd\u65b0\u52a0\u8f7d\u7f16\u8f91\u5668",
+                        "outcome": "snapshot_pending",
+                    }
+            state_snapshot, snapshot_error = cls._capture_exec_snapshot(resolved)
+            if state_snapshot is None:
+                message = f"\u65e0\u6cd5\u521b\u5efa\u8fd0\u884c\u524d\u573a\u666f\u5feb\u7167: {snapshot_error or '\u672a\u77e5\u9519\u8bef'}"
+                cls._replace_exec_state(
+                    status="error", outcome="snapshot_error", error=message,
+                    snapshotCaptured=False, restoreStatus="error", restoreError=message,
+                    finishedAt=time.time(),
+                )
+                return {"status": "error", "message": message, "outcome": "snapshot_error"}
+            with cls._exec_lock:
+                cls._exec_state_snapshot = state_snapshot
+
             filename = f"blockly_code{'_' + str(index) if index else ''}.py"
             filepath = cls.script_dir / filename
 
@@ -314,9 +464,38 @@ class ScratchTool:
                 _force_kill_thread(old_thread, timeout=0.5, context_id=old_context)
 
             context_id = cls._target_id(target_type, scene_name, actor_name)
+            started_at = time.time()
+            cls._replace_exec_state(
+                status="starting",
+                outcome="",
+                error="",
+                contextId=context_id,
+                sceneName=scene_name,
+                actorName=actor_name,
+                targetType=target_type,
+                requestedScene=requested_scene,
+                requestedActor=requested_actor,
+                resolvedSceneName=scene_name,
+                resolvedActorName=actor_name,
+                bindingMode=resolved.get("binding_mode", ""),
+                pythonScenes=resolved.get("python_scenes", []),
+                nativeScene=resolved.get("native_scene", ""),
+                actorCandidates=resolved.get("actor_candidates", []),
+                currentNodeId="",
+                currentNodeName="",
+                waitingEdgeId="",
+                waitingEdgeName="",
+                startedAt=started_at,
+                finishedAt=0.0,
+                inputLocked=True,
+                snapshotCaptured=True,
+                restoreStatus="idle",
+                restoreError="",
+            )
+            cls._set_exec_input_locked(True)
 
             def _run_in_thread():
-                cls._run_code_file(
+                outcome = cls._run_code_file(
                     filepath,
                     {
                         "id": context_id,
@@ -327,6 +506,18 @@ class ScratchTool:
                     single_exec=True,
                 )
                 with cls._exec_lock:
+                    current_status = cls._exec_state.get("status")
+                    if current_status not in ("error", "stopped"):
+                        final_status = "completed" if outcome == "completed" else "stopped" if outcome in ("stopped", "restart") else "error"
+                        cls._exec_state.update(
+                            status=final_status,
+                            outcome=outcome,
+                            finishedAt=time.time(),
+                        )
+                    if outcome in ("completed", "error"):
+                        cls._exec_state_snapshot = None
+                        cls._exec_state["snapshotCaptured"] = False
+                    cls._set_exec_input_locked(False)
                     if cls._exec_thread is threading.current_thread():
                         cls._exec_thread = None
                         cls._exec_context_id = None
@@ -338,13 +529,31 @@ class ScratchTool:
                 )
                 cls._exec_thread.start()
 
-            return {"status": "started", "filepath": str(filepath)}
+            return {
+                "status": "started",
+                "filepath": str(filepath),
+                "contextId": context_id,
+                "sceneName": scene_name,
+                "actorName": actor_name,
+                "targetType": target_type,
+                "requestedScene": requested_scene,
+                "requestedActor": requested_actor,
+                "resolvedSceneName": scene_name,
+                "resolvedActorName": actor_name,
+                "bindingMode": resolved.get("binding_mode", ""),
+            }
         except Exception as exc:
+            cls._set_exec_input_locked(False)
+            with cls._exec_lock:
+                cls._exec_state_snapshot = None
             logger.exception("[ScratchTool] execute_python_code failed")
+            cls._replace_exec_state(
+                status="error", outcome="startup_error", error=str(exc), finishedAt=time.time()
+            )
             return {"status": "error", "message": str(exc)}
 
     @classmethod
-    def stop_script_execution(cls) -> dict:
+    def stop_script_execution(cls, restore_state: bool = False) -> dict:
         thread_to_stop = None
         context_id = None
         with cls._exec_lock:
@@ -355,17 +564,61 @@ class ScratchTool:
         if thread_to_stop is not None:
             _force_kill_thread(thread_to_stop, timeout=0.5, context_id=context_id)
 
+        restored = False
+        restore_error = None
+        if bool(restore_state):
+            restored, restore_error = cls._restore_exec_snapshot()
+        else:
+            with cls._exec_lock:
+                cls._exec_state_snapshot = None
+                cls._exec_state.update(snapshotCaptured=False, restoreStatus="idle", restoreError="")
+
+        cls._set_exec_input_locked(False)
         with cls._exec_lock:
             cls._exec_thread = None
             cls._exec_context_id = None
-        return {"status": "stopped"}
+            cls._exec_state.update(
+                status="stopped",
+                outcome="stopped",
+                error="" if not restore_error else f"\u573a\u666f\u6062\u590d\u5931\u8d25: {restore_error}",
+                finishedAt=time.time(),
+                inputLocked=False,
+            )
+        result = {
+            "status": "stopped",
+            "restored": restored,
+            "snapshotCaptured": cls._exec_state_snapshot is not None,
+            "restoreStatus": cls._exec_state.get("restoreStatus", "idle"),
+        }
+        if restore_error:
+            result["restoreError"] = restore_error
+            result["message"] = f"\u5df2\u505c\u6b62\uff0c\u4f46\u573a\u666f\u6062\u590d\u5931\u8d25: {restore_error}"
+        return result
 
     @classmethod
     def get_script_status(cls) -> dict:
+        from CoronaCore.utils import corona_engine_scratch
+
         with cls._exec_lock:
-            if cls._exec_thread and cls._exec_thread.is_alive():
-                return {"status": "running"}
-        return {"status": "idle"}
+            state = dict(cls._exec_state)
+            state["inputLocked"] = bool(cls._exec_input_locked)
+            state["snapshotCaptured"] = cls._exec_state_snapshot is not None
+            context_id = cls._exec_context_id or state.get("contextId")
+            thread_alive = bool(cls._exec_thread and cls._exec_thread.is_alive())
+        snapshot = corona_engine_scratch.runtime_context_snapshot(context_id) if context_id else None
+        if snapshot:
+            state.update(
+                currentNodeId=snapshot.get("current_node_id", ""),
+                currentNodeName=snapshot.get("current_node_name", ""),
+                waitingEdgeId=snapshot.get("waiting_edge_id", ""),
+                waitingEdgeName=snapshot.get("waiting_edge_name", ""),
+            )
+            binding_error = snapshot.get("binding_error", "")
+            if binding_error and not state.get("error"):
+                state["error"] = binding_error
+        if thread_alive and state.get("status") not in ("starting", "running"):
+            state["status"] = "running"
+        return state
 
     # ------------------------------------------------------------------
     # Project preview
@@ -857,6 +1110,8 @@ class ScratchTool:
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
             spec.loader.exec_module(module)
+            if single_exec:
+                cls._replace_exec_state(status="running", outcome="", error="")
             if hasattr(module, "run"):
                 module.run()
             if corona_engine_scratch.has_runtime_handlers(ctx) and not ctx.stop_requested:
@@ -872,11 +1127,26 @@ class ScratchTool:
         except Exception as exc:
             outcome = "error"
             logger.exception("[ScratchTool] script failed: %s", context_id)
-            if not single_exec:
+            if single_exec:
+                cls._replace_exec_state(
+                    status="error",
+                    outcome="error",
+                    error=str(exc),
+                    finishedAt=time.time(),
+                )
+            else:
                 with cls._preview_lock:
                     cls._preview_errors.append(f"{context_id}: {exc}")
                     cls._preview_status = "error"
         finally:
+            snapshot = corona_engine_scratch.runtime_state_snapshot(ctx)
+            if single_exec:
+                cls._replace_exec_state(
+                    currentNodeId=snapshot.get("current_node_id", ""),
+                    currentNodeName=snapshot.get("current_node_name", ""),
+                    waitingEdgeId=snapshot.get("waiting_edge_id", ""),
+                    waitingEdgeName=snapshot.get("waiting_edge_name", ""),
+                )
             sys.modules.pop(module_name, None)
             corona_engine_scratch.release_context(ctx)
         return outcome

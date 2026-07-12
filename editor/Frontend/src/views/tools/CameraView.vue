@@ -172,6 +172,7 @@ const viewportUiMode = ref('flat2d');
 const visionAvailable = ref(false);
 const errorText = ref('');
 const previewHudStates = ref([]);
+const nodeGraphInputLocked = ref(false);
 const toolbarRef = ref(null);
 const inputLayerRef = ref(null);
 const backendMenuOpen = ref(false);
@@ -548,6 +549,9 @@ const cross = (a, b) => [
 ];
 
 const publishPose = () => {
+  // Keep Scratch input active, but never publish an editor-controlled camera
+  // pose while a node graph/game preview owns keyboard and mouse input.
+  if (isEditorInputLocked()) return;
   const item = camera.value;
   const bridge = window.coronaBridge;
   if (!item || !bridge || typeof bridge.cameraMove !== 'function') return;
@@ -601,11 +605,27 @@ const rotateCamera = (dt) => {
   publishPose();
 };
 
+const isEditorInputLocked = () => {
+  const locks = window.__coronaEditorInputLocks;
+  return Boolean(
+    window.__coronaGamePreviewInputLocked ||
+    (locks instanceof Set && locks.size > 0) ||
+    nodeGraphInputLocked.value
+  );
+};
+const resetCameraInput = () => {
+  keys.clear();
+  looking = false;
+};
 const movementFrame = (time) => {
   const dt = previousTime ? Math.min((time - previousTime) / 1000, 0.05) : 0;
   previousTime = time;
-  moveCamera(dt);
-  rotateCamera(dt);
+  if (!isEditorInputLocked()) {
+    moveCamera(dt);
+    rotateCamera(dt);
+  } else {
+    resetCameraInput();
+  }
   animationFrame = requestAnimationFrame(movementFrame);
 };
 
@@ -650,6 +670,11 @@ const onKeyDown = (event) => {
     keyModifiers(event),
     event.key || event.code || '',
   ).catch(() => {});
+  if (isEditorInputLocked()) {
+    keys.clear();
+    event.preventDefault();
+    return;
+  }
   const code = movementCode(event);
   if ([
     'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE',
@@ -699,6 +724,10 @@ const forwardScratchMouse = (eventType, event) => {
 };
 const beginLook = (event) => {
   forwardScratchMouse('mousedown', event);
+  if (isEditorInputLocked()) {
+    looking = false;
+    return;
+  }
   if (event.button !== 2) return;
   looking = true;
   lastMouseX = event.clientX;
@@ -729,6 +758,10 @@ const handleViewportPointerLeave = () => {
 
 const updateLook = (event) => {
   forwardScratchMouse('move', event);
+  if (isEditorInputLocked()) {
+    looking = false;
+    return;
+  }
   if (!looking || !camera.value) return;
   const dx = event.clientX - lastMouseX;
   const dy = event.clientY - lastMouseY;
@@ -796,6 +829,13 @@ const pollPreviewHud = async () => {
     previewHudStates.value = payload.has_snapshot ? (payload.runtime_states || []) : [];
   } catch {
     previewHudStates.value = [];
+  }
+  try {
+    const scriptStatus = unwrap(await scriptingService.getScriptStatus()) || {};
+    nodeGraphInputLocked.value = Boolean(scriptStatus.inputLocked);
+    if (nodeGraphInputLocked.value) resetCameraInput();
+  } catch {
+    nodeGraphInputLocked.value = false;
   }
 };
 

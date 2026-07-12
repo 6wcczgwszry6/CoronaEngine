@@ -193,6 +193,13 @@ bool parse_vec3_list(const CefRefPtr<CefListValue>& list, ktm::fvec3& out) {
 }
 
 bool handle_camera_move_fast(const CefRefPtr<CefProcessMessage>& message) {
+    // CameraMoveFast is the editor camera-control channel. Blockly/node-graph
+    // input must still reach Scratch, but while the runtime owns input we must
+    // not forward any pose updates produced by the editor camera controllers.
+    if (!Corona::API::is_editor_camera_input_enabled()) {
+        return true;
+    }
+
     auto args = message->GetArgumentList();
     if (!args || args->GetSize() < 5) {
         return true;

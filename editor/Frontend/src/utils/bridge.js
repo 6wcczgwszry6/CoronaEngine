@@ -546,7 +546,7 @@ const editorApiStatic = {
       call_manifest_editor_api('scratch.startGamePreview', [payload || { scope: 'project' }]),
     stopGamePreview: () => call_manifest_editor_api('scratch.stopGamePreview', []),
     getGamePreviewStatus: () => call_manifest_editor_api('scratch.getGamePreviewStatus', []),
-    stopScriptExecution: () => call_manifest_editor_api('scratch.stopScriptExecution', []),
+    stopScriptExecution: (restoreState = false) => call_manifest_editor_api('scratch.stopScriptExecution', [Boolean(restoreState)]),
     getScriptStatus: () => call_manifest_editor_api('scratch.getScriptStatus', []),
     sendKeyEvent: (key, modifiers, displayKey) =>
       call_manifest_editor_api('scratch.sendKeyEvent', [key, modifiers || '', displayKey || key]),
@@ -943,11 +943,25 @@ export const scriptingService = {
   /**
    * 停止当前正在执行的脚本
    */
-  stopScriptExecution: () => editorApi.scratch.stopScriptExecution(),
+  stopScriptExecution: (restoreState = false) => editorApi.scratch.stopScriptExecution(restoreState),
 
   /**
-   * 查询当前脚本执行状态
-   * @returns {Promise<{status: 'running'|'idle'}>}
+   * Query the current script state and node-graph execution trace.
+   * @returns {Promise<{
+   *   status: 'starting'|'running'|'completed'|'stopped'|'error',
+   *   outcome: string,
+   *   error: string,
+   *   contextId: string,
+   *   sceneName: string,
+   *   actorName: string,
+   *   targetType: 'actor'|'project',
+   *   currentNodeId: string,
+   *   currentNodeName: string,
+   *   waitingEdgeId: string,
+   *   waitingEdgeName: string,
+   *   startedAt: number,
+   *   finishedAt: number
+   * }>}
    */
   getScriptStatus: () => editorApi.scratch.getScriptStatus(),
 

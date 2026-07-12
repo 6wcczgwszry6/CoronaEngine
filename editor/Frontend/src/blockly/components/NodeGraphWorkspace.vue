@@ -1,5 +1,9 @@
 <template>
-  <div class="node-graph-workspace">
+  <div
+    ref="workspaceRootRef"
+    class="node-graph-workspace"
+    :style="layoutStyle"
+  >
     <div class="ng-toolbar">
       <div class="ng-title">
         <span class="ng-badge">节点</span>
@@ -16,7 +20,7 @@
         >
           {{ codeRunning ? '停止' : '运行' }}
         </button>
-        <span v-if="runStatus" class="ng-run-status">{{ runStatus }}</span>
+        <span v-if="runStatus" class="ng-run-status" :title="runDetail || runStatus" @click="toggleRunDetail">{{ runStatus }}</span>
         <button class="ng-mode" :class="{ active: mode === 'select' }" @click="setMode('select')">
           选择
         </button>
@@ -60,6 +64,7 @@
           @external-drag-end="handlePaletteDragEnd"
         />
       </aside>
+      <div class="ng-splitter vertical" title="拖动调整工具箱宽度" @pointerdown="beginLayoutResize($event, 'toolbox')"></div>
       <main
         ref="canvasRef"
         class="ng-panel ng-canvas" :class="{ 'drop-active': macroDropActive }"
@@ -138,6 +143,7 @@
             `type-${node.nodeType}`,
             {
               selected: selectedKind === 'node' && selectedId === node.id,
+              running: currentRunNodeId === node.id,
               delete: mode === 'delete',
             },
           ]"
@@ -147,30 +153,15 @@
         >
           <div class="ng-node-head">
             <span class="ng-node-dot"></span>
-            <select
-              v-model="node.nodeType"
-              class="ng-node-type"
-              @change="onNodeTypeChange(node)"
-              @mousedown.stop
-              @click.stop
-            >
-              <option value="start">开始节点</option>
-              <option value="end">结束节点</option>
-              <option value="custom">自定义</option>
-            </select>
+            <span class="ng-node-type-badge">{{ nodeTypeLabel(node.nodeType) }}</span>
           </div>
-          <input
-            v-if="node.nodeType === 'custom'"
-            v-model="node.name"
-            class="ng-node-name"
-            placeholder="自定义名称"
-            @input="scheduleSave"
-            @mousedown.stop
-            @click.stop
-          />
-          <div v-else class="ng-node-fixed-name">{{ nodeTypeLabel(node.nodeType) }}</div>
-          <div class="ng-node-hint">点击编辑内部积木</div>
-          <template v-if="selectedKind === 'node' && selectedId === node.id">
+          <div class="ng-node-display-name">{{ displayNodeName(node) }}</div>
+          <template
+            v-if="
+              (selectedKind === 'node' && selectedId === node.id) ||
+              Boolean(pendingPort)
+            "
+          >
             <button
               v-for="port in visiblePorts(node)"
               :key="`${node.id}-${port.side}-${port.index}`"
@@ -185,6 +176,7 @@
                     pendingPort.nodeId === node.id &&
                     pendingPort.side === port.side &&
                     pendingPort.index === port.index,
+                  'connection-target': pendingPort && pendingPort.nodeId !== node.id,
                 },
               ]"
               :style="portStyle(node, port)"
@@ -195,7 +187,8 @@
         </div>
         </div>
       </main>
-      <aside class="ng-panel ng-inspector">
+      <div class="ng-splitter vertical" title="拖动调整内部编辑区宽度" @pointerdown="beginLayoutResize($event, 'inspector')"></div>
+      <aside ref="inspectorRef" class="ng-panel ng-inspector">
         <section class="ng-vars">
           <div class="ng-section-title">
             全局变量池
@@ -209,10 +202,55 @@
             @change="onGlobalWorkspaceChange"
           />
         </section>
+        <div class="ng-splitter horizontal" title="拖动调整全局变量池高度" @pointerdown="beginLayoutResize($event, 'variables')"></div>
         <section class="ng-editor">
           <div class="ng-section-title">
             {{ activeEditorTitle }}
             <small>{{ activeEditorSubtitle }}</small>
+          </div>
+          <div v-if="selectedNode" class="ng-property-card">
+            <label class="ng-property-label">节点类型</label>
+            <div class="ng-type-tabs">
+              <button
+                v-for="option in nodeTypeOptions"
+                :key="option.value"
+                type="button"
+                :class="{ active: selectedNode.nodeType === option.value }"
+                @click="setSelectedNodeType(option.value)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+            <template v-if="selectedNode.nodeType === 'custom'">
+              <label class="ng-property-label">节点名称</label>
+              <div class="ng-name-row">
+                <input
+                  :value="selectedNode.customName"
+                  maxlength="24"
+                  placeholder="自定义节点"
+                  @input="updateSelectedNodeName($event.target.value)"
+                />
+                <span>{{ String(selectedNode.customName || '').length }}/24</span>
+              </div>
+            </template>
+          </div>
+          <div v-else-if="selectedEdge" class="ng-property-card">
+            <label class="ng-property-label">连线名称</label>
+            <div class="ng-name-row">
+              <input
+                ref="edgeNameInputRef"
+                :value="selectedEdge.name"
+                maxlength="24"
+                placeholder="条件"
+                @input="updateSelectedEdgeName($event.target.value)"
+              />
+              <span>{{ String(selectedEdge.name || '').length }}/24</span>
+            </div>
+            <div class="ng-edge-meta">
+              <span>起点：{{ edgeNodeName(selectedEdge.source.nodeId) }}</span>
+              <span>终点：{{ edgeNodeName(selectedEdge.target.nodeId) }}</span>
+            </div>
+            <div class="ng-condition-note">{{ edgeConditionNote }}</div>
           </div>
           <MiniBlocklyWorkspace
             v-if="activeEditorKey"
@@ -226,6 +264,13 @@
           <div v-else class="ng-editor-empty">选择节点或连线后可编辑内部积木</div>
         </section>
       </aside>
+    </div>
+    <div v-if="runDetailVisible && runDetail" class="ng-run-detail">
+      <div class="ng-run-detail-head">
+        <strong>运行诊断</strong>
+        <button type="button" @click="copyRunDetail">??</button>
+      </div>
+      <pre>{{ runDetail }}</pre>
     </div>
     <div
       v-if="externalDrag.active"
@@ -243,7 +288,7 @@ import MiniBlocklyWorkspace from '@/blockly/components/MiniBlocklyWorkspace.vue'
 import BlocklyToolboxPalette from '@/blockly/components/BlocklyToolboxPalette.vue';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { scriptingService } from '@/utils/bridge.js';
-import { nodeGraphToCode } from '@/blockly/generators/index.js';
+import { nodeGraphToCode, validateNodeGraph } from '@/blockly/generators/index.js';
 
 const props = defineProps({
   actorName: { type: String, default: '' },
@@ -260,9 +305,12 @@ const mode = ref('select'),
   selectedId = ref(''),
   pendingPort = ref(null),
   saveLabel = ref('');
-const canvasRef = ref(null),
+const workspaceRootRef = ref(null),
+  canvasRef = ref(null),
+  inspectorRef = ref(null),
   variablesBlocklyRef = ref(null),
-  activeBlocklyRef = ref(null);
+  activeBlocklyRef = ref(null),
+  edgeNameInputRef = ref(null);
 const canvasSize = reactive({ width: 900, height: 520 });
 const viewport = reactive({ scale: 1, offsetX: 0, offsetY: 0 });
 const connectionPointer = reactive({ active: false, x: 0, y: 0 });
@@ -270,6 +318,23 @@ const graph = reactive({ version: 1, nodes: [], edges: [], globalVariablesWorksp
 const codeRunning = ref(false);
 const runBusy = ref(false);
 const runStatus = ref('');
+const runDetail = ref('');
+const runDetailVisible = ref(false);
+const currentRunNodeId = ref('');
+const runWarnings = ref([]);
+const NODE_GRAPH_INPUT_LOCK = 'node_graph';
+function setEditorInputLock(reason, locked) {
+  const locks = window.__coronaEditorInputLocks instanceof Set
+    ? window.__coronaEditorInputLocks
+    : new Set();
+  window.__coronaEditorInputLocks = locks;
+  if (locked) locks.add(reason);
+  else locks.delete(reason);
+  window.__coronaGamePreviewInputLocked = locks.size > 0;
+}
+function setNodeGraphInputLocked(locked) {
+  setEditorInputLock(NODE_GRAPH_INPUT_LOCK, Boolean(locked));
+}
 const macroDropActive = ref(false);
 const externalDrag = reactive({
   active: false,
@@ -281,6 +346,14 @@ const externalDrag = reactive({
   clientY: 0,
   pointerId: null,
 });
+const LAYOUT_STORAGE_KEY = 'corona-nodegraph-layout-v2';
+const DEFAULT_LAYOUT = Object.freeze({ toolboxWidth: 320, inspectorWidth: 560, variablesHeight: 320 });
+const layout = reactive({ ...DEFAULT_LAYOUT });
+const layoutStyle = computed(() => ({
+  '--toolbox-width': `${layout.toolboxWidth}px`,
+  '--inspector-width': `${layout.inspectorWidth}px`,
+  '--variables-height': `${layout.variablesHeight}px`,
+}));
 const zoomText = computed(() => `${Math.round(viewport.scale * 100)}%`);
 const dragGhostStyle = computed(() => ({
   left: `${externalDrag.clientX + 14}px`,
@@ -297,6 +370,7 @@ let isLoading = false,
   resizeObserver = null,
   dragState = null,
   macroPointerDrag = null,
+  layoutResizeState = null,
   runPollTimer = null,
   startedRunForTarget = false;
 const targetKey = computed(
@@ -313,6 +387,17 @@ const selectedNode = computed(() =>
 const selectedEdge = computed(() =>
   selectedKind.value === 'edge' ? graph.edges.find((e) => e.id === selectedId.value) : null
 );
+const nodeTypeOptions = [
+  { value: 'start', label: '开始节点' },
+  { value: 'end', label: '结束节点' },
+  { value: 'custom', label: '自定义' },
+];
+const edgeConditionNote = computed(() => {
+  const blocks = selectedEdge.value?.conditionWorkspace?.blocks?.blocks;
+  return Array.isArray(blocks) && blocks.length
+    ? '条件积木将在运行前校验，必须只有一个顶层返回值积木'
+    : '未设置条件，当前连线会被视为始终成立';
+});
 const pendingEdgePath = computed(() => {
   if (!pendingPort.value || !connectionPointer.active) return '';
   const node = graph.nodes.find((item) => item.id === pendingPort.value.nodeId);
@@ -379,6 +464,7 @@ function addMacroNodeAt(macroType, clientX, clientY) {
     macroType: macroType || 'state',
     nodeType: graph.nodes.length === 0 ? 'start' : 'custom',
     name: graph.nodes.length === 0 ? '开始' : `状态${graph.nodes.length + 1}`,
+    customName: `状态${graph.nodes.length + 1}`,
     x: Math.max(20, world.x - NODE_WIDTH / 2),
     y: Math.max(54, world.y - 32),
     workspace: {},
@@ -533,6 +619,92 @@ function handleCanvasWheel(e) {
   viewport.offsetX = localX - world.x * nextScale;
   viewport.offsetY = localY - world.y * nextScale;
 }
+function persistLayout() {
+  try {
+    window.localStorage?.setItem(LAYOUT_STORAGE_KEY, JSON.stringify({
+      toolboxWidth: layout.toolboxWidth,
+      inspectorWidth: layout.inspectorWidth,
+      variablesHeight: layout.variablesHeight,
+    }));
+  } catch (_) {}
+}
+function loadLayout() {
+  try {
+    const saved = JSON.parse(window.localStorage?.getItem(LAYOUT_STORAGE_KEY) || '{}');
+    layout.toolboxWidth = Math.min(460, Math.max(240, Number(saved.toolboxWidth) || DEFAULT_LAYOUT.toolboxWidth));
+    layout.inspectorWidth = Math.min(760, Math.max(380, Number(saved.inspectorWidth) || DEFAULT_LAYOUT.inspectorWidth));
+    layout.variablesHeight = Math.max(140, Number(saved.variablesHeight) || DEFAULT_LAYOUT.variablesHeight);
+  } catch (_) {
+    Object.assign(layout, DEFAULT_LAYOUT);
+  }
+}
+function resizeEmbeddedWorkspaces() {
+  nextTick(() => {
+    updateCanvasSize();
+    variablesBlocklyRef.value?.resizeBlockly?.();
+    activeBlocklyRef.value?.resizeBlockly?.();
+  });
+}
+function clampLayoutWidths(toolboxWidth, inspectorWidth) {
+  const total = workspaceRootRef.value?.getBoundingClientRect?.().width || window.innerWidth;
+  const available = Math.max(0, total - 12);
+  let toolbox = Math.min(460, Math.max(240, toolboxWidth));
+  let inspector = Math.min(760, Math.max(380, inspectorWidth));
+  const maxSides = Math.max(620, available - 480);
+  if (toolbox + inspector > maxSides) {
+    const overflow = toolbox + inspector - maxSides;
+    if (layoutResizeState?.kind === 'toolbox') toolbox = Math.max(240, toolbox - overflow);
+    else inspector = Math.max(380, inspector - overflow);
+  }
+  return { toolbox, inspector };
+}
+function beginLayoutResize(event, kind) {
+  event.preventDefault();
+  event.stopPropagation();
+  layoutResizeState = {
+    kind,
+    startX: event.clientX,
+    startY: event.clientY,
+    toolboxWidth: layout.toolboxWidth,
+    inspectorWidth: layout.inspectorWidth,
+    variablesHeight: layout.variablesHeight,
+    inspectorHeight: inspectorRef.value?.getBoundingClientRect?.().height || 600,
+  };
+  window.addEventListener('pointermove', handleLayoutResize);
+  window.addEventListener('pointerup', stopLayoutResize, { once: true });
+}
+function handleLayoutResize(event) {
+  if (!layoutResizeState) return;
+  if (layoutResizeState.kind === 'variables') {
+    const maxHeight = Math.max(140, layoutResizeState.inspectorHeight - 306);
+    layout.variablesHeight = Math.min(maxHeight, Math.max(140, layoutResizeState.variablesHeight + event.clientY - layoutResizeState.startY));
+  } else {
+    const nextToolbox = layoutResizeState.kind === 'toolbox'
+      ? layoutResizeState.toolboxWidth + event.clientX - layoutResizeState.startX
+      : layoutResizeState.toolboxWidth;
+    const nextInspector = layoutResizeState.kind === 'inspector'
+      ? layoutResizeState.inspectorWidth - event.clientX + layoutResizeState.startX
+      : layoutResizeState.inspectorWidth;
+    const clamped = clampLayoutWidths(nextToolbox, nextInspector);
+    layout.toolboxWidth = clamped.toolbox;
+    layout.inspectorWidth = clamped.inspector;
+  }
+  resizeEmbeddedWorkspaces();
+}
+function stopLayoutResize() {
+  if (!layoutResizeState) return;
+  layoutResizeState = null;
+  window.removeEventListener('pointermove', handleLayoutResize);
+  persistLayout();
+  resizeEmbeddedWorkspaces();
+}
+function toggleRunDetail() {
+  if (runDetail.value) runDetailVisible.value = !runDetailVisible.value;
+}
+async function copyRunDetail() {
+  if (!runDetail.value) return;
+  try { await navigator.clipboard?.writeText(runDetail.value); } catch (_) {}
+}
 function resetZoom() {
   viewport.scale = 1;
   viewport.offsetX = 0;
@@ -581,11 +753,14 @@ function syncActiveBeforeSelection(nextKind, nextId) {
     refreshEmbeddedWorkspaceStates();
 }
 function selectNode(node) {
+  const isConnecting = Boolean(pendingPort.value);
   syncActiveBeforeSelection('node', node.id);
   selectedKind.value = 'node';
   selectedId.value = node.id;
-  pendingPort.value = null;
-  connectionPointer.active = false;
+  if (!isConnecting) {
+    pendingPort.value = null;
+    connectionPointer.active = false;
+  }
   nextTick(() => activeBlocklyRef.value?.resizeBlockly?.());
 }
 function selectEdge(edge) {
@@ -632,24 +807,57 @@ function deleteEdge(id) {
 }
 function renameEdge(edge) {
   if (mode.value === 'delete') return;
-  const v = window.prompt('连线名称', edge.name || '');
-  if (v === null) return;
-  edge.name = v.trim();
   selectEdge(edge);
+  nextTick(() => {
+    const input = Array.isArray(edgeNameInputRef.value) ? edgeNameInputRef.value[0] : edgeNameInputRef.value;
+    input?.focus?.();
+    input?.select?.();
+  });
+}
+function setSelectedNodeType(nextType) {
+  const node = selectedNode.value;
+  if (!node || !['start', 'end', 'custom'].includes(nextType)) return;
+  if (nextType === 'start') {
+    for (const other of graph.nodes) {
+      if (other.id !== node.id && other.nodeType === 'start') {
+        other.nodeType = 'custom';
+        const fallback = String(other.customName || '').trim() || '自定义节点';
+        other.customName = fallback;
+        other.name = fallback;
+      }
+    }
+  }
+  node.nodeType = nextType;
+  if (nextType === 'start') node.name = '开始';
+  else if (nextType === 'end') node.name = '结束';
+  else node.name = String(node.customName || '').trim() || '自定义节点';
   scheduleSave();
 }
-function onNodeTypeChange(node) {
-  if (node.nodeType === 'start' && !node.name) node.name = '开始';
-  if (node.nodeType === 'end' && !node.name) node.name = '结束';
-  if (node.nodeType === 'custom' && (!node.name || node.name === '开始' || node.name === '结束'))
-    node.name = '自定义节点';
+function updateSelectedNodeName(value) {
+  const node = selectedNode.value;
+  if (!node) return;
+  node.customName = String(value || '').slice(0, 24);
+  node.name = node.customName.trim() || '自定义节点';
   scheduleSave();
+}
+function updateSelectedEdgeName(value) {
+  const edge = selectedEdge.value;
+  if (!edge) return;
+  edge.name = String(value || '').slice(0, 24).trimStart();
+  scheduleSave();
+}
+function edgeNodeName(nodeId) {
+  return displayNodeName(getNode(nodeId)) || '未知节点';
 }
 function nodeTypeLabel(t) {
   return t === 'start' ? '开始节点' : t === 'end' ? '结束节点' : '自定义';
 }
 function displayNodeName(n) {
-  return n ? (n.nodeType === 'custom' ? n.name || '自定义节点' : nodeTypeLabel(n.nodeType)) : '';
+  return n
+    ? n.nodeType === 'custom'
+      ? n.customName || n.name || '自定义节点'
+      : nodeTypeLabel(n.nodeType)
+    : '';
 }
 function nodeHeight(node) {
   const sidePortCount = Math.max(
@@ -670,7 +878,7 @@ function nodeStyle(n) {
 }
 function startNodeDrag(e, node) {
   if (mode.value !== 'select') return;
-  if (e.target?.closest?.('input,select,button,.ng-port')) return;
+  if (e.target?.closest?.('button,.ng-port')) return;
   selectNode(node);
   const world = screenToWorld(e.clientX, e.clientY);
   dragState = { node, offsetX: world.x - node.x, offsetY: world.y - node.y };
@@ -894,19 +1102,31 @@ function normalizeGraph(raw) {
   return {
     version: 1,
     nodes: Array.isArray(n.nodes)
-      ? n.nodes.map((node, i) => ({
-          id: node.id || makeId('node'),
-          macroType: node.macroType || 'state',
-          nodeType: ['start', 'end', 'custom'].includes(node.nodeType)
+      ? n.nodes.map((node, i) => {
+          const nodeType = ['start', 'end', 'custom'].includes(node.nodeType)
             ? node.nodeType
             : i === 0
               ? 'start'
-              : 'custom',
-          name: node.name || (i === 0 ? '开始' : `状态${i + 1}`),
-          x: Number.isFinite(Number(node.x)) ? Number(node.x) : 40 + i * 24,
-          y: Number.isFinite(Number(node.y)) ? Number(node.y) : 80 + i * 24,
-          workspace: node.workspace && typeof node.workspace === 'object' ? node.workspace : {},
-        }))
+              : 'custom';
+          const legacyCustomName =
+            nodeType === 'custom' && node.name && node.name !== '开始' && node.name !== '结束'
+              ? String(node.name).trim()
+              : '';
+          const hasStoredCustomName = Object.prototype.hasOwnProperty.call(node, 'customName');
+          const customName = hasStoredCustomName
+            ? String(node.customName || '').slice(0, 24)
+            : (legacyCustomName || `状态${i + 1}`).slice(0, 24);
+          return {
+            id: node.id || makeId('node'),
+            macroType: node.macroType || 'state',
+            nodeType,
+            name: nodeType === 'start' ? '开始' : nodeType === 'end' ? '结束' : customName,
+            customName,
+            x: Number.isFinite(Number(node.x)) ? Number(node.x) : 40 + i * 24,
+            y: Number.isFinite(Number(node.y)) ? Number(node.y) : 80 + i * 24,
+            workspace: node.workspace && typeof node.workspace === 'object' ? node.workspace : {},
+          };
+        })
       : [],
     edges: Array.isArray(n.edges)
       ? n.edges
@@ -1010,46 +1230,106 @@ function clearRunPoll() {
   if (runPollTimer) window.clearInterval(runPollTimer);
   runPollTimer = null;
 }
+const STATUS_STARTING = "\u542f\u52a8\u4e2d...";
+const STATUS_WAITING = "\u7b49\u5f85\u8fde\u7ebf\u6761\u4ef6\uff1a";
+const STATUS_RUNNING = "\u8fd0\u884c\u4e2d\uff1a";
+const STATUS_RUNNING_BASE = "\u8fd0\u884c\u4e2d";
+const STATUS_COMPLETED = "\u5df2\u5b8c\u6210";
+const STATUS_STOPPED = "\u5df2\u505c\u6b62";
+const STATUS_FAILED = "\u6267\u884c\u5931\u8d25\uff1a";
+const STATUS_UNKNOWN_ERROR = "\u672a\u77e5\u9519\u8bef";
+const STATUS_QUERY_FAILED = "\u72b6\u6001\u67e5\u8be2\u5931\u8d25";
+const LOG_QUERY_FAILED = "\u67e5\u8be2\u8282\u70b9\u56fe\u8fd0\u884c\u72b6\u6001\u5931\u8d25";
+function formatRunState(status) {
+  const state = status?.status || 'idle';
+  if (state === 'starting') return STATUS_STARTING;
+  if (state === 'running') {
+    if (status?.waitingEdgeName) return `${STATUS_WAITING}${status.waitingEdgeName}`;
+    if (status?.currentNodeName) return `${STATUS_RUNNING}${status.currentNodeName}`;
+    return STATUS_RUNNING_BASE;
+  }
+  if (state === 'completed') return STATUS_COMPLETED;
+  if (state === 'stopped') return STATUS_STOPPED;
+  if (state === 'error') return `${STATUS_FAILED}${status?.error || STATUS_UNKNOWN_ERROR}`;
+  return '';
+}
+function formatRunDetail(status) {
+  if (!status || typeof status !== 'object') return '';
+  const lines = [];
+  if (status.error) lines.push(`错误：${status.error}`);
+  if (status.requestedScene || status.requestedActor) lines.push(`请求目标：${status.requestedScene || '(空场景)'} / ${status.requestedActor || '(空物体)'}`);
+  if (status.resolvedSceneName || status.resolvedActorName) lines.push(`绑定目标：${status.resolvedSceneName || '(空场景)'} / ${status.resolvedActorName || '(空物体)'}`);
+  if (status.bindingMode) lines.push(`绑定模式：${status.bindingMode === 'native_editor' ? 'Native Editor' : 'Python Scene'}`);
+  if (Array.isArray(status.pythonScenes)) lines.push(`Python 场景：${status.pythonScenes.join(', ') || '(空)'}`);
+  if (status.nativeScene) lines.push(`原生场景：${status.nativeScene}`);
+  if (Array.isArray(status.actorCandidates) && status.actorCandidates.length) lines.push(`物体候选：${status.actorCandidates.join(', ')}`);
+  return lines.join('\n');
+}
 function startRunPoll() {
   clearRunPoll();
   runPollTimer = window.setInterval(async () => {
     if (!codeRunning.value) return;
     try {
       const status = bridgeResult(await scriptingService.getScriptStatus());
-      if (status?.status !== 'running') {
+      currentRunNodeId.value = status?.currentNodeId || '';
+      setNodeGraphInputLocked(Boolean(status?.inputLocked));
+      runStatus.value = formatRunState(status);
+      runDetail.value = formatRunDetail(status);
+      if (!['starting', 'running'].includes(status?.status)) {
         clearRunPoll();
         codeRunning.value = false;
         startedRunForTarget = false;
-        runStatus.value = status?.status === 'error' ? '执行失败' : '已结束';
+        setNodeGraphInputLocked(false);
       }
     } catch (error) {
       clearRunPoll();
       codeRunning.value = false;
       startedRunForTarget = false;
-      runStatus.value = '状态查询失败';
-      logError('查询节点图运行状态失败', error);
+      currentRunNodeId.value = '';
+      setNodeGraphInputLocked(false);
+      runStatus.value = STATUS_QUERY_FAILED;
+      logError(LOG_QUERY_FAILED, error);
     }
-  }, 500);
+  }, 300);
 }
-async function stopNodeGraphRun(statusText = '已停止') {
+async function stopNodeGraphRun(statusText = '已停止', restoreState = false) {
   clearRunPoll();
-  if (!startedRunForTarget && !codeRunning.value) return;
+  if (!startedRunForTarget && !codeRunning.value) {
+    setNodeGraphInputLocked(false);
+    return;
+  }
   try {
-    await scriptingService.stopScriptExecution();
+    const response = bridgeResult(await scriptingService.stopScriptExecution(Boolean(restoreState)));
+    if (restoreState) {
+      if (response?.restored) {
+        runStatus.value = '已停止并恢复运行前状态';
+        runDetail.value = '';
+      } else if (response?.restoreError) {
+        runStatus.value = `已停止，但场景恢复失败：${response.restoreError}`;
+        runDetail.value = response.restoreError;
+      } else {
+        runStatus.value = statusText;
+      }
+    } else {
+      runStatus.value = statusText;
+    }
   } catch (error) {
+    runStatus.value = `停止节点图失败：${error?.message || error}`;
     logError('停止节点图失败', error);
   } finally {
     startedRunForTarget = false;
     codeRunning.value = false;
-    runStatus.value = statusText;
+    currentRunNodeId.value = '';
+    setNodeGraphInputLocked(false);
   }
 }
+
 async function handleToggleRun() {
   if (runBusy.value) return;
   runBusy.value = true;
   try {
     if (codeRunning.value) {
-      await stopNodeGraphRun('已停止');
+      await stopNodeGraphRun('已停止', true);
       return;
     }
     if (!props.actorName) {
@@ -1060,7 +1340,10 @@ async function handleToggleRun() {
     await saveNow();
     let code;
     try {
-      code = nodeGraphToCode(graphSnapshot());
+      const snapshot = graphSnapshot();
+      const analysis = validateNodeGraph(snapshot);
+      runWarnings.value = analysis.warnings || [];
+      code = nodeGraphToCode(snapshot);
     } catch (error) {
       runStatus.value = `生成失败：${error?.message || error}`;
       logError('生成节点图代码失败', error);
@@ -1073,7 +1356,7 @@ async function handleToggleRun() {
         0,
         props.sceneName || '',
         props.actorName,
-        props.targetType || 'actor'
+        props.targetType === 'model' ? 'actor' : props.targetType || 'actor'
       )
     );
     if (response?.status === 'error' || response?.success === false) {
@@ -1081,7 +1364,8 @@ async function handleToggleRun() {
     }
     startedRunForTarget = true;
     codeRunning.value = true;
-    runStatus.value = '运行中';
+    setNodeGraphInputLocked(true);
+    runStatus.value = runWarnings.value.length ? `\u8fd0\u884c\u4e2d\uff08${runWarnings.value[0]}\uff09` : '\u8fd0\u884c\u4e2d';
     startRunPoll();
   } catch (error) {
     startedRunForTarget = false;
@@ -1096,8 +1380,8 @@ async function handleToggleRun() {
 function updateCanvasSize() {
   const r = canvasRef.value?.getBoundingClientRect?.();
   if (!r) return;
-  canvasSize.width = Math.max(720, r.width);
-  canvasSize.height = Math.max(520, r.height);
+  canvasSize.width = Math.max(900, r.width);
+  canvasSize.height = Math.max(980, r.height);
 }
 watch(
   () => [props.sceneName, props.actorName, props.targetType],
@@ -1112,12 +1396,15 @@ watch(
     cancelMacroPointerDrag();
     if (oldTarget.actorName && !isLoading) await saveNow(oldTarget);
     runStatus.value = '';
+    currentRunNodeId.value = '';
+    runWarnings.value = [];
     await loadGraphForCurrentTarget();
   },
   { immediate: true }
 );
 onMounted(() => {
-  resizeObserver = new ResizeObserver(updateCanvasSize);
+  loadLayout();
+  resizeObserver = new ResizeObserver(resizeEmbeddedWorkspaces);
   if (canvasRef.value) resizeObserver.observe(canvasRef.value);
   updateCanvasSize();
 });
@@ -1128,7 +1415,8 @@ onBeforeUnmount(() => {
   clearRunPoll();
   clearExternalDrag();
   cancelMacroPointerDrag();
-  if (startedRunForTarget || codeRunning.value) scriptingService.stopScriptExecution().catch(() => {});
+  if (startedRunForTarget || codeRunning.value) scriptingService.stopScriptExecution(false).catch(() => {});
+  setNodeGraphInputLocked(false);
   window.removeEventListener('mousemove', onDragMove);
   window.removeEventListener('mouseup', stopNodeDrag);
 });
@@ -1136,8 +1424,9 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .node-graph-workspace {
+  position: relative;
   height: 100%;
-  min-height: 520px;
+  min-height: 1160px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1245,7 +1534,7 @@ onBeforeUnmount(() => {
   min-height: 0;
   flex: 1 1 auto;
   display: grid;
-  grid-template-columns: 300px minmax(360px, 1fr) 360px;
+  grid-template-columns: var(--toolbox-width) 6px minmax(480px, 1fr) 6px var(--inspector-width);
   gap: 8px;
   padding: 8px;
 }
@@ -1581,6 +1870,45 @@ onBeforeUnmount(() => {
   color: #94a3b8;
   font-size: 10px;
 }
+.ng-node.running {
+  border-color: #facc15;
+  box-shadow:
+    0 0 0 3px rgba(250, 204, 21, 0.2),
+    0 0 22px rgba(250, 204, 21, 0.32),
+    0 14px 24px rgba(0, 0, 0, 0.36);
+}
+.ng-node-type-badge {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid rgba(96, 165, 250, 0.48);
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.16);
+  color: #bfdbfe;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+.type-start .ng-node-type-badge {
+  border-color: rgba(34, 197, 94, 0.5);
+  background: rgba(34, 197, 94, 0.14);
+  color: #bbf7d0;
+}
+.type-end .ng-node-type-badge {
+  border-color: rgba(251, 113, 133, 0.5);
+  background: rgba(190, 24, 93, 0.16);
+  color: #fecdd3;
+}
+.ng-node-display-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: #f8fafc;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .ng-port {
   position: absolute;
   width: 12px;
@@ -1601,6 +1929,20 @@ onBeforeUnmount(() => {
 .ng-port.pending {
   background: #22c55e;
   box-shadow: 0 0 0 5px rgba(34, 197, 94, 0.25);
+}
+.ng-port.connection-target:not(.occupied) {
+  animation: ng-port-pulse 1s ease-in-out infinite;
+  border-color: #fffde0;
+  box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.28);
+}
+@keyframes ng-port-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.22);
+  }
 }
 .ng-condition-block {
   position: absolute;
@@ -1635,8 +1977,8 @@ onBeforeUnmount(() => {
 }
 .ng-inspector {
   display: grid;
-  grid-template-rows: minmax(150px, 0.38fr) minmax(260px, 0.62fr);
-  gap: 8px;
+  grid-template-rows: minmax(140px, var(--variables-height)) 6px minmax(300px, 1fr);
+  gap: 0;
   padding: 8px;
   background: rgba(15, 23, 42, 0.9);
 }
@@ -1652,6 +1994,87 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   min-height: 0;
 }
+.ng-property-card {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px;
+  margin-bottom: 4px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.82);
+}
+.ng-property-label {
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 800;
+}
+.ng-type-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+.ng-type-tabs button {
+  min-width: 0;
+  height: 30px;
+  padding: 0 5px;
+  border: 1px solid #3b4b64;
+  border-radius: 7px;
+  background: #172033;
+  color: #cbd5e1;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+.ng-type-tabs button:hover { border-color: #60a5fa; }
+.ng-type-tabs button.active {
+  border-color: #facc15;
+  background: rgba(161, 98, 7, 0.34);
+  color: #fef3c7;
+  box-shadow: inset 0 0 0 1px rgba(250, 204, 21, 0.16);
+}
+.ng-name-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+.ng-name-row input {
+  min-width: 0;
+  width: 100%;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid #3b4b64;
+  border-radius: 7px;
+  outline: none;
+  background: #0f172a;
+  color: #f8fafc;
+  font-size: 12px;
+}
+.ng-name-row input:focus {
+  border-color: #facc15;
+  box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.12);
+}
+.ng-name-row span {
+  color: #94a3b8;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.ng-edge-meta {
+  display: grid;
+  gap: 3px;
+  color: #94a3b8;
+  font-size: 10px;
+}
+.ng-condition-note {
+  padding: 6px 7px;
+  border-radius: 7px;
+  background: rgba(30, 41, 59, 0.72);
+  color: #cbd5e1;
+  font-size: 10px;
+  line-height: 1.4;
+}
 .ng-editor-empty {
   flex: 1 1 auto;
   display: grid;
@@ -1662,5 +2085,64 @@ onBeforeUnmount(() => {
   font-size: 12px;
   text-align: center;
   padding: 16px;
+}
+
+.ng-splitter {
+  position: relative;
+  z-index: 20;
+  background: rgba(51, 65, 85, 0.5);
+  transition: background 120ms ease;
+  touch-action: none;
+  user-select: none;
+}
+.ng-splitter:hover,
+.ng-splitter:active {
+  background: #60a5fa;
+}
+.ng-splitter.vertical {
+  cursor: col-resize;
+}
+.ng-splitter.horizontal {
+  cursor: row-resize;
+}
+.ng-run-status {
+  cursor: pointer;
+}
+.ng-run-detail {
+  position: absolute;
+  top: 48px;
+  right: 12px;
+  z-index: 80;
+  width: min(620px, calc(100% - 24px));
+  max-height: 45%;
+  padding: 10px;
+  border: 1px solid #475569;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.98);
+  box-shadow: 0 16px 35px rgba(0, 0, 0, 0.45);
+  color: #e2e8f0;
+}
+.ng-run-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 7px;
+}
+.ng-run-detail-head button {
+  border: 1px solid #475569;
+  border-radius: 6px;
+  padding: 3px 9px;
+  background: #1e293b;
+  color: #dbeafe;
+  cursor: pointer;
+}
+.ng-run-detail pre {
+  max-height: 280px;
+  overflow: auto;
+  margin: 0;
+  color: #fecaca;
+  font: 11px/1.55 Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 </style>

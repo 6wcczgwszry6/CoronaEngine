@@ -48,6 +48,8 @@ let resizeObserver = null;
 let isRenderingPalette = false;
 let blocksRegistered = false;
 let externalDrag = null;
+let paletteLayoutFrame = null;
+let paletteRenderGeneration = 0;
 const DRAG_THRESHOLD = 5;
 
 const categories = computed(() =>
@@ -145,30 +147,78 @@ function preparePaletteBlock(block) {
   } catch {}
 }
 
+function paletteBlockSize(block) {
+  const root = block.getSvgRoot?.();
+  try {
+    const box = root?.getBBox?.();
+    if (box && Number.isFinite(box.height) && box.height > 0) {
+      return { width: box.width || 180, height: box.height };
+    }
+  } catch {}
+  const size = block.getHeightWidth?.() || {};
+  return {
+    width: Number(size.width) || 180,
+    height: Number(size.height) || 42,
+  };
+}
+
+function cancelPaletteLayout() {
+  paletteRenderGeneration += 1;
+  if (paletteLayoutFrame != null) window.cancelAnimationFrame(paletteLayoutFrame);
+  paletteLayoutFrame = null;
+}
+
 function renderPaletteBlocks() {
   if (!workspace || !BlocklyLib) return;
+  cancelPaletteLayout();
+  const generation = paletteRenderGeneration;
   isRenderingPalette = true;
+  const renderedBlocks = [];
   try {
     workspace.clear();
     const category = activeCategory();
-    let y = 18;
+    let provisionalY = 18;
     for (const item of category?.blocks || []) {
       try {
         const block = workspace.newBlock(item.type);
         block.initSvg();
         block.render();
-        block.moveBy(16, y);
+        block.moveBy(16, provisionalY);
         preparePaletteBlock(block);
-        const size = block.getHeightWidth?.() || { height: 42 };
-        y += Math.max(34, size.height || 42) + 16;
+        renderedBlocks.push(block);
+        provisionalY += 72;
       } catch (e) {
         logError(`渲染积木预览失败: ${item.type}`, e);
       }
     }
-    workspace.scrollbar?.resize?.();
-    resizeBlockly();
-  } finally {
+
+    // Blockly reports incomplete dimensions for some statement/C-shaped blocks
+    // during the same render tick. Measure the real SVG bounds on the next frame
+    // and lay every category out with consistent non-overlapping spacing.
+    paletteLayoutFrame = window.requestAnimationFrame(() => {
+      paletteLayoutFrame = null;
+      if (!workspace || generation !== paletteRenderGeneration) return;
+      let y = 20;
+      for (const block of renderedBlocks) {
+        if (block.isDisposed?.()) continue;
+        const current = block.getRelativeToSurfaceXY?.() || { x: 0, y: 0 };
+        block.moveBy(16 - current.x, y - current.y);
+        const size = paletteBlockSize(block);
+        const isStatementShape =
+          block.type.startsWith('control_') ||
+          block.type.startsWith('controls_') ||
+          Boolean(block.getInput?.('DO')) ||
+          Boolean(block.getInput?.('DO0'));
+        y += Math.max(44, size.height) + (isStatementShape ? 26 : 18);
+      }
+      resizeBlockly();
+      workspace.resizeContents?.();
+      workspace.scrollbar?.resize?.();
+      isRenderingPalette = false;
+    });
+  } catch (error) {
     isRenderingPalette = false;
+    throw error;
   }
 }
 
@@ -322,6 +372,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   cancelExternalDrag();
+  cancelPaletteLayout();
   try {
     resizeObserver?.disconnect?.();
     workspace?.dispose?.();

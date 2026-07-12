@@ -964,7 +964,7 @@ void BindAll(nanobind::module_& m) {
     }, "Clear the camera follow target");
 
     m.def("camera_follow_set_input_enabled", [](bool enabled) {
-        Corona::Systems::CameraFollowController::instance().set_input_enabled(enabled);
+        Corona::API::set_editor_camera_input_enabled(enabled);
     }, nb::arg("enabled"),
        "Enable or disable editor camera-follow keyboard/mouse input");
 

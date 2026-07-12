@@ -327,6 +327,7 @@
       @pointerup="handleViewportPointer"
       @pointerleave="handleViewportPointerLeave"
       @mousedown.left="handleViewportPick"
+      @click="sendScratchPointerEvent('click', $event)"
       @wheel.prevent="handleWheel"
     ></div>
 
@@ -734,7 +735,10 @@ const visionAvailable = ref(false);
 const mainRenderBackend = ref('native');
 const mainVisionRenderMode = ref('path_tracing');
 let previewPollTimer = null;
-window.__coronaGamePreviewInputLocked = false;
+window.__coronaEditorInputLocks = window.__coronaEditorInputLocks instanceof Set
+  ? window.__coronaEditorInputLocks
+  : new Set();
+window.__coronaGamePreviewInputLocked = window.__coronaEditorInputLocks.size > 0;
 const EDITOR_CONTROLS_KEY = '__coronaEditorControls';
 
 // 物理参数状态
@@ -998,7 +1002,17 @@ const restoreCameraViews = async (sceneId) => {
   }
 };
 
+const scratchMouseButton = (button) => ({ 0: 'LeftButton', 1: 'MiddleButton', 2: 'RightButton' }[button] || '');
+const sendScratchPointerEvent = (type, event) => {
+  scriptingService.sendMouseEvent(
+    type,
+    scratchMouseButton(event.button),
+    event.clientX || 0,
+    event.clientY || 0
+  ).catch(() => {});
+};
 const handleWheel = (event) => {
+  sendScratchPointerEvent('wheel', event);
   if (isGamePreviewInputLocked()) return;
   if (event.shiftKey) {
     // Shift+滚轮：调节摄像头速度
@@ -1024,6 +1038,17 @@ const handleKeyDown = (event) => {
   }
   const tag = event.target?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  const modifiers = [
+    event.ctrlKey ? 'Ctrl' : '',
+    event.altKey ? 'Alt' : '',
+    event.shiftKey ? 'Shift' : '',
+    event.metaKey ? 'Meta' : '',
+  ].filter(Boolean).join(',');
+  scriptingService.sendKeyEvent(
+    event.code || event.key || '',
+    modifiers,
+    event.key || event.code || ''
+  ).catch(() => {});
   if (isGamePreviewInputLocked()) {
     resetRealtimeCameraInput();
     return;
@@ -1038,6 +1063,12 @@ const handleKeyDown = (event) => {
 };
 
 const handleKeyUp = (event) => {
+  const tag = event.target?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  scriptingService.sendKeyUpEvent(
+    event.code || event.key || '',
+    event.key || event.code || ''
+  ).catch(() => {});
   if (isGamePreviewInputLocked()) {
     resetRealtimeCameraInput();
     return;
@@ -1082,7 +1113,13 @@ const stopMoveLoop = () => {
   }
 };
 
-const isGamePreviewInputLocked = () => Boolean(window.__coronaGamePreviewInputLocked);
+const isGamePreviewInputLocked = () => {
+  const locks = window.__coronaEditorInputLocks;
+  return Boolean(
+    window.__coronaGamePreviewInputLocked ||
+    (locks instanceof Set && locks.size > 0)
+  );
+};
 
 const resetRealtimeCameraInput = () => {
   Object.keys(movementKeys).forEach((key) => {
@@ -1093,8 +1130,14 @@ const resetRealtimeCameraInput = () => {
 };
 
 const setGamePreviewInputLocked = (locked) => {
-  window.__coronaGamePreviewInputLocked = Boolean(locked);
-  if (locked) {
+  const locks = window.__coronaEditorInputLocks instanceof Set
+    ? window.__coronaEditorInputLocks
+    : new Set();
+  window.__coronaEditorInputLocks = locks;
+  if (locked) locks.add('game_preview');
+  else locks.delete('game_preview');
+  window.__coronaGamePreviewInputLocked = locks.size > 0;
+  if (window.__coronaGamePreviewInputLocked) {
     resetRealtimeCameraInput();
   }
 };
@@ -1322,11 +1365,13 @@ const handleMouseRotate = (dx, dy) => {
 const viewportCursorShape = () => (mouseRotate.active ? 'grabbing' : 'arrow');
 
 const handleViewportPointer = (event) => {
+  sendScratchPointerEvent(event.type === 'pointerup' ? 'mouseup' : 'move', event);
   viewportUiPointerController.send(event, event.type, viewportCursorShape());
 };
 
 const handleViewportPointerDown = (event) => {
   focusViewportInput();
+  sendScratchPointerEvent('mousedown', event);
   viewportUiPointerController.send(
     event,
     event.type,
@@ -1442,6 +1487,9 @@ const handleActorPickResult = (payload) => {
 };
 
 const sendCameraUpdateFast = () => {
+  // During Blockly/node-graph execution the editor must not publish camera
+  // poses. Keyboard/mouse events are still sent to Scratch by their handlers.
+  if (isGamePreviewInputLocked()) return true;
   const handle = cameraBindingState.value.cameraHandle;
   if (!handle) return false;
   const bridge = window.coronaBridge;

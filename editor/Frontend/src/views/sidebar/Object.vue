@@ -738,11 +738,11 @@
               </div>
             </div>
             <!-- 单位 - 节点 -->
-            <div v-show="ActiveSubTab === 'NodeGraph'" class="flex flex-col" style="height: 620px;">
+            <div v-show="ActiveSubTab === 'NodeGraph'" class="flex flex-col" style="height: clamp(1200px, calc(100vh - 48px), 1600px); min-height: 1200px;">
               <NodeGraphWorkspace
                 v-if="actorData.name"
-                :actorName="actorData.name"
-                :sceneName="actorData.parentScene || sceneData.name"
+                :actorName="currentActorFile || actorData.name"
+                :sceneName="actorData.parentScene || sceneData.sceneId || sceneData.name"
                 targetType="actor"
               />
               <div v-else class="flex items-center justify-center h-full text-[#909090] text-xs">
@@ -1326,11 +1326,11 @@
               </div>
             </div>
             <!-- 模型 - 节点 -->
-            <div v-show="ActiveSubTab === 'NodeGraph'" class="flex flex-col" style="height: 620px;">
+            <div v-show="ActiveSubTab === 'NodeGraph'" class="flex flex-col" style="height: clamp(1200px, calc(100vh - 48px), 1600px); min-height: 1200px;">
               <NodeGraphWorkspace
                 v-if="modelData.name"
-                :actorName="modelData.name"
-                :sceneName="modelData.targetScene || sceneData.name"
+                :actorName="currentModelFile || modelData.name"
+                :sceneName="modelData.targetScene || sceneData.sceneId || sceneData.name"
                 targetType="model"
               />
               <div v-else class="flex items-center justify-center h-full text-[#909090] text-xs">

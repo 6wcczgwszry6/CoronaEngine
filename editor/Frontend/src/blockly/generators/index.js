@@ -268,6 +268,51 @@ function safePythonId(value, prefix = 'node') {
   return `${prefix}_${normalized || 'unnamed'}`;
 }
 
+export function validateNodeGraph(rawGraph) {
+  const graph = rawGraph && typeof rawGraph === 'object' ? rawGraph : {};
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  const edges = Array.isArray(graph.edges) ? graph.edges : [];
+  const startNodes = nodes.filter((node) => node?.nodeType === 'start');
+  if (startNodes.length !== 1) {
+    throw new Error(startNodes.length === 0 ? '\u8282\u70b9\u56fe\u5fc5\u987b\u5305\u542b\u4e00\u4e2a\u5f00\u59cb\u8282\u70b9' : '\u8282\u70b9\u56fe\u53ea\u80fd\u5305\u542b\u4e00\u4e2a\u5f00\u59cb\u8282\u70b9');
+  }
+  const ids = nodes.map((node) => String(node?.id ?? ''));
+  if (ids.some((id) => !id)) throw new Error('\u8282\u70b9\u56fe\u4e2d\u5b58\u5728\u7f3a\u5c11 ID \u7684\u8282\u70b9');
+  if (new Set(ids).size !== ids.length) throw new Error('\u8282\u70b9\u56fe\u4e2d\u5b58\u5728\u91cd\u590d\u7684\u8282\u70b9 ID');
+  const nodeIds = new Set(ids);
+  const validSides = new Set(['left', 'right', 'bottom']);
+  const edgeIds = new Set();
+  for (const edge of edges) {
+    const edgeId = String(edge?.id ?? '');
+    if (!edgeId) throw new Error('\u8282\u70b9\u56fe\u4e2d\u5b58\u5728\u7f3a\u5c11 ID \u7684\u8fde\u7ebf');
+    if (edgeIds.has(edgeId)) throw new Error(`\u8fde\u7ebf ID \u91cd\u590d: ${edgeId}`);
+    edgeIds.add(edgeId);
+    for (const [label, endpoint] of [['\u8d77\u70b9', edge?.source], ['\u7ec8\u70b9', edge?.target]]) {
+      if (!nodeIds.has(String(endpoint?.nodeId ?? ''))) throw new Error(`\u8fde\u7ebf\u201c${edge?.name || edgeId}\u201d${label}\u6307\u5411\u4e0d\u5b58\u5728\u7684\u8282\u70b9`);
+      if (!validSides.has(endpoint?.side) || !Number.isInteger(Number(endpoint?.index)) || Number(endpoint.index) < 0) throw new Error(`\u8fde\u7ebf\u201c${edge?.name || edgeId}\u201d${label}\u7aef\u53e3\u65e0\u6548`);
+    }
+  }
+  const outgoing = new Map(ids.map((id) => [id, []]));
+  for (const edge of edges) outgoing.get(String(edge.source.nodeId))?.push(edge);
+  const reachable = new Set();
+  const queue = [String(startNodes[0].id)];
+  while (queue.length) {
+    const id = queue.shift();
+    if (reachable.has(id)) continue;
+    reachable.add(id);
+    for (const edge of outgoing.get(id) || []) queue.push(String(edge.target.nodeId));
+  }
+  const warnings = [];
+  const unreachable = nodes.filter((node) => !reachable.has(String(node.id)));
+  if (unreachable.length) warnings.push(`${unreachable.length} \u4e2a\u8282\u70b9\u4ece\u5f00\u59cb\u8282\u70b9\u4e0d\u53ef\u8fbe`);
+  for (const node of nodes) {
+    const name = node?.nodeType === 'custom' ? node?.customName || node?.name || '\u81ea\u5b9a\u4e49\u8282\u70b9' : node?.nodeType === 'start' ? '\u5f00\u59cb\u8282\u70b9' : '\u7ed3\u675f\u8282\u70b9';
+    if (node?.nodeType !== 'end' && !(outgoing.get(String(node.id)) || []).length) warnings.push(`\u8282\u70b9\u201c${name}\u201d\u6ca1\u6709\u51fa\u7ebf\uff0c\u8fd0\u884c\u65f6\u4f1a\u505c\u7559`);
+    if (!hasWorkspaceBlocks(node?.workspace || {})) warnings.push(`\u8282\u70b9\u201c${name}\u201d\u5185\u90e8\u6ca1\u6709\u79ef\u6728`);
+  }
+  return { warnings };
+}
+
 /**
  * Compile serialized node graph data into Python executable by the Scratch runtime.
  * Keep the existing node graph JSON schema unchanged.
@@ -276,19 +321,8 @@ export function nodeGraphToCode(rawGraph) {
   const graph = rawGraph && typeof rawGraph === 'object' ? rawGraph : {};
   const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
   const edges = Array.isArray(graph.edges) ? graph.edges : [];
+  validateNodeGraph(graph);
   const startNodes = nodes.filter((node) => node?.nodeType === 'start');
-  if (startNodes.length !== 1) {
-    throw new Error(
-      startNodes.length === 0 ? '节点图必须包含一个开始节点' : '节点图只能包含一个开始节点',
-    );
-  }
-
-  const nodeIds = new Set(nodes.map((node) => String(node?.id ?? '')));
-  for (const edge of edges) {
-    if (!nodeIds.has(String(edge?.source?.nodeId ?? '')) || !nodeIds.has(String(edge?.target?.nodeId ?? ''))) {
-      throw new Error(`连线 ${edge?.name || edge?.id || ''} 指向不存在的节点`);
-    }
-  }
 
   resetPrelude();
   const procedureChunks = [];
@@ -439,8 +473,10 @@ export function nodeGraphToCode(rawGraph) {
     const nodeId = String(node.id);
     const keyword = nodeIndex === 0 ? 'if' : 'elif';
     parts.push(`        ${keyword} _node_graph_state == ${pythonString(nodeId)}:`);
+    const traceName = node?.nodeType === 'custom' ? node?.customName || node?.name || '\u81ea\u5b9a\u4e49\u8282\u70b9' : node?.nodeType === 'start' ? '\u5f00\u59cb\u8282\u70b9' : '\u7ed3\u675f\u8282\u70b9';
+    parts.push(`            CoronaEngine.node_graph_enter(${pythonString(nodeId)}, ${pythonString(traceName)})`);
     const body = nodeBodies.get(nodeId) || '';
-    if (body.trim()) parts.push(indentBlock(indentBlock(body)));
+    if (body.trim()) parts.push(indentBlock(indentBlock(indentBlock(body))));
     if (node.nodeType === 'end') {
       parts.push('            _node_graph_state = None');
       parts.push('            continue');
@@ -450,6 +486,7 @@ export function nodeGraphToCode(rawGraph) {
       .map((edge, index) => ({ edge, index }))
       .filter(({ edge }) => String(edge?.source?.nodeId ?? '') === nodeId);
     if (!outgoing.length) {
+      parts.push(`            CoronaEngine.node_graph_waiting('', ${pythonString('\u7b49\u5f85\u8282\u70b9\u51fa\u7ebf')})`);
       parts.push('            CoronaEngine.wait(0.05)');
       parts.push('            continue');
       return;
@@ -464,6 +501,8 @@ export function nodeGraphToCode(rawGraph) {
       parts.push('                    break');
     });
     parts.push(`                if _node_graph_state == ${pythonString(nodeId)}:`);
+    const waitingEdge = outgoing.find(({ index }) => conditionFunctions.has(index))?.edge;
+    parts.push(`                    CoronaEngine.node_graph_waiting(${pythonString(waitingEdge?.id || '')}, ${pythonString(waitingEdge?.name || '\u7b49\u5f85\u8fde\u7ebf\u6761\u4ef6')})`);
     parts.push('                    CoronaEngine.wait(0.05)');
     parts.push('            CoronaEngine.wait(0.01)');
   });
