@@ -412,6 +412,18 @@ class GameProjectState:
         )
         object.__setattr__(self, "validation_status", validation_status)
 
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "project_version": self.project_version,
+            "room_id": self.room_id,
+            "active_task_graph_id": self.active_task_graph_id,
+            "active_scene_plan_id": self.active_scene_plan_id,
+            "scene_world_version": self.scene_world_version,
+            "artifact_refs": list(self.artifact_refs),
+            "validation_status": self.validation_status,
+        }
+
 
 @dataclass(frozen=True)
 class AgentTask:

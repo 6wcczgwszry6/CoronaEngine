@@ -942,3 +942,49 @@ W3.3 GameProjectState 存储与版本迁移：ready
 - 运行中的三职能 Agent 和任何 Snapshot 输入（Red 禁止）。
 - ActionProposal 构造器对 `assert_executable()` 的二次强制调用（Green-only W5）。
 - 所有 Runtime、Engine 与多人效果仍以最新 F5 GateReport 为准，本轮契约代码不改变 Gate 颜色。
+
+## 35. W3.3 GameProjectState 存储与版本迁移
+
+在强类型契约稳定后，本轮建立独立项目事实存储。该状态层只维护三职能协作的项目版本、任务图引用、场景计划/世界版本和 Artifact 引用；它不复用 Runtime `StatePatch`，也不读取或修改 RuntimeState。
+
+当前改动：
+
+- 新增线程安全 `ProjectStateStore`，以不可变 `GameProjectState` 作为当前项目事实。
+- 新增不可变 `ProjectStatePatch`；每个 Patch 必须携带 `patch_id/project_id/expected_project_version/source/changes`。
+- 采用 compare-and-swap：期望版本与当前版本不一致时明确抛出 `ProjectVersionConflictError`，不静默覆盖其他 Agent 更新。
+- `patch_id` 重放返回原结果且不重复增加版本/历史；相同 ID 携带不同内容时抛出 `ProjectPatchConflictError`。
+- `scene_world_version` 只能单调递增，回退版本明确拒绝。
+- `project_id/room_id/project_version` 等身份字段不能由 Patch 修改；只允许更新计划中列出的五个项目字段。
+- 无实际变化的 Patch 不虚构新 project version 或迁移记录。
+- 每个真实迁移记录 source、from/to version、changed fields 和不可变 before/after，用于后续 ArtifactRegistry 审计。
+- Store 与 contracts 独立导入时均不会加载 AgentRuntime/LANChat 模块。
+
+聚焦自动验证：
+
+```text
+创建项目 + 显式 source 更新 -> project_version 1 -> 2
+stale expected version -> 冲突且状态/历史零变化
+相同 patch 重放 -> 幂等；同 ID 异内容 -> 拒绝
+scene_world_version 回退 -> 拒绝
+no-op patch -> 不增加版本
+两个并发写者使用同一 expected version -> 仅一个成功
+多项目状态隔离 + 身份字段不可修改
+协作契约与 ProjectState 聚焦测试 15 项通过
+Python syntax compile、导入隔离与 git diff --check 通过
+```
+
+当前任务状态：
+
+```text
+W3.3 GameProjectState 存储与版本迁移：code_complete
+W3.4 ArtifactRegistry 与失效传播：ready
+W3.5 AgentTaskGraph：等待 W3.4
+当前 Gate：red / pending_reevaluation
+```
+
+以下仍未实现：
+
+- ProjectState 的跨进程持久化和多人广播；第一阶段只提供协作层内存事实接口。
+- ArtifactRegistry 注册/查询、版本索引和 stale 传播。
+- 真实 Snapshot、RuntimeState、LANChat 或三职能生产 Agent 接入。
+- 本轮不改变轨道 A Gate，所有 Engine/Sync 效果仍为 **[待 F5/实机验证]**。
