@@ -19,7 +19,7 @@ CoronaEngine 是一个模块化、多线程、数据驱动的 C++ 游戏引擎�
 - `include/corona/`：公共头文件，包含引擎 API、事件定义、系统对外接口。
 - `src/`：核心引擎实现，包含 `engine.cpp`、共享数据模块和各系统构建入口。
 - `src/systems/`：系统模块目录，当前包含 `acoustics`、`display`、`geometry`、`kinematics`、`mechanics`、`optics`、`script`、`ui`。
-- `examples/`：示例程序，当前可见示例包括 `engine` 和 `cef_subprocess`。
+- `examples/`：示例程序，当前主示例为 `engine`；CEF 子进程复用主程序入口。
 - `docs/`：项目中文/英文文档、设计提案和重构规划。
 - `misc/cmake/`：模块化 CMake 脚本，负责选项、依赖、Python、运行时文件复制等构建细节。
 - `assets/`：示例和运行时使用的模型、纹理、着色器等资源。

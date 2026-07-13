@@ -15,8 +15,9 @@ target_link_libraries(corona_engine PRIVATE
     corona::engine
 )
 
-# 确保 cef_subprocess 在 corona_engine 之前构建
-if(TARGET cef_subprocess)
-    add_dependencies(corona_engine cef_subprocess)
-endif()
+add_custom_command(TARGET corona_engine POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E rm -f
+            "$<TARGET_FILE_DIR:corona_engine>/cef_subprocess.exe"
+    VERBATIM
+)
 

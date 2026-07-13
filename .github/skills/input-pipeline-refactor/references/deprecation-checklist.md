@@ -103,7 +103,7 @@ During convergence, pay special attention to:
 - `editor/Frontend/src/views/layout/MainPage.vue`
 - `editor/Frontend/src/utils/bridge.js`
 - `src/systems/ui/cef/cef_client.cpp`
-- `examples/cef_subprocess/main.cpp`
+- `src/systems/ui/cef/cef_renderer_bridge.cpp`
 
 These are the most likely places for mixed old and new paths to coexist.
 
