@@ -69,6 +69,13 @@ struct OpticsFrameReadyEvent {
     uint32_t viewport_height = 0;
 };
 
+/** Display has submitted a composite that consumes a Native optics frame. */
+struct OpticsFrameConsumedEvent {
+    void* surface = nullptr;
+    uint64_t frame_index = 0;
+    uint64_t submit_serial = 0;
+};
+
 /**
  * @brief UI layer frame ready (published by VulkanBackend, consumed by DisplaySystem)
  */
