@@ -893,3 +893,52 @@ W1.2 Game-ready 实机提升：仍等待最新可信 F5
 - 下一轮 F5 的 GateReport 能否准确列出全部 needs-review 实体及真实缺失字段。
 - Scene Snapshot 身份修复后 Game-ready 是否达到 Yellow（至少 5/14）或 Green（至少 8/14）门槛。
 - 若仍未达标，必须按 `entity_diagnostics` 选择数量占比最高的真实责任字段继续修复，不能根据旧日志猜测。
+
+## 34. W3.1/W3.2/W3.6 三职能强类型契约底座
+
+轨道 A 的跨批次 readiness 恢复已有聚焦集成测试证明；在等待最新 F5 重新评估期间，按 Red 能力矩阵推进首个独立轨道 B 交付物。本轮只建立协作契约，不连接 LANChat、真实或 Mock Snapshot、AgentRuntime、ActionProposal 或 Runtime 写入路径。
+
+当前改动：
+
+- 新增独立 `services/agent_collaboration/contracts.py`，不导入 AgentRuntime 内部实现。
+- 定义 `GameProjectState`、`ArtifactEnvelope`、`AgentTask` 和六种首批 Artifact payload DTO。
+- `ArtifactEnvelope` 构造时规范化并深度冻结 payload，由实际 Validator 产生 `validation_result`；调用方不能传入伪造 hash 或默认“通过”结果。
+- `content_hash` 由 Artifact 类型、schema version 和规范化 payload 确定性计算；键顺序不影响 hash，内容变化必然改变 hash。
+- 无效 payload 可作为审计事实存在，但状态强制为 `invalid`，不能声称 `validated` 或通过执行资格检查。
+- 定义 `NonExecutableArtifactError` 与 `assert_executable()`；`snapshot_source=mock` 在构造时必须同时为 `non_executable=true`，执行资格检查始终拒绝 Mock。
+- Mock 仅在契约测试 fixture 中使用，没有注册运行中 Agent 输入，也没有创建 EntityBindingPlan 生产入口。
+- 本轮没有建立 ArtifactRegistry、TaskGraph、Coordinator、ProjectGate 或 ActionProposal。
+
+聚焦自动验证：
+
+```text
+六种首批 Artifact DTO -> 统一 Validator 通过
+相同规范化 payload -> 相同 content_hash
+payload 内容变化 -> content_hash 变化
+Artifact payload -> 深度不可变，导出副本修改不污染原件
+非法 payload -> validation_result.valid=false + status=invalid
+伪造 validation_result 构造参数 -> 拒绝
+Mock Artifact -> 可审计但 assert_executable 必然拒绝
+GameProjectState / AgentTask 基础约束与规范化通过
+独立导入 contracts -> 未加载 AgentRuntime/LANChat 模块
+契约聚焦测试 8 项通过
+Python syntax compile 与 git diff --check 通过
+```
+
+当前任务状态：
+
+```text
+W3.1 Artifact 与 Project 契约：code_complete
+W3.2 Content Hash 与真实 Validator：contract_layer_code_complete
+W3.6 Mock/非执行硬隔离：contract_layer_code_complete
+W3.3 GameProjectState 存储与版本迁移：ready
+当前 Gate：red / pending_reevaluation
+```
+
+以下仍未实现或未解锁：
+
+- ArtifactRegistry 的版本索引与 stale 传播（W3.4）。
+- AgentTaskGraph 的依赖、失败和重试状态机（W3.5）。
+- 运行中的三职能 Agent 和任何 Snapshot 输入（Red 禁止）。
+- ActionProposal 构造器对 `assert_executable()` 的二次强制调用（Green-only W5）。
+- 所有 Runtime、Engine 与多人效果仍以最新 F5 GateReport 为准，本轮契约代码不改变 Gate 颜色。
