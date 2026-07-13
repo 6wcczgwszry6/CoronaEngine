@@ -75,6 +75,13 @@ class Actor:
             actor_data and actor_data.get("_suppress_network_broadcast")
         )
         self.network_remote = self._suppress_network_broadcast
+        try:
+            self.actor_version = max(
+                1,
+                int((actor_data or {}).get("actor_version") or (actor_data or {}).get("version") or 1),
+            )
+        except (TypeError, ValueError):
+            self.actor_version = 1
         self._collision_callback = None
 
         self.file_data = configparser.ConfigParser()
@@ -613,8 +620,10 @@ class Actor:
                 return
             if not network_sync_policy.actor_is_syncable(self):
                 return
+            self.actor_version = max(1, int(getattr(self, "actor_version", 1) or 1)) + 1
             payload = {
                 "actor_guid": self.actor_guid,
+                "version": self.actor_version,
                 "scene": self.parent.route if self.parent else "",
                 "name": self.name,
                 "actor_type": self.actor_type,
@@ -1324,6 +1333,7 @@ class Actor:
         result_dict = {
             "name": self.name,
             "actor_guid": self.actor_guid,
+            "version": self.actor_version,
             "handle": int(self.handle),
             "path": self.route,
             "scene": self.parent.route if self.parent else "",

@@ -160,3 +160,32 @@ Python syntax compile
 自动验证已覆盖 native actor handle 变化但稳定请求身份不变、Engine 版本优先和 ScenePlan 版本兜底。
 
 房主端与成员端是否能稳定按 `entity_id + version` 去重仍标记为 **[待 F5/实机验证]**。
+
+## 9. M5 多人 Scene Sync 代码闭环
+
+本轮补齐了 LANChat 多人场景同步中原先只打印占位日志的前端断点：
+
+- 房主端通过 `scene.listActorTree` 获取真实 Actor 快照，并继续使用现有 NetworkSystem 广播。
+- 成员端在模型文件传输完成后，通过 `sceneTools.createActor` 创建 Actor；重复消息使用 `actor_guid` 和版本账本幂等处理。
+- Actor state/transform 更新复用同一 native create/update 接口，设置 `skip_if_exists/update_if_exists`，不重复创建实体。
+- 旧版本更新不得覆盖成员端已应用的新版本。
+- `__room_box`、`__room_terrain`、`__terrain_boundary` 等 AI 场景框架实体进入同步允许列表，不再因 `__` 前缀被前端过滤。
+- 接收端写入期间设置 `_suppress_network_broadcast` 并暂停 dirty sync，避免回环广播。
+- Python 发布侧按 `scene + actor_guid` 对 Actor create 做全生命周期去重；Actor 版本变化只走 state/transform 更新，不再次广播 create。
+
+自动验证已覆盖：
+
+```text
+LANChat Scene Sync 静态协议检查
+Actor create 跨事务去重
+Actor version 变化不重复发布 create
+Python syntax compile
+```
+
+仍需明确区分：以上说明前端与 Python 同步接口已经接通，不代表多人实机已通过。以下继续标记为 **[待 F5/实机验证]**：
+
+- 房主和成员实际出现相同的 environment/actor 集合。
+- 真实 transform 更新能在两端保持一致且无乱序回退。
+- 模型文件传输完成后 Actor 只创建一次，且 UI 不发生明显卡顿。
+- `scene_entity_registry` 与两端 Engine Actor 的 `entity_id/version` 一致。
+- 当前 C++ 文件传输主要按项目相对路径复用；跨路径按稳定 `asset_id` 去重仍需后续协议收口，不能在本轮宣称完成。
