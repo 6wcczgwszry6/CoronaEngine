@@ -535,6 +535,10 @@ LANChat Scene Sync 静态检查通过
 - Engine fingerprint 继续只由真实 Engine Actor 生成；两者在未物化实体存在时必须不同。
 - Engine Actor 缺失或漂移 `actor_id/asset_id/model_ref/version` 时均输出明确 mismatch；空值不再绕过检查。
 - 若 fingerprint 仍出现未被字段级诊断覆盖的差异，审计记录 `unclassified_fingerprint_mismatch_count` 并降级为 `needs_review`，禁止 `consistent + fingerprint mismatch` 的矛盾状态。
+- Snapshot 的 `game_ready` 现在受 Engine 一致性审计约束：审计为 `needs_review/blocked` 时，公开 Snapshot 与最终报告统一降级为 `needs_review`，实体级 Registry readiness 保留用于诊断。
+- Finalizer 顺序调整为 `registry ready -> consistency audited -> snapshot ready -> report ready`；不会再先发布 Game-ready Snapshot、随后才发现 Engine 漂移。
+- provisional Snapshot 同样读取当前 Engine snapshot 进行约束；缺少 Engine snapshot 时不能供可执行下游 Agent 使用。
+- immutable Snapshot 重放持久化报告中的一致性结论；旧报告缺少审计或审计未通过时保持保守降级，不因重新读取而恢复成 Game-ready。
 - Finalizer 已有的 `runtime_scene_world_consistency_audited` 与最终报告会直接继承该严格判定，不新增旁路状态源。
 
 聚焦自动验证：
@@ -545,7 +549,8 @@ LANChat Scene Sync 静态检查通过
 存在未物化 Runtime 实体 -> needs_review + fingerprint mismatch
 Game-ready 聚焦套件 19 项通过
 LANChat 世界一致性披露、Inspector 与 Peer Mirror 聚焦回归 7 项通过
-完整相关聚焦回归合计 29 项通过
+Game-ready 聚焦套件 22 项通过
+Inspector、Peer Mirror、同步桥和 LANChat 披露聚焦回归 10 项通过
 ```
 
 以下仍为 **[待 F5/实机验证]**：

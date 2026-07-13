@@ -17,6 +17,7 @@ from editor.plugins.AITool.services.agent_runtime import (
 )
 from editor.plugins.AITool.services.agent_runtime.scene_world_consistency import (
     audit_scene_world_consistency,
+    constrain_scene_world_snapshot_readiness,
 )
 from editor.plugins.AITool.services.lanchat_agent_worker import LANChatAgentWorker
 from editor.plugins.AITool.services.runtime_action_intent import RuntimeActionIntent
@@ -338,6 +339,11 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(result["plan_id"], "plan-1")
         self.assertEqual(result["scene_version"], 2)
         self.assertEqual(result["snapshot_stability"], "provisional")
+        self.assertEqual(result["world_readiness"], "needs_review")
+        self.assertEqual(
+            result["snapshot"]["readiness_summary"]["consistency_status"],
+            "blocked",
+        )
         self.assertEqual(before.get("tool_graphs", {}), after.get("tool_graphs", {}))
         self.assertEqual(before.get("pending_interventions", {}), after.get("pending_interventions", {}))
 
@@ -356,6 +362,51 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertFalse(result["found"])
         self.assertEqual(result["scene_version"], 2)
         self.assertEqual(result["reason"], "minimum_scene_version_not_available")
+
+    def test_immutable_snapshot_preserves_persisted_consistency_downgrade(self) -> None:
+        runtime = AgentRuntime()
+        applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=_room_fact(game_ready=True)))
+        self.assertTrue(applied)
+        persisted_snapshot = {
+            "room_id": "room-1",
+            "plan_id": "plan-1",
+            "scene_version": 2,
+            "world_readiness": "game_ready",
+            "readiness_summary": {"entity_count": 1, "game_ready_entity_count": 1},
+            "environment_entities": [],
+            "actor_entities": [],
+            "operation_cursor": "op:1",
+        }
+        persisted_report = {
+            "scene_world_snapshot": persisted_snapshot,
+            "scene_world_consistency_audit": {
+                "status": "needs_review",
+                "issue_count": 1,
+                "fingerprints_match": False,
+            },
+        }
+
+        with patch.object(runtime, "_latest_persisted_report_for_plan", return_value=persisted_report):
+            result = runtime.get_scene_world_snapshot(room_id="room-1")
+
+        self.assertEqual(result["snapshot_stability"], "immutable")
+        self.assertEqual(result["world_readiness"], "needs_review")
+        self.assertEqual(
+            result["snapshot"]["readiness_summary"]["consistency_status"],
+            "needs_review",
+        )
+
+    def test_report_downgrades_game_ready_registry_without_engine_snapshot(self) -> None:
+        runtime = AgentRuntime()
+        applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=_room_fact(game_ready=True)))
+        self.assertTrue(applied)
+
+        report = runtime.generate_report("room-1", plan_id="plan-1")
+
+        self.assertEqual(report["scene_entity_registry"]["game_ready_entity_count"], 1)
+        self.assertEqual(report["scene_world_consistency_audit"]["status"], "blocked")
+        self.assertEqual(report["scene_world_snapshot"]["world_readiness"], "needs_review")
+        self.assertEqual(report["completion_status"]["world_readiness"], "needs_review")
 
     def test_world_consistency_audit_matches_runtime_and_engine_identity(self) -> None:
         room = _room_fact(game_ready=True)
@@ -551,6 +602,24 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(audit["version_mismatches"][0]["actual"], 0)
         self.assertFalse(audit["fingerprints_match"])
 
+    def test_inconsistent_engine_audit_downgrades_game_ready_snapshot(self) -> None:
+        snapshot = {
+            "plan_id": "plan-1",
+            "scene_version": 1,
+            "world_readiness": "game_ready",
+            "readiness_summary": {"entity_count": 1, "game_ready_entity_count": 1},
+        }
+
+        constrained = constrain_scene_world_snapshot_readiness(
+            snapshot,
+            {"status": "needs_review", "issue_count": 1, "fingerprints_match": False},
+        )
+
+        self.assertEqual(constrained["world_readiness"], "needs_review")
+        self.assertEqual(constrained["readiness_summary"]["consistency_status"], "needs_review")
+        self.assertEqual(constrained["readiness_summary"]["consistency_issue_count"], 1)
+        self.assertEqual(snapshot["world_readiness"], "game_ready")
+
     def test_environment_support_semantics_are_game_ready_specific(self) -> None:
         room = _room_fact(game_ready=True)
         room["environment_components"] = {
@@ -684,9 +753,12 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
 
         self.assertTrue(result["report_ready"])
         events = runtime.operation_log.events()
-        self.assertLess(events.index("scene_entity_registry_ready"), events.index("scene_world_snapshot_ready"))
         self.assertLess(
+            events.index("runtime_scene_world_consistency_audited"),
             events.index("scene_world_snapshot_ready"),
+        )
+        self.assertLess(
+            events.index("scene_entity_registry_ready"),
             events.index("runtime_scene_world_consistency_audited"),
         )
         self.assertLess(

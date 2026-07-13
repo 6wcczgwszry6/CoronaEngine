@@ -311,8 +311,30 @@ def audit_scene_world_consistency(
     }
 
 
+def constrain_scene_world_snapshot_readiness(
+    world_snapshot: Mapping[str, Any],
+    consistency_audit: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Prevent downstream readers from treating an inconsistent world as Game-ready."""
+
+    snapshot = dict(world_snapshot or {})
+    readiness_summary = dict(snapshot.get("readiness_summary") or {})
+    consistency_status = _text(consistency_audit.get("status")) or "blocked"
+    consistency_issue_count = int(consistency_audit.get("issue_count") or 0)
+    readiness_summary.update({
+        "consistency_status": consistency_status,
+        "consistency_issue_count": consistency_issue_count,
+        "consistency_fingerprints_match": bool(consistency_audit.get("fingerprints_match")),
+    })
+    snapshot["readiness_summary"] = readiness_summary
+    if consistency_status != "consistent" and _text(snapshot.get("world_readiness")) == "game_ready":
+        snapshot["world_readiness"] = "needs_review"
+    return snapshot
+
+
 __all__ = [
     "audit_scene_world_consistency",
+    "constrain_scene_world_snapshot_readiness",
     "latest_engine_snapshot",
     "scene_world_fingerprint",
 ]

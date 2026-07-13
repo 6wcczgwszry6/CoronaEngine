@@ -18,6 +18,7 @@ from typing import Any, Callable, ClassVar, Iterable, Mapping
 
 from .scene_world_consistency import (
     audit_scene_world_consistency as build_scene_world_consistency_audit,
+    constrain_scene_world_snapshot_readiness,
     latest_engine_snapshot,
     scene_world_fingerprint,
 )
@@ -16509,24 +16510,6 @@ class AgentRuntime:
                 scene_entity_registry=registry,
                 operation_cursor=f"op:{len(self.operation_log.entries())}",
             )
-            if not self.operation_log.query(
-                event="scene_world_snapshot_ready",
-                room_id=str(room_id),
-                plan_id=plan_id,
-                limit=1,
-            ):
-                self.operation_log.append(
-                    "scene_world_snapshot_ready",
-                    room_id=str(room_id),
-                    plan_id=plan_id,
-                    payload={
-                        "scene_version": int(world_snapshot.get("scene_version") or 0),
-                        "world_readiness": str(world_snapshot.get("world_readiness") or "blocked"),
-                        "environment_entity_count": len(world_snapshot.get("environment_entities") or []),
-                        "actor_entity_count": len(world_snapshot.get("actor_entities") or []),
-                        "operation_cursor": str(world_snapshot.get("operation_cursor") or ""),
-                    },
-                )
             finalizer_engine_snapshot = latest_engine_snapshot(
                 dict(finalizer_room.get("engine_scene_snapshots") or {}),
                 plan_id=plan_id,
@@ -16534,6 +16517,10 @@ class AgentRuntime:
             finalizer_consistency_audit = build_scene_world_consistency_audit(
                 world_snapshot=world_snapshot,
                 engine_snapshot=finalizer_engine_snapshot,
+            )
+            world_snapshot = constrain_scene_world_snapshot_readiness(
+                world_snapshot,
+                finalizer_consistency_audit,
             )
             self.operation_log.append(
                 "runtime_scene_world_consistency_audited",
@@ -16560,6 +16547,27 @@ class AgentRuntime:
                     "issue_count": int(finalizer_consistency_audit.get("issue_count") or 0),
                 },
             )
+            if not self.operation_log.query(
+                event="scene_world_snapshot_ready",
+                room_id=str(room_id),
+                plan_id=plan_id,
+                limit=1,
+            ):
+                self.operation_log.append(
+                    "scene_world_snapshot_ready",
+                    room_id=str(room_id),
+                    plan_id=plan_id,
+                    payload={
+                        "scene_version": int(world_snapshot.get("scene_version") or 0),
+                        "world_readiness": str(world_snapshot.get("world_readiness") or "blocked"),
+                        "consistency_status": str(
+                            finalizer_consistency_audit.get("status") or "blocked"
+                        ),
+                        "environment_entity_count": len(world_snapshot.get("environment_entities") or []),
+                        "actor_entity_count": len(world_snapshot.get("actor_entities") or []),
+                        "operation_cursor": str(world_snapshot.get("operation_cursor") or ""),
+                    },
+                )
             persisted_report = self._latest_persisted_report_for_plan(
                 str(room_id),
                 plan_id,
@@ -20934,7 +20942,10 @@ class AgentRuntime:
             str(persisted_snapshot.get("plan_id") or "") == target_plan_id
             and int(persisted_snapshot.get("scene_version") or 0) == scene_version
         ):
-            snapshot = persisted_snapshot
+            snapshot = constrain_scene_world_snapshot_readiness(
+                persisted_snapshot,
+                dict(persisted_report.get("scene_world_consistency_audit") or {}),
+            )
             snapshot_stability = "immutable"
         else:
             registry = self._scene_entity_registry_for_plan(room, target_plan_id)
@@ -20947,6 +20958,15 @@ class AgentRuntime:
                 snapshot_authority="peer_mirror" if is_peer_mirror else "local_runtime",
                 scene_version_override=scene_version,
             )
+            engine_snapshot = latest_engine_snapshot(
+                dict(room.get("engine_scene_snapshots") or {}),
+                plan_id=target_plan_id,
+            )
+            consistency_audit = build_scene_world_consistency_audit(
+                world_snapshot=snapshot,
+                engine_snapshot=engine_snapshot,
+            )
+            snapshot = constrain_scene_world_snapshot_readiness(snapshot, consistency_audit)
             snapshot_stability = "peer_mirror" if is_peer_mirror else "provisional"
 
         result = {
@@ -22381,6 +22401,13 @@ class AgentRuntime:
         )
         if not engine_snapshot:
             scene_world_consistency_audit["reason"] = "engine_scene_snapshot_unavailable"
+        scene_world_snapshot = constrain_scene_world_snapshot_readiness(
+            scene_world_snapshot,
+            scene_world_consistency_audit,
+        )
+        completion_status["world_readiness"] = str(
+            scene_world_snapshot.get("world_readiness") or "blocked"
+        )
         report = {
             "room_id": str(room_id),
             "plan_id": active_plan_id,
