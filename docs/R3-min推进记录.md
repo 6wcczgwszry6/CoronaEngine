@@ -1083,3 +1083,58 @@ W4.2/W4.3 美术与程序 Agent：等待 W4.1
 - Coordinator、ProjectGate、ActionProposal、EntityBindingPlan 真实绑定和 Runtime 写入仍由 Green Gate 阻断。
 - TaskGraph/Registry 的跨进程持久化与多人传播不属于 W3 第一阶段。
 - 本轮不改变轨道 A Gate；所有 Engine/Sync 效果仍为 **[待 F5/实机验证]**。
+
+## 38. W4.1 PlanningAgent 非执行型策划 Artifact 输出
+
+在 W3 强类型契约、Registry 和 TaskGraph 完成后，实现第一个职能 Agent。该 Agent 通过可注入 `PlanningReasoner` 获取推理结果，但自身只处理项目级强类型输入和 Artifact，不注册 LANChat，不读取聊天流水、RuntimeState、Engine 或任何真实/Mock Snapshot。
+
+当前改动：
+
+- 新增 `services/agent_collaboration/agents/planning_agent.py` 和独立 agents 导出入口。
+- 定义 `PlanningRequest`、`PlanningContext`、`PlanningArtifactContext`、`PlanningAgentDraft`、`PlanningAgentResult` 与 `PlanningReasoner` Protocol。
+- PlanningRequest 只包含明确项目目标、约束、验收条件、project/graph/task identity 和请求来源，不接受聊天历史或场景对象。
+- PlanningContext 只包含 ProjectState 的项目版本和当前有效 planning Artifact；不携带 `scene_world_version`，避免 Red 状态下策划契约间接绑定 Runtime 世界事实。
+- PlanningAgent 要求责任任务属于 planning 且声明 `GameDesignBrief + LevelPlan` 两种输出；任务非 ready 时拒绝推理。
+- Reasoner 必须返回强类型 `PlanningAgentDraft`；输出再经过现有 Artifact schema Validator，不能用一段 prompt 文本冒充契约。
+- 输出使用稳定 lineage `planning.game-design-brief` 和 `planning.level-plan`，自动计算下一版本；LevelPlan 显式依赖同批 GameDesignBrief。
+- 两种 Artifact 通过 ArtifactRegistry 原子注册并由 AgentTaskGraph 校验 source_task、类型和当前可用性后，策划任务才进入 completed。
+- 推理期间 ProjectState 版本变化会抛出 `PlanningContextStaleError`，任务记录失败且不登记过期输出。
+- 同 project/request ID 的完全相同请求幂等返回；相同 ID 携带不同内容明确拒绝。
+- 当前 planning Artifact 若来自 `mock` 或 `runtime` snapshot source，Agent 在调用 Reasoner 前以 `PlanningIsolationError` 拒绝，避免测试 fixture 或世界绑定 Artifact 被静默洗入策划链。
+- 策划版本更新后，Registry 会使依赖旧 LevelPlan 的美术 Artifact 精确 stale，为 W4.2 返工提供事实依据。
+- 本轮 reasoner 通过依赖注入测试，没有注册生产 LLM/LANChat 入口，也没有 ActionProposal 或 Runtime 写入能力。
+
+聚焦自动验证：
+
+```text
+contracts + ProjectState + ArtifactRegistry + TaskGraph + PlanningAgent：42 tests passed
+GameDesignBrief + LevelPlan 原子产出与 TaskGraph completed：passed
+schema invalid / reasoner 非结构化输出失败：passed
+项目版本并发变化拒绝过期输出：passed
+Mock/Runtime source 在 Reasoner 前隔离：passed
+请求幂等与同 ID 异内容冲突：passed
+策划 v2 触发下游美术 Artifact stale：passed
+非执行 Artifact assert_executable 拒绝：passed
+Runtime/LANChat/Snapshot 静态与 import isolation：passed
+Python syntax compile：passed
+```
+
+当前任务状态：
+
+```text
+W3.1-W3.6 三职能强类型契约底座：code_complete
+W4.1 PlanningAgent：code_complete（可注入 reasoner，无生产入口）
+W4.2 ArtAgent：ready
+W4.3 ProgramAgent 非执行输出：ready
+W4.4 Artifact 综合闭环：等待 W4.2/W4.3
+当前 Gate：red / pending_reevaluation
+```
+
+以下仍未实现或未解锁：
+
+- W4.2 ArtAgent 的 `ArtDirection + SceneCompositionPlan` 强类型输出。
+- W4.3 ProgramAgent 的 `GameplayLogicPlan` 非脚本输出。
+- W4.4 六 Artifact 端到端任务图、版本返工和综合验收。
+- PlanningReasoner 的生产模型适配和 CollaborationCoordinator 入口；Red 状态下继续不注册 LANChat。
+- 真实/Mock Snapshot 输入、EntityBindingPlan、ProjectGate、ActionProposal 和 Runtime 写入仍由 Gate 阻断。
+- 本轮不改变轨道 A Gate；所有 Engine/Sync 效果仍为 **[待 F5/实机验证]**。
