@@ -33652,6 +33652,12 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                         "batch_id": batch.batch_id,
                         "asset_id": "asset-chair",
                         "model_ref": "chair.glb",
+                        "position": [0.0, 0.0, 0.0],
+                        "rotation": [0.0, 0.0, 0.0],
+                        "scale": [1.0, 1.0, 1.0],
+                        "support_type": "floor_supported",
+                        "grounding_status": "needs_review",
+                        "sync_status": "local",
                         "status": "engine_loading",
                         "bounds_ready": False,
                         "bounds_source": "estimated",
@@ -33709,13 +33715,38 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             1,
         )
         self.assertTrue(room["actors"]["engine-chair-ready"]["bounds_ready"])
+        self.assertEqual(room["actors"]["engine-chair-ready"]["grounding_status"], "grounded")
         self.assertTrue(room["environment_components"][batch.batch_id]["room_floor"]["bounds_ready"])
         self.assertEqual(
             room["custom_import_facts"][f"{batch.batch_id}:environment_import_result"]["ready_count"],
             1,
         )
         self.assertIn("engine_readiness_reconciled_from_snapshot", runtime.operation_log.events())
+        registry = runtime._scene_entity_registry_for_plan(room, plan.plan_id)
+        chair = next(entity for entity in registry["entities"] if entity.get("actor_id") == "engine-chair-ready")
+        self.assertTrue(chair["game_ready"])
         self.assertTrue(room["reports"])
+
+    def test_late_actual_bounds_do_not_ground_wall_or_floating_actors(self) -> None:
+        wall_actor = {
+            "name": "wall torch",
+            "support_type": "wall_mounted",
+            "grounding_status": "needs_review",
+            "bounds_ready": True,
+            "bounds_source": "engine_actual",
+            "aabb": {"min": [-0.1, 0.0, -0.1], "max": [0.1, 0.8, 0.1]},
+        }
+        floating_actor = {
+            "name": "chair",
+            "support_type": "floor_supported",
+            "grounding_status": "needs_review",
+            "bounds_ready": True,
+            "bounds_source": "engine_actual",
+            "aabb": {"min": [-0.5, 0.3, -0.5], "max": [0.5, 1.3, 0.5]},
+        }
+
+        self.assertEqual(AgentRuntime._grounding_status_from_actual_floor_bounds(wall_actor), "")
+        self.assertEqual(AgentRuntime._grounding_status_from_actual_floor_bounds(floating_actor), "")
 
     def test_plan_finalizer_reconciles_native_ids_across_all_historical_batches(self) -> None:
         def fake_provider(request: dict[str, Any]) -> dict[str, Any]:

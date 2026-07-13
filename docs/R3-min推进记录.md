@@ -1303,3 +1303,36 @@ EntityBindingPlan：schema_only / Green 后 W5.2 解锁
 - 三个 Reasoner 的生产模型适配和 CollaborationCoordinator 入口；Red 状态下继续不注册 LANChat。
 - 真实/Mock Snapshot 输入、EntityBindingPlan、ProjectGate、ActionProposal 和 Runtime 写入仍由 Gate 阻断。
 - 本轮不改变轨道 A Gate；所有 Engine/Sync 效果仍为 **[待 F5/实机验证]**。
+
+## 42. W1.3 Late-ready Actor 选择性 Grounding Reconcile
+
+旧 F5 的 `3/14 Game-ready` 证据中，部分普通 Actor 已被 Engine 接受，但真实 AABB 晚于首次导入结果到达。现有 late-ready reconcile 会补齐 `bounds_ready / bounds_source=engine_actual`，却保留导入早期的 `grounding_status=needs_review`，导致已经实际贴地的地面实体仍无法进入 Game-ready。
+
+本轮改动：
+
+- 在 `_reconcile_partial_engine_readiness()` 完成原生 Scene Snapshot 后，仅检查本轮待 reconcile 批次中的 Actor。
+- 仅当 `support_type=floor_supported`、AABB 为 `engine_actual`、`bounds_ready=true` 且 AABB 底面与地面高度误差不超过 `0.05m` 时，将 grounding 事实提升为 `grounded`。
+- 墙挂、吊挂、系统对象、未知支撑类型和真实浮空对象保持原状态，不移动 Actor，不伪造接地。
+- Grounding 更新通过 `runtime.engine_readiness.reconcile -> ToolResult -> StatePatch -> RuntimeState` 写回；该工具显式声明 `actors` 写集合，继续受 RuntimeGuard 约束。
+- OperationLog 增加 `grounding_reconciled_count`，用于下一轮 F5 对账。
+
+聚焦自动验证：
+
+```text
+Late-ready floor-supported Actor -> grounded -> Game-ready：passed
+wall_mounted / 实际浮空 Actor 不被误判 grounded：passed
+跨历史批次 native actor_id / AABB reconcile：passed
+Game-ready + R3 Readiness 聚焦套件：33 tests passed
+Python syntax compile：passed
+```
+
+当前 Gate：
+
+```text
+red / pending_reevaluation
+旧基准：3/14 Game-ready
+代码断点：late actual AABB 后 grounding 不更新，已修复
+实机效果：待新一轮儿童卧室 F5 重新运行 runtime.r3_readiness.evaluate
+```
+
+本轮不能证明已经达到 `8/14`。下一步固定使用儿童卧室场景重新 F5，核对 `grounding_reconciled_count`、逐实体 `readiness_missing_fields`、Registry、Snapshot 与 R3GateReport；所有 Engine 效果仍为 **[待 F5/实机验证]**。

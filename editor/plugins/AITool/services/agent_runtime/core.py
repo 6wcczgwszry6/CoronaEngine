@@ -9520,6 +9520,7 @@ class AgentRuntime:
             payload={
                 "import_fact_count": len(dict(changes.get("custom_import_facts") or {})),
                 "environment_batch_count": len(dict(changes.get("environment_components") or {})),
+                "actor_grounding_count": len(dict(changes.get("actors") or {})),
             },
         )
 
@@ -16784,10 +16785,27 @@ class AgentRuntime:
             for key, value in dict(room_after_snapshot.get("custom_import_facts") or {}).items()
             if isinstance(value, Mapping)
         }
+        reconcile_batch_ids = {str(batch.batch_id or "") for batch in batches}
+        actor_grounding_updates: dict[str, dict[str, Any]] = {}
+        for actor_id, raw_actor in actors.items():
+            if not isinstance(raw_actor, Mapping):
+                continue
+            actor = dict(raw_actor)
+            if str(actor.get("batch_id") or "") not in reconcile_batch_ids:
+                continue
+            inferred_grounding = self._grounding_status_from_actual_floor_bounds(actor)
+            if not inferred_grounding:
+                continue
+            actor["grounding_status"] = inferred_grounding
+            actor_grounding_updates[str(actor_id)] = actor
+            actors[str(actor_id)] = actor
         changed_batch_ids: list[str] = []
         for batch in batches:
             batch_id = batch.batch_id
-            batch_changed = False
+            batch_changed = any(
+                str(actor.get("batch_id") or "") == batch_id
+                for actor in actor_grounding_updates.values()
+            )
             for suffix in ("actor_import_plan", "actor_import_result"):
                 fact_key = f"{batch_id}:{suffix}"
                 fact = dict(import_facts.get(fact_key) or {})
@@ -16850,6 +16868,8 @@ class AgentRuntime:
             "custom_import_facts": import_facts,
             "environment_components": environment_components,
         }
+        if actor_grounding_updates:
+            changes["actors"] = actor_grounding_updates
         patch_ref = _id("engine-readiness-patch")
         self._pending_engine_readiness_patches[patch_ref] = changes
         reconcile_graph = ToolCallGraph(
@@ -16889,9 +16909,47 @@ class AgentRuntime:
             payload={
                 "changed_batch_count": len(changed_batch_ids),
                 "recovered_batch_count": len(recovered),
+                "grounding_reconciled_count": len(actor_grounding_updates),
             },
         )
         return {"recorded": True, "changed_batches": changed_batch_ids, "recovered_batches": recovered}
+
+    @classmethod
+    def _grounding_status_from_actual_floor_bounds(
+        cls,
+        actor: Mapping[str, Any],
+        *,
+        ground_y: float = 0.0,
+        epsilon: float = 0.05,
+    ) -> str:
+        """Confirm floor grounding only when authoritative bounds prove contact."""
+
+        current = str(actor.get("grounding_status") or actor.get("grounded_status") or "").strip().lower()
+        if current in {
+            "grounded",
+            "wall_mounted",
+            "suspended",
+            "ceiling_hung",
+            "not_applicable",
+            "enclosure",
+        }:
+            return ""
+        support_type = str(actor.get("support_type") or "").strip().lower()
+        if not support_type or support_type == "unknown":
+            support_type = cls._layout_support_type(actor)
+        if support_type != "floor_supported":
+            return ""
+        if not bool(actor.get("bounds_ready")):
+            return ""
+        if str(actor.get("bounds_source") or "").strip().lower() != "engine_actual":
+            return ""
+        bounds = ActorFactValidator._safe_aabb_bounds(actor.get("aabb") or actor.get("world_aabb"))
+        if not bounds:
+            return ""
+        bottom_y = float(bounds["min"][1])
+        if abs(bottom_y - float(ground_y)) > float(epsilon):
+            return ""
+        return "grounded"
 
     @staticmethod
     def _safe_snapshot_known_actor_projection(value: Any) -> dict[str, dict[str, Any]]:
@@ -33487,7 +33545,7 @@ class AgentRuntime:
                     "environment_components": {"state_key": "environment_components", "scope": "plan"},
                     "custom_import_facts": {"state_key": "custom_import_facts", "scope": "plan"},
                 },
-                produces_state=("environment_components", "custom_import_facts"),
+                produces_state=("actors", "environment_components", "custom_import_facts"),
                 requires_user_visible_failure=True,
                 description="Reconcile authoritative native bounds into pending Runtime import facts.",
             )
