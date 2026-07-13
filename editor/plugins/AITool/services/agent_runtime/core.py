@@ -16488,21 +16488,6 @@ class AgentRuntime:
         if next_status in {ScenePlanStatus.COMPLETED, ScenePlanStatus.FAILED}:
             finalizer_room = self.state.room(str(room_id))
             registry = self._scene_entity_registry_for_plan(finalizer_room, plan_id)
-            if not self.operation_log.query(
-                event="scene_entity_registry_ready",
-                room_id=str(room_id),
-                plan_id=plan_id,
-                limit=1,
-            ):
-                self.operation_log.append(
-                    "scene_entity_registry_ready",
-                    room_id=str(room_id),
-                    plan_id=plan_id,
-                    payload={
-                        "entity_count": int(registry.get("entity_count") or len(registry.get("entities") or [])),
-                        "game_ready_entity_count": int(registry.get("game_ready_entity_count") or 0),
-                    },
-                )
             world_snapshot = self._scene_world_snapshot_for_plan(
                 finalizer_room,
                 plan_id,
@@ -16510,6 +16495,26 @@ class AgentRuntime:
                 scene_entity_registry=registry,
                 operation_cursor=f"op:{len(self.operation_log.entries())}",
             )
+            scene_version = int(world_snapshot.get("scene_version") or 0)
+            registry_ready_for_version = any(
+                int(entry.payload.get("scene_version") or 0) == scene_version
+                for entry in self.operation_log.query(
+                    event="scene_entity_registry_ready",
+                    room_id=str(room_id),
+                    plan_id=plan_id,
+                )
+            )
+            if not registry_ready_for_version:
+                self.operation_log.append(
+                    "scene_entity_registry_ready",
+                    room_id=str(room_id),
+                    plan_id=plan_id,
+                    payload={
+                        "scene_version": scene_version,
+                        "entity_count": int(registry.get("entity_count") or len(registry.get("entities") or [])),
+                        "game_ready_entity_count": int(registry.get("game_ready_entity_count") or 0),
+                    },
+                )
             finalizer_engine_snapshot = latest_engine_snapshot(
                 dict(finalizer_room.get("engine_scene_snapshots") or {}),
                 plan_id=plan_id,
@@ -16547,12 +16552,15 @@ class AgentRuntime:
                     "issue_count": int(finalizer_consistency_audit.get("issue_count") or 0),
                 },
             )
-            if not self.operation_log.query(
-                event="scene_world_snapshot_ready",
-                room_id=str(room_id),
-                plan_id=plan_id,
-                limit=1,
-            ):
+            snapshot_ready_for_version = any(
+                int(entry.payload.get("scene_version") or 0) == scene_version
+                for entry in self.operation_log.query(
+                    event="scene_world_snapshot_ready",
+                    room_id=str(room_id),
+                    plan_id=plan_id,
+                )
+            )
+            if not snapshot_ready_for_version:
                 self.operation_log.append(
                     "scene_world_snapshot_ready",
                     room_id=str(room_id),

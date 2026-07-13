@@ -558,3 +558,30 @@ Inspector、Peer Mirror、同步桥和 LANChat 披露聚焦回归 10 项通过
 - 儿童卧室、森林营地和混合场景最终审计不存在未解释的 `non_materialized_entity_count`。
 - Provider 或 Engine 导入失败时，最终报告准确列出未物化实体并保持 `needs_review/partial`。
 - 追加批执行期间 Snapshot 的临时未物化实体不会被错误披露为 Game-ready；追加批完成后新版本重新收敛。
+
+## 22. Finalizer 终态事件按场景版本幂等
+
+本轮复核生成后追加批时发现，`scene_entity_registry_ready` 和 `scene_world_snapshot_ready` 此前只按 plan 判断是否已经记录。同一计划第一次完成后再追加实体，即使 `scene_version` 已增加，第二次 Finalizer 也可能跳过新版终态事件，导致成员端和只读下游 Agent 停留在旧世界版本。
+
+当前改动：
+
+- Registry/Snapshot ready 事件改为按 `plan_id + scene_version` 幂等。
+- 同一版本因 worker 重试重复进入 Finalizer 时不重复发布。
+- 追加批令计划版本增加后，新版本重新发布 Registry 与受 Engine 一致性约束的 Snapshot。
+- Registry ready payload 增加 `scene_version`；Snapshot ready 继续携带版本并新增一致性状态。
+- 不创建新的 ScenePlan，不改变追加批、RuntimeGuard 或 EngineWriteGate 主链。
+
+聚焦自动验证：
+
+```text
+version 1 Finalizer -> registry/snapshot ready 各一次
+version 2 Finalizer -> registry/snapshot ready 各新增一次
+version 2 重试 -> 不重复发布
+Game-ready、Inspector、Peer Mirror、同步桥与 LANChat 披露相关回归 33 项通过
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 生成完成后追加一个实体会令 scene version 增加，并在聊天室与成员端出现对应的新 Snapshot。
+- 追加批期间旧 immutable Snapshot 保持可读，但不能冒充新版本。
+- 新版 Snapshot 与 Engine Actor、Registry、最终报告的实体数量和 fingerprint 一致。

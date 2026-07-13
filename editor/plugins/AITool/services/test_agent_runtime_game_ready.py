@@ -768,6 +768,69 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertLess(events.index("scene_world_snapshot_ready"), events.index("report_ready"))
         self.assertLess(events.index("report_ready"), events.index("latest_completed_plan_set"))
 
+    def test_finalizer_ready_events_are_idempotent_per_scene_version(self) -> None:
+        runtime = AgentRuntime()
+        plan = ScenePlan(
+            plan_id="plan-versioned-finalizer",
+            room_id="room-versioned-finalizer",
+            title="versioned",
+            design_brief="versioned",
+            status=ScenePlanStatus.COMPLETED,
+            version=1,
+        )
+        batch = BatchPlan(
+            batch_id="batch-versioned-finalizer",
+            plan_id=plan.plan_id,
+            room_id=plan.room_id,
+            requested_items=["table"],
+            status=BatchPlanStatus.COMPLETED,
+        )
+        registry = {"entity_count": 1, "game_ready_entity_count": 0, "entities": [{}]}
+
+        def snapshot_for_version(*_args, **_kwargs):
+            return {
+                "plan_id": plan.plan_id,
+                "scene_version": plan.version,
+                "world_readiness": "needs_review",
+                "environment_entities": [],
+                "actor_entities": [{}],
+                "operation_cursor": "op:1",
+            }
+
+        with (
+            patch.object(runtime, "_runtime_plan_by_id_from_state", return_value=plan),
+            patch.object(runtime, "_planned_batches_for_plan", return_value=[batch]),
+            patch.object(runtime, "_reconcile_partial_engine_readiness", return_value={}),
+            patch.object(runtime, "_scene_entity_registry_for_plan", return_value=registry),
+            patch.object(runtime, "_scene_world_snapshot_for_plan", side_effect=snapshot_for_version),
+            patch.object(runtime, "_latest_persisted_report_for_plan", return_value={"report": "ready"}),
+            patch.object(runtime, "_report_covers_current_plan_state", return_value=True),
+            patch.object(runtime, "_persist_plan_identity_changes", return_value=True),
+        ):
+            runtime._finalize_plan_after_queue_drain(room_id=plan.room_id, plan_id=plan.plan_id)
+            plan.version = 2
+            runtime._finalize_plan_after_queue_drain(room_id=plan.room_id, plan_id=plan.plan_id)
+            runtime._finalize_plan_after_queue_drain(room_id=plan.room_id, plan_id=plan.plan_id)
+
+        registry_versions = [
+            int(entry.payload.get("scene_version") or 0)
+            for entry in runtime.operation_log.query(
+                event="scene_entity_registry_ready",
+                room_id=plan.room_id,
+                plan_id=plan.plan_id,
+            )
+        ]
+        snapshot_versions = [
+            int(entry.payload.get("scene_version") or 0)
+            for entry in runtime.operation_log.query(
+                event="scene_world_snapshot_ready",
+                room_id=plan.room_id,
+                plan_id=plan.plan_id,
+            )
+        ]
+        self.assertEqual(registry_versions, [1, 2])
+        self.assertEqual(snapshot_versions, [1, 2])
+
 
 if __name__ == "__main__":
     unittest.main()
