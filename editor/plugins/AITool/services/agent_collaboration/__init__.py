@@ -1,8 +1,10 @@
 """Strongly typed, non-runtime contracts for three-role collaboration."""
 
 from .contracts import (
+    ARTIFACT_LINEAGE_IDS,
     ARTIFACT_TYPES,
     PRODUCER_ROLES,
+    RED_PROJECT_ARTIFACT_TYPES,
     AgentTask,
     ArtifactEnvelope,
     ArtDirection,
@@ -16,6 +18,14 @@ from .contracts import (
     ValidationResult,
     assert_executable,
     validate_artifact_payload,
+)
+from .artifact_bundle import (
+    ProjectArtifactBundle,
+    ProjectArtifactBundleEntry,
+    ProjectArtifactBundleError,
+    ProjectArtifactBundleIncompleteError,
+    ProjectArtifactBundleReader,
+    ProjectArtifactBundleValidationError,
 )
 from .project_state import (
     InvalidProjectStateTransitionError,
@@ -55,8 +65,10 @@ from .task_graph import (
 )
 
 __all__ = [
+    "ARTIFACT_LINEAGE_IDS",
     "ARTIFACT_TYPES",
     "PRODUCER_ROLES",
+    "RED_PROJECT_ARTIFACT_TYPES",
     "AgentTask",
     "ArtifactEnvelope",
     "ArtDirection",
@@ -70,6 +82,12 @@ __all__ = [
     "ValidationResult",
     "assert_executable",
     "validate_artifact_payload",
+    "ProjectArtifactBundle",
+    "ProjectArtifactBundleEntry",
+    "ProjectArtifactBundleError",
+    "ProjectArtifactBundleIncompleteError",
+    "ProjectArtifactBundleReader",
+    "ProjectArtifactBundleValidationError",
     "InvalidProjectStateTransitionError",
     "ProjectAlreadyExistsError",
     "ProjectNotFoundError",

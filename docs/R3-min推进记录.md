@@ -1034,6 +1034,54 @@ W3.5 AgentTaskGraph：ready
 - 运行中的三职能 Agent、真实或 Mock Snapshot 输入、Coordinator、ProjectGate 和 ActionProposal。
 - 本轮不改变轨道 A Gate；所有 Engine/Sync 效果仍为 **[待 F5/实机验证]**。
 
+## 41. W4.4 五 Artifact 红灯阶段综合闭环
+
+在 PlanningAgent、ArtAgent 和 ProgramAgent 的非执行型输出完成后，补齐 Red Gate 下的单业务任务图综合闭环。该闭环只聚合项目契约事实，不接入 Runtime、Snapshot、LANChat 或场景写入。
+
+当前改动：
+
+- 在 `contracts.py` 统一声明 Artifact 稳定 lineage，并明确 Red 阶段五类可产出 Artifact：`GameDesignBrief`、`LevelPlan`、`ArtDirection`、`SceneCompositionPlan`、`GameplayLogicPlan`。
+- 三个职能 Agent 统一引用中心 lineage 映射，消除各模块重复字符串定义。
+- 新增只读 `ProjectArtifactBundleReader`，从当前 `ProjectState + ArtifactRegistry + AgentTaskGraph` 构建不可执行的五 Artifact 项目方案包。
+- 方案包校验当前任务图必须 completed、属于当前项目且仍是 active graph；每项 Artifact 必须是当前可用版本，并与 producer role、source task、项目引用和图输出一致。
+- 方案包使用规范化 payload 计算确定性 SHA-256 content hash；相同项目事实重复读取产生相同结果，读取过程不修改 ProjectState、Registry 或 TaskGraph。
+- 单一业务 DAG 按 `planning -> art -> program` 依赖顺序产出五类 Artifact；Program 只消费显式版本化策划输入与 ArtDirection。
+- 策划 v2 发布后，旧美术与程序 Artifact 精确进入 stale；重新执行下游任务后形成完整 v2 方案包，旧版本进入 superseded。
+- 美术任务失败时只重试失败节点；策划任务不重放，程序任务保持 blocked，待美术重试成功后继续。
+- `EntityBindingPlan` 继续保持 schema-only，不进入 Red 阶段方案包；真实/Mock Snapshot、ProjectGate、ActionProposal 和 Runtime 写入仍未解锁。
+
+聚焦自动验证：
+
+```text
+五 Artifact 单业务 DAG 与确定性方案包：passed
+planning -> art -> program 依赖解锁：passed
+策划 v2 触发下游 stale 并重建 v2：passed
+失败美术任务定点重试且不重放策划：passed
+方案包读取零状态副作用：passed
+五类 Artifact 均保持 non_executable：passed
+EntityBindingPlan 未提前生产：passed
+Runtime/LANChat/Snapshot/SceneTools/ActionProposal/ToolCallGraph 静态隔离：passed
+Python syntax compile：passed
+agent_collaboration 聚焦回归：76 tests passed
+```
+
+当前任务状态：
+
+```text
+W4.1 PlanningAgent：code_complete
+W4.2 ArtAgent：code_complete
+W4.3 ProgramAgent：code_complete
+W4.4 五 Artifact 红灯阶段综合闭环：code_complete
+EntityBindingPlan：schema_only / Green 后 W5.2 解锁
+当前 Gate：red / pending_reevaluation
+```
+
+以下仍未实现或未解锁：
+
+- 三个 Reasoner 的生产模型适配与 CollaborationCoordinator 生产入口。
+- 真实/Mock Snapshot 输入、EntityBindingPlan、ProjectGate、ActionProposal 和 Runtime 写入。
+- 轨道 A 新一轮 F5 Gate 复评；所有 Engine/Sync 效果仍为 **[待 F5/实机验证]**。
+
 ## 37. W3.5 AgentTaskGraph 业务任务状态机
 
 在 W3.4 的版本化 ArtifactRegistry 基础上，完成独立于 ToolCallGraph 和 AgentRuntime 的跨职能业务任务图。本轮只管理“哪个职能在什么依赖满足后产出哪类 Artifact”，不执行 Provider、Engine 或场景写入。

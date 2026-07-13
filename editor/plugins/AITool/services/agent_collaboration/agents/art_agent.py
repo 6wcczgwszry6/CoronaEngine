@@ -5,13 +5,18 @@ from threading import RLock
 from typing import Mapping, Protocol
 
 from ..artifact_registry import ArtifactNotFoundError, ArtifactRef, ArtifactRegistry
-from ..contracts import ArtDirection, ArtifactEnvelope, SceneCompositionPlan
+from ..contracts import (
+    ARTIFACT_LINEAGE_IDS,
+    ArtDirection,
+    ArtifactEnvelope,
+    SceneCompositionPlan,
+)
 from ..project_state import ProjectStateStore
 from ..task_graph import AgentTaskGraphStore, TaskTransitionError
 
 
-ART_DIRECTION_ID = "art.direction"
-SCENE_COMPOSITION_PLAN_ID = "art.scene-composition"
+ART_DIRECTION_ID = ARTIFACT_LINEAGE_IDS["ArtDirection"]
+SCENE_COMPOSITION_PLAN_ID = ARTIFACT_LINEAGE_IDS["SceneCompositionPlan"]
 ART_OUTPUT_TYPES = frozenset({"ArtDirection", "SceneCompositionPlan"})
 ART_INPUT_TYPES = frozenset({"GameDesignBrief", "LevelPlan"})
 

@@ -5,13 +5,13 @@ from threading import RLock
 from typing import Mapping, Protocol
 
 from ..artifact_registry import ArtifactNotFoundError, ArtifactRef, ArtifactRegistry
-from ..contracts import ArtifactEnvelope, GameDesignBrief, LevelPlan
+from ..contracts import ARTIFACT_LINEAGE_IDS, ArtifactEnvelope, GameDesignBrief, LevelPlan
 from ..project_state import ProjectStateStore
 from ..task_graph import AgentTaskGraphStore, TaskTransitionError
 
 
-GAME_DESIGN_BRIEF_ID = "planning.game-design-brief"
-LEVEL_PLAN_ID = "planning.level-plan"
+GAME_DESIGN_BRIEF_ID = ARTIFACT_LINEAGE_IDS["GameDesignBrief"]
+LEVEL_PLAN_ID = ARTIFACT_LINEAGE_IDS["LevelPlan"]
 PLANNING_OUTPUT_TYPES = frozenset({"GameDesignBrief", "LevelPlan"})
 
 

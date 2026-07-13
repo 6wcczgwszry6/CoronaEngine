@@ -5,12 +5,12 @@ from threading import RLock
 from typing import Mapping, Protocol
 
 from ..artifact_registry import ArtifactNotFoundError, ArtifactRef, ArtifactRegistry
-from ..contracts import ArtifactEnvelope, GameplayLogicPlan
+from ..contracts import ARTIFACT_LINEAGE_IDS, ArtifactEnvelope, GameplayLogicPlan
 from ..project_state import ProjectStateStore
 from ..task_graph import AgentTaskGraphStore, TaskTransitionError
 
 
-GAMEPLAY_LOGIC_PLAN_ID = "program.gameplay-logic-plan"
+GAMEPLAY_LOGIC_PLAN_ID = ARTIFACT_LINEAGE_IDS["GameplayLogicPlan"]
 PROGRAM_OUTPUT_TYPES = frozenset({"GameplayLogicPlan"})
 PROGRAM_REQUIRED_INPUT_TYPES = frozenset({"GameDesignBrief", "LevelPlan"})
 PROGRAM_OPTIONAL_INPUT_TYPES = frozenset({"ArtDirection"})

@@ -27,6 +27,25 @@ ARTIFACT_TYPES = frozenset(
         "EntityBindingPlan",
     }
 )
+ARTIFACT_LINEAGE_IDS = MappingProxyType(
+    {
+        "GameDesignBrief": "planning.game-design-brief",
+        "LevelPlan": "planning.level-plan",
+        "ArtDirection": "art.direction",
+        "SceneCompositionPlan": "art.scene-composition",
+        "GameplayLogicPlan": "program.gameplay-logic-plan",
+        "EntityBindingPlan": "program.entity-binding-plan",
+    }
+)
+RED_PROJECT_ARTIFACT_TYPES = frozenset(
+    {
+        "GameDesignBrief",
+        "LevelPlan",
+        "ArtDirection",
+        "SceneCompositionPlan",
+        "GameplayLogicPlan",
+    }
+)
 ARTIFACT_STATUSES = frozenset({"draft", "validated", "invalid", "stale", "archived"})
 SNAPSHOT_SOURCES = frozenset({"none", "mock", "runtime"})
 TASK_STATUSES = frozenset({"pending", "ready", "in_progress", "blocked", "failed", "completed"})
