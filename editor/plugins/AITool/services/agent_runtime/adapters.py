@@ -1303,7 +1303,31 @@ def _normalize_snapshot_actor(actor: Any, *, scene_name: str, index: int = 0) ->
         "actor_id": actor_id,
         "name": actor_name,
         "source": "scene_snapshot",
+        "status": "success",
     }
+    token_fields = {
+        "entity_id": ("entity_id", "runtime_entity_id"),
+        "asset_id": ("asset_id",),
+        "entity_type": ("entity_type",),
+        "semantic_role": ("semantic_role",),
+        "plan_id": ("source_plan_id", "plan_id"),
+        "batch_id": ("source_batch_id", "batch_id"),
+    }
+    for target_field, source_fields in token_fields.items():
+        value = _safe_component_token(
+            _first_present(*(actor.get(field) for field in source_fields)),
+            fallback="",
+            allow_empty=True,
+        )
+        if value:
+            safe[target_field] = value
+    model_ref = _safe_component_text(
+        actor.get("model_ref"),
+        fallback="",
+        allow_empty=True,
+    )
+    if model_ref:
+        safe["model_ref"] = model_ref
     effective_scene_name = _safe_component_text(
         _first_present(scene_name, actor.get("scene_name"), actor.get("scene")),
         fallback="",
@@ -1325,10 +1349,23 @@ def _normalize_snapshot_actor(actor: Any, *, scene_name: str, index: int = 0) ->
     )
     if aabb is not None:
         safe["aabb"] = aabb
-    if "bounds_ready" in actor:
-        safe["bounds_ready"] = _coerce_adapter_bool(actor.get("bounds_ready"), default=False)
-    if "version" in actor and isinstance(actor.get("version"), int):
-        safe["version"] = actor.get("version")
+    bounds_ready = _coerce_adapter_bool(
+        actor.get("bounds_ready"),
+        default=aabb is not None,
+    )
+    safe["bounds_ready"] = bounds_ready
+    if bounds_ready and aabb is not None:
+        safe["bounds_source"] = "engine_actual"
+        safe["engine_lifecycle_status"] = "bounds_ready"
+        safe["sync_status"] = "engine_imported"
+    raw_version = _first_present(actor.get("actor_version"), actor.get("version"))
+    try:
+        version = max(1, int(raw_version or 1))
+    except (TypeError, ValueError):
+        version = 1
+    safe["actor_version"] = version
+    safe["entity_version"] = version
+    safe["version"] = version
     return safe
 
 

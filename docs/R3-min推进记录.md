@@ -248,3 +248,35 @@ LANChat Scene Sync 静态协议回归
 - 传输中删除一个等待 Actor 不影响同组其他 Actor；删除最后一个 Actor 后传输组可安全回收。
 - 房主与成员的 `entity_id + asset_id + actor_version`、SceneWorldSnapshot 和 Engine Actor 数量一致。
 - 大模型 LAN 传输期间 UI 卡顿、带宽占用和同步时序满足验收要求。
+
+## 12. Engine Snapshot 身份保留与世界一致性审计
+
+本轮继续修复了 `C++ Actor snapshot -> Python Runtime` 接口断点：C++ 已返回 Runtime 身份，但旧快照适配器只保留 Actor 名称、transform 和 AABB，丢失了 `entity_id/asset_id/model_ref/actor_version`，因此无法可靠完成 Engine、Registry 与 SceneWorldSnapshot 对账。
+
+当前改动：
+
+- Engine snapshot 归一化保留 `entity_id`、`asset_id`、`model_ref`、`entity_type`、`semantic_role`、`plan_id/batch_id` 和 Actor/Entity version。
+- 真实 Engine AABB 到达时记录 `bounds_source=engine_actual`、`engine_lifecycle_status=bounds_ready` 和本地 `engine_imported`；不伪造多人 `synced`。
+- 新增只读接口 `runtime.scene_world_consistency.audit`，只消费 `SceneWorldSnapshot + engine_scene_snapshots`。
+- 审计按稳定 `entity_id` 对账，不根据名称或路径猜测身份；输出缺失、额外、无 Runtime 身份、重复 ID、actor/asset/version 漂移。
+- 审计被注册为 READ_ONLY，不创建 ScenePlan、PlanPatch、BatchPlan、ToolCallGraph 或 Engine 写入。
+
+聚焦自动验证：
+
+```text
+Engine snapshot 身份和实际 AABB 保留
+Runtime/Engine 身份完全一致 -> consistent
+缺少身份、asset/version 漂移 -> needs_review
+Snapshot/ActionIntent/Inspector/RuntimeGuard 聚焦回归 29 项通过
+LANChat Scene Sync 静态检查通过
+Python syntax compile 通过
+```
+
+一次包含完整 `test_lanchat_runtime_guard` 的大套件因大量历史长等待用例运行约 8 分钟仍未结束，被显式终止；没有观察到失败。本轮按约束文档改跑直接相关的 29 项聚焦测试，不将被终止的大套件计为通过。
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 儿童卧室、森林营地、混合场景的审计结果达到 `consistent`，或准确列出真实漂移实体。
+- Finalizer 后抓取的 Engine snapshot 与不可变 SceneWorldSnapshot 使用同一 plan/version。
+- 房主与成员分别审计时 `entity_id/asset_id/version` 和实体数量一致。
+- 多人传输失败时审计和 Snapshot 正确体现 `partial/needs_review`，不虚报 Game-ready。

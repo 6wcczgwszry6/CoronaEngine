@@ -16,6 +16,11 @@ import time
 import uuid
 from typing import Any, Callable, ClassVar, Iterable, Mapping
 
+from .scene_world_consistency import (
+    audit_scene_world_consistency as build_scene_world_consistency_audit,
+    latest_engine_snapshot,
+)
+
 
 def _now() -> float:
     return time.time()
@@ -7443,6 +7448,11 @@ class AgentRuntime:
         "scene_world_snapshot.get",
         "runtime_scene_world_snapshot_get",
     })
+    _SCENE_WORLD_CONSISTENCY_ACTIONS = frozenset({
+        "runtime.scene_world_consistency.audit",
+        "scene_world_consistency.audit",
+        "runtime_scene_world_consistency_audit",
+    })
     _RUNTIME_EVENT_ACTIONS = frozenset({"runtime_events", "user_visible_events", "runtime_event_feed"})
     _AUDIT_EVENT_ACTIONS = frozenset({"runtime_audit_event", "audit_event", "operation_audit_event"})
     _WORKER_DRAIN_ACTIONS = frozenset({"worker_drain", "drain_queue", "runtime_worker_drain", "tool_graph_drain"})
@@ -7544,6 +7554,7 @@ class AgentRuntime:
         | _STATUS_QUERY_ACTIONS
         | _ENTITY_STATUS_ACTIONS
         | _SCENE_WORLD_SNAPSHOT_ACTIONS
+        | _SCENE_WORLD_CONSISTENCY_ACTIONS
         | _RUNTIME_EVENT_ACTIONS
         | _SYNC_STATUS_ACTIONS
         | _ENGINE_WRITE_STATUS_ACTIONS
@@ -7564,6 +7575,7 @@ class AgentRuntime:
         | _STATUS_QUERY_ACTIONS
         | _ENTITY_STATUS_ACTIONS
         | _SCENE_WORLD_SNAPSHOT_ACTIONS
+        | _SCENE_WORLD_CONSISTENCY_ACTIONS
         | _AUDIT_EVENT_ACTIONS
         | _WORKER_DRAIN_ACTIONS
         | _RUNTIME_COMMAND_ACTIONS
@@ -12880,6 +12892,13 @@ class AgentRuntime:
                 room_id=room,
                 plan_id=requested_plan_id,
                 min_version=min_version,
+            )
+        if normalized_action in self._SCENE_WORLD_CONSISTENCY_ACTIONS:
+            raw_payload = dict(sync_event or {})
+            requested_plan_id = str(plan_id or raw_payload.get("plan_id") or "").strip()
+            return self.audit_scene_world_consistency(
+                room_id=room,
+                plan_id=requested_plan_id,
             )
         if normalized_action in self._STATUS_QUERY_ACTIONS:
             try:
@@ -20839,6 +20858,70 @@ class AgentRuntime:
             },
         )
         return result
+
+    def audit_scene_world_consistency(
+        self,
+        *,
+        room_id: str,
+        plan_id: str = "",
+    ) -> dict[str, Any]:
+        """Compare Runtime world identity with the latest read-only Engine snapshot."""
+
+        room_key = str(room_id)
+        world_result = self.get_scene_world_snapshot(
+            room_id=room_key,
+            plan_id=str(plan_id or "").strip(),
+        )
+        target_plan_id = str(world_result.get("plan_id") or plan_id or "").strip()
+        if not bool(world_result.get("found")):
+            return {
+                "handled": True,
+                "action": "runtime.scene_world_consistency.audit",
+                "recorded": False,
+                "found": False,
+                "plan_id": target_plan_id,
+                "audit": {
+                    "status": "blocked",
+                    "plan_id": target_plan_id,
+                    "issue_count": 0,
+                    "reason": str(world_result.get("reason") or "scene_world_snapshot_unavailable"),
+                },
+            }
+
+        room = self.state.room(room_key)
+        engine_snapshot = latest_engine_snapshot(
+            dict(room.get("engine_scene_snapshots") or {}),
+            plan_id=target_plan_id,
+        )
+        audit = build_scene_world_consistency_audit(
+            world_snapshot=dict(world_result.get("snapshot") or {}),
+            engine_snapshot=engine_snapshot,
+        )
+        if not engine_snapshot:
+            audit["reason"] = "engine_scene_snapshot_unavailable"
+        self.operation_log.append(
+            "runtime_scene_world_consistency_audited",
+            room_id=room_key,
+            plan_id=target_plan_id,
+            payload={
+                "status": str(audit.get("status") or "blocked"),
+                "scene_version": int(audit.get("scene_version") or 0),
+                "expected_entity_count": int(audit.get("expected_entity_count") or 0),
+                "engine_actor_count": int(audit.get("engine_actor_count") or 0),
+                "matched_entity_count": int(audit.get("matched_entity_count") or 0),
+                "issue_count": int(audit.get("issue_count") or 0),
+            },
+        )
+        return {
+            "handled": True,
+            "action": "runtime.scene_world_consistency.audit",
+            "recorded": False,
+            "found": True,
+            "plan_id": target_plan_id,
+            "scene_version": int(audit.get("scene_version") or 0),
+            "snapshot_stability": str(world_result.get("snapshot_stability") or "provisional"),
+            "audit": audit,
+        }
 
     @staticmethod
     def _sync_readiness_summary(

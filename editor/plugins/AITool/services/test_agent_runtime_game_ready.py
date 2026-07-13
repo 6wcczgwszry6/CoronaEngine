@@ -13,6 +13,7 @@ from editor.plugins.AITool.services.agent_runtime import (
     ToolCall,
     ToolCallGraph,
     ToolCallGraphValidator,
+    make_scene_snapshot_provider,
 )
 from editor.plugins.AITool.services.lanchat_agent_worker import LANChatAgentWorker
 from editor.plugins.AITool.services.runtime_action_intent import RuntimeActionIntent
@@ -35,6 +36,34 @@ class _DispatchTrackingWorker(LANChatAgentWorker):
 class _ClientDispatchTrackingWorker(_DispatchTrackingWorker):
     def _can_execute_generation_locally(self) -> bool:
         return False
+
+
+class _RuntimeIdentitySnapshotTool:
+    def invoke(self, _payload: dict) -> dict:
+        return {
+            "status": "success",
+            "actors": [
+                {
+                    "actor_guid": "actor-runtime-1",
+                    "name": "desk",
+                    "entity_id": "entity-runtime-1",
+                    "asset_id": "asset-desk",
+                    "model_ref": "asset-desk",
+                    "entity_type": "furniture",
+                    "semantic_role": "desk",
+                    "source_plan_id": "plan-runtime-1",
+                    "source_batch_id": "batch-runtime-1",
+                    "actor_version": 4,
+                    "bounds_ready": True,
+                    "world_aabb": [-1.0, 0.0, -0.5, 1.0, 1.2, 0.5],
+                    "geometry": {
+                        "position": [0.0, 0.0, 0.0],
+                        "rotation": [0.0, 0.0, 0.0],
+                        "scale": [1.0, 1.0, 1.0],
+                    },
+                }
+            ],
+        }
 
 
 def _room_fact(*, game_ready: bool) -> dict:
@@ -85,6 +114,28 @@ def _room_fact(*, game_ready: bool) -> dict:
 
 
 class AgentRuntimeGameReadyTests(unittest.TestCase):
+    def test_engine_snapshot_preserves_runtime_identity_and_actual_bounds(self) -> None:
+        provider = make_scene_snapshot_provider(
+            snapshot_tool=_RuntimeIdentitySnapshotTool(),
+            scene_name="Scene/runtime-identity.scene",
+        )
+
+        snapshot = provider({"room_id": "room-runtime-identity"})
+        self.assertEqual(snapshot["actor_count"], 1)
+        actor = snapshot["actors"][0]
+        self.assertEqual(actor["actor_id"], "actor-runtime-1")
+        self.assertEqual(actor["entity_id"], "entity-runtime-1")
+        self.assertEqual(actor["asset_id"], "asset-desk")
+        self.assertEqual(actor["model_ref"], "asset-desk")
+        self.assertEqual(actor["plan_id"], "plan-runtime-1")
+        self.assertEqual(actor["batch_id"], "batch-runtime-1")
+        self.assertEqual(actor["actor_version"], 4)
+        self.assertEqual(actor["entity_version"], 4)
+        self.assertEqual(actor["version"], 4)
+        self.assertEqual(actor["bounds_source"], "engine_actual")
+        self.assertEqual(actor["engine_lifecycle_status"], "bounds_ready")
+        self.assertEqual(actor["sync_status"], "engine_imported")
+
     def test_non_authoritative_client_does_not_execute_completed_scene_write(self) -> None:
         runtime = AgentRuntime()
         applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=_room_fact(game_ready=True)))
@@ -279,6 +330,110 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertFalse(result["found"])
         self.assertEqual(result["scene_version"], 2)
         self.assertEqual(result["reason"], "minimum_scene_version_not_available")
+
+    def test_world_consistency_audit_matches_runtime_and_engine_identity(self) -> None:
+        room = _room_fact(game_ready=True)
+        registry = AgentRuntime._scene_entity_registry_for_plan(room, "plan-1")
+        entity = next(row for row in registry["entities"] if row.get("actor_id") == "actor-cupid")
+        room["engine_scene_snapshots"] = {
+            "snapshot-runtime-1": {
+                "snapshot_id": "snapshot-runtime-1",
+                "room_id": "room-1",
+                "scene_name": "Scene/runtime.scene",
+                "plan_id": "plan-1",
+                "actor_count": 1,
+                "source": "scene_snapshot_tool",
+                "timestamp": 10.0,
+                "actors": [
+                    {
+                        "actor_id": entity["actor_id"],
+                        "entity_id": entity["entity_id"],
+                        "asset_id": entity["asset_id"],
+                        "model_ref": entity["model_ref"],
+                        "name": entity["name"],
+                        "source": "scene_snapshot",
+                        "status": "success",
+                        "version": entity["version"],
+                        "entity_version": entity["version"],
+                        "bounds_ready": True,
+                        "bounds_source": "engine_actual",
+                        "engine_lifecycle_status": "bounds_ready",
+                        "sync_status": "engine_imported",
+                        "aabb": entity["aabb"],
+                        "position": entity["transform"]["position"],
+                        "rotation": entity["transform"]["rotation"],
+                        "scale": entity["transform"]["scale"],
+                    }
+                ],
+            }
+        }
+        runtime = AgentRuntime()
+        applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=room))
+        self.assertTrue(applied)
+        before = runtime.state.room("room-1")
+
+        result = runtime.handle_message(
+            room_id="room-1",
+            text="",
+            action="runtime.scene_world_consistency.audit",
+        )
+
+        after = runtime.state.room("room-1")
+        self.assertTrue(result["found"])
+        self.assertEqual(result["audit"]["status"], "consistent")
+        self.assertEqual(result["audit"]["matched_entity_count"], 1)
+        self.assertEqual(result["audit"]["issue_count"], 0)
+        self.assertEqual(before.get("tool_graphs", {}), after.get("tool_graphs", {}))
+        self.assertEqual(before.get("pending_interventions", {}), after.get("pending_interventions", {}))
+        policy = AgentRuntime.message_action_policy("runtime.scene_world_consistency.audit")
+        self.assertEqual(policy["category"], "read_only")
+
+    def test_world_consistency_audit_reports_identity_and_version_drift(self) -> None:
+        room = _room_fact(game_ready=True)
+        registry = AgentRuntime._scene_entity_registry_for_plan(room, "plan-1")
+        entity = next(row for row in registry["entities"] if row.get("actor_id") == "actor-cupid")
+        room["engine_scene_snapshots"] = {
+            "snapshot-drift": {
+                "snapshot_id": "snapshot-drift",
+                "room_id": "room-1",
+                "scene_name": "Scene/runtime.scene",
+                "plan_id": "plan-1",
+                "actor_count": 2,
+                "source": "scene_snapshot_tool",
+                "timestamp": 20.0,
+                "actors": [
+                    {
+                        "actor_id": entity["actor_id"],
+                        "entity_id": entity["entity_id"],
+                        "asset_id": "asset-wrong",
+                        "name": entity["name"],
+                        "source": "scene_snapshot",
+                        "version": entity["version"] + 1,
+                    },
+                    {
+                        "actor_id": "actor-without-runtime-identity",
+                        "name": "manual actor",
+                        "source": "scene_snapshot",
+                        "version": 1,
+                    },
+                ],
+            }
+        }
+        runtime = AgentRuntime()
+        applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=room))
+        self.assertTrue(applied)
+
+        result = runtime.handle_message(
+            room_id="room-1",
+            text="",
+            action="runtime.scene_world_consistency.audit",
+        )
+
+        audit = result["audit"]
+        self.assertEqual(audit["status"], "needs_review")
+        self.assertEqual(audit["unidentified_engine_actor_ids"], ["actor-without-runtime-identity"])
+        self.assertEqual(audit["asset_id_mismatches"][0]["entity_id"], entity["entity_id"])
+        self.assertEqual(audit["version_mismatches"][0]["actual"], entity["version"] + 1)
 
     def test_environment_support_semantics_are_game_ready_specific(self) -> None:
         room = _room_fact(game_ready=True)
