@@ -122,8 +122,11 @@ def latest_engine_snapshot(
     snapshots: Mapping[str, Any],
     *,
     plan_id: str,
+    scene_version: int | None = None,
 ) -> dict[str, Any]:
-    candidates: list[tuple[float, int, dict[str, Any]]] = []
+    exact_candidates: list[tuple[float, int, dict[str, Any]]] = []
+    legacy_candidates: list[tuple[float, int, dict[str, Any]]] = []
+    target_version = max(0, int(scene_version or 0))
     for index, raw in enumerate(dict(snapshots or {}).values()):
         if not isinstance(raw, Mapping):
             continue
@@ -135,7 +138,16 @@ def latest_engine_snapshot(
             timestamp = float(snapshot.get("timestamp") or 0.0)
         except (TypeError, ValueError):
             timestamp = 0.0
-        candidates.append((timestamp, index, snapshot))
+        try:
+            snapshot_version = max(0, int(snapshot.get("scene_version") or 0))
+        except (TypeError, ValueError):
+            snapshot_version = 0
+        candidate = (timestamp, index, snapshot)
+        if not target_version or snapshot_version == target_version:
+            exact_candidates.append(candidate)
+        elif snapshot_version == 0:
+            legacy_candidates.append(candidate)
+    candidates = exact_candidates or legacy_candidates
     if not candidates:
         return {}
     return max(candidates, key=lambda item: (item[0], item[1]))[2]

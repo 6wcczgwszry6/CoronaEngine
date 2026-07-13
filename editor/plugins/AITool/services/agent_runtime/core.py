@@ -890,6 +890,7 @@ class SyncEventValidator:
         "peer_id",
         "status",
         "scene_name",
+        "scene_version",
         "timestamp",
         "chunk_index",
         "chunk_count",
@@ -1707,6 +1708,7 @@ class SceneSnapshotFactValidator:
         "plan_id",
         "room_id",
         "scene_name",
+        "scene_version",
         "snapshot_id",
         "source",
         "status",
@@ -1759,6 +1761,11 @@ class SceneSnapshotFactValidator:
             raise ValueError("engine scene snapshot actor_count must be a non-negative int")
         if "timestamp" in snapshot and not isinstance(snapshot.get("timestamp"), (int, float)):
             raise ValueError("engine scene snapshot timestamp must be numeric")
+        if "scene_version" in snapshot and (
+            not isinstance(snapshot.get("scene_version"), int)
+            or int(snapshot.get("scene_version") or 0) <= 0
+        ):
+            raise ValueError("engine scene snapshot scene_version must be a positive int")
         actors = snapshot.get("actors")
         if not isinstance(actors, list):
             raise ValueError("engine scene snapshot actors must be a list")
@@ -16518,6 +16525,7 @@ class AgentRuntime:
             finalizer_engine_snapshot = latest_engine_snapshot(
                 dict(finalizer_room.get("engine_scene_snapshots") or {}),
                 plan_id=plan_id,
+                scene_version=scene_version,
             )
             finalizer_consistency_audit = build_scene_world_consistency_audit(
                 world_snapshot=world_snapshot,
@@ -20969,6 +20977,7 @@ class AgentRuntime:
             engine_snapshot = latest_engine_snapshot(
                 dict(room.get("engine_scene_snapshots") or {}),
                 plan_id=target_plan_id,
+                scene_version=scene_version,
             )
             consistency_audit = build_scene_world_consistency_audit(
                 world_snapshot=snapshot,
@@ -21037,6 +21046,7 @@ class AgentRuntime:
         engine_snapshot = latest_engine_snapshot(
             dict(room.get("engine_scene_snapshots") or {}),
             plan_id=target_plan_id,
+            scene_version=int(world_result.get("scene_version") or 0),
         )
         audit = build_scene_world_consistency_audit(
             world_snapshot=dict(world_result.get("snapshot") or {}),
@@ -22402,6 +22412,7 @@ class AgentRuntime:
         engine_snapshot = latest_engine_snapshot(
             dict(room.get("engine_scene_snapshots") or {}),
             plan_id=active_plan_id,
+            scene_version=int(scene_world_snapshot.get("scene_version") or 0),
         )
         scene_world_consistency_audit = build_scene_world_consistency_audit(
             world_snapshot=scene_world_snapshot,
@@ -30551,11 +30562,30 @@ class AgentRuntime:
 
     def refresh_scene_snapshot(self, room_id: str) -> dict[str, Any]:
         room = str(room_id)
-        scene_name = ""
-        active_plan = self._active_scene_plan_for_room(room)
-        if active_plan is not None:
-            scene_name = str(active_plan.scene_name or "")
         room_before_snapshot = self.state.room(room)
+        target_plan_id = str(
+            room_before_snapshot.get("active_execution_plan_id")
+            or room_before_snapshot.get("latest_completed_plan_id")
+            or room_before_snapshot.get("peer_mirror_plan_id")
+            or room_before_snapshot.get("active_discussion_plan_id")
+            or room_before_snapshot.get("active_plan_id")
+            or ""
+        ).strip()
+        scene_name = ""
+        target_plan = self._runtime_plan_from_state(room, target_plan_id)
+        if target_plan is not None:
+            scene_name = str(target_plan.scene_name or "")
+            scene_version = max(1, int(target_plan.version or 1))
+        else:
+            scene_version = max(
+                1,
+                int(
+                    dict(room_before_snapshot.get("peer_mirror_scene_versions") or {}).get(
+                        target_plan_id
+                    )
+                    or 1
+                ),
+            )
         known_actors = self._safe_snapshot_known_actor_projection(
             room_before_snapshot.get("actors")
         )
@@ -30567,7 +30597,8 @@ class AgentRuntime:
                 args={
                     "room_id": room,
                     "scene_name": scene_name,
-                    "plan_id": str(active_plan.plan_id if active_plan is not None else ""),
+                    "plan_id": target_plan_id,
+                    "scene_version": scene_version,
                     "known_actors": known_actors,
                 },
                 risk_level=RiskLevel.LOW,
@@ -30582,7 +30613,7 @@ class AgentRuntime:
         executed = executor.execute(graph, room_id=room)
         state_snapshot = self.state.snapshot(room)
         room_state = dict(state_snapshot["room"])
-        active_plan_id = str(room_state.get("active_plan_id") or (active_plan.plan_id if active_plan is not None else "") or "")
+        active_plan_id = target_plan_id
         observed_total = {
             str(actor_id): dict(actor)
             for actor_id, actor in dict(room_state.get("observed_actors") or {}).items()
@@ -33937,6 +33968,7 @@ class AgentRuntime:
                     "room_id": plan.room_id,
                     "plan_id": plan.plan_id,
                     "batch_id": batch.batch_id,
+                    "scene_version": max(1, int(plan.version or 1)),
                     "scene_name": str(scene_name or ""),
                 },
                 risk_level=RiskLevel.LOW,

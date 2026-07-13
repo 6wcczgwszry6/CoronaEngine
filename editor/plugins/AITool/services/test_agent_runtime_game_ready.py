@@ -18,6 +18,7 @@ from editor.plugins.AITool.services.agent_runtime import (
 from editor.plugins.AITool.services.agent_runtime.scene_world_consistency import (
     audit_scene_world_consistency,
     constrain_scene_world_snapshot_readiness,
+    latest_engine_snapshot,
 )
 from editor.plugins.AITool.services.lanchat_agent_worker import LANChatAgentWorker
 from editor.plugins.AITool.services.runtime_action_intent import RuntimeActionIntent
@@ -619,6 +620,67 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(constrained["readiness_summary"]["consistency_status"], "needs_review")
         self.assertEqual(constrained["readiness_summary"]["consistency_issue_count"], 1)
         self.assertEqual(snapshot["world_readiness"], "game_ready")
+
+    def test_engine_snapshot_selection_is_scene_version_monotonic(self) -> None:
+        snapshots = {
+            "late-old": {
+                "snapshot_id": "late-old",
+                "plan_id": "plan-1",
+                "scene_version": 1,
+                "timestamp": 30.0,
+                "actors": [],
+            },
+            "current": {
+                "snapshot_id": "current",
+                "plan_id": "plan-1",
+                "scene_version": 2,
+                "timestamp": 20.0,
+                "actors": [],
+            },
+        }
+
+        selected = latest_engine_snapshot(snapshots, plan_id="plan-1", scene_version=2)
+        missing = latest_engine_snapshot(snapshots, plan_id="plan-1", scene_version=3)
+
+        self.assertEqual(selected["snapshot_id"], "current")
+        self.assertEqual(missing, {})
+
+    def test_batch_scene_snapshot_call_carries_scene_version(self) -> None:
+        runtime = AgentRuntime()
+        plan = ScenePlan(
+            plan_id="plan-versioned-snapshot",
+            room_id="room-versioned-snapshot",
+            title="versioned",
+            design_brief="bedroom",
+            status=ScenePlanStatus.CONFIRMED,
+            version=4,
+        )
+        batch = BatchPlan(
+            batch_id="batch-versioned-snapshot",
+            plan_id=plan.plan_id,
+            room_id=plan.room_id,
+            requested_items=["bed"],
+        )
+
+        graph = runtime._build_batch_execution_graph(plan, batch)
+        snapshot_call = next(
+            call for call in graph.nodes.values() if call.tool_name == "runtime.scene.snapshot"
+        )
+
+        self.assertEqual(snapshot_call.args["scene_version"], 4)
+
+    def test_scene_snapshot_refresh_targets_latest_completed_plan_version(self) -> None:
+        runtime = AgentRuntime()
+        applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=_room_fact(game_ready=True)))
+        self.assertTrue(applied)
+
+        refreshed = runtime.refresh_scene_snapshot("room-1")
+        room = runtime.state.room("room-1")
+        snapshot = next(reversed(dict(room.get("engine_scene_snapshots") or {}).values()))
+
+        self.assertEqual(refreshed["graph"]["status"], "completed")
+        self.assertEqual(snapshot["plan_id"], "plan-1")
+        self.assertEqual(snapshot["scene_version"], 2)
 
     def test_environment_support_semantics_are_game_ready_specific(self) -> None:
         room = _room_fact(game_ready=True)

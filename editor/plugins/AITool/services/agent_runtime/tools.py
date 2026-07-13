@@ -5578,6 +5578,7 @@ def _make_scene_snapshot_tool(provider: Callable[[Any], dict[str, Any]]) -> Call
             "room_id": room_id,
             "plan_id": str(call.args.get("plan_id") or ""),
             "batch_id": str(call.args.get("batch_id") or ""),
+            "scene_version": max(1, int(call.args.get("scene_version") or 1)),
             "scene_name": str(snapshot.get("scene_name") or call.args.get("scene_name") or ""),
             "actor_count": len(actors),
             "source": str(snapshot.get("source") or "scene_snapshot_provider"),

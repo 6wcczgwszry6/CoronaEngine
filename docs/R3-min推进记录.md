@@ -585,3 +585,35 @@ Game-ready、Inspector、Peer Mirror、同步桥与 LANChat 披露相关回归 3
 - 生成完成后追加一个实体会令 scene version 增加，并在聊天室与成员端出现对应的新 Snapshot。
 - 追加批期间旧 immutable Snapshot 保持可读，但不能冒充新版本。
 - 新版 Snapshot 与 Engine Actor、Registry、最终报告的实体数量和 fingerprint 一致。
+
+## 23. Engine Snapshot 绑定场景版本
+
+追加批完成后，Runtime 世界已按 `scene_version` 演进，但 Engine snapshot 此前只记录 plan 和时间戳。旧版本快照若晚到，`latest_engine_snapshot()` 可能把它当成当前世界参与 Finalizer 对账，导致新版本无法稳定收敛。完成态与成员 peer mirror 的手动刷新还沿用旧 active-plan 解析，可能写出空 plan 或默认 version 1。
+
+当前改动：
+
+- `runtime.scene.snapshot` ToolCall 显式携带当前 ScenePlan version。
+- Engine snapshot fact 增加并校验正整数 `scene_version`；ToolResult、StatePatch 与 RuntimeState 使用同一字段。
+- snapshot 选择器优先匹配 `plan_id + scene_version`，不使用显式旧版本或未来版本冒充当前世界。
+- 无版本历史快照仅作为兼容 fallback；新链路产生的快照必须版本化。
+- `refresh_scene_snapshot()` 目标统一为 `active_execution -> latest_completed -> peer_mirror -> discussion`，并携带对应版本。
+- 成员 peer mirror 在本机 Engine snapshot 到达后可从 `needs_review` 收敛；完成态本地计划不再因 active execution 已清空而丢失快照归属。
+- 接入时曾发现 Snapshot validator allowlist 漏接新字段；已补齐 schema，并用原 snapshot/Finalizer 测试验证 ToolGraph 不再被安全校验误拒绝。
+
+聚焦自动验证：
+
+```text
+version 2 世界 + 晚到 version 1 快照 -> 选择 version 2
+只有显式旧版本快照 -> 当前版本视为 snapshot unavailable
+Batch ToolCall 携带 ScenePlan version
+latest completed plan 刷新保留 plan/version
+peer mirror 本机快照按宿主 scene version 收敛
+Game-ready、Inspector、Peer Mirror、同步桥与 LANChat 披露 36 项通过
+真实 snapshot/Finalizer 聚焦回归 9 项通过
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 追加批前后 Engine snapshot 分别携带正确 scene version，晚到旧快照不影响当前报告。
+- 房主与成员端本机 snapshot 使用同一宿主 plan/version，但各自保留本机 Engine AABB 来源。
+- Engine snapshot 缺失当前版本时 Snapshot 保持 `needs_review`，当前版本到达后自动收敛。
