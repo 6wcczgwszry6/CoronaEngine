@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <string>
 #include <system_error>
+#include <thread>
 
 #include <corona/kernel/core/i_logger.h>
 
@@ -125,6 +126,7 @@ CefRefPtr<CefRenderHandler> OffscreenCefClient::GetRenderHandler() {
 }
 
 void OffscreenCefClient::SetTab(BrowserTab* tab) {
+    tab_id_ = tab ? tab->tab_id : -1;
     if (render_handler_) {
         render_handler_->SetTab(tab);
     }
@@ -132,6 +134,9 @@ void OffscreenCefClient::SetTab(BrowserTab* tab) {
 
 void OffscreenCefClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     CEF_REQUIRE_UI_THREAD();
+    CFW_LOG_INFO("CEF: OnAfterCreated tab={}, browser={}, thread={}", tab_id_,
+                 browser ? browser->GetIdentifier() : -1,
+                 std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
     bool close_requested = false;
     {
@@ -170,7 +175,8 @@ void OffscreenCefClient::OnLoadEnd(CefRefPtr<CefBrowser> browser,
         return;
     }
 
-    CFW_LOG_INFO("CEF: main frame load end status={}", httpStatusCode);
+    CFW_LOG_INFO("CEF: OnLoadEnd tab={}, status={}, thread={}", tab_id_, httpStatusCode,
+                 std::hash<std::thread::id>{}(std::this_thread::get_id()));
     browser->GetHost()->WasHidden(false);
     browser->GetHost()->WasResized();
     browser->GetHost()->Invalidate(PET_VIEW);
@@ -218,6 +224,8 @@ bool OffscreenCefClient::WaitForClose(std::chrono::milliseconds timeout) {
 }
 
 void OffscreenCefClient::MarkBrowserCreationFailed() {
+    CFW_LOG_ERROR("CEF: MarkBrowserCreationFailed tab={}, thread={}", tab_id_,
+                  std::hash<std::thread::id>{}(std::this_thread::get_id()));
     {
         std::lock_guard lock(browser_mutex_);
         browser_closed_ = true;

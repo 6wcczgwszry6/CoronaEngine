@@ -374,6 +374,19 @@ class GeometrySystem : public Kernel::SystemBase {
         const ktm::fvec3& world_center,
         float             bounding_radius) const;
 
+    /// Shadow-pass routing: selects the coarsest ready level whose geometric
+    /// error fits within one shadow texel, never falling back to a coarser
+    /// level than the requested target.
+    [[nodiscard]] std::vector<MeshSlot> query_shadow_mesh_slots(
+        std::uintptr_t geometry_handle,
+        float world_units_per_texel,
+        float max_abs_scale,
+        std::uint64_t frame = 0) const;
+
+    void request_shadow_lod(std::uintptr_t geometry_handle, uint32_t mesh_index,
+                            float world_units_per_texel, float max_abs_scale,
+                            std::uint64_t frame) const;
+
     /// 一站式渲染缓冲选择（渲染线程调用，线程安全）。
     ///
     /// 内部流程：compute_screen_ratio() → 选 LOD 级别 → 降级到已就绪级别，
@@ -394,6 +407,13 @@ class GeometrySystem : public Kernel::SystemBase {
         float                   camera_fov_deg,
         const ktm::fvec3&       world_center,
         float                   bounding_radius,
+        const RenderMeshBuffers& fallback) const;
+
+    [[nodiscard]] RenderMeshBuffers select_shadow_render_buffers(
+        std::uintptr_t geometry_handle,
+        uint32_t mesh_index,
+        float world_units_per_texel,
+        float max_abs_scale,
         const RenderMeshBuffers& fallback) const;
 
     /// 驻留路由（渲染线程调用，线程安全，**不做屏幕占比选级**）。

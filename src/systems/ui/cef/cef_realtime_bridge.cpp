@@ -1193,6 +1193,13 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
         const std::string cmd = command.value("cmd", "");
         auto& bm = BrowserManager::instance();
 
+        if (cmd == "createDetachedPanel") {
+            CFW_LOG_INFO("DockCommand createDetachedPanel received: panel_id={}, route={}, size={}x{}, pos=({}, {})",
+                         command.value("panelId", ""), command.value("routePath", ""),
+                         command.value("width", 400), command.value("height", 600),
+                         command.value("x", 120), command.value("y", 120));
+        }
+
         if (cmd == "createCameraView") {
             const std::string scene_id = command.value("sceneId", "");
             const std::string camera_id = command.value("cameraId", "");
@@ -1236,6 +1243,17 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
                     }
                     const int tab_id = browser_manager.create_tab(
                         base_url, route, "camera", width, height, false, true, x, y);
+                    if (auto* tab = browser_manager.get_tab(tab_id)) {
+                        // Camera views are standalone secondary surfaces.  Mark the tab for
+                        // detachment before it can be laid out in the main window, so the
+                        // frame runner creates the SDL child window and routes this camera's
+                        // image to its own surface.
+                        tab->detach_x = x;
+                        tab->detach_y = y;
+                        tab->detach_w = (width > 0) ? width : std::max(1, tab->width);
+                        tab->detach_h = (height > 0) ? height : std::max(1, tab->height);
+                        tab->detach_state = BrowserTab::DetachState::Detaching;
+                    }
                     if (!CameraViewportManager::instance().register_view(
                             scene_id, camera_id, camera_handle, tab_id)) {
                         browser_manager.remove_tab(tab_id);
@@ -1701,6 +1719,11 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
                     tab->detach_w = (width > 0) ? width : std::max(1, tab->width);
                     tab->detach_h = (height > 0) ? height : std::max(1, tab->height);
                     tab->detach_state = BrowserTab::DetachState::Detaching;
+                    CFW_LOG_INFO("createDetachedPanel: tab {} created and marked Detaching (panel_id={})",
+                                 tab_id, panel_id);
+                } else {
+                    CFW_LOG_ERROR("createDetachedPanel: tab {} was not found after create_tab (panel_id={})",
+                                  tab_id, panel_id);
                 }
                 nlohmann::json result;
                 result["tab_id"] = tab_id;
@@ -1808,6 +1831,40 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
                 tab->detach_w = (w > 0) ? w : std::max(1, tab->width);
                 tab->detach_h = (h > 0) ? h : std::max(1, tab->height);
                 tab->detach_state = BrowserTab::DetachState::Detaching;
+            });
+
+            nlohmann::json result;
+            result["queued"] = tab_id >= 0;
+            send_dock_callback(frame, request_id, nullptr, result);
+            return true;
+        }
+
+        if (cmd == "togglePanelWindowMode") {
+            int tab_id = find_tab_id_for_browser(browser);
+            if (command.contains("tabId") && command["tabId"].is_number_integer()) {
+                tab_id = command.value("tabId", -1);
+            }
+            const int x = command.value("x", 120);
+            const int y = command.value("y", 120);
+            const int w = command.value("width", 0);
+            const int h = command.value("height", 0);
+
+            bm.enqueue_main_thread_task([tab_id, x, y, w, h] {
+                auto* tab = BrowserManager::instance().get_tab(tab_id);
+                if (!tab) {
+                    return;
+                }
+                if (tab->detach_state == BrowserTab::DetachState::Docked) {
+                    tab->detach_x = x;
+                    tab->detach_y = y;
+                    tab->detach_w = (w > 0) ? w : std::max(1, tab->width);
+                    tab->detach_h = (h > 0) ? h : std::max(1, tab->height);
+                    tab->detach_state = BrowserTab::DetachState::Detaching;
+                    CFW_LOG_INFO("togglePanelWindowMode: tab {} -> Detaching", tab_id);
+                } else if (tab->detach_state == BrowserTab::DetachState::Detached) {
+                    tab->detach_state = BrowserTab::DetachState::Redocking;
+                    CFW_LOG_INFO("togglePanelWindowMode: tab {} -> Redocking", tab_id);
+                }
             });
 
             nlohmann::json result;

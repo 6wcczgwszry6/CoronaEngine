@@ -62,4 +62,29 @@ std::string bind_vision_actor_material(nlohmann::json& scene_data,
     return material_name;
 }
 
+bool ensure_native_actor_model_normalization(nlohmann::json& shape,
+                                             bool native_origin) {
+    if (!shape.is_object() || shape.value("type", std::string{}) != "model") {
+        return false;
+    }
+
+    const auto guid = shape.value("guid", std::string{});
+    if (!native_origin && guid.starts_with("vision-")) {
+        return false;
+    }
+    auto& params = shape["param"];
+    if (!params.is_object()) {
+        params = nlohmann::json::object();
+    }
+    const auto material = params.value("material", std::string{});
+    const bool identified_native = native_origin || guid.starts_with("native-") ||
+                                   material.starts_with("corona_actor_material_");
+    if (!identified_native ||
+        params.value("normalize_to_unit_bounds", false)) {
+        return false;
+    }
+    params["normalize_to_unit_bounds"] = true;
+    return true;
+}
+
 }  // namespace Corona::Systems::UI

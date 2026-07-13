@@ -5,6 +5,7 @@
 set(UI_SYSTEM_SOURCES
     ui_system.cpp
     ui_frame_runner.cpp
+    ui_surface_lifecycle.cpp
     camera_viewport_manager.cpp
     panel_layout.cpp
 
@@ -19,6 +20,7 @@ set(UI_SYSTEM_SOURCES
     cef/cef_editor_native_api_registry.cpp
     cef/cef_editor_native_api_handlers.cpp
     cef/vision_actor_material_bridge.cpp
+    cef/vision_actor_transform_bridge.cpp
     cef/cef_query_bridge.cpp
     cef/cef_realtime_bridge.cpp
     cef/cef_py_bind.cpp
@@ -34,6 +36,7 @@ set(UI_SYSTEM_SOURCES
     cef/cef_client.h
     cef/cef_editor_native_api_registry.h
     cef/vision_actor_material_bridge.h
+    cef/vision_actor_transform_bridge.h
     sdl/sdl_utils.h
 
     ${PROJECT_SOURCE_DIR}/include/corona/systems/ui/vulkan_backend.h
@@ -79,6 +82,16 @@ helicon_compile_shaders(corona_ui_system
 )
 
 if(BUILD_CORONA_TESTING OR BUILD_TESTING)
+    add_executable(corona_ui_surface_lifecycle_tests
+        tests/test_ui_surface_lifecycle.cpp
+        ui_surface_lifecycle.cpp
+    )
+    target_include_directories(corona_ui_surface_lifecycle_tests
+        PRIVATE ${PROJECT_SOURCE_DIR}/include
+    )
+    add_test(NAME UiSurfaceLifecycleTests
+             COMMAND corona_ui_surface_lifecycle_tests)
+
     add_executable(corona_vision_actor_material_bridge_tests
         tests/test_vision_actor_material_bridge.cpp
         cef/vision_actor_material_bridge.cpp
@@ -91,4 +104,39 @@ if(BUILD_CORONA_TESTING OR BUILD_TESTING)
     )
     add_test(NAME VisionActorMaterialBridgeTests
              COMMAND corona_vision_actor_material_bridge_tests)
+
+    add_executable(corona_vision_actor_transform_bridge_tests
+        tests/test_vision_actor_transform_bridge.cpp
+        cef/vision_actor_transform_bridge.cpp
+    )
+    target_include_directories(corona_vision_actor_transform_bridge_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_vision_actor_transform_bridge_tests
+        PRIVATE nlohmann_json::nlohmann_json
+    )
+    add_test(NAME VisionActorTransformBridgeTests
+             COMMAND corona_vision_actor_transform_bridge_tests)
+
+    add_executable(corona_ui_multisurface_smoke
+        tests/ui_multisurface_smoke.cpp
+        ${PROJECT_SOURCE_DIR}/src/shared_data_hub.cpp
+    )
+    target_include_directories(corona_ui_multisurface_smoke
+        PRIVATE ${PROJECT_SOURCE_DIR}/include
+                ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_ui_multisurface_smoke
+        PRIVATE corona_ui_system corona_display_system corona_script_system
+    )
+    if(COMMAND helicon_install_runtime_deps)
+        helicon_install_runtime_deps(corona_ui_multisurface_smoke)
+    endif()
+    add_test(NAME UiMultiSurfaceSmoke
+             COMMAND corona_ui_multisurface_smoke)
+    set_tests_properties(UiMultiSurfaceSmoke PROPERTIES
+        RUN_SERIAL TRUE
+        SKIP_RETURN_CODE 77
+        TIMEOUT 180
+    )
 endif()

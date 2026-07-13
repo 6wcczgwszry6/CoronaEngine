@@ -14,6 +14,7 @@
 #include "cef_editor_api.h"
 #include "cef_editor_native_api_registry.h"
 #include "vision_actor_material_bridge.h"
+#include "vision_actor_transform_bridge.h"
 
 #include <corona/events/acoustics_system_events.h>
 #include <corona/kernel/core/kernel_context.h>
@@ -527,8 +528,11 @@ std::string fnv1a_hex12(std::string_view text);
 std::string encode_vision_document_data(const nlohmann::json& document);
 nlohmann::json decode_vision_document_data(const std::string& data);
 nlohmann::json vision_document_for_render(nlohmann::json document);
-void bind_missing_native_actor_materials(NativeEditorScene& scene,
+bool bind_missing_native_actor_materials(NativeEditorScene& scene,
                                          nlohmann::json& document);
+bool hydrate_native_actor_transforms_from_vision_document(
+    NativeEditorScene& scene,
+    nlohmann::json& document);
 void cleanup_vision_document_editor_transform_overrides(nlohmann::json& document);
 std::string embedded_vision_scene_key(const NativeEditorScene& scene);
 void clear_embedded_vision_actor_bindings(NativeEditorScene& scene);
@@ -1062,7 +1066,14 @@ void apply_native_scene_vision_source(NativeEditorScene& scene) {
         }
         try {
             auto document = decode_vision_document_data(scene.vision_document_data);
-            bind_missing_native_actor_materials(scene, document);
+            const bool embedded_document_repaired =
+                bind_missing_native_actor_materials(scene, document);
+            if (embedded_document_repaired) {
+                persist_embedded_vision_document(scene, document);
+            }
+            if (hydrate_native_actor_transforms_from_vision_document(scene, document)) {
+                persist_native_scene_actors(scene);
+            }
             const auto render_document = vision_document_for_render(document);
             const auto scene_key = embedded_vision_scene_key(scene);
             register_embedded_vision_actor_bindings(scene, render_document, scene_key);
@@ -3237,10 +3248,6 @@ nlohmann::json vision_document_for_render(nlohmann::json document) {
     return document;
 }
 
-std::array<float, 3> corona_vec_to_vision(const std::array<float, 3>& value) {
-    return {value[0], value[1], -value[2]};
-}
-
 std::string vision_shape_match_guid(const nlohmann::json& shape, size_t index) {
     return vision_shape_guid(shape, index);
 }
@@ -3405,6 +3412,7 @@ nlohmann::json make_vision_shape_from_actor(const NativeEditorActor& actor) {
     }
     auto& params = ensure_vision_shape_param(shape);
     params["fn"] = normalize_route(actor.route);
+    (void)ensure_native_actor_model_normalization(shape, true);
     return shape;
 }
 
@@ -3460,15 +3468,90 @@ void bind_native_actor_material(nlohmann::json& document,
     }
 }
 
-void bind_missing_native_actor_materials(NativeEditorScene& scene,
+bool bind_missing_native_actor_materials(NativeEditorScene& scene,
                                          nlohmann::json& document) {
     ensure_vision_shape_guids(document);
+    bool changed = false;
     for (const auto& actor : scene.actors) {
         auto* shape = find_vision_shape_for_actor(document, actor);
-        if (shape && !vision_shape_has_named_material(*shape)) {
+        if (!shape) {
+            continue;
+        }
+        changed |= ensure_native_actor_model_normalization(*shape);
+        if (!vision_shape_has_named_material(*shape)) {
             bind_native_actor_material(document, *shape, actor);
+            changed = true;
         }
     }
+    return changed;
+}
+
+bool transform_component_changed(const std::array<float, 3>& lhs,
+                                 const std::array<float, 3>& rhs) {
+    constexpr float epsilon = 1.0e-5f;
+    for (std::size_t index = 0; index < lhs.size(); ++index) {
+        if (std::abs(lhs[index] - rhs[index]) > epsilon) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void log_lossy_vision_transform_once(const NativeEditorActor& actor) {
+    static std::unordered_set<std::string> logged_actors;
+    const auto identity = actor.actor_guid.empty() ? actor.name : actor.actor_guid;
+    if (logged_actors.insert(identity).second) {
+        CFW_LOG_WARNING(
+            "Vision transform for actor '{}' contains shear; native editing uses the closest TRS",
+            actor.name);
+    }
+}
+
+bool hydrate_native_actor_transform_from_vision_shape(NativeEditorActor& actor,
+                                                      const nlohmann::json& shape) {
+    const auto& params = vision_param_object(shape);
+    const auto transform_iterator = params.find("transform");
+    if (transform_iterator == params.end()) {
+        return false;
+    }
+    const auto state = decode_vision_actor_transform(*transform_iterator);
+    if (!state.valid) {
+        CFW_LOG_WARNING("Ignoring invalid Vision transform for actor '{}'", actor.name);
+        return false;
+    }
+    if (state.lossy) {
+        log_lossy_vision_transform_once(actor);
+    }
+
+    const auto current_position = actor.geometry ? actor.geometry->get_position() : actor.position;
+    const auto current_rotation = actor.geometry ? actor.geometry->get_rotation() : actor.rotation;
+    const auto current_scale = actor.geometry ? actor.geometry->get_scale() : actor.scale;
+    const bool changed = transform_component_changed(current_position, state.position) ||
+                         transform_component_changed(current_rotation, state.rotation) ||
+                         transform_component_changed(current_scale, state.scale);
+
+    actor.position = state.position;
+    actor.rotation = state.rotation;
+    actor.scale = state.scale;
+    if (actor.geometry && changed) {
+        actor.geometry->set_position(state.position);
+        actor.geometry->set_rotation(state.rotation);
+        actor.geometry->set_scale(state.scale);
+    }
+    return changed;
+}
+
+bool hydrate_native_actor_transforms_from_vision_document(
+    NativeEditorScene& scene,
+    nlohmann::json& document) {
+    bool changed = false;
+    for (auto& actor : scene.actors) {
+        auto* shape = find_vision_shape_for_actor(document, actor);
+        if (shape) {
+            changed |= hydrate_native_actor_transform_from_vision_shape(actor, *shape);
+        }
+    }
+    return changed;
 }
 
 void write_actor_visibility_to_vision_shape(const NativeEditorActor& actor,
@@ -3503,19 +3586,12 @@ void write_actor_state_to_vision_shape(const NativeEditorActor& actor,
     }
     auto& params = ensure_vision_shape_param(shape);
     if (sync_transform) {
-        auto& transform = params["transform"];
-        if (!transform.is_object()) {
-            transform = nlohmann::json::object();
-        }
-        transform["type"] = "trs";
-        auto& transform_params = transform["param"];
-        if (!transform_params.is_object()) {
-            transform_params = nlohmann::json::object();
-        }
-        const auto position = actor.geometry ? actor.geometry->get_position() : actor.position;
-        const auto scale = actor.geometry ? actor.geometry->get_scale() : actor.scale;
-        transform_params["t"] = corona_vec_to_vision(position);
-        transform_params["s"] = scale;
+        VisionActorTransformState state;
+        state.position = actor.geometry ? actor.geometry->get_position() : actor.position;
+        state.rotation = actor.geometry ? actor.geometry->get_rotation() : actor.rotation;
+        state.scale = actor.geometry ? actor.geometry->get_scale() : actor.scale;
+        state.valid = true;
+        params["transform"] = encode_vision_actor_transform(state);
     }
     write_actor_visibility_to_vision_shape(actor, shape);
 }
@@ -3538,7 +3614,10 @@ bool refresh_embedded_vision_view(NativeEditorScene& scene,
     }
     try {
         auto render_document = document;
-        bind_missing_native_actor_materials(scene, render_document);
+        (void)bind_missing_native_actor_materials(scene, render_document);
+        if (hydrate_native_actor_transforms_from_vision_document(scene, render_document)) {
+            persist_native_scene_actors(scene);
+        }
         render_document = vision_document_for_render(std::move(render_document));
         const auto scene_key = embedded_vision_scene_key(scene);
 
@@ -3624,6 +3703,7 @@ bool sync_native_actor_to_embedded_vision_document(NativeEditorScene& scene,
             vision_shape_uses_generated_actor_material(*shape)) {
             bind_native_actor_material(document, *shape, actor);
         }
+        (void)ensure_native_actor_model_normalization(*shape, created_shape);
         write_actor_state_to_vision_shape(actor, *shape, sync_transform);
         const bool persisted = persist_embedded_vision_document(scene, document);
         if (persisted && created_shape) {
@@ -3939,13 +4019,16 @@ void persist_vision_proxy_actors_from_document(const std::filesystem::path& proj
         const auto key = "actor" + std::to_string(imported++);
         const auto& params = vision_param_object(shape);
         const auto& transform = json_object_or_empty(params, "transform");
-        const auto& transform_params = transform.contains("param") && transform["param"].is_object()
-                                           ? transform["param"]
-                                           : transform;
-        const auto default_position = nlohmann::json::array({0.0f, 0.0f, 0.0f});
-        const auto default_scale = nlohmann::json::array({1.0f, 1.0f, 1.0f});
-        const auto position = vision_vec_to_corona(json_member_or(transform_params, "t", default_position), {0.0f, 0.0f, 0.0f});
-        const auto scale = json_float3_or(json_member_or(transform_params, "s", default_scale), {1.0f, 1.0f, 1.0f});
+        const auto transform_state = decode_vision_actor_transform(transform);
+        const auto position = transform_state.valid
+                                  ? transform_state.position
+                                  : std::array<float, 3>{0.0f, 0.0f, 0.0f};
+        const auto rotation = transform_state.valid
+                                  ? transform_state.rotation
+                                  : std::array<float, 3>{0.0f, 0.0f, 0.0f};
+        const auto scale = transform_state.valid
+                               ? transform_state.scale
+                               : std::array<float, 3>{1.0f, 1.0f, 1.0f};
         actors[key + ".actor_type"] = "model";
         actors[key + ".name"] = vision_shape_name(shape, source_model, index);
         actors[key + ".route"] = normalize_route(path_to_utf8(route));
@@ -3953,7 +4036,7 @@ void persist_vision_proxy_actors_from_document(const std::filesystem::path& proj
         actors[key + ".follow_camera"] = "false";
         actors[key + ".mechanics.physics_enabled"] = "false";
         actors[key + ".geometry.position"] = format_float3(position);
-        actors[key + ".geometry.rotation"] = "0, 0, 0";
+        actors[key + ".geometry.rotation"] = format_float3(rotation);
         actors[key + ".geometry.scale"] = format_float3(scale);
         actors[key + ".optics.visible"] = vision_shape_visible(shape) ? "true" : "false";
         const auto& material = json_object_or_empty(params, "material");

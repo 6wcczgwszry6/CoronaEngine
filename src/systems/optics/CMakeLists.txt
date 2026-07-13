@@ -45,6 +45,20 @@ set_source_files_properties("${OPTICS_CURSOR_SHADER}" PROPERTIES HEADER_FILE_ONL
 target_sources(corona_optics_system PRIVATE "${OPTICS_CURSOR_SHADER}")
 
 if((BUILD_CORONA_TESTING OR BUILD_TESTING) AND CORONA_BUILD_VISION)
+    add_executable(corona_vision_model_normalization_tests
+        tests/test_vision_model_normalization.cpp
+        ${CMAKE_SOURCE_DIR}/vision/src/render_core/shape/model_normalization.cpp
+    )
+    target_include_directories(corona_vision_model_normalization_tests
+        PRIVATE
+            ${CMAKE_SOURCE_DIR}/vision/src
+    )
+    target_link_libraries(corona_vision_model_normalization_tests
+        PRIVATE vision-all_libs
+    )
+    add_test(NAME VisionModelNormalizationTests
+             COMMAND corona_vision_model_normalization_tests)
+
     add_executable(corona_vision_render_mode_config_tests
         tests/test_vision_render_mode_config.cpp
     )
@@ -182,6 +196,30 @@ if(BUILD_CORONA_TESTING OR BUILD_TESTING)
     )
     add_test(NAME OpticsDebugLabelTests
              COMMAND corona_optics_debug_label_tests)
+
+    add_executable(corona_native_diagnostics_tests
+        tests/test_native_diagnostics.cpp
+    )
+    target_include_directories(corona_native_diagnostics_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/..
+    )
+    add_test(NAME NativeDiagnosticsTests
+             COMMAND corona_native_diagnostics_tests)
+
+    add_executable(corona_shadow_culling_tests
+        tests/test_shadow_culling.cpp
+        ${CMAKE_SOURCE_DIR}/src/systems/geometry/frustum.cpp
+    )
+    target_include_directories(corona_shadow_culling_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_shadow_culling_tests PRIVATE Horizon)
+    add_test(NAME ShadowCullingTests
+             COMMAND corona_shadow_culling_tests)
 endif()
 
 # ------------------------------------------------------------------------------

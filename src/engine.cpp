@@ -73,11 +73,11 @@ bool Engine::initialize() {
     auto& resource_manager = Resource::ResourceManager::get_instance();
     resource_manager.register_parser<Resource::TextParser>();
     resource_manager.register_parser<Resource::ImageParser>();
-    // 交互式项目加载走快速导入；离线导入工具可按需显式开启 simplify/LOD。
+    // 交互式项目导入启用网格简化和自适应 LOD，降低大量物体场景的运行时几何量。
     {
         auto scene_parser = std::make_shared<Resource::SceneParser>();
-        scene_parser->assimp_options.simplify_mesh = false;
-        scene_parser->assimp_options.lod_options.enabled = false;
+        scene_parser->assimp_options.simplify_mesh = true;
+        scene_parser->assimp_options.lod_options.enabled = true;
         resource_manager.register_parser(scene_parser);
     }
     resource_manager.register_parser<Resource::VideoParser>();

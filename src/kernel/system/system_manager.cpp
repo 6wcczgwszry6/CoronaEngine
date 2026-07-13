@@ -127,9 +127,28 @@ class SystemManager : public ISystemManager {
 
     void stop_all() override {
         std::lock_guard<std::mutex> lock(mutex_);
+        // UI produces frames consumed by Display. Stop that producer first, then
+        // stop Display immediately so it cannot continue presenting while the
+        // remaining systems are draining.
+        auto stop_named = [&](std::string_view name) {
+            for (const auto& system : systems_) {
+                if (system->get_name() == name) {
+                    system->stop();
+                    CFW_LOG_INFO("Stopped system: {}", system->get_name());
+                    return;
+                }
+            }
+        };
+        stop_named("UI");
+        stop_named("Display");
+
         for (auto it = systems_.rbegin(); it != systems_.rend(); ++it) {
+            const auto name = (*it)->get_name();
+            if (name == "UI" || name == "Display") {
+                continue;
+            }
             (*it)->stop();
-            CFW_LOG_INFO("Stopped system: {}", (*it)->get_name());
+            CFW_LOG_INFO("Stopped system: {}", name);
         }
     }
 

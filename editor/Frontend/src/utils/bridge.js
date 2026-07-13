@@ -833,6 +833,8 @@ export const appService = {
   // in logical px; width/height default to the panel's current size on the C++ side.
   detachPanel: (opts = {}) =>
     Bridge.callDockCommand({ cmd: 'detachPanel', ...opts }),
+  togglePanelWindowMode: (opts = {}) =>
+    Bridge.callDockCommand({ cmd: 'togglePanelWindowMode', ...opts }),
   // Re-dock the calling panel back into the main window (destroys its secondary window).
   redockPanel: (opts = {}) =>
     Bridge.callDockCommand({ cmd: 'redockPanel', ...opts }),

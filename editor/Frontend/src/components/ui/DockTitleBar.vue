@@ -13,17 +13,23 @@
       <div class="titlebar-button-group">
         <button
           v-if="showFloatToggle"
+          type="button"
           :title="t('dock.toggleFloat')"
           class="titlebar-button"
-          @click.stop="onToggleFloat"
+          @pointerdown.stop
+          @mousedown.stop
+          @click.stop.prevent="onToggleFloat"
         >
           ⤢
         </button>
 
         <button
+          type="button"
           :title="t('dock.close')"
           class="titlebar-button titlebar-close"
-          @click.stop="onClose"
+          @pointerdown.stop
+          @mousedown.stop
+          @click.stop.prevent="onClose"
         >
           ×
         </button>
@@ -149,12 +155,10 @@ function panelIdFromRoute() {
 }
 
 async function onToggleFloat() {
-  // DockTitleBar 仅在 standalone（已浮出为独立 OS 窗口）渲染，因此 ⤢ 永远表示「收回主窗口」。
-  // 收回 = closeThisTab：C++ 从调用方 browser 解析 tabId、置 open=false（帧循环按 promise
-  // 顺序拆掉副窗口），并广播 panel-closed → 主窗口 dockStore.popIn 恢复为 DOM 面板。
+  // Native 根据当前 detach_state 在主窗口 floating 与 SDL secondary window 之间切换。
   const panelId = panelIdFromRoute();
   try {
-    await appService.closeThisTab(panelId);
+    await appService.togglePanelWindowMode({ panelId });
   } catch (e) {
     console.error('[DockTitleBar] redock failed:', e);
   }
