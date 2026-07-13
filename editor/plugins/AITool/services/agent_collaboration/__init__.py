@@ -27,6 +27,19 @@ from .project_state import (
     ProjectStateTransition,
     ProjectVersionConflictError,
 )
+from .artifact_registry import (
+    ArtifactDependencyError,
+    ArtifactNotFoundError,
+    ArtifactNotUsableError,
+    ArtifactRecord,
+    ArtifactRef,
+    ArtifactRegistrationConflictError,
+    ArtifactRegistry,
+    ArtifactRegistryError,
+    ArtifactVersionConflictError,
+    InvalidArtifactError,
+    StaleReason,
+)
 
 __all__ = [
     "ARTIFACT_TYPES",
@@ -52,4 +65,15 @@ __all__ = [
     "ProjectStateStore",
     "ProjectStateTransition",
     "ProjectVersionConflictError",
+    "ArtifactDependencyError",
+    "ArtifactNotFoundError",
+    "ArtifactNotUsableError",
+    "ArtifactRecord",
+    "ArtifactRef",
+    "ArtifactRegistrationConflictError",
+    "ArtifactRegistry",
+    "ArtifactRegistryError",
+    "ArtifactVersionConflictError",
+    "InvalidArtifactError",
+    "StaleReason",
 ]

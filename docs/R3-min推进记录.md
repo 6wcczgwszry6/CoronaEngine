@@ -988,3 +988,48 @@ W3.5 AgentTaskGraph：等待 W3.4
 - ArtifactRegistry 注册/查询、版本索引和 stale 传播。
 - 真实 Snapshot、RuntimeState、LANChat 或三职能生产 Agent 接入。
 - 本轮不改变轨道 A Gate，所有 Engine/Sync 效果仍为 **[待 F5/实机验证]**。
+
+## 36. W3.4 ArtifactRegistry 与失效传播
+
+在 Gate 仍为 Red、等待下一轮 F5 重新评估期间，完成独立轨道 B 的 Artifact 版本事实层。本轮没有接入 RuntimeState、SceneWorldSnapshot、LANChat、ActionProposal 或 Engine 写入路径。
+
+当前改动：
+
+- 新增 `services/agent_collaboration/artifact_registry.py`，以不可变 `ArtifactEnvelope` 为内容事实，以独立 `ArtifactRecord` 保存 `current/stale/superseded` 生命周期，避免修改已计算 hash 的 Artifact。
+- 引入显式 `artifact_id@version` 引用；依赖、项目当前引用和审计查询均绑定具体版本，旧版本不能冒充当前有效版本。
+- 支持单项与批量原子注册；同一个 Agent 一次产出的多个 Artifact 可以共享同一个 `base_project_version`，批内依赖按拓扑顺序解析，ProjectState 只增加一次版本。
+- 注册操作通过 `ProjectStatePatch` 的 expected-version CAS 更新 `artifact_refs`；版本冲突、缺失依赖、非法跳版本或无效 Artifact 均不会写入 Registry 或 ProjectState。
+- 同一 Artifact ref 和相同内容可幂等重放；相同 ref 携带不同内容明确拒绝，避免静默覆盖审计事实。
+- 上游新版本发布后，直接依赖旧版本的当前 Artifact 标记 `dependency_superseded`，更下游 Artifact 递归标记 `dependency_stale`；每条 stale reason 保留明确依赖 ref，直接替代版本与传递失效不混淆。
+- 下游按新依赖发布新版本后，当前版本恢复可用；旧 stale/superseded 版本仍可按 ref 查询和审计。
+- ProjectState 在存在当前 stale Artifact 时写为 `validation_status=stale`；当前头部全部恢复后回到 `pending`，不在 ProjectGate 建立前伪称项目已通过验证。
+
+聚焦自动验证：
+
+```text
+contracts + ProjectState + ArtifactRegistry：23 tests passed
+批量原子注册 + 批内拓扑依赖：passed
+直接/传递 stale propagation：passed
+旧版本审计 + current usable guard：passed
+幂等重放 + 同 ref 异内容拒绝：passed
+项目版本、Artifact 版本、依赖与 invalid guard：passed
+轨道 B Runtime/LANChat import isolation：passed
+Python syntax compile：passed
+git diff --check：无 whitespace error（仅现有 CRLF 提示）
+```
+
+当前任务状态：
+
+```text
+W3.3 GameProjectState 存储与版本迁移：code_complete
+W3.4 ArtifactRegistry 与失效传播：code_complete
+W3.5 AgentTaskGraph：ready
+当前 Gate：red / pending_reevaluation
+```
+
+以下仍未实现或未解锁：
+
+- AgentTaskGraph 的依赖、失败、重试、blocked 和 output refs 状态机（W3.5）。
+- ArtifactRegistry 的跨进程持久化和多人传播；W3 第一阶段只提供协作层内存事实接口。
+- 运行中的三职能 Agent、真实或 Mock Snapshot 输入、Coordinator、ProjectGate 和 ActionProposal。
+- 本轮不改变轨道 A Gate；所有 Engine/Sync 效果仍为 **[待 F5/实机验证]**。
