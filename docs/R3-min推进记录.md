@@ -13,6 +13,20 @@
 
 没有恢复旧 Workflow 用户入口，没有引入可执行下游 Agent，也没有扩展 VLM、Provider 或 UI。
 
+### 本轮 M5 增量：权威 Scene Snapshot 切换
+
+- Runtime 导入的普通 Actor 与 environment Actor 现在携带 `source_scene_version`，并由 C++ Scene Actor 元数据持久化、快照读取和 LAN 同步保留。
+- Host 的 `ACTOR_SCENE_SNAPSHOT` JSON 顶层携带 `plan_id / scene_version / snapshot_authority`；没有新增网络消息类型。
+- C++ 收到带计划身份的 Snapshot 后产生 `scene_snapshot_received` 只读同步事实。
+- 成员 Runtime 可继续接收不同计划的 Actor 事实，但只有权威 Snapshot 可以把 `peer_mirror_plan_id` 从旧计划切换到新计划；迟到旧 Actor 事件不能再把活动世界切回去。
+- 聚焦验证：35 项 Python 测试、Python syntax compile、LANChat Scene Sync 静态检查通过。
+
+以下仍为 **[待 F5/实机验证]**：
+
+- C++ Actor 元数据在完整构建、场景保存/重载和真实 LAN 传输后保持 `source_scene_version`。
+- Host Snapshot 到达后，成员端活动 Snapshot 只切换一次且版本与 Host 一致。
+- 新计划 Actor 先于 Snapshot、旧计划 Actor 迟到、追加批更新三种乱序情况下，成员端均不回退世界版本。
+
 ## 2. 里程碑状态
 
 | 里程碑 | 状态 | 本轮结果 |

@@ -21742,6 +21742,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             "room_id": "room-env-import",
             "plan_id": "plan-env-import",
             "batch_id": "batch-env-import",
+            "scene_version": 5,
             "environment_components": {
                 "component-terrain": {
                     "component_id": "component-terrain",
@@ -21776,6 +21777,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(gate.calls[0]["entity_version"], 1)
         self.assertEqual(gate.calls[0]["source_plan_id"], "plan-env-import")
         self.assertEqual(gate.calls[0]["source_batch_id"], "batch-env-import")
+        self.assertEqual(gate.calls[0]["source_scene_version"], 5)
         self.assertEqual(gate.calls[0]["position"], [1.0, 0.0, 2.0])
         self.assertEqual(gate.calls[0]["rotation"], [0.0, 15.0, 0.0])
         self.assertEqual(gate.calls[0]["scale"], [6.0, 0.1, 6.0])
@@ -23303,6 +23305,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             {
                 "batch_id": "batch-1",
                 "plan_id": "plan-1",
+                "scene_version": 7,
                 "model_items": ["钘忓疂绠?"],
                 "model_resources": {
                     "钘忓疂绠?": {
@@ -23321,6 +23324,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(gate.calls[0]["scene_name"], "Scene/场景1.scene")
         self.assertEqual(gate.calls[0]["plan_id"], "plan-1")
         self.assertEqual(gate.calls[0]["batch_id"], "batch-1")
+        self.assertEqual(gate.calls[0]["source_scene_version"], 7)
         self.assertEqual(gate.calls[0]["asset_id"], "model-request-chest")
         self.assertEqual(gate.calls[0]["model_ref"], "model-request-chest")
         self.assertEqual(gate.calls[0]["object_id"], "batch-1-01")

@@ -5384,6 +5384,7 @@ def _resource_payload_from_call(call: ToolCall) -> dict[str, Any]:
         "room_id": str(call.args.get("room_id") or ""),
         "batch_id": str(call.args.get("batch_id") or call.tool_call_id),
         "plan_id": str(call.args.get("plan_id") or ""),
+        "scene_version": max(1, int(call.args.get("scene_version") or 1)),
         "model_items": model_items,
         "asset_requests": asset_requests,
         "placements": dict(call.args.get("placements") or {}),

@@ -135,6 +135,69 @@ class SceneWorldPeerMirrorTests(unittest.TestCase):
         self.assertEqual(room["peer_mirror_plan_id"], "")
         self.assertNotIn("actor-untrusted", room["actors"])
 
+    def test_authoritative_scene_snapshot_switches_plan_and_late_actor_does_not_switch_back(self) -> None:
+        self.assertTrue(self._record({
+            "room_id": "room-peer",
+            "event": "actor_create_received",
+            "plan_id": "plan-old",
+            "scene_version": 1,
+            "authority": "remote_host",
+            "actor_id": "actor-old",
+            "actor_version": 1,
+        })["recorded"])
+        self.assertEqual(
+            self.runtime.query_state("room-peer")["room"]["peer_mirror_plan_id"],
+            "plan-old",
+        )
+
+        incoming_new_actor = self._record({
+            "room_id": "room-peer",
+            "event": "actor_create_received",
+            "plan_id": "plan-new",
+            "scene_version": 2,
+            "authority": "remote_host",
+            "actor_id": "actor-new",
+            "actor_version": 1,
+        })
+        self.assertTrue(incoming_new_actor["recorded"])
+        room_before_snapshot = self.runtime.query_state("room-peer")["room"]
+        self.assertEqual(room_before_snapshot["peer_mirror_plan_id"], "plan-old")
+        self.assertIn("actor-new", room_before_snapshot["actors"])
+
+        snapshot_event = self._record({
+            "room_id": "room-peer",
+            "event": "scene_snapshot_received",
+            "plan_id": "plan-new",
+            "scene_version": 2,
+            "authority": "remote_host",
+            "scene_name": "Scene/main.scene",
+            "status": "received",
+        })
+        self.assertTrue(snapshot_event["recorded"])
+        room_after_snapshot = self.runtime.query_state("room-peer")["room"]
+        self.assertEqual(room_after_snapshot["peer_mirror_plan_id"], "plan-new")
+        self.assertEqual(room_after_snapshot["peer_mirror_scene_versions"]["plan-new"], 2)
+
+        delayed_old_actor = self._record({
+            "room_id": "room-peer",
+            "event": "actor_updated",
+            "plan_id": "plan-old",
+            "scene_version": 1,
+            "authority": "remote_host",
+            "actor_id": "actor-old",
+            "actor_version": 2,
+            "position": [9.0, 0.0, 9.0],
+        })
+        self.assertTrue(delayed_old_actor["recorded"])
+        final_room = self.runtime.query_state("room-peer")["room"]
+        self.assertEqual(final_room["peer_mirror_plan_id"], "plan-new")
+        current = self.runtime.get_scene_world_snapshot(room_id="room-peer")
+        self.assertEqual(current["plan_id"], "plan-new")
+        self.assertEqual(
+            [entity["actor_id"] for entity in current["snapshot"]["actor_entities"]],
+            ["actor-new"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

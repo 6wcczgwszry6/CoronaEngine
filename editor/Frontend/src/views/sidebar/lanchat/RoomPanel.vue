@@ -1068,9 +1068,23 @@ async function getActorSnapshot(sceneName) {
       : Array.isArray(result?.data)
         ? result.data
         : [];
+  const latestRuntimeActor = [...actors]
+    .reverse()
+    .find((actor) => String(actor?.source_plan_id || '').trim());
+  const planId = String(latestRuntimeActor?.source_plan_id || '').trim();
+  const sceneVersion = planId
+    ? actors.reduce((version, actor) => {
+        if (String(actor?.source_plan_id || '').trim() !== planId) return version;
+        const candidate = Number(actor?.source_scene_version ?? actor?.scene_version ?? 1);
+        return Number.isFinite(candidate) ? Math.max(version, Math.floor(candidate)) : version;
+      }, 1)
+    : 0;
   return {
     status: 'success',
     scene: targetScene,
+    plan_id: planId,
+    scene_version: sceneVersion,
+    snapshot_authority: 'host',
     actors,
   };
 }

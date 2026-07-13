@@ -92,6 +92,8 @@ class LanChatNativeSyncBridgeTests(unittest.TestCase):
         self.assertIn('"actor_transform"', network)
         self.assertIn('"actor_deleted"', network)
         self.assertIn('"asset_transfer_completed"', network)
+        self.assertIn('"scene_snapshot_received"', network)
+        self.assertIn('snapshot.value("plan_id"', network)
         self.assertIn('is_message_from_connected_host(sender_peer_id)', network)
         self.assertIn('? "remote_host"', network)
         self.assertIn(': "remote_peer"', network)

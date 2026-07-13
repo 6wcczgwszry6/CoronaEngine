@@ -479,6 +479,7 @@ struct NativeEditorActor {
     std::string semantic_role;
     std::string source_plan_id;
     std::string source_batch_id;
+    int source_scene_version{1};
     int actor_version{1};
     bool follow_camera{false};
     std::uint64_t audio_resource_id{0};  // 音频物体绑定的音频资源 id（actor_type=="audio"）
@@ -748,6 +749,8 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
         if (!actor.source_batch_id.empty()) {
             lines.push_back(key + ".runtime.source_batch_id = " + actor.source_batch_id);
         }
+        lines.push_back(key + ".runtime.source_scene_version = " +
+                        std::to_string(std::max(actor.source_scene_version, 1)));
         lines.push_back(key + ".runtime.actor_version = " + std::to_string(std::max(actor.actor_version, 1)));
         lines.push_back(key + ".follow_camera = " + std::string(actor.follow_camera ? "true" : "false"));
         if (actor.mechanics) {
@@ -1322,6 +1325,9 @@ void load_native_actor(NativeEditorScene& scene,
     item.semantic_role = actor_value(".runtime.semantic_role");
     item.source_plan_id = actor_value(".runtime.source_plan_id");
     item.source_batch_id = actor_value(".runtime.source_batch_id");
+    item.source_scene_version = std::max(
+        parse_int(actor_value(".runtime.source_scene_version", "1"), 1),
+        1);
     item.actor_version = std::max(
         parse_int(actor_value(".runtime.actor_version", "1"), 1),
         1);
@@ -1629,6 +1635,7 @@ nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorA
     item["semantic_role"] = actor.semantic_role;
     item["source_plan_id"] = actor.source_plan_id;
     item["source_batch_id"] = actor.source_batch_id;
+    item["source_scene_version"] = std::max(actor.source_scene_version, 1);
     item["actor_version"] = std::max(actor.actor_version, 1);
     item["version"] = std::max(actor.actor_version, 1);
     if (actor.actor_type == "audio") {
@@ -2213,6 +2220,10 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
         if (!semantic_role.empty()) target.semantic_role = semantic_role;
         if (!source_plan_id.empty()) target.source_plan_id = source_plan_id;
         if (!source_batch_id.empty()) target.source_batch_id = source_batch_id;
+        target.source_scene_version = std::max(
+            json_int_value(actor_data, "source_scene_version",
+                           json_int_value(actor_data, "scene_version", target.source_scene_version)),
+            1);
         target.actor_version = std::max(
             json_int_value(actor_data, "actor_version", json_int_value(actor_data, "version", target.actor_version)),
             1);

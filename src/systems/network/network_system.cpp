@@ -2049,6 +2049,26 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
         pending.snapshot_json = r.read_string(json_len);
         const std::string pending_scene_name = pending.scene_name;
         const size_t pending_snapshot_size = pending.snapshot_json.size();
+        try {
+            const auto snapshot = nlohmann::json::parse(pending.snapshot_json);
+            const std::string plan_id = snapshot.value("plan_id", std::string{});
+            if (!plan_id.empty()) {
+                enqueue_lanchat_sync_event(
+                    "scene_snapshot_received",
+                    nlohmann::json({
+                        {"plan_id", plan_id},
+                        {"scene_version", std::max(snapshot.value("scene_version", 1), 1)},
+                        {"scene_name", pending.scene_name},
+                        {"status", "received"},
+                        {"authority", remote_authority},
+                        {"peer_id", sender_peer_id},
+                    }).dump());
+            }
+        } catch (const nlohmann::json::exception&) {
+            CFW_LOG_WARNING(
+                "NetworkSystem: Ignoring invalid actor scene snapshot metadata from {}",
+                sender_peer_id);
+        }
         auto upsert_pending_actor_scene_snapshot = [&](Impl::PendingActorSceneSnapshot snapshot) {
             auto it = std::find_if(
                 impl_->pending_actor_scene_snapshots.begin(),

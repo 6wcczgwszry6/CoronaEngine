@@ -28362,10 +28362,19 @@ class AgentRuntime:
             )
             if not explicit_plan_id:
                 is_remote_host_fact = str(normalized.get("authority") or "").strip().lower() == "remote_host"
-                is_scene_fact = bool(normalized.get("actor_id") or normalized.get("asset_id"))
+                is_scene_fact = bool(
+                    normalized.get("actor_id")
+                    or normalized.get("asset_id")
+                    or normalized.get("event_type") == "scene_snapshot_received"
+                )
                 if is_remote_host_fact and is_scene_fact:
                     explicit_plan_id = requested_sync_plan_id
-                    peer_mirror_event = True
+                    current_peer_plan_id = str(room_state.get("peer_mirror_plan_id") or "").strip()
+                    peer_mirror_event = (
+                        normalized.get("event_type") == "scene_snapshot_received"
+                        or not current_peer_plan_id
+                        or current_peer_plan_id == requested_sync_plan_id
+                    )
                 else:
                     return skip_sync_event("no runtime plan")
         if not explicit_plan_id and explicit_external_plan_id:
@@ -33967,6 +33976,7 @@ class AgentRuntime:
                     "room_id": plan.room_id,
                     "batch_id": batch.batch_id,
                     "plan_id": plan.plan_id,
+                    "scene_version": plan.version,
                     "scene_name": str(scene_name or ""),
                     "design_brief": plan.design_brief,
                     "layout_items": list(plan.layout_items),
@@ -33993,6 +34003,7 @@ class AgentRuntime:
                     "room_id": plan.room_id,
                     "batch_id": batch.batch_id,
                     "plan_id": plan.plan_id,
+                    "scene_version": plan.version,
                     "scene_name": str(scene_name or ""),
                 },
                 risk_level=RiskLevel.LOW,
@@ -34011,6 +34022,7 @@ class AgentRuntime:
                     "room_id": plan.room_id,
                     "batch_id": batch.batch_id,
                     "plan_id": plan.plan_id,
+                    "scene_version": plan.version,
                     "scene_name": str(scene_name or ""),
                 },
                 risk_level=RiskLevel.LOW,
@@ -34107,6 +34119,7 @@ class AgentRuntime:
                     "room_id": plan.room_id,
                     "batch_id": batch.batch_id,
                     "plan_id": plan.plan_id,
+                    "scene_version": plan.version,
                     "scene_name": str(scene_name or ""),
                 },
                 risk_level=RiskLevel.LOW,

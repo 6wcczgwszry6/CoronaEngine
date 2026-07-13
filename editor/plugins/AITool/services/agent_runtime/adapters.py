@@ -608,6 +608,7 @@ def make_engine_environment_component_import_provider(
             import_payload["entity_version"] = 1
             import_payload["source_plan_id"] = plan_id
             import_payload["source_batch_id"] = batch_id
+            import_payload["source_scene_version"] = max(1, int(payload.get("scene_version") or 1))
             for field in ("position", "rotation", "scale"):
                 vector = _vector3(component.get(field))
                 if vector:
@@ -1588,6 +1589,7 @@ def make_engine_actor_import_provider(
                 "entity_version": 1,
                 "source_plan_id": plan_id,
                 "source_batch_id": batch_id,
+                "source_scene_version": max(1, int(payload.get("scene_version") or 1)),
                 "skip_if_exists": True,
                 "update_if_exists": False,
                 "position": list(placement.get("position") or [0.0, 0.0, 0.0]),
