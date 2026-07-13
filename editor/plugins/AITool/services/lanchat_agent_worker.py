@@ -26,6 +26,7 @@ from .runtime_action_intent import (
 
 MAX_COORDINATOR_SYNC_MESSAGES_PER_TICK = 4
 MAX_ROOM_EVENTS_PER_TICK = 4
+MAX_SYNC_EVENTS_PER_TICK = 8
 MAX_AGENT_RUNTIME_DRAIN_ROOMS_PER_TICK = 1
 MAX_AGENT_RUNTIME_GRAPHS_PER_TICK = 1
 MAX_AGENT_RUNTIME_DISCLOSURE_EVENT_LOOKBACK = 32
@@ -3241,6 +3242,9 @@ class LANChatAgentWorker:
         processed_room_event = self._process_room_events(
             max_events=MAX_ROOM_EVENTS_PER_TICK,
         )
+        processed_sync_event = self._process_sync_events(
+            max_events=MAX_SYNC_EVENTS_PER_TICK,
+        )
         processed_coordinator_sync = self._process_coordinator_sync_messages(
             max_messages=MAX_COORDINATOR_SYNC_MESSAGES_PER_TICK,
         )
@@ -3253,10 +3257,10 @@ class LANChatAgentWorker:
             trigger = self._corona_engine.network_pop_lanchat_agent_trigger()
         except Exception as exc:
             self._logger.debug("Failed to poll LANChat agent trigger: %s", type(exc).__name__)
-            return processed_room_event or processed_coordinator_sync or processed_runtime_drain
+            return processed_room_event or processed_sync_event or processed_coordinator_sync or processed_runtime_drain
 
         if not trigger:
-            return processed_room_event or processed_coordinator_sync or processed_runtime_drain
+            return processed_room_event or processed_sync_event or processed_coordinator_sync or processed_runtime_drain
 
         self._logger.info(
             "[LANChatAgentTrace] phase=trigger_pop message_id=%s correlation=%s room=%s sender=%s/%s target=%s/%s kind=%s text=%s",
@@ -3670,6 +3674,85 @@ class LANChatAgentWorker:
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug("Failed to handle LANChat room event: %s", type(exc).__name__)
         return processed
+
+    def _process_sync_events(self, *, max_events: int) -> bool:
+        pop_event = getattr(self._corona_engine, "network_pop_lanchat_sync_event", None)
+        if not callable(pop_event):
+            return False
+        processed = False
+        limit = max(1, int(max_events or 1))
+        for _ in range(limit):
+            try:
+                raw_event = pop_event()
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("Failed to poll LANChat sync event: %s", type(exc).__name__)
+                break
+            if not raw_event:
+                break
+            processed = True
+            event = self._expand_native_sync_event(dict(raw_event))
+            try:
+                self.handle_lanchat_sync_event(event)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("Failed to handle LANChat sync event: %s", type(exc).__name__)
+        return processed
+
+    @staticmethod
+    def _expand_native_sync_event(raw_event: dict[str, Any]) -> dict[str, Any]:
+        event = dict(raw_event or {})
+        payload_raw = event.pop("payload_json", "")
+        payload: dict[str, Any] = {}
+        if isinstance(payload_raw, str) and payload_raw.strip():
+            try:
+                decoded = json.loads(payload_raw)
+                if isinstance(decoded, dict):
+                    payload = decoded
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+        actor_raw = payload.pop("actor_json", "")
+        actor_data: dict[str, Any] = {}
+        if isinstance(actor_raw, str) and actor_raw.strip():
+            try:
+                decoded_actor = json.loads(actor_raw)
+                if isinstance(decoded_actor, dict):
+                    actor_data = decoded_actor
+            except (TypeError, ValueError, json.JSONDecodeError):
+                actor_data = {}
+        elif isinstance(actor_raw, dict):
+            actor_data = dict(actor_raw)
+
+        metadata = dict(actor_data.get("metadata") or {}) if isinstance(actor_data.get("metadata"), dict) else {}
+        expanded = {
+            **metadata,
+            **actor_data,
+            **payload,
+            **event,
+        }
+        expanded["actor_id"] = str(
+            expanded.get("actor_id")
+            or expanded.get("actor_guid")
+            or actor_data.get("actor_guid")
+            or ""
+        )
+        expanded["plan_id"] = str(
+            expanded.get("plan_id")
+            or expanded.get("runtime_plan_id")
+            or expanded.get("source_plan_id")
+            or ""
+        )
+        expanded["batch_id"] = str(
+            expanded.get("batch_id")
+            or expanded.get("runtime_batch_id")
+            or expanded.get("source_batch_id")
+            or ""
+        )
+        expanded["asset_id"] = str(
+            expanded.get("asset_id")
+            or expanded.get("actor_asset_id")
+            or expanded.get("model_asset_id")
+            or ""
+        )
+        return expanded
 
     def _process_coordinator_sync_messages(self, *, max_messages: int) -> bool:
         if not hasattr(self._corona_engine, "network_pop_lanchat_coordinator_sync_message"):

@@ -36,6 +36,7 @@ struct NetworkSystem::Impl {
     Network::LanChatState lanchat;
     std::function<void(const std::string&)> lanchat_event_callback;
     std::deque<NetworkSystem::LanChatRoomEvent> pending_lanchat_room_events;
+    std::deque<NetworkSystem::LanChatSyncEvent> pending_lanchat_sync_events;
     std::string lanchat_nickname;
     std::string lanchat_history_session_id;
     uint64_t next_lanchat_message_id = 1;
@@ -823,6 +824,22 @@ void NetworkSystem::notify_lanchat_room_closed() {
     }
 }
 
+void NetworkSystem::enqueue_lanchat_sync_event(const std::string& event,
+                                               const std::string& payload_json) {
+    if (event.empty()) {
+        return;
+    }
+    impl_->pending_lanchat_sync_events.push_back({
+        event,
+        impl_->lanchat.room_id(),
+        payload_json,
+    });
+    constexpr std::size_t kMaxPendingLanChatSyncEvents = 256;
+    if (impl_->pending_lanchat_sync_events.size() > kMaxPendingLanChatSyncEvents) {
+        impl_->pending_lanchat_sync_events.pop_front();
+    }
+}
+
 void NetworkSystem::clear_lanchat_room_state() {
     impl_->lanchat.close_room();
     impl_->lanchat_member_by_peer.clear();
@@ -831,6 +848,7 @@ void NetworkSystem::clear_lanchat_room_state() {
     impl_->lanchat_join_pending = false;
     impl_->lanchat_join_member_snapshot_received = false;
     impl_->lanchat_join_history_snapshot_received = false;
+    impl_->pending_lanchat_sync_events.clear();
 }
 
 bool NetworkSystem::connect_to_peer(const std::string& ip, uint16_t port,
@@ -1500,6 +1518,15 @@ bool NetworkSystem::register_actor_identity(const std::string& actor_guid,
     if (ok) {
         CFW_LOG_INFO("NetworkSystem: Registered actor identity — actor='{}' handle={} owner={}",
                      actor_guid, actor_handle, locally_owned ? "local" : "remote");
+        if (!locally_owned) {
+            enqueue_lanchat_sync_event(
+                "actor_imported",
+                nlohmann::json({
+                    {"actor_id", actor_guid},
+                    {"status", "engine_imported"},
+                    {"authority", "remote_host"},
+                }).dump());
+        }
     } else {
         CFW_LOG_WARNING("NetworkSystem: Failed to register actor identity — actor='{}' handle={}",
                         actor_guid, actor_handle);
@@ -1528,6 +1555,15 @@ void NetworkSystem::set_project_root(const std::string& project_root) {
         impl_->received_asset_cache.clear();
     }
     impl_->project_root = project_root;
+}
+
+std::optional<NetworkSystem::LanChatSyncEvent> NetworkSystem::lanchat_pop_sync_event() {
+    if (impl_->pending_lanchat_sync_events.empty()) {
+        return std::nullopt;
+    }
+    auto event = std::move(impl_->pending_lanchat_sync_events.front());
+    impl_->pending_lanchat_sync_events.pop_front();
+    return event;
 }
 
 void NetworkSystem::persist_lanchat_message(const Network::LanChatMessage& message) {
@@ -1686,6 +1722,21 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
                 return;
             }
 
+            enqueue_lanchat_sync_event(
+                "actor_create_received",
+                nlohmann::json({
+                    {"actor_id", actor_guid},
+                    {"scene_name", scene_name},
+                    {"asset_id", asset_id},
+                    {"actor_json", actor_json},
+                    {"position", {actor_packed.transform[0], actor_packed.transform[1], actor_packed.transform[2]}},
+                    {"rotation", {actor_packed.transform[3], actor_packed.transform[4], actor_packed.transform[5]}},
+                    {"scale", {actor_packed.transform[6], actor_packed.transform[7], actor_packed.transform[8]}},
+                    {"status", "received"},
+                    {"authority", "remote_host"},
+                    {"peer_id", sender_peer_id},
+                }).dump());
+
             auto upsert_pending_actor_create = [&](Impl::PendingAction action) {
                 auto it = std::find_if(
                     impl_->pending_actor_creates.begin(),
@@ -1840,6 +1891,19 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
             }
         }
         impl_->pending_actor_transform_updates.push_back(update);
+        enqueue_lanchat_sync_event(
+            "actor_transform",
+            nlohmann::json({
+                {"actor_id", actor_guid},
+                {"scene_name", scene_name},
+                {"position", {update.transform[0], update.transform[1], update.transform[2]}},
+                {"rotation", {update.transform[3], update.transform[4], update.transform[5]}},
+                {"scale", {update.transform[6], update.transform[7], update.transform[8]}},
+                {"status", "received"},
+                {"authority", "remote_host"},
+                {"peer_id", sender_peer_id},
+                {"correlation_id", update.correlation_id},
+            }).dump());
         CFW_LOG_INFO("NetworkSystem: Received ACTOR_TRANSFORM_UPDATE from {} — actor='{}' scene='{}' corr='{}'",
                      sender_peer_id, actor_guid, scene_name, update.correlation_id);
     } else if (mt == MessageType::ACTOR_DELETE) {
@@ -1884,6 +1948,16 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
             }
         }
         impl_->pending_actor_deletes.push_back(pending);
+        enqueue_lanchat_sync_event(
+            "actor_deleted",
+            nlohmann::json({
+                {"actor_id", pending.actor_guid},
+                {"actor_name", pending.actor_name},
+                {"scene_name", pending.scene_name},
+                {"status", "received"},
+                {"authority", "remote_host"},
+                {"peer_id", sender_peer_id},
+            }).dump());
         CFW_LOG_INFO(
             "NetworkSystem: Received ACTOR_DELETE from {} — actor='{}' name='{}' scene='{}'",
             sender_peer_id, pending.actor_guid, pending.actor_name, pending.scene_name);
@@ -1942,6 +2016,16 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
         if (!r.has_remaining(json_len)) return;
         pending.actor_json = r.read_string(json_len);
         impl_->pending_actor_state_updates.push_back(pending);
+        enqueue_lanchat_sync_event(
+            "actor_updated",
+            nlohmann::json({
+                {"actor_id", pending.actor_guid},
+                {"scene_name", pending.scene_name},
+                {"actor_json", pending.actor_json},
+                {"status", "received"},
+                {"authority", "remote_host"},
+                {"peer_id", sender_peer_id},
+            }).dump());
         CFW_LOG_INFO(
             "NetworkSystem: Received ACTOR_STATE_UPDATE from {} — actor='{}' scene='{}' bytes={}",
             sender_peer_id, pending.actor_guid, pending.scene_name, pending.actor_json.size());
@@ -2448,6 +2532,16 @@ void NetworkSystem::handle_file_chunk(const std::string& sender_peer_id,
         if (ft_it->second.remaining_files != 0) {
             return;
         }
+
+        enqueue_lanchat_sync_event(
+            "asset_transfer_completed",
+            nlohmann::json({
+                {"asset_id", ft_it->second.asset_id},
+                {"status", "completed"},
+                {"authority", "remote_host"},
+                {"peer_id", sender_peer_id},
+                {"file_count", ft_it->second.transfer_ids.size()},
+            }).dump());
 
         for (auto& action : ft_it->second.actor_actions) {
             action.model_path = ft_it->second.model_path;

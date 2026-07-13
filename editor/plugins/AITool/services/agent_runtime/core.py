@@ -28190,6 +28190,16 @@ class AgentRuntime:
                 "batch_id": str(event.get("batch_id") or event.get("runtime_batch_id") or ""),
                 "actor_id": actor_id,
                 "actor_name": str(event.get("actor_name") or event.get("name") or ""),
+                "entity_id": str(event.get("entity_id") or event.get("runtime_entity_id") or ""),
+                "entity_type": str(event.get("entity_type") or ""),
+                "semantic_role": str(event.get("semantic_role") or ""),
+                "grounding_status": str(event.get("grounding_status") or ""),
+                "model_ref": str(event.get("model_ref") or event.get("model") or event.get("path") or ""),
+                "actor_version": max(
+                    1,
+                    self._sync_non_negative_int_from_event(event, ("actor_version", "version")) or 1,
+                ),
+                "authority": str(event.get("authority") or ""),
                 "asset_id": asset_id,
                 "actor_asset_id": actor_asset_id,
                 "asset_path": str(event.get("asset_path") or event.get("model_path") or event.get("path") or ""),
@@ -28339,6 +28349,23 @@ class AgentRuntime:
                 "last_sync_status": str(normalized.get("status") or actor_fact.get("last_sync_status") or ""),
                 "last_sync_timestamp": normalized.get("timestamp"),
             })
+            for fact_key in (
+                "entity_id",
+                "entity_type",
+                "semantic_role",
+                "grounding_status",
+                "model_ref",
+                "authority",
+            ):
+                fact_value = normalized.get(fact_key)
+                if fact_value not in (None, ""):
+                    actor_fact[fact_key] = fact_value
+            try:
+                current_actor_version = int(actor_fact.get("actor_version") or actor_fact.get("version") or 1)
+            except (TypeError, ValueError):
+                current_actor_version = 1
+            actor_fact["actor_version"] = max(current_actor_version, int(normalized.get("actor_version") or 1))
+            actor_fact["version"] = actor_fact["actor_version"]
             actor_asset_id = str(normalized.get("actor_asset_id") or asset_id or "")
             if actor_asset_id:
                 actor_fact["asset_id"] = actor_asset_id
@@ -28374,6 +28401,10 @@ class AgentRuntime:
                 actor_fact["sync_lifecycle_status"] = "active"
             elif event_type in create_events:
                 actor_fact["sync_lifecycle_status"] = "active"
+                if event_type == "actor_imported" and not actor_fact.get("bounds_ready"):
+                    actor_fact["engine_lifecycle_status"] = "engine_imported"
+            elif event_type == "actor_create_received":
+                actor_fact["sync_lifecycle_status"] = "received"
             if event_type in {"actor_removed", "actor_deleted", "actor_destroyed", "actor_delete"}:
                 actor_fact["sync_lifecycle_status"] = "deleted"
                 actor_fact["deleted"] = True
