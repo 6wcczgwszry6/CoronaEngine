@@ -335,3 +335,32 @@ Python syntax compile 通过
 - 真实 LAN 传输失败或成员离线时，对应实体的 `sync_status` 能被 Runtime 记录为 partial/failed。
 - 传输恢复后 readiness reconcile 能将实体恢复为可用状态并生成新 scene version。
 - 房主与成员的 Snapshot 对同一实体给出一致版本与同步状态。
+
+## 15. Snapshot 世界指纹与 transform/AABB 对账
+
+本轮继续复核发现，旧一致性审计只检查 `entity_id / actor_id / asset_id / version`，即使 transform 或 world AABB 已发生漂移，仍可能被误判为 `consistent`。这不足以支撑多人世界一致性，也不能作为下游 Agent 的乐观并发依据。
+
+当前改动：
+
+- 一致性审计增加 transform 和 world AABB 对账，分别输出 `transform_mismatches` 与 `world_aabb_mismatches`。
+- `SceneWorldSnapshot` 增加排序无关的 `world_fingerprint`，由 plan/version 以及稳定实体身份、资源身份、版本、transform、world AABB 生成。
+- Engine 审计生成同口径 `engine_fingerprint`，并输出 `fingerprints_match`。
+- `runtime.scene_world_snapshot.get` 顶层返回 fingerprint；找不到计划或版本时返回空值，不伪造。
+- `SceneInspectorAgent` 分析结果绑定 `scene_version + world_fingerprint`，同版本内 late-ready 几何事实变化也可触发重新分析。
+
+聚焦自动验证：
+
+```text
+身份、版本、transform、AABB 一致 -> consistent + fingerprint match
+transform/AABB 缺失或漂移 -> needs_review
+Snapshot fingerprint 为稳定 64 位摘要
+SceneInspector 输出绑定 fingerprint
+Game-ready / Inspector / ActionIntent 27 项通过
+Python syntax compile 通过
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 房主 Runtime Snapshot 与本机 Engine snapshot 的 fingerprint 一致。
+- 成员端 Actor 同步完成后，其 Engine 实体事实与房主权威 Snapshot 对账一致。
+- transform 更新、late-ready AABB 和追加批会产生新的 fingerprint，旧分析不会被继续使用。

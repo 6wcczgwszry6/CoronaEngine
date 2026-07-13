@@ -259,6 +259,7 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
 
         self.assertEqual(snapshot["scene_version"], 2)
         self.assertEqual(snapshot["world_readiness"], "needs_review")
+        self.assertEqual(len(snapshot["world_fingerprint"]), 64)
         self.assertIn("engine_actual_aabb", snapshot["actor_entities"][0]["readiness_missing_fields"])
 
     def test_partial_sync_status_blocks_game_ready_snapshot(self) -> None:
@@ -381,8 +382,8 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
                         "bounds_source": "engine_actual",
                         "engine_lifecycle_status": "bounds_ready",
                         "sync_status": "engine_imported",
-                        "aabb": entity["aabb"],
-                        "position": entity["transform"]["position"],
+                        "aabb": [-0.5, 0, -0.5, 0.5, 1.8, 0.5],
+                        "position": [0, 0, 0],
                         "rotation": entity["transform"]["rotation"],
                         "scale": entity["transform"]["scale"],
                     }
@@ -405,6 +406,11 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(result["audit"]["status"], "consistent")
         self.assertEqual(result["audit"]["matched_entity_count"], 1)
         self.assertEqual(result["audit"]["issue_count"], 0)
+        self.assertTrue(result["audit"]["fingerprints_match"])
+        self.assertEqual(
+            result["audit"]["world_fingerprint"],
+            result["audit"]["engine_fingerprint"],
+        )
         self.assertEqual(before.get("tool_graphs", {}), after.get("tool_graphs", {}))
         self.assertEqual(before.get("pending_interventions", {}), after.get("pending_interventions", {}))
         policy = AgentRuntime.message_action_policy("runtime.scene_world_consistency.audit")
@@ -456,6 +462,9 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(audit["unidentified_engine_actor_ids"], ["actor-without-runtime-identity"])
         self.assertEqual(audit["asset_id_mismatches"][0]["entity_id"], entity["entity_id"])
         self.assertEqual(audit["version_mismatches"][0]["actual"], entity["version"] + 1)
+        self.assertEqual(audit["transform_mismatches"][0]["entity_id"], entity["entity_id"])
+        self.assertEqual(audit["world_aabb_mismatches"][0]["entity_id"], entity["entity_id"])
+        self.assertFalse(audit["fingerprints_match"])
 
     def test_environment_support_semantics_are_game_ready_specific(self) -> None:
         room = _room_fact(game_ready=True)

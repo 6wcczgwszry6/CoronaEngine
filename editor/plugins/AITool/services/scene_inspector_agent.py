@@ -9,6 +9,7 @@ from .agent_runtime import AgentRuntime
 @dataclass(frozen=True)
 class SceneAnalysis:
     scene_version: int
+    world_fingerprint: str
     world_readiness: str
     environment_summary: list[dict[str, Any]]
     entity_summary: list[dict[str, Any]]
@@ -62,6 +63,7 @@ class SceneInspectorAgent:
                 "reason": str(query.get("reason") or "scene_world_snapshot_unavailable"),
                 "analysis": SceneAnalysis(
                     scene_version=int(query.get("scene_version") or 0),
+                    world_fingerprint="",
                     world_readiness="blocked",
                     environment_summary=[],
                     entity_summary=[],
@@ -113,6 +115,7 @@ class SceneInspectorAgent:
 
         analysis = SceneAnalysis(
             scene_version=int(snapshot.get("scene_version") or 0),
+            world_fingerprint=str(snapshot.get("world_fingerprint") or ""),
             world_readiness=world_readiness,
             environment_summary=[self._entity_summary(entity) for entity in environment_entities],
             entity_summary=[self._entity_summary(entity) for entity in actor_entities],

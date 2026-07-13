@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
+import json
 from typing import Any, Mapping
 
 
@@ -23,6 +25,97 @@ def _version(row: Mapping[str, Any]) -> int:
 
 def _duplicates(values: list[str]) -> list[str]:
     return sorted(value for value, count in Counter(values).items() if value and count > 1)
+
+
+def _canonical_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _canonical_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_value(item) for item in value]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return round(float(value), 6)
+    return value
+
+
+def _transform(row: Mapping[str, Any]) -> dict[str, Any]:
+    raw = row.get("transform")
+    if not isinstance(raw, Mapping):
+        raw = row.get("geometry")
+    source = dict(raw) if isinstance(raw, Mapping) else {}
+    result: dict[str, Any] = {}
+    for key in ("position", "rotation", "scale"):
+        value = source.get(key)
+        if value is None:
+            value = row.get(key)
+        if isinstance(value, (list, tuple)):
+            result[key] = _canonical_value(value)
+    return result
+
+
+def _world_aabb(row: Mapping[str, Any]) -> Any:
+    for key in ("world_aabb", "aabb", "bounds"):
+        value = row.get(key)
+        if isinstance(value, Mapping):
+            minimum = value.get("min")
+            maximum = value.get("max")
+            if isinstance(minimum, (list, tuple)) and isinstance(maximum, (list, tuple)):
+                return {
+                    "min": _canonical_value(list(minimum)[:3]),
+                    "max": _canonical_value(list(maximum)[:3]),
+                }
+            return _canonical_value(value)
+        if isinstance(value, (list, tuple)):
+            values = list(value)
+            if len(values) >= 6:
+                return {
+                    "min": _canonical_value(values[:3]),
+                    "max": _canonical_value(values[3:6]),
+                }
+            if (
+                len(values) == 2
+                and isinstance(values[0], (list, tuple))
+                and isinstance(values[1], (list, tuple))
+            ):
+                return {
+                    "min": _canonical_value(list(values[0])[:3]),
+                    "max": _canonical_value(list(values[1])[:3]),
+                }
+            return _canonical_value(values)
+    return None
+
+
+def scene_world_fingerprint(
+    entities: list[Mapping[str, Any]],
+    *,
+    plan_id: str,
+    scene_version: int,
+) -> str:
+    """Build an order-independent digest from downstream-consumable world facts."""
+
+    facts: list[dict[str, Any]] = []
+    for row in entities:
+        facts.append({
+            "entity_id": _text(row.get("entity_id")),
+            "actor_id": _text(row.get("actor_id")),
+            "asset_id": _text(row.get("asset_id")),
+            "model_ref": _text(row.get("model_ref")),
+            "version": _version(row),
+            "transform": _transform(row),
+            "world_aabb": _world_aabb(row),
+        })
+    facts.sort(key=lambda item: (item["entity_id"], item["actor_id"], item["asset_id"]))
+    payload = {
+        "plan_id": _text(plan_id),
+        "scene_version": int(scene_version or 0),
+        "entities": facts,
+    }
+    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def latest_engine_snapshot(
@@ -91,6 +184,8 @@ def audit_scene_world_consistency(
     actor_id_mismatches: list[dict[str, Any]] = []
     asset_id_mismatches: list[dict[str, Any]] = []
     version_mismatches: list[dict[str, Any]] = []
+    transform_mismatches: list[dict[str, Any]] = []
+    world_aabb_mismatches: list[dict[str, Any]] = []
     for entity_id in sorted(set(world_by_id) & set(engine_by_id)):
         expected = world_by_id[entity_id]
         actual = engine_by_id[entity_id]
@@ -118,6 +213,22 @@ def audit_scene_world_consistency(
                 "expected": expected_version,
                 "actual": actual_version,
             })
+        expected_transform = _transform(expected)
+        actual_transform = _transform(actual)
+        if expected_transform and expected_transform != actual_transform:
+            transform_mismatches.append({
+                "entity_id": entity_id,
+                "expected": expected_transform,
+                "actual": actual_transform,
+            })
+        expected_aabb = _world_aabb(expected)
+        actual_aabb = _world_aabb(actual)
+        if expected_aabb is not None and expected_aabb != actual_aabb:
+            world_aabb_mismatches.append({
+                "entity_id": entity_id,
+                "expected": expected_aabb,
+                "actual": actual_aabb,
+            })
 
     issue_count = sum((
         len(duplicate_world_ids),
@@ -129,6 +240,8 @@ def audit_scene_world_consistency(
         len(actor_id_mismatches),
         len(asset_id_mismatches),
         len(version_mismatches),
+        len(transform_mismatches),
+        len(world_aabb_mismatches),
     ))
     if not plan_id or not engine_snapshot:
         status = "blocked"
@@ -136,6 +249,17 @@ def audit_scene_world_consistency(
         status = "needs_review"
     else:
         status = "consistent"
+
+    world_fingerprint = scene_world_fingerprint(
+        expected_entities,
+        plan_id=plan_id,
+        scene_version=scene_version,
+    )
+    engine_fingerprint = scene_world_fingerprint(
+        engine_actors,
+        plan_id=plan_id,
+        scene_version=scene_version,
+    )
 
     return {
         "status": status,
@@ -156,7 +280,16 @@ def audit_scene_world_consistency(
         "actor_id_mismatches": actor_id_mismatches,
         "asset_id_mismatches": asset_id_mismatches,
         "version_mismatches": version_mismatches,
+        "transform_mismatches": transform_mismatches,
+        "world_aabb_mismatches": world_aabb_mismatches,
+        "world_fingerprint": world_fingerprint,
+        "engine_fingerprint": engine_fingerprint,
+        "fingerprints_match": world_fingerprint == engine_fingerprint,
     }
 
 
-__all__ = ["audit_scene_world_consistency", "latest_engine_snapshot"]
+__all__ = [
+    "audit_scene_world_consistency",
+    "latest_engine_snapshot",
+    "scene_world_fingerprint",
+]

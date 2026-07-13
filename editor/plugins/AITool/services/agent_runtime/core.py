@@ -19,6 +19,7 @@ from typing import Any, Callable, ClassVar, Iterable, Mapping
 from .scene_world_consistency import (
     audit_scene_world_consistency as build_scene_world_consistency_audit,
     latest_engine_snapshot,
+    scene_world_fingerprint,
 )
 
 
@@ -3784,6 +3785,7 @@ class SceneWorldSnapshot:
     environment_entities: list[dict[str, Any]]
     actor_entities: list[dict[str, Any]]
     readiness_summary: dict[str, Any]
+    world_fingerprint: str
     operation_cursor: str
 
     def as_dict(self) -> dict[str, Any]:
@@ -3795,6 +3797,7 @@ class SceneWorldSnapshot:
             "environment_entities": [dict(item) for item in self.environment_entities],
             "actor_entities": [dict(item) for item in self.actor_entities],
             "readiness_summary": dict(self.readiness_summary),
+            "world_fingerprint": self.world_fingerprint,
             "operation_cursor": self.operation_cursor,
         }
 
@@ -20809,6 +20812,11 @@ class AgentRuntime:
                     scene_entity_registry.get("readiness_missing_field_counts") or {}
                 ),
             },
+            world_fingerprint=scene_world_fingerprint(
+                entities,
+                plan_id=str(plan_id or ""),
+                scene_version=max(1, int(plan.get("version") or 1)),
+            ),
             operation_cursor=str(operation_cursor or ""),
         )
         return snapshot.as_dict()
@@ -20843,6 +20851,7 @@ class AgentRuntime:
                 "plan_id": requested_plan_id,
                 "scene_version": 0,
                 "world_readiness": "blocked",
+                "world_fingerprint": "",
                 "snapshot": {},
                 "operation_cursor": f"op:{len(self.operation_log.entries())}",
                 "reason": "scene_plan_not_found",
@@ -20859,6 +20868,7 @@ class AgentRuntime:
                 "plan_id": target_plan_id,
                 "scene_version": scene_version,
                 "world_readiness": "blocked",
+                "world_fingerprint": "",
                 "snapshot": {},
                 "operation_cursor": f"op:{len(self.operation_log.entries())}",
                 "reason": "minimum_scene_version_not_available",
@@ -20895,6 +20905,7 @@ class AgentRuntime:
             "plan_id": target_plan_id,
             "scene_version": int(snapshot.get("scene_version") or scene_version),
             "world_readiness": str(snapshot.get("world_readiness") or "blocked"),
+            "world_fingerprint": str(snapshot.get("world_fingerprint") or ""),
             "snapshot": snapshot,
             "operation_cursor": str(snapshot.get("operation_cursor") or ""),
             "snapshot_stability": snapshot_stability,
@@ -20906,6 +20917,7 @@ class AgentRuntime:
             payload={
                 "scene_version": result["scene_version"],
                 "world_readiness": result["world_readiness"],
+                "world_fingerprint": result["world_fingerprint"],
                 "snapshot_stability": snapshot_stability,
             },
         )
