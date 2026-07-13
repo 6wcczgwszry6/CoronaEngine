@@ -2386,6 +2386,12 @@ NativeResult set_native_editor_actor_transform(const std::string& scene_route_ar
         return native_failure("Actor not found: " + actor_name, 2);
     }
 
+    bool persist_transform = true;
+    if (const auto persist_it = transform_data.find("persist");
+        persist_it != transform_data.end() && persist_it->is_boolean()) {
+        persist_transform = persist_it->get<bool>();
+    }
+
     const auto position = transform_float3_value(transform_data, "position", "pos");
     const auto rotation = transform_float3_value(transform_data, "rotation", "rot");
     const auto scale = transform_float3_value(transform_data, "scale", "scl");
@@ -2411,8 +2417,14 @@ NativeResult set_native_editor_actor_transform(const std::string& scene_route_ar
             actor->geometry->set_scale(*scale);
         }
     }
-    sync_native_actor_to_embedded_vision_document(*scene, *actor);
-    persist_native_scene_actors(*scene);
+    // Blockly/game-preview transforms can update every frame. Persisting the
+    // complete scene on every frame starves stop/restore requests and performs
+    // excessive disk I/O. Runtime callers pass persist=false; snapshot restore
+    // and regular editor operations keep the default persistent behavior.
+    if (persist_transform) {
+        sync_native_actor_to_embedded_vision_document(*scene, *actor);
+        persist_native_scene_actors(*scene);
+    }
     return native_success({
         {"status", "success"},
         {"scene", scene->route},
