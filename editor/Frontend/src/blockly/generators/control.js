@@ -113,4 +113,13 @@ export const defineControlGenerators = () => {
     return 'CoronaEngine.restart_level()\n';
   };
 
+
+  pythonGenerator.forBlock.control_cooldown_ready = (block) => {
+    const name = pythonGenerator.valueToCode(block, 'NAME', pythonGenerator.ORDER_NONE) || "''";
+    const seconds = pythonGenerator.valueToCode(block, 'SECONDS', pythonGenerator.ORDER_NONE) || block.getFieldValue('SECONDS_NUMBER') || '0';
+    const consume = block.getFieldValue('CONSUME') === 'TRUE' ? 'True' : 'False';
+    return [`CoronaEngine.cooldown_ready(${name}, ${seconds}, ${consume})`, pythonGenerator.ORDER_FUNCTION_CALL];
+  };
+  pythonGenerator.forBlock.control_reset_cooldown = (block) => `CoronaEngine.reset_cooldown(${pythonGenerator.valueToCode(block, 'NAME', pythonGenerator.ORDER_NONE) || "''"})\n`;
+
 };

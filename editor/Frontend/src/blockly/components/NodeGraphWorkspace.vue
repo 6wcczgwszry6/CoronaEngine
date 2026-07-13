@@ -15,8 +15,9 @@
           type="button"
           class="ng-run"
           :class="{ running: codeRunning }"
-          :disabled="runBusy"
-          @click="handleToggleRun"
+          :disabled="runBusy || (globalPreviewActive && !codeRunning)"
+          :title="globalPreviewActive && !codeRunning ? globalPreviewRunLabel : ''"
+          @click.stop="handleToggleRun"
         >
           {{ codeRunning ? '停止' : '运行' }}
         </button>
@@ -199,7 +200,9 @@
             :workspace-key="`${targetKey}:globals`"
             :initial-state="graph.globalVariablesWorkspace"
             :delete-mode="mode === 'delete'"
+            workspace-role="global"
             @change="onGlobalWorkspaceChange"
+            @reject="onWorkspaceReject"
           />
         </section>
         <div class="ng-splitter horizontal" title="拖动调整全局变量池高度" @pointerdown="beginLayoutResize($event, 'variables')"></div>
@@ -259,7 +262,9 @@
             :workspace-key="activeEditorKey"
             :initial-state="activeEditorState"
             :delete-mode="mode === 'delete'"
+            :workspace-role="selectedEdge ? 'condition' : 'node'"
             @change="onActiveWorkspaceChange"
+            @reject="onWorkspaceReject"
           />
           <div v-else class="ng-editor-empty">选择节点或连线后可编辑内部积木</div>
         </section>
@@ -288,6 +293,7 @@ import MiniBlocklyWorkspace from '@/blockly/components/MiniBlocklyWorkspace.vue'
 import BlocklyToolboxPalette from '@/blockly/components/BlocklyToolboxPalette.vue';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { scriptingService } from '@/utils/bridge.js';
+import { coronaEventBus } from '@/utils/eventBus.js';
 import { nodeGraphToCode, validateNodeGraph } from '@/blockly/generators/index.js';
 
 const props = defineProps({
@@ -317,11 +323,18 @@ const connectionPointer = reactive({ active: false, x: 0, y: 0 });
 const graph = reactive({ version: 1, nodes: [], edges: [], globalVariablesWorkspace: {} });
 const codeRunning = ref(false);
 const runBusy = ref(false);
+const globalPreviewActive = ref(false);
+const globalPreviewScope = ref('');
 const runStatus = ref('');
 const runDetail = ref('');
 const runDetailVisible = ref(false);
 const currentRunNodeId = ref('');
 const runWarnings = ref([]);
+const globalPreviewRunLabel = computed(() =>
+  globalPreviewScope.value === 'scene'
+    ? '当前节点图正在由全局运行执行'
+    : '当前节点图正在由项目预览执行'
+);
 const NODE_GRAPH_INPUT_LOCK = 'node_graph';
 function setEditorInputLock(reason, locked) {
   const locks = window.__coronaEditorInputLocks instanceof Set
@@ -372,6 +385,7 @@ let isLoading = false,
   macroPointerDrag = null,
   layoutResizeState = null,
   runPollTimer = null,
+  gamePreviewGuardTimer = null,
   startedRunForTarget = false;
 const targetKey = computed(
   () => `${props.targetType || 'actor'}:${props.sceneName || ''}:${props.actorName || ''}`
@@ -539,24 +553,17 @@ function clearExternalDrag() {
   externalDrag.label = '';
   externalDrag.pointerId = null;
 }
-function isGlobalWorkspaceBlock(blockType) {
-  return (
-    blockType === 'math_change' ||
-    blockType.startsWith('variable') ||
-    blockType.startsWith('variables_') ||
-    blockType.startsWith('list_') ||
-    blockType.startsWith('lists_')
-  );
+function onWorkspaceReject(message) {
+  saveLabel.value = String(message || '\u65e0\u6cd5\u653e\u5165\u8be5\u79ef\u6728');
 }
 function updatePaletteDropTarget(clientX, clientY) {
   const activeHit = Boolean(activeBlocklyRef.value?.hitTest?.(clientX, clientY));
-  const globalsHit = Boolean(
-    isGlobalWorkspaceBlock(externalDrag.blockType) &&
-      variablesBlocklyRef.value?.hitTest?.(clientX, clientY)
-  );
-  activeBlocklyRef.value?.setDropActive?.(activeHit);
-  variablesBlocklyRef.value?.setDropActive?.(!activeHit && globalsHit);
-  return activeHit ? activeBlocklyRef.value : globalsHit ? variablesBlocklyRef.value : null;
+  const globalsHit = Boolean(variablesBlocklyRef.value?.hitTest?.(clientX, clientY));
+  const activeValid = activeHit && Boolean(activeBlocklyRef.value?.canAcceptBlock?.(externalDrag.blockType));
+  const globalsValid = globalsHit && Boolean(variablesBlocklyRef.value?.canAcceptBlock?.(externalDrag.blockType));
+  activeBlocklyRef.value?.setDropActive?.(activeHit, activeValid);
+  variablesBlocklyRef.value?.setDropActive?.(!activeHit && globalsHit, globalsValid);
+  return activeValid ? activeBlocklyRef.value : (!activeHit && globalsValid ? variablesBlocklyRef.value : null);
 }
 function handlePaletteDragStart(payload) {
   if (!payload?.blockType) return;
@@ -585,10 +592,15 @@ function handlePaletteDragEnd(payload) {
 }
 function handlePalettePick(blockType) {
   if (!blockType) return;
-  const targetWorkspace = activeBlocklyRef.value ||
-    (isGlobalWorkspaceBlock(blockType) ? variablesBlocklyRef.value : null);
+  const active = activeBlocklyRef.value;
+  const globals = variablesBlocklyRef.value;
+  const targetWorkspace = active?.canAcceptBlock?.(blockType)
+    ? active
+    : globals?.canAcceptBlock?.(blockType)
+      ? globals
+      : null;
   if (!targetWorkspace?.addBlock) {
-    saveLabel.value = '\u8bf7\u5148\u9009\u62e9\u8282\u70b9\u6216\u8fde\u7ebf\uff1b\u5168\u5c40\u53d8\u91cf\u6c60\u53ea\u63a5\u53d7\u53d8\u91cf\u548c\u5217\u8868\u79ef\u6728';
+    saveLabel.value = '\u8bf7\u5148\u9009\u62e9\u8282\u70b9\u6216\u8fde\u7ebf\uff1b\u6b64\u79ef\u6728\u4e0d\u9002\u7528\u4e8e\u5168\u5c40\u53d8\u91cf\u6c60';
     return;
   }
   targetWorkspace.addBlock(blockType);
@@ -1330,6 +1342,7 @@ function startRunPoll() {
       if (!['starting', 'running'].includes(status?.status)) {
         clearRunPoll();
         codeRunning.value = false;
+        runBusy.value = false;
         startedRunForTarget = false;
         setNodeGraphInputLocked(false);
       }
@@ -1376,6 +1389,61 @@ async function stopNodeGraphRun(statusText = '已停止', restoreState = false) 
   }
 }
 
+function normalizeGamePreviewStatus(payload = {}) {
+  const status = payload?.data ?? payload ?? {};
+  const runningCount = Number(status.runningCount ?? status.running_count ?? 0);
+  const hasSnapshot = Boolean(status.hasSnapshot ?? status.has_snapshot);
+  const active = ['starting', 'running', 'stopping'].includes(status.status)
+    || runningCount > 0
+    || hasSnapshot;
+  return { ...status, active, scope: status.scope || 'project' };
+}
+function applyGamePreviewGuard(payload = {}) {
+  const preview = normalizeGamePreviewStatus(payload);
+  const previousLabel = globalPreviewRunLabel.value;
+  const wasPreviewMessage = runStatus.value === previousLabel;
+  globalPreviewActive.value = preview.active;
+  globalPreviewScope.value = preview.active ? preview.scope : '';
+  if (preview.active && !codeRunning.value) {
+    runStatus.value = globalPreviewRunLabel.value;
+    const errors = Array.isArray(preview.errors) ? preview.errors : [];
+    const warnings = Array.isArray(preview.warnings) ? preview.warnings : [];
+    runDetail.value = [...errors, ...warnings].filter(Boolean).join('\n');
+  } else if (!preview.active && wasPreviewMessage) {
+    runStatus.value = '';
+    runDetail.value = '';
+  }
+  return preview;
+}
+function onGamePreviewStatus(event) {
+  applyGamePreviewGuard(event?.detail || {});
+}
+function onViewportControlsState(state = {}) {
+  if (state?.preview && typeof state.preview === 'object') {
+    applyGamePreviewGuard(state.preview);
+  }
+}
+function startGamePreviewGuardPoll() {
+  if (gamePreviewGuardTimer) window.clearInterval(gamePreviewGuardTimer);
+  gamePreviewGuardTimer = window.setInterval(() => {
+    refreshGamePreviewGuard().catch(() => {});
+  }, 800);
+}
+async function refreshGamePreviewGuard() {
+  if (window.__coronaPreviewActionPending) {
+    return applyGamePreviewGuard({
+      status: 'starting',
+      scope: window.__coronaPreviewPendingScope || 'project',
+    });
+  }
+  try {
+    return applyGamePreviewGuard(await scriptingService.getGamePreviewStatus());
+  } catch (error) {
+    logError('查询全局运行状态失败', error);
+    return { active: false, scope: '' };
+  }
+}
+
 async function handleToggleRun() {
   if (runBusy.value) return;
   runBusy.value = true;
@@ -1388,6 +1456,21 @@ async function handleToggleRun() {
       runStatus.value = '请先选择运行目标';
       return;
     }
+    const preview = await refreshGamePreviewGuard();
+    if (preview.active) {
+      runStatus.value = globalPreviewRunLabel.value;
+      return;
+    }
+    // A terminal error is a diagnostic, not a latch. Keep it visible until the
+    // next click, then rebuild from the current workspaces and start a fresh run.
+    clearRunPoll();
+    codeRunning.value = false;
+    startedRunForTarget = false;
+    currentRunNodeId.value = '';
+    runWarnings.value = [];
+    runDetail.value = '';
+    runDetailVisible.value = false;
+    setNodeGraphInputLocked(false);
     refreshEmbeddedWorkspaceStates();
     await saveNow();
     let code;
@@ -1411,6 +1494,16 @@ async function handleToggleRun() {
         props.targetType === 'model' ? 'actor' : props.targetType || 'actor'
       )
     );
+    if (response?.outcome === 'preview_running') {
+      // A global preview owns this target. Treat the race as an ownership handoff
+      // instead of leaving a misleading node-graph execution error.
+      applyGamePreviewGuard({
+        status: response.previewStatus || 'running',
+        scope: response.previewScope || 'project',
+        runningCount: 1,
+      });
+      return;
+    }
     if (response?.status === 'error' || response?.success === false) {
       throw new Error(response?.message || '后端拒绝执行节点图');
     }
@@ -1423,6 +1516,8 @@ async function handleToggleRun() {
     startedRunForTarget = false;
     codeRunning.value = false;
     clearRunPoll();
+    currentRunNodeId.value = '';
+    setNodeGraphInputLocked(false);
     runStatus.value = `执行失败：${error?.message || error}`;
     logError('执行节点图失败', error);
   } finally {
@@ -1472,6 +1567,13 @@ function unregisterNodeGraphFlusher() {
   }
 }
 onMounted(() => {
+  window.addEventListener('corona-game-preview-status', onGamePreviewStatus);
+  coronaEventBus.on('viewport-controls-state', onViewportControlsState);
+  if (window.__coronaGamePreviewState) {
+    applyGamePreviewGuard(window.__coronaGamePreviewState);
+  }
+  refreshGamePreviewGuard();
+  startGamePreviewGuardPoll();
   registerNodeGraphFlusher();
   loadLayout();
   resizeObserver = new ResizeObserver(resizeEmbeddedWorkspaces);
@@ -1479,6 +1581,12 @@ onMounted(() => {
   updateCanvasSize();
 });
 onBeforeUnmount(() => {
+  window.removeEventListener('corona-game-preview-status', onGamePreviewStatus);
+  coronaEventBus.off('viewport-controls-state', onViewportControlsState);
+  if (gamePreviewGuardTimer) {
+    window.clearInterval(gamePreviewGuardTimer);
+    gamePreviewGuardTimer = null;
+  }
   unregisterNodeGraphFlusher();
   if (saveTimer) clearTimeout(saveTimer);
   saveNow();

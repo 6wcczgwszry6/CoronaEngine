@@ -116,6 +116,8 @@ class ScratchTool:
     _preview_restore_error = ""
     _preview_restored = False
     _preview_stopped_count = 0
+    _preview_restore_pending = False
+    _preview_restore_in_progress = False
 
     # ------------------------------------------------------------------
     # Project Blockly persistence
@@ -405,14 +407,33 @@ class ScratchTool:
             from CoronaCore.utils import corona_engine_scratch
 
             with cls._preview_lock:
+                live_preview_threads = sum(
+                    1 for info in cls._preview_threads
+                    if info.get("thread") and info["thread"].is_alive()
+                )
+                preview_status = cls._preview_status
+                preview_scope = cls._preview_scope
+                preview_has_snapshot = cls._preview_state_snapshot is not None
                 preview_active = bool(
-                    cls._preview_state_snapshot is not None
-                    or any(info.get("thread") and info["thread"].is_alive() for info in cls._preview_threads)
-                    or cls._preview_status in ("starting", "running", "stopping")
+                    preview_has_snapshot
+                    or live_preview_threads
+                    or preview_status in ("starting", "running", "stopping")
                 )
             if preview_active:
                 message = "全局运行或项目预览正在进行，请先停止并恢复后再运行单物体脚本"
-                return {"status": "error", "message": message, "outcome": "preview_running"}
+                logger.warning(
+                    "[ScratchTool] rejected single execution during preview: "
+                    "status=%s scope=%s snapshot=%s live_threads=%d scene=%s actor=%s",
+                    preview_status, preview_scope, preview_has_snapshot,
+                    live_preview_threads, scene_name, actor_name,
+                )
+                return {
+                    "status": "error",
+                    "message": message,
+                    "outcome": "preview_running",
+                    "previewStatus": preview_status,
+                    "previewScope": preview_scope,
+                }
 
             requested_scene = scene_name or ""
             requested_actor = actor_name or ""
@@ -457,6 +478,29 @@ class ScratchTool:
             actor_name = resolved.get("actor_name", actor_name)
 
             with cls._exec_lock:
+                active_thread = bool(cls._exec_thread and cls._exec_thread.is_alive())
+                previous_status = str(cls._exec_state.get("status") or "idle")
+                previous_outcome = str(cls._exec_state.get("outcome") or "")
+                if active_thread:
+                    return {
+                        "status": "error",
+                        "message": "\u4e0a\u4e00\u6b21\u8282\u70b9\u56fe\u811a\u672c\u4ecd\u5728\u7ed3\u675f\u4e2d\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5",
+                        "outcome": "execution_finishing",
+                    }
+                # A failed execution is terminal.  Its diagnostic remains visible in
+                # _exec_state, but a stale pre-run snapshot must never make the Run
+                # button unusable after the graph has been fixed.  Restore failures
+                # are intentionally retained so the user can retry restoration.
+                retryable_terminal = previous_status in ("error", "completed") or previous_outcome in (
+                    "error", "startup_error", "binding_error", "snapshot_error"
+                )
+                restore_failed = str(cls._exec_state.get("restoreStatus") or "") == "error"
+                if retryable_terminal and not restore_failed:
+                    cls._exec_state_snapshot = None
+                    cls._exec_thread = None
+                    cls._exec_context_id = None
+                    cls._exec_state.update(snapshotCaptured=False, inputLocked=False)
+                    cls._set_exec_input_locked(False)
                 if cls._exec_state_snapshot is not None:
                     return {
                         "status": "error",
@@ -549,6 +593,25 @@ class ScratchTool:
                     },
                     single_exec=True,
                 )
+                if outcome == "stop_restore":
+                    # Do not restore from the script thread: the stop coordinator
+                    # must be free to wait for handlers before restoring the scene.
+                    with cls._exec_lock:
+                        cls._exec_state.update(
+                            status="stopping",
+                            outcome=outcome,
+                            finishedAt=time.time(),
+                        )
+                        if cls._exec_thread is threading.current_thread():
+                            cls._exec_thread = None
+                    threading.Thread(
+                        target=cls.stop_script_execution,
+                        args=(True,),
+                        daemon=True,
+                        name="blockly-exec-stop-restore",
+                    ).start()
+                    return
+
                 with cls._exec_lock:
                     current_status = cls._exec_state.get("status")
                     if current_status not in ("error", "stopped"):
@@ -598,15 +661,28 @@ class ScratchTool:
 
     @classmethod
     def stop_script_execution(cls, restore_state: bool = False) -> dict:
+        from CoronaCore.utils import corona_engine_scratch
+
         thread_to_stop = None
         context_id = None
         with cls._exec_lock:
+            context_id = cls._exec_context_id
             if cls._exec_thread and cls._exec_thread.is_alive():
                 thread_to_stop = cls._exec_thread
-                context_id = cls._exec_context_id
 
         if thread_to_stop is not None:
             _force_kill_thread(thread_to_stop, timeout=0.5, context_id=context_id)
+        elif context_id:
+            corona_engine_scratch.request_stop(context_id)
+
+        child_threads = (
+            corona_engine_scratch.active_child_threads({context_id}) if context_id else []
+        )
+        pending_children = cls._wait_for_threads(child_threads, 0.75)
+        if pending_children:
+            for child in pending_children:
+                _inject_thread_system_exit(child)
+            cls._wait_for_threads(pending_children, 0.75)
 
         restored = False
         restore_error = None
@@ -717,7 +793,12 @@ class ScratchTool:
             "restore_error": cls._preview_restore_error,
             "restored": cls._preview_restored,
             "stopped_count": cls._preview_stopped_count,
-            "stop_pending": bool(cls._preview_stop_thread and cls._preview_stop_thread.is_alive()),
+            "restore_pending": cls._preview_restore_pending,
+            "stop_pending": bool(
+                (cls._preview_stop_thread and cls._preview_stop_thread.is_alive())
+                or cls._preview_restore_pending
+                or cls._preview_restore_in_progress
+            ),
         }
         payload.update({
             "sceneName": payload["scene_name"],
@@ -742,6 +823,10 @@ class ScratchTool:
         if scope == "scene" and not requested_scene:
             return {"status": "error", "message": "scene preview requires scene_name"}
 
+        logger.info(
+            "[ScratchTool] preview start requested: scope=%s scene=%s",
+            scope, requested_scene,
+        )
         with cls._exec_lock:
             single_active = bool(
                 (cls._exec_thread and cls._exec_thread.is_alive())
@@ -808,6 +893,8 @@ class ScratchTool:
             cls._preview_restore_error = ""
             cls._preview_restored = False
             cls._preview_stopped_count = 0
+            cls._preview_restore_pending = False
+            cls._preview_restore_in_progress = False
 
         if not targets:
             cls._set_preview_input_locked(False)
@@ -919,22 +1006,12 @@ class ScratchTool:
             with cls._preview_lock:
                 cls._preview_threads = []
                 cls._preview_stopped_count = len(infos)
-                cls._preview_restore_status = "restoring"
-
-            restored, restore_error = cls._restore_preview_state_snapshot()
-            if not restored and not restore_error:
-                restore_error = "The runtime scene snapshot was lost; restoration cannot continue"
-            if restored and not restore_error:
-                corona_engine_scratch.clear_runtime_state_snapshots()
-            with cls._preview_lock:
-                cls._preview_restored = bool(restored)
-                cls._preview_restore_error = restore_error or ""
-                cls._preview_restore_status = "error" if restore_error else "restored"
-                cls._preview_status = "error" if restore_error else "stopped"
-                if restore_error:
-                    message = f"场景恢复失败: {restore_error}"
-                    if message not in cls._preview_errors:
-                        cls._preview_errors.append(message)
+                # Native Editor APIs are safest when invoked from the bridge/status
+                # request thread. The background coordinator only terminates script
+                # threads; the next status poll performs restoration synchronously.
+                cls._preview_restore_pending = True
+                cls._preview_restore_status = "pending"
+                cls._preview_status = "stopping"
         except Exception as exc:
             logger.exception("[ScratchTool] stop_game_preview finalize failed")
             with cls._preview_lock:
@@ -949,8 +1026,14 @@ class ScratchTool:
                 cls._preview_stop_thread = None
                 keep_locked = bool(
                     cls._preview_state_snapshot is not None
-                    and cls._preview_restore_status == "error"
-                    and any(info.get("thread") and info["thread"].is_alive() for info in cls._preview_threads)
+                    and (
+                        cls._preview_restore_pending
+                        or cls._preview_restore_in_progress
+                        or (
+                            cls._preview_restore_status == "error"
+                            and any(info.get("thread") and info["thread"].is_alive() for info in cls._preview_threads)
+                        )
+                    )
                 )
             if not keep_locked:
                 cls._set_preview_input_locked(False)
@@ -963,6 +1046,9 @@ class ScratchTool:
             cls._prune_preview_locked()
             existing_stopper = cls._preview_stop_thread
             if existing_stopper and existing_stopper.is_alive():
+                cls._preview_status = "stopping"
+                return cls._preview_payload_locked()
+            if cls._preview_restore_pending or cls._preview_restore_in_progress:
                 cls._preview_status = "stopping"
                 return cls._preview_payload_locked()
 
@@ -987,6 +1073,7 @@ class ScratchTool:
             cls._preview_restore_status = "stopping"
             cls._preview_restore_error = ""
             cls._preview_restored = False
+            cls._preview_restore_pending = False
             stopper = threading.Thread(
                 target=cls._finalize_game_preview_stop,
                 args=(infos,),
@@ -1005,9 +1092,52 @@ class ScratchTool:
         from CoronaCore.utils import corona_engine_scratch
         with cls._preview_lock:
             cls._prune_preview_locked()
+            should_restore = cls._preview_restore_pending and not cls._preview_restore_in_progress
+        if should_restore:
+            cls._complete_preview_restore()
+        with cls._preview_lock:
             status = cls._preview_payload_locked()
         status["runtime_states"] = corona_engine_scratch.runtime_state_snapshots()
         return status
+
+    @classmethod
+    def _complete_preview_restore(cls) -> None:
+        """Restore the scene on the bridge/status thread after scripts stop."""
+        from CoronaCore.utils import corona_engine_scratch
+
+        with cls._preview_lock:
+            if not cls._preview_restore_pending or cls._preview_restore_in_progress:
+                return
+            cls._preview_restore_pending = False
+            cls._preview_restore_in_progress = True
+            cls._preview_restore_status = "restoring"
+            cls._preview_status = "stopping"
+
+        restored = False
+        restore_error: str | None = None
+        try:
+            restored, restore_error = cls._restore_preview_state_snapshot()
+            if not restored and not restore_error:
+                restore_error = "The runtime scene snapshot was lost; restoration cannot continue"
+            if restored and not restore_error:
+                corona_engine_scratch.clear_runtime_state_snapshots()
+        except Exception as exc:
+            logger.exception("[ScratchTool] preview restore completion failed")
+            restore_error = str(exc)
+        finally:
+            with cls._preview_lock:
+                cls._preview_restore_in_progress = False
+                cls._preview_restored = bool(restored and not restore_error)
+                cls._preview_restore_error = restore_error or ""
+                cls._preview_restore_status = "error" if restore_error else "restored"
+                cls._preview_status = "error" if restore_error else "stopped"
+                if restore_error:
+                    message = f"场景恢复失败: {restore_error}"
+                    if message not in cls._preview_errors:
+                        cls._preview_errors.append(message)
+            # Never leave camera input locked after all script threads have stopped.
+            # The snapshot is retained on failure so the user can retry restoration.
+            cls._set_preview_input_locked(False)
 
     @classmethod
     def _prepare_preview_targets(
@@ -1201,10 +1331,10 @@ class ScratchTool:
                     except Exception:
                         logger.exception("[ScratchTool] failed to save restored scene: %s", route)
 
+            cls._notify_preview_state_restored({item for item in restored_scenes if item})
             if clear_snapshot:
                 with cls._preview_lock:
                     cls._preview_state_snapshot = None
-            cls._notify_preview_state_restored({item for item in restored_scenes if item})
             logger.info("[ScratchTool] preview state restored: %d scenes", len(restored_scenes))
             return True, None
         except Exception as exc:
@@ -1326,6 +1456,11 @@ class ScratchTool:
         try:
             while True:
                 outcome = cls._run_code_file(code_path, target, single_exec=False)
+                if outcome == "stop_restore":
+                    # Reuse the exact global stop button flow. It runs restoration
+                    # on a separate coordinator thread and stops every preview target.
+                    cls.stop_game_preview()
+                    break
                 if outcome == "restart":
                     with cls._preview_restart_lock:
                         with cls._preview_lock:
@@ -1370,7 +1505,7 @@ class ScratchTool:
                 if result is not None:
                     if outcome == "error":
                         result["status"] = "error"
-                    elif outcome in ("stopped", "restart"):
+                    elif outcome in ("stopped", "restart", "stop_restore"):
                         result["status"] = "stopped"
                     else:
                         result["status"] = "completed"
@@ -1382,7 +1517,7 @@ class ScratchTool:
                     and info.get("thread")
                     and info["thread"].is_alive()
                 ]
-                if not cls._preview_threads and cls._preview_status not in ("stopping", "stopped"):
+                if not cls._preview_threads and cls._preview_status in ("starting", "running"):
                     # Keep the pre-run snapshot until explicit restore succeeds.
                     # Clearing it when scripts finish makes a later stop unable to restore.
                     # The stop action remains available while the snapshot exists.
@@ -1426,10 +1561,24 @@ class ScratchTool:
             if corona_engine_scratch.has_runtime_handlers(ctx) and not ctx.stop_requested:
                 while not ctx.stop_requested:
                     corona_engine_scratch.wait(0.1)
-        except SystemExit:
-            if ctx.game_state == "restart" or ctx.variables.get("game_state") == "restart":
+            requested_state = ctx.game_state or ctx.variables.get("game_state")
+            if requested_state == "stop_restore":
+                outcome = "stop_restore"
+                logger.info("[ScratchTool] stop-and-restore requested: %s", context_id)
+            elif requested_state == "restart":
                 outcome = "restart"
                 logger.info("[ScratchTool] level restart requested: %s", context_id)
+            elif ctx.stop_requested:
+                outcome = "stopped"
+                logger.info("[ScratchTool] script stopped: %s", context_id)
+        except SystemExit:
+            requested_state = ctx.game_state or ctx.variables.get("game_state")
+            if requested_state == "restart":
+                outcome = "restart"
+                logger.info("[ScratchTool] level restart requested: %s", context_id)
+            elif requested_state == "stop_restore":
+                outcome = "stop_restore"
+                logger.info("[ScratchTool] stop-and-restore requested: %s", context_id)
             else:
                 outcome = "stopped"
                 logger.info("[ScratchTool] script stopped: %s", context_id)
@@ -1437,8 +1586,10 @@ class ScratchTool:
             outcome = "error"
             logger.exception("[ScratchTool] script failed: %s", context_id)
             if single_exec:
+                # Keep the public status running until the wrapper has released the
+                # runtime context, snapshot and input lock.  Otherwise the frontend
+                # can offer Run again while the failed worker is still cleaning up.
                 cls._replace_exec_state(
-                    status="error",
                     outcome="error",
                     error=str(exc),
                     finishedAt=time.time(),

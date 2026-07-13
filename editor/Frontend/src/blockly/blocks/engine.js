@@ -353,4 +353,63 @@ export const defineEngineBlocks = () => {
     },
   };
 
+
+  const numberValueStatement = (type, label, input, legacy, defaultValue = 0) => {
+    Blockly.Blocks[type] = { init() {
+      this.appendValueInput(input)
+        .setCheck('Number')
+        .appendField(label)
+        .appendField(new Blockly.FieldNumber(defaultValue), legacy)
+        .appendField('\u6216\u63a5\u5165\u53d8\u91cf/\u8fd0\u7b97');
+      this.setInputsInline(true); this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('engine_blocks');
+    } };
+  };
+  numberValueStatement('engine_Xset', '\u8bbe\u7f6e X \u4e3a', 'VALUE', 'X');
+  numberValueStatement('engine_Yset', '\u8bbe\u7f6e Y \u4e3a', 'VALUE', 'Y');
+  numberValueStatement('engine_Zset', '\u8bbe\u7f6e Z \u4e3a', 'VALUE', 'Z');
+  numberValueStatement('engine_Xadd', 'X \u589e\u52a0', 'VALUE', 'DX');
+  numberValueStatement('engine_Yadd', 'Y \u589e\u52a0', 'VALUE', 'DY');
+  numberValueStatement('engine_Zadd', 'Z \u589e\u52a0', 'VALUE', 'DZ');
+  numberValueStatement('engine_jump', '\u8df3\u8dc3\u529b\u5ea6', 'VALUE', 'POWER', 8);
+  numberValueStatement('engine_set_game_speed', '\u8bbe\u7f6e\u6e38\u620f\u901f\u5ea6', 'VALUE', 'VALUE', 1);
+
+  const vectorStatement = (type, label, names, legacyNames) => {
+    Blockly.Blocks[type] = { init() {
+      this.appendDummyInput('LABEL').appendField(label);
+      names.forEach((name, index) => {
+        this.appendValueInput(name)
+          .setCheck('Number')
+          .appendField(name.replace(/^V|^I/, ''))
+          .appendField(new Blockly.FieldNumber(0), legacyNames[index])
+          .appendField('\u6216\u63a5\u5165\u53d8\u91cf/\u8fd0\u7b97');
+      });
+      this.setInputsInline(true); this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('engine_blocks');
+    } };
+  };
+  vectorStatement('engine_set_velocity', '\u8bbe\u7f6e\u901f\u5ea6', ['VX','VY','VZ'], ['VX','VY','VZ']);
+  vectorStatement('engine_apply_impulse', '\u65bd\u52a0\u51b2\u91cf', ['IX','IY','IZ'], ['IX','IY','IZ']);
+
+  Blockly.Blocks.engine_set_velocity_axis = { init() {
+    this.appendValueInput('VALUE')
+      .setCheck('Number')
+      .appendField('\u8bbe\u7f6e')
+      .appendField(new Blockly.FieldDropdown([['X','X'],['Y','Y'],['Z','Z']]), 'AXIS')
+      .appendField('\u901f\u5ea6\u4e3a')
+      .appendField(new Blockly.FieldNumber(0), 'VALUE_DEFAULT')
+      .appendField('\u6216\u63a5\u5165\u53d8\u91cf/\u8fd0\u7b97');
+    this.setInputsInline(true); this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('engine_blocks');
+  } };
+  Blockly.Blocks.engine_bounce_last_collision = { init() {
+    this.appendValueInput('FACTOR')
+      .setCheck('Number')
+      .appendField('\u6839\u636e\u6700\u8fd1\u78b0\u649e\u65b9\u5411\u53cd\u5f39 \u7cfb\u6570')
+      .appendField(new Blockly.FieldNumber(1), 'FACTOR_DEFAULT')
+      .appendField('\u6216\u63a5\u5165\u53d8\u91cf/\u8fd0\u7b97');
+    this.setInputsInline(true); this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('engine_blocks');
+  } };
+  Blockly.Blocks.engine_stop_motion = { init() {
+    this.appendDummyInput().appendField('\u505c\u6b62\u5f53\u524d\u7269\u4f53\u8fd0\u52a8');
+    this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('engine_blocks');
+  } };
+
 };

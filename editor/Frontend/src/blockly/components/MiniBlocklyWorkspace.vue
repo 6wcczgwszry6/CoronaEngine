@@ -1,12 +1,13 @@
 <template>
   <div
-    :class="['mini-blockly-shell', { 'drop-active': dropActive }]"
+    :class="['mini-blockly-shell', { 'drop-active': dropActive, 'drop-invalid': dropInvalid }]"
     @dragover.prevent
     @drop.prevent="handleDrop"
     @mouseup.capture="handleDeleteModePointer"
   >
     <div ref="blockdiv" class="mini-blockly-canvas"></div>
     <div v-if="loadingLabel" class="mini-blockly-overlay">{{ loadingLabel }}</div>
+    <div v-else-if="validationMessage" class="mini-blockly-validation">{{ validationMessage }}</div>
   </div>
 </template>
 
@@ -14,6 +15,7 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
+import { registerDataNamesFromState } from '@/blockly/blocks/variable.js';
 
 const props = defineProps({
   workspaceKey: { type: String, default: '' },
@@ -21,9 +23,10 @@ const props = defineProps({
   placeholder: { type: String, default: '将左侧微观积木拖入这里' },
   deleteMode: { type: Boolean, default: false },
   showToolbox: { type: Boolean, default: false },
+  workspaceRole: { type: String, default: 'node' },
 });
 
-const emit = defineEmits(['change', 'ready']);
+const emit = defineEmits(['change', 'ready', 'reject']);
 
 const { t, locale } = useI18n();
 const { error: logError } = useErrorHandler('MiniBlocklyWorkspace');
@@ -31,6 +34,9 @@ const { error: logError } = useErrorHandler('MiniBlocklyWorkspace');
 const blockdiv = ref(null);
 const loadingLabel = ref('');
 const dropActive = ref(false);
+const dropInvalid = ref(false);
+const validationMessage = ref('');
+const GLOBAL_ROOT_TYPES = new Set(['variable_define', 'list_define', 'variable_show', 'variable_hide', 'list_show', 'list_hide']);
 
 let workspace = null;
 let BlocklyLib = null;
@@ -133,6 +139,7 @@ function loadState(state) {
   try {
     workspace.clear();
     const nextState = cloneState(state);
+    registerDataNamesFromState(nextState);
     if (hasSerializedWorkspaceContent(nextState)) {
       BlocklyLib.serialization.workspaces.load(nextState, workspace);
     }
@@ -156,6 +163,7 @@ function deleteBlockById(blockId) {
   try {
     block.dispose(true, true);
     emitChange();
+    validateWorkspace();
     return true;
   } catch (e) {
     logError('删除子工作区积木失败', e);
@@ -204,14 +212,69 @@ function hitTest(clientX, clientY) {
   return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
 }
 
-function setDropActive(active) {
-  dropActive.value = Boolean(active);
+function setDropActive(active, valid = true) {
+  dropActive.value = Boolean(active) && Boolean(valid);
+  dropInvalid.value = Boolean(active) && !valid;
+}
+
+function inspectBlockAcceptance(block) {
+  if (!block) return { accepted: false, message: '无法识别该积木' };
+  if (props.workspaceRole === 'global') {
+    if (GLOBAL_ROOT_TYPES.has(block.type) || block.outputConnection) return { accepted: true, message: '' };
+    return { accepted: false, message: '此积木应放入节点内部编辑区' };
+  }
+  if (props.workspaceRole === 'condition' && !block.outputConnection) {
+    return { accepted: false, message: '连线条件只能放入返回值积木' };
+  }
+  return { accepted: true, message: '' };
+}
+
+function canAcceptBlock(blockType) {
+  if (!workspace || !blockType) return false;
+  let probe = null;
+  try {
+    probe = workspace.newBlock(blockType);
+    return inspectBlockAcceptance(probe).accepted;
+  } catch {
+    return false;
+  } finally {
+    try { probe?.dispose?.(false); } catch {}
+  }
+}
+
+function validateWorkspace() {
+  if (!workspace) return { valid: true, errors: [] };
+  const errors = [];
+  const topBlocks = workspace.getTopBlocks?.(true) || [];
+  if (props.workspaceRole === 'global') {
+    for (const block of topBlocks) {
+      if (!GLOBAL_ROOT_TYPES.has(block.type)) {
+        errors.push(block.outputConnection
+          ? '全局变量池中的返回值积木必须连接到初始化积木'
+          : '此积木应放入节点内部编辑区');
+      }
+    }
+  } else if (props.workspaceRole === 'condition') {
+    if (topBlocks.length > 1 || (topBlocks.length === 1 && !topBlocks[0].outputConnection)) {
+      errors.push('连线条件必须是一个返回值积木');
+    }
+  }
+  validationMessage.value = errors[0] || '';
+  return { valid: errors.length === 0, errors };
 }
 
 function addBlock(blockType, clientX, clientY) {
   if (!workspace || !BlocklyLib || !blockType) return false;
   try {
     const block = workspace.newBlock(blockType);
+    const acceptance = inspectBlockAcceptance(block);
+    if (!acceptance.accepted) {
+      block.dispose(false);
+      validationMessage.value = acceptance.message;
+      emit('reject', acceptance.message);
+      window.setTimeout(() => { if (validationMessage.value === acceptance.message) validationMessage.value = ''; }, 2400);
+      return false;
+    }
     block.initSvg();
     block.render();
 
@@ -269,6 +332,7 @@ async function initBlockly() {
     changeListener = (event) => {
       maybeDeleteClickedBlock(event);
       emitChange();
+      validateWorkspace();
     };
     workspace.addChangeListener(changeListener);
     loadState(props.initialState);
@@ -303,6 +367,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   dropActive.value = false;
+  dropInvalid.value = false;
   try {
     if (workspace && changeListener) workspace.removeChangeListener(changeListener);
     resizeObserver?.disconnect?.();
@@ -318,6 +383,8 @@ defineExpose({
   addBlockFromDrop,
   hitTest,
   setDropActive,
+  canAcceptBlock,
+  validateWorkspace,
   deleteBlockById,
   resizeBlockly,
 });
@@ -339,6 +406,27 @@ defineExpose({
 .mini-blockly-shell.drop-active {
   border-color: #60a5fa;
   box-shadow: inset 0 0 0 2px rgba(96, 165, 250, 0.28), 0 0 14px rgba(59, 130, 246, 0.22);
+}
+
+
+.mini-blockly-shell.drop-invalid {
+  border-color: #ef4444;
+  box-shadow: inset 0 0 0 2px rgba(239, 68, 68, 0.32);
+}
+
+.mini-blockly-validation {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  z-index: 4;
+  padding: 7px 10px;
+  border: 1px solid rgba(248, 113, 113, 0.65);
+  border-radius: 7px;
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.92);
+  font-size: 12px;
+  pointer-events: none;
 }
 
 .mini-blockly-canvas {

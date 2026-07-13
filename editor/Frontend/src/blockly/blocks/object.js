@@ -191,4 +191,57 @@ export const defineObjectBlocks = () => {
     },
   };
 
+
+  const objectStatement = (block, tooltip = '') => { setStatementBlock(block, tooltip); };
+  const addNumber = (block, key, label, defaultValue = 0) => block.appendValueInput(key).setCheck('Number').appendField(label).appendField(new Blockly.FieldNumber(defaultValue), `${key}_NUMBER`);
+  const addText = (block, key, label) => block.appendValueInput(key).setCheck('String').appendField(label);
+
+  Blockly.Blocks.object_clamp_axis = { init() {
+    addText(this, 'NAME', '\u9650\u5236\u5bf9\u8c61');
+    this.appendDummyInput().appendField('\u8f74').appendField(new Blockly.FieldDropdown([['X','X'],['Y','Y'],['Z','Z']]), 'AXIS');
+    addNumber(this, 'MIN', '\u6700\u5c0f'); addNumber(this, 'MAX', '\u6700\u5927'); objectStatement(this);
+  } };
+  Blockly.Blocks.object_save_checkpoint = { init() {
+    addText(this, 'NAME', '\u4fdd\u5b58\u5bf9\u8c61'); addText(this, 'CHECKPOINT', '\u68c0\u67e5\u70b9');
+    this.appendDummyInput().appendField('\u4fdd\u5b58\u901f\u5ea6').appendField(new Blockly.FieldCheckbox('TRUE'), 'SAVE_VELOCITY'); objectStatement(this);
+  } };
+  Blockly.Blocks.object_restore_checkpoint = { init() {
+    addText(this, 'NAME', '\u6062\u590d\u5bf9\u8c61'); addText(this, 'CHECKPOINT', '\u68c0\u67e5\u70b9');
+    this.appendDummyInput().appendField('\u6e05\u9664\u901f\u5ea6').appendField(new Blockly.FieldCheckbox('TRUE'), 'CLEAR_VELOCITY'); objectStatement(this);
+  } };
+  Blockly.Blocks.object_move_to_lane = { init() {
+    addText(this, 'NAME', '\u5bf9\u8c61');
+    this.appendDummyInput().appendField('\u79fb\u52a8\u5230').appendField(new Blockly.FieldDropdown([['X','X'],['Z','Z']]), 'AXIS').appendField('\u8dd1\u9053');
+    addNumber(this, 'LANE', '\u7f16\u53f7'); addNumber(this, 'ORIGIN', '\u8d77\u70b9'); addNumber(this, 'SPACING', '\u95f4\u8ddd'); objectStatement(this);
+  } };
+  Blockly.Blocks.object_lane_index = { init() {
+    addText(this, 'NAME', '\u5bf9\u8c61'); this.appendDummyInput().appendField('\u5f53\u524d').appendField(new Blockly.FieldDropdown([['X','X'],['Z','Z']]), 'AXIS').appendField('\u8dd1\u9053');
+    addNumber(this, 'ORIGIN', '\u8d77\u70b9'); addNumber(this, 'SPACING', '\u95f4\u8ddd'); this.setOutput(true, 'Number'); this.setStyle('object_blocks');
+  } };
+  Blockly.Blocks.object_set_random_position = { init() {
+    addText(this, 'NAME', '\u968f\u673a\u653e\u7f6e\u5bf9\u8c61');
+    for (const [key,label] of [['CX','\u4e2d\u5fc3X'],['CY','Y'],['CZ','Z'],['SX','\u5c3a\u5bf8X'],['SY','Y'],['SZ','Z']]) addNumber(this,key,label);
+    objectStatement(this);
+  } };
+  Blockly.Blocks.object_spawn_random_box = { init() {
+    addText(this, 'TEMPLATE', '\u5728 3D \u533a\u57df\u968f\u673a\u751f\u6210\u6a21\u677f'); addText(this, 'TAG', '\u6807\u7b7e'); addNumber(this, 'COUNT', '\u6570\u91cf');
+    for (const [key,label] of [['CX','\u4e2d\u5fc3X'],['CY','Y'],['CZ','Z'],['SX','\u5c3a\u5bf8X'],['SY','Y'],['SZ','Z']]) addNumber(this,key,label);
+    objectStatement(this);
+  } };
+  Blockly.Blocks.object_scatter_tag = { init() {
+    addText(this, 'TAG', '\u968f\u673a\u6563\u5e03\u6807\u7b7e');
+    for (const [key,label] of [['CX','\u4e2d\u5fc3X'],['CY','Y'],['CZ','Z'],['SX','\u5c3a\u5bf8X'],['SY','Y'],['SZ','Z']]) addNumber(this,key,label);
+    objectStatement(this);
+  } };
+  Blockly.Blocks.object_recycle_tag_axis = { init() {
+    addText(this, 'TAG', '\u56de\u6536\u6807\u7b7e');
+    this.appendDummyInput().appendField('\u524d\u8fdb\u8f74').appendField(new Blockly.FieldDropdown([['X','X'],['Y','Y'],['Z','Z']]), 'AXIS')
+      .appendField('\u65b9\u5411').appendField(new Blockly.FieldDropdown([['\u5c0f\u4e8e','LESS'],['\u5927\u4e8e','GREATER']]), 'DIRECTION');
+    addNumber(this, 'BOUNDARY', '\u8fb9\u754c'); addNumber(this, 'RESET', '\u91cd\u7f6e\u5750\u6807');
+    this.appendDummyInput().appendField('\u968f\u673a\u8f74').appendField(new Blockly.FieldDropdown([['\u4e0d\u968f\u673a',''],['X','X'],['Y','Y'],['Z','Z']]), 'RANDOM_AXIS');
+    addNumber(this, 'RANDOM_MIN', '\u968f\u673a\u6700\u5c0f'); addNumber(this, 'RANDOM_MAX', '\u968f\u673a\u6700\u5927'); objectStatement(this);
+  } };
+  Blockly.Blocks.object_reset_tag = { init() { addText(this, 'TAG', '\u6062\u590d\u6807\u7b7e\u5bf9\u8c61'); objectStatement(this); } };
+  Blockly.Blocks.object_count_active_tag = { init() { addText(this, 'TAG', '\u6807\u7b7e'); this.appendDummyInput().appendField('\u5f53\u524d\u6709\u6548\u6570\u91cf'); this.setOutput(true, 'Number'); this.setStyle('object_blocks'); } };
+
 };

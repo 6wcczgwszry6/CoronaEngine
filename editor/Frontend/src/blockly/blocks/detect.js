@@ -241,4 +241,54 @@ export const defineDetectBlocks = () => {
     },
   };
 
+
+  Blockly.Blocks.detect_touch_started = {
+    init() {
+      this.appendValueInput('NAME').setCheck('String').appendField('\u521a\u521a\u78b0\u5230\u5bf9\u8c61');
+      this.setOutput(true, 'Boolean');
+      this.setStyle('detect_blocks');
+      this.setTooltip('\u63a5\u89e6\u4ece\u65e0\u5230\u6709\u65f6\u53ea\u8fd4\u56de\u4e00\u6b21 true');
+    },
+  };
+  Blockly.Blocks.detect_touch_tag_started = {
+    init() {
+      this.appendValueInput('TAG').setCheck('String').appendField('\u521a\u521a\u78b0\u5230\u6807\u7b7e');
+      this.setOutput(true, 'Boolean');
+      this.setStyle('detect_blocks');
+    },
+  };
+  const addNumberInput = (block, key, label, defaultValue = 0) =>
+    block.appendValueInput(key).setCheck('Number').appendField(label).appendField(new Blockly.FieldNumber(defaultValue), `${key}_NUMBER`);
+  const defineCrossedOnce = (type, axis) => {
+    Blockly.Blocks[type] = { init() {
+      this.appendValueInput('NAME').setCheck('String').appendField('\u5bf9\u8c61');
+      this.appendDummyInput().appendField('\u901a\u8fc7 ' + axis).appendField(new Blockly.FieldDropdown([['\u589e\u5927\u65b9\u5411', 'POSITIVE'], ['\u51cf\u5c0f\u65b9\u5411', 'NEGATIVE'], ['\u4efb\u610f\u65b9\u5411', 'ANY']]), 'DIRECTION');
+      addNumberInput(this, 'THRESHOLD', '\u5750\u6807');
+      this.appendDummyInput().appendField('\u4e00\u6b21\uff1f');
+      this.setOutput(true, 'Boolean'); this.setStyle('detect_blocks');
+    } };
+  };
+  defineCrossedOnce('detect_crossed_x_once', 'X');
+  defineCrossedOnce('detect_crossed_z_once', 'Z');
+  Blockly.Blocks.detect_outside_axis = {
+    init() {
+      this.appendValueInput('NAME').setCheck('String').appendField('\u5bf9\u8c61');
+      this.appendDummyInput().appendField('\u5728').appendField(new Blockly.FieldDropdown([['X','X'],['Y','Y'],['Z','Z']]), 'AXIS').appendField('\u8303\u56f4\u5916');
+      addNumberInput(this, 'MIN', '\u6700\u5c0f');
+      addNumberInput(this, 'MAX', '\u6700\u5927');
+      this.setOutput(true, 'Boolean'); this.setStyle('detect_blocks');
+    },
+  };
+  Blockly.Blocks.detect_inside_box = {
+    init() {
+      this.appendValueInput('NAME').setCheck('String').appendField('\u5bf9\u8c61\u5728 3D \u533a\u57df\u5185');
+      for (const [key, label] of [['CX','\u4e2d\u5fc3X'],['CY','Y'],['CZ','Z'],['SX','\u5c3a\u5bf8X'],['SY','Y'],['SZ','Z']]) addNumberInput(this, key, label);
+      this.setOutput(true, 'Boolean'); this.setStyle('detect_blocks');
+    },
+  };
+  Blockly.Blocks.detect_last_collision_axis = { init() { this.appendDummyInput().appendField('\u6700\u8fd1\u78b0\u649e\u8f74'); this.setOutput(true, 'String'); this.setStyle('detect_blocks'); } };
+  for (const axis of ['X', 'Y', 'Z']) {
+    Blockly.Blocks[`detect_last_collision_normal_${axis.toLowerCase()}`] = { init() { this.appendDummyInput().appendField(`\u6700\u8fd1\u78b0\u649e\u6cd5\u7ebf ${axis}`); this.setOutput(true, 'Number'); this.setStyle('detect_blocks'); } };
+  }
+
 };

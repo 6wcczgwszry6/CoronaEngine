@@ -99,4 +99,13 @@ export const defineEventGenerators = () => {
     if (!branch) branch = pythonGenerator.INDENT + 'pass\n';
     return `if _event_type == 'contextmenu':\n` + indent(branch);
   };
+
+  const lifecycleCode = (block) => {
+    const branch = pythonGenerator.statementToCode(block, 'DO');
+    return branch || '';
+  };
+  pythonGenerator.forBlock.node_when_enter = lifecycleCode;
+  pythonGenerator.forBlock.node_while_active = lifecycleCode;
+  pythonGenerator.forBlock.node_when_exit = lifecycleCode;
+
 };

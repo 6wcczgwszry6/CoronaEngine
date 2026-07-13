@@ -73,4 +73,17 @@ export const defineMathGenerators = () => {
     const rightStr = `str(${right})`;
     return [leftStr + ' + ' + rightStr, pythonGenerator.ORDER_ADDITION];
   };
+
+  // COMPOSABLE_MATH_INPUTS
+  const operand = (block, input, legacy, fallback = '0') => pythonGenerator.valueToCode(block, input, pythonGenerator.ORDER_NONE) || block.getFieldValue(legacy) || fallback;
+  const binary = (operator, order) => (block) => [`(${operand(block,'A','x1')} ${operator} ${operand(block,'B','x2')})`, order];
+  pythonGenerator.forBlock.math_add = binary('+', pythonGenerator.ORDER_ADDITION);
+  pythonGenerator.forBlock.math_sub = binary('-', pythonGenerator.ORDER_ADDITION);
+  pythonGenerator.forBlock.math_mul = binary('*', pythonGenerator.ORDER_MULTIPLICATION);
+  pythonGenerator.forBlock.math_div = binary('/', pythonGenerator.ORDER_MULTIPLICATION);
+  pythonGenerator.forBlock.math_G = binary('>', pythonGenerator.ORDER_RELATIONAL);
+  pythonGenerator.forBlock.math_L = binary('<', pythonGenerator.ORDER_RELATIONAL);
+  pythonGenerator.forBlock.math_E = binary('==', pythonGenerator.ORDER_EQUALITY);
+  pythonGenerator.forBlock.math_random = (block) => [`CoronaEngine.random(${operand(block,'A','x1')}, ${operand(block,'B','x2','10')})`, pythonGenerator.ORDER_FUNCTION_CALL];
+
 };

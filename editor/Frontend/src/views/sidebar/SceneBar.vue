@@ -46,7 +46,8 @@
           :disabled="scenePreviewButtonDisabled"
           :title="scenePreviewButtonTitle"
           data-testid="scene-global-run-button"
-          @click="toggleSceneScripts"
+          @pointerdown.stop
+          @click.stop.prevent="toggleSceneScripts"
         >
           {{ scenePreviewButtonLabel }}
         </button>
@@ -718,7 +719,7 @@
 import { ref, reactive, onMounted, onUnmounted, computed } from 'vue';
 import { useRoute } from 'vue-router';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
-import { editorApi, appService, sceneService, projectService, resourceService } from '@/utils/bridge.js';
+import { editorApi, appService, sceneService, projectService, resourceService, scriptingService } from '@/utils/bridge.js';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
@@ -753,6 +754,7 @@ let speedApplyTimer = null;
 let actorChangedCallbackToken = null;
 let focusPoseResultCallbackToken = null;
 let sceneTreeChangedCallbackToken = null;
+let directPreviewPollTimer = null;
 
 const normalizeViewportControls = (state = {}) => {
   const modes = Array.isArray(state.viewportUiModes) && state.viewportUiModes.length > 0
@@ -909,6 +911,59 @@ const scenePreviewDetailTitle = computed(() => {
   return details.length ? details.join('\n') : scenePreviewSummary.value;
 });
 
+const unwrapBridgeData = (result) => result?.data ?? result;
+
+const publishGamePreviewStatus = (preview = {}) => {
+  if (typeof window === 'undefined') return;
+  window.__coronaGamePreviewState = preview;
+  window.dispatchEvent(new CustomEvent('corona-game-preview-status', { detail: preview }));
+};
+
+const applyDirectPreviewStatus = (payload = {}) => {
+  const preview = {
+    ...payload,
+    scope: payload.scope || 'project',
+    sceneName: payload.sceneName ?? payload.scene_name ?? '',
+    runningCount: Number(payload.runningCount ?? payload.running_count ?? 0),
+    startedCount: Number(payload.startedCount ?? payload.started_count ?? 0),
+    errorCount: Number(payload.errorCount ?? payload.error_count ?? 0),
+    blocklyCount: Number(payload.blocklyCount ?? payload.blockly_count ?? 0),
+    nodeGraphCount: Number(payload.nodeGraphCount ?? payload.node_graph_count ?? 0),
+    hasSnapshot: Boolean(payload.hasSnapshot ?? payload.has_snapshot),
+    stopPending: Boolean(payload.stopPending ?? payload.stop_pending),
+  };
+  const active = ['starting', 'running', 'stopping'].includes(preview.status)
+    || preview.runningCount > 0
+    || preview.hasSnapshot;
+  viewportControlState.value = {
+    ...viewportControlState.value,
+    available: true,
+    previewRunning: active,
+    previewBusy: false,
+    preview,
+  };
+  publishGamePreviewStatus(preview);
+  return preview;
+};
+
+const pollDirectPreviewStatus = () => {
+  if (directPreviewPollTimer) clearTimeout(directPreviewPollTimer);
+  const poll = async () => {
+    try {
+      const preview = applyDirectPreviewStatus(unwrapBridgeData(await scriptingService.getGamePreviewStatus()));
+      if (['starting', 'running', 'stopping'].includes(preview.status) || preview.stopPending) {
+        directPreviewPollTimer = window.setTimeout(poll, 500);
+      } else {
+        directPreviewPollTimer = null;
+      }
+    } catch (error) {
+      directPreviewPollTimer = null;
+      logWarn('查询全局运行状态失败', error);
+    }
+  };
+  directPreviewPollTimer = window.setTimeout(poll, 150);
+};
+
 const refreshPreviewStateSoon = () => {
   requestViewportControlsState();
   window.setTimeout(requestViewportControlsState, 250);
@@ -916,32 +971,59 @@ const refreshPreviewStateSoon = () => {
 };
 
 const toggleSceneScripts = async () => {
-  if (scenePreviewButtonDisabled.value) return;
+  if (scenePreviewActionBusy.value || viewportControlState.value.previewBusy) return;
   const controls = getEditorControls();
+  window.__coronaPreviewActionPendingCount = Number(window.__coronaPreviewActionPendingCount || 0) + 1;
+  window.__coronaPreviewActionPending = true;
+  window.__coronaPreviewPendingScope = 'scene';
   scenePreviewActionBusy.value = true;
+  let stopping = false;
   try {
-    if (scenePreviewStopAvailable.value) {
+    // 始终以后端状态决定本次点击是启动还是停止，避免场景栏轮询稍慢时
+    // 第二次点击再次发送 start，或第一次启动后仍显示成“全局运行”。
+    const live = applyDirectPreviewStatus(
+      unwrapBridgeData(await scriptingService.getGamePreviewStatus())
+    );
+    const liveActive = ['starting', 'running', 'stopping'].includes(live.status)
+      || live.runningCount > 0
+      || live.hasSnapshot;
+    stopping = liveActive && live.scope === 'scene';
+
+    if (stopping) {
       if (controls && typeof controls.stopPreview === 'function') {
         await controls.stopPreview();
       } else {
-        await appService.crossTabBroadcast('viewport-controls-request', { action: 'stopPreview' });
+        applyDirectPreviewStatus(unwrapBridgeData(await scriptingService.stopGamePreview()));
+        pollDirectPreviewStatus();
       }
+    } else if (liveActive) {
+      throw new Error('项目预览正在运行，请先在主视口停止');
     } else {
       const request = { scope: 'scene', scene_name: currentSceneName.value };
+      let started;
       if (controls && typeof controls.startPreview === 'function') {
-        await controls.startPreview(request);
+        started = await controls.startPreview(request);
       } else {
-        await appService.crossTabBroadcast('viewport-controls-request', {
-          action: 'startPreview',
-          request,
-        });
+        started = applyDirectPreviewStatus(unwrapBridgeData(await scriptingService.startGamePreview(request)));
+        pollDirectPreviewStatus();
+      }
+      if (started === false) {
+        const refreshed = applyDirectPreviewStatus(
+          unwrapBridgeData(await scriptingService.getGamePreviewStatus())
+        );
+        const message = refreshed.message || refreshed.errors?.[0] || '全局运行启动失败';
+        throw new Error(message);
       }
     }
   } catch (error) {
-    logError(scenePreviewStopAvailable.value ? '停止并恢复失败' : '全局运行失败', error);
+    logError(stopping ? '停止并恢复失败' : '全局运行失败', error);
   } finally {
+    window.__coronaPreviewActionPendingCount = Math.max(0, Number(window.__coronaPreviewActionPendingCount || 1) - 1);
+    window.__coronaPreviewActionPending = window.__coronaPreviewActionPendingCount > 0;
+    if (!window.__coronaPreviewActionPending) window.__coronaPreviewPendingScope = '';
     scenePreviewActionBusy.value = false;
     refreshPreviewStateSoon();
+    pollDirectPreviewStatus();
   }
 };
 
@@ -2316,6 +2398,10 @@ onUnmounted(() => {
   if (speedApplyTimer) {
     clearTimeout(speedApplyTimer);
     speedApplyTimer = null;
+  }
+  if (directPreviewPollTimer) {
+    clearTimeout(directPreviewPollTimer);
+    directPreviewPollTimer = null;
   }
   clearFocusPoseCache();
   clearActorSingleClickTimer();

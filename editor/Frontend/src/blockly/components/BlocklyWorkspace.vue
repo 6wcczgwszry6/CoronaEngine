@@ -114,7 +114,7 @@
               :class="codeRunning
                 ? 'text-red-300 bg-red-700/40 hover:bg-red-600/50 hover:text-red-200'
                 : 'text-green-400 bg-green-700/30 hover:bg-green-600/40 hover:text-green-200'"
-              @click="handleToggleRun"
+              @click.stop="handleToggleRun"
             >{{ codeRunning ? `⏹ ${t('blockly.stop')}` : `▶ ${t('blockly.run')}` }}</button>
             <button
               class="text-gray-400 hover:text-white transition-colors text-lg leading-none px-1"
@@ -392,7 +392,29 @@ async function handleToggleRun() {
     return;
   }
 
-  // 当前未执行 → 运行
+  // 当前未执行 → 运行。全局运行/项目预览拥有执行权时，不再重复启动
+  // 单物体脚本，否则后端会正确拒绝但界面会误显示为本脚本执行失败。
+  try {
+    const previewResult = window.__coronaPreviewActionPending
+      ? {
+          status: 'starting',
+          scope: window.__coronaPreviewPendingScope || 'project',
+        }
+      : await scriptingService.getGamePreviewStatus();
+    const preview = previewResult?.data ?? previewResult ?? {};
+    const previewActive = ['starting', 'running', 'stopping'].includes(preview.status)
+      || Number(preview.runningCount ?? preview.running_count ?? 0) > 0
+      || Boolean(preview.hasSnapshot ?? preview.has_snapshot);
+    if (previewActive) {
+      alert(preview.scope === 'scene'
+        ? '当前积木脚本正在由全局运行执行'
+        : '当前积木脚本正在由项目预览执行');
+      return;
+    }
+  } catch (error) {
+    console.warn('[Blockly] 查询全局运行状态失败，将继续尝试单物体运行:', error);
+  }
+
   const code = generatedCode.value;
   if (!code || code === t('blockly.codeEmpty') || code === t('blockly.codeGenerationFailed')) {
     alert(t('blockly.noExecutableCode'));
@@ -417,7 +439,12 @@ async function handleToggleRun() {
       target.targetType,
     );
     const execResult = result?.data ?? result;
-    if (execResult?.status === 'error') {
+    if (execResult?.outcome === 'preview_running') {
+      // The global preview already owns this target. A racing single-run request
+      // is an ownership handoff, not a Blockly execution failure.
+      codeRunning.value = false;
+      console.info('[Blockly] single-target run is owned by the global preview');
+    } else if (execResult?.status === 'error') {
       alert(t('blockly.codeRunningFailed', { message: execResult.message || t('blockly.codeRunUnknownError') }));
       codeRunning.value = false;
     } else {

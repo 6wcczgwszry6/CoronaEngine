@@ -96,4 +96,31 @@ export const defineDetectGenerators = () => {
     return [`CoronaEngine.object_passed_z(${pyString(block.getFieldValue('NAME'))}, ${block.getFieldValue('Z')})`, pythonGenerator.ORDER_FUNCTION_CALL];
   };
 
+
+  const value = (block, input, fallback) => pythonGenerator.valueToCode(block, input, pythonGenerator.ORDER_NONE) || block.getFieldValue(`${input}_NUMBER`) || fallback;
+  pythonGenerator.forBlock.detect_touch_started = (block) => [
+    `CoronaEngine.touch_started(${value(block, 'NAME', "''")}, ${JSON.stringify(block.id)})`,
+    pythonGenerator.ORDER_FUNCTION_CALL,
+  ];
+  pythonGenerator.forBlock.detect_touch_tag_started = (block) => [
+    `CoronaEngine.touch_tag_started(${value(block, 'TAG', "''")}, ${JSON.stringify(block.id)})`,
+    pythonGenerator.ORDER_FUNCTION_CALL,
+  ];
+  const crossedOnce = (axis) => (block) => [
+    `CoronaEngine.crossed_axis_once(${value(block, 'NAME', "''")}, '${axis}', ${value(block, 'THRESHOLD', '0')}, '${block.getFieldValue('DIRECTION') || 'ANY'}', ${JSON.stringify(block.id)})`,
+    pythonGenerator.ORDER_FUNCTION_CALL,
+  ];
+  pythonGenerator.forBlock.detect_crossed_x_once = crossedOnce('X');
+  pythonGenerator.forBlock.detect_crossed_z_once = crossedOnce('Z');
+  pythonGenerator.forBlock.detect_outside_axis = (block) => [
+    `CoronaEngine.outside_axis(${value(block, 'NAME', "''")}, '${block.getFieldValue('AXIS') || 'X'}', ${value(block, 'MIN', '0')}, ${value(block, 'MAX', '0')})`,
+    pythonGenerator.ORDER_FUNCTION_CALL,
+  ];
+  pythonGenerator.forBlock.detect_inside_box = (block) => [
+    `CoronaEngine.inside_box(${value(block, 'NAME', "''")}, ${['CX','CY','CZ','SX','SY','SZ'].map((key) => value(block, key, '0')).join(', ')})`,
+    pythonGenerator.ORDER_FUNCTION_CALL,
+  ];
+  pythonGenerator.forBlock.detect_last_collision_axis = () => ['CoronaEngine.last_collision_axis()', pythonGenerator.ORDER_FUNCTION_CALL];
+  for (const axis of ['x','y','z']) pythonGenerator.forBlock[`detect_last_collision_normal_${axis}`] = () => [`CoronaEngine.last_collision_normal('${axis.toUpperCase()}')`, pythonGenerator.ORDER_FUNCTION_CALL];
+
 };

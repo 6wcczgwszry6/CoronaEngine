@@ -95,6 +95,15 @@ class ScratchRuntimeContext:
     current_node_name: str = ""
     waiting_edge_id: str = ""
     waiting_edge_name: str = ""
+    countdown_started_at: float = 0.0
+    countdown_duration: float = 0.0
+    touch_state: dict = field(default_factory=dict)
+    crossing_state: dict = field(default_factory=dict)
+    last_collision_axis_value: str = ""
+    last_collision_normal_value: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    checkpoints: dict = field(default_factory=dict)
+    cooldowns: dict = field(default_factory=dict)
+    initial_tag_transforms: dict = field(default_factory=dict)
 
 
 _default_context = ScratchRuntimeContext("default", target_type="internal")
@@ -103,6 +112,9 @@ _completed_state_snapshots: dict[str, dict] = {}
 _scene_virtual_objects: dict[str, dict[str, object]] = {}
 _scene_deleted_objects: dict[str, set[str]] = {}
 _scene_object_tags: dict[str, dict[str, str]] = {}
+_scene_shared_variables: dict[str, dict[str, object]] = {}
+_scene_shared_lists: dict[str, dict[str, list]] = {}
+_scene_shared_declarations: dict[str, dict[str, tuple]] = {}
 _clone_threads: dict[str, list[_threading.Thread]] = {}
 _handler_threads: dict[str, list[_threading.Thread]] = {}
 
@@ -166,6 +178,13 @@ def release_context(ctx: ScratchRuntimeContext | None = None):
         ctx.visible_variables.clear()
         ctx.visible_lists.clear()
         ctx.list_values.clear()
+        ctx.touch_state.clear()
+        ctx.crossing_state.clear()
+        ctx.last_collision_axis_value = ""
+        ctx.last_collision_normal_value = [0.0, 0.0, 0.0]
+        ctx.checkpoints.clear()
+        ctx.cooldowns.clear()
+        ctx.initial_tag_transforms.clear()
         with _context_lock:
             _contexts.pop(ctx.context_id, None)
             _clone_threads[ctx.context_id] = [
@@ -921,8 +940,6 @@ def restore_runtime_scene_state(snapshot):
         engine = CoronaEditor.CoronaEngine
         remover = getattr(engine, "remove_editor_actor", None) if engine is not None else None
         creator = getattr(engine, "create_editor_actor", None) if engine is not None else None
-        if not callable(remover) or not callable(creator):
-            raise RuntimeError("Native scene create/remove actor API is unavailable")
 
         verification_failures = []
         for attempt in range(3):
@@ -937,9 +954,14 @@ def restore_runtime_scene_state(snapshot):
             ]
 
             # Remove runtime-created actors. Prefer GUID; use name/route only as fallback.
-            for item in current:
-                if any(_snapshot_actor_match([item], expected) is not None for expected in original):
-                    continue
+            runtime_created = [
+                item for item in current
+                if not any(_snapshot_actor_match([item], expected) is not None for expected in original)
+            ]
+            if runtime_created and not callable(remover):
+                names = ", ".join(str(item.get("name") or item.get("route") or "") for item in runtime_created)
+                raise RuntimeError(f"Native remove actor API is unavailable; cannot remove: {names}")
+            for item in runtime_created:
                 actor_name = str(item.get("name") or item.get("route") or "")
                 _native_payload_or_raise(
                     remover(scene_route, actor_name),
@@ -955,9 +977,11 @@ def restore_runtime_scene_state(snapshot):
             current = [item for item in refreshed.get("actors", []) if isinstance(item, dict)]
 
             # Recreate original actors deleted during runtime.
-            for item in original:
-                if _snapshot_actor_match(current, item) is not None:
-                    continue
+            missing_originals = [item for item in original if _snapshot_actor_match(current, item) is None]
+            if missing_originals and not callable(creator):
+                names = ", ".join(str(item.get("name") or item.get("route") or "") for item in missing_originals)
+                raise RuntimeError(f"Native create actor API is unavailable; cannot recreate: {names}")
+            for item in missing_originals:
                 route = str(item.get("route") or item.get("path") or item.get("model") or "")
                 actor_type = str(item.get("actor_type") or "model")
                 actor_name = str(item.get("name") or _Path(route).stem or "actor")
@@ -2013,6 +2037,24 @@ def _shared_object_tags(ctx=None):
         return _scene_object_tags.setdefault(key, {})
 
 
+def _shared_variables(ctx=None):
+    key = _runtime_scene_key(ctx)
+    with _context_lock:
+        return _scene_shared_variables.setdefault(key, {})
+
+
+def _shared_lists(ctx=None):
+    key = _runtime_scene_key(ctx)
+    with _context_lock:
+        return _scene_shared_lists.setdefault(key, {})
+
+
+def _shared_declarations(ctx=None):
+    key = _runtime_scene_key(ctx)
+    with _context_lock:
+        return _scene_shared_declarations.setdefault(key, {})
+
+
 def _iter_scene_actors(scene=None):
     if scene is None:
         scene = _runtime_scene()
@@ -2532,6 +2574,10 @@ def object_spawn(template, name, x, y, z):
             ctx.virtual_objects[_norm_name(actor_name)] = actor
             _shared_virtual_objects(ctx)[_norm_name(actor_name)] = actor
         return actor_name
+    if isinstance(_runtime_scene(), _NativeEditorSceneProxy):
+        _logger.error("[ScratchWrapper] native object spawn failed: scene=%s template=%s name=%s",
+                      _runtime_scene_key(ctx), template, name)
+        return ""
     virtual = _VirtualActor(name, pos, template=template)
     ctx.virtual_objects[_norm_name(name)] = virtual
     _shared_virtual_objects(ctx)[_norm_name(name)] = virtual
@@ -2653,7 +2699,10 @@ def lives():
 
 def set_countdown(seconds):
     ctx = _current_context()
-    ctx.countdown_end_time = _time.monotonic() + max(0.0, _safe_float(seconds))
+    duration = max(0.0, _safe_float(seconds))
+    ctx.countdown_started_at = _time.monotonic()
+    ctx.countdown_duration = duration
+    ctx.countdown_end_time = ctx.countdown_started_at + duration
 
 
 def countdown_left():
@@ -2697,14 +2746,20 @@ def runtime_state_snapshot(ctx=None):
     ctx = ctx or _current_context()
     end_time = _safe_float(ctx.countdown_end_time, 0.0)
     countdown = max(0.0, end_time - _time.monotonic()) if end_time > 0 else 0.0
-    variables = {
-        name: ctx.variables.get(name, 0.0)
-        for name in sorted(ctx.visible_variables)
-    }
-    lists = {
-        name: ctx.list_values.get(name, [])
-        for name in sorted(ctx.visible_lists)
-    }
+    variables = {}
+    for marker in sorted(ctx.visible_variables):
+        if marker.startswith('SCENE:'):
+            name = marker[6:]
+            variables[name] = _shared_variables(ctx).get(name, 0.0)
+        else:
+            variables[marker] = ctx.variables.get(marker, 0.0)
+    lists = {}
+    for marker in sorted(ctx.visible_lists):
+        if marker.startswith('SCENE:'):
+            name = marker[6:]
+            lists[name] = _shared_lists(ctx).get(name, [])
+        else:
+            lists[marker] = ctx.list_values.get(marker, [])
     return {
         'context_id': ctx.context_id,
         'target_type': ctx.target_type,
@@ -2740,6 +2795,9 @@ def clear_runtime_state_snapshots():
         _scene_virtual_objects.clear()
         _scene_deleted_objects.clear()
         _scene_object_tags.clear()
+        _scene_shared_variables.clear()
+        _scene_shared_lists.clear()
+        _scene_shared_declarations.clear()
 
 
 def game_win():
@@ -2992,6 +3050,12 @@ def stop(option):
             if peer.scene_name == ctx.scene_name and peer.actor_name == ctx.actor_name:
                 peer.stop_requested = True
         return True
+    elif normalized in ('CURRENT_SCRIPT', 'CURRENT'):
+        # The editor's stop action restores the pre-run scene snapshot. Mark this
+        # exit explicitly so the backend can coordinate all related threads and
+        # run the same stop-and-restore flow instead of merely ending this context.
+        ctx.game_state = 'stop_restore'
+        ctx.variables['game_state'] = 'stop_restore'
     ctx.stop_requested = True
     raise SystemExit(0)
 
@@ -3286,42 +3350,519 @@ def random(a, b):
     return _random.uniform(float(a), float(b))
 
 
-def var_add(name, value):
-    ctx = _current_context()
-    ctx.variables[name] = ctx.variables.get(name, 0.0) + float(value)
+def var_add(name, value, scope='OBJECT'):
+    return data_add(scope, name, value)
 
 
-def var_set(name, value):
-    _current_context().variables[name] = float(value)
+def var_set(name, value, scope='OBJECT'):
+    return data_set(scope, name, value)
 
 
-def var_show(name):
-    _current_context().visible_variables.add(str(name or ''))
-    return True
-
-
-def var_hide(name):
-    _current_context().visible_variables.discard(str(name or ''))
-    return True
-
-
-def list_show(name, value=None):
-    ctx = _current_context()
+def var_show(name, scope='OBJECT'):
     key = str(name or '')
-    ctx.visible_lists.add(key)
-    if value is not None:
-        if isinstance(value, list):
-            ctx.list_values[key] = value
-        else:
-            try:
-                ctx.list_values[key] = list(value)
-            except TypeError:
-                ctx.list_values[key] = [value]
+    marker = f'SCENE:{key}' if _normalize_data_scope(scope) == 'SCENE' else key
+    _current_context().visible_variables.add(marker)
     return True
 
 
-def list_hide(name):
-    _current_context().visible_lists.discard(str(name or ''))
+def var_hide(name, scope='OBJECT'):
+    key = str(name or '')
+    marker = f'SCENE:{key}' if _normalize_data_scope(scope) == 'SCENE' else key
+    _current_context().visible_variables.discard(marker)
+    return True
+
+
+def list_show(name, value=None, scope='OBJECT'):
+    ctx, key = _current_context(), str(name or '')
+    marker = f'SCENE:{key}' if _normalize_data_scope(scope) == 'SCENE' else key
+    ctx.visible_lists.add(marker)
+    if value is not None:
+        data_list_define(scope, key, value)
+    return True
+
+
+def list_hide(name, scope='OBJECT'):
+    key = str(name or '')
+    marker = f'SCENE:{key}' if _normalize_data_scope(scope) == 'SCENE' else key
+    _current_context().visible_lists.discard(marker)
+    return True
+
+
+# Scoped data used by node graphs and concurrent scene scripts.
+
+def _normalize_data_scope(scope):
+    value = str(scope or 'OBJECT').strip().upper()
+    return 'SCENE' if value in ('SCENE', 'CURRENT_SCENE') else 'OBJECT'
+
+
+def _data_store(scope, ctx=None):
+    ctx = ctx or _current_context()
+    return _shared_variables(ctx) if _normalize_data_scope(scope) == 'SCENE' else ctx.variables
+
+
+def _list_store(scope, ctx=None):
+    ctx = ctx or _current_context()
+    return _shared_lists(ctx) if _normalize_data_scope(scope) == 'SCENE' else ctx.list_values
+
+
+def _copy_runtime_value(value):
+    if isinstance(value, (dict, list, tuple, set)):
+        try:
+            return _json.loads(_json.dumps(value, ensure_ascii=False))
+        except Exception:
+            return dict(value) if isinstance(value, dict) else list(value)
+    return value
+
+
+def data_define(scope, name, value):
+    key = str(name or '').strip()
+    if not key:
+        return False
+    normalized = _normalize_data_scope(scope)
+    with _context_lock:
+        store = _data_store(normalized)
+        if normalized == 'SCENE':
+            declarations = _shared_declarations()
+            signature = ('value', type(value).__name__, repr(value))
+            previous = declarations.get(key)
+            if previous is not None and previous != signature:
+                raise RuntimeError(f'scene variable {key!r} has conflicting declarations')
+            declarations.setdefault(key, signature)
+        store.setdefault(key, _copy_runtime_value(value))
+    return True
+
+
+def data_get(scope, name, default=None):
+    with _context_lock:
+        return _data_store(scope).get(str(name or '').strip(), default)
+
+
+def data_set(scope, name, value):
+    key = str(name or '').strip()
+    if not key:
+        return False
+    with _context_lock:
+        _data_store(scope)[key] = _copy_runtime_value(value)
+    return True
+
+
+def data_add(scope, name, delta):
+    key = str(name or '').strip()
+    if not key:
+        return 0.0
+    with _context_lock:
+        store = _data_store(scope)
+        store[key] = _safe_float(store.get(key, 0.0)) + _safe_float(delta)
+        return store[key]
+
+
+def data_exists(scope, name):
+    with _context_lock:
+        return str(name or '').strip() in _data_store(scope)
+
+
+def _as_runtime_list(values):
+    if values is None:
+        return []
+    if isinstance(values, list):
+        return list(values)
+    if isinstance(values, tuple):
+        return list(values)
+    if isinstance(values, str):
+        return [values]
+    try:
+        return list(values)
+    except TypeError:
+        return [values]
+
+
+def data_list_define(scope, name, values):
+    key = str(name or '').strip()
+    if not key:
+        return False
+    normalized = _normalize_data_scope(scope)
+    value = _as_runtime_list(values)
+    with _context_lock:
+        store = _list_store(normalized)
+        if normalized == 'SCENE':
+            declarations = _shared_declarations()
+            signature = ('list', type(value).__name__, repr(value))
+            previous = declarations.get(key)
+            if previous is not None and previous != signature:
+                raise RuntimeError(f'scene list {key!r} has conflicting declarations')
+            declarations.setdefault(key, signature)
+        store.setdefault(key, value)
+    return True
+
+
+def data_list_add(scope, name, value):
+    with _context_lock:
+        values = _list_store(scope).setdefault(str(name or '').strip(), [])
+        values.append(value)
+        return len(values)
+
+
+def data_list_insert(scope, name, index, value):
+    with _context_lock:
+        values = _list_store(scope).setdefault(str(name or '').strip(), [])
+        idx = max(0, min(len(values), _safe_int(index, 1) - 1))
+        values.insert(idx, value)
+        return len(values)
+
+
+def data_list_remove_index(scope, name, index):
+    with _context_lock:
+        values = _list_store(scope).setdefault(str(name or '').strip(), [])
+        idx = _safe_int(index, 1) - 1
+        if 0 <= idx < len(values):
+            return values.pop(idx)
+    return None
+
+
+def data_list_remove_value(scope, name, value):
+    with _context_lock:
+        values = _list_store(scope).setdefault(str(name or '').strip(), [])
+        try:
+            values.remove(value)
+            return True
+        except ValueError:
+            return False
+
+
+def data_list_clear(scope, name):
+    with _context_lock:
+        _list_store(scope)[str(name or '').strip()] = []
+    return True
+
+
+def data_list_item(scope, name, index):
+    with _context_lock:
+        values = _list_store(scope).get(str(name or '').strip(), [])
+        idx = _safe_int(index, 1) - 1
+        return values[idx] if 0 <= idx < len(values) else None
+
+
+def data_list_length(scope, name):
+    with _context_lock:
+        return len(_list_store(scope).get(str(name or '').strip(), []))
+
+
+def data_list_contains(scope, name, value):
+    with _context_lock:
+        return value in _list_store(scope).get(str(name or '').strip(), [])
+
+
+# One-shot collision, checkpoint, lane and demo helpers.
+
+def _collision_normal(source, target):
+    a, b = _actor_aabb(source), _actor_aabb(target)
+    source_pos = _actor_position(source) or [0.0, 0.0, 0.0]
+    target_pos = _actor_position(target) or [0.0, 0.0, 0.0]
+    if a is not None and b is not None:
+        overlaps = [min(a[i + 3], b[i + 3]) - max(a[i], b[i]) for i in range(3)]
+        axis_index = min(range(3), key=lambda i: overlaps[i])
+    else:
+        delta = [abs(source_pos[i] - target_pos[i]) for i in range(3)]
+        velocity = [abs(v) for v in _velocity_list()]
+        axis_index = max(range(3), key=lambda i: velocity[i]) if any(velocity) else max(range(3), key=lambda i: delta[i])
+    normal = [0.0, 0.0, 0.0]
+    normal[axis_index] = -1.0 if source_pos[axis_index] < target_pos[axis_index] else 1.0
+    return ('XYZ'[axis_index], normal)
+
+
+def _remember_collision(source, target):
+    axis, normal = _collision_normal(source, target)
+    ctx = _current_context()
+    ctx.last_collision_axis_value = axis
+    ctx.last_collision_normal_value = normal
+
+
+def touch_started(name, trigger_id):
+    source, target = _current_actor(), _resolve_actor(name)
+    touching = _actors_touch(source, target)
+    key = f'object:{trigger_id}'
+    previous = bool(_current_context().touch_state.get(key, False))
+    _current_context().touch_state[key] = touching
+    if touching:
+        _record_touch(target)
+        _remember_collision(source, target)
+    return bool(touching and not previous)
+
+
+def touch_tag_started(tag, trigger_id):
+    source, target = _current_actor(), None
+    if source is not None:
+        for actor in _iter_known_actors():
+            if actor is not source and _actor_matches_tag(actor, tag) and _actors_touch(source, actor):
+                target = actor
+                break
+    touching = target is not None
+    key = f'tag:{trigger_id}'
+    previous = bool(_current_context().touch_state.get(key, False))
+    _current_context().touch_state[key] = touching
+    if touching:
+        _record_touch(target)
+        _remember_collision(source, target)
+    return bool(touching and not previous)
+
+
+def crossed_axis_once(name, axis, threshold, direction, trigger_id):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    pos = _actor_position(actor)
+    if pos is None:
+        return False
+    axis_name = str(axis or 'X').upper()
+    index = {'X': 0, 'Y': 1, 'Z': 2}.get(axis_name, 0)
+    current, limit = pos[index], _safe_float(threshold)
+    key = f'{trigger_id}:{_object_name(actor)}:{axis_name}'
+    previous = _current_context().crossing_state.get(key)
+    _current_context().crossing_state[key] = current
+    if previous is None:
+        return False
+    mode = str(direction or 'GREATER').upper()
+    return bool(previous >= limit and current < limit) if mode in ('LESS', 'LT', 'BELOW', '-') else bool(previous <= limit and current > limit)
+
+
+def outside_axis(name, axis, minimum, maximum):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    pos = _actor_position(actor)
+    if pos is None:
+        return False
+    index = {'X': 0, 'Y': 1, 'Z': 2}.get(str(axis or 'X').upper(), 0)
+    lo, hi = sorted((_safe_float(minimum), _safe_float(maximum)))
+    return pos[index] < lo or pos[index] > hi
+
+
+def inside_box(name, cx, cy, cz, sx, sy, sz):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    pos = _actor_position(actor)
+    if pos is None:
+        return False
+    center = [_safe_float(cx), _safe_float(cy), _safe_float(cz)]
+    half = [abs(_safe_float(sx)) * 0.5, abs(_safe_float(sy)) * 0.5, abs(_safe_float(sz)) * 0.5]
+    return all(center[i] - half[i] <= pos[i] <= center[i] + half[i] for i in range(3))
+
+
+def last_collision_axis():
+    return _current_context().last_collision_axis_value or ''
+
+
+def last_collision_normal(axis):
+    index = {'X': 0, 'Y': 1, 'Z': 2}.get(str(axis or 'X').upper(), 0)
+    return _safe_float(_current_context().last_collision_normal_value[index])
+
+
+def bounce_last_collision(factor=1.0):
+    normal = list(_current_context().last_collision_normal_value or [0.0, 0.0, 0.0])
+    if not any(abs(v) > 1e-9 for v in normal):
+        return False
+    velocity = _velocity_list()
+    dot = sum(velocity[i] * normal[i] for i in range(3))
+    coefficient = max(0.0, _safe_float(factor, 1.0))
+    reflected = [velocity[i] - (1.0 + coefficient) * dot * normal[i] for i in range(3)]
+    return set_velocity(*reflected)
+
+
+def stop_motion():
+    return set_velocity(0.0, 0.0, 0.0)
+
+
+def set_velocity_axis(axis, value):
+    velocity = _velocity_list()
+    index = {'X': 0, 'Y': 1, 'Z': 2}.get(str(axis or 'X').upper(), 0)
+    velocity[index] = _safe_float(value)
+    return set_velocity(*velocity)
+
+
+def _actor_vector(actor, getter_name, fallback):
+    getter = getattr(actor, getter_name, None) if actor is not None else None
+    if callable(getter):
+        try:
+            value = list(getter())[:3]
+            while len(value) < 3:
+                value.append(fallback[len(value)])
+            return [_safe_float(value[i], fallback[i]) for i in range(3)]
+        except Exception:
+            pass
+    return list(fallback)
+
+
+def _set_actor_vector(actor, setter_name, value):
+    setter = getattr(actor, setter_name, None) if actor is not None else None
+    if not callable(setter):
+        return False
+    try:
+        setter(list(value))
+        return True
+    except TypeError:
+        try:
+            setter(*value)
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
+def object_clamp_axis(name, axis, minimum, maximum):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    pos = _actor_position(actor)
+    if actor is None or pos is None:
+        return False
+    index = {'X': 0, 'Y': 1, 'Z': 2}.get(str(axis or 'X').upper(), 0)
+    lo, hi = sorted((_safe_float(minimum), _safe_float(maximum)))
+    pos[index] = min(hi, max(lo, pos[index]))
+    return _set_actor_position(actor, pos)
+
+
+def object_save_checkpoint(name, checkpoint, save_velocity=True):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    if actor is None:
+        return False
+    key = f'{_norm_name(_object_name(actor))}:{str(checkpoint or "default")}'
+    _current_context().checkpoints[key] = {
+        'position': _actor_position(actor) or [0.0, 0.0, 0.0],
+        'rotation': _actor_vector(actor, 'get_rotation', [0.0, 0.0, 0.0]),
+        'scale': _actor_vector(actor, 'get_scale', [1.0, 1.0, 1.0]),
+        'velocity': _velocity_list() if actor is _current_actor() and save_velocity else [0.0, 0.0, 0.0],
+    }
+    return True
+
+
+def object_restore_checkpoint(name, checkpoint, clear_velocity=True):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    if actor is None:
+        return False
+    key = f'{_norm_name(_object_name(actor))}:{str(checkpoint or "default")}'
+    state = _current_context().checkpoints.get(key)
+    if not state:
+        return False
+    ok = _set_actor_position(actor, state['position'])
+    _set_actor_vector(actor, 'set_rotation', state['rotation'])
+    _set_actor_vector(actor, 'set_scale', state['scale'])
+    if actor is _current_actor():
+        set_velocity(0.0, 0.0, 0.0) if clear_velocity else set_velocity(*state['velocity'])
+    return ok
+
+
+def object_move_to_lane(name, axis, lane, origin, spacing):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    pos = _actor_position(actor)
+    if actor is None or pos is None:
+        return False
+    index = {'X': 0, 'Z': 2}.get(str(axis or 'X').upper(), 0)
+    pos[index] = _safe_float(origin) + _safe_int(lane, 0) * _safe_float(spacing, 1.0)
+    return _set_actor_position(actor, pos)
+
+
+def object_lane_index(name, axis, origin, spacing):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    pos, step = _actor_position(actor), _safe_float(spacing, 1.0)
+    if pos is None or abs(step) < 1e-9:
+        return 0
+    index = {'X': 0, 'Z': 2}.get(str(axis or 'X').upper(), 0)
+    return int(round((pos[index] - _safe_float(origin)) / step))
+
+
+def object_set_random_position(name, cx, cy, cz, sx, sy, sz):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    if actor is None:
+        return False
+    center = [_safe_float(cx), _safe_float(cy), _safe_float(cz)]
+    size = [abs(_safe_float(sx)), abs(_safe_float(sy)), abs(_safe_float(sz))]
+    pos = [_random.uniform(center[i] - size[i] * 0.5, center[i] + size[i] * 0.5) for i in range(3)]
+    return _set_actor_position(actor, pos)
+
+
+def object_spawn_random_box(template, tag, count, cx, cy, cz, sx, sy, sz):
+    created = 0
+    for index in range(max(0, _safe_int(count))):
+        name = _unique_object_name(f'{str(tag or "object")}_{index + 1:02d}')
+        center = [_safe_float(cx), _safe_float(cy), _safe_float(cz)]
+        size = [abs(_safe_float(sx)), abs(_safe_float(sy)), abs(_safe_float(sz))]
+        pos = [_random.uniform(center[i] - size[i] * 0.5, center[i] + size[i] * 0.5) for i in range(3)]
+        spawned = object_spawn(template, name, *pos)
+        if not spawned:
+            raise RuntimeError(f'failed to spawn template {template!r}')
+        object_set_tag(spawned, tag)
+        created += 1
+    return created
+
+
+def _remember_tag_initial_positions(tag):
+    ctx, key = _current_context(), _norm_name(tag)
+    states = ctx.initial_tag_transforms.setdefault(key, {})
+    for actor in _iter_known_actors():
+        if _actor_matches_tag(actor, tag):
+            states.setdefault(_norm_name(_object_name(actor)), list(_actor_position(actor) or [0.0, 0.0, 0.0]))
+    return states
+
+
+def object_scatter_tag(tag, cx, cy, cz, sx, sy, sz):
+    _remember_tag_initial_positions(tag)
+    return sum(1 for actor in _iter_known_actors() if _actor_matches_tag(actor, tag) and object_set_random_position(_object_name(actor), cx, cy, cz, sx, sy, sz))
+
+
+def object_recycle_tag_axis(tag, axis, direction, boundary, reset_value, random_axis='', random_min=0, random_max=0):
+    _remember_tag_initial_positions(tag)
+    axis_index = {'X': 0, 'Y': 1, 'Z': 2}.get(str(axis or 'X').upper(), 0)
+    random_index = {'X': 0, 'Y': 1, 'Z': 2}.get(str(random_axis or '').upper())
+    mode, reset = str(direction or 'LESS').upper(), 0
+    for actor in _iter_known_actors():
+        if not _actor_matches_tag(actor, tag):
+            continue
+        pos = _actor_position(actor)
+        if pos is None:
+            continue
+        crossed = pos[axis_index] < _safe_float(boundary) if mode in ('LESS', 'LT', '-') else pos[axis_index] > _safe_float(boundary)
+        if not crossed:
+            continue
+        pos[axis_index] = _safe_float(reset_value)
+        if random_index is not None:
+            lo, hi = sorted((_safe_float(random_min), _safe_float(random_max)))
+            pos[random_index] = _random.uniform(lo, hi)
+        if _set_actor_position(actor, pos):
+            reset += 1
+    return reset
+
+
+def object_reset_tag(tag):
+    states, restored = _current_context().initial_tag_transforms.get(_norm_name(tag), {}), 0
+    for actor in _iter_known_actors():
+        pos = states.get(_norm_name(_object_name(actor)))
+        if pos is not None and _set_actor_position(actor, pos):
+            restored += 1
+    return restored
+
+
+def object_count_active_tag(tag):
+    return object_count_tag(tag)
+
+
+def score():
+    return _safe_float(_current_context().variables.get('score', 0.0))
+
+
+def game_state():
+    ctx = _current_context()
+    return str(ctx.variables.get('game_state', ctx.game_state or ''))
+
+
+def countdown_elapsed():
+    ctx = _current_context()
+    return 0.0 if ctx.countdown_started_at <= 0 else min(ctx.countdown_duration, max(0.0, _time.monotonic() - ctx.countdown_started_at))
+
+
+def cooldown_ready(name, seconds, consume=True):
+    ctx, key, now = _current_context(), str(name or '').strip() or 'default', _time.monotonic()
+    ready = now >= _safe_float(ctx.cooldowns.get(key, 0.0))
+    if ready and bool(consume):
+        ctx.cooldowns[key] = now + max(0.0, _safe_float(seconds))
+    return ready
+
+
+def reset_cooldown(name):
+    _current_context().cooldowns.pop(str(name or '').strip() or 'default', None)
     return True
 
 

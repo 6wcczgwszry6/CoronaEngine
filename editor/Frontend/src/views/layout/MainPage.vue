@@ -472,7 +472,7 @@ import {
 import AIHintBubble from '@/components/ui/AIHintBubble.vue';
 import { startStageHints, stopStageHints, setHintShowMs } from '@/services/aiHintGenerator.js';
 
-const { error: logError } = useErrorHandler('MainPage');
+const { error: logError, warn: logWarn } = useErrorHandler('MainPage');
 
 const router = useRouter();
 const dockStore = useDockStore();
@@ -1703,6 +1703,12 @@ const normalizePreviewDetails = (payload = {}) => ({
   targets: Array.isArray(payload.targets) ? payload.targets : [],
 });
 
+const publishGamePreviewStatus = (details = {}) => {
+  if (typeof window === 'undefined') return;
+  window.__coronaGamePreviewState = details;
+  window.dispatchEvent(new CustomEvent('corona-game-preview-status', { detail: details }));
+};
+
 const applyPreviewStatus = (payload = {}) => {
   const details = normalizePreviewDetails(payload);
   previewDetails.value = details;
@@ -1718,6 +1724,7 @@ const applyPreviewStatus = (payload = {}) => {
   else if (state === 'stopped') previewStatusText.value = '已停止并恢复';
   else if (state === 'error') previewStatusText.value = details.restoreError ? `场景恢复失败：${details.restoreError}` : (details.errors[0] || details.message || '预览出错');
   else previewStatusText.value = details.startedCount === 0 && details.warnings.length ? '没有可运行脚本' : '';
+  publishGamePreviewStatus(details);
   return details;
 };
 
@@ -1753,11 +1760,33 @@ const normalizePreviewRequest = (request) => {
 };
 
 const handleStartGamePreview = async (request = { scope: 'project' }) => {
-  if (previewRunning.value || previewBusy.value) return false;
+  if (previewBusy.value) return false;
   const previewRequest = normalizePreviewRequest(request);
+  window.__coronaPreviewActionPendingCount = Number(window.__coronaPreviewActionPendingCount || 0) + 1;
+  window.__coronaPreviewActionPending = true;
+  window.__coronaPreviewPendingScope = previewRequest.scope;
   previewBusy.value = true;
   previewStatusText.value = previewRequest.scope === 'scene' ? '准备当前场景脚本...' : '准备项目预览...';
   try {
+    // 本地 previewRunning 可能因跨面板广播延迟而滞后。启动前重新读取
+    // 后端真值，避免把一次有效点击误判为重复启动。
+    try {
+      const live = applyPreviewStatus(unwrapBridgeData(await scriptingService.getGamePreviewStatus()));
+      const liveActive = ['starting', 'running', 'stopping'].includes(live.status)
+        || live.runningCount > 0
+        || live.hasSnapshot;
+      if (liveActive) {
+        broadcastViewportControlsState();
+        return live;
+      }
+    } catch (statusError) {
+      logWarn('启动前查询预览状态失败，将继续尝试启动', statusError);
+    }
+    publishGamePreviewStatus(normalizePreviewDetails({
+      status: 'starting',
+      scope: previewRequest.scope,
+      sceneName: previewRequest.scene_name || '',
+    }));
     if (typeof window.__coronaBlocklyFlushSave === 'function') {
       await window.__coronaBlocklyFlushSave();
     }
@@ -1784,6 +1813,9 @@ const handleStartGamePreview = async (request = { scope: 'project' }) => {
     broadcastViewportControlsState();
     return false;
   } finally {
+    window.__coronaPreviewActionPendingCount = Math.max(0, Number(window.__coronaPreviewActionPendingCount || 1) - 1);
+    window.__coronaPreviewActionPending = window.__coronaPreviewActionPendingCount > 0;
+    if (!window.__coronaPreviewActionPending) window.__coronaPreviewPendingScope = '';
     previewBusy.value = false;
     activeMenu.value = null;
     broadcastViewportControlsState();

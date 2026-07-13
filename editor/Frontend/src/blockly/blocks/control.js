@@ -194,4 +194,16 @@ export const defineControlBlocks = () => {
     },
   };
 
+
+  Blockly.Blocks.control_cooldown_ready = { init() {
+    this.appendValueInput('NAME').setCheck('String').appendField('\u51b7\u5374');
+    this.appendValueInput('SECONDS').setCheck('Number').appendField('\u95f4\u9694\u79d2\u6570').appendField(new Blockly.FieldNumber(0), 'SECONDS_NUMBER');
+    this.appendDummyInput().appendField('\u5c31\u7eea\uff1f').appendField(new Blockly.FieldCheckbox('TRUE'), 'CONSUME').appendField('\u7acb\u5373\u6d88\u8017');
+    this.setOutput(true, 'Boolean'); this.setStyle('control_blocks');
+  } };
+  Blockly.Blocks.control_reset_cooldown = { init() {
+    this.appendValueInput('NAME').setCheck('String').appendField('\u91cd\u7f6e\u51b7\u5374');
+    this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('control_blocks');
+  } };
+
 };
