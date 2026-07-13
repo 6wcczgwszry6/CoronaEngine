@@ -88,7 +88,7 @@ Observed sync path:
 
 Evidence:
 - `scheduleCameraUpdate`, `sendCameraUpdateFast`, and `onMouseUp` in `editor/Frontend/src/views/layout/MainPage.vue`
-- `cameraMove` V8 injection in `examples/cef_subprocess/main.cpp`
+- `cameraMove` V8 injection in `src/systems/ui/cef/cef_renderer_bridge.cpp`
 - `CameraMoveFast` handling in `src/systems/ui/cef/cef_client.cpp`
 
 Assessment:
@@ -171,7 +171,7 @@ Suggested future split:
 - `src/systems/ui/cef/browser_ui.cpp`
 - `editor/Frontend/src/utils/bridge.js`
 - `editor/Frontend/src/views/layout/MainPage.vue`
-- `examples/cef_subprocess/main.cpp`
+- `src/systems/ui/cef/cef_renderer_bridge.cpp`
 - `src/systems/ui/cef/cef_client.cpp` as current runtime bridge host
 
 ### Narrow or Refactor

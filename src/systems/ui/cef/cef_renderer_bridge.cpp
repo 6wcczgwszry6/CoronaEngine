@@ -1,35 +1,22 @@
-/**
- * @brief CEF 子进程可执行文件
- *
- * 这是一个轻量级的可执行文件，专门用于 CEF 子进程（Browser, Renderer, GPU 等）。
- * 使用单独的可执行文件可以避免主引擎的静态初始化代码在子进程中执行。
- */
-
-#include <cef_app.h>
 #include <include/cef_v8.h>
 #include <wrapper/cef_helpers.h>
 #include <wrapper/cef_message_router.h>
 
 #include <iostream>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
+#include "cef_app.h"
+#include "cef_renderer_bridge.h"
 
-// 与主程序使用相同的消息路由配置
-static CefMessageRouterConfig GetMessageRouterConfig() {
-    CefMessageRouterConfig config;
-    config.js_query_function = "cefQuery";
-    config.js_cancel_function = "cefQueryCancel";
-    return config;
-}
+namespace Corona::Systems::UI {
+
+namespace {
 
 // 渲染进程处理器 - 负责在渲染进程中注入 cefQuery 函数
-class SubprocessRenderHandler : public CefRenderProcessHandler {
+class CoronaRenderProcessHandler : public CefRenderProcessHandler {
    public:
-    SubprocessRenderHandler() : renderer_side_router_(nullptr) {}
+    CoronaRenderProcessHandler() : renderer_side_router_(nullptr) {}
 
-    class FastCameraMoveHandler : public CefV8Handler {
+    class CoronaBridgeV8Handler : public CefV8Handler {
        public:
         bool Execute(const CefString& name,
                      CefRefPtr<CefV8Value> object,
@@ -505,14 +492,15 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
             return true;
         }
 
-        IMPLEMENT_REFCOUNTING(FastCameraMoveHandler);
+        IMPLEMENT_REFCOUNTING(CoronaBridgeV8Handler);
     };
 
     void OnContextCreated(CefRefPtr<CefBrowser> browser,
                           CefRefPtr<CefFrame> frame,
                           CefRefPtr<CefV8Context> context) override {
         if (!renderer_side_router_) {
-            renderer_side_router_ = CefMessageRouterRendererSide::Create(GetMessageRouterConfig());
+            renderer_side_router_ =
+                CefMessageRouterRendererSide::Create(make_cef_message_router_config());
         }
 
         // 将 cefQuery 和 cefQueryCancel 函数注入到 window 对象中
@@ -520,7 +508,7 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
 
         CefRefPtr<CefV8Value> global = context->GetGlobal();
         CefRefPtr<CefV8Value> bridge = CefV8Value::CreateObject(nullptr, nullptr);
-        CefRefPtr<CefV8Handler> handler(new FastCameraMoveHandler());
+        CefRefPtr<CefV8Handler> handler(new CoronaBridgeV8Handler());
         CefRefPtr<CefV8Value> camera_move = CefV8Value::CreateFunction("cameraMove", handler);
         CefRefPtr<CefV8Value> actor_transform = CefV8Value::CreateFunction("actorTransform", handler);
         CefRefPtr<CefV8Value> set_property = CefV8Value::CreateFunction("setProperty", handler);
@@ -577,37 +565,13 @@ class SubprocessRenderHandler : public CefRenderProcessHandler {
 
    private:
     CefRefPtr<CefMessageRouterRendererSide> renderer_side_router_;
-    IMPLEMENT_REFCOUNTING(SubprocessRenderHandler);
+    IMPLEMENT_REFCOUNTING(CoronaRenderProcessHandler);
 };
 
-// CefApp 实现，用于子进程
-class SubprocessApp : public CefApp {
-   public:
-    SubprocessApp() : render_handler_(new SubprocessRenderHandler()) {}
+}  // namespace
 
-    CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override {
-        return render_handler_;
-    }
-
-   private:
-    CefRefPtr<SubprocessRenderHandler> render_handler_;
-    IMPLEMENT_REFCOUNTING(SubprocessApp);
-};
-
-#ifdef _WIN32
-int APIENTRY wWinMain(HINSTANCE hInstance,
-                      HINSTANCE hPrevInstance,
-                      LPWSTR lpCmdLine,
-                      int nCmdShow) {
-    CefMainArgs main_args(hInstance);
-#else
-int main(int argc, char* argv[]) {
-    CefMainArgs main_args(argc, argv);
-#endif
-
-    CefRefPtr<SubprocessApp> app(new SubprocessApp());
-
-    // 执行 CEF 子进程逻辑
-    // 这将阻塞直到子进程结束
-    return CefExecuteProcess(main_args, app.get(), nullptr);
+CefRefPtr<CefRenderProcessHandler> create_cef_render_process_handler() {
+    return new CoronaRenderProcessHandler();
 }
+
+}  // namespace Corona::Systems::UI
