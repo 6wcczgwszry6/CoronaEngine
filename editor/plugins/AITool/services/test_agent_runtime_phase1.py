@@ -23272,6 +23272,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                     "actor": {
                         "name": "native-safe-but-wrong-name",
                         "actor_guid": f"guid-{payload['actor_name']}",
+                        "version": 9,
                         "scene_name": "Scene/native-old.scene",
                         "geometry": {
                             "position": payload["position"],
@@ -23329,6 +23330,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         )
         self.assertEqual(gate.calls[1]["actor_guid"], gate.calls[0]["actor_guid"])
         self.assertEqual(set(replay_result["actors"]), set(actors))
+        actor_fact = next(iter(actors.values()))
+        self.assertEqual(actor_fact["actor_version"], 9)
+        self.assertTrue(actor_fact["entity_id"].startswith("entity-"))
+        self.assertEqual(actor_fact["entity_id"], next(iter(replay_result["actors"].values()))["entity_id"])
+        self.assertEqual(actor_fact["actor_request_id"], "batch-1-01")
         self.assertIn("guid-钘忓疂绠?", actors)
         self.assertEqual(actors["guid-钘忓疂绠?"]["source"], "engine_import")
         self.assertEqual(actors["guid-钘忓疂绠?"]["name"], "native-safe-but-wrong-name")

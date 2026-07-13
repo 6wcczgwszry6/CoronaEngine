@@ -4191,9 +4191,13 @@ def _safe_actor_import_results(results: Any) -> list[dict[str, Any]]:
         safe: dict[str, Any] = {}
         for field in (
             "actor_id",
+            "actor_request_id",
+            "actor_version",
             "actor_name",
             "asset_id",
             "display_name",
+            "entity_id",
+            "entity_version",
             "grounding_status",
             "model_ref",
             "native_name",
@@ -4203,6 +4207,7 @@ def _safe_actor_import_results(results: Any) -> list[dict[str, Any]]:
             "status",
             "sync_lifecycle_status",
             "sync_status",
+            "version",
             "reason",
             "failure_code",
         ):

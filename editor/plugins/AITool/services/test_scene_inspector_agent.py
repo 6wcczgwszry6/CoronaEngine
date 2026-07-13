@@ -74,6 +74,7 @@ class SceneInspectorAgentTests(unittest.TestCase):
         after = runtime.state.room("room-inspect")
         self.assertTrue(result["available"])
         self.assertEqual(result["analysis"]["scene_version"], 4)
+        self.assertTrue(all(item["version"] == 4 for item in result["analysis"]["entity_summary"]))
         self.assertEqual(
             [item["name"] for item in result["analysis"]["interaction_candidates"]],
             ["door"],
@@ -104,6 +105,7 @@ class SceneInspectorAgentTests(unittest.TestCase):
         self.assertEqual(first["analysis"]["scene_version"], 4)
         self.assertEqual(second["analysis"]["scene_version"], 5)
         self.assertEqual(len(second["analysis"]["entity_summary"]), 3)
+        self.assertTrue(all(item["version"] == 5 for item in second["analysis"]["entity_summary"]))
 
 
 if __name__ == "__main__":

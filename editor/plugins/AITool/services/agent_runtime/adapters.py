@@ -1496,13 +1496,15 @@ def make_engine_actor_import_provider(
                 requested_name=name,
                 source_index=index,
             )
+            entity_id = _stable_runtime_entity_id(actor_guid)
+            actor_request_id = f"{batch_id}-{index:02d}" if batch_id else f"runtime-{index:02d}"
             import_payload = {
                 "model_path": model_path,
                 "actor_name": name,
                 "model_name": name,
                 "asset_id": asset_id,
                 "model_ref": model_ref,
-                "object_id": f"{batch_id}-{index:02d}" if batch_id else f"runtime-{index:02d}",
+                "object_id": actor_request_id,
                 "target": name,
                 "actor_guid": actor_guid,
                 "skip_if_exists": True,
@@ -1546,6 +1548,8 @@ def make_engine_actor_import_provider(
                     asset_id=asset_id,
                     model_ref=model_ref,
                 )
+                actor["entity_id"] = entity_id
+                actor["actor_request_id"] = actor_request_id
             except Exception as exc:  # noqa: BLE001
                 import_results.append({
                     "actor_name": name,
@@ -1707,6 +1711,11 @@ def _stable_runtime_actor_guid(
     )
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
     return f"runtime-actor-{digest}"
+
+
+def _stable_runtime_entity_id(actor_guid: str) -> str:
+    digest = hashlib.sha256(f"runtime-entity|{str(actor_guid or '')}".encode("utf-8")).hexdigest()
+    return f"entity-{digest[:32]}"
 
 
 def _runtime_actor_support_type(actor: dict[str, Any]) -> str:
@@ -2183,6 +2192,7 @@ def _safe_cpp_success_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "component_id",
         "component_type",
         "entity_id",
+        "entity_version",
         "event_type",
         "geometry",
         "ground_snapped",
@@ -2216,6 +2226,8 @@ def _safe_cpp_success_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "sky_mode",
         "terrain_profile",
         "type",
+        "version",
+        "actor_version",
         "world_aabb",
         "world_bounds",
         "x",
@@ -2541,6 +2553,23 @@ def _normalize_import_result(
             fallback=sync_lifecycle_status,
         ),
     }
+    version_value = _first_present(
+        actor.get("entity_version") if isinstance(actor, dict) else None,
+        actor.get("actor_version") if isinstance(actor, dict) else None,
+        actor.get("version") if isinstance(actor, dict) else None,
+        actor_data.get("entity_version") if isinstance(actor_data, dict) else None,
+        actor_data.get("actor_version") if isinstance(actor_data, dict) else None,
+        actor_data.get("version") if isinstance(actor_data, dict) else None,
+        parsed.get("entity_version"),
+        parsed.get("actor_version"),
+        parsed.get("version"),
+    )
+    try:
+        normalized_version = int(version_value or 0)
+    except (TypeError, ValueError):
+        normalized_version = 0
+    if normalized_version > 0:
+        result["actor_version"] = normalized_version
     aliases: list[str] = []
     for alias in (
         requested_name,

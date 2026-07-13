@@ -146,3 +146,17 @@ Python syntax compile
 - 同步失败时 Snapshot 明确标记 `partial`。
 
 以上真实 Engine、渲染、碰撞、同步和多端一致性均标记为 **[待 F5/实机验证]**。
+
+## 8. Entity Version 闭环
+
+本轮补齐了 `scene_entity_registry -> SceneWorldSnapshot -> SceneInspectorAgent` 的实体版本语义：
+
+- 每个 actor、environment、substrate 实体均输出正整数 `version` 和 `version_source`。
+- C++/Engine 返回 `actor_version` 时优先采用真实版本；没有真实版本时回退到当前 `ScenePlan.version`。
+- Actor 导入时独立生成稳定 Runtime `entity_id`，不再默认把 native actor handle 当作实体身份。
+- Registry 同时保留 `actor_id`、`source_plan_id`、`source_batch_id`，便于定位实体来源。
+- `SceneInspectorAgent` 输出实体版本，Snapshot 版本变化后必须重新分析。
+
+自动验证已覆盖 native actor handle 变化但稳定请求身份不变、Engine 版本优先和 ScenePlan 版本兜底。
+
+房主端与成员端是否能稳定按 `entity_id + version` 去重仍标记为 **[待 F5/实机验证]**。

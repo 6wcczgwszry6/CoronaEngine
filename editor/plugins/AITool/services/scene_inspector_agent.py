@@ -30,6 +30,7 @@ class SceneInspectorAgent:
     def _entity_summary(entity: Mapping[str, Any]) -> dict[str, Any]:
         return {
             "entity_id": str(entity.get("entity_id") or ""),
+            "version": int(entity.get("version") or 0),
             "actor_id": str(entity.get("actor_id") or ""),
             "name": str(entity.get("display_name") or entity.get("name") or ""),
             "entity_type": str(entity.get("entity_type") or ""),

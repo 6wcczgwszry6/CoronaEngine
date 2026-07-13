@@ -210,6 +210,40 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(snapshot["world_readiness"], "needs_review")
         self.assertIn("engine_actual_aabb", snapshot["actor_entities"][0]["readiness_missing_fields"])
 
+    def test_registry_entities_carry_stable_versions_and_source_identity(self) -> None:
+        room = _room_fact(game_ready=True)
+        actor = room["actors"]["actor-cupid"]
+        actor["actor_request_id"] = "actor-request-cupid"
+        actor["actor_version"] = 7
+        room["element_routes"] = {
+            "batch-1": [
+                {
+                    "name": "grass",
+                    "target_pipeline": "environment",
+                }
+            ]
+        }
+
+        first = AgentRuntime._scene_entity_registry_for_plan(room, "plan-1")
+        first_actor = next(entity for entity in first["entities"] if entity.get("actor_id") == "actor-cupid")
+        substrate = next(entity for entity in first["entities"] if entity.get("entity_type") == "substrate")
+        first_entity_id = first_actor["entity_id"]
+
+        room["actors"]["actor-cupid-reloaded"] = room["actors"].pop("actor-cupid")
+        second = AgentRuntime._scene_entity_registry_for_plan(room, "plan-1")
+        second_actor = next(
+            entity for entity in second["entities"] if entity.get("actor_id") == "actor-cupid-reloaded"
+        )
+
+        self.assertEqual(first_actor["version"], 7)
+        self.assertEqual(first_actor["version_source"], "engine_actual")
+        self.assertEqual(first_actor["entity_id_source"], "request_identity")
+        self.assertEqual(first_entity_id, second_actor["entity_id"])
+        self.assertEqual(first_actor["source_plan_id"], "plan-1")
+        self.assertEqual(first_actor["source_batch_id"], "batch-1")
+        self.assertEqual(substrate["version"], 2)
+        self.assertEqual(substrate["version_source"], "scene_version")
+
     def test_public_snapshot_api_is_read_only_and_uses_latest_completed_plan(self) -> None:
         runtime = AgentRuntime()
         applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=_room_fact(game_ready=True)))

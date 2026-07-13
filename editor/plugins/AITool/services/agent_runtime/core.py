@@ -1390,6 +1390,8 @@ class ActorFactValidator:
 
     _ALLOWED_FIELDS = {
         "actor_id",
+        "actor_request_id",
+        "actor_version",
         "asset_id",
         "aabb",
         "aliases",
@@ -1402,6 +1404,8 @@ class ActorFactValidator:
         "deleted_at",
         "display_name",
         "entity_type",
+        "entity_id",
+        "entity_version",
         "engine_lifecycle_status",
         "gameplay_tags",
         "grounding_status",
@@ -1457,6 +1461,7 @@ class ActorFactValidator:
     }
     _SAFE_TEXT_FIELDS = {
         "actor_id",
+        "actor_request_id",
         "asset_id",
         "batch_id",
         "bounds_source",
@@ -1475,6 +1480,7 @@ class ActorFactValidator:
         "grounding_status",
         "support_type",
         "entity_type",
+        "entity_id",
         "engine_lifecycle_status",
         "sync_status",
         "sync_lifecycle_status",
@@ -3048,6 +3054,8 @@ class EnvironmentComponentValidator:
         "display_name",
         "environment_profile",
         "engine_lifecycle_status",
+        "entity_id",
+        "entity_version",
         "entity_type",
         "gameplay_tags",
         "handler",
@@ -3075,6 +3083,7 @@ class EnvironmentComponentValidator:
         "sync_status",
         "sky_mode",
         "terrain_profile",
+        "version",
         "world_aabb",
         "world_bounds",
     }
@@ -3154,6 +3163,7 @@ class EnvironmentComponentValidator:
             "requested_name",
             "component_type",
             "engine_lifecycle_status",
+            "entity_id",
             "entity_type",
             "handler",
             "model_ref",
@@ -3196,6 +3206,13 @@ class EnvironmentComponentValidator:
             raise ValueError("environment component fact requires name")
         if "requires_engine_write" in component and not isinstance(component.get("requires_engine_write"), bool):
             raise ValueError("environment component fact requires_engine_write must be a bool")
+        for field in ("entity_version", "version"):
+            if field in component and (
+                not isinstance(component.get(field), int)
+                or isinstance(component.get(field), bool)
+                or int(component.get(field) or 0) <= 0
+            ):
+                raise ValueError(f"environment component fact {field} must be a positive integer")
         for field in (
             "actor_id",
             "boundary_style",
@@ -3207,6 +3224,7 @@ class EnvironmentComponentValidator:
             "requested_name",
             "handler",
             "engine_lifecycle_status",
+            "entity_id",
             "entity_type",
             "model_ref",
             "review_status",
@@ -19944,6 +19962,40 @@ class AgentRuntime:
             identity = "|".join(str(part or "").strip() for part in parts)
             return f"entity-{uuid.uuid5(uuid.NAMESPACE_URL, 'corona-runtime:' + identity).hex}"
 
+        scene_plan = dict((room.get("scene_plans") or {}).get(active_plan_id) or {})
+        try:
+            scene_version = max(1, int(scene_plan.get("version") or 1))
+        except (TypeError, ValueError):
+            scene_version = 1
+
+        def entity_version(row: Mapping[str, Any]) -> tuple[int, str]:
+            for key, source in (
+                ("entity_version", "entity_actual"),
+                ("actor_version", "engine_actual"),
+                ("version", "source_actual"),
+            ):
+                try:
+                    value = int(row.get(key) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if value > 0:
+                    return value, source
+            return scene_version, "scene_version"
+
+        def stable_request_identity(row: Mapping[str, Any]) -> str:
+            for key in (
+                "entity_request_id",
+                "actor_request_id",
+                "model_request_id",
+                "asset_request_id",
+                "request_id",
+                "instance_id",
+            ):
+                value = str(row.get(key) or "").strip()
+                if value:
+                    return value
+            return ""
+
         def stable_environment_asset_id(row: Mapping[str, Any], component_type: str) -> str:
             existing = str(row.get("asset_id") or "").strip()
             if existing:
@@ -20275,15 +20327,29 @@ class AgentRuntime:
                 or actor_source == "engine_import_runtime_estimated_bounds"
                 else raw_bounds_source or "runtime_state"
             )
-            entity_id = str(merged.get("entity_id") or "").strip() or stable_entity_id(
-                active_plan_id,
-                merged.get("batch_id"),
-                asset_id,
-                merged.get("requested_name"),
-                actor_id,
-            )
+            explicit_entity_id = str(merged.get("entity_id") or "").strip()
+            request_identity = stable_request_identity(merged)
+            if explicit_entity_id:
+                entity_id = explicit_entity_id
+                entity_id_source = "runtime_explicit"
+            elif request_identity:
+                entity_id = stable_entity_id(active_plan_id, merged.get("batch_id"), request_identity)
+                entity_id_source = "request_identity"
+            else:
+                entity_id = stable_entity_id(
+                    active_plan_id,
+                    merged.get("batch_id"),
+                    asset_id,
+                    merged.get("requested_name"),
+                    actor_id,
+                )
+                entity_id_source = "native_fallback"
+            current_entity_version, entity_version_source = entity_version(merged)
             entity = {
                 "entity_id": entity_id,
+                "entity_id_source": entity_id_source,
+                "version": current_entity_version,
+                "version_source": entity_version_source,
                 "actor_id": str(actor_id),
                 "name": str(merged.get("name") or actor_id),
                 "display_name": str(merged.get("display_name") or merged.get("name") or actor_id),
@@ -20322,6 +20388,8 @@ class AgentRuntime:
                 "review_status": review_status_for(merged, str(merged.get("name") or actor_id)),
                 "plan_id": str(merged.get("plan_id") or active_plan_id),
                 "batch_id": str(merged.get("batch_id") or ""),
+                "source_plan_id": str(merged.get("plan_id") or active_plan_id),
+                "source_batch_id": str(merged.get("batch_id") or ""),
             }
             game_ready = entity_is_game_ready(entity)
             entity["readiness_missing_fields"] = readiness_missing_fields(entity)
@@ -20375,8 +20443,16 @@ class AgentRuntime:
                 bounds = bounds_from(component)
                 component_actor_id = str(component.get("actor_id") or "").strip()
                 component_sync = actor_sync_status(component, str(component.get("asset_id") or ""))
+                current_entity_version, entity_version_source = entity_version(component)
                 entity = {
                     "entity_id": entity_id,
+                    "entity_id_source": (
+                        "runtime_explicit"
+                        if str(component.get("entity_id") or "").strip()
+                        else "component_identity"
+                    ),
+                    "version": current_entity_version,
+                    "version_source": entity_version_source,
                     "actor_id": component_actor_id,
                     "component_id": str(component.get("component_id") or component_id),
                     "name": str(component.get("name") or component_id),
@@ -20418,6 +20494,8 @@ class AgentRuntime:
                     "review_status": review_status_for(component, str(component.get("name") or component_id)),
                     "plan_id": active_plan_id,
                     "batch_id": str(current_batch_id),
+                    "source_plan_id": active_plan_id,
+                    "source_batch_id": str(current_batch_id),
                 }
                 game_ready = entity_is_game_ready(entity)
                 entity["readiness_missing_fields"] = readiness_missing_fields(entity)
@@ -20444,11 +20522,14 @@ class AgentRuntime:
             text = str(name or "").strip()
             if not text:
                 continue
-            entity_id = f"substrate:{text}"
+            entity_id = stable_entity_id(active_plan_id, "substrate", text)
             if entity_id in seen_entity_ids or text in seen_semantic_roles:
                 continue
             entities.append({
                 "entity_id": entity_id,
+                "entity_id_source": "substrate_identity",
+                "version": scene_version,
+                "version_source": "scene_version",
                 "actor_id": "",
                 "asset_id": "",
                 "model_ref": "",
@@ -20477,6 +20558,8 @@ class AgentRuntime:
                 "review_status": "pending_review",
                 "plan_id": active_plan_id,
                 "batch_id": active_batch_id,
+                "source_plan_id": active_plan_id,
+                "source_batch_id": active_batch_id,
             })
             seen_entity_ids.add(entity_id)
 
