@@ -183,6 +183,7 @@ def audit_scene_world_consistency(
 
     actor_id_mismatches: list[dict[str, Any]] = []
     asset_id_mismatches: list[dict[str, Any]] = []
+    model_ref_mismatches: list[dict[str, Any]] = []
     version_mismatches: list[dict[str, Any]] = []
     transform_mismatches: list[dict[str, Any]] = []
     world_aabb_mismatches: list[dict[str, Any]] = []
@@ -191,7 +192,7 @@ def audit_scene_world_consistency(
         actual = engine_by_id[entity_id]
         expected_actor_id = _text(expected.get("actor_id"))
         actual_actor_id = _text(actual.get("actor_id"))
-        if expected_actor_id and actual_actor_id and expected_actor_id != actual_actor_id:
+        if expected_actor_id and expected_actor_id != actual_actor_id:
             actor_id_mismatches.append({
                 "entity_id": entity_id,
                 "expected": expected_actor_id,
@@ -199,15 +200,23 @@ def audit_scene_world_consistency(
             })
         expected_asset_id = _text(expected.get("asset_id"))
         actual_asset_id = _text(actual.get("asset_id"))
-        if expected_asset_id and actual_asset_id and expected_asset_id != actual_asset_id:
+        if expected_asset_id and expected_asset_id != actual_asset_id:
             asset_id_mismatches.append({
                 "entity_id": entity_id,
                 "expected": expected_asset_id,
                 "actual": actual_asset_id,
             })
+        expected_model_ref = _text(expected.get("model_ref"))
+        actual_model_ref = _text(actual.get("model_ref"))
+        if expected_model_ref and expected_model_ref != actual_model_ref:
+            model_ref_mismatches.append({
+                "entity_id": entity_id,
+                "expected": expected_model_ref,
+                "actual": actual_model_ref,
+            })
         expected_version = _version(expected)
         actual_version = _version(actual)
-        if expected_version and actual_version and expected_version != actual_version:
+        if expected_version and expected_version != actual_version:
             version_mismatches.append({
                 "entity_id": entity_id,
                 "expected": expected_version,
@@ -240,18 +249,12 @@ def audit_scene_world_consistency(
         len(unexpected_in_engine),
         len(actor_id_mismatches),
         len(asset_id_mismatches),
+        len(model_ref_mismatches),
         len(version_mismatches),
         len(transform_mismatches),
         len(world_aabb_mismatches),
         non_materialized_entity_count,
     ))
-    if not plan_id or not engine_snapshot:
-        status = "blocked"
-    elif issue_count:
-        status = "needs_review"
-    else:
-        status = "consistent"
-
     # The Runtime fingerprint represents the whole downstream-visible world,
     # including entities that have not materialized into Engine actors yet.
     # Otherwise a partial world could compare equal after silently dropping
@@ -266,6 +269,17 @@ def audit_scene_world_consistency(
         plan_id=plan_id,
         scene_version=scene_version,
     )
+    fingerprints_match = world_fingerprint == engine_fingerprint
+    unclassified_fingerprint_mismatch_count = int(
+        bool(plan_id and engine_snapshot and not fingerprints_match and issue_count == 0)
+    )
+    issue_count += unclassified_fingerprint_mismatch_count
+    if not plan_id or not engine_snapshot:
+        status = "blocked"
+    elif issue_count:
+        status = "needs_review"
+    else:
+        status = "consistent"
 
     return {
         "status": status,
@@ -285,12 +299,14 @@ def audit_scene_world_consistency(
         "unexpected_in_engine_entity_ids": unexpected_in_engine,
         "actor_id_mismatches": actor_id_mismatches,
         "asset_id_mismatches": asset_id_mismatches,
+        "model_ref_mismatches": model_ref_mismatches,
         "version_mismatches": version_mismatches,
         "transform_mismatches": transform_mismatches,
         "world_aabb_mismatches": world_aabb_mismatches,
         "world_fingerprint": world_fingerprint,
         "engine_fingerprint": engine_fingerprint,
-        "fingerprints_match": world_fingerprint == engine_fingerprint,
+        "fingerprints_match": fingerprints_match,
+        "unclassified_fingerprint_mismatch_count": unclassified_fingerprint_mismatch_count,
     }
 
 

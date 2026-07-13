@@ -512,6 +512,43 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertGreaterEqual(audit["issue_count"], 1)
         self.assertFalse(audit["fingerprints_match"])
 
+    def test_world_consistency_audit_rejects_missing_engine_resource_identity(self) -> None:
+        runtime_entity = {
+            "entity_id": "entity-desk",
+            "actor_id": "actor-desk",
+            "asset_id": "asset-desk",
+            "model_ref": "desk.obj",
+            "version": 3,
+            "transform": {
+                "position": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0],
+                "scale": [1.0, 1.0, 1.0],
+            },
+            "world_aabb": {"min": [-0.5, 0.0, -0.5], "max": [0.5, 1.0, 0.5]},
+        }
+        engine_actor = dict(runtime_entity)
+        engine_actor["model_ref"] = ""
+        engine_actor["version"] = 0
+
+        audit = audit_scene_world_consistency(
+            world_snapshot={
+                "plan_id": "plan-1",
+                "scene_version": 3,
+                "environment_entities": [],
+                "actor_entities": [runtime_entity],
+            },
+            engine_snapshot={
+                "snapshot_id": "snapshot-missing-resource-identity",
+                "plan_id": "plan-1",
+                "actors": [engine_actor],
+            },
+        )
+
+        self.assertEqual(audit["status"], "needs_review")
+        self.assertEqual(audit["model_ref_mismatches"][0]["actual"], "")
+        self.assertEqual(audit["version_mismatches"][0]["actual"], 0)
+        self.assertFalse(audit["fingerprints_match"])
+
     def test_environment_support_semantics_are_game_ready_specific(self) -> None:
         room = _room_fact(game_ready=True)
         room["environment_components"] = {
