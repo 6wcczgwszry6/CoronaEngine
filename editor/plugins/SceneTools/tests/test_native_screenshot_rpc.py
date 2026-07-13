@@ -59,6 +59,15 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             self._repo_root() / "editor" / "Frontend" / "src" / "utils" / "bridge.js"
         ).read_text(encoding="utf-8")
 
+    def _network_system_source(self):
+        return (
+            self._repo_root()
+            / "src"
+            / "systems"
+            / "network"
+            / "network_system.cpp"
+        ).read_text(encoding="utf-8")
+
     def _frontend_rpc_calls(self):
         bridge_source = self._frontend_bridge_source()
         return set(
@@ -3420,6 +3429,31 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "actor->actor_version = std::max(actor->actor_version + 1, 1);",
             transform_body.group(0),
         )
+
+    def test_actor_file_transfer_uses_runtime_asset_identity_without_wire_changes(self):
+        source = self._network_system_source()
+
+        for snippet in (
+            "std::string actor_asset_id(const std::string& actor_json)",
+            'document.find("asset_id")',
+            "std::unordered_map<std::string, uint64_t> asset_to_transfer_group;",
+            "std::unordered_map<std::string, CachedIncomingAsset> received_asset_cache;",
+            "std::vector<PendingAction> actor_actions;",
+            "Coalesced actor onto asset transfer",
+            "Reused received asset",
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertIn(snippet, source)
+
+        self.assertIn(
+            "impl_->asset_to_transfer_group[asset_id] = group_id;",
+            source,
+        )
+        self.assertIn(
+            "impl_->received_asset_cache[ft_it->second.asset_id]",
+            source,
+        )
+        self.assertNotIn("asset_id = r.read_string", source)
 
     def test_embedded_vision_reload_logs_shape_guid_uniqueness(self):
         source = self._handler_source()

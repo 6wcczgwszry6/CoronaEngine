@@ -219,3 +219,32 @@ Python syntax compile
 - 跨路径模型资源按稳定 `asset_id` 去重传输。
 
 本轮尝试运行一次 `verify_ultimate_plan.py` 总门禁，但当前进程持续约 54 分钟仍未退出；同一工作站还存在更早启动且长期未退出的旧门禁进程。为避免继续占用验证资源，本轮门禁被显式终止，不能计为通过。聚焦测试与 syntax compile 已通过；总门禁悬挂原因需单独排查，不与 Runtime 身份闭环混为一项。
+
+## 11. M5 资源传输按稳定 asset_id 去重
+
+本轮在不修改 `ACTOR_CREATE / FILE_REQUEST / FILE_CHUNK` 网络包格式的前提下，补齐了接收端资源传输去重：
+
+- 接收端从现有 `actor_json` 结构化读取稳定 `asset_id`；缺失或无效时保持原有按路径传输行为。
+- 同一 `asset_id` 正在传输时，后续 Actor 加入同一个传输组，不重复发送文件请求；每个 Actor 仍保留自己的 `actor_guid`、transform 和 Runtime 元数据。
+- 同一 `asset_id` 已完成接收且本地文件仍存在时，后续 Actor 直接复用已接收模型路径，不再次传输模型和依赖文件。
+- 超时、Actor 删除、停止会话和项目根目录切换时清理相应索引，避免旧传输组或跨项目缓存污染。
+- 传输结束后才逐个释放等待 Actor 到现有 `pollPendingActorCreate -> sceneTools.createActor` 链路，没有新增绕过 EngineWriteGate 的写入口。
+
+聚焦自动验证覆盖：
+
+```text
+asset_id 从 actor_json 读取而非扩展线协议
+同资产传输组和已接收缓存存在
+Runtime Actor 身份快照回归
+LANChat Scene Sync 静态协议回归
+```
+
+完整 `NativeSceneToolsRpcTests` 本轮共运行 149 项，148 项通过；唯一失败是远端 `engine.cpp` 已启用 mesh simplification，而旧断言仍要求关闭。该失败与本轮网络资源去重无关，未在本提交中顺手修改。
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 两个 Actor 同时引用同一资产时只发生一次真实模型/依赖文件传输，并各自只创建一次。
+- 相同 `asset_id` 但来源路径不同的 Actor 能复用已接收文件，且材质依赖仍正确加载。
+- 传输中删除一个等待 Actor 不影响同组其他 Actor；删除最后一个 Actor 后传输组可安全回收。
+- 房主与成员的 `entity_id + asset_id + actor_version`、SceneWorldSnapshot 和 Engine Actor 数量一致。
+- 大模型 LAN 传输期间 UI 卡顿、带宽占用和同步时序满足验收要求。
