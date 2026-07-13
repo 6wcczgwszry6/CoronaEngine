@@ -842,7 +842,6 @@ class LANChatAgentWorker:
         """
         if not isinstance(message, dict):
             return False
-        self._apply_generation_options_from_message(message)
         message_kind = str(message.get("message_kind") or "chat").lower()
         sender_type = str(message.get("sender_type") or "user").lower()
         dedupe_key = self._coordinator_sync_dedupe_key(message, source=source)
@@ -906,6 +905,21 @@ class LANChatAgentWorker:
             return False
         room_id = str(message.get("room_id") or "default")
         self._remember_room_id(room_id)
+        if not self._can_execute_agent_locally():
+            # Native chat is delivered to every peer, but ActionIntent,
+            # Coordinator mutation, Provider work, and business replies are
+            # host-authoritative.  Member peers consume the dedicated sync
+            # event stream instead of independently interpreting the chat.
+            self._logger.info(
+                "[LANChatRuntimeAuthority] phase=chat_forwarded_to_host "
+                "source=%s room=%s message_id=%s",
+                source,
+                room_id,
+                message.get("message_id") or "",
+            )
+            self._remember_coordinator_seen_message_id(dedupe_key)
+            return False
+        self._apply_generation_options_from_message(message)
         # GM control traffic is authoritative protocol, not planning context.
         # Resolve it before status/intervention/SeedPlan routing so the native
         # sync copy cannot pollute a discussion plan before the agent-trigger

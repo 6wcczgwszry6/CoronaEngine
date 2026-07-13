@@ -671,3 +671,30 @@ Inspector scene version 更新检测回归通过
 
 - 下游 Inspector 频繁轮询不会改变聊天室终态事件窗口或成员端 cursor。
 - 同一场景版本在房主与成员端读取时各自稳定，宿主发布新版本后再发生可解释变化。
+
+## 26. Native Chat 的房主权威门禁
+
+多人权威复核发现，生成写入路径虽然已有本机角色检查，但每个节点都会收到的 Native Chat Queue 在进入 GM 控制、实体查询、ActionIntent、Coordinator 和方案上下文前没有统一门禁。进程内 MessageDispatchLedger 只能去重同一进程的 Native Queue/Agent Trigger，不能阻止房主和成员两个进程同时解释同一消息并回复。
+
+当前改动：
+
+- Native Chat 在任何 GM、Intent、Coordinator、Provider 或业务回复前检查本机 network session role。
+- `client` 只标记该聊天消息已观察并等待房主权威结果，不执行 Agent 路由。
+- 生成选项/VLM 环境设置同样移到权威门禁之后，成员端不能凭同步到的聊天修改本机执行选项。
+- 成员仍通过独立 Native Sync Event 路径接收 Actor、asset、transform、AABB 和宿主 Snapshot，不影响 peer mirror。
+- Agent Trigger 原有非房主门禁继续保留，形成两个消息入口的一致权威边界。
+
+聚焦自动验证：
+
+```text
+成员收到房主 GM 消息 -> 不运行 Coordinator/Runtime、不回复
+同一成员消息重放 -> 本地观察去重
+房主 Runtime status query -> 继续正常处理
+Native sync bridge + peer mirror 6 项回归通过
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 房主和成员同时在线时，同一聊天只产生一条 ActionIntent 和一条权威回复。
+- 成员不调用 LLM/Provider，不创建 PlanPatch/Actor；仅消费宿主同步事实。
+- 房主/成员 Snapshot 的 entity/version/fingerprint 最终一致，成员本机 Engine 未 ready 时保持 `needs_review`。

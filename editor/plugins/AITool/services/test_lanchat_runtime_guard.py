@@ -446,6 +446,11 @@ class _RemoteGenerationWorker(_TestWorker):
         return False
 
 
+class _RemoteClientWorker(_TestWorker):
+    def _can_execute_agent_locally(self) -> bool:
+        return False
+
+
 class _LayoutDirectExecutionTrackingWorker(_TestWorker):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -467,6 +472,39 @@ class _LayoutDirectExecutionTrackingWorker(_TestWorker):
 
 
 class LANChatRuntimeGuardTests(unittest.TestCase):
+    def test_member_native_chat_does_not_run_authoritative_agent_routes(self) -> None:
+        worker = _RemoteClientWorker(
+            interaction_coordinator=_ExplodingCoordinator(),
+            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+        )
+        operation_count_before = len(worker._agent_runtime.operation_log.entries())
+        message = {
+            "room_id": "room-member-authority",
+            "message_id": "msg-member-authority",
+            "text": "@GM 当前进度",
+            "sender_id": "host-1",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "is_host": True,
+        }
+
+        handled = worker.sync_chat_message_to_coordinator(
+            message,
+            source="lanchat_native_queue",
+            emit_disclosure=False,
+        )
+        repeated = worker.sync_chat_message_to_coordinator(
+            message,
+            source="lanchat_native_queue",
+            emit_disclosure=False,
+        )
+
+        self.assertFalse(handled)
+        self.assertFalse(repeated)
+        self.assertEqual(len(worker._agent_runtime.operation_log.entries()), operation_count_before)
+        self.assertEqual(len(worker._coordinator_seen_message_ids), 1)
+
     def test_runtime_planning_external_id_reuses_active_room_plan_link(self) -> None:
         worker = _TestWorker()
         plan = worker._agent_runtime.sync_external_plan_context(
