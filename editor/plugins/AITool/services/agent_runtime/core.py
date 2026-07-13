@@ -28339,7 +28339,11 @@ class AgentRuntime:
             room = str(room_id or event.get("room_id") or event.get("room") or "default")
             incoming_actor_version = self._sync_non_negative_int_from_event(
                 event,
-                ("actor_version", "version"),
+                ("actor_version", "entity_version", "version"),
+            )
+            incoming_scene_version = self._sync_non_negative_int_from_event(
+                event,
+                ("scene_version", "plan_version", "source_scene_version"),
             )
             event_type = self._canonical_sync_event_type(
                 str(event.get("event") or event.get("event_type") or event.get("type") or "").strip().lower()
@@ -28386,8 +28390,9 @@ class AgentRuntime:
                 "actor_version_explicit": incoming_actor_version is not None,
                 "scene_version": max(
                     1,
-                    self._sync_non_negative_int_from_event(event, ("scene_version", "plan_version")) or 1,
+                    incoming_scene_version or 1,
                 ),
+                "scene_version_explicit": incoming_scene_version is not None,
                 "authority": str(event.get("authority") or ""),
                 "asset_id": asset_id,
                 "actor_asset_id": actor_asset_id,
@@ -28519,6 +28524,18 @@ class AgentRuntime:
             scene_name = str(plan_data.get("scene_name") or "")
         if scene_name:
             normalized["scene_name"] = scene_name
+        current_peer_plan_id = str(room_state.get("peer_mirror_plan_id") or "").strip()
+        if (
+            bool(normalized.get("scene_version_explicit"))
+            and str(normalized.get("authority") or "").strip().lower() == "remote_host"
+            and effective_plan_id
+            and effective_plan_id == current_peer_plan_id
+        ):
+            mirror_versions = dict(room_state.get("peer_mirror_scene_versions") or {})
+            current_scene_version = int(mirror_versions.get(effective_plan_id) or 0)
+            incoming_version = int(normalized.get("scene_version") or 1)
+            if current_scene_version > 0 and incoming_version < current_scene_version:
+                return skip_sync_event("stale scene version")
         actor_id_for_version_check = str(normalized.get("actor_id") or "")
         if actor_id_for_version_check and bool(normalized.get("actor_version_explicit")):
             current_actor_fact = dict(

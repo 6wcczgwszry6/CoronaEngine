@@ -5517,6 +5517,13 @@ def _make_scene_snapshot_tool(provider: Callable[[Any], dict[str, Any]]) -> Call
                 user_visible_message="场景状态读取结果不符合系统协议，当前状态可能需要稍后刷新。",
             )
         snapshot_id = str(call.args.get("snapshot_id") or call.tool_call_id)
+        snapshot_actors = dict(observed_actors)
+        for runtime_actor_id, actor in actors.items():
+            for alias in actor.get("aliases") or []:
+                alias_id = str(alias or "").strip()
+                if alias_id and alias_id != runtime_actor_id:
+                    snapshot_actors.pop(alias_id, None)
+            snapshot_actors[runtime_actor_id] = dict(actor)
         snapshot_payload = {
             "snapshot_id": snapshot_id,
             "room_id": room_id,
@@ -5524,9 +5531,9 @@ def _make_scene_snapshot_tool(provider: Callable[[Any], dict[str, Any]]) -> Call
             "batch_id": str(call.args.get("batch_id") or ""),
             "scene_version": max(1, int(call.args.get("scene_version") or 1)),
             "scene_name": str(snapshot.get("scene_name") or call.args.get("scene_name") or ""),
-            "actor_count": len(observed_actors),
+            "actor_count": len(snapshot_actors),
             "source": str(snapshot.get("source") or "scene_snapshot_provider"),
-            "actors": list(observed_actors.values()),
+            "actors": list(snapshot_actors.values()),
         }
         return ToolResult(
             True,

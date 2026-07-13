@@ -122,6 +122,35 @@ class SceneWorldPeerMirrorTests(unittest.TestCase):
         self.assertTrue(local_entity["game_ready"])
         self.assertEqual(local_snapshot["world_readiness"], "game_ready")
 
+    def test_stale_source_scene_version_is_rejected_for_current_peer_plan(self) -> None:
+        accepted = self._record({
+            "room_id": "room-peer",
+            "event": "actor_create_received",
+            "plan_id": "plan-host-scene",
+            "source_scene_version": 4,
+            "authority": "remote_host",
+            "actor_id": "actor-current",
+            "entity_version": 4,
+        })
+        self.assertTrue(accepted["recorded"])
+
+        stale_scene = self._record({
+            "room_id": "room-peer",
+            "event": "actor_updated",
+            "plan_id": "plan-host-scene",
+            "source_scene_version": 3,
+            "authority": "remote_host",
+            "actor_id": "actor-late",
+            "entity_version": 1,
+            "position": [8.0, 0.0, 8.0],
+        })
+        self.assertFalse(stale_scene["recorded"])
+        self.assertEqual(stale_scene["reason"], "stale scene version")
+        self.assertNotIn(
+            "actor-late",
+            self.runtime.query_state("room-peer")["room"]["actors"],
+        )
+
     def test_unknown_local_plan_sync_fact_is_rejected(self) -> None:
         result = self._record({
             "room_id": "room-peer",

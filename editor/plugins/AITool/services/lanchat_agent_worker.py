@@ -3793,6 +3793,20 @@ class LANChatAgentWorker:
             or expanded.get("model_asset_id")
             or ""
         )
+        scene_version = (
+            expanded.get("scene_version")
+            or expanded.get("plan_version")
+            or expanded.get("source_scene_version")
+        )
+        if scene_version is not None and str(scene_version).strip():
+            expanded["scene_version"] = scene_version
+        actor_version = (
+            expanded.get("actor_version")
+            or expanded.get("entity_version")
+            or expanded.get("version")
+        )
+        if actor_version is not None and str(actor_version).strip():
+            expanded["actor_version"] = actor_version
         return expanded
 
     def _process_coordinator_sync_messages(self, *, max_messages: int) -> bool:

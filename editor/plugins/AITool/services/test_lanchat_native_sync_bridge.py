@@ -56,7 +56,8 @@ class LanChatNativeSyncBridgeTests(unittest.TestCase):
                         "runtime_batch_id": "batch-cupid",
                         "entity_id": "entity-cupid",
                         "semantic_role": "statue",
-                        "actor_version": 3,
+                        "entity_version": 3,
+                        "source_scene_version": 4,
                     }),
                 }),
             },
@@ -77,6 +78,7 @@ class LanChatNativeSyncBridgeTests(unittest.TestCase):
         self.assertEqual(call["sync_event"]["batch_id"], "batch-cupid")
         self.assertEqual(call["sync_event"]["entity_id"], "entity-cupid")
         self.assertEqual(call["sync_event"]["actor_version"], 3)
+        self.assertEqual(call["sync_event"]["scene_version"], 4)
         self.assertNotIn("actor_json", call["sync_event"])
         self.assertNotIn("payload_json", call["sync_event"])
 
