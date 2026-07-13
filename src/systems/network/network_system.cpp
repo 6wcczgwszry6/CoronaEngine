@@ -829,13 +829,72 @@ void NetworkSystem::enqueue_lanchat_sync_event(const std::string& event,
     if (event.empty()) {
         return;
     }
+
+    const auto is_coalescible_sync_event = [](const std::string& event_name) {
+        return event_name == "actor_transform" || event_name == "actor_updated";
+    };
+    const auto actor_id_from_payload = [](const std::string& payload) -> std::string {
+        const auto parsed = nlohmann::json::parse(payload, nullptr, false);
+        if (parsed.is_discarded() || !parsed.is_object()) {
+            return {};
+        }
+        const auto actor_it = parsed.find("actor_id");
+        return actor_it != parsed.end() && actor_it->is_string()
+            ? actor_it->get<std::string>()
+            : std::string{};
+    };
+
+    // Transform/state events are snapshots, not an ordered operation log.
+    // Keep only the newest pending fact per actor so high-frequency movement
+    // cannot evict create/import/delete or asset terminal events.
+    if (is_coalescible_sync_event(event)) {
+        const std::string incoming_actor_id = actor_id_from_payload(payload_json);
+        if (!incoming_actor_id.empty()) {
+            for (auto it = impl_->pending_lanchat_sync_events.rbegin();
+                 it != impl_->pending_lanchat_sync_events.rend(); ++it) {
+                if (it->event != event ||
+                    actor_id_from_payload(it->payload_json) != incoming_actor_id) {
+                    continue;
+                }
+                it->event = event;
+                it->room_id = impl_->lanchat.room_id();
+                it->payload_json = payload_json;
+                return;
+            }
+        }
+    }
+
     impl_->pending_lanchat_sync_events.push_back({
         event,
         impl_->lanchat.room_id(),
         payload_json,
     });
-    constexpr std::size_t kMaxPendingLanChatSyncEvents = 256;
-    if (impl_->pending_lanchat_sync_events.size() > kMaxPendingLanChatSyncEvents) {
+
+    constexpr std::size_t kSoftMaxPendingLanChatSyncEvents = 256;
+    constexpr std::size_t kHardMaxPendingLanChatSyncEvents = 2048;
+    if (impl_->pending_lanchat_sync_events.size() <= kSoftMaxPendingLanChatSyncEvents) {
+        return;
+    }
+
+    const auto best_effort_it = std::find_if(
+        impl_->pending_lanchat_sync_events.begin(),
+        impl_->pending_lanchat_sync_events.end(),
+        [&](const LanChatSyncEvent& pending) {
+            return is_coalescible_sync_event(pending.event);
+        });
+    if (best_effort_it != impl_->pending_lanchat_sync_events.end()) {
+        impl_->pending_lanchat_sync_events.erase(best_effort_it);
+        return;
+    }
+
+    // A queue containing only terminal/identity facts may exceed the soft
+    // limit briefly.  Preserve those facts unless the emergency hard bound is
+    // reached; this keeps memory bounded without letting transform floods
+    // erase world-state convergence events.
+    if (impl_->pending_lanchat_sync_events.size() > kHardMaxPendingLanChatSyncEvents) {
+        CFW_LOG_WARNING(
+            "NetworkSystem: LANChat sync event queue reached hard limit; dropping oldest critical event '{}'",
+            impl_->pending_lanchat_sync_events.front().event);
         impl_->pending_lanchat_sync_events.pop_front();
     }
 }

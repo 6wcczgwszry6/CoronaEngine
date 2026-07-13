@@ -482,3 +482,29 @@ Python syntax compile 通过
 - 宿主 Snapshot 可以先用于只读世界展示，但成员在本机 Actor 未就绪前保持 `needs_review`。
 - 成员本机 snapshot 到达后，Registry/Snapshot/fingerprint 自动收敛且不丢失宿主 plan/entity/asset/version 身份。
 - environment 和普通 Actor 均遵守同一事实来源边界。
+
+## 20. LAN 同步事实队列背压与终态保护
+
+C++ `LanChatSyncEvent` 队列此前在超过 256 项后直接删除最老事件。多人场景中 transform/state update 可能高频进入队列，这种策略会连带丢失更早的 `actor_create_received`、`actor_imported`、`actor_deleted` 或 `asset_transfer_completed`，导致成员 RuntimeState 永远缺少收敛终态。
+
+当前改动：
+
+- 同一 Actor、同一事件类型的 `actor_transform/actor_updated` 在待消费队列中只保留最新快照。
+- transform 与 actor state update 不互相覆盖，避免不同事实集合被错误合并。
+- 队列超过软上限时优先移除可合并的 best-effort 事件，不删除关键生命周期终态。
+- 仅由关键事实构成的队列允许短时超过软上限，并受 2048 项紧急硬上限保护；触发硬上限会输出明确告警。
+- 不修改现有 LAN 网络包格式、Actor 创建协议或 Python binding，只调整 Runtime 同步事实桥的本地背压语义。
+
+聚焦自动验证：
+
+```text
+C++ 同步桥事件生产点与背压策略静态核对通过
+Snapshot/Game-ready/SceneInspector/ActionIntent/同步桥 32 项通过
+LANChat Scene Sync 静态检查通过
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 高频拖动多个 Actor 时，同一 Actor 的 transform 事件被有效压缩且最终位置不丢失。
+- 文件传输和 transform 高并发期间，Actor create/import/delete 与 asset complete 终态均进入 RuntimeState。
+- 队列压力不会造成明显主线程卡顿；若触发硬上限告警，需要进一步拆分关键/快照双队列。

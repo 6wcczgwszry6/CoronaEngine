@@ -95,6 +95,11 @@ class LanChatNativeSyncBridgeTests(unittest.TestCase):
         self.assertIn('is_message_from_connected_host(sender_peer_id)', network)
         self.assertIn('? "remote_host"', network)
         self.assertIn(': "remote_peer"', network)
+        self.assertIn("is_coalescible_sync_event", network)
+        self.assertIn("kSoftMaxPendingLanChatSyncEvents", network)
+        self.assertIn("kHardMaxPendingLanChatSyncEvents", network)
+        self.assertIn("actor_id_from_payload", network)
+        self.assertNotIn("kMaxPendingLanChatSyncEvents = 256", network)
         self.assertIn('m.def("network_pop_lanchat_sync_event"', bindings)
 
     def test_received_actor_is_not_engine_imported_until_identity_event(self) -> None:
