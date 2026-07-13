@@ -308,3 +308,30 @@ Python syntax compile 通过
 - Finalizer 完成后聊天室最终报告显示“对账通过”，且数量与 Scene 面板一致。
 - Engine Actor 晚到时状态从“等待快照”更新为“对账通过”或准确的“需要复核”。
 - 多人房主与成员看到的对账状态不矛盾；成员端没有完整 Runtime 事实时不得伪造一致。
+
+## 14. 同步异常阻断 Game-ready
+
+本轮复核发现，Registry 旧逻辑只要求 `sync_status` 非空，因此 `partial / failed / needs_attention` 也可能被计入 Game-ready，进而让下游 Agent 读取到“流程完成但多人事实并不完整”的世界。
+
+当前改动：
+
+- 单机已知状态 `engine_created / engine_imported / runtime_state` 和真实多人状态 `synced / synchronized` 继续允许参与 Game-ready 判定。
+- `partial / failed / needs_attention / timeout / abandoned / cancelled / deleted` 明确阻断 Game-ready。
+- 异常同步实体增加 `readiness_missing_fields=[sync_status_ready]`，Snapshot 可定位到具体实体，而不是只给房间级模糊失败。
+- `SceneWorldSnapshot.world_readiness` 自动降为 `needs_review`；不把同步不完整世界提供给后续可执行 Agent。
+
+聚焦自动验证：
+
+```text
+partial sync_status -> game_ready_entity_count=0
+Snapshot world_readiness=needs_review
+缺失事实包含 sync_status_ready
+Game-ready / ActionIntent / SceneInspector 27 项通过
+Python syntax compile 通过
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 真实 LAN 传输失败或成员离线时，对应实体的 `sync_status` 能被 Runtime 记录为 partial/failed。
+- 传输恢复后 readiness reconcile 能将实体恢复为可用状态并生成新 scene version。
+- 房主与成员的 Snapshot 对同一实体给出一致版本与同步状态。

@@ -20161,7 +20161,19 @@ class AgentRuntime:
             bounds_source = str(entity.get("bounds_source") or "").strip().lower()
             entity_type = str(entity.get("entity_type") or "").strip().lower()
             stable_resource = bool(entity.get("asset_id")) and bool(entity.get("model_ref"))
-            sync_known = str(entity.get("sync_status") or "").strip().lower() not in {"", "unknown"}
+            sync_status = str(entity.get("sync_status") or "").strip().lower()
+            sync_known = sync_status not in {
+                "",
+                "unknown",
+                "partial",
+                "failed",
+                "needs_attention",
+                "timeout",
+                "timed_out",
+                "abandoned",
+                "cancelled",
+                "deleted",
+            }
             grounding_known = grounding in {
                 "grounded",
                 "wall_mounted",
@@ -20203,8 +20215,20 @@ class AgentRuntime:
                 "grounded", "wall_mounted", "suspended", "ceiling_hung", "not_applicable", "enclosure"
             }:
                 missing.append("grounding_status")
-            if str(entity.get("sync_status") or "").strip().lower() in {"", "unknown"}:
+            sync_status = str(entity.get("sync_status") or "").strip().lower()
+            if sync_status in {"", "unknown"}:
                 missing.append("sync_status")
+            elif sync_status in {
+                "partial",
+                "failed",
+                "needs_attention",
+                "timeout",
+                "timed_out",
+                "abandoned",
+                "cancelled",
+                "deleted",
+            }:
+                missing.append("sync_status_ready")
             return missing
 
         def reviewed_ok_targets() -> set[str]:

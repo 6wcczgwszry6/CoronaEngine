@@ -261,6 +261,28 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(snapshot["world_readiness"], "needs_review")
         self.assertIn("engine_actual_aabb", snapshot["actor_entities"][0]["readiness_missing_fields"])
 
+    def test_partial_sync_status_blocks_game_ready_snapshot(self) -> None:
+        room = _room_fact(game_ready=True)
+        room["actors"]["actor-cupid"]["sync_status"] = "partial"
+        room["observed_actors"]["actor-cupid"]["sync_status"] = "partial"
+
+        registry = AgentRuntime._scene_entity_registry_for_plan(room, "plan-1")
+        snapshot = AgentRuntime._scene_world_snapshot_for_plan(
+            room,
+            "plan-1",
+            room_id="room-1",
+            scene_entity_registry=registry,
+            operation_cursor="op:11",
+        )
+
+        self.assertEqual(registry["game_ready_entity_count"], 0)
+        self.assertEqual(snapshot["world_readiness"], "needs_review")
+        self.assertEqual(snapshot["actor_entities"][0]["sync_status"], "partial")
+        self.assertIn(
+            "sync_status_ready",
+            snapshot["actor_entities"][0]["readiness_missing_fields"],
+        )
+
     def test_registry_entities_carry_stable_versions_and_source_identity(self) -> None:
         room = _room_fact(game_ready=True)
         actor = room["actors"]["actor-cupid"]
