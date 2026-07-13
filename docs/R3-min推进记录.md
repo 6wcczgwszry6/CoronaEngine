@@ -725,3 +725,29 @@ Game-ready 聚焦套件 26 项回归通过
 - 火把、壁灯、地图、吊灯等对象在真实 Engine 场景中不被拉到地面。
 - 未接入墙面/悬挂验证的对象在 Snapshot 中明确列为 needs_review。
 - 后续若增加 wall/ceiling support checker，必须以独立 ToolResult/StatePatch 写入可信状态。
+
+## 28. Runtime Evidence 只统计业务 ToolCallGraph
+
+最新旧版 F5 日志显示 5 个业务批次对应 151 个 ToolCallGraph。报告层已经按 `graph_role` 分域，但 LANChat Evidence 只有在执行结果没有携带 graphs 时才从 RuntimeState 过滤；worker drain 返回全量内部图时会绕过过滤，导致日志、节点数和状态列表继续混入 query/state/finalizer 图。
+
+当前改动：
+
+- Evidence 无条件从 RuntimeState 按当前 plan 重建图集合，不信任 drain 返回的全量 graphs。
+- 业务图由 `graph_role=business_batch` 或 `BatchPlan.tool_graph_id` 双重识别，兼容早期持久化数据。
+- 图状态、active/terminal 和 node 数只统计业务批次图。
+- 内部图仅保留独立 `internal_graph_count`，不进入用户可见执行状态列表。
+- 日志字段改为 `graphs=business:X,internal:Y,...`，避免把内部编排量误读为业务批次数。
+
+聚焦自动验证：
+
+```text
+输入包含全量 Runtime graphs -> Evidence 仅返回业务图
+business_graph_count == graph_count
+internal_graph_count > 0 且不进入业务节点统计
+单图执行回复与报告 graph domain 回归通过
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 下一轮 3-5 个业务批次日志中的 business graph 数与 BatchPlan 数一致。
+- internal graph 数可增长，但不影响 GM/UI 的业务进度和完成判断。

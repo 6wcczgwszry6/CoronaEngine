@@ -10496,8 +10496,14 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             max_items_per_batch=8,
         )
 
+        runtime_room = worker._agent_runtime.query_state("room-runtime-evidence")["room"]
+        all_plan_graphs = [
+            dict(graph)
+            for graph in runtime_room["tool_graphs"].values()
+            if graph.get("plan_id") == plan.plan_id
+        ]
         evidence_result = worker._runtime_evidence_result(
-            {},
+            {"graphs": all_plan_graphs},
             room_id="room-runtime-evidence",
             plan_id=plan.plan_id,
         )
@@ -10505,6 +10511,12 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
 
         self.assertGreater(summary["batch_count"], 0)
         self.assertGreater(summary["graph_count"], 0)
+        self.assertGreater(summary["internal_graph_count"], 0)
+        self.assertGreater(len(all_plan_graphs), summary["graph_count"])
+        self.assertEqual(
+            summary["business_graph_count"],
+            summary["graph_count"],
+        )
         self.assertGreater(summary["node_count"], 0)
         self.assertEqual(
             summary["batch_count"],

@@ -2642,24 +2642,34 @@ class LANChatAgentWorker:
                 for item in dict(room.get("batch_plans") or {}).values()
                 if isinstance(item, dict) and str(item.get("plan_id") or "") == target_plan_id
             ]
-        if not enriched.get("graphs"):
-            business_graph_ids = {
-                str(item.get("tool_graph_id") or "")
-                for item in dict(room.get("batch_plans") or {}).values()
-                if isinstance(item, dict)
-                and str(item.get("plan_id") or "") == target_plan_id
-                and str(item.get("tool_graph_id") or "")
-            }
-            enriched["graphs"] = [
-                dict(item)
-                for item in dict(room.get("tool_graphs") or {}).values()
-                if isinstance(item, dict)
-                and str(item.get("plan_id") or "") == target_plan_id
-                and (
-                    str(item.get("graph_role") or "") == "business_batch"
-                    or str(item.get("graph_id") or "") in business_graph_ids
-                )
-            ]
+        business_graph_ids = {
+            str(item.get("tool_graph_id") or "")
+            for item in dict(room.get("batch_plans") or {}).values()
+            if isinstance(item, dict)
+            and str(item.get("plan_id") or "") == target_plan_id
+            and str(item.get("tool_graph_id") or "")
+        }
+        all_plan_graphs = [
+            dict(item)
+            for item in dict(room.get("tool_graphs") or {}).values()
+            if isinstance(item, dict)
+            and str(item.get("plan_id") or "") == target_plan_id
+        ]
+        business_graphs = [
+            item
+            for item in all_plan_graphs
+            if str(item.get("graph_role") or "") == "business_batch"
+            or str(item.get("graph_id") or "") in business_graph_ids
+        ]
+        # Drain results may contain every internal state/query graph. Runtime
+        # evidence is reconstructed from persisted graph roles so user-facing
+        # counts and statuses describe business batches only.
+        enriched["graphs"] = business_graphs
+        enriched["runtime_graph_domain_summary"] = {
+            "total_graph_count": len(all_plan_graphs),
+            "business_batch_count": len(business_graphs),
+            "internal_graph_count": max(0, len(all_plan_graphs) - len(business_graphs)),
+        }
         return enriched
 
     @staticmethod
@@ -2868,7 +2878,11 @@ class LANChatAgentWorker:
         sync_summary = dict(replay.get("sync_replay_summary") or {})
         asset_transfer_summary = dict(replay.get("asset_transfer_replay_summary") or {})
         batch_execution_summary = dict(replay.get("batch_execution_summary") or {})
-        graph_domain = dict(report.get("tool_graph_domain_summary") or {})
+        graph_domain = dict(
+            report.get("tool_graph_domain_summary")
+            or result.get("runtime_graph_domain_summary")
+            or {}
+        )
         drain_result = result.get("drain") if isinstance(result.get("drain"), dict) else {}
         batches = LANChatAgentWorker._agent_runtime_batches_from_result(result)
         graphs = LANChatAgentWorker._agent_runtime_graphs_from_result(result)
@@ -3016,7 +3030,7 @@ class LANChatAgentWorker:
         self._logger.info(
             "[LANChatRuntimeEvidence] phase=%s room=%s runtime_plan=%s "
             "batches=total:%s,active:%s,terminal:%s "
-            "graphs=total:%s,active:%s,terminal:%s graph_statuses=%s "
+            "graphs=business:%s,internal:%s,active:%s,terminal:%s graph_statuses=%s "
             "nodes=total:%s,succeeded:%s,failed:%s,terminal:%s "
             "flow=%s flow_status=%s entities=%s game_ready=%s actors=%s environment=%s "
             "planned_substrates=%s engine_verified=%s engine_loading=%s terrain=%s skybox=%s "
@@ -3038,6 +3052,7 @@ class LANChatAgentWorker:
             summary.get("batch_active_count", 0),
             summary.get("batch_terminal_count", 0),
             summary.get("graph_count", 0),
+            summary.get("internal_graph_count", 0),
             summary.get("graph_active_count", 0),
             summary.get("graph_terminal_count", 0),
             summary.get("graph_statuses", ""),
