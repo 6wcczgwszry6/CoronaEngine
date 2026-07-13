@@ -2091,7 +2091,7 @@ const ACTOR_TRANSFORM_OPERATION = {
   Scale: 2,
 };
 
-// 属性编辑快速通道常量（与 cef_subprocess/main.cpp 中 setProperty 的 propertyType 一致）
+// 属性编辑快速通道常量（与 cef_renderer_bridge.cpp 中 setProperty 的 propertyType 一致）
 const PROPERTY = {
   Mass: 0,
   Restitution: 1,
