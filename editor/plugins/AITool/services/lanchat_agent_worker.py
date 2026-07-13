@@ -2926,6 +2926,9 @@ class LANChatAgentWorker:
             "flow_status": str(flow.get("status") or ""),
             "entity_count": int(registry.get("entity_count") or 0),
             "game_ready_entity_count": int(registry.get("game_ready_entity_count") or 0),
+            "readiness_missing_field_counts": dict(
+                registry.get("readiness_missing_field_counts") or {}
+            ),
             "actor_count": int(registry.get("actor_count") or entity_type_counts.get("actor") or 0),
             "environment_count": int(
                 registry.get("environment_count") or entity_type_counts.get("environment") or 0
@@ -3032,7 +3035,7 @@ class LANChatAgentWorker:
             "batches=total:%s,active:%s,terminal:%s "
             "graphs=business:%s,internal:%s,active:%s,terminal:%s graph_statuses=%s "
             "nodes=total:%s,succeeded:%s,failed:%s,terminal:%s "
-            "flow=%s flow_status=%s entities=%s game_ready=%s actors=%s environment=%s "
+            "flow=%s flow_status=%s entities=%s game_ready=%s readiness_missing=%s actors=%s environment=%s "
             "planned_substrates=%s engine_verified=%s engine_loading=%s terrain=%s skybox=%s "
             "model_items=%s substrate_items=%s "
             "operations=%s operation_total=%s state_source=%s engine_boundary=%s engine_imports=%s "
@@ -3064,6 +3067,7 @@ class LANChatAgentWorker:
             summary.get("flow_status", ""),
             summary.get("entity_count", 0),
             summary.get("game_ready_entity_count", 0),
+            summary.get("readiness_missing_field_counts", {}),
             summary.get("actor_count", 0),
             summary.get("environment_count", 0),
             summary.get("planned_substrate_count", 0),

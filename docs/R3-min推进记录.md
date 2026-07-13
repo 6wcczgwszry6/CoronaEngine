@@ -751,3 +751,26 @@ internal_graph_count > 0 且不进入业务节点统计
 
 - 下一轮 3-5 个业务批次日志中的 business graph 数与 BatchPlan 数一致。
 - internal graph 数可增长，但不影响 GM/UI 的业务进度和完成判断。
+
+## 29. F5 Evidence 披露 Game-ready 缺失事实
+
+旧 F5 最终状态为 14 个实体、3 个 Game-ready，但 Evidence 只打印总数，无法现场判断其余实体究竟缺少 Engine AABB、grounding、resource identity、sync 还是 Engine ready。Registry 已经有逐实体和聚合缺失字段，本轮只把这份既有事实接到现有 Evidence。
+
+当前改动：
+
+- Evidence 增加 `readiness_missing_field_counts`，直接读取 scene_entity_registry 聚合。
+- LANChat Runtime 日志增加紧凑 `readiness_missing={...}` 字段。
+- 不新增 Replay、检查器或第二状态源，不改变 Game-ready 判定。
+- 下一次 F5 可直接判断 Engine Snapshot/reconcile 修复后剩余断点。
+
+聚焦自动验证：
+
+```text
+Registry 缺失字段聚合 -> Evidence 原样披露
+execution reply/evidence 既有字段回归通过
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 旧运行的 14/3 是否主要由 `engine_actual_aabb/engine_ready/grounding_status` 缺失造成。
+- 当前版本 Finalizer reconcile 后，各缺失项是否降为 0；若不为 0，日志可直接定位责任域。

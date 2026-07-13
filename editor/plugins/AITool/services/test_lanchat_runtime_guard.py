@@ -10716,6 +10716,10 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                 },
                 "scene_entity_registry": {
                     "entity_count": 3,
+                    "readiness_missing_field_counts": {
+                        "engine_actual_aabb": 2,
+                        "grounding_status": 1,
+                    },
                     "entity_type_counts": {
                         "actor": 1,
                         "terrain": 1,
@@ -10866,6 +10870,10 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(evidence["graph_count"], 1)
         self.assertEqual(evidence["flow_steps"], "plan>terrain>asset>actor>review>report")
         self.assertEqual(evidence["entity_count"], 3)
+        self.assertEqual(
+            evidence["readiness_missing_field_counts"],
+            {"engine_actual_aabb": 2, "grounding_status": 1},
+        )
         self.assertEqual(evidence["model_items"], 1)
         self.assertEqual(evidence["substrate_items"], 2)
         self.assertEqual(evidence["operation_count"], 12)
