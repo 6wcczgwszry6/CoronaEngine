@@ -3,6 +3,7 @@
 #include <corona/spatial/octree.h>
 #include <corona/systems/geometry/actor_cache.h>
 #include <corona/systems/geometry/geometry_system.h>
+#include "shadow_lod_state.h"
 
 #include <oneapi/tbb/task_group.h>
 
@@ -129,6 +130,11 @@ struct GeometrySystem::Impl {
         int  prev_committed    = -1;    // ≥0 表示保活中的旧简化级；-1 表示无保活
         bool swap_in_progress  = false; // true = 正在等待新级 build 完成
 
+        int shadow_committed_demand = -1;
+        std::uint64_t shadow_last_request_frame = 0;
+        int shadow_prev_committed = -1;
+        bool shadow_swap_in_progress = false;
+
         // 条目身份版本（方案 C 异步构建 ABA 守卫）：upload 每次 (重)建本条目时自增。
         // 异步构建任务捕获发起时的 epoch；回写时比对，防止 evict→erase→重载同 model_id
         // 后旧任务误填新条目（model_id 相同骗过 model_id 校验的极端情形）。
@@ -174,13 +180,16 @@ struct GeometrySystem::Impl {
     };
 
     // 每个 (geom,mesh) 至多一个在途任务（committed 是单值）。仅几何线程访问，无需加锁。
+    enum class LodBuildPurpose : std::uint8_t { Main, Shadow };
     struct PendingLodBuild {
         std::uint64_t               model_id        = 0;  // ABA 守卫（防 slot 复用）
         std::uint64_t               residency_epoch = 0;  // ABA 守卫（防同 model_id 重建）
         int                         level           = 0;  // 目标缓存级下标
         std::future<LODBuildResult> future;
+        LodBuildPurpose purpose = LodBuildPurpose::Main;
     };
     std::unordered_map<uint64_t /*lod_key*/, PendingLodBuild> pending_lod_builds;
+    std::unordered_map<uint64_t /*lod_key*/, PendingLodBuild> pending_shadow_lod_builds;
 
     // TBB 任务组（复用全局 worker 池，不新建线程）；shutdown 时 wait() 排空。
     tbb::task_group lod_build_tasks;
@@ -213,6 +222,9 @@ struct GeometrySystem::Impl {
     std::uint64_t diag_lod_frees            = 0;   // 释放已就绪级次数
     std::uint64_t diag_scene_acquires       = 0;   // acquire_read<Scene> 次数（每帧每 geom）
     std::uint64_t diag_demand_changes       = 0;   // committed_demand 实际变更次数
+    std::uint64_t diag_geometry_upload_queued = 0;
+    std::uint64_t diag_geometry_upload_published = 0;
+    std::uint64_t diag_geometry_upload_discarded = 0;
 
     // kLodReleaseCooldownFrames 已废弃（保留注释供历史参考）：
     // 旧机制：demand 切换后旧级保留 90 帧（≈1.5s@60fps），防止阈值边界横跳反复重建。
@@ -267,6 +279,17 @@ struct GeometrySystem::Impl {
         std::future<std::uint64_t> future;
     };
     std::unordered_map<Payload, PendingImportTask> pending_import_tasks;
+
+    // 完成 CPU import 后，在 worker 上异步创建 GPU mesh；几何线程只轮询并发布结果。
+    struct PendingGeometryBuild {
+        std::uint64_t model_id = 0;
+        std::uint64_t epoch = 0;
+        std::future<std::vector<MeshDevice>> future;
+    };
+    std::unordered_map<Payload, PendingGeometryBuild> pending_geometry_builds;
+    tbb::task_group geometry_build_tasks;
+    static constexpr std::size_t kMaxInflightGeometryBuilds = 1;
+    std::uint64_t next_geometry_build_epoch = 1;
 
     /// import 任务 epoch 分配器（进程级单调递增，0 保留为"无任务"）。
     std::uint64_t next_import_epoch = 1;
