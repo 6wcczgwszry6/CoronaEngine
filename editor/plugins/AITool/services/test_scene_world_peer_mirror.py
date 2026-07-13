@@ -15,7 +15,13 @@ from plugins.AITool.services.agent_runtime import AgentRuntime  # noqa: E402
 
 class SceneWorldPeerMirrorTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.runtime = AgentRuntime()
+        self.local_snapshot_actors: list[dict] = []
+        self.runtime = AgentRuntime(
+            scene_snapshot_provider=lambda _request: {
+                "source": "engine_scene_snapshot",
+                "actors": list(self.local_snapshot_actors),
+            }
+        )
 
     def _record(self, event: dict) -> dict:
         return self.runtime.record_sync_event(room_id="room-peer", event=event)
@@ -65,13 +71,15 @@ class SceneWorldPeerMirrorTests(unittest.TestCase):
         self.assertEqual(snapshot_result["snapshot_authority"], "peer_mirror")
         self.assertEqual(snapshot_result["snapshot_stability"], "peer_mirror")
         self.assertEqual(snapshot_result["scene_version"], 4)
-        self.assertEqual(snapshot_result["world_readiness"], "game_ready")
+        self.assertEqual(snapshot_result["world_readiness"], "needs_review")
         self.assertEqual(len(snapshot_result["snapshot"]["actor_entities"]), 1)
         entity = snapshot_result["snapshot"]["actor_entities"][0]
         self.assertEqual(entity["entity_id"], "entity-cupid")
         self.assertEqual(entity["actor_id"], "actor-cupid")
-        self.assertEqual(entity["bounds_source"], "engine_actual")
+        self.assertEqual(entity["bounds_source"], "remote_host_actual")
         self.assertEqual(entity["sync_status"], "synced")
+        self.assertFalse(entity["game_ready"])
+        self.assertIn("engine_actual_aabb", entity["readiness_missing_fields"])
         self.assertEqual(self.runtime.query_state("room-peer")["room"]["scene_plans"], {})
 
         status = self.runtime.status_summary("room-peer")
@@ -95,6 +103,24 @@ class SceneWorldPeerMirrorTests(unittest.TestCase):
         self.assertEqual(stable_entity["transform"]["position"], [1.0, 0.0, 2.0])
         self.assertEqual(stable_entity["world_aabb"]["min"], [0.5, 0.0, 1.5])
         self.assertEqual(after_stale["world_fingerprint"], snapshot_result["world_fingerprint"])
+
+        self.local_snapshot_actors = [{
+            "actor_id": "actor-cupid",
+            "name": "丘比特雕像",
+            "position": [1.0, 0.0, 2.0],
+            "rotation": [0.0, 45.0, 0.0],
+            "scale": [1.0, 1.0, 1.0],
+            "world_aabb": {"min": [0.5, 0.0, 1.5], "max": [1.5, 2.0, 2.5]},
+            "bounds_ready": True,
+        }]
+        refreshed = self.runtime.refresh_scene_snapshot("room-peer")
+        self.assertEqual(refreshed["graph"]["status"], "completed")
+        local_snapshot = self.runtime.get_scene_world_snapshot(room_id="room-peer")
+        local_entity = local_snapshot["snapshot"]["actor_entities"][0]
+        self.assertEqual(local_entity["bounds_source"], "engine_actual")
+        self.assertEqual(local_entity["engine_write_verification_status"], "engine_verified")
+        self.assertTrue(local_entity["game_ready"])
+        self.assertEqual(local_snapshot["world_readiness"], "game_ready")
 
     def test_unknown_local_plan_sync_fact_is_rejected(self) -> None:
         result = self._record({

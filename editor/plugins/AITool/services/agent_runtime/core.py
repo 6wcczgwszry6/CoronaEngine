@@ -16826,13 +16826,21 @@ class AgentRuntime:
             "requested_name",
             "aliases",
             "asset_id",
+            "model_ref",
             "semantic_role",
             "entity_type",
+            "actor_version",
+            "entity_version",
+            "version",
             "plan_id",
             "batch_id",
             "grounding_status",
+            "support_type",
             "interaction_capability",
             "gameplay_tags",
+            "sync_status",
+            "sync_lifecycle_status",
+            "review_status",
         )
         projected: dict[str, dict[str, Any]] = {}
         for actor_id, raw_actor in dict(value or {}).items():
@@ -28456,13 +28464,30 @@ class AgentRuntime:
                 actor_fact["asset_id"] = actor_asset_id
             if scene_name:
                 actor_fact["scene_name"] = scene_name
+            sync_authority = str(normalized.get("authority") or "").strip().lower()
+            remote_bounds_source = (
+                "remote_host_actual"
+                if sync_authority == "remote_host"
+                else "remote_peer_actual"
+                if sync_authority == "remote_peer"
+                else ""
+            )
             if event_bounds is not None:
                 actor_fact["aabb"] = event_bounds
-                actor_fact["bounds_ready"] = True
-                actor_fact["bounds_source"] = "engine_actual"
-                actor_fact["engine_lifecycle_status"] = "bounds_ready"
-                actor_fact["status"] = "ready"
-                if str(normalized.get("authority") or "").strip().lower() == "remote_host":
+                if remote_bounds_source:
+                    # A host/peer AABB is authoritative for the shared world, but
+                    # it does not prove that this process has materialized the
+                    # actor in its own GeometrySystem.  Only a local scene
+                    # snapshot may promote this fact to engine_actual.
+                    actor_fact["bounds_ready"] = False
+                    actor_fact["bounds_source"] = remote_bounds_source
+                    actor_fact["status"] = "sync_received"
+                else:
+                    actor_fact["bounds_ready"] = True
+                    actor_fact["bounds_source"] = "engine_actual"
+                    actor_fact["engine_lifecycle_status"] = "bounds_ready"
+                    actor_fact["status"] = "ready"
+                if sync_authority == "remote_host":
                     actor_fact["sync_status"] = "synced"
             affected_batch_id = str(actor_fact.get("batch_id") or affected_batch_id)
             transform_events = {
@@ -28488,7 +28513,10 @@ class AgentRuntime:
                 actor_fact["sync_lifecycle_status"] = "active"
             elif event_type in create_events:
                 actor_fact["sync_lifecycle_status"] = "active"
-                if event_type == "actor_imported" and not actor_fact.get("bounds_ready"):
+                if event_type == "actor_imported":
+                    # register_actor_identity proves local import, not local
+                    # geometry/AABB readiness.  A later engine snapshot performs
+                    # the bounds_ready promotion.
                     actor_fact["engine_lifecycle_status"] = "engine_imported"
                     actor_fact["sync_status"] = "engine_imported"
             elif event_type == "actor_create_received":
@@ -28575,10 +28603,15 @@ class AgentRuntime:
                     if str(component.get("actor_id") or "") != actor_id:
                         continue
                     component["aabb"] = dict(event_bounds)
-                    component["bounds_ready"] = True
-                    component["bounds_source"] = "engine_actual"
-                    component["engine_lifecycle_status"] = "bounds_ready"
-                    component["status"] = "ready"
+                    if remote_bounds_source:
+                        component["bounds_ready"] = False
+                        component["bounds_source"] = remote_bounds_source
+                        component["status"] = "sync_received"
+                    else:
+                        component["bounds_ready"] = True
+                        component["bounds_source"] = "engine_actual"
+                        component["engine_lifecycle_status"] = "bounds_ready"
+                        component["status"] = "ready"
                     affected_batch_id = affected_batch_id or batch_key
 
         custom_import_facts = {

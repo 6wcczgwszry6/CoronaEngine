@@ -447,3 +447,38 @@ Snapshot/Game-ready/SceneInspector/同步桥 24 项通过
 - 真实网络乱序或重放时，成员 Engine 与 Runtime 均拒绝旧版本。
 - 同版本的 identity、AABB 和同步终态补齐不会被误判为重复而丢失。
 - 房主追加批产生的新 actor/scene version 能在成员端单调收敛。
+
+## 19. 宿主世界 AABB 与成员本机 Engine AABB 分域
+
+多人同步中的 `actor_json` 可以携带宿主测得的 world AABB，但该事实只能证明宿主世界中的几何范围，不能证明成员进程已经在本机 GeometrySystem 中完成模型加载。旧逻辑将两者都记录成 `bounds_source=engine_actual`，可能让成员 peer mirror 在本机 Actor 尚未 materialize 时提前进入 Game-ready。
+
+当前改动：
+
+- `authority=remote_host/remote_peer` 的同步 AABB 分别记录为 `remote_host_actual/remote_peer_actual`。
+- 远端 AABB 保留为共享世界事实，但不设置成员本机 `bounds_ready`，也不把本机 Engine 生命周期提升为 `bounds_ready`。
+- `actor_imported` 只证明成员本机已注册 Actor identity，状态收敛到 `engine_imported`；它不伪造本机 AABB。
+- 只有 `runtime.scene.snapshot` 从成员本机 Engine 读取到真实 AABB 后，才覆盖为 `bounds_source=engine_actual` 并允许进入 Game-ready 判定。
+- Engine snapshot 的已知 Actor 投影保留 `model_ref`、Actor/Entity version 和同步身份，防止刷新真实几何时丢失稳定资源身份。
+- environment component 使用同一来源边界，远端 room/terrain bounds 不会提前完成成员本机 environment readiness。
+
+聚焦自动验证：
+
+```text
+宿主 AABB 到达 -> peer mirror needs_review
+成员 actor_imported -> 仍等待本机 engine_actual AABB
+成员本机 scene snapshot -> engine_actual + engine_verified + game_ready
+迟到旧版本 transform/AABB -> rejected，world fingerprint 不变
+Snapshot/Game-ready/SceneInspector/同步桥 24 项通过
+ActionIntent 聚焦回归 8 项通过
+LANChat Scene Sync 静态检查通过
+Python syntax compile 通过
+```
+
+历史 `test_agent_runtime_phase1` 大套件本轮运行超过两分钟仍未完成，已显式终止；已执行部分未见失败，但不计为通过，也不作为本轮提交证据。
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 成员接收模型后，`actor_imported` 与本机 GeometrySystem AABB 事件按预期先后到达。
+- 宿主 Snapshot 可以先用于只读世界展示，但成员在本机 Actor 未就绪前保持 `needs_review`。
+- 成员本机 snapshot 到达后，Registry/Snapshot/fingerprint 自动收敛且不丢失宿主 plan/entity/asset/version 身份。
+- environment 和普通 Actor 均遵守同一事实来源边界。
