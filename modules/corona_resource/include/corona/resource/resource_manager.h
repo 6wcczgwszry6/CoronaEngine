@@ -1,5 +1,4 @@
 #pragma once
-#include <oneapi/tbb/task_arena.h>
 #include <oneapi/tbb/task_group.h>
 
 #include <future>
@@ -204,9 +203,6 @@ class ResourceManager final {
     TResourceID load_internal(const std::filesystem::path& path);
 
    private:
-    // 模型/场景导入通常同时触发多个大任务。将导入任务限制在小型 arena
-    // 内，避免一次打开场景时占满所有 worker 并阻塞渲染线程。
-    tbb::task_arena import_arena_{2};
     tbb::task_group async_tasks_{};  ///< TBB任务组，用于管理异步任务
 
     ParserRegistry parser_registry_;

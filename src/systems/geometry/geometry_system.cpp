@@ -15,7 +15,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
 #include <filesystem>
 #include <future>
 #include <limits>
@@ -28,8 +27,6 @@
 #include <utility>
 
 #include "geometry_internal.h"
-#include "storage_snapshot.h"
-#include "../common/diagnostic_env.h"
 
 #include <corona/systems/geometry/geometry_mesh_builder.h>
 
@@ -41,12 +38,6 @@ namespace {
 
 std::mutex g_invalid_mesh_slot_log_mutex;
 std::unordered_set<std::string> g_invalid_mesh_slot_logs;
-
-[[nodiscard]] bool geometry_diagnostics_enabled() {
-    static const bool enabled = Diagnostics::parse_env_flag(
-        std::getenv("CORONA_GEOMETRY_DIAG_PROFILE"));
-    return enabled;
-}
 
 template <typename T>
 Horizon::HardwareBuffer make_geometry_buffer(const std::vector<T>& data,
@@ -554,17 +545,12 @@ void GeometrySystem::update() {
             //  - scene_acquires 同量级 → 每帧每 geom 取 Scene（merge 引入，疑似开销源）
             //  - builds/frees 若每秒成百上千 → reconcile 在 GPU churn（卡顿+LOD切换坐实）
             //  - demand_changes 高 → 选级在抖动；低但 builds 高 → 别处反复失效缓存
-            if (geometry_diagnostics_enabled()) {
-                CFW_LOG_NOTICE("[GeoDiag/1s] mesh_visits={} scene_acquires={} builds={} frees={} demand_changes={} launches={} discards={} inflight={} upload_queued={} upload_published={} upload_discarded={}",
-                               impl_->diag_reconcile_mesh_visits, impl_->diag_scene_acquires,
-                               impl_->diag_lod_builds, impl_->diag_lod_frees,
-                               impl_->diag_demand_changes,
-                               impl_->diag_lod_build_launches, impl_->diag_lod_build_discards,
-                               impl_->pending_lod_builds.size(),
-                               impl_->diag_geometry_upload_queued,
-                               impl_->diag_geometry_upload_published,
-                               impl_->diag_geometry_upload_discarded);
-            }
+            CFW_LOG_NOTICE("[GeoDiag/1s] mesh_visits={} scene_acquires={} builds={} frees={} demand_changes={} launches={} discards={} inflight={}",
+                           impl_->diag_reconcile_mesh_visits, impl_->diag_scene_acquires,
+                           impl_->diag_lod_builds, impl_->diag_lod_frees,
+                           impl_->diag_demand_changes,
+                           impl_->diag_lod_build_launches, impl_->diag_lod_build_discards,
+                           impl_->pending_lod_builds.size());
             impl_->diag_reconcile_mesh_visits = 0;
             impl_->diag_scene_acquires = 0;
             impl_->diag_lod_builds = 0;
@@ -572,21 +558,16 @@ void GeometrySystem::update() {
             impl_->diag_demand_changes = 0;
             impl_->diag_lod_build_launches = 0;
             impl_->diag_lod_build_discards = 0;
-            impl_->diag_geometry_upload_queued = 0;
-            impl_->diag_geometry_upload_published = 0;
-            impl_->diag_geometry_upload_discarded = 0;
 
             std::shared_lock lock(impl_->mtx);
             for (auto& [scene_handle, scene_state] : impl_->scenes) {
                 std::lock_guard stats_lock(scene_state.stats_mutex);
                 auto& s = scene_state.stats;
-                if (geometry_diagnostics_enabled()) {
-                    CFW_LOG_NOTICE("[GeometrySystem] Scene stats: total={} visible={} "
-                                   "loaded={} loading={} unloading={} unloaded={} offline={}",
-                                   s.actor_total, s.actor_visible,
-                                   s.actor_loaded, s.actor_loading, s.actor_unloading,
-                                   s.actor_unloaded, s.actor_offline);
-                }
+                // CFW_LOG_NOTICE("[GeometrySystem] Scene stats: total={} visible={} "
+                //                "loaded={} loading={} unloading={} unloaded={} offline={}",
+                //                s.actor_total, s.actor_visible,
+                //                s.actor_loaded, s.actor_loading, s.actor_unloading,
+                //                s.actor_unloaded, s.actor_offline);
             }
             // auto& rm = Resource::ResourceManager::get_instance();
             // auto entries = rm.list_entries();
@@ -614,17 +595,15 @@ void GeometrySystem::update() {
             ledger_counter = 0;
             update_cpu_resource_ledger();
             const MemoryReport mr = compute_memory_report();
-            if (geometry_diagnostics_enabled()) {
-                CFW_LOG_NOTICE("[GeometrySystem] Mem mesh: VRAM={}KB RAM={}KB | tex: VRAM={}KB RAM={}KB "
-                               "| VRAM total={}KB (peak {}KB){} | RAM total={}KB{}",
-                               mr.vram.mesh_bytes / 1024, mr.ram.mesh_bytes / 1024,
-                               mr.vram.texture_bytes / 1024, mr.ram.texture_bytes / 1024,
-                               mr.vram.used_bytes / 1024,
-                               (mr.vram_mesh_peak + mr.vram_texture_peak) / 1024,
-                               mr.vram.pressured ? " OVER-VRAM-BUDGET" : "",
-                               mr.ram.used_bytes / 1024,
-                               mr.ram.pressured ? " OVER-RAM-BUDGET" : "");
-            }
+            CFW_LOG_NOTICE("[GeometrySystem] Mem mesh: VRAM={}KB RAM={}KB | tex: VRAM={}KB RAM={}KB "
+                           "| VRAM total={}KB (peak {}KB){} | RAM total={}KB{}",
+                           mr.vram.mesh_bytes / 1024, mr.ram.mesh_bytes / 1024,
+                           mr.vram.texture_bytes / 1024, mr.ram.texture_bytes / 1024,
+                           mr.vram.used_bytes / 1024,
+                           (mr.vram_mesh_peak + mr.vram_texture_peak) / 1024,
+                           mr.vram.pressured ? " OVER-VRAM-BUDGET" : "",
+                           mr.ram.used_bytes / 1024,
+                           mr.ram.pressured ? " OVER-RAM-BUDGET" : "");
         }
     }
 
@@ -689,9 +668,6 @@ void GeometrySystem::shutdown() {
         if (task.future.valid()) task.future.wait();
     }
     impl_->pending_import_tasks.clear();
-
-    impl_->geometry_build_tasks.wait();
-    impl_->pending_geometry_builds.clear();
 
     // 等待在途的异步 LOD 构建任务（方案 C）：task_group::wait() 阻塞至全部完成，
     // 避免 task_group 析构时仍有任务运行 / promise 悬挂。结果丢弃（缓冲 RAII 释放）。
@@ -1772,35 +1748,6 @@ GeometrySystem::RenderMeshBuffers GeometrySystem::select_render_buffers(
     return out;
 }
 
-GeometrySystem::RenderMeshBuffers GeometrySystem::select_shadow_render_buffers(
-    std::uintptr_t geometry_handle, uint32_t mesh_index,
-    float world_units_per_texel, float max_abs_scale,
-    const RenderMeshBuffers& fallback) const {
-    std::shared_lock lock(impl_->lod_cache_mutex);
-    auto it = impl_->lod_cache.find(Impl::make_lod_key(geometry_handle, mesh_index));
-    if (it == impl_->lod_cache.end() || it->second.levels.empty()) return fallback;
-    const auto& levels = it->second.levels;
-    int target = it->second.committed_demand;
-    if (world_units_per_texel > 0.0f && std::isfinite(world_units_per_texel)) {
-        target = 0;
-        const float scale = std::max(std::abs(max_abs_scale), 1.0e-6f);
-        for (int level = 0; level < static_cast<int>(levels.size()); ++level) {
-            const float error = levels[level].geometric_error * scale;
-            if (std::isfinite(error) && error <= world_units_per_texel) target = level;
-        }
-    }
-    target = std::clamp(target, 0, static_cast<int>(levels.size()) - 1);
-    for (int level = target; level >= 0; --level) {
-        const auto& candidate = levels[static_cast<size_t>(level)];
-        if (!candidate.ready || !candidate.vertex_buffer || !candidate.index_buffer) continue;
-        return RenderMeshBuffers{candidate.vertex_buffer, candidate.index_buffer,
-            candidate.vertex_storage ? candidate.vertex_storage : fallback.vertex_storage,
-            candidate.index_storage ? candidate.index_storage : fallback.index_storage,
-            candidate.vertex_count, candidate.index_count, candidate.max_index};
-    }
-    return fallback;
-}
-
 GeometrySystem::RenderMeshBuffers GeometrySystem::resident_render_buffers(
     std::uintptr_t           geometry_handle,
     uint32_t                 mesh_index,
@@ -2145,51 +2092,6 @@ void GeometrySystem::process_pending_geometry_builds() {
     auto& resource_manager = Resource::ResourceManager::get_instance();
     auto& geom_storage = hub.geometry_storage();
 
-    // 先回收 worker 结果。Geometry 更新线程只做短暂状态写回，不在这里创建
-    // HardwareBuffer/HardwareImage，避免把 GPU 构建时间算进主更新帧。
-    std::vector<std::uintptr_t> completed;
-    for (const auto& [handle, task] : impl_->pending_geometry_builds) {
-        if (task.future.valid() &&
-            task.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-            completed.push_back(handle);
-        }
-    }
-    for (const auto handle : completed) {
-        auto task_it = impl_->pending_geometry_builds.find(handle);
-        if (task_it == impl_->pending_geometry_builds.end()) continue;
-        auto task = std::move(task_it->second);
-        impl_->pending_geometry_builds.erase(task_it);
-        std::vector<MeshDevice> mesh_devices;
-        try {
-            mesh_devices = task.future.get();
-        } catch (...) {
-            mesh_devices.clear();
-        }
-        if (mesh_devices.empty()) {
-            ++impl_->diag_geometry_upload_discarded;
-            CFW_LOG_WARNING("[GeometryUpload] build failed geometry={} model={}", handle, task.model_id);
-            continue;
-        }
-        if (auto geom_write = geom_storage.try_acquire_write(handle)) {
-            if (geom_write->gpu_build_state == GeometryDevice::GpuBuildState::PendingBuild &&
-                geom_write->mesh_handles.empty() && geom_write->model_resource_handle != 0) {
-                std::uint64_t current_model = 0;
-                if (auto model = hub.model_resource_storage().try_acquire_read(geom_write->model_resource_handle)) {
-                    current_model = model->model_id;
-                }
-                if (current_model == task.model_id) {
-                    geom_write->mesh_handles = std::move(mesh_devices);
-                    geom_write->gpu_build_state = GeometryDevice::GpuBuildState::Ready;
-                    CFW_LOG_NOTICE("[GeometryUpload] published geometry={} meshes={} model={}",
-                                   handle, geom_write->mesh_handles.size(), task.model_id);
-                    ++impl_->diag_geometry_upload_published;
-                } else {
-                    ++impl_->diag_geometry_upload_discarded;
-                }
-            }
-        }
-    }
-
     // ---- 阶段 1：只读收集待构建项 ----
     // 收集 gpu_build_state==PendingBuild 且 model_id 已就绪的 geometry。
     // 仅记录 (geom_handle, model_id, world_pos)，不在持有遍历期间做重活。
@@ -2199,20 +2101,11 @@ void GeometrySystem::process_pending_geometry_builds() {
         ktm::fvec3     world_pos;  // 用于按相机距离排序（近处先建）
     };
     std::vector<PendingBuild> pending;
-    std::vector<std::uintptr_t> completed_while_queued;
     for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
         const GeometryDevice& geom_dev = *it;
         if (geom_dev.gpu_build_state != GeometryDevice::GpuBuildState::PendingBuild) continue;
         if (!geom_dev.model_resource_handle) continue;
-        const auto geom_handle = reinterpret_cast<std::uintptr_t>(&geom_dev);
-        // Actor reload/rebuild may have filled the mesh handles while the
-        // geometry was still marked PendingBuild. Record it and transition the
-        // state after the read-only iteration; never acquire a write lock while
-        // cbegin() is holding the storage read lock.
-        if (!geom_dev.mesh_handles.empty()) {
-            completed_while_queued.push_back(geom_handle);
-            continue;
-        }
+
         std::uint64_t model_id = 0;
         if (auto model_res = hub.model_resource_storage().try_acquire_read(geom_dev.model_resource_handle)) {
             model_id = model_res->model_id;
@@ -2227,16 +2120,7 @@ void GeometrySystem::process_pending_geometry_builds() {
             }
         }
 
-        pending.push_back({geom_handle, model_id, world_pos});
-    }
-
-    for (const auto geom_handle : completed_while_queued) {
-        if (auto geom_write = geom_storage.try_acquire_write(geom_handle)) {
-            if (geom_write->gpu_build_state == GeometryDevice::GpuBuildState::PendingBuild &&
-                !geom_write->mesh_handles.empty()) {
-                geom_write->gpu_build_state = GeometryDevice::GpuBuildState::Ready;
-            }
-        }
+        pending.push_back({reinterpret_cast<std::uintptr_t>(&geom_dev), model_id, world_pos});
     }
     if (pending.empty()) return;
 
@@ -2250,33 +2134,38 @@ void GeometrySystem::process_pending_geometry_builds() {
                   });
     }
 
-    // ---- 阶段 2：异步启动 GPU 构建 ----
-    // 每个 geometry 最多一个在途任务，整个系统最多一个大型模型上传，
-    // 避免多个 GLB 同时争用 Vulkan 设备；当前帧只排队，不等待结果。
+    // ---- 阶段 2：构建 GPU 资源（不持 storage 锁，仅写回时短暂加锁）----
+    // 每帧预算：最多构建 kMaxBuildsPerFrame 个，剩余保持 PendingBuild 下帧继续。
+    // 目的：一次性创建大量对象时，把 GPU buffer 创建的帧突刺摊平到多帧，
+    // 避免单帧卡顿。预算为内部常量（"由底层自行决定"），无外部开关。
+    constexpr size_t kMaxBuildsPerFrame = 4;
+    size_t built = 0;
     for (const auto& item : pending) {
-        if (impl_->pending_geometry_builds.size() >= Impl::kMaxInflightGeometryBuilds) break;
-        if (impl_->pending_geometry_builds.find(item.geom_handle) != impl_->pending_geometry_builds.end()) continue;
+        if (built >= kMaxBuildsPerFrame) break;  // 本帧预算用尽，剩余下帧处理
 
-        const auto epoch = impl_->next_geometry_build_epoch++;
-        auto promise = std::make_shared<std::promise<std::vector<MeshDevice>>>();
-        impl_->pending_geometry_builds.emplace(
-            item.geom_handle,
-            Impl::PendingGeometryBuild{item.model_id, epoch, promise->get_future()});
-        impl_->geometry_build_tasks.run(
-            [model_id = item.model_id, promise, &resource_manager]() {
-                std::vector<MeshDevice> result;
-                try {
-                    auto scene = resource_manager.acquire_read<Resource::Scene>(model_id);
-                    if (scene.valid()) result = build_mesh_devices_from_scene(*scene);
-                } catch (...) {
-                    result.clear();
-                }
-                promise->set_value(std::move(result));
-            });
-        CFW_LOG_DEBUG("[GeometryUpload] queued geometry={} model={} epoch={}",
-                      item.geom_handle, item.model_id, epoch);
-        ++impl_->diag_geometry_upload_queued;
-        break;
+        auto scene_read = resource_manager.acquire_read<Resource::Scene>(item.model_id);
+        if (!scene_read.valid()) continue;  // 资源无效，下帧再试
+
+        std::vector<MeshDevice> mesh_devices = build_mesh_devices_from_scene(*scene_read);
+
+        // 先失效旧 LOD 缓存（新 mesh_handles 即将替换，旧条目指向已变更的缓冲）
+        {
+            std::unique_lock lod_lock(impl_->lod_cache_mutex);
+            for (uint32_t i = 0; i < static_cast<uint32_t>(mesh_devices.size()); ++i) {
+                impl_->lod_cache.erase(Impl::make_lod_key(item.geom_handle, i));
+            }
+        }
+
+        // 写回 + TOCTOU 重校验：仅当仍为 PendingBuild 才接管（防止期间被其它路径改写）
+        if (auto geom_write = hub.geometry_storage().try_acquire_write(item.geom_handle)) {
+            if (geom_write->gpu_build_state == GeometryDevice::GpuBuildState::PendingBuild) {
+                geom_write->mesh_handles = std::move(mesh_devices);
+                geom_write->gpu_build_state = GeometryDevice::GpuBuildState::Ready;
+                ++built;
+                CFW_LOG_NOTICE("[GeometrySystem] Built pending GPU resources for geometry {}, {} mesh(es)",
+                               item.geom_handle, geom_write->mesh_handles.size());
+            }
+        }
     }
 }
 
@@ -2421,13 +2310,6 @@ void GeometrySystem::reconcile_lod_residency() {
     auto& hub = SharedDataHub::instance();
     auto& geom_storage = hub.geometry_storage();
 
-    struct Lod0DeviceEviction {
-        std::uintptr_t geometry_handle = 0;
-        std::uintptr_t expected_model_resource_handle = 0;
-        std::vector<std::uint32_t> mesh_indices;
-    };
-    std::vector<Lod0DeviceEviction> pending_lod0_evictions;
-
     // ---- 收集观察者 (世界位置, 角误差预算 epsilon)；无则不改动驻留 ----
     // 每个相机把「像素预算 + 自身 fov/分辨率」塌缩成单个角阈值 epsilon。选级判据
     // world_error/d ≤ epsilon 是纯球形量（与方向无关）→ 相机背后物体同样有定义，
@@ -2453,24 +2335,13 @@ void GeometrySystem::reconcile_lod_residency() {
     // 仅在确有相机（会真正评估需求级）时推进，避免无相机帧空转计数。
     const std::uint64_t this_frame = ++impl_->lod_frame_counter;
 
-    // 先结束 Geometry storage 的只读迭代，再执行下面可能需要的 Geometry 写锁。
-    // ConstIterator 持有 storage 读锁；禁止在其作用域内升级同一 storage 的写锁。
-    const auto geometry_handles = GeometryInternal::snapshot_storage_handles(geom_storage);
-    for (const auto geom_handle : geometry_handles) {
-        std::uintptr_t model_resource_handle = 0;
-        std::uintptr_t transform_handle = 0;
-        std::uint32_t mesh_count = 0;
-        {
-            auto geom_read = geom_storage.try_acquire_read(geom_handle);
-            if (!geom_read) continue;
-            model_resource_handle = geom_read->model_resource_handle;
-            transform_handle = geom_read->transform_handle;
-            mesh_count = static_cast<std::uint32_t>(geom_read->mesh_handles.size());
-        }
-        if (!model_resource_handle) continue;
+    for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
+        const GeometryDevice& geom_dev = *it;
+        auto geom_handle = reinterpret_cast<std::uintptr_t>(&geom_dev);
+        if (!geom_dev.model_resource_handle) continue;
 
         std::uint64_t model_id = 0;
-        if (auto model_res = hub.model_resource_storage().try_acquire_read(model_resource_handle)) {
+        if (auto model_res = hub.model_resource_storage().try_acquire_read(geom_dev.model_resource_handle)) {
             model_id = model_res->model_id;
         }
         if (model_id == 0) continue;
@@ -2480,8 +2351,8 @@ void GeometrySystem::reconcile_lod_residency() {
         Corona::ModelTransform transform{};
         bool have_transform = false;
         float scale_factor = 1.0f;
-        if (transform_handle) {
-            if (auto tr = hub.model_transform_storage().try_acquire_read(transform_handle)) {
+        if (geom_dev.transform_handle) {
+            if (auto tr = hub.model_transform_storage().try_acquire_read(geom_dev.transform_handle)) {
                 transform = *tr;
                 have_transform = true;
                 scale_factor = std::max({std::abs(tr->scale.x),
@@ -2494,7 +2365,7 @@ void GeometrySystem::reconcile_lod_residency() {
         // Fix 1：不再每帧每 geom acquire_read<Scene>。半径从 lod_cache 条目读取（upload 已缓存），
         // Scene CPU 数据仅在确需构建某级时（need_build）才惰性取用。
         for (uint32_t mesh_idx = 0;
-             mesh_idx < mesh_count; ++mesh_idx) {
+             mesh_idx < static_cast<uint32_t>(geom_dev.mesh_handles.size()); ++mesh_idx) {
             const uint64_t lod_key = Impl::make_lod_key(geom_handle, mesh_idx);
             ++impl_->diag_reconcile_mesh_visits;  // 诊断：处理的 (geom,mesh) 次数
 
@@ -2585,30 +2456,6 @@ void GeometrySystem::reconcile_lod_residency() {
             if (demand < 0) demand = 0;
             if (static_cast<size_t>(demand) >= level_count) demand = static_cast<int>(level_count) - 1;
 
-            int shadow_demand = -1;
-            int shadow_previous = -1;
-            {
-                std::unique_lock lock(impl_->lod_cache_mutex);
-                auto cit = impl_->lod_cache.find(lod_key);
-                if (cit != impl_->lod_cache.end() && cit->second.model_id == model_id) {
-                    if (this_frame > cit->second.shadow_last_request_frame &&
-                        this_frame - cit->second.shadow_last_request_frame >
-                            GeometryDetail::kShadowLodRequestTtlFrames) {
-                        cit->second.shadow_committed_demand = -1;
-                    }
-                    shadow_demand = cit->second.shadow_committed_demand;
-                    shadow_previous = cit->second.shadow_prev_committed;
-                    if (shadow_demand >= 0 &&
-                        static_cast<size_t>(shadow_demand) < cit->second.levels.size() &&
-                        !cit->second.levels[shadow_demand].ready) {
-                        cit->second.shadow_prev_committed =
-                            cit->second.committed_demand;
-                        cit->second.shadow_swap_in_progress = true;
-                        shadow_previous = cit->second.shadow_prev_committed;
-                    }
-                }
-            }
-
             // 限速反向（方案 D）：committed 直接跳到滞回目标，不再强制逐级移动。
             // 旧的"单帧最多移动一级"会逼着 committed 扫过每个中间级 → 每个中间级都被
             // 当成 demand 各 build 一次（哪怕只显示一帧）→ 相机平移时 GPU 上传抖动。
@@ -2657,8 +2504,6 @@ void GeometrySystem::reconcile_lod_residency() {
             // 一旦新级 ready（process_pending_lod_builds 完成 swap），守卫解除，下一帧即释放。
             bool need_build = false;
             std::uint32_t demand_src_idx = 0;
-            bool shadow_need_build = false;
-            std::uint32_t shadow_src_idx = 0;
             std::vector<int> to_free;
             {
                 std::shared_lock lock(impl_->lod_cache_mutex);
@@ -2667,11 +2512,6 @@ void GeometrySystem::reconcile_lod_residency() {
                 const auto& levels = cit->second.levels;
                 const bool  in_swap = cit->second.swap_in_progress;
                 const int   guarded = cit->second.prev_committed;
-                if (shadow_demand > 0 && static_cast<size_t>(shadow_demand) < levels.size() &&
-                    !levels[shadow_demand].ready) {
-                    shadow_need_build = true;
-                    shadow_src_idx = levels[shadow_demand].source_lod_index;
-                }
                 for (size_t i = 0; i < levels.size(); ++i) {  // i=0：LOD0 也参与 free 判断
                     if (static_cast<int>(i) == demand) {
                         if (!levels[i].ready) {
@@ -2680,10 +2520,8 @@ void GeometrySystem::reconcile_lod_residency() {
                         }
                     } else if (levels[i].ready) {
                         // swap 保活：若该级是当前被替换的旧级，保留到新级 ready
-                    const bool is_swap_guarded = in_swap && (static_cast<int>(i) == guarded);
-                    const bool is_shadow_kept = static_cast<int>(i) == shadow_demand ||
-                                                static_cast<int>(i) == shadow_previous;
-                        if (!is_swap_guarded && !is_shadow_kept) {
+                        const bool is_swap_guarded = in_swap && (static_cast<int>(i) == guarded);
+                        if (!is_swap_guarded) {
                             to_free.push_back(static_cast<int>(i));
                         }
                     }
@@ -2750,44 +2588,6 @@ void GeometrySystem::reconcile_lod_residency() {
                 }
             }
 
-            if (shadow_need_build && shadow_demand > 0) {
-                auto scene_read = resource_manager.acquire_read<Resource::Scene>(model_id);
-                ++impl_->diag_scene_acquires;
-                const auto* scene_ptr = scene_read.valid() ? &(*scene_read) : nullptr;
-                if (scene_ptr && mesh_idx < scene_ptr->data.meshes.size() &&
-                    shadow_src_idx < scene_ptr->data.meshes[mesh_idx].lod_levels.size()) {
-                    const auto& lod_data = scene_ptr->data.meshes[mesh_idx].lod_levels[shadow_src_idx];
-                    if (!lod_data.vertices.empty() && !lod_data.indices.empty()) {
-                        std::uint64_t epoch = 0;
-                        { std::shared_lock lk(impl_->lod_cache_mutex); auto cit = impl_->lod_cache.find(lod_key);
-                          if (cit != impl_->lod_cache.end() && cit->second.model_id == model_id) epoch = cit->second.residency_epoch; }
-                        auto pit = impl_->pending_shadow_lod_builds.find(lod_key);
-                        bool already = pit != impl_->pending_shadow_lod_builds.end() &&
-                            pit->second.level == shadow_demand && pit->second.model_id == model_id &&
-                            pit->second.residency_epoch == epoch && pit->second.future.valid();
-                        if (!already && pit != impl_->pending_shadow_lod_builds.end()) impl_->pending_shadow_lod_builds.erase(pit);
-                        if (!already && impl_->pending_shadow_lod_builds.size() < Impl::kMaxInflightLodBuilds) {
-                            auto verts = lod_data.vertices; auto inds = lod_data.indices;
-                            const std::size_t bytes = 2u * verts.size() * sizeof(Resource::Vertex) +
-                                                      2u * inds.size() * sizeof(std::uint16_t);
-                            auto promise = std::make_shared<std::promise<Impl::LODBuildResult>>();
-                            impl_->pending_shadow_lod_builds[lod_key] =
-                                Impl::PendingLodBuild{model_id, epoch, shadow_demand, promise->get_future(), Impl::LodBuildPurpose::Shadow};
-                            impl_->lod_build_tasks.run([verts=std::move(verts), inds=std::move(inds), bytes, promise]() {
-                                Impl::LODBuildResult r; try {
-                                    r.vertex_buffer=make_geometry_buffer(verts,Horizon::BufferUsageFlags::TransferDst|Horizon::BufferUsageFlags::Vertex,"geometry.shadow_lod_vertex");
-                                    r.index_buffer=make_geometry_buffer(inds,Horizon::BufferUsageFlags::TransferDst|Horizon::BufferUsageFlags::Index,"geometry.shadow_lod_index");
-                                    r.vertex_storage=make_geometry_buffer(verts,Horizon::BufferUsageFlags::TransferSrc|Horizon::BufferUsageFlags::TransferDst|Horizon::BufferUsageFlags::Storage,"geometry.shadow_lod_vertex_storage");
-                                    r.index_storage=make_geometry_buffer(inds,Horizon::BufferUsageFlags::TransferSrc|Horizon::BufferUsageFlags::TransferDst|Horizon::BufferUsageFlags::Storage,"geometry.shadow_lod_index_storage");
-                                    r.gpu_bytes=bytes; r.ok=static_cast<bool>(r.vertex_buffer)&&static_cast<bool>(r.index_buffer);
-                                } catch (...) { r.ok=false; } promise->set_value(std::move(r));
-                            });
-                            ++impl_->diag_lod_build_launches;
-                        }
-                    }
-                }
-            }
-
             // ---- demand=0 且 LOD0 已被卸载 → 从 Scene CPU 数据重建 LOD0 GPU 缓冲 ----
             // LOD0 被卸载后（levels[0].ready=false），demand 回到 0 时走本路径重建。
             // 重建期间 swap 模型保活 prev_committed 级供渲染使用，不中断渲染。
@@ -2850,7 +2650,7 @@ void GeometrySystem::reconcile_lod_residency() {
 
             // ---- 释放多余的已就绪级（持锁；refcount 保证渲染端副本存活）----
             // 注：LOD0（lvl_idx=0）现在也参与释放判断。释放 lod_cache 引用后，
-            // 延迟到整个 Geometry 只读扫描结束后再清空 mesh_dev 的独立句柄。
+            // 在锁外再清空 mesh_dev 的 vertexBuffer 等，使 VRAM 引用计数归零真正释放显存。
             bool freed_lod0 = false;
             if (!to_free.empty()) {
                 std::unique_lock lock(impl_->lod_cache_mutex);
@@ -2871,40 +2671,22 @@ void GeometrySystem::reconcile_lod_residency() {
                     }
                 }
             }
+            // LOD0 已从 lod_cache 释放 → 清空 mesh_dev 的独立引用使 VRAM 真正归零
+            // （lod_cache_mutex 已释放，此处只加 geometry 写锁，无死锁风险）
             if (freed_lod0) {
-                auto eviction = std::find_if(
-                    pending_lod0_evictions.begin(), pending_lod0_evictions.end(),
-                    [geom_handle](const Lod0DeviceEviction& candidate) {
-                        return candidate.geometry_handle == geom_handle;
-                    });
-                if (eviction == pending_lod0_evictions.end()) {
-                    pending_lod0_evictions.push_back(
-                        Lod0DeviceEviction{geom_handle, model_resource_handle, {mesh_idx}});
-                } else {
-                    eviction->mesh_indices.push_back(mesh_idx);
+                auto& geom_storage = hub.geometry_storage();
+                if (auto geom_write = geom_storage.try_acquire_write(geom_handle)) {
+                    if (mesh_idx < static_cast<uint32_t>(geom_write->mesh_handles.size())) {
+                        auto& md = geom_write->mesh_handles[mesh_idx];
+                        md.vertexBuffer        = Horizon::HardwareBuffer{};
+                        md.indexBuffer         = Horizon::HardwareBuffer{};
+                        md.vertexStorageBuffer = Horizon::HardwareBuffer{};
+                        md.indexStorageBuffer  = Horizon::HardwareBuffer{};
+                        md.mesh_mem            = Corona::Memory::GpuMemToken{};
+                        CFW_LOG_NOTICE("[LOD] evicted LOD0 from VRAM: geom={} mesh={}", geom_handle, mesh_idx);
+                    }
                 }
             }
-        }
-    }
-
-    // All Geometry storage read iterators/accessors are out of scope here.
-    // Only now may this function acquire Geometry storage write locks.
-    for (const auto& eviction : pending_lod0_evictions) {
-        auto geom_write = geom_storage.try_acquire_write(eviction.geometry_handle);
-        if (!geom_write ||
-            geom_write->model_resource_handle != eviction.expected_model_resource_handle) {
-            continue;
-        }
-        for (const auto mesh_idx : eviction.mesh_indices) {
-            if (mesh_idx >= geom_write->mesh_handles.size()) continue;
-            auto& md = geom_write->mesh_handles[mesh_idx];
-            md.vertexBuffer        = Horizon::HardwareBuffer{};
-            md.indexBuffer         = Horizon::HardwareBuffer{};
-            md.vertexStorageBuffer = Horizon::HardwareBuffer{};
-            md.indexStorageBuffer  = Horizon::HardwareBuffer{};
-            md.mesh_mem            = Corona::Memory::GpuMemToken{};
-            CFW_LOG_NOTICE("[LOD] evicted LOD0 from VRAM: geom={} mesh={}",
-                           eviction.geometry_handle, mesh_idx);
         }
     }
 }
@@ -2963,19 +2745,13 @@ void GeometrySystem::process_pending_lod_builds() {
         // ---- 变更 H：swap 完成检测 ----
         // 新级 ready 后立即释放被保活的旧级（prev_committed），最小化"2层共存"窗口。
         // 不等下一帧 reconcile：本帧 build 回写后即刻在同一 unique_lock 内完成 swap。
-        const bool shadow_task = task.purpose == Impl::LodBuildPurpose::Shadow;
-        if (shadow_task ? cit->second.shadow_swap_in_progress : cit->second.swap_in_progress) {
-            const int new_d   = shadow_task ? cit->second.shadow_committed_demand : cit->second.committed_demand;
-            const int old_lvl = shadow_task ? cit->second.shadow_prev_committed : cit->second.prev_committed;
+        if (cit->second.swap_in_progress) {
+            const int new_d   = cit->second.committed_demand;
+            const int old_lvl = cit->second.prev_committed;
             // 确认：刚回写的级正是 committed_demand（避免中途跳级时把错误级当新级）
             if (task.level == new_d && lvl.ready) {
-                if (shadow_task) {
-                    cit->second.shadow_swap_in_progress = false;
-                    cit->second.shadow_prev_committed = -1;
-                } else {
-                    cit->second.swap_in_progress = false;
-                    cit->second.prev_committed = -1;
-                }
+                cit->second.swap_in_progress = false;
+                cit->second.prev_committed   = -1;
                 CFW_LOG_NOTICE("[LOD] swap complete: freed old level {} -> active level {}",
                                old_lvl, new_d);
                 // 释放旧保活级（old_lvl >= 1：永不从 lod_cache 移除 LOD0 的引用计数副本）
@@ -2993,14 +2769,6 @@ void GeometrySystem::process_pending_lod_builds() {
                 }
             }
         }
-    }
-
-    if (!impl_->pending_shadow_lod_builds.empty()) {
-        auto main_pending = std::move(impl_->pending_lod_builds);
-        impl_->pending_lod_builds = std::move(impl_->pending_shadow_lod_builds);
-        process_pending_lod_builds();
-        impl_->pending_shadow_lod_builds = std::move(impl_->pending_lod_builds);
-        impl_->pending_lod_builds = std::move(main_pending);
     }
 }
 
@@ -3144,10 +2912,7 @@ build_mesh_slots(const GeometrySystem*        gs,
                  const ktm::fvec3&            camera_pos,
                  float                        camera_fov_deg,
                  const ktm::fvec3&            world_center,
-                 float                        bounding_radius,
-                 bool                         use_shadow_lod = false,
-                 float                        shadow_texel = 0.0f,
-                 float                        shadow_scale = 1.0f) {
+                 float                        bounding_radius) {
     std::vector<GeometrySystem::MeshSlot> result;
     result.reserve(geom.mesh_handles.size());
 
@@ -3160,10 +2925,7 @@ build_mesh_slots(const GeometrySystem*        gs,
             m.vertexStorageBuffer, m.indexStorageBuffer,
             m.vertex_count, m.index_count, m.max_index};
 
-        GeometrySystem::RenderMeshBuffers geo = use_shadow_lod
-            ? gs->select_shadow_render_buffers(geometry_handle, i, shadow_texel,
-                                                shadow_scale, fallback)
-            : use_camera
+        GeometrySystem::RenderMeshBuffers geo = use_camera
             ? gs->select_render_buffers(
                   geometry_handle, i,
                   camera_pos, camera_fov_deg, world_center, bounding_radius,
@@ -3217,46 +2979,6 @@ GeometrySystem::query_mesh_slots(std::uintptr_t    geometry_handle,
     return build_mesh_slots(this, geometry_handle, *geom,
                             true, camera_pos, camera_fov_deg,
                             world_center, bounding_radius);
-}
-
-void GeometrySystem::request_shadow_lod(std::uintptr_t geometry_handle,
-                                        uint32_t mesh_index,
-                                        float world_units_per_texel,
-                                        float max_abs_scale,
-                                        std::uint64_t frame) const {
-    if (!(world_units_per_texel > 0.0f) || !std::isfinite(world_units_per_texel) ||
-        !std::isfinite(max_abs_scale)) return;
-    std::unique_lock lock(impl_->lod_cache_mutex);
-    auto it = impl_->lod_cache.find(Impl::make_lod_key(geometry_handle, mesh_index));
-    if (it == impl_->lod_cache.end() || it->second.levels.size() <= 1) return;
-    std::array<float, 8> errors{};
-    const int count = static_cast<int>(std::min<size_t>(it->second.levels.size(), errors.size()));
-    for (int i = 0; i < count; ++i) errors[static_cast<size_t>(i)] = it->second.levels[i].geometric_error;
-    const int target = GeometryDetail::choose_shadow_target(
-        errors, count, max_abs_scale, world_units_per_texel, 0);
-    if (it->second.shadow_last_request_frame != frame) {
-        it->second.shadow_committed_demand = target;
-    } else if (it->second.shadow_committed_demand < 0) {
-        it->second.shadow_committed_demand = target;
-    } else {
-        it->second.shadow_committed_demand = std::min(it->second.shadow_committed_demand, target);
-    }
-    it->second.shadow_last_request_frame = frame;
-}
-
-std::vector<GeometrySystem::MeshSlot>
-GeometrySystem::query_shadow_mesh_slots(std::uintptr_t geometry_handle,
-                                        float world_units_per_texel,
-                                        float max_abs_scale,
-                                        std::uint64_t frame) const {
-    auto& geom_storage = SharedDataHub::instance().geometry_storage();
-    auto geom = geom_storage.try_acquire_read(geometry_handle);
-    if (!geom || geom->mesh_handles.empty()) return {};
-    for (uint32_t i = 0; i < static_cast<uint32_t>(geom->mesh_handles.size()); ++i)
-        request_shadow_lod(geometry_handle, i, world_units_per_texel, max_abs_scale, frame);
-    return build_mesh_slots(this, geometry_handle, *geom,
-                            false, {}, 0.0f, {}, 0.0f,
-                            true, world_units_per_texel, max_abs_scale);
 }
 
 void GeometrySystem::update_cpu_resource_ledger() {

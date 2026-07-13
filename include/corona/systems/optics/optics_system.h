@@ -13,7 +13,6 @@
 #endif
 
 #include <chrono>
-#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -307,8 +306,6 @@ class OpticsSystem : public Kernel::SystemBase {
     static constexpr uint64_t kUiViewIdleEvictFrames = 240;
 
     std::unique_ptr<Hardware> hardware_;
-    double pending_native_throttle_wait_ms_{0.0};
-    std::atomic<std::uint64_t> pending_native_consumed_serial_{0};
 
     // LOD 系统引用（渲染时查询 LOD 缓冲）
     GeometrySystem* geometry_system_ = nullptr;
@@ -356,7 +353,6 @@ class OpticsSystem : public Kernel::SystemBase {
     Kernel::EventId backend_switch_sub_id_ = 0;
     Kernel::EventId vision_scene_load_sub_id_ = 0;
     Kernel::EventId residency_sub_id_ = 0;
-    Kernel::EventId native_frame_consumed_sub_id_ = 0;
 
     // ActorResidencyChangedEvent 驱动的驻留集合（Loaded actor 在此）
     mutable std::shared_mutex residency_mtx_;

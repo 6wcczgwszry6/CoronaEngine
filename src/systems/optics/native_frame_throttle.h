@@ -14,21 +14,12 @@ class NativeFrameThrottle {
 public:
     static constexpr std::size_t kMaxInFlight = 2;
 
-    [[nodiscard]] bool try_acquire_slot() noexcept {
-        return in_flight_.size() < kMaxInFlight;
-    }
-
-    void acknowledge_consumed(std::uint64_t serial) noexcept {
-        while (!in_flight_.empty() && in_flight_.front().serial <= serial) {
+    template <typename WaitForCompletion>
+    void make_room(WaitForCompletion&& wait_for_completion) {
+        while (in_flight_.size() >= kMaxInFlight) {
+            std::forward<WaitForCompletion>(wait_for_completion)(in_flight_.front());
             in_flight_.pop_front();
         }
-    }
-
-    template <typename WaitForCompletion>
-    void retire_one(WaitForCompletion&& wait_for_completion) {
-        if (in_flight_.empty()) return;
-        std::forward<WaitForCompletion>(wait_for_completion)(in_flight_.front());
-        in_flight_.pop_front();
     }
 
     void submitted(Corona::Horizon::SubmitReceipt receipt) {
@@ -43,7 +34,8 @@ public:
     template <typename WaitForCompletion>
     void drain(WaitForCompletion&& wait_for_completion) {
         while (!in_flight_.empty()) {
-            retire_one(std::forward<WaitForCompletion>(wait_for_completion));
+            std::forward<WaitForCompletion>(wait_for_completion)(in_flight_.front());
+            in_flight_.pop_front();
         }
     }
 
