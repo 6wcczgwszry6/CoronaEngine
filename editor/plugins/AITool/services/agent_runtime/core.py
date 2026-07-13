@@ -16677,19 +16677,44 @@ class AgentRuntime:
         if self._scene_snapshot_provider is None:
             return {}
         room_key = str(room_id)
-        batches = [
-            batch
-            for batch in self._planned_batches_for_plan(plan_id)
-            if batch.status == BatchPlanStatus.PARTIAL
-        ]
+        room_before = self.state.room(room_key)
+        planned_batches = self._planned_batches_for_plan(plan_id)
+        actors_before = dict(room_before.get("actors") or {})
+        environment_before = dict(room_before.get("environment_components") or {})
+
+        def batch_needs_reconcile(batch: BatchPlan) -> bool:
+            if batch.status not in {BatchPlanStatus.PARTIAL, BatchPlanStatus.COMPLETED}:
+                return False
+            if batch.status == BatchPlanStatus.PARTIAL:
+                return True
+            batch_id = str(batch.batch_id or "")
+            if any(
+                isinstance(actor, Mapping)
+                and str(actor.get("plan_id") or "") == plan_id
+                and str(actor.get("batch_id") or "") == batch_id
+                and (
+                    not bool(actor.get("bounds_ready"))
+                    or str(actor.get("bounds_source") or "").strip().lower() != "engine_actual"
+                )
+                for actor in actors_before.values()
+            ):
+                return True
+            components = dict(environment_before.get(batch_id) or {})
+            return any(
+                isinstance(component, Mapping)
+                and (
+                    not bool(component.get("bounds_ready"))
+                    or str(component.get("bounds_source") or "").strip().lower() != "engine_actual"
+                )
+                for component in components.values()
+            )
+
+        batches = [batch for batch in planned_batches if batch_needs_reconcile(batch)]
         if not batches:
             return {}
-        room_before = self.state.room(room_key)
         plan_row = dict(dict(room_before.get("scene_plans") or {}).get(plan_id) or {})
         scene_name = str(plan_row.get("scene_name") or "")
-        known_actors = self._safe_snapshot_known_actor_projection(
-            room_before.get("actors")
-        )
+        known_actors = self._safe_snapshot_known_scene_actor_projection(room_before)
         snapshot_graph = ToolCallGraph(
             graph_id=_id("graph-engine-readiness-snapshot"),
             plan_id=plan_id,
@@ -16888,6 +16913,52 @@ class AgentRuntime:
             }
             actor["actor_id"] = str(actor.get("actor_id") or safe_actor_id)
             projected[safe_actor_id] = actor
+        return projected
+
+    @classmethod
+    def _safe_snapshot_known_scene_actor_projection(
+        cls,
+        room: Mapping[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        """Project actor and environment identities for native snapshot matching."""
+
+        projected = cls._safe_snapshot_known_actor_projection(room.get("actors"))
+        batch_plans = dict(room.get("batch_plans") or {})
+        environment_rows: dict[str, dict[str, Any]] = {}
+        for batch_id, raw_components in dict(room.get("environment_components") or {}).items():
+            if not isinstance(raw_components, Mapping):
+                continue
+            batch_row = dict(batch_plans.get(str(batch_id)) or {})
+            for component in raw_components.values():
+                if not isinstance(component, Mapping):
+                    continue
+                actor_id = str(component.get("actor_id") or "").strip()
+                if not actor_id:
+                    continue
+                row = dict(component)
+                row.update({
+                    "actor_id": actor_id,
+                    "name": str(
+                        component.get("name")
+                        or component.get("component_id")
+                        or component.get("component_type")
+                        or actor_id
+                    ),
+                    "batch_id": str(component.get("batch_id") or batch_id or ""),
+                    "plan_id": str(
+                        component.get("plan_id")
+                        or batch_row.get("plan_id")
+                        or ""
+                    ),
+                    "entity_type": "environment",
+                    "semantic_role": str(
+                        component.get("semantic_role")
+                        or component.get("component_type")
+                        or "environment"
+                    ),
+                })
+                environment_rows[actor_id] = row
+        projected.update(cls._safe_snapshot_known_actor_projection(environment_rows))
         return projected
 
     def _drain_queued_tool_graph(
@@ -30579,9 +30650,7 @@ class AgentRuntime:
                     or 1
                 ),
             )
-        known_actors = self._safe_snapshot_known_actor_projection(
-            room_before_snapshot.get("actors")
-        )
+        known_actors = self._safe_snapshot_known_scene_actor_projection(room_before_snapshot)
         graph = ToolCallGraph(graph_id=_id("graph"), plan_id=f"scene-snapshot:{room}", batch_id="")
         graph.add(
             ToolCall(

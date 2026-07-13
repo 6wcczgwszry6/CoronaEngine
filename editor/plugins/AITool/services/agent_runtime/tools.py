@@ -5497,23 +5497,19 @@ def _make_scene_snapshot_tool(provider: Callable[[Any], dict[str, Any]]) -> Call
                 for actor_id, actor in dict(call.args.get("known_actors") or {}).items()
                 if str(actor_id or "") and isinstance(actor, Mapping)
             }
-            for actor_id, observed in list(normalized_actors.items()):
-                known = known_actors.get(str(actor_id))
-                if not known or not isinstance(observed, dict):
-                    continue
-                # Native observations own geometry/lifecycle fields, while the
-                # Runtime row remains authoritative for plan, batch, asset and
-                # semantic identity.  StatePatch merges actor maps by key, so
-                # preserve the existing row before replacing that key.
-                normalized_actors[actor_id] = {**known, **observed}
-            for actor in normalized_actors.values():
+            actor_updates = _match_snapshot_actors_to_runtime(
+                normalized_actors,
+                known_actors,
+            ) if known_actors else dict(normalized_actors)
+            for actor in actor_updates.values():
                 if not isinstance(actor, dict):
                     continue
                 if plan_id and not str(actor.get("plan_id") or ""):
                     actor["plan_id"] = plan_id
                 if batch_id and not str(actor.get("batch_id") or ""):
                     actor["batch_id"] = batch_id
-            actors = ActorFactValidator.safe_actor_map(normalized_actors)
+            actors = ActorFactValidator.safe_actor_map(actor_updates)
+            observed_actors = ActorFactValidator.safe_actor_map(normalized_actors)
         except Exception as exc:  # noqa: BLE001
             return _provider_failure_tool_result(
                 "scene_snapshot",
@@ -5528,9 +5524,9 @@ def _make_scene_snapshot_tool(provider: Callable[[Any], dict[str, Any]]) -> Call
             "batch_id": str(call.args.get("batch_id") or ""),
             "scene_version": max(1, int(call.args.get("scene_version") or 1)),
             "scene_name": str(snapshot.get("scene_name") or call.args.get("scene_name") or ""),
-            "actor_count": len(actors),
+            "actor_count": len(observed_actors),
             "source": str(snapshot.get("source") or "scene_snapshot_provider"),
-            "actors": list(actors.values()),
+            "actors": list(observed_actors.values()),
         }
         return ToolResult(
             True,
@@ -5539,7 +5535,7 @@ def _make_scene_snapshot_tool(provider: Callable[[Any], dict[str, Any]]) -> Call
                 room_id=room_id,
                 changes={
                     "engine_scene_snapshots": {snapshot_id: snapshot_payload},
-                    "observed_actors": actors,
+                    "observed_actors": observed_actors,
                     "actors": actors,
                 },
             ),
@@ -5547,6 +5543,104 @@ def _make_scene_snapshot_tool(provider: Callable[[Any], dict[str, Any]]) -> Call
         )
 
     return _tool
+
+
+def _match_snapshot_actors_to_runtime(
+    observed_actors: Mapping[str, Mapping[str, Any]],
+    known_actors: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Match native observations to Runtime identity without inventing ownership."""
+
+    indexes: dict[str, dict[str, set[str]]] = {
+        "entity_id": {},
+        "asset_id": {},
+        "model_ref": {},
+        "name": {},
+    }
+
+    def add_index(kind: str, value: Any, actor_id: str) -> None:
+        token = str(value or "").strip().casefold()
+        if token:
+            indexes[kind].setdefault(token, set()).add(actor_id)
+
+    for actor_id, actor in known_actors.items():
+        runtime_actor_id = str(actor_id or "").strip()
+        if not runtime_actor_id:
+            continue
+        add_index("entity_id", actor.get("entity_id"), runtime_actor_id)
+        add_index("asset_id", actor.get("asset_id"), runtime_actor_id)
+        add_index("model_ref", actor.get("model_ref"), runtime_actor_id)
+        for value in (
+            actor.get("native_name"),
+            actor.get("requested_name"),
+            actor.get("display_name"),
+            actor.get("name"),
+            *(actor.get("aliases") or []),
+        ):
+            add_index("name", value, runtime_actor_id)
+
+    matched: dict[str, dict[str, Any]] = {}
+    claimed_runtime_ids: set[str] = set()
+    for observed_id, observed_value in observed_actors.items():
+        observed = dict(observed_value or {})
+        runtime_actor_id = str(observed_id or "").strip()
+        if runtime_actor_id not in known_actors:
+            candidates: set[str] = set()
+            for kind, values in (
+                ("entity_id", (observed.get("entity_id"),)),
+                ("asset_id", (observed.get("asset_id"),)),
+                ("model_ref", (observed.get("model_ref"),)),
+                (
+                    "name",
+                    (
+                        observed.get("native_name"),
+                        observed.get("requested_name"),
+                        observed.get("display_name"),
+                        observed.get("name"),
+                        *(observed.get("aliases") or []),
+                    ),
+                ),
+            ):
+                for value in values:
+                    token = str(value or "").strip().casefold()
+                    owners = indexes[kind].get(token, set()) if token else set()
+                    if len(owners) == 1:
+                        candidates.update(owners)
+            if len(candidates) != 1:
+                continue
+            runtime_actor_id = next(iter(candidates))
+        if runtime_actor_id in claimed_runtime_ids:
+            continue
+        known = dict(known_actors.get(runtime_actor_id) or {})
+        aliases = list(dict.fromkeys([
+            *(known.get("aliases") or []),
+            str(observed_id or "").strip(),
+        ]))
+        merged = {
+            **known,
+            **observed,
+            "actor_id": runtime_actor_id,
+            "aliases": [alias for alias in aliases if alias and alias != runtime_actor_id],
+        }
+        # Runtime identity remains authoritative; the native snapshot owns only
+        # observed geometry, transform, and lifecycle fields.
+        for field in (
+            "entity_id",
+            "asset_id",
+            "model_ref",
+            "plan_id",
+            "batch_id",
+            "semantic_role",
+            "entity_type",
+            "grounding_status",
+            "support_type",
+            "sync_status",
+        ):
+            if known.get(field) not in (None, "", [], {}):
+                merged[field] = known[field]
+        matched[runtime_actor_id] = merged
+        claimed_runtime_ids.add(runtime_actor_id)
+    return matched
 
 
 def _empty_scene_snapshot_provider(request: Any) -> dict[str, Any]:
@@ -5650,6 +5744,21 @@ def _normalize_snapshot_actors(snapshot: dict[str, Any]) -> dict[str, dict[str, 
             "version": item.get("version"),
             "source": str(snapshot.get("source") or "scene_snapshot_provider"),
         }
+        for field in (
+            "entity_id",
+            "asset_id",
+            "model_ref",
+            "plan_id",
+            "batch_id",
+            "native_name",
+            "requested_name",
+            "display_name",
+        ):
+            value = item.get(field)
+            if value not in (None, "", [], {}):
+                actor[field] = value
+        if isinstance(item.get("aliases"), list):
+            actor["aliases"] = list(item.get("aliases") or [])
         aabb = item.get("aabb") or item.get("world_aabb") or item.get("bounds")
         if isinstance(aabb, dict):
             actor["aabb"] = dict(aabb or {})

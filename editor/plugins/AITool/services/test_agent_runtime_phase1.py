@@ -33640,6 +33640,144 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertIn("engine_readiness_reconciled_from_snapshot", runtime.operation_log.events())
         self.assertTrue(room["reports"])
 
+    def test_plan_finalizer_reconciles_native_ids_across_all_historical_batches(self) -> None:
+        def fake_provider(request: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "room_id": request.get("room_id"),
+                "source": "engine_scene_snapshot",
+                "actors": [
+                    {
+                        "actor_id": "native-handle-chair",
+                        "name": "chair",
+                        "position": [-1.0, 0.0, 0.0],
+                        "aabb": {"min": [-1.5, 0.0, -0.5], "max": [-0.5, 1.0, 0.5]},
+                        "bounds_ready": True,
+                    },
+                    {
+                        "actor_id": "native-handle-table",
+                        "name": "table",
+                        "position": [1.0, 0.0, 0.0],
+                        "aabb": {"min": [0.5, 0.0, -0.5], "max": [1.5, 0.8, 0.5]},
+                        "bounds_ready": True,
+                    },
+                    {
+                        "actor_id": "native-unrelated-scene-actor",
+                        "name": "unrelated scene actor",
+                        "position": [5.0, 0.0, 5.0],
+                        "aabb": {"min": [4.5, 0.0, 4.5], "max": [5.5, 1.0, 5.5]},
+                        "bounds_ready": True,
+                    },
+                ],
+            }
+
+        runtime = AgentRuntime(scene_snapshot_provider=fake_provider)
+        plan = runtime.propose_scene_plan(
+            room_id="room-multi-batch-native-snapshot",
+            text="create a room with a chair and table",
+            owner_agent="designer",
+        )
+        plan.status = ScenePlanStatus.EXECUTING
+        first_batch = BatchPlan(
+            batch_id="batch-native-history-1",
+            plan_id=plan.plan_id,
+            room_id="room-multi-batch-native-snapshot",
+            requested_items=["chair"],
+            status=BatchPlanStatus.COMPLETED,
+        )
+        second_batch = BatchPlan(
+            batch_id="batch-native-history-2",
+            plan_id=plan.plan_id,
+            room_id="room-multi-batch-native-snapshot",
+            requested_items=["table"],
+            status=BatchPlanStatus.PARTIAL,
+        )
+        runtime.scene_plans[plan.plan_id] = plan
+        runtime.batch_plans[first_batch.batch_id] = first_batch
+        runtime.batch_plans[second_batch.batch_id] = second_batch
+
+        actors: dict[str, dict[str, Any]] = {}
+        import_facts: dict[str, dict[str, Any]] = {}
+        for actor_id, name, batch in (
+            ("runtime-chair", "chair", first_batch),
+            ("runtime-table", "table", second_batch),
+        ):
+            actors[actor_id] = {
+                "actor_id": actor_id,
+                "entity_id": f"entity-{name}",
+                "name": name,
+                "requested_name": name,
+                "plan_id": plan.plan_id,
+                "batch_id": batch.batch_id,
+                "asset_id": f"asset-{name}",
+                "model_ref": f"{name}.glb",
+                "position": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0],
+                "scale": [1.0, 1.0, 1.0],
+                "grounding_status": "grounded",
+                "support_type": "floor_supported",
+                "sync_status": "local",
+                "status": "engine_loading",
+                "bounds_ready": False,
+                "bounds_source": "estimated",
+                "engine_lifecycle_status": "engine_loading",
+            }
+            import_facts[f"{batch.batch_id}:actor_import_result"] = {
+                "status": "engine_loading",
+                "requested_count": 1,
+                "imported_count": 1,
+                "ready_count": 0,
+                "failed_count": 0,
+            }
+
+        applied, reason = runtime.state.apply_patch(StatePatch(
+            room_id="room-multi-batch-native-snapshot",
+            changes={
+                "active_plan_id": plan.plan_id,
+                "scene_plans": {plan.plan_id: plan.as_dict()},
+                "batch_plans": {
+                    first_batch.batch_id: first_batch.as_dict(),
+                    second_batch.batch_id: second_batch.as_dict(),
+                },
+                "actors": actors,
+                "custom_import_facts": import_facts,
+            },
+        ))
+        self.assertTrue(applied, reason)
+
+        runtime.handle_message(
+            room_id="room-multi-batch-native-snapshot",
+            text="runtime worker drain",
+            action="worker_drain",
+        )
+        room = runtime.query_state("room-multi-batch-native-snapshot")["room"]
+
+        self.assertEqual(room["batch_plans"][first_batch.batch_id]["status"], "completed")
+        self.assertEqual(room["batch_plans"][second_batch.batch_id]["status"], "completed")
+        self.assertEqual(set(room["actors"]), {"runtime-chair", "runtime-table"})
+        for actor_id in ("runtime-chair", "runtime-table"):
+            self.assertTrue(room["actors"][actor_id]["bounds_ready"])
+            self.assertEqual(room["actors"][actor_id]["bounds_source"], "engine_actual")
+        self.assertIn("native-unrelated-scene-actor", room["observed_actors"])
+        registry = runtime._scene_entity_registry_for_plan(room, plan.plan_id)
+        self.assertEqual(registry["entity_count"], 2)
+        self.assertEqual(registry["engine_write_verified_count"], 2)
+        self.assertEqual(registry["game_ready_entity_count"], 2)
+        self.assertEqual(
+            room["custom_import_facts"][f"{first_batch.batch_id}:actor_import_result"]["ready_count"],
+            1,
+        )
+        self.assertEqual(
+            room["custom_import_facts"][f"{second_batch.batch_id}:actor_import_result"]["ready_count"],
+            1,
+        )
+        reconcile_event = runtime.operation_log.query(
+            event="engine_readiness_reconciled_from_snapshot",
+            room_id="room-multi-batch-native-snapshot",
+            plan_id=plan.plan_id,
+        )[-1]
+        self.assertEqual(reconcile_event.payload["changed_batch_count"], 2)
+        self.assertEqual(reconcile_event.payload["recovered_batch_count"], 2)
+
     def test_scene_snapshot_provider_failure_does_not_patch_runtime_state(self) -> None:
         def failing_provider(room_id: str) -> dict:
             raise RuntimeError("native bridge unavailable")
