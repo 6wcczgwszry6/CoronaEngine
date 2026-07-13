@@ -88,7 +88,11 @@ def _gate_facts(*, game_ready_count: int) -> dict:
     )
     consistency["engine_snapshot_available"] = True
     operation_entries = [
-        {"event": event, "timestamp": float(index + 1)}
+        {
+            "event": event,
+            "timestamp": float(index + 1),
+            "payload": {"scene_version": scene_version},
+        }
         for index, event in enumerate(
             (
                 "finalizer_started",
@@ -148,7 +152,13 @@ def _gate_facts(*, game_ready_count: int) -> dict:
         "batch_plans": batches,
         "tool_graphs": graphs,
         "operation_entries": operation_entries,
-        "runtime_events": [{"event_type": "report_ready", "timestamp": 7.0}],
+        "runtime_events": [
+            {
+                "event_type": "report_ready",
+                "timestamp": 7.0,
+                "payload": {"scene_version": scene_version},
+            }
+        ],
         "engine_write_summary": {
             "boundary_fact_count": 3,
             "bridge_call_count": 14,
@@ -201,6 +211,23 @@ class R3ReadinessGateTests(unittest.TestCase):
         )
         self.assertIn("readonly_snapshot_analysis", report.capability_unlocks)
         self.assertNotIn("action_proposal", report.capability_unlocks)
+
+    def test_finalizer_events_from_different_scene_versions_do_not_form_green_chain(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        facts["operation_entries"] = deepcopy(facts["operation_entries"])
+        registry_event = next(
+            entry
+            for entry in facts["operation_entries"]
+            if entry["event"] == "scene_entity_registry_ready"
+        )
+        registry_event["payload"]["scene_version"] = 2
+
+        report = evaluate_r3_gate(**facts)
+
+        dimension = report.dimensions["finalizer_completeness"]
+        self.assertEqual(dimension.status, "red")
+        self.assertIn("scene_entity_registry_ready", dimension.missing)
+        self.assertIn("finalizer_scene_version_mismatch", dimension.contradictions)
 
     def test_entity_diagnostics_include_identity_failures_without_trusting_game_ready(self) -> None:
         facts = _gate_facts(game_ready_count=8)

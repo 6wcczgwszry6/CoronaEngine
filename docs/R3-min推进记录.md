@@ -1336,3 +1336,51 @@ red / pending_reevaluation
 ```
 
 本轮不能证明已经达到 `8/14`。下一步固定使用儿童卧室场景重新 F5，核对 `grounding_reconciled_count`、逐实体 `readiness_missing_fields`、Registry、Snapshot 与 R3GateReport；所有 Engine 效果仍为 **[待 F5/实机验证]**。
+
+## 43. W1.4 Finalizer 同版本终态证据闭环
+
+现有 Finalizer 已产生 Registry、Consistency Audit、Snapshot 和 Report 事件，但 R3 Gate 原先只检查事件名称是否在同一计划历史中出现以及最后位置是否有序，没有验证这些事件属于同一个 `scene_version`。这允许旧 Registry、新 Snapshot 和另一版本 Report 被错误拼接成绿色证据。
+
+本轮改动：
+
+- Finalizer 的 `finalizer_started`、`tool_graph_queue_empty` 和 `scene_plan_finalized` 统一写入当前 `scene_version`。
+- `report_ready/report_pending` 的用户可见 RuntimeEvent 同步携带最终 `SceneWorldSnapshot.scene_version`。
+- Registry、Consistency Audit 和 Snapshot 原有版本事实保留，七个终态节点现在可以按同一版本对账。
+- `runtime.r3_readiness.evaluate` 的 `finalizer_completeness` 不再跨版本拼事件，而是以最新 versioned `report_ready` 为目标，查找同版本的完整有序链：
+
+```text
+finalizer_started
+-> tool_graph_queue_empty
+-> scene_plan_finalized
+-> scene_entity_registry_ready
+-> runtime_scene_world_consistency_audited
+-> scene_world_snapshot_ready
+-> report_ready
+```
+
+- 缺少版本证据返回 `finalizer_scene_version_missing`；事件存在但版本不同返回 `finalizer_scene_version_mismatch`；同版本但顺序错误返回 `finalizer_event_order_invalid`。
+- 旧 F5 证据不会因事件名称齐全而自动变绿，必须由新代码重新实机产生同版本闭环。
+
+聚焦自动验证：
+
+```text
+R3 Finalizer 混合 scene_version 拒绝：passed
+Registry -> Snapshot -> Report 同版本有序闭环：passed
+同 scene_version 终态事件幂等：passed
+final report 写入失败后下一 drain 重试：passed
+report_pending 不冒充 terminal report：passed
+Finalizer/R3 专项：12 tests passed
+Game-ready + R3 Readiness 套件：34 tests passed
+Python syntax compile：passed
+```
+
+当前 Gate：
+
+```text
+red / pending_reevaluation
+finalizer_completeness 代码约束：已收口
+旧 F5 终态版本证据：不足，保持 red
+新 F5 同版本终态链：待实机验证
+```
+
+下一步按优先级进入 `business_graph_consistency`，检查一个业务 Batch 是否严格对应一个 terminal `business_batch` ToolGraph；所有 Engine/Sync/终态实机效果仍为 **[待 F5/实机验证]**。

@@ -412,27 +412,70 @@ def _finalizer_dimension(
         "scene_world_snapshot_ready",
         "report_ready",
     )
-    timeline: list[tuple[float, int, str]] = []
+    timeline: list[tuple[float, int, str, int]] = []
     ordinal = 0
+
+    def scene_version_from(row: Mapping[str, Any]) -> int:
+        payload = row.get("payload")
+        payload_version = payload.get("scene_version") if isinstance(payload, Mapping) else 0
+        return _safe_int(payload_version or row.get("scene_version"))
+
     for entry in _stable_rows(operation_entries):
         event = str(entry.get("event") or "")
         if event in required:
-            timeline.append((float(entry.get("timestamp") or 0.0), ordinal, event))
+            timeline.append(
+                (
+                    float(entry.get("timestamp") or 0.0),
+                    ordinal,
+                    event,
+                    scene_version_from(entry),
+                )
+            )
             ordinal += 1
     for entry in _stable_rows(runtime_events):
         event = str(entry.get("event_type") or entry.get("event") or "")
         if event == "report_ready":
-            timeline.append((float(entry.get("timestamp") or 0.0), ordinal, event))
+            timeline.append(
+                (
+                    float(entry.get("timestamp") or 0.0),
+                    ordinal,
+                    event,
+                    scene_version_from(entry),
+                )
+            )
             ordinal += 1
     timeline.sort(key=lambda item: (item[0], item[1]))
-    last_positions: dict[str, int] = {}
-    for index, (_, _, event) in enumerate(timeline):
-        last_positions[event] = index
-    missing = [event for event in required if event not in last_positions]
-    ordered = not missing and [last_positions[event] for event in required] == sorted(
-        last_positions[event] for event in required
-    )
-    contradictions = [] if ordered or missing else ["finalizer_event_order_invalid"]
+    versioned_report_rows = [row for row in timeline if row[2] == "report_ready" and row[3] > 0]
+    target_scene_version = versioned_report_rows[-1][3] if versioned_report_rows else 0
+    version_timeline = [row for row in timeline if row[3] == target_scene_version] if target_scene_version else []
+    ordered_positions: list[int] = []
+    cursor = -1
+    missing: list[str] = []
+    for event in required:
+        next_position = next(
+            (
+                index
+                for index, (_, _, candidate_event, _) in enumerate(version_timeline)
+                if index > cursor and candidate_event == event
+            ),
+            None,
+        )
+        if next_position is None:
+            missing.append(event)
+            continue
+        cursor = next_position
+        ordered_positions.append(next_position)
+    ordered = bool(target_scene_version) and not missing and len(ordered_positions) == len(required)
+    contradictions: list[str] = []
+    if not target_scene_version:
+        contradictions.append("finalizer_scene_version_missing")
+    elif missing:
+        version_events = {row[2] for row in version_timeline}
+        all_events = {row[2] for row in timeline}
+        if any(event in all_events and event not in version_events for event in missing):
+            contradictions.append("finalizer_scene_version_mismatch")
+        elif any(event in version_events for event in missing):
+            contradictions.append("finalizer_event_order_invalid")
     status = "green" if not missing and ordered else "red"
     return _dimension(
         "finalizer_completeness",
@@ -442,9 +485,11 @@ def _finalizer_dimension(
         else "Finalizer terminal evidence is incomplete or out of order.",
         metrics={
             "required_event_count": len(required),
-            "observed_event_count": len(last_positions),
+            "observed_event_count": len({row[2] for row in version_timeline}),
             "ordered": ordered,
-            "observed_events": [event for _, _, event in timeline],
+            "target_scene_version": target_scene_version,
+            "observed_events": [event for _, _, event, _ in version_timeline],
+            "all_observed_event_versions": sorted({row[3] for row in timeline if row[3] > 0}),
         },
         missing=missing,
         contradictions=contradictions,

@@ -16460,17 +16460,24 @@ class AgentRuntime:
                 "reason": "tool_graphs_active",
                 "active_graph_count": len(active_queue_rows),
             }
+        finalizer_scene_version = max(1, int(plan.version or 1))
         self.operation_log.append(
             "finalizer_started",
             room_id=str(room_id),
             plan_id=plan_id,
-            payload={"active_graph_count": 0},
+            payload={
+                "active_graph_count": 0,
+                "scene_version": finalizer_scene_version,
+            },
         )
         self.operation_log.append(
             "tool_graph_queue_empty",
             room_id=str(room_id),
             plan_id=plan_id,
-            payload={"active_graph_count": 0},
+            payload={
+                "active_graph_count": 0,
+                "scene_version": finalizer_scene_version,
+            },
         )
         self._reconcile_partial_engine_readiness(room_id=str(room_id), plan_id=plan_id)
         batches = self._planned_batches_for_plan(plan_id)
@@ -16510,6 +16517,7 @@ class AgentRuntime:
             "completed_count": sum(status == BatchPlanStatus.COMPLETED for status in batch_statuses),
             "partial_count": sum(status == BatchPlanStatus.PARTIAL for status in batch_statuses),
             "failed_count": sum(status == BatchPlanStatus.FAILED for status in batch_statuses),
+            "scene_version": finalizer_scene_version,
         }
         self.operation_log.append(
             "scene_plan_finalized" if next_status in {ScenePlanStatus.COMPLETED, ScenePlanStatus.FAILED} else "scene_plan_finalization_pending",
@@ -23116,6 +23124,7 @@ class AgentRuntime:
             progress=100 if report_terminal else 96,
             payload={
                 "status": str(plan.get("status") or ""),
+                "scene_version": int(scene_world_snapshot.get("scene_version") or 0),
                 "pipeline_status": completion_status["pipeline_status"],
                 "engine_materialization_status": completion_status["engine_materialization_status"],
                 "world_readiness": completion_status["world_readiness"],
