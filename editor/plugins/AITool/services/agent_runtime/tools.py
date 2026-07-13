@@ -3962,6 +3962,21 @@ def _make_actor_import_tool(
                 user_visible_message="场景导入结果不符合系统协议，系统会稍后重试或等待进一步处理。",
             )
         for actor in actors.values():
+            actor.setdefault("entity_type", "actor")
+            actor.setdefault(
+                "semantic_role",
+                str(actor.get("requested_name") or actor.get("name") or ""),
+            )
+            actor.setdefault("interaction_capability", [])
+            actor.setdefault("gameplay_tags", [])
+            actor.setdefault("physics_profile", {})
+            actor.setdefault("audio_profile", {"surface": "generic"})
+            actor.setdefault(
+                "lighting_profile",
+                {"receives_light": True, "casts_shadow": True},
+            )
+            actor.setdefault("script_bindings", ["runtime_scene_entity"])
+            actor.setdefault("review_status", "pending_review")
             has_actual_bounds = bool(_safe_import_aabb(actor.get("aabb") or actor.get("bounds")))
             bounds_source = str(actor.get("bounds_source") or "").strip().lower()
             if "bounds_ready" not in actor and has_actual_bounds and bounds_source != "estimated":

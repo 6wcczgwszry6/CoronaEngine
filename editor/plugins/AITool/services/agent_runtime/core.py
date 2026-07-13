@@ -20646,6 +20646,19 @@ class AgentRuntime:
                 component_actor_id = str(component.get("actor_id") or "").strip()
                 component_sync = actor_sync_status(component, str(component.get("asset_id") or ""))
                 current_entity_version, entity_version_source = entity_version(component)
+                explicit_component_grounding = str(
+                    component.get("grounding_status") or component.get("grounded_status") or ""
+                ).strip()
+                if explicit_component_grounding:
+                    component_grounding = explicit_component_grounding
+                elif component.get("requires_engine_write") is False:
+                    component_grounding = "not_applicable"
+                elif component_type in {"room_floor", "terrain", "ground", "walkable_floor"}:
+                    component_grounding = "grounded"
+                elif component_type in {"room_box", "room_shell", "indoor_enclosure"}:
+                    component_grounding = "enclosure"
+                else:
+                    component_grounding = "not_applicable"
                 entity = {
                     "entity_id": entity_id,
                     "entity_id_source": (
@@ -20675,13 +20688,7 @@ class AgentRuntime:
                     "bounds_ready": bool(component.get("bounds_ready")) if "bounds_ready" in component else bool(bounds),
                     "bounds_source": str(component.get("bounds_source") or "runtime_state"),
                     "size": vector3(component.get("size")),
-                    "grounding_status": (
-                        "grounded"
-                        if component_type in {"room_floor", "terrain", "ground", "walkable_floor"}
-                        else "enclosure"
-                        if component_type in {"room_box", "room_shell", "indoor_enclosure"}
-                        else "not_applicable"
-                    ),
+                    "grounding_status": component_grounding,
                     "interaction_capability": list_field(component, "interaction_capability"),
                     "gameplay_tags": list_field(component, "gameplay_tags"),
                     "physics_profile": mapping_field(component, "physics_profile"),
