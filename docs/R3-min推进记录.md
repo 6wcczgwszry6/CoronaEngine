@@ -420,3 +420,30 @@ Python syntax compile
 - 房主与成员的 `entity_id/asset_id/actor_version/transform/AABB` 和 fingerprint 一致。
 - 成员远端 Actor identity 注册及真实 AABB 到达后，Snapshot 从 `needs_review` 正确收敛。
 - 房主切换执行计划或追加场景版本时，成员 peer mirror 不回退到迟到旧事实。
+
+## 18. Runtime 同步版本单调性
+
+前端已经按 `actor_guid + actor_version` 拒绝旧 Actor 更新，但 Runtime 同步 reducer 之前仍会直接应用迟到事件中的 transform/AABB。这会造成 Engine 已保留新版本，而成员 SceneWorldSnapshot 被旧事实覆盖。
+
+当前改动：
+
+- 同步事件显式携带 `actor_version/version` 时，Runtime 在创建 StatePatch 前与现有 ActorFact 版本比较。
+- 低于当前版本的事件记录为 `sync_event_record_skipped: stale actor version`，不修改 ActorFact、Registry、Snapshot 或 fingerprint。
+- 未携带版本的旧协议事件保持兼容，不凭默认版本 1 错误拒绝。
+- 同版本事件仍可补齐晚到 AABB/readiness 事实，避免阻断合法的 Engine-ready 收敛。
+- Runtime/GM 状态摘要与公开 Snapshot 使用同一目标优先级；成员没有本地 ScenePlan 时可只读显示 peer mirror 实体世界及 authority，不再错误显示“无计划”。
+
+聚焦自动验证：
+
+```text
+actor version 4 后收到 version 3 -> rejected
+旧 transform/AABB 不覆盖新事实
+Snapshot world_fingerprint 保持不变
+Snapshot/Game-ready/SceneInspector/同步桥 24 项通过
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 真实网络乱序或重放时，成员 Engine 与 Runtime 均拒绝旧版本。
+- 同版本的 identity、AABB 和同步终态补齐不会被误判为重复而丢失。
+- 房主追加批产生的新 actor/scene version 能在成员端单调收敛。

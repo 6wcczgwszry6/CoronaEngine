@@ -3692,7 +3692,15 @@ class LANChatAgentWorker:
             processed = True
             event = self._expand_native_sync_event(dict(raw_event))
             try:
-                self.handle_lanchat_sync_event(event)
+                handled = self.handle_lanchat_sync_event(event)
+                self._logger.info(
+                    "[LANChatSyncBridge] event=%s room=%s authority=%s actor_version=%s recorded=%s",
+                    str(event.get("event") or event.get("type") or "unknown"),
+                    str(event.get("room_id") or event.get("room") or ""),
+                    str(event.get("authority") or "unknown"),
+                    str(event.get("actor_version") or event.get("version") or ""),
+                    bool(dict(handled.get("runtime_sync") or {}).get("recorded")),
+                )
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug("Failed to handle LANChat sync event: %s", type(exc).__name__)
         return processed

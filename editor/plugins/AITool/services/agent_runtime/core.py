@@ -24026,6 +24026,7 @@ class AgentRuntime:
                 if missing_external_plan
                 else room.get("active_execution_plan_id")
                 or room.get("latest_completed_plan_id")
+                or room.get("peer_mirror_plan_id")
                 or room.get("active_discussion_plan_id")
                 or room.get("active_plan_id")
             )
@@ -24355,7 +24356,11 @@ class AgentRuntime:
             context_type_counts[context_type] = context_type_counts.get(context_type, 0) + 1
             speaker_type_counts[speaker_type] = speaker_type_counts.get(speaker_type, 0) + 1
         planning_context_digest = self._planning_context_digest_for_report(context_events)
-        available = plan_available or bool(context_events)
+        available = (
+            plan_available
+            or bool(context_events)
+            or bool(scene_entity_registry.get("available"))
+        )
         pending_interventions = [
             dict(item)
             for item in room.get("pending_interventions", {}).values()
@@ -24456,6 +24461,14 @@ class AgentRuntime:
             "active_discussion_plan_id": str(room.get("active_discussion_plan_id") or ""),
             "active_execution_plan_id": str(room.get("active_execution_plan_id") or ""),
             "latest_completed_plan_id": str(room.get("latest_completed_plan_id") or ""),
+            "peer_mirror_plan_id": str(room.get("peer_mirror_plan_id") or ""),
+            "snapshot_authority": (
+                "peer_mirror"
+                if active_plan_id
+                and active_plan_id == str(room.get("peer_mirror_plan_id") or "")
+                and active_plan_id not in dict(room.get("scene_plans") or {})
+                else "local_runtime"
+            ),
             "active_external_plan_id": routable_external_plan_id,
             "batch_id": active_batch_id,
             "state_version": snapshot["version"],
@@ -28196,6 +28209,10 @@ class AgentRuntime:
             }
         else:
             room = str(room_id or event.get("room_id") or event.get("room") or "default")
+            incoming_actor_version = self._sync_non_negative_int_from_event(
+                event,
+                ("actor_version", "version"),
+            )
             event_type = self._canonical_sync_event_type(
                 str(event.get("event") or event.get("event_type") or event.get("type") or "").strip().lower()
                 or "unknown"
@@ -28236,8 +28253,9 @@ class AgentRuntime:
                 "model_ref": str(event.get("model_ref") or event.get("model") or event.get("path") or ""),
                 "actor_version": max(
                     1,
-                    self._sync_non_negative_int_from_event(event, ("actor_version", "version")) or 1,
+                    incoming_actor_version or 1,
                 ),
+                "actor_version_explicit": incoming_actor_version is not None,
                 "scene_version": max(
                     1,
                     self._sync_non_negative_int_from_event(event, ("scene_version", "plan_version")) or 1,
@@ -28364,6 +28382,22 @@ class AgentRuntime:
             scene_name = str(plan_data.get("scene_name") or "")
         if scene_name:
             normalized["scene_name"] = scene_name
+        actor_id_for_version_check = str(normalized.get("actor_id") or "")
+        if actor_id_for_version_check and bool(normalized.get("actor_version_explicit")):
+            current_actor_fact = dict(
+                dict(room_state.get("actors") or {}).get(actor_id_for_version_check) or {}
+            )
+            try:
+                current_actor_version = int(
+                    current_actor_fact.get("actor_version")
+                    or current_actor_fact.get("version")
+                    or 0
+                )
+            except (TypeError, ValueError):
+                current_actor_version = 0
+            incoming_version = int(normalized.get("actor_version") or 1)
+            if current_actor_version > 0 and incoming_version < current_actor_version:
+                return skip_sync_event("stale actor version")
         stored_event = SyncEventValidator.safe_storage_event(normalized)
         existing_sync_state = dict(room_state.get("sync_state") or {})
         existing_events = list(room_state.get("sync_events") or [])

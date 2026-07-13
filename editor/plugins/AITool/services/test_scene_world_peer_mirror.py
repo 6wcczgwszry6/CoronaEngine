@@ -74,6 +74,28 @@ class SceneWorldPeerMirrorTests(unittest.TestCase):
         self.assertEqual(entity["sync_status"], "synced")
         self.assertEqual(self.runtime.query_state("room-peer")["room"]["scene_plans"], {})
 
+        status = self.runtime.status_summary("room-peer")
+        self.assertTrue(status["available"])
+        self.assertEqual(status["plan_id"], "plan-host-scene")
+        self.assertEqual(status["peer_mirror_plan_id"], "plan-host-scene")
+        self.assertEqual(status["snapshot_authority"], "peer_mirror")
+        self.assertEqual(status["scene_entity_registry"]["actor_count"], 1)
+
+        stale = self._record({
+            **base,
+            "event": "actor_updated",
+            "actor_version": 3,
+            "position": [99.0, 99.0, 99.0],
+            "world_aabb": {"min": [98.0, 98.0, 98.0], "max": [100.0, 100.0, 100.0]},
+        })
+        self.assertFalse(stale["recorded"])
+        self.assertEqual(stale["reason"], "stale actor version")
+        after_stale = self.runtime.get_scene_world_snapshot(room_id="room-peer")
+        stable_entity = after_stale["snapshot"]["actor_entities"][0]
+        self.assertEqual(stable_entity["transform"]["position"], [1.0, 0.0, 2.0])
+        self.assertEqual(stable_entity["world_aabb"]["min"], [0.5, 0.0, 1.5])
+        self.assertEqual(after_stale["world_fingerprint"], snapshot_result["world_fingerprint"])
+
     def test_unknown_local_plan_sync_fact_is_rejected(self) -> None:
         result = self._record({
             "room_id": "room-peer",
