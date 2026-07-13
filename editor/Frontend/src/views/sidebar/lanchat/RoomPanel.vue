@@ -529,6 +529,9 @@ const snapshotActorCreateKeys = new Set();
 const remoteAppliedActorVersions = new Map();
 const remoteSnapshotActors = new Map();
 const remoteActorRecords = new Map();
+const lastBroadcastSnapshotHashes = new Map();
+const latestRemoteSceneSnapshots = new Map();
+const lastPeerSnapshotAckHashes = new Map();
 
 const roleTemplates = [
   {
@@ -975,6 +978,17 @@ function hashString(str) {
   return hash >>> 0;
 }
 
+function stableStringify(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function lastPathPart(value) {
   return (
     String(value || '')
@@ -1056,6 +1070,40 @@ function stopModelTransferPolling() {
   remoteAppliedActorVersions.clear();
   remoteSnapshotActors.clear();
   remoteActorRecords.clear();
+  lastBroadcastSnapshotHashes.clear();
+  latestRemoteSceneSnapshots.clear();
+  lastPeerSnapshotAckHashes.clear();
+}
+
+function snapshotIdentityRow(actorData) {
+  return {
+    actor_guid: String(actorData?.actor_guid || '').trim(),
+    entity_id: String(actorData?.entity_id || actorData?.runtime_entity_id || '').trim(),
+    asset_id: String(actorData?.asset_id || actorData?.actor_asset_id || '').trim(),
+    actor_version: actorVersion(actorData),
+    source_plan_id: String(actorData?.source_plan_id || actorData?.plan_id || '').trim(),
+    source_scene_version: Math.max(
+      1,
+      Number(actorData?.source_scene_version ?? actorData?.scene_version ?? 1) || 1,
+    ),
+  };
+}
+
+function snapshotIdentityRows(actors, planId) {
+  const targetPlanId = String(planId || '').trim();
+  if (!targetPlanId) return [];
+  return (Array.isArray(actors) ? actors : [])
+    .map((actor) => snapshotIdentityRow(actor))
+    .filter((row) => row.actor_guid && row.entity_id && row.source_plan_id === targetPlanId)
+    .sort((left, right) => (
+      left.actor_guid.localeCompare(right.actor_guid)
+      || left.entity_id.localeCompare(right.entity_id)
+    ));
+}
+
+function snapshotIdentityFingerprint(rows) {
+  const serialized = stableStringify(Array.isArray(rows) ? rows : []);
+  return `scene-id-v1-${hashString(serialized).toString(16)}-${serialized.length}`;
 }
 
 async function getActorSnapshot(sceneName) {
@@ -1079,12 +1127,16 @@ async function getActorSnapshot(sceneName) {
         return Number.isFinite(candidate) ? Math.max(version, Math.floor(candidate)) : version;
       }, 1)
     : 0;
+  const identityRows = snapshotIdentityRows(actors, planId);
   return {
     status: 'success',
+    snapshot_kind: 'host_snapshot',
     scene: targetScene,
     plan_id: planId,
     scene_version: sceneVersion,
     snapshot_authority: 'host',
+    entity_count: identityRows.length,
+    identity_fingerprint: snapshotIdentityFingerprint(identityRows),
     actors,
   };
 }
@@ -1150,7 +1202,7 @@ async function registerActorIdentityFromData(actorData, locallyOwned = true) {
   return true;
 }
 
-async function broadcastCurrentSceneSnapshot(sceneName, includeActorCreates = true) {
+async function broadcastCurrentSceneSnapshot(sceneName, includeActorCreates = true, force = false) {
   if (!modelTransferActive()) return;
   const targetScene = String(sceneName || '').trim() || currentModelTransferSceneName();
   const snapshot = await getActorSnapshot(targetScene);
@@ -1171,7 +1223,79 @@ async function broadcastCurrentSceneSnapshot(sceneName, includeActorCreates = tr
       if (sent) rememberActorCreateBroadcast(targetScene, actorGuid, modelPath);
     }
   }
+  const snapshotHash = hashString(stableStringify(snapshot));
+  if (!force && lastBroadcastSnapshotHashes.get(targetScene) === snapshotHash) return;
+  lastBroadcastSnapshotHashes.set(targetScene, snapshotHash);
   await networkService.broadcastSceneSnapshot(targetScene, snapshot).catch(() => {});
+}
+
+function buildPeerSnapshotAck(sceneName, snapshot) {
+  const targetScene = String(sceneName || '').trim() || currentModelTransferSceneName();
+  const planId = String(snapshot?.plan_id || '').trim();
+  const expectedRows = snapshotIdentityRows(snapshot?.actors, planId);
+  const appliedRows = [];
+  let identityDriftCount = 0;
+  let versionDriftCount = 0;
+  let missingEntityCount = 0;
+  for (const expected of expectedRows) {
+    const key = remoteActorKey(targetScene, expected.actor_guid);
+    const appliedVersion = Number(remoteAppliedActorVersions.get(key) || 0);
+    const record = remoteActorRecords.get(key);
+    if (!record || appliedVersion <= 0) {
+      missingEntityCount += 1;
+      continue;
+    }
+    const actual = snapshotIdentityRow(record.actorData || {});
+    if (actual.entity_id !== expected.entity_id || actual.asset_id !== expected.asset_id) {
+      identityDriftCount += 1;
+      continue;
+    }
+    if (appliedVersion !== expected.actor_version || actual.actor_version !== expected.actor_version) {
+      versionDriftCount += 1;
+      continue;
+    }
+    appliedRows.push(actual);
+  }
+  const hostFingerprint = String(
+    snapshot?.identity_fingerprint || snapshotIdentityFingerprint(expectedRows),
+  ).trim();
+  const peerFingerprint = snapshotIdentityFingerprint(appliedRows);
+  const partialEntityCount = missingEntityCount + identityDriftCount + versionDriftCount;
+  return {
+    status: partialEntityCount === 0 && peerFingerprint === hostFingerprint
+      ? 'peer_confirmed'
+      : 'partial',
+    snapshot_kind: 'peer_ack',
+    scene: targetScene,
+    plan_id: planId,
+    scene_version: Math.max(1, Number(snapshot?.scene_version || 1) || 1),
+    host_identity_fingerprint: hostFingerprint,
+    peer_identity_fingerprint: peerFingerprint,
+    entity_count: expectedRows.length,
+    applied_entity_count: appliedRows.length,
+    partial_entity_count: partialEntityCount,
+    identity_drift_count: identityDriftCount,
+    version_drift_count: versionDriftCount,
+    missing_fields_explicit: true,
+  };
+}
+
+async function broadcastPeerSnapshotAck(sceneName, snapshot) {
+  if (!modelTransferActive() || s.role !== 'guest') return;
+  const ack = buildPeerSnapshotAck(sceneName, snapshot);
+  if (!ack.plan_id) return;
+  const ackKey = `${ack.scene}:${ack.plan_id}:${ack.scene_version}`;
+  const ackHash = hashString(stableStringify(ack));
+  if (lastPeerSnapshotAckHashes.get(ackKey) === ackHash) return;
+  lastPeerSnapshotAckHashes.set(ackKey, ackHash);
+  await networkService.broadcastSceneSnapshot(ack.scene, ack).catch(() => {});
+}
+
+async function refreshPeerSnapshotAcks() {
+  if (!modelTransferActive() || s.role !== 'guest') return;
+  for (const [sceneName, snapshot] of latestRemoteSceneSnapshots.entries()) {
+    await broadcastPeerSnapshotAck(sceneName, snapshot);
+  }
 }
 
 async function applyRemoteSceneSnapshot(sceneName, snapshotPayload) {
@@ -1185,6 +1309,7 @@ async function applyRemoteSceneSnapshot(sceneName, snapshotPayload) {
     }
   }
   if (!snapshot || !Array.isArray(snapshot.actors)) return;
+  latestRemoteSceneSnapshots.set(targetScene, snapshot);
   await networkService.setSyncPaused(true);
   try {
     for (const actor of snapshot.actors) {
@@ -1201,6 +1326,7 @@ async function applyRemoteSceneSnapshot(sceneName, snapshotPayload) {
   } finally {
     await networkService.setSyncPaused(false);
   }
+  await broadcastPeerSnapshotAck(targetScene, snapshot);
 }
 
 async function pollPendingActorCreates() {
@@ -1269,8 +1395,15 @@ async function pollModelTransfer() {
       for (let i = 0; i < PENDING_MODEL_TRANSFER_POLL_LIMIT; i += 1) {
         const pendingRequest = await networkService.pollPendingSceneSnapshotRequest();
         if (!pendingRequest || !pendingRequest.has_pending) break;
-        await broadcastCurrentSceneSnapshot(pendingRequest.scene_name || currentModelTransferSceneName(), true);
+        await broadcastCurrentSceneSnapshot(
+          pendingRequest.scene_name || currentModelTransferSceneName(),
+          true,
+          true,
+        );
       }
+      // Actor geometry can become visible after the create callback. Rebuild the
+      // identity snapshot on each poll; hash deduplication keeps the wire quiet.
+      await broadcastCurrentSceneSnapshot(currentModelTransferSceneName(), false, false);
     } else if (s.role === 'guest') {
       for (let i = 0; i < PENDING_MODEL_TRANSFER_POLL_LIMIT; i += 1) {
         const pendingSnapshot = await networkService.pollPendingSceneSnapshot();
@@ -1280,6 +1413,7 @@ async function pollModelTransfer() {
           pendingSnapshot.snapshot_json,
         );
       }
+      await refreshPeerSnapshotAcks();
     }
   } catch (error) {
     console.warn('[LANChat] model transfer polling failed', error);
@@ -1299,8 +1433,9 @@ function handleActorSyncBroadcast(actorData) {
   registerActorIdentityFromData(actorData).catch(() => {});
   networkService
     .broadcastActorCreate(actorGuid, sceneName, modelPath, actorData)
-    .then(() => {
+    .then(async () => {
       rememberActorCreateBroadcast(sceneName, actorGuid, modelPath);
+      await broadcastCurrentSceneSnapshot(sceneName, false, false);
     })
     .catch(() => {});
 }

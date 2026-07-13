@@ -227,6 +227,89 @@ class SceneWorldPeerMirrorTests(unittest.TestCase):
             ["actor-new"],
         )
 
+    def test_host_multiplayer_evidence_requires_exact_peer_snapshot_ack(self) -> None:
+        registry = {
+            "entities": [
+                {"actor_id": "actor-a", "entity_id": "entity-a", "sync_status": "local"},
+                {"actor_id": "actor-b", "entity_id": "entity-b", "sync_status": "local"},
+            ],
+        }
+        room = {
+            "sync_state": {"peer_events": {"peer-1": {"status": "connected"}}},
+            "sync_events": [{
+                "event_type": "scene_snapshot_peer_ack",
+                "plan_id": "plan-local",
+                "peer_id": "peer-1",
+                "authority": "remote_peer",
+                "host_identity_fingerprint": "scene-id-v1-equal",
+                "peer_identity_fingerprint": "scene-id-v1-equal",
+                "entity_count": 2,
+                "applied_entity_count": 2,
+                "partial_entity_count": 0,
+                "identity_drift_count": 0,
+                "version_drift_count": 0,
+                "missing_fields_explicit": True,
+            }],
+        }
+
+        evidence = AgentRuntime._r3_multiplayer_evidence(room, "plan-local", registry)
+        self.assertTrue(evidence["applicable"])
+        self.assertEqual(evidence["comparison_mode"], "peer_snapshot_ack")
+        self.assertEqual(evidence["acknowledged_peer_count"], 1)
+        self.assertEqual(evidence["verified_entity_count"], 2)
+        self.assertEqual(evidence["partial_entity_count"], 0)
+        self.assertEqual(evidence["identity_drift_count"], 0)
+        self.assertEqual(evidence["version_drift_count"], 0)
+
+    def test_host_multiplayer_evidence_rejects_fingerprint_or_version_drift(self) -> None:
+        registry = {
+            "entities": [
+                {"actor_id": "actor-a", "entity_id": "entity-a", "sync_status": "local"},
+                {"actor_id": "actor-b", "entity_id": "entity-b", "sync_status": "local"},
+            ],
+        }
+        room = {
+            "sync_state": {"peer_events": {"peer-1": {"status": "connected"}}},
+            "sync_events": [{
+                "event_type": "scene_snapshot_peer_ack",
+                "plan_id": "plan-local",
+                "peer_id": "peer-1",
+                "authority": "remote_peer",
+                "host_identity_fingerprint": "scene-id-v1-host",
+                "peer_identity_fingerprint": "scene-id-v1-peer",
+                "entity_count": 2,
+                "applied_entity_count": 2,
+                "partial_entity_count": 0,
+                "identity_drift_count": 0,
+                "version_drift_count": 1,
+                "missing_fields_explicit": True,
+            }],
+        }
+
+        evidence = AgentRuntime._r3_multiplayer_evidence(room, "plan-local", registry)
+        self.assertTrue(evidence["applicable"])
+        self.assertEqual(evidence["verified_entity_count"], 0)
+        self.assertEqual(evidence["partial_entity_count"], 2)
+        self.assertGreaterEqual(evidence["identity_drift_count"], 1)
+        self.assertEqual(evidence["version_drift_count"], 1)
+
+    def test_generic_peer_events_are_not_authoritative_host_comparison(self) -> None:
+        evidence = AgentRuntime._r3_multiplayer_evidence(
+            {
+                "sync_state": {"peer_events": {"peer-1": {"status": "connected"}}},
+                "sync_events": [{
+                    "event_type": "actor_create_received",
+                    "plan_id": "plan-local",
+                    "peer_id": "peer-1",
+                    "authority": "remote_peer",
+                }],
+            },
+            "plan-local",
+            {"entities": []},
+        )
+        self.assertFalse(evidence["applicable"])
+        self.assertEqual(evidence["comparison_mode"], "none")
+
 
 if __name__ == "__main__":
     unittest.main()

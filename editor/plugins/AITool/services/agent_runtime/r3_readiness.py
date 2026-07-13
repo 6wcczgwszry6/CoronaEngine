@@ -609,6 +609,8 @@ def _multiplayer_dimension(multiplayer_evidence: Mapping[str, Any]) -> R3GateDim
         metrics={
             "applicable": applicable,
             "peer_count": _safe_int(evidence.get("peer_count")),
+            "acknowledged_peer_count": _safe_int(evidence.get("acknowledged_peer_count")),
+            "comparison_mode": str(evidence.get("comparison_mode") or "none"),
             "entity_count": entity_count,
             "verified_entity_count": verified_count,
             "partial_entity_count": partial_count,

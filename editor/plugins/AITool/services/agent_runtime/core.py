@@ -888,11 +888,24 @@ class SyncEventValidator:
         "batch_id",
         "actor_id",
         "actor_name",
+        "entity_id",
         "asset_id",
         "peer_id",
         "status",
+        "authority",
         "scene_name",
         "scene_version",
+        "actor_version",
+        "snapshot_kind",
+        "identity_fingerprint",
+        "host_identity_fingerprint",
+        "peer_identity_fingerprint",
+        "entity_count",
+        "applied_entity_count",
+        "partial_entity_count",
+        "identity_drift_count",
+        "version_drift_count",
+        "missing_fields_explicit",
         "timestamp",
         "chunk_index",
         "chunk_count",
@@ -931,11 +944,31 @@ class SyncEventValidator:
         "batch_id",
         "actor_id",
         "actor_name",
+        "entity_id",
         "asset_id",
         "peer_id",
         "status",
+        "authority",
         "scene_name",
+        "snapshot_kind",
+        "identity_fingerprint",
+        "host_identity_fingerprint",
+        "peer_identity_fingerprint",
     }
+    _SAFE_INTEGER_FIELDS = {
+        "actor_version",
+        "entity_count",
+        "applied_entity_count",
+        "partial_entity_count",
+        "identity_drift_count",
+        "version_drift_count",
+        "chunk_index",
+        "chunk_count",
+        "bytes_transferred",
+        "total_bytes",
+        "progress",
+    }
+    _SAFE_BOOLEAN_FIELDS = {"missing_fields_explicit"}
 
     @staticmethod
     def validate_normalized(event: Mapping[str, Any]) -> None:
@@ -954,9 +987,12 @@ class SyncEventValidator:
         timestamp = event.get("timestamp")
         if timestamp is not None and not isinstance(timestamp, (int, float)):
             raise ValueError("sync event timestamp must be numeric")
-        for numeric_key in ("chunk_index", "chunk_count", "bytes_transferred", "total_bytes", "progress"):
+        for numeric_key in SyncEventValidator._SAFE_INTEGER_FIELDS:
             if numeric_key in event and not isinstance(event.get(numeric_key), int):
                 raise ValueError(f"sync event {numeric_key} must be int")
+        for boolean_key in SyncEventValidator._SAFE_BOOLEAN_FIELDS:
+            if boolean_key in event and not isinstance(event.get(boolean_key), bool):
+                raise ValueError(f"sync event {boolean_key} must be bool")
         for vector_key in ("position", "rotation", "scale"):
             if vector_key in event:
                 value = event.get(vector_key)
@@ -975,11 +1011,17 @@ class SyncEventValidator:
             value = safe_event.get(key)
             if key == "timestamp":
                 cleaned[key] = value if isinstance(value, (int, float)) else 0
-            elif key in {"chunk_index", "chunk_count", "bytes_transferred", "total_bytes", "progress"}:
+            elif key in SyncEventValidator._SAFE_INTEGER_FIELDS:
                 try:
                     cleaned[key] = max(0, int(value or 0))
                 except (TypeError, ValueError):
                     cleaned[key] = 0
+            elif key in SyncEventValidator._SAFE_BOOLEAN_FIELDS:
+                cleaned[key] = (
+                    value
+                    if isinstance(value, bool)
+                    else str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+                )
             else:
                 cleaned[key] = str(value or "")
         for key in SyncEventValidator._BLOCKED_EVENT_KEYS:
@@ -997,11 +1039,17 @@ class SyncEventValidator:
             value = event.get(key)
             if key == "timestamp":
                 cleaned[key] = value if isinstance(value, (int, float)) else 0
-            elif key in {"chunk_index", "chunk_count", "bytes_transferred", "total_bytes", "progress"}:
+            elif key in SyncEventValidator._SAFE_INTEGER_FIELDS:
                 try:
                     cleaned[key] = max(0, int(value or 0))
                 except (TypeError, ValueError):
                     cleaned[key] = 0
+            elif key in SyncEventValidator._SAFE_BOOLEAN_FIELDS:
+                cleaned[key] = (
+                    value
+                    if isinstance(value, bool)
+                    else str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+                )
             else:
                 cleaned[key] = str(value or "")
         for vector_key in ("position", "rotation", "scale"):
@@ -20519,8 +20567,16 @@ class AgentRuntime:
             return f"entity-{uuid.uuid5(uuid.NAMESPACE_URL, 'corona-runtime:' + identity).hex}"
 
         scene_plan = dict((room.get("scene_plans") or {}).get(active_plan_id) or {})
+        peer_mirror_versions = dict(room.get("peer_mirror_scene_versions") or {})
         try:
-            scene_version = max(1, int(scene_plan.get("version") or 1))
+            scene_version = max(
+                1,
+                int(
+                    scene_plan.get("version")
+                    or peer_mirror_versions.get(active_plan_id)
+                    or 1
+                ),
+            )
         except (TypeError, ValueError):
             scene_version = 1
 
@@ -21547,14 +21603,16 @@ class AgentRuntime:
         sync_state = dict(room.get("sync_state") or {})
         peer_events = dict(sync_state.get("peer_events") or {})
         peer_mirror_plan_id = str(room.get("peer_mirror_plan_id") or "").strip()
-        applicable = bool(
-            peer_events
-            or peer_mirror_plan_id == str(plan_id or "")
-            or any(
-                str(item.get("authority") or "") in {"remote_host", "peer", "member"}
-                for item in sync_events
-            )
-        )
+        is_peer_mirror = peer_mirror_plan_id == str(plan_id or "")
+        latest_peer_acks: dict[str, dict[str, Any]] = {}
+        for item in sync_events:
+            if str(item.get("event_type") or "") != "scene_snapshot_peer_ack":
+                continue
+            peer_id = str(item.get("peer_id") or "").strip()
+            if not peer_id:
+                continue
+            latest_peer_acks[peer_id] = item
+        applicable = bool(latest_peer_acks or is_peer_mirror)
         actor_entities: dict[str, set[str]] = {}
         for row in [*entities, *sync_events]:
             actor_id = str(row.get("actor_id") or row.get("actor_guid") or "").strip()
@@ -21584,17 +21642,66 @@ class AgentRuntime:
             for entity in entities
             if str(entity.get("sync_status") or "").strip().lower() not in verified_sync_statuses
         ]
+        acknowledged_peer_count = len(latest_peer_acks)
+        ack_partial_count = 0
+        ack_identity_drift_count = 0
+        ack_version_drift_count = 0
+        ack_missing_fields_explicit = True
+        if latest_peer_acks:
+            verified_by_peer: list[int] = []
+            partial_by_peer: list[int] = []
+            expected_entity_count = len(entities)
+            for ack in latest_peer_acks.values():
+                host_fingerprint = str(ack.get("host_identity_fingerprint") or "").strip()
+                peer_fingerprint = str(ack.get("peer_identity_fingerprint") or "").strip()
+                host_entity_count = max(0, int(ack.get("entity_count") or 0))
+                applied_entity_count = max(0, int(ack.get("applied_entity_count") or 0))
+                identity_drift = max(0, int(ack.get("identity_drift_count") or 0))
+                version_drift = max(0, int(ack.get("version_drift_count") or 0))
+                explicit_partial = max(0, int(ack.get("partial_entity_count") or 0))
+                if not host_fingerprint or not peer_fingerprint:
+                    identity_drift += 1
+                elif host_fingerprint != peer_fingerprint:
+                    identity_drift += 1
+                if host_entity_count != expected_entity_count:
+                    identity_drift += 1
+                peer_verified = min(expected_entity_count, applied_entity_count)
+                if identity_drift or version_drift:
+                    peer_verified = 0
+                peer_partial = max(
+                    explicit_partial,
+                    expected_entity_count - peer_verified,
+                )
+                verified_by_peer.append(peer_verified)
+                partial_by_peer.append(peer_partial)
+                ack_identity_drift_count += identity_drift
+                ack_version_drift_count += version_drift
+                ack_missing_fields_explicit = (
+                    ack_missing_fields_explicit
+                    and bool(ack.get("missing_fields_explicit"))
+                )
+            verified_entity_count = min(verified_by_peer) if verified_by_peer else 0
+            ack_partial_count = max(partial_by_peer) if partial_by_peer else expected_entity_count
+        partial_entity_count = (
+            ack_partial_count if latest_peer_acks else len(partial_entities)
+        )
         return {
             "applicable": applicable,
-            "peer_count": len(peer_events),
+            "peer_count": acknowledged_peer_count if latest_peer_acks else len(peer_events),
+            "acknowledged_peer_count": acknowledged_peer_count,
+            "comparison_mode": "peer_snapshot_ack" if latest_peer_acks else "peer_mirror" if is_peer_mirror else "none",
             "entity_count": len(entities),
             "verified_entity_count": verified_entity_count,
-            "partial_entity_count": len(partial_entities),
-            "identity_drift_count": identity_drift_count,
-            "version_drift_count": version_drift_count,
-            "missing_fields_explicit": all(
-                bool(list(entity.get("readiness_missing_fields") or []))
-                for entity in partial_entities
+            "partial_entity_count": partial_entity_count,
+            "identity_drift_count": identity_drift_count + ack_identity_drift_count,
+            "version_drift_count": version_drift_count + ack_version_drift_count,
+            "missing_fields_explicit": (
+                ack_missing_fields_explicit
+                if latest_peer_acks
+                else all(
+                    bool(list(entity.get("readiness_missing_fields") or []))
+                    for entity in partial_entities
+                )
             ),
         }
 
@@ -29076,6 +29183,11 @@ class AgentRuntime:
                 ),
                 "scene_version_explicit": incoming_scene_version is not None,
                 "authority": str(event.get("authority") or ""),
+                "snapshot_kind": str(event.get("snapshot_kind") or ""),
+                "identity_fingerprint": str(event.get("identity_fingerprint") or ""),
+                "host_identity_fingerprint": str(event.get("host_identity_fingerprint") or ""),
+                "peer_identity_fingerprint": str(event.get("peer_identity_fingerprint") or ""),
+                "missing_fields_explicit": bool(event.get("missing_fields_explicit", False)),
                 "asset_id": asset_id,
                 "actor_asset_id": actor_asset_id,
                 "asset_path": str(event.get("asset_path") or event.get("model_path") or event.get("path") or ""),
@@ -29106,6 +29218,11 @@ class AgentRuntime:
                 or event.get("world_bounds")
             )
             for target_key, candidates in {
+                "entity_count": ("entity_count", "host_entity_count"),
+                "applied_entity_count": ("applied_entity_count", "peer_entity_count"),
+                "partial_entity_count": ("partial_entity_count", "missing_entity_count"),
+                "identity_drift_count": ("identity_drift_count",),
+                "version_drift_count": ("version_drift_count",),
                 "chunk_index": ("chunk_index", "chunk", "chunk_id", "chunk_no", "chunk_number"),
                 "chunk_count": ("chunk_count", "total_chunks", "chunk_total"),
                 "bytes_transferred": ("bytes_transferred", "transferred_bytes", "bytes_sent", "received_bytes"),

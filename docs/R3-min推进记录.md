@@ -1494,3 +1494,41 @@ environment_readiness 代码约束：已收口
 ```
 
 下一步进入 `multiplayer_consistency` 前，先按固定儿童卧室、森林营地和混合场景执行新一轮 F5，核对 Environment Actor、RuntimeState、Registry、Snapshot 与 Report 五方身份和 readiness；所有 Engine/Sync 实机效果仍为 **[待 F5/实机验证]**。
+
+## 47. W1.8 Multiplayer Snapshot Identity ACK 闭环
+
+本轮推进 Gate 维度：`multiplayer_consistency`。
+
+此前同步状态只能证明“发生过同步事件”，不能证明房主端与成员端实际持有相同的实体身份和版本；同时，安全事件过滤会丢弃实体指纹、实体数量和漂移计数，使 R3 Gate 可能基于弱证据误判。
+
+本轮完成：
+
+- 房主 Snapshot 增加确定性实体身份指纹，输入仅包含 `entity_id / actor_id / asset_id / actor_version / source_plan_id / source_scene_version`。
+- 成员应用 Snapshot 后发送 `peer_ack`，回传房主/成员指纹、预期/已应用/partial 数量、身份漂移和版本漂移计数。
+- 成员在模型晚到并完成 Actor 创建后刷新 ACK；房主轮询期周期性重算 Snapshot，并用 hash 去重避免重复广播。
+- C++ NetworkSystem 将 `peer_ack` 转为 `scene_snapshot_peer_ack`，且不再把 ACK 放回前端 Snapshot 队列，避免形成应用循环。
+- Runtime 同步事件白名单保留上述安全证据；R3 Gate 只接受明确 ACK 或 peer mirror 证据，普通 `peer_connected/syncing` 事件不再被当作身份一致性证明。
+- peer mirror Registry 与房主 Snapshot 使用同一 `scene_version`，避免镜像构建阶段制造假版本漂移。
+
+验证证据：
+
+```text
+Python compile：passed
+multiplayer / native sync / R3 readiness 聚焦测试：20 tests passed
+Game-ready + multiplayer + native sync + R3 readiness 扩展聚焦测试：49 tests passed
+RoomPanel <script setup> JavaScript 语法解析：passed
+git diff --check：clean（仅既有 CRLF 提示）
+Frontend ESLint：未执行，当前工作区未安装 @eslint/js
+Native C++ build：未执行
+F5 多人实机：未执行
+```
+
+当前 Gate：
+
+```text
+red / pending_reevaluation
+multiplayer_consistency 代码证据链：已补齐
+真实房主/成员 Snapshot ACK、实体落地后的指纹一致性、无重复 Actor/无 ACK 循环：待 F5 验证
+```
+
+所有真实 Engine、网络传输与多人一致性效果仍为 **[待 F5/实机验证]**。下一轮应先执行固定多人 F5，对账房主/成员的 `entity_id / asset_id / version / identity_fingerprint`，再根据新 GateReport 决定是否从红灯切换为黄灯或绿灯。

@@ -2052,6 +2052,35 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
         try {
             const auto snapshot = nlohmann::json::parse(pending.snapshot_json);
             const std::string plan_id = snapshot.value("plan_id", std::string{});
+            const std::string snapshot_kind =
+                snapshot.value("snapshot_kind", std::string{"host_snapshot"});
+            if (snapshot_kind == "peer_ack") {
+                if (!plan_id.empty()) {
+                    enqueue_lanchat_sync_event(
+                        "scene_snapshot_peer_ack",
+                        nlohmann::json({
+                            {"plan_id", plan_id},
+                            {"scene_version", std::max(snapshot.value("scene_version", 1), 1)},
+                            {"scene_name", pending.scene_name},
+                            {"snapshot_kind", snapshot_kind},
+                            {"host_identity_fingerprint", snapshot.value("host_identity_fingerprint", std::string{})},
+                            {"peer_identity_fingerprint", snapshot.value("peer_identity_fingerprint", std::string{})},
+                            {"entity_count", std::max(snapshot.value("entity_count", 0), 0)},
+                            {"applied_entity_count", std::max(snapshot.value("applied_entity_count", 0), 0)},
+                            {"partial_entity_count", std::max(snapshot.value("partial_entity_count", 0), 0)},
+                            {"identity_drift_count", std::max(snapshot.value("identity_drift_count", 0), 0)},
+                            {"version_drift_count", std::max(snapshot.value("version_drift_count", 0), 0)},
+                            {"missing_fields_explicit", snapshot.value("missing_fields_explicit", false)},
+                            {"status", snapshot.value("status", std::string{"partial"})},
+                            {"authority", remote_authority},
+                            {"peer_id", sender_peer_id},
+                        }).dump());
+                }
+                CFW_LOG_INFO(
+                    "NetworkSystem: Received peer scene snapshot acknowledgement from {} — scene='{}' bytes={}",
+                    sender_peer_id, pending_scene_name, pending_snapshot_size);
+                return;
+            }
             if (!plan_id.empty()) {
                 enqueue_lanchat_sync_event(
                     "scene_snapshot_received",
@@ -2059,6 +2088,9 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
                         {"plan_id", plan_id},
                         {"scene_version", std::max(snapshot.value("scene_version", 1), 1)},
                         {"scene_name", pending.scene_name},
+                        {"snapshot_kind", snapshot_kind},
+                        {"identity_fingerprint", snapshot.value("identity_fingerprint", std::string{})},
+                        {"entity_count", std::max(snapshot.value("entity_count", 0), 0)},
                         {"status", "received"},
                         {"authority", remote_authority},
                         {"peer_id", sender_peer_id},

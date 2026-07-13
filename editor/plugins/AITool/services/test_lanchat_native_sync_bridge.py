@@ -12,6 +12,7 @@ if str(EDITOR_ROOT) not in sys.path:
     sys.path.insert(0, str(EDITOR_ROOT))
 
 from plugins.AITool.services.agent_runtime import AgentRuntimeFlags  # noqa: E402
+from plugins.AITool.services.agent_runtime.core import SyncEventValidator  # noqa: E402
 from plugins.AITool.services.lanchat_agent_worker import LANChatAgentWorker  # noqa: E402
 
 
@@ -95,6 +96,10 @@ class LanChatNativeSyncBridgeTests(unittest.TestCase):
         self.assertIn('"actor_deleted"', network)
         self.assertIn('"asset_transfer_completed"', network)
         self.assertIn('"scene_snapshot_received"', network)
+        self.assertIn('"scene_snapshot_peer_ack"', network)
+        self.assertIn('snapshot_kind == "peer_ack"', network)
+        self.assertIn('"host_identity_fingerprint"', network)
+        self.assertIn('"peer_identity_fingerprint"', network)
         self.assertIn('snapshot.value("plan_id"', network)
         self.assertIn('is_message_from_connected_host(sender_peer_id)', network)
         self.assertIn('? "remote_host"', network)
@@ -105,6 +110,50 @@ class LanChatNativeSyncBridgeTests(unittest.TestCase):
         self.assertIn("actor_id_from_payload", network)
         self.assertNotIn("kMaxPendingLanChatSyncEvents = 256", network)
         self.assertIn('m.def("network_pop_lanchat_sync_event"', bindings)
+
+    def test_peer_snapshot_ack_fields_survive_safe_sync_storage(self) -> None:
+        stored = SyncEventValidator.safe_storage_event({
+            "room_id": "room-sync",
+            "event_type": "scene_snapshot_peer_ack",
+            "plan_id": "plan-sync",
+            "peer_id": "peer-1",
+            "authority": "remote_peer",
+            "snapshot_kind": "peer_ack",
+            "scene_version": 7,
+            "host_identity_fingerprint": "scene-id-v1-host",
+            "peer_identity_fingerprint": "scene-id-v1-peer",
+            "entity_count": 8,
+            "applied_entity_count": 7,
+            "partial_entity_count": 1,
+            "identity_drift_count": 0,
+            "version_drift_count": 1,
+            "missing_fields_explicit": True,
+        })
+
+        self.assertEqual(stored["authority"], "remote_peer")
+        self.assertEqual(stored["snapshot_kind"], "peer_ack")
+        self.assertEqual(stored["entity_count"], 8)
+        self.assertEqual(stored["applied_entity_count"], 7)
+        self.assertEqual(stored["version_drift_count"], 1)
+        self.assertTrue(stored["missing_fields_explicit"])
+
+    def test_lanchat_room_panel_emits_identity_fingerprinted_peer_ack(self) -> None:
+        panel = (
+            REPO_ROOT / "editor/Frontend/src/views/sidebar/lanchat/RoomPanel.vue"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("function snapshotIdentityRows", panel)
+        self.assertIn("function snapshotIdentityFingerprint", panel)
+        self.assertIn("snapshot_kind: 'host_snapshot'", panel)
+        self.assertIn("identity_fingerprint: snapshotIdentityFingerprint(identityRows)", panel)
+        self.assertIn("function buildPeerSnapshotAck", panel)
+        self.assertIn("snapshot_kind: 'peer_ack'", panel)
+        self.assertIn("function refreshPeerSnapshotAcks", panel)
+        self.assertIn("await refreshPeerSnapshotAcks()", panel)
+        self.assertIn(
+            "await broadcastCurrentSceneSnapshot(currentModelTransferSceneName(), false, false);",
+            panel,
+        )
 
     def test_received_actor_is_not_engine_imported_until_identity_event(self) -> None:
         engine = _FakeNativeSyncEngine([
