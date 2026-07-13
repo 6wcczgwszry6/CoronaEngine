@@ -77,6 +77,13 @@ from .adapters import (
     make_legacy_model_resource_provider,
 )
 from .flags import AgentRuntimeFlags, install_f5_runtime_provider_env_defaults
+from .r3_readiness import (
+    R3_DIMENSION_NAMES,
+    R3GateDimension,
+    R3GateReport,
+    R3GateReportValidator,
+    evaluate_r3_gate,
+)
 
 __all__ = [
     "AgentRuntime",
@@ -147,4 +154,9 @@ __all__ = [
     "make_engine_layout_transform_provider",
     "AgentRuntimeFlags",
     "install_f5_runtime_provider_env_defaults",
+    "R3_DIMENSION_NAMES",
+    "R3GateDimension",
+    "R3GateReport",
+    "R3GateReportValidator",
+    "evaluate_r3_gate",
 ]

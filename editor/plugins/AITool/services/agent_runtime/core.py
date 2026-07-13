@@ -22,6 +22,7 @@ from .scene_world_consistency import (
     latest_engine_snapshot,
     scene_world_fingerprint,
 )
+from .r3_readiness import evaluate_r3_gate
 
 
 def _now() -> float:
@@ -7475,6 +7476,11 @@ class AgentRuntime:
         "scene_world_snapshot.get",
         "runtime_scene_world_snapshot_get",
     })
+    _R3_READINESS_ACTIONS = frozenset({
+        "runtime.r3_readiness.evaluate",
+        "r3_readiness.evaluate",
+        "runtime_r3_readiness_evaluate",
+    })
     _SCENE_WORLD_CONSISTENCY_ACTIONS = frozenset({
         "runtime.scene_world_consistency.audit",
         "scene_world_consistency.audit",
@@ -7581,6 +7587,7 @@ class AgentRuntime:
         | _STATUS_QUERY_ACTIONS
         | _ENTITY_STATUS_ACTIONS
         | _SCENE_WORLD_SNAPSHOT_ACTIONS
+        | _R3_READINESS_ACTIONS
         | _SCENE_WORLD_CONSISTENCY_ACTIONS
         | _RUNTIME_EVENT_ACTIONS
         | _SYNC_STATUS_ACTIONS
@@ -7602,6 +7609,7 @@ class AgentRuntime:
         | _STATUS_QUERY_ACTIONS
         | _ENTITY_STATUS_ACTIONS
         | _SCENE_WORLD_SNAPSHOT_ACTIONS
+        | _R3_READINESS_ACTIONS
         | _SCENE_WORLD_CONSISTENCY_ACTIONS
         | _AUDIT_EVENT_ACTIONS
         | _WORKER_DRAIN_ACTIONS
@@ -11726,7 +11734,7 @@ class AgentRuntime:
         # SceneWorldSnapshot is a pure read contract for downstream Agents.
         # Logging the query into the world's OperationLog would advance its
         # cursor and make two identical reads observably different.
-        if normalized_action not in self._SCENE_WORLD_SNAPSHOT_ACTIONS:
+        if normalized_action not in (self._SCENE_WORLD_SNAPSHOT_ACTIONS | self._R3_READINESS_ACTIONS):
             self.operation_log.append(
                 "runtime_message_action_routed",
                 room_id=room,
@@ -12923,6 +12931,19 @@ class AgentRuntime:
                 room_id=room,
                 plan_id=requested_plan_id,
                 min_version=min_version,
+            )
+        if normalized_action in self._R3_READINESS_ACTIONS:
+            raw_payload = dict(sync_event or {})
+            requested_plan_id = str(plan_id or raw_payload.get("plan_id") or "").strip()
+            try:
+                expected_entity_count = max(0, int(raw_payload.get("expected_entity_count") or 0))
+            except (TypeError, ValueError):
+                expected_entity_count = 0
+            return self.evaluate_r3_readiness(
+                room_id=room,
+                plan_id=requested_plan_id,
+                benchmark_profile=str(raw_payload.get("benchmark_profile") or ""),
+                expected_entity_count=expected_entity_count,
             )
         if normalized_action in self._SCENE_WORLD_CONSISTENCY_ACTIONS:
             raw_payload = dict(sync_event or {})
@@ -21083,6 +21104,223 @@ class AgentRuntime:
             "snapshot_stability": snapshot_stability,
         }
         return result
+
+    @staticmethod
+    def _r3_multiplayer_evidence(
+        room: Mapping[str, Any],
+        plan_id: str,
+        scene_entity_registry: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        entities = [
+            dict(item)
+            for item in list(scene_entity_registry.get("entities") or [])
+            if isinstance(item, Mapping)
+        ]
+        sync_events = [
+            dict(item)
+            for item in list(room.get("sync_events") or [])
+            if isinstance(item, Mapping)
+            and (not plan_id or str(item.get("plan_id") or "") in {"", plan_id})
+        ]
+        sync_state = dict(room.get("sync_state") or {})
+        peer_events = dict(sync_state.get("peer_events") or {})
+        peer_mirror_plan_id = str(room.get("peer_mirror_plan_id") or "").strip()
+        applicable = bool(
+            peer_events
+            or peer_mirror_plan_id == str(plan_id or "")
+            or any(
+                str(item.get("authority") or "") in {"remote_host", "peer", "member"}
+                for item in sync_events
+            )
+        )
+        actor_entities: dict[str, set[str]] = {}
+        for row in [*entities, *sync_events]:
+            actor_id = str(row.get("actor_id") or row.get("actor_guid") or "").strip()
+            entity_id = str(row.get("entity_id") or "").strip()
+            if actor_id and entity_id:
+                actor_entities.setdefault(actor_id, set()).add(entity_id)
+        identity_drift_count = sum(1 for values in actor_entities.values() if len(values) > 1)
+        version_drift_count = sum(
+            1
+            for row in sync_events
+            if str(row.get("status") or row.get("reason") or "").strip().lower()
+            in {"identity_drift", "version_drift", "version_conflict"}
+        )
+        verified_sync_statuses = {
+            "synced",
+            "peer_confirmed",
+            "host_peer_verified",
+            "remote_host_ready",
+        }
+        verified_entity_count = sum(
+            1
+            for entity in entities
+            if str(entity.get("sync_status") or "").strip().lower() in verified_sync_statuses
+        )
+        partial_entities = [
+            entity
+            for entity in entities
+            if str(entity.get("sync_status") or "").strip().lower() not in verified_sync_statuses
+        ]
+        return {
+            "applicable": applicable,
+            "peer_count": len(peer_events),
+            "entity_count": len(entities),
+            "verified_entity_count": verified_entity_count,
+            "partial_entity_count": len(partial_entities),
+            "identity_drift_count": identity_drift_count,
+            "version_drift_count": version_drift_count,
+            "missing_fields_explicit": all(
+                bool(list(entity.get("readiness_missing_fields") or []))
+                for entity in partial_entities
+            ),
+        }
+
+    def evaluate_r3_readiness(
+        self,
+        *,
+        room_id: str,
+        plan_id: str = "",
+        benchmark_profile: str = "",
+        expected_entity_count: int = 0,
+    ) -> dict[str, Any]:
+        """Aggregate the R3 gate without mutating Runtime or querying providers."""
+
+        room_key = str(room_id)
+        requested_plan_id = str(plan_id or "").strip()
+        room = self.state.rooms.get(room_key)
+        if not isinstance(room, Mapping):
+            report = evaluate_r3_gate(
+                room_id=room_key,
+                plan_id=requested_plan_id,
+                scene_version=0,
+                snapshot_result={"found": False, "plan_id": requested_plan_id},
+                consistency_audit={},
+                scene_entity_registry={},
+                required_environment_components=[],
+                batch_plans=[],
+                tool_graphs=[],
+                operation_entries=[],
+                runtime_events=[],
+                engine_write_summary={},
+                multiplayer_evidence={},
+                state_version=int(self.state.version),
+            )
+            return {
+                "handled": True,
+                "action": "runtime.r3_readiness.evaluate",
+                "recorded": False,
+                "found": False,
+                "plan_id": requested_plan_id,
+                "gate_report": report.as_dict(),
+                "reason": "runtime_room_not_found",
+            }
+
+        snapshot_result = self.get_scene_world_snapshot(
+            room_id=room_key,
+            plan_id=requested_plan_id,
+        )
+        target_plan_id = str(snapshot_result.get("plan_id") or requested_plan_id or "").strip()
+        scene_version = max(0, int(snapshot_result.get("scene_version") or 0))
+        registry = (
+            self._scene_entity_registry_for_plan(room, target_plan_id)
+            if target_plan_id
+            else {}
+        )
+        contract = self._scene_design_contract_summary_for_plan(room, target_plan_id)
+        required_environment_components = list(
+            contract.get("required_environment_components") or []
+        )
+        batches = [
+            dict(item)
+            for item in dict(room.get("batch_plans") or {}).values()
+            if isinstance(item, Mapping)
+            and str(item.get("plan_id") or "") == target_plan_id
+        ]
+        graphs = [
+            dict(item)
+            for item in dict(room.get("tool_graphs") or {}).values()
+            if isinstance(item, Mapping)
+            and str(item.get("plan_id") or "") == target_plan_id
+        ]
+        operation_entries = [
+            entry.as_dict()
+            for entry in self.operation_log.query(room_id=room_key, plan_id=target_plan_id)
+        ]
+        runtime_events = [
+            dict(item)
+            for item in list(room.get("runtime_events") or [])
+            if isinstance(item, Mapping)
+            and str(item.get("plan_id") or "") == target_plan_id
+        ]
+        snapshot = dict(snapshot_result.get("snapshot") or {})
+        engine_snapshot = latest_engine_snapshot(
+            dict(room.get("engine_scene_snapshots") or {}),
+            plan_id=target_plan_id,
+            scene_version=scene_version,
+        )
+        consistency_audit = build_scene_world_consistency_audit(
+            world_snapshot=snapshot,
+            engine_snapshot=engine_snapshot,
+        )
+        consistency_audit["engine_snapshot_available"] = bool(engine_snapshot)
+        plan = dict(dict(room.get("scene_plans") or {}).get(target_plan_id) or {})
+        plan_text = " ".join(
+            str(plan.get(key) or "")
+            for key in ("title", "design_brief", "scene_name")
+        ).lower()
+        resolved_benchmark = str(benchmark_profile or "").strip().lower()
+        if not resolved_benchmark:
+            resolved_benchmark = (
+                "bedroom_14"
+                if "bedroom" in plan_text or "\u5367\u5ba4" in plan_text
+                else "generic"
+            )
+        resolved_expected_count = max(0, int(expected_entity_count or 0))
+        if resolved_expected_count <= 0 and resolved_benchmark == "bedroom_14":
+            resolved_expected_count = 14
+        elif resolved_expected_count <= 0:
+            resolved_expected_count = int(registry.get("entity_count") or 0)
+        timestamps = [
+            float(item.get("timestamp") or 0.0)
+            for item in [*operation_entries, *runtime_events]
+            if isinstance(item, Mapping)
+        ]
+        report = evaluate_r3_gate(
+            room_id=room_key,
+            plan_id=target_plan_id,
+            scene_version=scene_version,
+            snapshot_result=snapshot_result,
+            consistency_audit=consistency_audit,
+            scene_entity_registry=registry,
+            required_environment_components=required_environment_components,
+            batch_plans=batches,
+            tool_graphs=graphs,
+            operation_entries=operation_entries,
+            runtime_events=runtime_events,
+            engine_write_summary=self._engine_write_boundary_summary_for_plan(
+                room,
+                target_plan_id,
+            ),
+            multiplayer_evidence=self._r3_multiplayer_evidence(
+                room,
+                target_plan_id,
+                registry,
+            ),
+            state_version=int(self.state.version),
+            benchmark_profile=resolved_benchmark,
+            expected_entity_count=resolved_expected_count,
+            evaluated_at=max(timestamps, default=0.0),
+        )
+        return {
+            "handled": True,
+            "action": "runtime.r3_readiness.evaluate",
+            "recorded": False,
+            "found": bool(snapshot_result.get("found")),
+            "plan_id": target_plan_id,
+            "scene_version": scene_version,
+            "gate_report": report.as_dict(),
+        }
 
     def audit_scene_world_consistency(
         self,

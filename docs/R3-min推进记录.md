@@ -785,3 +785,38 @@ execution reply/evidence 既有字段回归通过
 - 后续阶段进度继续写入本文件；微小修改只保留在提交记录中。
 
 当前 Gate 仍为 `red / pending_reevaluation`：最近 F5 是旧代码的 `3/14 Game-ready` 结果，最新 Readiness、业务图分域、Finalizer 与 Peer Mirror 修复仍需新一轮 F5 验证。文档切换本身没有改变 Runtime、Engine 或多人同步代码。
+
+## 31. W0.2/W0.3 R3GateReport 与只读自动对账
+
+轨道 A 的首要断点此前只能依赖人工拼接 Runtime、Registry、Snapshot 和日志。本轮完成首个代码闭环：
+
+- 新增稳定 `R3GateReport`、七个固定判定维度及 `R3GateReportValidator`。
+- 新增纯聚合接口 `runtime.r3_readiness.evaluate`，统一读取当前 execution/completed plan 的既有 Runtime 事实。
+- 七维覆盖 Snapshot、必要环境、实体身份与 readiness、Finalizer、业务批次/图、多人一致性和 Runtime 写入安全。
+- `5/14` 判定 Yellow；`8/14` 且全部硬条件满足时判定 Green；环境缺失、Fingerprint 不稳、身份漂移或写入边界缺失判定 Red。
+- `gate_report_id` 与 `evaluated_at` 均由输入事实派生；相同 room/plan/version 和相同事实重复查询得到完全相同报告。
+- 查询 action 不记录 `runtime_message_action_routed`，不存在的 room 也不会被 `RuntimeState.room()` 隐式创建。
+- evaluator 不写 OperationLog、StatePatch、PlanPatch 或 ToolCallGraph，不调用 Provider，不触发 Engine 写入。
+
+聚焦自动验证：
+
+```text
+R3 readiness 新增测试 6 项通过
+5/14 -> Yellow
+8/14 + 全部硬条件 -> Green
+环境缺失 / Fingerprint 错误 / duplicate entity_id -> Red
+相同事实重复评估 -> 报告和 gate_report_id 完全一致
+缺失 room 与已有 room 查询 -> RuntimeState/OperationLog 均零变化
+AgentRuntime Game-ready + Phase 1 兼容回归 28 项通过
+Python syntax compile 通过
+```
+
+当前任务状态：
+
+```text
+W0.2 R3GateReport 契约：code_complete
+W0.3 只读 Gate evaluator：code_complete
+W0.4 初始 Gate 锚点：等待最新可信 F5 事实
+```
+
+当前 Gate **仍为 `red / pending_reevaluation`**。以上证据只证明 Python 结构、边界和零副作用成立；旧 F5 的 `3/14 Game-ready` 仍是最新实机基准。Engine、多人一致性和实际 Green 判定均为 **[待 F5/实机验证]**。
