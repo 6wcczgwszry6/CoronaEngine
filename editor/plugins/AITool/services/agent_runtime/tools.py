@@ -2009,8 +2009,8 @@ def _make_environment_components_tool(provider: ResourceProvider | None) -> Call
                 exc,
                 user_visible_message="环境组件准备失败，系统会保留模型批次并等待后续处理。",
             )
-        requested_count = len(substrate_resolutions)
-        if requested_count and not components:
+        substrate_request_count = len(substrate_resolutions)
+        if substrate_request_count and not components:
             return ToolResult(
                 False,
                 "environment component provider returned no components",
@@ -2018,6 +2018,11 @@ def _make_environment_components_tool(provider: ResourceProvider | None) -> Call
                 error_code="environment_component_provider_empty",
                 user_visible_message="环境组件准备没有返回可用结果，系统会保留模型批次并等待后续处理。",
             )
+        # A configured semantic provider may only resolve explicit substrate
+        # items. Required framework components remain Runtime-owned contract
+        # facts and must not disappear merely because that provider is enabled.
+        _add_default_framework_components(payload, components)
+        requested_count = len(components)
         _normalize_environment_components_for_runtime(
             components,
             batch_id=batch_id,

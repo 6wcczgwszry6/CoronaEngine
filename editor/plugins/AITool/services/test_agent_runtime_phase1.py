@@ -21208,6 +21208,70 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertNotIn("provider-should-not-win", str(components))
         self.assertEqual(result["report"]["provider_summary"]["environment_component"]["mode"], "adapter")
 
+    def test_configured_environment_provider_cannot_drop_required_framework(self) -> None:
+        runtime = AgentRuntime(environment_component_provider=lambda _payload: {})
+
+        def execute_framework_case(
+            *,
+            room_id: str,
+            batch_id: str,
+            environment_type: str,
+            required: list[str],
+        ) -> dict[str, dict[str, Any]]:
+            graph = ToolCallGraph(
+                graph_id=f"graph-{batch_id}",
+                plan_id=f"plan-{batch_id}",
+                batch_id=batch_id,
+            )
+            graph.add(
+                ToolCall(
+                    tool_call_id=f"tool-{batch_id}",
+                    tool_name="runtime.environment.create_components",
+                    args={
+                        "room_id": room_id,
+                        "plan_id": f"plan-{batch_id}",
+                        "batch_id": batch_id,
+                        "scene_name": f"Scene/{batch_id}.scene",
+                        "environment_type": environment_type,
+                        "required_environment_components": required,
+                        "substrate_resolutions": [],
+                    },
+                )
+            )
+            executor = ToolCallGraphExecutor(
+                registry=runtime.registry,
+                guard=runtime.guard,
+                state=runtime.state,
+                operation_log=runtime.operation_log,
+            )
+
+            executed = executor.execute(graph, room_id=room_id)
+
+            self.assertEqual(executed.status, "completed")
+            return dict(runtime.state.room(room_id)["environment_components"][batch_id])
+
+        indoor = execute_framework_case(
+            room_id="room-required-indoor",
+            batch_id="batch-required-indoor",
+            environment_type="indoor",
+            required=["room_box", "room_floor"],
+        )
+        mixed = execute_framework_case(
+            room_id="room-required-mixed",
+            batch_id="batch-required-mixed",
+            environment_type="mixed",
+            required=["terrain", "room_box", "room_floor", "transition_zone"],
+        )
+
+        self.assertEqual(
+            {row["component_type"] for row in indoor.values()},
+            {"room_box", "room_floor"},
+        )
+        self.assertEqual(
+            {row["component_type"] for row in mixed.values()},
+            {"terrain", "room_box", "room_floor", "transition_zone"},
+        )
+
     def test_environment_component_summary_uses_batch_scope_for_runtime_events(self) -> None:
         runtime = AgentRuntime()
         first = runtime.propose_scene_plan(
@@ -21953,6 +22017,46 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(
             reused["environment_components"]["component-terrain"]["actor_id"],
             "actor-component-terrain",
+        )
+
+        # A process/provider restart loses the in-memory reuse cache. The same
+        # plan-level environment component must still resolve to the same
+        # Runtime identity even when a later business batch materializes it.
+        restarted_provider = make_engine_environment_component_import_provider(
+            environment_import_tool=FakeEnvironmentImportTool(),
+            engine_gate=gate,
+            scene_name="Scene/runtime-env.scene",
+        )
+        restarted = restarted_provider({
+            "room_id": "room-env-import",
+            "plan_id": "plan-env-import",
+            "batch_id": "batch-env-import-after-restart",
+            "environment_components": {
+                "component-terrain": {
+                    "component_id": "component-terrain",
+                    "name": "石板地面",
+                    "component_type": "terrain",
+                    "asset_id": "asset-terrain-stone",
+                    "model_ref": "terrain-stone-runtime",
+                }
+            },
+        })
+        self.assertEqual(len(gate.calls), 2)
+        self.assertEqual(
+            gate.calls[1]["actor_guid"],
+            gate.calls[0]["actor_guid"],
+        )
+        self.assertEqual(
+            gate.calls[1]["entity_id"],
+            gate.calls[0]["entity_id"],
+        )
+        self.assertEqual(
+            restarted["environment_components"]["component-terrain"]["entity_id"],
+            component["entity_id"],
+        )
+        self.assertEqual(
+            gate.calls[1]["source_batch_id"],
+            "batch-env-import-after-restart",
         )
         serialized = str(result).lower()
         self.assertNotIn("provider raw", serialized)

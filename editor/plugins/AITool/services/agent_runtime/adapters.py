@@ -598,10 +598,12 @@ def make_engine_environment_component_import_provider(
             import_payload["model_ref"] = model_ref
             actor_guid = _stable_runtime_actor_guid(
                 plan_id=plan_id,
-                batch_id=batch_id,
+                # Environment components belong to the scene plan, not to the
+                # business batch that happened to materialize them first.
+                batch_id="__environment__",
                 asset_id=asset_id,
                 requested_name=component_id,
-                source_index=index,
+                source_index=0,
             )
             import_payload["actor_guid"] = actor_guid
             import_payload["entity_id"] = _stable_runtime_entity_id(actor_guid)

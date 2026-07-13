@@ -21029,12 +21029,18 @@ class AgentRuntime:
                 ).strip()
                 if explicit_component_grounding:
                     component_grounding = explicit_component_grounding
-                elif component.get("requires_engine_write") is False:
-                    component_grounding = "not_applicable"
-                elif component_type in {"room_floor", "terrain", "ground", "walkable_floor"}:
+                elif component_type in {
+                    "room_floor",
+                    "terrain",
+                    "ground",
+                    "walkable_floor",
+                    "transition_zone",
+                }:
                     component_grounding = "grounded"
                 elif component_type in {"room_box", "room_shell", "indoor_enclosure"}:
                     component_grounding = "enclosure"
+                elif component.get("requires_engine_write") is False:
+                    component_grounding = "not_applicable"
                 else:
                     component_grounding = "not_applicable"
                 entity = {

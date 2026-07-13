@@ -825,6 +825,7 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
                     "sync_status": "engine_created",
                     "source": "engine_environment_import",
                     "status": "success",
+                    "requires_engine_write": False,
                 },
                 "shell": {
                     "component_id": "shell",
@@ -842,6 +843,25 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
                     "sync_status": "engine_created",
                     "source": "engine_environment_import",
                     "status": "success",
+                    "requires_engine_write": False,
+                },
+                "transition": {
+                    "component_id": "transition",
+                    "component_type": "transition_zone",
+                    "actor_id": "actor-transition",
+                    "asset_id": "asset-transition",
+                    "model_ref": "transition_zone.obj",
+                    "position": [0.0, 0.0, 3.0],
+                    "rotation": [0.0, 0.0, 0.0],
+                    "scale": [1.0, 1.0, 1.0],
+                    "aabb": {"min": [-2.0, 0.0, 2.0], "max": [2.0, 0.1, 4.0]},
+                    "bounds_source": "engine_actual",
+                    "bounds_ready": True,
+                    "engine_lifecycle_status": "bounds_ready",
+                    "sync_status": "engine_created",
+                    "source": "engine_environment_import",
+                    "status": "success",
+                    "requires_engine_write": False,
                 },
             }
         }
@@ -855,6 +875,12 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
 
         self.assertEqual(support_by_component["room_floor"], "grounded")
         self.assertEqual(support_by_component["room_box"], "enclosure")
+        self.assertEqual(support_by_component["transition_zone"], "grounded")
+        self.assertTrue(all(
+            entity["game_ready"]
+            for entity in registry["entities"]
+            if entity.get("entity_type") == "environment"
+        ))
 
     def test_business_graph_role_is_persisted_and_validated(self) -> None:
         graph = ToolCallGraph(

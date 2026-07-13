@@ -1459,3 +1459,38 @@ snapshot_integrity 代码约束：已收口
 ```
 
 下一步按轨道 A 优先级进入 `environment_readiness`，核实室内 `room_box/room_floor`、室外 terrain 和混合 transition zone 是否以真实 Engine-ready 环境实体进入 Registry 与 Snapshot；所有 Engine/Sync 实机效果仍为 **[待 F5/实机验证]**。
+
+## 46. W1.7 Environment Readiness 契约与稳定身份收口
+
+代码核查确认，Environment 链路存在三个会直接阻断 R3 Gate 的事实断点：配置了外部环境 fact provider 后，Runtime 会完全采用其返回值，导致 SceneDesignContract 要求的 `room_box/room_floor/terrain/transition_zone` 可能被吞掉；Registry 先根据 `requires_engine_write=False` 把环境实体标为 `not_applicable`，覆盖了 floor、terrain、room shell 的真实支撑语义；环境 Actor GUID 依赖当前业务 `batch_id`，provider 重建或跨批次补录时可能产生新身份。
+
+本轮改动：
+
+- `runtime.environment.create_components` 在外部 provider 成功后仍统一应用 SceneDesignContract 的 framework fallback；室内稳定补齐 `room_box + room_floor`，室外补齐 terrain，混合场景补齐 terrain、room shell、floor 与 transition zone。
+- 显式 substrate 请求仍保持严格失败语义：外部 provider 未解析任何请求项时继续失败，不用默认组件掩盖真实 provider 断点。
+- Registry 的环境支撑语义改为 component type 优先：`room_floor/terrain/ground/transition_zone -> grounded`，`room_box/room_shell -> enclosure`；只有其他无几何写入需求的环境事实才使用 `not_applicable`。
+- 环境 Actor GUID 改为 plan-level 稳定身份，不再纳入业务批次；`source_batch_id` 仍记录本次物化来源，便于 OperationLog 对账。
+- provider 内缓存继续避免同一进程重复导入；即使 provider 重建导致缓存丢失，同一 `plan_id + component_id + asset_id` 仍解析到相同 `actor_guid/entity_id`。
+
+聚焦自动验证：
+
+```text
+外部 provider 不得吞掉 indoor/mixed 必需 framework components：passed
+环境导入缺失/部分失败阻断普通 Actor：passed
+floor/room shell/transition zone 支撑语义与 Game-ready 判定：passed
+provider 重建及跨业务批次环境身份稳定：passed
+Environment 聚焦回归：7 tests passed
+Game-ready + R3 Readiness 套件：37 tests passed
+git diff --check：clean（仅既有 CRLF 提示）
+```
+
+当前 Gate：
+
+```text
+red / pending_reevaluation
+environment_readiness 代码约束：已收口
+旧 F5 环境实体证据：不足，保持 red
+新 F5 的真实 room_box/room_floor/terrain/transition zone、Engine-ready 与 Snapshot 事实：待实机验证
+```
+
+下一步进入 `multiplayer_consistency` 前，先按固定儿童卧室、森林营地和混合场景执行新一轮 F5，核对 Environment Actor、RuntimeState、Registry、Snapshot 与 Report 五方身份和 readiness；所有 Engine/Sync 实机效果仍为 **[待 F5/实机验证]**。
