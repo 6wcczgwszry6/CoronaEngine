@@ -21709,6 +21709,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 return {
                     "status": "success",
                     "component_id": payload["component_id"],
+                    "entity_id": payload["entity_id"],
+                    "actor_version": payload["entity_version"],
                     "actor_id": f"actor-{payload['component_id']}",
                     "asset_id": payload.get("asset_id") or f"asset-{payload['component_id']}",
                     "model_ref": payload.get("model_ref") or "",
@@ -21769,6 +21771,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(gate.calls[0]["batch_id"], "batch-env-import")
         self.assertEqual(gate.calls[0]["asset_id"], "asset-terrain-stone")
         self.assertEqual(gate.calls[0]["model_ref"], "terrain-stone-runtime")
+        self.assertTrue(gate.calls[0]["actor_guid"].startswith("runtime-actor-"))
+        self.assertTrue(gate.calls[0]["entity_id"].startswith("entity-"))
+        self.assertEqual(gate.calls[0]["entity_version"], 1)
+        self.assertEqual(gate.calls[0]["source_plan_id"], "plan-env-import")
+        self.assertEqual(gate.calls[0]["source_batch_id"], "batch-env-import")
         self.assertEqual(gate.calls[0]["position"], [1.0, 0.0, 2.0])
         self.assertEqual(gate.calls[0]["rotation"], [0.0, 15.0, 0.0])
         self.assertEqual(gate.calls[0]["scale"], [6.0, 0.1, 6.0])
@@ -21785,6 +21792,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(component["entity_type"], "environment")
         self.assertEqual(component["source"], "engine_environment_import")
         self.assertEqual(component["actor_id"], "actor-component-terrain")
+        self.assertEqual(component["entity_id"], gate.calls[0]["entity_id"])
+        self.assertEqual(component["entity_version"], 1)
         self.assertEqual(component["asset_id"], "asset-terrain-stone")
         self.assertEqual(component["model_ref"], "terrain-stone-runtime")
         self.assertEqual(component["sync_status"], "active")
@@ -21819,6 +21828,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         })
         self.assertEqual(len(gate.calls), 1)
         self.assertEqual(reused["environment_import_results"][0]["status"], "reused")
+        self.assertEqual(
+            reused["environment_import_results"][0]["entity_id"],
+            gate.calls[0]["entity_id"],
+        )
+        self.assertEqual(reused["environment_import_results"][0]["entity_version"], 1)
         self.assertEqual(
             reused["environment_components"]["component-terrain"]["actor_id"],
             "actor-component-terrain",
@@ -23814,6 +23828,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             )
 
             self.assertEqual(gate.calls[0]["model_path"], str(mesh_path))
+            self.assertTrue(gate.calls[0]["entity_id"].startswith("entity-"))
+            self.assertEqual(gate.calls[0]["entity_version"], 1)
+            self.assertEqual(gate.calls[0]["source_plan_id"], "plan-metadata-folder")
+            self.assertEqual(gate.calls[0]["source_batch_id"], "batch-metadata-folder")
             self.assertIn("actor-folder-42", result["actors"])
             self.assertEqual(result["import_results"][0]["status"], "success")
 

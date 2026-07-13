@@ -472,6 +472,14 @@ struct NativeEditorActor {
     std::string actor_guid;
     std::string route;
     std::string actor_type{"actor"};
+    std::string runtime_entity_id;
+    std::string asset_id;
+    std::string model_ref;
+    std::string entity_type;
+    std::string semantic_role;
+    std::string source_plan_id;
+    std::string source_batch_id;
+    int actor_version{1};
     bool follow_camera{false};
     std::uint64_t audio_resource_id{0};  // 音频物体绑定的音频资源 id（actor_type=="audio"）
     std::array<float, 3> position{0.0f, 0.0f, 0.0f};
@@ -719,6 +727,28 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
         if (!actor.actor_guid.empty()) {
             lines.push_back(key + ".actor_guid = " + actor.actor_guid);
         }
+        if (!actor.runtime_entity_id.empty()) {
+            lines.push_back(key + ".runtime.entity_id = " + actor.runtime_entity_id);
+        }
+        if (!actor.asset_id.empty()) {
+            lines.push_back(key + ".runtime.asset_id = " + actor.asset_id);
+        }
+        if (!actor.model_ref.empty()) {
+            lines.push_back(key + ".runtime.model_ref = " + actor.model_ref);
+        }
+        if (!actor.entity_type.empty()) {
+            lines.push_back(key + ".runtime.entity_type = " + actor.entity_type);
+        }
+        if (!actor.semantic_role.empty()) {
+            lines.push_back(key + ".runtime.semantic_role = " + actor.semantic_role);
+        }
+        if (!actor.source_plan_id.empty()) {
+            lines.push_back(key + ".runtime.source_plan_id = " + actor.source_plan_id);
+        }
+        if (!actor.source_batch_id.empty()) {
+            lines.push_back(key + ".runtime.source_batch_id = " + actor.source_batch_id);
+        }
+        lines.push_back(key + ".runtime.actor_version = " + std::to_string(std::max(actor.actor_version, 1)));
         lines.push_back(key + ".follow_camera = " + std::string(actor.follow_camera ? "true" : "false"));
         if (actor.mechanics) {
             lines.push_back(key + ".mechanics.physics_enabled = " +
@@ -1281,6 +1311,20 @@ void load_native_actor(NativeEditorScene& scene,
     item.actor_guid = actors_section.contains(actor_key + ".actor_guid")
                           ? actors_section.at(actor_key + ".actor_guid")
                           : "";
+    const auto actor_value = [&](const std::string& suffix, const std::string& fallback = "") {
+        const auto it = actors_section.find(actor_key + suffix);
+        return it == actors_section.end() ? fallback : it->second;
+    };
+    item.runtime_entity_id = actor_value(".runtime.entity_id");
+    item.asset_id = actor_value(".runtime.asset_id");
+    item.model_ref = actor_value(".runtime.model_ref");
+    item.entity_type = actor_value(".runtime.entity_type");
+    item.semantic_role = actor_value(".runtime.semantic_role");
+    item.source_plan_id = actor_value(".runtime.source_plan_id");
+    item.source_batch_id = actor_value(".runtime.source_batch_id");
+    item.actor_version = std::max(
+        parse_int(actor_value(".runtime.actor_version", "1"), 1),
+        1);
     item.follow_camera = actors_section.contains(actor_key + ".follow_camera") &&
                          parse_bool(actors_section.at(actor_key + ".follow_camera"));
     item.position = parse_float3(
@@ -1578,6 +1622,15 @@ nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorA
     item["model"] = actor.route;
     item["model_dependencies"] = nlohmann::json::array();
     item["actor_type"] = actor.actor_type;
+    item["entity_id"] = actor.runtime_entity_id;
+    item["asset_id"] = actor.asset_id;
+    item["model_ref"] = actor.model_ref;
+    item["entity_type"] = actor.entity_type;
+    item["semantic_role"] = actor.semantic_role;
+    item["source_plan_id"] = actor.source_plan_id;
+    item["source_batch_id"] = actor.source_batch_id;
+    item["actor_version"] = std::max(actor.actor_version, 1);
+    item["version"] = std::max(actor.actor_version, 1);
     if (actor.actor_type == "audio") {
         item["audio_resource_id"] = std::to_string(actor.audio_resource_id);
     }
@@ -2145,6 +2198,26 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
         scene = reload_native_editor_scene("", scene_route);
     }
 
+    auto apply_runtime_metadata = [&](NativeEditorActor& target) {
+        const auto entity_id = json_string_value(actor_data, {"entity_id", "runtime_entity_id"});
+        const auto asset_id = json_string_value(actor_data, {"asset_id"});
+        const auto model_ref = json_string_value(actor_data, {"model_ref"});
+        const auto entity_type = json_string_value(actor_data, {"entity_type"});
+        const auto semantic_role = json_string_value(actor_data, {"semantic_role"});
+        const auto source_plan_id = json_string_value(actor_data, {"source_plan_id", "plan_id"});
+        const auto source_batch_id = json_string_value(actor_data, {"source_batch_id", "batch_id"});
+        if (!entity_id.empty()) target.runtime_entity_id = entity_id;
+        if (!asset_id.empty()) target.asset_id = asset_id;
+        if (!model_ref.empty()) target.model_ref = model_ref;
+        if (!entity_type.empty()) target.entity_type = entity_type;
+        if (!semantic_role.empty()) target.semantic_role = semantic_role;
+        if (!source_plan_id.empty()) target.source_plan_id = source_plan_id;
+        if (!source_batch_id.empty()) target.source_batch_id = source_batch_id;
+        target.actor_version = std::max(
+            json_int_value(actor_data, "actor_version", json_int_value(actor_data, "version", target.actor_version)),
+            1);
+    };
+
     auto apply_actor_data_to_existing = [&](NativeEditorActor& target) {
         if (auto position = actor_data_float3(actor_data, "position")) {
             target.position = *position;
@@ -2172,6 +2245,7 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
                 target.mechanics->set_physics_enabled(*physics_enabled);
             }
         }
+        apply_runtime_metadata(target);
     };
 
     NativeEditorActor item;
@@ -2212,6 +2286,7 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
     item.position = {0.0f, 0.0f, 0.0f};
     item.rotation = {0.0f, 0.0f, 0.0f};
     item.scale = {1.0f, 1.0f, 1.0f};
+    apply_runtime_metadata(item);
 
     if (item.actor_type == "actor" && to_lower_ascii(actor_file_extension(item.route)) == "actor") {
         const auto actor_file = resolve_project_path(scene->project_root, item.route);
@@ -2411,6 +2486,7 @@ NativeResult set_native_editor_actor_transform(const std::string& scene_route_ar
             actor->geometry->set_scale(*scale);
         }
     }
+    actor->actor_version = std::max(actor->actor_version + 1, 1);
     sync_native_actor_to_embedded_vision_document(*scene, *actor);
     persist_native_scene_actors(*scene);
     return native_success({

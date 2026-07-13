@@ -189,3 +189,33 @@ Python syntax compile
 - 模型文件传输完成后 Actor 只创建一次，且 UI 不发生明显卡顿。
 - `scene_entity_registry` 与两端 Engine Actor 的 `entity_id/version` 一致。
 - 当前 C++ 文件传输主要按项目相对路径复用；跨路径按稳定 `asset_id` 去重仍需后续协议收口，不能在本轮宣称完成。
+
+## 10. Runtime 实体身份贯通 C++ Actor
+
+本轮补齐了 `SceneWorldSnapshot` 与 Engine Actor 快照之间的身份断点：
+
+- 普通模型和 environment 导入在进入 `RuntimeGuard -> EngineWriteGate` 前生成并携带稳定 `actor_guid`、`entity_id`、`asset_id/model_ref`、`source_plan_id/source_batch_id` 和初始版本。
+- C++ `NativeEditorActor` 保存上述 Runtime 元数据，并通过现有 Scene actors INI 持久化；场景重载后不应退化为仅有 native handle 的匿名 Actor。
+- `actor_to_json()` 将 Runtime 身份和 `actor_version/version` 原样返回，现有 LANChat actor snapshot 无需扩展网络包即可携带同一实体身份。
+- 原生 transform 写入成功后递增 `actor_version`，成员端可继续按 `actor_guid + version` 拒绝过期更新。
+- environment 事实将 C++ `actor_version` 归一为 Runtime `entity_version`，继续满足现有 Environment schema。
+
+聚焦自动验证覆盖：
+
+```text
+普通模型导入保留 Runtime 身份
+environment 导入保留 Runtime 身份
+C++ Actor snapshot 输出身份和版本
+C++ Scene actors 持久化/重载身份字段
+transform 更新递增 actor_version
+Python syntax compile
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- native 场景保存并重载后 `entity_id/asset_id/version` 在面板快照中保持不变。
+- 房主与成员收到相同 `entity_id + actor_version`，且旧 transform 不覆盖新版本。
+- Registry、SceneWorldSnapshot 与两端 Engine Actor 的身份、数量和版本一致。
+- 跨路径模型资源按稳定 `asset_id` 去重传输。
+
+本轮尝试运行一次 `verify_ultimate_plan.py` 总门禁，但当前进程持续约 54 分钟仍未退出；同一工作站还存在更早启动且长期未退出的旧门禁进程。为避免继续占用验证资源，本轮门禁被显式终止，不能计为通过。聚焦测试与 syntax compile 已通过；总门禁悬挂原因需单独排查，不与 Runtime 身份闭环混为一项。

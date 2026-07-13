@@ -210,6 +210,12 @@ class ImportModelInput(BaseModel):
         default=None,
         description="Stable Runtime actor identity used for idempotent native creation",
     )
+    entity_id: Optional[str] = Field(default=None, description="Stable Runtime scene entity identity")
+    entity_version: int = Field(default=1, ge=1, description="Initial Runtime entity version")
+    source_plan_id: Optional[str] = Field(default=None, description="Owning Runtime scene plan")
+    source_batch_id: Optional[str] = Field(default=None, description="Owning Runtime batch plan")
+    plan_id: Optional[str] = Field(default=None, description="Compatibility alias for source_plan_id")
+    batch_id: Optional[str] = Field(default=None, description="Compatibility alias for source_batch_id")
     skip_if_exists: bool = Field(
         default=False,
         description="Return an existing native actor with the same guid/name instead of duplicating it",
@@ -264,6 +270,13 @@ class ImportEnvironmentComponentInput(BaseModel):
     object_id: Optional[str] = Field(default=None, description="Runtime object id")
     asset_id: Optional[str] = Field(default=None, description="Runtime asset id")
     model_ref: Optional[str] = Field(default=None, description="Optional environment asset/model reference")
+    actor_guid: Optional[str] = Field(default=None, description="Stable Runtime actor identity")
+    entity_id: Optional[str] = Field(default=None, description="Stable Runtime scene entity identity")
+    entity_version: int = Field(default=1, ge=1, description="Initial Runtime entity version")
+    source_plan_id: Optional[str] = Field(default=None, description="Owning Runtime scene plan")
+    source_batch_id: Optional[str] = Field(default=None, description="Owning Runtime batch plan")
+    plan_id: Optional[str] = Field(default=None, description="Compatibility alias for source_plan_id")
+    batch_id: Optional[str] = Field(default=None, description="Compatibility alias for source_batch_id")
     position: Optional[List[float]] = Field(default=None, description="Initial position [x,y,z]")
     rotation: Optional[List[float]] = Field(default=None, description="Initial rotation [x,y,z]")
     scale: Optional[List[float]] = Field(default=None, description="Initial scale [x,y,z]")
@@ -291,6 +304,12 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
         asset_id: str | None = None,
         model_ref: str | None = None,
         actor_guid: str | None = None,
+        entity_id: str | None = None,
+        entity_version: int = 1,
+        source_plan_id: str | None = None,
+        source_batch_id: str | None = None,
+        plan_id: str | None = None,
+        batch_id: str | None = None,
         skip_if_exists: bool = False,
         update_if_exists: bool = False,
         target: str | None = None,
@@ -343,6 +362,10 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
                 "asset_id": asset_id or object_id or model_name or preferred_name,
                 "model_ref": model_ref or asset_id or model_name or object_id or preferred_name,
                 "actor_guid": actor_guid or "",
+                "entity_id": entity_id or "",
+                "actor_version": max(1, int(entity_version or 1)),
+                "source_plan_id": source_plan_id or plan_id or "",
+                "source_batch_id": source_batch_id or batch_id or "",
                 "skip_if_exists": bool(skip_if_exists),
                 "update_if_exists": bool(update_if_exists),
                 "target": target or preferred_name,
@@ -385,6 +408,8 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
             result_data = {
                 "status": "success",
                 "actor_id": actor_id,
+                "entity_id": actor.get("entity_id") or entity_id or "",
+                "actor_version": int(actor.get("actor_version") or actor.get("version") or entity_version or 1),
                 "actor_name": actor.get("name", preferred_name),
                 "asset_id": asset_id or object_id or model_name or preferred_name,
                 "model_ref": model_ref or asset_id or model_name or object_id or preferred_name,
@@ -399,6 +424,8 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
                 "sync_lifecycle_status": "engine_imported",
                 "actor_data": {
                     "actor_id": actor_id,
+                    "entity_id": actor.get("entity_id") or entity_id or "",
+                    "actor_version": int(actor.get("actor_version") or actor.get("version") or entity_version or 1),
                     "name": actor.get("name") or preferred_name,
                     "asset_id": asset_id or object_id or model_name or preferred_name,
                     "model_ref": model_ref or asset_id or model_name or object_id or preferred_name,
@@ -461,6 +488,13 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
         object_id: str | None = None,
         asset_id: str | None = None,
         model_ref: str | None = None,
+        actor_guid: str | None = None,
+        entity_id: str | None = None,
+        entity_version: int = 1,
+        source_plan_id: str | None = None,
+        source_batch_id: str | None = None,
+        plan_id: str | None = None,
+        batch_id: str | None = None,
         position: List[float] | None = None,
         rotation: List[float] | None = None,
         scale: List[float] | None = None,
@@ -528,6 +562,11 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
                 "handler": handler or "",
                 "asset_id": asset_id or safe_component_id,
                 "model_ref": model_ref or asset_ref,
+                "actor_guid": actor_guid or "",
+                "entity_id": entity_id or "",
+                "actor_version": max(1, int(entity_version or 1)),
+                "source_plan_id": source_plan_id or plan_id or "",
+                "source_batch_id": source_batch_id or batch_id or "",
                 "surface": surface or "",
                 "terrain_profile": terrain_profile or "",
                 "sky_mode": sky_mode or "",
@@ -592,6 +631,8 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
                 "boundary_style": boundary_style or "",
                 "scene_name": native_result.get("scene") or scene_name or "",
                 "actor_id": actor_id,
+                "entity_id": actor.get("entity_id") or entity_id or "",
+                "actor_version": int(actor.get("actor_version") or actor.get("version") or entity_version or 1),
                 "bounds_ready": bounds_ready,
                 "bounds_source": bounds_source,
                 "engine_lifecycle_status": engine_lifecycle_status,
@@ -600,6 +641,8 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
                 "actor_data": {
                     "actor_id": actor_id,
                     "actor_guid": actor_id,
+                    "entity_id": actor.get("entity_id") or entity_id or "",
+                    "actor_version": int(actor.get("actor_version") or actor.get("version") or entity_version or 1),
                     "name": actor.get("name") or component_name,
                     "component_id": safe_component_id,
                     "component_type": component_type_value,

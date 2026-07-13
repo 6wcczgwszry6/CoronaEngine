@@ -69,6 +69,10 @@ class ModelImportToolsTests(unittest.TestCase):
                     asset_id="asset-content-stable",
                     model_ref="model-ref-stable",
                     actor_guid="runtime-actor-stable-guid",
+                    entity_id="entity-chair-stable",
+                    entity_version=4,
+                    source_plan_id="plan-chair",
+                    source_batch_id="batch-chair",
                     skip_if_exists=True,
                     scene_name="Scene/test.scene",
                 )
@@ -77,6 +81,10 @@ class ModelImportToolsTests(unittest.TestCase):
         self.assertEqual(calls[0]["actor_data"]["asset_id"], "asset-content-stable")
         self.assertEqual(calls[0]["actor_data"]["model_ref"], "model-ref-stable")
         self.assertEqual(calls[0]["actor_data"]["actor_guid"], "runtime-actor-stable-guid")
+        self.assertEqual(calls[0]["actor_data"]["entity_id"], "entity-chair-stable")
+        self.assertEqual(calls[0]["actor_data"]["actor_version"], 4)
+        self.assertEqual(calls[0]["actor_data"]["source_plan_id"], "plan-chair")
+        self.assertEqual(calls[0]["actor_data"]["source_batch_id"], "batch-chair")
         self.assertTrue(calls[0]["actor_data"]["skip_if_exists"])
         self.assertIn("asset-content-stable", str(raw))
         self.assertIn("model-ref-stable", str(raw))
@@ -157,6 +165,11 @@ class ModelImportToolsTests(unittest.TestCase):
                 component_id="component-room-box",
                 name="room_box",
                 component_type="room_box",
+                actor_guid="runtime-room-box-guid",
+                entity_id="entity-room-box",
+                entity_version=2,
+                source_plan_id="plan-room",
+                source_batch_id="batch-environment",
                 scale=[6.5, 3.0, 6.0],
                 scene_name="Scene/test.scene",
             )
@@ -173,6 +186,11 @@ class ModelImportToolsTests(unittest.TestCase):
         self.assertTrue(calls[0]["source_path"].endswith("room_box.obj"))
         self.assertEqual(calls[0]["actor_data"]["entity_type"], "environment")
         self.assertEqual(calls[0]["actor_data"]["semantic_role"], "indoor_enclosure")
+        self.assertEqual(calls[0]["actor_data"]["actor_guid"], "runtime-room-box-guid")
+        self.assertEqual(calls[0]["actor_data"]["entity_id"], "entity-room-box")
+        self.assertEqual(calls[0]["actor_data"]["actor_version"], 2)
+        self.assertEqual(calls[0]["actor_data"]["source_plan_id"], "plan-room")
+        self.assertEqual(calls[0]["actor_data"]["source_batch_id"], "batch-environment")
         self.assertEqual(calls[1]["actor_type"], "model")
         self.assertTrue(calls[1]["source_path"].endswith("transition_zone.obj"))
         self.assertEqual(

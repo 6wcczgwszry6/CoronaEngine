@@ -559,6 +559,8 @@ def make_engine_environment_component_import_provider(
                     "component_type": str(cached_component.get("component_type") or component_type),
                     "status": "reused",
                     "actor_id": str(cached_component.get("actor_id") or ""),
+                    "entity_id": str(cached_component.get("entity_id") or ""),
+                    "entity_version": int(cached_component.get("entity_version") or 1),
                     "asset_id": str(cached_component.get("asset_id") or component_id),
                     "model_ref": str(cached_component.get("model_ref") or component_id),
                     "bounds_ready": bool(cached_component.get("bounds_ready")),
@@ -594,6 +596,18 @@ def make_engine_environment_component_import_provider(
             )
             import_payload["asset_id"] = asset_id
             import_payload["model_ref"] = model_ref
+            actor_guid = _stable_runtime_actor_guid(
+                plan_id=plan_id,
+                batch_id=batch_id,
+                asset_id=asset_id,
+                requested_name=component_id,
+                source_index=index,
+            )
+            import_payload["actor_guid"] = actor_guid
+            import_payload["entity_id"] = _stable_runtime_entity_id(actor_guid)
+            import_payload["entity_version"] = 1
+            import_payload["source_plan_id"] = plan_id
+            import_payload["source_batch_id"] = batch_id
             for field in ("position", "rotation", "scale"):
                 vector = _vector3(component.get(field))
                 if vector:
@@ -653,6 +667,8 @@ def make_engine_environment_component_import_provider(
             }
             for field in (
                 "actor_id",
+                "entity_id",
+                "entity_version",
                 "asset_id",
                 "model_ref",
                 "display_name",
@@ -1012,6 +1028,16 @@ def _normalize_environment_component_import_result(
     )
     update = {
         "component_id": component_id,
+        "entity_id": _safe_component_token(
+            _first_present(
+                parsed.get("entity_id"),
+                actor_data.get("entity_id"),
+                actor.get("entity_id") if isinstance(actor, dict) else None,
+                fallback.get("entity_id"),
+            ),
+            fallback="",
+            allow_empty=True,
+        ),
         "asset_id": asset_id,
         "model_ref": model_ref,
         "name": name,
@@ -1027,6 +1053,20 @@ def _normalize_environment_component_import_result(
         "sync_status": sync_status,
         "sync_lifecycle_status": sync_lifecycle_status,
     }
+    version_value = _first_present(
+        actor.get("actor_version") if isinstance(actor, dict) else None,
+        actor.get("version") if isinstance(actor, dict) else None,
+        actor_data.get("actor_version"),
+        actor_data.get("version"),
+        parsed.get("actor_version"),
+        parsed.get("version"),
+        fallback.get("entity_version"),
+        1,
+    )
+    try:
+        update["entity_version"] = max(1, int(version_value or 1))
+    except (TypeError, ValueError):
+        update["entity_version"] = 1
     if actor_id:
         update["actor_id"] = actor_id
     aliases: list[str] = []
@@ -1507,6 +1547,10 @@ def make_engine_actor_import_provider(
                 "object_id": actor_request_id,
                 "target": name,
                 "actor_guid": actor_guid,
+                "entity_id": entity_id,
+                "entity_version": 1,
+                "source_plan_id": plan_id,
+                "source_batch_id": batch_id,
                 "skip_if_exists": True,
                 "update_if_exists": False,
                 "position": list(placement.get("position") or [0.0, 0.0, 0.0]),
@@ -1561,6 +1605,8 @@ def make_engine_actor_import_provider(
             actors[actor["actor_id"]] = actor
             import_results.append({
                 "actor_id": actor["actor_id"],
+                "entity_id": actor["entity_id"],
+                "actor_version": int(actor.get("actor_version") or 1),
                 "actor_name": actor["name"],
                 "display_name": actor.get("display_name") or actor["name"],
                 "native_name": actor.get("native_name") or actor["name"],

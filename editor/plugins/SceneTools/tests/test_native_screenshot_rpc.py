@@ -3378,6 +3378,49 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("std::atomic<std::uint64_t>", guid_body.group(0))
         self.assertIn("fetch_add", guid_body.group(0))
 
+    def test_native_actor_runtime_identity_survives_snapshot_persistence_and_transform(self):
+        source = self._handler_source()
+
+        for snippet in (
+            "std::string runtime_entity_id;",
+            "std::string asset_id;",
+            "std::string model_ref;",
+            "std::string source_plan_id;",
+            "std::string source_batch_id;",
+            "int actor_version{1};",
+            'item["entity_id"] = actor.runtime_entity_id;',
+            'item["actor_version"] = std::max(actor.actor_version, 1);',
+            '".runtime.entity_id = "',
+            '".runtime.actor_version = "',
+            'actor_value(".runtime.entity_id")',
+            'actor_value(".runtime.actor_version", "1")',
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertIn(snippet, source)
+
+        create_body = re.search(
+            r"NativeResult create_native_editor_actor\(.*?\n\}",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(create_body)
+        self.assertIn("apply_runtime_metadata", create_body.group(0))
+        self.assertIn(
+            'json_string_value(actor_data, {"entity_id", "runtime_entity_id"})',
+            create_body.group(0),
+        )
+
+        transform_body = re.search(
+            r"NativeResult set_native_editor_actor_transform\(.*?\n\}",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(transform_body)
+        self.assertIn(
+            "actor->actor_version = std::max(actor->actor_version + 1, 1);",
+            transform_body.group(0),
+        )
+
     def test_embedded_vision_reload_logs_shape_guid_uniqueness(self):
         source = self._handler_source()
         refresh_body = re.search(
