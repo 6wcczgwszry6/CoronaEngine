@@ -1524,7 +1524,7 @@ bool NetworkSystem::register_actor_identity(const std::string& actor_guid,
                 nlohmann::json({
                     {"actor_id", actor_guid},
                     {"status", "engine_imported"},
-                    {"authority", "remote_host"},
+                    {"authority", impl_->session_role == SessionRole::Client ? "remote_host" : "remote_peer"},
                 }).dump());
         }
     } else {
@@ -1653,6 +1653,11 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
     if (len < 1) return;
     using Network::MessageType;
     auto mt = static_cast<MessageType>(data[0]);
+    const char* remote_authority =
+        impl_->session_role == SessionRole::Client &&
+                is_message_from_connected_host(sender_peer_id)
+            ? "remote_host"
+            : "remote_peer";
 
     if (mt == MessageType::ACTOR_CREATE) {
         Network::BufferReader r(data + 1, len - 1);
@@ -1733,7 +1738,7 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
                     {"rotation", {actor_packed.transform[3], actor_packed.transform[4], actor_packed.transform[5]}},
                     {"scale", {actor_packed.transform[6], actor_packed.transform[7], actor_packed.transform[8]}},
                     {"status", "received"},
-                    {"authority", "remote_host"},
+                    {"authority", remote_authority},
                     {"peer_id", sender_peer_id},
                 }).dump());
 
@@ -1900,7 +1905,7 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
                 {"rotation", {update.transform[3], update.transform[4], update.transform[5]}},
                 {"scale", {update.transform[6], update.transform[7], update.transform[8]}},
                 {"status", "received"},
-                {"authority", "remote_host"},
+                {"authority", remote_authority},
                 {"peer_id", sender_peer_id},
                 {"correlation_id", update.correlation_id},
             }).dump());
@@ -1955,7 +1960,7 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
                 {"actor_name", pending.actor_name},
                 {"scene_name", pending.scene_name},
                 {"status", "received"},
-                {"authority", "remote_host"},
+                {"authority", remote_authority},
                 {"peer_id", sender_peer_id},
             }).dump());
         CFW_LOG_INFO(
@@ -2023,7 +2028,7 @@ void NetworkSystem::on_custom_message(const std::string& sender_peer_id,
                 {"scene_name", pending.scene_name},
                 {"actor_json", pending.actor_json},
                 {"status", "received"},
-                {"authority", "remote_host"},
+                {"authority", remote_authority},
                 {"peer_id", sender_peer_id},
             }).dump());
         CFW_LOG_INFO(
@@ -2538,7 +2543,10 @@ void NetworkSystem::handle_file_chunk(const std::string& sender_peer_id,
             nlohmann::json({
                 {"asset_id", ft_it->second.asset_id},
                 {"status", "completed"},
-                {"authority", "remote_host"},
+                {"authority", impl_->session_role == SessionRole::Client &&
+                        is_message_from_connected_host(sender_peer_id)
+                    ? "remote_host"
+                    : "remote_peer"},
                 {"peer_id", sender_peer_id},
                 {"file_count", ft_it->second.transfer_ids.size()},
             }).dump());
