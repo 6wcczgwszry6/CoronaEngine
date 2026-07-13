@@ -698,3 +698,30 @@ Native sync bridge + peer mirror 6 项回归通过
 - 房主和成员同时在线时，同一聊天只产生一条 ActionIntent 和一条权威回复。
 - 成员不调用 LLM/Provider，不创建 PlanPatch/Actor；仅消费宿主同步事实。
 - 房主/成员 Snapshot 的 entity/version/fingerprint 最终一致，成员本机 Engine 未 ready 时保持 `needs_review`。
+
+## 27. 墙挂与悬挂支撑不得由名称推断为已验证
+
+Game-ready grounding 复核确认，地面物体只有在 Engine transform 返回 `ground_snapped` 或真实 AABB bottom 已贴地时才会写入 `grounded`。但墙挂和悬挂对象此前只要名称命中 support type，就会默认写成 `not_applicable`；Registry 的 Game-ready 判定接受该状态，因此尚未验证墙面/天花支撑的对象可能被错误计为可用实体。
+
+当前改动：
+
+- 名称分类只决定 `support_type`，不再证明墙挂/悬挂已经安装正确。
+- `wall_mounted/ceiling_hung/unknown` 若没有显式 Engine/可信支撑事实，统一保持 `grounding_status=needs_review`。
+- 显式返回的 `wall_mounted/suspended` 仍可进入 Registry，并在其他 Engine-ready 条件满足时成为 Game-ready。
+- 地面对象原有 AABB bottom snap、Engine transform 和贴地验证路径不变。
+- 不把墙挂对象错误执行 floor snap。
+
+聚焦自动验证：
+
+```text
+ready floor actor + Engine ground snap -> grounded
+ready wall torch + 仅名称 support 分类 -> needs_review
+wall actor -> 不调用 floor snap transform
+Game-ready 聚焦套件 26 项回归通过
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 火把、壁灯、地图、吊灯等对象在真实 Engine 场景中不被拉到地面。
+- 未接入墙面/悬挂验证的对象在 Snapshot 中明确列为 needs_review。
+- 后续若增加 wall/ceiling support checker，必须以独立 ToolResult/StatePatch 写入可信状态。

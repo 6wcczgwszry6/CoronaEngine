@@ -23522,6 +23522,74 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(actor["position"], [1.0, 0.22, 2.0])
         self.assertTrue(result["import_results"][0]["ground_snapped"])
 
+    def test_engine_actor_import_provider_does_not_claim_unverified_wall_support(self) -> None:
+        guid_holder = {"value": ""}
+
+        class FakeGate:
+            def invoke_tool(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+            def set_transform(self, tool, payload: dict) -> dict:
+                raise AssertionError("wall-mounted actor must not use floor snap")
+
+        class ImportTool:
+            def invoke(self, payload: dict) -> dict:
+                guid_holder["value"] = str(payload["actor_guid"])
+                return {
+                    "status": "success",
+                    "actor": {
+                        "actor_guid": payload["actor_guid"],
+                        "name": payload["actor_name"],
+                        "geometry": {
+                            "position": payload["position"],
+                            "rotation": payload["rotation"],
+                            "scale": payload["scale"],
+                        },
+                    },
+                }
+
+        class TransformTool:
+            def invoke(self, payload: dict) -> dict:
+                raise AssertionError("wall-mounted actor must not use floor snap")
+
+        def snapshot_provider(_request: dict) -> dict:
+            return {
+                "actors": [{
+                    "actor_id": guid_holder["value"],
+                    "name": "wall torch",
+                    "bounds_ready": True,
+                    "position": [1.0, 1.5, 2.0],
+                    "rotation": [0.0, 0.0, 0.0],
+                    "scale": [1.0, 1.0, 1.0],
+                    "aabb": {"min": [0.8, 1.0, 1.8], "max": [1.2, 2.0, 2.2]},
+                }],
+            }
+
+        provider = make_engine_actor_import_provider(
+            import_tool=ImportTool(),
+            transform_tool=TransformTool(),
+            engine_gate=FakeGate(),
+            scene_snapshot_provider=snapshot_provider,
+        )
+        result = provider({
+            "room_id": "room-wall-support",
+            "batch_id": "batch-wall-support",
+            "plan_id": "plan-wall-support",
+            "model_items": ["wall torch"],
+            "model_resources": {
+                "wall torch": {
+                    "status": "ready",
+                    "local_path": "E:/models/wall-torch.glb",
+                    "asset_id": "asset-wall-torch",
+                }
+            },
+            "placements": {"wall torch": {"position": [1.0, 1.5, 2.0]}},
+        })
+
+        actor = next(iter(result["actors"].values()))
+        self.assertEqual(actor["support_type"], "wall_mounted")
+        self.assertEqual(actor["grounding_status"], "needs_review")
+
     def test_initial_grounding_reaches_runtime_state_operation_log_and_report_registry(self) -> None:
         guid_holder = {"value": ""}
 

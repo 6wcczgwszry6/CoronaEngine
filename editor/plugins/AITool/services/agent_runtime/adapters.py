@@ -1673,11 +1673,15 @@ def make_engine_actor_import_provider(
             for actor_id, actor in list(actors.items()):
                 support_type = _runtime_actor_support_type(actor)
                 actor["support_type"] = support_type
-                if support_type != "floor_supported" or not bool(actor.get("bounds_ready")):
-                    actor.setdefault(
-                        "grounding_status",
-                        "needs_review" if support_type == "unknown" else "not_applicable",
-                    )
+                if support_type != "floor_supported":
+                    # Naming can choose the support domain, but it cannot prove
+                    # that a wall/ceiling attachment actually exists. Preserve
+                    # an explicit Engine fact; otherwise keep the entity out of
+                    # Game-ready until a support review supplies one.
+                    actor.setdefault("grounding_status", "needs_review")
+                    continue
+                if not bool(actor.get("bounds_ready")):
+                    actor.setdefault("grounding_status", "needs_review")
                     continue
                 engine_actor_name = _engine_actor_name_for_transform(actor, {}, actor_id)
                 position = _vector3(actor.get("position"))
