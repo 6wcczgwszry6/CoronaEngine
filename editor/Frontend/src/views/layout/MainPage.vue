@@ -731,6 +731,7 @@ const activeMenu = ref(null);
 const previewRunning = ref(false);
 const previewBusy = ref(false);
 const previewStatusText = ref('');
+const previewDetails = ref({});
 const visionAvailable = ref(false);
 const mainRenderBackend = ref('native');
 const mainVisionRenderMode = ref('path_tracing');
@@ -1681,114 +1682,150 @@ const clearPreviewPoll = () => {
   }
 };
 
+const normalizePreviewDetails = (payload = {}) => ({
+  ...payload,
+  scope: payload.scope || 'project',
+  sceneName: payload.sceneName ?? payload.scene_name ?? '',
+  startedCount: Number(payload.startedCount ?? payload.started_count ?? 0),
+  runningCount: Number(payload.runningCount ?? payload.running_count ?? 0),
+  completedCount: Number(payload.completedCount ?? payload.completed_count ?? 0),
+  errorCount: Number(payload.errorCount ?? payload.error_count ?? 0),
+  blocklyCount: Number(payload.blocklyCount ?? payload.blockly_count ?? 0),
+  nodeGraphCount: Number(payload.nodeGraphCount ?? payload.node_graph_count ?? 0),
+  inputLocked: Boolean(payload.inputLocked ?? payload.input_locked),
+  hasSnapshot: Boolean(payload.hasSnapshot ?? payload.has_snapshot),
+  restoreStatus: payload.restoreStatus ?? payload.restore_status ?? 'idle',
+  restoreError: payload.restoreError ?? payload.restore_error ?? '',
+  restored: Boolean(payload.restored),
+  stopPending: Boolean(payload.stopPending ?? payload.stop_pending),
+  errors: Array.isArray(payload.errors) ? payload.errors : [],
+  warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
+  targets: Array.isArray(payload.targets) ? payload.targets : [],
+});
+
+const applyPreviewStatus = (payload = {}) => {
+  const details = normalizePreviewDetails(payload);
+  previewDetails.value = details;
+  const state = details.status || 'idle';
+  previewRunning.value = ['starting', 'running', 'stopping'].includes(state)
+    || details.runningCount > 0
+    || details.hasSnapshot;
+  setGamePreviewInputLocked(Boolean(details.inputLocked));
+  if (state === 'starting') previewStatusText.value = '正在启动脚本...';
+  else if (state === 'running') previewStatusText.value = `预览中 ${details.runningCount || details.startedCount}`;
+  else if (state === 'stopping') previewStatusText.value = '正在停止并恢复...';
+  else if (state === 'completed') previewStatusText.value = details.errorCount ? `已完成，${details.errorCount} 个脚本错误` : '脚本已完成';
+  else if (state === 'stopped') previewStatusText.value = '已停止并恢复';
+  else if (state === 'error') previewStatusText.value = details.restoreError ? `场景恢复失败：${details.restoreError}` : (details.errors[0] || details.message || '预览出错');
+  else previewStatusText.value = details.startedCount === 0 && details.warnings.length ? '没有可运行脚本' : '';
+  return details;
+};
+
 const pollGamePreviewStatus = () => {
   clearPreviewPoll();
   const poll = async () => {
     try {
       const result = await scriptingService.getGamePreviewStatus();
-      const status = unwrapBridgeData(result);
-      const state = status?.status || 'idle';
-      const count = status?.running_count || 0;
-      const hasSnapshot = !!status?.has_snapshot;
-      previewRunning.value = state === 'running' || state === 'stopping' || count > 0 || hasSnapshot;
-      setGamePreviewInputLocked(Boolean(status?.input_locked ?? previewRunning.value));
-      previewStatusText.value = previewRunning.value
-        ? (count > 0 ? `预览中 ${count}` : '预览已停止，等待恢复')
-        : state === 'error'
-          ? '预览出错'
-          : '';
-      if (previewRunning.value) {
-        previewPollTimer = setTimeout(poll, 1000);
-      }
+      const details = applyPreviewStatus(unwrapBridgeData(result));
+      broadcastViewportControlsState();
+      if (previewRunning.value) previewPollTimer = setTimeout(poll, 700);
+      return details;
     } catch (error) {
       previewRunning.value = false;
+      previewDetails.value = {};
       setGamePreviewInputLocked(false);
       previewStatusText.value = '预览状态异常';
       logError('查询预览状态失败', error);
+      return null;
     }
   };
-  previewPollTimer = setTimeout(poll, 800);
+  previewPollTimer = setTimeout(poll, 300);
 };
 
-const handleStartGamePreview = async () => {
+const normalizePreviewRequest = (request) => {
+  if (!request || typeof request !== 'object' || !['project', 'scene'].includes(request.scope)) {
+    return { scope: 'project' };
+  }
+  return {
+    scope: request.scope,
+    ...(request.scope === 'scene' ? { scene_name: request.scene_name || request.sceneName || '' } : {}),
+  };
+};
+
+const handleStartGamePreview = async (request = { scope: 'project' }) => {
   if (previewRunning.value || previewBusy.value) return false;
+  const previewRequest = normalizePreviewRequest(request);
   previewBusy.value = true;
-  previewStatusText.value = '准备预览...';
+  previewStatusText.value = previewRequest.scope === 'scene' ? '准备当前场景脚本...' : '准备项目预览...';
   try {
     if (typeof window.__coronaBlocklyFlushSave === 'function') {
       await window.__coronaBlocklyFlushSave();
     }
-    const result = await scriptingService.startGamePreview({ scope: 'project' });
+    if (typeof window.__coronaNodeGraphFlushSave === 'function') {
+      await window.__coronaNodeGraphFlushSave();
+    }
+    const result = await scriptingService.startGamePreview(previewRequest);
     const payload = unwrapBridgeData(result);
+    const details = applyPreviewStatus(payload);
     if (payload?.status === 'error') {
-      previewRunning.value = false;
-      setGamePreviewInputLocked(false);
-      previewStatusText.value = '预览启动失败';
-      logError('开始预览失败', payload.message);
+      logError('开始预览失败', payload.message || details.errors[0]);
+      broadcastViewportControlsState();
       return false;
     }
-    previewRunning.value = payload?.status === 'running' || (payload?.started_count || 0) > 0;
-    setGamePreviewInputLocked(Boolean(payload?.input_locked ?? previewRunning.value));
-    previewStatusText.value = previewRunning.value
-      ? `预览中 ${payload?.started_count || 0}`
-      : '没有可运行积木';
     if (previewRunning.value) pollGamePreviewStatus();
-    return previewRunning.value;
+    broadcastViewportControlsState();
+    return details;
   } catch (error) {
     previewRunning.value = false;
+    previewDetails.value = {};
     setGamePreviewInputLocked(false);
     previewStatusText.value = '预览启动失败';
     logError('开始预览失败', error);
+    broadcastViewportControlsState();
     return false;
   } finally {
     previewBusy.value = false;
     activeMenu.value = null;
+    broadcastViewportControlsState();
   }
 };
 
 const handleStopGamePreview = async () => {
-  if (!previewRunning.value || previewBusy.value) return false;
+  // 后端停止接口是幂等的。不要因为前端状态同步稍慢而挡住停止请求，
+  // 否则 Scene ID 不一致或跨窗口状态延迟时会出现“只能运行、不能停止”。
+  if (previewBusy.value) return false;
   previewBusy.value = true;
-  previewStatusText.value = '正在恢复预览前参数...';
-  let keepPreviewActive = false;
+  previewStatusText.value = '正在停止并恢复...';
   try {
     const result = await scriptingService.stopGamePreview();
     const payload = unwrapBridgeData(result);
-    if (payload?.restore_error) {
-      keepPreviewActive = true;
-      setGamePreviewInputLocked(Boolean(payload?.input_locked ?? true));
-      previewStatusText.value = '预览恢复失败';
-      logError('结束预览恢复失败', payload.restore_error);
+    const details = applyPreviewStatus(payload);
+    if (details.status === 'stopping' || details.stopPending) {
+      pollGamePreviewStatus();
+    } else {
+      clearPreviewPoll();
+    }
+    if (details.restoreError && details.status !== 'stopping') {
+      logError('结束预览恢复失败', details.restoreError);
+      broadcastViewportControlsState();
       return false;
     }
-    setGamePreviewInputLocked(Boolean(payload?.input_locked ?? false));
-    if (payload?.restored) {
-      previewStatusText.value = '已恢复预览前参数';
-      setTimeout(() => {
-        if (!previewRunning.value && !previewBusy.value && previewStatusText.value === '已恢复预览前参数') {
-          previewStatusText.value = '';
-        }
-      }, 2000);
-    } else {
-      previewStatusText.value = '';
-    }
-    return true;
+    broadcastViewportControlsState();
+    return details;
   } catch (error) {
     previewStatusText.value = '结束预览失败';
     logError('结束预览失败', error);
+    // 即使本次 RPC 报错也继续轮询，后端可能已经收到停止请求。
+    pollGamePreviewStatus();
+    broadcastViewportControlsState();
     return false;
   } finally {
-    clearPreviewPoll();
-    previewRunning.value = keepPreviewActive;
-    if (!keepPreviewActive) {
-      setGamePreviewInputLocked(false);
-    }
     previewBusy.value = false;
     activeMenu.value = null;
+    broadcastViewportControlsState();
   }
 };
 
-// 修改：运行菜单的处理函数
 const handleRunProject = async () => {
   try {
     console.log('运行项目');
@@ -1892,6 +1929,7 @@ const getEditorControlsState = () => ({
   previewRunning: previewRunning.value,
   previewBusy: previewBusy.value,
   previewStatusText: previewStatusText.value,
+  preview: previewDetails.value,
   visionAvailable: visionAvailable.value,
   renderMode: currentMainRenderMode(),
   renderLabel: mainRenderModeLabel.value,
@@ -1915,7 +1953,7 @@ const broadcastViewportControlsState = () => {
     .catch(() => {});
 };
 
-const handleViewportControlsRequest = (payload = {}) => {
+const handleViewportControlsRequest = async (payload = {}) => {
   if (!payload || typeof payload !== 'object') {
     broadcastViewportControlsState();
     return;
@@ -1928,6 +1966,18 @@ const handleViewportControlsRequest = (payload = {}) => {
 
   if (payload.action === 'setCameraSpeed') {
     setCameraSpeedFromPanel(payload.value);
+    return;
+  }
+
+  if (payload.action === 'startPreview') {
+    await handleStartGamePreview(payload.request || payload);
+    broadcastViewportControlsState();
+    return;
+  }
+
+  if (payload.action === 'stopPreview') {
+    await handleStopGamePreview();
+    broadcastViewportControlsState();
     return;
   }
 

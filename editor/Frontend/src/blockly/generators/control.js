@@ -6,11 +6,12 @@ export const defineControlGenerators = () => {
     return `CoronaEngine.wait(${seconds})\n`;
   };
 
-  /** 在循环体开头注入 stop 检查 */
-  function injectStopCheck(branch, indent) {
-    const stopCheck = indent + 'CoronaEngine.check_stop()\n';
-    if (!branch) return stopCheck + indent + 'pass\n';
-    return stopCheck + branch;
+  /** Inject a stop guard and optionally yield once per frame for long-running loops. */
+  function injectStopCheck(branch, indent, paced = false) {
+    let guard = indent + 'CoronaEngine.check_stop()\n';
+    if (paced) guard += indent + 'CoronaEngine.loop_yield()\n';
+    if (!branch) return guard + indent + 'pass\n';
+    return guard + branch;
   }
 
   pythonGenerator.forBlock['control_for'] = function (block) {
@@ -22,7 +23,7 @@ export const defineControlGenerators = () => {
           pythonGenerator.INDENT
         ) + branch;
     }
-    branch = injectStopCheck(branch, pythonGenerator.INDENT);
+    branch = injectStopCheck(branch, pythonGenerator.INDENT, true);
     return `while True:\n` + branch;
   };
 
@@ -76,7 +77,7 @@ export const defineControlGenerators = () => {
     const condition =
       pythonGenerator.valueToCode(block, 'CONDITION', pythonGenerator.ORDER_NONE) || 'False';
     let branch = pythonGenerator.statementToCode(block, 'DO');
-    branch = injectStopCheck(branch, pythonGenerator.INDENT);
+    branch = injectStopCheck(branch, pythonGenerator.INDENT, true);
     return `while not (${condition}):\n` + branch;
   };
 

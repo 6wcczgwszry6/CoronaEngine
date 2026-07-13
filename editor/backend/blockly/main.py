@@ -21,6 +21,24 @@ from utils.settings import core_path, settings_manager
 logger = logging.getLogger(__name__)
 
 
+def _inject_thread_system_exit(thread: threading.Thread) -> bool:
+    """向仍在执行 Python 字节码的脚本线程注入 SystemExit。"""
+    if not thread or not thread.is_alive() or thread.ident is None:
+        return True
+    tid = thread.ident
+    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_ulong(tid), ctypes.py_object(SystemExit)
+    )
+    if res == 0:
+        logger.error("[ScratchTool] invalid thread id: %s", tid)
+        return False
+    if res > 1:
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(tid), None)
+        logger.error("[ScratchTool] SystemExit injection touched multiple threads; rolled back")
+        return False
+    return True
+
+
 def _force_kill_thread(
     thread: threading.Thread,
     timeout: float = 3.0,
@@ -35,17 +53,7 @@ def _force_kill_thread(
         return True
 
     logger.warning("[ScratchTool] thread did not stop in %.1fs; injecting SystemExit", timeout)
-    tid = thread.ident
-    if tid is not None:
-        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_ulong(tid), ctypes.py_object(SystemExit)
-        )
-        if res == 0:
-            logger.error("[ScratchTool] invalid thread id: %s", tid)
-        elif res > 1:
-            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(tid), None)
-            logger.error("[ScratchTool] SystemExit injection touched multiple threads; rolled back")
-
+    _inject_thread_system_exit(thread)
     thread.join(timeout=1.0)
     return not thread.is_alive()
 
@@ -97,6 +105,17 @@ class ScratchTool:
     _preview_restart_generation = 0
     _preview_restart_in_progress = False
     _preview_restart_lock = threading.Lock()
+    _preview_scope = "project"
+    _preview_scene_name = ""
+    _preview_results: dict[str, dict[str, Any]] = {}
+    _preview_started_count = 0
+    _preview_blockly_count = 0
+    _preview_node_graph_count = 0
+    _preview_stop_thread: Optional[threading.Thread] = None
+    _preview_restore_status = "idle"
+    _preview_restore_error = ""
+    _preview_restored = False
+    _preview_stopped_count = 0
 
     # ------------------------------------------------------------------
     # Project Blockly persistence
@@ -145,11 +164,23 @@ class ScratchTool:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
 
     @staticmethod
-    def _target_id(target_type: str, scene_name: str = "", actor_name: str = "") -> str:
+    def _normalize_script_kind(script_kind: Any) -> str:
+        return "node_graph" if str(script_kind or "blockly").strip().lower() == "node_graph" else "blockly"
+
+    @classmethod
+    def _target_id(
+        cls,
+        target_type: str,
+        scene_name: str = "",
+        actor_name: str = "",
+        script_kind: str = "blockly",
+    ) -> str:
         normalized_type = "actor" if target_type == "model" else target_type
+        kind = cls._normalize_script_kind(script_kind)
+        prefix = "node_graph:" if kind == "node_graph" else ""
         if normalized_type == "project":
-            return "project:global"
-        return f"actor:{scene_name}:{actor_name}"
+            return f"{prefix}project:global"
+        return f"{prefix}actor:{scene_name}:{actor_name}"
 
     @staticmethod
     def _target_digest(target_id: str) -> str:
@@ -177,40 +208,35 @@ class ScratchTool:
 
     @classmethod
     def save_blockly_target(cls, payload: dict | str) -> dict:
-        """
-        Save generated Python and Blockly workspace JSON into the active project.
-
-        Manifest schema:
-        { targets: [{ id, target_type, scene_name, actor_name, code_path,
-                      workspace_path, updated_at, enabled }] }
-        """
+        """Save generated Python and workspace JSON for one Blockly or node-graph target."""
         try:
             data = cls._normalize_payload(payload)
-            target_type = data.get("target_type") or "actor"
+            target_type = "actor" if data.get("target_type") == "model" else (data.get("target_type") or "actor")
             if target_type not in ("project", "actor"):
                 return {"status": "error", "message": f"unsupported target_type: {target_type}"}
 
-            scene_name = data.get("scene_name") or ""
-            actor_name = data.get("actor_name") or ""
+            script_kind = cls._normalize_script_kind(data.get("script_kind"))
+            scene_name = str(data.get("scene_name") or "")
+            actor_name = str(data.get("actor_name") or "")
             if target_type == "actor" and (not scene_name or not actor_name):
                 return {"status": "error", "message": "actor target requires scene_name and actor_name"}
             if target_type == "project":
                 scene_name = ""
                 actor_name = ""
 
-            target_id = cls._target_id(target_type, scene_name, actor_name)
+            target_id = cls._target_id(target_type, scene_name, actor_name, script_kind)
             digest = cls._target_digest(target_id)
-            prefix = "project_global" if target_type == "project" else "actor"
+            if script_kind == "node_graph":
+                prefix = "node_graph_project" if target_type == "project" else "node_graph_actor"
+            else:
+                prefix = "project_global" if target_type == "project" else "actor"
             blockly_dir = cls._blockly_dir()
             code_path = blockly_dir / f"{prefix}_{digest}.py"
             workspace_path = blockly_dir / f"{prefix}_{digest}.blockly.json"
             project_path = cls._active_project_path()
 
             code = cls._with_context_prelude(
-                str(data.get("code") or ""),
-                target_type,
-                scene_name,
-                actor_name,
+                str(data.get("code") or ""), target_type, scene_name, actor_name
             )
             with open(code_path, "w", encoding="utf-8") as f:
                 f.write(code)
@@ -220,26 +246,36 @@ class ScratchTool:
             def _rel(path: Path) -> str:
                 return path.relative_to(project_path).as_posix()
 
+            validation_errors = data.get("validation_errors") or []
+            if not isinstance(validation_errors, list):
+                validation_errors = [str(validation_errors)]
             target = {
                 "id": target_id,
                 "target_type": target_type,
+                "script_kind": script_kind,
                 "scene_name": scene_name,
                 "actor_name": actor_name,
                 "code_path": _rel(code_path),
                 "workspace_path": _rel(workspace_path),
                 "updated_at": time.time(),
                 "enabled": bool(data.get("enabled", True)),
+                "runnable": bool(data.get("runnable", True)),
+                "validation_errors": [str(item) for item in validation_errors if str(item)],
             }
 
             manifest = cls._load_manifest()
             targets = [t for t in manifest.get("targets", []) if t.get("id") != target_id]
             targets.append(target)
-            targets.sort(key=lambda t: (0 if t.get("target_type") == "project" else 1,
-                                        t.get("scene_name", ""),
-                                        t.get("actor_name", "")))
+            targets.sort(
+                key=lambda t: (
+                    0 if t.get("target_type") == "project" else 1,
+                    t.get("scene_name", ""),
+                    t.get("actor_name", ""),
+                    cls._normalize_script_kind(t.get("script_kind")),
+                )
+            )
             manifest["targets"] = targets
             cls._write_manifest(manifest)
-
             return {"status": "saved", "target": target}
         except Exception as exc:
             logger.exception("[ScratchTool] save_blockly_target failed")
@@ -247,33 +283,32 @@ class ScratchTool:
 
     @classmethod
     def load_blockly_target(cls, payload: dict | str) -> dict:
-        """Load a saved Blockly workspace for one project/actor target."""
+        """Load a saved Blockly or node-graph workspace for one target."""
         try:
             data = cls._normalize_payload(payload)
-            target_type = data.get("target_type") or "actor"
+            target_type = "actor" if data.get("target_type") == "model" else (data.get("target_type") or "actor")
             if target_type not in ("project", "actor"):
                 return {"status": "error", "message": f"unsupported target_type: {target_type}"}
+            script_kind = cls._normalize_script_kind(data.get("script_kind"))
 
-            scene_name = data.get("scene_name") or ""
-            actor_name = data.get("actor_name") or ""
+            scene_name = str(data.get("scene_name") or "")
+            actor_name = str(data.get("actor_name") or "")
             if target_type == "project":
                 scene_name = ""
                 actor_name = ""
             elif not scene_name or not actor_name:
                 return {"status": "error", "message": "actor target requires scene_name and actor_name"}
 
-            target_id = cls._target_id(target_type, scene_name, actor_name)
+            target_id = cls._target_id(target_type, scene_name, actor_name, script_kind)
             manifest = cls._load_manifest()
-            target = next(
-                (item for item in manifest.get("targets", []) if item.get("id") == target_id),
-                None,
-            )
+            target = next((item for item in manifest.get("targets", []) if item.get("id") == target_id), None)
             if not target:
                 return {
                     "status": "missing",
                     "target": {
                         "id": target_id,
                         "target_type": target_type,
+                        "script_kind": script_kind,
                         "scene_name": scene_name,
                         "actor_name": actor_name,
                     },
@@ -287,7 +322,6 @@ class ScratchTool:
                 workspace_path.relative_to(project_path)
             except ValueError:
                 return {"status": "error", "message": "workspace_path escapes active project"}
-
             if not workspace_path.exists():
                 return {"status": "missing", "target": target, "workspace": {}}
             with open(workspace_path, "r", encoding="utf-8") as f:
@@ -369,6 +403,16 @@ class ScratchTool:
     ) -> dict:
         try:
             from CoronaCore.utils import corona_engine_scratch
+
+            with cls._preview_lock:
+                preview_active = bool(
+                    cls._preview_state_snapshot is not None
+                    or any(info.get("thread") and info["thread"].is_alive() for info in cls._preview_threads)
+                    or cls._preview_status in ("starting", "running", "stopping")
+                )
+            if preview_active:
+                message = "全局运行或项目预览正在进行，请先停止并恢复后再运行单物体脚本"
+                return {"status": "error", "message": message, "outcome": "preview_running"}
 
             requested_scene = scene_name or ""
             requested_actor = actor_name or ""
@@ -628,67 +672,163 @@ class ScratchTool:
         with cls._preview_lock:
             cls._preview_input_locked = bool(locked)
         try:
-            CoronaEditor.set_editor_camera_input_enabled(not locked)
+            # CoronaEditor owns the reason-based lock set and propagates the aggregate
+            # state to the native camera-follow controller.  Do not call the native
+            # setter directly here, otherwise another active lock could be released.
+            CoronaEditor.set_editor_camera_input_enabled(not locked, reason="game_preview")
         except Exception:
             logger.debug("[ScratchTool] editor camera input gate unavailable", exc_info=True)
-        try:
-            import CoronaEngine
-            setter = getattr(CoronaEngine, "camera_follow_set_input_enabled", None)
-            if setter is not None:
-                setter(not locked)
-        except Exception:
-            logger.debug("[ScratchTool] camera follow input gate unavailable", exc_info=True)
+
+    @staticmethod
+    def _scene_names_match(left: Any, right: Any) -> bool:
+        def tokens(value: Any) -> set[str]:
+            text = str(value or "").strip().replace("\\", "/").casefold()
+            if not text:
+                return set()
+            name = text.rsplit("/", 1)[-1]
+            stem = name.rsplit(".", 1)[0]
+            return {text, name, stem}
+        return bool(tokens(left) & tokens(right))
+
+    @classmethod
+    def _preview_payload_locked(cls) -> dict[str, Any]:
+        targets = [dict(item) for item in cls._preview_results.values()]
+        targets.sort(key=lambda item: (item.get("scene_name", ""), item.get("actor_name", ""), item.get("script_kind", "")))
+        running_count = sum(1 for item in targets if item.get("status") in ("starting", "running"))
+        completed_count = sum(1 for item in targets if item.get("status") == "completed")
+        error_count = sum(1 for item in targets if item.get("status") == "error")
+        payload = {
+            "status": cls._preview_status,
+            "scope": cls._preview_scope,
+            "scene_name": cls._preview_scene_name,
+            "started_count": cls._preview_started_count,
+            "running_count": running_count,
+            "completed_count": completed_count,
+            "error_count": error_count,
+            "blockly_count": cls._preview_blockly_count,
+            "node_graph_count": cls._preview_node_graph_count,
+            "targets": targets,
+            "errors": list(cls._preview_errors),
+            "warnings": list(cls._preview_warnings),
+            "input_locked": cls._preview_input_locked,
+            "has_snapshot": cls._preview_state_snapshot is not None,
+            "restart_generation": cls._preview_restart_generation,
+            "restore_status": cls._preview_restore_status,
+            "restore_error": cls._preview_restore_error,
+            "restored": cls._preview_restored,
+            "stopped_count": cls._preview_stopped_count,
+            "stop_pending": bool(cls._preview_stop_thread and cls._preview_stop_thread.is_alive()),
+        }
+        payload.update({
+            "sceneName": payload["scene_name"],
+            "startedCount": payload["started_count"],
+            "runningCount": payload["running_count"],
+            "completedCount": payload["completed_count"],
+            "errorCount": payload["error_count"],
+            "blocklyCount": payload["blockly_count"],
+            "nodeGraphCount": payload["node_graph_count"],
+            "inputLocked": payload["input_locked"],
+            "hasSnapshot": payload["has_snapshot"],
+        })
+        return payload
 
     @classmethod
     def start_game_preview(cls, payload: dict | str | None = None) -> dict:
         data = cls._normalize_payload(payload)
-        scope = data.get("scope", "project")
-        if scope != "project":
+        scope = str(data.get("scope") or "project").strip().lower()
+        requested_scene = str(data.get("scene_name") or data.get("sceneName") or "").strip()
+        if scope not in ("project", "scene"):
             return {"status": "error", "message": f"unsupported preview scope: {scope}"}
+        if scope == "scene" and not requested_scene:
+            return {"status": "error", "message": "scene preview requires scene_name"}
 
-        cls.stop_game_preview()
+        with cls._exec_lock:
+            single_active = bool(
+                (cls._exec_thread and cls._exec_thread.is_alive())
+                or cls._exec_state_snapshot is not None
+                or cls._exec_state.get("status") in ("starting", "running")
+            )
+        if single_active:
+            return {
+                "status": "error",
+                "message": "单物体脚本正在运行，请先停止后再启动全局运行",
+                "outcome": "single_script_running",
+            }
+        with cls._preview_lock:
+            preview_active = bool(
+                cls._preview_state_snapshot is not None
+                or any(info.get("thread") and info["thread"].is_alive() for info in cls._preview_threads)
+                or cls._preview_status in ("starting", "running", "stopping")
+            )
+        if preview_active:
+            return {"status": "error", "message": "已有预览或全局运行正在进行，请先停止并恢复"}
+
         from CoronaCore.utils import corona_engine_scratch
         corona_engine_scratch.clear_runtime_state_snapshots()
-
         try:
             flush_pending_auto_saves()
-            targets, warnings = cls._prepare_preview_targets()
+            targets, warnings = cls._prepare_preview_targets(scope, requested_scene)
             flush_pending_auto_saves()
         except Exception as exc:
             logger.exception("[ScratchTool] start_game_preview prepare failed")
             return {"status": "error", "message": str(exc)}
 
-        if not targets:
-            with cls._preview_lock:
-                cls._preview_errors = []
-                cls._preview_warnings = list(warnings)
-                cls._preview_threads = []
-                cls._preview_status = "idle"
-            cls._set_preview_input_locked(False)
-            return {
-                "status": "idle",
-                "started_count": 0,
-                "errors": [],
-                "warnings": warnings,
-                "input_locked": False,
-            }
-
-        try:
-            state_snapshot = cls._create_preview_state_snapshot()
-        except Exception as exc:
-            logger.exception("[ScratchTool] preview state snapshot failed")
-            return {"status": "error", "message": f"创建预览状态快照失败: {exc}"}
-
         with cls._preview_lock:
+            cls._preview_scope = scope
+            cls._preview_scene_name = requested_scene if scope == "scene" else ""
             cls._preview_errors = []
             cls._preview_warnings = list(warnings)
             cls._preview_threads = []
-            cls._preview_status = "running" if targets else "idle"
-            cls._preview_state_snapshot = state_snapshot
+            cls._preview_started_count = len(targets)
+            cls._preview_blockly_count = sum(1 for item in targets if cls._normalize_script_kind(item.get("script_kind")) == "blockly")
+            cls._preview_node_graph_count = sum(1 for item in targets if cls._normalize_script_kind(item.get("script_kind")) == "node_graph")
+            cls._preview_results = {}
+            for target in targets:
+                cls._preview_results[target["id"]] = {
+                    "id": target["id"],
+                    "target_type": target.get("target_type", "actor"),
+                    "script_kind": cls._normalize_script_kind(target.get("script_kind")),
+                    "scene_name": target.get("scene_name", ""),
+                    "actor_name": target.get("actor_name", ""),
+                    "requested_scene_name": target.get("requested_scene_name", target.get("scene_name", "")),
+                    "requested_actor_name": target.get("requested_actor_name", target.get("actor_name", "")),
+                    "binding_mode": target.get("binding_mode", ""),
+                    "status": "starting",
+                    "outcome": "",
+                    "error": "",
+                    "started_at": 0.0,
+                    "finished_at": 0.0,
+                }
+            cls._preview_status = "starting" if targets else "idle"
+            cls._preview_state_snapshot = None
             cls._preview_restart_generation = 0
             cls._preview_restart_in_progress = False
+            cls._preview_stop_thread = None
+            cls._preview_restore_status = "idle"
+            cls._preview_restore_error = ""
+            cls._preview_restored = False
+            cls._preview_stopped_count = 0
+
+        if not targets:
+            cls._set_preview_input_locked(False)
+            with cls._preview_lock:
+                return cls._preview_payload_locked()
+
+        try:
+            state_snapshot = cls._create_scoped_preview_snapshot(scope, targets)
+        except Exception as exc:
+            logger.exception("[ScratchTool] preview state snapshot failed")
+            with cls._preview_lock:
+                cls._preview_status = "error"
+                cls._preview_errors.append(f"创建预览状态快照失败: {exc}")
+                return {**cls._preview_payload_locked(), "message": f"创建预览状态快照失败: {exc}"}
+
+        with cls._preview_lock:
+            cls._preview_state_snapshot = state_snapshot
+            cls._preview_status = "running"
         cls._set_preview_input_locked(True)
 
+        pending_threads = []
         for target in targets:
             code_path = cls._active_project_path() / target["code_path"]
             thread = threading.Thread(
@@ -697,141 +837,274 @@ class ScratchTool:
                 daemon=True,
                 name=f"blockly-preview-{cls._target_digest(target['id'])}",
             )
-            with cls._preview_lock:
-                cls._preview_threads.append({"thread": thread, "target": target})
-            thread.start()
+            pending_threads.append({"thread": thread, "target": target})
+        with cls._preview_lock:
+            cls._preview_threads = list(pending_threads)
+            for info in pending_threads:
+                info["thread"].start()
+            return cls._preview_payload_locked()
 
-        return {
-            "status": "running" if targets else "idle",
-            "started_count": len(targets),
-            "errors": [],
-            "warnings": warnings,
-            "input_locked": True,
-        }
+    @staticmethod
+    def _wait_for_threads(threads: list[threading.Thread], timeout: float) -> list[threading.Thread]:
+        """在统一截止时间内等待线程，避免按物体逐个累计超时。"""
+        current = threading.current_thread()
+        pending = [thread for thread in threads if thread and thread is not current and thread.is_alive()]
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while pending and time.monotonic() < deadline:
+            for thread in list(pending):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                thread.join(timeout=min(0.01, remaining))
+            pending = [thread for thread in pending if thread.is_alive()]
+        return pending
+
+    @classmethod
+    def _finalize_game_preview_stop(cls, infos: list[dict[str, Any]]) -> None:
+        """后台停止所有预览线程，确认结束后再恢复场景。"""
+        from CoronaCore.utils import corona_engine_scratch
+
+        with cls._preview_lock:
+            # A target's main thread may have completed and removed itself from
+            # _preview_threads while a clone/broadcast child thread is still alive.
+            # Keep every started preview context in the stop set, otherwise that
+            # orphan child can continue changing actors while restoration runs.
+            context_ids = {str(value) for value in cls._preview_results if str(value)}
+        context_ids.update({
+            str((info.get("target") or {}).get("id") or "")
+            for info in infos
+            if (info.get("target") or {}).get("id")
+        })
+        main_threads = [info.get("thread") for info in infos if info.get("thread")]
+        try:
+            corona_engine_scratch.request_stop_all()
+            child_threads = corona_engine_scratch.active_child_threads(context_ids)
+            pending = cls._wait_for_threads(main_threads + child_threads, 1.25)
+
+            # 不合作的纯 Python 循环不会调用 check_stop()/wait()。并行注入，
+            # 然后使用统一截止时间等待，避免脚本数量越多停止越慢。
+            if pending:
+                logger.warning(
+                    "[ScratchTool] %d preview thread(s) ignored cooperative stop; injecting SystemExit",
+                    len(pending),
+                )
+                for thread in pending:
+                    _inject_thread_system_exit(thread)
+                pending = cls._wait_for_threads(pending, 1.5)
+
+            # 广播/克隆处理器可能在主线程退出期间新建，再抓取一次。
+            child_threads = corona_engine_scratch.active_child_threads(context_ids)
+            pending = list({thread for thread in pending + child_threads if thread and thread.is_alive()})
+            if pending:
+                for thread in pending:
+                    _inject_thread_system_exit(thread)
+                pending = cls._wait_for_threads(pending, 1.0)
+
+            if pending:
+                names = ", ".join(sorted({thread.name for thread in pending}))
+                message = f"仍有 {len(pending)} 个脚本线程未停止: {names}"
+                with cls._preview_lock:
+                    cls._preview_threads = [
+                        info for info in cls._preview_threads
+                        if info.get("thread") and info["thread"].is_alive()
+                    ]
+                    cls._preview_status = "error"
+                    cls._preview_restore_status = "error"
+                    cls._preview_restore_error = message
+                    if message not in cls._preview_errors:
+                        cls._preview_errors.append(message)
+                logger.error("[ScratchTool] %s", message)
+                return
+
+            with cls._preview_lock:
+                cls._preview_threads = []
+                cls._preview_stopped_count = len(infos)
+                cls._preview_restore_status = "restoring"
+
+            restored, restore_error = cls._restore_preview_state_snapshot()
+            if not restored and not restore_error:
+                restore_error = "The runtime scene snapshot was lost; restoration cannot continue"
+            if restored and not restore_error:
+                corona_engine_scratch.clear_runtime_state_snapshots()
+            with cls._preview_lock:
+                cls._preview_restored = bool(restored)
+                cls._preview_restore_error = restore_error or ""
+                cls._preview_restore_status = "error" if restore_error else "restored"
+                cls._preview_status = "error" if restore_error else "stopped"
+                if restore_error:
+                    message = f"场景恢复失败: {restore_error}"
+                    if message not in cls._preview_errors:
+                        cls._preview_errors.append(message)
+        except Exception as exc:
+            logger.exception("[ScratchTool] stop_game_preview finalize failed")
+            with cls._preview_lock:
+                cls._preview_status = "error"
+                cls._preview_restore_status = "error"
+                cls._preview_restore_error = str(exc)
+                message = f"停止并恢复失败: {exc}"
+                if message not in cls._preview_errors:
+                    cls._preview_errors.append(message)
+        finally:
+            with cls._preview_lock:
+                cls._preview_stop_thread = None
+                keep_locked = bool(
+                    cls._preview_state_snapshot is not None
+                    and cls._preview_restore_status == "error"
+                    and any(info.get("thread") and info["thread"].is_alive() for info in cls._preview_threads)
+                )
+            if not keep_locked:
+                cls._set_preview_input_locked(False)
 
     @classmethod
     def stop_game_preview(cls) -> dict:
-        with cls._preview_lock:
-            infos = list(cls._preview_threads)
-            if infos:
-                cls._preview_status = "stopping"
-
-        from CoronaCore.utils import corona_engine_scratch
-
-        corona_engine_scratch.request_stop_all()
-        stopped = 0
-        for info in infos:
-            thread = info.get("thread")
-            target = info.get("target") or {}
-            if thread and thread.is_alive():
-                if _force_kill_thread(thread, timeout=0.5, context_id=target.get("id")):
-                    stopped += 1
-            else:
-                stopped += 1
-
-        with cls._preview_lock:
-            cls._preview_threads = [
-                info for info in cls._preview_threads
-                if info.get("thread") and info["thread"].is_alive()
-            ]
-            cls._preview_status = "idle" if not cls._preview_threads else "stopping"
-            live_count = len(cls._preview_threads)
-
-        if live_count:
-            return {
-                "status": cls._preview_status,
-                "stopped_count": stopped,
-                "restored": False,
-                "restore_error": "preview threads are still running",
-                "input_locked": True,
-            }
-
-        restored, restore_error = cls._restore_preview_state_snapshot()
-        corona_engine_scratch.clear_runtime_state_snapshots()
-        cls._set_preview_input_locked(False)
-        with cls._preview_lock:
-            if restore_error:
-                cls._preview_status = "error"
-            else:
-                cls._preview_status = "idle"
-
-        return {
-            "status": cls._preview_status,
-            "stopped_count": stopped,
-            "restored": restored,
-            "input_locked": False,
-            **({"restore_error": restore_error} if restore_error else {}),
-        }
-
-    @classmethod
-    def get_game_preview_status(cls) -> dict:
         from CoronaCore.utils import corona_engine_scratch
 
         with cls._preview_lock:
             cls._prune_preview_locked()
-            live = [info for info in cls._preview_threads if info["thread"].is_alive()]
-            status = {
-                "status": cls._preview_status,
-                "running_count": len(live),
-                "has_snapshot": cls._preview_state_snapshot is not None,
-                "errors": list(cls._preview_errors),
-                "warnings": list(cls._preview_warnings),
-                "input_locked": cls._preview_input_locked,
-                "restart_generation": cls._preview_restart_generation,
-            }
+            existing_stopper = cls._preview_stop_thread
+            if existing_stopper and existing_stopper.is_alive():
+                cls._preview_status = "stopping"
+                return cls._preview_payload_locked()
+
+            infos = list(cls._preview_threads)
+            has_snapshot = cls._preview_state_snapshot is not None
+            context_ids = {str(value) for value in cls._preview_results if str(value)}
+            context_ids.update({
+                str((info.get("target") or {}).get("id") or "")
+                for info in infos
+                if (info.get("target") or {}).get("id")
+            })
+            child_threads = corona_engine_scratch.active_child_threads(context_ids)
+            if not infos and not child_threads and not has_snapshot:
+                cls._preview_status = "stopped"
+                cls._preview_restore_status = "restored"
+                cls._preview_restore_error = ""
+                cls._preview_restored = False
+                cls._set_preview_input_locked(False)
+                return cls._preview_payload_locked()
+
+            cls._preview_status = "stopping"
+            cls._preview_restore_status = "stopping"
+            cls._preview_restore_error = ""
+            cls._preview_restored = False
+            stopper = threading.Thread(
+                target=cls._finalize_game_preview_stop,
+                args=(infos,),
+                daemon=True,
+                name="blockly-preview-stop",
+            )
+            cls._preview_stop_thread = stopper
+
+        corona_engine_scratch.request_stop_all()
+        stopper.start()
+        with cls._preview_lock:
+            return cls._preview_payload_locked()
+
+    @classmethod
+    def get_game_preview_status(cls) -> dict:
+        from CoronaCore.utils import corona_engine_scratch
+        with cls._preview_lock:
+            cls._prune_preview_locked()
+            status = cls._preview_payload_locked()
         status["runtime_states"] = corona_engine_scratch.runtime_state_snapshots()
         return status
 
     @classmethod
-    def _prepare_preview_targets(cls) -> tuple[list[dict], list[str]]:
+    def _prepare_preview_targets(
+        cls, scope: str = "project", requested_scene: str = ""
+    ) -> tuple[list[dict], list[str]]:
         manifest = cls._load_manifest()
-        project_scenes = cls._project_scene_routes()
-        scene_order = {route: i for i, route in enumerate(project_scenes)}
         targets: list[dict] = []
         warnings: list[str] = []
+        from CoronaCore.utils import corona_engine_scratch
 
-        from CoronaCore.core.managers import scene_manager
-
-        for route in project_scenes:
-            try:
-                scene_manager.get_or_create(route)
-            except Exception as exc:
-                warnings.append(f"场景加载失败，已跳过: {route} ({exc})")
-
-        for target in manifest.get("targets", []):
+        for raw in manifest.get("targets", []):
+            target = dict(raw)
+            target["script_kind"] = cls._normalize_script_kind(target.get("script_kind"))
+            target_type = "actor" if target.get("target_type") == "model" else target.get("target_type")
+            target["target_type"] = target_type
+            if scope == "scene":
+                if target_type != "actor":
+                    continue
+                if not cls._scene_names_match(target.get("scene_name", ""), requested_scene):
+                    continue
             if not target.get("enabled", True):
                 continue
-            target_type = target.get("target_type")
+            if not target.get("runnable", True):
+                errors = target.get("validation_errors") or ["脚本配置无效"]
+                warnings.append(f"脚本不可运行，已跳过: {target.get('id')} ({'; '.join(map(str, errors))})")
+                continue
             code_path = target.get("code_path")
             if not code_path or not (cls._active_project_path() / code_path).exists():
                 warnings.append(f"积木代码不存在，已跳过: {target.get('id')}")
                 continue
             if target_type == "project":
-                targets.append(target)
+                if scope == "project":
+                    targets.append(target)
                 continue
             if target_type != "actor":
                 warnings.append(f"未知积木目标，已跳过: {target.get('id')}")
                 continue
 
-            scene_name = target.get("scene_name", "")
-            actor_name = target.get("actor_name", "")
-            if scene_name not in scene_order:
-                warnings.append(f"目标场景不在项目列表中，已跳过: {scene_name}/{actor_name}")
+            requested_target_scene = str(target.get("scene_name") or "")
+            requested_actor = str(target.get("actor_name") or "")
+            resolved = corona_engine_scratch.resolve_runtime_target(
+                "actor", requested_target_scene, requested_actor
+            )
+            if resolved.get("status") != "ok":
+                warnings.append(
+                    f"目标绑定失败，已跳过: {requested_target_scene}/{requested_actor} "
+                    f"({resolved.get('message') or '未知错误'})"
+                )
                 continue
-            scene = scene_manager.get_or_create(scene_name)
-            if not scene or not scene.find_actor(actor_name):
-                warnings.append(f"目标物体不存在，已跳过: {scene_name}/{actor_name}")
+            if scope == "scene" and not cls._scene_names_match(
+                resolved.get("scene_name", ""), requested_scene
+            ):
+                warnings.append(
+                    f"目标绑定到了其他场景，已跳过: {requested_target_scene}/{requested_actor} "
+                    f"-> {resolved.get('scene_name', '')}"
+                )
                 continue
+            target.update({
+                "requested_scene_name": requested_target_scene,
+                "requested_actor_name": requested_actor,
+                "scene_name": resolved.get("scene_name", requested_target_scene),
+                "actor_name": resolved.get("actor_name", requested_actor),
+                "binding_mode": resolved.get("binding_mode", ""),
+                "_resolved": resolved,
+            })
             targets.append(target)
 
-        targets.sort(
-            key=lambda t: (
-                0 if t.get("target_type") == "project" else 1,
-                scene_order.get(t.get("scene_name", ""), 999999),
-                t.get("actor_name", ""),
-            )
-        )
+        targets.sort(key=lambda item: (
+            0 if item.get("target_type") == "project" else 1,
+            item.get("scene_name", ""),
+            item.get("actor_name", ""),
+            item.get("script_kind", ""),
+        ))
         return targets, warnings
+
+    @classmethod
+    def _create_scoped_preview_snapshot(cls, scope: str, targets: list[dict]) -> dict[str, Any]:
+        from CoronaCore.utils import corona_engine_scratch
+        snapshots: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for target in targets:
+            if target.get("target_type") != "actor":
+                continue
+            resolved = target.get("_resolved") or {}
+            key = (str(resolved.get("binding_mode") or ""), str(resolved.get("scene_name") or target.get("scene_name") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            snapshots.append(corona_engine_scratch.capture_runtime_scene_state(
+                scene_name=key[1],
+                scene=resolved.get("scene"),
+                binding_mode=key[0],
+            ))
+        snapshot: dict[str, Any] = {"kind": "runtime", "scope": scope, "snapshots": snapshots}
+        if scope == "project" and any(item.get("target_type") == "project" for item in targets):
+            snapshot["legacy"] = cls._create_preview_state_snapshot()
+        return snapshot
 
     @classmethod
     def _create_preview_state_snapshot(cls) -> dict[str, Any]:
@@ -900,32 +1173,38 @@ class ScratchTool:
     ) -> tuple[bool, str | None]:
         with cls._preview_lock:
             snapshot = cls._preview_state_snapshot
-
         if not snapshot:
             return False, None
 
         try:
             cancel_pending_auto_saves()
-            from CoronaCore.core.managers import scene_manager
+            restored_scenes: set[str] = set()
+            if snapshot.get("kind") == "runtime":
+                from CoronaCore.utils import corona_engine_scratch
+                for runtime_snapshot in snapshot.get("snapshots") or []:
+                    corona_engine_scratch.restore_runtime_scene_state(runtime_snapshot)
+                    restored_scenes.add(str(runtime_snapshot.get("scene_name") or ""))
+                legacy = snapshot.get("legacy")
+            else:
+                legacy = snapshot
 
-            restored_scenes = set()
-            for route, scene_state in (snapshot.get("scenes") or {}).items():
-                scene = scene_manager.get(route)
-                if scene is None:
-                    continue
-
-                cls._restore_scene_state(scene, scene_state)
-                restored_scenes.add(route)
-                try:
-                    scene.save_data()
-                except Exception:
-                    logger.exception("[ScratchTool] failed to save restored scene: %s", route)
+            if legacy:
+                from CoronaCore.core.managers import scene_manager
+                for route, scene_state in (legacy.get("scenes") or {}).items():
+                    scene = scene_manager.get(route)
+                    if scene is None:
+                        continue
+                    cls._restore_scene_state(scene, scene_state)
+                    restored_scenes.add(route)
+                    try:
+                        scene.save_data()
+                    except Exception:
+                        logger.exception("[ScratchTool] failed to save restored scene: %s", route)
 
             if clear_snapshot:
                 with cls._preview_lock:
                     cls._preview_state_snapshot = None
-
-            cls._notify_preview_state_restored(restored_scenes)
+            cls._notify_preview_state_restored({item for item in restored_scenes if item})
             logger.info("[ScratchTool] preview state restored: %d scenes", len(restored_scenes))
             return True, None
         except Exception as exc:
@@ -1035,54 +1314,84 @@ class ScratchTool:
 
     @classmethod
     def _run_preview_target(cls, code_path: Path, target: dict) -> None:
+        context_id = target.get("id", "")
+        current_thread = threading.current_thread()
         with cls._preview_lock:
             observed_generation = cls._preview_restart_generation
+            result = cls._preview_results.get(context_id)
+            if result is not None:
+                result.update(status="running", started_at=time.time())
 
-        while True:
-            outcome = cls._run_code_file(code_path, target, single_exec=False)
-            if outcome == "restart":
-                with cls._preview_restart_lock:
-                    with cls._preview_lock:
-                        if cls._preview_restart_generation == observed_generation:
-                            cls._preview_restart_in_progress = True
-                            cls._preview_restart_generation += 1
-                            cls._preview_status = "running"
-                            should_restore = True
-                        else:
-                            should_restore = False
-                    if should_restore:
-                        from CoronaCore.utils import corona_engine_scratch
-
-                        corona_engine_scratch.request_stop_all()
-                        restored, error = cls._restore_preview_state_snapshot(clear_snapshot=False)
-                        if error:
-                            with cls._preview_lock:
-                                cls._preview_errors.append(f"restart: {error}")
-                                cls._preview_status = "error"
-                        elif not restored:
-                            logger.warning("[ScratchTool] restart requested without preview snapshot")
-                        with cls._preview_lock:
-                            cls._preview_restart_in_progress = False
-                with cls._preview_lock:
-                    observed_generation = cls._preview_restart_generation
-                continue
-
+        outcome = "completed"
+        try:
             while True:
-                with cls._preview_lock:
-                    generation = cls._preview_restart_generation
-                    restarting = cls._preview_restart_in_progress
-                    status = cls._preview_status
-                if restarting:
-                    time.sleep(0.02)
+                outcome = cls._run_code_file(code_path, target, single_exec=False)
+                if outcome == "restart":
+                    with cls._preview_restart_lock:
+                        with cls._preview_lock:
+                            if cls._preview_restart_generation == observed_generation:
+                                cls._preview_restart_in_progress = True
+                                cls._preview_restart_generation += 1
+                                should_restore = True
+                            else:
+                                should_restore = False
+                        if should_restore:
+                            from CoronaCore.utils import corona_engine_scratch
+                            corona_engine_scratch.request_stop_all()
+                            restored, error = cls._restore_preview_state_snapshot(clear_snapshot=False)
+                            if error:
+                                with cls._preview_lock:
+                                    cls._preview_errors.append(f"restart: {error}")
+                            elif not restored:
+                                logger.warning("[ScratchTool] restart requested without preview snapshot")
+                            with cls._preview_lock:
+                                cls._preview_restart_in_progress = False
+                    with cls._preview_lock:
+                        observed_generation = cls._preview_restart_generation
+                    continue
+
+                while True:
+                    with cls._preview_lock:
+                        generation = cls._preview_restart_generation
+                        restarting = cls._preview_restart_in_progress
+                        status = cls._preview_status
+                    if restarting:
+                        time.sleep(0.02)
+                        continue
+                    break
+                if generation != observed_generation and status in ("running", "starting"):
+                    observed_generation = generation
                     continue
                 break
-            if generation != observed_generation and status in ("running", "error"):
-                observed_generation = generation
-                continue
-            break
-
-        with cls._preview_lock:
-            cls._prune_preview_locked()
+        finally:
+            should_unlock = False
+            with cls._preview_lock:
+                result = cls._preview_results.get(context_id)
+                if result is not None:
+                    if outcome == "error":
+                        result["status"] = "error"
+                    elif outcome in ("stopped", "restart"):
+                        result["status"] = "stopped"
+                    else:
+                        result["status"] = "completed"
+                    result["outcome"] = outcome
+                    result["finished_at"] = time.time()
+                cls._preview_threads = [
+                    info for info in cls._preview_threads
+                    if info.get("thread") is not current_thread
+                    and info.get("thread")
+                    and info["thread"].is_alive()
+                ]
+                if not cls._preview_threads and cls._preview_status not in ("stopping", "stopped"):
+                    # Keep the pre-run snapshot until explicit restore succeeds.
+                    # Clearing it when scripts finish makes a later stop unable to restore.
+                    # The stop action remains available while the snapshot exists.
+                    cls._preview_status = "completed"
+                    should_unlock = True
+            if should_unlock:
+                from CoronaCore.utils import corona_engine_scratch
+                corona_engine_scratch.clear_runtime_state_snapshots()
+                cls._set_preview_input_locked(False)
 
     @classmethod
     def _run_code_file(cls, code_path: Path, target: dict, single_exec: bool) -> str:
@@ -1136,8 +1445,11 @@ class ScratchTool:
                 )
             else:
                 with cls._preview_lock:
-                    cls._preview_errors.append(f"{context_id}: {exc}")
-                    cls._preview_status = "error"
+                    message = f"{context_id}: {exc}"
+                    cls._preview_errors.append(message)
+                    result = cls._preview_results.get(context_id)
+                    if result is not None:
+                        result.update(status="error", outcome="error", error=str(exc), finished_at=time.time())
         finally:
             snapshot = corona_engine_scratch.runtime_state_snapshot(ctx)
             if single_exec:
@@ -1157,8 +1469,10 @@ class ScratchTool:
             info for info in cls._preview_threads
             if info.get("thread") and info["thread"].is_alive()
         ]
-        if not cls._preview_threads and cls._preview_status in ("running", "stopping"):
-            cls._preview_status = "error" if cls._preview_errors else "idle"
+        if not cls._preview_threads and cls._preview_status in ("starting", "running"):
+            # Polling may converge thread state but must not destroy the restore snapshot.
+            # _restore_preview_state_snapshot() clears it only after successful restoration.
+            cls._preview_status = "completed"
             cls._set_preview_input_locked(False)
 
     @staticmethod

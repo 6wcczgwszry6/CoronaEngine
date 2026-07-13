@@ -173,6 +173,7 @@ const visionAvailable = ref(false);
 const errorText = ref('');
 const previewHudStates = ref([]);
 const nodeGraphInputLocked = ref(false);
+const gamePreviewInputLocked = ref(false);
 const toolbarRef = ref(null);
 const inputLayerRef = ref(null);
 const backendMenuOpen = ref(false);
@@ -609,6 +610,7 @@ const isEditorInputLocked = () => {
   const locks = window.__coronaEditorInputLocks;
   return Boolean(
     window.__coronaGamePreviewInputLocked ||
+    gamePreviewInputLocked.value ||
     (locks instanceof Set && locks.size > 0) ||
     nodeGraphInputLocked.value
   );
@@ -827,8 +829,11 @@ const pollPreviewHud = async () => {
   try {
     const payload = unwrap(await scriptingService.getGamePreviewStatus()) || {};
     previewHudStates.value = payload.has_snapshot ? (payload.runtime_states || []) : [];
+    gamePreviewInputLocked.value = Boolean(payload.input_locked ?? payload.inputLocked);
+    if (gamePreviewInputLocked.value) resetCameraInput();
   } catch {
     previewHudStates.value = [];
+    gamePreviewInputLocked.value = false;
   }
   try {
     const scriptStatus = unwrap(await scriptingService.getScriptStatus()) || {};

@@ -1189,13 +1189,42 @@ async function saveNow(targetOverride = null) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
+  const snapshot = graphSnapshot();
+  let runnable = true;
+  let code = '';
+  const validationErrors = [];
   try {
-    window.localStorage?.setItem(storageKeyForTarget(target), JSON.stringify(graphSnapshot()));
-    saveLabel.value = `\u672c\u5730\u5df2\u4fdd\u5b58 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+    validateNodeGraph(snapshot);
+    code = nodeGraphToCode(snapshot);
+  } catch (error) {
+    runnable = false;
+    validationErrors.push(String(error?.message || error));
+  }
+  try {
+    window.localStorage?.setItem(storageKeyForTarget(target), JSON.stringify(snapshot));
+  } catch (error) {
+    logError('保存本地节点图失败', error);
+  }
+  try {
+    const response = bridgeResult(await scriptingService.saveBlocklyTarget({
+      target_type: target.targetType === 'model' ? 'actor' : target.targetType || 'actor',
+      scene_name: target.sceneName || '',
+      actor_name: target.actorName || '',
+      script_kind: 'node_graph',
+      workspace: snapshot,
+      code,
+      enabled: true,
+      runnable,
+      validation_errors: validationErrors,
+    }));
+    if (response?.status === 'error') throw new Error(response.message || '保存节点图失败');
+    saveLabel.value = runnable
+      ? `项目已保存 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
+      : `项目已保存（不可运行：${validationErrors[0]}）`;
     return true;
-  } catch (e) {
-    logError('\u4fdd\u5b58\u672c\u5730\u8282\u70b9\u56fe\u5931\u8d25', e);
-    saveLabel.value = '\u672c\u5730\u4fdd\u5b58\u5931\u8d25';
+  } catch (error) {
+    logError('保存项目节点图失败', error);
+    saveLabel.value = '项目保存失败（本地副本已保留）';
     return false;
   }
 }
@@ -1206,15 +1235,37 @@ async function loadGraphForCurrentTarget() {
     return;
   }
   isLoading = true;
-  saveLabel.value = '\u672c\u5730\u52a0\u8f7d\u4e2d...';
+  saveLabel.value = '项目加载中...';
+  let shouldMigrateLocal = false;
   try {
-    const raw = window.localStorage?.getItem(storageKeyForTarget(currentTarget()));
-    applyGraph(normalizeGraph(raw ? JSON.parse(raw) : {}));
-    saveLabel.value = raw ? '\u672c\u5730\u5df2\u52a0\u8f7d' : '\u65b0\u8282\u70b9\u56fe\uff08\u672c\u5730\uff09';
-  } catch (e) {
-    logError('\u52a0\u8f7d\u672c\u5730\u8282\u70b9\u56fe\u5931\u8d25', e);
-    applyGraph(normalizeGraph({}));
-    saveLabel.value = '\u672c\u5730\u52a0\u8f7d\u5931\u8d25';
+    const target = currentTarget();
+    const response = bridgeResult(await scriptingService.loadBlocklyTarget({
+      target_type: target.targetType === 'model' ? 'actor' : target.targetType || 'actor',
+      scene_name: target.sceneName || '',
+      actor_name: target.actorName || '',
+      script_kind: 'node_graph',
+    }));
+    if (response?.status === 'error') throw new Error(response.message || '节点图加载失败');
+    if (response?.status === 'loaded') {
+      applyGraph(normalizeGraph(response.workspace || {}));
+      saveLabel.value = '项目节点图已加载';
+    } else {
+      const raw = window.localStorage?.getItem(storageKeyForTarget(target));
+      applyGraph(normalizeGraph(raw ? JSON.parse(raw) : {}));
+      shouldMigrateLocal = Boolean(raw);
+      saveLabel.value = raw ? '已加载本地节点图，正在迁移...' : '新节点图';
+    }
+  } catch (error) {
+    logError('加载项目节点图失败', error);
+    try {
+      const raw = window.localStorage?.getItem(storageKeyForTarget(currentTarget()));
+      applyGraph(normalizeGraph(raw ? JSON.parse(raw) : {}));
+      shouldMigrateLocal = Boolean(raw);
+      saveLabel.value = raw ? '项目加载失败，已使用本地副本' : '节点图加载失败';
+    } catch (_) {
+      applyGraph(normalizeGraph({}));
+      saveLabel.value = '节点图加载失败';
+    }
   } finally {
     isLoading = false;
     await nextTick();
@@ -1222,6 +1273,7 @@ async function loadGraphForCurrentTarget() {
     activeBlocklyRef.value?.loadState?.(activeEditorState.value || {});
     updateCanvasSize();
   }
+  if (shouldMigrateLocal) await saveNow();
 }
 function bridgeResult(response) {
   return response?.data?.data ?? response?.data ?? response ?? {};
@@ -1402,13 +1454,32 @@ watch(
   },
   { immediate: true }
 );
+function registerNodeGraphFlusher() {
+  const flushers = window.__coronaNodeGraphFlushers instanceof Set
+    ? window.__coronaNodeGraphFlushers
+    : new Set();
+  window.__coronaNodeGraphFlushers = flushers;
+  flushers.add(saveNow);
+  window.__coronaNodeGraphFlushSave = () => Promise.all(
+    Array.from(window.__coronaNodeGraphFlushers || []).map((flush) => Promise.resolve().then(() => flush()))
+  );
+}
+function unregisterNodeGraphFlusher() {
+  window.__coronaNodeGraphFlushers?.delete?.(saveNow);
+  if (!window.__coronaNodeGraphFlushers?.size) {
+    delete window.__coronaNodeGraphFlushSave;
+    delete window.__coronaNodeGraphFlushers;
+  }
+}
 onMounted(() => {
+  registerNodeGraphFlusher();
   loadLayout();
   resizeObserver = new ResizeObserver(resizeEmbeddedWorkspaces);
   if (canvasRef.value) resizeObserver.observe(canvasRef.value);
   updateCanvasSize();
 });
 onBeforeUnmount(() => {
+  unregisterNodeGraphFlusher();
   if (saveTimer) clearTimeout(saveTimer);
   saveNow();
   resizeObserver?.disconnect?.();
