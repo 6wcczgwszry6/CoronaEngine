@@ -25,6 +25,7 @@ R3_DIMENSION_NAMES = (
     "runtime_write_safety",
 )
 R3_GATE_STATES = frozenset({"red", "yellow", "green"})
+R3_ENTITY_DIAGNOSTIC_LIMIT = 50
 
 
 def _stable_mapping(value: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -309,21 +310,48 @@ def _entity_dimension(
     duplicate_ids = sorted({entity_id for entity_id in ids if entity_id and ids.count(entity_id) > 1})
     missing: list[str] = []
     contradictions: list[str] = []
+    entity_diagnostics: list[dict[str, Any]] = []
     partial_without_reasons = 0
     for index, entity in enumerate(entities):
         entity_ref = str(entity.get("entity_id") or f"entity[{index}]")
+        identity_missing: list[str] = []
         if not str(entity.get("entity_id") or "").strip():
             missing.append(f"{entity_ref}:entity_id")
+            identity_missing.append("entity_id")
         if not str(entity.get("asset_id") or entity.get("model_ref") or "").strip():
             missing.append(f"{entity_ref}:asset_identity")
+            identity_missing.append("asset_identity")
         if str(entity.get("entity_type") or "") not in {"environment", "substrate"} and not str(
             entity.get("actor_id") or ""
         ).strip():
             missing.append(f"{entity_ref}:actor_id")
+            identity_missing.append("actor_id")
         if _safe_int(entity.get("version"), 0) <= 0:
             missing.append(f"{entity_ref}:version")
-        if not bool(entity.get("game_ready")) and not list(entity.get("readiness_missing_fields") or []):
+            identity_missing.append("version")
+        raw_readiness_missing = entity.get("readiness_missing_fields")
+        readiness_missing = _unique_text(
+            raw_readiness_missing
+            if isinstance(raw_readiness_missing, Sequence)
+            and not isinstance(raw_readiness_missing, (str, bytes, bytearray))
+            else []
+        )
+        diagnostic_missing = _unique_text([*identity_missing, *readiness_missing])
+        if not bool(entity.get("game_ready")) and not readiness_missing:
             partial_without_reasons += 1
+        if not bool(entity.get("game_ready")) or identity_missing:
+            entity_diagnostics.append(
+                {
+                    "entity_ref": entity_ref,
+                    "entity_type": str(entity.get("entity_type") or "unknown"),
+                    "semantic_role": str(entity.get("semantic_role") or "unknown"),
+                    "game_ready": bool(entity.get("game_ready")),
+                    "readiness_missing_fields": diagnostic_missing,
+                }
+            )
+    entity_diagnostics.sort(key=lambda item: str(item.get("entity_ref") or ""))
+    diagnostic_total_count = len(entity_diagnostics)
+    entity_diagnostics = entity_diagnostics[:R3_ENTITY_DIAGNOSTIC_LIMIT]
     contradictions.extend(f"duplicate_entity_id:{entity_id}" for entity_id in duplicate_ids)
     if partial_without_reasons:
         contradictions.append("needs_review_entities_without_missing_fields")
@@ -361,6 +389,9 @@ def _entity_dimension(
             "identity_complete_count": max(0, entity_count - len({item.split(":", 1)[0] for item in missing})),
             "partial_without_missing_fields_count": partial_without_reasons,
             "readiness_missing_field_counts": dict(data.get("readiness_missing_field_counts") or {}),
+            "entity_diagnostics": entity_diagnostics,
+            "entity_diagnostics_total_count": diagnostic_total_count,
+            "entity_diagnostics_truncated_count": max(0, diagnostic_total_count - len(entity_diagnostics)),
         },
         missing=missing,
         contradictions=contradictions,

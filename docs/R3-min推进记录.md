@@ -855,3 +855,41 @@ W0.4 初始 Gate 锚点：仍等待最新可信 F5
 - 多批次生成时，前序 Actor 的 `entity_id/asset_id/model_ref/batch_id` 不再被后续 Snapshot 覆盖。
 - Finalizer 使用 known identity 对齐 Engine Actor 后，`engine_verified` 和 Game-ready 数量能否由旧基准 `3/14` 提升到 Yellow/Green 门槛。
 - 未被当前计划拥有的既有场景 Actor 只出现在观察事实中，不进入当前计划 Registry/Snapshot。
+
+## 33. W0.4/W1.2 R3 Gate 输出逐实体 Readiness 责任字段
+
+旧 F5 只记录 `14 entities / 3 Game-ready` 和聚合缺失计数，无法证明剩余 11 个实体分别缺少身份、真实 AABB、Engine ready、贴地还是同步事实。`scene_entity_registry` 已经保存每个实体的 `readiness_missing_fields`，但 `runtime.r3_readiness.evaluate` 此前没有把这份既有事实带入 GateReport。
+
+当前改动：
+
+- `entity_readiness.metrics` 增加稳定排序的 `entity_diagnostics`，逐项披露 `entity_ref/entity_type/semantic_role/game_ready/readiness_missing_fields`。
+- 诊断直接读取 `scene_entity_registry`，并合并 Gate 自己验证出的 `entity_id/asset_identity/actor_id/version` 身份缺失，不建立第二状态源。
+- 已标记 `game_ready=true` 但缺少稳定身份的实体仍进入诊断并使 Gate 判 Red，不能信任矛盾标记。
+- 诊断默认最多 50 项，同时提供 total/truncated 计数，避免大场景报告无限增长。
+- 输出按 `entity_ref` 排序并参与确定性 GateReport hash；相同事实重复查询仍得到相同结果。
+- 不修改 RuntimeState、OperationLog、Registry、ToolCallGraph 或 Engine，也不改变现有 Game-ready 判定。
+
+聚焦自动验证：
+
+```text
+R3 readiness evaluator 7 项通过
+5/14 Yellow -> 精确列出 9 个 needs-review 实体及 support_classification
+game_ready 标记与 asset identity 矛盾 -> 逐实体诊断并判 Red
+AgentRuntime Game-ready 26 项通过
+SceneWorld peer mirror 4 项通过
+Python syntax compile 与 git diff --check 通过
+```
+
+当前任务状态：
+
+```text
+W0.4 Gate 逐实体诊断：code_complete
+W1.2 Game-ready 实机提升：仍等待最新可信 F5
+当前 Gate：red / pending_reevaluation
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 下一轮 F5 的 GateReport 能否准确列出全部 needs-review 实体及真实缺失字段。
+- Scene Snapshot 身份修复后 Game-ready 是否达到 Yellow（至少 5/14）或 Green（至少 8/14）门槛。
+- 若仍未达标，必须按 `entity_diagnostics` 选择数量占比最高的真实责任字段继续修复，不能根据旧日志猜测。

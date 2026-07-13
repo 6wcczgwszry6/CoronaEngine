@@ -186,8 +186,38 @@ class R3ReadinessGateTests(unittest.TestCase):
 
         self.assertEqual(report.overall, "yellow")
         self.assertEqual(report.dimensions["entity_readiness"].status, "yellow")
+        metrics = report.dimensions["entity_readiness"].metrics
+        self.assertEqual(metrics["entity_diagnostics_total_count"], 9)
+        self.assertEqual(metrics["entity_diagnostics_truncated_count"], 0)
+        self.assertEqual(
+            [item["entity_ref"] for item in metrics["entity_diagnostics"]],
+            [f"entity-{index:02d}" for index in range(5, 14)],
+        )
+        self.assertTrue(
+            all(
+                item["readiness_missing_fields"] == ["support_classification"]
+                for item in metrics["entity_diagnostics"]
+            )
+        )
         self.assertIn("readonly_snapshot_analysis", report.capability_unlocks)
         self.assertNotIn("action_proposal", report.capability_unlocks)
+
+    def test_entity_diagnostics_include_identity_failures_without_trusting_game_ready(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        registry = deepcopy(facts["scene_entity_registry"])
+        registry["entities"][0]["asset_id"] = ""
+        registry["entities"][0]["model_ref"] = ""
+        facts["scene_entity_registry"] = registry
+
+        report = evaluate_r3_gate(**facts)
+
+        dimension = report.dimensions["entity_readiness"]
+        self.assertEqual(dimension.status, "red")
+        diagnostics = dimension.metrics["entity_diagnostics"]
+        entity = next(item for item in diagnostics if item["entity_ref"] == "entity-00")
+        self.assertTrue(entity["game_ready"])
+        self.assertEqual(entity["readiness_missing_fields"], ["asset_identity"])
+        self.assertIn("entity-00:asset_identity", dimension.missing)
 
     def test_environment_fingerprint_and_identity_failures_are_red(self) -> None:
         missing_environment = _gate_facts(game_ready_count=8)
