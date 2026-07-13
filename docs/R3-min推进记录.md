@@ -774,3 +774,14 @@ execution reply/evidence 既有字段回归通过
 
 - 旧运行的 14/3 是否主要由 `engine_actual_aabb/engine_ready/grounding_status` 缺失造成。
 - 当前版本 Finalizer reconcile 后，各缺失项是否降为 0；若不为 0，日志可直接定位责任域。
+
+## 30. 当前权威文档切换为双轨推进与分级门禁
+
+为避免超长历史计划和旧约束文档继续产生执行口径歧义，本轮完成文档治理：
+
+- 新增 `R3稳定门禁与三职能Agent双轨推进计划.md`，作为当前唯一推进优先级来源。
+- 新增 `Agent任务约束循环_R3三职能协同版.md`，作为当前 Agent / Codex 执行规约。
+- 旧计划和旧约束循环保留历史正文，并增加新文档迁移提示。
+- 后续阶段进度继续写入本文件；微小修改只保留在提交记录中。
+
+当前 Gate 仍为 `red / pending_reevaluation`：最近 F5 是旧代码的 `3/14 Game-ready` 结果，最新 Readiness、业务图分域、Finalizer 与 Peer Mirror 修复仍需新一轮 F5 验证。文档切换本身没有改变 Runtime、Engine 或多人同步代码。
