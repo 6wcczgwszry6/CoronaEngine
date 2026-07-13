@@ -1033,3 +1033,53 @@ W3.5 AgentTaskGraph：ready
 - ArtifactRegistry 的跨进程持久化和多人传播；W3 第一阶段只提供协作层内存事实接口。
 - 运行中的三职能 Agent、真实或 Mock Snapshot 输入、Coordinator、ProjectGate 和 ActionProposal。
 - 本轮不改变轨道 A Gate；所有 Engine/Sync 效果仍为 **[待 F5/实机验证]**。
+
+## 37. W3.5 AgentTaskGraph 业务任务状态机
+
+在 W3.4 的版本化 ArtifactRegistry 基础上，完成独立于 ToolCallGraph 和 AgentRuntime 的跨职能业务任务图。本轮只管理“哪个职能在什么依赖满足后产出哪类 Artifact”，不执行 Provider、Engine 或场景写入。
+
+当前改动：
+
+- 新增 `services/agent_collaboration/task_graph.py`，定义不可变 `AgentTaskGraph`、`AgentTaskRecord`、`TaskBlockReason` 和 `TaskGraphTransition`。
+- `AgentTask` 增加显式 `max_attempts`；Record 的权威状态会同步到嵌套 Task，避免序列化后同时出现 `pending` 和 `in_progress` 两个事实。
+- 建图时验证 task_id 唯一、depends_on 完整、输入 Artifact ref 显式带版本、依赖图无环；图定义和 project identity 共同参与幂等/冲突判断。
+- 项目同一时刻只允许一个非 terminal active task graph；创建成功后通过 ProjectState CAS 写入 `active_task_graph_id`。
+- 上游任务未完成时，下游保持 `pending`；上游完成且输入 Artifact 当前可用时才进入 `ready`。
+- 上游失败/blocked、输入缺失或 stale 时，下游进入 `blocked` 并保留结构化原因，不会凭任务文本猜测继续执行。
+- 单个任务支持 `ready -> in_progress -> completed/failed -> retry`；失败只重开责任任务，已完成上游不重跑，重试预算耗尽后明确拒绝。
+- 任务完成前必须核验 output ref 存在、当前可用、`source_task_id` 匹配责任任务且覆盖声明的 output types；不能用其他 Agent 的 Artifact 冒充本任务结果。
+- Artifact 更新后 `refresh()` 精确阻断依赖旧版本的已完成任务及其下游；`rebind_inputs()` 显式绑定新版本并清空旧输出后才重新 ready。
+- 两个并发执行者竞争同一 ready task 时只有一个能进入 `in_progress`；状态迁移均有 graph version 和 transition history。
+- 模块不导入 ToolCallGraph、RuntimeState、SceneWorldSnapshot、LANChat 或 Engine 接口。
+
+聚焦自动验证：
+
+```text
+contracts + ProjectState + ArtifactRegistry + AgentTaskGraph：34 tests passed
+三职能依赖顺序与完整 completed 闭环：passed
+任务级失败/重试与预算耗尽：passed
+stale input 精确阻断 + 版本 rebind：passed
+output source/type/current version 门禁：passed
+循环/未知依赖/跨项目 graph ID 冲突：passed
+并发 ready task 原子认领：passed
+迁移历史和 no-op refresh：passed
+轨道 B Runtime/LANChat import isolation：passed
+Python syntax compile：passed
+```
+
+当前任务状态：
+
+```text
+W3.1-W3.6 三职能强类型契约底座：code_complete
+W4.1 策划 Agent 非执行型 Artifact 输出：ready
+W4.2/W4.3 美术与程序 Agent：等待 W4.1
+当前 Gate：red / pending_reevaluation
+```
+
+以下仍未实现或未解锁：
+
+- W4 三职能 Agent 的结构化 Artifact 生产与纯契约协作闭环。
+- 运行中的 Agent 不得读取真实或 Mock Snapshot；Red 状态下 W4.1 只能消费 ProjectState 和有效 Artifact。
+- Coordinator、ProjectGate、ActionProposal、EntityBindingPlan 真实绑定和 Runtime 写入仍由 Green Gate 阻断。
+- TaskGraph/Registry 的跨进程持久化与多人传播不属于 W3 第一阶段。
+- 本轮不改变轨道 A Gate；所有 Engine/Sync 效果仍为 **[待 F5/实机验证]**。

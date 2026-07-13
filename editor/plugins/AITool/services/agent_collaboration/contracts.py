@@ -437,6 +437,7 @@ class AgentTask:
     capability_set: tuple[str, ...]
     risk_level: str = "low"
     status: str = "pending"
+    max_attempts: int = 2
 
     def __post_init__(self) -> None:
         if not _text(self.task_id) or not _text(self.objective):
@@ -455,10 +456,13 @@ class AgentTask:
         status = _text(self.status).lower()
         if risk not in RISK_LEVELS or status not in TASK_STATUSES:
             raise ValueError("risk_level or task status is invalid")
+        if int(self.max_attempts) <= 0:
+            raise ValueError("max_attempts must be positive")
         object.__setattr__(self, "assigned_role", role)
         object.__setattr__(self, "output_types", outputs)
         object.__setattr__(self, "risk_level", risk)
         object.__setattr__(self, "status", status)
+        object.__setattr__(self, "max_attempts", int(self.max_attempts))
         for field_name, allow_empty in (
             ("input_artifact_refs", True),
             ("depends_on", True),

@@ -40,6 +40,19 @@ from .artifact_registry import (
     InvalidArtifactError,
     StaleReason,
 )
+from .task_graph import (
+    AgentTaskGraph,
+    AgentTaskGraphError,
+    AgentTaskGraphStore,
+    AgentTaskRecord,
+    TaskBlockReason,
+    TaskGraphAlreadyExistsError,
+    TaskGraphNotFoundError,
+    TaskGraphTransition,
+    TaskGraphValidationError,
+    TaskOutputValidationError,
+    TaskTransitionError,
+)
 
 __all__ = [
     "ARTIFACT_TYPES",
@@ -76,4 +89,15 @@ __all__ = [
     "ArtifactVersionConflictError",
     "InvalidArtifactError",
     "StaleReason",
+    "AgentTaskGraph",
+    "AgentTaskGraphError",
+    "AgentTaskGraphStore",
+    "AgentTaskRecord",
+    "TaskBlockReason",
+    "TaskGraphAlreadyExistsError",
+    "TaskGraphNotFoundError",
+    "TaskGraphTransition",
+    "TaskGraphValidationError",
+    "TaskOutputValidationError",
+    "TaskTransitionError",
 ]
