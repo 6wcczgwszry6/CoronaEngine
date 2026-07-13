@@ -5512,10 +5512,24 @@ def _make_scene_snapshot_tool(provider: Callable[[Any], dict[str, Any]]) -> Call
                 for actor_id, actor in dict(call.args.get("known_actors") or {}).items()
                 if str(actor_id or "") and isinstance(actor, Mapping)
             }
-            actor_updates = _match_snapshot_actors_to_runtime(
-                normalized_actors,
-                known_actors,
-            ) if known_actors else dict(normalized_actors)
+            if known_actors:
+                actor_updates = _match_snapshot_actors_to_runtime(
+                    normalized_actors,
+                    known_actors,
+                )
+            elif plan_id or batch_id:
+                # A plan-scoped snapshot is an observation, not ownership
+                # evidence.  Without Runtime identity facts, copying every
+                # native actor into ``actors`` would assign existing scene
+                # objects to the current plan/batch and overwrite stable
+                # resource identity from earlier batches.  Keep unmatched
+                # native rows in ``observed_actors`` until a later reconcile
+                # supplies an unambiguous known-actor projection.
+                actor_updates = {}
+            else:
+                # An explicit unscoped scene refresh may still expose native
+                # actors as unmanaged Runtime facts for inspection.
+                actor_updates = dict(normalized_actors)
             for actor in actor_updates.values():
                 if not isinstance(actor, dict):
                     continue

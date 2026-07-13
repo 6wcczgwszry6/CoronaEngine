@@ -33522,6 +33522,83 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertTrue(actor["bounds_ready"])
         self.assertEqual(actor["engine_lifecycle_status"], "bounds_ready")
 
+    def test_plan_scoped_snapshot_without_known_identity_does_not_claim_or_rebatch_actors(self) -> None:
+        def fake_provider(request: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "room_id": request.get("room_id"),
+                "source": "fake_engine",
+                "actors": [
+                    {
+                        "actor_id": "native-existing-chair",
+                        "name": "native-chair",
+                        "position": [2.0, 0.0, 1.0],
+                        "aabb": {"min": [1.5, 0.0, 0.5], "max": [2.5, 1.0, 1.5]},
+                        "bounds_ready": True,
+                    },
+                    {
+                        "actor_id": "native-unmanaged-prop",
+                        "name": "unmanaged-prop",
+                        "position": [0.0, 0.0, 0.0],
+                        "aabb": {"min": [-0.5, 0.0, -0.5], "max": [0.5, 1.0, 0.5]},
+                        "bounds_ready": True,
+                    },
+                ],
+            }
+
+        runtime = AgentRuntime(scene_snapshot_provider=fake_provider)
+        plan = runtime.propose_scene_plan(
+            room_id="room-snapshot-no-claim",
+            text="create a room with a chair",
+            owner_agent="designer",
+        )
+        runtime.state.apply_patch(StatePatch(
+            room_id="room-snapshot-no-claim",
+            changes={
+                "actors": {
+                    "runtime-chair": {
+                        "actor_id": "runtime-chair",
+                        "entity_id": "entity-chair",
+                        "name": "chair",
+                        "plan_id": plan.plan_id,
+                        "batch_id": "batch-original",
+                        "asset_id": "asset-chair",
+                        "model_ref": "chair.glb",
+                        "status": "engine_loading",
+                    }
+                }
+            },
+        ))
+        graph = ToolCallGraph(
+            graph_id="graph-plan-scoped-snapshot",
+            plan_id=plan.plan_id,
+            batch_id="batch-next",
+        )
+        graph.add(ToolCall(
+            tool_call_id="tool-plan-scoped-snapshot",
+            tool_name="runtime.scene.snapshot",
+            args={
+                "room_id": "room-snapshot-no-claim",
+                "plan_id": plan.plan_id,
+                "batch_id": "batch-next",
+            },
+            risk_level=RiskLevel.LOW,
+        ))
+
+        executed = ToolCallGraphExecutor(
+            registry=runtime.registry,
+            guard=runtime.guard,
+            state=runtime.state,
+            operation_log=runtime.operation_log,
+        ).execute(graph, room_id="room-snapshot-no-claim")
+        room = runtime.query_state("room-snapshot-no-claim")["room"]
+
+        self.assertEqual(executed.status, "completed")
+        self.assertEqual(set(room["actors"]), {"runtime-chair"})
+        self.assertEqual(room["actors"]["runtime-chair"]["batch_id"], "batch-original")
+        self.assertEqual(room["actors"]["runtime-chair"]["asset_id"], "asset-chair")
+        self.assertIn("native-existing-chair", room["observed_actors"])
+        self.assertIn("native-unmanaged-prop", room["observed_actors"])
+
     def test_plan_finalizer_recovers_partial_batch_from_native_snapshot(self) -> None:
         def fake_provider(request: dict[str, Any]) -> dict[str, Any]:
             return {

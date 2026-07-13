@@ -820,3 +820,38 @@ W0.4 初始 Gate 锚点：等待最新可信 F5 事实
 ```
 
 当前 Gate **仍为 `red / pending_reevaluation`**。以上证据只证明 Python 结构、边界和零副作用成立；旧 F5 的 `3/14 Game-ready` 仍是最新实机基准。Engine、多人一致性和实际 Green 判定均为 **[待 F5/实机验证]**。
+
+## 32. W1.2 计划内 Scene Snapshot 不再认领未知 Actor
+
+复核旧 F5 的 `14 entities / 3 Game-ready` 与当前 Scene Snapshot 调用链后，确认存在一个跨批次身份覆盖断点：每个业务批次开头都会执行 `runtime.scene.snapshot`；当调用没有携带 `known_actors` 时，Snapshot 工具此前会把所有 Engine 观察对象同时写入 `observed_actors` 和权威 `actors`，并补上当前 plan/batch。这样会把既有场景对象错误认领为当前计划实体，也可能把前几批 Actor 的稳定资源身份和原始 batch 归属覆盖为后一批。
+
+当前改动：
+
+- plan/batch scoped Snapshot 在没有 Runtime 稳定身份投影时，只写 `observed_actors` 和 Engine snapshot，不写权威 `actors`。
+- 只有通过 actor_id、entity_id、asset_id、model_ref 或唯一名称索引与 `known_actors` 明确匹配的 Engine 对象，才允许把真实 transform/AABB/lifecycle 回写到 Runtime Actor。
+- 手动、无 plan/batch 的显式场景刷新继续允许登记 unmanaged native Actor，保留原有检查能力。
+- 不修改模型生成、Actor import、RuntimeGuard、EngineWriteGate 或 Finalizer 主链。
+
+聚焦自动验证：
+
+```text
+plan-scoped snapshot + no known identity -> 观察到 native Actor，但不认领、不改批次
+known Runtime actor + Engine snapshot -> 保留 plan/batch/asset identity，并吸收真实 AABB
+Finalizer partial batch recovery -> 继续从唯一匹配的 native snapshot 收敛
+AgentRuntime Game-ready 26 项通过
+R3 readiness evaluator 6 项通过
+Python syntax compile 与 git diff --check 通过
+```
+
+当前任务状态：
+
+```text
+W1.2 稳定身份和真实几何事实：本断点 code_complete
+W0.4 初始 Gate 锚点：仍等待最新可信 F5
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 多批次生成时，前序 Actor 的 `entity_id/asset_id/model_ref/batch_id` 不再被后续 Snapshot 覆盖。
+- Finalizer 使用 known identity 对齐 Engine Actor 后，`engine_verified` 和 Game-ready 数量能否由旧基准 `3/14` 提升到 Yellow/Green 门槛。
+- 未被当前计划拥有的既有场景 Actor 只出现在观察事实中，不进入当前计划 Registry/Snapshot。
