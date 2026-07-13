@@ -5427,6 +5427,70 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(coordinator.ingest_calls, [])
         self.assertIn("user_report_generated", worker._agent_runtime.operation_log.events())
 
+    def test_world_consistency_disclosure_is_count_only(self) -> None:
+        consistent = LANChatAgentWorker._format_agent_runtime_scene_world_consistency_report({
+            "status": "consistent",
+            "expected_entity_count": 4,
+            "engine_actor_count": 4,
+            "matched_entity_count": 4,
+            "issue_count": 0,
+            "missing_in_engine_entity_ids": ["entity-secret"],
+        })
+        needs_review = LANChatAgentWorker._format_agent_runtime_scene_world_consistency_report({
+            "status": "needs_review",
+            "expected_entity_count": 4,
+            "engine_actor_count": 3,
+            "matched_entity_count": 3,
+            "issue_count": 1,
+            "missing_in_engine_entity_ids": ["entity-secret"],
+        })
+
+        self.assertIn("对账通过", consistent)
+        self.assertIn("匹配 4/4", consistent)
+        self.assertIn("需要复核", needs_review)
+        self.assertIn("问题 1 项", needs_review)
+        self.assertNotIn("entity-secret", consistent)
+        self.assertNotIn("entity-secret", needs_review)
+
+    def test_world_consistency_disclosure_reaches_report_and_status(self) -> None:
+        worker = _TestWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))
+        audit = {
+            "status": "needs_review",
+            "expected_entity_count": 4,
+            "engine_actor_count": 3,
+            "matched_entity_count": 3,
+            "issue_count": 1,
+            "missing_in_engine_entity_ids": ["entity-secret"],
+        }
+        with patch.object(worker._agent_runtime, "handle_message", return_value={
+            "recorded": True,
+            "report": {
+                "plan_id": "plan-report-audit",
+                "scene_world_consistency_audit": audit,
+            },
+        }):
+            report_reply = worker._handle_agent_runtime_report_query({
+                "room_id": "room-report-audit",
+                "message_id": "msg-report-audit",
+                "text": "@GM runtime report",
+                "message_kind": "chat",
+            })
+        with patch.object(worker._agent_runtime, "handle_message", return_value={
+            "status": {
+                "available": True,
+                "plan_id": "plan-status-audit",
+                "scene_world_consistency_audit": audit,
+            },
+        }):
+            status_reply = worker._agent_runtime_status_reply(room_id="room-status-audit")
+
+        self.assertIn("world consistency: 需要复核", report_reply or "")
+        self.assertIn("场景事实对账：需要复核", status_reply)
+        self.assertIn("问题 1 项", report_reply or "")
+        self.assertIn("问题 1 项", status_reply)
+        self.assertNotIn("entity-secret", report_reply or "")
+        self.assertNotIn("entity-secret", status_reply)
+
     def test_runtime_report_query_uses_metadata_batch_scope(self) -> None:
         coordinator = _ExplodingCoordinator()
         worker = _TestWorker(

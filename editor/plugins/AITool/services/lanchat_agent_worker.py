@@ -5364,6 +5364,11 @@ class LANChatAgentWorker:
         plan_summary = report.get("plan_summary", {}) if isinstance(report.get("plan_summary"), dict) else {}
         classification = report.get("classification_summary", {}) if isinstance(report.get("classification_summary"), dict) else {}
         scene_registry = report.get("scene_entity_registry", {}) if isinstance(report.get("scene_entity_registry"), dict) else {}
+        scene_world_consistency = (
+            report.get("scene_world_consistency_audit", {})
+            if isinstance(report.get("scene_world_consistency_audit"), dict)
+            else {}
+        )
         scene_design_contract = report.get("scene_design_contract_summary", {}) if isinstance(report.get("scene_design_contract_summary"), dict) else {}
         semantic_arbitration = report.get("semantic_arbitration_summary", {}) if isinstance(report.get("semantic_arbitration_summary"), dict) else {}
         scene_snapshot = report.get("scene_snapshot_summary", {}) if isinstance(report.get("scene_snapshot_summary"), dict) else {}
@@ -5481,6 +5486,9 @@ class LANChatAgentWorker:
             f"{len(raw_substrate_items)}"
         )
         scene_registry_text = self._format_agent_runtime_scene_registry_report(scene_registry)
+        scene_world_consistency_text = self._format_agent_runtime_scene_world_consistency_report(
+            scene_world_consistency
+        )
         scene_contract_text = self._format_agent_runtime_scene_contract_report(scene_design_contract)
         semantic_arbitration_text = self._format_agent_runtime_semantic_arbitration_report(semantic_arbitration)
         scene_snapshot_text = self._format_agent_runtime_scene_snapshot_report(scene_snapshot)
@@ -5545,6 +5553,7 @@ class LANChatAgentWorker:
             f"- models: {model_items}\n"
             f"- substrate: {substrate_items}\n"
             f"- scene registry: {scene_registry_text}\n"
+            f"- world consistency: {scene_world_consistency_text}\n"
             f"- scene contract: {scene_contract_text}\n"
             f"- semantic arbitration: {semantic_arbitration_text}\n"
             f"- scene snapshot: {scene_snapshot_text}\n"
@@ -5633,6 +5642,25 @@ class LANChatAgentWorker:
         if roles:
             parts.append("roles " + "、".join(roles))
         return ", ".join(parts)
+
+    @staticmethod
+    def _format_agent_runtime_scene_world_consistency_report(summary: Any) -> str:
+        if not isinstance(summary, dict) or not summary:
+            return "尚无 Engine/Runtime 对账结果"
+        status = str(summary.get("status") or "blocked").strip().lower()
+        expected = int(summary.get("expected_entity_count") or 0)
+        actual = int(summary.get("engine_actor_count") or 0)
+        matched = int(summary.get("matched_entity_count") or 0)
+        issues = int(summary.get("issue_count") or 0)
+        counts = f"匹配 {matched}/{expected}，Engine 实体 {actual}"
+        if status == "consistent":
+            return f"对账通过，{counts}"
+        if status == "needs_review":
+            return f"需要复核，{counts}，问题 {issues} 项"
+        reason = str(summary.get("reason") or "engine_snapshot_unavailable").strip().lower()
+        if reason == "engine_scene_snapshot_unavailable":
+            return f"对账尚未完成，等待 Engine 场景快照；{counts}"
+        return f"对账尚未完成，{counts}"
 
     @staticmethod
     def _format_agent_runtime_environment_report(summary: Any) -> str:
@@ -8128,6 +8156,11 @@ class LANChatAgentWorker:
         interventions = status.get("intervention_summary", {}) if isinstance(status.get("intervention_summary"), dict) else {}
         classification = status.get("classification_summary", {}) if isinstance(status.get("classification_summary"), dict) else {}
         scene_registry = status.get("scene_entity_registry", {}) if isinstance(status.get("scene_entity_registry"), dict) else {}
+        scene_world_consistency = (
+            status.get("scene_world_consistency_audit", {})
+            if isinstance(status.get("scene_world_consistency_audit"), dict)
+            else {}
+        )
         scene_design_contract = status.get("scene_design_contract_summary", {}) if isinstance(status.get("scene_design_contract_summary"), dict) else {}
         semantic_arbitration = status.get("semantic_arbitration_summary", {}) if isinstance(status.get("semantic_arbitration_summary"), dict) else {}
         scene_snapshot = status.get("scene_snapshot_summary", {}) if isinstance(status.get("scene_snapshot_summary"), dict) else {}
@@ -8255,6 +8288,9 @@ class LANChatAgentWorker:
         batch_status = batch.get("status_counts", {}) if isinstance(batch.get("status_counts"), dict) else {}
         graph_status = graphs.get("status_counts", {}) if isinstance(graphs.get("status_counts"), dict) else {}
         scene_registry_text = self._format_agent_runtime_scene_registry_report(scene_registry)
+        scene_world_consistency_text = self._format_agent_runtime_scene_world_consistency_report(
+            scene_world_consistency
+        )
         scene_contract_text = self._format_agent_runtime_scene_contract_report(scene_design_contract)
         semantic_arbitration_text = self._format_agent_runtime_semantic_arbitration_report(semantic_arbitration)
         scene_snapshot_text = self._format_agent_runtime_scene_snapshot_report(scene_snapshot)
@@ -8342,6 +8378,7 @@ class LANChatAgentWorker:
             f"- 主要模型：{item_text}",
             f"- 环境/地形：{substrate_text}",
             f"- 场景实体：{scene_registry_text}",
+            f"- 场景事实对账：{scene_world_consistency_text}",
             f"- 场景契约：{scene_contract_text}",
             f"- 语义仲裁：{semantic_arbitration_text}",
             f"- 场景快照：{scene_snapshot_text}",

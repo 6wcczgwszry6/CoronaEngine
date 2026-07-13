@@ -281,3 +281,30 @@ Python syntax compile 通过
 - Finalizer 后抓取的 Engine snapshot 与不可变 SceneWorldSnapshot 使用同一 plan/version。
 - 房主与成员分别审计时 `entity_id/asset_id/version` 和实体数量一致。
 - 多人传输失败时审计和 Snapshot 正确体现 `partial/needs_review`，不虚报 Game-ready。
+
+## 13. LANChat 世界一致性审计披露
+
+本轮补齐了 Runtime 审计到用户可见报告的最后一段只读链路。此前 `scene_world_consistency_audit` 已由 Finalizer 写入报告，但 LANChat 的 Runtime Report 和状态查询没有消费该字段，导致用户无法判断 Engine、RuntimeState 与 SceneWorldSnapshot 是否一致。
+
+当前改动：
+
+- Runtime Report 新增 `world consistency` 摘要。
+- Runtime 状态查询新增“场景事实对账”摘要。
+- 只披露 `consistent / needs_review / blocked`、匹配数量、Engine 实体数量和问题总数。
+- 不披露 `entity_id`、`actor_id`、模型路径或具体漂移列表；详细证据仍保留在 Runtime 报告和 OperationLog 中供调试。
+- Engine 快照尚未到达时明确显示“等待 Engine 场景快照”，不把 blocked 误报为失败或完成。
+
+聚焦自动验证：
+
+```text
+consistent / needs_review / blocked 三态格式化
+Runtime Report 与 Runtime 状态查询均可见审计摘要
+内部 entity_id 不进入聊天室文本
+Python syntax compile 通过
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- Finalizer 完成后聊天室最终报告显示“对账通过”，且数量与 Scene 面板一致。
+- Engine Actor 晚到时状态从“等待快照”更新为“对账通过”或准确的“需要复核”。
+- 多人房主与成员看到的对账状态不矛盾；成员端没有完整 Runtime 事实时不得伪造一致。
