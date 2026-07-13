@@ -328,8 +328,14 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=_room_fact(game_ready=True)))
         self.assertTrue(applied)
         before = runtime.state.room("room-1")
+        operation_count_before = len(runtime.operation_log.entries())
 
         result = runtime.handle_message(
+            room_id="room-1",
+            text="",
+            action="runtime.scene_world_snapshot.get",
+        )
+        repeated = runtime.handle_message(
             room_id="room-1",
             text="",
             action="runtime.scene_world_snapshot.get",
@@ -347,6 +353,9 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         )
         self.assertEqual(before.get("tool_graphs", {}), after.get("tool_graphs", {}))
         self.assertEqual(before.get("pending_interventions", {}), after.get("pending_interventions", {}))
+        self.assertEqual(len(runtime.operation_log.entries()), operation_count_before)
+        self.assertEqual(repeated["operation_cursor"], result["operation_cursor"])
+        self.assertEqual(repeated["world_fingerprint"], result["world_fingerprint"])
 
     def test_public_snapshot_api_rejects_unavailable_minimum_version(self) -> None:
         runtime = AgentRuntime()

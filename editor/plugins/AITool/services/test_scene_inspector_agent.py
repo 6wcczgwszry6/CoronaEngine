@@ -68,6 +68,7 @@ class SceneInspectorAgentTests(unittest.TestCase):
         applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-inspect", changes=_scene_state()))
         self.assertTrue(applied)
         before = runtime.state.room("room-inspect")
+        operation_count_before = len(runtime.operation_log.entries())
 
         result = SceneInspectorAgent(runtime).analyze(room_id="room-inspect")
 
@@ -82,6 +83,7 @@ class SceneInspectorAgentTests(unittest.TestCase):
         )
         self.assertEqual(before.get("tool_graphs", {}), after.get("tool_graphs", {}))
         self.assertEqual(before.get("pending_interventions", {}), after.get("pending_interventions", {}))
+        self.assertEqual(len(runtime.operation_log.entries()), operation_count_before)
 
     def test_inspector_does_not_reuse_an_older_scene_version(self) -> None:
         runtime = AgentRuntime()

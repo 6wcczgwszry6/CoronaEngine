@@ -645,3 +645,29 @@ Python syntax compile 通过
 - 实机场景 Snapshot 中未知 gameplay 字段保持为空，不影响 Registry/报告完成。
 - 后续 SceneInspectorAgent 不会把空能力扩写成可执行动作。
 - 未来能力识别必须由独立、可审计的 EntityIntent/CapabilityPatch 写入，而不是恢复名称模板默认值。
+
+## 25. SceneWorldSnapshot API 严格只读
+
+复核公开 Snapshot 接口时发现，`get_scene_world_snapshot()` 虽然不创建 ToolGraph 或 PlanPatch，但统一消息入口和查询方法仍会把每次读取写入世界 OperationLog。结果是只读 Inspector 每分析一次场景都会推进 operation cursor，连续读取同一版本也会产生新的世界历史。
+
+当前改动：
+
+- `runtime.scene_world_snapshot.get` 不再写 `runtime_message_action_routed` 或 snapshot queried 世界事件。
+- 其他控制、写入和审计 action 继续完整记录 OperationLog，不放松执行审计。
+- 连续读取同一 `plan_id + scene_version` 返回相同 fingerprint 和 operation cursor。
+- SceneInspectorAgent 读取 Snapshot 后，RuntimeState、ToolGraph、PlanPatch 和 OperationLog 均不变化。
+- Snapshot 仍从已有 RuntimeState、OperationLog、Registry 与 Engine consistency fact 构建，不引入第二事实源。
+
+聚焦自动验证：
+
+```text
+连续两次公开 Snapshot 查询 -> OperationLog 数量不变
+连续两次公开 Snapshot 查询 -> cursor/fingerprint 稳定
+SceneInspectorAgent 分析 -> 零世界写入
+Inspector scene version 更新检测回归通过
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 下游 Inspector 频繁轮询不会改变聊天室终态事件窗口或成员端 cursor。
+- 同一场景版本在房主与成员端读取时各自稳定，宿主发布新版本后再发生可解释变化。

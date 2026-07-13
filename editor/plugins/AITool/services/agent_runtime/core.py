@@ -11723,11 +11723,15 @@ class AgentRuntime:
             or raw_payload.get("runtime_batch_id")
             or ""
         )
-        self.operation_log.append(
-            "runtime_message_action_routed",
-            room_id=room,
-            payload=action_policy,
-        )
+        # SceneWorldSnapshot is a pure read contract for downstream Agents.
+        # Logging the query into the world's OperationLog would advance its
+        # cursor and make two identical reads observably different.
+        if normalized_action not in self._SCENE_WORLD_SNAPSHOT_ACTIONS:
+            self.operation_log.append(
+                "runtime_message_action_routed",
+                room_id=room,
+                payload=action_policy,
+            )
         if action_policy["category"] == RuntimeMessageActionCategory.UNKNOWN.value:
             self.operation_log.append(
                 "runtime_message_unknown_action_rejected",
@@ -21000,17 +21004,6 @@ class AgentRuntime:
             "operation_cursor": str(snapshot.get("operation_cursor") or ""),
             "snapshot_stability": snapshot_stability,
         }
-        self.operation_log.append(
-            "runtime_scene_world_snapshot_queried",
-            room_id=room_key,
-            plan_id=target_plan_id,
-            payload={
-                "scene_version": result["scene_version"],
-                "world_readiness": result["world_readiness"],
-                "world_fingerprint": result["world_fingerprint"],
-                "snapshot_stability": snapshot_stability,
-            },
-        )
         return result
 
     def audit_scene_world_consistency(
