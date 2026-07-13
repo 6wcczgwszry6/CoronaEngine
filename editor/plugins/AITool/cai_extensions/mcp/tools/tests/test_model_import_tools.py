@@ -306,15 +306,11 @@ class ModelImportToolsTests(unittest.TestCase):
             },
         ])
 
-        with mock.patch(
-            "Quasar.ai_modules.three_d_generate.tools.client_hunyuan3d.time.sleep",
-            return_value=None,
-        ):
-            result = client.run_to_download_urls(
-                prompt="bookshelf",
-                poll_interval=0.01,
-                poll_timeout=10.0,
-            )
+        result = client.run_to_download_urls(
+            prompt="bookshelf",
+            poll_interval=0.0,
+            poll_timeout=10.0,
+        )
 
         self.assertEqual(result["task_uuid"], "job-existing")
         self.assertEqual(client.submit_job.call_count, 1)

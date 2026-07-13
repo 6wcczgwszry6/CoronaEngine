@@ -1002,6 +1002,15 @@ class LANChatAgentWorker:
                 and action_intent.operation in {"add", "modify"}
                 and not action_intent.requires_confirmation
             ):
+                if not self._can_execute_generation_locally():
+                    self._logger.info(
+                        "[LANChatRuntimeAuthority] phase=runtime_write_forwarded room=%s message_id=%s plan=%s",
+                        room_id,
+                        message.get("message_id") or "",
+                        execution_plan_id,
+                    )
+                    self._remember_coordinator_seen_message_id(dedupe_key)
+                    return True
                 note_kind = "add" if action_intent.operation == "add" else "edit_existing"
                 message_id = str(message.get("message_id") or "")
                 claimed = self._message_dispatch_ledger.claim(
@@ -1029,6 +1038,15 @@ class LANChatAgentWorker:
         if not execution_plan_id and completed_intent is not None and (
             completed_intent.route == "runtime_write" or completed_intent.clarification
         ):
+            if completed_intent.route == "runtime_write" and not self._can_execute_generation_locally():
+                self._logger.info(
+                    "[LANChatRuntimeAuthority] phase=completed_write_forwarded room=%s message_id=%s plan=%s",
+                    room_id,
+                    message.get("message_id") or "",
+                    completed_plan_id,
+                )
+                self._remember_coordinator_seen_message_id(dedupe_key)
+                return True
             message_id = str(message.get("message_id") or "")
             if not self._message_dispatch_ledger.claim(
                 room_id,

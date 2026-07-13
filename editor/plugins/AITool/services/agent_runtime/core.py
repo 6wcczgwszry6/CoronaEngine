@@ -7420,6 +7420,11 @@ class AgentRuntime:
         "query_runtime_state",
     })
     _ENTITY_STATUS_ACTIONS = frozenset({"runtime.entity_status", "entity_status", "runtime_entity_status"})
+    _SCENE_WORLD_SNAPSHOT_ACTIONS = frozenset({
+        "runtime.scene_world_snapshot.get",
+        "scene_world_snapshot.get",
+        "runtime_scene_world_snapshot_get",
+    })
     _RUNTIME_EVENT_ACTIONS = frozenset({"runtime_events", "user_visible_events", "runtime_event_feed"})
     _AUDIT_EVENT_ACTIONS = frozenset({"runtime_audit_event", "audit_event", "operation_audit_event"})
     _WORKER_DRAIN_ACTIONS = frozenset({"worker_drain", "drain_queue", "runtime_worker_drain", "tool_graph_drain"})
@@ -7520,6 +7525,7 @@ class AgentRuntime:
         | _GM_SUMMARY_ACTIONS
         | _STATUS_QUERY_ACTIONS
         | _ENTITY_STATUS_ACTIONS
+        | _SCENE_WORLD_SNAPSHOT_ACTIONS
         | _RUNTIME_EVENT_ACTIONS
         | _SYNC_STATUS_ACTIONS
         | _ENGINE_WRITE_STATUS_ACTIONS
@@ -7539,6 +7545,7 @@ class AgentRuntime:
         | _GM_SUMMARY_ACTIONS
         | _STATUS_QUERY_ACTIONS
         | _ENTITY_STATUS_ACTIONS
+        | _SCENE_WORLD_SNAPSHOT_ACTIONS
         | _AUDIT_EVENT_ACTIONS
         | _WORKER_DRAIN_ACTIONS
         | _RUNTIME_COMMAND_ACTIONS
@@ -12843,6 +12850,19 @@ class AgentRuntime:
                 },
             )
             return result
+        if normalized_action in self._SCENE_WORLD_SNAPSHOT_ACTIONS:
+            raw_payload = dict(sync_event or {})
+            requested_plan_id = str(plan_id or raw_payload.get("plan_id") or "").strip()
+            raw_min_version = raw_payload.get("min_version")
+            try:
+                min_version = int(raw_min_version) if raw_min_version is not None else None
+            except (TypeError, ValueError):
+                min_version = None
+            return self.get_scene_world_snapshot(
+                room_id=room,
+                plan_id=requested_plan_id,
+                min_version=min_version,
+            )
         if normalized_action in self._STATUS_QUERY_ACTIONS:
             try:
                 summary = self.status_summary(
@@ -16799,6 +16819,22 @@ class AgentRuntime:
         self._mark_tool_graph_queue_item(executed, room_id=room_id, status=executed.status)
         self._emit_resource_stage_events_for_graph(str(room_id), executed)
         self._finalize_batch_after_drained_graph(executed, room_id=room_id)
+        if executed.status == "completed" and executed.plan_id:
+            reconcile = self._reconcile_partial_engine_readiness(
+                room_id=str(room_id),
+                plan_id=executed.plan_id,
+            )
+            self.operation_log.append(
+                "batch_engine_readiness_reconciled",
+                room_id=str(room_id),
+                plan_id=executed.plan_id,
+                batch_id=executed.batch_id,
+                payload={
+                    "graph_id": executed.graph_id,
+                    "recorded": bool(reconcile.get("recorded")),
+                    "reason": str(reconcile.get("reason") or ""),
+                },
+            )
         return executed
 
     def _persist_tool_graph_state(self, graph: ToolCallGraph, *, room_id: str, reason: str) -> None:
@@ -20026,12 +20062,14 @@ class AgentRuntime:
             bounds_source = str(entity.get("bounds_source") or "").strip().lower()
             entity_type = str(entity.get("entity_type") or "").strip().lower()
             stable_resource = bool(entity.get("asset_id")) and bool(entity.get("model_ref"))
+            sync_known = str(entity.get("sync_status") or "").strip().lower() not in {"", "unknown"}
             grounding_known = grounding in {
                 "grounded",
                 "wall_mounted",
                 "suspended",
                 "ceiling_hung",
                 "not_applicable",
+                "enclosure",
             }
             if entity_type == "environment" and grounding == "not_applicable":
                 grounding_known = True
@@ -20043,6 +20081,7 @@ class AgentRuntime:
                 and bounds_source == "engine_actual"
                 and stable_resource
                 and grounding_known
+                and sync_known
             )
 
         def readiness_missing_fields(entity: Mapping[str, Any]) -> list[str]:
@@ -20062,9 +20101,11 @@ class AgentRuntime:
             if str(entity.get("engine_write_verification_status") or "") != "engine_verified":
                 missing.append("engine_ready")
             if str(entity.get("grounding_status") or "").strip().lower() not in {
-                "grounded", "wall_mounted", "suspended", "ceiling_hung", "not_applicable"
+                "grounded", "wall_mounted", "suspended", "ceiling_hung", "not_applicable", "enclosure"
             }:
                 missing.append("grounding_status")
+            if str(entity.get("sync_status") or "").strip().lower() in {"", "unknown"}:
+                missing.append("sync_status")
             return missing
 
         def reviewed_ok_targets() -> set[str]:
@@ -20356,7 +20397,13 @@ class AgentRuntime:
                     "bounds_ready": bool(component.get("bounds_ready")) if "bounds_ready" in component else bool(bounds),
                     "bounds_source": str(component.get("bounds_source") or "runtime_state"),
                     "size": vector3(component.get("size")),
-                    "grounding_status": "not_applicable",
+                    "grounding_status": (
+                        "grounded"
+                        if component_type in {"room_floor", "terrain", "ground", "walkable_floor"}
+                        else "enclosure"
+                        if component_type in {"room_box", "room_shell", "indoor_enclosure"}
+                        else "not_applicable"
+                    ),
                     "interaction_capability": list_field(component, "interaction_capability"),
                     "gameplay_tags": list_field(component, "gameplay_tags"),
                     "physics_profile": mapping_field(component, "physics_profile"),
@@ -20573,7 +20620,9 @@ class AgentRuntime:
             if isinstance(item, Mapping)
         ]
         environment_entities = [
-            item for item in entities if str(item.get("entity_type") or "") == "environment"
+            item
+            for item in entities
+            if str(item.get("entity_type") or "") in {"environment", "substrate"}
         ]
         actor_entities = [
             item for item in entities if str(item.get("entity_type") or "") not in {"environment", "substrate"}
@@ -20609,6 +20658,104 @@ class AgentRuntime:
             operation_cursor=str(operation_cursor or ""),
         )
         return snapshot.as_dict()
+
+    def get_scene_world_snapshot(
+        self,
+        *,
+        room_id: str,
+        plan_id: str = "",
+        min_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Return a side-effect-free world snapshot for downstream readers."""
+
+        room_key = str(room_id)
+        room = self.state.room(room_key)
+        plans = dict(room.get("scene_plans") or {})
+        requested_plan_id = str(plan_id or "").strip()
+        if requested_plan_id:
+            target_plan_id = requested_plan_id if requested_plan_id in plans else ""
+        else:
+            target_plan_id = str(
+                room.get("active_execution_plan_id")
+                or room.get("latest_completed_plan_id")
+                or ""
+            ).strip()
+        if not target_plan_id or target_plan_id not in plans:
+            return {
+                "handled": True,
+                "action": "runtime.scene_world_snapshot.get",
+                "recorded": False,
+                "found": False,
+                "plan_id": requested_plan_id,
+                "scene_version": 0,
+                "world_readiness": "blocked",
+                "snapshot": {},
+                "operation_cursor": f"op:{len(self.operation_log.entries())}",
+                "reason": "scene_plan_not_found",
+            }
+
+        plan = dict(plans.get(target_plan_id) or {})
+        scene_version = max(1, int(plan.get("version") or 1))
+        if min_version is not None and scene_version < max(0, int(min_version)):
+            return {
+                "handled": True,
+                "action": "runtime.scene_world_snapshot.get",
+                "recorded": False,
+                "found": False,
+                "plan_id": target_plan_id,
+                "scene_version": scene_version,
+                "world_readiness": "blocked",
+                "snapshot": {},
+                "operation_cursor": f"op:{len(self.operation_log.entries())}",
+                "reason": "minimum_scene_version_not_available",
+            }
+
+        persisted_report = self._latest_persisted_report_for_plan(
+            room_key,
+            target_plan_id,
+            terminal_only=True,
+        )
+        persisted_snapshot = dict(persisted_report.get("scene_world_snapshot") or {})
+        if (
+            str(persisted_snapshot.get("plan_id") or "") == target_plan_id
+            and int(persisted_snapshot.get("scene_version") or 0) == scene_version
+        ):
+            snapshot = persisted_snapshot
+            snapshot_stability = "immutable"
+        else:
+            registry = self._scene_entity_registry_for_plan(room, target_plan_id)
+            snapshot = self._scene_world_snapshot_for_plan(
+                room,
+                target_plan_id,
+                room_id=room_key,
+                scene_entity_registry=registry,
+                operation_cursor=f"op:{len(self.operation_log.entries())}",
+            )
+            snapshot_stability = "provisional"
+
+        result = {
+            "handled": True,
+            "action": "runtime.scene_world_snapshot.get",
+            "recorded": False,
+            "found": True,
+            "plan_id": target_plan_id,
+            "scene_version": int(snapshot.get("scene_version") or scene_version),
+            "world_readiness": str(snapshot.get("world_readiness") or "blocked"),
+            "snapshot": snapshot,
+            "operation_cursor": str(snapshot.get("operation_cursor") or ""),
+            "snapshot_stability": snapshot_stability,
+        }
+        self.operation_log.append(
+            "runtime_scene_world_snapshot_queried",
+            room_id=room_key,
+            plan_id=target_plan_id,
+            payload={
+                "scene_version": result["scene_version"],
+                "world_readiness": result["world_readiness"],
+                "snapshot_stability": snapshot_stability,
+            },
+        )
+        return result
 
     @staticmethod
     def _sync_readiness_summary(

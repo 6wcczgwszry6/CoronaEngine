@@ -15,6 +15,7 @@ from editor.plugins.AITool.services.agent_runtime import (
     ToolCallGraphValidator,
 )
 from editor.plugins.AITool.services.lanchat_agent_worker import LANChatAgentWorker
+from editor.plugins.AITool.services.runtime_action_intent import RuntimeActionIntent
 
 
 class _DispatchTrackingWorker(LANChatAgentWorker):
@@ -29,6 +30,11 @@ class _DispatchTrackingWorker(LANChatAgentWorker):
     def _send_final_reply(self, _agent_id: str, _agent_name: str, text: str, *_args, **_kwargs) -> bool:
         self.authoritative_replies.append(str(text))
         return True
+
+
+class _ClientDispatchTrackingWorker(_DispatchTrackingWorker):
+    def _can_execute_generation_locally(self) -> bool:
+        return False
 
 
 def _room_fact(*, game_ready: bool) -> dict:
@@ -79,6 +85,37 @@ def _room_fact(*, game_ready: bool) -> dict:
 
 
 class AgentRuntimeGameReadyTests(unittest.TestCase):
+    def test_non_authoritative_client_does_not_execute_completed_scene_write(self) -> None:
+        runtime = AgentRuntime()
+        applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=_room_fact(game_ready=True)))
+        self.assertTrue(applied)
+        worker = _ClientDispatchTrackingWorker(agent_runtime=runtime)
+        intent = RuntimeActionIntent(
+            message_id="msg-client-write",
+            room_id="room-1",
+            route="runtime_write",
+            operation="add",
+            modality="command",
+            confidence=0.99,
+            target_plan_id="plan-1",
+        )
+        message = {
+            "room_id": "room-1",
+            "message_id": "msg-client-write",
+            "text": "add a table",
+            "sender_id": "member-1",
+            "sender_name": "member",
+            "sender_type": "user",
+            "message_kind": "chat",
+        }
+
+        with patch.object(worker, "_runtime_action_intent_for_trigger", return_value=intent):
+            handled = worker.sync_chat_message_to_coordinator(message, source="lanchat_native_queue")
+
+        self.assertTrue(handled)
+        self.assertEqual(runtime.state.room("room-1").get("pending_interventions", {}), {})
+        self.assertEqual(worker.authoritative_replies, [])
+
     def test_native_and_agent_trigger_share_one_authoritative_query_reply(self) -> None:
         runtime = AgentRuntime()
         applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=_room_fact(game_ready=True)))
@@ -172,6 +209,93 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(snapshot["scene_version"], 2)
         self.assertEqual(snapshot["world_readiness"], "needs_review")
         self.assertIn("engine_actual_aabb", snapshot["actor_entities"][0]["readiness_missing_fields"])
+
+    def test_public_snapshot_api_is_read_only_and_uses_latest_completed_plan(self) -> None:
+        runtime = AgentRuntime()
+        applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=_room_fact(game_ready=True)))
+        self.assertTrue(applied)
+        before = runtime.state.room("room-1")
+
+        result = runtime.handle_message(
+            room_id="room-1",
+            text="",
+            action="runtime.scene_world_snapshot.get",
+        )
+
+        after = runtime.state.room("room-1")
+        self.assertTrue(result["found"])
+        self.assertEqual(result["plan_id"], "plan-1")
+        self.assertEqual(result["scene_version"], 2)
+        self.assertEqual(result["snapshot_stability"], "provisional")
+        self.assertEqual(before.get("tool_graphs", {}), after.get("tool_graphs", {}))
+        self.assertEqual(before.get("pending_interventions", {}), after.get("pending_interventions", {}))
+
+    def test_public_snapshot_api_rejects_unavailable_minimum_version(self) -> None:
+        runtime = AgentRuntime()
+        applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=_room_fact(game_ready=True)))
+        self.assertTrue(applied)
+
+        result = runtime.handle_message(
+            room_id="room-1",
+            text="",
+            action="runtime.scene_world_snapshot.get",
+            sync_event={"min_version": 3},
+        )
+
+        self.assertFalse(result["found"])
+        self.assertEqual(result["scene_version"], 2)
+        self.assertEqual(result["reason"], "minimum_scene_version_not_available")
+
+    def test_environment_support_semantics_are_game_ready_specific(self) -> None:
+        room = _room_fact(game_ready=True)
+        room["environment_components"] = {
+            "batch-1": {
+                "floor": {
+                    "component_id": "floor",
+                    "component_type": "room_floor",
+                    "actor_id": "actor-floor",
+                    "asset_id": "asset-floor",
+                    "model_ref": "room_floor.obj",
+                    "position": [0.0, 0.0, 0.0],
+                    "rotation": [0.0, 0.0, 0.0],
+                    "scale": [1.0, 1.0, 1.0],
+                    "aabb": {"min": [-3.0, 0.0, -3.0], "max": [3.0, 0.1, 3.0]},
+                    "bounds_source": "engine_actual",
+                    "bounds_ready": True,
+                    "engine_lifecycle_status": "bounds_ready",
+                    "sync_status": "engine_created",
+                    "source": "engine_environment_import",
+                    "status": "success",
+                },
+                "shell": {
+                    "component_id": "shell",
+                    "component_type": "room_box",
+                    "actor_id": "actor-shell",
+                    "asset_id": "asset-shell",
+                    "model_ref": "room_box.obj",
+                    "position": [0.0, 0.0, 0.0],
+                    "rotation": [0.0, 0.0, 0.0],
+                    "scale": [1.0, 1.0, 1.0],
+                    "aabb": {"min": [-3.0, 0.0, -3.0], "max": [3.0, 3.0, 3.0]},
+                    "bounds_source": "engine_actual",
+                    "bounds_ready": True,
+                    "engine_lifecycle_status": "bounds_ready",
+                    "sync_status": "engine_created",
+                    "source": "engine_environment_import",
+                    "status": "success",
+                },
+            }
+        }
+
+        registry = AgentRuntime._scene_entity_registry_for_plan(room, "plan-1")
+        support_by_component = {
+            entity["component_type"]: entity["grounding_status"]
+            for entity in registry["entities"]
+            if entity.get("entity_type") == "environment"
+        }
+
+        self.assertEqual(support_by_component["room_floor"], "grounded")
+        self.assertEqual(support_by_component["room_box"], "enclosure")
 
     def test_business_graph_role_is_persisted_and_validated(self) -> None:
         graph = ToolCallGraph(
