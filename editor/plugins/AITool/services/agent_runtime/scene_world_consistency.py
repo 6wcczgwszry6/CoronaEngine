@@ -230,6 +230,7 @@ def audit_scene_world_consistency(
                 "actual": actual_aabb,
             })
 
+    non_materialized_entity_count = max(0, len(world_entities) - len(expected_entities))
     issue_count = sum((
         len(duplicate_world_ids),
         len(duplicate_engine_ids),
@@ -242,6 +243,7 @@ def audit_scene_world_consistency(
         len(version_mismatches),
         len(transform_mismatches),
         len(world_aabb_mismatches),
+        non_materialized_entity_count,
     ))
     if not plan_id or not engine_snapshot:
         status = "blocked"
@@ -250,8 +252,12 @@ def audit_scene_world_consistency(
     else:
         status = "consistent"
 
+    # The Runtime fingerprint represents the whole downstream-visible world,
+    # including entities that have not materialized into Engine actors yet.
+    # Otherwise a partial world could compare equal after silently dropping
+    # exactly the entities the audit is meant to expose.
     world_fingerprint = scene_world_fingerprint(
-        expected_entities,
+        world_entities,
         plan_id=plan_id,
         scene_version=scene_version,
     )
@@ -269,7 +275,7 @@ def audit_scene_world_consistency(
         "expected_entity_count": len(expected_entities),
         "engine_actor_count": len(engine_actors),
         "matched_entity_count": len(set(world_by_id) & set(engine_by_id)),
-        "non_materialized_entity_count": max(0, len(world_entities) - len(expected_entities)),
+        "non_materialized_entity_count": non_materialized_entity_count,
         "issue_count": issue_count,
         "duplicate_world_entity_ids": duplicate_world_ids,
         "duplicate_engine_entity_ids": duplicate_engine_ids,

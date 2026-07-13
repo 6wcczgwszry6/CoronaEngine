@@ -522,3 +522,29 @@ LANChat Scene Sync 静态检查通过
 - 高频拖动多个 Actor 时，同一 Actor 的 transform 事件被有效压缩且最终位置不丢失。
 - 文件传输和 transform 高并发期间，Actor create/import/delete 与 asset complete 终态均进入 RuntimeState。
 - 队列压力不会造成明显主线程卡顿；若触发硬上限告警，需要进一步拆分关键/快照双队列。
+
+## 21. 五方对账禁止忽略未物化实体
+
+本轮复核 M3 五方对账时发现，一致性审计此前只把带 `actor_id` 的 Runtime 实体纳入 Engine 对账。尚未物化的 environment、substrate 或普通实体会被排除，导致“Runtime 世界仍有 planned 实体，但剩余 Actor 与 Engine 完全一致”时错误返回 `consistent`，世界指纹也可能出现假一致。
+
+当前改动：
+
+- `non_materialized_entity_count` 计入一致性审计问题总数；只要 Snapshot 中存在尚未形成 Engine Actor 的实体，审计至少为 `needs_review`。
+- Runtime world fingerprint 使用完整下游可见实体集合，不再只对已物化 Actor 求摘要。
+- Engine fingerprint 继续只由真实 Engine Actor 生成；两者在未物化实体存在时必须不同。
+- Finalizer 已有的 `runtime_scene_world_consistency_audited` 与最终报告会直接继承该严格判定，不新增旁路状态源。
+
+聚焦自动验证：
+
+```text
+完整物化且身份/transform/AABB 一致 -> consistent
+身份、版本、transform 或 AABB 漂移 -> needs_review
+存在未物化 Runtime 实体 -> needs_review + fingerprint mismatch
+Game-ready 聚焦套件 18 项通过
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 儿童卧室、森林营地和混合场景最终审计不存在未解释的 `non_materialized_entity_count`。
+- Provider 或 Engine 导入失败时，最终报告准确列出未物化实体并保持 `needs_review/partial`。
+- 追加批执行期间 Snapshot 的临时未物化实体不会被错误披露为 Game-ready；追加批完成后新版本重新收敛。

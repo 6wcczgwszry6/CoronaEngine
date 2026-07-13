@@ -15,6 +15,9 @@ from editor.plugins.AITool.services.agent_runtime import (
     ToolCallGraphValidator,
     make_scene_snapshot_provider,
 )
+from editor.plugins.AITool.services.agent_runtime.scene_world_consistency import (
+    audit_scene_world_consistency,
+)
 from editor.plugins.AITool.services.lanchat_agent_worker import LANChatAgentWorker
 from editor.plugins.AITool.services.runtime_action_intent import RuntimeActionIntent
 
@@ -464,6 +467,49 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(audit["version_mismatches"][0]["actual"], entity["version"] + 1)
         self.assertEqual(audit["transform_mismatches"][0]["entity_id"], entity["entity_id"])
         self.assertEqual(audit["world_aabb_mismatches"][0]["entity_id"], entity["entity_id"])
+        self.assertFalse(audit["fingerprints_match"])
+
+    def test_world_consistency_audit_rejects_non_materialized_runtime_entity(self) -> None:
+        materialized = {
+            "entity_id": "entity-desk",
+            "actor_id": "actor-desk",
+            "asset_id": "asset-desk",
+            "model_ref": "desk.obj",
+            "version": 1,
+            "transform": {
+                "position": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0],
+                "scale": [1.0, 1.0, 1.0],
+            },
+            "world_aabb": {"min": [-0.5, 0.0, -0.5], "max": [0.5, 1.0, 0.5]},
+        }
+        planned_only = {
+            "entity_id": "entity-terrain",
+            "actor_id": "",
+            "asset_id": "asset-terrain",
+            "model_ref": "terrain.obj",
+            "version": 1,
+            "transform": {},
+            "world_aabb": {},
+        }
+
+        audit = audit_scene_world_consistency(
+            world_snapshot={
+                "plan_id": "plan-1",
+                "scene_version": 1,
+                "environment_entities": [planned_only],
+                "actor_entities": [materialized],
+            },
+            engine_snapshot={
+                "snapshot_id": "snapshot-partial-world",
+                "plan_id": "plan-1",
+                "actors": [materialized],
+            },
+        )
+
+        self.assertEqual(audit["status"], "needs_review")
+        self.assertEqual(audit["non_materialized_entity_count"], 1)
+        self.assertGreaterEqual(audit["issue_count"], 1)
         self.assertFalse(audit["fingerprints_match"])
 
     def test_environment_support_semantics_are_game_ready_specific(self) -> None:
