@@ -14131,6 +14131,121 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(drained["drained_count"], len(queued["graphs"]))
         self.assertGreaterEqual(len(runtime.query_state("room-enqueue-only")["room"]["actors"]), 1)
 
+    def test_enqueue_planned_batches_only_creates_missing_principal_graph(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-enqueue-mixed-principal",
+            text="bedroom with bed, desk, chair and wardrobe",
+            owner_agent="tester",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+        initial = runtime.enqueue_planned_batches(plan.plan_id, max_items_per_batch=1)
+        self.assertGreaterEqual(len(initial["batches"]), 2)
+        first_batch = initial["batches"][0]
+        second_batch = initial["batches"][1]
+        first_graph_id = str(first_batch["tool_graph_id"])
+        second_graph_id = str(second_batch["tool_graph_id"])
+
+        room = runtime.state.room(plan.room_id)
+        room["tool_graphs"].pop(second_graph_id, None)
+        room["tool_graph_queue"].pop(second_graph_id, None)
+        room["batch_plans"][second_batch["batch_id"]]["tool_graph_id"] = ""
+        runtime._queued_tool_graphs.pop(second_graph_id, None)
+        runtime.batch_plans[second_batch["batch_id"]].tool_graph_id = ""
+
+        queued = runtime.enqueue_planned_batches(plan.plan_id, max_items_per_batch=1)
+        graph_by_batch = {graph["batch_id"]: graph for graph in queued["graphs"]}
+        business_graphs = {
+            graph_id: graph
+            for graph_id, graph in runtime.state.room(plan.room_id)["tool_graphs"].items()
+            if graph.get("graph_role") == "business_batch"
+        }
+
+        self.assertEqual(graph_by_batch[first_batch["batch_id"]]["graph_id"], first_graph_id)
+        self.assertNotEqual(graph_by_batch[second_batch["batch_id"]]["graph_id"], second_graph_id)
+        self.assertEqual(len(business_graphs), len(initial["batches"]))
+        self.assertEqual(
+            runtime.state.room(plan.room_id)["batch_plans"][first_batch["batch_id"]]["tool_graph_id"],
+            first_graph_id,
+        )
+        partial_reuse = [
+            entry
+            for entry in runtime.operation_log.entries()
+            if entry.event == "planned_batches_enqueue_partial_reuse"
+        ]
+        self.assertEqual(len(partial_reuse), 1)
+        self.assertEqual(partial_reuse[0].payload["reused_graph_count"], len(initial["batches"]) - 1)
+        self.assertEqual(partial_reuse[0].payload["new_graph_count"], 1)
+
+    def test_enqueue_planned_batches_does_not_rerun_partial_batch_with_completed_graph(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-enqueue-partial-late-ready",
+            text="bedroom with one bed",
+            owner_agent="tester",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+        initial = runtime.enqueue_planned_batches(plan.plan_id, max_items_per_batch=16)
+        self.assertEqual(len(initial["batches"]), 1)
+        batch_id = str(initial["batches"][0]["batch_id"])
+        graph_id = str(initial["batches"][0]["tool_graph_id"])
+        room = runtime.state.room(plan.room_id)
+        room["batch_plans"][batch_id]["status"] = BatchPlanStatus.PARTIAL.value
+        room["tool_graphs"][graph_id]["status"] = "completed"
+        room["tool_graph_queue"][graph_id]["status"] = "completed"
+        runtime.batch_plans[batch_id].status = BatchPlanStatus.PARTIAL
+        runtime._queued_tool_graphs[graph_id].status = "completed"
+        original_generation = int(room["tool_graphs"][graph_id].get("generation") or 0)
+        original_business_graph_ids = {
+            key
+            for key, graph in room["tool_graphs"].items()
+            if graph.get("graph_role") == "business_batch"
+        }
+
+        queued = runtime.enqueue_planned_batches(plan.plan_id, max_items_per_batch=16)
+        room_after = runtime.state.room(plan.room_id)
+        business_graph_ids = {
+            key
+            for key, graph in room_after["tool_graphs"].items()
+            if graph.get("graph_role") == "business_batch"
+        }
+
+        self.assertEqual(queued["graphs"][0]["graph_id"], graph_id)
+        self.assertEqual(queued["graphs"][0]["status"], "completed")
+        self.assertEqual(business_graph_ids, original_business_graph_ids)
+        self.assertEqual(int(room_after["tool_graphs"][graph_id].get("generation") or 0), original_generation)
+        self.assertEqual(room_after["batch_plans"][batch_id]["status"], BatchPlanStatus.PARTIAL.value)
+
+    def test_enqueue_planned_batches_rejects_dangling_principal_graph_reference(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-enqueue-dangling-principal",
+            text="bedroom with one bed",
+            owner_agent="tester",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+        initial = runtime.enqueue_planned_batches(plan.plan_id, max_items_per_batch=16)
+        batch_id = str(initial["batches"][0]["batch_id"])
+        graph_id = str(initial["batches"][0]["tool_graph_id"])
+        room = runtime.state.room(plan.room_id)
+        room["tool_graphs"].pop(graph_id, None)
+        runtime._queued_tool_graphs.pop(graph_id, None)
+
+        with self.assertRaisesRegex(RuntimeError, "principal business graph fact missing"):
+            runtime.enqueue_planned_batches(plan.plan_id, max_items_per_batch=16)
+
+        business_graphs = [
+            graph
+            for graph in runtime.state.room(plan.room_id)["tool_graphs"].values()
+            if graph.get("graph_role") == "business_batch"
+        ]
+        self.assertEqual(business_graphs, [])
+        self.assertEqual(
+            runtime.state.room(plan.room_id)["batch_plans"][batch_id]["tool_graph_id"],
+            graph_id,
+        )
+        self.assertIn("business_graph_principal_fact_missing", runtime.operation_log.events())
+
     def test_tool_queue_health_flags_batch_graph_consistency_breaks(self) -> None:
         room = {
             "batch_plans": {

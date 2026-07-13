@@ -1384,3 +1384,40 @@ finalizer_completeness 代码约束：已收口
 ```
 
 下一步按优先级进入 `business_graph_consistency`，检查一个业务 Batch 是否严格对应一个 terminal `business_batch` ToolGraph；所有 Engine/Sync/终态实机效果仍为 **[待 F5/实机验证]**。
+
+## 44. W1.5 Business Batch 与 Principal ToolGraph 一对一收口
+
+旧 F5 曾出现少量业务批次对应大量 ToolCallGraph 的矛盾统计。代码核查确认，`enqueue_planned_batches()` 原先采用整组判断：只有全部未完成批次都已有 `queued/running` 图时才整体复用；只要一个批次缺图，就会为全部未完成批次重新创建业务图。这会重复提交仍在执行的批次，也会把已完成业务图、但仍等待 Engine late-ready 的 `partial` 批次重新跑一遍资源链路。
+
+本轮改动：
+
+- `BatchPlan.tool_graph_id` 现在被视为该批次稳定的 principal business graph 身份。
+- `enqueue_planned_batches()` 改为逐批解析：已有合法 principal graph 的批次一律复用，仅为没有主图的待执行批次创建新图。
+- `partial BatchPlan + completed business graph` 被识别为 Engine readiness 收尾状态，不重新执行图片、模型、导入链路。
+- 显式失败重试继续复用现有 `graph_id`，由既有 `retry_generation` 增加 `generation`，OperationLog 保留尝试历史。
+- 主图事实缺失、plan/batch/role 身份不一致、active graph 缺 queue fact 或 graph/queue 状态冲突时明确失败并记录诊断事件，不再静默生成第二张业务图。
+- 混合状态下记录 `planned_batches_enqueue_partial_reuse`，可对账复用图数和新建图数。
+- 返回结果按 BatchPlan 顺序列出每个批次的 principal graph，避免只返回新建图造成调用方统计失真。
+
+聚焦自动验证：
+
+```text
+混合“已有主图 + 缺图”仅补一个 principal graph：passed
+partial batch + completed graph 不重跑资源链路：passed
+悬空 principal graph 引用明确失败且不创建第二图：passed
+原子入队、介入吸收回滚与失败重试 generation：passed
+业务图域报告与 R3 Gate 回归：14 tests passed
+Game-ready + R3 Readiness 套件：34 tests passed
+Python syntax compile：passed
+```
+
+当前 Gate：
+
+```text
+red / pending_reevaluation
+business_graph_consistency 代码约束：已收口
+旧 F5 的 5 批/151 图证据：不满足，保持 red
+新 F5 的 BatchPlan/principal graph 一对一事实：待实机验证
+```
+
+下一步按优先级进入 `snapshot_integrity`，核实同一 `plan_id + scene_version` 的 Snapshot 是否不可变、Fingerprint 是否稳定，以及 Registry/Snapshot/Report 是否引用同一版本；所有 Engine/Sync 实机效果仍为 **[待 F5/实机验证]**。

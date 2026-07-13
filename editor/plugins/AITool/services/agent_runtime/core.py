@@ -14922,46 +14922,14 @@ class AgentRuntime:
         room_state = self.state.room(plan.room_id)
         graph_facts = dict(room_state.get("tool_graphs") or {})
         queue_facts = dict(room_state.get("tool_graph_queue") or {})
-        pending_batches = [
-            batch for batch in batches
-            if batch.status != BatchPlanStatus.COMPLETED
-        ]
-        existing_active_graphs: list[dict[str, Any]] = []
-        for batch in pending_batches:
-            graph_id = str(batch.tool_graph_id or "").strip()
-            graph_fact = dict(graph_facts.get(graph_id) or {}) if graph_id else {}
-            queue_fact = dict(queue_facts.get(graph_id) or {}) if graph_id else {}
-            status = str(queue_fact.get("status") or graph_fact.get("status") or "").strip().lower()
-            if graph_id and status in {"queued", "running"}:
-                existing_active_graphs.append({
-                    "graph_id": graph_id,
-                    "status": status,
-                    "batch_id": batch.batch_id,
-                    "nodes": dict(graph_fact.get("nodes") or {}),
-                })
-        if pending_batches and len(existing_active_graphs) == len(pending_batches):
-            self.operation_log.append(
-                "planned_batches_enqueue_reused",
-                room_id=plan.room_id,
-                plan_id=plan.plan_id,
-                payload={
-                    "batch_count": len(batches),
-                    "graph_count": len(existing_active_graphs),
-                    "statuses": [graph["status"] for graph in existing_active_graphs],
-                },
-            )
-            return {
-                "plan": plan.as_dict(),
-                "batches": [batch.as_dict() for batch in batches],
-                "graphs": existing_active_graphs,
-            }
         plan_state = dict(absorb_changes.get("scene_plans", {}).get(plan.plan_id) or plan.as_dict())
         if scene_name:
             plan_state["scene_name"] = str(scene_name)
         plan_state["status"] = ScenePlanStatus.EXECUTING.value
         plan_state["updated_at"] = now
         ScenePlanValidator.validate(plan_state)
-        graphs: list[ToolCallGraph] = []
+        principal_graphs: dict[str, dict[str, Any]] = {}
+        reused_graph_count = 0
         graph_entries: list[tuple[BatchPlan, ToolCallGraph, dict[str, Any]]] = []
         for batch in batches:
             if self._refresh_plan_status(plan) in {ScenePlanStatus.PAUSED, ScenePlanStatus.CANCELLED}:
@@ -14984,8 +14952,90 @@ class AgentRuntime:
                     payload={"status": plan.status.value},
                 )
                 break
-            if batch.status == BatchPlanStatus.COMPLETED:
+            graph_id = str(batch.tool_graph_id or "").strip()
+            graph_fact = dict(graph_facts.get(graph_id) or {}) if graph_id else {}
+            queue_fact = dict(queue_facts.get(graph_id) or {}) if graph_id else {}
+            if graph_id:
+                if not graph_fact:
+                    self.operation_log.append(
+                        "business_graph_principal_fact_missing",
+                        room_id=plan.room_id,
+                        plan_id=plan.plan_id,
+                        batch_id=batch.batch_id,
+                        payload={"graph_id": graph_id, "batch_status": batch.status.value},
+                    )
+                    raise RuntimeError(
+                        f"principal business graph fact missing for batch {batch.batch_id}: {graph_id}"
+                    )
+                graph_plan_id = str(graph_fact.get("plan_id") or "")
+                graph_batch_id = str(graph_fact.get("batch_id") or "")
+                graph_role = str(graph_fact.get("graph_role") or "")
+                if (
+                    graph_plan_id != plan.plan_id
+                    or graph_batch_id != batch.batch_id
+                    or graph_role != "business_batch"
+                ):
+                    self.operation_log.append(
+                        "business_graph_principal_identity_mismatch",
+                        room_id=plan.room_id,
+                        plan_id=plan.plan_id,
+                        batch_id=batch.batch_id,
+                        payload={
+                            "graph_id": graph_id,
+                            "graph_plan_id": graph_plan_id,
+                            "graph_batch_id": graph_batch_id,
+                            "graph_role": graph_role,
+                        },
+                    )
+                    raise RuntimeError(
+                        f"principal business graph identity mismatch for batch {batch.batch_id}: {graph_id}"
+                    )
+                graph_status = str(graph_fact.get("status") or "").strip().lower()
+                queue_status = str(queue_fact.get("status") or "").strip().lower()
+                if graph_status in {"queued", "running"} and not queue_fact:
+                    self.operation_log.append(
+                        "business_graph_principal_queue_missing",
+                        room_id=plan.room_id,
+                        plan_id=plan.plan_id,
+                        batch_id=batch.batch_id,
+                        payload={"graph_id": graph_id, "graph_status": graph_status},
+                    )
+                    raise RuntimeError(
+                        f"principal business graph queue state missing for batch {batch.batch_id}: {graph_id}"
+                    )
+                if queue_status and graph_status and queue_status != graph_status:
+                    self.operation_log.append(
+                        "business_graph_principal_status_mismatch",
+                        room_id=plan.room_id,
+                        plan_id=plan.plan_id,
+                        batch_id=batch.batch_id,
+                        payload={
+                            "graph_id": graph_id,
+                            "graph_status": graph_status,
+                            "queue_status": queue_status,
+                        },
+                    )
+                    raise RuntimeError(
+                        f"principal business graph status mismatch for batch {batch.batch_id}: {graph_id}"
+                    )
+                principal_graphs[batch.batch_id] = {
+                    "graph_id": graph_id,
+                    "status": queue_status or graph_status,
+                    "batch_id": batch.batch_id,
+                    "nodes": dict(graph_fact.get("nodes") or {}),
+                    "generation": int(graph_fact.get("generation") or 0),
+                }
+                reused_graph_count += 1
                 continue
+            if batch.status == BatchPlanStatus.COMPLETED:
+                self.operation_log.append(
+                    "business_graph_principal_ref_missing",
+                    room_id=plan.room_id,
+                    plan_id=plan.plan_id,
+                    batch_id=batch.batch_id,
+                    payload={"batch_status": batch.status.value},
+                )
+                raise RuntimeError(f"completed batch is missing principal business graph: {batch.batch_id}")
             batch_state = batch.as_dict()
             if batch.status == BatchPlanStatus.FAILED:
                 batch_state["status"] = BatchPlanStatus.PLANNED.value
@@ -15006,7 +15056,48 @@ class AgentRuntime:
                 "updated_at": now,
             }
             graph_entries.append((batch, graph, queue_item))
-            graphs.append(graph)
+            principal_graphs[batch.batch_id] = {
+                "graph_id": graph.graph_id,
+                "status": graph.status,
+                "batch_id": graph.batch_id,
+                "nodes": {key: call.as_dict() for key, call in graph.nodes.items()},
+                "generation": graph.generation,
+            }
+        if not graph_entries:
+            self.operation_log.append(
+                "planned_batches_enqueue_reused",
+                room_id=plan.room_id,
+                plan_id=plan.plan_id,
+                payload={
+                    "batch_count": len(batches),
+                    "graph_count": len(principal_graphs),
+                    "statuses": [
+                        str(principal_graphs[batch.batch_id].get("status") or "")
+                        for batch in batches
+                        if batch.batch_id in principal_graphs
+                    ],
+                },
+            )
+            return {
+                "plan": plan.as_dict(),
+                "batches": [batch.as_dict() for batch in batches],
+                "graphs": [
+                    principal_graphs[batch.batch_id]
+                    for batch in batches
+                    if batch.batch_id in principal_graphs
+                ],
+            }
+        if reused_graph_count:
+            self.operation_log.append(
+                "planned_batches_enqueue_partial_reuse",
+                room_id=plan.room_id,
+                plan_id=plan.plan_id,
+                payload={
+                    "batch_count": len(batches),
+                    "reused_graph_count": reused_graph_count,
+                    "new_graph_count": len(graph_entries),
+                },
+            )
         if graph_entries:
             active_queue_count = self._active_tool_graph_queue_count(plan.room_id)
             if active_queue_count + len(graph_entries) > self._max_queued_tool_graphs:
@@ -15245,13 +15336,9 @@ class AgentRuntime:
             "plan": plan.as_dict(),
             "batches": [batch.as_dict() for batch in batches],
             "graphs": [
-                {
-                    "graph_id": graph.graph_id,
-                    "status": graph.status,
-                    "batch_id": graph.batch_id,
-                    "nodes": {key: call.as_dict() for key, call in graph.nodes.items()},
-                }
-                for graph in graphs
+                principal_graphs[batch.batch_id]
+                for batch in batches
+                if batch.batch_id in principal_graphs
             ],
         }
 
